@@ -186,7 +186,8 @@ UseNTP=yes
 EOF
 
     chroot "${WORK_DIR}/rootfs" systemctl enable systemd-networkd.service
-    chroot "${WORK_DIR}/rootfs" systemctl enable systemd-resolved.service
+    # systemd-resolved may not exist in minimal install, ignore error
+    chroot "${WORK_DIR}/rootfs" systemctl enable systemd-resolved.service 2>/dev/null || true
 }
 
 configure_overlay() {
