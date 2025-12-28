@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     /// Device hostname (NDI source will always be "usb")
     #[serde(default = "default_hostname")]
@@ -16,6 +16,16 @@ pub struct Config {
     /// Network configuration (optional, for future use)
     #[allow(dead_code)]
     pub network: Option<NetworkConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            hostname: default_hostname(),
+            device: default_device(),
+            network: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
