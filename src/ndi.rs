@@ -202,26 +202,143 @@ impl NdiSender {
         })
     }
 
+    // --- Format conversion functions ---
+
+    fn convert_yuyv_to_uyvy(&mut self, yuyv: &[u8]) {
+        self.uyvy_buffer.clear();
+        self.uyvy_buffer.reserve(yuyv.len());
+        for chunk in yuyv.chunks_exact(4) {
+            self.uyvy_buffer.push(chunk[1]); // U0
+            self.uyvy_buffer.push(chunk[0]); // Y0
+            self.uyvy_buffer.push(chunk[3]); // V0
+            self.uyvy_buffer.push(chunk[2]); // Y1
+        }
+    }
+
+    fn convert_nv12_to_uyvy(&mut self, nv12: &[u8], width: usize, height: usize) {
+        // NV12: Y plane followed by interleaved UV plane
+        let y_size = width * height;
+        self.uyvy_buffer.clear();
+        self.uyvy_buffer.reserve(width * height * 2);
+
+        let y_plane = &nv12[..y_size];
+        let uv_plane = &nv12[y_size..];
+
+        for row in 0..height {
+            let uv_row = row / 2;
+            for col in (0..width).step_by(2) {
+                let y0 = y_plane[row * width + col];
+                let y1 = y_plane[row * width + col + 1];
+                let uv_idx = uv_row * width + col;
+                let u = uv_plane.get(uv_idx).copied().unwrap_or(128);
+                let v = uv_plane.get(uv_idx + 1).copied().unwrap_or(128);
+
+                // UYVY: U Y0 V Y1
+                self.uyvy_buffer.push(u);
+                self.uyvy_buffer.push(y0);
+                self.uyvy_buffer.push(v);
+                self.uyvy_buffer.push(y1);
+            }
+        }
+    }
+
+    fn decode_mjpeg_to_uyvy(&mut self, mjpeg: &[u8], _width: usize, _height: usize) -> Result<()> {
+        // Simple MJPEG decoder using system libjpeg via turbojpeg would be ideal,
+        // but for simplicity we'll use a pure-Rust approach
+        // For now, fail gracefully - full MJPEG support would need additional dependency
+        use std::process::Command;
+        use std::io::Write;
+
+        // Use ffmpeg as external decoder (commonly available)
+        let mut child = Command::new("ffmpeg")
+            .args([
+                "-f", "mjpeg",
+                "-i", "pipe:0",
+                "-f", "rawvideo",
+                "-pix_fmt", "uyvy422",
+                "-frames:v", "1",
+                "pipe:1",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("MJPEG decode requires ffmpeg. Install with: apt install ffmpeg")?;
+
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin.write_all(mjpeg)?;
+        }
+
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            anyhow::bail!("ffmpeg MJPEG decode failed");
+        }
+
+        self.uyvy_buffer = output.stdout;
+        Ok(())
+    }
+
+    fn convert_bgra_to_uyvy(&mut self, bgra: &[u8], width: usize, height: usize) {
+        self.uyvy_buffer.clear();
+        self.uyvy_buffer.reserve(width * height * 2);
+
+        for row in 0..height {
+            for col in (0..width).step_by(2) {
+                let idx0 = (row * width + col) * 4;
+                let idx1 = (row * width + col + 1) * 4;
+
+                // BGRA to YUV conversion (BT.601)
+                let (b0, g0, r0) = (bgra[idx0] as i32, bgra[idx0 + 1] as i32, bgra[idx0 + 2] as i32);
+                let (b1, g1, r1) = (
+                    bgra.get(idx1).copied().unwrap_or(0) as i32,
+                    bgra.get(idx1 + 1).copied().unwrap_or(0) as i32,
+                    bgra.get(idx1 + 2).copied().unwrap_or(0) as i32,
+                );
+
+                let y0 = ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16;
+                let y1 = ((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16;
+
+                // Average for U/V
+                let r = (r0 + r1) / 2;
+                let g = (g0 + g1) / 2;
+                let b = (b0 + b1) / 2;
+                let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+
+                // UYVY: U Y0 V Y1
+                self.uyvy_buffer.push(u.clamp(0, 255) as u8);
+                self.uyvy_buffer.push(y0.clamp(16, 235) as u8);
+                self.uyvy_buffer.push(v.clamp(0, 255) as u8);
+                self.uyvy_buffer.push(y1.clamp(16, 235) as u8);
+            }
+        }
+    }
+
     /// Send video frame
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        // Get frame data in UYVY format
+        // Get frame data in UYVY format (NDI native)
         let fourcc_str = frame.fourcc.str()?;
         let data = match fourcc_str.as_ref() {
             "UYVY" => &frame.data,
             "YUYV" => {
-                // Convert YUYV to UYVY
-                self.uyvy_buffer.clear();
-                self.uyvy_buffer.reserve(frame.data.len());
-                for chunk in frame.data.chunks_exact(4) {
-                    self.uyvy_buffer.push(chunk[1]); // U0
-                    self.uyvy_buffer.push(chunk[0]); // Y0
-                    self.uyvy_buffer.push(chunk[3]); // V0
-                    self.uyvy_buffer.push(chunk[2]); // Y1
-                }
+                self.convert_yuyv_to_uyvy(&frame.data);
+                &self.uyvy_buffer
+            }
+            "NV12" => {
+                self.convert_nv12_to_uyvy(&frame.data, frame.width as usize, frame.height as usize);
+                &self.uyvy_buffer
+            }
+            "MJPG" => {
+                self.decode_mjpeg_to_uyvy(&frame.data, frame.width as usize, frame.height as usize)?;
+                &self.uyvy_buffer
+            }
+            "BGRA" | "BGR4" | "RX24" => {
+                self.convert_bgra_to_uyvy(&frame.data, frame.width as usize, frame.height as usize);
                 &self.uyvy_buffer
             }
             format => {
-                anyhow::bail!("Unsupported video format: {}", format);
+                anyhow::bail!("Unsupported video format: {}. Supported: UYVY, YUYV, NV12, MJPG, BGRA", format);
             }
         };
 
