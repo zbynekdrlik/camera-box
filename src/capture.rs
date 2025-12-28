@@ -60,7 +60,7 @@ impl VideoCapture {
 
         let mut final_format = format;
         for preferred in preferred_formats {
-            let mut try_format = final_format.clone();
+            let mut try_format = final_format;
             try_format.fourcc = preferred;
             if let Ok(set_format) = Capture::set_format(&device, &try_format) {
                 if set_format.fourcc == preferred {

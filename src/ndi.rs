@@ -330,7 +330,7 @@ impl NdiSender {
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         // Get frame data in UYVY format (NDI native)
         let fourcc_str = frame.fourcc.str()?;
-        let data = match fourcc_str.as_ref() {
+        let data = match fourcc_str {
             "UYVY" => &frame.data,
             "YUYV" => {
                 self.convert_yuyv_to_uyvy(&frame.data);
@@ -381,7 +381,7 @@ impl NdiSender {
 
         self.frame_count += 1;
 
-        if self.frame_count % 300 == 0 {
+        if self.frame_count.is_multiple_of(300) {
             tracing::debug!("Sent {} frames", self.frame_count);
         }
 
