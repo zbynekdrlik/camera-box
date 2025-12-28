@@ -55,18 +55,19 @@ async fn main() -> Result<()> {
     };
 
     // Run the capture loop
-    run_capture_loop(&device_path).await
+    run_capture_loop(&device_path, &config.ndi_name).await
 }
 
-async fn run_capture_loop(device_path: &str) -> Result<()> {
+async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
     // Open capture device
     let mut capture = VideoCapture::open(device_path)?;
     let (width, height) = capture.dimensions();
+    let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);
 
-    // Create NDI sender
-    let mut sender = NdiSender::new()?;
-    tracing::info!("NDI sender ready, streaming as 'usb'");
+    // Create NDI sender with configured name and detected frame rate
+    let mut sender = NdiSender::new(ndi_name, frame_rate)?;
+    tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
 
     // Spawn capture loop in blocking task
     let capture_handle = tokio::task::spawn_blocking(move || {

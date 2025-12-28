@@ -14,6 +14,23 @@ pub struct Frame {
     pub stride: u32,
 }
 
+/// Frame rate as numerator/denominator
+#[derive(Debug, Clone, Copy)]
+pub struct FrameRate {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl Default for FrameRate {
+    fn default() -> Self {
+        // Default to 30000/1001 (29.97 fps) if detection fails
+        Self {
+            numerator: 30000,
+            denominator: 1001,
+        }
+    }
+}
+
 /// V4L2 video capture wrapper
 pub struct VideoCapture {
     stream: Stream<'static>,
@@ -21,6 +38,7 @@ pub struct VideoCapture {
     height: u32,
     fourcc: FourCC,
     stride: u32,
+    frame_rate: FrameRate,
 }
 
 impl VideoCapture {
@@ -76,6 +94,30 @@ impl VideoCapture {
         let fourcc = final_format.fourcc;
         let stride = final_format.stride;
 
+        // Get frame rate from device parameters
+        let frame_rate = match Capture::params(&device) {
+            Ok(params) => {
+                let interval = params.interval;
+                // V4L2 gives us frame interval (seconds per frame) as numerator/denominator
+                // We need frame rate (frames per second), so we swap them
+                let frame_rate = FrameRate {
+                    numerator: interval.denominator,
+                    denominator: interval.numerator,
+                };
+                tracing::info!(
+                    "Detected frame rate: {}/{} ({:.2} fps)",
+                    frame_rate.numerator,
+                    frame_rate.denominator,
+                    frame_rate.numerator as f64 / frame_rate.denominator as f64
+                );
+                frame_rate
+            }
+            Err(e) => {
+                tracing::warn!("Could not get frame rate from device: {}, using default", e);
+                FrameRate::default()
+            }
+        };
+
         // Create memory-mapped stream with minimal buffers for low latency
         // 4 buffers is minimum for stable streaming
         let stream = Stream::with_buffers(&device, Type::VideoCapture, 4)
@@ -90,6 +132,7 @@ impl VideoCapture {
             height,
             fourcc,
             stride,
+            frame_rate,
         })
     }
 
@@ -118,5 +161,10 @@ impl VideoCapture {
     #[allow(dead_code)]
     pub fn fourcc(&self) -> FourCC {
         self.fourcc
+    }
+
+    /// Get frame rate
+    pub fn frame_rate(&self) -> FrameRate {
+        self.frame_rate
     }
 }

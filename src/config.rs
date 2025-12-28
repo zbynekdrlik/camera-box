@@ -5,9 +5,13 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Device hostname (NDI source will always be "usb")
+    /// Device hostname
     #[serde(default = "default_hostname")]
     pub hostname: String,
+
+    /// NDI source name (appears as "NAME (hostname)" in NDI)
+    #[serde(default = "default_ndi_name")]
+    pub ndi_name: String,
 
     /// Video capture device path ("auto" for auto-detection)
     #[serde(default = "default_device")]
@@ -22,6 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hostname: default_hostname(),
+            ndi_name: default_ndi_name(),
             device: default_device(),
             network: None,
         }
@@ -43,6 +48,10 @@ pub struct NetworkConfig {
 
 fn default_hostname() -> String {
     "camera-box".to_string()
+}
+
+fn default_ndi_name() -> String {
+    "CAM1".to_string()
 }
 
 fn default_device() -> String {

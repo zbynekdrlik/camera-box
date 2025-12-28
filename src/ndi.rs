@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::Path;
 use std::ptr;
 
-use crate::capture::Frame;
+use crate::capture::{Frame, FrameRate};
 
 // NDI SDK type definitions (minimal subset for video sending)
 #[repr(C)]
@@ -167,6 +167,7 @@ pub struct NdiSender {
     sender: *mut c_void,
     #[allow(dead_code)]
     ndi_name: CString, // Keep CString alive while sender exists
+    frame_rate: FrameRate,
     frame_count: u64,
     uyvy_buffer: Vec<u8>,
 }
@@ -175,11 +176,11 @@ pub struct NdiSender {
 unsafe impl Send for NdiSender {}
 
 impl NdiSender {
-    /// Create a new NDI sender with source name "usb"
-    pub fn new() -> Result<Self> {
+    /// Create a new NDI sender with the specified source name and frame rate
+    pub fn new(name: &str, frame_rate: FrameRate) -> Result<Self> {
         let lib = NdiLib::load()?;
 
-        let ndi_name = CString::new("usb").unwrap();
+        let ndi_name = CString::new(name).unwrap();
 
         let create_settings = NDIlib_send_create_t {
             p_ndi_name: ndi_name.as_ptr(),
@@ -193,12 +194,13 @@ impl NdiSender {
             anyhow::bail!("Failed to create NDI sender");
         }
 
-        tracing::info!("NDI sender created: usb");
+        tracing::info!("NDI sender created: {}", name);
 
         Ok(Self {
             lib,
             sender,
             ndi_name,
+            frame_rate,
             frame_count: 0,
             uyvy_buffer: Vec::new(),
         })
@@ -364,8 +366,8 @@ impl NdiSender {
             xres: frame.width as c_int,
             yres: frame.height as c_int,
             fourcc: NDILIBD_FOURCC_UYVY,
-            frame_rate_n: 30000,
-            frame_rate_d: 1001,
+            frame_rate_n: self.frame_rate.numerator as c_int,
+            frame_rate_d: self.frame_rate.denominator as c_int,
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
             timecode: i64::MAX, // Use current time
