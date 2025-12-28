@@ -164,8 +164,8 @@ if [[ ! -f "$CONFIG_DIR/config.toml" ]]; then
     cat > "$CONFIG_DIR/config.toml" << 'EOF'
 # Camera-Box Configuration
 
-# NDI source name (appears as "NAME (hostname)" in NDI)
-ndi_name = "CAM1"
+# NDI source name (appears as "HOSTNAME (source_name)" in NDI)
+ndi_name = "usb"
 
 # Video capture device ("auto" for auto-detection)
 device = "auto"

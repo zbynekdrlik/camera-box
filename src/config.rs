@@ -51,7 +51,7 @@ fn default_hostname() -> String {
 }
 
 fn default_ndi_name() -> String {
-    "CAM1".to_string()
+    "usb".to_string()
 }
 
 fn default_device() -> String {
