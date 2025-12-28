@@ -1,0 +1,37 @@
+[package]
+name = "camera-box"
+version = "0.1.0"
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "Simple USB video capture to NDI streaming appliance"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/camera-box"
+
+[dependencies]
+# V4L2 capture
+v4l = "0.14"
+
+# Dynamic library loading (for NDI SDK at runtime)
+libloading = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Configuration
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

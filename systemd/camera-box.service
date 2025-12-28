@@ -1,0 +1,38 @@
+[Unit]
+Description=Camera Box - USB Video Capture to NDI
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/camera-box
+Restart=always
+RestartSec=3
+
+# Run with real-time priority for low latency
+Nice=-10
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
+
+# Environment for NDI SDK
+Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camera-box
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/
+ReadWritePaths=/dev /sys /run
+
+# Allow access to video devices
+SupplementaryGroups=video
+
+[Install]
+WantedBy=multi-user.target
