@@ -1,0 +1,178 @@
+name: Build USB Image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: Build Ubuntu USB Image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils cloud-image-utils gdisk parted e2fsprogs
+
+      - name: Download Ubuntu 24.04 cloud image
+        run: |
+          curl -L -o ubuntu-cloud.img https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+
+      - name: Convert and resize image
+        run: |
+          qemu-img convert -f qcow2 -O raw ubuntu-cloud.img ubuntu-camera.img
+          qemu-img resize -f raw ubuntu-camera.img 4G
+
+      - name: Setup loop device
+        run: |
+          sudo losetup -fP ubuntu-camera.img
+          LOOP=$(losetup -l | grep ubuntu-camera.img | awk '{print $1}')
+          echo "LOOP=$LOOP" >> $GITHUB_ENV
+
+      - name: Fix GPT and resize partition
+        run: |
+          sudo sgdisk -e ${{ env.LOOP }}
+          sudo partprobe ${{ env.LOOP }}
+          sudo growpart ${{ env.LOOP }} 1
+          sudo partprobe ${{ env.LOOP }}
+          sudo e2fsck -fy ${{ env.LOOP }}p1
+          sudo resize2fs ${{ env.LOOP }}p1
+
+      - name: Mount filesystem
+        run: |
+          sudo mkdir -p /mnt/camera-root
+          sudo mount ${{ env.LOOP }}p1 /mnt/camera-root
+
+      - name: Configure system
+        run: |
+          # Create user
+          sudo chroot /mnt/camera-root useradd -m -s /bin/bash -G sudo newlevel
+          echo 'newlevel:newlevel' | sudo chroot /mnt/camera-root chpasswd
+
+          # Passwordless sudo
+          echo 'newlevel ALL=(ALL) NOPASSWD:ALL' | sudo tee /mnt/camera-root/etc/sudoers.d/newlevel
+
+          # Enable SSH password auth
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /mnt/camera-root/etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /mnt/camera-root/etc/ssh/sshd_config
+
+          # Set hostname
+          echo 'CAM1' | sudo tee /mnt/camera-root/etc/hostname
+          echo '127.0.0.1 CAM1' | sudo tee -a /mnt/camera-root/etc/hosts
+
+          # Disable cloud-init
+          sudo touch /mnt/camera-root/etc/cloud/cloud-init.disabled
+
+          # Configure network (DHCP)
+          sudo tee /mnt/camera-root/etc/netplan/01-netcfg.yaml << 'EOF'
+          network:
+            version: 2
+            ethernets:
+              all-ethernets:
+                match:
+                  name: "e*"
+                dhcp4: true
+          EOF
+
+      - name: Install camera-box
+        run: |
+          # Download latest release
+          curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/camera-box-linux-amd64.tar.gz -o camera-box.tar.gz || \
+          curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/camera-box-linux-amd64.tar.gz -o camera-box.tar.gz
+
+          tar -xzf camera-box.tar.gz
+          sudo cp camera-box /mnt/camera-root/usr/local/bin/
+          sudo chmod 755 /mnt/camera-root/usr/local/bin/camera-box
+
+          # Install service
+          sudo tee /mnt/camera-root/etc/systemd/system/camera-box.service << 'EOF'
+          [Unit]
+          Description=Camera Box - USB Video Capture to NDI
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/camera-box
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Create config
+          sudo mkdir -p /mnt/camera-root/etc/camera-box
+          sudo tee /mnt/camera-root/etc/camera-box/config.toml << 'EOF'
+          ndi_name = "usb"
+          device = "auto"
+          EOF
+
+          # Enable service
+          sudo ln -sf /etc/systemd/system/camera-box.service /mnt/camera-root/etc/systemd/system/multi-user.target.wants/
+
+      - name: Configure power savings
+        run: |
+          sudo tee /mnt/camera-root/etc/rc.local << 'EOF'
+          #!/bin/bash
+          for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+              [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null
+          done
+          for ctrl in /sys/bus/usb/devices/*/power/control; do
+              [ -f "$ctrl" ] && echo "on" > "$ctrl" 2>/dev/null
+          done
+          for iface in /sys/class/net/*/device/power/control; do
+              [ -f "$iface" ] && echo "on" > "$iface" 2>/dev/null
+          done
+          exit 0
+          EOF
+          sudo chmod +x /mnt/camera-root/etc/rc.local
+
+      - name: Setup NDI library path
+        run: |
+          sudo mkdir -p /mnt/camera-root/usr/lib/ndi
+          echo "/usr/lib/ndi" | sudo tee /mnt/camera-root/etc/ld.so.conf.d/ndi.conf
+          echo "NOTE: NDI library must be installed manually after first boot"
+
+      - name: Cleanup and unmount
+        run: |
+          sudo umount /mnt/camera-root
+          sudo losetup -d ${{ env.LOOP }}
+
+      - name: Compress image
+        run: |
+          xz -9 -T0 ubuntu-camera.img
+          mv ubuntu-camera.img.xz camera-box-ubuntu-24.04.img.xz
+          sha256sum camera-box-ubuntu-24.04.img.xz > camera-box-ubuntu-24.04.img.xz.sha256
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-box-image
+          path: |
+            camera-box-ubuntu-24.04.img.xz
+            camera-box-ubuntu-24.04.img.xz.sha256
+
+  release-image:
+    name: Add Image to Release
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-box-image
+          path: ./artifacts
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/camera-box-ubuntu-24.04.img.xz
+            artifacts/camera-box-ubuntu-24.04.img.xz.sha256
