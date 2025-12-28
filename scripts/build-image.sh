@@ -7,12 +7,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_TARBALL="${1:-}"
 OUTPUT_IMAGE="camera-box-image.img"
-IMAGE_SIZE="2G"
+IMAGE_SIZE="4G"
 WORK_DIR="/tmp/camera-box-build"
 
 # Partition sizes
 EFI_SIZE="256M"
-ROOT_SIZE="1G"
+ROOT_SIZE="3G"
 OVERLAY_SIZE="512M"
 
 log() {
@@ -64,8 +64,8 @@ create_image() {
     parted -s "$OUTPUT_IMAGE" mklabel gpt
     parted -s "$OUTPUT_IMAGE" mkpart ESP fat32 1MiB "${EFI_SIZE}"
     parted -s "$OUTPUT_IMAGE" set 1 esp on
-    parted -s "$OUTPUT_IMAGE" mkpart root ext4 "${EFI_SIZE}" "1280MiB"
-    parted -s "$OUTPUT_IMAGE" mkpart overlay ext4 "1280MiB" "100%"
+    parted -s "$OUTPUT_IMAGE" mkpart root ext4 "${EFI_SIZE}" "3328MiB"
+    parted -s "$OUTPUT_IMAGE" mkpart overlay ext4 "3328MiB" "100%"
 
     log "Setting up loop device..."
     LOOP_DEV=$(losetup --find --show --partscan "$OUTPUT_IMAGE")
@@ -117,7 +117,8 @@ EOF
         iproute2 \
         openssh-server \
         curl \
-        ca-certificates
+        ca-certificates \
+        ffmpeg
 
     # Clean up apt cache
     chroot "${WORK_DIR}/rootfs" apt-get clean
@@ -244,6 +245,24 @@ EOF
     chroot "${WORK_DIR}/rootfs" update-grub
 }
 
+install_ndi_library() {
+    log "Installing NDI library..."
+
+    # Check if NDI library exists on build system
+    if [[ -f "/usr/lib/ndi/libndi.so.6" ]]; then
+        mkdir -p "${WORK_DIR}/rootfs/usr/lib/ndi"
+        cp /usr/lib/ndi/libndi.so* "${WORK_DIR}/rootfs/usr/lib/ndi/"
+        log "NDI library copied from build system"
+    elif [[ -n "${NDI_SDK_PATH:-}" ]] && [[ -d "$NDI_SDK_PATH" ]]; then
+        mkdir -p "${WORK_DIR}/rootfs/usr/lib/ndi"
+        cp "$NDI_SDK_PATH"/lib/x86_64-linux-gnu/libndi.so* "${WORK_DIR}/rootfs/usr/lib/ndi/"
+        log "NDI library copied from NDI_SDK_PATH"
+    else
+        log "Warning: NDI library not found. Set NDI_SDK_PATH or install to /usr/lib/ndi/"
+        log "The camera-box will not work until NDI library is installed on the device."
+    fi
+}
+
 download_dantetimesync() {
     log "Downloading DanteTimeSync..."
     local DTS_URL="https://github.com/zbynekdrlik/dantetimesync/releases/latest/download/dantetimesync-linux-amd64"
@@ -309,6 +328,7 @@ main() {
     create_image
     bootstrap_rootfs
     install_camera_box
+    install_ndi_library
     configure_power_button
     configure_network
     configure_overlay
