@@ -46,7 +46,8 @@ type NDIlib_send_create_fn = unsafe extern "C" fn(*const NDIlib_send_create_t) -
 #[allow(non_camel_case_types)]
 type NDIlib_send_destroy_fn = unsafe extern "C" fn(*mut c_void);
 #[allow(non_camel_case_types)]
-type NDIlib_send_send_video_v2_fn = unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_t);
+type NDIlib_send_send_video_v2_fn =
+    unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_t);
 
 /// NDI library wrapper with dynamic loading
 struct NdiLib {
@@ -84,8 +85,9 @@ impl NdiLib {
                     tracing::debug!("Trying NDI library: {:?}", lib_path);
                     match unsafe { Library::new(&lib_path) } {
                         Ok(lib) => {
-                            return Self::init_from_library(lib)
-                                .with_context(|| format!("Failed to initialize NDI from {:?}", lib_path));
+                            return Self::init_from_library(lib).with_context(|| {
+                                format!("Failed to initialize NDI from {:?}", lib_path)
+                            });
                         }
                         Err(e) => {
                             last_error = Some(e);
@@ -246,17 +248,22 @@ impl NdiSender {
         // Simple MJPEG decoder using system libjpeg via turbojpeg would be ideal,
         // but for simplicity we'll use a pure-Rust approach
         // For now, fail gracefully - full MJPEG support would need additional dependency
-        use std::process::Command;
         use std::io::Write;
+        use std::process::Command;
 
         // Use ffmpeg as external decoder (commonly available)
         let mut child = Command::new("ffmpeg")
             .args([
-                "-f", "mjpeg",
-                "-i", "pipe:0",
-                "-f", "rawvideo",
-                "-pix_fmt", "uyvy422",
-                "-frames:v", "1",
+                "-f",
+                "mjpeg",
+                "-i",
+                "pipe:0",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "uyvy422",
+                "-frames:v",
+                "1",
                 "pipe:1",
             ])
             .stdin(std::process::Stdio::piped())
@@ -289,7 +296,11 @@ impl NdiSender {
                 let idx1 = (row * width + col + 1) * 4;
 
                 // BGRA to YUV conversion (BT.601)
-                let (b0, g0, r0) = (bgra[idx0] as i32, bgra[idx0 + 1] as i32, bgra[idx0 + 2] as i32);
+                let (b0, g0, r0) = (
+                    bgra[idx0] as i32,
+                    bgra[idx0 + 1] as i32,
+                    bgra[idx0 + 2] as i32,
+                );
                 let (b1, g1, r1) = (
                     bgra.get(idx1).copied().unwrap_or(0) as i32,
                     bgra.get(idx1 + 1).copied().unwrap_or(0) as i32,
@@ -330,7 +341,11 @@ impl NdiSender {
                 &self.uyvy_buffer
             }
             "MJPG" => {
-                self.decode_mjpeg_to_uyvy(&frame.data, frame.width as usize, frame.height as usize)?;
+                self.decode_mjpeg_to_uyvy(
+                    &frame.data,
+                    frame.width as usize,
+                    frame.height as usize,
+                )?;
                 &self.uyvy_buffer
             }
             "BGRA" | "BGR4" | "RX24" => {
@@ -338,7 +353,10 @@ impl NdiSender {
                 &self.uyvy_buffer
             }
             format => {
-                anyhow::bail!("Unsupported video format: {}. Supported: UYVY, YUYV, NV12, MJPG, BGRA", format);
+                anyhow::bail!(
+                    "Unsupported video format: {}. Supported: UYVY, YUYV, NV12, MJPG, BGRA",
+                    format
+                );
             }
         };
 

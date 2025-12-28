@@ -39,9 +39,7 @@ async fn main() -> Result<()> {
     } else {
         EnvFilter::new("camera_box=info")
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     tracing::info!("camera-box starting...");
 

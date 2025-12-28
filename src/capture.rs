@@ -120,4 +120,3 @@ impl VideoCapture {
         self.fourcc
     }
 }
-

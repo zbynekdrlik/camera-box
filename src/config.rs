@@ -81,7 +81,10 @@ fn find_capture_device() -> Result<String> {
         if let Ok(device) = Device::with_path(&path) {
             // Check if this device supports video capture
             let caps = device.query_caps()?;
-            if caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
+            if caps
+                .capabilities
+                .contains(v4l::capability::Flags::VIDEO_CAPTURE)
+            {
                 tracing::info!("Auto-detected capture device: {}", path);
                 return Ok(path);
             }
