@@ -1,8 +1,10 @@
 mod capture;
 mod config;
 mod display;
+mod intercom;
 mod ndi;
 mod ndi_display;
+mod vban;
 
 use anyhow::Result;
 use clap::Parser;
@@ -107,6 +109,14 @@ struct Args {
     /// Enable debug logging
     #[arg(long)]
     debug: bool,
+
+    /// Enable VBAN intercom (stream name, e.g., "cam1")
+    #[arg(long = "intercom")]
+    intercom_stream: Option<String>,
+
+    /// VBAN intercom target host (default: strih.lan)
+    #[arg(long, default_value = "strih.lan")]
+    intercom_target: String,
 }
 
 #[tokio::main]
@@ -149,14 +159,38 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Run the capture loop with optional display
-    run_capture_loop(&device_path, &config.ndi_name, display_config).await
+    // Determine intercom config (CLI overrides config)
+    let intercom_config = if let Some(ref stream) = args.intercom_stream {
+        Some(intercom::IntercomConfig {
+            stream_name: stream.clone(),
+            target_host: args.intercom_target.clone(),
+            sample_rate: 48000,
+            channels: 2,
+        })
+    } else {
+        config.intercom.as_ref().map(|ic| intercom::IntercomConfig {
+            stream_name: ic.stream.clone(),
+            target_host: ic.target.clone(),
+            sample_rate: ic.sample_rate,
+            channels: ic.channels,
+        })
+    };
+
+    // Run the capture loop with optional display and intercom
+    run_capture_loop(
+        &device_path,
+        &config.ndi_name,
+        display_config,
+        intercom_config,
+    )
+    .await
 }
 
 async fn run_capture_loop(
     device_path: &str,
     ndi_name: &str,
     display_config: Option<NdiDisplayConfig>,
+    intercom_config: Option<intercom::IntercomConfig>,
 ) -> Result<()> {
     // Shared flag for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
@@ -172,6 +206,24 @@ async fn run_capture_loop(
 
             if let Err(e) = ndi_display::run_display_loop(config, running_clone) {
                 tracing::error!("NDI display error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Start intercom thread if configured
+    let intercom_handle = if let Some(config) = intercom_config {
+        let running_clone = Arc::clone(&running);
+        tracing::info!(
+            "Starting VBAN intercom: stream={}, target={}",
+            config.stream_name,
+            config.target_host
+        );
+
+        Some(std::thread::spawn(move || {
+            if let Err(e) = intercom::run_intercom(config, running_clone) {
+                tracing::error!("Intercom error: {}", e);
             }
         }))
     } else {
@@ -240,6 +292,11 @@ async fn run_capture_loop(
 
     // Wait for display thread if running
     if let Some(handle) = display_handle {
+        let _ = handle.join();
+    }
+
+    // Wait for intercom thread if running
+    if let Some(handle) = intercom_handle {
         let _ = handle.join();
     }
 

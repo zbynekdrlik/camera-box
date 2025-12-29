@@ -20,6 +20,10 @@ pub struct Config {
     /// NDI display configuration (optional)
     #[serde(default)]
     pub display: Option<DisplayConfig>,
+
+    /// VBAN intercom configuration (optional)
+    #[serde(default)]
+    pub intercom: Option<IntercomConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,6 +40,41 @@ fn default_fb_device() -> String {
     "/dev/fb0".to_string()
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct IntercomConfig {
+    /// VBAN stream name (default: "cam1")
+    #[serde(default = "default_intercom_stream")]
+    pub stream: String,
+
+    /// Target host for VBAN (default: "strih.lan")
+    #[serde(default = "default_intercom_target")]
+    pub target: String,
+
+    /// Sample rate in Hz (default: 48000)
+    #[serde(default = "default_intercom_sample_rate")]
+    pub sample_rate: u32,
+
+    /// Number of audio channels (default: 2)
+    #[serde(default = "default_intercom_channels")]
+    pub channels: u8,
+}
+
+fn default_intercom_stream() -> String {
+    "cam1".to_string()
+}
+
+fn default_intercom_target() -> String {
+    "strih.lan".to_string()
+}
+
+fn default_intercom_sample_rate() -> u32 {
+    48000
+}
+
+fn default_intercom_channels() -> u8 {
+    2
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -43,6 +82,7 @@ impl Default for Config {
             ndi_name: default_ndi_name(),
             device: default_device(),
             display: None,
+            intercom: None,
         }
     }
 }

@@ -34,6 +34,9 @@ anyhow = "1"
 # Low-level system calls (real-time scheduling, memory locking)
 libc = "0.2"
 
+# Audio I/O for VBAN intercom
+cpal = "0.15"
+
 [profile.release]
 lto = true
 codegen-units = 1
