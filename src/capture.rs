@@ -61,8 +61,8 @@ impl VideoCapture {
         format.height = 1080;
         format.fourcc = FourCC::new(b"YUYV");
 
-        let final_format = Capture::set_format(&device, &format)
-            .context("Failed to set 1920x1080 YUYV format")?;
+        let final_format =
+            Capture::set_format(&device, &format).context("Failed to set 1920x1080 YUYV format")?;
 
         tracing::info!(
             "Capture format: {}x{} {} (stride: {})",
