@@ -68,11 +68,23 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
     let mut frame_count: u64 = 0;
     let mut last_report = std::time::Instant::now();
 
+    let mut no_frame_count: u64 = 0;
+
     // Main display loop
     while running.load(Ordering::Relaxed) {
         // Capture frame with 100ms timeout
         match receiver.capture_frame(100) {
             Ok(Some(frame)) => {
+                no_frame_count = 0;
+
+                // Debug: log fourcc on first frame
+                if frame_count == 0 {
+                    let fourcc_bytes = frame.fourcc.to_le_bytes();
+                    let fourcc_str = std::str::from_utf8(&fourcc_bytes).unwrap_or("????");
+                    tracing::info!("NDI display: first frame fourcc={} (0x{:08x}), size={}x{}, data_len={}",
+                        fourcc_str, frame.fourcc, frame.width, frame.height, frame.data.len());
+                }
+
                 // Display the frame
                 if let Err(e) =
                     display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
@@ -99,7 +111,14 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                 }
             }
             Ok(None) => {
-                // No frame available, this is normal
+                // No frame available
+                no_frame_count += 1;
+                if no_frame_count == 50 {
+                    tracing::warn!("NDI display: No frames received for 5 seconds");
+                }
+                if no_frame_count % 100 == 0 {
+                    tracing::debug!("NDI display: waiting for frames... ({})", no_frame_count);
+                }
             }
             Err(e) => {
                 tracing::error!("Failed to capture frame: {}", e);

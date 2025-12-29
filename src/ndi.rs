@@ -762,14 +762,15 @@ impl NdiReceiver {
             }
         }
 
-        // Cleanup finder
-        unsafe { (lib.find_destroy)(finder) };
+        let source = match found_source {
+            Some(s) => s,
+            None => {
+                unsafe { (lib.find_destroy)(finder) };
+                anyhow::bail!("NDI source '{}' not found within timeout", source_name);
+            }
+        };
 
-        let source = found_source.ok_or_else(|| {
-            anyhow::anyhow!("NDI source '{}' not found within timeout", source_name)
-        })?;
-
-        // Create receiver
+        // Create receiver and connect BEFORE destroying finder (source pointers are owned by finder)
         let recv_name = CString::new("camera-box-display").unwrap();
         let recv_create = NDIlib_recv_create_v3_t {
             source_to_connect_to: source,
@@ -781,8 +782,13 @@ impl NdiReceiver {
 
         let receiver = unsafe { (lib.recv_create_v3)(&recv_create) };
         if receiver.is_null() {
+            // Cleanup finder before error
+            unsafe { (lib.find_destroy)(finder) };
             anyhow::bail!("Failed to create NDI receiver");
         }
+
+        // NOW we can cleanup finder - receiver has copied the source info
+        unsafe { (lib.find_destroy)(finder) };
 
         tracing::info!("NDI receiver connected to source");
 
@@ -807,6 +813,15 @@ impl NdiReceiver {
                 timeout_ms,
             )
         };
+
+        // Debug: log frame type occasionally
+        static mut FRAME_TYPE_LOG_COUNT: u64 = 0;
+        unsafe {
+            FRAME_TYPE_LOG_COUNT += 1;
+            if FRAME_TYPE_LOG_COUNT <= 5 || FRAME_TYPE_LOG_COUNT % 100 == 0 {
+                tracing::debug!("NDI recv frame_type={} (0=none, 1=video, 2=audio, 3=meta, 4=error)", frame_type);
+            }
+        }
 
         if frame_type != NDILIB_FRAME_TYPE_VIDEO {
             return Ok(None);

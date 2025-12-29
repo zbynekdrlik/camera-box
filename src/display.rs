@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
+use std::os::unix::fs::FileExt;
 
 // Framebuffer ioctl constants
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
@@ -150,20 +151,23 @@ impl FramebufferDisplay {
             bgra_data
         };
 
-        // Write to framebuffer
-        self.file.seek(SeekFrom::Start(0))?;
-
-        // Write line by line to handle line_length padding
+        // Write to framebuffer using pwrite (atomic position + write)
         let src_stride = self.width as usize * 4;
-        for y in 0..self.height as usize {
-            let src_offset = y * src_stride;
-            let src_end = src_offset + src_stride;
-            if src_end <= final_data.len() {
-                self.file.write_all(&final_data[src_offset..src_end])?;
-                // Pad to line_length if needed
-                let padding = self.line_length as usize - src_stride;
-                if padding > 0 {
-                    self.file.write_all(&vec![0u8; padding])?;
+        if self.line_length as usize == src_stride {
+            // No padding needed - write entire frame at once at offset 0
+            self.file.write_all_at(&final_data, 0)?;
+        } else {
+            // Write line by line with padding
+            self.file.seek(SeekFrom::Start(0))?;
+            for y in 0..self.height as usize {
+                let src_offset = y * src_stride;
+                let src_end = src_offset + src_stride;
+                if src_end <= final_data.len() {
+                    self.file.write_all(&final_data[src_offset..src_end])?;
+                    let padding = self.line_length as usize - src_stride;
+                    if padding > 0 {
+                        self.file.write_all(&vec![0u8; padding])?;
+                    }
                 }
             }
         }
