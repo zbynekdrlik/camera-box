@@ -55,12 +55,12 @@ async fn main() -> Result<()> {
     };
 
     // Run the capture loop
-    run_capture_loop(&device_path, &config.ndi_name, &config).await
+    run_capture_loop(&device_path, &config.ndi_name).await
 }
 
-async fn run_capture_loop(device_path: &str, ndi_name: &str, config: &Config) -> Result<()> {
-    // Open capture device with optional resolution/framerate override
-    let mut capture = VideoCapture::open(device_path, config.width, config.height, config.framerate)?;
+async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
+    // Open capture device at 1920x1080 @ 60fps
+    let mut capture = VideoCapture::open(device_path)?;
     let (width, height) = capture.dimensions();
     let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);

@@ -42,14 +42,8 @@ pub struct VideoCapture {
 }
 
 impl VideoCapture {
-    /// Open capture device and start streaming
-    ///
-    /// Parameters:
-    /// - `device_path`: Path to V4L2 device
-    /// - `req_width`: Requested width (0 = auto, try highest)
-    /// - `req_height`: Requested height (0 = auto, try highest)
-    /// - `req_fps`: Requested frame rate (0 = auto, try highest)
-    pub fn open(device_path: &str, req_width: u32, req_height: u32, req_fps: u32) -> Result<Self> {
+    /// Open capture device and start streaming at 1920x1080 @ 60fps
+    pub fn open(device_path: &str) -> Result<Self> {
         tracing::info!("Opening capture device: {}", device_path);
 
         let device = Device::with_path(device_path)
@@ -60,126 +54,42 @@ impl VideoCapture {
         tracing::info!("Device: {} ({})", caps.card, caps.driver);
 
         // Get current format as starting point
-        let format = Capture::format(&device)?;
+        let mut format = Capture::format(&device)?;
+
+        // Set 1920x1080 YUYV (best for NDI conversion)
+        format.width = 1920;
+        format.height = 1080;
+        format.fourcc = FourCC::new(b"YUYV");
+
+        let final_format = Capture::set_format(&device, &format)
+            .context("Failed to set 1920x1080 YUYV format")?;
+
         tracing::info!(
-            "Default format: {}x{} {} (stride: {})",
-            format.width,
-            format.height,
-            format.fourcc,
-            format.stride
+            "Capture format: {}x{} {} (stride: {})",
+            final_format.width,
+            final_format.height,
+            final_format.fourcc,
+            final_format.stride
         );
-
-        // Preferred pixel formats for NDI (UYVY native, YUYV simple swap, NV12 convert)
-        let preferred_formats = [
-            FourCC::new(b"UYVY"),
-            FourCC::new(b"YUYV"),
-            FourCC::new(b"NV12"),
-        ];
-
-        // Build resolution list based on config
-        let resolutions: Vec<(u32, u32)> = if req_width > 0 && req_height > 0 {
-            // User specified resolution - try only that
-            vec![(req_width, req_height)]
-        } else {
-            // Auto: try highest resolutions first
-            vec![
-                (1920, 1080),
-                (1280, 720),
-                (720, 576),
-                (640, 480),
-            ]
-        };
-
-        // Try to set resolution with preferred format
-        let mut final_format = format.clone();
-        let mut found_format = false;
-
-        'resolution: for (target_width, target_height) in &resolutions {
-            for preferred_fourcc in &preferred_formats {
-                let mut try_format = format.clone();
-                try_format.width = *target_width;
-                try_format.height = *target_height;
-                try_format.fourcc = *preferred_fourcc;
-
-                if let Ok(set_format) = Capture::set_format(&device, &try_format) {
-                    // Check if we got what we requested
-                    if set_format.width == *target_width && set_format.height == *target_height {
-                        final_format = set_format;
-                        found_format = true;
-                        tracing::info!(
-                            "Set format: {}x{} {} (stride: {})",
-                            final_format.width,
-                            final_format.height,
-                            final_format.fourcc,
-                            final_format.stride
-                        );
-                        break 'resolution;
-                    }
-                }
-            }
-        }
-
-        if !found_format {
-            // Fall back to whatever the device accepts
-            tracing::warn!("Could not set preferred format, using driver default");
-            final_format = Capture::format(&device)?;
-        }
 
         let width = final_format.width;
         let height = final_format.height;
         let fourcc = final_format.fourcc;
         let stride = final_format.stride;
 
-        // Build frame rate list based on config
-        let frame_rates: Vec<(u32, u32)> = if req_fps > 0 {
-            // User specified frame rate
-            vec![(req_fps, 1)]
-        } else {
-            // Auto: try highest frame rates first
-            vec![
-                (60, 1),
-                (50, 1),
-                (30, 1),
-            ]
-        };
-
-        for (fps_num, fps_den) in frame_rates {
-            let mut params = match Capture::params(&device) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            // V4L2 uses frame interval (1/fps), so swap numerator/denominator
-            params.interval.numerator = fps_den;
-            params.interval.denominator = fps_num;
-            if Capture::set_params(&device, &params).is_ok() {
-                tracing::info!("Requested frame rate: {} fps", fps_num);
-                break;
-            }
+        // Set 60fps
+        if let Ok(mut params) = Capture::params(&device) {
+            params.interval.numerator = 1;
+            params.interval.denominator = 60;
+            let _ = Capture::set_params(&device, &params);
         }
 
-        // Get actual frame rate from device parameters
-        let frame_rate = match Capture::params(&device) {
-            Ok(params) => {
-                let interval = params.interval;
-                // V4L2 gives us frame interval (seconds per frame) as numerator/denominator
-                // We need frame rate (frames per second), so we swap them
-                let frame_rate = FrameRate {
-                    numerator: interval.denominator,
-                    denominator: interval.numerator,
-                };
-                tracing::info!(
-                    "Active frame rate: {}/{} ({:.2} fps)",
-                    frame_rate.numerator,
-                    frame_rate.denominator,
-                    frame_rate.numerator as f64 / frame_rate.denominator as f64
-                );
-                frame_rate
-            }
-            Err(e) => {
-                tracing::warn!("Could not get frame rate from device: {}, using default", e);
-                FrameRate::default()
-            }
+        // Fixed frame rate: 60fps
+        let frame_rate = FrameRate {
+            numerator: 60,
+            denominator: 1,
         };
+        tracing::info!("Frame rate: 60 fps");
 
         // Create memory-mapped stream with minimal buffers for low latency
         // 4 buffers is minimum for stable streaming
