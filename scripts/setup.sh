@@ -501,13 +501,6 @@ EOF
     # Create NDI directory
     mkdir -p "$NDI_DIR"
 
-    # Add service watchdog for auto-restart on hang
-    mkdir -p /etc/systemd/system/camera-box.service.d
-    cat > /etc/systemd/system/camera-box.service.d/watchdog.conf << 'EOF'
-[Service]
-WatchdogSec=60
-EOF
-
     systemctl daemon-reload
     systemctl enable camera-box
 

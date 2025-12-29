@@ -17,6 +17,18 @@ pub struct Config {
     #[serde(default = "default_device")]
     pub device: String,
 
+    /// Video width (0 = auto, try highest available)
+    #[serde(default)]
+    pub width: u32,
+
+    /// Video height (0 = auto, try highest available)
+    #[serde(default)]
+    pub height: u32,
+
+    /// Frame rate (0 = auto, try highest available)
+    #[serde(default)]
+    pub framerate: u32,
+
     /// Network configuration (optional, for future use)
     #[allow(dead_code)]
     pub network: Option<NetworkConfig>,
@@ -28,6 +40,9 @@ impl Default for Config {
             hostname: default_hostname(),
             ndi_name: default_ndi_name(),
             device: default_device(),
+            width: 0,
+            height: 0,
+            framerate: 0,
             network: None,
         }
     }

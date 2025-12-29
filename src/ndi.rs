@@ -332,15 +332,18 @@ impl NdiSender {
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         // Get frame data in UYVY format (NDI native)
         let fourcc_str = frame.fourcc.str()?;
-        let data = match fourcc_str {
-            "UYVY" => &frame.data,
+
+        // Track whether we're using converted data (needs recalculated stride)
+        let (data, stride) = match fourcc_str {
+            "UYVY" => (&frame.data, frame.stride),
             "YUYV" => {
                 self.convert_yuyv_to_uyvy(&frame.data);
-                &self.uyvy_buffer
+                // UYVY stride is width * 2 bytes per pixel
+                (&self.uyvy_buffer, frame.width * 2)
             }
             "NV12" => {
                 self.convert_nv12_to_uyvy(&frame.data, frame.width as usize, frame.height as usize);
-                &self.uyvy_buffer
+                (&self.uyvy_buffer, frame.width * 2)
             }
             "MJPG" => {
                 self.decode_mjpeg_to_uyvy(
@@ -348,11 +351,11 @@ impl NdiSender {
                     frame.width as usize,
                     frame.height as usize,
                 )?;
-                &self.uyvy_buffer
+                (&self.uyvy_buffer, frame.width * 2)
             }
             "BGRA" | "BGR4" | "RX24" => {
                 self.convert_bgra_to_uyvy(&frame.data, frame.width as usize, frame.height as usize);
-                &self.uyvy_buffer
+                (&self.uyvy_buffer, frame.width * 2)
             }
             format => {
                 anyhow::bail!(
@@ -372,7 +375,7 @@ impl NdiSender {
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
             timecode: i64::MAX, // Use current time
             p_data: data.as_ptr(),
-            line_stride_in_bytes: frame.stride as c_int,
+            line_stride_in_bytes: stride as c_int,
             p_metadata: ptr::null(),
             timestamp: 0,
         };
