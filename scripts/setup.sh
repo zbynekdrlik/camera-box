@@ -162,7 +162,7 @@ configure_system() {
     log "Setting timezone to UTC..."
     timedatectl set-timezone UTC || true
 
-    # --- Disable unnecessary services ---
+    # --- Disable unnecessary services for fast boot ---
     log "Disabling unnecessary services..."
     local services_to_disable=(
         "apt-daily.timer"
@@ -173,6 +173,22 @@ configure_system() {
     for svc in "${services_to_disable[@]}"; do
         systemctl disable "$svc" 2>/dev/null || true
         systemctl stop "$svc" 2>/dev/null || true
+    done
+
+    # Mask slow boot services
+    log "Masking slow boot services..."
+    local services_to_mask=(
+        "snapd.service"
+        "snapd.socket"
+        "snapd.seeded.service"
+        "systemd-networkd-wait-online.service"
+        "ModemManager.service"
+        "thermald.service"
+        "apport.service"
+        "pollinate.service"
+    )
+    for svc in "${services_to_mask[@]}"; do
+        systemctl mask "$svc" 2>/dev/null || true
     done
 
     # --- Disable power saving ---
@@ -274,6 +290,85 @@ EOF
 
     # Force fsck on next boot after unclean shutdown
     tune2fs -c 1 "$(findmnt -n -o SOURCE /)" 2>/dev/null || true
+
+    # --- Configure GRUB for fast boot ---
+    log "Configuring GRUB for fast boot..."
+    if [[ -f /etc/default/grub ]]; then
+        sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
+        sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
+        grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
+        grep -q "GRUB_RECORDFAIL_TIMEOUT" /etc/default/grub || echo "GRUB_RECORDFAIL_TIMEOUT=0" >> /etc/default/grub
+        update-grub 2>/dev/null || true
+    fi
+
+    # --- Configure autologin ---
+    log "Configuring automatic console login..."
+    mkdir -p /etc/systemd/system/getty@tty1.service.d
+    cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+EOF
+
+    # Add status display on login
+    cat > /root/.bash_profile << 'EOF'
+# Camera-Box Status on Login
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║                    Camera-Box Device                          ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Hostname: $(hostname)"
+echo "IP: $(hostname -I | awk '{print $1}')"
+echo "Uptime: $(uptime -p)"
+echo ""
+echo "Services:"
+systemctl is-active camera-box >/dev/null 2>&1 && echo "  camera-box: running" || echo "  camera-box: stopped"
+systemctl is-active dantesync >/dev/null 2>&1 && echo "  dantesync: running" || echo "  dantesync: stopped"
+systemctl is-active avahi-daemon >/dev/null 2>&1 && echo "  avahi-daemon: running" || echo "  avahi-daemon: stopped"
+echo ""
+EOF
+
+    # --- Configure read-only filesystem ---
+    log "Configuring read-only filesystem..."
+
+    # Configure journald for volatile storage
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > /etc/systemd/journald.conf.d/volatile.conf << 'EOF'
+[Journal]
+Storage=volatile
+RuntimeMaxUse=30M
+EOF
+
+    # Create helper scripts for switching modes
+    cat > /usr/local/bin/rw-mode << 'EOF'
+#!/bin/bash
+mount -o remount,rw /
+echo "Root filesystem is now read-write"
+EOF
+    chmod +x /usr/local/bin/rw-mode
+
+    cat > /usr/local/bin/ro-mode << 'EOF'
+#!/bin/bash
+sync
+mount -o remount,ro /
+echo "Root filesystem is now read-only"
+EOF
+    chmod +x /usr/local/bin/ro-mode
+
+    # Configure fstab for read-only root and tmpfs mounts
+    local root_uuid
+    root_uuid=$(findmnt -n -o UUID /)
+
+    cat > /etc/fstab << EOF
+# Camera-Box filesystem configuration (read-only root)
+UUID=$root_uuid / ext4 ro 0 1
+tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
+tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
+tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=100M 0 0
+tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
+EOF
 
     # --- Enable avahi for mDNS ---
     log "Enabling Avahi (mDNS)..."
