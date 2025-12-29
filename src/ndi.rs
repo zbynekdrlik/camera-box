@@ -765,8 +765,9 @@ impl NdiReceiver {
         // Cleanup finder
         unsafe { (lib.find_destroy)(finder) };
 
-        let source = found_source
-            .ok_or_else(|| anyhow::anyhow!("NDI source '{}' not found within timeout", source_name))?;
+        let source = found_source.ok_or_else(|| {
+            anyhow::anyhow!("NDI source '{}' not found within timeout", source_name)
+        })?;
 
         // Create receiver
         let recv_name = CString::new("camera-box-display").unwrap();

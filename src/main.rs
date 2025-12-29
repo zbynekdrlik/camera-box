@@ -236,10 +236,7 @@ async fn run_capture_loop(
     running.store(false, Ordering::Relaxed);
 
     // Wait for capture loop (with timeout)
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        capture_handle,
-    ).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), capture_handle).await;
 
     // Wait for display thread if running
     if let Some(handle) = display_handle {

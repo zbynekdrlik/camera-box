@@ -74,7 +74,9 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         match receiver.capture_frame(100) {
             Ok(Some(frame)) => {
                 // Display the frame
-                if let Err(e) = display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc) {
+                if let Err(e) =
+                    display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
+                {
                     tracing::error!("Failed to display frame: {}", e);
                 }
 

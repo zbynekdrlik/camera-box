@@ -133,7 +133,13 @@ impl FramebufferDisplay {
     }
 
     /// Display a frame (handles format conversion and scaling)
-    pub fn display_frame(&mut self, data: &[u8], width: u32, height: u32, fourcc: u32) -> Result<()> {
+    pub fn display_frame(
+        &mut self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        fourcc: u32,
+    ) -> Result<()> {
         // Convert to BGRA for framebuffer
         let bgra_data = self.convert_to_bgra(data, width, height, fourcc)?;
 
@@ -166,7 +172,13 @@ impl FramebufferDisplay {
     }
 
     /// Convert various formats to BGRA
-    fn convert_to_bgra(&mut self, data: &[u8], width: u32, height: u32, fourcc: u32) -> Result<Vec<u8>> {
+    fn convert_to_bgra(
+        &mut self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        fourcc: u32,
+    ) -> Result<Vec<u8>> {
         let fourcc_bytes = fourcc.to_le_bytes();
         let fourcc_str = std::str::from_utf8(&fourcc_bytes).unwrap_or("????");
 
@@ -175,7 +187,11 @@ impl FramebufferDisplay {
             "BGRA" | "BGRX" => Ok(data.to_vec()),
             "RGBA" => Ok(self.rgba_to_bgra(data)),
             _ => {
-                tracing::warn!("Unknown fourcc: {} (0x{:08x}), treating as UYVY", fourcc_str, fourcc);
+                tracing::warn!(
+                    "Unknown fourcc: {} (0x{:08x}), treating as UYVY",
+                    fourcc_str,
+                    fourcc
+                );
                 Ok(self.uyvy_to_bgra(data, width, height))
             }
         }
