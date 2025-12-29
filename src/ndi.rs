@@ -1,15 +1,16 @@
 use anyhow::{Context, Result};
 use libloading::Library;
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 use crate::capture::{Frame, FrameRate};
 
-// NDI SDK type definitions (minimal subset for video sending)
+// NDI SDK type definitions (minimal subset for video sending and receiving)
 #[repr(C)]
 struct NDIlib_send_create_t {
     p_ndi_name: *const c_char,
@@ -36,9 +37,72 @@ struct NDIlib_video_frame_v2_t {
 
 // FourCC codes
 const NDILIBD_FOURCC_UYVY: u32 = u32::from_le_bytes([b'U', b'Y', b'V', b'Y']);
+#[allow(dead_code)]
+const NDILIBD_FOURCC_BGRA: u32 = u32::from_le_bytes([b'B', b'G', b'R', b'A']);
+#[allow(dead_code)]
+const NDILIBD_FOURCC_BGRX: u32 = u32::from_le_bytes([b'B', b'G', b'R', b'X']);
 
 // Frame format types
 const NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE: c_int = 1;
+
+// NDI receiver types
+#[repr(C)]
+struct NDIlib_find_create_t {
+    show_local_sources: bool,
+    p_groups: *const c_char,
+    p_extra_ips: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NDIlib_source_t {
+    pub p_ndi_name: *const c_char,
+    p_url_address: *const c_char,
+}
+
+#[repr(C)]
+struct NDIlib_recv_create_v3_t {
+    source_to_connect_to: NDIlib_source_t,
+    color_format: c_int,
+    bandwidth: c_int,
+    allow_video_fields: bool,
+    p_ndi_recv_name: *const c_char,
+}
+
+#[repr(C)]
+pub struct NDIlib_video_frame_v2_recv_t {
+    pub xres: c_int,
+    pub yres: c_int,
+    pub fourcc: u32,
+    pub frame_rate_n: c_int,
+    pub frame_rate_d: c_int,
+    pub picture_aspect_ratio: f32,
+    pub frame_format_type: c_int,
+    pub timecode: i64,
+    pub p_data: *mut u8,
+    pub line_stride_in_bytes: c_int,
+    pub p_metadata: *const c_char,
+    pub timestamp: i64,
+}
+
+// Frame types returned by recv_capture
+#[allow(dead_code)]
+const NDILIB_FRAME_TYPE_NONE: c_int = 0;
+const NDILIB_FRAME_TYPE_VIDEO: c_int = 1;
+#[allow(dead_code)]
+const NDILIB_FRAME_TYPE_AUDIO: c_int = 2;
+#[allow(dead_code)]
+const NDILIB_FRAME_TYPE_METADATA: c_int = 3;
+#[allow(dead_code)]
+const NDILIB_FRAME_TYPE_ERROR: c_int = 4;
+
+// Color formats
+const NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA: c_int = 0;
+#[allow(dead_code)]
+const NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA: c_int = 1;
+
+// Bandwidth
+const NDILIB_RECV_BANDWIDTH_HIGHEST: c_int = 100;
 
 #[allow(non_camel_case_types)]
 type NDIlib_initialize_fn = unsafe extern "C" fn() -> bool;
@@ -55,15 +119,51 @@ type NDIlib_send_send_video_v2_fn =
 type NDIlib_send_send_video_async_v2_fn =
     unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_t);
 
+// Receiver function types
+#[allow(non_camel_case_types)]
+type NDIlib_find_create_v2_fn = unsafe extern "C" fn(*const NDIlib_find_create_t) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type NDIlib_find_destroy_fn = unsafe extern "C" fn(*mut c_void);
+#[allow(non_camel_case_types)]
+type NDIlib_find_wait_for_sources_fn = unsafe extern "C" fn(*mut c_void, u32) -> bool;
+#[allow(non_camel_case_types)]
+type NDIlib_find_get_current_sources_fn =
+    unsafe extern "C" fn(*mut c_void, *mut u32) -> *const NDIlib_source_t;
+#[allow(non_camel_case_types)]
+type NDIlib_recv_create_v3_fn = unsafe extern "C" fn(*const NDIlib_recv_create_v3_t) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type NDIlib_recv_destroy_fn = unsafe extern "C" fn(*mut c_void);
+#[allow(non_camel_case_types)]
+type NDIlib_recv_capture_v3_fn = unsafe extern "C" fn(
+    *mut c_void,
+    *mut NDIlib_video_frame_v2_recv_t,
+    *mut c_void, // audio frame (null)
+    *mut c_void, // metadata frame (null)
+    u32,
+) -> c_int;
+#[allow(non_camel_case_types)]
+type NDIlib_recv_free_video_v2_fn =
+    unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_recv_t);
+
 /// NDI library wrapper with dynamic loading
 struct NdiLib {
     _library: Library,
     destroy: NDIlib_destroy_fn,
+    // Sender functions
     send_create: NDIlib_send_create_fn,
     send_destroy: NDIlib_send_destroy_fn,
     send_send_video_v2: NDIlib_send_send_video_v2_fn,
     #[allow(dead_code)] // Keep for potential future async mode
     send_send_video_async_v2: NDIlib_send_send_video_async_v2_fn,
+    // Receiver functions
+    find_create_v2: NDIlib_find_create_v2_fn,
+    find_destroy: NDIlib_find_destroy_fn,
+    find_wait_for_sources: NDIlib_find_wait_for_sources_fn,
+    find_get_current_sources: NDIlib_find_get_current_sources_fn,
+    recv_create_v3: NDIlib_recv_create_v3_fn,
+    recv_destroy: NDIlib_recv_destroy_fn,
+    recv_capture_v3: NDIlib_recv_capture_v3_fn,
+    recv_free_video_v2: NDIlib_recv_free_video_v2_fn,
 }
 
 impl NdiLib {
@@ -133,6 +233,8 @@ impl NdiLib {
             let destroy: NDIlib_destroy_fn = *library
                 .get::<NDIlib_destroy_fn>(b"NDIlib_destroy")
                 .context("NDIlib_destroy not found")?;
+
+            // Sender functions
             let send_create: NDIlib_send_create_fn = *library
                 .get::<NDIlib_send_create_fn>(b"NDIlib_send_create")
                 .context("NDIlib_send_create not found")?;
@@ -145,6 +247,32 @@ impl NdiLib {
             let send_send_video_async_v2: NDIlib_send_send_video_async_v2_fn = *library
                 .get::<NDIlib_send_send_video_async_v2_fn>(b"NDIlib_send_send_video_async_v2")
                 .context("NDIlib_send_send_video_async_v2 not found")?;
+
+            // Receiver functions
+            let find_create_v2: NDIlib_find_create_v2_fn = *library
+                .get::<NDIlib_find_create_v2_fn>(b"NDIlib_find_create_v2")
+                .context("NDIlib_find_create_v2 not found")?;
+            let find_destroy: NDIlib_find_destroy_fn = *library
+                .get::<NDIlib_find_destroy_fn>(b"NDIlib_find_destroy")
+                .context("NDIlib_find_destroy not found")?;
+            let find_wait_for_sources: NDIlib_find_wait_for_sources_fn = *library
+                .get::<NDIlib_find_wait_for_sources_fn>(b"NDIlib_find_wait_for_sources")
+                .context("NDIlib_find_wait_for_sources not found")?;
+            let find_get_current_sources: NDIlib_find_get_current_sources_fn = *library
+                .get::<NDIlib_find_get_current_sources_fn>(b"NDIlib_find_get_current_sources")
+                .context("NDIlib_find_get_current_sources not found")?;
+            let recv_create_v3: NDIlib_recv_create_v3_fn = *library
+                .get::<NDIlib_recv_create_v3_fn>(b"NDIlib_recv_create_v3")
+                .context("NDIlib_recv_create_v3 not found")?;
+            let recv_destroy: NDIlib_recv_destroy_fn = *library
+                .get::<NDIlib_recv_destroy_fn>(b"NDIlib_recv_destroy")
+                .context("NDIlib_recv_destroy not found")?;
+            let recv_capture_v3: NDIlib_recv_capture_v3_fn = *library
+                .get::<NDIlib_recv_capture_v3_fn>(b"NDIlib_recv_capture_v3")
+                .context("NDIlib_recv_capture_v3 not found")?;
+            let recv_free_video_v2: NDIlib_recv_free_video_v2_fn = *library
+                .get::<NDIlib_recv_free_video_v2_fn>(b"NDIlib_recv_free_video_v2")
+                .context("NDIlib_recv_free_video_v2 not found")?;
 
             // Initialize NDI
             if !initialize() {
@@ -160,6 +288,14 @@ impl NdiLib {
                 send_destroy,
                 send_send_video_v2,
                 send_send_video_async_v2,
+                find_create_v2,
+                find_destroy,
+                find_wait_for_sources,
+                find_get_current_sources,
+                recv_create_v3,
+                recv_destroy,
+                recv_capture_v3,
+                recv_free_video_v2,
             })
         }
     }
@@ -541,6 +677,176 @@ impl Drop for NdiSender {
         if !self.sender.is_null() {
             unsafe {
                 (self.lib.send_destroy)(self.sender);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// NDI Receiver
+// ============================================================================
+
+/// Video frame received from NDI source
+pub struct ReceivedFrame {
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: u32,
+    #[allow(dead_code)]
+    pub stride: u32,
+    pub data: Vec<u8>,
+}
+
+/// NDI receiver wrapper - receives video from an NDI source
+pub struct NdiReceiver {
+    lib: Arc<NdiLib>,
+    receiver: *mut c_void,
+    source_name: String,
+}
+
+// SAFETY: NdiReceiver uses thread-safe NDI operations
+unsafe impl Send for NdiReceiver {}
+
+impl NdiReceiver {
+    /// Find and connect to an NDI source by name
+    /// Blocks until the source is found (with timeout)
+    pub fn connect(source_name: &str, timeout_secs: u32) -> Result<Self> {
+        let lib = Arc::new(NdiLib::load()?);
+
+        tracing::info!("Searching for NDI source: {}", source_name);
+
+        // Create finder
+        let find_create = NDIlib_find_create_t {
+            show_local_sources: true,
+            p_groups: ptr::null(),
+            p_extra_ips: ptr::null(),
+        };
+
+        let finder = unsafe { (lib.find_create_v2)(&find_create) };
+        if finder.is_null() {
+            anyhow::bail!("Failed to create NDI finder");
+        }
+
+        // Search for source with timeout
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs as u64);
+        let mut found_source: Option<NDIlib_source_t> = None;
+
+        while start.elapsed() < timeout {
+            // Wait for sources (1 second intervals)
+            unsafe { (lib.find_wait_for_sources)(finder, 1000) };
+
+            // Get current sources
+            let mut num_sources: u32 = 0;
+            let sources = unsafe { (lib.find_get_current_sources)(finder, &mut num_sources) };
+
+            if num_sources > 0 && !sources.is_null() {
+                for i in 0..num_sources {
+                    let source = unsafe { *sources.add(i as usize) };
+                    if !source.p_ndi_name.is_null() {
+                        let name = unsafe { CStr::from_ptr(source.p_ndi_name) }
+                            .to_string_lossy()
+                            .to_string();
+                        tracing::debug!("Found NDI source: {}", name);
+
+                        if name.contains(source_name) {
+                            tracing::info!("Found matching source: {}", name);
+                            found_source = Some(source);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found_source.is_some() {
+                break;
+            }
+        }
+
+        // Cleanup finder
+        unsafe { (lib.find_destroy)(finder) };
+
+        let source = found_source
+            .ok_or_else(|| anyhow::anyhow!("NDI source '{}' not found within timeout", source_name))?;
+
+        // Create receiver
+        let recv_name = CString::new("camera-box-display").unwrap();
+        let recv_create = NDIlib_recv_create_v3_t {
+            source_to_connect_to: source,
+            color_format: NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA,
+            bandwidth: NDILIB_RECV_BANDWIDTH_HIGHEST,
+            allow_video_fields: false,
+            p_ndi_recv_name: recv_name.as_ptr(),
+        };
+
+        let receiver = unsafe { (lib.recv_create_v3)(&recv_create) };
+        if receiver.is_null() {
+            anyhow::bail!("Failed to create NDI receiver");
+        }
+
+        tracing::info!("NDI receiver connected to source");
+
+        Ok(Self {
+            lib,
+            receiver,
+            source_name: source_name.to_string(),
+        })
+    }
+
+    /// Capture next video frame (blocking with timeout)
+    /// Returns None if no frame available within timeout
+    pub fn capture_frame(&mut self, timeout_ms: u32) -> Result<Option<ReceivedFrame>> {
+        let mut video_frame: NDIlib_video_frame_v2_recv_t = unsafe { std::mem::zeroed() };
+
+        let frame_type = unsafe {
+            (self.lib.recv_capture_v3)(
+                self.receiver,
+                &mut video_frame,
+                ptr::null_mut(), // no audio
+                ptr::null_mut(), // no metadata
+                timeout_ms,
+            )
+        };
+
+        if frame_type != NDILIB_FRAME_TYPE_VIDEO {
+            return Ok(None);
+        }
+
+        // Copy frame data (receiver may reuse buffer)
+        let data_size = (video_frame.line_stride_in_bytes * video_frame.yres) as usize;
+        let data = if !video_frame.p_data.is_null() && data_size > 0 {
+            unsafe { std::slice::from_raw_parts(video_frame.p_data, data_size).to_vec() }
+        } else {
+            return Ok(None);
+        };
+
+        let frame = ReceivedFrame {
+            width: video_frame.xres as u32,
+            height: video_frame.yres as u32,
+            fourcc: video_frame.fourcc,
+            stride: video_frame.line_stride_in_bytes as u32,
+            data,
+        };
+
+        // Free the NDI frame
+        unsafe {
+            (self.lib.recv_free_video_v2)(self.receiver, &video_frame);
+        }
+
+        Ok(Some(frame))
+    }
+
+    /// Get source name
+    #[allow(dead_code)]
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+}
+
+impl Drop for NdiReceiver {
+    fn drop(&mut self) {
+        if !self.receiver.is_null() {
+            unsafe {
+                (self.lib.recv_destroy)(self.receiver);
             }
         }
     }

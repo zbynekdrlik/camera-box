@@ -16,6 +16,24 @@ pub struct Config {
     /// Video capture device path ("auto" for auto-detection)
     #[serde(default = "default_device")]
     pub device: String,
+
+    /// NDI display configuration (optional)
+    #[serde(default)]
+    pub display: Option<DisplayConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DisplayConfig {
+    /// NDI source name to display (partial match)
+    pub source: String,
+
+    /// Framebuffer device (default: /dev/fb0)
+    #[serde(default = "default_fb_device")]
+    pub fb_device: String,
+}
+
+fn default_fb_device() -> String {
+    "/dev/fb0".to_string()
 }
 
 impl Default for Config {
@@ -24,6 +42,7 @@ impl Default for Config {
             hostname: default_hostname(),
             ndi_name: default_ndi_name(),
             device: default_device(),
+            display: None,
         }
     }
 }
