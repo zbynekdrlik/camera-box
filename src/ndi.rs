@@ -61,8 +61,8 @@ struct NdiLib {
     destroy: NDIlib_destroy_fn,
     send_create: NDIlib_send_create_fn,
     send_destroy: NDIlib_send_destroy_fn,
-    #[allow(dead_code)]
     send_send_video_v2: NDIlib_send_send_video_v2_fn,
+    #[allow(dead_code)] // Keep for potential future async mode
     send_send_video_async_v2: NDIlib_send_send_video_async_v2_fn,
 }
 
