@@ -48,6 +48,9 @@ type NDIlib_send_destroy_fn = unsafe extern "C" fn(*mut c_void);
 #[allow(non_camel_case_types)]
 type NDIlib_send_send_video_v2_fn =
     unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_t);
+#[allow(non_camel_case_types)]
+type NDIlib_send_send_video_async_v2_fn =
+    unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_t);
 
 /// NDI library wrapper with dynamic loading
 struct NdiLib {
@@ -55,7 +58,9 @@ struct NdiLib {
     destroy: NDIlib_destroy_fn,
     send_create: NDIlib_send_create_fn,
     send_destroy: NDIlib_send_destroy_fn,
+    #[allow(dead_code)]
     send_send_video_v2: NDIlib_send_send_video_v2_fn,
+    send_send_video_async_v2: NDIlib_send_send_video_async_v2_fn,
 }
 
 impl NdiLib {
@@ -134,6 +139,9 @@ impl NdiLib {
             let send_send_video_v2: NDIlib_send_send_video_v2_fn = *library
                 .get::<NDIlib_send_send_video_v2_fn>(b"NDIlib_send_send_video_v2")
                 .context("NDIlib_send_send_video_v2 not found")?;
+            let send_send_video_async_v2: NDIlib_send_send_video_async_v2_fn = *library
+                .get::<NDIlib_send_send_video_async_v2_fn>(b"NDIlib_send_send_video_async_v2")
+                .context("NDIlib_send_send_video_async_v2 not found")?;
 
             // Initialize NDI
             if !initialize() {
@@ -148,6 +156,7 @@ impl NdiLib {
                 send_create,
                 send_destroy,
                 send_send_video_v2,
+                send_send_video_async_v2,
             })
         }
     }
@@ -169,7 +178,9 @@ pub struct NdiSender {
     ndi_name: CString, // Keep CString alive while sender exists
     frame_rate: FrameRate,
     frame_count: u64,
-    uyvy_buffer: Vec<u8>,
+    // Double buffer for async sending - NDI keeps reference to previous frame
+    uyvy_buffers: [Vec<u8>; 2],
+    current_buffer: usize,
 }
 
 // SAFETY: NdiSender uses thread-safe NDI operations
@@ -202,28 +213,31 @@ impl NdiSender {
             ndi_name,
             frame_rate,
             frame_count: 0,
-            uyvy_buffer: Vec::new(),
+            uyvy_buffers: [Vec::new(), Vec::new()],
+            current_buffer: 0,
         })
     }
 
     // --- Format conversion functions ---
 
     fn convert_yuyv_to_uyvy(&mut self, yuyv: &[u8]) {
-        self.uyvy_buffer.clear();
-        self.uyvy_buffer.reserve(yuyv.len());
+        let buf = &mut self.uyvy_buffers[self.current_buffer];
+        buf.clear();
+        buf.reserve(yuyv.len());
         for chunk in yuyv.chunks_exact(4) {
-            self.uyvy_buffer.push(chunk[1]); // U0
-            self.uyvy_buffer.push(chunk[0]); // Y0
-            self.uyvy_buffer.push(chunk[3]); // V0
-            self.uyvy_buffer.push(chunk[2]); // Y1
+            buf.push(chunk[1]); // U0
+            buf.push(chunk[0]); // Y0
+            buf.push(chunk[3]); // V0
+            buf.push(chunk[2]); // Y1
         }
     }
 
     fn convert_nv12_to_uyvy(&mut self, nv12: &[u8], width: usize, height: usize) {
         // NV12: Y plane followed by interleaved UV plane
         let y_size = width * height;
-        self.uyvy_buffer.clear();
-        self.uyvy_buffer.reserve(width * height * 2);
+        let buf = &mut self.uyvy_buffers[self.current_buffer];
+        buf.clear();
+        buf.reserve(width * height * 2);
 
         let y_plane = &nv12[..y_size];
         let uv_plane = &nv12[y_size..];
@@ -238,10 +252,10 @@ impl NdiSender {
                 let v = uv_plane.get(uv_idx + 1).copied().unwrap_or(128);
 
                 // UYVY: U Y0 V Y1
-                self.uyvy_buffer.push(u);
-                self.uyvy_buffer.push(y0);
-                self.uyvy_buffer.push(v);
-                self.uyvy_buffer.push(y1);
+                buf.push(u);
+                buf.push(y0);
+                buf.push(v);
+                buf.push(y1);
             }
         }
     }
@@ -284,13 +298,14 @@ impl NdiSender {
             anyhow::bail!("ffmpeg MJPEG decode failed");
         }
 
-        self.uyvy_buffer = output.stdout;
+        self.uyvy_buffers[self.current_buffer] = output.stdout;
         Ok(())
     }
 
     fn convert_bgra_to_uyvy(&mut self, bgra: &[u8], width: usize, height: usize) {
-        self.uyvy_buffer.clear();
-        self.uyvy_buffer.reserve(width * height * 2);
+        let buf = &mut self.uyvy_buffers[self.current_buffer];
+        buf.clear();
+        buf.reserve(width * height * 2);
 
         for row in 0..height {
             for col in (0..width).step_by(2) {
@@ -320,30 +335,35 @@ impl NdiSender {
                 let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
 
                 // UYVY: U Y0 V Y1
-                self.uyvy_buffer.push(u.clamp(0, 255) as u8);
-                self.uyvy_buffer.push(y0.clamp(16, 235) as u8);
-                self.uyvy_buffer.push(v.clamp(0, 255) as u8);
-                self.uyvy_buffer.push(y1.clamp(16, 235) as u8);
+                buf.push(u.clamp(0, 255) as u8);
+                buf.push(y0.clamp(16, 235) as u8);
+                buf.push(v.clamp(0, 255) as u8);
+                buf.push(y1.clamp(16, 235) as u8);
             }
         }
     }
 
-    /// Send video frame
+    /// Send video frame using async for lowest latency
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         // Get frame data in UYVY format (NDI native)
         let fourcc_str = frame.fourcc.str()?;
 
-        // Track whether we're using converted data (needs recalculated stride)
-        let (data, stride) = match fourcc_str {
-            "UYVY" => (&frame.data, frame.stride),
+        // Convert to UYVY in current buffer, get stride
+        let stride = match fourcc_str {
+            "UYVY" => {
+                // Copy directly to current buffer for async safety
+                let buf = &mut self.uyvy_buffers[self.current_buffer];
+                buf.clear();
+                buf.extend_from_slice(&frame.data);
+                frame.stride
+            }
             "YUYV" => {
                 self.convert_yuyv_to_uyvy(&frame.data);
-                // UYVY stride is width * 2 bytes per pixel
-                (&self.uyvy_buffer, frame.width * 2)
+                frame.width * 2
             }
             "NV12" => {
                 self.convert_nv12_to_uyvy(&frame.data, frame.width as usize, frame.height as usize);
-                (&self.uyvy_buffer, frame.width * 2)
+                frame.width * 2
             }
             "MJPG" => {
                 self.decode_mjpeg_to_uyvy(
@@ -351,11 +371,11 @@ impl NdiSender {
                     frame.width as usize,
                     frame.height as usize,
                 )?;
-                (&self.uyvy_buffer, frame.width * 2)
+                frame.width * 2
             }
             "BGRA" | "BGR4" | "RX24" => {
                 self.convert_bgra_to_uyvy(&frame.data, frame.width as usize, frame.height as usize);
-                (&self.uyvy_buffer, frame.width * 2)
+                frame.width * 2
             }
             format => {
                 anyhow::bail!(
@@ -374,15 +394,19 @@ impl NdiSender {
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
             timecode: i64::MAX, // Use current time
-            p_data: data.as_ptr(),
+            p_data: self.uyvy_buffers[self.current_buffer].as_ptr(),
             line_stride_in_bytes: stride as c_int,
             p_metadata: ptr::null(),
             timestamp: 0,
         };
 
+        // Use async send - returns immediately, NDI keeps reference to buffer
         unsafe {
-            (self.lib.send_send_video_v2)(self.sender, &video_frame);
+            (self.lib.send_send_video_async_v2)(self.sender, &video_frame);
         }
+
+        // Swap to other buffer for next frame (double buffering)
+        self.current_buffer = 1 - self.current_buffer;
 
         self.frame_count += 1;
 
