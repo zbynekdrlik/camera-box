@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 
 // Framebuffer ioctl constants
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;

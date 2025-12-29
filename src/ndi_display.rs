@@ -61,7 +61,11 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                     tracing::warn!("Failed to open framebuffer (attempt {}): {}", attempt, e);
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 } else {
-                    tracing::error!("Failed to open framebuffer after {} attempts: {}", attempt, e);
+                    tracing::error!(
+                        "Failed to open framebuffer after {} attempts: {}",
+                        attempt,
+                        e
+                    );
                     return Err(e);
                 }
             }
@@ -93,8 +97,14 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                 if frame_count == 0 {
                     let fourcc_bytes = frame.fourcc.to_le_bytes();
                     let fourcc_str = std::str::from_utf8(&fourcc_bytes).unwrap_or("????");
-                    tracing::info!("NDI display: first frame fourcc={} (0x{:08x}), size={}x{}, data_len={}",
-                        fourcc_str, frame.fourcc, frame.width, frame.height, frame.data.len());
+                    tracing::info!(
+                        "NDI display: first frame fourcc={} (0x{:08x}), size={}x{}, data_len={}",
+                        fourcc_str,
+                        frame.fourcc,
+                        frame.width,
+                        frame.height,
+                        frame.data.len()
+                    );
                 }
 
                 // Display the frame (ignore errors - display may be disconnected)
