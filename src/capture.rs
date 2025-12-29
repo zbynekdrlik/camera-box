@@ -5,7 +5,16 @@ use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
-/// Video frame data with metadata
+/// Video frame metadata (data passed separately as zero-copy reference)
+#[derive(Clone, Copy)]
+pub struct FrameInfo {
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: FourCC,
+    pub stride: u32,
+}
+
+/// Video frame data with metadata (for compatibility, still used for owned data)
 pub struct Frame {
     pub data: Vec<u8>,
     pub width: u32,
@@ -91,9 +100,9 @@ impl VideoCapture {
         };
         tracing::info!("Frame rate: 60 fps");
 
-        // Create memory-mapped stream with minimum buffers for low latency
-        // 2 buffers for stable streaming (1 buffer didn't reduce latency)
-        let stream = Stream::with_buffers(&device, Type::VideoCapture, 2)
+        // Create memory-mapped stream with enough buffers to avoid frame drops
+        // 4 buffers to handle processing time variance
+        let stream = Stream::with_buffers(&device, Type::VideoCapture, 4)
             .context("Failed to create capture stream")?;
 
         // Leak the device to get 'static lifetime (it lives for program duration)
@@ -109,7 +118,8 @@ impl VideoCapture {
         })
     }
 
-    /// Capture next frame (blocking)
+    /// Capture next frame (blocking) - COPIES DATA
+    #[allow(dead_code)]
     pub fn next_frame(&mut self) -> Result<Frame> {
         let (buffer, _metadata) = self.stream.next()?;
 
@@ -123,6 +133,42 @@ impl VideoCapture {
             fourcc: self.fourcc,
             stride: self.stride,
         })
+    }
+
+    /// Process next frame with zero-copy callback (FAST PATH)
+    /// The callback receives a direct reference to the mmap buffer - no copying!
+    /// Buffer is automatically requeued after callback returns.
+    #[inline]
+    pub fn process_frame<F>(&mut self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(&[u8], FrameInfo),
+    {
+        let (buffer, _metadata) = self.stream.next()?;
+
+        let info = FrameInfo {
+            width: self.width,
+            height: self.height,
+            fourcc: self.fourcc,
+            stride: self.stride,
+        };
+
+        // Zero-copy: pass buffer slice directly to callback
+        #[allow(clippy::needless_borrow)]
+        callback(&buffer, info);
+
+        // Buffer automatically requeued when it goes out of scope
+        Ok(())
+    }
+
+    /// Get frame info without capturing
+    #[allow(dead_code)]
+    pub fn frame_info(&self) -> FrameInfo {
+        FrameInfo {
+            width: self.width,
+            height: self.height,
+            fourcc: self.fourcc,
+            stride: self.stride,
+        }
     }
 
     /// Get frame dimensions

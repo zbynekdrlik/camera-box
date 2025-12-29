@@ -31,6 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 
+# Low-level system calls (real-time scheduling, memory locking)
+libc = "0.2"
+
 [profile.release]
 lto = true
 codegen-units = 1

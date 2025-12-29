@@ -12,6 +12,73 @@ use crate::capture::VideoCapture;
 use crate::config::Config;
 use crate::ndi::NdiSender;
 
+/// Apply real-time optimizations to the current thread for lowest latency
+/// Based on media-bridge's extreme low-latency settings
+fn apply_realtime_optimizations() {
+    // 1. Set real-time SCHED_FIFO scheduling with high priority
+    apply_realtime_scheduling();
+
+    // 2. Lock all memory to prevent page faults
+    apply_memory_locking();
+
+    // 3. Set CPU affinity (optional - pin to core 1)
+    apply_cpu_affinity();
+}
+
+/// Set SCHED_FIFO real-time scheduling with priority 90
+fn apply_realtime_scheduling() {
+    unsafe {
+        let param = libc::sched_param { sched_priority: 90 };
+        let result = libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
+
+        if result == 0 {
+            tracing::info!("Real-time SCHED_FIFO priority 90 enabled");
+        } else {
+            tracing::warn!(
+                "Could not set real-time priority (need CAP_SYS_NICE). \
+                Run: sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box"
+            );
+        }
+    }
+}
+
+/// Lock all memory to prevent page faults during capture
+fn apply_memory_locking() {
+    unsafe {
+        // MCL_CURRENT: Lock all pages currently mapped
+        // MCL_FUTURE: Lock all pages that will be mapped in the future
+        let result = libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+
+        if result == 0 {
+            tracing::info!("Memory locked (mlockall) - no page faults possible");
+        } else {
+            tracing::warn!(
+                "Could not lock memory (need CAP_IPC_LOCK). \
+                Run: sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box"
+            );
+        }
+    }
+}
+
+/// Set CPU affinity to pin capture thread to a specific core
+fn apply_cpu_affinity() {
+    unsafe {
+        let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
+
+        // Pin to CPU core 1 (leave core 0 for system tasks)
+        libc::CPU_SET(1, &mut cpuset);
+
+        let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
+
+        if result == 0 {
+            tracing::info!("CPU affinity set to core 1");
+        } else {
+            // Not critical - just a hint to the scheduler
+            tracing::debug!("Could not set CPU affinity (non-critical)");
+        }
+    }
+}
+
 /// Simple USB video capture to NDI streaming appliance
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -68,19 +135,39 @@ async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
     // Create NDI sender with configured name and detected frame rate
     let mut sender = NdiSender::new(ndi_name, frame_rate)?;
     tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
+    tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
-    // Spawn capture loop in blocking task
+    // Spawn capture loop in blocking task - minimal overhead for lowest latency
     let capture_handle = tokio::task::spawn_blocking(move || {
+        // Apply real-time optimizations BEFORE entering the capture loop
+        apply_realtime_optimizations();
+
+        let mut frame_count: u64 = 0;
+        let mut last_report = std::time::Instant::now();
+
         loop {
-            match capture.next_frame() {
-                Ok(frame) => {
-                    if let Err(e) = sender.send_frame(&frame) {
-                        tracing::error!("Failed to send frame: {}", e);
+            // ZERO-COPY: Process frame directly from mmap buffer without copying
+            let result = capture.process_frame(|data, info| {
+                if let Err(e) = sender.send_frame_zero_copy(data, info) {
+                    tracing::error!("Failed to send frame: {}", e);
+                }
+            });
+
+            match result {
+                Ok(()) => {
+                    frame_count += 1;
+
+                    // Report fps every 5 seconds
+                    let elapsed = last_report.elapsed();
+                    if elapsed.as_secs() >= 5 {
+                        let fps = frame_count as f64 / elapsed.as_secs_f64();
+                        tracing::info!("Streaming: {:.1} fps ({} frames)", fps, frame_count);
+                        frame_count = 0;
+                        last_report = std::time::Instant::now();
                     }
                 }
                 Err(e) => {
                     tracing::error!("Failed to capture frame: {}", e);
-                    // Small delay before retry
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
