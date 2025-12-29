@@ -1,16 +1,21 @@
 mod capture;
 mod config;
+mod display;
 mod ndi;
+mod ndi_display;
 
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
 use crate::capture::VideoCapture;
 use crate::config::Config;
 use crate::ndi::NdiSender;
+use crate::ndi_display::NdiDisplayConfig;
 
 /// Apply real-time optimizations to the current thread for lowest latency
 /// Based on media-bridge's extreme low-latency settings
@@ -91,6 +96,14 @@ struct Args {
     #[arg(short, long)]
     device: Option<String>,
 
+    /// NDI source to display on HDMI (e.g., "STRIH-SNV (interkom)")
+    #[arg(long = "display")]
+    display_source: Option<String>,
+
+    /// Framebuffer device for display output
+    #[arg(long, default_value = "/dev/fb0")]
+    fb_device: String,
+
     /// Enable debug logging
     #[arg(long)]
     debug: bool,
@@ -121,11 +134,50 @@ async fn main() -> Result<()> {
         config.device_path()?
     };
 
-    // Run the capture loop
-    run_capture_loop(&device_path, &config.ndi_name).await
+    // Determine display source (CLI overrides config)
+    let display_config = if let Some(ref source) = args.display_source {
+        Some(NdiDisplayConfig {
+            source_name: source.clone(),
+            fb_device: args.fb_device.clone(),
+            find_timeout_secs: 30,
+        })
+    } else {
+        config.display.as_ref().map(|display| NdiDisplayConfig {
+            source_name: display.source.clone(),
+            fb_device: display.fb_device.clone(),
+            find_timeout_secs: 30,
+        })
+    };
+
+    // Run the capture loop with optional display
+    run_capture_loop(&device_path, &config.ndi_name, display_config).await
 }
 
-async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
+async fn run_capture_loop(
+    device_path: &str,
+    ndi_name: &str,
+    display_config: Option<NdiDisplayConfig>,
+) -> Result<()> {
+    // Shared flag for graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Start display thread if configured (LOW PRIORITY - different core)
+    let display_handle = if let Some(config) = display_config {
+        let running_clone = Arc::clone(&running);
+        tracing::info!("Starting NDI display for source: {}", config.source_name);
+
+        Some(std::thread::spawn(move || {
+            // Apply low priority settings BEFORE doing anything
+            ndi_display::apply_low_priority();
+
+            if let Err(e) = ndi_display::run_display_loop(config, running_clone) {
+                tracing::error!("NDI display error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
     // Open capture device at 1920x1080 @ 60fps
     let mut capture = VideoCapture::open(device_path)?;
     let (width, height) = capture.dimensions();
@@ -138,6 +190,7 @@ async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
     tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
     // Spawn capture loop in blocking task - minimal overhead for lowest latency
+    let running_capture = Arc::clone(&running);
     let capture_handle = tokio::task::spawn_blocking(move || {
         // Apply real-time optimizations BEFORE entering the capture loop
         apply_realtime_optimizations();
@@ -145,7 +198,7 @@ async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
         let mut frame_count: u64 = 0;
         let mut last_report = std::time::Instant::now();
 
-        loop {
+        while running_capture.load(Ordering::Relaxed) {
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 if let Err(e) = sender.send_frame_zero_copy(data, info) {
@@ -179,8 +232,17 @@ async fn run_capture_loop(device_path: &str, ndi_name: &str) -> Result<()> {
     signal::ctrl_c().await?;
     tracing::info!("Shutdown signal received");
 
-    // Abort capture loop
-    capture_handle.abort();
+    // Signal all threads to stop
+    running.store(false, Ordering::Relaxed);
+
+    // Wait for capture loop (with timeout)
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), capture_handle).await;
+
+    // Wait for display thread if running
+    if let Some(handle) = display_handle {
+        let _ = handle.join();
+    }
+
     tracing::info!("camera-box stopped");
 
     Ok(())

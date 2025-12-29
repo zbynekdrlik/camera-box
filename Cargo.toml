@@ -15,7 +15,7 @@ v4l = "0.14"
 libloading = "0.8"
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
