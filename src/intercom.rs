@@ -340,10 +340,12 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     );
 
     // Query device capabilities and use appropriate channel counts
+    // Input: use device capability (typically mono for USB mics)
     let input_channels = get_supported_channels(&input_device, true, config.sample_rate)
         .unwrap_or(1);
-    let output_channels = get_supported_channels(&output_device, false, config.sample_rate)
-        .unwrap_or(2);
+    // Output: force stereo (2 channels) since VBAN streams are typically stereo
+    // and most output devices support it (ALSA plug may report wrong value)
+    let output_channels = 2u16;
 
     tracing::info!(
         "Audio config: input {} ch, output {} ch @ {}Hz",
