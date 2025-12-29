@@ -91,9 +91,9 @@ impl VideoCapture {
         };
         tracing::info!("Frame rate: 60 fps");
 
-        // Create memory-mapped stream with minimal buffers for low latency
-        // 4 buffers is minimum for stable streaming
-        let stream = Stream::with_buffers(&device, Type::VideoCapture, 4)
+        // Create memory-mapped stream with minimum buffers for lowest latency
+        // 2 buffers = ~33ms latency at 60fps (one capturing, one processing)
+        let stream = Stream::with_buffers(&device, Type::VideoCapture, 2)
             .context("Failed to create capture stream")?;
 
         // Leak the device to get 'static lifetime (it lives for program duration)

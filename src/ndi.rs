@@ -185,7 +185,7 @@ impl NdiSender {
         let create_settings = NDIlib_send_create_t {
             p_ndi_name: ndi_name.as_ptr(),
             p_groups: ptr::null(),
-            clock_video: true,
+            clock_video: false, // Disable for lowest latency (no frame pacing)
             clock_audio: false,
         };
 
