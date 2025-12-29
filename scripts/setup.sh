@@ -233,7 +233,7 @@ EOF
     # --- Configure kernel parameters ---
     log "Configuring kernel parameters..."
     cat > /etc/sysctl.d/99-camera-box.conf << 'EOF'
-# Camera-box performance tuning
+# Camera-box performance and reliability tuning
 
 # Reduce swappiness
 vm.swappiness = 10
@@ -244,8 +244,36 @@ fs.inotify.max_user_watches = 524288
 # Network tuning
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
+
+# Auto-reboot on kernel panic (10 seconds)
+kernel.panic = 10
+kernel.panic_on_oops = 1
+
+# Reduce console noise
+kernel.printk = 3 4 1 3
 EOF
     sysctl -p /etc/sysctl.d/99-camera-box.conf 2>/dev/null || true
+
+    # --- Resilience features ---
+    log "Configuring resilience features..."
+
+    # Hardware watchdog - reboot if system hangs
+    mkdir -p /etc/systemd/system.conf.d
+    cat > /etc/systemd/system.conf.d/watchdog.conf << 'EOF'
+[Manager]
+RuntimeWatchdogSec=30
+RebootWatchdogSec=10min
+EOF
+
+    # udev rule to restart camera-box on USB reconnect
+    cat > /etc/udev/rules.d/99-camera-box.rules << 'EOF'
+# Restart camera-box when USB video device is added
+ACTION=="add", SUBSYSTEM=="video4linux", RUN+="/bin/systemctl restart camera-box.service"
+EOF
+    udevadm control --reload-rules 2>/dev/null || true
+
+    # Force fsck on next boot after unclean shutdown
+    tune2fs -c 1 "$(findmnt -n -o SOURCE /)" 2>/dev/null || true
 
     # --- Enable avahi for mDNS ---
     log "Enabling Avahi (mDNS)..."
@@ -377,6 +405,13 @@ EOF
 
     # Create NDI directory
     mkdir -p "$NDI_DIR"
+
+    # Add service watchdog for auto-restart on hang
+    mkdir -p /etc/systemd/system/camera-box.service.d
+    cat > /etc/systemd/system/camera-box.service.d/watchdog.conf << 'EOF'
+[Service]
+WatchdogSec=60
+EOF
 
     systemctl daemon-reload
     systemctl enable camera-box
