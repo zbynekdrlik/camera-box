@@ -114,6 +114,36 @@ fn find_audio_device(
     })
 }
 
+/// Get supported channel count for a device at the given sample rate
+fn get_supported_channels(device: &cpal::Device, is_input: bool, sample_rate: u32) -> Option<u16> {
+    use cpal::SupportedStreamConfigRange;
+
+    let configs: Vec<SupportedStreamConfigRange> = if is_input {
+        device.supported_input_configs().ok()?.collect()
+    } else {
+        device.supported_output_configs().ok()?.collect()
+    };
+
+    // Find a config that supports our sample rate
+    for config in configs {
+        let min_rate = config.min_sample_rate().0;
+        let max_rate = config.max_sample_rate().0;
+        if sample_rate >= min_rate && sample_rate <= max_rate {
+            // Return the channel count from this config
+            return Some(config.channels());
+        }
+    }
+
+    // Fallback: try to get default config
+    let default_config = if is_input {
+        device.default_input_config().ok()
+    } else {
+        device.default_output_config().ok()
+    };
+
+    default_config.map(|c| c.channels())
+}
+
 /// Run the VBAN receiver (network -> speakers)
 fn run_receiver(
     config: &IntercomConfig,
@@ -204,26 +234,28 @@ fn run_sender(
     capture_buffer: Arc<Mutex<AudioBuffer>>,
     running: Arc<AtomicBool>,
     frames_sent: Arc<AtomicU64>,
+    audio_channels: u8,
 ) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create VBAN sender socket")?;
 
     let target_addr = format!("{}:{}", config.target_host, VBAN_PORT);
     tracing::info!(
-        "VBAN sender targeting {}, stream: {}",
+        "VBAN sender targeting {}, stream: {}, {} channels",
         target_addr,
-        config.stream_name
+        config.stream_name,
+        audio_channels
     );
 
     let mut header = VbanHeader::new(
         &config.stream_name,
         config.sample_rate,
-        config.channels,
+        audio_channels,
         VbanCodec::Pcm16,
     )?;
 
     // Samples per VBAN packet (typically 256)
     let samples_per_packet = 256;
-    let samples_needed = samples_per_packet * config.channels as usize;
+    let samples_needed = samples_per_packet * audio_channels as usize;
 
     // Calculate packet interval based on sample rate
     let packet_interval = std::time::Duration::from_micros(
@@ -307,17 +339,38 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         output_device.name().unwrap_or_default()
     );
 
-    // Configure audio streams
-    let stream_config = StreamConfig {
-        channels: config.channels as u16,
+    // Query device capabilities and use appropriate channel counts
+    let input_channels = get_supported_channels(&input_device, true, config.sample_rate)
+        .unwrap_or(1);
+    let output_channels = get_supported_channels(&output_device, false, config.sample_rate)
+        .unwrap_or(2);
+
+    tracing::info!(
+        "Audio config: input {} ch, output {} ch @ {}Hz",
+        input_channels,
+        output_channels,
+        config.sample_rate
+    );
+
+    // Configure audio streams with device-specific channel counts
+    let input_config = StreamConfig {
+        channels: input_channels,
+        sample_rate: SampleRate(config.sample_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    let output_config = StreamConfig {
+        channels: output_channels,
         sample_rate: SampleRate(config.sample_rate),
         buffer_size: cpal::BufferSize::Default,
     };
 
     // Audio buffers (about 500ms of audio)
-    let buffer_capacity = config.sample_rate as usize * config.channels as usize / 2;
-    let playback_buffer = Arc::new(Mutex::new(AudioBuffer::new(buffer_capacity)));
-    let capture_buffer = Arc::new(Mutex::new(AudioBuffer::new(buffer_capacity)));
+    // Playback buffer uses output channels, capture buffer uses input channels
+    let playback_buffer_capacity = config.sample_rate as usize * output_channels as usize / 2;
+    let capture_buffer_capacity = config.sample_rate as usize * input_channels as usize / 2;
+    let playback_buffer = Arc::new(Mutex::new(AudioBuffer::new(playback_buffer_capacity)));
+    let capture_buffer = Arc::new(Mutex::new(AudioBuffer::new(capture_buffer_capacity)));
 
     // Statistics
     let frames_received = Arc::new(AtomicU64::new(0));
@@ -326,7 +379,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     // Create output stream (VBAN -> speakers)
     let playback_buf_clone = Arc::clone(&playback_buffer);
     let output_stream = output_device.build_output_stream(
-        &stream_config,
+        &output_config,
         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
             if let Ok(mut buf) = playback_buf_clone.lock() {
                 let samples = buf.pop_samples(data.len());
@@ -347,7 +400,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     // Create input stream (microphone -> VBAN)
     let capture_buf_clone = Arc::clone(&capture_buffer);
     let input_stream = input_device.build_input_stream(
-        &stream_config,
+        &input_config,
         move |data: &[i16], _: &cpal::InputCallbackInfo| {
             if let Ok(mut buf) = capture_buf_clone.lock() {
                 buf.push_samples(data);
@@ -380,8 +433,9 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let send_buf = Arc::clone(&capture_buffer);
     let send_running = Arc::clone(&running);
     let send_frames = Arc::clone(&frames_sent);
+    let send_channels = input_channels as u8;
     let sender_thread = std::thread::spawn(move || {
-        if let Err(e) = run_sender(&send_config, send_buf, send_running, send_frames) {
+        if let Err(e) = run_sender(&send_config, send_buf, send_running, send_frames, send_channels) {
             tracing::error!("VBAN sender error: {}", e);
         }
     });
