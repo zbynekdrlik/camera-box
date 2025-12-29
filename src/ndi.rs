@@ -818,7 +818,7 @@ impl NdiReceiver {
         static mut FRAME_TYPE_LOG_COUNT: u64 = 0;
         unsafe {
             FRAME_TYPE_LOG_COUNT += 1;
-            if FRAME_TYPE_LOG_COUNT <= 5 || FRAME_TYPE_LOG_COUNT % 100 == 0 {
+            if FRAME_TYPE_LOG_COUNT <= 5 || FRAME_TYPE_LOG_COUNT.is_multiple_of(100) {
                 tracing::debug!(
                     "NDI recv frame_type={} (0=none, 1=video, 2=audio, 3=meta, 4=error)",
                     frame_type

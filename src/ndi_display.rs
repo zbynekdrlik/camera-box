@@ -112,7 +112,7 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                     display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
                 {
                     // Only log occasionally to avoid spam
-                    if frame_count % 300 == 0 {
+                    if frame_count.is_multiple_of(300) {
                         tracing::warn!("Display write failed (monitor disconnected?): {}", e);
                     }
                 }
@@ -141,7 +141,7 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                 if no_frame_count == 50 {
                     tracing::warn!("NDI display: No frames received for 5 seconds");
                 }
-                if no_frame_count % 100 == 0 {
+                if no_frame_count.is_multiple_of(100) {
                     tracing::debug!("NDI display: waiting for frames... ({})", no_frame_count);
                 }
             }
