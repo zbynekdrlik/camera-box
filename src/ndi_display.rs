@@ -48,14 +48,26 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         }
     };
 
-    // Open framebuffer
-    let mut display = match FramebufferDisplay::open(&config.fb_device) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!("Failed to open framebuffer: {}", e);
-            return Err(e);
+    // Open framebuffer (retry a few times if display not ready)
+    let mut display = None;
+    for attempt in 1..=5 {
+        match FramebufferDisplay::open(&config.fb_device) {
+            Ok(d) => {
+                display = Some(d);
+                break;
+            }
+            Err(e) => {
+                if attempt < 5 {
+                    tracing::warn!("Failed to open framebuffer (attempt {}): {}", attempt, e);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                } else {
+                    tracing::error!("Failed to open framebuffer after {} attempts: {}", attempt, e);
+                    return Err(e);
+                }
+            }
         }
-    };
+    }
+    let mut display = display.unwrap();
 
     let (fb_width, fb_height) = display.dimensions();
     tracing::info!(
@@ -85,11 +97,14 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                         fourcc_str, frame.fourcc, frame.width, frame.height, frame.data.len());
                 }
 
-                // Display the frame
+                // Display the frame (ignore errors - display may be disconnected)
                 if let Err(e) =
                     display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
                 {
-                    tracing::error!("Failed to display frame: {}", e);
+                    // Only log occasionally to avoid spam
+                    if frame_count % 300 == 0 {
+                        tracing::warn!("Display write failed (monitor disconnected?): {}", e);
+                    }
                 }
 
                 frame_count += 1;
