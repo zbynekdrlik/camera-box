@@ -3,11 +3,15 @@ set -euo pipefail
 
 # Camera-Box Device Setup Script
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/camera-box/main/scripts/setup.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/camera-box/main/scripts/setup.sh | sudo bash -s CAM1
 #
 # This script transforms a fresh Ubuntu installation into a fully configured camera-box device.
 
+# Accept hostname as first argument, default to "camera-box"
+DEVICE_HOSTNAME="${1:-camera-box}"
+
 REPO="zbynekdrlik/camera-box"
-DANTE_REPO="zbynekdrlik/dantetimesync"
+DANTE_REPO="zbynekdrlik/dantesync"
 INSTALL_DIR="/usr/local/bin"
 NDI_DIR="/usr/lib/ndi"
 CONFIG_DIR="/etc/camera-box"
@@ -37,6 +41,33 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         error "This script must be run as root (use sudo)"
     fi
+}
+
+# Set hostname
+set_hostname() {
+    header "Setting Hostname"
+
+    local current_hostname
+    current_hostname=$(hostname)
+
+    if [[ "$current_hostname" == "$DEVICE_HOSTNAME" ]]; then
+        info "Hostname already set to $DEVICE_HOSTNAME"
+        return 0
+    fi
+
+    log "Setting hostname to: $DEVICE_HOSTNAME"
+
+    # Set hostname
+    hostnamectl set-hostname "$DEVICE_HOSTNAME"
+    echo "$DEVICE_HOSTNAME" > /etc/hostname
+
+    # Update /etc/hosts
+    sed -i "s/127.0.1.1.*/127.0.1.1\t$DEVICE_HOSTNAME/" /etc/hosts
+    if ! grep -q "127.0.1.1" /etc/hosts; then
+        echo "127.0.1.1	$DEVICE_HOSTNAME" >> /etc/hosts
+    fi
+
+    log "Hostname set to: $DEVICE_HOSTNAME"
 }
 
 # Expand disk to use full storage
@@ -225,17 +256,17 @@ EOF
 }
 
 # Install DanteTimeSync
-install_dantetimesync() {
-    header "Installing DanteTimeSync"
+install_dantesync() {
+    header "Installing DanteSync"
 
-    log "Fetching latest DanteTimeSync release..."
+    log "Fetching latest DanteSync release..."
     local dante_url
     dante_url=$(curl -fsSL "https://api.github.com/repos/${DANTE_REPO}/releases/latest" 2>/dev/null | \
-        grep -o '"browser_download_url": *"[^"]*dantetimesync[^"]*"' | \
+        grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' | \
         head -1 | cut -d'"' -f4) || true
 
     if [[ -z "$dante_url" ]]; then
-        warn "DanteTimeSync release not found, skipping"
+        warn "DanteSync release not found, skipping"
         return 0
     fi
 
@@ -243,20 +274,20 @@ install_dantetimesync() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
 
-    if curl -fsSL "$dante_url" -o "$tmp_dir/dantetimesync"; then
-        install -m 755 "$tmp_dir/dantetimesync" "$INSTALL_DIR/"
+    if curl -fsSL "$dante_url" -o "$tmp_dir/dantesync"; then
+        install -m 755 "$tmp_dir/dantesync" "$INSTALL_DIR/"
         rm -rf "$tmp_dir"
 
-        log "Creating DanteTimeSync service..."
-        cat > /etc/systemd/system/dantetimesync.service << 'EOF'
+        log "Creating DanteSync service..."
+        cat > /etc/systemd/system/dantesync.service << 'EOF'
 [Unit]
-Description=Dante Time Sync
+Description=Dante Time Sync (PTP/NTP Synchronization)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dantetimesync
+ExecStart=/usr/local/bin/dantesync
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -267,12 +298,12 @@ WantedBy=multi-user.target
 EOF
 
         systemctl daemon-reload
-        systemctl enable dantetimesync
-        systemctl start dantetimesync
+        systemctl enable dantesync
+        systemctl start dantesync
 
-        log "DanteTimeSync installed and started"
+        log "DanteSync installed and started"
     else
-        warn "Failed to download DanteTimeSync"
+        warn "Failed to download DanteSync"
     fi
 }
 
@@ -391,7 +422,7 @@ show_status() {
     echo ""
 
     echo "Services:"
-    for svc in dantetimesync camera-box avahi-daemon; do
+    for svc in dantesync camera-box avahi-daemon; do
         local status
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             status="${GREEN}running${NC}"
@@ -403,7 +434,7 @@ show_status() {
     echo ""
 
     echo "SSH Access:"
-    echo "  ssh $(whoami)@$(hostname -I | awk '{print $1}')"
+    echo "  ssh root@$(hostname -I | awk '{print $1}')"
     echo ""
 
     if [[ ! -f "$NDI_DIR/libndi.so.6" ]] && [[ ! -f "$NDI_DIR/libndi.so" ]]; then
@@ -412,9 +443,9 @@ show_status() {
     fi
 
     echo "Useful commands:"
-    echo "  journalctl -u camera-box -f     # View camera-box logs"
-    echo "  journalctl -u dantetimesync -f  # View time sync logs"
-    echo "  v4l2-ctl --list-devices         # List video devices"
+    echo "  journalctl -u camera-box -f   # View camera-box logs"
+    echo "  journalctl -u dantesync -f    # View time sync logs"
+    echo "  v4l2-ctl --list-devices       # List video devices"
     echo ""
 }
 
@@ -426,12 +457,15 @@ main() {
     echo "║         Automated Device Configuration Script                 ║"
     echo "╚═══════════════════════════════════════════════════════════════╝"
     echo ""
+    info "Target hostname: $DEVICE_HOSTNAME"
+    echo ""
 
     check_root
+    set_hostname
     expand_disk
     update_system
     configure_system
-    install_dantetimesync
+    install_dantesync
     install_camera_box
     check_ndi_sdk
     show_status
