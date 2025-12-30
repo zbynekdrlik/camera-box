@@ -65,6 +65,7 @@ impl VbanCodec {
 
 /// VBAN packet header
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VbanHeader {
     /// Sample rate index (0-19)
     pub sample_rate_index: u8,
@@ -80,6 +81,7 @@ pub struct VbanHeader {
     pub frame_counter: u32,
 }
 
+#[allow(dead_code)]
 impl VbanHeader {
     /// Create a new VBAN header
     pub fn new(
@@ -198,6 +200,7 @@ impl VbanHeader {
 }
 
 /// Convert sample rate to VBAN index
+#[allow(dead_code)]
 pub fn sample_rate_to_index(rate: u32) -> Option<u8> {
     SAMPLE_RATES
         .iter()

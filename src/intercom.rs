@@ -229,7 +229,6 @@ fn run_receiver(
     Ok(())
 }
 
-
 /// Run the intercom system
 pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
     tracing::info!(
@@ -256,8 +255,8 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
 
     // Query device capabilities and use appropriate channel counts
     // Input: use device capability (typically mono for USB mics)
-    let input_channels = get_supported_channels(&input_device, true, config.sample_rate)
-        .unwrap_or(1);
+    let input_channels =
+        get_supported_channels(&input_device, true, config.sample_rate).unwrap_or(1);
     // Output: force stereo (2 channels) since VBAN streams are typically stereo
     // and most output devices support it (ALSA plug may report wrong value)
     let output_channels = 2u16;
@@ -292,7 +291,8 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let samples_captured = Arc::new(AtomicU64::new(0));
 
     // VBAN sender socket and state (for direct sending from callback)
-    let vban_socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create VBAN sender socket")?;
+    let vban_socket =
+        UdpSocket::bind("0.0.0.0:0").context("Failed to create VBAN sender socket")?;
     let target_addr = format!("{}:{}", config.target_host, VBAN_PORT);
     vban_socket.connect(&target_addr)?;
     let vban_socket = Arc::new(vban_socket);

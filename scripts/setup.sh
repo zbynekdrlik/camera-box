@@ -145,7 +145,9 @@ update_system() {
         v4l-utils \
         libavahi-client3 \
         avahi-daemon \
-        ca-certificates
+        ca-certificates \
+        libasound2 \
+        alsa-utils
 
     log "Cleaning up..."
     apt-get autoremove -y
