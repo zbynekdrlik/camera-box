@@ -39,7 +39,7 @@ if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
     exit 1
 fi
 
-TOTAL_STEPS=15
+TOTAL_STEPS=16
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Camera-Box Device Setup${NC}"
@@ -130,10 +130,43 @@ else
 fi
 
 # =============================================================================
-# STEP 5: Create camera-box config
+# STEP 5: Configure ALSA for USB headset
 # =============================================================================
 echo ""
-echo -e "${GREEN}[5/${TOTAL_STEPS}] Creating camera-box config...${NC}"
+echo -e "${GREEN}[5/${TOTAL_STEPS}] Configuring ALSA audio...${NC}"
+cat > /etc/asound.conf << 'ALSAEOF'
+# Asymmetric config: stereo output, mono input
+# USB headset on card 1 (CSCTEK USB Audio and HID)
+pcm.!default {
+    type asym
+    playback.pcm {
+        type plug
+        slave {
+            pcm "hw:1,0"
+            channels 2
+        }
+    }
+    capture.pcm {
+        type plug
+        slave {
+            pcm "hw:1,0"
+            channels 1
+        }
+    }
+}
+
+ctl.!default {
+    type hw
+    card 1
+}
+ALSAEOF
+echo "  ALSA config: /etc/asound.conf (USB headset on card 1)"
+
+# =============================================================================
+# STEP 6: Create camera-box config
+# =============================================================================
+echo ""
+echo -e "${GREEN}[6/${TOTAL_STEPS}] Creating camera-box config...${NC}"
 mkdir -p /etc/camera-box
 cat > /etc/camera-box/config.toml << EOF
 # Camera-Box Configuration
@@ -156,10 +189,10 @@ EOF
 echo "  Config: /etc/camera-box/config.toml"
 
 # =============================================================================
-# STEP 6: Create systemd service
+# STEP 7: Create systemd service
 # =============================================================================
 echo ""
-echo -e "${GREEN}[6/${TOTAL_STEPS}] Creating systemd service...${NC}"
+echo -e "${GREEN}[7/${TOTAL_STEPS}] Creating systemd service...${NC}"
 cat > /etc/systemd/system/camera-box.service << 'EOF'
 [Unit]
 Description=Camera Box - USB Video Capture to NDI
@@ -205,10 +238,10 @@ systemctl enable camera-box
 echo "  Service created and enabled"
 
 # =============================================================================
-# STEP 7: Set binary capabilities
+# STEP 8: Set binary capabilities
 # =============================================================================
 echo ""
-echo -e "${GREEN}[7/${TOTAL_STEPS}] Setting binary capabilities...${NC}"
+echo -e "${GREEN}[8/${TOTAL_STEPS}] Setting binary capabilities...${NC}"
 if [ -f /usr/local/bin/camera-box ]; then
     setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box
     echo "  Capabilities set (real-time priority, memory lock)"
@@ -217,10 +250,10 @@ else
 fi
 
 # =============================================================================
-# STEP 8: Disable GRUB timeout (fast boot)
+# STEP 9: Disable GRUB timeout (fast boot)
 # =============================================================================
 echo ""
-echo -e "${GREEN}[8/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
+echo -e "${GREEN}[9/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
 sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
 sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
 grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
@@ -228,10 +261,10 @@ update-grub 2>/dev/null || true
 echo "  GRUB timeout: 0 seconds"
 
 # =============================================================================
-# STEP 9: Reduce network wait timeout
+# STEP 10: Reduce network wait timeout
 # =============================================================================
 echo ""
-echo -e "${GREEN}[9/${TOTAL_STEPS}] Reducing network wait timeout...${NC}"
+echo -e "${GREEN}[10/${TOTAL_STEPS}] Reducing network wait timeout...${NC}"
 mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
 cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf << EOF
 [Service]
@@ -241,10 +274,10 @@ EOF
 echo "  Network wait timeout: 5 seconds"
 
 # =============================================================================
-# STEP 10: Disable power button shutdown
+# STEP 11: Disable power button shutdown
 # =============================================================================
 echo ""
-echo -e "${GREEN}[10/${TOTAL_STEPS}] Disabling power button shutdown...${NC}"
+echo -e "${GREEN}[11/${TOTAL_STEPS}] Disabling power button shutdown...${NC}"
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/disable-power-button.conf << EOF
 [Login]
@@ -256,10 +289,10 @@ EOF
 echo "  Power button: ignored (used for mute toggle)"
 
 # =============================================================================
-# STEP 11: Disable all power saving / sleep
+# STEP 12: Disable all power saving / sleep
 # =============================================================================
 echo ""
-echo -e "${GREEN}[11/${TOTAL_STEPS}] Disabling power saving...${NC}"
+echo -e "${GREEN}[12/${TOTAL_STEPS}] Disabling power saving...${NC}"
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
 # Disable CPU frequency scaling (use performance governor)
 for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
@@ -285,10 +318,10 @@ echo "  Sleep/suspend: disabled"
 echo "  CPU governor: performance"
 
 # =============================================================================
-# STEP 12: Optimize network for performance
+# STEP 13: Optimize network for performance
 # =============================================================================
 echo ""
-echo -e "${GREEN}[12/${TOTAL_STEPS}] Optimizing network performance...${NC}"
+echo -e "${GREEN}[13/${TOTAL_STEPS}] Optimizing network performance...${NC}"
 cat > /etc/sysctl.d/99-network-performance.conf << 'EOF'
 # Network performance optimizations for low-latency streaming
 
@@ -319,10 +352,10 @@ echo "  TCP congestion: BBR"
 echo "  IPv6: disabled"
 
 # =============================================================================
-# STEP 13: Disable unnecessary services
+# STEP 14: Disable unnecessary services
 # =============================================================================
 echo ""
-echo -e "${GREEN}[13/${TOTAL_STEPS}] Disabling unnecessary services...${NC}"
+echo -e "${GREEN}[14/${TOTAL_STEPS}] Disabling unnecessary services...${NC}"
 # Snap
 systemctl disable --now snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true
 systemctl mask snapd.service 2>/dev/null || true
@@ -340,20 +373,20 @@ systemctl disable --now cups.service cups-browsed.service 2>/dev/null || true
 echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups"
 
 # =============================================================================
-# STEP 14: Install required packages
+# STEP 15: Install required packages
 # =============================================================================
 echo ""
-echo -e "${GREEN}[14/${TOTAL_STEPS}] Installing required packages...${NC}"
+echo -e "${GREEN}[15/${TOTAL_STEPS}] Installing required packages...${NC}"
 apt-get update -qq
 apt-get install -y -qq avahi-daemon libavahi-client3 v4l-utils alsa-utils 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, v4l-utils, alsa-utils"
 
 # =============================================================================
-# STEP 15: Summary
+# STEP 16: Summary
 # =============================================================================
 echo ""
-echo -e "${GREEN}[15/${TOTAL_STEPS}] Setup Complete!${NC}"
+echo -e "${GREEN}[16/${TOTAL_STEPS}] Setup Complete!${NC}"
 echo "=========================================="
 echo ""
 echo "Configuration:"
