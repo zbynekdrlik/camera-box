@@ -2,6 +2,60 @@
 
 This guide documents how to set up a new camera-box device (CAM1, CAM2, etc.).
 
+## Quick Start (Image-Based Deployment)
+
+The fastest way to deploy a new camera is using the master USB image.
+
+### Step 1: Write Image to USB
+
+```bash
+# From dev machine, with USB drive connected
+cd /home/newlevel/devel/camera-box
+
+# Check available USB devices
+lsblk -d -o NAME,SIZE,MODEL | grep -E '^sd'
+
+# Write image to USB (replace /dev/sdX with your USB device)
+sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /dev/sdX
+
+# Script will automatically unmount when done - safe to remove
+```
+
+### Step 2: Boot New Device
+
+1. Insert USB into new camera PC
+2. Boot from USB (may need to change BIOS boot order)
+3. Wait for system to boot (will have CAM1 settings initially)
+
+### Step 3: Configure Device via SSH
+
+```bash
+# Get the device IP (it boots with DHCP or CAM1's old IP)
+# User provides the IP
+
+# SSH into the new device
+ssh root@<DEVICE_IP>   # password: newlevel
+
+# Run setup script with new device settings
+./setup-device.sh CAM2 10.77.9.62 cam2
+
+# Reboot to apply
+reboot
+```
+
+### Step 4: Verify
+
+```bash
+# Connect at new IP
+ssh root@10.77.9.62
+
+# Check service
+systemctl status camera-box
+journalctl -u camera-box -f
+```
+
+---
+
 ## Device-Specific Configuration
 
 Each camera device requires the following unique settings:
