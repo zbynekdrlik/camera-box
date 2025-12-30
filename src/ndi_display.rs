@@ -39,30 +39,33 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         config.source_name
     );
 
-    // Open framebuffer first (retry a few times if display not ready)
-    let mut display = None;
-    for attempt in 1..=5 {
+    // Open framebuffer (retry indefinitely until display is connected)
+    let mut display;
+    let mut attempt = 0u32;
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            anyhow::bail!("Shutdown requested");
+        }
+        attempt = attempt.saturating_add(1);
         match FramebufferDisplay::open(&config.fb_device) {
             Ok(d) => {
-                display = Some(d);
+                tracing::info!("Framebuffer opened successfully");
+                display = d;
                 break;
             }
             Err(e) => {
-                if attempt < 5 {
-                    tracing::warn!("Failed to open framebuffer (attempt {}): {}", attempt, e);
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                } else {
-                    tracing::error!(
-                        "Failed to open framebuffer after {} attempts: {}",
+                // Log every 30 seconds (15 attempts * 2 seconds)
+                if attempt % 15 == 1 {
+                    tracing::warn!(
+                        "Waiting for display (attempt {}): {} - will keep retrying...",
                         attempt,
                         e
                     );
-                    return Err(e);
                 }
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
     }
-    let mut display = display.unwrap();
     let (fb_width, fb_height) = display.dimensions();
 
     // Outer reconnection loop - keeps trying to connect/reconnect
