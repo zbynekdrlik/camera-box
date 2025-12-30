@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev
 
       - name: Build release
         run: cargo build --release
