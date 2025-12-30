@@ -3,10 +3,12 @@
 //! Receives VBAN audio stream and plays through speakers.
 //! Captures microphone audio and sends via VBAN.
 //! Provides low-latency sidetone (mic monitoring in headphones).
+//! Supports mute toggle via power button.
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleRate, StreamConfig};
+use evdev::{Device, Key};
 use std::collections::VecDeque;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -99,6 +101,97 @@ impl SidetoneBuffer {
 // SAFETY: Uses atomic operations for thread-safe SPSC access
 unsafe impl Send for SidetoneBuffer {}
 unsafe impl Sync for SidetoneBuffer {}
+
+// =============================================================================
+// Power Button Mute Toggle
+// =============================================================================
+
+/// Find all power button input devices
+fn find_power_buttons() -> Vec<(String, i32)> {
+    let mut devices = Vec::new();
+
+    // Try common paths for power button
+    for i in 0..10 {
+        let path = format!("/dev/input/event{}", i);
+        if let Ok(device) = Device::open(&path) {
+            // Check if this device has the power key
+            if let Some(keys) = device.supported_keys() {
+                if keys.contains(Key::KEY_POWER) {
+                    let name = device.name().unwrap_or("unknown").to_string();
+                    tracing::info!("Found power button: {} ({})", name, path);
+
+                    // Get raw fd before device is dropped
+                    use std::os::unix::io::AsRawFd;
+                    let fd = device.as_raw_fd();
+
+                    // Duplicate fd so it stays valid after Device is dropped
+                    let dup_fd = unsafe { libc::dup(fd) };
+                    if dup_fd >= 0 {
+                        devices.push((path, dup_fd));
+                    }
+                }
+            }
+        }
+    }
+    devices
+}
+
+/// Monitor power button and toggle mute state
+fn run_power_button_monitor(muted: Arc<AtomicBool>, running: Arc<AtomicBool>) {
+    let devices = find_power_buttons();
+
+    if devices.is_empty() {
+        tracing::warn!("No power button found - mute toggle disabled");
+        return;
+    }
+
+    // Set all devices to non-blocking mode
+    for (_path, fd) in &devices {
+        unsafe {
+            let flags = libc::fcntl(*fd, libc::F_GETFL);
+            libc::fcntl(*fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
+    tracing::info!("Power button mute toggle enabled ({} devices)", devices.len());
+
+    // Use raw read for events
+    let mut event_buf = [0u8; 24]; // sizeof(input_event) = 24 on 64-bit
+
+    while running.load(Ordering::Relaxed) {
+        // Check all power button devices
+        for (path, fd) in &devices {
+            let n = unsafe {
+                libc::read(*fd, event_buf.as_mut_ptr() as *mut libc::c_void, event_buf.len())
+            };
+
+            if n == 24 {
+                // Parse input_event: time (16 bytes), type (2), code (2), value (4)
+                let event_type = u16::from_ne_bytes([event_buf[16], event_buf[17]]);
+                let event_code = u16::from_ne_bytes([event_buf[18], event_buf[19]]);
+                let event_value = i32::from_ne_bytes([event_buf[20], event_buf[21], event_buf[22], event_buf[23]]);
+
+                // EV_KEY = 1, KEY_POWER = 116
+                if event_type == 1 && event_code == 116 && event_value == 1 {
+                    let was_muted = muted.fetch_xor(true, Ordering::Relaxed);
+                    let now_muted = !was_muted;
+                    tracing::info!(
+                        "🎤 Microphone {} (via {})",
+                        if now_muted { "MUTED" } else { "UNMUTED" },
+                        path
+                    );
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // Close file descriptors
+    for (_path, fd) in devices {
+        unsafe { libc::close(fd) };
+    }
+}
 
 /// Intercom configuration
 #[derive(Debug, Clone)]
@@ -392,6 +485,16 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let frames_sent = Arc::new(AtomicU64::new(0));
     let samples_captured = Arc::new(AtomicU64::new(0));
 
+    // Mute state (toggled by power button)
+    let muted = Arc::new(AtomicBool::new(false));
+
+    // Start power button monitor thread
+    let muted_btn = Arc::clone(&muted);
+    let running_btn = Arc::clone(&running);
+    std::thread::spawn(move || {
+        run_power_button_monitor(muted_btn, running_btn);
+    });
+
     // VBAN sender socket and state (for direct sending from callback)
     let vban_socket =
         UdpSocket::bind("0.0.0.0:0").context("Failed to create VBAN sender socket")?;
@@ -408,9 +511,12 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     // Create output stream (VBAN + sidetone -> speakers)
     let playback_buf_clone = Arc::clone(&playback_buffer);
     let sidetone_buf_clone = Arc::clone(&sidetone_buffer);
+    let muted_output = Arc::clone(&muted);
     let output_stream = output_device.build_output_stream(
         &output_config,
         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+            let is_muted = muted_output.load(Ordering::Relaxed);
+
             // Get VBAN playback samples
             let vban_samples = if let Ok(mut buf) = playback_buf_clone.lock() {
                 buf.pop_samples(data.len())
@@ -418,16 +524,20 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
                 vec![0i16; data.len()]
             };
 
-            // Get sidetone samples
+            // Get sidetone samples (still read to keep buffer flowing)
             let sidetone_samples = sidetone_buf_clone.read_stereo(data.len());
 
-            // Mix VBAN playback with sidetone (both with gain)
+            // Mix VBAN playback with sidetone (sidetone muted when mic is muted)
             for (i, sample) in data.iter_mut().enumerate() {
                 let vban = (vban_samples.get(i).copied().unwrap_or(0) as f32 * vban_gain) as i32;
-                let sidetone = sidetone_samples
-                    .get(i)
-                    .map(|&s| (s as f32 * sidetone_volume) as i32)
-                    .unwrap_or(0);
+                let sidetone = if is_muted {
+                    0 // No sidetone when muted
+                } else {
+                    sidetone_samples
+                        .get(i)
+                        .map(|&s| (s as f32 * sidetone_volume) as i32)
+                        .unwrap_or(0)
+                };
                 // Mix and clamp to i16 range
                 *sample = (vban + sidetone).clamp(-32768, 32767) as i16;
             }
@@ -443,6 +553,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let frames_sent_clone = Arc::clone(&frames_sent);
     let vban_socket_clone = Arc::clone(&vban_socket);
     let sidetone_buf_input = Arc::clone(&sidetone_buffer);
+    let muted_input = Arc::clone(&muted);
     let frame_counter = Arc::new(AtomicU64::new(0));
     let frame_counter_clone = Arc::clone(&frame_counter);
 
@@ -451,8 +562,17 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         move |data: &[i16], _: &cpal::InputCallbackInfo| {
             samples_captured_clone.fetch_add(data.len() as u64, Ordering::Relaxed);
 
-            // Write to sidetone buffer for local monitoring (before VBAN processing)
-            sidetone_buf_input.write_mono(data);
+            let is_muted = muted_input.load(Ordering::Relaxed);
+
+            // Write to sidetone buffer for local monitoring (only when not muted)
+            if !is_muted {
+                sidetone_buf_input.write_mono(data);
+            }
+
+            // Skip VBAN sending when muted
+            if is_muted {
+                return;
+            }
 
             // Split data into chunks for smaller VBAN packets (~128 samples each)
             const CHUNK_SIZE: usize = 128;

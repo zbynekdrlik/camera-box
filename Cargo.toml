@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -36,6 +36,9 @@ libc = "0.2"
 
 # Audio I/O for VBAN intercom
 cpal = "0.15"
+
+# Input device events (for power button mute)
+evdev = "0.12"
 
 [profile.release]
 lto = true
