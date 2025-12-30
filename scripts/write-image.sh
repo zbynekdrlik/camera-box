@@ -12,13 +12,20 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-IMAGE_FILE="${1:-}"
+# Default to ubuntu-usb-master.img in images directory
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEFAULT_IMAGE="${SCRIPT_DIR}/../images/ubuntu-usb-master.img"
+
+IMAGE_FILE="${1:-$DEFAULT_IMAGE}"
 USB_DEVICE="${2:-}"
 
-if [ -z "$IMAGE_FILE" ] || [ -z "$USB_DEVICE" ]; then
-    echo -e "${RED}Usage: $0 IMAGE_FILE USB_DEVICE${NC}"
+if [ -z "$USB_DEVICE" ]; then
+    echo -e "${RED}Usage: $0 [IMAGE_FILE] USB_DEVICE${NC}"
     echo ""
-    echo "Example: $0 camera-box-v1.0.0.img.xz /dev/sdb"
+    echo "Example: $0 /dev/sdb                    # Uses default image"
+    echo "Example: $0 custom.img /dev/sdb         # Uses custom image"
+    echo ""
+    echo "Default image: $DEFAULT_IMAGE"
     echo ""
     echo "Available USB devices:"
     lsblk -d -o NAME,SIZE,MODEL | grep -E '^sd'
