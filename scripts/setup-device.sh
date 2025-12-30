@@ -347,9 +347,34 @@ net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
+
+# Disable EEE (Energy Efficient Ethernet / Green Ethernet) and flow control
+# This reduces latency by preventing power-saving mode transitions
+cat > /etc/networkd-dispatcher/routable.d/optimize-nic << 'NICEOF'
+#!/bin/bash
+# Disable EEE (Green Ethernet) and flow control for low latency
+IFACE="$IFACE"
+if [ -n "$IFACE" ] && [ "$IFACE" != "lo" ]; then
+    # Disable Energy Efficient Ethernet
+    ethtool --set-eee "$IFACE" eee off 2>/dev/null || true
+    # Disable flow control (pause frames)
+    ethtool -A "$IFACE" rx off tx off 2>/dev/null || true
+fi
+NICEOF
+chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
+
+# Apply to current interface
+for iface in /sys/class/net/*/device; do
+    IFACE=$(basename $(dirname $iface))
+    ethtool --set-eee "$IFACE" eee off 2>/dev/null || true
+    ethtool -A "$IFACE" rx off tx off 2>/dev/null || true
+done
+
 echo "  Network buffers: optimized"
 echo "  TCP congestion: BBR"
 echo "  IPv6: disabled"
+echo "  EEE (Green Ethernet): disabled"
+echo "  Flow control: disabled"
 
 # =============================================================================
 # STEP 14: Disable unnecessary services
@@ -378,9 +403,34 @@ echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups
 echo ""
 echo -e "${GREEN}[15/${TOTAL_STEPS}] Installing required packages...${NC}"
 apt-get update -qq
-apt-get install -y -qq avahi-daemon libavahi-client3 v4l-utils alsa-utils 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 v4l-utils alsa-utils ethtool 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, libavahi-client3, v4l-utils, alsa-utils"
+echo "  Installed: avahi-daemon, libavahi-client3, v4l-utils, alsa-utils, ethtool"
+
+# Create rc.local for power management settings (USB autosuspend, etc.)
+cat > /etc/rc.local << 'RCEOF'
+#!/bin/bash
+# Camera-box power settings
+
+# CPU performance mode
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null
+done
+
+# USB autosuspend off
+for ctrl in /sys/bus/usb/devices/*/power/control; do
+    [ -f "$ctrl" ] && echo "on" > "$ctrl" 2>/dev/null
+done
+
+# Network power management off
+for iface in /sys/class/net/*/device/power/control; do
+    [ -f "$iface" ] && echo "on" > "$iface" 2>/dev/null
+done
+
+exit 0
+RCEOF
+chmod +x /etc/rc.local
+echo "  Created: /etc/rc.local (USB autosuspend off, CPU performance)"
 
 # =============================================================================
 # STEP 16: Configure read-only root filesystem
