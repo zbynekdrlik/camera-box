@@ -271,8 +271,9 @@ echo -e "${GREEN}[10/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
 sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
 sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
 grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
+grep -q "GRUB_RECORDFAIL_TIMEOUT" /etc/default/grub || echo "GRUB_RECORDFAIL_TIMEOUT=0" >> /etc/default/grub
 update-grub 2>/dev/null || true
-echo "  GRUB timeout: 0 seconds"
+echo "  GRUB timeout: 0 seconds (including recordfail)"
 
 # =============================================================================
 # STEP 11: Reduce network wait timeout
