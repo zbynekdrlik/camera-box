@@ -39,7 +39,7 @@ if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
     exit 1
 fi
 
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Camera-Box Device Setup${NC}"
@@ -238,10 +238,24 @@ systemctl enable camera-box
 echo "  Service created and enabled"
 
 # =============================================================================
-# STEP 8: Set binary capabilities
+# STEP 8: Configure auto-login on tty1
 # =============================================================================
 echo ""
-echo -e "${GREEN}[8/${TOTAL_STEPS}] Setting binary capabilities...${NC}"
+echo -e "${GREEN}[8/${TOTAL_STEPS}] Configuring auto-login...${NC}"
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+EOF
+systemctl daemon-reload
+echo "  Auto-login: root on tty1"
+
+# =============================================================================
+# STEP 9: Set binary capabilities
+# =============================================================================
+echo ""
+echo -e "${GREEN}[9/${TOTAL_STEPS}] Setting binary capabilities...${NC}"
 if [ -f /usr/local/bin/camera-box ]; then
     setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box
     echo "  Capabilities set (real-time priority, memory lock)"
@@ -250,10 +264,10 @@ else
 fi
 
 # =============================================================================
-# STEP 9: Disable GRUB timeout (fast boot)
+# STEP 10: Disable GRUB timeout (fast boot)
 # =============================================================================
 echo ""
-echo -e "${GREEN}[9/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
+echo -e "${GREEN}[10/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
 sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
 sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
 grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
@@ -261,10 +275,10 @@ update-grub 2>/dev/null || true
 echo "  GRUB timeout: 0 seconds"
 
 # =============================================================================
-# STEP 10: Reduce network wait timeout
+# STEP 11: Reduce network wait timeout
 # =============================================================================
 echo ""
-echo -e "${GREEN}[10/${TOTAL_STEPS}] Reducing network wait timeout...${NC}"
+echo -e "${GREEN}[11/${TOTAL_STEPS}] Reducing network wait timeout...${NC}"
 mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
 cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf << EOF
 [Service]
@@ -274,10 +288,10 @@ EOF
 echo "  Network wait timeout: 5 seconds"
 
 # =============================================================================
-# STEP 11: Disable power button shutdown
+# STEP 12: Disable power button shutdown
 # =============================================================================
 echo ""
-echo -e "${GREEN}[11/${TOTAL_STEPS}] Disabling power button shutdown...${NC}"
+echo -e "${GREEN}[12/${TOTAL_STEPS}] Disabling power button shutdown...${NC}"
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/disable-power-button.conf << EOF
 [Login]
@@ -289,10 +303,10 @@ EOF
 echo "  Power button: ignored (used for mute toggle)"
 
 # =============================================================================
-# STEP 12: Disable all power saving / sleep
+# STEP 13: Disable all power saving / sleep
 # =============================================================================
 echo ""
-echo -e "${GREEN}[12/${TOTAL_STEPS}] Disabling power saving...${NC}"
+echo -e "${GREEN}[13/${TOTAL_STEPS}] Disabling power saving...${NC}"
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
 # Disable CPU frequency scaling (use performance governor)
 for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
@@ -318,10 +332,10 @@ echo "  Sleep/suspend: disabled"
 echo "  CPU governor: performance"
 
 # =============================================================================
-# STEP 13: Optimize network for performance
+# STEP 14: Optimize network for performance
 # =============================================================================
 echo ""
-echo -e "${GREEN}[13/${TOTAL_STEPS}] Optimizing network performance...${NC}"
+echo -e "${GREEN}[14/${TOTAL_STEPS}] Optimizing network performance...${NC}"
 cat > /etc/sysctl.d/99-network-performance.conf << 'EOF'
 # Network performance optimizations for low-latency streaming
 
@@ -377,10 +391,10 @@ echo "  EEE (Green Ethernet): disabled"
 echo "  Flow control: disabled"
 
 # =============================================================================
-# STEP 14: Disable unnecessary services
+# STEP 15: Disable unnecessary services
 # =============================================================================
 echo ""
-echo -e "${GREEN}[14/${TOTAL_STEPS}] Disabling unnecessary services...${NC}"
+echo -e "${GREEN}[15/${TOTAL_STEPS}] Disabling unnecessary services...${NC}"
 # Snap
 systemctl disable --now snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true
 systemctl mask snapd.service 2>/dev/null || true
@@ -398,10 +412,10 @@ systemctl disable --now cups.service cups-browsed.service 2>/dev/null || true
 echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups"
 
 # =============================================================================
-# STEP 15: Install required packages
+# STEP 16: Install required packages
 # =============================================================================
 echo ""
-echo -e "${GREEN}[15/${TOTAL_STEPS}] Installing required packages...${NC}"
+echo -e "${GREEN}[16/${TOTAL_STEPS}] Installing required packages...${NC}"
 apt-get update -qq
 apt-get install -y -qq avahi-daemon libavahi-client3 v4l-utils alsa-utils ethtool 2>/dev/null || true
 systemctl enable avahi-daemon
@@ -433,10 +447,10 @@ chmod +x /etc/rc.local
 echo "  Created: /etc/rc.local (USB autosuspend off, CPU performance)"
 
 # =============================================================================
-# STEP 16: Configure read-only root filesystem
+# STEP 17: Configure read-only root filesystem
 # =============================================================================
 echo ""
-echo -e "${GREEN}[16/${TOTAL_STEPS}] Configuring read-only filesystem...${NC}"
+echo -e "${GREEN}[17/${TOTAL_STEPS}] Configuring read-only filesystem...${NC}"
 
 # Get the root partition UUID
 ROOT_UUID=$(findmnt -n -o UUID /)
@@ -465,10 +479,10 @@ echo "  tmpfs mounts: /tmp, /var/log, /var/tmp, /var/cache, /var/spool"
 echo "  To remount read-write: mount -o remount,rw /"
 
 # =============================================================================
-# STEP 17: Summary
+# STEP 18: Summary
 # =============================================================================
 echo ""
-echo -e "${GREEN}[17/${TOTAL_STEPS}] Setup Complete!${NC}"
+echo -e "${GREEN}[18/${TOTAL_STEPS}] Setup Complete!${NC}"
 echo "=========================================="
 echo ""
 echo "Configuration:"
