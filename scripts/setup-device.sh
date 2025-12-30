@@ -39,7 +39,10 @@ if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
     exit 1
 fi
 
-TOTAL_STEPS=18
+TOTAL_STEPS=19
+
+# GitHub repos
+DANTESYNC_REPO="zbynekdrlik/dantesync"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Camera-Box Device Setup${NC}"
@@ -448,10 +451,57 @@ chmod +x /etc/rc.local
 echo "  Created: /etc/rc.local (USB autosuspend off, CPU performance)"
 
 # =============================================================================
-# STEP 17: Configure read-only root filesystem
+# STEP 17: Install dantesync (PTP time synchronization)
 # =============================================================================
 echo ""
-echo -e "${GREEN}[17/${TOTAL_STEPS}] Configuring read-only filesystem...${NC}"
+echo -e "${GREEN}[17/${TOTAL_STEPS}] Installing dantesync...${NC}"
+
+DANTESYNC_INSTALLED=false
+
+# Get latest release URL from GitHub (fail-proof)
+DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null | \
+    grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' | \
+    grep -o 'https://[^"]*' | head -1) || true
+
+if [ -n "$DANTESYNC_URL" ]; then
+    if curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync 2>/dev/null; then
+        chmod +x /usr/local/bin/dantesync
+
+        # Create systemd service
+        cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
+[Unit]
+Description=Dante Time Sync (PTP/NTP Synchronization)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dantesync
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+DANTEEOF
+
+        systemctl daemon-reload
+        systemctl enable dantesync 2>/dev/null || true
+        DANTESYNC_INSTALLED=true
+        echo "  dantesync: installed and enabled"
+    else
+        echo -e "  ${YELLOW}Warning: Failed to download dantesync (non-critical)${NC}"
+    fi
+else
+    echo -e "  ${YELLOW}Warning: Could not get dantesync release URL (non-critical)${NC}"
+fi
+
+# =============================================================================
+# STEP 18: Configure read-only root filesystem
+# =============================================================================
+echo ""
+echo -e "${GREEN}[18/${TOTAL_STEPS}] Configuring read-only filesystem...${NC}"
 
 # Get the root partition UUID
 ROOT_UUID=$(findmnt -n -o UUID /)
@@ -480,10 +530,10 @@ echo "  tmpfs mounts: /tmp, /var/log, /var/tmp, /var/cache, /var/spool"
 echo "  To remount read-write: mount -o remount,rw /"
 
 # =============================================================================
-# STEP 18: Summary
+# STEP 19: Summary
 # =============================================================================
 echo ""
-echo -e "${GREEN}[18/${TOTAL_STEPS}] Setup Complete!${NC}"
+echo -e "${GREEN}[19/${TOTAL_STEPS}] Setup Complete!${NC}"
 echo "=========================================="
 echo ""
 echo "Configuration:"
@@ -501,6 +551,9 @@ echo "  - CPU governor: performance"
 echo "  - Network: optimized for streaming"
 echo "  - Unnecessary services: disabled"
 echo "  - Root filesystem: read-only (with tmpfs overlays)"
+if [ "$DANTESYNC_INSTALLED" = true ]; then
+    echo "  - Dante time sync: installed (PTP synchronization)"
+fi
 echo ""
 if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
     echo -e "${YELLOW}ACTION REQUIRED:${NC}"
