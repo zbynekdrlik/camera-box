@@ -422,16 +422,35 @@ fn run_receiver(
     Ok(())
 }
 
-/// Run the intercom system
+/// Run the intercom system with auto-recovery
 pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
-    tracing::info!(
-        "Starting VBAN intercom: stream={}, target={}, {}Hz, {} channels",
-        config.stream_name,
-        config.target_host,
-        config.sample_rate,
-        config.channels
-    );
+    // Outer loop for auto-recovery
+    while running.load(Ordering::Relaxed) {
+        tracing::info!(
+            "Starting VBAN intercom: stream={}, target={}, {}Hz, {} channels",
+            config.stream_name,
+            config.target_host,
+            config.sample_rate,
+            config.channels
+        );
 
+        match run_intercom_inner(&config, Arc::clone(&running)) {
+            Ok(()) => {
+                tracing::info!("Intercom stopped normally");
+                break;
+            }
+            Err(e) => {
+                tracing::error!("Intercom error: {} - restarting in 2 seconds", e);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Inner intercom implementation
+fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
     // Initialize audio host
     let host = cpal::default_host();
     tracing::info!("Audio host: {}", host.id().name());
@@ -497,8 +516,12 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let frames_sent = Arc::new(AtomicU64::new(0));
     let samples_captured = Arc::new(AtomicU64::new(0));
 
-    // Mute state (toggled by power button)
-    let muted = Arc::new(AtomicBool::new(false));
+    // Error counter for auto-recovery (triggers restart after 100 consecutive errors)
+    let error_count = Arc::new(AtomicU64::new(0));
+
+    // Mute state (toggled by power button) - starts MUTED for safety
+    let muted = Arc::new(AtomicBool::new(true));
+    tracing::info!("🎤 Microphone starts MUTED - press power button to unmute");
 
     // Start power button monitor thread
     let muted_btn = Arc::clone(&muted);
@@ -524,6 +547,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let playback_buf_clone = Arc::clone(&playback_buffer);
     let sidetone_buf_clone = Arc::clone(&sidetone_buffer);
     let muted_output = Arc::clone(&muted);
+    let error_count_output = Arc::clone(&error_count);
     let output_stream = output_device.build_output_stream(
         &output_config,
         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
@@ -556,6 +580,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         },
         move |err| {
             tracing::error!("Output stream error: {}", err);
+            error_count_output.fetch_add(1, Ordering::Relaxed);
         },
         None,
     )?;
@@ -566,6 +591,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     let vban_socket_clone = Arc::clone(&vban_socket);
     let sidetone_buf_input = Arc::clone(&sidetone_buffer);
     let muted_input = Arc::clone(&muted);
+    let error_count_input = Arc::clone(&error_count);
     let frame_counter = Arc::new(AtomicU64::new(0));
     let frame_counter_clone = Arc::clone(&frame_counter);
 
@@ -626,6 +652,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         },
         move |err| {
             tracing::error!("Input stream error: {}", err);
+            error_count_input.fetch_add(1, Ordering::Relaxed);
         },
         None,
     )?;
@@ -657,6 +684,13 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     while running.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
+        // Check for too many errors - trigger restart
+        let errors = error_count.load(Ordering::Relaxed);
+        if errors >= 100 {
+            tracing::warn!("Too many audio errors ({}) - triggering restart", errors);
+            return Err(anyhow!("Audio stream errors exceeded threshold"));
+        }
+
         if last_report.elapsed() >= report_interval {
             let received = frames_received.load(Ordering::Relaxed);
             let sent = frames_sent.load(Ordering::Relaxed);
@@ -675,6 +709,9 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
             );
 
             samples_captured.store(0, Ordering::Relaxed);
+
+            // Reset error counter - we only care about consecutive errors
+            error_count.store(0, Ordering::Relaxed);
 
             last_received = received;
             last_sent = sent;
