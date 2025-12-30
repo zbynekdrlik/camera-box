@@ -39,7 +39,7 @@ if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
     exit 1
 fi
 
-TOTAL_STEPS=16
+TOTAL_STEPS=17
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Camera-Box Device Setup${NC}"
@@ -383,10 +383,42 @@ systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, v4l-utils, alsa-utils"
 
 # =============================================================================
-# STEP 16: Summary
+# STEP 16: Configure read-only root filesystem
 # =============================================================================
 echo ""
-echo -e "${GREEN}[16/${TOTAL_STEPS}] Setup Complete!${NC}"
+echo -e "${GREEN}[16/${TOTAL_STEPS}] Configuring read-only filesystem...${NC}"
+
+# Get the root partition UUID
+ROOT_UUID=$(findmnt -n -o UUID /)
+
+# Backup original fstab
+cp /etc/fstab /etc/fstab.bak
+
+# Create new fstab with read-only root and tmpfs mounts
+cat > /etc/fstab << FSTABEOF
+# Root filesystem - read-only for reliability
+UUID=${ROOT_UUID} / ext4 ro 0 1
+
+# EFI partition (if exists)
+$(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
+
+# tmpfs mounts for writable directories
+tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
+tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
+tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=100M 0 0
+tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
+FSTABEOF
+
+echo "  Root filesystem: read-only (ro)"
+echo "  tmpfs mounts: /tmp, /var/log, /var/tmp, /var/cache, /var/spool"
+echo "  To remount read-write: mount -o remount,rw /"
+
+# =============================================================================
+# STEP 17: Summary
+# =============================================================================
+echo ""
+echo -e "${GREEN}[17/${TOTAL_STEPS}] Setup Complete!${NC}"
 echo "=========================================="
 echo ""
 echo "Configuration:"
@@ -403,6 +435,7 @@ echo "  - Sleep/suspend: disabled"
 echo "  - CPU governor: performance"
 echo "  - Network: optimized for streaming"
 echo "  - Unnecessary services: disabled"
+echo "  - Root filesystem: read-only (with tmpfs overlays)"
 echo ""
 if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
     echo -e "${YELLOW}ACTION REQUIRED:${NC}"
