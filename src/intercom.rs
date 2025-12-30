@@ -9,6 +9,7 @@ use cpal::{SampleRate, StreamConfig};
 use std::collections::VecDeque;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+// mpsc removed - now sending directly from audio callback
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -228,92 +229,6 @@ fn run_receiver(
     Ok(())
 }
 
-/// Run the VBAN sender (microphone -> network)
-fn run_sender(
-    config: &IntercomConfig,
-    capture_buffer: Arc<Mutex<AudioBuffer>>,
-    running: Arc<AtomicBool>,
-    frames_sent: Arc<AtomicU64>,
-    audio_channels: u8,
-) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create VBAN sender socket")?;
-
-    let target_addr = format!("{}:{}", config.target_host, VBAN_PORT);
-    tracing::info!(
-        "VBAN sender targeting {}, stream: {}, {} channels",
-        target_addr,
-        config.stream_name,
-        audio_channels
-    );
-
-    let mut header = VbanHeader::new(
-        &config.stream_name,
-        config.sample_rate,
-        audio_channels,
-        VbanCodec::Pcm16,
-    )?;
-
-    // Samples per VBAN packet (typically 256)
-    let samples_per_packet = 256;
-    let samples_needed = samples_per_packet * audio_channels as usize;
-
-    // Calculate packet interval based on sample rate
-    let packet_interval = std::time::Duration::from_micros(
-        (samples_per_packet as u64 * 1_000_000) / config.sample_rate as u64,
-    );
-
-    let mut packet_buf = vec![0u8; VBAN_HEADER_SIZE + samples_needed * 2];
-    let mut last_send = std::time::Instant::now();
-
-    while running.load(Ordering::Relaxed) {
-        // Wait for packet interval
-        let elapsed = last_send.elapsed();
-        if elapsed < packet_interval {
-            std::thread::sleep(packet_interval - elapsed);
-        }
-        last_send = std::time::Instant::now();
-
-        // Get samples from capture buffer
-        let samples = if let Ok(mut buf) = capture_buffer.lock() {
-            buf.pop_samples(samples_needed)
-        } else {
-            continue;
-        };
-
-        if samples.is_empty() {
-            continue;
-        }
-
-        // Pad with silence if not enough samples
-        let mut padded_samples = samples;
-        while padded_samples.len() < samples_needed {
-            padded_samples.push(0);
-        }
-
-        // Encode header
-        let header_bytes = header.encode(samples_per_packet);
-        packet_buf[..VBAN_HEADER_SIZE].copy_from_slice(&header_bytes);
-
-        // Encode audio data as PCM16 little-endian
-        for (i, &sample) in padded_samples.iter().enumerate() {
-            let bytes = sample.to_le_bytes();
-            packet_buf[VBAN_HEADER_SIZE + i * 2] = bytes[0];
-            packet_buf[VBAN_HEADER_SIZE + i * 2 + 1] = bytes[1];
-        }
-
-        let packet_len = VBAN_HEADER_SIZE + padded_samples.len() * 2;
-
-        // Send packet
-        if let Err(e) = socket.send_to(&packet_buf[..packet_len], &target_addr) {
-            tracing::warn!("VBAN send error: {}", e);
-        } else {
-            header.frame_counter = header.frame_counter.wrapping_add(1);
-            frames_sent.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    Ok(())
-}
 
 /// Run the intercom system
 pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
@@ -367,16 +282,26 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         buffer_size: cpal::BufferSize::Default,
     };
 
-    // Audio buffers (about 500ms of audio)
-    // Playback buffer uses output channels, capture buffer uses input channels
+    // Playback buffer for receiving VBAN
     let playback_buffer_capacity = config.sample_rate as usize * output_channels as usize / 2;
-    let capture_buffer_capacity = config.sample_rate as usize * input_channels as usize / 2;
     let playback_buffer = Arc::new(Mutex::new(AudioBuffer::new(playback_buffer_capacity)));
-    let capture_buffer = Arc::new(Mutex::new(AudioBuffer::new(capture_buffer_capacity)));
 
     // Statistics
     let frames_received = Arc::new(AtomicU64::new(0));
     let frames_sent = Arc::new(AtomicU64::new(0));
+    let samples_captured = Arc::new(AtomicU64::new(0));
+
+    // VBAN sender socket and state (for direct sending from callback)
+    let vban_socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create VBAN sender socket")?;
+    let target_addr = format!("{}:{}", config.target_host, VBAN_PORT);
+    vban_socket.connect(&target_addr)?;
+    let vban_socket = Arc::new(vban_socket);
+
+    tracing::info!(
+        "VBAN sender targeting {}, stream: {}, mono->stereo",
+        target_addr,
+        config.stream_name
+    );
 
     // Create output stream (VBAN -> speakers)
     let playback_buf_clone = Arc::clone(&playback_buffer);
@@ -399,13 +324,54 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         None,
     )?;
 
-    // Create input stream (microphone -> VBAN)
-    let capture_buf_clone = Arc::clone(&capture_buffer);
+    // Create input stream (microphone -> VBAN directly)
+    let samples_captured_clone = Arc::clone(&samples_captured);
+    let frames_sent_clone = Arc::clone(&frames_sent);
+    let vban_socket_clone = Arc::clone(&vban_socket);
+    let frame_counter = Arc::new(AtomicU64::new(0));
+    let frame_counter_clone = Arc::clone(&frame_counter);
+
     let input_stream = input_device.build_input_stream(
         &input_config,
         move |data: &[i16], _: &cpal::InputCallbackInfo| {
-            if let Ok(mut buf) = capture_buf_clone.lock() {
-                buf.push_samples(data);
+            samples_captured_clone.fetch_add(data.len() as u64, Ordering::Relaxed);
+
+            // Split data into chunks for smaller VBAN packets (~128 samples each)
+            const CHUNK_SIZE: usize = 128;
+
+            for chunk in data.chunks(CHUNK_SIZE) {
+                // Convert mono to stereo
+                let stereo_data: Vec<i16> = chunk.iter().flat_map(|&s| [s, s]).collect();
+
+                // Create VBAN packet
+                let samples_per_frame = chunk.len();
+                let mut packet = vec![0u8; VBAN_HEADER_SIZE + stereo_data.len() * 2];
+
+                // VBAN header
+                packet[0..4].copy_from_slice(b"VBAN");
+                packet[4] = 3; // Sample rate index for 48000Hz
+                packet[5] = (samples_per_frame.saturating_sub(1) & 0xFF) as u8;
+                packet[6] = 1; // 2 channels - 1
+                packet[7] = 0x01; // PCM16
+
+                // Stream name
+                let name = b"cam1";
+                packet[8..8 + name.len()].copy_from_slice(name);
+
+                // Frame counter
+                let fc = frame_counter_clone.fetch_add(1, Ordering::Relaxed) as u32;
+                packet[24..28].copy_from_slice(&fc.to_le_bytes());
+
+                // Audio data (stereo PCM16 LE)
+                for (i, &sample) in stereo_data.iter().enumerate() {
+                    let bytes = sample.to_le_bytes();
+                    packet[VBAN_HEADER_SIZE + i * 2] = bytes[0];
+                    packet[VBAN_HEADER_SIZE + i * 2 + 1] = bytes[1];
+                }
+
+                // Send packet
+                let _ = vban_socket_clone.send(&packet);
+                frames_sent_clone.fetch_add(1, Ordering::Relaxed);
             }
         },
         move |err| {
@@ -430,17 +396,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         }
     });
 
-    // Start VBAN sender thread
-    let send_config = config.clone();
-    let send_buf = Arc::clone(&capture_buffer);
-    let send_running = Arc::clone(&running);
-    let send_frames = Arc::clone(&frames_sent);
-    let send_channels = input_channels as u8;
-    let sender_thread = std::thread::spawn(move || {
-        if let Err(e) = run_sender(&send_config, send_buf, send_running, send_frames, send_channels) {
-            tracing::error!("VBAN sender error: {}", e);
-        }
-    });
+    // Note: VBAN sending is now done directly from the input stream callback
 
     // Stats reporting loop
     let mut last_received = 0u64;
@@ -458,11 +414,17 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
             let recv_rate = (received - last_received) as f64 / report_interval.as_secs_f64();
             let send_rate = (sent - last_sent) as f64 / report_interval.as_secs_f64();
 
+            let captured = samples_captured.load(Ordering::Relaxed);
+            let capture_rate = captured as f64 / report_interval.as_secs_f64();
+
             tracing::info!(
-                "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s",
+                "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s, capture {:.0} samp/s",
                 recv_rate,
-                send_rate
+                send_rate,
+                capture_rate
             );
+
+            samples_captured.store(0, Ordering::Relaxed);
 
             last_received = received;
             last_sent = sent;
@@ -470,9 +432,8 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
         }
     }
 
-    // Wait for threads to finish
+    // Wait for receiver thread to finish
     let _ = receiver_thread.join();
-    let _ = sender_thread.join();
 
     tracing::info!("VBAN intercom stopped");
     Ok(())
