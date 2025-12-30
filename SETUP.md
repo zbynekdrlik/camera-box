@@ -17,8 +17,8 @@ This guide documents how to set up a new camera-box device (CAM1, CAM2, etc.).
 | Device | Hostname | IP Address | VBAN Stream | Status |
 |--------|----------|------------|-------------|--------|
 | CAM1 | CAM1 | 10.77.9.61 | cam1 | Active (READ-ONLY) |
-| CAM2 | CAM2 | 10.77.9.62 | cam2 | Planned |
-| CAM3 | CAM3 | 10.77.9.63 | cam3 | Future |
+| CAM2 | CAM2 | 10.77.9.62 | cam2 | Active |
+| CAM3 | CAM3 | 10.77.9.63 | cam3 | Active |
 
 ## Network Configuration
 
@@ -49,8 +49,12 @@ sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /de
 
 1. Insert USB into new camera PC
 2. Power on and boot from USB (may need BIOS/UEFI boot menu)
-3. Wait for boot to complete
+3. **Wait ~5 minutes for first boot** - the master image takes longer on first boot
 4. Device will get DHCP IP initially
+
+**SSH Connection Details (master image):**
+- Username: `root`
+- Password: `newlevel`
 
 ## Step 3: Get Device IP
 
