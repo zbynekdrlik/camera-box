@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 # GitHub repo for downloading binary
 GITHUB_REPO="zbynekdrlik/camera-box"
-BINARY_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/camera-box"
+BINARY_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/camera-box-linux-amd64.tar.gz"
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -99,9 +99,11 @@ echo "  Static IP configured: $DEVICE_IP"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
-if curl -fsSL "$BINARY_URL" -o /usr/local/bin/camera-box; then
+if curl -fsSL "$BINARY_URL" -o /tmp/camera-box.tar.gz; then
+    tar -xzf /tmp/camera-box.tar.gz -C /usr/local/bin/
     chmod +x /usr/local/bin/camera-box
-    echo "  Binary installed from GitHub"
+    rm -f /tmp/camera-box.tar.gz
+    echo "  Binary installed from GitHub (v1.0.0)"
 else
     echo -e "  ${YELLOW}Warning: Could not download binary from GitHub${NC}"
     echo "  Please install manually to /usr/local/bin/camera-box"
@@ -113,12 +115,18 @@ fi
 echo ""
 echo -e "${GREEN}[4/${TOTAL_STEPS}] Setting up NDI library...${NC}"
 mkdir -p /usr/lib/ndi
-# NDI library must be copied manually due to licensing
-if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
-    echo -e "  ${YELLOW}NDI library not found - copy from CAM1:${NC}"
-    echo "  scp root@10.77.9.61:/usr/lib/ndi/* /usr/lib/ndi/"
+# Add NDI library path to ldconfig
+echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
+# NDI library must be copied from dev machine due to licensing
+# This is done separately before running this script:
+#   scp /usr/lib/ndi/* root@<DEVICE_IP>:/usr/lib/ndi/
+if [ -f /usr/lib/ndi/libndi.so.6 ]; then
+    ldconfig
+    echo "  NDI library: present and configured"
 else
-    echo "  NDI library present"
+    echo -e "  ${YELLOW}NDI library not found${NC}"
+    echo "  Copy from dev machine BEFORE running this script:"
+    echo "  scp /usr/lib/ndi/* root@<DEVICE_IP>:/usr/lib/ndi/"
 fi
 
 # =============================================================================
@@ -337,9 +345,9 @@ echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups
 echo ""
 echo -e "${GREEN}[14/${TOTAL_STEPS}] Installing required packages...${NC}"
 apt-get update -qq
-apt-get install -y -qq avahi-daemon v4l-utils alsa-utils 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 v4l-utils alsa-utils 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, v4l-utils, alsa-utils"
+echo "  Installed: avahi-daemon, libavahi-client3, v4l-utils, alsa-utils"
 
 # =============================================================================
 # STEP 15: Summary
