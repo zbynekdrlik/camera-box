@@ -137,22 +137,36 @@ fi
 # =============================================================================
 echo ""
 echo -e "${GREEN}[5/${TOTAL_STEPS}] Configuring ALSA audio...${NC}"
-cat > /etc/asound.conf << 'ALSAEOF'
+
+# Auto-detect USB headset card (CSCTEK USB Audio and HID)
+USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -E 'HID.*USB Audio|USB Audio.*HID' | head -1 | awk '{print $1}')
+if [ -z "$USB_CARD" ]; then
+    # Fallback: try to find any USB audio device
+    USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -i 'usb.*audio\|audio.*usb' | head -1 | awk '{print $1}')
+fi
+if [ -z "$USB_CARD" ]; then
+    USB_CARD=1  # Default fallback
+    echo -e "  ${YELLOW}Warning: Could not detect USB headset, using card $USB_CARD${NC}"
+else
+    echo "  Detected USB headset on card $USB_CARD"
+fi
+
+cat > /etc/asound.conf << ALSAEOF
 # Asymmetric config: stereo output, mono input
-# USB headset on card 1 (CSCTEK USB Audio and HID)
+# USB headset on card $USB_CARD (auto-detected)
 pcm.!default {
     type asym
     playback.pcm {
         type plug
         slave {
-            pcm "hw:1,0"
+            pcm "hw:$USB_CARD,0"
             channels 2
         }
     }
     capture.pcm {
         type plug
         slave {
-            pcm "hw:1,0"
+            pcm "hw:$USB_CARD,0"
             channels 1
         }
     }
@@ -160,10 +174,10 @@ pcm.!default {
 
 ctl.!default {
     type hw
-    card 1
+    card $USB_CARD
 }
 ALSAEOF
-echo "  ALSA config: /etc/asound.conf (USB headset on card 1)"
+echo "  ALSA config: /etc/asound.conf (card $USB_CARD)"
 
 # =============================================================================
 # STEP 6: Create camera-box config

@@ -594,6 +594,13 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
     let error_count_input = Arc::clone(&error_count);
     let frame_counter = Arc::new(AtomicU64::new(0));
     let frame_counter_clone = Arc::clone(&frame_counter);
+    let stream_name_bytes: [u8; 16] = {
+        let mut buf = [0u8; 16];
+        let name = config.stream_name.as_bytes();
+        let len = name.len().min(16);
+        buf[..len].copy_from_slice(&name[..len]);
+        buf
+    };
 
     let input_stream = input_device.build_input_stream(
         &input_config,
@@ -630,9 +637,8 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
                 packet[6] = 1; // 2 channels - 1
                 packet[7] = 0x01; // PCM16
 
-                // Stream name
-                let name = b"cam1";
-                packet[8..8 + name.len()].copy_from_slice(name);
+                // Stream name (from config, max 16 bytes)
+                packet[8..24].copy_from_slice(&stream_name_bytes);
 
                 // Frame counter
                 let fc = frame_counter_clone.fetch_add(1, Ordering::Relaxed) as u32;
