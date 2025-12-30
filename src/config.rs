@@ -57,6 +57,10 @@ pub struct IntercomConfig {
     /// Number of audio channels (default: 2)
     #[serde(default = "default_intercom_channels")]
     pub channels: u8,
+
+    /// Sidetone volume (0.0 = off, 1.0 = full, default: 0.5)
+    #[serde(default = "default_sidetone_volume")]
+    pub sidetone_volume: f32,
 }
 
 fn default_intercom_stream() -> String {
@@ -73,6 +77,10 @@ fn default_intercom_sample_rate() -> u32 {
 
 fn default_intercom_channels() -> u8 {
     2
+}
+
+fn default_sidetone_volume() -> f32 {
+    1.0 // 100% sidetone by default
 }
 
 impl Default for Config {

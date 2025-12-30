@@ -166,6 +166,7 @@ async fn main() -> Result<()> {
             target_host: args.intercom_target.clone(),
             sample_rate: 48000,
             channels: 2,
+            sidetone_volume: 1.0, // Default 100% sidetone
         })
     } else {
         config.intercom.as_ref().map(|ic| intercom::IntercomConfig {
@@ -173,6 +174,7 @@ async fn main() -> Result<()> {
             target_host: ic.target.clone(),
             sample_rate: ic.sample_rate,
             channels: ic.channels,
+            sidetone_volume: ic.sidetone_volume,
         })
     };
 
