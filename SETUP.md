@@ -2,265 +2,152 @@
 
 This guide documents how to set up a new camera-box device (CAM1, CAM2, etc.).
 
-## Quick Start (Image-Based Deployment)
-
-The fastest way to deploy a new camera is using the master USB image.
-
-### Step 1: Write Image to USB
-
-```bash
-# From dev machine, with USB drive connected
-cd /home/newlevel/devel/camera-box
-
-# Check available USB devices
-lsblk -d -o NAME,SIZE,MODEL | grep -E '^sd'
-
-# Write image to USB (replace /dev/sdX with your USB device)
-sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /dev/sdX
-
-# Script will automatically unmount when done - safe to remove
-```
-
-### Step 2: Boot New Device
-
-1. Insert USB into new camera PC
-2. Boot from USB (may need to change BIOS boot order)
-3. Wait for system to boot (will have CAM1 settings initially)
-
-### Step 3: Configure Device via SSH
-
-```bash
-# Get the device IP (it boots with DHCP or CAM1's old IP)
-# User provides the IP
-
-# SSH into the new device
-ssh root@<DEVICE_IP>   # password: newlevel
-
-# Run setup script with new device settings
-./setup-device.sh CAM2 10.77.9.62 cam2
-
-# Reboot to apply
-reboot
-```
-
-### Step 4: Verify
-
-```bash
-# Connect at new IP
-ssh root@10.77.9.62
-
-# Check service
-systemctl status camera-box
-journalctl -u camera-box -f
-```
-
----
-
-## Device-Specific Configuration
-
-Each camera device requires the following unique settings:
-
-| Setting | CAM1 | CAM2 | Location |
-|---------|------|------|----------|
-| Hostname | `CAM1` | `CAM2` | `/etc/hostname`, `/etc/hosts` |
-| Static IP | `10.77.9.61` | `10.77.9.62` | `/etc/netplan/01-netcfg.yaml` |
-| VBAN Stream | `cam1` | `cam2` | `/etc/camera-box/config.toml` |
-| NDI Name | `usb` | `usb` | `/etc/camera-box/config.toml` (same for all) |
-
-## Network Information
-
-- **Network**: `10.77.8.0/23`
-- **Gateway**: `10.77.8.1`
-- **DNS**: Uses systemd-resolved (default)
-
-## Setup Steps
-
-### 1. Install Base System
-
-Install Ubuntu Server (minimal) on the device.
-
-### 2. Set Hostname
-
-```bash
-# Set hostname (replace CAM1 with CAM2, etc.)
-DEVICE_NAME="CAM1"
-
-echo "$DEVICE_NAME" > /etc/hostname
-hostnamectl set-hostname "$DEVICE_NAME"
-
-# Update /etc/hosts
-sed -i "s/127.0.1.1.*/127.0.1.1\t$DEVICE_NAME/" /etc/hosts
-```
-
-### 3. Configure Static IP
-
-Create/edit `/etc/netplan/01-netcfg.yaml`:
-
-```bash
-# For CAM1: IP = 10.77.9.61
-# For CAM2: IP = 10.77.9.62
-DEVICE_IP="10.77.9.61"
-
-cat > /etc/netplan/01-netcfg.yaml << EOF
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    all-ethernet:
-      match:
-        driver: "*"
-      addresses:
-        - ${DEVICE_IP}/23
-      routes:
-        - to: default
-          via: 10.77.8.1
-      nameservers:
-        addresses:
-          - 10.77.8.1
-EOF
-
-# Apply network configuration
-netplan apply
-```
-
-### 4. Install camera-box Binary
-
-```bash
-# Download latest release
-curl -fsSL https://github.com/zbynekdrlik/camera-box/releases/latest/download/camera-box -o /usr/local/bin/camera-box
-chmod +x /usr/local/bin/camera-box
-
-# Or copy from build machine
-scp /path/to/camera-box root@DEVICE_IP:/usr/local/bin/
-```
-
-### 5. Install NDI SDK
-
-```bash
-# Create NDI directory
-mkdir -p /usr/lib/ndi
-
-# Copy NDI SDK libraries (from another device or download)
-# Required files: libndi.so.6
-```
-
-### 6. Create Configuration File
-
-```bash
-# For CAM1: stream = "cam1"
-# For CAM2: stream = "cam2"
-VBAN_STREAM="cam1"
-
-mkdir -p /etc/camera-box
-
-cat > /etc/camera-box/config.toml << EOF
-# Camera-Box Configuration
-
-# NDI source name (appears on network)
-ndi_name = "usb"
-
-# Video capture device ("auto" for auto-detection)
-device = "auto"
-
-# VBAN Intercom Configuration
-[intercom]
-stream = "${VBAN_STREAM}"
-target = "strih.lan"
-sample_rate = 48000
-channels = 1
-EOF
-```
-
-### 7. Create Systemd Service
-
-```bash
-cat > /etc/systemd/system/camera-box.service << 'EOF'
-[Unit]
-Description=Camera Box - USB Video Capture to NDI
-Documentation=https://github.com/zbynekdrlik/camera-box
-After=network-online.target avahi-daemon.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)"
-Restart=always
-RestartSec=3
-
-# Run with real-time priority for low latency
-Nice=-10
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
-
-# Environment for NDI SDK
-Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=camera-box
-
-# Security hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ReadOnlyPaths=/
-ReadWritePaths=/dev /sys /run
-
-# Allow access to video devices
-SupplementaryGroups=video
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start service
-systemctl daemon-reload
-systemctl enable camera-box
-systemctl start camera-box
-```
-
-### 8. Set Capabilities (for real-time priority)
-
-```bash
-setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box
-```
-
-### 9. Verify Setup
-
-```bash
-# Check service status
-systemctl status camera-box
-
-# Check logs
-journalctl -u camera-box -f
-
-# Verify network
-ip addr show
-ping -c 3 strih.lan
-```
-
-## Quick Setup Script
-
-For convenience, here's a one-liner setup script (run as root):
-
-```bash
-# Set these variables for each device
-DEVICE_NAME="CAM1"      # CAM1, CAM2, etc.
-DEVICE_IP="10.77.9.61"  # 10.77.9.61, 10.77.9.62, etc.
-VBAN_STREAM="cam1"      # cam1, cam2, etc.
-
-# Then run setup
-curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/camera-box/main/scripts/setup-device.sh | bash -s -- "$DEVICE_NAME" "$DEVICE_IP" "$VBAN_STREAM"
-```
+## Overview
+
+**Process for creating a new camera device:**
+
+1. Write clean Ubuntu master image to USB
+2. Boot new device from USB
+3. SSH into device and run setup script
+4. Copy NDI library from CAM1
+5. Reboot - device is ready
 
 ## Device Registry
 
 | Device | Hostname | IP Address | VBAN Stream | Status |
 |--------|----------|------------|-------------|--------|
-| CAM1 | CAM1 | 10.77.9.61 | cam1 | Active |
+| CAM1 | CAM1 | 10.77.9.61 | cam1 | Active (READ-ONLY) |
 | CAM2 | CAM2 | 10.77.9.62 | cam2 | Planned |
+| CAM3 | CAM3 | 10.77.9.63 | cam3 | Future |
+
+## Network Configuration
+
+- **Network**: `10.77.8.0/23`
+- **Gateway**: `10.77.8.1`
+- **DNS**: `10.77.8.1`
+
+---
+
+## Step 1: Write Master Image to USB
+
+The master image is a clean Ubuntu Server with only SSH configured.
+
+```bash
+# On dev machine, connect USB drive
+cd /home/newlevel/devel/camera-box
+
+# Check USB device name
+lsblk -d -o NAME,SIZE,MODEL | grep -E '^sd'
+
+# Write image (replace /dev/sdX with your USB device)
+sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /dev/sdX
+
+# Script automatically unmounts - safe to remove when done
+```
+
+## Step 2: Boot New Device
+
+1. Insert USB into new camera PC
+2. Power on and boot from USB (may need BIOS/UEFI boot menu)
+3. Wait for boot to complete
+4. Device will get DHCP IP initially
+
+## Step 3: Get Device IP
+
+The user must provide the device's current DHCP IP address.
+
+**DO NOT scan the network** - ask user for the IP.
+
+## Step 4: Run Setup Script
+
+SSH into the device and run the setup script:
+
+```bash
+# From dev machine - copy setup script to device
+sshpass -p 'newlevel' scp scripts/setup-device.sh root@<DEVICE_IP>:/root/
+
+# SSH into device
+sshpass -p 'newlevel' ssh root@<DEVICE_IP>
+
+# On the device, run setup script:
+# Usage: ./setup-device.sh DEVICE_NAME DEVICE_IP VBAN_STREAM
+./setup-device.sh CAM2 10.77.9.62 cam2
+```
+
+### What the Setup Script Does (15 steps):
+
+1. **Set hostname** - e.g., CAM2
+2. **Configure static IP** - e.g., 10.77.9.62
+3. **Install camera-box binary** - Downloads from GitHub releases
+4. **Setup NDI library directory** - /usr/lib/ndi
+5. **Create camera-box config** - /etc/camera-box/config.toml
+6. **Create systemd service** - camera-box.service
+7. **Set binary capabilities** - Real-time priority, memory lock
+8. **Disable GRUB timeout** - Fast boot (0 seconds)
+9. **Reduce network wait** - 5 second timeout
+10. **Disable power button shutdown** - Used for mute toggle instead
+11. **Disable power saving** - No sleep/suspend, CPU performance mode
+12. **Optimize network** - Large buffers, BBR congestion, disable IPv6
+13. **Disable unnecessary services** - snapd, cloud-init, bluetooth, cups, etc.
+14. **Install required packages** - avahi-daemon, v4l-utils, alsa-utils
+15. **Summary** - Shows what was configured
+
+## Step 5: Copy NDI Library
+
+NDI library cannot be distributed - must copy from existing device:
+
+```bash
+# On the new device:
+scp root@10.77.9.61:/usr/lib/ndi/* /usr/lib/ndi/
+```
+
+## Step 6: Apply Network and Reboot
+
+```bash
+# On the device:
+netplan apply
+reboot
+```
+
+## Step 7: Verify
+
+```bash
+# Connect at new static IP
+sshpass -p 'newlevel' ssh root@10.77.9.62
+
+# Check service status
+systemctl status camera-box
+
+# Watch logs
+journalctl -u camera-box -f
+```
+
+---
+
+## Quick Reference Commands
+
+### For CAM2 Setup:
+```bash
+# 1. Write image (on dev machine)
+sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /dev/sdb
+
+# 2. After boot, user provides IP (e.g., 10.77.8.164)
+
+# 3. Copy and run setup script
+sshpass -p 'newlevel' scp scripts/setup-device.sh root@10.77.8.164:/root/
+sshpass -p 'newlevel' ssh root@10.77.8.164 "./setup-device.sh CAM2 10.77.9.62 cam2"
+
+# 4. Copy NDI library
+sshpass -p 'newlevel' ssh root@10.77.8.164 "scp root@10.77.9.61:/usr/lib/ndi/* /usr/lib/ndi/"
+
+# 5. Apply network and reboot
+sshpass -p 'newlevel' ssh root@10.77.8.164 "netplan apply && reboot"
+
+# 6. Verify at new IP
+sshpass -p 'newlevel' ssh root@10.77.9.62 "systemctl status camera-box"
+```
+
+---
 
 ## Troubleshooting
 
@@ -277,7 +164,6 @@ ls -la /dev/video*
 
 ### No NDI output
 ```bash
-# Check NDI library
 ls -la /usr/lib/ndi/
 ldd /usr/local/bin/camera-box | grep ndi
 ```
@@ -288,3 +174,35 @@ ip addr show
 ip route
 ping 10.77.8.1
 ```
+
+### Check boot time
+```bash
+systemd-analyze
+systemd-analyze blame | head -20
+```
+
+---
+
+## Files Reference
+
+| File | Purpose |
+|------|---------|
+| `/etc/hostname` | Device hostname |
+| `/etc/netplan/01-netcfg.yaml` | Static IP configuration |
+| `/etc/camera-box/config.toml` | Camera-box app config |
+| `/etc/systemd/system/camera-box.service` | Systemd service |
+| `/usr/local/bin/camera-box` | Application binary |
+| `/usr/lib/ndi/libndi.so.6` | NDI library |
+| `/etc/default/grub` | GRUB timeout settings |
+| `/etc/sysctl.d/99-network-performance.conf` | Network optimizations |
+| `/etc/systemd/logind.conf.d/disable-power-button.conf` | Power button config |
+
+---
+
+## Important Notes
+
+- **CAM1 is READ-ONLY** - Do not modify CAM1, it's the production reference
+- **Never scan network** - Always ask user for device IP
+- **Master image** = Clean Ubuntu + SSH only (NOT a clone of CAM1)
+- **Setup script** = Does ALL configuration (installs apps, optimizes system)
+- **NDI library** = Must be copied manually (licensing)

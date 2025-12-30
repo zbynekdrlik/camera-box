@@ -1,8 +1,10 @@
 #!/bin/bash
 #
 # Camera-Box Device Setup Script
+# Sets up a clean Ubuntu installation as a camera-box appliance
+#
 # Usage: ./setup-device.sh DEVICE_NAME DEVICE_IP VBAN_STREAM
-# Example: ./setup-device.sh CAM1 10.77.9.61 cam1
+# Example: ./setup-device.sh CAM2 10.77.9.62 cam2
 #
 
 set -e
@@ -12,6 +14,10 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# GitHub repo for downloading binary
+GITHUB_REPO="zbynekdrlik/camera-box"
+BINARY_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/camera-box"
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -33,6 +39,8 @@ if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
     exit 1
 fi
 
+TOTAL_STEPS=15
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Camera-Box Device Setup${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -50,15 +58,21 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
+# =============================================================================
+# STEP 1: Set hostname
+# =============================================================================
 echo ""
-echo -e "${GREEN}[1/7] Setting hostname...${NC}"
+echo -e "${GREEN}[1/${TOTAL_STEPS}] Setting hostname...${NC}"
 echo "$DEVICE_NAME" > /etc/hostname
 hostnamectl set-hostname "$DEVICE_NAME"
 sed -i "s/127.0.1.1.*/127.0.1.1\t$DEVICE_NAME/" /etc/hosts
 echo "  Hostname set to: $DEVICE_NAME"
 
+# =============================================================================
+# STEP 2: Configure static IP
+# =============================================================================
 echo ""
-echo -e "${GREEN}[2/7] Configuring static IP...${NC}"
+echo -e "${GREEN}[2/${TOTAL_STEPS}] Configuring static IP...${NC}"
 cat > /etc/netplan/01-netcfg.yaml << EOF
 network:
   version: 2
@@ -77,12 +91,41 @@ network:
           - 10.77.8.1
 EOF
 chmod 600 /etc/netplan/01-netcfg.yaml
-# Remove cloud-init config if exists
 rm -f /etc/netplan/50-cloud-init.yaml
 echo "  Static IP configured: $DEVICE_IP"
 
+# =============================================================================
+# STEP 3: Install camera-box binary
+# =============================================================================
 echo ""
-echo -e "${GREEN}[3/7] Creating camera-box config...${NC}"
+echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
+if curl -fsSL "$BINARY_URL" -o /usr/local/bin/camera-box; then
+    chmod +x /usr/local/bin/camera-box
+    echo "  Binary installed from GitHub"
+else
+    echo -e "  ${YELLOW}Warning: Could not download binary from GitHub${NC}"
+    echo "  Please install manually to /usr/local/bin/camera-box"
+fi
+
+# =============================================================================
+# STEP 4: Install NDI library
+# =============================================================================
+echo ""
+echo -e "${GREEN}[4/${TOTAL_STEPS}] Setting up NDI library...${NC}"
+mkdir -p /usr/lib/ndi
+# NDI library must be copied manually due to licensing
+if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
+    echo -e "  ${YELLOW}NDI library not found - copy from CAM1:${NC}"
+    echo "  scp root@10.77.9.61:/usr/lib/ndi/* /usr/lib/ndi/"
+else
+    echo "  NDI library present"
+fi
+
+# =============================================================================
+# STEP 5: Create camera-box config
+# =============================================================================
+echo ""
+echo -e "${GREEN}[5/${TOTAL_STEPS}] Creating camera-box config...${NC}"
 mkdir -p /etc/camera-box
 cat > /etc/camera-box/config.toml << EOF
 # Camera-Box Configuration
@@ -102,10 +145,13 @@ target = "strih.lan"
 sample_rate = 48000
 channels = 1
 EOF
-echo "  Config created: /etc/camera-box/config.toml"
+echo "  Config: /etc/camera-box/config.toml"
 
+# =============================================================================
+# STEP 6: Create systemd service
+# =============================================================================
 echo ""
-echo -e "${GREEN}[4/7] Creating systemd service...${NC}"
+echo -e "${GREEN}[6/${TOTAL_STEPS}] Creating systemd service...${NC}"
 cat > /etc/systemd/system/camera-box.service << 'EOF'
 [Unit]
 Description=Camera Box - USB Video Capture to NDI
@@ -150,29 +196,157 @@ systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
 
+# =============================================================================
+# STEP 7: Set binary capabilities
+# =============================================================================
 echo ""
-echo -e "${GREEN}[5/7] Setting capabilities...${NC}"
+echo -e "${GREEN}[7/${TOTAL_STEPS}] Setting binary capabilities...${NC}"
 if [ -f /usr/local/bin/camera-box ]; then
     setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box
-    echo "  Capabilities set on binary"
+    echo "  Capabilities set (real-time priority, memory lock)"
 else
-    echo -e "  ${YELLOW}Warning: Binary not found at /usr/local/bin/camera-box${NC}"
-    echo "  Please install the binary first"
+    echo -e "  ${YELLOW}Skipped - binary not installed${NC}"
 fi
 
+# =============================================================================
+# STEP 8: Disable GRUB timeout (fast boot)
+# =============================================================================
 echo ""
-echo -e "${GREEN}[6/7] Creating NDI directory...${NC}"
-mkdir -p /usr/lib/ndi
-echo "  NDI directory: /usr/lib/ndi"
-if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
-    echo -e "  ${YELLOW}Warning: NDI library not found${NC}"
-    echo "  Please copy libndi.so.6 to /usr/lib/ndi/"
-fi
+echo -e "${GREEN}[8/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
+sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
+sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
+grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
+update-grub 2>/dev/null || true
+echo "  GRUB timeout: 0 seconds"
 
+# =============================================================================
+# STEP 9: Reduce network wait timeout
+# =============================================================================
 echo ""
-echo -e "${GREEN}[7/7] Summary${NC}"
+echo -e "${GREEN}[9/${TOTAL_STEPS}] Reducing network wait timeout...${NC}"
+mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
+cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf << EOF
+[Service]
+ExecStart=
+ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --timeout=5
+EOF
+echo "  Network wait timeout: 5 seconds"
+
+# =============================================================================
+# STEP 10: Disable power button shutdown
+# =============================================================================
+echo ""
+echo -e "${GREEN}[10/${TOTAL_STEPS}] Disabling power button shutdown...${NC}"
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/disable-power-button.conf << EOF
+[Login]
+HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+EOF
+echo "  Power button: ignored (used for mute toggle)"
+
+# =============================================================================
+# STEP 11: Disable all power saving / sleep
+# =============================================================================
+echo ""
+echo -e "${GREEN}[11/${TOTAL_STEPS}] Disabling power saving...${NC}"
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+# Disable CPU frequency scaling (use performance governor)
+for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    echo "performance" > "$cpu" 2>/dev/null || true
+done
+# Make it persistent
+cat > /etc/systemd/system/cpu-performance.service << 'EOF'
+[Unit]
+Description=Set CPU to performance mode
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $cpu; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable cpu-performance.service 2>/dev/null || true
+echo "  Sleep/suspend: disabled"
+echo "  CPU governor: performance"
+
+# =============================================================================
+# STEP 12: Optimize network for performance
+# =============================================================================
+echo ""
+echo -e "${GREEN}[12/${TOTAL_STEPS}] Optimizing network performance...${NC}"
+cat > /etc/sysctl.d/99-network-performance.conf << 'EOF'
+# Network performance optimizations for low-latency streaming
+
+# Increase network buffer sizes
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 5000
+
+# TCP optimizations
+net.ipv4.tcp_rmem = 4096 1048576 134217728
+net.ipv4.tcp_wmem = 4096 1048576 134217728
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+
+# Reduce latency
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_nodelay = 1
+
+# Disable IPv6 if not needed
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOF
+sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
+echo "  Network buffers: optimized"
+echo "  TCP congestion: BBR"
+echo "  IPv6: disabled"
+
+# =============================================================================
+# STEP 13: Disable unnecessary services
+# =============================================================================
+echo ""
+echo -e "${GREEN}[13/${TOTAL_STEPS}] Disabling unnecessary services...${NC}"
+# Snap
+systemctl disable --now snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true
+systemctl mask snapd.service 2>/dev/null || true
+# Cloud-init
+systemctl disable --now cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service 2>/dev/null || true
+touch /etc/cloud/cloud-init.disabled 2>/dev/null || true
+# Auto updates
+systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+# ModemManager (not needed)
+systemctl disable --now ModemManager.service 2>/dev/null || true
+# Bluetooth (not needed)
+systemctl disable --now bluetooth.service 2>/dev/null || true
+# Printing (not needed)
+systemctl disable --now cups.service cups-browsed.service 2>/dev/null || true
+echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups"
+
+# =============================================================================
+# STEP 14: Install required packages
+# =============================================================================
+echo ""
+echo -e "${GREEN}[14/${TOTAL_STEPS}] Installing required packages...${NC}"
+apt-get update -qq
+apt-get install -y -qq avahi-daemon v4l-utils alsa-utils 2>/dev/null || true
+systemctl enable avahi-daemon
+echo "  Installed: avahi-daemon, v4l-utils, alsa-utils"
+
+# =============================================================================
+# STEP 15: Summary
+# =============================================================================
+echo ""
+echo -e "${GREEN}[15/${TOTAL_STEPS}] Setup Complete!${NC}"
 echo "=========================================="
-echo "Device setup complete!"
 echo ""
 echo "Configuration:"
 echo "  Hostname:    $DEVICE_NAME"
@@ -180,16 +354,22 @@ echo "  IP Address:  $DEVICE_IP"
 echo "  VBAN Stream: $VBAN_STREAM"
 echo "  NDI Name:    usb"
 echo ""
-echo "Files created:"
-echo "  /etc/hostname"
-echo "  /etc/netplan/01-netcfg.yaml"
-echo "  /etc/camera-box/config.toml"
-echo "  /etc/systemd/system/camera-box.service"
+echo "Optimizations applied:"
+echo "  - GRUB timeout: 0s"
+echo "  - Network wait: 5s"
+echo "  - Power button: mute toggle (not shutdown)"
+echo "  - Sleep/suspend: disabled"
+echo "  - CPU governor: performance"
+echo "  - Network: optimized for streaming"
+echo "  - Unnecessary services: disabled"
 echo ""
+if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
+    echo -e "${YELLOW}ACTION REQUIRED:${NC}"
+    echo "  Copy NDI library: scp root@10.77.9.61:/usr/lib/ndi/* /usr/lib/ndi/"
+    echo ""
+fi
 echo -e "${YELLOW}Next steps:${NC}"
-echo "  1. Install camera-box binary to /usr/local/bin/"
-echo "  2. Copy NDI library to /usr/lib/ndi/"
-echo "  3. Apply network config: netplan apply"
-echo "  4. Reboot to apply all changes: reboot"
+echo "  1. Apply network config: netplan apply"
+echo "  2. Reboot: reboot"
 echo ""
 echo -e "${GREEN}After reboot, connect via: ssh root@${DEVICE_IP}${NC}"
