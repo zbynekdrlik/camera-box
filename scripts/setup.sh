@@ -134,6 +134,12 @@ update_system() {
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
     log "Installing essential packages..."
+    # Detect correct ALSA package name (Ubuntu 24.04+ uses libasound2t64)
+    ALSA_PKG="libasound2"
+    if apt-cache show libasound2t64 &>/dev/null; then
+        ALSA_PKG="libasound2t64"
+    fi
+
     apt-get install -y \
         curl \
         wget \
@@ -146,7 +152,7 @@ update_system() {
         libavahi-client3 \
         avahi-daemon \
         ca-certificates \
-        libasound2 \
+        "$ALSA_PKG" \
         alsa-utils
 
     log "Cleaning up..."
@@ -586,8 +592,8 @@ main() {
     echo ""
 
     check_root
+    expand_disk      # First! Before anything that needs disk space
     set_hostname
-    expand_disk
     update_system
     configure_system
     install_dantesync
