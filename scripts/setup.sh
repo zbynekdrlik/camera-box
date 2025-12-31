@@ -464,44 +464,74 @@ install_camera_box() {
     tar -xzf "$tmp_dir/camera-box.tar.gz" -C "$tmp_dir"
     install -m 755 "$tmp_dir/camera-box" "$INSTALL_DIR/"
 
-    # Install systemd service if present
-    if [[ -f "$tmp_dir/camera-box.service" ]]; then
-        install -m 644 "$tmp_dir/camera-box.service" /etc/systemd/system/
-    else
-        log "Creating camera-box service..."
-        cat > /etc/systemd/system/camera-box.service << 'EOF'
+    # Create systemd service (always use our production config)
+    log "Creating camera-box service..."
+    cat > /etc/systemd/system/camera-box.service << 'EOF'
 [Unit]
-Description=Camera-Box NDI Streaming
-After=network.target avahi-daemon.service
-Wants=avahi-daemon.service
+Description=Camera Box - USB Video Capture to NDI
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/camera-box
+ExecStart=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)"
 Restart=always
-RestartSec=5
-Environment="NDI_RUNTIME_DIR_V6=/usr/lib/ndi"
+RestartSec=3
+
+# Run with real-time priority for low latency
+Nice=-10
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
+
+# Environment for NDI SDK
+Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi
+
+# Logging
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=camera-box
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/
+ReadWritePaths=/dev /sys /run
+
+# Allow access to video devices
+SupplementaryGroups=video
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    fi
 
     rm -rf "$tmp_dir"
 
     # Create config directory
     mkdir -p "$CONFIG_DIR"
     if [[ ! -f "$CONFIG_DIR/config.toml" ]]; then
-        cat > "$CONFIG_DIR/config.toml" << 'EOF'
-# Camera-Box Configuration
+        # Generate stream name from hostname (lowercase)
+        local stream_name
+        stream_name=$(echo "$DEVICE_HOSTNAME" | tr '[:upper:]' '[:lower:]')
 
-# NDI source name (appears on network)
+        cat > "$CONFIG_DIR/config.toml" << EOF
+# Camera-Box Configuration - $DEVICE_HOSTNAME
+
+# NDI source name (appears as "$DEVICE_HOSTNAME (usb)" on network)
 ndi_name = "usb"
 
 # Video capture device ("auto" for auto-detection)
 device = "auto"
+
+# VBAN Intercom Configuration
+[intercom]
+stream = "$stream_name"
+target = "strih.lan"
+sample_rate = 48000
+channels = 2
+sidetone_volume = 1.0
 EOF
         log "Created config at $CONFIG_DIR/config.toml"
     fi
@@ -602,6 +632,11 @@ main() {
     show_status
 
     log "Setup completed successfully!"
+    echo ""
+    warn "Rebooting in 5 seconds to apply all changes..."
+    warn "After reboot, connect via: ssh root@<new-static-ip>"
+    sleep 5
+    reboot
 }
 
 main "$@"
