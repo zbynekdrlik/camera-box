@@ -36,6 +36,7 @@ libc = "0.2"
 
 # Audio I/O for VBAN intercom
 cpal = "0.15"
+alsa = "0.9"
 
 # Input device events (for power button mute)
 evdev = "0.12"
