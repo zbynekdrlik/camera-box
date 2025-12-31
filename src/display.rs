@@ -519,7 +519,7 @@ mod tests {
         let dst = scale_nearest_neighbor(&src, 4, 2, 2, 1);
 
         assert_eq!(dst.len(), 8); // 2 pixels * 4 bytes
-        // First output pixel should sample from (0,0) area - red
+                                  // First output pixel should sample from (0,0) area - red
         assert_eq!(dst[2], 255, "First pixel should be red");
         // Second output pixel should sample from (2,0) area - green
         assert_eq!(dst[5], 255, "Second pixel should be green");
