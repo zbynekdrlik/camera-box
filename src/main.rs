@@ -1,11 +1,3 @@
-mod capture;
-mod config;
-mod display;
-mod intercom;
-mod ndi;
-mod ndi_display;
-mod vban;
-
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
@@ -14,10 +6,11 @@ use std::sync::Arc;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
-use crate::capture::VideoCapture;
-use crate::config::Config;
-use crate::ndi::NdiSender;
-use crate::ndi_display::NdiDisplayConfig;
+use camera_box::capture::VideoCapture;
+use camera_box::config::Config;
+use camera_box::intercom;
+use camera_box::ndi::NdiSender;
+use camera_box::ndi_display::{self, NdiDisplayConfig};
 
 /// Apply real-time optimizations to the current thread for lowest latency
 /// Based on media-bridge's extreme low-latency settings
@@ -305,4 +298,106 @@ async fn run_capture_loop(
     tracing::info!("camera-box stopped");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_args_parse_default() {
+        // Test that default values are correct
+        let args = Args::try_parse_from(["camera-box"]).unwrap();
+        assert_eq!(args.config, PathBuf::from("/etc/camera-box/config.toml"));
+        assert!(args.device.is_none());
+        assert!(args.display_source.is_none());
+        assert_eq!(args.fb_device, "/dev/fb0");
+        assert!(!args.debug);
+        assert!(args.intercom_stream.is_none());
+        assert_eq!(args.intercom_target, "strih.lan");
+    }
+
+    #[test]
+    fn test_args_parse_with_device() {
+        let args = Args::try_parse_from(["camera-box", "--device", "/dev/video2"]).unwrap();
+        assert_eq!(args.device, Some("/dev/video2".to_string()));
+    }
+
+    #[test]
+    fn test_args_parse_with_config() {
+        let args = Args::try_parse_from(["camera-box", "-c", "/custom/config.toml"]).unwrap();
+        assert_eq!(args.config, PathBuf::from("/custom/config.toml"));
+    }
+
+    #[test]
+    fn test_args_parse_with_display() {
+        let args =
+            Args::try_parse_from(["camera-box", "--display", "STRIH-SNV (interkom)"]).unwrap();
+        assert_eq!(
+            args.display_source,
+            Some("STRIH-SNV (interkom)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_args_parse_with_intercom() {
+        let args = Args::try_parse_from([
+            "camera-box",
+            "--intercom",
+            "cam1",
+            "--intercom-target",
+            "192.168.1.100",
+        ])
+        .unwrap();
+        assert_eq!(args.intercom_stream, Some("cam1".to_string()));
+        assert_eq!(args.intercom_target, "192.168.1.100");
+    }
+
+    #[test]
+    fn test_args_parse_debug_flag() {
+        let args = Args::try_parse_from(["camera-box", "--debug"]).unwrap();
+        assert!(args.debug);
+    }
+
+    #[test]
+    fn test_args_parse_fb_device() {
+        let args = Args::try_parse_from(["camera-box", "--fb-device", "/dev/fb1"]).unwrap();
+        assert_eq!(args.fb_device, "/dev/fb1");
+    }
+
+    #[test]
+    fn test_args_command_valid() {
+        // Ensure the command can be built
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn test_args_all_options() {
+        let args = Args::try_parse_from([
+            "camera-box",
+            "-c",
+            "/custom/config.toml",
+            "-d",
+            "/dev/video3",
+            "--display",
+            "NDI Source",
+            "--fb-device",
+            "/dev/fb1",
+            "--debug",
+            "--intercom",
+            "cam2",
+            "--intercom-target",
+            "host.lan",
+        ])
+        .unwrap();
+
+        assert_eq!(args.config, PathBuf::from("/custom/config.toml"));
+        assert_eq!(args.device, Some("/dev/video3".to_string()));
+        assert_eq!(args.display_source, Some("NDI Source".to_string()));
+        assert_eq!(args.fb_device, "/dev/fb1");
+        assert!(args.debug);
+        assert_eq!(args.intercom_stream, Some("cam2".to_string()));
+        assert_eq!(args.intercom_target, "host.lan");
+    }
 }

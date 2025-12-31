@@ -191,11 +191,11 @@ pub fn apply_low_priority() {
         }
     }
 
-    // Set CPU affinity to different core than camera (core 0 or 2)
+    // Set CPU affinity to core 0 (camera uses isolated core 3, intercom uses core 1)
     unsafe {
         let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
 
-        // Use core 0 (camera uses core 1)
+        // Use core 0 for display
         libc::CPU_SET(0, &mut cpuset);
 
         let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
@@ -205,5 +205,43 @@ pub fn apply_low_priority() {
         } else {
             tracing::debug!("NDI display: Could not set CPU affinity (non-critical)");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ndi_display_config_default() {
+        let config = NdiDisplayConfig::default();
+        assert!(config.source_name.is_empty());
+        assert_eq!(config.fb_device, "/dev/fb0");
+        assert_eq!(config.find_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_ndi_display_config_custom() {
+        let config = NdiDisplayConfig {
+            source_name: "STRIH-SNV (interkom)".to_string(),
+            fb_device: "/dev/fb1".to_string(),
+            find_timeout_secs: 60,
+        };
+        assert_eq!(config.source_name, "STRIH-SNV (interkom)");
+        assert_eq!(config.fb_device, "/dev/fb1");
+        assert_eq!(config.find_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_ndi_display_config_fields() {
+        let config = NdiDisplayConfig {
+            source_name: "test".to_string(),
+            fb_device: "/dev/fb0".to_string(),
+            find_timeout_secs: 10,
+        };
+        // Verify all fields are accessible
+        assert!(!config.source_name.is_empty());
+        assert!(!config.fb_device.is_empty());
+        assert!(config.find_timeout_secs > 0);
     }
 }

@@ -870,3 +870,371 @@ impl Drop for NdiReceiver {
         }
     }
 }
+
+// ============================================================================
+// Standalone conversion functions for testing (without NDI library dependency)
+// ============================================================================
+
+/// Convert YUYV to UYVY using scalar method (standalone for testing)
+/// YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
+pub fn convert_yuyv_to_uyvy_scalar(yuyv: &[u8]) -> Vec<u8> {
+    let mut uyvy = Vec::with_capacity(yuyv.len());
+    for chunk in yuyv.chunks_exact(4) {
+        uyvy.push(chunk[1]); // U0
+        uyvy.push(chunk[0]); // Y0
+        uyvy.push(chunk[3]); // V0
+        uyvy.push(chunk[2]); // Y1
+    }
+    uyvy
+}
+
+/// Convert YUYV to UYVY using AVX2 SIMD (standalone for testing)
+///
+/// # Safety
+/// This function requires AVX2 CPU support. The caller must verify AVX2 is available
+/// using `has_avx2()` before calling. Calling on a CPU without AVX2 is undefined behavior.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn convert_yuyv_to_uyvy_avx2(yuyv: &[u8]) -> Vec<u8> {
+    let total_bytes = yuyv.len();
+    let avx_bytes = (total_bytes / 64) * 64;
+
+    let mut uyvy = vec![0u8; total_bytes];
+    let dst = uyvy.as_mut_ptr();
+
+    // Shuffle mask to convert YUYV to UYVY
+    let shuffle_mask = _mm256_setr_epi8(
+        1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10,
+        13, 12, 15, 14,
+    );
+
+    let mut i = 0;
+    while i < avx_bytes {
+        let data0 = _mm256_loadu_si256(yuyv.as_ptr().add(i) as *const __m256i);
+        let data1 = _mm256_loadu_si256(yuyv.as_ptr().add(i + 32) as *const __m256i);
+
+        let result0 = _mm256_shuffle_epi8(data0, shuffle_mask);
+        let result1 = _mm256_shuffle_epi8(data1, shuffle_mask);
+
+        _mm256_storeu_si256(dst.add(i) as *mut __m256i, result0);
+        _mm256_storeu_si256(dst.add(i + 32) as *mut __m256i, result1);
+
+        i += 64;
+    }
+
+    // Handle remaining bytes with scalar code
+    while i < total_bytes {
+        let y0 = *yuyv.get_unchecked(i);
+        let u = *yuyv.get_unchecked(i + 1);
+        let y1 = *yuyv.get_unchecked(i + 2);
+        let v = *yuyv.get_unchecked(i + 3);
+
+        *dst.add(i) = u;
+        *dst.add(i + 1) = y0;
+        *dst.add(i + 2) = v;
+        *dst.add(i + 3) = y1;
+
+        i += 4;
+    }
+
+    uyvy
+}
+
+/// Convert NV12 to UYVY (standalone for testing)
+pub fn convert_nv12_to_uyvy(nv12: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let y_size = width * height;
+    let mut uyvy = Vec::with_capacity(width * height * 2);
+
+    let y_plane = &nv12[..y_size.min(nv12.len())];
+    let uv_plane = if nv12.len() > y_size {
+        &nv12[y_size..]
+    } else {
+        &[]
+    };
+
+    for row in 0..height {
+        let uv_row = row / 2;
+        for col in (0..width).step_by(2) {
+            let y0 = y_plane.get(row * width + col).copied().unwrap_or(128);
+            let y1 = y_plane.get(row * width + col + 1).copied().unwrap_or(128);
+            let uv_idx = uv_row * width + col;
+            let u = uv_plane.get(uv_idx).copied().unwrap_or(128);
+            let v = uv_plane.get(uv_idx + 1).copied().unwrap_or(128);
+
+            uyvy.push(u);
+            uyvy.push(y0);
+            uyvy.push(v);
+            uyvy.push(y1);
+        }
+    }
+
+    uyvy
+}
+
+/// Convert BGRA to UYVY (standalone for testing)
+pub fn convert_bgra_to_uyvy(bgra: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut uyvy = Vec::with_capacity(width * height * 2);
+
+    for row in 0..height {
+        for col in (0..width).step_by(2) {
+            let idx0 = (row * width + col) * 4;
+            let idx1 = (row * width + col + 1) * 4;
+
+            let (b0, g0, r0) = (
+                bgra.get(idx0).copied().unwrap_or(0) as i32,
+                bgra.get(idx0 + 1).copied().unwrap_or(0) as i32,
+                bgra.get(idx0 + 2).copied().unwrap_or(0) as i32,
+            );
+            let (b1, g1, r1) = (
+                bgra.get(idx1).copied().unwrap_or(0) as i32,
+                bgra.get(idx1 + 1).copied().unwrap_or(0) as i32,
+                bgra.get(idx1 + 2).copied().unwrap_or(0) as i32,
+            );
+
+            let y0 = ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16;
+            let y1 = ((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16;
+
+            let r = (r0 + r1) / 2;
+            let g = (g0 + g1) / 2;
+            let b = (b0 + b1) / 2;
+            let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+            let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+
+            uyvy.push(u.clamp(0, 255) as u8);
+            uyvy.push(y0.clamp(16, 235) as u8);
+            uyvy.push(v.clamp(0, 255) as u8);
+            uyvy.push(y1.clamp(16, 235) as u8);
+        }
+    }
+
+    uyvy
+}
+
+/// Check if AVX2 is available (for testing)
+#[cfg(target_arch = "x86_64")]
+pub fn has_avx2() -> bool {
+    is_x86_feature_detected!("avx2")
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn has_avx2() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_yuyv_to_uyvy_scalar_basic() {
+        // YUYV: Y0=10, U=20, Y1=30, V=40
+        let yuyv = vec![10, 20, 30, 40];
+        let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
+
+        // Expected UYVY: U=20, Y0=10, V=40, Y1=30
+        assert_eq!(uyvy, vec![20, 10, 40, 30]);
+    }
+
+    #[test]
+    fn test_yuyv_to_uyvy_scalar_multiple_pixels() {
+        // Two sets of pixel pairs
+        let yuyv = vec![
+            10, 20, 30, 40, // First pair
+            50, 60, 70, 80, // Second pair
+        ];
+        let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
+
+        assert_eq!(uyvy.len(), 8);
+        assert_eq!(uyvy[0..4], [20, 10, 40, 30]); // First pair
+        assert_eq!(uyvy[4..8], [60, 50, 80, 70]); // Second pair
+    }
+
+    #[test]
+    fn test_yuyv_to_uyvy_scalar_all_values() {
+        // Test with all byte values 0-255 (cycling)
+        let yuyv: Vec<u8> = (0..=255).cycle().take(256).collect();
+        let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
+
+        assert_eq!(uyvy.len(), 256);
+        // Verify swapping pattern
+        for i in (0..256).step_by(4) {
+            assert_eq!(uyvy[i], yuyv[i + 1], "U should be from position 1");
+            assert_eq!(uyvy[i + 1], yuyv[i], "Y0 should be from position 0");
+            assert_eq!(uyvy[i + 2], yuyv[i + 3], "V should be from position 3");
+            assert_eq!(uyvy[i + 3], yuyv[i + 2], "Y1 should be from position 2");
+        }
+    }
+
+    #[test]
+    fn test_yuyv_to_uyvy_length_preserved() {
+        for size in [4, 8, 64, 256, 1024, 1920 * 2] {
+            let yuyv: Vec<u8> = vec![128; size];
+            let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
+            assert_eq!(
+                uyvy.len(),
+                size,
+                "Length should be preserved for size {}",
+                size
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_yuyv_to_uyvy_avx2_matches_scalar() {
+        if !has_avx2() {
+            println!("Skipping AVX2 test - CPU doesn't support AVX2");
+            return;
+        }
+
+        // Test with various sizes including AVX2 chunk boundaries
+        for size in [64, 128, 256, 512, 1024, 1920 * 2, 1920 * 1080 * 2] {
+            let yuyv: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+
+            let scalar_result = convert_yuyv_to_uyvy_scalar(&yuyv);
+            let avx2_result = unsafe { convert_yuyv_to_uyvy_avx2(&yuyv) };
+
+            assert_eq!(scalar_result, avx2_result, "AVX2 mismatch at size {}", size);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_yuyv_to_uyvy_avx2_non_aligned() {
+        if !has_avx2() {
+            return;
+        }
+
+        // Sizes that don't align with 64-byte AVX2 chunks
+        for size in [68, 100, 132, 200] {
+            let yuyv: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+
+            let scalar_result = convert_yuyv_to_uyvy_scalar(&yuyv);
+            let avx2_result = unsafe { convert_yuyv_to_uyvy_avx2(&yuyv) };
+
+            assert_eq!(
+                scalar_result, avx2_result,
+                "AVX2 non-aligned mismatch at size {}",
+                size
+            );
+        }
+    }
+
+    #[test]
+    fn test_nv12_to_uyvy_basic() {
+        // Simple 2x2 NV12 frame
+        // Y plane: 4 bytes (2x2)
+        // UV plane: 2 bytes (1x2, interleaved)
+        let nv12 = vec![
+            100, 110, // Y row 0
+            120, 130, // Y row 1
+            64, 192, // UV (U=64, V=192)
+        ];
+        let uyvy = convert_nv12_to_uyvy(&nv12, 2, 2);
+
+        assert_eq!(uyvy.len(), 8); // 2x2 * 2 bytes per pixel
+                                   // First row: U=64, Y0=100, V=192, Y1=110
+        assert_eq!(uyvy[0], 64); // U
+        assert_eq!(uyvy[1], 100); // Y0
+        assert_eq!(uyvy[2], 192); // V
+        assert_eq!(uyvy[3], 110); // Y1
+    }
+
+    #[test]
+    fn test_nv12_to_uyvy_output_size() {
+        // Full HD NV12
+        let width = 1920usize;
+        let height = 1080usize;
+        let y_size = width * height;
+        let uv_size = width * height / 2;
+        let nv12 = vec![128u8; y_size + uv_size];
+
+        let uyvy = convert_nv12_to_uyvy(&nv12, width, height);
+        assert_eq!(uyvy.len(), width * height * 2);
+    }
+
+    #[test]
+    fn test_bgra_to_uyvy_black() {
+        // Black pixel: BGRA = (0, 0, 0, 255)
+        let bgra = vec![0, 0, 0, 255, 0, 0, 0, 255]; // 2 black pixels
+        let uyvy = convert_bgra_to_uyvy(&bgra, 2, 1);
+
+        assert_eq!(uyvy.len(), 4);
+        // Y should be ~16 (video black), U and V should be ~128 (neutral)
+        assert_eq!(uyvy[1], 16, "Y0 should be video black (16)");
+        assert_eq!(uyvy[3], 16, "Y1 should be video black (16)");
+        assert!((uyvy[0] as i32 - 128).abs() < 5, "U should be neutral");
+        assert!((uyvy[2] as i32 - 128).abs() < 5, "V should be neutral");
+    }
+
+    #[test]
+    fn test_bgra_to_uyvy_white() {
+        // White pixel: BGRA = (255, 255, 255, 255)
+        let bgra = vec![255, 255, 255, 255, 255, 255, 255, 255];
+        let uyvy = convert_bgra_to_uyvy(&bgra, 2, 1);
+
+        assert_eq!(uyvy.len(), 4);
+        // Y should be 235 (video white)
+        assert_eq!(uyvy[1], 235, "Y0 should be video white (235)");
+        assert_eq!(uyvy[3], 235, "Y1 should be video white (235)");
+    }
+
+    #[test]
+    fn test_bgra_to_uyvy_output_size() {
+        for (width, height) in [(2, 1), (4, 2), (1920, 1080)] {
+            let bgra = vec![128u8; width * height * 4];
+            let uyvy = convert_bgra_to_uyvy(&bgra, width, height);
+            assert_eq!(uyvy.len(), width * height * 2);
+        }
+    }
+
+    #[test]
+    fn test_detect_avx2() {
+        // This just verifies the function works - result depends on CPU
+        let result = has_avx2();
+        println!("AVX2 support detected: {}", result);
+        // No assertion - just ensure it doesn't panic
+    }
+
+    #[test]
+    fn test_yuyv_to_uyvy_empty() {
+        let yuyv: Vec<u8> = vec![];
+        let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
+        assert!(uyvy.is_empty());
+    }
+
+    #[test]
+    fn test_fourcc_constants() {
+        assert_eq!(
+            NDILIBD_FOURCC_UYVY,
+            u32::from_le_bytes([b'U', b'Y', b'V', b'Y'])
+        );
+        assert_eq!(
+            NDILIBD_FOURCC_BGRA,
+            u32::from_le_bytes([b'B', b'G', b'R', b'A'])
+        );
+    }
+
+    #[test]
+    fn test_received_frame_construction() {
+        let frame = ReceivedFrame {
+            width: 1920,
+            height: 1080,
+            fourcc: NDILIBD_FOURCC_UYVY,
+            stride: 3840,
+            data: vec![0u8; 1920 * 1080 * 2],
+        };
+        assert_eq!(frame.width, 1920);
+        assert_eq!(frame.height, 1080);
+        assert_eq!(frame.stride, 3840);
+        assert_eq!(frame.data.len(), 1920 * 1080 * 2);
+    }
+
+    #[test]
+    fn test_yuyv_to_uyvy_1080p_frame() {
+        // Full 1080p frame
+        let yuyv = vec![128u8; 1920 * 1080 * 2];
+        let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
+        assert_eq!(uyvy.len(), 1920 * 1080 * 2);
+    }
+}

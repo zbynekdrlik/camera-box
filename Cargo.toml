@@ -7,6 +7,14 @@ description = "Simple USB video capture to NDI streaming appliance"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/camera-box"
 
+[lib]
+name = "camera_box"
+path = "src/lib.rs"
+
+[[bin]]
+name = "camera-box"
+path = "src/main.rs"
+
 [dependencies]
 # V4L2 capture
 v4l = "0.14"
@@ -40,6 +48,20 @@ alsa = "0.9"
 
 # Input device events (for power button mute)
 evdev = "0.12"
+
+[dev-dependencies]
+# Property-based testing for format conversions
+proptest = "1.4"
+# Better diff output for byte arrays
+pretty_assertions = "1.4"
+# Temporary files for config tests
+tempfile = "3.9"
+# Performance benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "format_conversions"
+harness = false
 
 [profile.release]
 lto = true

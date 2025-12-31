@@ -187,3 +187,107 @@ impl VideoCapture {
         self.frame_rate
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frame_rate_default() {
+        let rate = FrameRate::default();
+        assert_eq!(rate.numerator, 30000);
+        assert_eq!(rate.denominator, 1001);
+        // 30000/1001 = ~29.97 fps
+        let fps = rate.numerator as f64 / rate.denominator as f64;
+        assert!((fps - 29.97).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_frame_rate_as_f64() {
+        let rate = FrameRate {
+            numerator: 60,
+            denominator: 1,
+        };
+        let fps = rate.numerator as f64 / rate.denominator as f64;
+        assert!((fps - 60.0).abs() < 0.001);
+
+        let rate_ntsc = FrameRate {
+            numerator: 60000,
+            denominator: 1001,
+        };
+        let fps_ntsc = rate_ntsc.numerator as f64 / rate_ntsc.denominator as f64;
+        assert!((fps_ntsc - 59.94).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_frame_rate_clone() {
+        let rate = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        let cloned = rate;
+        assert_eq!(rate.numerator, cloned.numerator);
+        assert_eq!(rate.denominator, cloned.denominator);
+    }
+
+    #[test]
+    fn test_frame_info_clone_copy() {
+        let info = FrameInfo {
+            width: 1920,
+            height: 1080,
+            fourcc: FourCC::new(b"YUYV"),
+            stride: 3840,
+        };
+        // Test Copy trait
+        let copied = info;
+        assert_eq!(info.width, copied.width);
+        assert_eq!(info.height, copied.height);
+        assert_eq!(info.stride, copied.stride);
+    }
+
+    #[test]
+    fn test_frame_info_fields() {
+        let info = FrameInfo {
+            width: 1280,
+            height: 720,
+            fourcc: FourCC::new(b"MJPG"),
+            stride: 2560,
+        };
+        assert_eq!(info.width, 1280);
+        assert_eq!(info.height, 720);
+        assert_eq!(info.stride, 2560);
+    }
+
+    #[test]
+    fn test_frame_construction() {
+        let frame = Frame {
+            data: vec![0u8; 1920 * 1080 * 2],
+            width: 1920,
+            height: 1080,
+            fourcc: FourCC::new(b"YUYV"),
+            stride: 3840,
+        };
+        assert_eq!(frame.width, 1920);
+        assert_eq!(frame.height, 1080);
+        assert_eq!(frame.stride, 3840);
+        assert_eq!(frame.data.len(), 1920 * 1080 * 2);
+    }
+
+    #[test]
+    fn test_fourcc_formatting() {
+        let fourcc = FourCC::new(b"YUYV");
+        let display = format!("{}", fourcc);
+        assert!(display.contains('Y') || display.len() == 4);
+    }
+
+    #[test]
+    fn test_frame_rate_debug() {
+        let rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        let debug = format!("{:?}", rate);
+        assert!(debug.contains("FrameRate"));
+        assert!(debug.contains("30"));
+    }
+}

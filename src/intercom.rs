@@ -341,10 +341,83 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
     Ok(())
 }
 
+// =============================================================================
+// Testable Audio Buffer (public for testing)
+// =============================================================================
+
+/// Ring buffer for audio samples (exposed for testing)
+#[derive(Debug)]
+pub struct TestableAudioBuffer {
+    samples: VecDeque<i16>,
+    capacity: usize,
+}
+
+impl TestableAudioBuffer {
+    /// Create a new audio buffer with the given capacity
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Push samples into the buffer, dropping oldest if at capacity
+    pub fn push_samples(&mut self, data: &[i16]) {
+        while self.samples.len() + data.len() > self.capacity {
+            self.samples.pop_front();
+        }
+        self.samples.extend(data.iter().copied());
+    }
+
+    /// Pop up to `count` samples from the buffer
+    pub fn pop_samples(&mut self, count: usize) -> Vec<i16> {
+        let available = count.min(self.samples.len());
+        self.samples.drain(..available).collect()
+    }
+
+    /// Get current number of samples in buffer
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Check if buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Get buffer capacity
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
 fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
-    // Open ALSA devices
-    let capture = open_alsa_capture()?;
-    let playback = open_alsa_playback()?;
+    // Open ALSA devices with retry
+    let capture = loop {
+        match open_alsa_capture() {
+            Ok(c) => break c,
+            Err(e) => {
+                if !running.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                tracing::warn!("Waiting for audio capture device: {} - retrying...", e);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    };
+
+    let playback = loop {
+        match open_alsa_playback() {
+            Ok(p) => break p,
+            Err(e) => {
+                if !running.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                tracing::warn!("Waiting for audio playback device: {} - retrying...", e);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    };
 
     // Mute state
     let muted = Arc::new(AtomicBool::new(true));
@@ -409,6 +482,10 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
     let mut last_received = 0u64;
     let mut last_sent = 0u64;
 
+    // Capture watchdog - detect if capture stops producing samples
+    let mut last_capture_samples = 0u64;
+    let mut capture_stall_count = 0u32;
+
     tracing::info!(
         "Audio streams started with direct ALSA, period={}frames (~{:.1}ms)",
         PERIOD_SIZE,
@@ -421,8 +498,9 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
         // === CAPTURE ===
         let io_cap = capture.io_i16()?;
         match io_cap.readi(&mut capture_buf) {
-            Ok(frames) => {
+            Ok(frames) if frames > 0 => {
                 samples_captured.fetch_add(frames as u64, Ordering::Relaxed);
+                capture_stall_count = 0; // Reset stall counter on successful capture
 
                 if !is_muted {
                     // Add to sidetone buffer (mono -> stereo later)
@@ -459,11 +537,26 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
                     }
                 }
             }
+            Ok(_) => {
+                // Zero frames - capture might be stalled
+                capture_stall_count += 1;
+            }
             Err(e) => {
+                capture_stall_count += 1;
                 if !recover_alsa(&capture, e.errno()) {
                     return Err(anyhow!("ALSA capture error: {}", e));
                 }
             }
+        }
+
+        // Quick stall detection: if 500+ consecutive iterations without capture
+        // (about 2.5 seconds at 5ms/iteration), force restart
+        if capture_stall_count > 500 {
+            tracing::warn!(
+                "Capture device unresponsive ({} consecutive failures), forcing restart...",
+                capture_stall_count
+            );
+            return Err(anyhow!("Capture device unresponsive"));
         }
 
         // === PLAYBACK ===
@@ -501,14 +594,15 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
             }
         }
 
-        // Stats
+        // Stats and watchdog
         if last_report.elapsed() >= report_interval {
             let received = frames_received.load(Ordering::Relaxed);
             let sent = frames_sent.load(Ordering::Relaxed);
             let recv_rate = (received - last_received) as f64 / report_interval.as_secs_f64();
             let send_rate = (sent - last_sent) as f64 / report_interval.as_secs_f64();
-            let captured = samples_captured.swap(0, Ordering::Relaxed);
-            let capture_rate = captured as f64 / report_interval.as_secs_f64();
+            let captured = samples_captured.load(Ordering::Relaxed);
+            let capture_rate =
+                (captured - last_capture_samples) as f64 / report_interval.as_secs_f64();
 
             tracing::info!(
                 "Intercom: recv {:.1} pkt/s, send {:.1} pkt/s, capture {:.0} samp/s",
@@ -517,6 +611,17 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
                 capture_rate
             );
 
+            // Watchdog: if no samples captured in this period, something is wrong
+            if captured == last_capture_samples && capture_rate < 1000.0 {
+                tracing::warn!(
+                    "Capture stalled! No samples in {}s (stall_count={}), forcing restart...",
+                    report_interval.as_secs(),
+                    capture_stall_count
+                );
+                return Err(anyhow!("Capture device stalled - forcing restart"));
+            }
+
+            last_capture_samples = captured;
             last_received = received;
             last_sent = sent;
             last_report = std::time::Instant::now();
@@ -524,4 +629,140 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_intercom_config_default() {
+        let config = IntercomConfig::default();
+        assert_eq!(config.stream_name, "cam1");
+        assert_eq!(config.target_host, "strih.lan");
+        assert_eq!(config.sample_rate, 48000);
+        assert_eq!(config.channels, 2);
+        assert!((config.sidetone_volume - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_intercom_config_clone() {
+        let config = IntercomConfig {
+            stream_name: "test".to_string(),
+            target_host: "host.lan".to_string(),
+            sample_rate: 44100,
+            channels: 1,
+            sidetone_volume: 0.5,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.stream_name, cloned.stream_name);
+        assert_eq!(config.target_host, cloned.target_host);
+        assert_eq!(config.sample_rate, cloned.sample_rate);
+        assert_eq!(config.channels, cloned.channels);
+    }
+
+    #[test]
+    fn test_audio_buffer_new() {
+        let buf = TestableAudioBuffer::new(100);
+        assert_eq!(buf.capacity(), 100);
+        assert_eq!(buf.len(), 0);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_audio_buffer_push_within_capacity() {
+        let mut buf = TestableAudioBuffer::new(10);
+        buf.push_samples(&[1, 2, 3, 4, 5]);
+        assert_eq!(buf.len(), 5);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_audio_buffer_push_overflow() {
+        let mut buf = TestableAudioBuffer::new(5);
+        buf.push_samples(&[1, 2, 3, 4, 5]);
+        assert_eq!(buf.len(), 5);
+
+        // Push more - should drop oldest
+        buf.push_samples(&[6, 7, 8]);
+        assert_eq!(buf.len(), 5); // Still at capacity
+
+        // First three should be gone, remaining should be 4, 5, 6, 7, 8
+        let samples = buf.pop_samples(5);
+        assert_eq!(samples, vec![4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_audio_buffer_pop_exact() {
+        let mut buf = TestableAudioBuffer::new(10);
+        buf.push_samples(&[1, 2, 3, 4, 5]);
+
+        let samples = buf.pop_samples(3);
+        assert_eq!(samples, vec![1, 2, 3]);
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn test_audio_buffer_pop_more_than_available() {
+        let mut buf = TestableAudioBuffer::new(10);
+        buf.push_samples(&[1, 2, 3]);
+
+        let samples = buf.pop_samples(10);
+        assert_eq!(samples, vec![1, 2, 3]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_audio_buffer_pop_empty() {
+        let mut buf = TestableAudioBuffer::new(10);
+        let samples = buf.pop_samples(5);
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn test_audio_buffer_fifo_order() {
+        let mut buf = TestableAudioBuffer::new(100);
+        buf.push_samples(&[1, 2, 3]);
+        buf.push_samples(&[4, 5, 6]);
+
+        let samples = buf.pop_samples(6);
+        assert_eq!(samples, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_audio_buffer_interleaved_push_pop() {
+        let mut buf = TestableAudioBuffer::new(100);
+
+        buf.push_samples(&[1, 2]);
+        let s1 = buf.pop_samples(1);
+        assert_eq!(s1, vec![1]);
+
+        buf.push_samples(&[3, 4]);
+        let s2 = buf.pop_samples(3);
+        assert_eq!(s2, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_audio_buffer_large_capacity() {
+        let mut buf = TestableAudioBuffer::new(48000); // 1 second at 48kHz
+        let samples: Vec<i16> = (0..48000).map(|i| (i % 1000) as i16).collect();
+        buf.push_samples(&samples);
+        assert_eq!(buf.len(), 48000);
+    }
+
+    #[test]
+    fn test_alsa_constants() {
+        assert_eq!(SAMPLE_RATE, 48000);
+        assert_eq!(PERIOD_SIZE, 256);
+        assert_eq!(BUFFER_PERIODS, 4);
+        assert_eq!(ALSA_DEVICE, "hw:CARD=HID,DEV=0");
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = IntercomConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("IntercomConfig"));
+        assert!(debug.contains("cam1"));
+    }
 }

@@ -163,3 +163,200 @@ fn find_capture_device() -> Result<String> {
     }
     anyhow::bail!("No video capture device found")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_config_default_values() {
+        let config = Config::default();
+        assert_eq!(config.hostname, "camera-box");
+        assert_eq!(config.ndi_name, "usb");
+        assert_eq!(config.device, "auto");
+        assert!(config.display.is_none());
+        assert!(config.intercom.is_none());
+    }
+
+    #[test]
+    fn test_config_load_nonexistent_returns_default() {
+        let result = Config::load("/nonexistent/path/to/config.toml");
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.hostname, "camera-box");
+        assert_eq!(config.ndi_name, "usb");
+    }
+
+    #[test]
+    fn test_config_load_valid_toml() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+hostname = "CAM1"
+ndi_name = "camera"
+device = "/dev/video0"
+
+[display]
+source = "STRIH-SNV"
+fb_device = "/dev/fb1"
+
+[intercom]
+stream = "cam1"
+target = "192.168.1.100"
+sample_rate = 44100
+channels = 1
+sidetone_volume = 0.5
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(file.path()).unwrap();
+        assert_eq!(config.hostname, "CAM1");
+        assert_eq!(config.ndi_name, "camera");
+        assert_eq!(config.device, "/dev/video0");
+
+        let display = config.display.unwrap();
+        assert_eq!(display.source, "STRIH-SNV");
+        assert_eq!(display.fb_device, "/dev/fb1");
+
+        let intercom = config.intercom.unwrap();
+        assert_eq!(intercom.stream, "cam1");
+        assert_eq!(intercom.target, "192.168.1.100");
+        assert_eq!(intercom.sample_rate, 44100);
+        assert_eq!(intercom.channels, 1);
+        assert!((intercom.sidetone_volume - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_config_load_partial_toml_uses_defaults() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+hostname = "CAM2"
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(file.path()).unwrap();
+        assert_eq!(config.hostname, "CAM2");
+        // These should be defaults
+        assert_eq!(config.ndi_name, "usb");
+        assert_eq!(config.device, "auto");
+        assert!(config.display.is_none());
+        assert!(config.intercom.is_none());
+    }
+
+    #[test]
+    fn test_config_load_invalid_toml_error() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "this is not valid toml {{{{").unwrap();
+
+        let result = Config::load(file.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_device_path_explicit() {
+        let config = Config {
+            device: "/dev/video2".to_string(),
+            ..Default::default()
+        };
+        let path = config.device_path().unwrap();
+        assert_eq!(path, "/dev/video2");
+    }
+
+    #[test]
+    fn test_intercom_config_defaults() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+[intercom]
+stream = "test"
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(file.path()).unwrap();
+        let intercom = config.intercom.unwrap();
+        assert_eq!(intercom.stream, "test");
+        // These should be defaults
+        assert_eq!(intercom.target, "strih.lan");
+        assert_eq!(intercom.sample_rate, 48000);
+        assert_eq!(intercom.channels, 2);
+        assert!((intercom.sidetone_volume - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_display_config_defaults() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+[display]
+source = "NDI Source"
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(file.path()).unwrap();
+        let display = config.display.unwrap();
+        assert_eq!(display.source, "NDI Source");
+        assert_eq!(display.fb_device, "/dev/fb0"); // Default
+    }
+
+    #[test]
+    fn test_default_function_values() {
+        assert_eq!(default_hostname(), "camera-box");
+        assert_eq!(default_ndi_name(), "usb");
+        assert_eq!(default_device(), "auto");
+        assert_eq!(default_fb_device(), "/dev/fb0");
+        assert_eq!(default_intercom_stream(), "cam1");
+        assert_eq!(default_intercom_target(), "strih.lan");
+        assert_eq!(default_intercom_sample_rate(), 48000);
+        assert_eq!(default_intercom_channels(), 2);
+        assert!((default_sidetone_volume() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_config_empty_file_uses_defaults() {
+        let file = NamedTempFile::new().unwrap();
+        // Empty file - should parse as empty TOML and use all defaults
+        let config = Config::load(file.path()).unwrap();
+        assert_eq!(config.hostname, "camera-box");
+        assert_eq!(config.ndi_name, "usb");
+        assert_eq!(config.device, "auto");
+    }
+
+    #[test]
+    fn test_display_config_clone() {
+        let display = DisplayConfig {
+            source: "test".to_string(),
+            fb_device: "/dev/fb0".to_string(),
+        };
+        let cloned = display.clone();
+        assert_eq!(display.source, cloned.source);
+        assert_eq!(display.fb_device, cloned.fb_device);
+    }
+
+    #[test]
+    fn test_intercom_config_clone() {
+        let intercom = IntercomConfig {
+            stream: "test".to_string(),
+            target: "host.lan".to_string(),
+            sample_rate: 48000,
+            channels: 2,
+            sidetone_volume: 0.5,
+        };
+        let cloned = intercom.clone();
+        assert_eq!(intercom.stream, cloned.stream);
+        assert_eq!(intercom.target, cloned.target);
+        assert_eq!(intercom.sample_rate, cloned.sample_rate);
+        assert_eq!(intercom.channels, cloned.channels);
+        assert!((intercom.sidetone_volume - cloned.sidetone_volume).abs() < 0.001);
+    }
+}

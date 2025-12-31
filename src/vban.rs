@@ -232,4 +232,180 @@ mod tests {
         assert_eq!(sample_rate_to_index(44100), Some(16));
         assert_eq!(sample_rate_to_index(12345), None);
     }
+
+    #[test]
+    fn test_codec_bytes_per_sample_all_variants() {
+        assert_eq!(VbanCodec::Pcm8.bytes_per_sample(), 1);
+        assert_eq!(VbanCodec::Pcm16.bytes_per_sample(), 2);
+        assert_eq!(VbanCodec::Pcm24.bytes_per_sample(), 3);
+        assert_eq!(VbanCodec::Pcm32.bytes_per_sample(), 4);
+        assert_eq!(VbanCodec::Float32.bytes_per_sample(), 4);
+        assert_eq!(VbanCodec::Float64.bytes_per_sample(), 8);
+    }
+
+    #[test]
+    fn test_header_new_invalid_sample_rate() {
+        let result = VbanHeader::new("test", 12345, 2, VbanCodec::Pcm16);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported sample rate"));
+    }
+
+    #[test]
+    fn test_header_decode_too_short() {
+        let short_data = [0u8; 20]; // Less than VBAN_HEADER_SIZE (28)
+        let result = VbanHeader::decode(&short_data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
+    }
+
+    #[test]
+    fn test_header_decode_invalid_magic() {
+        let mut data = [0u8; VBAN_HEADER_SIZE];
+        data[0..4].copy_from_slice(b"XXXX"); // Wrong magic
+        let result = VbanHeader::decode(&data);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid VBAN magic"));
+    }
+
+    #[test]
+    fn test_header_decode_non_audio_protocol() {
+        let mut data = [0u8; VBAN_HEADER_SIZE];
+        data[0..4].copy_from_slice(VBAN_MAGIC);
+        data[4] = 0x20; // Serial protocol, not Audio
+        let result = VbanHeader::decode(&data);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Not a VBAN audio packet"));
+    }
+
+    #[test]
+    fn test_stream_name_truncation() {
+        // Name longer than 15 chars should be truncated
+        let long_name = "this_is_a_very_long_stream_name";
+        let header = VbanHeader::new(long_name, 48000, 2, VbanCodec::Pcm16).unwrap();
+        let name = header.stream_name_str();
+        assert_eq!(name.len(), 15); // Max 15 chars (16 - null terminator)
+        assert_eq!(name, "this_is_a_very_");
+    }
+
+    #[test]
+    fn test_stream_name_exactly_max_length() {
+        let exact_name = "exactly15chars!"; // 15 chars
+        let header = VbanHeader::new(exact_name, 48000, 2, VbanCodec::Pcm16).unwrap();
+        assert_eq!(header.stream_name_str(), exact_name);
+    }
+
+    #[test]
+    fn test_sample_rate_index_all_rates() {
+        // Test all 20 valid sample rates
+        let expected_rates = [
+            (6000, 0),
+            (12000, 1),
+            (24000, 2),
+            (48000, 3),
+            (96000, 4),
+            (192000, 5),
+            (384000, 6),
+            (8000, 7),
+            (16000, 8),
+            (32000, 9),
+            (64000, 10),
+            (128000, 11),
+            (256000, 12),
+            (512000, 13),
+            (11025, 14),
+            (22050, 15),
+            (44100, 16),
+            (88200, 17),
+            (176400, 18),
+            (352800, 19),
+        ];
+        for (rate, expected_index) in expected_rates {
+            assert_eq!(
+                sample_rate_to_index(rate),
+                Some(expected_index),
+                "Failed for rate {}",
+                rate
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_encode_decode_roundtrip_all_sample_rates() {
+        for &rate in SAMPLE_RATES {
+            let header = VbanHeader::new("test", rate, 2, VbanCodec::Pcm16).unwrap();
+            let encoded = header.encode(128);
+            let decoded = VbanHeader::decode(&encoded).unwrap();
+            assert_eq!(
+                decoded.sample_rate(),
+                rate,
+                "Round-trip failed for rate {}",
+                rate
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_channels() {
+        // Test channel count encoding (stored as n-1)
+        for channels in 1..=8 {
+            let header = VbanHeader::new("test", 48000, channels, VbanCodec::Pcm16).unwrap();
+            let encoded = header.encode(256);
+            let decoded = VbanHeader::decode(&encoded).unwrap();
+            assert_eq!(
+                decoded.num_channels(),
+                channels,
+                "Failed for {} channels",
+                channels
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_samples_per_frame() {
+        let header = VbanHeader::new("test", 48000, 2, VbanCodec::Pcm16).unwrap();
+        for samples in [1, 64, 128, 256] {
+            let encoded = header.encode(samples);
+            let decoded = VbanHeader::decode(&encoded).unwrap();
+            assert_eq!(
+                decoded.num_samples(),
+                samples,
+                "Failed for {} samples",
+                samples
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_frame_counter() {
+        let mut header = VbanHeader::new("test", 48000, 2, VbanCodec::Pcm16).unwrap();
+        header.frame_counter = 0x12345678;
+        let encoded = header.encode(256);
+        let decoded = VbanHeader::decode(&encoded).unwrap();
+        assert_eq!(decoded.frame_counter, 0x12345678);
+    }
+
+    #[test]
+    fn test_protocol_enum_values() {
+        assert_eq!(VbanProtocol::Audio as u8, 0x00);
+        assert_eq!(VbanProtocol::Serial as u8, 0x20);
+        assert_eq!(VbanProtocol::Text as u8, 0x40);
+        assert_eq!(VbanProtocol::Service as u8, 0x60);
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(VBAN_PORT, 6980);
+        assert_eq!(VBAN_HEADER_SIZE, 28);
+        assert_eq!(VBAN_STREAM_NAME_SIZE, 16);
+        assert_eq!(VBAN_MAGIC, b"VBAN");
+    }
 }
