@@ -40,11 +40,16 @@ When setting up a new camera device:
 
 ## Build & Deploy
 
+**IMPORTANT:** Use IP addresses, not hostnames (`.lan` DNS may not resolve):
+
 ```bash
 # Build release
 cargo build --release
 
-# Deploy to device
-scp target/release/camera-box root@camX.lan:/usr/local/bin/
-ssh root@camX.lan "rw-mode && systemctl restart camera-box && ro-mode"
+# Deploy to device (use IP from table above, password: newlevel)
+sshpass -p 'newlevel' ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
+sshpass -p 'newlevel' scp target/release/camera-box root@10.77.9.6X:/usr/local/bin/
+sshpass -p 'newlevel' ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
 ```
+
+Note: `rw-mode`/`ro-mode` scripts may not exist on all devices. Use `mount -o remount,rw /` instead.
