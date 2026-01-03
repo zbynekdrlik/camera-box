@@ -140,7 +140,7 @@ impl Default for IntercomConfig {
             mic_gain: 4.0,
             headphone_gain: 6.0,
             limiter_enabled: true,
-            limiter_threshold: 0.5,
+            limiter_threshold: 0.15,
         }
     }
 }
@@ -262,7 +262,12 @@ impl PeakLimiter {
         self.envelope = self.envelope * coeff + target_gain * (1.0 - coeff);
 
         // Apply gain to delayed sample
-        (delayed as f32 * self.envelope).clamp(-32768.0, 32767.0) as i16
+        let limited = (delayed as f32 * self.envelope).clamp(-32768.0, 32767.0) as i16;
+
+        // HARD CLIPPER: Safety net for instantaneous spikes that envelope can't catch
+        // This ensures NO sample ever exceeds the threshold, even on plug/unplug transients
+        let hard_clip_max = (self.threshold * 32767.0) as i16;
+        limited.clamp(-hard_clip_max, hard_clip_max)
     }
 
     /// Process a buffer of samples in-place.
@@ -647,9 +652,16 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
                     }
 
                     // Apply mic gain and limiter for VBAN output (separate from sidetone)
+                    // Pre-clip: catch ALSA garbage from plug/unplug BEFORE gain amplification
+                    // Any sample near max likely indicates a transient glitch
+                    const PRE_CLIP_THRESHOLD: i16 = 30000; // ~91% of max
                     let mut vban_samples: Vec<i16> = capture_buf[..frames]
                         .iter()
-                        .map(|&s| (s as f32 * mic_gain).clamp(-32768.0, 32767.0) as i16)
+                        .map(|&s| {
+                            // Pre-clip extreme values before applying gain
+                            let clipped = s.clamp(-PRE_CLIP_THRESHOLD, PRE_CLIP_THRESHOLD);
+                            (clipped as f32 * mic_gain).clamp(-32768.0, 32767.0) as i16
+                        })
                         .collect();
 
                     // Apply limiter if enabled (prevents spikes from plug/unplug)
@@ -793,7 +805,7 @@ mod tests {
         assert!((config.mic_gain - 4.0).abs() < 0.001);
         assert!((config.headphone_gain - 6.0).abs() < 0.001);
         assert!(config.limiter_enabled);
-        assert!((config.limiter_threshold - 0.5).abs() < 0.001);
+        assert!((config.limiter_threshold - 0.15).abs() < 0.001);
     }
 
     #[test]
@@ -1080,6 +1092,65 @@ mod tests {
             max_output < 32767,
             "Limiter should reduce output below max: got {}",
             max_output
+        );
+    }
+
+    #[test]
+    fn test_limiter_hard_clip_at_threshold() {
+        // Test that hard clipper caps output at exactly threshold * 32767
+        let threshold = 0.15;
+        let mut limiter = PeakLimiter::new(threshold, 48000);
+
+        // Fill look-ahead buffer
+        for _ in 0..50 {
+            limiter.process(32767);
+        }
+
+        // Process extreme values
+        let outputs: Vec<i16> = (0..100).map(|_| limiter.process(32767)).collect();
+
+        // Hard clip max should be threshold * 32767 = 0.15 * 32767 = 4915
+        let hard_clip_max = (threshold * 32767.0) as i16;
+        let max_output = outputs.iter().map(|&s| s.abs()).max().unwrap_or(0);
+
+        assert!(
+            max_output <= hard_clip_max,
+            "Hard clipper should cap at {}, got {}",
+            hard_clip_max,
+            max_output
+        );
+    }
+
+    #[test]
+    fn test_limiter_default_threshold_is_aggressive() {
+        // Regression test: default threshold should be 0.15 (15%) to prevent loud spikes
+        let config = IntercomConfig::default();
+        assert!(
+            (config.limiter_threshold - 0.15).abs() < 0.001,
+            "Default limiter threshold should be 0.15 for aggressive spike prevention, got {}",
+            config.limiter_threshold
+        );
+    }
+
+    #[test]
+    fn test_limiter_with_low_threshold() {
+        // Test that a low threshold (0.15) effectively limits loud signals
+        let mut limiter = PeakLimiter::new(0.15, 48000);
+
+        // Fill look-ahead
+        for _ in 0..30 {
+            limiter.process(0);
+        }
+
+        // Send a spike at max level (simulating plug/unplug transient)
+        let spike_outputs: Vec<i16> = (0..50).map(|_| limiter.process(32767)).collect();
+
+        // With 0.15 threshold, max output should be ~4915
+        let max_spike = spike_outputs.iter().map(|&s| s.abs()).max().unwrap_or(0);
+        assert!(
+            max_spike <= 4916, // 0.15 * 32767 rounded up
+            "Low threshold should aggressively limit spikes: got {}",
+            max_spike
         );
     }
 }
