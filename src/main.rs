@@ -159,7 +159,11 @@ async fn main() -> Result<()> {
             target_host: args.intercom_target.clone(),
             sample_rate: 48000,
             channels: 2,
-            sidetone_volume: 1.0, // Default 100% sidetone
+            sidetone_volume: 1.0,
+            mic_gain: 4.0,       // +12dB boost for outbound mic
+            headphone_gain: 6.0, // Headphone volume from network
+            limiter_enabled: true,
+            limiter_threshold: 0.5, // -6dB ceiling
         })
     } else {
         config.intercom.as_ref().map(|ic| intercom::IntercomConfig {
@@ -168,6 +172,10 @@ async fn main() -> Result<()> {
             sample_rate: ic.sample_rate,
             channels: ic.channels,
             sidetone_volume: ic.sidetone_volume,
+            mic_gain: ic.mic_gain,
+            headphone_gain: ic.headphone_gain,
+            limiter_enabled: ic.limiter_enabled,
+            limiter_threshold: ic.limiter_threshold,
         })
     };
 

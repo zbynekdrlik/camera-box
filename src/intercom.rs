@@ -119,6 +119,14 @@ pub struct IntercomConfig {
     #[allow(dead_code)] // Config API, uses fixed mono/stereo internally
     pub channels: u8,
     pub sidetone_volume: f32,
+    /// Microphone gain for outbound VBAN stream (default: 4.0 = +12dB)
+    pub mic_gain: f32,
+    /// Headphone gain for incoming VBAN stream (default: 6.0)
+    pub headphone_gain: f32,
+    /// Enable peak limiter on microphone output
+    pub limiter_enabled: bool,
+    /// Limiter threshold as fraction of max (0.5 = -6dB)
+    pub limiter_threshold: f32,
 }
 
 impl Default for IntercomConfig {
@@ -129,6 +137,10 @@ impl Default for IntercomConfig {
             sample_rate: SAMPLE_RATE,
             channels: 2,
             sidetone_volume: 1.0,
+            mic_gain: 4.0,
+            headphone_gain: 6.0,
+            limiter_enabled: true,
+            limiter_threshold: 0.5,
         }
     }
 }
@@ -160,6 +172,111 @@ impl AudioBuffer {
     fn pop_samples(&mut self, count: usize) -> Vec<i16> {
         let available = count.min(self.samples.len());
         self.samples.drain(..available).collect()
+    }
+}
+
+// =============================================================================
+// Peak Limiter (for microphone output to network)
+// =============================================================================
+
+/// Look-ahead peak limiter to prevent audio spikes from reaching the network.
+/// Uses a small delay buffer to detect peaks before they hit the output,
+/// allowing preemptive gain reduction for transparent limiting.
+pub struct PeakLimiter {
+    /// Threshold as fraction of max (0.5 = -6dB)
+    threshold: f32,
+    /// Attack coefficient (how fast gain reduces)
+    attack_coeff: f32,
+    /// Release coefficient (how fast gain recovers)
+    release_coeff: f32,
+    /// Current envelope follower value (the gain to apply)
+    envelope: f32,
+    /// Look-ahead buffer (delays audio to allow preemptive limiting)
+    lookahead_buffer: VecDeque<i16>,
+    /// Look-ahead samples (0.5ms at 48kHz = 24 samples)
+    lookahead_samples: usize,
+}
+
+impl PeakLimiter {
+    /// Create a new peak limiter.
+    ///
+    /// # Arguments
+    /// * `threshold` - Threshold as fraction of max (0.5 = -6dB)
+    /// * `sample_rate` - Audio sample rate in Hz
+    pub fn new(threshold: f32, sample_rate: u32) -> Self {
+        // Attack: 0.1ms = very fast to catch transients
+        let attack_time = 0.0001;
+        // Release: 50ms = smooth recovery
+        let release_time = 0.050;
+        // Look-ahead: 0.5ms = catches spikes before output
+        let lookahead_time = 0.0005;
+
+        let attack_coeff = (-1.0 / (attack_time * sample_rate as f32)).exp();
+        let release_coeff = (-1.0 / (release_time * sample_rate as f32)).exp();
+        let lookahead_samples = (lookahead_time * sample_rate as f32) as usize;
+
+        Self {
+            threshold: threshold.clamp(0.01, 1.0),
+            attack_coeff,
+            release_coeff,
+            envelope: 1.0,
+            lookahead_buffer: VecDeque::with_capacity(lookahead_samples + 1),
+            lookahead_samples,
+        }
+    }
+
+    /// Process a single sample through the limiter.
+    /// Returns the limited sample.
+    pub fn process(&mut self, input: i16) -> i16 {
+        // Push input to look-ahead buffer
+        self.lookahead_buffer.push_back(input);
+
+        // If buffer not full yet, output silence (startup transient)
+        if self.lookahead_buffer.len() <= self.lookahead_samples {
+            return 0;
+        }
+
+        // Get the delayed sample (this is what we'll output)
+        let delayed = self.lookahead_buffer.pop_front().unwrap_or(0);
+
+        // Find peak in look-ahead window
+        let peak = self
+            .lookahead_buffer
+            .iter()
+            .map(|&s| (s as f32).abs() / 32768.0)
+            .fold(0.0f32, f32::max);
+
+        // Calculate target gain (reduce if over threshold)
+        let target_gain = if peak > self.threshold {
+            self.threshold / peak
+        } else {
+            1.0
+        };
+
+        // Apply envelope follower with attack/release
+        let coeff = if target_gain < self.envelope {
+            self.attack_coeff // Fast attack for transients
+        } else {
+            self.release_coeff // Slow release for smooth recovery
+        };
+        self.envelope = self.envelope * coeff + target_gain * (1.0 - coeff);
+
+        // Apply gain to delayed sample
+        (delayed as f32 * self.envelope).clamp(-32768.0, 32767.0) as i16
+    }
+
+    /// Process a buffer of samples in-place.
+    pub fn process_buffer(&mut self, buffer: &mut [i16]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+
+    /// Reset the limiter state (call when audio stream restarts).
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.envelope = 1.0;
+        self.lookahead_buffer.clear();
     }
 }
 
@@ -459,7 +576,26 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
 
     // Audio gains
     let sidetone_gain = 20.0_f32 * config.sidetone_volume;
-    let vban_gain = 4.0_f32;
+    let headphone_gain = config.headphone_gain;
+    let mic_gain = config.mic_gain;
+
+    // Peak limiter for microphone output (prevents spikes from plug/unplug)
+    let mut limiter = if config.limiter_enabled {
+        Some(PeakLimiter::new(config.limiter_threshold, SAMPLE_RATE))
+    } else {
+        None
+    };
+    tracing::info!(
+        "Audio gains: mic={:.1}x, headphone={:.1}x, sidetone={:.1}x, limiter={}",
+        mic_gain,
+        headphone_gain,
+        sidetone_gain,
+        if config.limiter_enabled {
+            format!("on (threshold={:.0}%)", config.limiter_threshold * 100.0)
+        } else {
+            "off".to_string()
+        }
+    );
 
     // VBAN packet state
     let mut frame_counter: u32 = 0;
@@ -503,16 +639,27 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
                 capture_stall_count = 0; // Reset stall counter on successful capture
 
                 if !is_muted {
-                    // Add to sidetone buffer (mono -> stereo later)
+                    // Add RAW samples to sidetone buffer (no gain/limiter for minimum latency)
                     for &sample in &capture_buf[..frames] {
                         if sidetone_buf.len() < 512 {
                             sidetone_buf.push_back(sample);
                         }
                     }
 
+                    // Apply mic gain and limiter for VBAN output (separate from sidetone)
+                    let mut vban_samples: Vec<i16> = capture_buf[..frames]
+                        .iter()
+                        .map(|&s| (s as f32 * mic_gain).clamp(-32768.0, 32767.0) as i16)
+                        .collect();
+
+                    // Apply limiter if enabled (prevents spikes from plug/unplug)
+                    if let Some(ref mut lim) = limiter {
+                        lim.process_buffer(&mut vban_samples);
+                    }
+
                     // Send VBAN packets
                     const CHUNK_SIZE: usize = 128;
-                    for chunk in capture_buf[..frames].chunks(CHUNK_SIZE) {
+                    for chunk in vban_samples.chunks(CHUNK_SIZE) {
                         let stereo_data: Vec<i16> = chunk.iter().flat_map(|&s| [s, s]).collect();
                         let samples_per_frame = chunk.len();
                         let mut packet = vec![0u8; VBAN_HEADER_SIZE + stereo_data.len() * 2];
@@ -568,7 +715,7 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
         };
 
         for (i, sample) in playback_buf.iter_mut().enumerate() {
-            let vban = (vban_samples.get(i).copied().unwrap_or(0) as f32 * vban_gain) as i32;
+            let vban = (vban_samples.get(i).copied().unwrap_or(0) as f32 * headphone_gain) as i32;
             let sidetone = if is_muted {
                 0
             } else {
@@ -643,6 +790,10 @@ mod tests {
         assert_eq!(config.sample_rate, 48000);
         assert_eq!(config.channels, 2);
         assert!((config.sidetone_volume - 1.0).abs() < 0.001);
+        assert!((config.mic_gain - 4.0).abs() < 0.001);
+        assert!((config.headphone_gain - 6.0).abs() < 0.001);
+        assert!(config.limiter_enabled);
+        assert!((config.limiter_threshold - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -653,12 +804,20 @@ mod tests {
             sample_rate: 44100,
             channels: 1,
             sidetone_volume: 0.5,
+            mic_gain: 2.0,
+            headphone_gain: 8.0,
+            limiter_enabled: false,
+            limiter_threshold: 0.8,
         };
         let cloned = config.clone();
         assert_eq!(config.stream_name, cloned.stream_name);
         assert_eq!(config.target_host, cloned.target_host);
         assert_eq!(config.sample_rate, cloned.sample_rate);
         assert_eq!(config.channels, cloned.channels);
+        assert!((config.mic_gain - cloned.mic_gain).abs() < 0.001);
+        assert!((config.headphone_gain - cloned.headphone_gain).abs() < 0.001);
+        assert_eq!(config.limiter_enabled, cloned.limiter_enabled);
+        assert!((config.limiter_threshold - cloned.limiter_threshold).abs() < 0.001);
     }
 
     #[test]
@@ -764,5 +923,163 @@ mod tests {
         let debug = format!("{:?}", config);
         assert!(debug.contains("IntercomConfig"));
         assert!(debug.contains("cam1"));
+    }
+
+    // =============================================================================
+    // PeakLimiter Tests
+    // =============================================================================
+
+    #[test]
+    fn test_limiter_new() {
+        let limiter = PeakLimiter::new(0.5, 48000);
+        assert!((limiter.threshold - 0.5).abs() < 0.001);
+        assert!((limiter.envelope - 1.0).abs() < 0.001);
+        assert_eq!(limiter.lookahead_samples, 24); // 0.5ms at 48kHz
+    }
+
+    #[test]
+    fn test_limiter_threshold_clamping() {
+        // Threshold should be clamped to valid range
+        let limiter_low = PeakLimiter::new(0.001, 48000);
+        assert!((limiter_low.threshold - 0.01).abs() < 0.001);
+
+        let limiter_high = PeakLimiter::new(2.0, 48000);
+        assert!((limiter_high.threshold - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_limiter_passes_quiet_signal() {
+        let mut limiter = PeakLimiter::new(0.5, 48000); // -6dB threshold
+
+        // Fill look-ahead buffer with the quiet signal itself
+        let input: i16 = 1000; // About -30dB, well below threshold
+        for _ in 0..50 {
+            limiter.process(input);
+        }
+
+        // After look-ahead is filled, quiet signal should pass through nearly unchanged
+        let output = limiter.process(input);
+
+        // Envelope should be ~1.0 for quiet signal, so output ≈ input
+        assert!(
+            (output as i32 - input as i32).abs() < 100,
+            "Quiet signal should pass through nearly unchanged: {} vs {}",
+            output,
+            input
+        );
+    }
+
+    #[test]
+    fn test_limiter_reduces_loud_signal() {
+        let mut limiter = PeakLimiter::new(0.5, 48000); // -6dB threshold = 16384
+
+        // Fill look-ahead buffer
+        for _ in 0..50 {
+            limiter.process(0);
+        }
+
+        // Process a loud spike (above threshold)
+        let spike_value: i16 = 30000; // Well above 16384 threshold
+        for _ in 0..100 {
+            limiter.process(spike_value);
+        }
+
+        // After processing, the output should be reduced
+        let output = limiter.process(spike_value);
+        assert!(
+            (output.abs() as i32) < (spike_value.abs() as i32),
+            "Loud signal should be reduced: output {} should be < input {}",
+            output,
+            spike_value
+        );
+    }
+
+    #[test]
+    fn test_limiter_startup_silence() {
+        let mut limiter = PeakLimiter::new(0.5, 48000);
+
+        // During look-ahead fill, output should be 0 (silence)
+        for _ in 0..24 {
+            // 24 samples = look-ahead time
+            let output = limiter.process(10000);
+            assert_eq!(output, 0, "Should output silence during look-ahead fill");
+        }
+
+        // After look-ahead is filled, we should get actual output
+        let output = limiter.process(10000);
+        assert_ne!(output, 0, "Should output audio after look-ahead is filled");
+    }
+
+    #[test]
+    fn test_limiter_process_buffer() {
+        let mut limiter = PeakLimiter::new(0.5, 48000);
+
+        // Fill look-ahead
+        let mut warmup = vec![0i16; 50];
+        limiter.process_buffer(&mut warmup);
+
+        // Create a buffer with some samples
+        let mut buffer: Vec<i16> = vec![1000, 2000, 3000, 4000, 5000];
+        let original = buffer.clone();
+
+        limiter.process_buffer(&mut buffer);
+
+        // Buffer should be modified
+        assert_eq!(buffer.len(), original.len());
+    }
+
+    #[test]
+    fn test_limiter_reset() {
+        let mut limiter = PeakLimiter::new(0.5, 48000);
+
+        // Process some samples
+        for _ in 0..100 {
+            limiter.process(20000);
+        }
+
+        // Envelope should be reduced after processing loud signal
+        assert!(limiter.envelope < 1.0);
+
+        // Reset should restore envelope to 1.0
+        limiter.reset();
+        assert!((limiter.envelope - 1.0).abs() < 0.001);
+        assert!(limiter.lookahead_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_limiter_different_sample_rates() {
+        // At 48kHz, 0.5ms = 24 samples
+        let limiter_48k = PeakLimiter::new(0.5, 48000);
+        assert_eq!(limiter_48k.lookahead_samples, 24);
+
+        // At 44100Hz, 0.5ms = ~22 samples
+        let limiter_44k = PeakLimiter::new(0.5, 44100);
+        assert_eq!(limiter_44k.lookahead_samples, 22);
+
+        // At 96kHz, 0.5ms = 48 samples
+        let limiter_96k = PeakLimiter::new(0.5, 96000);
+        assert_eq!(limiter_96k.lookahead_samples, 48);
+    }
+
+    #[test]
+    fn test_limiter_prevents_clipping() {
+        let mut limiter = PeakLimiter::new(0.5, 48000);
+
+        // Fill look-ahead with extreme values
+        for _ in 0..50 {
+            limiter.process(32767);
+        }
+
+        // Process more extreme values and collect outputs
+        let outputs: Vec<i16> = (0..100).map(|_| limiter.process(32767)).collect();
+
+        // Outputs should be reduced (limited) below max
+        // At 0.5 threshold, output should be around 16384 or less
+        let max_output = outputs.iter().map(|&s| s.abs()).max().unwrap_or(0);
+        assert!(
+            max_output < 32767,
+            "Limiter should reduce output below max: got {}",
+            max_output
+        );
     }
 }
