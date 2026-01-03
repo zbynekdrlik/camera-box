@@ -203,6 +203,27 @@ systemd-analyze blame | head -20
 
 ---
 
+## Deploying Updates to Existing Cameras
+
+**IMPORTANT:** Use IP addresses, not `.lan` hostnames (DNS may not resolve).
+
+```bash
+# Build release on dev machine
+cargo build --release
+
+# Deploy to a camera (replace X with camera number: 1, 2, 3, or 4)
+sshpass -p 'newlevel' ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
+sshpass -p 'newlevel' scp target/release/camera-box root@10.77.9.6X:/usr/local/bin/
+sshpass -p 'newlevel' ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
+```
+
+**Notes:**
+- `rw-mode`/`ro-mode` scripts may not exist on all devices - use `mount -o remount,rw /` instead
+- The `mount -o remount,ro` may show "mount point is busy" warning - this is harmless
+- Password for all devices: `newlevel`
+
+---
+
 ## Important Notes
 
 - **CAM1 is READ-ONLY** - Do not modify CAM1, it's the production reference
