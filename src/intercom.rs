@@ -121,7 +121,7 @@ pub struct IntercomConfig {
     pub sidetone_gain: f32,
     /// Microphone gain for outbound VBAN stream (default: 8.0 = +18dB)
     pub mic_gain: f32,
-    /// Headphone gain for incoming VBAN stream (default: 10.0)
+    /// Headphone gain for incoming VBAN stream (default: 15.0)
     pub headphone_gain: f32,
     /// Enable peak limiter on microphone output
     pub limiter_enabled: bool,
@@ -138,7 +138,7 @@ impl Default for IntercomConfig {
             channels: 2,
             sidetone_gain: 30.0,
             mic_gain: 8.0,
-            headphone_gain: 10.0,
+            headphone_gain: 15.0,
             limiter_enabled: true,
             limiter_threshold: 0.15,
         }
@@ -803,7 +803,7 @@ mod tests {
         assert_eq!(config.channels, 2);
         assert!((config.sidetone_gain - 30.0).abs() < 0.001);
         assert!((config.mic_gain - 8.0).abs() < 0.001);
-        assert!((config.headphone_gain - 10.0).abs() < 0.001);
+        assert!((config.headphone_gain - 15.0).abs() < 0.001);
         assert!(config.limiter_enabled);
         assert!((config.limiter_threshold - 0.15).abs() < 0.001);
     }

@@ -66,7 +66,7 @@ pub struct IntercomConfig {
     #[serde(default = "default_mic_gain")]
     pub mic_gain: f32,
 
-    /// Headphone gain for incoming VBAN stream (default: 10.0)
+    /// Headphone gain for incoming VBAN stream (default: 15.0)
     #[serde(default = "default_headphone_gain")]
     pub headphone_gain: f32,
 
@@ -104,7 +104,7 @@ fn default_mic_gain() -> f32 {
 }
 
 fn default_headphone_gain() -> f32 {
-    10.0 // Headphone volume from strih.lan
+    15.0 // Headphone volume from strih.lan
 }
 
 fn default_limiter_enabled() -> bool {
@@ -322,7 +322,7 @@ stream = "test"
         assert_eq!(intercom.channels, 2);
         assert!((intercom.sidetone_gain - 30.0).abs() < 0.001);
         assert!((intercom.mic_gain - 8.0).abs() < 0.001);
-        assert!((intercom.headphone_gain - 10.0).abs() < 0.001);
+        assert!((intercom.headphone_gain - 15.0).abs() < 0.001);
         assert!(intercom.limiter_enabled);
         assert!((intercom.limiter_threshold - 0.15).abs() < 0.001);
     }
@@ -357,7 +357,7 @@ source = "NDI Source"
         assert_eq!(default_intercom_channels(), 2);
         assert!((default_sidetone_gain() - 30.0).abs() < 0.001);
         assert!((default_mic_gain() - 8.0).abs() < 0.001);
-        assert!((default_headphone_gain() - 10.0).abs() < 0.001);
+        assert!((default_headphone_gain() - 15.0).abs() < 0.001);
         assert!(default_limiter_enabled());
         assert!((default_limiter_threshold() - 0.15).abs() < 0.001);
     }
@@ -392,7 +392,7 @@ source = "NDI Source"
             channels: 2,
             sidetone_gain: 15.0,
             mic_gain: 8.0,
-            headphone_gain: 10.0,
+            headphone_gain: 15.0,
             limiter_enabled: true,
             limiter_threshold: 0.5,
         };

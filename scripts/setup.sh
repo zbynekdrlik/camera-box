@@ -533,7 +533,7 @@ sample_rate = 48000
 channels = 2
 sidetone_gain = 30.0
 mic_gain = 8.0
-headphone_gain = 10.0
+headphone_gain = 15.0
 EOF
         log "Created config at $CONFIG_DIR/config.toml"
     fi
