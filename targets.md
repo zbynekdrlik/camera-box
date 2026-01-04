@@ -7,8 +7,9 @@
 | stagebox1 | 10.77.9.237 | Active | SSH: newlevel/newlevel |
 | strih | 10.77.9.202 | Active | SSH: newlevel/newlevel |
 | ableton-foh | 10.77.9.230 | Active | SSH: master/master |
-| mbc | 10.77.9.232 | Offline | - |
-| stream | 10.77.9.204 | Offline | - |
+| mbc | 10.77.9.232 | Active | SSH: newlevel/newlevel |
+| stream | 10.77.9.204 | Active | SSH: newlevel/newlevel |
+| bridge | 10.77.9.201 | Active | SSH: newlevel/newlevel |
 
 ## Camera Targets (camera-box)
 
