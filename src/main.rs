@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
             sample_rate: 48000,
             channels: 2,
             sidetone_gain: 30.0,
-            mic_gain: 8.0,        // +18dB boost for outbound mic
+            mic_gain: 12.0,       // +22dB boost for outbound mic
             headphone_gain: 15.0, // Headphone volume from network
             limiter_enabled: true,
             limiter_threshold: 0.15, // -16dB ceiling
