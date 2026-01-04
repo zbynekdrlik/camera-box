@@ -1,5 +1,9 @@
 # Claude Code Guidelines for camera-box
 
+## DO NOT DELETE These Files
+
+**NEVER delete `targets.md`** - it contains IP addresses for all deployment targets (Windows and cameras). This file has been accidentally deleted multiple times during PR cleanup. DO NOT remove it.
+
 ## Script Failure Policy
 
 **IMPORTANT:** When a setup script or automation script fails:
