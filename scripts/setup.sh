@@ -531,7 +531,7 @@ stream = "$stream_name"
 target = "strih.lan"
 sample_rate = 48000
 channels = 2
-sidetone_gain = 30.0
+sidetone_gain = 100.0
 mic_gain = 12.0
 headphone_gain = 15.0
 EOF

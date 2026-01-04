@@ -58,7 +58,7 @@ pub struct IntercomConfig {
     #[serde(default = "default_intercom_channels")]
     pub channels: u8,
 
-    /// Sidetone gain multiplier (0.0 = off, default: 30.0)
+    /// Sidetone gain multiplier (0.0 = off, default: 100.0)
     #[serde(default = "default_sidetone_gain")]
     pub sidetone_gain: f32,
 
@@ -96,7 +96,7 @@ fn default_intercom_channels() -> u8 {
 }
 
 fn default_sidetone_gain() -> f32 {
-    30.0 // Direct gain multiplier for sidetone
+    100.0 // Direct gain multiplier for sidetone
 }
 
 fn default_mic_gain() -> f32 {
@@ -320,7 +320,7 @@ stream = "test"
         assert_eq!(intercom.target, "strih.lan");
         assert_eq!(intercom.sample_rate, 48000);
         assert_eq!(intercom.channels, 2);
-        assert!((intercom.sidetone_gain - 30.0).abs() < 0.001);
+        assert!((intercom.sidetone_gain - 100.0).abs() < 0.001);
         assert!((intercom.mic_gain - 12.0).abs() < 0.001);
         assert!((intercom.headphone_gain - 15.0).abs() < 0.001);
         assert!(intercom.limiter_enabled);
@@ -355,7 +355,7 @@ source = "NDI Source"
         assert_eq!(default_intercom_target(), "strih.lan");
         assert_eq!(default_intercom_sample_rate(), 48000);
         assert_eq!(default_intercom_channels(), 2);
-        assert!((default_sidetone_gain() - 30.0).abs() < 0.001);
+        assert!((default_sidetone_gain() - 100.0).abs() < 0.001);
         assert!((default_mic_gain() - 12.0).abs() < 0.001);
         assert!((default_headphone_gain() - 15.0).abs() < 0.001);
         assert!(default_limiter_enabled());

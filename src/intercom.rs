@@ -136,7 +136,7 @@ impl Default for IntercomConfig {
             target_host: "strih.lan".to_string(),
             sample_rate: SAMPLE_RATE,
             channels: 2,
-            sidetone_gain: 30.0,
+            sidetone_gain: 100.0,
             mic_gain: 12.0,
             headphone_gain: 15.0,
             limiter_enabled: true,
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(config.target_host, "strih.lan");
         assert_eq!(config.sample_rate, 48000);
         assert_eq!(config.channels, 2);
-        assert!((config.sidetone_gain - 30.0).abs() < 0.001);
+        assert!((config.sidetone_gain - 100.0).abs() < 0.001);
         assert!((config.mic_gain - 12.0).abs() < 0.001);
         assert!((config.headphone_gain - 15.0).abs() < 0.001);
         assert!(config.limiter_enabled);
