@@ -10,6 +10,9 @@
 | mbc | 10.77.9.232 | Active | SSH: newlevel/newlevel |
 | stream | 10.77.9.204 | Active | SSH: newlevel/newlevel |
 | bridge | 10.77.9.201 | Active | SSH: newlevel/newlevel |
+| iem | 10.77.9.231 | Active | SSH: iem/iem |
+| songs | 10.77.9.212 | Active | SSH: newlevel/newlevel |
+| piano | 10.77.9.236 | Offline | SSH: newlevel/newlevel |
 
 ## Camera Targets (camera-box)
 
