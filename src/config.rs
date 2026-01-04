@@ -74,7 +74,7 @@ pub struct IntercomConfig {
     #[serde(default = "default_limiter_enabled")]
     pub limiter_enabled: bool,
 
-    /// Limiter threshold as fraction of max (0.5 = -6dB, default: 0.5)
+    /// Limiter threshold as fraction of max (default: 0.5 = -6dB)
     #[serde(default = "default_limiter_threshold")]
     pub limiter_threshold: f32,
 }
@@ -112,7 +112,7 @@ fn default_limiter_enabled() -> bool {
 }
 
 fn default_limiter_threshold() -> f32 {
-    0.15 // -16dB ceiling - aggressive to prevent plug/unplug spikes
+    0.5 // -6dB ceiling - balanced headroom with protection
 }
 
 impl Default for Config {
@@ -324,7 +324,7 @@ stream = "test"
         assert!((intercom.mic_gain - 12.0).abs() < 0.001);
         assert!((intercom.headphone_gain - 15.0).abs() < 0.001);
         assert!(intercom.limiter_enabled);
-        assert!((intercom.limiter_threshold - 0.15).abs() < 0.001);
+        assert!((intercom.limiter_threshold - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -359,7 +359,7 @@ source = "NDI Source"
         assert!((default_mic_gain() - 12.0).abs() < 0.001);
         assert!((default_headphone_gain() - 15.0).abs() < 0.001);
         assert!(default_limiter_enabled());
-        assert!((default_limiter_threshold() - 0.15).abs() < 0.001);
+        assert!((default_limiter_threshold() - 0.5).abs() < 0.001);
     }
 
     #[test]

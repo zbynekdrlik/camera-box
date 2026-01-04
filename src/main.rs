@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
             mic_gain: 12.0,       // +22dB boost for outbound mic
             headphone_gain: 15.0, // Headphone volume from network
             limiter_enabled: true,
-            limiter_threshold: 0.15, // -16dB ceiling
+            limiter_threshold: 0.5, // -6dB ceiling
         })
     } else {
         config.intercom.as_ref().map(|ic| intercom::IntercomConfig {

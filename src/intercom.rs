@@ -140,7 +140,7 @@ impl Default for IntercomConfig {
             mic_gain: 12.0,
             headphone_gain: 15.0,
             limiter_enabled: true,
-            limiter_threshold: 0.15,
+            limiter_threshold: 0.5,
         }
     }
 }
@@ -805,7 +805,7 @@ mod tests {
         assert!((config.mic_gain - 12.0).abs() < 0.001);
         assert!((config.headphone_gain - 15.0).abs() < 0.001);
         assert!(config.limiter_enabled);
-        assert!((config.limiter_threshold - 0.15).abs() < 0.001);
+        assert!((config.limiter_threshold - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -1122,12 +1122,12 @@ mod tests {
     }
 
     #[test]
-    fn test_limiter_default_threshold_is_aggressive() {
-        // Regression test: default threshold should be 0.15 (15%) to prevent loud spikes
+    fn test_limiter_default_threshold_is_balanced() {
+        // Regression test: default threshold should be 0.5 (-6dB) for balanced headroom
         let config = IntercomConfig::default();
         assert!(
-            (config.limiter_threshold - 0.15).abs() < 0.001,
-            "Default limiter threshold should be 0.15 for aggressive spike prevention, got {}",
+            (config.limiter_threshold - 0.5).abs() < 0.001,
+            "Default limiter threshold should be 0.5 for balanced headroom, got {}",
             config.limiter_threshold
         );
     }
