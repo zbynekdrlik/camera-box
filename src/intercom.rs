@@ -118,10 +118,10 @@ pub struct IntercomConfig {
     pub sample_rate: u32,
     #[allow(dead_code)] // Config API, uses fixed mono/stereo internally
     pub channels: u8,
-    pub sidetone_volume: f32,
-    /// Microphone gain for outbound VBAN stream (default: 4.0 = +12dB)
+    pub sidetone_gain: f32,
+    /// Microphone gain for outbound VBAN stream (default: 8.0 = +18dB)
     pub mic_gain: f32,
-    /// Headphone gain for incoming VBAN stream (default: 6.0)
+    /// Headphone gain for incoming VBAN stream (default: 10.0)
     pub headphone_gain: f32,
     /// Enable peak limiter on microphone output
     pub limiter_enabled: bool,
@@ -136,9 +136,9 @@ impl Default for IntercomConfig {
             target_host: "strih.lan".to_string(),
             sample_rate: SAMPLE_RATE,
             channels: 2,
-            sidetone_volume: 1.0,
-            mic_gain: 4.0,
-            headphone_gain: 6.0,
+            sidetone_gain: 30.0,
+            mic_gain: 8.0,
+            headphone_gain: 10.0,
             limiter_enabled: true,
             limiter_threshold: 0.15,
         }
@@ -580,7 +580,7 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
     });
 
     // Audio gains
-    let sidetone_gain = 20.0_f32 * config.sidetone_volume;
+    let sidetone_gain = config.sidetone_gain;
     let headphone_gain = config.headphone_gain;
     let mic_gain = config.mic_gain;
 
@@ -801,9 +801,9 @@ mod tests {
         assert_eq!(config.target_host, "strih.lan");
         assert_eq!(config.sample_rate, 48000);
         assert_eq!(config.channels, 2);
-        assert!((config.sidetone_volume - 1.0).abs() < 0.001);
-        assert!((config.mic_gain - 4.0).abs() < 0.001);
-        assert!((config.headphone_gain - 6.0).abs() < 0.001);
+        assert!((config.sidetone_gain - 30.0).abs() < 0.001);
+        assert!((config.mic_gain - 8.0).abs() < 0.001);
+        assert!((config.headphone_gain - 10.0).abs() < 0.001);
         assert!(config.limiter_enabled);
         assert!((config.limiter_threshold - 0.15).abs() < 0.001);
     }
@@ -815,7 +815,7 @@ mod tests {
             target_host: "host.lan".to_string(),
             sample_rate: 44100,
             channels: 1,
-            sidetone_volume: 0.5,
+            sidetone_gain: 15.0,
             mic_gain: 2.0,
             headphone_gain: 8.0,
             limiter_enabled: false,

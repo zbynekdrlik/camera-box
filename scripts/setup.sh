@@ -531,7 +531,9 @@ stream = "$stream_name"
 target = "strih.lan"
 sample_rate = 48000
 channels = 2
-sidetone_volume = 1.0
+sidetone_gain = 30.0
+mic_gain = 8.0
+headphone_gain = 10.0
 EOF
         log "Created config at $CONFIG_DIR/config.toml"
     fi

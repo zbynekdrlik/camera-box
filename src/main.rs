@@ -159,9 +159,9 @@ async fn main() -> Result<()> {
             target_host: args.intercom_target.clone(),
             sample_rate: 48000,
             channels: 2,
-            sidetone_volume: 1.0,
-            mic_gain: 4.0,       // +12dB boost for outbound mic
-            headphone_gain: 6.0, // Headphone volume from network
+            sidetone_gain: 30.0,
+            mic_gain: 8.0,        // +18dB boost for outbound mic
+            headphone_gain: 10.0, // Headphone volume from network
             limiter_enabled: true,
             limiter_threshold: 0.15, // -16dB ceiling
         })
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
             target_host: ic.target.clone(),
             sample_rate: ic.sample_rate,
             channels: ic.channels,
-            sidetone_volume: ic.sidetone_volume,
+            sidetone_gain: ic.sidetone_gain,
             mic_gain: ic.mic_gain,
             headphone_gain: ic.headphone_gain,
             limiter_enabled: ic.limiter_enabled,

@@ -58,15 +58,15 @@ pub struct IntercomConfig {
     #[serde(default = "default_intercom_channels")]
     pub channels: u8,
 
-    /// Sidetone volume (0.0 = off, 1.0 = full, default: 1.0)
-    #[serde(default = "default_sidetone_volume")]
-    pub sidetone_volume: f32,
+    /// Sidetone gain multiplier (0.0 = off, default: 30.0)
+    #[serde(default = "default_sidetone_gain")]
+    pub sidetone_gain: f32,
 
-    /// Microphone gain for outbound VBAN stream (default: 4.0 = +12dB)
+    /// Microphone gain for outbound VBAN stream (default: 8.0 = +18dB)
     #[serde(default = "default_mic_gain")]
     pub mic_gain: f32,
 
-    /// Headphone gain for incoming VBAN stream (default: 6.0)
+    /// Headphone gain for incoming VBAN stream (default: 10.0)
     #[serde(default = "default_headphone_gain")]
     pub headphone_gain: f32,
 
@@ -95,16 +95,16 @@ fn default_intercom_channels() -> u8 {
     2
 }
 
-fn default_sidetone_volume() -> f32 {
-    1.0 // 100% sidetone by default
+fn default_sidetone_gain() -> f32 {
+    30.0 // Direct gain multiplier for sidetone
 }
 
 fn default_mic_gain() -> f32 {
-    4.0 // +12dB boost for outbound mic
+    8.0 // +18dB boost for outbound mic
 }
 
 fn default_headphone_gain() -> f32 {
-    6.0 // Headphone volume from strih.lan
+    10.0 // Headphone volume from strih.lan
 }
 
 fn default_limiter_enabled() -> bool {
@@ -240,7 +240,7 @@ stream = "cam1"
 target = "192.168.1.100"
 sample_rate = 44100
 channels = 1
-sidetone_volume = 0.5
+sidetone_gain = 15.0
 "#
         )
         .unwrap();
@@ -259,7 +259,7 @@ sidetone_volume = 0.5
         assert_eq!(intercom.target, "192.168.1.100");
         assert_eq!(intercom.sample_rate, 44100);
         assert_eq!(intercom.channels, 1);
-        assert!((intercom.sidetone_volume - 0.5).abs() < 0.001);
+        assert!((intercom.sidetone_gain - 15.0).abs() < 0.001);
     }
 
     #[test]
@@ -320,9 +320,9 @@ stream = "test"
         assert_eq!(intercom.target, "strih.lan");
         assert_eq!(intercom.sample_rate, 48000);
         assert_eq!(intercom.channels, 2);
-        assert!((intercom.sidetone_volume - 1.0).abs() < 0.001);
-        assert!((intercom.mic_gain - 4.0).abs() < 0.001);
-        assert!((intercom.headphone_gain - 6.0).abs() < 0.001);
+        assert!((intercom.sidetone_gain - 30.0).abs() < 0.001);
+        assert!((intercom.mic_gain - 8.0).abs() < 0.001);
+        assert!((intercom.headphone_gain - 10.0).abs() < 0.001);
         assert!(intercom.limiter_enabled);
         assert!((intercom.limiter_threshold - 0.15).abs() < 0.001);
     }
@@ -355,9 +355,9 @@ source = "NDI Source"
         assert_eq!(default_intercom_target(), "strih.lan");
         assert_eq!(default_intercom_sample_rate(), 48000);
         assert_eq!(default_intercom_channels(), 2);
-        assert!((default_sidetone_volume() - 1.0).abs() < 0.001);
-        assert!((default_mic_gain() - 4.0).abs() < 0.001);
-        assert!((default_headphone_gain() - 6.0).abs() < 0.001);
+        assert!((default_sidetone_gain() - 30.0).abs() < 0.001);
+        assert!((default_mic_gain() - 8.0).abs() < 0.001);
+        assert!((default_headphone_gain() - 10.0).abs() < 0.001);
         assert!(default_limiter_enabled());
         assert!((default_limiter_threshold() - 0.15).abs() < 0.001);
     }
@@ -390,9 +390,9 @@ source = "NDI Source"
             target: "host.lan".to_string(),
             sample_rate: 48000,
             channels: 2,
-            sidetone_volume: 0.5,
-            mic_gain: 4.0,
-            headphone_gain: 6.0,
+            sidetone_gain: 15.0,
+            mic_gain: 8.0,
+            headphone_gain: 10.0,
             limiter_enabled: true,
             limiter_threshold: 0.5,
         };
@@ -401,7 +401,7 @@ source = "NDI Source"
         assert_eq!(intercom.target, cloned.target);
         assert_eq!(intercom.sample_rate, cloned.sample_rate);
         assert_eq!(intercom.channels, cloned.channels);
-        assert!((intercom.sidetone_volume - cloned.sidetone_volume).abs() < 0.001);
+        assert!((intercom.sidetone_gain - cloned.sidetone_gain).abs() < 0.001);
         assert!((intercom.mic_gain - cloned.mic_gain).abs() < 0.001);
         assert!((intercom.headphone_gain - cloned.headphone_gain).abs() < 0.001);
         assert_eq!(intercom.limiter_enabled, cloned.limiter_enabled);
