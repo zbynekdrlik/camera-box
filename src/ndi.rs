@@ -10,6 +10,18 @@ use std::arch::x86_64::*;
 
 use crate::capture::{Frame, FrameRate};
 
+/// Get current wall clock time in 100-nanosecond intervals since Unix epoch.
+/// This is the format NDI expects for timecodes.
+/// Using explicit SystemTime ensures we always get the current time,
+/// unlike i64::MAX which uses NDI's cached time from library initialization.
+#[inline]
+fn get_wall_clock_100ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_nanos() / 100) as i64)
+        .unwrap_or(0)
+}
+
 // NDI SDK type definitions (minimal subset for video sending and receiving)
 #[repr(C)]
 struct NDIlib_send_create_t {
@@ -634,7 +646,7 @@ impl NdiSender {
             frame_rate_d: self.frame_rate.denominator as c_int,
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
-            timecode: i64::MAX, // Use current time
+            timecode: get_wall_clock_100ns(), // Explicit current time (not NDI's cached time)
             p_data: uyvy_ptr,
             line_stride_in_bytes: uyvy_stride as c_int,
             p_metadata: ptr::null(),
