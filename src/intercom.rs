@@ -442,6 +442,14 @@ fn apply_intercom_priority() {
 pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
     apply_intercom_priority();
 
+    // Mute state and power button monitor - created ONCE, survives retries
+    let muted = Arc::new(AtomicBool::new(true));
+    tracing::info!("🎤 Microphone starts MUTED - press power button to unmute");
+
+    let muted_btn = Arc::clone(&muted);
+    let running_btn = Arc::clone(&running);
+    std::thread::spawn(move || run_power_button_monitor(muted_btn, running_btn));
+
     while running.load(Ordering::Relaxed) {
         tracing::info!(
             "Starting VBAN intercom with direct ALSA: stream={}, target={}",
@@ -449,7 +457,7 @@ pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<
             config.target_host
         );
 
-        match run_intercom_inner(&config, Arc::clone(&running)) {
+        match run_intercom_inner(&config, Arc::clone(&running), Arc::clone(&muted)) {
             Ok(()) => {
                 tracing::info!("Intercom stopped normally");
                 break;
@@ -513,7 +521,11 @@ impl TestableAudioBuffer {
     }
 }
 
-fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {
+fn run_intercom_inner(
+    config: &IntercomConfig,
+    running: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
+) -> Result<()> {
     // Open ALSA devices with retry
     let capture = loop {
         match open_alsa_capture() {
@@ -540,15 +552,6 @@ fn run_intercom_inner(config: &IntercomConfig, running: Arc<AtomicBool>) -> Resu
             }
         }
     };
-
-    // Mute state
-    let muted = Arc::new(AtomicBool::new(true));
-    tracing::info!("🎤 Microphone starts MUTED - press power button to unmute");
-
-    // Start power button monitor
-    let muted_btn = Arc::clone(&muted);
-    let running_btn = Arc::clone(&running);
-    std::thread::spawn(move || run_power_button_monitor(muted_btn, running_btn));
 
     // VBAN sender
     let vban_socket = UdpSocket::bind("0.0.0.0:0")?;
