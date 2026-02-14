@@ -86,19 +86,19 @@ impl VideoCapture {
         let fourcc = final_format.fourcc;
         let stride = final_format.stride;
 
-        // Set 60fps
+        // Set 30fps for genlock synchronization
         if let Ok(mut params) = Capture::params(&device) {
             params.interval.numerator = 1;
-            params.interval.denominator = 60;
+            params.interval.denominator = 30;
             let _ = Capture::set_params(&device, &params);
         }
 
-        // Fixed frame rate: 60fps
+        // Fixed frame rate: 30fps
         let frame_rate = FrameRate {
-            numerator: 60,
+            numerator: 30,
             denominator: 1,
         };
-        tracing::info!("Frame rate: 60 fps");
+        tracing::info!("Frame rate: 30 fps");
 
         // Create memory-mapped stream with enough buffers to avoid frame drops
         // 4 buffers to handle processing time variance

@@ -22,15 +22,54 @@ fn get_wall_clock_100ns() -> i64 {
         .unwrap_or(0)
 }
 
-/// Snap wall-clock timecode to the nearest frame boundary for genlock alignment.
-/// Returns the boundary at or before the current wall clock, in 100ns units.
+/// Wait for the next frame boundary and return its timecode.
+/// This blocks until the next aligned boundary for genlock synchronization.
+/// All cameras with NTP/PTP synchronized clocks will send frames at the same
+/// wall-clock boundaries, enabling software genlock across multiple devices.
+///
+/// Boundaries are calculated relative to each second to avoid drift:
+/// - Frame 0:  000.000 ms
+/// - Frame 1:  033.333 ms
+/// - Frame 2:  066.667 ms
+/// - ...
+/// - Frame 29: 966.667 ms
 #[inline]
-fn get_boundary_aligned_100ns(frame_period_100ns: i64) -> i64 {
-    let wall_100ns = get_wall_clock_100ns();
-    if frame_period_100ns <= 0 {
-        return wall_100ns;
+fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
+    if fps <= 0 {
+        return get_wall_clock_100ns();
     }
-    (wall_100ns / frame_period_100ns) * frame_period_100ns
+
+    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
+
+    let now_100ns = get_wall_clock_100ns();
+
+    // Find the start of the current second
+    let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
+    let offset_in_second = now_100ns - current_second_100ns;
+
+    // Calculate which frame we're in within this second (0 to fps-1)
+    // Using multiplication before division to avoid precision loss
+    let frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+
+    // Calculate next frame boundary
+    let next_frame_in_second = frame_in_second + 1;
+    let next_boundary = if next_frame_in_second >= fps {
+        // Next frame is at the start of the next second (exactly X:XX:XX.000)
+        current_second_100ns + UNITS_PER_SECOND
+    } else {
+        // Boundary = second_start + (frame_num * UNITS_PER_SECOND / fps)
+        // Multiply before divide to maintain precision
+        current_second_100ns + (next_frame_in_second * UNITS_PER_SECOND / fps)
+    };
+
+    // Sleep until next boundary
+    let wait_100ns = next_boundary - now_100ns;
+    if wait_100ns > 0 {
+        let wait_duration = std::time::Duration::from_nanos((wait_100ns * 100) as u64);
+        std::thread::sleep(wait_duration);
+    }
+
+    next_boundary
 }
 
 // NDI SDK type definitions (minimal subset for video sending and receiving)
@@ -658,9 +697,9 @@ impl NdiSender {
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
             timecode: {
-                let period_100ns = (self.frame_rate.denominator as i64 * 10_000_000)
-                    / self.frame_rate.numerator as i64;
-                get_boundary_aligned_100ns(period_100ns)
+                // Pass fps (frames per second) - for 30fps this is 30
+                let fps = self.frame_rate.numerator as i64 / self.frame_rate.denominator as i64;
+                wait_for_next_boundary_100ns(fps)
             },
             p_data: uyvy_ptr,
             line_stride_in_bytes: uyvy_stride as c_int,
