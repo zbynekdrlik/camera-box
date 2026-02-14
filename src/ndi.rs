@@ -22,6 +22,17 @@ fn get_wall_clock_100ns() -> i64 {
         .unwrap_or(0)
 }
 
+/// Snap wall-clock timecode to the nearest frame boundary for genlock alignment.
+/// Returns the boundary at or before the current wall clock, in 100ns units.
+#[inline]
+fn get_boundary_aligned_100ns(frame_period_100ns: i64) -> i64 {
+    let wall_100ns = get_wall_clock_100ns();
+    if frame_period_100ns <= 0 {
+        return wall_100ns;
+    }
+    (wall_100ns / frame_period_100ns) * frame_period_100ns
+}
+
 // NDI SDK type definitions (minimal subset for video sending and receiving)
 #[repr(C)]
 struct NDIlib_send_create_t {
@@ -646,7 +657,11 @@ impl NdiSender {
             frame_rate_d: self.frame_rate.denominator as c_int,
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
-            timecode: get_wall_clock_100ns(), // Explicit current time (not NDI's cached time)
+            timecode: {
+                let period_100ns = (self.frame_rate.denominator as i64 * 10_000_000)
+                    / self.frame_rate.numerator as i64;
+                get_boundary_aligned_100ns(period_100ns)
+            },
             p_data: uyvy_ptr,
             line_stride_in_bytes: uyvy_stride as c_int,
             p_metadata: ptr::null(),
