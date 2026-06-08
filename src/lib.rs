@@ -9,3 +9,6 @@ pub mod intercom;
 pub mod ndi;
 pub mod ndi_display;
 pub mod vban;
+
+#[cfg(feature = "probe")]
+pub mod probe;
