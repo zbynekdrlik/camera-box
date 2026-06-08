@@ -36,6 +36,9 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             run_id: cfg.run_id,
             source: cfg.source.clone(),
             connect_timeout_secs: cfg.connect_timeout_secs,
+            // Decode only the centered ROI where the QR is painted (+margin for
+            // quiet zone and capture jitter), so decode keeps up in real time.
+            decode_crop: (cfg.qr_size + 120).min(cfg.canvas_h),
         };
         std::thread::spawn(move || run_reader(params, start, stop, observed))
     };

@@ -31,9 +31,46 @@ pub fn bgra_to_luma(data: &[u8], width: u32, height: u32) -> GrayImage {
     GrayImage::from_raw(width, height, buf).expect("buffer sized w*h")
 }
 
+/// Crop a centered `cw`×`ch` region from a grayscale image (clamped to bounds).
+/// Used to limit QR decoding to the region where the QR is painted, which keeps
+/// per-frame decode fast enough to track the capture in real time.
+pub fn crop_center(img: &GrayImage, cw: u32, ch: u32) -> GrayImage {
+    let (w, h) = (img.width(), img.height());
+    let cw = cw.clamp(1, w);
+    let ch = ch.clamp(1, h);
+    let ox = (w - cw) / 2;
+    let oy = (h - ch) / 2;
+    let mut out = vec![0u8; (cw as usize) * (ch as usize)];
+    for y in 0..ch {
+        for x in 0..cw {
+            out[(y * cw + x) as usize] = img.get_pixel(ox + x, oy + y)[0];
+        }
+    }
+    GrayImage::from_raw(cw, ch, out).expect("buffer sized cw*ch")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_center_extracts_middle() {
+        // 4x2 image; crop the center 2x2 (ox=1, oy=0).
+        let img = GrayImage::from_raw(4, 2, vec![0, 1, 2, 3, 10, 11, 12, 13]).unwrap();
+        let c = crop_center(&img, 2, 2);
+        assert_eq!(c.dimensions(), (2, 2));
+        assert_eq!(c.get_pixel(0, 0)[0], 1);
+        assert_eq!(c.get_pixel(1, 0)[0], 2);
+        assert_eq!(c.get_pixel(0, 1)[0], 11);
+        assert_eq!(c.get_pixel(1, 1)[0], 12);
+    }
+
+    #[test]
+    fn crop_center_clamps_to_bounds() {
+        let img = GrayImage::from_raw(2, 2, vec![1, 2, 3, 4]).unwrap();
+        let c = crop_center(&img, 99, 99);
+        assert_eq!(c.dimensions(), (2, 2));
+    }
 
     #[test]
     fn uyvy_picks_luma_bytes() {
