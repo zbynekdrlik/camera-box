@@ -133,6 +133,18 @@ mod tests {
     }
 
     #[test]
+    fn unequal_dup_counts_are_not_a_drop() {
+        // id 1 twice upstream, once downstream — still PRESENT downstream, so it
+        // is not a drop. Pins set-difference (membership) semantics: a multiset /
+        // count-based differ would wrongly flag id 1 here.
+        let up = vec![o(0, 0), o(1, 33), o(1, 40), o(2, 66)];
+        let down = vec![o(0, 10), o(1, 43), o(2, 76)];
+        let r = diff_hop(input(&up, &down));
+        assert!(r.pass);
+        assert!(r.dropped_ids.is_empty());
+    }
+
+    #[test]
     fn reorder_on_downstream_fails() {
         let up = vec![o(0, 0), o(1, 33), o(2, 66)];
         let down = vec![o(0, 10), o(2, 43), o(1, 76)];
