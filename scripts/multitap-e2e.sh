@@ -51,15 +51,21 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
 
 echo "[4/5] dev1 taps (run_id=$RUN_ID, ${DURATION}s)"
 sleep 5  # let OBS NDI outputs become discoverable
-./target/release/multitap-probe \
+# A failing per-hop gate is multitap-probe exiting 1 — its designed FAIL signal.
+# Capture it without `set -e` aborting before the artifact dump (the failure case
+# is exactly when we want the JSON shown), then propagate the code as the exit.
+if ./target/release/multitap-probe \
   --run-id "$RUN_ID" \
   --tap cam="CAM2 (usb)" \
   --tap strih=STRIH-PHASE2 \
   --tap stream=STREAM-PHASE2 \
   --duration-secs "$DURATION" \
-  --out "$OUT"
-GATE=$?
+  --out "$OUT"; then
+  GATE=0
+else
+  GATE=$?
+fi
 
 echo "[5/5] artifact: $OUT"
 cat "$OUT"
-exit $GATE
+exit "$GATE"
