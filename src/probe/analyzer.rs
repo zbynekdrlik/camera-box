@@ -23,7 +23,18 @@ pub struct AnalysisInput {
     pub emitted_ids: Vec<u32>,
     pub observed: Vec<Observed>,
     pub capture_fps: f64,
+    /// Detection threshold: a run of more than this many consecutive-equal ids
+    /// is listed as a freeze. Populates the `freezes` list; does not by itself
+    /// fail the verdict.
     pub freeze_periods: f64,
+    /// Hard gate: fail the verdict if measured `latency.p99_ms` exceeds this.
+    /// `None` ⇒ latency is report-only (Phase-1 behavior). Set from a baseline
+    /// plus margin once the rig is characterized (spec §9/§14/§15).
+    pub max_p99_latency_ms: Option<f64>,
+    /// Hard gate: fail the verdict if any detected freeze's `repeat_count`
+    /// exceeds this. Distinct from `freeze_periods` (which only *detects*).
+    /// `None` ⇒ freezes are report-only.
+    pub max_freeze_periods_gate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +122,29 @@ pub fn latency_stats(samples_ms: &[f64]) -> Option<LatencyStats> {
     })
 }
 
+/// Hard gate on latency p99 and freeze severity. A `None` bound leaves that
+/// dimension report-only (Phase-1 behavior); a `Some` bound fails the verdict
+/// when exceeded. Both comparisons use strict `>` so a value exactly at the
+/// bound passes.
+pub fn latency_freeze_gate_pass(
+    latency: &Option<LatencyStats>,
+    freezes: &[Freeze],
+    max_p99_latency_ms: Option<f64>,
+    max_freeze_periods_gate: Option<f64>,
+) -> bool {
+    if let (Some(bound), Some(l)) = (max_p99_latency_ms, latency) {
+        if l.p99_ms > bound {
+            return false;
+        }
+    }
+    if let Some(gate) = max_freeze_periods_gate {
+        if freezes.iter().any(|f| f.repeat_count as f64 > gate) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     let emitted_set: HashSet<u32> = input.emitted_ids.iter().copied().collect();
     let observed_set: HashSet<u32> = input.observed.iter().map(|o| o.frame_id).collect();
@@ -175,6 +209,22 @@ mod tests {
             observed,
             capture_fps: 30.0,
             freeze_periods: 3.0,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: None,
+        }
+    }
+
+    fn input_gated(
+        mode: PaintMode,
+        emitted: Vec<u32>,
+        observed: Vec<Observed>,
+        max_p99_latency_ms: Option<f64>,
+        max_freeze_periods_gate: Option<f64>,
+    ) -> AnalysisInput {
+        AnalysisInput {
+            max_p99_latency_ms,
+            max_freeze_periods_gate,
+            ..input(mode, emitted, observed)
         }
     }
 
@@ -334,5 +384,168 @@ mod tests {
         assert_eq!(s.min_ms, 10.0);
         assert!((s.mean_ms - 20.0).abs() < 0.001);
         assert_eq!(s.max_ms, 30.0);
+    }
+
+    // --- #10: hard latency + freeze gates folded into the verdict ---
+
+    /// Five unique ids 0..4, ascending (no reorder/loss), with one id at `hi_ms`
+    /// latency and the rest at 100 ms. p99 (nearest-rank, n=5) == `hi_ms`.
+    fn obs_with_p99(hi_ms: i64) -> Vec<Observed> {
+        vec![
+            obs(0, 0, 100_000_000),
+            obs(1, 0, 100_000_000),
+            obs(2, 0, 100_000_000),
+            obs(3, 0, 100_000_000),
+            obs(4, 0, hi_ms * 1_000_000),
+        ]
+    }
+
+    #[test]
+    fn latency_p99_over_bound_fails_coverage() {
+        // p99 = 300 ms, bound 250 ms -> FAIL despite zero loss/reorder.
+        let r = analyze(input_gated(
+            PaintMode::Coverage,
+            vec![0, 1, 2, 3, 4],
+            obs_with_p99(300),
+            Some(250.0),
+            None,
+        ));
+        assert!(r.missing_ids.is_empty());
+        assert!(r.reorders.is_empty());
+        assert_eq!(r.latency.as_ref().unwrap().p99_ms, 300.0);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn latency_p99_at_bound_passes() {
+        // p99 = 250 ms, bound 250 ms -> PASS (uses `>`, not `>=`).
+        let r = analyze(input_gated(
+            PaintMode::Coverage,
+            vec![0, 1, 2, 3, 4],
+            obs_with_p99(250),
+            Some(250.0),
+            None,
+        ));
+        assert_eq!(r.latency.as_ref().unwrap().p99_ms, 250.0);
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn latency_gate_also_applies_to_fullrate() {
+        // Full-rate loss is report-only, but the latency gate still fails the run.
+        // emitted has a missing id (5) to prove loss is ignored while p99 gates.
+        let r = analyze(input_gated(
+            PaintMode::FullRate,
+            vec![0, 1, 2, 3, 4, 5],
+            obs_with_p99(300),
+            Some(250.0),
+            None,
+        ));
+        assert_eq!(r.missing_ids, vec![5]);
+        assert!(r.reorders.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn freeze_over_gate_fails() {
+        // id 1 repeats 5x (detected at freeze_periods=3); gate 4 -> 5 > 4 -> FAIL.
+        let observed = vec![
+            obs(0, 0, 1),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(2, 20, 21),
+        ];
+        let r = analyze(input_gated(
+            PaintMode::Coverage,
+            vec![0, 1, 2],
+            observed,
+            None,
+            Some(4.0),
+        ));
+        assert_eq!(r.freezes[0].repeat_count, 5);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn freeze_at_gate_passes() {
+        // repeat_count 5, gate 5 -> 5 > 5 is false -> PASS (uses `>`, not `>=`).
+        let observed = vec![
+            obs(0, 0, 1),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(2, 20, 21),
+        ];
+        let r = analyze(input_gated(
+            PaintMode::Coverage,
+            vec![0, 1, 2],
+            observed,
+            None,
+            Some(5.0),
+        ));
+        assert_eq!(r.freezes[0].repeat_count, 5);
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn no_gate_thresholds_preserve_behavior() {
+        // None/None: a high-latency, frozen run still PASSES (report-only) — the
+        // Phase-1 contract. Supersedes the intent of freeze_is_detected_but_not_gated.
+        let observed = vec![
+            obs(0, 0, 100_000_000),
+            obs(1, 0, 999_000_000),
+            obs(1, 0, 999_000_000),
+            obs(1, 0, 999_000_000),
+            obs(1, 0, 999_000_000),
+            obs(1, 0, 999_000_000),
+            obs(2, 0, 100_000_000),
+        ];
+        let r = analyze(input_gated(
+            PaintMode::Coverage,
+            vec![0, 1, 2],
+            observed,
+            None,
+            None,
+        ));
+        assert_eq!(r.freezes.len(), 1);
+        assert!(r.latency.as_ref().unwrap().p99_ms > 250.0);
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn gate_helper_none_bounds_always_pass() {
+        let lat = latency_stats(&[1000.0]);
+        let freezes = vec![Freeze {
+            frame_id: 1,
+            repeat_count: 99,
+            duration_ms: 0.0,
+        }];
+        assert!(latency_freeze_gate_pass(&lat, &freezes, None, None));
+    }
+
+    #[test]
+    fn gate_helper_latency_bound() {
+        let lat = latency_stats(&[300.0]); // p99 = 300
+        assert!(!latency_freeze_gate_pass(&lat, &[], Some(250.0), None));
+        assert!(latency_freeze_gate_pass(&lat, &[], Some(300.0), None));
+        // No samples -> latency None -> cannot exceed -> pass.
+        assert!(latency_freeze_gate_pass(&None, &[], Some(1.0), None));
+    }
+
+    #[test]
+    fn gate_helper_freeze_bound() {
+        let freezes = vec![Freeze {
+            frame_id: 1,
+            repeat_count: 5,
+            duration_ms: 0.0,
+        }];
+        assert!(!latency_freeze_gate_pass(&None, &freezes, None, Some(4.0)));
+        assert!(latency_freeze_gate_pass(&None, &freezes, None, Some(5.0)));
+        assert!(latency_freeze_gate_pass(&None, &[], None, Some(0.0)));
     }
 }

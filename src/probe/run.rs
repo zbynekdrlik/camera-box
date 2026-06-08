@@ -25,6 +25,10 @@ pub struct RunConfig {
     /// loss check: they may not have traversed the pipeline (latency) and been
     /// decoded before teardown. Must exceed the observed max end-to-end latency.
     pub settle_ms: u64,
+    /// Hard gate: fail the verdict if p99 latency exceeds this (`None` ⇒ off).
+    pub max_p99_latency_ms: Option<f64>,
+    /// Hard gate: fail the verdict if a freeze run exceeds this (`None` ⇒ off).
+    pub max_freeze_periods_gate: Option<f64>,
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
@@ -96,6 +100,8 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
         observed: observed_vec,
         capture_fps: cfg.capture_fps,
         freeze_periods: cfg.freeze_periods,
+        max_p99_latency_ms: cfg.max_p99_latency_ms,
+        max_freeze_periods_gate: cfg.max_freeze_periods_gate,
     }))
 }
 
