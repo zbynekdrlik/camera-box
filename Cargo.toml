@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.5.0-dev.1"
+version = "1.7.0-dev.1"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -72,6 +72,11 @@ probe = ["dep:serde_json", "dep:crc", "dep:qrcode", "dep:rqrr", "dep:image"]
 [[bin]]
 name = "frame-probe"
 path = "src/bin/frame-probe.rs"
+required-features = ["probe"]
+
+[[bin]]
+name = "multitap-probe"
+path = "src/bin/multitap-probe.rs"
 required-features = ["probe"]
 
 [[bench]]

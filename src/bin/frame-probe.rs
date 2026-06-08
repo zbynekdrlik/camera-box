@@ -45,6 +45,14 @@ struct Args {
     /// JSON artifact output path
     #[arg(long, default_value = "/tmp/frame-probe.json")]
     out: String,
+    /// Shared run id (default: derived from the clock). Set it so taps on other
+    /// machines can filter to this painter's frames.
+    #[arg(long)]
+    run_id: Option<u32>,
+    /// Only paint the framebuffer; do not receive/analyze NDI. Used on the
+    /// camera box in Phase 2 (taps run on dev1).
+    #[arg(long, default_value_t = false)]
+    paint_only: bool,
 }
 
 fn main() -> Result<()> {
@@ -77,7 +85,10 @@ fn main() -> Result<()> {
         PaintMode::Coverage => 12.0,
         PaintMode::FullRate => 30.0,
     });
-    let run_id = (SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() & 0xFFFF_FFFF) as u32;
+    let run_id = match args.run_id {
+        Some(r) => r,
+        None => (SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() & 0xFFFF_FFFF) as u32,
+    };
 
     tracing::info!(
         "frame-probe start: mode={:?} run_id={} source={:?} paint_fps={} dur={}s",
@@ -88,7 +99,7 @@ fn main() -> Result<()> {
         args.duration_secs
     );
 
-    let report = run(RunConfig {
+    let cfg = RunConfig {
         mode,
         run_id,
         source: args.source,
@@ -102,7 +113,15 @@ fn main() -> Result<()> {
         freeze_periods: args.freeze_periods,
         connect_timeout_secs: args.connect_timeout_secs,
         settle_ms: args.settle_ms,
-    })?;
+    };
+
+    if args.paint_only {
+        let painted = camera_box::probe::run::run_paint_only(&cfg)?;
+        println!("PAINT_ONLY run_id={} painted={}", run_id, painted);
+        return Ok(());
+    }
+
+    let report = run(cfg)?;
 
     let json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&args.out, &json)?;

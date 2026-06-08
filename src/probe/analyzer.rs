@@ -57,13 +57,58 @@ pub struct AnalysisReport {
     pub verdict_pass: bool,
 }
 
-fn percentile(sorted: &[f64], q: f64) -> f64 {
+pub fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
     let rank = (q * (sorted.len() as f64)).ceil() as usize;
     let idx = rank.saturating_sub(1).min(sorted.len() - 1);
     sorted[idx]
+}
+
+/// Backwards-going adjacent pairs in capture order = reordering.
+pub fn detect_reorders(observed: &[Observed]) -> Vec<(u32, u32)> {
+    let mut reorders = Vec::new();
+    for w in observed.windows(2) {
+        if w[1].frame_id < w[0].frame_id {
+            reorders.push((w[0].frame_id, w[1].frame_id));
+        }
+    }
+    reorders
+}
+
+/// Runs of consecutive-equal frame IDs longer than `freeze_periods` capture
+/// periods. `chunk_by` avoids a manual index loop (no infinite-loop mutants).
+pub fn detect_freezes(observed: &[Observed], capture_fps: f64, freeze_periods: f64) -> Vec<Freeze> {
+    let period_ms = 1000.0 / capture_fps;
+    observed
+        .chunk_by(|a, b| a.frame_id == b.frame_id)
+        .filter(|run| (run.len() as f64) > freeze_periods)
+        .map(|run| Freeze {
+            frame_id: run[0].frame_id,
+            repeat_count: run.len(),
+            duration_ms: run.len() as f64 * period_ms,
+        })
+        .collect()
+}
+
+/// min/mean/p50/p95/p99/max over a set of millisecond samples (None if empty).
+pub fn latency_stats(samples_ms: &[f64]) -> Option<LatencyStats> {
+    if samples_ms.is_empty() {
+        return None;
+    }
+    let mut sorted = samples_ms.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let sum: f64 = sorted.iter().sum();
+    Some(LatencyStats {
+        samples: sorted.len(),
+        min_ms: sorted[0],
+        mean_ms: sum / sorted.len() as f64,
+        p50_ms: percentile(&sorted, 0.50),
+        p95_ms: percentile(&sorted, 0.95),
+        p99_ms: percentile(&sorted, 0.99),
+        max_ms: *sorted.last().unwrap(),
+    })
 }
 
 pub fn analyze(input: AnalysisInput) -> AnalysisReport {
@@ -77,26 +122,8 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
         .filter(|id| !observed_set.contains(id))
         .collect();
 
-    let mut reorders = Vec::new();
-    for w in input.observed.windows(2) {
-        if w[1].frame_id < w[0].frame_id {
-            reorders.push((w[0].frame_id, w[1].frame_id));
-        }
-    }
-
-    // Group consecutive-equal frame IDs into runs (no manual index loop — keeps
-    // mutation testing free of infinite-loop "timeout" mutants).
-    let period_ms = 1000.0 / input.capture_fps;
-    let freezes: Vec<Freeze> = input
-        .observed
-        .chunk_by(|a, b| a.frame_id == b.frame_id)
-        .filter(|run| (run.len() as f64) > input.freeze_periods)
-        .map(|run| Freeze {
-            frame_id: run[0].frame_id,
-            repeat_count: run.len(),
-            duration_ms: run.len() as f64 * period_ms,
-        })
-        .collect();
+    let reorders = detect_reorders(&input.observed);
+    let freezes = detect_freezes(&input.observed, input.capture_fps, input.freeze_periods);
 
     let mut seen = HashSet::new();
     let mut lat_ms: Vec<f64> = Vec::new();
@@ -105,22 +132,7 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
             lat_ms.push((o.recv_ts_ns - o.gen_ts_ns) as f64 / 1_000_000.0);
         }
     }
-    let latency = if lat_ms.is_empty() {
-        None
-    } else {
-        let mut sorted = lat_ms.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let sum: f64 = sorted.iter().sum();
-        Some(LatencyStats {
-            samples: sorted.len(),
-            min_ms: sorted[0],
-            mean_ms: sum / sorted.len() as f64,
-            p50_ms: percentile(&sorted, 0.50),
-            p95_ms: percentile(&sorted, 0.95),
-            p99_ms: percentile(&sorted, 0.99),
-            max_ms: *sorted.last().unwrap(),
-        })
-    };
+    let latency = latency_stats(&lat_ms);
 
     // A coverage PASS requires that we actually tested frames: an empty emitted
     // set (e.g. settle window >= run duration) must FAIL, never pass vacuously.
@@ -277,5 +289,50 @@ mod tests {
         assert_eq!(percentile(&s, 0.50), 5.0);
         assert_eq!(percentile(&s, 0.95), 10.0);
         assert_eq!(percentile(&s, 0.99), 10.0);
+    }
+
+    #[test]
+    fn detect_reorders_flags_backwards_pairs() {
+        let obs = vec![obs(0, 0, 1), obs(2, 0, 2), obs(1, 0, 3), obs(3, 0, 4)];
+        assert_eq!(detect_reorders(&obs), vec![(2, 1)]);
+    }
+
+    #[test]
+    fn detect_reorders_empty_when_monotonic() {
+        let obs = vec![obs(0, 0, 1), obs(1, 0, 2), obs(1, 0, 3), obs(2, 0, 4)];
+        assert!(detect_reorders(&obs).is_empty());
+    }
+
+    #[test]
+    fn detect_freezes_groups_runs_over_threshold() {
+        // id 1 repeats 5x (> 3) at 30 fps -> one freeze, 5*33.333ms.
+        let obs = vec![
+            obs(0, 0, 1),
+            obs(1, 0, 2),
+            obs(1, 0, 3),
+            obs(1, 0, 4),
+            obs(1, 0, 5),
+            obs(1, 0, 6),
+            obs(2, 0, 7),
+        ];
+        let f = detect_freezes(&obs, 30.0, 3.0);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].frame_id, 1);
+        assert_eq!(f[0].repeat_count, 5);
+        assert!((f[0].duration_ms - 166.6667).abs() < 0.01);
+    }
+
+    #[test]
+    fn latency_stats_none_on_empty() {
+        assert!(latency_stats(&[]).is_none());
+    }
+
+    #[test]
+    fn latency_stats_computes_fields() {
+        let s = latency_stats(&[10.0, 20.0, 30.0]).unwrap();
+        assert_eq!(s.samples, 3);
+        assert_eq!(s.min_ms, 10.0);
+        assert!((s.mean_ms - 20.0).abs() < 0.001);
+        assert_eq!(s.max_ms, 30.0);
     }
 }

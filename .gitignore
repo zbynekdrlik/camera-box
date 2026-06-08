@@ -26,3 +26,7 @@ Thumbs.db
 # cargo-mutants output
 mutants.out/
 mutants.out.old/
+
+# Python bytecode cache (from scripts/*.py)
+__pycache__/
+*.pyc
