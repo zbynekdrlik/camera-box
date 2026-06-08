@@ -13,3 +13,20 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   - #7/#8/#9/#10 — labeled `blocked` (depend on earlier phases / clock sync).
   - #11 60 fps — large pipeline-enablement, future end-state.
   → Autopilot stops after merging #5: nothing auto-implementable without crossing the bundling gate or a genuine design decision.
+
+## 2026-06-09 — auto-merge run
+
+- Session already shipped #6 (Phase 2, closed via #12/#15) and #10 (latency/freeze
+  hard gate, merged PR #16 → main `945877a`, main CI green). dev bumped → `1.7.0-dev.4`.
+- Removed stale `blocked` labels on #10 and #9 (their only blocker, Phase 1 PR #5, is merged).
+- **Backlog scan: NONE hands-off auto-mergeable.**
+  - #8, #7 — `blocked`. #8 needs a design call (chrony NTP vs PTP) + destructive deploy
+    to live cam1/3/4 + Windows OBS; #7 depends on #8.
+  - #11 — phase-3; depends on #7+#8 + hardware capture 30→60 fps change. Fails gate.
+  - #4 — user "not on focus right now"; greenfield fleet auto-updater. Deferred.
+  - #9 — actionable but needs a sudo self-hosted-runner service install on dev1
+    (security boundary: runs arbitrary CI code) + repo-admin token (gh HAS it).
+    cam2 off-air verification is pre-authorized.
+- **Action: STOPPED for authorization.** No silent destructive/security-sensitive action
+  under auto-merge. Awaiting user choice: authorize #9 runner setup, or make the #8
+  chrony-vs-PTP design call + authorize the production off-air clock deploy.
