@@ -30,8 +30,10 @@ struct Args {
     /// QR pixel size on the canvas
     #[arg(long, default_value_t = 700)]
     qr_size: u32,
-    /// Freeze threshold in capture periods
-    #[arg(long, default_value_t = 3.0)]
+    /// Freeze threshold: flag a stall when the same id is captured for more than
+    /// this many consecutive frames. Above the normal dup run (capture/paint
+    /// ratio, ~2.5 at coverage 12 fps) so steady dups are not false freezes.
+    #[arg(long, default_value_t = 6.0)]
     freeze_periods: f64,
     /// NDI connect timeout (seconds)
     #[arg(long, default_value_t = 30)]
@@ -58,8 +60,14 @@ fn main() -> Result<()> {
         "full-rate" | "fullrate" => PaintMode::FullRate,
         other => anyhow::bail!("unknown mode '{}' (use coverage|full-rate)", other),
     };
+    // Coverage default 12 fps: each id is displayed ~83 ms (>= 2.5 capture
+    // periods at 30 fps), guaranteeing >= 2 capture samples per id. The
+    // framebuffer is written once per id (~0.8 ms), and captures are ~33 ms
+    // apart, so at most one sample per id can be torn -> >= 1 clean sample
+    // always exists -> tearing cannot cause a false loss. (Full-rate runs at
+    // capture rate to stress the real path; it is report-only for loss.)
     let paint_fps = args.paint_fps.unwrap_or(match mode {
-        PaintMode::Coverage => 24.0,
+        PaintMode::Coverage => 12.0,
         PaintMode::FullRate => 30.0,
     });
     let run_id = (SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() & 0xFFFF_FFFF) as u32;
