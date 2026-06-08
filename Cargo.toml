@@ -74,6 +74,11 @@ name = "frame-probe"
 path = "src/bin/frame-probe.rs"
 required-features = ["probe"]
 
+[[bin]]
+name = "multitap-probe"
+path = "src/bin/multitap-probe.rs"
+required-features = ["probe"]
+
 [[bench]]
 name = "format_conversions"
 harness = false
