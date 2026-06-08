@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
@@ -25,6 +28,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libv4l-dev libasound2-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -47,15 +55,9 @@ jobs:
           sudo apt-get install -y libv4l-dev libasound2-dev
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: test
 
       - name: Run tests
         run: cargo test --verbose
@@ -83,24 +85,60 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          key: coverage
 
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           files: lcov.info
+          # Upload is informational only; the real gate is --fail-under-lines above.
+          # Codecov flakiness (token/rate-limit) must not fail an already-passing build.
           fail_ci_if_error: false
+
+  mutants:
+    name: Mutation Testing
+    runs-on: ubuntu-latest
+    # PR-only: --in-diff has nothing to mutate on a push to main (diff is empty),
+    # which would waste a full cold baseline build on a trivial no-op.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libv4l-dev libasound2-dev
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@cargo-mutants
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+
+      - name: Build PR diff
+        run: git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+
+      - name: Mutation testing (PR diff only)
+        # cargo-mutants runs a full unmutated baseline build+test first; skip it
+        # entirely when the PR touches no Rust, so doc/CI-only PRs stay fast.
+        run: |
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
+            cargo mutants --in-diff pr.diff --timeout 120
+          else
+            echo "No Rust source changes in this PR — skipping mutation testing."
+          fi
 
   build:
     name: Build
@@ -117,15 +155,9 @@ jobs:
           sudo apt-get install -y libv4l-dev libasound2-dev
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: build
 
       - name: Build release
         run: cargo build --release
@@ -143,7 +175,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
 
       - name: Security audit
         run: cargo audit
