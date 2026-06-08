@@ -22,26 +22,46 @@ fn get_wall_clock_100ns() -> i64 {
         .unwrap_or(0)
 }
 
-/// Wait for the next frame boundary and return its timecode.
-/// This blocks until the next aligned boundary for genlock synchronization.
-/// All cameras with NTP/PTP synchronized clocks will send frames at the same
-/// wall-clock boundaries, enabling software genlock across multiple devices.
-///
-/// Boundaries are calculated relative to each second to avoid drift:
-/// - Frame 0:  000.000 ms
-/// - Frame 1:  033.333 ms
-/// - Frame 2:  066.667 ms
-/// - ...
-/// - Frame 29: 966.667 ms
 /// Pure boundary math: given the current wall-clock time (100ns units) and a
 /// frame rate, return the timecode of the next aligned frame boundary. Split
 /// out from the sleeping wrapper so the genlock pacing is deterministically
 /// unit-testable at any fps (30, 60, ...) without touching the real clock.
-fn next_boundary_100ns(_now_100ns: i64, _fps: i64) -> i64 {
-    // STUB — real body lands in the GREEN commit.
-    _now_100ns
+///
+/// Boundaries are calculated relative to each second to avoid drift. Spacing is
+/// `1/fps` seconds, so the rate is parameterized — at 60 fps boundaries fall
+/// every 16.667 ms (frame 0 = 0.000 ms, frame 1 = 16.667 ms, ... frame 59 =
+/// 983.333 ms); at 30 fps every 33.333 ms.
+fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
+    if fps <= 0 {
+        return now_100ns;
+    }
+
+    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
+
+    // Find the start of the current second
+    let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
+    let offset_in_second = now_100ns - current_second_100ns;
+
+    // Calculate which frame we're in within this second (0 to fps-1)
+    // Using multiplication before division to avoid precision loss
+    let frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+
+    // Calculate next frame boundary
+    let next_frame_in_second = frame_in_second + 1;
+    if next_frame_in_second >= fps {
+        // Next frame is at the start of the next second (exactly X:XX:XX.000)
+        current_second_100ns + UNITS_PER_SECOND
+    } else {
+        // Boundary = second_start + (frame_num * UNITS_PER_SECOND / fps)
+        // Multiply before divide to maintain precision
+        current_second_100ns + (next_frame_in_second * UNITS_PER_SECOND / fps)
+    }
 }
 
+/// Block until the next aligned frame boundary and return its timecode. All
+/// cameras with NTP/PTP-synchronized clocks send frames at the same wall-clock
+/// boundaries, enabling software genlock across devices. Pure boundary math is
+/// in [`next_boundary_100ns`]; this wrapper only adds the real-clock sleep.
 #[inline]
 fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
     if fps <= 0 {

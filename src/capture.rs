@@ -49,9 +49,15 @@ impl Default for FrameRate {
 /// falls back to the NTSC-safe default. Deriving the rate from the negotiated
 /// interval (instead of hard-coding it) keeps the NDI-advertised rate and the
 /// genlock pacing honest about what the capture device actually delivers.
-pub fn frame_rate_from_interval(_interval_numerator: u32, _interval_denominator: u32) -> FrameRate {
-    // STUB — real body lands in the GREEN commit.
-    FrameRate::default()
+pub fn frame_rate_from_interval(interval_numerator: u32, interval_denominator: u32) -> FrameRate {
+    if interval_numerator == 0 || interval_denominator == 0 {
+        return FrameRate::default();
+    }
+    // fps = 1 / period = denominator / numerator
+    FrameRate {
+        numerator: interval_denominator,
+        denominator: interval_numerator,
+    }
 }
 
 /// V4L2 video capture wrapper
@@ -100,19 +106,28 @@ impl VideoCapture {
         let fourcc = final_format.fourcc;
         let stride = final_format.stride;
 
-        // Set 30fps for genlock synchronization
-        if let Ok(mut params) = Capture::params(&device) {
-            params.interval.numerator = 1;
-            params.interval.denominator = 30;
-            let _ = Capture::set_params(&device, &params);
-        }
-
-        // Fixed frame rate: 30fps
-        let frame_rate = FrameRate {
-            numerator: 30,
-            denominator: 1,
+        // Request 1080p60 for the genlock/NDI pipeline (#11 quality bar). The
+        // frame rate is derived from the rate the driver actually negotiates,
+        // not hard-coded — so NDI metadata and genlock pacing stay honest about
+        // what the capture device delivers.
+        let frame_rate = match Capture::params(&device) {
+            Ok(mut params) => {
+                params.interval.numerator = 1;
+                params.interval.denominator = 60;
+                let negotiated = Capture::set_params(&device, &params).unwrap_or(params);
+                frame_rate_from_interval(
+                    negotiated.interval.numerator,
+                    negotiated.interval.denominator,
+                )
+            }
+            Err(_) => frame_rate_from_interval(1, 60),
         };
-        tracing::info!("Frame rate: 30 fps");
+        tracing::info!(
+            "Frame rate: {:.3} fps ({}/{})",
+            frame_rate.numerator as f64 / frame_rate.denominator as f64,
+            frame_rate.numerator,
+            frame_rate.denominator
+        );
 
         // Create memory-mapped stream with enough buffers to avoid frame drops
         // 4 buffers to handle processing time variance
