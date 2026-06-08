@@ -64,11 +64,8 @@ fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
 /// in [`next_boundary_100ns`]; this wrapper only adds the real-clock sleep.
 #[inline]
 fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
-    if fps <= 0 {
-        return get_wall_clock_100ns();
-    }
-
     let now_100ns = get_wall_clock_100ns();
+    // next_boundary_100ns already guards fps <= 0 (returns now -> zero wait).
     let next_boundary = next_boundary_100ns(now_100ns, fps);
 
     // Sleep until next boundary
@@ -1142,6 +1139,26 @@ mod tests {
     #[test]
     fn boundary_zero_fps_is_noop() {
         assert_eq!(next_boundary_100ns(12_345, 0), 12_345);
+    }
+
+    #[test]
+    fn wait_for_next_boundary_returns_real_recent_boundary() {
+        // Exercises the sleeping wrapper: it must sleep until and return a real
+        // wall-clock boundary timecode (not 0/1/-1, not a future value).
+        let b = wait_for_next_boundary_100ns(60);
+        let now = get_wall_clock_100ns();
+        // A real 100ns-since-epoch timecode is huge -> kills ->0 / ->1 / ->-1.
+        assert!(b > 1_000_000, "boundary must be a real timecode, got {b}");
+        // We slept until the boundary, so it is now-or-just-past, never future.
+        assert!(
+            b <= now,
+            "boundary {b} must not be in the future (now {now})"
+        );
+        // ...and within ~one 60fps frame of now (kills skip-the-sleep mutants).
+        assert!(
+            now - b < UNITS_PER_SECOND / 60 + 100_000,
+            "boundary {b} too stale vs now {now}"
+        );
     }
 
     #[test]
