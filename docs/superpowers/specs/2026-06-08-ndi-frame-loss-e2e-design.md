@@ -66,7 +66,7 @@ approach on a single box (cam2) using a physical HDMI-out → HDMI-in loopback.
 frame-probe (painter thread)
    └─ QR(frame_id, gen_ts) → BGRA 1080p → /dev/fb0
         └─ iGPU HDMI-A-2 OUT ── cable ──> ShadowCast 2 HDMI IN
-             └─ /dev/video0 (YUYV) ─> camera-box [UNCHANGED] ─> NDI "usb (CAM2)"
+             └─ /dev/video0 (YUYV) ─> camera-box [UNCHANGED] ─> NDI "CAM2 (usb)"
                   └─ frame-probe (reader thread): NdiReceiver → UYVY → Y(gray) → rqrr decode
                        └─ (frame_id, recv_ts)
 analyzer: correlate emitted vs observed → classify → latency stats → JSON artifact
@@ -98,18 +98,19 @@ Two painter modes (both built — user decision):
 
 ### 6.1 Coverage mode → the clean zero-loss gate
 
-Painter emits **slower than the capture samples** (default ~24 fps vs 30 fps capture). Each
-painted frame persists on the framebuffer for its full paint interval (~41 ms), which is
-**longer than one capture period (~33 ms) with margin** — so every painted frame's display
-window contains at least one capture instant. This **guarantees every emitted ID is sampled
-at least once** in a healthy system. Therefore:
+Painter emits **slower than the capture samples** (default **12 fps** vs 30 fps capture —
+see §15 for why 12, not 24). Each painted frame persists on the framebuffer ~83 ms (≥2.5
+capture periods at 30 fps), guaranteeing **≥2 capture samples per ID**. The framebuffer is
+written once per ID (~0.8 ms) and captures are ~33 ms apart, so **at most one** sample per
+ID can be torn → **≥1 clean sample always exists**. Therefore:
 
-- **Loss = any emitted ID that never appears** in the decoded stream. No beat tolerance,
-  no fuzziness — an absent ID is a real drop.
+- **Sustained loss = any emitted ID that never appears** in *any* of its samples — a real,
+  ≥83 ms pipeline gap. No beat tolerance, no tearing false positives.
 - Duplicates are **expected** (capture faster than paint) and ignored.
-- Holding each frame stable across the sample also defeats HDMI tearing.
+- Single-frame drops are intentionally *not* gated here — over-sampling masks them, and on
+  the HDMI resample they are rig-confounded anyway (see §15 "Gate semantics").
 
-This is the run that backs the **zero-loss hard gate**.
+This is the run that backs the **deterministic sustained-loss + reorder gate**.
 
 ### 6.2 Full-rate mode → the realistic stress / soak
 
@@ -247,10 +248,57 @@ fits a low-version high-EC QR that survives 4:2:2 subsampling and scaling.
 | Parameter | Default | Notes |
 |---|---|---|
 | Capture rate | 30 fps | ShadowCast / camera-box native |
-| Coverage paint rate | ~24 fps | < capture (paint interval ~41 ms > capture ~33 ms), guarantees each ID sampled |
+| Coverage paint rate | 12 fps | each ID displayed ~83 ms (≥2.5 capture periods) → ≥2 samples/ID, ≥1 always tear-free |
 | Full-rate paint rate | 30 fps | production stress |
 | Run length | 5 min (~9,000 frames) | parametrized (smoke / soak presets) |
 | QR EC level | H (30%) | survives subsample + scale |
 | Freeze threshold | > 3 capture periods | reported in Phase 1, gated later |
 | Loss gate | 0 (coverage mode) | hard fail on any real loss/reorder |
 | Latency gate | none (report only) | ratchet a bound in after baseline |
+
+## 15. Phase-1 implementation outcome (2026-06-08)
+
+Built and verified on cam2 (the off-air rig). Key realities discovered during
+hardware bring-up and how the design adapted:
+
+- **cam2 holds `/dev/fb0`.** The service runs `camera-box --display "STRIH-SNV
+  (interkom)"`, whose framebuffer thread owns fb0. The orchestration script
+  (`scripts/loopback-e2e.sh`) therefore stops the service and runs camera-box
+  **without `--display`** for the run (keeps capture→NDI, frees fb0), then always
+  restores the service via a trap.
+- **NDI source name is `CAM2 (usb)`** (`<machine> (<ndi_name>)`), not `usb (CAM2)`.
+- **Decode must be cropped.** Full-frame 1080p `rqrr` decode was too slow (>33 ms),
+  causing NDI backlog → inflated/growing latency and dropped frames. Decoding only
+  the centered ROI (`qr_size+120`) fixed it; latency dropped 446 ms → ~115 ms.
+- **Settle window.** Frames painted within `--settle-ms` (500 ms) of the run end are
+  excluded from the loss check — they may still be in flight (latency ≤190 ms).
+- **Tearing & the deterministic gate.** Direct fb0 writes tear (~0.07 %/frame false
+  loss). The i915 DRM-emulated fbdev rejects legacy double-buffering
+  (`FBIOPUT_VSCREENINFO` keeps `yres_virtual=1080`), so `VsyncFb` logs that and falls
+  back to a direct write. The **deterministic** guarantee instead comes from the
+  **12 fps coverage paint rate**: each ID is displayed ~83 ms (≥2.5 capture periods)
+  → ≥2 samples/ID; the fb is written once per ID (~0.8 ms) and captures are ~33 ms
+  apart, so at most one sample per ID is torn → ≥1 clean sample always exists.
+  (`VsyncFb` is kept as best-effort for hardware that does support panning.)
+
+**Gate semantics (important).** On the HDMI loopback, "every painted frame appears
+exactly once" is **not** achievable — the ShadowCast samples on its own clock, an
+async resample that adds dups/skips by beat. So:
+
+- **Coverage (12 fps) gate** = zero **sustained** loss + zero reorder (+ freeze/latency
+  reported). Deterministic, false-positive-free. Catches pipeline stalls, sustained
+  drops, reordering, and latency regressions.
+- **Full-rate (30 fps)** is report-only for loss: at paint≈capture the beat produces
+  ~5 % periodic skips (measured) that are a rig artifact, not pipeline loss.
+- **Single-frame-accurate loss** is therefore a **Phase-2** capability — diff the
+  digital ID stream between two points (NDI-in vs OBS-out) where there is no resample.
+
+**Measured baseline (cam2, 2026-06-08):**
+
+| Run | Result | Frames | missing | reorders | freezes | latency mean / p50 / p95 / p99 / max (ms) |
+|---|---|---|---|---|---|---|
+| Coverage 5 min @12 fps | **PASS** | 3594 | 0 | 0 | 0 | 112.0 / 108.6 / 141.0 / 157.1 / 190.1 |
+| Full-rate 90 s @30 fps | PASS (report-only) | 2685 | 138 (~5 % beat) | 0 | 0 | 122.1 / 131.7 / 165.1 / 165.4 / 167.3 |
+
+End-to-end latency ~112–122 ms is dominated by the GENKI ShadowCast 2 USB capture
+dongle. A hard latency/freeze bound can now be ratcheted in from these numbers.
