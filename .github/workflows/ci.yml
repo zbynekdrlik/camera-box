@@ -60,7 +60,7 @@ jobs:
           key: test
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose
 
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run
@@ -90,7 +90,9 @@ jobs:
           key: coverage
 
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        # Probe hardware glue (painter/reader/run) and the bin drive /dev/fb0 + NDI and
+        # cannot be unit-tested; exclude them so the threshold reflects testable logic.
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run)\.rs|src/bin/frame-probe\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
