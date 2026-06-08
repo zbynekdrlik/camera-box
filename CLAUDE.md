@@ -57,3 +57,10 @@ sshpass -p 'newlevel' ssh root@10.77.9.6X "systemctl start camera-box && mount -
 ```
 
 Note: `rw-mode`/`ro-mode` scripts may not exist on all devices. Use `mount -o remount,rw /` instead.
+
+## Local Build Policy
+
+<!-- airuleset:local-builds=allowed -->
+
+**Local builds (Tier 1) ENABLED.** Full `cargo build --release` / `cargo test` allowed.
+Reason: embedded NDI camera app deployed to CAM1-4 devices by building the release binary locally and `scp`-ing it to the device — there is no CI/device build path, so the dev machine IS the build target.
