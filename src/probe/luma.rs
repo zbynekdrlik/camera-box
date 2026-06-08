@@ -114,4 +114,74 @@ mod tests {
         assert_eq!(img.get_pixel(0, 0)[0], 255);
         assert_eq!(img.get_pixel(1, 0)[0], 0);
     }
+
+    #[test]
+    fn uyvy_multi_row_indexing() {
+        // 2x2: rows [U Y V Y]; luma must land at buf[y*w + x], not a degenerate index.
+        let data = [0, 10, 0, 20, 0, 30, 0, 40];
+        let img = uyvy_to_luma(&data, 2, 2, 4);
+        assert_eq!(img.get_pixel(0, 0)[0], 10);
+        assert_eq!(img.get_pixel(1, 0)[0], 20);
+        assert_eq!(img.get_pixel(0, 1)[0], 30);
+        assert_eq!(img.get_pixel(1, 1)[0], 40);
+    }
+
+    #[test]
+    fn uyvy_guards_short_data() {
+        // Pixel 1's Y index is 3; with only 3 bytes it must stay 0, not read OOB.
+        let img = uyvy_to_luma(&[10, 200, 20], 2, 1, 4);
+        assert_eq!(img.get_pixel(0, 0)[0], 200);
+        assert_eq!(img.get_pixel(1, 0)[0], 0);
+    }
+
+    #[test]
+    fn bgra_guards_short_data() {
+        // Pixel 1 needs bytes 4..7 but only 6 exist -> must stay 0, not read OOB.
+        let img = bgra_to_luma(&[255, 255, 255, 255, 0, 0], 2, 1, 8);
+        assert_eq!(img.get_pixel(0, 0)[0], 255);
+        assert_eq!(img.get_pixel(1, 0)[0], 0);
+    }
+
+    #[test]
+    fn bgra_channel_weights() {
+        // Distinct B/G/R so the channel offsets (o, o+1, o+2) are all pinned.
+        assert_eq!(
+            bgra_to_luma(&[0, 0, 255, 255], 1, 1, 4).get_pixel(0, 0)[0],
+            76
+        ); // red
+        assert_eq!(
+            bgra_to_luma(&[0, 255, 0, 255], 1, 1, 4).get_pixel(0, 0)[0],
+            149
+        ); // green
+        assert_eq!(
+            bgra_to_luma(&[255, 0, 0, 255], 1, 1, 4).get_pixel(0, 0)[0],
+            29
+        ); // blue
+    }
+
+    #[test]
+    fn crop_center_handles_zero_width() {
+        // 0-width but non-zero height: the OR guard must catch it (AND would not).
+        let img = GrayImage::from_raw(0, 5, vec![]).unwrap();
+        let c = crop_center(&img, 4, 4);
+        assert_eq!(c.dimensions(), (1, 1));
+    }
+
+    #[test]
+    fn crop_center_x_offset_is_centered() {
+        // 8-wide gradient cropped to 2 wide -> ox = (8-2)/2 = 3 -> columns 3,4.
+        let img = GrayImage::from_raw(8, 1, vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let c = crop_center(&img, 2, 1);
+        assert_eq!(c.get_pixel(0, 0)[0], 3);
+        assert_eq!(c.get_pixel(1, 0)[0], 4);
+    }
+
+    #[test]
+    fn crop_center_y_offset_is_centered() {
+        // 8-tall gradient cropped to 2 tall -> oy = (8-2)/2 = 3 -> rows 3,4.
+        let img = GrayImage::from_raw(1, 8, vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let c = crop_center(&img, 1, 2);
+        assert_eq!(c.get_pixel(0, 0)[0], 3);
+        assert_eq!(c.get_pixel(0, 1)[0], 4);
+    }
 }

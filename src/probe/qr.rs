@@ -92,4 +92,45 @@ mod tests {
         let blank = GrayImage::from_raw(640, 480, vec![255u8; 640 * 480]).unwrap();
         assert_eq!(decode_qr_luma(blank), None);
     }
+
+    #[test]
+    fn render_centers_qr_and_writes_gray_bgra() {
+        // Asymmetric canvas so x- and y-centering are exercised distinctly.
+        let p = Payload {
+            run_id: 1,
+            frame_id: 2,
+            gen_ts_ns: 3,
+        };
+        let (cw, ch, qs) = (1000u32, 800u32, 400u32);
+        let canvas = render_qr_bgra(&p, cw, ch, qs);
+        assert_eq!(canvas.len(), (cw * ch * 4) as usize);
+
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (cw, 0u32, ch, 0u32);
+        for y in 0..ch {
+            for x in 0..cw {
+                let i = ((y * cw + x) * 4) as usize;
+                let (b, g, r, a) = (canvas[i], canvas[i + 1], canvas[i + 2], canvas[i + 3]);
+                // Every pixel: opaque, and gray (B==G==R) — white background or QR module.
+                assert_eq!(a, 255, "alpha must be 255 at ({x},{y})");
+                assert!(b == g && g == r, "B==G==R at ({x},{y}): {b},{g},{r}");
+                if b != 255 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        // The QR's non-white bounding box must be centered: equal margins each side.
+        let (left, right) = (min_x as i64, (cw - 1 - max_x) as i64);
+        let (top, bottom) = (min_y as i64, (ch - 1 - max_y) as i64);
+        assert!(
+            (left - right).abs() <= 1,
+            "x-centered: left={left} right={right}"
+        );
+        assert!(
+            (top - bottom).abs() <= 1,
+            "y-centered: top={top} bottom={bottom}"
+        );
+    }
 }

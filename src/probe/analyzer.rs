@@ -89,11 +89,11 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     let mut i = 0;
     while i < input.observed.len() {
         let id = input.observed[i].frame_id;
-        let mut j = i + 1;
-        while j < input.observed.len() && input.observed[j].frame_id == id {
-            j += 1;
+        let start = i;
+        while i < input.observed.len() && input.observed[i].frame_id == id {
+            i += 1;
         }
-        let run = j - i;
+        let run = i - start;
         if (run as f64) > input.freeze_periods {
             freezes.push(Freeze {
                 frame_id: id,
@@ -101,7 +101,6 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
                 duration_ms: run as f64 * period_ms,
             });
         }
-        i = j;
     }
 
     let mut seen = HashSet::new();
@@ -218,7 +217,31 @@ mod tests {
         assert_eq!(r.freezes.len(), 1);
         assert_eq!(r.freezes[0].frame_id, 1);
         assert_eq!(r.freezes[0].repeat_count, 5);
+        // duration = run (5) * period_ms (1000/30) = 166.667 ms. Pins period_ms
+        // and the run*period multiplication.
+        assert!((r.freezes[0].duration_ms - 166.6667).abs() < 0.01);
         assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn run_equal_to_threshold_is_not_a_freeze() {
+        // A run of exactly freeze_periods (3) must NOT flag (uses `>`, not `>=`).
+        let observed = vec![
+            obs(0, 0, 1),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(1, 10, 11),
+            obs(2, 20, 21),
+        ];
+        let r = analyze(input(PaintMode::Coverage, vec![0, 1, 2], observed));
+        assert!(r.freezes.is_empty());
+    }
+
+    #[test]
+    fn percentile_clamps_out_of_range_quantile() {
+        // q > 1 must clamp to the last element, never index out of bounds.
+        let s = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(percentile(&s, 1.5), 5.0);
     }
 
     #[test]
