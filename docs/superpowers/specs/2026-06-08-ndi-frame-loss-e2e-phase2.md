@@ -39,6 +39,11 @@ clean, beat-free count of frames a specific hop actually dropped.
 
 ## 4. Architecture — taps colocate on dev1
 
+> **NDI-name note:** the `STRIH-PHASE2` / `STREAM-PHASE2` labels below were the original
+> design placeholders. Live bring-up (§11.1) showed each OBS already re-emits its program via
+> an existing `NDI Main Output` whose name is read at setup (strih advertises `2ME PGM`), so the
+> taps subscribe to the **discovered** program NDI names rather than ones the harness creates.
+
 ```
  cam2 (10.77.9.62, off-air rig)            dev1 (10.77.9.21 — orchestrator + future CI host #9)
  ┌───────────────────────────┐            ┌──────────────────────────────────────────────┐

@@ -19,8 +19,9 @@ struct Args {
     #[arg(long)]
     run_id: u32,
     /// A tap as NAME=NDI_SOURCE_SUBSTRING. Repeat; adjacent taps are
-    /// differenced in the order given (e.g. cam="CAM2 (usb)" strih=STRIH-PHASE2
-    /// stream=STREAM-PHASE2 → hops cam→strih, strih→stream).
+    /// differenced in the order given (e.g. cam="CAM2 (usb)" strih="2ME PGM"
+    /// stream="<stream program NDI>" → hops cam→strih, strih→stream). The OBS
+    /// program NDI names are whatever each box's DistroAV Main Output advertises.
     #[arg(long = "tap", value_parser = parse_tap)]
     taps: Vec<(String, String)>,
     /// Run duration in seconds.
