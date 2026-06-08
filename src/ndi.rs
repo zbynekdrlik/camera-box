@@ -10,6 +10,9 @@ use std::arch::x86_64::*;
 
 use crate::capture::{Frame, FrameRate};
 
+/// 100-nanosecond units per second (genlock boundary math base).
+const UNITS_PER_SECOND: i64 = 10_000_000;
+
 /// Get current wall clock time in 100-nanosecond intervals since Unix epoch.
 /// This is the format NDI expects for timecodes.
 /// Using explicit SystemTime ensures we always get the current time,
@@ -35,8 +38,6 @@ fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     if fps <= 0 {
         return now_100ns;
     }
-
-    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
 
     // Find the start of the current second
     let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
@@ -68,8 +69,10 @@ fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
     // next_boundary_100ns already guards fps <= 0 (returns now -> zero wait).
     let next_boundary = next_boundary_100ns(now_100ns, fps);
 
-    // Sleep until next boundary
-    let wait_100ns = next_boundary - now_100ns;
+    // Sleep until next boundary. A genlock wait is always < one frame interval,
+    // so clamp to one second: a clock jump (or a bad boundary) must never park
+    // the send thread for an unbounded time.
+    let wait_100ns = (next_boundary - now_100ns).clamp(0, UNITS_PER_SECOND);
     if wait_100ns > 0 {
         let wait_duration = std::time::Duration::from_nanos((wait_100ns * 100) as u64);
         std::thread::sleep(wait_duration);
@@ -1096,8 +1099,6 @@ pub fn has_avx2() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
 
     #[test]
     fn boundary_60fps_from_second_start() {
