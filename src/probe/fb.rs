@@ -1,0 +1,202 @@
+//! Vsync, double-buffered framebuffer presenter for the painter.
+//!
+//! A direct `/dev/fb0` write tears: the capture can sample the framebuffer while
+//! a frame is half-written, producing an image where the QR is partially updated
+//! and will not decode. That surfaces as occasional single-frame "loss" that is a
+//! rig artifact, not a real pipeline drop. This presenter writes each frame to an
+//! off-screen page and flips it at vblank, so the capture only ever sees complete
+//! frames. If the driver cannot double-buffer, it falls back to a direct write.
+
+use anyhow::{bail, Context, Result};
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
+
+const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
+const FBIOPUT_VSCREENINFO: libc::c_ulong = 0x4601;
+const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+const FBIOPAN_DISPLAY: libc::c_ulong = 0x4606;
+// _IOW('F', 0x20, __u32)
+const FBIO_WAITFORVSYNC: libc::c_ulong = 0x4004_4620;
+const FB_ACTIVATE_VBL: u32 = 16;
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct FbBitfield {
+    offset: u32,
+    length: u32,
+    msb_right: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct FbVarScreenInfo {
+    xres: u32,
+    yres: u32,
+    xres_virtual: u32,
+    yres_virtual: u32,
+    xoffset: u32,
+    yoffset: u32,
+    bits_per_pixel: u32,
+    grayscale: u32,
+    red: FbBitfield,
+    green: FbBitfield,
+    blue: FbBitfield,
+    transp: FbBitfield,
+    nonstd: u32,
+    activate: u32,
+    height: u32,
+    width: u32,
+    accel_flags: u32,
+    pixclock: u32,
+    left_margin: u32,
+    right_margin: u32,
+    upper_margin: u32,
+    lower_margin: u32,
+    hsync_len: u32,
+    vsync_len: u32,
+    sync: u32,
+    vmode: u32,
+    rotate: u32,
+    colorspace: u32,
+    reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct FbFixScreenInfo {
+    id: [u8; 16],
+    smem_start: libc::c_ulong,
+    smem_len: u32,
+    fb_type: u32,
+    type_aux: u32,
+    visual: u32,
+    xpanstep: u16,
+    ypanstep: u16,
+    ywrapstep: u16,
+    line_length: u32,
+    mmio_start: libc::c_ulong,
+    mmio_len: u32,
+    accel: u32,
+    capabilities: u16,
+    reserved: [u16; 2],
+}
+
+/// Double-buffered, vsync-flipping framebuffer presenter.
+pub struct VsyncFb {
+    file: File,
+    width: u32,
+    height: u32,
+    line_length: u32,
+    vinfo: FbVarScreenInfo,
+    double_buffered: bool,
+    back_page: u32,
+}
+
+impl VsyncFb {
+    /// Open the framebuffer and try to enable double buffering.
+    pub fn open(device: &str) -> Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(device)
+            .with_context(|| format!("open framebuffer {}", device))?;
+        let fd = file.as_raw_fd();
+
+        let mut vinfo = FbVarScreenInfo::default();
+        if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut vinfo) } < 0 {
+            bail!("FBIOGET_VSCREENINFO failed");
+        }
+        let mut finfo = FbFixScreenInfo::default();
+        if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO, &mut finfo) } < 0 {
+            bail!("FBIOGET_FSCREENINFO failed");
+        }
+        let width = vinfo.xres;
+        let height = vinfo.yres;
+        let line_length = finfo.line_length;
+
+        // Request a virtual height of 2*yres so we can pan between two pages.
+        let mut want = vinfo;
+        want.yres_virtual = height * 2;
+        want.xres_virtual = width.max(vinfo.xres_virtual);
+        want.xoffset = 0;
+        want.yoffset = 0;
+        want.activate = 0; // FB_ACTIVATE_NOW
+        let put_ok = unsafe { libc::ioctl(fd, FBIOPUT_VSCREENINFO, &want) } >= 0;
+
+        let mut got = FbVarScreenInfo::default();
+        unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut got) };
+        let double_buffered = put_ok && got.yres_virtual >= height * 2;
+
+        if double_buffered {
+            tracing::info!(
+                "VsyncFb: double-buffered {}x{} (virtual {}x{}), vsync flips enabled",
+                width,
+                height,
+                got.xres_virtual,
+                got.yres_virtual
+            );
+        } else {
+            tracing::warn!(
+                "VsyncFb: double-buffer unavailable (yres_virtual={}); direct write, tearing possible",
+                got.yres_virtual
+            );
+        }
+
+        Ok(Self {
+            file,
+            width,
+            height,
+            line_length,
+            vinfo: got,
+            double_buffered,
+            back_page: 1,
+        })
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Present a full BGRA frame (`width*height*4` bytes). Tear-free when
+    /// double-buffered; otherwise a direct write to page 0.
+    pub fn present(&mut self, bgra: &[u8]) -> Result<()> {
+        let page = if self.double_buffered {
+            self.back_page
+        } else {
+            0
+        };
+        let page_off = (page as u64) * (self.height as u64) * (self.line_length as u64);
+        let src_stride = (self.width * 4) as usize;
+
+        if self.line_length as usize == src_stride {
+            self.file.write_all_at(bgra, page_off)?;
+        } else {
+            for y in 0..self.height as usize {
+                let s = y * src_stride;
+                self.file.write_all_at(
+                    &bgra[s..s + src_stride],
+                    page_off + (y as u64) * (self.line_length as u64),
+                )?;
+            }
+        }
+
+        if self.double_buffered {
+            let fd = self.file.as_raw_fd();
+            let mut v = self.vinfo;
+            v.xoffset = 0;
+            v.yoffset = page * self.height;
+            v.activate = FB_ACTIVATE_VBL;
+            if unsafe { libc::ioctl(fd, FBIOPAN_DISPLAY, &v) } < 0 {
+                // Pan failed at runtime; degrade to direct writes.
+                self.double_buffered = false;
+            } else {
+                let mut crtc: u32 = 0;
+                // Best-effort: wait for the flip so we don't reuse the page too soon.
+                unsafe { libc::ioctl(fd, FBIO_WAITFORVSYNC, &mut crtc) };
+                self.back_page ^= 1;
+            }
+        }
+        Ok(())
+    }
+}

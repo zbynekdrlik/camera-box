@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Phase-1 NDI frame-loss/latency loopback E2E.
+#
+# Builds frame-probe on the dev machine, deploys it to a camera-box device (the
+# off-air rig), runs the QR HDMI-loopback probe, pulls the JSON artifact, and
+# exits non-zero on a failing verdict.
+#
+# On the device, camera-box normally runs with `--display`, which holds /dev/fb0.
+# The probe's painter needs fb0, so this script stops the service and runs
+# camera-box WITHOUT --display for the duration (keeps capture->NDI alive, frees
+# fb0), then ALWAYS restores the service via a trap — even on failure.
+#
+# Env overrides: CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS LOCAL_OUT
+set -euo pipefail
+
+CAM_IP="${CAM_IP:-10.77.9.62}"
+CAM_PASS="${CAM_PASS:-newlevel}"
+SOURCE="${SOURCE:-CAM2 (usb)}"        # NDI name is "<machine> (<ndi_name>)"
+MODE="${MODE:-coverage}"               # coverage (gate) | full-rate (stress)
+DURATION_SECS="${DURATION_SECS:-300}"  # default 5 min evidence run
+QR_SIZE="${QR_SIZE:-700}"
+SETTLE_MS="${SETTLE_MS:-500}"          # must exceed observed max latency
+LOCAL_OUT="${LOCAL_OUT:-./frame-probe-${MODE}.json}"
+REMOTE_BIN="/tmp/frame-probe"
+REMOTE_OUT="/tmp/frame-probe.json"
+
+ssh_cam() { sshpass -p "$CAM_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${CAM_IP}" "$@"; }
+
+echo ">> Building frame-probe (release, --features probe)"
+cargo build --release --features probe --bin frame-probe
+
+echo ">> Deploying to ${CAM_IP}:${REMOTE_BIN}"
+sshpass -p "$CAM_PASS" scp -o StrictHostKeyChecking=no target/release/frame-probe "root@${CAM_IP}:${REMOTE_BIN}"
+
+echo ">> Running ${MODE} loopback for ${DURATION_SECS}s on ${CAM_IP} (source: '${SOURCE}')"
+echo "   camera-box runs WITHOUT --display for the duration; service is restored afterwards."
+
+# Remote orchestration. Quoted heredoc — values are passed via env on the ssh line.
+set +e
+ssh_cam "MODE='${MODE}' DURATION='${DURATION_SECS}' SOURCE='${SOURCE}' QR_SIZE='${QR_SIZE}' SETTLE_MS='${SETTLE_MS}' OUT='${REMOTE_OUT}' bash -s" <<'REMOTE'
+set -uo pipefail
+export NDI_RUNTIME_DIR_V6=/usr/lib/ndi
+chmod +x /tmp/frame-probe
+MANUAL_PID=""
+cleanup() {
+  if [ -n "$MANUAL_PID" ]; then kill "$MANUAL_PID" 2>/dev/null || true; fi
+  sleep 1
+  systemctl start camera-box
+  echo ">> CLEANUP: camera-box service restarted ($(systemctl is-active camera-box))"
+}
+trap cleanup EXIT HUP INT TERM
+
+echo ">> stop camera-box (release fb0 + video0)"
+systemctl stop camera-box
+sleep 2
+
+echo ">> start camera-box WITHOUT --display (capture->NDI only)"
+nohup /usr/local/bin/camera-box >/tmp/cam-manual.log 2>&1 &
+MANUAL_PID=$!
+sleep 7
+if ! kill -0 "$MANUAL_PID" 2>/dev/null; then
+  echo "ERROR: manual camera-box died:"; tail -20 /tmp/cam-manual.log; exit 3
+fi
+
+setterm --blank 0 --powerdown 0 >/dev/null 2>&1 || true
+
+echo ">> running frame-probe"
+/tmp/frame-probe --mode "$MODE" --source "$SOURCE" --duration-secs "$DURATION" \
+  --qr-size "$QR_SIZE" --settle-ms "$SETTLE_MS" --out "$OUT" --connect-timeout-secs 20
+rc=$?
+echo "PROBE_RC=$rc"
+exit $rc
+REMOTE
+PROBE_RC=$?
+set -e
+
+echo ">> Pulling artifact to ${LOCAL_OUT}"
+sshpass -p "$CAM_PASS" scp -o StrictHostKeyChecking=no "root@${CAM_IP}:${REMOTE_OUT}" "$LOCAL_OUT" || echo "!! could not pull artifact"
+
+if [ -f "$LOCAL_OUT" ]; then
+  echo ">> Result summary:"
+  python3 -c "
+import json,sys
+d=json.load(open('$LOCAL_OUT'))
+l=d.get('latency') or {}
+print(f\"  mode={d['mode']} verdict={'PASS' if d['verdict_pass'] else 'FAIL'}\")
+print(f\"  emitted={d['emitted_count']} observed={d['observed_count']} unique={d['unique_observed']}\")
+print(f\"  missing={len(d['missing_ids'])} reorders={len(d['reorders'])} freezes={len(d['freezes'])}\")
+if l: print(f\"  latency_ms: mean={l['mean_ms']:.1f} p50={l['p50_ms']:.1f} p95={l['p95_ms']:.1f} p99={l['p99_ms']:.1f} max={l['max_ms']:.1f} (n={l['samples']})\")
+" 2>/dev/null || cat "$LOCAL_OUT"
+fi
+
+if [ "$PROBE_RC" -ne 0 ]; then
+  echo "!! FRAME-PROBE FAILED (rc=${PROBE_RC}) — see ${LOCAL_OUT}"
+  exit "$PROBE_RC"
+fi
+echo ">> PASS"

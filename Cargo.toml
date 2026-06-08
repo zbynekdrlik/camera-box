@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.4.1"
+version = "1.5.0-dev.1"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -49,6 +49,13 @@ alsa = "0.9"
 # Input device events (for power button mute)
 evdev = "0.12"
 
+# Frame-loss/latency probe (feature = "probe") — kept out of the production binary
+serde_json = { version = "1", optional = true }
+crc = { version = "3", optional = true }
+qrcode = { version = "0.14", optional = true, features = ["image"] }
+rqrr = { version = "0.9", optional = true }
+image = { version = "0.25", optional = true, default-features = false }
+
 [dev-dependencies]
 # Property-based testing for format conversions
 proptest = "1.4"
@@ -58,6 +65,14 @@ pretty_assertions = "1.4"
 tempfile = "3.9"
 # Performance benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+probe = ["dep:serde_json", "dep:crc", "dep:qrcode", "dep:rqrr", "dep:image"]
+
+[[bin]]
+name = "frame-probe"
+path = "src/bin/frame-probe.rs"
+required-features = ["probe"]
 
 [[bench]]
 name = "format_conversions"

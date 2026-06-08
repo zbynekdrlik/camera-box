@@ -60,7 +60,7 @@ jobs:
           key: test
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose
 
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run
@@ -90,7 +90,9 @@ jobs:
           key: coverage
 
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        # Probe hardware glue (painter/reader/run) and the bin drive /dev/fb0 + NDI and
+        # cannot be unit-tested; exclude them so the threshold reflects testable logic.
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb)\.rs|src/bin/frame-probe\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -133,9 +135,20 @@ jobs:
       - name: Mutation testing (PR diff only)
         # cargo-mutants runs a full unmutated baseline build+test first; skip it
         # entirely when the PR touches no Rust, so doc/CI-only PRs stay fast.
+        # --features probe: the probe modules are feature-gated, so mutants must
+        #   be built+tested with the feature or they all "survive" vacuously.
+        # -e <glue>: painter/reader/run/fb/bin drive /dev/fb0 + NDI and are
+        #   verified by the on-device loopback E2E, not unit tests — exclude them
+        #   (same rationale as the coverage exclusion).
         run: |
           if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
-            cargo mutants --in-diff pr.diff --timeout 120
+            cargo mutants --in-diff pr.diff --features probe \
+              -e 'src/probe/painter.rs' \
+              -e 'src/probe/reader.rs' \
+              -e 'src/probe/run.rs' \
+              -e 'src/probe/fb.rs' \
+              -e 'src/bin/frame-probe.rs' \
+              --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
           fi

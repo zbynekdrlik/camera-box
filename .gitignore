@@ -19,3 +19,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# MCP config (symlink to ~/.claude/mcp-configs/)
+.mcp.json
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/
