@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 try:
     from websocket import create_connection
@@ -94,13 +95,53 @@ def setup(a):
         "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
         "inputSettings": {"ndi_source_name": a.upstream, "ndi_bw_mode": 0},
     })
+    # OBS ndi_source matches the FULL "MACHINE (name)" network name; an OBS Main
+    # Output's ndi_name is bare (e.g. "2ME PGM"), and ingesting the bare name
+    # connects to nothing. Snapshot this box's DistroAV-discovered source list
+    # ONCE, then resolve both the ingest source and this box's own program output
+    # to their full names. A downstream box may not list an upstream OBS output
+    # in its own discovery, so we resolve each output on the box that PRODUCES it
+    # (its own list always contains it) and print the full name for the next hop.
+    vals = _ndi_source_list(ws, inp)
+    ingest_full = _match_full(vals, a.upstream)
+    if ingest_full != a.upstream:
+        _rpc(ws, "SetInputSettings", {
+            "inputName": inp,
+            "inputSettings": {"ndi_source_name": ingest_full},
+            "overlay": True,
+        }, ignore_err=True)
     _rpc(ws, "SetCurrentProgramScene", {"sceneName": scene})
+    out_full = _match_full(vals, ndi_name)
     ws.close()
     sys.stderr.write(
-        f"[obs] {a.host}: program -> {scene} ingest '{a.upstream}'; "
-        f"Main Output NDI '{ndi_name}'\n"
+        f"[obs] {a.host}: program -> {scene} ingest '{ingest_full}'; "
+        f"Main Output NDI '{out_full}'\n"
     )
-    print(ndi_name)  # stdout = the NDI name to tap for this host's program
+    print(out_full)  # stdout = the FULL NDI name to tap / chain for this program
+
+
+def _ndi_source_list(ws, inp):
+    """The full 'MACHINE (name)' NDI source names DistroAV has discovered on this
+    box, read from the ndi_source_name property's item list."""
+    items = _rpc(ws, "GetInputPropertiesListPropertyItems", {
+        "inputName": inp, "propertyName": "ndi_source_name",
+    }, ignore_err=True).get("propertyItems", [])
+    return [it.get("itemValue") for it in items if it.get("itemValue")]
+
+
+def _match_full(vals, bare):
+    """Map a bare NDI name to its full 'MACHINE (name)' form from `vals`; returns
+    `bare` unchanged if it is already full or no candidate matches."""
+    for v in vals:  # already full/exact
+        if v == bare:
+            return v
+    for v in vals:  # bare output name as the "(suffix)" of a full name
+        if v.endswith(f"({bare})"):
+            return v
+    for v in vals:  # last resort: any substring match
+        if bare in v:
+            return v
+    return bare
 
 
 def teardown(a):
@@ -115,6 +156,17 @@ def teardown(a):
         if prev:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": prev}, ignore_err=True)
         if inp:
+            # CRITICAL: disconnect the NDI receiver BEFORE destroying the input.
+            # Removing an ndi_source while it is actively receiving the 1080p feed
+            # faults the NDI runtime (processing.ndi.lib) and crashes OBS. Clearing
+            # ndi_source_name makes DistroAV tear down the receiver cleanly; the
+            # settle lets the receive thread idle before RemoveInput.
+            _rpc(ws, "SetInputSettings", {
+                "inputName": inp,
+                "inputSettings": {"ndi_source_name": ""},
+                "overlay": True,
+            }, ignore_err=True)
+            time.sleep(1.5)
             _rpc(ws, "RemoveInput", {"inputName": inp}, ignore_err=True)
         if scene:
             _rpc(ws, "RemoveScene", {"sceneName": scene}, ignore_err=True)
