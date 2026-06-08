@@ -1,6 +1,7 @@
 //! Render a payload to a centered QR on a white BGRA canvas, and decode a payload
 //! from a grayscale image.
 
+use crate::probe::luma::{bgra_to_luma, crop_center, uyvy_to_luma};
 use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
@@ -48,10 +49,30 @@ pub fn decode_qr_luma(img: GrayImage) -> Option<Payload> {
     None
 }
 
+/// Turn one captured NDI frame into a decoded `Payload`, or None.
+/// Dispatches BGRA/BGRX vs UYVY by fourcc, converts to luma (padded-stride
+/// aware), restricts the QR decode to the centered `decode_crop` square (the
+/// ROI speed fix), and decodes. Shared by the single-tap reader and the
+/// multi-tap reader so the decode path has one tested implementation.
+pub fn decode_capture(
+    fourcc: u32,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    decode_crop: u32,
+) -> Option<Payload> {
+    let full = match &fourcc.to_le_bytes() {
+        b"BGRA" | b"BGRX" => bgra_to_luma(data, width, height, stride),
+        _ => uyvy_to_luma(data, width, height, stride),
+    };
+    let img = crop_center(&full, decode_crop, decode_crop);
+    decode_qr_luma(img)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::luma::bgra_to_luma;
     use image::imageops::{resize, FilterType};
 
     fn sample() -> Payload {
@@ -91,6 +112,27 @@ mod tests {
     fn blank_image_decodes_to_none() {
         let blank = GrayImage::from_raw(640, 480, vec![255u8; 640 * 480]).unwrap();
         assert_eq!(decode_qr_luma(blank), None);
+    }
+
+    #[test]
+    fn decode_capture_roundtrips_bgra_frame() {
+        let p = Payload {
+            run_id: 3,
+            frame_id: 99,
+            gen_ts_ns: 42,
+        };
+        // 1920x1080 BGRA frame carrying a centered QR, tight stride.
+        let bgra = render_qr_bgra(&p, 1920, 1080, 700);
+        let fourcc = u32::from_le_bytes(*b"BGRA");
+        let got = decode_capture(fourcc, &bgra, 1920, 1080, 1920 * 4, 820);
+        assert_eq!(got, Some(p));
+    }
+
+    #[test]
+    fn decode_capture_none_on_blank() {
+        let blank = vec![255u8; (640 * 480 * 4) as usize];
+        let fourcc = u32::from_le_bytes(*b"BGRA");
+        assert_eq!(decode_capture(fourcc, &blank, 640, 480, 640 * 4, 400), None);
     }
 
     #[test]

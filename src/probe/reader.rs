@@ -2,8 +2,6 @@
 
 use crate::ndi::NdiReceiver;
 use crate::probe::analyzer::Observed;
-use crate::probe::luma::{bgra_to_luma, crop_center, uyvy_to_luma};
-use crate::probe::qr::decode_qr_luma;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,12 +32,14 @@ pub fn run_reader(
             None => continue,
         };
         let recv_ts_ns = start.elapsed().as_nanos() as i64;
-        let full = match &frame.fourcc.to_le_bytes() {
-            b"BGRA" | b"BGRX" => bgra_to_luma(&frame.data, frame.width, frame.height, frame.stride),
-            _ => uyvy_to_luma(&frame.data, frame.width, frame.height, frame.stride),
-        };
-        let img = crop_center(&full, params.decode_crop, params.decode_crop);
-        if let Some(p) = decode_qr_luma(img) {
+        if let Some(p) = crate::probe::qr::decode_capture(
+            frame.fourcc,
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.stride,
+            params.decode_crop,
+        ) {
             if p.run_id == params.run_id {
                 observed.lock().unwrap().push(Observed {
                     frame_id: p.frame_id,
