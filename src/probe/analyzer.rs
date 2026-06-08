@@ -222,7 +222,11 @@ mod tests {
     fn reorder_fails_both_modes() {
         let emitted = vec![0, 1, 2];
         let observed = vec![obs(0, 0, 1), obs(2, 2, 3), obs(1, 1, 4)];
-        let cov = analyze(input(PaintMode::Coverage, emitted.clone(), observed.clone()));
+        let cov = analyze(input(
+            PaintMode::Coverage,
+            emitted.clone(),
+            observed.clone(),
+        ));
         let full = analyze(input(PaintMode::FullRate, emitted, observed));
         assert!(!cov.verdict_pass);
         assert!(!full.verdict_pass);
