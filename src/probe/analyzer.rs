@@ -84,24 +84,19 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
         }
     }
 
+    // Group consecutive-equal frame IDs into runs (no manual index loop — keeps
+    // mutation testing free of infinite-loop "timeout" mutants).
     let period_ms = 1000.0 / input.capture_fps;
-    let mut freezes = Vec::new();
-    let mut i = 0;
-    while i < input.observed.len() {
-        let id = input.observed[i].frame_id;
-        let start = i;
-        while i < input.observed.len() && input.observed[i].frame_id == id {
-            i += 1;
-        }
-        let run = i - start;
-        if (run as f64) > input.freeze_periods {
-            freezes.push(Freeze {
-                frame_id: id,
-                repeat_count: run,
-                duration_ms: run as f64 * period_ms,
-            });
-        }
-    }
+    let freezes: Vec<Freeze> = input
+        .observed
+        .chunk_by(|a, b| a.frame_id == b.frame_id)
+        .filter(|run| (run.len() as f64) > input.freeze_periods)
+        .map(|run| Freeze {
+            frame_id: run[0].frame_id,
+            repeat_count: run.len(),
+            duration_ms: run.len() as f64 * period_ms,
+        })
+        .collect();
 
     let mut seen = HashSet::new();
     let mut lat_ms: Vec<f64> = Vec::new();
