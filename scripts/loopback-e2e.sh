@@ -11,7 +11,7 @@
 # fb0), then ALWAYS restores the service via a trap — even on failure.
 #
 # Env overrides: CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS
-#                MAX_P99_MS MAX_FREEZE_PERIODS LOCAL_OUT
+#                CAPTURE_FPS MAX_P99_MS MAX_FREEZE_PERIODS LOCAL_OUT
 set -euo pipefail
 
 CAM_IP="${CAM_IP:-10.77.9.62}"
@@ -21,6 +21,10 @@ MODE="${MODE:-coverage}"               # coverage (gate) | full-rate (stress)
 DURATION_SECS="${DURATION_SECS:-300}"  # default 5 min evidence run
 QR_SIZE="${QR_SIZE:-700}"
 SETTLE_MS="${SETTLE_MS:-500}"          # must exceed observed max latency
+# camera-box now captures + sends NDI at 1080p60 (#11). The probe's coverage
+# oversample math needs the real capture rate; at 60 fps capture the default
+# 12 fps coverage paint is ~5x oversampled (>= 2 samples/id required).
+CAPTURE_FPS="${CAPTURE_FPS:-60}"
 # Hard latency/freeze gates (spec §15). Defaults are RIG-SPECIFIC — derived from
 # the cam2 2026-06-08 baseline (coverage p99 157 ms, max 190 ms; ShadowCast 2 USB
 # capture dominates) with margin so normal jitter does not flake. RE-BASELINE
@@ -44,7 +48,7 @@ echo "   camera-box runs WITHOUT --display for the duration; service is restored
 
 # Remote orchestration. Quoted heredoc — values are passed via env on the ssh line.
 set +e
-ssh_cam "MODE='${MODE}' DURATION='${DURATION_SECS}' SOURCE='${SOURCE}' QR_SIZE='${QR_SIZE}' SETTLE_MS='${SETTLE_MS}' MAX_P99_MS='${MAX_P99_MS}' MAX_FREEZE_PERIODS='${MAX_FREEZE_PERIODS}' OUT='${REMOTE_OUT}' bash -s" <<'REMOTE'
+ssh_cam "MODE='${MODE}' DURATION='${DURATION_SECS}' SOURCE='${SOURCE}' QR_SIZE='${QR_SIZE}' SETTLE_MS='${SETTLE_MS}' CAPTURE_FPS='${CAPTURE_FPS}' MAX_P99_MS='${MAX_P99_MS}' MAX_FREEZE_PERIODS='${MAX_FREEZE_PERIODS}' OUT='${REMOTE_OUT}' bash -s" <<'REMOTE'
 set -uo pipefail
 export NDI_RUNTIME_DIR_V6=/usr/lib/ndi
 chmod +x /tmp/frame-probe
@@ -73,7 +77,7 @@ setterm --blank 0 --powerdown 0 >/dev/null 2>&1 || true
 
 echo ">> running frame-probe"
 /tmp/frame-probe --mode "$MODE" --source "$SOURCE" --duration-secs "$DURATION" \
-  --qr-size "$QR_SIZE" --settle-ms "$SETTLE_MS" \
+  --qr-size "$QR_SIZE" --settle-ms "$SETTLE_MS" --capture-fps "$CAPTURE_FPS" \
   --max-p99-latency-ms "$MAX_P99_MS" --max-freeze-periods "$MAX_FREEZE_PERIODS" \
   --out "$OUT" --connect-timeout-secs 20
 rc=$?
