@@ -135,9 +135,20 @@ jobs:
       - name: Mutation testing (PR diff only)
         # cargo-mutants runs a full unmutated baseline build+test first; skip it
         # entirely when the PR touches no Rust, so doc/CI-only PRs stay fast.
+        # --features probe: the probe modules are feature-gated, so mutants must
+        #   be built+tested with the feature or they all "survive" vacuously.
+        # -e <glue>: painter/reader/run/fb/bin drive /dev/fb0 + NDI and are
+        #   verified by the on-device loopback E2E, not unit tests — exclude them
+        #   (same rationale as the coverage exclusion).
         run: |
           if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
-            cargo mutants --in-diff pr.diff --timeout 120
+            cargo mutants --in-diff pr.diff --features probe \
+              -e 'src/probe/painter.rs' \
+              -e 'src/probe/reader.rs' \
+              -e 'src/probe/run.rs' \
+              -e 'src/probe/fb.rs' \
+              -e 'src/bin/frame-probe.rs' \
+              --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
           fi
