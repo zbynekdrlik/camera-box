@@ -47,8 +47,26 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     let up_unique: HashSet<u32> = input.upstream.iter().map(|o| o.frame_id).collect();
     let down_unique: HashSet<u32> = input.downstream.iter().map(|o| o.frame_id).collect();
 
-    let mut dropped_ids: Vec<u32> = up_unique.difference(&down_unique).copied().collect();
-    dropped_ids.sort_unstable();
+    // A frame counts as dropped at this hop only if it falls within the
+    // downstream tap's *active span* [first id, last id] yet is absent there.
+    // The two taps connect and disconnect independently — the OBS-forwarded tap
+    // establishes its NDI receive seconds after the direct tap — so ids the
+    // downstream tap had no chance to see (before its first decode or after its
+    // last) are tap start/stop skew, not hop drops. This is the id-granular
+    // complement to the trailing settle-window the orchestrator already applies.
+    // A real mid-stream drop still lies inside [lo, hi] and is still flagged.
+    let dropped_ids: Vec<u32> = match (down_unique.iter().min(), down_unique.iter().max()) {
+        (Some(&lo), Some(&hi)) => {
+            let mut v: Vec<u32> = up_unique
+                .iter()
+                .copied()
+                .filter(|id| *id >= lo && *id <= hi && !down_unique.contains(id))
+                .collect();
+            v.sort_unstable();
+            v
+        }
+        _ => Vec::new(),
+    };
 
     let reorders = detect_reorders(input.downstream);
     let freezes = detect_freezes(input.downstream, input.capture_fps, input.freeze_periods);
@@ -172,5 +190,52 @@ mod tests {
         assert_eq!(l.samples, 3);
         assert!((l.mean_ms - 10.0).abs() < 0.001);
         assert!((l.max_ms - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn startup_skew_before_downstream_first_id_is_not_a_drop() {
+        // Downstream tap (OBS-forwarded) connected late: it never saw ids 0..4.
+        // Those are start skew, not drops — only ids within [5, 9] are judged.
+        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3), o(4, 4),
+                      o(5, 5), o(6, 6), o(7, 7), o(8, 8), o(9, 9)];
+        let down = vec![o(5, 15), o(6, 16), o(7, 17), o(8, 18), o(9, 19)];
+        let r = diff_hop(input(&up, &down));
+        assert!(r.dropped_ids.is_empty());
+        assert!(r.pass);
+    }
+
+    #[test]
+    fn shutdown_skew_after_downstream_last_id_is_not_a_drop() {
+        // Downstream stopped at id 5 (in-flight tail); ids 6..9 are end skew.
+        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3), o(4, 4), o(5, 5),
+                      o(6, 6), o(7, 7), o(8, 8), o(9, 9)];
+        let down = vec![o(0, 10), o(1, 11), o(2, 12), o(3, 13), o(4, 14), o(5, 15)];
+        let r = diff_hop(input(&up, &down));
+        assert!(r.dropped_ids.is_empty());
+        assert!(r.pass);
+    }
+
+    #[test]
+    fn real_drop_inside_active_span_still_fails() {
+        // Skew at both ends (down starts at 2, ends at 8) AND a genuine drop of
+        // id 5 in the middle. The skew is excluded; the real drop is caught.
+        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3), o(4, 4), o(5, 5),
+                      o(6, 6), o(7, 7), o(8, 8), o(9, 9)];
+        let down = vec![o(2, 12), o(3, 13), o(4, 14), o(6, 16), o(7, 17), o(8, 18)];
+        let r = diff_hop(input(&up, &down));
+        assert_eq!(r.dropped_ids, vec![5]);
+        assert!(!r.pass);
+    }
+
+    #[test]
+    fn drop_exactly_at_span_boundaries_is_excluded() {
+        // Pins the inclusive bounds: ids equal to lo (2) and hi (8) that are
+        // present downstream are not drops; the `>= lo` / `<= hi` comparisons
+        // must stay inclusive (kills boundary mutants).
+        let up = vec![o(2, 2), o(3, 3), o(4, 4), o(5, 5), o(6, 6), o(7, 7), o(8, 8)];
+        let down = vec![o(2, 12), o(3, 13), o(4, 14), o(5, 15), o(6, 16), o(7, 17), o(8, 18)];
+        let r = diff_hop(input(&up, &down));
+        assert!(r.dropped_ids.is_empty());
+        assert!(r.pass);
     }
 }
