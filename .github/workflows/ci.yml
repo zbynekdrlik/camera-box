@@ -92,7 +92,7 @@ jobs:
       - name: Generate coverage report
         # Probe hardware glue (painter/reader/run) and the bin drive /dev/fb0 + NDI and
         # cannot be unit-tested; exclude them so the threshold reflects testable logic.
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run)\.rs|src/bin/frame-probe\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb)\.rs|src/bin/frame-probe\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

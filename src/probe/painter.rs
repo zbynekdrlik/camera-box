@@ -1,6 +1,6 @@
 //! Painter thread: draw QR frames to /dev/fb0, paced, recording emitted IDs.
 
-use crate::display::FramebufferDisplay;
+use crate::probe::fb::VsyncFb;
 use crate::probe::payload::Payload;
 use crate::probe::qr::render_qr_bgra;
 use anyhow::Result;
@@ -24,8 +24,7 @@ pub fn run_painter(
     stop: Arc<AtomicBool>,
     emitted: Arc<Mutex<Vec<(u32, i64)>>>,
 ) -> Result<()> {
-    let mut fb = FramebufferDisplay::open(&params.fb_device)?;
-    let bgra_fourcc = u32::from_le_bytes(*b"BGRA");
+    let mut fb = VsyncFb::open(&params.fb_device)?;
     let period = Duration::from_secs_f64(1.0 / params.paint_fps);
     let mut frame_id: u32 = 0;
     let mut next = Instant::now();
@@ -38,7 +37,7 @@ pub fn run_painter(
             gen_ts_ns,
         };
         let bgra = render_qr_bgra(&payload, params.canvas_w, params.canvas_h, params.qr_size);
-        fb.display_frame(&bgra, params.canvas_w, params.canvas_h, bgra_fourcc)?;
+        fb.present(&bgra)?;
         emitted.lock().unwrap().push((frame_id, gen_ts_ns));
 
         frame_id = frame_id.wrapping_add(1);
