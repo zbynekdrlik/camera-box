@@ -1,0 +1,73 @@
+//! Orchestrate painter + reader for a fixed duration, then analyze.
+
+use crate::probe::analyzer::{analyze, AnalysisInput, AnalysisReport, Observed, PaintMode};
+use crate::probe::painter::{run_painter, PaintParams};
+use crate::probe::reader::{run_reader, ReadParams};
+use anyhow::Result;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub struct RunConfig {
+    pub mode: PaintMode,
+    pub run_id: u32,
+    pub source: String,
+    pub fb_device: String,
+    pub duration: Duration,
+    pub paint_fps: f64,
+    pub capture_fps: f64,
+    pub canvas_w: u32,
+    pub canvas_h: u32,
+    pub qr_size: u32,
+    pub freeze_periods: f64,
+    pub connect_timeout_secs: u32,
+}
+
+pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
+    let start = Instant::now();
+    let stop = Arc::new(AtomicBool::new(false));
+    let emitted: Arc<Mutex<Vec<(u32, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let reader_handle = {
+        let stop = stop.clone();
+        let observed = observed.clone();
+        let params = ReadParams {
+            run_id: cfg.run_id,
+            source: cfg.source.clone(),
+            connect_timeout_secs: cfg.connect_timeout_secs,
+        };
+        std::thread::spawn(move || run_reader(params, start, stop, observed))
+    };
+
+    let painter_handle = {
+        let stop = stop.clone();
+        let emitted = emitted.clone();
+        let params = PaintParams {
+            run_id: cfg.run_id,
+            fb_device: cfg.fb_device.clone(),
+            paint_fps: cfg.paint_fps,
+            canvas_w: cfg.canvas_w,
+            canvas_h: cfg.canvas_h,
+            qr_size: cfg.qr_size,
+        };
+        std::thread::spawn(move || run_painter(params, start, stop, emitted))
+    };
+
+    std::thread::sleep(cfg.duration);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    painter_handle.join().expect("painter panicked")?;
+    reader_handle.join().expect("reader panicked")?;
+
+    let emitted_ids: Vec<u32> = emitted.lock().unwrap().iter().map(|(id, _)| *id).collect();
+    let observed_vec = observed.lock().unwrap().clone();
+
+    Ok(analyze(AnalysisInput {
+        mode: cfg.mode,
+        emitted_ids,
+        observed: observed_vec,
+        capture_fps: cfg.capture_fps,
+        freeze_periods: cfg.freeze_periods,
+    }))
+}
