@@ -21,6 +21,10 @@ pub struct RunConfig {
     pub qr_size: u32,
     pub freeze_periods: f64,
     pub connect_timeout_secs: u32,
+    /// Frames painted within this window of the run end are excluded from the
+    /// loss check: they may not have traversed the pipeline (latency) and been
+    /// decoded before teardown. Must exceed the observed max end-to-end latency.
+    pub settle_ms: u64,
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
@@ -59,11 +63,23 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
 
     std::thread::sleep(cfg.duration);
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let stop_ns = start.elapsed().as_nanos() as i64;
 
     painter_handle.join().expect("painter panicked")?;
     reader_handle.join().expect("reader panicked")?;
 
-    let emitted_ids: Vec<u32> = emitted.lock().unwrap().iter().map(|(id, _)| *id).collect();
+    // Exclude the trailing settle window: frames painted that close to the end
+    // may legitimately still be in flight (pipeline latency) when the reader
+    // stops, so they must not count as losses.
+    let settle_ns = (cfg.settle_ms as i64) * 1_000_000;
+    let cutoff_ns = stop_ns - settle_ns;
+    let emitted_ids: Vec<u32> = emitted
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, gen_ts)| *gen_ts <= cutoff_ns)
+        .map(|(id, _)| *id)
+        .collect();
     let observed_vec = observed.lock().unwrap().clone();
 
     Ok(analyze(AnalysisInput {

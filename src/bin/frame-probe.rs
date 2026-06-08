@@ -36,6 +36,10 @@ struct Args {
     /// NDI connect timeout (seconds)
     #[arg(long, default_value_t = 30)]
     connect_timeout_secs: u32,
+    /// Trailing settle window (ms): frames painted this close to the end are
+    /// excluded from the loss check (pipeline latency). Must exceed max latency.
+    #[arg(long, default_value_t = 500)]
+    settle_ms: u64,
     /// JSON artifact output path
     #[arg(long, default_value = "/tmp/frame-probe.json")]
     out: String,
@@ -82,6 +86,7 @@ fn main() -> Result<()> {
         qr_size: args.qr_size,
         freeze_periods: args.freeze_periods,
         connect_timeout_secs: args.connect_timeout_secs,
+        settle_ms: args.settle_ms,
     })?;
 
     let json = serde_json::to_string_pretty(&report)?;
