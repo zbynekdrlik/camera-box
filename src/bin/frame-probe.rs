@@ -42,6 +42,14 @@ struct Args {
     /// excluded from the loss check (pipeline latency). Must exceed max latency.
     #[arg(long, default_value_t = 500)]
     settle_ms: u64,
+    /// Hard latency gate (ms): fail the run if p99 latency exceeds this.
+    /// Omitted ⇒ latency is report-only. Set from a rig baseline plus margin.
+    #[arg(long)]
+    max_p99_latency_ms: Option<f64>,
+    /// Hard freeze gate: fail the run if any stall repeats more than this many
+    /// consecutive frames. Omitted ⇒ freezes are report-only.
+    #[arg(long)]
+    max_freeze_periods: Option<f64>,
     /// JSON artifact output path
     #[arg(long, default_value = "/tmp/frame-probe.json")]
     out: String,
@@ -113,6 +121,8 @@ fn main() -> Result<()> {
         freeze_periods: args.freeze_periods,
         connect_timeout_secs: args.connect_timeout_secs,
         settle_ms: args.settle_ms,
+        max_p99_latency_ms: args.max_p99_latency_ms,
+        max_freeze_periods_gate: args.max_freeze_periods,
     };
 
     if args.paint_only {

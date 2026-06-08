@@ -10,7 +10,8 @@
 # camera-box WITHOUT --display for the duration (keeps capture->NDI alive, frees
 # fb0), then ALWAYS restores the service via a trap — even on failure.
 #
-# Env overrides: CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS LOCAL_OUT
+# Env overrides: CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS
+#                MAX_P99_MS MAX_FREEZE_PERIODS LOCAL_OUT
 set -euo pipefail
 
 CAM_IP="${CAM_IP:-10.77.9.62}"
@@ -20,6 +21,12 @@ MODE="${MODE:-coverage}"               # coverage (gate) | full-rate (stress)
 DURATION_SECS="${DURATION_SECS:-300}"  # default 5 min evidence run
 QR_SIZE="${QR_SIZE:-700}"
 SETTLE_MS="${SETTLE_MS:-500}"          # must exceed observed max latency
+# Hard latency/freeze gates (spec §15). Defaults are RIG-SPECIFIC — derived from
+# the cam2 2026-06-08 baseline (coverage p99 157 ms, max 190 ms; ShadowCast 2 USB
+# capture dominates) with margin so normal jitter does not flake. RE-BASELINE
+# when the capture dongle / cabling / device / fps changes.
+MAX_P99_MS="${MAX_P99_MS:-250}"            # fail if p99 latency > this
+MAX_FREEZE_PERIODS="${MAX_FREEZE_PERIODS:-6}"  # fail if a stall repeats > this many frames
 LOCAL_OUT="${LOCAL_OUT:-./frame-probe-${MODE}.json}"
 REMOTE_BIN="/tmp/frame-probe"
 REMOTE_OUT="/tmp/frame-probe.json"
@@ -37,7 +44,7 @@ echo "   camera-box runs WITHOUT --display for the duration; service is restored
 
 # Remote orchestration. Quoted heredoc — values are passed via env on the ssh line.
 set +e
-ssh_cam "MODE='${MODE}' DURATION='${DURATION_SECS}' SOURCE='${SOURCE}' QR_SIZE='${QR_SIZE}' SETTLE_MS='${SETTLE_MS}' OUT='${REMOTE_OUT}' bash -s" <<'REMOTE'
+ssh_cam "MODE='${MODE}' DURATION='${DURATION_SECS}' SOURCE='${SOURCE}' QR_SIZE='${QR_SIZE}' SETTLE_MS='${SETTLE_MS}' MAX_P99_MS='${MAX_P99_MS}' MAX_FREEZE_PERIODS='${MAX_FREEZE_PERIODS}' OUT='${REMOTE_OUT}' bash -s" <<'REMOTE'
 set -uo pipefail
 export NDI_RUNTIME_DIR_V6=/usr/lib/ndi
 chmod +x /tmp/frame-probe
@@ -66,7 +73,9 @@ setterm --blank 0 --powerdown 0 >/dev/null 2>&1 || true
 
 echo ">> running frame-probe"
 /tmp/frame-probe --mode "$MODE" --source "$SOURCE" --duration-secs "$DURATION" \
-  --qr-size "$QR_SIZE" --settle-ms "$SETTLE_MS" --out "$OUT" --connect-timeout-secs 20
+  --qr-size "$QR_SIZE" --settle-ms "$SETTLE_MS" \
+  --max-p99-latency-ms "$MAX_P99_MS" --max-freeze-periods "$MAX_FREEZE_PERIODS" \
+  --out "$OUT" --connect-timeout-secs 20
 rc=$?
 echo "PROBE_RC=$rc"
 exit $rc
