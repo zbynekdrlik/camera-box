@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
@@ -93,11 +96,16 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: lcov.info
+          # Upload is informational only; the real gate is --fail-under-lines above.
+          # Codecov flakiness (token/rate-limit) must not fail an already-passing build.
           fail_ci_if_error: false
 
   mutants:
     name: Mutation Testing
     runs-on: ubuntu-latest
+    # PR-only: --in-diff has nothing to mutate on a push to main (diff is empty),
+    # which would waste a full cold baseline build on a trivial no-op.
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,10 +128,17 @@ jobs:
           key: mutants
 
       - name: Build PR diff
-        run: git diff origin/${{ github.base_ref || 'main' }}...HEAD > pr.diff
+        run: git diff origin/${{ github.base_ref }}...HEAD > pr.diff
 
       - name: Mutation testing (PR diff only)
-        run: cargo mutants --in-diff pr.diff --timeout 120
+        # cargo-mutants runs a full unmutated baseline build+test first; skip it
+        # entirely when the PR touches no Rust, so doc/CI-only PRs stay fast.
+        run: |
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
+            cargo mutants --in-diff pr.diff --timeout 120
+          else
+            echo "No Rust source changes in this PR — skipping mutation testing."
+          fi
 
   build:
     name: Build
