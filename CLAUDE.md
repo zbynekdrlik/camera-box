@@ -1,5 +1,14 @@
 # Claude Code Guidelines for camera-box
 
+Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with software genlock + intercom/sidetone audio. Built locally, deployed to the camera devices over SSH.
+
+<!-- Global rules inherited from ~/.claude/CLAUDE.md (managed by airuleset) -->
+<!-- PR merge policy, CI monitoring, TDD, two-branch git workflow, test strictness, security, comprehensive logging apply automatically. This file holds ONLY camera-box-specific context — do not duplicate global rules here. -->
+
+## Branch model
+
+Two branches: `main` (production) + `dev`. Work on `dev`, PR to `main`. Standard global two-branch workflow.
+
 ## DO NOT DELETE These Files
 
 **NEVER delete `targets.md`** - it contains IP addresses for all deployment targets (Windows and cameras). This file has been accidentally deleted multiple times during PR cleanup. DO NOT remove it.
