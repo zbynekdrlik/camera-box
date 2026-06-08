@@ -98,3 +98,41 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
         freeze_periods: cfg.freeze_periods,
     }))
 }
+
+/// Paint QR frames for `duration` without receiving/analyzing — used on the
+/// camera box in Phase 2, where the QR reaches NDI via camera-box's own
+/// capture→NDI path and the taps run elsewhere (dev1).
+pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
+    use crate::probe::painter::{run_painter, PaintParams};
+
+    let start = Instant::now();
+    let stop = Arc::new(AtomicBool::new(false));
+    let emitted: Arc<Mutex<Vec<(u32, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let painter_handle = {
+        let stop = stop.clone();
+        let emitted = emitted.clone();
+        let params = PaintParams {
+            run_id: cfg.run_id,
+            fb_device: cfg.fb_device.clone(),
+            paint_fps: cfg.paint_fps,
+            canvas_w: cfg.canvas_w,
+            canvas_h: cfg.canvas_h,
+            qr_size: cfg.qr_size,
+        };
+        std::thread::spawn(move || run_painter(params, start, stop, emitted))
+    };
+
+    let deadline = Instant::now() + cfg.duration;
+    while Instant::now() < deadline {
+        if painter_handle.is_finished() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    painter_handle.join().expect("painter panicked")?;
+
+    let count = emitted.lock().unwrap().len() as u64;
+    Ok(count)
+}
