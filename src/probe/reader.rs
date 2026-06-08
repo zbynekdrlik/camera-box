@@ -35,8 +35,8 @@ pub fn run_reader(
         };
         let recv_ts_ns = start.elapsed().as_nanos() as i64;
         let full = match &frame.fourcc.to_le_bytes() {
-            b"BGRA" | b"BGRX" => bgra_to_luma(&frame.data, frame.width, frame.height),
-            _ => uyvy_to_luma(&frame.data, frame.width, frame.height),
+            b"BGRA" | b"BGRX" => bgra_to_luma(&frame.data, frame.width, frame.height, frame.stride),
+            _ => uyvy_to_luma(&frame.data, frame.width, frame.height, frame.stride),
         };
         let img = crop_center(&full, params.decode_crop, params.decode_crop);
         if let Some(p) = decode_qr_luma(img) {

@@ -48,7 +48,7 @@ cleanup() {
   systemctl start camera-box
   echo ">> CLEANUP: camera-box service restarted ($(systemctl is-active camera-box))"
 }
-trap cleanup EXIT
+trap cleanup EXIT HUP INT TERM
 
 echo ">> stop camera-box (release fb0 + video0)"
 systemctl stop camera-box

@@ -21,7 +21,7 @@ struct Args {
     /// Run duration in seconds
     #[arg(long, default_value_t = 300)]
     duration_secs: u64,
-    /// Painter rate (defaults: coverage 24, full-rate 30)
+    /// Painter rate (defaults: coverage 12, full-rate 30)
     #[arg(long)]
     paint_fps: Option<f64>,
     /// Expected capture rate
@@ -55,6 +55,13 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if args.settle_ms >= args.duration_secs.saturating_mul(1000) {
+        anyhow::bail!(
+            "--settle-ms ({}) must be less than the run duration ({} s) — otherwise no frames are tested",
+            args.settle_ms,
+            args.duration_secs
+        );
+    }
     let mode = match args.mode.as_str() {
         "coverage" => PaintMode::Coverage,
         "full-rate" | "fullrate" => PaintMode::FullRate,

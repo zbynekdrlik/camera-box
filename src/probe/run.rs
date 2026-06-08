@@ -61,7 +61,15 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };
 
-    std::thread::sleep(cfg.duration);
+    // Run for the duration, but stop early if either thread dies (e.g. the
+    // framebuffer fails to open) so a failure surfaces in seconds, not minutes.
+    let deadline = Instant::now() + cfg.duration;
+    while Instant::now() < deadline {
+        if painter_handle.is_finished() || reader_handle.is_finished() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let stop_ns = start.elapsed().as_nanos() as i64;
 

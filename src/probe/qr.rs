@@ -66,7 +66,7 @@ mod tests {
     fn clean_roundtrip() {
         let p = sample();
         let bgra = render_qr_bgra(&p, 1280, 720, 600);
-        let luma = bgra_to_luma(&bgra, 1280, 720);
+        let luma = bgra_to_luma(&bgra, 1280, 720, 1280 * 4);
         assert_eq!(decode_qr_luma(luma), Some(p));
     }
 
@@ -74,7 +74,7 @@ mod tests {
     fn survives_downscale_and_noise() {
         let p = sample();
         let bgra = render_qr_bgra(&p, 1920, 1080, 700);
-        let full = bgra_to_luma(&bgra, 1920, 1080);
+        let full = bgra_to_luma(&bgra, 1920, 1080, 1920 * 4);
 
         let small = resize(&full, 960, 540, FilterType::Triangle);
         let mut back = resize(&small, 1920, 1080, FilterType::Triangle);

@@ -70,13 +70,12 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     let emitted_set: HashSet<u32> = input.emitted_ids.iter().copied().collect();
     let observed_set: HashSet<u32> = input.observed.iter().map(|o| o.frame_id).collect();
 
-    let mut missing_ids: Vec<u32> = input
+    let missing_ids: Vec<u32> = input
         .emitted_ids
         .iter()
         .copied()
         .filter(|id| !observed_set.contains(id))
         .collect();
-    missing_ids.dedup();
 
     let mut reorders = Vec::new();
     for w in input.observed.windows(2) {
@@ -129,8 +128,12 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
         })
     };
 
+    // A coverage PASS requires that we actually tested frames: an empty emitted
+    // set (e.g. settle window >= run duration) must FAIL, never pass vacuously.
     let verdict_pass = match input.mode {
-        PaintMode::Coverage => missing_ids.is_empty() && reorders.is_empty(),
+        PaintMode::Coverage => {
+            !emitted_set.is_empty() && missing_ids.is_empty() && reorders.is_empty()
+        }
         PaintMode::FullRate => reorders.is_empty(),
     };
 
@@ -240,6 +243,14 @@ mod tests {
         let r = analyze(input(PaintMode::FullRate, emitted, observed));
         assert!(r.verdict_pass);
         assert_eq!(r.missing_ids, vec![1]);
+    }
+
+    #[test]
+    fn empty_emitted_coverage_fails() {
+        // No frames tested (e.g. settle window >= duration) must never pass.
+        let r = analyze(input(PaintMode::Coverage, vec![], vec![]));
+        assert!(!r.verdict_pass);
+        assert_eq!(r.emitted_count, 0);
     }
 
     #[test]
