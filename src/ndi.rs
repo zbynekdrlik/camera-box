@@ -33,34 +33,23 @@ fn get_wall_clock_100ns() -> i64 {
 /// - Frame 2:  066.667 ms
 /// - ...
 /// - Frame 29: 966.667 ms
+/// Pure boundary math: given the current wall-clock time (100ns units) and a
+/// frame rate, return the timecode of the next aligned frame boundary. Split
+/// out from the sleeping wrapper so the genlock pacing is deterministically
+/// unit-testable at any fps (30, 60, ...) without touching the real clock.
+fn next_boundary_100ns(_now_100ns: i64, _fps: i64) -> i64 {
+    // STUB — real body lands in the GREEN commit.
+    _now_100ns
+}
+
 #[inline]
 fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
     if fps <= 0 {
         return get_wall_clock_100ns();
     }
 
-    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
-
     let now_100ns = get_wall_clock_100ns();
-
-    // Find the start of the current second
-    let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
-    let offset_in_second = now_100ns - current_second_100ns;
-
-    // Calculate which frame we're in within this second (0 to fps-1)
-    // Using multiplication before division to avoid precision loss
-    let frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
-
-    // Calculate next frame boundary
-    let next_frame_in_second = frame_in_second + 1;
-    let next_boundary = if next_frame_in_second >= fps {
-        // Next frame is at the start of the next second (exactly X:XX:XX.000)
-        current_second_100ns + UNITS_PER_SECOND
-    } else {
-        // Boundary = second_start + (frame_num * UNITS_PER_SECOND / fps)
-        // Multiply before divide to maintain precision
-        current_second_100ns + (next_frame_in_second * UNITS_PER_SECOND / fps)
-    };
+    let next_boundary = next_boundary_100ns(now_100ns, fps);
 
     // Sleep until next boundary
     let wait_100ns = next_boundary - now_100ns;
@@ -1090,6 +1079,50 @@ pub fn has_avx2() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
+
+    #[test]
+    fn boundary_60fps_from_second_start() {
+        // At a clean second start, the next 60fps boundary is frame 1 = 1/60 s.
+        let b = next_boundary_100ns(0, 60);
+        assert_eq!(b, UNITS_PER_SECOND / 60); // 166_666
+    }
+
+    #[test]
+    fn boundary_60fps_mid_frame0_targets_frame1() {
+        // 1 unit into frame 0 still targets frame 1.
+        let b = next_boundary_100ns(1, 60);
+        assert_eq!(b, UNITS_PER_SECOND / 60);
+    }
+
+    #[test]
+    fn boundary_60fps_last_frame_wraps_to_next_second() {
+        // Inside frame 59 (>= 59/60 s), the next boundary is the next second.
+        let now = 9_900_000; // 0.99 s, within frame 59
+        let b = next_boundary_100ns(now, 60);
+        assert_eq!(b, UNITS_PER_SECOND);
+    }
+
+    #[test]
+    fn boundary_30fps_still_correct() {
+        // 60fps must not break the legacy 30fps pacing.
+        assert_eq!(next_boundary_100ns(0, 30), UNITS_PER_SECOND / 30); // 333_333
+    }
+
+    #[test]
+    fn boundary_60fps_is_denser_than_30fps() {
+        // 60fps boundaries are ~half the spacing of 30fps (twice the density).
+        let s60 = next_boundary_100ns(0, 60);
+        let s30 = next_boundary_100ns(0, 30);
+        assert!(s60 < s30);
+        assert!((s30 - 2 * s60).abs() <= 2, "s30={s30} s60={s60}");
+    }
+
+    #[test]
+    fn boundary_zero_fps_is_noop() {
+        assert_eq!(next_boundary_100ns(12_345, 0), 12_345);
+    }
 
     #[test]
     fn test_yuyv_to_uyvy_scalar_basic() {

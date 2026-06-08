@@ -40,6 +40,20 @@ impl Default for FrameRate {
     }
 }
 
+/// Derive a frame rate (fps) from a V4L2 capture interval.
+///
+/// V4L2 expresses the capture interval as a PERIOD — seconds per frame
+/// (`numerator/denominator` s). Frames-per-second is the reciprocal, so a
+/// `1/60` interval is 60 fps and a `1001/60000` interval is 59.94 fps. A zero
+/// numerator or denominator means the device reported no usable interval and
+/// falls back to the NTSC-safe default. Deriving the rate from the negotiated
+/// interval (instead of hard-coding it) keeps the NDI-advertised rate and the
+/// genlock pacing honest about what the capture device actually delivers.
+pub fn frame_rate_from_interval(_interval_numerator: u32, _interval_denominator: u32) -> FrameRate {
+    // STUB — real body lands in the GREEN commit.
+    FrameRate::default()
+}
+
 /// V4L2 video capture wrapper
 pub struct VideoCapture {
     stream: Stream<'static>,
@@ -191,6 +205,40 @@ impl VideoCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_rate_from_interval_60fps() {
+        // 1080p60: V4L2 interval 1/60 s/frame -> 60 fps.
+        let r = frame_rate_from_interval(1, 60);
+        assert_eq!(r.numerator, 60);
+        assert_eq!(r.denominator, 1);
+        let fps = r.numerator as f64 / r.denominator as f64;
+        assert!((fps - 60.0).abs() < 1e-9, "expected 60 fps, got {fps}");
+    }
+
+    #[test]
+    fn frame_rate_from_interval_30fps() {
+        // Legacy 30 fps interval still derives correctly.
+        let r = frame_rate_from_interval(1, 30);
+        assert_eq!(r.numerator, 30);
+        assert_eq!(r.denominator, 1);
+    }
+
+    #[test]
+    fn frame_rate_from_interval_5994fps() {
+        // NTSC 59.94: interval 1001/60000 s/frame.
+        let r = frame_rate_from_interval(1001, 60000);
+        let fps = r.numerator as f64 / r.denominator as f64;
+        assert!((fps - 59.94).abs() < 0.01, "expected 59.94 fps, got {fps}");
+    }
+
+    #[test]
+    fn frame_rate_from_interval_invalid_falls_back() {
+        // A zero numerator/denominator is not a usable interval -> default.
+        assert_eq!(frame_rate_from_interval(0, 0).numerator, 30000);
+        assert_eq!(frame_rate_from_interval(1, 0).denominator, 1001);
+        assert_eq!(frame_rate_from_interval(0, 60).numerator, 30000);
+    }
 
     #[test]
     fn test_frame_rate_default() {
