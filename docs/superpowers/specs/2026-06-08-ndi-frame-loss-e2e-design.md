@@ -247,14 +247,14 @@ fits a low-version high-EC QR that survives 4:2:2 subsampling and scaling.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| Capture rate | 30 fps | ShadowCast / camera-box native |
-| Coverage paint rate | 12 fps | each ID displayed ~83 ms (≥2.5 capture periods) → ≥2 samples/ID, ≥1 always tear-free |
-| Full-rate paint rate | 30 fps | production stress |
-| Run length | 5 min (~9,000 frames) | parametrized (smoke / soak presets) |
+| Capture rate | 60 fps (1080p60) | ShadowCast 2 / camera-box native (YUYV 1920×1080@60; see §15.2) |
+| Coverage paint rate | 12 fps | each ID displayed ~83 ms (~5 capture periods at 60 fps) → ≥2 samples/ID, ≥1 always tear-free |
+| Full-rate paint rate | = capture rate (60 fps) | production stress at the real rate |
+| Run length | 5 min (~18,000 frames @60) | parametrized (smoke / soak presets) |
 | QR EC level | H (30%) | survives subsample + scale |
 | Freeze detection | > 6 capture periods (`--freeze-periods`) | populates the freeze list |
 | Loss gate | 0 (coverage mode) | hard fail on any real loss/reorder |
-| Latency gate | `--max-p99-latency-ms 250` (rig default) | hard fail if p99 > bound; `None` ⇒ off (see §15.1) |
+| Latency gate | `--max-p99-latency-ms 350` (rig default, 1080p60) | hard fail if p99 > bound; `None` ⇒ off (see §15.1/§15.2) |
 | Freeze gate | `--max-freeze-periods 6` (rig default) | hard fail if a stall repeats > N frames; `None` ⇒ off (see §15.1) |
 
 ## 15. Phase-1 implementation outcome (2026-06-08)
@@ -325,5 +325,52 @@ p99 = 157 ms, max = 190 ms ⇒ `MAX_P99_MS=250` (≈1.6× p99 margin so jitter d
 flake), `MAX_FREEZE_PERIODS=6` (the detection threshold — any genuine multi-period
 stall fails). These are tuned to the cam2 / ShadowCast 2 rig; **re-baseline and
 retune when the capture dongle, cabling, device, or fps changes** (USB capture
-dominates the latency). The current baseline run still PASSES against these bounds
-(p99 157 ms < 250 ms, 0 freezes).
+dominates the latency). The Phase-1 30fps baseline run PASSED against the original
+250 ms bound (p99 157 ms, 0 freezes); the bound was re-baselined to 350 ms when the
+pipeline moved to 1080p60 — see §15.2.
+
+### 15.2 Pipeline enablement: 1080p60 (issue #11, 2026-06-09)
+
+#11 sets the **terminal quality bar at 60 fps** end-to-end. The first, hardware-
+de-risked slice — the camera-box capture/genlock/NDI pipeline running at 1080p**60**
+— is implemented and verified on cam2 here (`Refs #11`, not a close: the full bar
+also needs the OBS hops + full-path cert, tracked below).
+
+- **Hardware finding (the gating unknown, now resolved).** `v4l2-ctl --list-formats-ext`
+  on cam2 shows the GENKI ShadowCast 2 exposes **`YUYV 1920×1080 @ 60.000 fps`
+  natively** (uncompressed, USB3). The issue's feared fallback ("YUYV 1080p60 ≈ 2.7
+  Gb/s may force MJPG, changing the QR-decode path") does **not** apply — the QR/
+  decode path is unchanged.
+- **Single-source fps.** `capture.rs` now requests V4L2 interval `1/60` and derives
+  the `FrameRate` from the rate the driver **negotiates** (`frame_rate_from_interval`)
+  instead of the old hard-coded `30`. That rate flows unchanged through
+  `NdiSender` → genlock pacing → the NDI-advertised frame rate, so there is no
+  hard-coded 30 left in the pipeline. Resolution stays FullHD (1920×1080).
+- **Genlock.** `wait_for_next_boundary_100ns(fps)` was already fps-parameterized; the
+  pure boundary math is split into `next_boundary_100ns` and unit-tested at 60 fps
+  (16.667 ms boundaries) and 30 fps.
+- **Harness.** `loopback-e2e.sh` adds `CAPTURE_FPS` (default 60) and passes
+  `--capture-fps`; `frame-probe` defaults `--capture-fps 60` and full-rate paint
+  follows the capture rate.
+
+**Measured 1080p60 baseline (cam2, 2026-06-09):**
+
+| Run | Result | Frames | missing | reorders | freezes | latency mean / p50 / p95 / p99 / max (ms) |
+|---|---|---|---|---|---|---|
+| Coverage 180 s @12 fps paint, 60 fps capture | **PASS** (report-only latency) | 2158 ids | 0 | 0 | 0 | 246.8 / 246.7 / 266.7 / 280.4 / 290.3 |
+
+Zero loss at sustained 1080p60. Latency is ~2× the 30fps loopback (p99 280 vs 157 ms)
+but **stable and bounded** (max only ~10 ms over p99) — a deeper single-box loopback
+pipeline (ShadowCast dongle + V4L2 4-buffer queue + NDI roundtrip), **not** CPU
+starvation: the box was **50 % idle** (load 1.97 / 3 cores) during the run, zero loss.
+⇒ re-baselined `MAX_P99_MS = 350` (≈1.25× p99 / 1.2× max margin), freeze gate kept at
+6 (at 60 fps capture / 12 fps paint a legit ID repeats ~5× < 6).
+
+**Remaining for the full #11 bar (tracked on dependencies, NOT in this slice):**
+
+- OBS strih + stream pipelines at 60 fps (production reconfig — needs separate approval).
+- Single-frame zero-loss certification at 60 fps across the full path — the Phase-2
+  differencing taps (#6) + the Phase-3 full-path gate (#7).
+- A CI/regression gate asserting the 60 fps bar — needs the self-hosted runner (#9).
+- Deploying the 1080p60 binary to live cam1/3/4 (separate deploy approval; merge ≠ deploy).
+- Cross-node latency at 60 fps depends on clock sync (#8).

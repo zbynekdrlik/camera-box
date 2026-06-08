@@ -26,10 +26,13 @@ SETTLE_MS="${SETTLE_MS:-500}"          # must exceed observed max latency
 # 12 fps coverage paint is ~5x oversampled (>= 2 samples/id required).
 CAPTURE_FPS="${CAPTURE_FPS:-60}"
 # Hard latency/freeze gates (spec §15). Defaults are RIG-SPECIFIC — derived from
-# the cam2 2026-06-08 baseline (coverage p99 157 ms, max 190 ms; ShadowCast 2 USB
-# capture dominates) with margin so normal jitter does not flake. RE-BASELINE
-# when the capture dongle / cabling / device / fps changes.
-MAX_P99_MS="${MAX_P99_MS:-250}"            # fail if p99 latency > this
+# the cam2 1080p60 baseline (2026-06-08, 180s coverage: p99 280 ms, max 290 ms,
+# zero loss; ShadowCast 2 USB capture + V4L2 4-buffer queue + NDI roundtrip
+# dominate the single-box loopback path) with ~1.25x margin so normal jitter
+# does not flake. The 60fps loopback latency is ~2x the old 30fps baseline
+# (p99 157 ms) — a deeper but stable pipeline, NOT CPU starvation (box was 50%
+# idle). RE-BASELINE when the capture dongle / cabling / device / fps changes.
+MAX_P99_MS="${MAX_P99_MS:-350}"            # fail if p99 latency > this (1080p60)
 MAX_FREEZE_PERIODS="${MAX_FREEZE_PERIODS:-6}"  # fail if a stall repeats > this many frames
 LOCAL_OUT="${LOCAL_OUT:-./frame-probe-${MODE}.json}"
 REMOTE_BIN="/tmp/frame-probe"
