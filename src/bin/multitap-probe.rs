@@ -84,7 +84,10 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     if args.taps.len() < 2 {
-        bail!("need >= 2 taps to difference at least one hop (got {})", args.taps.len());
+        bail!(
+            "need >= 2 taps to difference at least one hop (got {})",
+            args.taps.len()
+        );
     }
     if args.settle_ms >= args.duration_secs.saturating_mul(1000) {
         bail!(
@@ -165,7 +168,11 @@ fn main() -> Result<()> {
         .zip(&trimmed)
         .map(|(r, obs)| TapSummary {
             name: r.name.clone(),
-            unique_frames: obs.iter().map(|o| o.frame_id).collect::<std::collections::HashSet<_>>().len(),
+            unique_frames: obs
+                .iter()
+                .map(|o| o.frame_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
         })
         .collect();
 
@@ -200,7 +207,11 @@ fn main() -> Result<()> {
             );
         }
     }
-    println!("VERDICT={} ARTIFACT={}", if verdict_pass { "PASS" } else { "FAIL" }, args.out);
+    println!(
+        "VERDICT={} ARTIFACT={}",
+        if verdict_pass { "PASS" } else { "FAIL" },
+        args.out
+    );
 
     if verdict_pass {
         Ok(())

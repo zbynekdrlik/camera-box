@@ -105,7 +105,11 @@ mod tests {
     use super::*;
 
     fn o(frame_id: u32, recv_ms: i64) -> Observed {
-        Observed { frame_id, gen_ts_ns: 0, recv_ts_ns: recv_ms * 1_000_000 }
+        Observed {
+            frame_id,
+            gen_ts_ns: 0,
+            recv_ts_ns: recv_ms * 1_000_000,
+        }
     }
 
     fn input<'a>(up: &'a [Observed], down: &'a [Observed]) -> HopInput<'a> {
@@ -196,8 +200,18 @@ mod tests {
     fn startup_skew_before_downstream_first_id_is_not_a_drop() {
         // Downstream tap (OBS-forwarded) connected late: it never saw ids 0..4.
         // Those are start skew, not drops — only ids within [5, 9] are judged.
-        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3), o(4, 4),
-                      o(5, 5), o(6, 6), o(7, 7), o(8, 8), o(9, 9)];
+        let up = vec![
+            o(0, 0),
+            o(1, 1),
+            o(2, 2),
+            o(3, 3),
+            o(4, 4),
+            o(5, 5),
+            o(6, 6),
+            o(7, 7),
+            o(8, 8),
+            o(9, 9),
+        ];
         let down = vec![o(5, 15), o(6, 16), o(7, 17), o(8, 18), o(9, 19)];
         let r = diff_hop(input(&up, &down));
         assert!(r.dropped_ids.is_empty());
@@ -207,8 +221,18 @@ mod tests {
     #[test]
     fn shutdown_skew_after_downstream_last_id_is_not_a_drop() {
         // Downstream stopped at id 5 (in-flight tail); ids 6..9 are end skew.
-        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3), o(4, 4), o(5, 5),
-                      o(6, 6), o(7, 7), o(8, 8), o(9, 9)];
+        let up = vec![
+            o(0, 0),
+            o(1, 1),
+            o(2, 2),
+            o(3, 3),
+            o(4, 4),
+            o(5, 5),
+            o(6, 6),
+            o(7, 7),
+            o(8, 8),
+            o(9, 9),
+        ];
         let down = vec![o(0, 10), o(1, 11), o(2, 12), o(3, 13), o(4, 14), o(5, 15)];
         let r = diff_hop(input(&up, &down));
         assert!(r.dropped_ids.is_empty());
@@ -219,8 +243,18 @@ mod tests {
     fn real_drop_inside_active_span_still_fails() {
         // Skew at both ends (down starts at 2, ends at 8) AND a genuine drop of
         // id 5 in the middle. The skew is excluded; the real drop is caught.
-        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3), o(4, 4), o(5, 5),
-                      o(6, 6), o(7, 7), o(8, 8), o(9, 9)];
+        let up = vec![
+            o(0, 0),
+            o(1, 1),
+            o(2, 2),
+            o(3, 3),
+            o(4, 4),
+            o(5, 5),
+            o(6, 6),
+            o(7, 7),
+            o(8, 8),
+            o(9, 9),
+        ];
         let down = vec![o(2, 12), o(3, 13), o(4, 14), o(6, 16), o(7, 17), o(8, 18)];
         let r = diff_hop(input(&up, &down));
         assert_eq!(r.dropped_ids, vec![5]);
@@ -232,8 +266,24 @@ mod tests {
         // Pins the inclusive bounds: ids equal to lo (2) and hi (8) that are
         // present downstream are not drops; the `>= lo` / `<= hi` comparisons
         // must stay inclusive (kills boundary mutants).
-        let up = vec![o(2, 2), o(3, 3), o(4, 4), o(5, 5), o(6, 6), o(7, 7), o(8, 8)];
-        let down = vec![o(2, 12), o(3, 13), o(4, 14), o(5, 15), o(6, 16), o(7, 17), o(8, 18)];
+        let up = vec![
+            o(2, 2),
+            o(3, 3),
+            o(4, 4),
+            o(5, 5),
+            o(6, 6),
+            o(7, 7),
+            o(8, 8),
+        ];
+        let down = vec![
+            o(2, 12),
+            o(3, 13),
+            o(4, 14),
+            o(5, 15),
+            o(6, 16),
+            o(7, 17),
+            o(8, 18),
+        ];
         let r = diff_hop(input(&up, &down));
         assert!(r.dropped_ids.is_empty());
         assert!(r.pass);

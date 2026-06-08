@@ -308,7 +308,11 @@ mod tests {
         // id 1 repeats 5x (> 3) at 30 fps -> one freeze, 5*33.333ms.
         let obs = vec![
             obs(0, 0, 1),
-            obs(1, 0, 2), obs(1, 0, 3), obs(1, 0, 4), obs(1, 0, 5), obs(1, 0, 6),
+            obs(1, 0, 2),
+            obs(1, 0, 3),
+            obs(1, 0, 4),
+            obs(1, 0, 5),
+            obs(1, 0, 6),
             obs(2, 0, 7),
         ];
         let f = detect_freezes(&obs, 30.0, 3.0);
