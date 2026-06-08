@@ -103,8 +103,6 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
 /// camera box in Phase 2, where the QR reaches NDI via camera-box's own
 /// capture→NDI path and the taps run elsewhere (dev1).
 pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
-    use crate::probe::painter::{run_painter, PaintParams};
-
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64)>>> = Arc::new(Mutex::new(Vec::new()));
