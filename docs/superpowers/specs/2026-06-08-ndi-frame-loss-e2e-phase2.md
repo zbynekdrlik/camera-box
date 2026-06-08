@@ -194,3 +194,41 @@ New feature → minor bump on `dev` to `1.7.0-dev.1` as the FIRST implementation
 - Reused code: `src/probe/{payload,qr,luma,analyzer}.rs`, `src/probe/reader.rs` (generalized),
   `src/ndi.rs::NdiReceiver`, `scripts/loopback-e2e.sh` (orchestration template).
 - Clock/OBS-timestamp context: `distroav-issue-response.md`, `distroav-timestamp-fix.patch`.
+
+## 11. Live bring-up findings (2026-06-08)
+
+Discovered while running the harness against the real boxes; the orchestration and the
+differ were corrected to match reality.
+
+### 11.1 Real OBS / DistroAV vocab (corrected from §5.6 assumptions)
+
+The production OBS (32.0.4, obs-websocket 5.6.3, DistroAV) does NOT use `distroav_*`
+identifiers:
+- NDI source **input kind** is `ndi_source`; the source-name field is **`ndi_source_name`**.
+- The program is re-emitted by an output named **`NDI Main Output`** (kind `ndi_output`),
+  configured with an `ndi_name` (e.g. strih advertises **`2ME PGM`**). The harness does NOT
+  create this output — `scripts/obs_phase2.py` reads its `ndi_name` to know what to tap, and
+  fails loudly if the Main Output is not enabled on a host. The tap names are therefore
+  **discovered at setup**, not hardcoded.
+
+### 11.2 Tap connect/disconnect skew → differ span-bounding
+
+The two taps establish their NDI receive at different times — the OBS-forwarded tap connects
+seconds after the direct camera tap. The first live cam→strih run flagged a contiguous block
+of leading ids (seen by the direct tap before the OBS tap connected) plus an in-flight trailing
+pair as false "drops". Fixed in `differ.rs`: a frame counts as dropped only within the
+downstream tap's **active id span `[first, last]`** — the id-granular complement to the trailing
+settle-window. A real mid-stream drop still lies inside the span and still fails (unit-tested:
+`startup_skew_*`, `shutdown_skew_*`, `real_drop_inside_active_span_still_fails`,
+`drop_exactly_at_span_boundaries_is_excluded`).
+
+### 11.3 Verification status
+
+- **cam→strih hop: VERIFIED.** 60 s coverage run, run_id 461179597 → 715 frames at both taps,
+  **0 dropped, 0 reorders, 0 freezes, PASS**; per-hop relative latency mean 141 ms / p95 144 ms
+  / max 153 ms (single-clock on dev1). FAIL→fix→PASS confirmed the span-bounding fix.
+- **strih→stream hop: PENDING a prerequisite.** stream's OBS has no `NDI Main Output` enabled
+  (its program is not re-emitted as NDI), so there is nothing to tap for the second hop. Enabling
+  the DistroAV NDI Main Output on stream is a one-time persistent OBS config (Tools menu); once
+  enabled, `scripts/multitap-e2e.sh` covers both hops unchanged. Tracked as the remaining
+  acceptance for #6.
