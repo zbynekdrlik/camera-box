@@ -215,6 +215,20 @@ identifiers:
   create this output — `scripts/obs_phase2.py` reads its `ndi_name` to know what to tap, and
   fails loudly if the Main Output is not enabled on a host. The tap names are therefore
   **discovered at setup**, not hardcoded.
+- **Full vs bare NDI names.** OBS `ndi_source` ingest matches the FULL `MACHINE (name)` network
+  name, but a Main Output's `ndi_name` is bare (`2ME PGM`); ingesting the bare name connects to
+  nothing. A *downstream* box may not even list an upstream OBS output in its own DistroAV
+  discovery. So `obs_phase2.py` resolves each output's full name on the box that PRODUCES it
+  (its own list always contains it) via `GetInputPropertiesListPropertyItems`, and prints the
+  full name for the next hop / the dev1 tap.
+
+### 11.1a OBS crash on teardown (root-caused + fixed)
+
+Removing an `ndi_source` input while it is actively receiving the 1080p feed faults the NDI
+runtime (`processing.ndi.lib.x64.dll`, unhandled `e06d7363`) and crashes OBS — reproduced
+twice on `stream`. Fixed in `obs_phase2.py` teardown: clear `ndi_source_name` (disconnect the
+receiver) and settle ~1.5 s **before** `RemoveInput`. Validated: a full two-hop run with an
+active stream receiver tore down with **0 crashes**.
 
 ### 11.2 Tap connect/disconnect skew → differ span-bounding
 
@@ -227,13 +241,20 @@ settle-window. A real mid-stream drop still lies inside the span and still fails
 `startup_skew_*`, `shutdown_skew_*`, `real_drop_inside_active_span_still_fails`,
 `drop_exactly_at_span_boundaries_is_excluded`).
 
-### 11.3 Verification status
+### 11.3 Verification status — BOTH hops VERIFIED
 
-- **cam→strih hop: VERIFIED.** 60 s coverage run, run_id 461179597 → 715 frames at both taps,
-  **0 dropped, 0 reorders, 0 freezes, PASS**; per-hop relative latency mean 141 ms / p95 144 ms
-  / max 153 ms (single-clock on dev1). FAIL→fix→PASS confirmed the span-bounding fix.
-- **strih→stream hop: PENDING a prerequisite.** stream's OBS has no `NDI Main Output` enabled
-  (its program is not re-emitted as NDI), so there is nothing to tap for the second hop. Enabling
-  the DistroAV NDI Main Output on stream is a one-time persistent OBS config (Tools menu); once
-  enabled, `scripts/multitap-e2e.sh` covers both hops unchanged. Tracked as the remaining
-  acceptance for #6.
+A single 60 s coverage two-hop run (`scripts/multitap-e2e.sh`) with both OBS NDI Main Outputs
+enabled, after the full-name resolution + crash-safe teardown fixes:
+
+- **cam→strih hop: PASS** — 714/715 unique at the taps, **0 dropped, 0 reorders, 0 freezes**;
+  per-hop relative latency mean 109 ms / p95 114 ms / max 125 ms (single-clock on dev1).
+- **strih→stream hop: PASS** — 715/714 unique, **0 dropped, 0 reorders, 0 freezes**; per-hop
+  relative latency mean 190 ms / p95 200 ms / max 261 ms. The strih→stream OBS hop adds ~80 ms
+  over cam→strih.
+- Both hops in one JSON artifact; overall **VERDICT=PASS**. Production state restored on cam2 +
+  strih + stream; **0 OBS crashes**.
+
+An earlier strih→stream run showed ~39 % loss + ~2 s latency — that was a setup artifact
+(freshly-launched, still-stabilising stream OBS + a wrong/hardcoded ingest name), not a pipeline
+defect; the clean run above is the authoritative result. Absolute cross-machine (glass-to-glass)
+latency remains UNAVAILABLE pending cluster clock sync (#8).
