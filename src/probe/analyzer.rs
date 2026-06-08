@@ -170,12 +170,21 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
 
     // A coverage PASS requires that we actually tested frames: an empty emitted
     // set (e.g. settle window >= run duration) must FAIL, never pass vacuously.
-    let verdict_pass = match input.mode {
+    let base_pass = match input.mode {
         PaintMode::Coverage => {
             !emitted_set.is_empty() && missing_ids.is_empty() && reorders.is_empty()
         }
         PaintMode::FullRate => reorders.is_empty(),
     };
+    // Latency/freeze hard gates apply to BOTH modes: full-rate loss is
+    // report-only, but a latency or freeze regression there still fails the run.
+    let verdict_pass = base_pass
+        && latency_freeze_gate_pass(
+            &latency,
+            &freezes,
+            input.max_p99_latency_ms,
+            input.max_freeze_periods_gate,
+        );
 
     AnalysisReport {
         mode: input.mode,
@@ -490,6 +499,39 @@ mod tests {
         ));
         assert_eq!(r.freezes[0].repeat_count, 5);
         assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn freeze_gate_fails_when_any_one_run_exceeds() {
+        // Two freezes (id1 x5, id3 x8); gate 6 -> 8 > 6 -> FAIL even though x5
+        // is under. Proves the gate trips on ANY over-bound run, not all.
+        let observed = vec![
+            obs(0, 0, 1),
+            obs(1, 0, 1),
+            obs(1, 0, 1),
+            obs(1, 0, 1),
+            obs(1, 0, 1),
+            obs(1, 0, 1),
+            obs(2, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(3, 0, 1),
+            obs(4, 0, 1),
+        ];
+        let r = analyze(input_gated(
+            PaintMode::Coverage,
+            vec![0, 1, 2, 3, 4],
+            observed,
+            None,
+            Some(6.0),
+        ));
+        assert_eq!(r.freezes.len(), 2);
+        assert!(!r.verdict_pass);
     }
 
     #[test]

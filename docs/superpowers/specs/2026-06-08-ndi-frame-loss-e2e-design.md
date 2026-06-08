@@ -252,9 +252,10 @@ fits a low-version high-EC QR that survives 4:2:2 subsampling and scaling.
 | Full-rate paint rate | 30 fps | production stress |
 | Run length | 5 min (~9,000 frames) | parametrized (smoke / soak presets) |
 | QR EC level | H (30%) | survives subsample + scale |
-| Freeze threshold | > 3 capture periods | reported in Phase 1, gated later |
+| Freeze detection | > 6 capture periods (`--freeze-periods`) | populates the freeze list |
 | Loss gate | 0 (coverage mode) | hard fail on any real loss/reorder |
-| Latency gate | none (report only) | ratchet a bound in after baseline |
+| Latency gate | `--max-p99-latency-ms 250` (rig default) | hard fail if p99 > bound; `None` ⇒ off (see §15.1) |
+| Freeze gate | `--max-freeze-periods 6` (rig default) | hard fail if a stall repeats > N frames; `None` ⇒ off (see §15.1) |
 
 ## 15. Phase-1 implementation outcome (2026-06-08)
 
@@ -302,3 +303,27 @@ async resample that adds dups/skips by beat. So:
 
 End-to-end latency ~112–122 ms is dominated by the GENKI ShadowCast 2 USB capture
 dongle. A hard latency/freeze bound can now be ratcheted in from these numbers.
+
+### 15.1 Hard latency + freeze gate (issue #10, 2026-06-08)
+
+The latency/freeze "ratchet after baseline" deferred in §9/§14 is now closed. The
+analyzer verdict gates on two **optional** bounds (`None` ⇒ report-only, the
+Phase-1 default — so nothing changes until thresholds are passed):
+
+- `AnalysisInput.max_p99_latency_ms` — FAIL if `latency.p99_ms` exceeds it.
+- `AnalysisInput.max_freeze_periods_gate` — FAIL if any detected freeze's
+  `repeat_count` exceeds it (distinct from `freeze_periods`, which only *detects*).
+
+Both use strict `>` (a value exactly at the bound passes) and apply to **both**
+modes: full-rate loss stays report-only, but a latency or freeze regression there
+still fails the run. `frame-probe` exposes `--max-p99-latency-ms` /
+`--max-freeze-periods`; `scripts/loopback-e2e.sh` ships them via `MAX_P99_MS` /
+`MAX_FREEZE_PERIODS` env overrides.
+
+**Default thresholds (RIG-SPECIFIC — derived from the table above):** coverage
+p99 = 157 ms, max = 190 ms ⇒ `MAX_P99_MS=250` (≈1.6× p99 margin so jitter does not
+flake), `MAX_FREEZE_PERIODS=6` (the detection threshold — any genuine multi-period
+stall fails). These are tuned to the cam2 / ShadowCast 2 rig; **re-baseline and
+retune when the capture dongle, cabling, device, or fps changes** (USB capture
+dominates the latency). The current baseline run still PASSES against these bounds
+(p99 157 ms < 250 ms, 0 freezes).
