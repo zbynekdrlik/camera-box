@@ -134,9 +134,11 @@ struct TapSummary {
     captured: u64,
     /// Raw frames whose QR decoded with a matching run_id (includes oversample
     /// duplicates of the same id). `captured - decoded` is this tap's
-    /// QR-decode-failure floor — frames that ARRIVED but tore. Comparing a
-    /// downstream tap's `captured` against the upstream tap's output proves
-    /// whether id-level `dropped_ids` is true hop loss or just tap decode tears.
+    /// decode-miss floor — frames that ARRIVED but did not yield a matching-run_id
+    /// QR: torn/un-decodable, or (≈0 in a single-run probe) a QR from a different
+    /// run_id. Comparing a downstream tap's `captured` against the upstream tap's
+    /// output proves whether id-level `dropped_ids` is true hop loss or just tap
+    /// decode misses.
     decoded: u64,
 }
 

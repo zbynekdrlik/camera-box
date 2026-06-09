@@ -27,11 +27,12 @@ pub struct TapResult {
     pub name: String,
     pub observed: Arc<Mutex<Vec<Observed>>>,
     /// Every NDI frame this tap pulled off the wire, decoded or not. `captured`
-    /// minus the run_id-matching decoded count is the tap's QR-decode-failure
-    /// floor — frames that physically ARRIVED but whose QR was torn by NDI
-    /// compression/resample. Without this, a torn frame is indistinguishable
-    /// from a frame the hop genuinely dropped, so the differ's `dropped_ids`
-    /// would over-report loss. Capture-count parity across a hop proves the hop
+    /// minus the run_id-matching decoded count is the tap's decode-miss floor —
+    /// frames that physically ARRIVED but did not yield a matching-run_id QR:
+    /// torn by NDI compression/resample, or (≈0 in a single-run probe) a QR from
+    /// a different run_id. Without this, a torn frame is indistinguishable from a
+    /// frame the hop genuinely dropped, so the differ's `dropped_ids` would
+    /// over-report loss. Capture-count parity across a hop proves the hop
     /// delivered every frame even when some ids fail to decode at the tap.
     pub captured: Arc<AtomicU64>,
 }
