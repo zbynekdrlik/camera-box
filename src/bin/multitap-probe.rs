@@ -46,6 +46,18 @@ struct Args {
     /// A tap with fewer than this many run_id-matching frames FAILS (not vacuous).
     #[arg(long, default_value_t = 100)]
     min_frames: usize,
+    /// Per-hop latency gate as DOWNSTREAM_TAP=MS (repeat per hop, e.g.
+    /// `--max-p99-latency-ms strih=130 --max-p99-latency-ms stream=220`). The hop
+    /// feeding tap X FAILs if its relative-latency p99 exceeds X's bound (strict
+    /// `>`). An omitted hop is report-only — the Phase-2 default. Bounds are
+    /// rig-specific; baseline with a report-only run first, then ratchet.
+    #[arg(long = "max-p99-latency-ms", value_parser = parse_bound)]
+    max_p99_latency_ms: Vec<(String, f64)>,
+    /// Per-hop freeze gate as DOWNSTREAM_TAP=PERIODS (repeat per hop). The hop
+    /// feeding tap X FAILs if any freeze's repeat_count exceeds X's bound (strict
+    /// `>`). An omitted hop is report-only (default).
+    #[arg(long = "max-freeze-periods", value_parser = parse_bound)]
+    max_freeze_periods: Vec<(String, f64)>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -57,6 +69,18 @@ fn parse_tap(s: &str) -> Result<(String, String), String> {
             Ok((name.to_string(), src.to_string()))
         }
         _ => Err(format!("tap must be NAME=NDI_SOURCE (got '{s}')")),
+    }
+}
+
+/// Parse a per-hop bound `DOWNSTREAM_TAP=VALUE` (value is the latency-ms or
+/// freeze-periods threshold for the hop feeding that tap).
+fn parse_bound(s: &str) -> Result<(String, f64), String> {
+    match s.split_once('=') {
+        Some((name, val)) if !name.is_empty() => val
+            .parse::<f64>()
+            .map(|v| (name.to_string(), v))
+            .map_err(|e| format!("bound value must be a number (got '{val}': {e})")),
+        _ => Err(format!("bound must be DOWNSTREAM_TAP=VALUE (got '{s}')")),
     }
 }
 
@@ -150,10 +174,18 @@ fn main() -> Result<()> {
         })
         .collect();
 
+    // Per-hop gate bounds, keyed by the hop's DOWNSTREAM tap name (the tap the
+    // hop feeds). Absent ⇒ None ⇒ report-only.
+    let p99_bounds: std::collections::HashMap<String, f64> =
+        args.max_p99_latency_ms.iter().cloned().collect();
+    let freeze_bounds: std::collections::HashMap<String, f64> =
+        args.max_freeze_periods.iter().cloned().collect();
+
     // Difference each adjacent pair.
     let mut hops: Vec<HopReport> = Vec::new();
     for i in 0..trimmed.len() - 1 {
-        let name = format!("{}→{}", results[i].name, results[i + 1].name);
+        let down_name = results[i + 1].name.clone();
+        let name = format!("{}→{}", results[i].name, down_name);
         hops.push(diff_hop(HopInput {
             name,
             upstream: &trimmed[i],
@@ -161,8 +193,8 @@ fn main() -> Result<()> {
             capture_fps: args.capture_fps,
             freeze_periods: args.freeze_periods,
             min_frames: args.min_frames,
-            max_p99_latency_ms: None,
-            max_freeze_periods_gate: None,
+            max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
+            max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
         }));
     }
 

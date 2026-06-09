@@ -63,6 +63,17 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
 
 echo "[4/5] dev1 taps (run_id=$RUN_ID, ${DURATION}s)"
 sleep 6  # let OBS NDI outputs become discoverable + the chain stabilise
+
+# Per-hop latency/freeze gate bounds — report-only unless set (#23). Keyed by the
+# DOWNSTREAM tap of each hop: 'strih' = cam→strih, 'stream' = strih→stream.
+# Baseline first with a report-only run, then ratchet. Rig-specific p99 baselines
+# (spec 11.3): cam→strih ~109 ms, strih→stream ~190 ms. Leave unset to disable.
+GATE_ARGS=()
+[ -n "${MAX_P99_STRIH:-}" ]    && GATE_ARGS+=(--max-p99-latency-ms "strih=$MAX_P99_STRIH")
+[ -n "${MAX_P99_STREAM:-}" ]   && GATE_ARGS+=(--max-p99-latency-ms "stream=$MAX_P99_STREAM")
+[ -n "${MAX_FREEZE_STRIH:-}" ]  && GATE_ARGS+=(--max-freeze-periods "strih=$MAX_FREEZE_STRIH")
+[ -n "${MAX_FREEZE_STREAM:-}" ] && GATE_ARGS+=(--max-freeze-periods "stream=$MAX_FREEZE_STREAM")
+
 # A failing per-hop gate is multitap-probe exiting 1 — its designed FAIL signal.
 # Capture it without `set -e` aborting before the artifact dump (the failure case
 # is exactly when we want the JSON shown), then propagate the code as the exit.
@@ -72,6 +83,7 @@ if ./target/release/multitap-probe \
   --tap strih="$STRIH_OUT" \
   --tap stream="$STREAM_OUT" \
   --duration-secs "$DURATION" \
+  ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
   --out "$OUT"; then
   GATE=0
 else
