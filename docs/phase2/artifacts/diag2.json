@@ -1,0 +1,64 @@
+{
+  "run_id": 43001073,
+  "duration_secs": 120,
+  "taps": [
+    {
+      "name": "cam",
+      "unique_frames": 1433,
+      "captured": 3937,
+      "decoded": 3937
+    },
+    {
+      "name": "strih",
+      "unique_frames": 1434,
+      "captured": 3599,
+      "decoded": 3599
+    },
+    {
+      "name": "stream",
+      "unique_frames": 1434,
+      "captured": 3598,
+      "decoded": 3598
+    }
+  ],
+  "hops": [
+    {
+      "name": "cam→strih",
+      "upstream_unique": 1433,
+      "downstream_unique": 1434,
+      "dropped_ids": [],
+      "reorders": [],
+      "freezes": [],
+      "latency": {
+        "samples": 1433,
+        "min_ms": -112.012699,
+        "mean_ms": -37.778909324494045,
+        "p50_ms": -46.81096,
+        "p95_ms": 37.845113,
+        "p99_ms": 69.393878,
+        "max_ms": 130.003277
+      },
+      "pass": true
+    },
+    {
+      "name": "strih→stream",
+      "upstream_unique": 1434,
+      "downstream_unique": 1434,
+      "dropped_ids": [],
+      "reorders": [],
+      "freezes": [],
+      "latency": {
+        "samples": 1431,
+        "min_ms": 18.056342,
+        "mean_ms": 187.5497754276729,
+        "p50_ms": 188.666432,
+        "p95_ms": 238.477294,
+        "p99_ms": 285.044924,
+        "max_ms": 332.991716
+      },
+      "pass": true
+    }
+  ],
+  "absolute_latency": "UNAVAILABLE — clock not synced (Phase 3 / #8)",
+  "verdict_pass": true
+}

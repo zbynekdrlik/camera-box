@@ -73,6 +73,21 @@ GATE_ARGS=()
 [ -n "${MAX_P99_STREAM:-}" ]   && GATE_ARGS+=(--max-p99-latency-ms "stream=$MAX_P99_STREAM")
 [ -n "${MAX_FREEZE_STRIH:-}" ]  && GATE_ARGS+=(--max-freeze-periods "strih=$MAX_FREEZE_STRIH")
 [ -n "${MAX_FREEZE_STREAM:-}" ] && GATE_ARGS+=(--max-freeze-periods "stream=$MAX_FREEZE_STREAM")
+
+# Per-hop DOCUMENTED-BOUND loss gate (#21). Both OBS hops drop frames because
+# camera-box, strih OBS and stream OBS each run a free-running 30 fps clock with
+# no genlock — the compositor samples its NDI source on its own render tick and
+# drops ~1-4.5% of source frames (measured; see docs/phase2/strih-stream-baseline.md).
+# This is irreducible until cluster genlock/clock-truth lands (#8 / #7 / #11), so
+# the gate accepts the quantified single-copy (oversample-independent) per-frame
+# loss up to 10% — ~2x the observed ~4.6% ceiling, far below the #14 catastrophe
+# (~39%) — and FAILS on any regression past it. Override per-hop to tighten as the
+# clock work progresses. Set to empty to fall back to strict zero-loss.
+MAX_LOSS_STRIH="${MAX_LOSS_STRIH-10}"
+MAX_LOSS_STREAM="${MAX_LOSS_STREAM-10}"
+[ -n "$MAX_LOSS_STRIH" ]  && GATE_ARGS+=(--max-loss-pct "strih=$MAX_LOSS_STRIH")
+[ -n "$MAX_LOSS_STREAM" ] && GATE_ARGS+=(--max-loss-pct "stream=$MAX_LOSS_STREAM")
+
 # Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
 [ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")
 

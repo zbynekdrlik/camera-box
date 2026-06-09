@@ -1,0 +1,16 @@
+==== 10.77.9.202 ====
+  OBS 32.0.4 / ws 5.6.3
+  STREAMING active=False timecode=00:00:00.000
+  RECORDING active=False
+  program scene = test 2
+  scenes (15): ['test 2', 'Multiview', 'Grading', 'Test', 'CG bridge', 'Ableset', 'Interkom', 'Control', 'Camera info', 'Stream', 'Moderatori', 'Cam 5', 'Cam 3', 'Cam 2', 'Cam 1']
+  RESIDUE scenes=[] inputs=['phase2-probe-src', 'phase2-probe-src-2554143', 'phase2-probe-src-2556093', 'phase2-probe-src-2607771', 'phase2-probe-src-2610428']
+  NDI Main Output ndi_name = 2ME PGM  (err=False)
+==== 10.77.9.204 ====
+  OBS 32.0.4 / ws 5.6.3
+  STREAMING active=False timecode=00:00:00.000
+  RECORDING active=False
+  program scene = test
+  scenes (11): ['party', 'test', 'zaloha', 'ytfast', 'ytslow', 'ytchristmas', 'restream', 'PRO', 'PRO KLAPKA', 'POST', 'PRE']
+  RESIDUE scenes=[] inputs=['phase2-probe-src-2620678', 'phase2-probe-src-2623663']
+  NDI Main Output ndi_name = stream  (err=False)

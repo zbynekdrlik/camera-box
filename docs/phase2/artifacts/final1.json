@@ -1,0 +1,52 @@
+{
+  "run_id": 1909784766,
+  "duration_secs": 180,
+  "taps": [
+    {
+      "name": "cam",
+      "unique_frames": 2146,
+      "captured": 6626,
+      "decoded": 6626
+    },
+    {
+      "name": "strih",
+      "unique_frames": 0,
+      "captured": 5400,
+      "decoded": 0
+    },
+    {
+      "name": "stream",
+      "unique_frames": 0,
+      "captured": 5399,
+      "decoded": 0
+    }
+  ],
+  "hops": [
+    {
+      "name": "cam→strih",
+      "upstream_unique": 2146,
+      "downstream_unique": 0,
+      "dropped_ids": [],
+      "reorders": [],
+      "freezes": [],
+      "latency": null,
+      "single_copy_total": 0,
+      "single_copy_dropped": 0,
+      "pass": false
+    },
+    {
+      "name": "strih→stream",
+      "upstream_unique": 0,
+      "downstream_unique": 0,
+      "dropped_ids": [],
+      "reorders": [],
+      "freezes": [],
+      "latency": null,
+      "single_copy_total": 0,
+      "single_copy_dropped": 0,
+      "pass": false
+    }
+  ],
+  "absolute_latency": "UNAVAILABLE — clock not synced (Phase 3 / #8)",
+  "verdict_pass": false
+}
