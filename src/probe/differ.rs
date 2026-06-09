@@ -217,7 +217,10 @@ mod tests {
         // freeze repeat_count 5, bound 5 → PASS (strict `>`, not `>=`).
         let r = hop_with_freeze(5, Some(5.0));
         assert_eq!(r.freezes[0].repeat_count, 5);
-        assert!(r.pass, "freeze repeat_count 5 == bound 5 must PASS (strict >)");
+        assert!(
+            r.pass,
+            "freeze repeat_count 5 == bound 5 must PASS (strict >)"
+        );
     }
 
     #[test]
