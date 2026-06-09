@@ -357,6 +357,44 @@ mod tests {
     }
 
     #[test]
+    fn loss_pct_bound_passes_when_no_single_copy_frames() {
+        // Every upstream id is oversampled (×2) and delivered → single_copy_total=0.
+        // The documented-bound gate must PASS on 0 loss, NOT divide 0/0 into a NaN
+        // that fails the comparison. Pins `single_copy_total > 0` (not `>= 0`).
+        let up = vec![o(0, 0), o(0, 1), o(1, 2), o(1, 3), o(2, 4), o(2, 5)];
+        let down = vec![o(0, 10), o(1, 12), o(2, 14)];
+        let r = diff_hop(HopInput {
+            name: "strih→stream".to_string(),
+            upstream: &up,
+            downstream: &down,
+            capture_fps: 30.0,
+            freeze_periods: 3.0,
+            min_frames: 2,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: None,
+            max_loss_pct: Some(5.0),
+        });
+        assert_eq!(r.single_copy_total, 0);
+        assert!(
+            r.pass,
+            "no single-copy frames + zero loss under bound must PASS, not NaN-fail"
+        );
+    }
+
+    #[test]
+    fn loss_pct_bound_at_exact_bound_passes() {
+        // 5/100 single-copy frames dropped = exactly 5.0%; bound 5.0 → PASS
+        // (strict `<=`, not `<`). Pins the bound comparison boundary.
+        let r = hop_single_copy(100, 5, Some(5.0));
+        assert_eq!(r.single_copy_dropped, 5);
+        assert_eq!(r.single_copy_total, 100);
+        assert!(
+            r.pass,
+            "single-copy loss exactly at the bound must PASS (<=)"
+        );
+    }
+
+    #[test]
     fn clean_hop_passes_no_drops() {
         let up = vec![o(0, 0), o(1, 33), o(2, 66), o(3, 99)];
         let down = vec![o(0, 10), o(1, 43), o(2, 76), o(3, 109)];
