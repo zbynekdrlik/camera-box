@@ -219,23 +219,22 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     // (that would have to black out multiple full hold-windows) — it is a real
     // burst loss -> confirmed, fails the gate (review C1). A run that is not
     // oversampled keeps strict membership: every absent id is confirmed.
+    // `chunk_by` groups maximal runs of equal zero-ness (all-absent vs
+    // all-present), avoiding a manual index loop and its infinite-loop mutants
+    // (same reason as `detect_freezes`).
     let mut confirmed_drops: Vec<u32> = Vec::new();
     let mut inconclusive_gaps: Vec<u32> = Vec::new();
-    let mut i = 0;
-    while i < input.emitted_ids.len() {
-        if samples(input.emitted_ids[i]) == 0 {
-            let start = i;
-            while i < input.emitted_ids.len() && samples(input.emitted_ids[i]) == 0 {
-                i += 1;
-            }
-            let run = &input.emitted_ids[start..i];
-            if run_oversampled && run.len() == 1 {
-                inconclusive_gaps.push(run[0]);
-            } else {
-                confirmed_drops.extend_from_slice(run);
-            }
+    for run in input
+        .emitted_ids
+        .chunk_by(|a, b| (samples(*a) == 0) == (samples(*b) == 0))
+    {
+        if samples(run[0]) != 0 {
+            continue;
+        }
+        if run_oversampled && run.len() == 1 {
+            inconclusive_gaps.push(run[0]);
         } else {
-            i += 1;
+            confirmed_drops.extend_from_slice(run);
         }
     }
     let missing_ids = confirmed_drops.clone();
