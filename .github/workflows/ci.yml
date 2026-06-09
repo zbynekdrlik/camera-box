@@ -202,3 +202,45 @@ jobs:
 
       - name: Security audit
         run: cargo audit
+
+  notify-on-failure:
+    name: Notify on red
+    # Fires only when a gate above goes RED — replaces silent-red eyeballing
+    # (#25). Covers these unit/build gates today and auto-covers #9's scheduled
+    # loopback/full-path E2E job once it is added to this workflow. Posts via the
+    # NewLevelMedia Discord bot directly to #notifications (the channel the fleet
+    # watches). Secrets: DISCORD_BOT_TOKEN (bot token) + DISCORD_CHANNEL_ID
+    # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
+    # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
+    # API is used directly — Discord returns the created message object on success.
+    needs: [lint, test, coverage, mutants, build, security]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discord alert (bot API → #notifications)
+        env:
+          BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHANNEL_ID:-}" ]; then
+            echo "DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID not set — skipping alert."
+            exit 0
+          fi
+          # Name every gate job that failed.
+          failed=$(printf '%s' "$RESULTS" \
+            | jq -r '[to_entries[] | select(.value.result=="failure") | .key] | join(", ")')
+          [ -z "$failed" ] && failed="unknown"
+          content="🔴 **camera-box CI red** on \`${REF}\` (${SHA:0:7}, ${EVENT}) — failed: ${failed} — ${RUN_URL}"
+          payload=$(jq -n --arg c "$content" '{content:$c}')
+          curl -fsS --max-time 10 -X POST \
+            -H "Authorization: Bot ${BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" >/dev/null
+          echo "Alert posted to #notifications for: ${failed}"

@@ -7,7 +7,8 @@
 //! accuracy Phase 1's single point could not provide.
 
 use crate::probe::analyzer::{
-    detect_freezes, detect_reorders, latency_stats, Freeze, LatencyStats, Observed,
+    detect_freezes, detect_reorders, latency_freeze_gate_pass, latency_stats, Freeze, LatencyStats,
+    Observed,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +22,14 @@ pub struct HopInput<'a> {
     /// A tap that saw fewer than this many run_id-matching frames is treated as
     /// disconnected — the hop FAILS rather than vacuously passing on no data.
     pub min_frames: usize,
+    /// Hard gate: fail this hop if its per-hop relative-latency `p99_ms` exceeds
+    /// this. `None` ⇒ report-only (the Phase-2 default), mirroring the Phase-1
+    /// #10 `max_p99_latency_ms` convention. Strict `>` — a value exactly at the
+    /// bound passes.
+    pub max_p99_latency_ms: Option<f64>,
+    /// Hard gate: fail this hop if any detected freeze's `repeat_count` exceeds
+    /// this. `None` ⇒ report-only. Strict `>`.
+    pub max_freeze_periods_gate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,10 +92,19 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     }
     let latency = latency_stats(&deltas);
 
+    // Loss + reorder are always hard; latency-p99 and freeze are gated only when
+    // a per-hop bound is set (None ⇒ report-only). Reuses the Phase-1 #10 gate so
+    // the strict-`>` / None-report-only semantics are identical across phases.
     let pass = up_unique.len() >= input.min_frames
         && down_unique.len() >= input.min_frames
         && dropped_ids.is_empty()
-        && reorders.is_empty();
+        && reorders.is_empty()
+        && latency_freeze_gate_pass(
+            &latency,
+            &freezes,
+            input.max_p99_latency_ms,
+            input.max_freeze_periods_gate,
+        );
 
     HopReport {
         name: input.name,
@@ -120,7 +138,101 @@ mod tests {
             capture_fps: 30.0,
             freeze_periods: 3.0,
             min_frames: 2,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: None,
         }
+    }
+
+    /// A hop whose downstream per-id relative latency p99 == `hi_ms`: four ids at
+    /// 10 ms and one at `hi_ms`, so nearest-rank p99 over n=5 lands on `hi_ms`.
+    /// `max_p99` is the latency gate under test; the freeze gate is left off.
+    fn hop_with_p99(hi_ms: i64, max_p99: Option<f64>) -> HopReport {
+        let up = vec![o(0, 0), o(1, 0), o(2, 0), o(3, 0), o(4, 0)];
+        let down = vec![o(0, 10), o(1, 10), o(2, 10), o(3, 10), o(4, hi_ms)];
+        diff_hop(HopInput {
+            name: "cam→strih".to_string(),
+            upstream: &up,
+            downstream: &down,
+            capture_fps: 30.0,
+            freeze_periods: 3.0,
+            min_frames: 2,
+            max_p99_latency_ms: max_p99,
+            max_freeze_periods_gate: None,
+        })
+    }
+
+    /// A hop whose downstream holds id 2 for `repeats` consecutive frames — a
+    /// freeze of `repeat_count == repeats` (freeze_periods = 3 < repeats). No
+    /// drop, no reorder, so the freeze gate is the only possible failure cause.
+    fn hop_with_freeze(repeats: usize, max_freeze: Option<f64>) -> HopReport {
+        let up = vec![o(0, 0), o(1, 1), o(2, 2), o(3, 3)];
+        let mut down = vec![o(0, 10), o(1, 11)];
+        for k in 0..repeats {
+            down.push(o(2, 12 + k as i64));
+        }
+        down.push(o(3, 99));
+        diff_hop(HopInput {
+            name: "cam→strih".to_string(),
+            upstream: &up,
+            downstream: &down,
+            capture_fps: 30.0,
+            freeze_periods: 3.0,
+            min_frames: 2,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: max_freeze,
+        })
+    }
+
+    #[test]
+    fn per_hop_latency_p99_over_bound_fails() {
+        // p99 = 300 ms, bound 250 ms → FAIL despite zero loss/reorder.
+        let r = hop_with_p99(300, Some(250.0));
+        assert_eq!(r.latency.as_ref().unwrap().p99_ms, 300.0);
+        assert!(r.dropped_ids.is_empty());
+        assert!(r.reorders.is_empty());
+        assert!(!r.pass, "p99 300 > bound 250 must FAIL the hop");
+    }
+
+    #[test]
+    fn per_hop_latency_p99_at_bound_passes() {
+        // p99 = 250 ms, bound 250 ms → PASS (strict `>`, not `>=`).
+        let r = hop_with_p99(250, Some(250.0));
+        assert_eq!(r.latency.as_ref().unwrap().p99_ms, 250.0);
+        assert!(r.pass, "p99 250 == bound 250 must PASS (strict >)");
+    }
+
+    #[test]
+    fn per_hop_freeze_over_bound_fails() {
+        // freeze repeat_count 6, bound 5 → FAIL despite zero loss/reorder.
+        let r = hop_with_freeze(6, Some(5.0));
+        assert_eq!(r.freezes.len(), 1);
+        assert_eq!(r.freezes[0].repeat_count, 6);
+        assert!(r.dropped_ids.is_empty());
+        assert!(r.reorders.is_empty());
+        assert!(!r.pass, "freeze repeat_count 6 > bound 5 must FAIL the hop");
+    }
+
+    #[test]
+    fn per_hop_freeze_at_bound_passes() {
+        // freeze repeat_count 5, bound 5 → PASS (strict `>`, not `>=`).
+        let r = hop_with_freeze(5, Some(5.0));
+        assert_eq!(r.freezes[0].repeat_count, 5);
+        assert!(
+            r.pass,
+            "freeze repeat_count 5 == bound 5 must PASS (strict >)"
+        );
+    }
+
+    #[test]
+    fn none_bounds_are_report_only_phase2_default() {
+        // High latency AND a real freeze, but both bounds None → report-only;
+        // the hop still PASSes, preserving the Phase-2 loss+reorder-only default.
+        let r_lat = hop_with_p99(9999, None);
+        assert!(r_lat.latency.as_ref().unwrap().p99_ms > 250.0);
+        assert!(r_lat.pass, "None latency bound must stay report-only");
+        let r_frz = hop_with_freeze(99, None);
+        assert!(!r_frz.freezes.is_empty());
+        assert!(r_frz.pass, "None freeze bound must stay report-only");
     }
 
     #[test]
