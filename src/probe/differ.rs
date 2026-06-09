@@ -7,7 +7,8 @@
 //! accuracy Phase 1's single point could not provide.
 
 use crate::probe::analyzer::{
-    detect_freezes, detect_reorders, latency_stats, Freeze, LatencyStats, Observed,
+    detect_freezes, detect_reorders, latency_freeze_gate_pass, latency_stats, Freeze, LatencyStats,
+    Observed,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -91,10 +92,19 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     }
     let latency = latency_stats(&deltas);
 
+    // Loss + reorder are always hard; latency-p99 and freeze are gated only when
+    // a per-hop bound is set (None ⇒ report-only). Reuses the Phase-1 #10 gate so
+    // the strict-`>` / None-report-only semantics are identical across phases.
     let pass = up_unique.len() >= input.min_frames
         && down_unique.len() >= input.min_frames
         && dropped_ids.is_empty()
-        && reorders.is_empty();
+        && reorders.is_empty()
+        && latency_freeze_gate_pass(
+            &latency,
+            &freezes,
+            input.max_p99_latency_ms,
+            input.max_freeze_periods_gate,
+        );
 
     HopReport {
         name: input.name,
