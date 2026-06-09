@@ -58,6 +58,14 @@ struct Args {
     /// `>`). An omitted hop is report-only (default).
     #[arg(long = "max-freeze-periods", value_parser = parse_bound)]
     max_freeze_periods: Vec<(String, f64)>,
+    /// Per-hop documented-bound loss gate as DOWNSTREAM_TAP=PCT (repeat per hop).
+    /// When set, the hop is judged by its oversample-independent single-copy
+    /// frame-loss percentage staying `<= PCT` instead of the strict
+    /// any-drop-fails default. For hops with a known, quantified, currently
+    /// irreducible loss (strih→stream's OBS render-clock drop pending genlock,
+    /// #8): accepts the documented floor, still fails on regression past it.
+    #[arg(long = "max-loss-pct", value_parser = parse_bound)]
+    max_loss_pct: Vec<(String, f64)>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -167,6 +175,7 @@ fn main() -> Result<()> {
         &downstream_taps,
         "--max-freeze-periods",
     )?;
+    validate_bound_keys(&args.max_loss_pct, &downstream_taps, "--max-loss-pct")?;
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
@@ -227,6 +236,8 @@ fn main() -> Result<()> {
         args.max_p99_latency_ms.iter().cloned().collect();
     let freeze_bounds: std::collections::HashMap<String, f64> =
         args.max_freeze_periods.iter().cloned().collect();
+    let loss_bounds: std::collections::HashMap<String, f64> =
+        args.max_loss_pct.iter().cloned().collect();
 
     // Difference each adjacent pair.
     let mut hops: Vec<HopReport> = Vec::new();
@@ -242,6 +253,7 @@ fn main() -> Result<()> {
             min_frames: args.min_frames,
             max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
             max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
+            max_loss_pct: loss_bounds.get(&down_name).copied(),
         }));
     }
 
@@ -303,8 +315,14 @@ fn main() -> Result<()> {
         );
     }
     for h in &report.hops {
+        let sc_pct = if h.single_copy_total > 0 {
+            100.0 * h.single_copy_dropped as f64 / h.single_copy_total as f64
+        } else {
+            0.0
+        };
         println!(
-            "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={}",
+            "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={} \
+             single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
             h.name,
             if h.pass { "PASS" } else { "FAIL" },
             h.upstream_unique,
@@ -312,6 +330,9 @@ fn main() -> Result<()> {
             h.dropped_ids.len(),
             h.reorders.len(),
             h.freezes.len(),
+            h.single_copy_dropped,
+            h.single_copy_total,
+            sc_pct,
         );
         if let Some(l) = &h.latency {
             println!(

@@ -30,6 +30,15 @@ pub struct HopInput<'a> {
     /// Hard gate: fail this hop if any detected freeze's `repeat_count` exceeds
     /// this. `None` ⇒ report-only. Strict `>`.
     pub max_freeze_periods_gate: Option<f64>,
+    /// Loss-gate mode. `None` ⇒ STRICT zero-loss: the hop fails on ANY in-span
+    /// dropped id (the Phase-2 default, correct for genlocked / local hops).
+    /// `Some(pct)` ⇒ DOCUMENTED-BOUND mode: the hop is judged by its
+    /// oversample-independent single-copy frame-loss percentage and passes while
+    /// that stays `<= pct`. This is for hops with a known, quantified, currently
+    /// irreducible loss (e.g. strih→stream's OBS render-clock drop pending
+    /// genlock, #8) — it accepts the documented floor yet still catches a
+    /// regression past it. `dropped_ids` is always reported either way.
+    pub max_loss_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +50,15 @@ pub struct HopReport {
     pub reorders: Vec<(u32, u32)>,
     pub freezes: Vec<Freeze>,
     pub latency: Option<LatencyStats>,
+    /// Upstream ids within the downstream active span carried by exactly ONE
+    /// frame (no oversample redundancy). Their loss rate is the unmasked,
+    /// oversample-independent estimate of the hop's per-frame drop probability —
+    /// the figure that would apply to real 60 fps content where every frame is
+    /// unique. A trustworthy zero-loss verdict needs a meaningful count here; a
+    /// run with very few single-copy frames cannot certify zero-loss.
+    pub single_copy_total: usize,
+    /// Of `single_copy_total`, how many are absent downstream.
+    pub single_copy_dropped: usize,
     pub pass: bool,
 }
 
@@ -77,6 +95,33 @@ pub fn diff_hop(input: HopInput) -> HopReport {
         _ => Vec::new(),
     };
 
+    // Single-copy (no-oversample) per-frame loss: of the upstream ids carried by
+    // exactly one frame AND lying within the downstream active span, how many are
+    // absent downstream. This is the oversample-independent per-frame drop
+    // estimate — multi-copy ids survive whenever any one copy lands on a render
+    // tick, so only single-copy ids expose the true drop probability.
+    let mut up_mult: HashMap<u32, usize> = HashMap::new();
+    for o in input.upstream {
+        *up_mult.entry(o.frame_id).or_insert(0) += 1;
+    }
+    let (single_copy_total, single_copy_dropped) =
+        match (down_unique.iter().min(), down_unique.iter().max()) {
+            (Some(&lo), Some(&hi)) => {
+                let singles = up_mult
+                    .iter()
+                    .filter(|(id, m)| **m == 1 && **id >= lo && **id <= hi);
+                let total = singles.clone().count();
+                let dropped = singles.filter(|(id, _)| !down_unique.contains(id)).count();
+                (total, dropped)
+            }
+            _ => (0, 0),
+        };
+    let single_copy_loss_pct = if single_copy_total > 0 {
+        100.0 * single_copy_dropped as f64 / single_copy_total as f64
+    } else {
+        0.0
+    };
+
     let reorders = detect_reorders(input.downstream);
     let freezes = detect_freezes(input.downstream, input.capture_fps, input.freeze_periods);
 
@@ -92,12 +137,18 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     }
     let latency = latency_stats(&deltas);
 
-    // Loss + reorder are always hard; latency-p99 and freeze are gated only when
-    // a per-hop bound is set (None ⇒ report-only). Reuses the Phase-1 #10 gate so
-    // the strict-`>` / None-report-only semantics are identical across phases.
+    // Loss gate: STRICT zero (any in-span drop fails) by default; or, when a
+    // documented per-hop bound is set, judged by the oversample-independent
+    // single-copy loss percentage staying `<= max_loss_pct` (strict `<=`).
+    // Reorder is always hard; latency-p99 and freeze are gated only when a
+    // per-hop bound is set (None ⇒ report-only).
+    let loss_ok = match input.max_loss_pct {
+        None => dropped_ids.is_empty(),
+        Some(bound) => single_copy_loss_pct <= bound,
+    };
     let pass = up_unique.len() >= input.min_frames
         && down_unique.len() >= input.min_frames
-        && dropped_ids.is_empty()
+        && loss_ok
         && reorders.is_empty()
         && latency_freeze_gate_pass(
             &latency,
@@ -114,6 +165,8 @@ pub fn diff_hop(input: HopInput) -> HopReport {
         reorders,
         freezes,
         latency,
+        single_copy_total,
+        single_copy_dropped,
         pass,
     }
 }
@@ -140,6 +193,7 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
+            max_loss_pct: None,
         }
     }
 
@@ -158,6 +212,7 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: max_p99,
             max_freeze_periods_gate: None,
+            max_loss_pct: None,
         })
     }
 
@@ -180,6 +235,7 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: None,
             max_freeze_periods_gate: max_freeze,
+            max_loss_pct: None,
         })
     }
 
