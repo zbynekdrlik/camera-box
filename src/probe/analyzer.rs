@@ -1,7 +1,14 @@
 //! Correlate emitted vs observed frame IDs → loss / freeze / reorder + latency.
 
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Oversample floor: a coverage run is *designed* to capture every painted id at
+/// least this many times (at 60 fps capture / ~12 fps coverage paint the real
+/// oversample is ~5x). A neighbour with >= this many decoded samples proves the
+/// capture+decode pipeline was alive there, so an adjacent 0-sample id is a real
+/// drop rather than a torn-QR artifact. Spec §coverage: ">= 2 samples/id".
+const MIN_CONFIRM_SAMPLES: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +62,27 @@ pub struct Freeze {
     pub duration_ms: f64,
 }
 
+/// #20 oversample discriminator: per-emitted-id decoded-sample multiplicity,
+/// surfaced so a single "missing" frame can be classified as a genuine pipeline
+/// drop or a torn/illegible-QR artifact (which the analyzer cannot re-decode).
+#[derive(Debug, Clone, Serialize)]
+pub struct CoverageStats {
+    /// The oversample floor used to judge neighbour health (see MIN_CONFIRM_SAMPLES).
+    pub min_confirm_samples: usize,
+    /// Median decoded samples per emitted id — the run-health signal.
+    pub oversample_p50: usize,
+    /// `oversample_p50 >= min_confirm_samples`: the neighbour-confirmation rule is
+    /// only applied to genuinely oversampled runs; otherwise strict membership.
+    pub run_oversampled: bool,
+    /// Emitted ids with exactly 1 decoded sample: present but torn-prone.
+    pub low_coverage_ids: Vec<u32>,
+    /// Emitted ids with 0 decoded samples judged genuine drops (== `missing_ids`).
+    pub confirmed_drops: Vec<u32>,
+    /// Emitted ids with 0 decoded samples inside a locally-degraded span
+    /// (a neighbour was itself under the floor) — ambiguous, report-only.
+    pub inconclusive_gaps: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisReport {
     pub mode: PaintMode,
@@ -65,6 +93,7 @@ pub struct AnalysisReport {
     pub reorders: Vec<(u32, u32)>,
     pub freezes: Vec<Freeze>,
     pub latency: Option<LatencyStats>,
+    pub coverage: CoverageStats,
     pub verdict_pass: bool,
 }
 
@@ -149,12 +178,57 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     let emitted_set: HashSet<u32> = input.emitted_ids.iter().copied().collect();
     let observed_set: HashSet<u32> = input.observed.iter().map(|o| o.frame_id).collect();
 
-    let missing_ids: Vec<u32> = input
-        .emitted_ids
-        .iter()
-        .copied()
-        .filter(|id| !observed_set.contains(id))
-        .collect();
+    // #20: decoded-sample count per emitted id (the oversample discriminator).
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for o in &input.observed {
+        *counts.entry(o.frame_id).or_insert(0) += 1;
+    }
+    let samples = |id: u32| counts.get(&id).copied().unwrap_or(0);
+    let oversample_p50 = {
+        let mut per: Vec<usize> = input.emitted_ids.iter().map(|&id| samples(id)).collect();
+        per.sort_unstable();
+        if per.is_empty() {
+            0
+        } else {
+            per[per.len() / 2]
+        }
+    };
+    let run_oversampled = oversample_p50 >= MIN_CONFIRM_SAMPLES;
+    let healthy = |id: u32| samples(id) >= MIN_CONFIRM_SAMPLES;
+
+    // Split zero-sample emitted ids into confirmed real drops vs torn-prone gaps.
+    // In an oversampled run a 0-sample id is only a *confirmed* drop when both
+    // emitted neighbours were healthy (so the pipeline was demonstrably alive
+    // around it); a 0-sample id inside a locally-degraded span is inconclusive
+    // (report-only) so a torn QR cannot flake the zero-loss gate. A run that is
+    // not oversampled falls back to strict membership (every gap confirmed).
+    let mut confirmed_drops: Vec<u32> = Vec::new();
+    let mut inconclusive_gaps: Vec<u32> = Vec::new();
+    let mut low_coverage_ids: Vec<u32> = Vec::new();
+    for (i, &id) in input.emitted_ids.iter().enumerate() {
+        match samples(id) {
+            0 => {
+                let prev_ok = i == 0 || healthy(input.emitted_ids[i - 1]);
+                let next_ok = i + 1 >= input.emitted_ids.len() || healthy(input.emitted_ids[i + 1]);
+                if run_oversampled && !(prev_ok && next_ok) {
+                    inconclusive_gaps.push(id);
+                } else {
+                    confirmed_drops.push(id);
+                }
+            }
+            1 => low_coverage_ids.push(id),
+            _ => {}
+        }
+    }
+    let missing_ids = confirmed_drops.clone();
+    let coverage = CoverageStats {
+        min_confirm_samples: MIN_CONFIRM_SAMPLES,
+        oversample_p50,
+        run_oversampled,
+        low_coverage_ids,
+        confirmed_drops,
+        inconclusive_gaps,
+    };
 
     let reorders = detect_reorders(&input.observed);
     let freezes = detect_freezes(&input.observed, input.capture_fps, input.freeze_periods);
@@ -195,6 +269,7 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
         reorders,
         freezes,
         latency,
+        coverage,
         verdict_pass,
     }
 }

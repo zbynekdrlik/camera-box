@@ -102,6 +102,10 @@ l=d.get('latency') or {}
 print(f\"  mode={d['mode']} verdict={'PASS' if d['verdict_pass'] else 'FAIL'}\")
 print(f\"  emitted={d['emitted_count']} observed={d['observed_count']} unique={d['unique_observed']}\")
 print(f\"  missing={len(d['missing_ids'])} reorders={len(d['reorders'])} freezes={len(d['freezes'])}\")
+c=d.get('coverage') or {}
+if c: print(f\"  coverage: oversample_p50={c['oversample_p50']} (floor {c['min_confirm_samples']}, oversampled={c['run_oversampled']}) confirmed_drops={len(c['confirmed_drops'])} inconclusive_gaps={len(c['inconclusive_gaps'])} low_coverage={len(c['low_coverage_ids'])}\")
+if c and c['confirmed_drops']: print(f\"    CONFIRMED DROP ids: {c['confirmed_drops'][:20]}\")
+if c and c['inconclusive_gaps']: print(f\"    inconclusive (torn-prone) ids: {c['inconclusive_gaps'][:20]}\")
 if l: print(f\"  latency_ms: mean={l['mean_ms']:.1f} p50={l['p50_ms']:.1f} p95={l['p95_ms']:.1f} p99={l['p99_ms']:.1f} max={l['max_ms']:.1f} (n={l['samples']})\")
 " 2>/dev/null || cat "$LOCAL_OUT"
 fi
