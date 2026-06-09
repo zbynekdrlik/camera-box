@@ -1,7 +1,20 @@
 //! Correlate emitted vs observed frame IDs → loss / freeze / reorder + latency.
 
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Oversample floor: a coverage run is *designed* to capture every painted id at
+/// least this many times (at 60 fps capture / ~12 fps coverage paint the real
+/// oversample is ~5x). The run is judged "oversampled" when its median decoded
+/// samples/id reaches this floor; only then is the torn-QR allowance for lone
+/// gaps applied. Spec §coverage: ">= 2 samples/id".
+const MIN_CONFIRM_SAMPLES: usize = 2;
+
+/// Isolated single-frame gaps are tolerated as torn-QR artifacts only up to
+/// `emitted / this` of them (one per 1000 emitted ids = 0.1%, floor 1). Above the
+/// cap, scattered single-frame loss is real (periodic/alternating drop) and is
+/// reclassified as confirmed loss.
+const INCONCLUSIVE_TOLERANCE_DIVISOR: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +68,36 @@ pub struct Freeze {
     pub duration_ms: f64,
 }
 
+/// #20 oversample discriminator: per-emitted-id decoded-sample multiplicity,
+/// surfaced so a single "missing" frame can be classified as a genuine pipeline
+/// drop or a torn/illegible-QR artifact (which the analyzer cannot re-decode).
+#[derive(Debug, Clone, Serialize)]
+pub struct CoverageStats {
+    /// The oversample floor (see MIN_CONFIRM_SAMPLES) the run median must reach
+    /// for the torn-QR allowance to apply.
+    pub min_confirm_samples: usize,
+    /// Median decoded samples per emitted id — the run-health signal.
+    pub oversample_p50: usize,
+    /// `oversample_p50 >= min_confirm_samples`: the lone-gap torn-QR allowance is
+    /// only applied to genuinely oversampled runs; otherwise strict membership.
+    pub run_oversampled: bool,
+    /// Emitted ids with exactly 1 decoded sample: present but torn-prone.
+    pub low_coverage_ids: Vec<u32>,
+    /// Emitted ids with 0 decoded samples judged genuine drops (== `missing_ids`):
+    /// any absent id in a non-oversampled run, or any run of >= 2 CONSECUTIVE
+    /// absent ids (a burst loss tearing cannot produce). Fails the coverage gate.
+    pub confirmed_drops: Vec<u32>,
+    /// Lone (single, isolated) absent ids in an oversampled run, while their
+    /// total stays within the torn-QR tolerance (INCONCLUSIVE_TOLERANCE_DIVISOR)
+    /// — indistinguishable
+    /// from a torn-on-every-sample QR, so report-only rather than failing the
+    /// gate (#20). NOTE: a genuine *isolated single-frame* drop (a handful, under
+    /// the cap) therefore does not fail the gate; it is still surfaced here and
+    /// as a frame-probe WARN. Bursts, non-oversampled gaps, and scattered gaps
+    /// over the cap (periodic/alternating loss) are always confirmed.
+    pub inconclusive_gaps: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisReport {
     pub mode: PaintMode,
@@ -65,6 +108,7 @@ pub struct AnalysisReport {
     pub reorders: Vec<(u32, u32)>,
     pub freezes: Vec<Freeze>,
     pub latency: Option<LatencyStats>,
+    pub coverage: CoverageStats,
     pub verdict_pass: bool,
 }
 
@@ -149,12 +193,84 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     let emitted_set: HashSet<u32> = input.emitted_ids.iter().copied().collect();
     let observed_set: HashSet<u32> = input.observed.iter().map(|o| o.frame_id).collect();
 
-    let missing_ids: Vec<u32> = input
+    // #20: decoded-sample count per emitted id (the oversample discriminator).
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for o in &input.observed {
+        *counts.entry(o.frame_id).or_insert(0) += 1;
+    }
+    let samples = |id: u32| counts.get(&id).copied().unwrap_or(0);
+    let oversample_p50 = {
+        let mut per: Vec<usize> = input.emitted_ids.iter().map(|&id| samples(id)).collect();
+        per.sort_unstable();
+        if per.is_empty() {
+            0
+        } else {
+            per[per.len() / 2]
+        }
+    };
+    let run_oversampled = oversample_p50 >= MIN_CONFIRM_SAMPLES;
+
+    // Emitted ids with exactly one decoded sample: present but torn-prone.
+    // (Precondition: emitted_ids are unique per run — the painter increments
+    // frame_id monotonically — so each id maps to one decoded-sample count.)
+    let low_coverage_ids: Vec<u32> = input
         .emitted_ids
         .iter()
         .copied()
-        .filter(|id| !observed_set.contains(id))
+        .filter(|&id| samples(id) == 1)
         .collect();
+
+    // Classify zero-sample emitted ids by the length of each maximal run of
+    // CONSECUTIVE absent ids. Tearing corrupts at most a few capture frames
+    // around a paint transition, so at real oversample it can zero out at most
+    // ONE emitted id in isolation — a lone gap is a torn-QR *candidate*. Two or
+    // more ADJACENT absent ids cannot be tearing (that would have to black out
+    // multiple full hold-windows) — it is a real burst loss -> confirmed, fails
+    // the gate (review C1). A run that is not oversampled keeps strict
+    // membership: every absent id is confirmed. `chunk_by` groups maximal runs
+    // of equal zero-ness, avoiding a manual index loop and its infinite-loop
+    // mutants (same reason as `detect_freezes`).
+    let mut confirmed_drops: Vec<u32> = Vec::new();
+    let mut isolated_candidates: Vec<u32> = Vec::new();
+    for run in input
+        .emitted_ids
+        .chunk_by(|a, b| (samples(*a) == 0) == (samples(*b) == 0))
+    {
+        if samples(run[0]) != 0 {
+            continue;
+        }
+        if run_oversampled && run.len() == 1 {
+            isolated_candidates.push(run[0]);
+        } else {
+            confirmed_drops.extend_from_slice(run);
+        }
+    }
+    // Torn-QR gaps are RARE (measured ~0 zero-sample ids per 7196 on the cam2
+    // 1080p60 rig; the original #20 false-"missing" was 1 in 7196 = 0.014%).
+    // Tolerate isolated gaps as torn-prone only up to emitted /
+    // INCONCLUSIVE_TOLERANCE_DIVISOR of them — above that, periodic/scattered
+    // single-frame loss (alternating-frame drop, 1-in-N) is real and MUST fail,
+    // not hide as inconclusive (review round 2). The cap is many times the
+    // observed torn rate yet far below any real periodic-loss rate.
+    let tolerance = (input.emitted_ids.len() / INCONCLUSIVE_TOLERANCE_DIVISOR).max(1);
+    let inconclusive_gaps = if isolated_candidates.len() <= tolerance {
+        isolated_candidates
+    } else {
+        confirmed_drops.extend_from_slice(&isolated_candidates);
+        Vec::new()
+    };
+    // Emitted ids are ascending (monotonic paint), so sorting confirmed restores
+    // emitted order after appending the reclassified isolated gaps.
+    confirmed_drops.sort_unstable();
+    let missing_ids = confirmed_drops.clone();
+    let coverage = CoverageStats {
+        min_confirm_samples: MIN_CONFIRM_SAMPLES,
+        oversample_p50,
+        run_oversampled,
+        low_coverage_ids,
+        confirmed_drops,
+        inconclusive_gaps,
+    };
 
     let reorders = detect_reorders(&input.observed);
     let freezes = detect_freezes(&input.observed, input.capture_fps, input.freeze_periods);
@@ -195,6 +311,7 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
         reorders,
         freezes,
         latency,
+        coverage,
         verdict_pass,
     }
 }
@@ -589,5 +706,215 @@ mod tests {
         assert!(!latency_freeze_gate_pass(&None, &freezes, None, Some(4.0)));
         assert!(latency_freeze_gate_pass(&None, &freezes, None, Some(5.0)));
         assert!(latency_freeze_gate_pass(&None, &[], None, Some(0.0)));
+    }
+
+    // --- #20: per-id oversample instrumentation + drop confirmation ---
+
+    /// Build observed for `(id, sample_count)` pairs in ascending id order so
+    /// there is no reorder noise; each sample gets a fixed 10 ms latency. Counts
+    /// stay <= 3 (under the freeze_periods=3 detector) unless a test wants one.
+    fn oversampled(ids_counts: &[(u32, usize)]) -> Vec<Observed> {
+        let mut v = Vec::new();
+        for &(id, n) in ids_counts {
+            let gen = id as i64 * 16_000_000;
+            for _ in 0..n {
+                v.push(obs(id, gen, gen + 10_000_000));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn isolated_single_drop_is_inconclusive() {
+        // Oversampled run (2 samples/id, exactly at the floor), id 2 the lone
+        // absent id. Indistinguishable from a torn-on-every-sample QR, so it is
+        // inconclusive (report-only), NOT a gate failure (#20). p50 == 2 also
+        // pins the `>=` oversample bound (a `>` mutant -> not oversampled ->
+        // strict -> would wrongly confirm).
+        let emitted = vec![0, 1, 2, 3, 4];
+        let observed = oversampled(&[(0, 2), (1, 2), (3, 2), (4, 2)]); // id 2 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.oversample_p50, 2);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![2]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.missing_ids.is_empty());
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn zero_sample_in_degraded_region_is_inconclusive() {
+        // Oversampled run overall, but a local torn span: ids 2,3,4 = 1,0,1
+        // samples. The 0-sample id 3 sits between two torn (1-sample) neighbors
+        // -> ambiguous, NOT a confirmed pipeline drop -> coverage gate must pass
+        // (path b: a torn-QR artifact no longer flakes the zero-loss gate).
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 1), (4, 1), (5, 3), (6, 3)]); // 3 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.oversample_p50, 3);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![3]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.missing_ids.is_empty());
+        assert!(r.coverage.low_coverage_ids.contains(&2));
+        assert!(r.coverage.low_coverage_ids.contains(&4));
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn consecutive_drop_is_confirmed() {
+        // CRITICAL (#20 review C1): two ADJACENT 0-sample ids in an oversampled
+        // run = a real burst loss, not a torn-QR artifact (tearing cannot black
+        // out two full hold-windows). Must be CONFIRMED and FAIL the gate, never
+        // hidden as inconclusive.
+        let emitted = vec![0, 1, 2, 3, 4, 5];
+        let observed = oversampled(&[(0, 3), (1, 3), (4, 3), (5, 3)]); // ids 2,3 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.confirmed_drops, vec![2, 3]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert_eq!(r.missing_ids, vec![2, 3]);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn long_burst_is_confirmed() {
+        // A 5-frame contiguous loss in an otherwise pristine oversampled run must
+        // be fully confirmed (every id), not silently passed.
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (8, 3), (9, 3)]); // 3..=7 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.confirmed_drops, vec![3, 4, 5, 6, 7]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn alternating_loss_is_confirmed() {
+        // CRITICAL (#20 review round 2): every-other-frame loss is a catastrophic
+        // real loss, NOT torn-QR noise. Each gap is a length-1 run, but 5 of 10
+        // emitted are absent — far over the inconclusive cap -> all confirmed,
+        // gate FAILS. (Was silently passing as all-inconclusive.)
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let observed = oversampled(&[(0, 3), (2, 3), (4, 3), (6, 3), (8, 3)]); // odds absent
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.confirmed_drops, vec![1, 3, 5, 7, 9]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn tolerance_scales_with_run_length() {
+        // Large run (2000 emitted -> tolerance = 2000/1000 = 2). A SINGLE isolated
+        // gap (1 < 2, strictly under the cap) stays inconclusive. Pins the cap as
+        // `<=`/`<` (vs an `==` that would only tolerate exactly-`tolerance` gaps)
+        // and the emitted/DIVISOR scaling (vs the floor-1 small-run case).
+        let mut pairs: Vec<(u32, usize)> = (0..2000u32).map(|id| (id, 3)).collect();
+        pairs.remove(1000); // id 1000 absent (0 samples)
+        let emitted: Vec<u32> = (0..2000u32).collect();
+        let r = analyze(input(PaintMode::Coverage, emitted, oversampled(&pairs)));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![1000]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn scattered_single_gaps_over_cap_are_confirmed() {
+        // Two non-adjacent isolated gaps in a 10-frame run (20% loss). The cap is
+        // max(1, emitted/1000) = 1 here, so 2 isolated gaps exceed it -> the gaps
+        // are reclassified confirmed (real loss), gate FAILS. A torn-QR run has
+        // FAR fewer than 0.1% such gaps.
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let observed = oversampled(&[
+            (0, 3),
+            (1, 3),
+            (3, 3),
+            (4, 3),
+            (5, 3),
+            (6, 3),
+            (8, 3),
+            (9, 3),
+        ]); // 2,7 absent
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.confirmed_drops, vec![2, 7]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn boundary_burst_is_confirmed() {
+        // A burst at the very start of the sequence (ids 0,1 absent) — the run
+        // begins mid-gap. Length 2 -> confirmed, fails the gate. Pins the
+        // while-loop's leading-run handling (start index 0).
+        let emitted = vec![0, 1, 2, 3, 4];
+        let observed = oversampled(&[(2, 3), (3, 3), (4, 3)]); // ids 0,1 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.confirmed_drops, vec![0, 1]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert_eq!(r.missing_ids, vec![0, 1]);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn trailing_single_drop_is_inconclusive() {
+        // A lone absent id at the very END of the sequence (run ends mid-gap):
+        // still a single isolated gap -> inconclusive. Pins the while-loop's
+        // trailing-run handling (run reaching emitted_ids.len()).
+        let emitted = vec![0, 1, 2, 3, 4];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (3, 3)]); // id 4 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![4]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn oversample_p50_even_length_uses_upper_middle() {
+        // Even emitted count: median index len/2 (upper-middle). counts
+        // [1,2,3,4] -> sorted same -> index 2 == 3 (not index 1 == 2). Pins the
+        // `len()/2` median index against an off-by-one mutant.
+        let emitted = vec![0, 1, 2, 3];
+        let observed = oversampled(&[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.oversample_p50, 3);
+        assert!(r.coverage.run_oversampled);
+        assert!(r.coverage.low_coverage_ids.contains(&0));
+    }
+
+    #[test]
+    fn coverage_instrumentation_reports_counts() {
+        let emitted = vec![0, 1, 2, 3];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (3, 3)]);
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.min_confirm_samples, 2);
+        assert_eq!(r.coverage.oversample_p50, 3);
+        assert!(r.coverage.run_oversampled);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(r.coverage.low_coverage_ids.is_empty());
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn low_oversample_run_keeps_strict_membership() {
+        // p50 < 2 (single-sample synthetic run): the neighbor rule is OFF, every
+        // 0-sample id is a confirmed drop (preserves Phase-1 strict semantics and
+        // every existing minimal-stream test above).
+        let emitted = vec![0, 1, 2, 3];
+        let observed = vec![
+            obs(0, 0, 1),
+            obs(1, 16_000_000, 16_010_000),
+            obs(3, 48_000_000, 48_010_000),
+        ];
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(!r.coverage.run_oversampled);
+        assert_eq!(r.coverage.oversample_p50, 1);
+        assert_eq!(r.missing_ids, vec![2]);
+        assert_eq!(r.coverage.confirmed_drops, vec![2]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
     }
 }

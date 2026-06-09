@@ -153,6 +153,28 @@ fn main() -> Result<()> {
             l.min_ms, l.mean_ms, l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms, l.samples
         );
     }
+    // #20 oversample discriminator: tells a real drop (confirmed) from a
+    // torn/illegible-QR artifact (inconclusive, report-only) and flags
+    // torn-prone 1-sample ids.
+    let c = &report.coverage;
+    println!(
+        "COVERAGE oversample_p50={} (>={}? {}) confirmed_drops={} inconclusive_gaps={} low_coverage={}",
+        c.oversample_p50,
+        c.min_confirm_samples,
+        c.run_oversampled,
+        c.confirmed_drops.len(),
+        c.inconclusive_gaps.len(),
+        c.low_coverage_ids.len(),
+    );
+    if !c.inconclusive_gaps.is_empty() {
+        // PASS can still hide isolated torn-QR gaps we could not confirm as real
+        // loss — surface them so a degraded-capture run is not read as clean.
+        println!(
+            "WARN {} inconclusive (torn-prone) single-frame gap(s) — capture degraded, not a confirmed drop: {:?}",
+            c.inconclusive_gaps.len(),
+            &c.inconclusive_gaps[..c.inconclusive_gaps.len().min(20)],
+        );
+    }
     println!("ARTIFACT={}", args.out);
 
     if report.verdict_pass {
