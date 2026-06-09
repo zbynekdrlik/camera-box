@@ -81,6 +81,17 @@ fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
     next_boundary
 }
 
+/// Derive the integer genlock pacing rate (frames per second) from a rational
+/// NDI frame rate (`numerator/denominator`). A zero/negative denominator yields
+/// 0, which [`next_boundary_100ns`] treats as a genlock no-op (never divides by
+/// zero).
+fn fps_from_frame_rate(numerator: i64, denominator: i64) -> i64 {
+    if denominator <= 0 {
+        return 0;
+    }
+    numerator / denominator
+}
+
 // NDI SDK type definitions (minimal subset for video sending and receiving)
 #[repr(C)]
 struct NDIlib_send_create_t {
@@ -706,8 +717,13 @@ impl NdiSender {
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
             timecode: {
-                // Pass fps (frames per second) - for 30fps this is 30
-                let fps = self.frame_rate.numerator as i64 / self.frame_rate.denominator as i64;
+                // NDI advertises the exact rational rate; genlock paces on the
+                // nearest whole-frame cadence derived from it (see
+                // fps_from_frame_rate — rounds, so 59.94 -> 60 not 59).
+                let fps = fps_from_frame_rate(
+                    self.frame_rate.numerator as i64,
+                    self.frame_rate.denominator as i64,
+                );
                 wait_for_next_boundary_100ns(fps)
             },
             p_data: uyvy_ptr,
@@ -1140,6 +1156,40 @@ mod tests {
     #[test]
     fn boundary_zero_fps_is_noop() {
         assert_eq!(next_boundary_100ns(12_345, 0), 12_345);
+    }
+
+    #[test]
+    fn fps_from_frame_rate_exact_60() {
+        assert_eq!(fps_from_frame_rate(60, 1), 60);
+    }
+
+    #[test]
+    fn fps_from_frame_rate_exact_30() {
+        assert_eq!(fps_from_frame_rate(30, 1), 30);
+    }
+
+    #[test]
+    fn fps_from_frame_rate_ntsc_5994_rounds_to_60() {
+        // NTSC 59.94 = 60000/1001. Integer truncation gives 59 (silent genlock
+        // drift vs the advertised rational); the nearest whole frame is 60.
+        assert_eq!(fps_from_frame_rate(60000, 1001), 60);
+    }
+
+    #[test]
+    fn fps_from_frame_rate_ntsc_2997_rounds_to_30() {
+        // NTSC 29.97 = 30000/1001. Truncation gives 29; nearest whole frame 30.
+        assert_eq!(fps_from_frame_rate(30000, 1001), 30);
+    }
+
+    #[test]
+    fn fps_from_frame_rate_zero_denominator_is_noop() {
+        // A bad negotiation must never divide by zero -> 0 (genlock no-op).
+        assert_eq!(fps_from_frame_rate(60, 0), 0);
+    }
+
+    #[test]
+    fn fps_from_frame_rate_negative_denominator_is_noop() {
+        assert_eq!(fps_from_frame_rate(60, -1), 0);
     }
 
     #[test]
