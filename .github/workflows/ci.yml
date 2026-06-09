@@ -140,6 +140,13 @@ jobs:
         # -e <glue>: painter/reader/run/fb/bin drive /dev/fb0 + NDI and are
         #   verified by the on-device loopback E2E, not unit tests — exclude them
         #   (same rationale as the coverage exclusion).
+        # --exclude-re NdiSender::send_frame_data: the NDI SDK send path is
+        #   integration-only glue (builds the NDIlib frame struct + FFI send,
+        #   genlock sleep) — its body-replacement mutant is uncatchable by any
+        #   unit test and is covered by the on-device loopback E2E. The genlock
+        #   fps math it calls (fps_from_frame_rate, next_boundary_100ns) is a
+        #   separate, fully-mutation-tested pure function. Function-scoped, so
+        #   the rest of src/ndi.rs (conversions, boundary math) stays mutated.
         run: |
           if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe \
@@ -150,6 +157,7 @@ jobs:
               -e 'src/probe/multi_reader.rs' \
               -e 'src/bin/frame-probe.rs' \
               -e 'src/bin/multitap-probe.rs' \
+              --exclude-re 'NdiSender::send_frame_data' \
               --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
