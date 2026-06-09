@@ -73,6 +73,8 @@ GATE_ARGS=()
 [ -n "${MAX_P99_STREAM:-}" ]   && GATE_ARGS+=(--max-p99-latency-ms "stream=$MAX_P99_STREAM")
 [ -n "${MAX_FREEZE_STRIH:-}" ]  && GATE_ARGS+=(--max-freeze-periods "strih=$MAX_FREEZE_STRIH")
 [ -n "${MAX_FREEZE_STREAM:-}" ] && GATE_ARGS+=(--max-freeze-periods "stream=$MAX_FREEZE_STREAM")
+# Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
+[ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")
 
 # A failing per-hop gate is multitap-probe exiting 1 — its designed FAIL signal.
 # Capture it without `set -e` aborting before the artifact dump (the failure case

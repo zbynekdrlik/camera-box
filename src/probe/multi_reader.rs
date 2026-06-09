@@ -7,7 +7,7 @@ use crate::ndi::NdiReceiver;
 use crate::probe::analyzer::Observed;
 use crate::probe::qr::decode_capture;
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -26,6 +26,14 @@ pub struct TapSpec {
 pub struct TapResult {
     pub name: String,
     pub observed: Arc<Mutex<Vec<Observed>>>,
+    /// Every NDI frame this tap pulled off the wire, decoded or not. `captured`
+    /// minus the run_id-matching decoded count is the tap's QR-decode-failure
+    /// floor — frames that physically ARRIVED but whose QR was torn by NDI
+    /// compression/resample. Without this, a torn frame is indistinguishable
+    /// from a frame the hop genuinely dropped, so the differ's `dropped_ids`
+    /// would over-report loss. Capture-count parity across a hop proves the hop
+    /// delivered every frame even when some ids fail to decode at the tap.
+    pub captured: Arc<AtomicU64>,
 }
 
 /// Spawn a reader thread for one tap. Returns its join handle plus a handle to
@@ -36,11 +44,13 @@ pub fn spawn_tap(
     stop: Arc<AtomicBool>,
 ) -> (JoinHandle<Result<()>>, TapResult) {
     let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::new(AtomicU64::new(0));
     let result = TapResult {
         name: spec.name.clone(),
         observed: observed.clone(),
+        captured: captured.clone(),
     };
-    let handle = std::thread::spawn(move || tap_loop(spec, start, stop, observed));
+    let handle = std::thread::spawn(move || tap_loop(spec, start, stop, observed, captured));
     (handle, result)
 }
 
@@ -49,6 +59,7 @@ fn tap_loop(
     start: Instant,
     stop: Arc<AtomicBool>,
     observed: Arc<Mutex<Vec<Observed>>>,
+    captured: Arc<AtomicU64>,
 ) -> Result<()> {
     let mut rx = NdiReceiver::connect(&spec.source, spec.connect_timeout_secs)?;
     while !stop.load(Ordering::Relaxed) {
@@ -57,6 +68,10 @@ fn tap_loop(
             None => continue,
         };
         let recv_ts_ns = start.elapsed().as_nanos() as i64;
+        // Count every frame that physically arrived BEFORE attempting QR decode,
+        // so a torn-QR frame still increments `captured`. This is what separates
+        // hop frame-loss from tap decode-failure.
+        captured.fetch_add(1, Ordering::Relaxed);
         if let Some(p) = decode_capture(
             frame.fourcc,
             &frame.data,
@@ -74,6 +89,13 @@ fn tap_loop(
             }
         }
     }
-    tracing::info!(tap = %spec.name, source = %spec.source, "tap finished");
+    let total = captured.load(Ordering::Relaxed);
+    let decoded = observed.lock().unwrap().len();
+    tracing::info!(
+        tap = %spec.name, source = %spec.source,
+        captured = total, decoded = decoded,
+        decode_failed = total.saturating_sub(decoded as u64),
+        "tap finished"
+    );
     Ok(())
 }

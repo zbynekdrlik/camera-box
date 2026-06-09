@@ -61,6 +61,11 @@ struct Args {
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
+    /// Optional raw per-frame dump (JSONL: {tap,frame_id,recv_ts_ns}) of every
+    /// decoded observation, untrimmed. Diagnostic for root-causing which ids drop
+    /// and their oversample multiplicity; off unless set.
+    #[arg(long)]
+    dump_raw: Option<String>,
 }
 
 fn parse_tap(s: &str) -> Result<(String, String), String> {
@@ -117,6 +122,14 @@ struct MultiTapReport {
 struct TapSummary {
     name: String,
     unique_frames: usize,
+    /// Raw NDI frames pulled off the wire (decoded or not), over the whole run.
+    captured: u64,
+    /// Raw frames whose QR decoded with a matching run_id (includes oversample
+    /// duplicates of the same id). `captured - decoded` is this tap's
+    /// QR-decode-failure floor — frames that ARRIVED but tore. Comparing a
+    /// downstream tap's `captured` against the upstream tap's output proves
+    /// whether id-level `dropped_ids` is true hop loss or just tap decode tears.
+    decoded: u64,
 }
 
 fn main() -> Result<()> {
@@ -242,6 +255,10 @@ fn main() -> Result<()> {
                 .map(|o| o.frame_id)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
+            captured: r.captured.load(Ordering::Relaxed),
+            // Raw (untrimmed) decoded-frame count for this tap — the run_id QR
+            // frames it actually decoded, oversample dups included.
+            decoded: r.observed.lock().unwrap().len() as u64,
         })
         .collect();
 
@@ -258,6 +275,33 @@ fn main() -> Result<()> {
     let json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&args.out, &json)?;
 
+    if let Some(path) = &args.dump_raw {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path)?;
+        for r in &results {
+            let name = &r.name;
+            for o in r.observed.lock().unwrap().iter() {
+                writeln!(
+                    f,
+                    "{{\"tap\":\"{}\",\"frame_id\":{},\"recv_ts_ns\":{}}}",
+                    name, o.frame_id, o.recv_ts_ns
+                )?;
+            }
+        }
+    }
+
+    for t in &report.taps {
+        let fail = t.captured.saturating_sub(t.decoded);
+        let pct = if t.captured > 0 {
+            100.0 * fail as f64 / t.captured as f64
+        } else {
+            0.0
+        };
+        println!(
+            "TAP {} captured={} decoded={} decode_failed={} ({:.2}% torn)",
+            t.name, t.captured, t.decoded, fail, pct
+        );
+    }
     for h in &report.hops {
         println!(
             "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={}",
