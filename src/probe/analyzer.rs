@@ -76,10 +76,15 @@ pub struct CoverageStats {
     pub run_oversampled: bool,
     /// Emitted ids with exactly 1 decoded sample: present but torn-prone.
     pub low_coverage_ids: Vec<u32>,
-    /// Emitted ids with 0 decoded samples judged genuine drops (== `missing_ids`).
+    /// Emitted ids with 0 decoded samples judged genuine drops (== `missing_ids`):
+    /// any absent id in a non-oversampled run, or any run of >= 2 CONSECUTIVE
+    /// absent ids (a burst loss tearing cannot produce). Fails the coverage gate.
     pub confirmed_drops: Vec<u32>,
-    /// Emitted ids with 0 decoded samples inside a locally-degraded span
-    /// (a neighbour was itself under the floor) — ambiguous, report-only.
+    /// Lone (single, isolated) absent ids in an oversampled run — indistinguishable
+    /// from a torn-on-every-sample QR, so report-only rather than failing the gate
+    /// (#20). NOTE: a genuine *isolated single-frame* drop therefore does not fail
+    /// the gate; it is still surfaced here and as a frame-probe WARN. Bursts and
+    /// non-oversampled gaps are always confirmed.
     pub inconclusive_gaps: Vec<u32>,
 }
 
@@ -194,30 +199,43 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
         }
     };
     let run_oversampled = oversample_p50 >= MIN_CONFIRM_SAMPLES;
-    let healthy = |id: u32| samples(id) >= MIN_CONFIRM_SAMPLES;
 
-    // Split zero-sample emitted ids into confirmed real drops vs torn-prone gaps.
-    // In an oversampled run a 0-sample id is only a *confirmed* drop when both
-    // emitted neighbours were healthy (so the pipeline was demonstrably alive
-    // around it); a 0-sample id inside a locally-degraded span is inconclusive
-    // (report-only) so a torn QR cannot flake the zero-loss gate. A run that is
-    // not oversampled falls back to strict membership (every gap confirmed).
+    // Emitted ids with exactly one decoded sample: present but torn-prone.
+    // (Precondition: emitted_ids are unique per run — the painter increments
+    // frame_id monotonically — so each id maps to one decoded-sample count.)
+    let low_coverage_ids: Vec<u32> = input
+        .emitted_ids
+        .iter()
+        .copied()
+        .filter(|&id| samples(id) == 1)
+        .collect();
+
+    // Classify zero-sample emitted ids by the length of each maximal run of
+    // CONSECUTIVE absent ids. Tearing corrupts at most a few capture frames
+    // around a paint transition, so at real oversample it can zero out at most
+    // ONE emitted id in isolation — that lone gap is treated as a torn-QR
+    // artifact (inconclusive, report-only) so a torn QR cannot flake the
+    // zero-loss gate (#20). Two or more ADJACENT absent ids cannot be tearing
+    // (that would have to black out multiple full hold-windows) — it is a real
+    // burst loss -> confirmed, fails the gate (review C1). A run that is not
+    // oversampled keeps strict membership: every absent id is confirmed.
     let mut confirmed_drops: Vec<u32> = Vec::new();
     let mut inconclusive_gaps: Vec<u32> = Vec::new();
-    let mut low_coverage_ids: Vec<u32> = Vec::new();
-    for (i, &id) in input.emitted_ids.iter().enumerate() {
-        match samples(id) {
-            0 => {
-                let prev_ok = i == 0 || healthy(input.emitted_ids[i - 1]);
-                let next_ok = i + 1 >= input.emitted_ids.len() || healthy(input.emitted_ids[i + 1]);
-                if run_oversampled && !(prev_ok && next_ok) {
-                    inconclusive_gaps.push(id);
-                } else {
-                    confirmed_drops.push(id);
-                }
+    let mut i = 0;
+    while i < input.emitted_ids.len() {
+        if samples(input.emitted_ids[i]) == 0 {
+            let start = i;
+            while i < input.emitted_ids.len() && samples(input.emitted_ids[i]) == 0 {
+                i += 1;
             }
-            1 => low_coverage_ids.push(id),
-            _ => {}
+            let run = &input.emitted_ids[start..i];
+            if run_oversampled && run.len() == 1 {
+                inconclusive_gaps.push(run[0]);
+            } else {
+                confirmed_drops.extend_from_slice(run);
+            }
+        } else {
+            i += 1;
         }
     }
     let missing_ids = confirmed_drops.clone();
@@ -683,19 +701,21 @@ mod tests {
     }
 
     #[test]
-    fn isolated_drop_in_healthy_region_is_confirmed() {
-        // Oversampled run (2 samples/id, exactly at the floor), id 2 fully
-        // absent, both neighbors healthy -> a genuine single-frame drop that
-        // must still FAIL the coverage gate. p50 == 2 also pins the `>=` bound.
+    fn isolated_single_drop_is_inconclusive() {
+        // Oversampled run (2 samples/id, exactly at the floor), id 2 the lone
+        // absent id. Indistinguishable from a torn-on-every-sample QR, so it is
+        // inconclusive (report-only), NOT a gate failure (#20). p50 == 2 also
+        // pins the `>=` oversample bound (a `>` mutant -> not oversampled ->
+        // strict -> would wrongly confirm).
         let emitted = vec![0, 1, 2, 3, 4];
         let observed = oversampled(&[(0, 2), (1, 2), (3, 2), (4, 2)]); // id 2 omitted
         let r = analyze(input(PaintMode::Coverage, emitted, observed));
         assert!(r.coverage.run_oversampled);
         assert_eq!(r.coverage.oversample_p50, 2);
-        assert_eq!(r.coverage.confirmed_drops, vec![2]);
-        assert!(r.coverage.inconclusive_gaps.is_empty());
-        assert_eq!(r.missing_ids, vec![2]);
-        assert!(!r.verdict_pass);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![2]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.missing_ids.is_empty());
+        assert!(r.verdict_pass);
     }
 
     #[test]
@@ -746,33 +766,45 @@ mod tests {
     }
 
     #[test]
-    fn single_healthy_neighbour_is_inconclusive() {
-        // A 0-sample id with ONE healthy neighbour (prev=3 samples) and ONE
-        // degraded neighbour (next=1 sample). A genuine isolated drop has clean
-        // frames on BOTH sides; a one-sided disturbance is a torn span, so this
-        // must be inconclusive, NOT confirmed. Pins the inner `&&` (both
-        // neighbours required) against a `||` (either-neighbour) mutant.
-        let emitted = vec![0, 1, 2, 3, 4, 5, 6];
-        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (4, 1), (5, 3), (6, 3)]); // 3 omitted
+    fn boundary_burst_is_confirmed() {
+        // A burst at the very start of the sequence (ids 0,1 absent) — the run
+        // begins mid-gap. Length 2 -> confirmed, fails the gate. Pins the
+        // while-loop's leading-run handling (start index 0).
+        let emitted = vec![0, 1, 2, 3, 4];
+        let observed = oversampled(&[(2, 3), (3, 3), (4, 3)]); // ids 0,1 omitted
         let r = analyze(input(PaintMode::Coverage, emitted, observed));
         assert!(r.coverage.run_oversampled);
-        assert_eq!(r.coverage.inconclusive_gaps, vec![3]);
+        assert_eq!(r.coverage.confirmed_drops, vec![0, 1]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert_eq!(r.missing_ids, vec![0, 1]);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn trailing_single_drop_is_inconclusive() {
+        // A lone absent id at the very END of the sequence (run ends mid-gap):
+        // still a single isolated gap -> inconclusive. Pins the while-loop's
+        // trailing-run handling (run reaching emitted_ids.len()).
+        let emitted = vec![0, 1, 2, 3, 4];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (3, 3)]); // id 4 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![4]);
         assert!(r.coverage.confirmed_drops.is_empty());
-        assert!(r.missing_ids.is_empty());
         assert!(r.verdict_pass);
     }
 
     #[test]
-    fn boundary_drop_is_confirmed_when_run_healthy() {
-        // First emitted id absent in an oversampled run -> confirmed: only one
-        // neighbor exists and it is healthy (the missing side cannot disconfirm).
+    fn oversample_p50_even_length_uses_upper_middle() {
+        // Even emitted count: median index len/2 (upper-middle). counts
+        // [1,2,3,4] -> sorted same -> index 2 == 3 (not index 1 == 2). Pins the
+        // `len()/2` median index against an off-by-one mutant.
         let emitted = vec![0, 1, 2, 3];
-        let observed = oversampled(&[(1, 3), (2, 3), (3, 3)]); // id 0 omitted
+        let observed = oversampled(&[(0, 1), (1, 2), (2, 3), (3, 4)]);
         let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.oversample_p50, 3);
         assert!(r.coverage.run_oversampled);
-        assert_eq!(r.coverage.confirmed_drops, vec![0]);
-        assert!(r.coverage.inconclusive_gaps.is_empty());
-        assert!(!r.verdict_pass);
+        assert!(r.coverage.low_coverage_ids.contains(&0));
     }
 
     #[test]

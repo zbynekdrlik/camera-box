@@ -166,6 +166,15 @@ fn main() -> Result<()> {
         c.inconclusive_gaps.len(),
         c.low_coverage_ids.len(),
     );
+    if !c.inconclusive_gaps.is_empty() {
+        // PASS can still hide isolated torn-QR gaps we could not confirm as real
+        // loss — surface them so a degraded-capture run is not read as clean.
+        println!(
+            "WARN {} inconclusive (torn-prone) single-frame gap(s) — capture degraded, not a confirmed drop: {:?}",
+            c.inconclusive_gaps.len(),
+            &c.inconclusive_gaps[..c.inconclusive_gaps.len().min(20)],
+        );
+    }
     println!("ARTIFACT={}", args.out);
 
     if report.verdict_pass {
