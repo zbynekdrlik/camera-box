@@ -87,11 +87,12 @@ fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
 /// [`next_boundary_100ns`] paces on a whole-number fps. Rounding — not
 /// truncating — keeps a non-integer source on its nearest whole-frame cadence
 /// (59.94 -> 60, 29.97 -> 30) instead of silently dropping to 59 / 29, which
-/// would drift the genlock cadence against the advertised rate. A zero/negative
-/// denominator yields 0, which [`next_boundary_100ns`] treats as a genlock
-/// no-op (never divides by zero).
-fn fps_from_frame_rate(numerator: i64, denominator: i64) -> i64 {
-    if denominator <= 0 {
+/// would drift the genlock cadence against the advertised rate. `numerator` /
+/// `denominator` are the `u32` `FrameRate` fields; a zero denominator yields 0,
+/// which [`next_boundary_100ns`] treats as a genlock no-op (never divides by
+/// zero).
+fn fps_from_frame_rate(numerator: u32, denominator: u32) -> i64 {
+    if denominator == 0 {
         return 0;
     }
     (numerator as f64 / denominator as f64).round() as i64
@@ -725,10 +726,8 @@ impl NdiSender {
                 // NDI advertises the exact rational rate; genlock paces on the
                 // nearest whole-frame cadence derived from it (see
                 // fps_from_frame_rate — rounds, so 59.94 -> 60 not 59).
-                let fps = fps_from_frame_rate(
-                    self.frame_rate.numerator as i64,
-                    self.frame_rate.denominator as i64,
-                );
+                let fps =
+                    fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
                 wait_for_next_boundary_100ns(fps)
             },
             p_data: uyvy_ptr,
@@ -1190,11 +1189,6 @@ mod tests {
     fn fps_from_frame_rate_zero_denominator_is_noop() {
         // A bad negotiation must never divide by zero -> 0 (genlock no-op).
         assert_eq!(fps_from_frame_rate(60, 0), 0);
-    }
-
-    #[test]
-    fn fps_from_frame_rate_negative_denominator_is_noop() {
-        assert_eq!(fps_from_frame_rate(60, -1), 0);
     }
 
     #[test]
