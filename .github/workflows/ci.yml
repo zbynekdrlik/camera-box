@@ -207,12 +207,14 @@ jobs:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
     # (#25). Covers these unit/build gates today and auto-covers #9's scheduled
-    # loopback/full-path E2E job once it is added to this workflow.
+    # loopback/full-path E2E job once it is added to this workflow. Posts to the
+    # shared n8n relay (CLAUDE_DISCORD_WEBHOOK_URL) the rest of the fleet already
+    # uses for Claude→Discord pings, so the alert lands in the same channel.
     needs: [lint, test, coverage, mutants, build, security]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Discord alert
+      - name: Discord alert (via n8n relay)
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RESULTS: ${{ toJSON(needs) }}
@@ -220,30 +222,23 @@ jobs:
           REF: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           if [ -z "${WEBHOOK:-}" ]; then
             echo "DISCORD_WEBHOOK_URL secret not set — skipping alert."
-            echo "Set it to enable notify-on-red: gh secret set DISCORD_WEBHOOK_URL"
+            echo "Enable notify-on-red: gh secret set DISCORD_WEBHOOK_URL"
             exit 0
           fi
-          payload=$(python3 - <<'PY'
-          import json, os
-          res = json.loads(os.environ["RESULTS"])
-          failed = [k for k, v in res.items() if v.get("result") == "failure"]
-          content = (
-              "\U0001F534 **camera-box CI red** on `%s` (%s, %s)\n"
-              "Failed: %s\n%s"
-              % (
-                  os.environ["REF"],
-                  os.environ["SHA"][:7],
-                  os.environ["EVENT"],
-                  ", ".join(failed) or "unknown",
-                  os.environ["RUN_URL"],
-              )
-          )
-          print(json.dumps({"content": content}))
-          PY
-          )
-          curl -fsS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
-          echo "Alert sent for failed jobs."
+          # Name every gate job that failed (the relay renders message verbatim).
+          failed=$(printf '%s' "$RESULTS" \
+            | jq -r '[to_entries[] | select(.value.result=="failure") | .key] | join(", ")')
+          [ -z "$failed" ] && failed="unknown"
+          msg="🔴 CI red on ${REF} (${SHA:0:7}, ${EVENT}) — failed: ${failed} — ${RUN_URL}"
+          # n8n "claude-stop" relay contract: {project, machine, message, timestamp, session_id}.
+          payload=$(jq -n \
+            --arg p "camera-box" --arg m "github-ci" --arg msg "$msg" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg sid "$RUN_ID" \
+            '{project:$p, machine:$m, message:$msg, timestamp:$ts, session_id:$sid}')
+          curl -fsS --max-time 10 -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
+          echo "Alert relayed for: ${failed}"
