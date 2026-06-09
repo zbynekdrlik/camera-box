@@ -718,6 +718,34 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_drop_is_confirmed() {
+        // CRITICAL (#20 review C1): two ADJACENT 0-sample ids in an oversampled
+        // run = a real burst loss, not a torn-QR artifact (tearing cannot black
+        // out two full hold-windows). Must be CONFIRMED and FAIL the gate, never
+        // hidden as inconclusive.
+        let emitted = vec![0, 1, 2, 3, 4, 5];
+        let observed = oversampled(&[(0, 3), (1, 3), (4, 3), (5, 3)]); // ids 2,3 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.confirmed_drops, vec![2, 3]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert_eq!(r.missing_ids, vec![2, 3]);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn long_burst_is_confirmed() {
+        // A 5-frame contiguous loss in an otherwise pristine oversampled run must
+        // be fully confirmed (every id), not silently passed.
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (8, 3), (9, 3)]); // 3..=7 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.confirmed_drops, vec![3, 4, 5, 6, 7]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
     fn single_healthy_neighbour_is_inconclusive() {
         // A 0-sample id with ONE healthy neighbour (prev=3 samples) and ONE
         // degraded neighbour (next=1 sample). A genuine isolated drop has clean
