@@ -202,3 +202,48 @@ jobs:
 
       - name: Security audit
         run: cargo audit
+
+  notify-on-failure:
+    name: Notify on red
+    # Fires only when a gate above goes RED — replaces silent-red eyeballing
+    # (#25). Covers these unit/build gates today and auto-covers #9's scheduled
+    # loopback/full-path E2E job once it is added to this workflow.
+    needs: [lint, test, coverage, mutants, build, security]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discord alert
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set — skipping alert."
+            echo "Set it to enable notify-on-red: gh secret set DISCORD_WEBHOOK_URL"
+            exit 0
+          fi
+          payload=$(python3 - <<'PY'
+          import json, os
+          res = json.loads(os.environ["RESULTS"])
+          failed = [k for k, v in res.items() if v.get("result") == "failure"]
+          content = (
+              "\U0001F534 **camera-box CI red** on `%s` (%s, %s)\n"
+              "Failed: %s\n%s"
+              % (
+                  os.environ["REF"],
+                  os.environ["SHA"][:7],
+                  os.environ["EVENT"],
+                  ", ".join(failed) or "unknown",
+                  os.environ["RUN_URL"],
+              )
+          )
+          print(json.dumps({"content": content}))
+          PY
+          )
+          curl -fsS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
+          echo "Alert sent for failed jobs."
