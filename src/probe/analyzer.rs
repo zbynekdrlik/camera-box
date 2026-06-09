@@ -5,10 +5,15 @@ use std::collections::{HashMap, HashSet};
 
 /// Oversample floor: a coverage run is *designed* to capture every painted id at
 /// least this many times (at 60 fps capture / ~12 fps coverage paint the real
-/// oversample is ~5x). A neighbour with >= this many decoded samples proves the
-/// capture+decode pipeline was alive there, so an adjacent 0-sample id is a real
-/// drop rather than a torn-QR artifact. Spec §coverage: ">= 2 samples/id".
+/// oversample is ~5x). The run is judged "oversampled" when its median decoded
+/// samples/id reaches this floor; only then is the torn-QR allowance for lone
+/// gaps applied. Spec §coverage: ">= 2 samples/id".
 const MIN_CONFIRM_SAMPLES: usize = 2;
+
+/// Isolated single-frame gaps are tolerated as torn-QR artifacts only up to this
+/// many per 1000 emitted ids (0.1%). Above the cap, scattered single-frame loss
+/// is real (periodic/alternating drop) and is reclassified as confirmed loss.
+const INCONCLUSIVE_TOLERANCE_PER_MILLE: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,11 +72,12 @@ pub struct Freeze {
 /// drop or a torn/illegible-QR artifact (which the analyzer cannot re-decode).
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverageStats {
-    /// The oversample floor used to judge neighbour health (see MIN_CONFIRM_SAMPLES).
+    /// The oversample floor (see MIN_CONFIRM_SAMPLES) the run median must reach
+    /// for the torn-QR allowance to apply.
     pub min_confirm_samples: usize,
     /// Median decoded samples per emitted id — the run-health signal.
     pub oversample_p50: usize,
-    /// `oversample_p50 >= min_confirm_samples`: the neighbour-confirmation rule is
+    /// `oversample_p50 >= min_confirm_samples`: the lone-gap torn-QR allowance is
     /// only applied to genuinely oversampled runs; otherwise strict membership.
     pub run_oversampled: bool,
     /// Emitted ids with exactly 1 decoded sample: present but torn-prone.
@@ -80,11 +86,13 @@ pub struct CoverageStats {
     /// any absent id in a non-oversampled run, or any run of >= 2 CONSECUTIVE
     /// absent ids (a burst loss tearing cannot produce). Fails the coverage gate.
     pub confirmed_drops: Vec<u32>,
-    /// Lone (single, isolated) absent ids in an oversampled run — indistinguishable
-    /// from a torn-on-every-sample QR, so report-only rather than failing the gate
-    /// (#20). NOTE: a genuine *isolated single-frame* drop therefore does not fail
-    /// the gate; it is still surfaced here and as a frame-probe WARN. Bursts and
-    /// non-oversampled gaps are always confirmed.
+    /// Lone (single, isolated) absent ids in an oversampled run, while their
+    /// total stays within INCONCLUSIVE_TOLERANCE_PER_MILLE — indistinguishable
+    /// from a torn-on-every-sample QR, so report-only rather than failing the
+    /// gate (#20). NOTE: a genuine *isolated single-frame* drop (a handful, under
+    /// the cap) therefore does not fail the gate; it is still surfaced here and
+    /// as a frame-probe WARN. Bursts, non-oversampled gaps, and scattered gaps
+    /// over the cap (periodic/alternating loss) are always confirmed.
     pub inconclusive_gaps: Vec<u32>,
 }
 
@@ -213,17 +221,15 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     // Classify zero-sample emitted ids by the length of each maximal run of
     // CONSECUTIVE absent ids. Tearing corrupts at most a few capture frames
     // around a paint transition, so at real oversample it can zero out at most
-    // ONE emitted id in isolation — that lone gap is treated as a torn-QR
-    // artifact (inconclusive, report-only) so a torn QR cannot flake the
-    // zero-loss gate (#20). Two or more ADJACENT absent ids cannot be tearing
-    // (that would have to black out multiple full hold-windows) — it is a real
-    // burst loss -> confirmed, fails the gate (review C1). A run that is not
-    // oversampled keeps strict membership: every absent id is confirmed.
-    // `chunk_by` groups maximal runs of equal zero-ness (all-absent vs
-    // all-present), avoiding a manual index loop and its infinite-loop mutants
-    // (same reason as `detect_freezes`).
+    // ONE emitted id in isolation — a lone gap is a torn-QR *candidate*. Two or
+    // more ADJACENT absent ids cannot be tearing (that would have to black out
+    // multiple full hold-windows) — it is a real burst loss -> confirmed, fails
+    // the gate (review C1). A run that is not oversampled keeps strict
+    // membership: every absent id is confirmed. `chunk_by` groups maximal runs
+    // of equal zero-ness, avoiding a manual index loop and its infinite-loop
+    // mutants (same reason as `detect_freezes`).
     let mut confirmed_drops: Vec<u32> = Vec::new();
-    let mut inconclusive_gaps: Vec<u32> = Vec::new();
+    let mut isolated_candidates: Vec<u32> = Vec::new();
     for run in input
         .emitted_ids
         .chunk_by(|a, b| (samples(*a) == 0) == (samples(*b) == 0))
@@ -232,11 +238,28 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
             continue;
         }
         if run_oversampled && run.len() == 1 {
-            inconclusive_gaps.push(run[0]);
+            isolated_candidates.push(run[0]);
         } else {
             confirmed_drops.extend_from_slice(run);
         }
     }
+    // Torn-QR gaps are RARE (measured ~0 zero-sample ids per 7196 on the cam2
+    // 1080p60 rig; the original #20 false-"missing" was 1 in 7196 = 0.014%).
+    // Tolerate isolated gaps as torn-prone only up to INCONCLUSIVE_TOLERANCE_PER_MILLE
+    // of emitted ids — above that, periodic/scattered single-frame loss
+    // (alternating-frame drop, 1-in-N) is real and MUST fail, not hide as
+    // inconclusive (review round 2). The cap is many times the observed torn
+    // rate yet far below any real periodic-loss rate.
+    let tolerance = (input.emitted_ids.len() * INCONCLUSIVE_TOLERANCE_PER_MILLE / 1000).max(1);
+    let inconclusive_gaps = if isolated_candidates.len() <= tolerance {
+        isolated_candidates
+    } else {
+        confirmed_drops.extend_from_slice(&isolated_candidates);
+        Vec::new()
+    };
+    // Emitted ids are ascending (monotonic paint), so sorting confirmed restores
+    // emitted order after appending the reclassified isolated gaps.
+    confirmed_drops.sort_unstable();
     let missing_ids = confirmed_drops.clone();
     let coverage = CoverageStats {
         min_confirm_samples: MIN_CONFIRM_SAMPLES,
