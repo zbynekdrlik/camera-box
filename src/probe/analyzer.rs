@@ -10,10 +10,11 @@ use std::collections::{HashMap, HashSet};
 /// gaps applied. Spec §coverage: ">= 2 samples/id".
 const MIN_CONFIRM_SAMPLES: usize = 2;
 
-/// Isolated single-frame gaps are tolerated as torn-QR artifacts only up to this
-/// many per 1000 emitted ids (0.1%). Above the cap, scattered single-frame loss
-/// is real (periodic/alternating drop) and is reclassified as confirmed loss.
-const INCONCLUSIVE_TOLERANCE_PER_MILLE: usize = 1;
+/// Isolated single-frame gaps are tolerated as torn-QR artifacts only up to
+/// `emitted / this` of them (one per 1000 emitted ids = 0.1%, floor 1). Above the
+/// cap, scattered single-frame loss is real (periodic/alternating drop) and is
+/// reclassified as confirmed loss.
+const INCONCLUSIVE_TOLERANCE_DIVISOR: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,7 +88,8 @@ pub struct CoverageStats {
     /// absent ids (a burst loss tearing cannot produce). Fails the coverage gate.
     pub confirmed_drops: Vec<u32>,
     /// Lone (single, isolated) absent ids in an oversampled run, while their
-    /// total stays within INCONCLUSIVE_TOLERANCE_PER_MILLE — indistinguishable
+    /// total stays within the torn-QR tolerance (INCONCLUSIVE_TOLERANCE_DIVISOR)
+    /// — indistinguishable
     /// from a torn-on-every-sample QR, so report-only rather than failing the
     /// gate (#20). NOTE: a genuine *isolated single-frame* drop (a handful, under
     /// the cap) therefore does not fail the gate; it is still surfaced here and
@@ -245,12 +247,12 @@ pub fn analyze(input: AnalysisInput) -> AnalysisReport {
     }
     // Torn-QR gaps are RARE (measured ~0 zero-sample ids per 7196 on the cam2
     // 1080p60 rig; the original #20 false-"missing" was 1 in 7196 = 0.014%).
-    // Tolerate isolated gaps as torn-prone only up to INCONCLUSIVE_TOLERANCE_PER_MILLE
-    // of emitted ids — above that, periodic/scattered single-frame loss
-    // (alternating-frame drop, 1-in-N) is real and MUST fail, not hide as
-    // inconclusive (review round 2). The cap is many times the observed torn
-    // rate yet far below any real periodic-loss rate.
-    let tolerance = (input.emitted_ids.len() * INCONCLUSIVE_TOLERANCE_PER_MILLE / 1000).max(1);
+    // Tolerate isolated gaps as torn-prone only up to emitted /
+    // INCONCLUSIVE_TOLERANCE_DIVISOR of them — above that, periodic/scattered
+    // single-frame loss (alternating-frame drop, 1-in-N) is real and MUST fail,
+    // not hide as inconclusive (review round 2). The cap is many times the
+    // observed torn rate yet far below any real periodic-loss rate.
+    let tolerance = (input.emitted_ids.len() / INCONCLUSIVE_TOLERANCE_DIVISOR).max(1);
     let inconclusive_gaps = if isolated_candidates.len() <= tolerance {
         isolated_candidates
     } else {
@@ -799,6 +801,22 @@ mod tests {
         assert_eq!(r.coverage.confirmed_drops, vec![1, 3, 5, 7, 9]);
         assert!(r.coverage.inconclusive_gaps.is_empty());
         assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn tolerance_scales_with_run_length() {
+        // Large run (2000 emitted -> tolerance = 2000/1000 = 2). A SINGLE isolated
+        // gap (1 < 2, strictly under the cap) stays inconclusive. Pins the cap as
+        // `<=`/`<` (vs an `==` that would only tolerate exactly-`tolerance` gaps)
+        // and the emitted/DIVISOR scaling (vs the floor-1 small-run case).
+        let mut pairs: Vec<(u32, usize)> = (0..2000u32).map(|id| (id, 3)).collect();
+        pairs.remove(1000); // id 1000 absent (0 samples)
+        let emitted: Vec<u32> = (0..2000u32).collect();
+        let r = analyze(input(PaintMode::Coverage, emitted, oversampled(&pairs)));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![1000]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.verdict_pass);
     }
 
     #[test]
