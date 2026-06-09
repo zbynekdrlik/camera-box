@@ -84,6 +84,25 @@ fn parse_bound(s: &str) -> Result<(String, f64), String> {
     }
 }
 
+/// Fail loudly if any bound keys a tap that is not a hop downstream. A bound is
+/// applied by exact name match against the downstream tap, so a typo (`striih=`)
+/// or a renamed tap would otherwise silently turn an intended gate into a
+/// report-only no-op — the opposite of what an operator asked for.
+fn validate_bound_keys(
+    bounds: &[(String, f64)],
+    downstream_taps: &std::collections::HashSet<&str>,
+    flag: &str,
+) -> Result<()> {
+    for (key, _) in bounds {
+        if !downstream_taps.contains(key.as_str()) {
+            let mut valid: Vec<&str> = downstream_taps.iter().copied().collect();
+            valid.sort_unstable();
+            bail!("{flag} key '{key}' matches no downstream tap (valid: {valid:?})");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct MultiTapReport {
     run_id: u32,
@@ -121,6 +140,21 @@ fn main() -> Result<()> {
             args.duration_secs
         );
     }
+    // Every hop's downstream is a tap after the first; a bound must key one of
+    // them or it silently no-ops. Reject orphan keys before doing any work.
+    let downstream_taps: std::collections::HashSet<&str> =
+        args.taps.iter().skip(1).map(|(n, _)| n.as_str()).collect();
+    validate_bound_keys(
+        &args.max_p99_latency_ms,
+        &downstream_taps,
+        "--max-p99-latency-ms",
+    )?;
+    validate_bound_keys(
+        &args.max_freeze_periods,
+        &downstream_taps,
+        "--max-freeze-periods",
+    )?;
+
     let decode_crop = (args.qr_size + 120).min(1080);
 
     let start = Instant::now();
@@ -252,5 +286,48 @@ fn main() -> Result<()> {
         Ok(())
     } else {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn taps() -> HashSet<&'static str> {
+        ["strih", "stream"].into_iter().collect()
+    }
+
+    #[test]
+    fn orphan_bound_key_is_rejected() {
+        // A typo'd / renamed key must FAIL loudly, not silently no-op the gate.
+        let err = validate_bound_keys(
+            &[("striih".to_string(), 130.0)],
+            &taps(),
+            "--max-p99-latency-ms",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("striih"));
+    }
+
+    #[test]
+    fn matching_bound_keys_pass() {
+        let bounds = [("strih".to_string(), 130.0), ("stream".to_string(), 220.0)];
+        assert!(validate_bound_keys(&bounds, &taps(), "--max-p99-latency-ms").is_ok());
+    }
+
+    #[test]
+    fn no_bounds_pass() {
+        assert!(validate_bound_keys(&[], &taps(), "--max-freeze-periods").is_ok());
+    }
+
+    #[test]
+    fn parse_bound_rejects_non_numeric_and_empty_name() {
+        assert!(parse_bound("strih=abc").is_err());
+        assert!(parse_bound("=130").is_err());
+        assert_eq!(
+            parse_bound("stream=220").unwrap(),
+            ("stream".to_string(), 220.0)
+        );
     }
 }

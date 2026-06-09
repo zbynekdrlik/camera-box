@@ -208,8 +208,9 @@ jobs:
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
     # (#25). Covers these unit/build gates today and auto-covers #9's scheduled
     # loopback/full-path E2E job once it is added to this workflow. Posts to the
-    # shared n8n relay (CLAUDE_DISCORD_WEBHOOK_URL) the rest of the fleet already
-    # uses for Claude→Discord pings, so the alert lands in the same channel.
+    # shared n8n relay the fleet already uses for Claude→Discord pings (locally
+    # the CLAUDE_DISCORD_WEBHOOK_URL hook); store that same relay URL in THIS
+    # repo's GitHub secret DISCORD_WEBHOOK_URL so the alert lands in that channel.
     needs: [lint, test, coverage, mutants, build, security]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
