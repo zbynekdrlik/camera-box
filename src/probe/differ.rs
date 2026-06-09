@@ -235,6 +235,71 @@ mod tests {
         assert!(r_frz.pass, "None freeze bound must stay report-only");
     }
 
+    /// Build a hop with one heavily-oversampled anchor id (3 copies, always
+    /// delivered) plus `n` single-copy upstream ids, of which the first `drop_k`
+    /// are absent downstream (their sole frame dropped). Models the real pipeline:
+    /// per-frame loss is only exposed on frames that lack oversample redundancy,
+    /// so the masking-aware metric must count exactly those.
+    fn hop_single_copy(n: usize, drop_k: usize, max_loss_pct: Option<f64>) -> HopReport {
+        let mut up = vec![o(0, 0), o(0, 1), o(0, 2)]; // oversampled anchor, never lost
+        for k in 1..=n {
+            up.push(o(k as u32, (2 + k) as i64));
+        }
+        let mut down = vec![o(0, 10)];
+        for k in 1..=n {
+            if k > drop_k {
+                down.push(o(k as u32, (12 + k) as i64));
+            }
+        }
+        diff_hop(HopInput {
+            name: "strih→stream".to_string(),
+            upstream: &up,
+            downstream: &down,
+            capture_fps: 30.0,
+            freeze_periods: 3.0,
+            min_frames: 2,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: None,
+            max_loss_pct,
+        })
+    }
+
+    #[test]
+    fn single_copy_loss_is_counted_unmasked() {
+        // 10 single-copy ids, 2 dropped. The 3-copy anchor id 0 survives and must
+        // NOT inflate the single-copy denominator.
+        let r = hop_single_copy(10, 2, None);
+        assert_eq!(r.single_copy_total, 10);
+        assert_eq!(r.single_copy_dropped, 2);
+    }
+
+    #[test]
+    fn loss_pct_bound_accepts_documented_irreducible_loss() {
+        // 2/100 single-copy frames dropped = 2%; bound 5% → PASS even though
+        // dropped_ids is non-empty. This is the documented-bound gate mode (#21):
+        // strih→stream's genlock-bound per-frame loss is accepted up to the bound.
+        let r = hop_single_copy(100, 2, Some(5.0));
+        assert!(!r.dropped_ids.is_empty());
+        assert_eq!(r.single_copy_total, 100);
+        assert_eq!(r.single_copy_dropped, 2);
+        assert!(r.pass, "2% single-copy loss under a 5% bound must PASS");
+    }
+
+    #[test]
+    fn loss_pct_bound_fails_on_regression_above_bound() {
+        // 8/100 = 8% > 5% bound → FAIL (catches regression past the documented bound).
+        let r = hop_single_copy(100, 8, Some(5.0));
+        assert!(!r.pass, "8% single-copy loss over a 5% bound must FAIL");
+    }
+
+    #[test]
+    fn none_loss_bound_keeps_strict_zero_loss() {
+        // Default (None) keeps the strict dropped_ids-empty gate: ANY drop FAILs,
+        // preserving the Phase-2 zero-loss default for hops without a bound.
+        let r = hop_single_copy(10, 1, None);
+        assert!(!r.pass, "None bound must stay strict zero-loss");
+    }
+
     #[test]
     fn clean_hop_passes_no_drops() {
         let up = vec![o(0, 0), o(1, 33), o(2, 66), o(3, 99)];
