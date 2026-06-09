@@ -718,6 +718,23 @@ mod tests {
     }
 
     #[test]
+    fn single_healthy_neighbour_is_inconclusive() {
+        // A 0-sample id with ONE healthy neighbour (prev=3 samples) and ONE
+        // degraded neighbour (next=1 sample). A genuine isolated drop has clean
+        // frames on BOTH sides; a one-sided disturbance is a torn span, so this
+        // must be inconclusive, NOT confirmed. Pins the inner `&&` (both
+        // neighbours required) against a `||` (either-neighbour) mutant.
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (4, 1), (5, 3), (6, 3)]); // 3 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![3]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.missing_ids.is_empty());
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
     fn boundary_drop_is_confirmed_when_run_healthy() {
         // First emitted id absent in an oversampled run -> confirmed: only one
         // neighbor exists and it is healthy (the missing side cannot disconfirm).
