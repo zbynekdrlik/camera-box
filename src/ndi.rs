@@ -82,14 +82,19 @@ fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
 }
 
 /// Derive the integer genlock pacing rate (frames per second) from a rational
-/// NDI frame rate (`numerator/denominator`). A zero/negative denominator yields
-/// 0, which [`next_boundary_100ns`] treats as a genlock no-op (never divides by
-/// zero).
+/// NDI frame rate (`numerator/denominator`). NDI advertises the exact rational
+/// (e.g. NTSC 59.94 = 60000/1001, 29.97 = 30000/1001) but the boundary math in
+/// [`next_boundary_100ns`] paces on a whole-number fps. Rounding — not
+/// truncating — keeps a non-integer source on its nearest whole-frame cadence
+/// (59.94 -> 60, 29.97 -> 30) instead of silently dropping to 59 / 29, which
+/// would drift the genlock cadence against the advertised rate. A zero/negative
+/// denominator yields 0, which [`next_boundary_100ns`] treats as a genlock
+/// no-op (never divides by zero).
 fn fps_from_frame_rate(numerator: i64, denominator: i64) -> i64 {
     if denominator <= 0 {
         return 0;
     }
-    numerator / denominator
+    (numerator as f64 / denominator as f64).round() as i64
 }
 
 // NDI SDK type definitions (minimal subset for video sending and receiving)
