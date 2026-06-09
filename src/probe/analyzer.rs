@@ -590,4 +590,102 @@ mod tests {
         assert!(latency_freeze_gate_pass(&None, &freezes, None, Some(5.0)));
         assert!(latency_freeze_gate_pass(&None, &[], None, Some(0.0)));
     }
+
+    // --- #20: per-id oversample instrumentation + drop confirmation ---
+
+    /// Build observed for `(id, sample_count)` pairs in ascending id order so
+    /// there is no reorder noise; each sample gets a fixed 10 ms latency. Counts
+    /// stay <= 3 (under the freeze_periods=3 detector) unless a test wants one.
+    fn oversampled(ids_counts: &[(u32, usize)]) -> Vec<Observed> {
+        let mut v = Vec::new();
+        for &(id, n) in ids_counts {
+            let gen = id as i64 * 16_000_000;
+            for _ in 0..n {
+                v.push(obs(id, gen, gen + 10_000_000));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn isolated_drop_in_healthy_region_is_confirmed() {
+        // Oversampled run (2 samples/id, exactly at the floor), id 2 fully
+        // absent, both neighbors healthy -> a genuine single-frame drop that
+        // must still FAIL the coverage gate. p50 == 2 also pins the `>=` bound.
+        let emitted = vec![0, 1, 2, 3, 4];
+        let observed = oversampled(&[(0, 2), (1, 2), (3, 2), (4, 2)]); // id 2 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.oversample_p50, 2);
+        assert_eq!(r.coverage.confirmed_drops, vec![2]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert_eq!(r.missing_ids, vec![2]);
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn zero_sample_in_degraded_region_is_inconclusive() {
+        // Oversampled run overall, but a local torn span: ids 2,3,4 = 1,0,1
+        // samples. The 0-sample id 3 sits between two torn (1-sample) neighbors
+        // -> ambiguous, NOT a confirmed pipeline drop -> coverage gate must pass
+        // (path b: a torn-QR artifact no longer flakes the zero-loss gate).
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 1), (4, 1), (5, 3), (6, 3)]); // 3 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.oversample_p50, 3);
+        assert_eq!(r.coverage.inconclusive_gaps, vec![3]);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.missing_ids.is_empty());
+        assert!(r.coverage.low_coverage_ids.contains(&2));
+        assert!(r.coverage.low_coverage_ids.contains(&4));
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn boundary_drop_is_confirmed_when_run_healthy() {
+        // First emitted id absent in an oversampled run -> confirmed: only one
+        // neighbor exists and it is healthy (the missing side cannot disconfirm).
+        let emitted = vec![0, 1, 2, 3];
+        let observed = oversampled(&[(1, 3), (2, 3), (3, 3)]); // id 0 omitted
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(r.coverage.run_oversampled);
+        assert_eq!(r.coverage.confirmed_drops, vec![0]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn coverage_instrumentation_reports_counts() {
+        let emitted = vec![0, 1, 2, 3];
+        let observed = oversampled(&[(0, 3), (1, 3), (2, 3), (3, 3)]);
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.min_confirm_samples, 2);
+        assert_eq!(r.coverage.oversample_p50, 3);
+        assert!(r.coverage.run_oversampled);
+        assert!(r.coverage.confirmed_drops.is_empty());
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(r.coverage.low_coverage_ids.is_empty());
+        assert!(r.verdict_pass);
+    }
+
+    #[test]
+    fn low_oversample_run_keeps_strict_membership() {
+        // p50 < 2 (single-sample synthetic run): the neighbor rule is OFF, every
+        // 0-sample id is a confirmed drop (preserves Phase-1 strict semantics and
+        // every existing minimal-stream test above).
+        let emitted = vec![0, 1, 2, 3];
+        let observed = vec![
+            obs(0, 0, 1),
+            obs(1, 16_000_000, 16_010_000),
+            obs(3, 48_000_000, 48_010_000),
+        ];
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert!(!r.coverage.run_oversampled);
+        assert_eq!(r.coverage.oversample_p50, 1);
+        assert_eq!(r.missing_ids, vec![2]);
+        assert_eq!(r.coverage.confirmed_drops, vec![2]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
 }
