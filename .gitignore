@@ -27,6 +27,9 @@ Thumbs.db
 mutants.out/
 mutants.out.old/
 
+# frame-probe loopback run artifacts (LOCAL_OUT in scripts/loopback-e2e.sh)
+frame-probe-*.json
+
 # Python bytecode cache (from scripts/*.py)
 __pycache__/
 *.pyc

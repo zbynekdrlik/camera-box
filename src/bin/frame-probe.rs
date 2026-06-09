@@ -21,11 +21,11 @@ struct Args {
     /// Run duration in seconds
     #[arg(long, default_value_t = 300)]
     duration_secs: u64,
-    /// Painter rate (defaults: coverage 12, full-rate 30)
+    /// Painter rate (defaults: coverage 12, full-rate = capture rate)
     #[arg(long)]
     paint_fps: Option<f64>,
-    /// Expected capture rate
-    #[arg(long, default_value_t = 30.0)]
+    /// Expected capture rate (1080p60 pipeline default)
+    #[arg(long, default_value_t = 60.0)]
     capture_fps: f64,
     /// QR pixel size on the canvas
     #[arg(long, default_value_t = 700)]
@@ -83,15 +83,16 @@ fn main() -> Result<()> {
         "full-rate" | "fullrate" => PaintMode::FullRate,
         other => anyhow::bail!("unknown mode '{}' (use coverage|full-rate)", other),
     };
-    // Coverage default 12 fps: each id is displayed ~83 ms (>= 2.5 capture
-    // periods at 30 fps), guaranteeing >= 2 capture samples per id. The
-    // framebuffer is written once per id (~0.8 ms), and captures are ~33 ms
-    // apart, so at most one sample per id can be torn -> >= 1 clean sample
-    // always exists -> tearing cannot cause a false loss. (Full-rate runs at
-    // capture rate to stress the real path; it is report-only for loss.)
+    // Coverage default 12 fps: each id is displayed ~83 ms (~5 capture periods
+    // at the 1080p60 pipeline rate, >= 2.5 even at 30 fps), guaranteeing >= 2
+    // capture samples per id. The framebuffer is written once per id (~0.8 ms),
+    // and captures are ~16.7 ms apart at 60 fps, so at most one sample per id
+    // can be torn -> >= 1 clean sample always exists -> tearing cannot cause a
+    // false loss. (Full-rate runs at the capture rate to stress the real path;
+    // it is report-only for loss.)
     let paint_fps = args.paint_fps.unwrap_or(match mode {
         PaintMode::Coverage => 12.0,
-        PaintMode::FullRate => 30.0,
+        PaintMode::FullRate => args.capture_fps,
     });
     let run_id = match args.run_id {
         Some(r) => r,

@@ -10,6 +10,9 @@ use std::arch::x86_64::*;
 
 use crate::capture::{Frame, FrameRate};
 
+/// 100-nanosecond units per second (genlock boundary math base).
+const UNITS_PER_SECOND: i64 = 10_000_000;
+
 /// Get current wall clock time in 100-nanosecond intervals since Unix epoch.
 /// This is the format NDI expects for timecodes.
 /// Using explicit SystemTime ensures we always get the current time,
@@ -22,26 +25,19 @@ fn get_wall_clock_100ns() -> i64 {
         .unwrap_or(0)
 }
 
-/// Wait for the next frame boundary and return its timecode.
-/// This blocks until the next aligned boundary for genlock synchronization.
-/// All cameras with NTP/PTP synchronized clocks will send frames at the same
-/// wall-clock boundaries, enabling software genlock across multiple devices.
+/// Pure boundary math: given the current wall-clock time (100ns units) and a
+/// frame rate, return the timecode of the next aligned frame boundary. Split
+/// out from the sleeping wrapper so the genlock pacing is deterministically
+/// unit-testable at any fps (30, 60, ...) without touching the real clock.
 ///
-/// Boundaries are calculated relative to each second to avoid drift:
-/// - Frame 0:  000.000 ms
-/// - Frame 1:  033.333 ms
-/// - Frame 2:  066.667 ms
-/// - ...
-/// - Frame 29: 966.667 ms
-#[inline]
-fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
+/// Boundaries are calculated relative to each second to avoid drift. Spacing is
+/// `1/fps` seconds, so the rate is parameterized — at 60 fps boundaries fall
+/// every 16.667 ms (frame 0 = 0.000 ms, frame 1 = 16.667 ms, ... frame 59 =
+/// 983.333 ms); at 30 fps every 33.333 ms.
+fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     if fps <= 0 {
-        return get_wall_clock_100ns();
+        return now_100ns;
     }
-
-    const UNITS_PER_SECOND: i64 = 10_000_000; // 100ns units per second
-
-    let now_100ns = get_wall_clock_100ns();
 
     // Find the start of the current second
     let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
@@ -53,17 +49,30 @@ fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
 
     // Calculate next frame boundary
     let next_frame_in_second = frame_in_second + 1;
-    let next_boundary = if next_frame_in_second >= fps {
+    if next_frame_in_second >= fps {
         // Next frame is at the start of the next second (exactly X:XX:XX.000)
         current_second_100ns + UNITS_PER_SECOND
     } else {
         // Boundary = second_start + (frame_num * UNITS_PER_SECOND / fps)
         // Multiply before divide to maintain precision
         current_second_100ns + (next_frame_in_second * UNITS_PER_SECOND / fps)
-    };
+    }
+}
 
-    // Sleep until next boundary
-    let wait_100ns = next_boundary - now_100ns;
+/// Block until the next aligned frame boundary and return its timecode. All
+/// cameras with NTP/PTP-synchronized clocks send frames at the same wall-clock
+/// boundaries, enabling software genlock across devices. Pure boundary math is
+/// in [`next_boundary_100ns`]; this wrapper only adds the real-clock sleep.
+#[inline]
+fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
+    let now_100ns = get_wall_clock_100ns();
+    // next_boundary_100ns already guards fps <= 0 (returns now -> zero wait).
+    let next_boundary = next_boundary_100ns(now_100ns, fps);
+
+    // Sleep until next boundary. A genlock wait is always < one frame interval,
+    // so clamp to one second: a clock jump (or a bad boundary) must never park
+    // the send thread for an unbounded time.
+    let wait_100ns = (next_boundary - now_100ns).clamp(0, UNITS_PER_SECOND);
     if wait_100ns > 0 {
         let wait_duration = std::time::Duration::from_nanos((wait_100ns * 100) as u64);
         std::thread::sleep(wait_duration);
@@ -1090,6 +1099,68 @@ pub fn has_avx2() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_60fps_from_second_start() {
+        // At a clean second start, the next 60fps boundary is frame 1 = 1/60 s.
+        let b = next_boundary_100ns(0, 60);
+        assert_eq!(b, UNITS_PER_SECOND / 60); // 166_666
+    }
+
+    #[test]
+    fn boundary_60fps_mid_frame0_targets_frame1() {
+        // 1 unit into frame 0 still targets frame 1.
+        let b = next_boundary_100ns(1, 60);
+        assert_eq!(b, UNITS_PER_SECOND / 60);
+    }
+
+    #[test]
+    fn boundary_60fps_last_frame_wraps_to_next_second() {
+        // Inside frame 59 (>= 59/60 s), the next boundary is the next second.
+        let now = 9_900_000; // 0.99 s, within frame 59
+        let b = next_boundary_100ns(now, 60);
+        assert_eq!(b, UNITS_PER_SECOND);
+    }
+
+    #[test]
+    fn boundary_30fps_still_correct() {
+        // 60fps must not break the legacy 30fps pacing.
+        assert_eq!(next_boundary_100ns(0, 30), UNITS_PER_SECOND / 30); // 333_333
+    }
+
+    #[test]
+    fn boundary_60fps_is_denser_than_30fps() {
+        // 60fps boundaries are ~half the spacing of 30fps (twice the density).
+        let s60 = next_boundary_100ns(0, 60);
+        let s30 = next_boundary_100ns(0, 30);
+        assert!(s60 < s30);
+        assert!((s30 - 2 * s60).abs() <= 2, "s30={s30} s60={s60}");
+    }
+
+    #[test]
+    fn boundary_zero_fps_is_noop() {
+        assert_eq!(next_boundary_100ns(12_345, 0), 12_345);
+    }
+
+    #[test]
+    fn wait_for_next_boundary_returns_real_recent_boundary() {
+        // Exercises the sleeping wrapper: it must sleep until and return a real
+        // wall-clock boundary timecode (not 0/1/-1, not a future value).
+        let b = wait_for_next_boundary_100ns(60);
+        let now = get_wall_clock_100ns();
+        // A real 100ns-since-epoch timecode is huge -> kills ->0 / ->1 / ->-1.
+        assert!(b > 1_000_000, "boundary must be a real timecode, got {b}");
+        // We slept until the boundary, so it is now-or-just-past, never future.
+        assert!(
+            b <= now,
+            "boundary {b} must not be in the future (now {now})"
+        );
+        // ...and within ~one 60fps frame of now (kills skip-the-sleep mutants).
+        assert!(
+            now - b < UNITS_PER_SECOND / 60 + 100_000,
+            "boundary {b} too stale vs now {now}"
+        );
+    }
 
     #[test]
     fn test_yuyv_to_uyvy_scalar_basic() {
