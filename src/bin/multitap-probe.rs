@@ -161,6 +161,8 @@ fn main() -> Result<()> {
             capture_fps: args.capture_fps,
             freeze_periods: args.freeze_periods,
             min_frames: args.min_frames,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: None,
         }));
     }
 
