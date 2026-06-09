@@ -765,6 +765,43 @@ mod tests {
     }
 
     #[test]
+    fn alternating_loss_is_confirmed() {
+        // CRITICAL (#20 review round 2): every-other-frame loss is a catastrophic
+        // real loss, NOT torn-QR noise. Each gap is a length-1 run, but 5 of 10
+        // emitted are absent — far over the inconclusive cap -> all confirmed,
+        // gate FAILS. (Was silently passing as all-inconclusive.)
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let observed = oversampled(&[(0, 3), (2, 3), (4, 3), (6, 3), (8, 3)]); // odds absent
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.confirmed_drops, vec![1, 3, 5, 7, 9]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
+    fn scattered_single_gaps_over_cap_are_confirmed() {
+        // Two non-adjacent isolated gaps in a 10-frame run (20% loss). The cap is
+        // max(1, emitted/1000) = 1 here, so 2 isolated gaps exceed it -> the gaps
+        // are reclassified confirmed (real loss), gate FAILS. A torn-QR run has
+        // FAR fewer than 0.1% such gaps.
+        let emitted = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let observed = oversampled(&[
+            (0, 3),
+            (1, 3),
+            (3, 3),
+            (4, 3),
+            (5, 3),
+            (6, 3),
+            (8, 3),
+            (9, 3),
+        ]); // 2,7 absent
+        let r = analyze(input(PaintMode::Coverage, emitted, observed));
+        assert_eq!(r.coverage.confirmed_drops, vec![2, 7]);
+        assert!(r.coverage.inconclusive_gaps.is_empty());
+        assert!(!r.verdict_pass);
+    }
+
+    #[test]
     fn boundary_burst_is_confirmed() {
         // A burst at the very start of the sequence (ids 0,1 absent) — the run
         // begins mid-gap. Length 2 -> confirmed, fails the gate. Pins the
