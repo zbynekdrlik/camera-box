@@ -4,7 +4,7 @@
 //! camera box (frame-probe --paint-only) with the same --run-id.
 
 use anyhow::{bail, Result};
-use camera_box::probe::differ::{diff_hop, HopInput, HopReport};
+use camera_box::probe::differ::{diff_hop, HopInput, HopReport, HopVerdict};
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
 use serde::Serialize;
@@ -66,6 +66,17 @@ struct Args {
     /// #8): accepts the documented floor, still fails on regression past it.
     #[arg(long = "max-loss-pct", value_parser = parse_bound)]
     max_loss_pct: Vec<(String, f64)>,
+    /// Oversample-masking guard (#29): minimum single-copy (oversample-independent)
+    /// frames a hop must contain before a passed loss gate is CERTIFIED. The
+    /// painter is sub-fps, so each unique id is oversampled and a dropped id only
+    /// counts when ALL its copies are lost — a high-oversample run can show zero
+    /// loss while the pipeline really drops frames. When the loss gate passes but a
+    /// hop has fewer than this many single-copy frames, its verdict is INCONCL
+    /// (which, like FAIL, makes the run exit non-zero) instead of a false-green
+    /// PASS. Applies to every hop. `0` (default) disables the guard. Set this in CI
+    /// so a green proves enough oversample-independent evidence, not luck.
+    #[arg(long, default_value_t = 0)]
+    min_single_copy: usize,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -256,6 +267,7 @@ fn main() -> Result<()> {
             max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
             max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
             max_loss_pct: loss_bounds.get(&down_name).copied(),
+            min_single_copy: args.min_single_copy,
         }));
     }
 
@@ -276,7 +288,9 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    let verdict_pass = hops.iter().all(|h| h.pass);
+    // INCONCL (insufficient oversample-independent evidence) counts as NOT-pass,
+    // exactly like FAIL — a run that cannot certify must not exit green (#29).
+    let verdict_pass = hops.iter().all(|h| h.verdict.is_pass());
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
@@ -326,7 +340,11 @@ fn main() -> Result<()> {
             "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={} \
              single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
             h.name,
-            if h.pass { "PASS" } else { "FAIL" },
+            match h.verdict {
+                HopVerdict::Pass => "PASS",
+                HopVerdict::Fail => "FAIL",
+                HopVerdict::Inconclusive => "INCONCL",
+            },
             h.upstream_unique,
             h.downstream_unique,
             h.dropped_ids.len(),
@@ -343,11 +361,19 @@ fn main() -> Result<()> {
             );
         }
     }
-    println!(
-        "VERDICT={} ARTIFACT={}",
-        if verdict_pass { "PASS" } else { "FAIL" },
-        args.out
-    );
+    // Top-level label distinguishes a proven regression (any hop FAIL) from an
+    // untrustworthy green (a hop INCONCL: gates passed but too few single-copy
+    // samples). Both exit non-zero via `verdict_pass`; the label tells the
+    // operator which so an INCONCL is read as "need a longer/denser run", not
+    // "the pipeline broke".
+    let overall = if verdict_pass {
+        "PASS"
+    } else if report.hops.iter().any(|h| h.verdict == HopVerdict::Fail) {
+        "FAIL"
+    } else {
+        "INCONCL"
+    };
+    println!("VERDICT={overall} ARTIFACT={}", args.out);
 
     if verdict_pass {
         Ok(())
