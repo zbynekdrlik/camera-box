@@ -58,9 +58,22 @@ struct Args {
     /// `>`). An omitted hop is report-only (default).
     #[arg(long = "max-freeze-periods", value_parser = parse_bound)]
     max_freeze_periods: Vec<(String, f64)>,
+    /// Per-hop documented-bound loss gate as DOWNSTREAM_TAP=PCT (repeat per hop).
+    /// When set, the hop is judged by its oversample-independent single-copy
+    /// frame-loss percentage staying `<= PCT` instead of the strict
+    /// any-drop-fails default. For hops with a known, quantified, currently
+    /// irreducible loss (strih→stream's OBS render-clock drop pending genlock,
+    /// #8): accepts the documented floor, still fails on regression past it.
+    #[arg(long = "max-loss-pct", value_parser = parse_bound)]
+    max_loss_pct: Vec<(String, f64)>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
+    /// Optional raw per-frame dump (JSONL: {tap,frame_id,recv_ts_ns}) of every
+    /// decoded observation, untrimmed. Diagnostic for root-causing which ids drop
+    /// and their oversample multiplicity; off unless set.
+    #[arg(long)]
+    dump_raw: Option<String>,
 }
 
 fn parse_tap(s: &str) -> Result<(String, String), String> {
@@ -117,6 +130,16 @@ struct MultiTapReport {
 struct TapSummary {
     name: String,
     unique_frames: usize,
+    /// Raw NDI frames pulled off the wire (decoded or not), over the whole run.
+    captured: u64,
+    /// Raw frames whose QR decoded with a matching run_id (includes oversample
+    /// duplicates of the same id). `captured - decoded` is this tap's
+    /// decode-miss floor — frames that ARRIVED but did not yield a matching-run_id
+    /// QR: torn/un-decodable, or (≈0 in a single-run probe) a QR from a different
+    /// run_id. Comparing a downstream tap's `captured` against the upstream tap's
+    /// output proves whether id-level `dropped_ids` is true hop loss or just tap
+    /// decode misses.
+    decoded: u64,
 }
 
 fn main() -> Result<()> {
@@ -154,6 +177,7 @@ fn main() -> Result<()> {
         &downstream_taps,
         "--max-freeze-periods",
     )?;
+    validate_bound_keys(&args.max_loss_pct, &downstream_taps, "--max-loss-pct")?;
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
@@ -214,6 +238,8 @@ fn main() -> Result<()> {
         args.max_p99_latency_ms.iter().cloned().collect();
     let freeze_bounds: std::collections::HashMap<String, f64> =
         args.max_freeze_periods.iter().cloned().collect();
+    let loss_bounds: std::collections::HashMap<String, f64> =
+        args.max_loss_pct.iter().cloned().collect();
 
     // Difference each adjacent pair.
     let mut hops: Vec<HopReport> = Vec::new();
@@ -229,6 +255,7 @@ fn main() -> Result<()> {
             min_frames: args.min_frames,
             max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
             max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
+            max_loss_pct: loss_bounds.get(&down_name).copied(),
         }));
     }
 
@@ -242,6 +269,10 @@ fn main() -> Result<()> {
                 .map(|o| o.frame_id)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
+            captured: r.captured.load(Ordering::Relaxed),
+            // Raw (untrimmed) decoded-frame count for this tap — the run_id QR
+            // frames it actually decoded, oversample dups included.
+            decoded: r.observed.lock().unwrap().len() as u64,
         })
         .collect();
 
@@ -258,9 +289,42 @@ fn main() -> Result<()> {
     let json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&args.out, &json)?;
 
-    for h in &report.hops {
+    if let Some(path) = &args.dump_raw {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path)?;
+        for r in &results {
+            let name = &r.name;
+            for o in r.observed.lock().unwrap().iter() {
+                writeln!(
+                    f,
+                    "{{\"tap\":\"{}\",\"frame_id\":{},\"recv_ts_ns\":{}}}",
+                    name, o.frame_id, o.recv_ts_ns
+                )?;
+            }
+        }
+    }
+
+    for t in &report.taps {
+        let fail = t.captured.saturating_sub(t.decoded);
+        let pct = if t.captured > 0 {
+            100.0 * fail as f64 / t.captured as f64
+        } else {
+            0.0
+        };
         println!(
-            "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={}",
+            "TAP {} captured={} decoded={} decode_failed={} ({:.2}% torn)",
+            t.name, t.captured, t.decoded, fail, pct
+        );
+    }
+    for h in &report.hops {
+        let sc_pct = if h.single_copy_total > 0 {
+            100.0 * h.single_copy_dropped as f64 / h.single_copy_total as f64
+        } else {
+            0.0
+        };
+        println!(
+            "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={} \
+             single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
             h.name,
             if h.pass { "PASS" } else { "FAIL" },
             h.upstream_unique,
@@ -268,6 +332,9 @@ fn main() -> Result<()> {
             h.dropped_ids.len(),
             h.reorders.len(),
             h.freezes.len(),
+            h.single_copy_dropped,
+            h.single_copy_total,
+            sc_pct,
         );
         if let Some(l) = &h.latency {
             println!(
