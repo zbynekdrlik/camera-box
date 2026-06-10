@@ -39,27 +39,38 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-echo "[1/5] OBS setup — route the chain and discover each program's NDI name"
-# strih ingests the camera's QR NDI; STRIH_OUT = strih program NDI name.
-STRIH_OUT=$(python3 scripts/obs_phase2.py setup --host "$STRIH" --upstream "$CAM_SOURCE")
-# stream ingests strih's program NDI; STREAM_OUT = stream program NDI name.
-STREAM_OUT=$(python3 scripts/obs_phase2.py setup --host "$STREAM" --upstream "$STRIH_OUT")
-echo "    tap names: cam='$CAM_SOURCE'  strih='$STRIH_OUT'  stream='$STREAM_OUT'"
-
-echo "[2/5] build frame-probe + multitap-probe"
+echo "[1/5] build frame-probe + multitap-probe"
 cargo build --release --features probe --bin frame-probe --bin multitap-probe
 
-echo "[3/5] start cam2 painter (run_id=$RUN_ID), camera-box keeps capture->NDI"
+echo "[2/5] bring up the cam2 NDI sender FIRST (run_id=$RUN_ID), then the painter"
+# #30 ordering fix: camera-box's "CAM2 (usb)" NDI sender must EXIST before OBS
+# binds its ndi_source to it. Previously OBS setup ran first and bound to the
+# sender that this step then RESTARTED — DistroAV intermittently failed to
+# reconnect to the new sender, so strih/stream rendered black and every tap
+# downstream of OBS decoded 0 for the whole run (false-RED on min_frames).
+# Starting (restarting) camera-box up front means OBS binds, in step [3], to the
+# live sender that then persists for the entire tap window — no mid-run teardown,
+# no reconnect, no race.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   target/release/frame-probe root@"$CAM2":/tmp/frame-probe
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
   "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; sleep 1; \
    (NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
    sleep 4; \
-   (nohup /tmp/frame-probe --paint-only --run-id $RUN_ID --duration-secs $((DURATION+20)) \
+   (nohup /tmp/frame-probe --paint-only --run-id $RUN_ID --duration-secs $((DURATION+40)) \
       >/tmp/painter.log 2>&1 &)"
 # NOTE: camera-box is started WITHOUT --display so /dev/fb0 is free for the
 # painter; it still runs capture->NDI, carrying the QR frames onto the network.
+# Painter outlasts the tap window by +40s because OBS setup ([3]) now runs AFTER
+# the painter starts and consumes a few seconds before the taps begin.
+sleep 3  # let the fresh "CAM2 (usb)" NDI sender become discoverable on the LAN
+
+echo "[3/5] OBS setup — route the chain to the LIVE sender, discover program NDI names"
+# strih ingests the camera's live QR NDI; STRIH_OUT = strih program NDI name.
+STRIH_OUT=$(python3 scripts/obs_phase2.py setup --host "$STRIH" --upstream "$CAM_SOURCE")
+# stream ingests strih's program NDI; STREAM_OUT = stream program NDI name.
+STREAM_OUT=$(python3 scripts/obs_phase2.py setup --host "$STREAM" --upstream "$STRIH_OUT")
+echo "    tap names: cam='$CAM_SOURCE'  strih='$STRIH_OUT'  stream='$STREAM_OUT'"
 
 echo "[4/5] dev1 taps (run_id=$RUN_ID, ${DURATION}s)"
 sleep 6  # let OBS NDI outputs become discoverable + the chain stabilise
@@ -87,6 +98,26 @@ MAX_LOSS_STRIH="${MAX_LOSS_STRIH-10}"
 MAX_LOSS_STREAM="${MAX_LOSS_STREAM-10}"
 [ -n "$MAX_LOSS_STRIH" ]  && GATE_ARGS+=(--max-loss-pct "strih=$MAX_LOSS_STRIH")
 [ -n "$MAX_LOSS_STREAM" ] && GATE_ARGS+=(--max-loss-pct "stream=$MAX_LOSS_STREAM")
+
+# Per-hop oversample-masking guard (#29), keyed by the DOWNSTREAM tap of each hop.
+# A hop is only CERTIFIED (PASS) once it carried at least this many single-copy
+# (oversample-independent) frames; below it the verdict is INCONCL (exit non-zero),
+# not a false-green PASS. The sub-fps QR painter oversamples each id, so a unique
+# id is only "dropped" when ALL its copies are lost and a lucky run can show zero
+# loss while frames really drop; single-copy ids expose the true per-frame drop.
+#
+# Measured single-copy yield is HOP-DEPENDENT and, on the second hop, NOT
+# duration-stable:
+#   cam→strih (key 'strih'):  48 / 68 / 49 / 60  over 120-300 s  — reliably ~50-68
+#   strih→stream (key 'stream'): 12 / 63 / 17 / 2 — starved, often too few (2 at 300 s!)
+# So guard cam→strih at 20 (always met → catches a degenerate <20 run) and leave
+# strih→stream UNGATED until the full-fps painter (#32) gives it a stable supply —
+# gating it now would INCONCL healthy runs. Override per hop to tighten as #32
+# lands. Set a value to empty to disable that hop's guard.
+MIN_SC_STRIH="${MIN_SC_STRIH-20}"
+MIN_SC_STREAM="${MIN_SC_STREAM-}"   # ungated until #32 (full-fps painter)
+[ -n "$MIN_SC_STRIH" ]  && GATE_ARGS+=(--min-single-copy "strih=$MIN_SC_STRIH")
+[ -n "$MIN_SC_STREAM" ] && GATE_ARGS+=(--min-single-copy "stream=$MIN_SC_STREAM")
 
 # Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
 [ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")

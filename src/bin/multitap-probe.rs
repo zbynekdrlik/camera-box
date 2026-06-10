@@ -66,17 +66,19 @@ struct Args {
     /// #8): accepts the documented floor, still fails on regression past it.
     #[arg(long = "max-loss-pct", value_parser = parse_bound)]
     max_loss_pct: Vec<(String, f64)>,
-    /// Oversample-masking guard (#29): minimum single-copy (oversample-independent)
-    /// frames a hop must contain before a passed loss gate is CERTIFIED. The
-    /// painter is sub-fps, so each unique id is oversampled and a dropped id only
-    /// counts when ALL its copies are lost — a high-oversample run can show zero
-    /// loss while the pipeline really drops frames. When the loss gate passes but a
-    /// hop has fewer than this many single-copy frames, its verdict is INCONCL
-    /// (which, like FAIL, makes the run exit non-zero) instead of a false-green
-    /// PASS. Applies to every hop. `0` (default) disables the guard. Set this in CI
-    /// so a green proves enough oversample-independent evidence, not luck.
-    #[arg(long, default_value_t = 0)]
-    min_single_copy: usize,
+    /// Oversample-masking guard (#29) as DOWNSTREAM_TAP=COUNT (repeat per hop, like
+    /// the other gates). The hop feeding tap X is only CERTIFIED (verdict PASS)
+    /// when it carried at least COUNT single-copy (oversample-independent) frames;
+    /// below that its verdict is INCONCL (which, like FAIL, makes the run exit
+    /// non-zero) instead of a false-green PASS. The painter is sub-fps, so a unique
+    /// id is only "dropped" when ALL its copies are lost and a high-oversample run
+    /// can show zero loss while the pipeline really drops frames; single-copy ids
+    /// expose the real per-frame drop. Per-hop because the yield differs sharply by
+    /// hop: cam→strih reliably gives ~50-68, but strih→stream is starved (2-63,
+    /// often too few) until the full-fps painter (#32) — so guard the hop that has
+    /// the evidence and leave the starved one ungated. An omitted hop is ungated.
+    #[arg(long = "min-single-copy", value_parser = parse_bound)]
+    min_single_copy: Vec<(String, f64)>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -189,6 +191,7 @@ fn main() -> Result<()> {
         "--max-freeze-periods",
     )?;
     validate_bound_keys(&args.max_loss_pct, &downstream_taps, "--max-loss-pct")?;
+    validate_bound_keys(&args.min_single_copy, &downstream_taps, "--min-single-copy")?;
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
@@ -251,6 +254,10 @@ fn main() -> Result<()> {
         args.max_freeze_periods.iter().cloned().collect();
     let loss_bounds: std::collections::HashMap<String, f64> =
         args.max_loss_pct.iter().cloned().collect();
+    // Per-hop single-copy guard counts, keyed by downstream tap. Absent ⇒ 0 ⇒
+    // ungated. Parsed as f64 (shared parser) then floored to a frame count.
+    let sc_bounds: std::collections::HashMap<String, f64> =
+        args.min_single_copy.iter().cloned().collect();
 
     // Difference each adjacent pair.
     let mut hops: Vec<HopReport> = Vec::new();
@@ -267,7 +274,7 @@ fn main() -> Result<()> {
             max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
             max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
             max_loss_pct: loss_bounds.get(&down_name).copied(),
-            min_single_copy: args.min_single_copy,
+            min_single_copy: sc_bounds.get(&down_name).copied().unwrap_or(0.0) as usize,
         }));
     }
 
