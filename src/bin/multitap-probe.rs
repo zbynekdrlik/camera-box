@@ -129,6 +129,19 @@ fn validate_bound_keys(
     Ok(())
 }
 
+/// A single-copy guard is a frame COUNT. The shared f64 `parse_bound` accepts
+/// negatives and fractions, but `strih=-5` would saturate to 0 (= ungated) — the
+/// opposite of an operator tightening the gate — and `strih=2.7` would silently
+/// truncate. Reject both loudly so the gate can never weaken by typo.
+fn validate_count_bounds(bounds: &[(String, f64)], flag: &str) -> Result<()> {
+    for (key, val) in bounds {
+        if *val < 0.0 || val.fract() != 0.0 {
+            bail!("{flag} {key}={val} must be a non-negative integer (frame count)");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct MultiTapReport {
     run_id: u32,
@@ -192,6 +205,7 @@ fn main() -> Result<()> {
     )?;
     validate_bound_keys(&args.max_loss_pct, &downstream_taps, "--max-loss-pct")?;
     validate_bound_keys(&args.min_single_copy, &downstream_taps, "--min-single-copy")?;
+    validate_count_bounds(&args.min_single_copy, "--min-single-copy")?;
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
@@ -419,6 +433,19 @@ mod tests {
     #[test]
     fn no_bounds_pass() {
         assert!(validate_bound_keys(&[], &taps(), "--max-freeze-periods").is_ok());
+    }
+
+    #[test]
+    fn min_single_copy_rejects_negative_and_fractional() {
+        // A frame-count guard must be a non-negative integer; a typo'd negative or
+        // fractional value must FAIL loudly, not silently saturate/truncate to a
+        // weaker-or-disabled gate.
+        assert!(
+            validate_count_bounds(&[("strih".to_string(), -5.0)], "--min-single-copy").is_err()
+        );
+        assert!(validate_count_bounds(&[("strih".to_string(), 2.7)], "--min-single-copy").is_err());
+        assert!(validate_count_bounds(&[("strih".to_string(), 20.0)], "--min-single-copy").is_ok());
+        assert!(validate_count_bounds(&[("strih".to_string(), 0.0)], "--min-single-copy").is_ok());
     }
 
     #[test]
