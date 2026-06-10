@@ -4,7 +4,7 @@
 //! camera box (frame-probe --paint-only) with the same --run-id.
 
 use anyhow::{bail, Result};
-use camera_box::probe::differ::{diff_hop, HopInput, HopReport};
+use camera_box::probe::differ::{diff_hop, HopInput, HopReport, HopVerdict};
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
 use serde::Serialize;
@@ -66,6 +66,19 @@ struct Args {
     /// #8): accepts the documented floor, still fails on regression past it.
     #[arg(long = "max-loss-pct", value_parser = parse_bound)]
     max_loss_pct: Vec<(String, f64)>,
+    /// Oversample-masking guard (#29) as DOWNSTREAM_TAP=COUNT (repeat per hop, like
+    /// the other gates). The hop feeding tap X is only CERTIFIED (verdict PASS)
+    /// when it carried at least COUNT single-copy (oversample-independent) frames;
+    /// below that its verdict is INCONCL (which, like FAIL, makes the run exit
+    /// non-zero) instead of a false-green PASS. The painter is sub-fps, so a unique
+    /// id is only "dropped" when ALL its copies are lost and a high-oversample run
+    /// can show zero loss while the pipeline really drops frames; single-copy ids
+    /// expose the real per-frame drop. Per-hop because the yield differs sharply by
+    /// hop: cam→strih reliably gives ~50-68, but strih→stream is starved (2-63,
+    /// often too few) until the full-fps painter (#32) — so guard the hop that has
+    /// the evidence and leave the starved one ungated. An omitted hop is ungated.
+    #[arg(long = "min-single-copy", value_parser = parse_bound)]
+    min_single_copy: Vec<(String, f64)>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -111,6 +124,19 @@ fn validate_bound_keys(
             let mut valid: Vec<&str> = downstream_taps.iter().copied().collect();
             valid.sort_unstable();
             bail!("{flag} key '{key}' matches no downstream tap (valid: {valid:?})");
+        }
+    }
+    Ok(())
+}
+
+/// A single-copy guard is a frame COUNT. The shared f64 `parse_bound` accepts
+/// negatives and fractions, but `strih=-5` would saturate to 0 (= ungated) — the
+/// opposite of an operator tightening the gate — and `strih=2.7` would silently
+/// truncate. Reject both loudly so the gate can never weaken by typo.
+fn validate_count_bounds(bounds: &[(String, f64)], flag: &str) -> Result<()> {
+    for (key, val) in bounds {
+        if *val < 0.0 || val.fract() != 0.0 {
+            bail!("{flag} {key}={val} must be a non-negative integer (frame count)");
         }
     }
     Ok(())
@@ -178,6 +204,8 @@ fn main() -> Result<()> {
         "--max-freeze-periods",
     )?;
     validate_bound_keys(&args.max_loss_pct, &downstream_taps, "--max-loss-pct")?;
+    validate_bound_keys(&args.min_single_copy, &downstream_taps, "--min-single-copy")?;
+    validate_count_bounds(&args.min_single_copy, "--min-single-copy")?;
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
@@ -240,6 +268,10 @@ fn main() -> Result<()> {
         args.max_freeze_periods.iter().cloned().collect();
     let loss_bounds: std::collections::HashMap<String, f64> =
         args.max_loss_pct.iter().cloned().collect();
+    // Per-hop single-copy guard counts, keyed by downstream tap. Absent ⇒ 0 ⇒
+    // ungated. Parsed as f64 (shared parser) then floored to a frame count.
+    let sc_bounds: std::collections::HashMap<String, f64> =
+        args.min_single_copy.iter().cloned().collect();
 
     // Difference each adjacent pair.
     let mut hops: Vec<HopReport> = Vec::new();
@@ -256,6 +288,7 @@ fn main() -> Result<()> {
             max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
             max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
             max_loss_pct: loss_bounds.get(&down_name).copied(),
+            min_single_copy: sc_bounds.get(&down_name).copied().unwrap_or(0.0) as usize,
         }));
     }
 
@@ -276,7 +309,9 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    let verdict_pass = hops.iter().all(|h| h.pass);
+    // INCONCL (insufficient oversample-independent evidence) counts as NOT-pass,
+    // exactly like FAIL — a run that cannot certify must not exit green (#29).
+    let verdict_pass = hops.iter().all(|h| h.verdict.is_pass());
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
@@ -326,7 +361,11 @@ fn main() -> Result<()> {
             "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={} \
              single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
             h.name,
-            if h.pass { "PASS" } else { "FAIL" },
+            match h.verdict {
+                HopVerdict::Pass => "PASS",
+                HopVerdict::Fail => "FAIL",
+                HopVerdict::Inconclusive => "INCONCL",
+            },
             h.upstream_unique,
             h.downstream_unique,
             h.dropped_ids.len(),
@@ -343,11 +382,19 @@ fn main() -> Result<()> {
             );
         }
     }
-    println!(
-        "VERDICT={} ARTIFACT={}",
-        if verdict_pass { "PASS" } else { "FAIL" },
-        args.out
-    );
+    // Top-level label distinguishes a proven regression (any hop FAIL) from an
+    // untrustworthy green (a hop INCONCL: gates passed but too few single-copy
+    // samples). Both exit non-zero via `verdict_pass`; the label tells the
+    // operator which so an INCONCL is read as "need a longer/denser run", not
+    // "the pipeline broke".
+    let overall = if verdict_pass {
+        "PASS"
+    } else if report.hops.iter().any(|h| h.verdict == HopVerdict::Fail) {
+        "FAIL"
+    } else {
+        "INCONCL"
+    };
+    println!("VERDICT={overall} ARTIFACT={}", args.out);
 
     if verdict_pass {
         Ok(())
@@ -386,6 +433,19 @@ mod tests {
     #[test]
     fn no_bounds_pass() {
         assert!(validate_bound_keys(&[], &taps(), "--max-freeze-periods").is_ok());
+    }
+
+    #[test]
+    fn min_single_copy_rejects_negative_and_fractional() {
+        // A frame-count guard must be a non-negative integer; a typo'd negative or
+        // fractional value must FAIL loudly, not silently saturate/truncate to a
+        // weaker-or-disabled gate.
+        assert!(
+            validate_count_bounds(&[("strih".to_string(), -5.0)], "--min-single-copy").is_err()
+        );
+        assert!(validate_count_bounds(&[("strih".to_string(), 2.7)], "--min-single-copy").is_err());
+        assert!(validate_count_bounds(&[("strih".to_string(), 20.0)], "--min-single-copy").is_ok());
+        assert!(validate_count_bounds(&[("strih".to_string(), 0.0)], "--min-single-copy").is_ok());
     }
 
     #[test]

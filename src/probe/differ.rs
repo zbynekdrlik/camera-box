@@ -39,6 +39,39 @@ pub struct HopInput<'a> {
     /// genlock, #8) — it accepts the documented floor yet still catches a
     /// regression past it. `dropped_ids` is always reported either way.
     pub max_loss_pct: Option<f64>,
+    /// Oversample-masking guard (#29): the minimum number of single-copy
+    /// (oversample-independent) frames the run must contain before a passed loss
+    /// gate may be CERTIFIED. The painter runs sub-fps, so each unique id is
+    /// oversampled and a dropped id only counts when ALL its copies are lost —
+    /// a high-oversample run can show `dropped_ids` empty (or single-copy loss
+    /// under bound) while the pipeline is really dropping frames. When the loss
+    /// gate passes but `single_copy_total < min_single_copy`, there is too little
+    /// oversample-independent evidence to trust the green, so the verdict is
+    /// `Inconclusive`, not `Pass`. `0` disables the guard (the default — a hop
+    /// that did not opt in keeps its prior pass/fail behaviour).
+    pub min_single_copy: usize,
+}
+
+/// A hop's certification outcome. Three states, because "not a clean pass" is not
+/// the same as "a proven regression": a `Fail` means the hop genuinely dropped
+/// frames / reordered / breached a bound; an `Inconclusive` means every gate
+/// passed but the run lacked enough oversample-independent (single-copy) frames
+/// to TRUST a zero/within-bound loss verdict (#29). Both keep the hop out of a
+/// green CI run (`is_pass()` is false for either), but an operator must be able
+/// to tell "the pipeline is broken" from "the harness needs more samples".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum HopVerdict {
+    Pass,
+    Fail,
+    Inconclusive,
+}
+
+impl HopVerdict {
+    /// True only for `Pass` — a certified clean hop. `Fail` and `Inconclusive`
+    /// both return false, so neither can sneak into a green overall verdict.
+    pub fn is_pass(self) -> bool {
+        matches!(self, HopVerdict::Pass)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,7 +92,10 @@ pub struct HopReport {
     pub single_copy_total: usize,
     /// Of `single_copy_total`, how many are absent downstream.
     pub single_copy_dropped: usize,
-    pub pass: bool,
+    /// `Pass` / `Fail` / `Inconclusive` — see `HopVerdict`. Replaces the old
+    /// `pass: bool` so an oversample-masked, under-sampled run reads as
+    /// `Inconclusive` rather than a falsely green `Pass` (#29).
+    pub verdict: HopVerdict,
 }
 
 fn first_recv(observed: &[Observed]) -> HashMap<u32, i64> {
@@ -146,7 +182,7 @@ pub fn diff_hop(input: HopInput) -> HopReport {
         None => dropped_ids.is_empty(),
         Some(bound) => single_copy_loss_pct <= bound,
     };
-    let pass = up_unique.len() >= input.min_frames
+    let gates_ok = up_unique.len() >= input.min_frames
         && down_unique.len() >= input.min_frames
         && loss_ok
         && reorders.is_empty()
@@ -156,6 +192,20 @@ pub fn diff_hop(input: HopInput) -> HopReport {
             input.max_p99_latency_ms,
             input.max_freeze_periods_gate,
         );
+
+    // Verdict (#29): a real gate breach is a `Fail`. Only when every gate passes
+    // do we ask whether the green is TRUSTWORTHY — a passed loss gate certified
+    // on too few oversample-independent (single-copy) frames is `Inconclusive`,
+    // never `Pass`, so masking cannot manufacture a false green. `min_single_copy
+    // == 0` keeps the guard off (default), so a hop that did not opt in still
+    // reports `Pass`/`Fail` exactly as before.
+    let verdict = if !gates_ok {
+        HopVerdict::Fail
+    } else if single_copy_total < input.min_single_copy {
+        HopVerdict::Inconclusive
+    } else {
+        HopVerdict::Pass
+    };
 
     HopReport {
         name: input.name,
@@ -167,7 +217,7 @@ pub fn diff_hop(input: HopInput) -> HopReport {
         latency,
         single_copy_total,
         single_copy_dropped,
-        pass,
+        verdict,
     }
 }
 
@@ -194,6 +244,7 @@ mod tests {
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
             max_loss_pct: None,
+            min_single_copy: 0,
         }
     }
 
@@ -213,6 +264,7 @@ mod tests {
             max_p99_latency_ms: max_p99,
             max_freeze_periods_gate: None,
             max_loss_pct: None,
+            min_single_copy: 0,
         })
     }
 
@@ -236,6 +288,7 @@ mod tests {
             max_p99_latency_ms: None,
             max_freeze_periods_gate: max_freeze,
             max_loss_pct: None,
+            min_single_copy: 0,
         })
     }
 
@@ -246,7 +299,10 @@ mod tests {
         assert_eq!(r.latency.as_ref().unwrap().p99_ms, 300.0);
         assert!(r.dropped_ids.is_empty());
         assert!(r.reorders.is_empty());
-        assert!(!r.pass, "p99 300 > bound 250 must FAIL the hop");
+        assert!(
+            !r.verdict.is_pass(),
+            "p99 300 > bound 250 must FAIL the hop"
+        );
     }
 
     #[test]
@@ -254,7 +310,10 @@ mod tests {
         // p99 = 250 ms, bound 250 ms → PASS (strict `>`, not `>=`).
         let r = hop_with_p99(250, Some(250.0));
         assert_eq!(r.latency.as_ref().unwrap().p99_ms, 250.0);
-        assert!(r.pass, "p99 250 == bound 250 must PASS (strict >)");
+        assert!(
+            r.verdict.is_pass(),
+            "p99 250 == bound 250 must PASS (strict >)"
+        );
     }
 
     #[test]
@@ -265,7 +324,10 @@ mod tests {
         assert_eq!(r.freezes[0].repeat_count, 6);
         assert!(r.dropped_ids.is_empty());
         assert!(r.reorders.is_empty());
-        assert!(!r.pass, "freeze repeat_count 6 > bound 5 must FAIL the hop");
+        assert!(
+            !r.verdict.is_pass(),
+            "freeze repeat_count 6 > bound 5 must FAIL the hop"
+        );
     }
 
     #[test]
@@ -274,7 +336,7 @@ mod tests {
         let r = hop_with_freeze(5, Some(5.0));
         assert_eq!(r.freezes[0].repeat_count, 5);
         assert!(
-            r.pass,
+            r.verdict.is_pass(),
             "freeze repeat_count 5 == bound 5 must PASS (strict >)"
         );
     }
@@ -285,10 +347,16 @@ mod tests {
         // the hop still PASSes, preserving the Phase-2 loss+reorder-only default.
         let r_lat = hop_with_p99(9999, None);
         assert!(r_lat.latency.as_ref().unwrap().p99_ms > 250.0);
-        assert!(r_lat.pass, "None latency bound must stay report-only");
+        assert!(
+            r_lat.verdict.is_pass(),
+            "None latency bound must stay report-only"
+        );
         let r_frz = hop_with_freeze(99, None);
         assert!(!r_frz.freezes.is_empty());
-        assert!(r_frz.pass, "None freeze bound must stay report-only");
+        assert!(
+            r_frz.verdict.is_pass(),
+            "None freeze bound must stay report-only"
+        );
     }
 
     /// Build a hop with one heavily-oversampled anchor id (3 copies, always
@@ -296,7 +364,12 @@ mod tests {
     /// are absent downstream (their sole frame dropped). Models the real pipeline:
     /// per-frame loss is only exposed on frames that lack oversample redundancy,
     /// so the masking-aware metric must count exactly those.
-    fn hop_single_copy(n: usize, drop_k: usize, max_loss_pct: Option<f64>) -> HopReport {
+    fn hop_single_copy(
+        n: usize,
+        drop_k: usize,
+        max_loss_pct: Option<f64>,
+        min_single_copy: usize,
+    ) -> HopReport {
         let mut up = vec![o(0, 0), o(0, 1), o(0, 2)]; // oversampled anchor, never lost
         for k in 1..=n {
             up.push(o(k as u32, (2 + k) as i64));
@@ -317,6 +390,7 @@ mod tests {
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
             max_loss_pct,
+            min_single_copy,
         })
     }
 
@@ -324,7 +398,7 @@ mod tests {
     fn single_copy_loss_is_counted_unmasked() {
         // 10 single-copy ids, 2 dropped. The 3-copy anchor id 0 survives and must
         // NOT inflate the single-copy denominator.
-        let r = hop_single_copy(10, 2, None);
+        let r = hop_single_copy(10, 2, None, 0);
         assert_eq!(r.single_copy_total, 10);
         assert_eq!(r.single_copy_dropped, 2);
     }
@@ -334,26 +408,35 @@ mod tests {
         // 2/100 single-copy frames dropped = 2%; bound 5% → PASS even though
         // dropped_ids is non-empty. This is the documented-bound gate mode (#21):
         // strih→stream's genlock-bound per-frame loss is accepted up to the bound.
-        let r = hop_single_copy(100, 2, Some(5.0));
+        let r = hop_single_copy(100, 2, Some(5.0), 0);
         assert!(!r.dropped_ids.is_empty());
         assert_eq!(r.single_copy_total, 100);
         assert_eq!(r.single_copy_dropped, 2);
-        assert!(r.pass, "2% single-copy loss under a 5% bound must PASS");
+        assert!(
+            r.verdict.is_pass(),
+            "2% single-copy loss under a 5% bound must PASS"
+        );
     }
 
     #[test]
     fn loss_pct_bound_fails_on_regression_above_bound() {
         // 8/100 = 8% > 5% bound → FAIL (catches regression past the documented bound).
-        let r = hop_single_copy(100, 8, Some(5.0));
-        assert!(!r.pass, "8% single-copy loss over a 5% bound must FAIL");
+        let r = hop_single_copy(100, 8, Some(5.0), 0);
+        assert!(
+            !r.verdict.is_pass(),
+            "8% single-copy loss over a 5% bound must FAIL"
+        );
     }
 
     #[test]
     fn none_loss_bound_keeps_strict_zero_loss() {
         // Default (None) keeps the strict dropped_ids-empty gate: ANY drop FAILs,
         // preserving the Phase-2 zero-loss default for hops without a bound.
-        let r = hop_single_copy(10, 1, None);
-        assert!(!r.pass, "None bound must stay strict zero-loss");
+        let r = hop_single_copy(10, 1, None, 0);
+        assert!(
+            !r.verdict.is_pass(),
+            "None bound must stay strict zero-loss"
+        );
     }
 
     #[test]
@@ -373,10 +456,11 @@ mod tests {
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
             max_loss_pct: Some(5.0),
+            min_single_copy: 0,
         });
         assert_eq!(r.single_copy_total, 0);
         assert!(
-            r.pass,
+            r.verdict.is_pass(),
             "no single-copy frames + zero loss under bound must PASS, not NaN-fail"
         );
     }
@@ -385,13 +469,87 @@ mod tests {
     fn loss_pct_bound_at_exact_bound_passes() {
         // 5/100 single-copy frames dropped = exactly 5.0%; bound 5.0 → PASS
         // (strict `<=`, not `<`). Pins the bound comparison boundary.
-        let r = hop_single_copy(100, 5, Some(5.0));
+        let r = hop_single_copy(100, 5, Some(5.0), 0);
         assert_eq!(r.single_copy_dropped, 5);
         assert_eq!(r.single_copy_total, 100);
         assert!(
-            r.pass,
+            r.verdict.is_pass(),
             "single-copy loss exactly at the bound must PASS (<=)"
         );
+    }
+
+    // ---- #29 oversample-masking guard: min single-copy-sample sufficiency ----
+
+    #[test]
+    fn insufficient_single_copy_is_inconclusive_not_pass() {
+        // Strict zero-loss met (0 dropped) but only 5 single-copy frames against a
+        // guard of 100 → the green is oversample-masking-suspect. Verdict must be
+        // INCONCLUSIVE — neither a clean Pass (untrustworthy) nor a Fail (no
+        // regression was proven).
+        let r = hop_single_copy(5, 0, None, 100);
+        assert!(r.dropped_ids.is_empty());
+        assert_eq!(r.single_copy_total, 5);
+        assert_eq!(r.verdict, HopVerdict::Inconclusive);
+        assert!(!r.verdict.is_pass(), "Inconclusive must not count as pass");
+    }
+
+    #[test]
+    fn enough_single_copy_certifies_pass() {
+        // 200 single-copy frames, 0 dropped, guard 100 satisfied → trustworthy
+        // zero-loss → PASS.
+        let r = hop_single_copy(200, 0, None, 100);
+        assert_eq!(r.single_copy_total, 200);
+        assert_eq!(r.verdict, HopVerdict::Pass);
+    }
+
+    #[test]
+    fn single_copy_at_exact_min_certifies_pass() {
+        // single_copy_total == min_single_copy (100 == 100) → PASS. Pins the guard
+        // boundary as `single_copy_total < min` (strict `<`), so a run with exactly
+        // the required samples certifies; kills a `<`→`<=` mutant.
+        let r = hop_single_copy(100, 0, None, 100);
+        assert_eq!(r.single_copy_total, 100);
+        assert_eq!(r.verdict, HopVerdict::Pass);
+    }
+
+    #[test]
+    fn one_below_min_single_copy_is_inconclusive() {
+        // single_copy_total == min_single_copy - 1 (99 < 100) → INCONCLUSIVE. The
+        // other half of the boundary; together with the exact-min test, pins the
+        // comparison so neither `<`→`<=` nor `<`→`>` mutants survive.
+        let r = hop_single_copy(99, 0, None, 100);
+        assert_eq!(r.single_copy_total, 99);
+        assert_eq!(r.verdict, HopVerdict::Inconclusive);
+    }
+
+    #[test]
+    fn guard_zero_disables_inconclusive_back_compat() {
+        // min_single_copy == 0 (default) → guard off → a clean hop with very few
+        // single-copy frames still PASSes, preserving pre-#29 behaviour for hops
+        // that did not opt in.
+        let r = hop_single_copy(3, 0, None, 0);
+        assert_eq!(r.verdict, HopVerdict::Pass);
+    }
+
+    #[test]
+    fn real_loss_is_fail_not_inconclusive_even_below_guard() {
+        // A genuine drop (2 of 5 single-copy ids absent) with single_copy_total
+        // below the guard must read as FAIL, not INCONCLUSIVE — a proven
+        // regression outranks the sample-sufficiency check. Pins that the guard
+        // only ever downgrades a would-be Pass, never a Fail.
+        let r = hop_single_copy(5, 2, None, 100);
+        assert_eq!(r.single_copy_dropped, 2);
+        assert_eq!(r.verdict, HopVerdict::Fail);
+    }
+
+    #[test]
+    fn guard_applies_in_documented_bound_mode_too() {
+        // Documented-bound mode: single-copy loss 0% is under the 5% bound (loss
+        // gate passes), but only 10 single-copy frames against a guard of 100 →
+        // INCONCLUSIVE. The guard protects the bound-mode green as well as strict.
+        let r = hop_single_copy(10, 0, Some(5.0), 100);
+        assert_eq!(r.single_copy_total, 10);
+        assert_eq!(r.verdict, HopVerdict::Inconclusive);
     }
 
     #[test]
@@ -399,7 +557,7 @@ mod tests {
         let up = vec![o(0, 0), o(1, 33), o(2, 66), o(3, 99)];
         let down = vec![o(0, 10), o(1, 43), o(2, 76), o(3, 109)];
         let r = diff_hop(input(&up, &down));
-        assert!(r.pass);
+        assert!(r.verdict.is_pass());
         assert!(r.dropped_ids.is_empty());
         assert_eq!(r.upstream_unique, 4);
         assert_eq!(r.downstream_unique, 4);
@@ -411,7 +569,7 @@ mod tests {
         let up = vec![o(0, 0), o(1, 33), o(2, 66), o(3, 99)];
         let down = vec![o(0, 10), o(1, 43), o(3, 109)];
         let r = diff_hop(input(&up, &down));
-        assert!(!r.pass);
+        assert!(!r.verdict.is_pass());
         assert_eq!(r.dropped_ids, vec![2]);
     }
 
@@ -421,7 +579,7 @@ mod tests {
         let up = vec![o(0, 0), o(1, 33), o(1, 40), o(2, 66)];
         let down = vec![o(0, 10), o(1, 43), o(1, 50), o(2, 76)];
         let r = diff_hop(input(&up, &down));
-        assert!(r.pass);
+        assert!(r.verdict.is_pass());
         assert!(r.dropped_ids.is_empty());
     }
 
@@ -433,7 +591,7 @@ mod tests {
         let up = vec![o(0, 0), o(1, 33), o(1, 40), o(2, 66)];
         let down = vec![o(0, 10), o(1, 43), o(2, 76)];
         let r = diff_hop(input(&up, &down));
-        assert!(r.pass);
+        assert!(r.verdict.is_pass());
         assert!(r.dropped_ids.is_empty());
     }
 
@@ -442,7 +600,7 @@ mod tests {
         let up = vec![o(0, 0), o(1, 33), o(2, 66)];
         let down = vec![o(0, 10), o(2, 43), o(1, 76)];
         let r = diff_hop(input(&up, &down));
-        assert!(!r.pass);
+        assert!(!r.verdict.is_pass());
         assert_eq!(r.reorders, vec![(2, 1)]);
     }
 
@@ -451,7 +609,7 @@ mod tests {
         let up = vec![o(0, 0), o(1, 33), o(2, 66)];
         let down: Vec<Observed> = vec![];
         let r = diff_hop(input(&up, &down));
-        assert!(!r.pass);
+        assert!(!r.verdict.is_pass());
         assert_eq!(r.downstream_unique, 0);
     }
 
@@ -486,7 +644,7 @@ mod tests {
         let down = vec![o(5, 15), o(6, 16), o(7, 17), o(8, 18), o(9, 19)];
         let r = diff_hop(input(&up, &down));
         assert!(r.dropped_ids.is_empty());
-        assert!(r.pass);
+        assert!(r.verdict.is_pass());
     }
 
     #[test]
@@ -507,7 +665,7 @@ mod tests {
         let down = vec![o(0, 10), o(1, 11), o(2, 12), o(3, 13), o(4, 14), o(5, 15)];
         let r = diff_hop(input(&up, &down));
         assert!(r.dropped_ids.is_empty());
-        assert!(r.pass);
+        assert!(r.verdict.is_pass());
     }
 
     #[test]
@@ -529,7 +687,7 @@ mod tests {
         let down = vec![o(2, 12), o(3, 13), o(4, 14), o(6, 16), o(7, 17), o(8, 18)];
         let r = diff_hop(input(&up, &down));
         assert_eq!(r.dropped_ids, vec![5]);
-        assert!(!r.pass);
+        assert!(!r.verdict.is_pass());
     }
 
     #[test]
@@ -557,6 +715,6 @@ mod tests {
         ];
         let r = diff_hop(input(&up, &down));
         assert!(r.dropped_ids.is_empty());
-        assert!(r.pass);
+        assert!(r.verdict.is_pass());
     }
 }

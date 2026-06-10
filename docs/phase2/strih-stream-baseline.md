@@ -102,14 +102,42 @@ Per #21's second acceptance branch (document the irreducible bound and gate to i
 - **Per-hop latency captured (report-only first)** — strih→stream rel-latency p99 ~285-500 ms (mean ~190-254 ms), report-only; cam→strih rel-latency is receiver-scheduling noise (often negative) and is NOT gated. ✅
 - **OBS changes via MCP/WebSocket, snapshot before/after** — obs_phase2.py over obs-websocket; program scenes saved + restored each run; before-snapshot recorded. ✅
 
-## Known harness limitations (filed, not this issue)
+## Harness honesty — single-copy guard + decode-race fix (#29, #30)
 
-- **#29** oversample masks per-frame loss — a high-oversample run can show
-  `dropped_ids=0` while frames drop; the single-copy metric exposes it but needs a
-  min-sample guard / full-fps painter to make a green fully trustworthy.
-- **#30** intermittent first-run `decode=0` — strih's `ndi_source` is wired before
-  the camera-box NDI sender restarts, so a cold run can bind to the dead sender and
-  decode nothing (the gate correctly FAILs it on min_frames — never a false green).
+- **#29 oversample-masking guard — RESOLVED.** A passed loss gate is now only
+  CERTIFIED (verdict `Pass`) when the hop carried at least its `--min-single-copy`
+  oversample-independent frames; below that the verdict is `Inconclusive` (exits
+  non-zero, distinct from a regression `Fail`), so a lucky high-oversample run can
+  no longer false-green. The guard is **per-hop** (keyed by downstream tap, like
+  the latency/freeze/loss gates) because the single-copy yield is sharply
+  hop-dependent and, on the second hop, NOT duration-stable:
+
+  | hop | single-copy frames (run1/2/3 @120s, run4 @300s) |
+  |---|---|
+  | cam→strih | 48 / 68 / 49 / 60 — reliably ~50-68 |
+  | strih→stream | 12 / 63 / 17 / **2** — starved, often too few |
+
+  So the e2e default guards **cam→strih at 20** (always met → catches a degenerate
+  <20 run) and leaves **strih→stream UNGATED** — at only 2 single-copy frames on
+  the 300 s run4, any guard there would `Inconclusive` healthy runs. Verified
+  end-to-end: run4 (300 s, guard on) gave cam→strih `Pass` (single_copy 60≥20) and,
+  with the guard then enabled on stream, `Inconclusive` (2<20) — the guard
+  correctly refusing to certify the starved hop. strih→stream stays ungated until
+  the full-fps painter (#32) gives it a stable single-copy supply.
+- **#30 first-run `decode=0` race — RESOLVED.** `multitap-e2e.sh` now brings the
+  camera-box `CAM2 (usb)` NDI sender up FIRST and only then wires strih/stream's
+  `ndi_source` to it, so OBS binds to the live sender that persists for the whole
+  run instead of one restarted mid-setup. Verified by consecutive cold-restart
+  runs with all taps decoding well above `min_frames`.
+
+## Full-fps painter — the strong-guard fix (#32, tracked, not this issue)
+
+The single-copy yield is low because the QR painter runs sub-fps (~12 fps unique)
+while the pipeline runs 30 fps, so most ids are oversampled and few are
+single-copy. Painting unique QR at the pipeline fps (oversample → 1) would make
+every dropped frame a dropped unique id, giving a strong per-frame signal without
+needing 10-minute runs. This needs a faster painter (pre-rendered QR atlas / GPU
+blit / lower-res QR) — #29's option 2, filed as **#32**.
 
 ## True-zero-loss path (tracked, not this issue)
 
