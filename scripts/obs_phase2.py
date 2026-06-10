@@ -9,20 +9,24 @@ Matches the LIVE vocab on the production OBS boxes (verified 2026-06-08):
     NDI source to tap. **The DistroAV NDI Main Output must already be enabled in
     OBS (Tools menu) on each host; setup fails loudly if it is not.**
 
-Per host, `setup` records the current program scene, makes a UNIQUELY-named temp
-scene with an `ndi_source` pointing at the upstream NDI name, sets it to program,
-and prints that host's Main Output `ndi_name` on stdout. `teardown` restores the
-prior program scene and removes the temp scene + input. Unique per-run names mean
-a leftover from a crashed run can never collide.
+Per host, `setup` records the current program scene, ensures ONE stable-named probe
+scene+`ndi_source` exists (reused across runs), re-points it at this run's upstream NDI
+name, sets it to program, and prints that host's Main Output `ndi_name` on stdout.
+`teardown` restores the prior program scene and IDLES the receiver (clears
+`ndi_source_name`) but KEEPS the scene+input for the next run.
+
+Why stable reuse (#22): the production DistroAV fork cannot delete an `ndi_source` input
+over the websocket API, so the old per-run PID-suffixed inputs were never cleaned up —
+they accumulated and cluttered the OBS audio mixer (24 stuck inputs observed). Reusing one
+fixed name leaves exactly one dormant probe artifact per box, forever — never per-run
+growth.
 
 Requires: pip install websocket-client. OBS WebSocket :4455 (pass --password if a
 host requires auth; LAN boxes here use none).
 """
 import argparse
 import json
-import os
 import sys
-import time
 
 try:
     from websocket import create_connection
@@ -32,6 +36,11 @@ except ImportError:
 PORT = 4455
 STATE = "/tmp/obs_phase2_state.json"
 MAIN_OUTPUT = "NDI Main Output"
+# #22: ONE stable-named scene+input per box, reused across every run. Per-run pid-suffixed
+# names made DistroAV ndi_source inputs accumulate (the fork's RemoveInput no-ops), so we
+# fix the names and keep the artifacts dormant between runs instead of recreating them.
+SCENE = "PHASE2-PROBE"
+INPUT = "phase2-probe-src"
 
 
 def _conn(host, password=""):
@@ -80,21 +89,47 @@ def setup(a):
             f"NDI name, then re-run. Phase 2 taps the program NDI this output emits."
         )
 
-    suffix = os.getpid()
-    scene = f"PHASE2-PROBE-{suffix}"
-    inp = f"phase2-probe-src-{suffix}"
+    # If a prior run crashed without restoring, the current program may already be our
+    # own probe scene — never record that as the restore target. Recover the real prior
+    # scene from the last good run's saved state instead.
+    if prev == SCENE:
+        try:
+            prev = json.load(open(STATE)).get(a.host, {}).get("prev_scene") or prev
+        except FileNotFoundError:
+            pass
     try:
         state = json.load(open(STATE))
     except FileNotFoundError:
         state = {}
-    state[a.host] = {"prev_scene": prev, "scene": scene, "input": inp}
+    state[a.host] = {"prev_scene": prev}
     json.dump(state, open(STATE, "w"))
 
-    _rpc(ws, "CreateScene", {"sceneName": scene})
-    _rpc(ws, "CreateInput", {
-        "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
-        "inputSettings": {"ndi_source_name": a.upstream, "ndi_bw_mode": 0},
-    })
+    # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
+    # what made the fork's un-removable ndi_source inputs pile up.
+    scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
+    if SCENE not in scenes:
+        _rpc(ws, "CreateScene", {"sceneName": SCENE}, ignore_err=True)
+    inputs = [i.get("inputName") for i in _rpc(ws, "GetInputList").get("inputs", [])]
+    if INPUT not in inputs:
+        _rpc(ws, "CreateInput", {
+            "sceneName": SCENE, "inputName": INPUT, "inputKind": "ndi_source",
+            "inputSettings": {"ndi_source_name": a.upstream, "ndi_bw_mode": 0},
+        }, ignore_err=True)
+    else:
+        # Reuse: re-point the existing dormant input at this run's upstream ...
+        _rpc(ws, "SetInputSettings", {
+            "inputName": INPUT,
+            "inputSettings": {"ndi_source_name": a.upstream, "ndi_bw_mode": 0},
+            "overlay": True,
+        }, ignore_err=True)
+        # ... and make sure it is an item of the stable scene (re-add if the scene was
+        # recreated above, or a prior run left the input orphaned).
+        items = _rpc(ws, "GetSceneItemList", {"sceneName": SCENE},
+                     ignore_err=True).get("sceneItems", [])
+        if not any(it.get("sourceName") == INPUT for it in items):
+            _rpc(ws, "CreateSceneItem",
+                 {"sceneName": SCENE, "sourceName": INPUT}, ignore_err=True)
+
     # OBS ndi_source matches the FULL "MACHINE (name)" network name; an OBS Main
     # Output's ndi_name is bare (e.g. "2ME PGM"), and ingesting the bare name
     # connects to nothing. Snapshot this box's DistroAV-discovered source list
@@ -102,19 +137,19 @@ def setup(a):
     # to their full names. A downstream box may not list an upstream OBS output
     # in its own discovery, so we resolve each output on the box that PRODUCES it
     # (its own list always contains it) and print the full name for the next hop.
-    vals = _ndi_source_list(ws, inp)
+    vals = _ndi_source_list(ws, INPUT)
     ingest_full = _match_full(vals, a.upstream)
     if ingest_full != a.upstream:
         _rpc(ws, "SetInputSettings", {
-            "inputName": inp,
+            "inputName": INPUT,
             "inputSettings": {"ndi_source_name": ingest_full},
             "overlay": True,
         }, ignore_err=True)
-    _rpc(ws, "SetCurrentProgramScene", {"sceneName": scene})
+    _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
     out_full = _match_full(vals, ndi_name)
     ws.close()
     sys.stderr.write(
-        f"[obs] {a.host}: program -> {scene} ingest '{ingest_full}'; "
+        f"[obs] {a.host}: program -> {SCENE} ingest '{ingest_full}'; "
         f"Main Output NDI '{out_full}'\n"
     )
     print(out_full)  # stdout = the FULL NDI name to tap / chain for this program
@@ -151,27 +186,24 @@ def teardown(a):
         state = {}
     try:
         ws = _conn(a.host, a.password)
-        st = state.get(a.host, {})
-        prev, scene, inp = st.get("prev_scene"), st.get("scene"), st.get("input")
+        prev = state.get(a.host, {}).get("prev_scene")
         if prev:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": prev}, ignore_err=True)
-        if inp:
-            # CRITICAL: disconnect the NDI receiver BEFORE destroying the input.
-            # Removing an ndi_source while it is actively receiving the 1080p feed
-            # faults the NDI runtime (processing.ndi.lib) and crashes OBS. Clearing
-            # ndi_source_name makes DistroAV tear down the receiver cleanly; the
-            # settle lets the receive thread idle before RemoveInput.
-            _rpc(ws, "SetInputSettings", {
-                "inputName": inp,
-                "inputSettings": {"ndi_source_name": ""},
-                "overlay": True,
-            }, ignore_err=True)
-            time.sleep(1.5)
-            _rpc(ws, "RemoveInput", {"inputName": inp}, ignore_err=True)
-        if scene:
-            _rpc(ws, "RemoveScene", {"sceneName": scene}, ignore_err=True)
+        # Idle the NDI receiver but KEEP the stable scene+input for the next run (#22).
+        # Clearing ndi_source_name makes DistroAV tear the receiver down cleanly (destroying
+        # an ndi_source while it is actively receiving the 1080p feed faults the NDI runtime
+        # and crashes OBS). We deliberately keep the one stable scene+input dormant rather
+        # than destroy and recreate them — reuse is exactly what stops the per-run
+        # accumulation the fork caused.
+        _rpc(ws, "SetInputSettings", {
+            "inputName": INPUT,
+            "inputSettings": {"ndi_source_name": ""},
+            "overlay": True,
+        }, ignore_err=True)
         ws.close()
-        sys.stderr.write(f"[obs] {a.host}: restored program -> {prev}, temp scene removed\n")
+        sys.stderr.write(
+            f"[obs] {a.host}: restored program -> {prev}, probe input idled (reused next run)\n"
+        )
     except Exception as e:  # teardown must never raise
         sys.stderr.write(f"[obs] {a.host}: teardown warning: {e}\n")
 
