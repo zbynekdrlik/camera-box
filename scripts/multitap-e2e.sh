@@ -25,6 +25,14 @@ CAM_SOURCE="CAM2 (usb)"
 RUN_ID=$(( (RANDOM << 16) | RANDOM ))
 DURATION="${DURATION:-300}"
 OUT="${OUT:-/tmp/multitap-probe.json}"
+# #32: paint at the pipeline rate (the OBS clocks run ~30 fps), NOT the 12 fps
+# coverage default. At 30 fps each painted id is carried ~once per hop (oversample
+# ~1), so single-copy (oversample-independent) frames are abundant on EVERY hop —
+# measured ~1200 (cam→strih) / ~1780 (strih→stream) per 60 s, vs 2–63 at 12 fps —
+# which is what lets the #29 guard certify strih→stream. qr_size stays 700 (the
+# default): the 30 fps NDI taps decode it 100% (decode_failed=0), so no shrink is
+# needed; smaller would only risk robustness across the NDI/OBS compression hops.
+PAINT_FPS="${PAINT_FPS:-30}"
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
 # shellcheck disable=SC2317  # cleanup() is invoked indirectly via the EXIT/HUP/INT/TERM trap
@@ -57,7 +65,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
   "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; sleep 1; \
    (NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
    sleep 4; \
-   (nohup /tmp/frame-probe --paint-only --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+   (nohup /tmp/frame-probe --paint-only --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
       >/tmp/painter.log 2>&1 &)"
 # NOTE: camera-box is started WITHOUT --display so /dev/fb0 is free for the
 # painter; it still runs capture->NDI, carrying the QR frames onto the network.
@@ -102,20 +110,20 @@ MAX_LOSS_STREAM="${MAX_LOSS_STREAM-10}"
 # Per-hop oversample-masking guard (#29), keyed by the DOWNSTREAM tap of each hop.
 # A hop is only CERTIFIED (PASS) once it carried at least this many single-copy
 # (oversample-independent) frames; below it the verdict is INCONCL (exit non-zero),
-# not a false-green PASS. The sub-fps QR painter oversamples each id, so a unique
-# id is only "dropped" when ALL its copies are lost and a lucky run can show zero
-# loss while frames really drop; single-copy ids expose the true per-frame drop.
+# not a false-green PASS. A unique id is only "dropped" when ALL its copies are lost,
+# so an oversampled run can show zero loss while frames really drop; single-copy ids
+# (multiplicity exactly 1) expose the true per-frame drop.
 #
-# Measured single-copy yield is HOP-DEPENDENT and, on the second hop, NOT
-# duration-stable:
-#   cam→strih (key 'strih'):  48 / 68 / 49 / 60  over 120-300 s  — reliably ~50-68
-#   strih→stream (key 'stream'): 12 / 63 / 17 / 2 — starved, often too few (2 at 300 s!)
-# So guard cam→strih at 20 (always met → catches a degenerate <20 run) and leave
-# strih→stream UNGATED until the full-fps painter (#32) gives it a stable supply —
-# gating it now would INCONCL healthy runs. Override per hop to tighten as #32
-# lands. Set a value to empty to disable that hop's guard.
-MIN_SC_STRIH="${MIN_SC_STRIH-20}"
-MIN_SC_STREAM="${MIN_SC_STREAM-}"   # ungated until #32 (full-fps painter)
+# #32 RESOLVED: full-rate painting (PAINT_FPS=30, above) drives oversample→~1, so
+# single-copy is now ABUNDANT on BOTH hops — measured on the live rig (60 s taps):
+#   cam→strih (key 'strih'):     ~1200 single-copy  (was 48–68 at 12 fps)
+#   strih→stream (key 'stream'): ~1780 single-copy  (was 2–63, often starved)
+# So BOTH hops are gated. The floor 100 is the statistical evidence needed to certify
+# ~<5% per-frame loss at ~95% confidence; it is met many times over at 30 fps (≥1200
+# per 60 s) yet still trips a degenerate/starved run (e.g. a black-render hop). Override
+# per hop to tighten. Set a value to empty to disable that hop's guard.
+MIN_SC_STRIH="${MIN_SC_STRIH-100}"
+MIN_SC_STREAM="${MIN_SC_STREAM-100}"
 [ -n "$MIN_SC_STRIH" ]  && GATE_ARGS+=(--min-single-copy "strih=$MIN_SC_STRIH")
 [ -n "$MIN_SC_STREAM" ] && GATE_ARGS+=(--min-single-copy "stream=$MIN_SC_STREAM")
 

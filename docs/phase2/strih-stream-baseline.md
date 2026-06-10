@@ -117,27 +117,47 @@ Per #21's second acceptance branch (document the irreducible bound and gate to i
   | cam→strih | 48 / 68 / 49 / 60 — reliably ~50-68 |
   | strih→stream | 12 / 63 / 17 / **2** — starved, often too few |
 
-  So the e2e default guards **cam→strih at 20** (always met → catches a degenerate
-  <20 run) and leaves **strih→stream UNGATED** — at only 2 single-copy frames on
-  the 300 s run4, any guard there would `Inconclusive` healthy runs. Verified
-  end-to-end: run4 (300 s, guard on) gave cam→strih `Pass` (single_copy 60≥20) and,
-  with the guard then enabled on stream, `Inconclusive` (2<20) — the guard
-  correctly refusing to certify the starved hop. strih→stream stays ungated until
-  the full-fps painter (#32) gives it a stable single-copy supply.
+  At the 12 fps painter this starved strih→stream (2 single-copy on the 300 s run4),
+  so it was originally left **UNGATED** while cam→strih guarded at 20. **#32 (below)
+  then made full-rate painting feed both hops abundant single-copy, so BOTH are now
+  gated at 100** (see the #32 section for the rig measurements).
 - **#30 first-run `decode=0` race — RESOLVED.** `multitap-e2e.sh` now brings the
   camera-box `CAM2 (usb)` NDI sender up FIRST and only then wires strih/stream's
   `ndi_source` to it, so OBS binds to the live sender that persists for the whole
   run instead of one restarted mid-setup. Verified by consecutive cold-restart
   runs with all taps decoding well above `min_frames`.
 
-## Full-fps painter — the strong-guard fix (#32, tracked, not this issue)
+## Full-rate painter — strong single-copy guard (#32) — RESOLVED
 
-The single-copy yield is low because the QR painter runs sub-fps (~12 fps unique)
-while the pipeline runs 30 fps, so most ids are oversampled and few are
-single-copy. Painting unique QR at the pipeline fps (oversample → 1) would make
-every dropped frame a dropped unique id, giving a strong per-frame signal without
-needing 10-minute runs. This needs a faster painter (pre-rendered QR atlas / GPU
-blit / lower-res QR) — #29's option 2, filed as **#32**.
+The issue's premise (the painter is render-capped at ~12 fps and needs a faster
+painter — atlas / GPU / lower-res QR) was **falsified by measurement** on the live
+rig (cam2 is x86_64, not a weak SoC):
+
+- `frame-probe --paint-only` sustains the requested rate exactly — 30.1 fps at
+  target 30, 60.1 fps at target 60, render ceiling ~156 fps. The 12 fps figure was
+  just the **coverage-mode default**, never a cap. No atlas/GPU needed.
+- The real binding constraint is the **QR decoder**, and only at the cam2 60 fps
+  *capture* loopback: rqrr caps ~37 fps at qr_size 700, so at oversample 1 a skipped
+  capture became a false single-frame loss (7% at 30 fps, 37% at 60 fps on the cam2
+  loopback). Shrinking the QR lifts decode (qr 300 → 56 fps), but…
+- …the **binding strih→stream hop runs at 30 fps NDI, where qr 700 decodes 100 %**
+  (`decode_failed=0`). So painting at the 30 fps pipeline rate with the *unchanged*
+  qr_size 700 already gives oversample→1 and abundant single-copy. A smaller QR is
+  unnecessary and would only risk robustness across the NDI/OBS compression hops.
+
+Live-rig measurement (60 s taps, `PAINT_FPS=30`, qr 700), two consecutive runs:
+
+| hop | up_unique | single-copy | per-frame loss | decode_failed |
+|---|---|---|---|---|
+| cam→strih | ~1640 | **~1210** | 0–0.08 % | 0 |
+| strih→stream | ~1770 | **~1760** | 0.46–0.56 % | 0 |
+
+(vs 12 fps: cam→strih 48–68, strih→stream 2–63.) The gated config
+(`--max-loss-pct 10` + `--min-single-copy 100` on both hops) verified **PASS** end
+to end. So `multitap-e2e.sh` now paints at `PAINT_FPS=30` and gates **both** hops at
+100 single-copy — the floor to certify ~<5 % per-frame loss at ~95 % confidence,
+met many times over (≥1200 per 60 s). The 60 fps capstone (#11) still exceeds the
+decoder even at qr 300 and remains future work (faster/parallel decode).
 
 ## True-zero-loss path (tracked, not this issue)
 
