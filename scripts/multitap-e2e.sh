@@ -93,17 +93,22 @@ GATE_ARGS=()
 [ -n "${MAX_FREEZE_STRIH:-}" ]  && GATE_ARGS+=(--max-freeze-periods "strih=$MAX_FREEZE_STRIH")
 [ -n "${MAX_FREEZE_STREAM:-}" ] && GATE_ARGS+=(--max-freeze-periods "stream=$MAX_FREEZE_STREAM")
 
-# Per-hop DOCUMENTED-BOUND loss gate (#21). Both OBS hops drop frames because
-# camera-box, strih OBS and stream OBS each run a free-running 30 fps clock with
-# no genlock — the compositor samples its NDI source on its own render tick and
-# drops ~1-4.5% of source frames (measured; see docs/phase2/strih-stream-baseline.md).
-# This is irreducible until cluster genlock/clock-truth lands (#8 / #7 / #11), so
-# the gate accepts the quantified single-copy (oversample-independent) per-frame
-# loss up to 10% — ~2x the observed ~4.6% ceiling, far below the #14 catastrophe
-# (~39%) — and FAILS on any regression past it. Override per-hop to tighten as the
-# clock work progresses. Set to empty to fall back to strict zero-loss.
-MAX_LOSS_STRIH="${MAX_LOSS_STRIH-10}"
-MAX_LOSS_STREAM="${MAX_LOSS_STREAM-10}"
+# Per-hop loss gate — STRICT zero-loss by DEFAULT (#35). The canonical run fails on
+# ANY dropped frame at ANY hop, because that is the exact defect the harness exists to
+# expose: both OBS hops drop ~0.5-4.5% of source frames (camera-box, strih OBS and
+# stream OBS each run a free-running 30 fps clock with no genlock — the compositor
+# samples its NDI source on its own render tick; measured, see
+# docs/phase2/strih-stream-baseline.md). A green test while frames drop is a lie, so the
+# default passes NO --max-loss-pct → multitap-probe uses strict any-drop-fails and the
+# gate stays RED until the pipeline is genuinely loss-free (the forcing function for the
+# reason-fix #8 / #7 / #11).
+#
+# The #21 "documented bound" (≤N% per hop) is NOT gone — it is now an explicit OPT-IN
+# ONLY, for tracking progress as the clock work lands: e.g. `MAX_LOSS_STRIH=10
+# MAX_LOSS_STREAM=10 ./multitap-e2e.sh` re-enables the bounded gate per hop. Empty
+# default = strict.
+MAX_LOSS_STRIH="${MAX_LOSS_STRIH-}"
+MAX_LOSS_STREAM="${MAX_LOSS_STREAM-}"
 [ -n "$MAX_LOSS_STRIH" ]  && GATE_ARGS+=(--max-loss-pct "strih=$MAX_LOSS_STRIH")
 [ -n "$MAX_LOSS_STREAM" ] && GATE_ARGS+=(--max-loss-pct "stream=$MAX_LOSS_STREAM")
 

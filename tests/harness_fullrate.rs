@@ -62,3 +62,33 @@ fn phase2_strih_stream_single_copy_guard_is_enabled() {
          MIN_SC_STREAM=\"${{MIN_SC_STREAM-100}}\") gating the strih→stream hop."
     );
 }
+
+/// #35: the per-hop LOSS gate MUST default to STRICT zero-loss. A positive default
+/// (the old #21 ≤10% "documented bound") lets the test PASS while frames are dropped —
+/// the exact lie the harness exists to expose. The documented bound stays available, but
+/// ONLY as an explicit opt-in via the `MAX_LOSS_*` env vars, never as the default.
+#[test]
+fn phase2_loss_gate_defaults_to_strict_zero_loss() {
+    let s = script();
+    for hop in ["MAX_LOSS_STRIH", "MAX_LOSS_STREAM"] {
+        // A positive numeric default — `MAX_LOSS_STRIH="${MAX_LOSS_STRIH-10}"` — is BANNED.
+        // The only allowed default is the empty form `-}` (falls through to strict).
+        let positive_default = s.lines().any(|l| {
+            l.contains(&format!("{hop}=\"${{{hop}-")) && !l.contains(&format!("{hop}-}}"))
+        });
+        assert!(
+            !positive_default,
+            "#35 regression: {hop} must DEFAULT to strict zero-loss (empty default \
+             `{hop}=\"${{{hop}-}}\"`), not a positive ≤N% bound. A positive default passes \
+             the gate while real frames drop, hiding the loss the test exists to surface. \
+             The ≤N% documented bound is an opt-in env override only."
+        );
+        // And the strict empty-default form MUST be present, so a `MAX_LOSS_*=N` override
+        // still works while the default stays strict.
+        assert!(
+            s.contains(&format!("{hop}=\"${{{hop}-}}\"")),
+            "#35: expected the strict empty-default form `{hop}=\"${{{hop}-}}\"` so the loss \
+             gate falls through to strict zero-loss by default, with {hop}=N as opt-in only."
+        );
+    }
+}

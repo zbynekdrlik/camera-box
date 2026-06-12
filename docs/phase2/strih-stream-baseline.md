@@ -79,26 +79,32 @@ There is **no frame-accuracy / sync-timing knob**. The drop is at the render-clo
 sampling stage, downstream of any receive buffer. Eliminating it requires cluster
 **genlock / clock-truth (#8)** and a frame-accurate path (#7 / #11), not a setting.
 
-## Resolution — documented bound + honest gate
-
-Per #21's second acceptance branch (document the irreducible bound and gate to it):
+## Resolution — strict zero-loss by default, documented bound opt-in (#35)
 
 - The differ now reports `single_copy_total` / `single_copy_dropped` — the
   oversample-independent per-frame-loss estimate — so a high-oversample run can no
   longer false-green (it previously could show `dropped_ids=0` while dropping
   frames). See #29 for the min-sample guard / full-fps painter that makes the green
   fully trustworthy.
-- `HopInput.max_loss_pct` / `multitap-probe --max-loss-pct DOWNSTREAM=PCT` gates a
-  hop on single-copy loss `<= PCT` instead of strict any-drop-fails. The harness
-  ships a standing bound of **10%** on both OBS hops — ~2x the observed ~4.6%
-  ceiling, far below the #14 catastrophe (~39%) — so the chain passes at the
-  documented floor and FAILS on regression past it. Tighten as #8 lands.
+- **The canonical gate is STRICT zero-loss (#35).** `multitap-e2e.sh` passes NO
+  `--max-loss-pct` by default, so `multitap-probe` fails on ANY dropped frame at ANY
+  hop. The ~0.5-4.5% OBS render-clock loss documented above is REAL frame loss, so the
+  strict run is EXPECTED to FAIL on the current rig — and that failure is the forcing
+  function for the reason-fix (#8 genlock / #7 full-path gate / #11 60 fps capstone).
+  A green test while frames drop would be a lie; #21's earlier ≤10% default was exactly
+  that and is removed.
+- The #21 documented bound (`HopInput.max_loss_pct` / `--max-loss-pct DOWNSTREAM=PCT`,
+  hop passes when single-copy loss `<= PCT`) is **not gone — it is now an explicit
+  OPT-IN only**, for tracking progress as the clock work lands:
+  `MAX_LOSS_STRIH=10 MAX_LOSS_STREAM=10 ./scripts/multitap-e2e.sh` re-enables the
+  bounded gate per hop. Tighten the opt-in bound toward 0 as #8 lands; the default
+  never relaxes off strict.
 
 ## Acceptance-criteria mapping
 
 - **Reproduce + quantify ≥3 sustained runs, JSON artifacts** — `docs/phase2/artifacts/final{1,2,3}.json` (+ diagnostic `run{1,2,3}.json`, `diag2.json`). ✅
 - **Root-cause with evidence** — Findings 1-3 above; OBS 30 fps free-running render clock, no genlock, no DistroAV sync knob. ✅
-- **Fix to zero OR document+gate the bound** — documented bound + single-copy gate (10%); true zero-loss tracked by #8/#7/#11. ✅
+- **Fix to zero OR document+gate the bound** — root-caused + quantified; the canonical gate is now STRICT zero-loss (#35, default fails on any drop), with the ≤N% documented bound kept as an opt-in progress tracker. True zero-loss tracked by #8/#7/#11. ✅
 - **Per-hop latency captured (report-only first)** — strih→stream rel-latency p99 ~285-500 ms (mean ~190-254 ms), report-only; cam→strih rel-latency is receiver-scheduling noise (often negative) and is NOT gated. ✅
 - **OBS changes via MCP/WebSocket, snapshot before/after** — obs_phase2.py over obs-websocket; program scenes saved + restored each run; before-snapshot recorded. ✅
 
