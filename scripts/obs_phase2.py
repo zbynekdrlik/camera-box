@@ -27,6 +27,7 @@ host requires auth; LAN boxes here use none).
 import argparse
 import json
 import sys
+import time
 
 try:
     from websocket import create_connection
@@ -137,8 +138,7 @@ def setup(a):
     # to their full names. A downstream box may not list an upstream OBS output
     # in its own discovery, so we resolve each output on the box that PRODUCES it
     # (its own list always contains it) and print the full name for the next hop.
-    vals = _ndi_source_list(ws, INPUT)
-    ingest_full = _match_full(vals, a.upstream)
+    ingest_full, vals = _resolve_full(ws, INPUT, a.upstream)
     if ingest_full != a.upstream:
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
@@ -146,7 +146,9 @@ def setup(a):
             "overlay": True,
         }, ignore_err=True)
     _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
-    out_full = _match_full(vals, ndi_name)
+    # Resolve THIS box's own Main Output name to its full form too, polling discovery —
+    # the next hop ingests this name, and a bare value here would fail its downstream bind.
+    out_full, _ = _resolve_full(ws, INPUT, ndi_name)
     ws.close()
     sys.stderr.write(
         f"[obs] {a.host}: program -> {SCENE} ingest '{ingest_full}'; "
@@ -177,6 +179,31 @@ def _match_full(vals, bare):
         if bare in v:
             return v
     return bare
+
+
+def _resolve_full(ws, inp, bare, timeout=20.0, interval=1.0):
+    """Resolve `bare` to its full 'MACHINE (name)' NDI form, POLLING DistroAV discovery
+    until it appears (or timeout). An OBS ndi_source binds by the full network name;
+    binding the BARE Main-Output name (e.g. '2ME PGM') connects to nothing → black render
+    → 0 decode on the next hop. Cold discovery may not list a just-started upstream/own
+    output for a few seconds, so we wait for it rather than racing it with a fixed sleep
+    (#22 verification exposed this on strih→stream). Names that are already full (contain
+    '(') bind directly and pass through. Returns (full_or_bare, last_vals)."""
+    if "(" in bare:  # already a full "MACHINE (name)" — binds directly, no discovery wait
+        return bare, _ndi_source_list(ws, inp)
+    end = time.time() + timeout
+    while True:
+        vals = _ndi_source_list(ws, inp)
+        full = _match_full(vals, bare)
+        if full != bare:
+            return full, vals
+        if time.time() >= end:
+            sys.stderr.write(
+                f"[obs] WARN: bare NDI name '{bare}' did not resolve to a full "
+                f"'MACHINE (name)' within {timeout:.0f}s; binding bare (may not connect)\n"
+            )
+            return bare, vals
+        time.sleep(interval)
 
 
 def teardown(a):

@@ -70,3 +70,28 @@ fn phase2_obs_teardown_keeps_stable_input_for_reuse() {
          fork's RemoveInput no-op) is exactly what made inputs accumulate."
     );
 }
+
+/// #22 verification exposed a strih→stream flake: setup resolved NDI names with a single
+/// best-effort `_match_full` against cold DistroAV discovery, so when the full
+/// `MACHINE (name)` form wasn't discovered yet it bound the BARE name (e.g. `2ME PGM`) —
+/// which connects to nothing → stream rendered black → 0 decode. The fix polls discovery
+/// until the full name resolves. This pins that the resolution polls, not races.
+#[test]
+fn phase2_obs_resolves_ndi_names_by_polling_discovery() {
+    let py = obs_py();
+    assert!(
+        py.contains("def _resolve_full(") && py.contains("time.sleep"),
+        "#22: obs_phase2.py must resolve NDI names by POLLING discovery (a _resolve_full \
+         helper that waits for the full 'MACHINE (name)' form), not race it — binding the \
+         bare Main-Output name connects to nothing (black render, 0 decode downstream)."
+    );
+    let su = py.find("def setup(").expect("setup() not found");
+    let end = py[su..].find("\ndef ").map(|i| su + i).unwrap_or(py.len());
+    let body = &py[su..end];
+    assert!(
+        body.matches("_resolve_full(").count() >= 2,
+        "#22: setup() must resolve BOTH the ingest source AND this box's own Main Output \
+         name via _resolve_full (poll-until-full), so a cold-discovery run never binds a \
+         bare, unconnectable NDI name (the strih→stream black-render flake)."
+    );
+}
