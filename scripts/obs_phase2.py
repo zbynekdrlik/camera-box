@@ -26,6 +26,7 @@ host requires auth; LAN boxes here use none).
 """
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -42,6 +43,27 @@ MAIN_OUTPUT = "NDI Main Output"
 # fix the names and keep the artifacts dormant between runs instead of recreating them.
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
+
+
+def _load_state():
+    """Read the per-host prev-scene state. Tolerates a MISSING or CORRUPT/truncated file
+    (a crash mid-write can leave partial JSON) — returns {} rather than raising, so a bad
+    state file can never make teardown raise before it restores the prior program scene
+    (which would strand the probe scene as live program on a production OBS)."""
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):  # ValueError covers JSONDecodeError
+        return {}
+
+
+def _save_state(state):
+    """Write state ATOMICALLY (tmp + os.replace) so a crash mid-write can never leave the
+    corrupt file that _load_state would otherwise have to recover from."""
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE)
 
 
 def _conn(host, password=""):
@@ -90,24 +112,28 @@ def setup(a):
             f"NDI name, then re-run. Phase 2 taps the program NDI this output emits."
         )
 
-    # If a prior run crashed without restoring, the current program may already be our
-    # own probe scene — never record that as the restore target. Recover the real prior
-    # scene from the last good run's saved state instead.
+    # Snapshot the scene list once — used both for the prev-scene sanitizer and the
+    # idempotent scene-exists check below.
+    scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
+
+    # Never record our own probe scene as the restore target: if a prior run crashed with
+    # the probe on program, recover the real prior scene from the last good run's saved
+    # state; if THAT is also missing/the probe, fall back to any existing non-probe scene.
+    # This guarantees teardown can never strand the probe scene as live program on a box.
     if prev == SCENE:
-        try:
-            prev = json.load(open(STATE)).get(a.host, {}).get("prev_scene") or prev
-        except FileNotFoundError:
-            pass
-    try:
-        state = json.load(open(STATE))
-    except FileNotFoundError:
-        state = {}
+        prev = _load_state().get(a.host, {}).get("prev_scene") or prev
+    if not prev or prev == SCENE:
+        prev = next((s for s in scenes if s != SCENE), None)
+        sys.stderr.write(
+            f"[obs] {a.host}: WARN prior program unknown/was the probe scene; "
+            f"will restore to '{prev}'\n"
+        )
+    state = _load_state()
     state[a.host] = {"prev_scene": prev}
-    json.dump(state, open(STATE, "w"))
+    _save_state(state)
 
     # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
     # what made the fork's un-removable ndi_source inputs pile up.
-    scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
     if SCENE not in scenes:
         _rpc(ws, "CreateScene", {"sceneName": SCENE}, ignore_err=True)
     inputs = [i.get("inputName") for i in _rpc(ws, "GetInputList").get("inputs", [])]
@@ -131,24 +157,33 @@ def setup(a):
             _rpc(ws, "CreateSceneItem",
                  {"sceneName": SCENE, "sourceName": INPUT}, ignore_err=True)
 
-    # OBS ndi_source matches the FULL "MACHINE (name)" network name; an OBS Main
-    # Output's ndi_name is bare (e.g. "2ME PGM"), and ingesting the bare name
-    # connects to nothing. Snapshot this box's DistroAV-discovered source list
-    # ONCE, then resolve both the ingest source and this box's own program output
-    # to their full names. A downstream box may not list an upstream OBS output
-    # in its own discovery, so we resolve each output on the box that PRODUCES it
-    # (its own list always contains it) and print the full name for the next hop.
-    ingest_full, vals = _resolve_full(ws, INPUT, a.upstream)
+    # OBS ndi_source binds by the FULL "MACHINE (name)" network name; binding a bare name
+    # (e.g. "2ME PGM") connects to nothing. Resolve BOTH the ingest source and this box's
+    # own Main Output name to their full forms (polling discovery) BEFORE switching the
+    # program scene, so a doomed run — a name that never resolves — fails fast with the
+    # production program scene UNTOUCHED, never half-set-up.
+    ingest_full, _ = _resolve_full(ws, INPUT, a.upstream)
+    if "(" not in ingest_full:
+        raise SystemExit(
+            f"[obs] {a.host}: ingest source '{a.upstream}' did not resolve to a full NDI "
+            f"name; aborting before touching the program scene."
+        )
     if ingest_full != a.upstream:
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
             "inputSettings": {"ndi_source_name": ingest_full},
             "overlay": True,
         }, ignore_err=True)
-    _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
-    # Resolve THIS box's own Main Output name to its full form too, polling discovery —
-    # the next hop ingests this name, and a bare value here would fail its downstream bind.
     out_full, _ = _resolve_full(ws, INPUT, ndi_name)
+    if "(" not in out_full:
+        raise SystemExit(
+            f"[obs] {a.host}: own Main Output '{ndi_name}' did not resolve to a full NDI "
+            f"name (the next hop would ingest a dead name); aborting before touching the "
+            f"program scene."
+        )
+    # Everything resolved — NOW switch program to the probe scene (kept to the last step so
+    # any failure above leaves the live program where it was).
+    _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
     ws.close()
     sys.stderr.write(
         f"[obs] {a.host}: program -> {SCENE} ingest '{ingest_full}'; "
@@ -207,10 +242,7 @@ def _resolve_full(ws, inp, bare, timeout=20.0, interval=1.0):
 
 
 def teardown(a):
-    try:
-        state = json.load(open(STATE))
-    except FileNotFoundError:
-        state = {}
+    state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
         ws = _conn(a.host, a.password)
         prev = state.get(a.host, {}).get("prev_scene")

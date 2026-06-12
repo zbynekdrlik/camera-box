@@ -95,3 +95,25 @@ fn phase2_obs_resolves_ndi_names_by_polling_discovery() {
          bare, unconnectable NDI name (the strih→stream black-render flake)."
     );
 }
+
+/// Review hardening (#22): the per-host prev-scene state file is the ONLY source teardown
+/// uses to restore the production program scene. If a crash leaves it corrupt/truncated and
+/// the load isn't corruption-safe, teardown raises before restoring → the probe scene is
+/// stranded as live program on a production OBS. So the load must tolerate a corrupt file
+/// (not just a missing one), and the write must be atomic so a crash can't create that
+/// corrupt file in the first place.
+#[test]
+fn phase2_obs_state_io_is_corruption_safe_and_atomic() {
+    let py = obs_py();
+    assert!(
+        py.contains("ValueError"),
+        "#22 safety: state-file load must catch ValueError (JSONDecodeError), not only \
+         FileNotFoundError, so a corrupt /tmp state file can't make teardown raise before \
+         it restores the prior program scene (stranding the probe scene as live program)."
+    );
+    assert!(
+        py.contains("os.replace("),
+        "#22 safety: the state write must be atomic (tmp file + os.replace), so a crash \
+         mid-write can't leave a corrupt state file in the first place."
+    );
+}
