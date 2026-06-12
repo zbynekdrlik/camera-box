@@ -1,0 +1,78 @@
+name: Loopback E2E (hardware · self-hosted dev1)
+
+# Hardware frame-loss/latency evidence run for the single-box cam2 HDMI loopback
+# (scripts/loopback-e2e.sh). This is the ONLY camera-box workflow that drives real
+# hardware, so it is deliberately:
+#   * MANUAL ONLY (workflow_dispatch) — NO push / pull_request triggers. The run stops
+#     camera-box on cam2 and runs it without --display for the duration, taking that
+#     camera OFF-AIR. An operator must dispatch it knowing cam2 is free to disrupt — the
+#     operator is the guard (per project decision; no automated streaming guard).
+#   * runs-on the self-hosted dev1 runner (label `camera-lan`) — GitHub-hosted runners
+#     cannot reach cam2/strih/stream on the 10.77.9.0/24 LAN. See docs/self-hosted-runner.md.
+#   * NOT part of ci.yml — it never gates a PR.
+# It touches ONLY cam2 (the off-air rig), NOT the production strih/stream OBS boxes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "coverage (gate) | full-rate (stress)"
+        type: choice
+        options: [coverage, full-rate]
+        default: coverage
+      duration_secs:
+        description: "Run duration in seconds"
+        default: "300"
+      cam_ip:
+        description: "cam2 IP"
+        default: "10.77.9.62"
+      source:
+        description: "NDI source name (\"<machine> (<ndi_name>)\")"
+        default: "CAM2 (usb)"
+
+permissions:
+  contents: read
+
+# Never run two hardware runs at once (they both fight for cam2).
+concurrency:
+  group: loopback-e2e-hardware
+  cancel-in-progress: false
+
+jobs:
+  loopback:
+    runs-on: [self-hosted, linux, camera-lan]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cam2 loopback frame-loss E2E
+        env:
+          CAM_IP: ${{ inputs.cam_ip }}
+          SOURCE: ${{ inputs.source }}
+          MODE: ${{ inputs.mode }}
+          DURATION_SECS: ${{ inputs.duration_secs }}
+          # Optional: set repo secret CAM_PASS to override; empty falls back to the
+          # script's documented LAN default, so no credential is committed here.
+          CAM_PASS: ${{ secrets.CAM_PASS }}
+          LOCAL_OUT: ./frame-probe-${{ inputs.mode }}.json
+        run: bash scripts/loopback-e2e.sh
+
+      - name: Upload metrics artifact
+        if: always() # keep the evidence even on a failing verdict
+        uses: actions/upload-artifact@v4
+        with:
+          name: frame-probe-${{ inputs.mode }}
+          path: ./frame-probe-*.json
+          if-no-files-found: warn
+
+      - name: Re-assert camera-box is running on cam2 (cancel-safe)
+        if: always() # the script's trap restores it; this is a belt-and-braces check
+        env:
+          CAM_IP: ${{ inputs.cam_ip }}
+          CAM_PASS: ${{ secrets.CAM_PASS }}
+        run: |
+          PASS="${CAM_PASS:-newlevel}"
+          sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            "root@${CAM_IP}" \
+            "systemctl is-active camera-box || systemctl restart camera-box; \
+             echo -n 'camera-box: '; systemctl is-active camera-box"
