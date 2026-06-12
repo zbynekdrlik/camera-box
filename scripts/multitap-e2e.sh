@@ -41,8 +41,14 @@ cleanup() {
   echo "[cleanup] restoring OBS program scenes + cam2 service"
   python3 scripts/obs_phase2.py teardown --host "$STREAM"
   python3 scripts/obs_phase2.py teardown --host "$STRIH"
+  # pkill -x ONLY (exact process-name match). The old full-cmdline pkill form matched the
+  # remote shell's OWN cmdline (it contains the pattern text), killed the shell, and the
+  # restart below never ran — every run stranded a manual camera-box orphan on cam2 with
+  # the service left stopped (which then broke the #9 loopback dispatch with EBUSY).
+  # (sleep 1 only: if video0 is still settling, the unit's Restart=always/RestartSec=3
+  # absorbs a transient first-start EBUSY — the safety lives in the unit file.)
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
-    "pkill -f 'frame-probe' 2>/dev/null; pkill -f '/usr/local/bin/camera-box' 2>/dev/null; \
+    "pkill -x frame-probe 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      systemctl restart camera-box 2>/dev/null; true"
 }
 trap cleanup EXIT HUP INT TERM
@@ -61,8 +67,14 @@ echo "[2/5] bring up the cam2 NDI sender FIRST (run_id=$RUN_ID), then the painte
 # no reconnect, no race.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   target/release/frame-probe root@"$CAM2":/tmp/frame-probe
+# After the stop: sweep any orphaned manual camera-box (pkill -x — exact name, can't
+# self-match the remote shell) and WAIT until /dev/video0 is actually free; uvcvideo
+# teardown completes asynchronously after the process dies, and a fixed sleep races it
+# into EBUSY on the manual start. (\$-escaped so the loop runs REMOTELY, not on dev1.)
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
-  "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; sleep 1; \
+  "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; \
+   pkill -x camera-box 2>/dev/null; \
+   i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
    sleep 4; \
    (nohup /tmp/frame-probe --paint-only --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \

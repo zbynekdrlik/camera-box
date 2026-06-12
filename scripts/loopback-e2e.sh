@@ -66,7 +66,19 @@ trap cleanup EXIT HUP INT TERM
 
 echo ">> stop camera-box (release fb0 + video0)"
 systemctl stop camera-box
-sleep 2
+# Sweep any orphaned manual camera-box (a broken earlier cleanup can leave one outside
+# systemd holding /dev/video0) — pkill -x is exact-name and cannot match this shell.
+pkill -x camera-box 2>/dev/null || true
+# WAIT until /dev/video0 is actually free instead of racing uvcvideo's async teardown
+# with a fixed sleep (the EBUSY rc=3 failure of the first #9 dispatch). ~15s ceiling.
+# fuser errors are silenced in the loop, so fail loudly if it's missing entirely —
+# otherwise a future device image without psmisc would silently skip the wait.
+command -v fuser >/dev/null 2>&1 || { echo "ERROR: fuser not found on device (psmisc)"; exit 5; }
+i=0
+while fuser -s /dev/video0 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.5; i=$((i + 1)); done
+if fuser -s /dev/video0 2>/dev/null; then
+  echo "ERROR: /dev/video0 still busy after stop+sweep:"; fuser -v /dev/video0 2>&1; exit 4
+fi
 
 echo ">> start camera-box WITHOUT --display (capture->NDI only)"
 nohup /usr/local/bin/camera-box >/tmp/cam-manual.log 2>&1 &
