@@ -61,6 +61,17 @@ struct Args {
     /// camera box in Phase 2 (taps run on dev1).
     #[arg(long, default_value_t = false)]
     paint_only: bool,
+    /// Paint QR frames DIRECTLY into an NDI sender with this name (no
+    /// framebuffer, no capture hardware) at an exact --paint-fps. The
+    /// software-only source for genlock validation (#42) and the OBS-bypass
+    /// golden-reference runs: zero hardware in the loop.
+    #[arg(long)]
+    synth_ndi: Option<String>,
+    /// Canvas size for --synth-ndi (the fb path is fixed 1920x1080)
+    #[arg(long, default_value_t = 1920)]
+    canvas_w: u32,
+    #[arg(long, default_value_t = 1080)]
+    canvas_h: u32,
 }
 
 fn main() -> Result<()> {
@@ -116,8 +127,8 @@ fn main() -> Result<()> {
         duration: Duration::from_secs(args.duration_secs),
         paint_fps,
         capture_fps: args.capture_fps,
-        canvas_w: 1920,
-        canvas_h: 1080,
+        canvas_w: args.canvas_w,
+        canvas_h: args.canvas_h,
         qr_size: args.qr_size,
         freeze_periods: args.freeze_periods,
         connect_timeout_secs: args.connect_timeout_secs,
@@ -125,6 +136,12 @@ fn main() -> Result<()> {
         max_p99_latency_ms: args.max_p99_latency_ms,
         max_freeze_periods_gate: args.max_freeze_periods,
     };
+
+    if let Some(name) = args.synth_ndi.as_deref() {
+        let sent = synth_ndi_paint(name, &cfg)?;
+        println!("SYNTH_NDI run_id={} sent={}", run_id, sent);
+        return Ok(());
+    }
 
     if args.paint_only {
         let painted = camera_box::probe::run::run_paint_only(&cfg)?;
@@ -181,5 +198,90 @@ fn main() -> Result<()> {
         Ok(())
     } else {
         std::process::exit(1);
+    }
+}
+
+/// Paint QR ids straight into an NDI sender at an exact rate — no framebuffer,
+/// no capture device, no HDMI loop. This is the all-software source for the
+/// genlock validation rig (#42): every emitted frame is a unique id at exactly
+/// --paint-fps, so any drop downstream is the pipeline's fault, never the
+/// source's. UYVY passthrough (gray QR -> Y plane, neutral chroma).
+fn synth_ndi_paint(name: &str, cfg: &camera_box::probe::run::RunConfig) -> Result<u64> {
+    use camera_box::capture::FrameRate;
+    use camera_box::ndi::NdiSender;
+    use camera_box::probe::payload::Payload;
+    use camera_box::probe::qr::render_qr_bgra;
+    use std::time::Instant;
+
+    anyhow::ensure!(
+        cfg.qr_size <= cfg.canvas_h && cfg.qr_size <= cfg.canvas_w,
+        "--qr-size {} does not fit the {}x{} canvas",
+        cfg.qr_size,
+        cfg.canvas_w,
+        cfg.canvas_h
+    );
+    let fps = cfg.paint_fps;
+    let mut sender = NdiSender::new(
+        name,
+        FrameRate {
+            numerator: fps.round() as u32,
+            denominator: 1,
+        },
+    )?;
+    let (w, h) = (cfg.canvas_w, cfg.canvas_h);
+    let mut uyvy = vec![0u8; (w * h * 2) as usize];
+    let period = Duration::from_secs_f64(1.0 / fps);
+    let start = Instant::now();
+    let mut next = Instant::now();
+    let mut frame_id: u32 = 0;
+
+    tracing::info!("synth-ndi: sending '{}' {}x{} @{} fps", name, w, h, fps);
+    while start.elapsed() < cfg.duration {
+        let payload = Payload {
+            run_id: cfg.run_id,
+            frame_id,
+            gen_ts_ns: start.elapsed().as_nanos() as i64,
+        };
+        let bgra = render_qr_bgra(&payload, w, h, cfg.qr_size);
+        bgra_gray_to_uyvy(&bgra, &mut uyvy);
+        sender.send_frame_data(&uyvy, w, h, v4l::FourCC::new(b"UYVY"), w * 2)?;
+        frame_id = frame_id.wrapping_add(1);
+        next += period;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else {
+            next = now;
+        }
+    }
+    tracing::info!("synth-ndi: sent {} frames", frame_id);
+    Ok(frame_id as u64)
+}
+
+/// Gray BGRA -> UYVY: Y from the blue channel (R=G=B on the QR canvas),
+/// neutral chroma (U=V=128).
+fn bgra_gray_to_uyvy(bgra: &[u8], out: &mut [u8]) {
+    let pairs = bgra.len() / 8;
+    for i in 0..pairs {
+        let y0 = bgra[i * 8];
+        let y1 = bgra[i * 8 + 4];
+        out[i * 4] = 128;
+        out[i * 4 + 1] = y0;
+        out[i * 4 + 2] = 128;
+        out[i * 4 + 3] = y1;
+    }
+}
+
+#[cfg(test)]
+mod synth_tests {
+    use super::bgra_gray_to_uyvy;
+
+    #[test]
+    fn gray_bgra_maps_luma_and_neutral_chroma() {
+        // two pixels: black (0) and white (255), gray => B=G=R
+        let bgra = [0u8, 0, 0, 255, 255u8, 255, 255, 255];
+        let mut out = [0u8; 4];
+        bgra_gray_to_uyvy(&bgra, &mut out);
+        assert_eq!(out, [128, 0, 128, 255]); // U=128, Y0=0, V=128, Y1=255
     }
 }
