@@ -804,11 +804,80 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
 	pthread_mutex_unlock(&obs->video.encoder_group_mutex);
 }
 
+/* ---- genlock (camera-box #42) -------------------------------------------
+ * Stock OBS schedules every render tick on the FREE-RUNNING monotonic clock
+ * (os_gettime_ns = QPC / CLOCK_MONOTONIC), which NTP/PTP do not discipline.
+ * Two boxes therefore tick at slightly different real rates and the async
+ * source resampler drops/duplicates frames where the clocks beat (measured
+ * 0.24-12.66% per hop on the production rig).
+ *
+ * Genlock mode (env OBS_GENLOCK_WALL_CLOCK=1) instead derives every tick
+ * deadline from the DanteSync-disciplined WALL clock, aligned to ABSOLUTE
+ * frame boundaries (wall_ns % interval == 0). All genlocked machines tick at
+ * the same disciplined frequency AND phase, so a chained camera->OBS->OBS
+ * pipeline has zero rate mismatch end to end. Wall-clock steps (the NTP
+ * fallback regime) are absorbed by clamping the per-tick correction to
+ * GENLOCK_MAX_SLEW_NS - the tick slews toward the new boundary, never jumps.
+ */
+#define GENLOCK_MAX_SLEW_NS (2 * 1000 * 1000) /* 2 ms per tick */
+
+static bool genlock_tick_enabled(void)
+{
+	static int enabled = -1;
+	if (enabled == -1) {
+		const char *v = getenv("OBS_GENLOCK_WALL_CLOCK");
+		enabled = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+		if (enabled)
+			blog(LOG_INFO,
+			     "genlock: wall-clock-slaved render tick ENABLED "
+			     "(OBS_GENLOCK_WALL_CLOCK, slew cap %d ns/tick)",
+			     GENLOCK_MAX_SLEW_NS);
+	}
+	return enabled == 1;
+}
+
+static uint64_t genlock_wall_ns(void)
+{
+#ifdef _WIN32
+	FILETIME ft;
+	ULARGE_INTEGER u;
+	GetSystemTimePreciseAsFileTime(&ft);
+	u.LowPart = ft.dwLowDateTime;
+	u.HighPart = ft.dwHighDateTime;
+	/* FILETIME (100ns since 1601) -> unix epoch ns */
+	return (u.QuadPart - 116444736000000000ULL) * 100ULL;
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+/* Map the next absolute wall-clock frame boundary onto the monotonic
+ * timebase os_sleepto_ns() uses, slew-clamped against the stock deadline. */
+static uint64_t genlock_next_deadline(uint64_t cur_time, uint64_t interval_ns)
+{
+	const uint64_t wall = genlock_wall_ns();
+	const uint64_t mono = os_gettime_ns();
+	const uint64_t next_wall = wall - (wall % interval_ns) + interval_ns;
+	const uint64_t target = mono + (next_wall - wall);
+	const uint64_t stock = cur_time + interval_ns;
+	const int64_t corr = (int64_t)(target - stock);
+
+	if (corr > GENLOCK_MAX_SLEW_NS)
+		return stock + GENLOCK_MAX_SLEW_NS;
+	if (corr < -GENLOCK_MAX_SLEW_NS)
+		return stock - GENLOCK_MAX_SLEW_NS;
+	return target;
+}
+/* ---- end genlock --------------------------------------------------------- */
+
 static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time, uint64_t interval_ns)
 {
 	struct obs_vframe_info vframe_info;
 	uint64_t cur_time = *p_time;
-	uint64_t t = cur_time + interval_ns;
+	uint64_t t = genlock_tick_enabled() ? genlock_next_deadline(cur_time, interval_ns)
+					    : cur_time + interval_ns;
 	int count;
 
 	if (os_sleepto_ns(t)) {

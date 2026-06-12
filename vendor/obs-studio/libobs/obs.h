@@ -1544,6 +1544,14 @@ EXPORT void obs_source_get_audio_mix(const obs_source_t *source, struct obs_sour
 EXPORT void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered);
 EXPORT bool obs_source_async_unbuffered(const obs_source_t *source);
 
+/** Genlock FIFO consumption (camera-box #42): when enabled, the compositor
+ * consumes EXACTLY ONE queued async frame per render tick (pure FIFO) instead
+ * of the timestamp-cursor resample that erases overtaken frames. Pair with the
+ * wall-clock-slaved render tick (OBS_GENLOCK_WALL_CLOCK=1) so source and
+ * compositor run at the same disciplined rate. */
+EXPORT void obs_source_set_genlock_fifo(obs_source_t *source, bool enabled);
+EXPORT bool obs_source_get_genlock_fifo(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */
