@@ -79,6 +79,8 @@ jobs:
           # cmdline pattern did exactly that on the first dispatch: it matched the
           # plain 'camera-box' text in the systemctl part of the same command line,
           # killed the shell, and the repair never ran → exit 255).
+          # (sleep 1 only after the kill: a transient video0-EBUSY first start is
+          # absorbed by the unit's Restart=always/RestartSec=3 plus the settle retry.)
           sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             "root@${CAM_IP}" \
             "pkill -x frame-probe 2>/dev/null; \

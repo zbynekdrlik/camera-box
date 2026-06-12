@@ -46,6 +46,12 @@ fn rig_scripts_never_use_cmdline_matching_pkill() {
              runs (this stranded a camera-box orphan on cam2 and broke the #9 dispatch). \
              Use `pkill -x <exact-process-name>` instead."
         );
+        // The same self-match hole via pgrep: `pgrep -f … | xargs kill` etc.
+        assert!(
+            !s.contains("pgrep -f"),
+            "{file}: uses `pgrep -f` — same full-cmdline self-match hole as `pkill -f` \
+             (the remote shell's own cmdline matches). Use exact-name matching."
+        );
         // Any pkill present must be the -x form.
         for line in s.lines().filter(|l| l.contains("pkill")) {
             assert!(

@@ -71,6 +71,9 @@ systemctl stop camera-box
 pkill -x camera-box 2>/dev/null || true
 # WAIT until /dev/video0 is actually free instead of racing uvcvideo's async teardown
 # with a fixed sleep (the EBUSY rc=3 failure of the first #9 dispatch). ~15s ceiling.
+# fuser errors are silenced in the loop, so fail loudly if it's missing entirely —
+# otherwise a future device image without psmisc would silently skip the wait.
+command -v fuser >/dev/null 2>&1 || { echo "ERROR: fuser not found on device (psmisc)"; exit 5; }
 i=0
 while fuser -s /dev/video0 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.5; i=$((i + 1)); done
 if fuser -s /dev/video0 2>/dev/null; then

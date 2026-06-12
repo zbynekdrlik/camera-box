@@ -45,6 +45,8 @@ cleanup() {
   # remote shell's OWN cmdline (it contains the pattern text), killed the shell, and the
   # restart below never ran — every run stranded a manual camera-box orphan on cam2 with
   # the service left stopped (which then broke the #9 loopback dispatch with EBUSY).
+  # (sleep 1 only: if video0 is still settling, the unit's Restart=always/RestartSec=3
+  # absorbs a transient first-start EBUSY — the safety lives in the unit file.)
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
     "pkill -x frame-probe 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      systemctl restart camera-box 2>/dev/null; true"
