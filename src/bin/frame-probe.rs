@@ -230,12 +230,31 @@ fn synth_ndi_paint(name: &str, cfg: &camera_box::probe::run::RunConfig) -> Resul
     )?;
     let (w, h) = (cfg.canvas_w, cfg.canvas_h);
     let mut uyvy = vec![0u8; (w * h * 2) as usize];
-    let period = Duration::from_secs_f64(1.0 / fps);
     let start = Instant::now();
-    let mut next = Instant::now();
     let mut frame_id: u32 = 0;
 
-    tracing::info!("synth-ndi: sending '{}' {}x{} @{} fps", name, w, h, fps);
+    // Pace on ABSOLUTE WALL-CLOCK frame boundaries, not the monotonic clock.
+    // The genlocked OBS render tick consumes on the DanteSync-disciplined wall
+    // clock; a monotonic-paced source drifts against it by the PTP frequency
+    // correction (~10-20 ppm ≈ 1 frame per ~1-2 min), ratcheting the receiver
+    // queue to its cap and forcing periodic flush bursts. Wall-boundary pacing
+    // makes source and consumer tick at the same disciplined rate and phase
+    // (the same scheme as camera-box's sender and the libobs genlock patch).
+    let interval_ns: u64 = (1_000_000_000f64 / fps).round() as u64;
+    let wall_ns = || -> u64 {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("wall clock before epoch");
+        d.as_nanos() as u64
+    };
+
+    tracing::info!(
+        "synth-ndi: sending '{}' {}x{} @{} fps (wall-boundary paced)",
+        name,
+        w,
+        h,
+        fps
+    );
     while start.elapsed() < cfg.duration {
         let payload = Payload {
             run_id: cfg.run_id,
@@ -246,13 +265,10 @@ fn synth_ndi_paint(name: &str, cfg: &camera_box::probe::run::RunConfig) -> Resul
         bgra_gray_to_uyvy(&bgra, &mut uyvy);
         sender.send_frame_data(&uyvy, w, h, v4l::FourCC::new(b"UYVY"), w * 2)?;
         frame_id = frame_id.wrapping_add(1);
-        next += period;
-        let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
-        } else {
-            next = now;
-        }
+        // sleep to the next absolute wall boundary
+        let now = wall_ns();
+        let next_wall = now - (now % interval_ns) + interval_ns;
+        std::thread::sleep(Duration::from_nanos(next_wall - now));
     }
     tracing::info!("synth-ndi: sent {} frames", frame_id);
     Ok(frame_id as u64)
