@@ -33,6 +33,40 @@
 #define PROP_SYNC "ndi_sync"
 #define PROP_FRAMESYNC "ndi_framesync"
 #define PROP_GENLOCK_FIFO "genlock_fifo" /* camera-box #42 */
+
+/* camera-box #42: resolve the genlock export at RUNTIME. On Windows the
+ * DistroAV build system fetches stock OBS SDK headers (no genlock symbols), so
+ * a link-time call cannot build; runtime binding works against any headers AND
+ * leaves the plugin loadable on a stock OBS (checkbox becomes an inert no-op
+ * with a loud warning instead of a load failure). */
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+typedef void (*set_genlock_fifo_fn)(obs_source_t *, bool);
+static set_genlock_fifo_fn resolve_set_genlock_fifo()
+{
+	static set_genlock_fifo_fn fn = nullptr;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+#ifdef _WIN32
+		HMODULE m = GetModuleHandleA("obs.dll");
+		if (!m)
+			m = GetModuleHandleA("libobs.dll");
+		if (m)
+			fn = (set_genlock_fifo_fn)GetProcAddress(m, "obs_source_set_genlock_fifo");
+#else
+		fn = (set_genlock_fifo_fn)dlsym(RTLD_DEFAULT, "obs_source_set_genlock_fifo");
+#endif
+		if (!fn)
+			obs_log(LOG_WARNING,
+				"genlock: obs_source_set_genlock_fifo not exported by this OBS build — "
+				"the Genlock checkbox is inert (stock OBS?)");
+	}
+	return fn;
+}
 #define PROP_HW_ACCEL "ndi_recv_hw_accel"
 #define PROP_FIX_ALPHA "ndi_fix_alpha_blending"
 #define PROP_YUV_RANGE "yuv_range"
@@ -947,8 +981,10 @@ void ndi_source_update(void *data, obs_data_t *settings)
 
 	/* camera-box #42: pure-FIFO consumption of this source's frames by the
 	 * compositor (exactly one per render tick, nothing erased ahead). Takes
-	 * effect immediately; no receiver reset needed. */
-	obs_source_set_genlock_fifo(obs_source, obs_data_get_bool(settings, PROP_GENLOCK_FIFO));
+	 * effect immediately; no receiver reset needed. Runtime-resolved so the
+	 * plugin builds against stock SDK headers and loads on any OBS. */
+	if (auto set_genlock = resolve_set_genlock_fifo())
+		set_genlock(obs_source, obs_data_get_bool(settings, PROP_GENLOCK_FIFO));
 
 	auto new_hw_accel_enabled = obs_data_get_bool(settings, PROP_HW_ACCEL);
 	reset_ndi_receiver |= (s->config.hw_accel_enabled != new_hw_accel_enabled);
