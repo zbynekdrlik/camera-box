@@ -1,0 +1,83 @@
+name: Windows genlock build (vendored OBS + DistroAV)
+
+# Builds the PRODUCTION Windows artifact for strih/stream from the vendored,
+# genlock-patched tree (#42): OBS 32.1.2 (browser ON for production parity,
+# What's New / update prompts OFF per #43) + DistroAV 6.2.1 against it.
+# Manual dispatch; artifacts are deployed off-air to the boxes (portable mode
+# first — never overwriting the production install).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-genlock-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure OBS (windows-x64 preset + genlock build flags)
+        working-directory: vendor/obs-studio
+        run: >
+          cmake --preset windows-x64
+          -DOBS_VERSION_OVERRIDE=32.1.2
+          -DENABLE_WHATSNEW=OFF
+          -DENABLE_AJA=OFF
+          -DENABLE_VLC=OFF
+          -DENABLE_TEST_INPUT=OFF
+
+      - name: Build OBS
+        working-directory: vendor/obs-studio
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
+      - name: Install OBS SDK prefix
+        working-directory: vendor/obs-studio
+        run: cmake --install build_x64 --config RelWithDebInfo --prefix ${{ github.workspace }}/obs-sdk
+
+      - name: Configure DistroAV against the genlocked OBS
+        working-directory: vendor/distroav
+        run: >
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/obs-sdk"
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build DistroAV
+        working-directory: vendor/distroav
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
+      - name: Assert no updater/What's New in the artifact (#43)
+        shell: pwsh
+        run: |
+          $rundir = "vendor/obs-studio/build_x64/rundir/RelWithDebInfo"
+          if (Test-Path "$rundir/bin/64bit/updater.exe") { Write-Error "updater.exe present — #43 violated"; exit 1 }
+          Write-Output "no updater.exe — OK"
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          $rundir = "vendor/obs-studio/build_x64/rundir/RelWithDebInfo"
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item -Recurse "$rundir/*" stage/
+          # DistroAV plugin + data into the OBS rundir layout
+          Copy-Item "vendor/distroav/build_x64/RelWithDebInfo/distroav.dll" "stage/obs-plugins/64bit/" -ErrorAction SilentlyContinue
+          if (!(Test-Path "stage/obs-plugins/64bit/distroav.dll")) {
+            $dll = Get-ChildItem -Recurse vendor/distroav/build_x64 -Filter distroav.dll | Select-Object -First 1
+            Copy-Item $dll.FullName "stage/obs-plugins/64bit/"
+          }
+          New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/distroav" | Out-Null
+          Copy-Item -Recurse "vendor/distroav/data/*" "stage/data/obs-plugins/distroav/" -ErrorAction SilentlyContinue
+          git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-genlock-windows-x64
+          path: stage/
+          if-no-files-found: error

@@ -32,6 +32,7 @@
 #define PROP_BANDWIDTH "ndi_bw_mode"
 #define PROP_SYNC "ndi_sync"
 #define PROP_FRAMESYNC "ndi_framesync"
+#define PROP_GENLOCK_FIFO "genlock_fifo" /* camera-box #42 */
 #define PROP_HW_ACCEL "ndi_recv_hw_accel"
 #define PROP_FIX_ALPHA "ndi_fix_alpha_blending"
 #define PROP_YUV_RANGE "yuv_range"
@@ -281,6 +282,8 @@ obs_properties_t *ndi_source_getproperties(void *data)
 				  PROP_SYNC_NDI_SOURCE_TIMECODE);
 
 	obs_properties_add_bool(props, PROP_FRAMESYNC, obs_module_text("NDIPlugin.NDIFrameSync"));
+
+	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock (FIFO frame consumption, camera-box #42)");
 
 	obs_properties_add_bool(props, PROP_HW_ACCEL, obs_module_text("NDIPlugin.SourceProps.HWAccel"));
 
@@ -941,6 +944,11 @@ void ndi_source_update(void *data, obs_data_t *settings)
 		obs_source_name, new_framesync_enabled ? "true" : "false",
 		s->config.framesync_enabled ? "true" : "false");
 	s->config.framesync_enabled = new_framesync_enabled;
+
+	/* camera-box #42: pure-FIFO consumption of this source's frames by the
+	 * compositor (exactly one per render tick, nothing erased ahead). Takes
+	 * effect immediately; no receiver reset needed. */
+	obs_source_set_genlock_fifo(obs_source, obs_data_get_bool(settings, PROP_GENLOCK_FIFO));
 
 	auto new_hw_accel_enabled = obs_data_get_bool(settings, PROP_HW_ACCEL);
 	reset_ndi_receiver |= (s->config.hw_accel_enabled != new_hw_accel_enabled);

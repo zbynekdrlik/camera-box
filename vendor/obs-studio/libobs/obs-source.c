@@ -4092,6 +4092,16 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 	uint64_t frame_time = next_frame->timestamp;
 	uint64_t frame_offset = 0;
 
+	if (source->genlock_fifo) {
+		/* camera-box #42: pure FIFO - exactly one queued frame per render
+		 * tick, no timestamp cursor, nothing erased ahead. With the
+		 * wall-clock-slaved tick the source and compositor rates match,
+		 * so the queue depth stays constant and no frame is ever lost
+		 * or duplicated in steady state. */
+		source->last_frame_ts = next_frame->timestamp;
+		return true;
+	}
+
 	if (source->async_unbuffered) {
 		while (source->async_frames.num > 1) {
 			da_erase(source->async_frames, 0);
@@ -5593,6 +5603,21 @@ enum obs_monitoring_type obs_source_get_monitoring_type(const obs_source_t *sour
 {
 	return obs_source_valid(source, "obs_source_get_monitoring_type") ? source->monitoring_type
 									  : OBS_MONITORING_TYPE_NONE;
+}
+
+void obs_source_set_genlock_fifo(obs_source_t *source, bool enabled)
+{
+	if (!obs_source_valid(source, "obs_source_set_genlock_fifo"))
+		return;
+
+	source->genlock_fifo = enabled;
+	blog(LOG_INFO, "genlock: FIFO frame consumption %s for source '%s'", enabled ? "ENABLED" : "disabled",
+	     obs_source_get_name(source));
+}
+
+bool obs_source_get_genlock_fifo(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_genlock_fifo") ? source->genlock_fifo : false;
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)

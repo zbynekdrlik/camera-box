@@ -907,6 +907,7 @@ struct obs_source {
 	bool async_update_texture;
 	bool async_unbuffered;
 	bool async_decoupled;
+	bool genlock_fifo; /* camera-box #42: consume exactly one queued frame per render tick */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;
