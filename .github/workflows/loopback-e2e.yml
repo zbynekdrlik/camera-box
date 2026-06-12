@@ -21,7 +21,7 @@ on:
         options: [coverage, full-rate]
         default: coverage
       duration_secs:
-        description: "Run duration in seconds"
+        description: "Run duration in seconds (job ceiling 30 min incl. build — keep ≤1500)"
         default: "300"
       cam_ip:
         description: "cam2 IP"
@@ -41,7 +41,7 @@ concurrency:
 jobs:
   loopback:
     runs-on: [self-hosted, linux, camera-lan]
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -72,7 +72,11 @@ jobs:
           CAM_PASS: ${{ secrets.CAM_PASS }}
         run: |
           PASS="${CAM_PASS:-newlevel}"
+          # Kill any orphaned MANUAL camera-box first (edge: hard network partition can
+          # strand the script's remote process, which would hold /dev/video0 against the
+          # service restart). Bracket trick avoids pkill matching this ssh command itself.
           sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             "root@${CAM_IP}" \
-            "systemctl is-active camera-box || systemctl restart camera-box; \
+            "pkill -f '/tmp/[f]rame-probe' 2>/dev/null; \
+             systemctl is-active camera-box >/dev/null || { pkill -f '[c]amera-box' 2>/dev/null; sleep 1; systemctl restart camera-box; }; \
              echo -n 'camera-box: '; systemctl is-active camera-box"
