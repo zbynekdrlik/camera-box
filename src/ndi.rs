@@ -398,6 +398,34 @@ impl Drop for NdiLib {
 }
 
 /// NDI sender wrapper - optimized for low latency
+/// Genlock decimation gate (#11): given the current wall-clock time `now_ns`, the
+/// next emit boundary `next_boundary_ns` (0 = uninitialized), and the boundary
+/// `interval_ns` (1e9 / target_fps), decide whether THIS captured frame should be
+/// emitted — it is the first capture at/after a boundary — and return the updated
+/// next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
+/// wall-clock boundaries of the slower genlock/broadcast rate (e.g. 30 fps) so a
+/// downstream genlocked OBS consumes exactly one frame per render tick (zero loss).
+/// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
+pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> (bool, u64) {
+    // Initialize (or keep) the next absolute wall-clock boundary.
+    let boundary = if next_boundary_ns == 0 {
+        now_ns - (now_ns % interval_ns) + interval_ns
+    } else {
+        next_boundary_ns
+    };
+    if now_ns < boundary {
+        // Between boundaries — decimate this capture (do not emit).
+        return (false, boundary);
+    }
+    // Crossed the boundary: emit this (freshest) frame, advance the boundary.
+    let mut next = boundary + interval_ns;
+    if next <= now_ns {
+        // Fell behind (clock slew/jump or a slow capture) — resync forward.
+        next = now_ns - (now_ns % interval_ns) + interval_ns;
+    }
+    (true, next)
+}
+
 pub struct NdiSender {
     lib: NdiLib,
     sender: *mut c_void,
@@ -409,6 +437,11 @@ pub struct NdiSender {
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
     has_avx2: bool,
+    // Genlock #11: when true, the caller paces the sends (decimating the capture
+    // to the target rate on wall-clock boundaries), so send_frame stamps the
+    // boundary timecode WITHOUT the internal blocking wait — blocking here would
+    // back-pressure the faster capture loop and pile up V4L2 buffers.
+    external_pacing: bool,
 }
 
 // SAFETY: NdiSender uses thread-safe NDI operations
@@ -454,7 +487,20 @@ impl NdiSender {
             frame_count: 0,
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
+            external_pacing: false,
         })
+    }
+
+    /// Genlock #11: enable external pacing — the caller decimates the capture to
+    /// the target rate on wall-clock boundaries and `send_frame` stamps the
+    /// boundary timecode without blocking. Use when the sender's `frame_rate` is
+    /// the genlock/broadcast rate (e.g. 30) but capture runs faster (e.g. 60).
+    pub fn set_external_pacing(&mut self, enabled: bool) {
+        self.external_pacing = enabled;
+        tracing::info!(
+            "NDI sender: external pacing {} (genlock decimation by caller)",
+            if enabled { "ENABLED" } else { "disabled" }
+        );
     }
 
     /// Detect AVX2 CPU support
@@ -728,7 +774,13 @@ impl NdiSender {
                 // fps_from_frame_rate — rounds, so 59.94 -> 60 not 59).
                 let fps =
                     fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
-                wait_for_next_boundary_100ns(fps)
+                if self.external_pacing {
+                    // Caller already gated this send to a wall-clock boundary;
+                    // stamp the boundary timecode without sleeping.
+                    next_boundary_100ns(get_wall_clock_100ns(), fps)
+                } else {
+                    wait_for_next_boundary_100ns(fps)
+                }
             },
             p_data: uyvy_ptr,
             line_stride_in_bytes: uyvy_stride as c_int,
@@ -1422,5 +1474,101 @@ mod tests {
         let yuyv = vec![128u8; 1920 * 1080 * 2];
         let uyvy = convert_yuyv_to_uyvy_scalar(&yuyv);
         assert_eq!(uyvy.len(), 1920 * 1080 * 2);
+    }
+
+    // --- genlock_emit_gate (#11) --------------------------------------------
+    // interval for 30 fps in ns.
+    const I30: u64 = 1_000_000_000 / 30; // 33_333_333
+
+    #[test]
+    fn genlock_gate_init_does_not_emit_and_sets_next_boundary() {
+        // next_boundary 0 => initialize to the next boundary above `now`, no emit.
+        let now = 5 * I30 + 1000; // just past the 5th boundary
+        let (emit, next) = genlock_emit_gate(now, 0, I30);
+        assert!(!emit, "init frame must not emit");
+        assert_eq!(next, now - (now % I30) + I30);
+        assert!(next > now, "boundary must be strictly after now");
+    }
+
+    #[test]
+    fn genlock_gate_skips_between_boundaries() {
+        // now strictly before the pending boundary => decimate, boundary unchanged.
+        let boundary = 10 * I30;
+        let now = boundary - 5; // just before
+        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        assert!(!emit, "capture before the boundary must be decimated");
+        assert_eq!(next, boundary, "boundary must not move when skipping");
+    }
+
+    #[test]
+    fn genlock_gate_emits_at_boundary_and_advances_one_interval() {
+        // now exactly at the boundary => emit, advance by exactly one interval.
+        let boundary = 7 * I30;
+        let (emit, next) = genlock_emit_gate(boundary, boundary, I30);
+        assert!(emit, "capture at the boundary must emit");
+        assert_eq!(next, boundary + I30, "advance exactly one interval");
+    }
+
+    #[test]
+    fn genlock_gate_emits_just_after_boundary() {
+        let boundary = 7 * I30;
+        let now = boundary + 100; // first capture after the boundary
+        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        assert!(emit);
+        assert_eq!(next, boundary + I30);
+    }
+
+    #[test]
+    fn genlock_gate_advance_is_boundary_plus_interval_not_resync() {
+        // Misaligned boundary, now exactly at it (and < boundary+interval, so the
+        // resync branch must NOT fire): next must be boundary + interval exactly.
+        // With an aligned boundary the resync value coincides with boundary+interval
+        // and masks a '+' -> '-' mutation; a misaligned boundary distinguishes them
+        // (resync would give 8*I30, the correct advance gives 8*I30 + 5).
+        let boundary = 7 * I30 + 5;
+        let now = boundary;
+        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        assert!(emit);
+        assert_eq!(next, boundary + I30);
+        assert_ne!(next, now - (now % I30) + I30); // != the resync-realigned value
+    }
+
+    #[test]
+    fn genlock_gate_resyncs_when_far_behind() {
+        // now is several intervals past the boundary (gap/jump): emit, and the
+        // next boundary must jump forward to just-after-now, not boundary+1.
+        let boundary = 3 * I30;
+        let now = boundary + 4 * I30 + 17; // ~4 intervals late
+        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        assert!(emit);
+        let realigned = now - (now % I30) + I30;
+        assert_eq!(
+            next, realigned,
+            "must resync forward, not creep one interval"
+        );
+        assert!(next > now);
+        assert_ne!(next, boundary + I30);
+    }
+
+    #[test]
+    fn genlock_gate_emits_at_30fps_over_a_60fps_capture_stream() {
+        // Drive ~1s of 60 fps captures through the gate; exactly ~30 must emit
+        // (the 60->30 decimation), one per wall boundary.
+        let cap_interval = 1_000_000_000u64 / 60;
+        let mut next_b = 0u64;
+        let mut emitted = 0;
+        let start = 1_000_000_000u64; // arbitrary absolute ns
+        for k in 0..60u64 {
+            let now = start + k * cap_interval;
+            let (emit, nb) = genlock_emit_gate(now, next_b, I30);
+            next_b = nb;
+            if emit {
+                emitted += 1;
+            }
+        }
+        assert!(
+            (29..=31).contains(&emitted),
+            "60fps capture must decimate to ~30 emits, got {emitted}"
+        );
     }
 }

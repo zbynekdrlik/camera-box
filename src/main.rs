@@ -12,6 +12,19 @@ use camera_box::intercom;
 use camera_box::ndi::NdiSender;
 use camera_box::ndi_display::{self, NdiDisplayConfig};
 
+/// Wall-clock time in ns (CLOCK_REALTIME — the DanteSync-disciplined clock the
+/// cluster genlock aligns to). Used by the genlock decimation gate.
+fn wall_clock_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+    }
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
+}
+
 /// Apply real-time optimizations to the current thread for lowest latency
 /// Based on media-bridge's extreme low-latency settings
 fn apply_realtime_optimizations() {
@@ -239,8 +252,37 @@ async fn run_capture_loop(
     let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);
 
-    // Create NDI sender with configured name and detected frame rate
-    let mut sender = NdiSender::new(ndi_name, frame_rate)?;
+    // Genlock #11: optionally emit NDI at a target broadcast rate, decimating the
+    // faster capture onto DanteSync wall-clock boundaries, so a downstream
+    // genlocked OBS (genlock_fifo) consumes exactly one frame per render tick =
+    // zero loss. CAMERA_BOX_GENLOCK_FPS=30 makes a 60fps capture emit 30fps
+    // wall-paced (matching a 1080p30 broadcast). Unset = send every captured
+    // frame at the capture rate (legacy behavior).
+    let genlock_fps: Option<u32> = std::env::var("CAMERA_BOX_GENLOCK_FPS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&f| f > 0);
+    let send_rate = match genlock_fps {
+        Some(f) => {
+            tracing::info!(
+                "GENLOCK: emitting {} fps wall-paced (capture {}/{} fps)",
+                f,
+                frame_rate.numerator,
+                frame_rate.denominator
+            );
+            camera_box::capture::FrameRate {
+                numerator: f,
+                denominator: 1,
+            }
+        }
+        None => frame_rate,
+    };
+
+    // Create NDI sender with configured name and the (genlock or capture) rate
+    let mut sender = NdiSender::new(ndi_name, send_rate)?;
+    if genlock_fps.is_some() {
+        sender.set_external_pacing(true);
+    }
     tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
     tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
@@ -253,9 +295,29 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0;
         let mut last_report = std::time::Instant::now();
 
+        // Genlock decimation state: emit the first capture at/after each target
+        // wall-clock boundary, skip the rest. interval_ns 0 => decimation off.
+        let out_interval_ns: u64 = genlock_fps
+            .map(|f| 1_000_000_000u64 / f as u64)
+            .unwrap_or(0);
+        let mut next_boundary_ns: u64 = 0;
+
         while running_capture.load(Ordering::Relaxed) {
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
+                if out_interval_ns > 0 {
+                    // Genlock decimation: emit only the capture at/after each
+                    // wall-clock boundary (pure logic in ndi::genlock_emit_gate).
+                    let (emit, next) = camera_box::ndi::genlock_emit_gate(
+                        wall_clock_ns(),
+                        next_boundary_ns,
+                        out_interval_ns,
+                    );
+                    next_boundary_ns = next;
+                    if !emit {
+                        return; // between boundaries — decimate (don't send)
+                    }
+                }
                 if let Err(e) = sender.send_frame_zero_copy(data, info) {
                     tracing::error!("Failed to send frame: {}", e);
                 }
