@@ -292,7 +292,8 @@ async fn run_capture_loop(
         // Apply real-time optimizations BEFORE entering the capture loop
         apply_realtime_optimizations();
 
-        let mut frame_count: u64 = 0;
+        let mut frame_count: u64 = 0; // frames captured this report window
+        let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
 
         // Genlock decimation state: emit the first capture at/after each target
@@ -321,18 +322,39 @@ async fn run_capture_loop(
                 if let Err(e) = sender.send_frame_zero_copy(data, info) {
                     tracing::error!("Failed to send frame: {}", e);
                 }
+                emit_count += 1; // reached only when the frame passed the gate
             });
 
             match result {
                 Ok(()) => {
                     frame_count += 1;
 
-                    // Report fps every 5 seconds
+                    // Report fps every 5 seconds. Under genlock decimation the
+                    // emit rate (frames actually sent) differs from the capture
+                    // rate — log both so a decimation regression (e.g. emitting
+                    // 0 or 60 instead of 30) is visible on-device.
                     let elapsed = last_report.elapsed();
                     if elapsed.as_secs() >= 5 {
-                        let fps = frame_count as f64 / elapsed.as_secs_f64();
-                        tracing::info!("Streaming: {:.1} fps ({} frames)", fps, frame_count);
+                        let secs = elapsed.as_secs_f64();
+                        let cap_fps = frame_count as f64 / secs;
+                        if out_interval_ns > 0 {
+                            let emit_fps = emit_count as f64 / secs;
+                            tracing::info!(
+                                "Streaming: {:.1} fps emitted / {:.1} fps captured ({} sent, {} captured)",
+                                emit_fps,
+                                cap_fps,
+                                emit_count,
+                                frame_count
+                            );
+                        } else {
+                            tracing::info!(
+                                "Streaming: {:.1} fps ({} frames)",
+                                cap_fps,
+                                frame_count
+                            );
+                        }
                         frame_count = 0;
+                        emit_count = 0;
                         last_report = std::time::Instant::now();
                     }
                 }

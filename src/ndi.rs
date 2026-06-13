@@ -406,7 +406,22 @@ impl Drop for NdiLib {
 /// wall-clock boundaries of the slower genlock/broadcast rate (e.g. 30 fps) so a
 /// downstream genlocked OBS consumes exactly one frame per render tick (zero loss).
 /// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
+///
+/// Grid note: this gate aligns on a continuous epoch-relative grid
+/// (`now_ns % interval_ns`), which is INDEPENDENT of the per-second-reset grid
+/// used for the stamped NDI timecode in [`next_boundary_100ns`]. With an integer
+/// `interval_ns` (e.g. 33_333_333 for 30 fps) the two grids differ only by the
+/// per-second truncation residue (~10 ns/s, < 2e-8 rate error → under one frame
+/// per hour) — harmless for the OBS-FIFO decimation this drives; the grids are
+/// not required to coincide. `interval_ns == 0` disables the gate and is the
+/// guarded divisor case, matching [`next_boundary_100ns`] / [`fps_from_frame_rate`]
+/// which also guard a zero divisor rather than panicking.
 pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> (bool, u64) {
+    // Guard the divisor: a zero interval means genlock is off — never emit, and
+    // never modulo/divide by zero (would panic on this pub API surface).
+    if interval_ns == 0 {
+        return (false, next_boundary_ns);
+    }
     // Initialize (or keep) the next absolute wall-clock boundary.
     let boundary = if next_boundary_ns == 0 {
         now_ns - (now_ns % interval_ns) + interval_ns
@@ -495,6 +510,12 @@ impl NdiSender {
     /// the target rate on wall-clock boundaries and `send_frame` stamps the
     /// boundary timecode without blocking. Use when the sender's `frame_rate` is
     /// the genlock/broadcast rate (e.g. 30) but capture runs faster (e.g. 60).
+    ///
+    /// INVARIANT (caller-enforced): `frame_rate` MUST already equal the emit rate
+    /// the caller decimates to before this is enabled. Enabling it while
+    /// `frame_rate` still reflects the capture rate stamps wrong timecodes on
+    /// every frame. The single caller (`main.rs`) sets the genlock rate and this
+    /// flag together; any new caller must uphold the same ordering.
     pub fn set_external_pacing(&mut self, enabled: bool) {
         self.external_pacing = enabled;
         tracing::info!(
@@ -1516,6 +1537,18 @@ mod tests {
         let (emit, next) = genlock_emit_gate(now, boundary, I30);
         assert!(emit);
         assert_eq!(next, boundary + I30);
+    }
+
+    #[test]
+    fn genlock_gate_zero_interval_does_not_panic_and_never_emits() {
+        // interval_ns == 0 (genlock off) must NOT panic (no modulo/divide by
+        // zero) and must never emit, leaving the boundary untouched.
+        let (emit, next) = genlock_emit_gate(123_456_789, 0, 0);
+        assert!(!emit);
+        assert_eq!(next, 0);
+        let (emit2, next2) = genlock_emit_gate(999, 555, 0);
+        assert!(!emit2);
+        assert_eq!(next2, 555);
     }
 
     #[test]
