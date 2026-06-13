@@ -23,11 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
+      # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)
         working-directory: vendor/obs-studio
+        shell: bash
         run: >
           cmake --preset windows-x64
-          -DOBS_VERSION_OVERRIDE=32.1.2
+          '-DOBS_VERSION_OVERRIDE=32.1.2'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
           -DENABLE_VLC=OFF
@@ -35,21 +38,25 @@ jobs:
 
       - name: Build OBS
         working-directory: vendor/obs-studio
+        shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
       - name: Install OBS SDK prefix
         working-directory: vendor/obs-studio
-        run: cmake --install build_x64 --config RelWithDebInfo --prefix ${{ github.workspace }}/obs-sdk
+        shell: bash
+        run: cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
 
       - name: Configure DistroAV against the genlocked OBS
         working-directory: vendor/distroav
+        shell: bash
         run: >
           cmake -B build_x64 -G "Visual Studio 17 2022" -A x64
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/obs-sdk"
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
       - name: Build DistroAV
         working-directory: vendor/distroav
+        shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
       - name: Assert no updater/What's New in the artifact (#43)
