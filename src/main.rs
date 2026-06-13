@@ -306,18 +306,16 @@ async fn run_capture_loop(
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 if out_interval_ns > 0 {
-                    let now = wall_clock_ns();
-                    if next_boundary_ns == 0 {
-                        next_boundary_ns = now - (now % out_interval_ns) + out_interval_ns;
-                    }
-                    if now < next_boundary_ns {
+                    // Genlock decimation: emit only the capture at/after each
+                    // wall-clock boundary (pure logic in ndi::genlock_emit_gate).
+                    let (emit, next) = camera_box::ndi::genlock_emit_gate(
+                        wall_clock_ns(),
+                        next_boundary_ns,
+                        out_interval_ns,
+                    );
+                    next_boundary_ns = next;
+                    if !emit {
                         return; // between boundaries — decimate (don't send)
-                    }
-                    // crossed a boundary: send this (freshest) frame, advance.
-                    next_boundary_ns += out_interval_ns;
-                    if next_boundary_ns <= now {
-                        // fell behind (slew/jump) — resync to the next boundary.
-                        next_boundary_ns = now - (now % out_interval_ns) + out_interval_ns;
                     }
                 }
                 if let Err(e) = sender.send_frame_zero_copy(data, info) {
