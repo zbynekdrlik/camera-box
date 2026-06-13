@@ -46,7 +46,9 @@ ssh_cam() { sshpass -p "$CAM_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTim
 build_remote_env() {
   # printf %q emits a shell-safe quoting of every value, so a single quote (or any
   # metacharacter) in a free-text value cannot break out and inject into the remote
-  # root shell — the #39 hardening.
+  # root shell — the #39 hardening. Safe here because BOTH this builder (#!/usr/bin/env
+  # bash) and the remote consumer (`bash -s`) are bash: %q may emit bash-only $'…'
+  # ANSI-C quoting, which a POSIX sh/dash would not parse — don't reuse this in an sh ctx.
   printf 'MODE=%q DURATION=%q SOURCE=%q QR_SIZE=%q SETTLE_MS=%q CAPTURE_FPS=%q MAX_P99_MS=%q MAX_FREEZE_PERIODS=%q OUT=%q' \
     "$MODE" "$DURATION_SECS" "$SOURCE" "$QR_SIZE" "$SETTLE_MS" "$CAPTURE_FPS" "$MAX_P99_MS" "$MAX_FREEZE_PERIODS" "$REMOTE_OUT"
 }

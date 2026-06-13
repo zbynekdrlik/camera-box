@@ -32,9 +32,9 @@ fn loopback_remote_env_is_injection_safe() {
 
     // Per-process marker the injection payload tries to create. If it exists after the
     // run, the malicious value escaped the quoting and executed a command remotely.
-    let tmp = manifest_dir().join("target/tmp");
-    std::fs::create_dir_all(&tmp).unwrap();
-    let marker = tmp.join(format!("loopback_inject_marker_{}", std::process::id()));
+    // System temp dir (always writable; PID keeps it unique across parallel test procs).
+    let marker =
+        std::env::temp_dir().join(format!("loopback_inject_marker_{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
 
     // Malicious SOURCE: close the single quote, run `touch <marker>`, reopen a quote.
