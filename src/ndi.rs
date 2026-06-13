@@ -409,6 +409,11 @@ pub struct NdiSender {
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
     has_avx2: bool,
+    // Genlock #11: when true, the caller paces the sends (decimating the capture
+    // to the target rate on wall-clock boundaries), so send_frame stamps the
+    // boundary timecode WITHOUT the internal blocking wait — blocking here would
+    // back-pressure the faster capture loop and pile up V4L2 buffers.
+    external_pacing: bool,
 }
 
 // SAFETY: NdiSender uses thread-safe NDI operations
@@ -454,7 +459,20 @@ impl NdiSender {
             frame_count: 0,
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
+            external_pacing: false,
         })
+    }
+
+    /// Genlock #11: enable external pacing — the caller decimates the capture to
+    /// the target rate on wall-clock boundaries and `send_frame` stamps the
+    /// boundary timecode without blocking. Use when the sender's `frame_rate` is
+    /// the genlock/broadcast rate (e.g. 30) but capture runs faster (e.g. 60).
+    pub fn set_external_pacing(&mut self, enabled: bool) {
+        self.external_pacing = enabled;
+        tracing::info!(
+            "NDI sender: external pacing {} (genlock decimation by caller)",
+            if enabled { "ENABLED" } else { "disabled" }
+        );
     }
 
     /// Detect AVX2 CPU support
@@ -728,7 +746,13 @@ impl NdiSender {
                 // fps_from_frame_rate — rounds, so 59.94 -> 60 not 59).
                 let fps =
                     fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
-                wait_for_next_boundary_100ns(fps)
+                if self.external_pacing {
+                    // Caller already gated this send to a wall-clock boundary;
+                    // stamp the boundary timecode without sleeping.
+                    next_boundary_100ns(get_wall_clock_100ns(), fps)
+                } else {
+                    wait_for_next_boundary_100ns(fps)
+                }
             },
             p_data: uyvy_ptr,
             line_stride_in_bytes: uyvy_stride as c_int,
