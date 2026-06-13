@@ -40,6 +40,21 @@ REMOTE_OUT="/tmp/frame-probe.json"
 
 ssh_cam() { sshpass -p "$CAM_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${CAM_IP}" "$@"; }
 
+# Build the env-assignment prefix that is shipped to the remote shell ahead of `bash -s`.
+# These values include the free-text `source` workflow input, so the quoting MUST be
+# injection-safe (see #39 regression test).
+build_remote_env() {
+  printf "MODE='%s' DURATION='%s' SOURCE='%s' QR_SIZE='%s' SETTLE_MS='%s' CAPTURE_FPS='%s' MAX_P99_MS='%s' MAX_FREEZE_PERIODS='%s' OUT='%s'" \
+    "$MODE" "$DURATION_SECS" "$SOURCE" "$QR_SIZE" "$SETTLE_MS" "$CAPTURE_FPS" "$MAX_P99_MS" "$MAX_FREEZE_PERIODS" "$REMOTE_OUT"
+}
+
+# When sourced (the #39 regression test exercises build_remote_env in isolation), stop
+# before the build/deploy/ssh actions. Direct execution (`bash scripts/loopback-e2e.sh`)
+# has $0 == BASH_SOURCE and runs the full flow below.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+  return 0
+fi
+
 echo ">> Building frame-probe (release, --features probe)"
 cargo build --release --features probe --bin frame-probe
 
@@ -49,9 +64,10 @@ sshpass -p "$CAM_PASS" scp -o StrictHostKeyChecking=no target/release/frame-prob
 echo ">> Running ${MODE} loopback for ${DURATION_SECS}s on ${CAM_IP} (source: '${SOURCE}')"
 echo "   camera-box runs WITHOUT --display for the duration; service is restored afterwards."
 
-# Remote orchestration. Quoted heredoc — values are passed via env on the ssh line.
+# Remote orchestration. Quoted heredoc — values are passed via env on the ssh line,
+# quoted by build_remote_env so a free-text value cannot inject into the remote shell.
 set +e
-ssh_cam "MODE='${MODE}' DURATION='${DURATION_SECS}' SOURCE='${SOURCE}' QR_SIZE='${QR_SIZE}' SETTLE_MS='${SETTLE_MS}' CAPTURE_FPS='${CAPTURE_FPS}' MAX_P99_MS='${MAX_P99_MS}' MAX_FREEZE_PERIODS='${MAX_FREEZE_PERIODS}' OUT='${REMOTE_OUT}' bash -s" <<'REMOTE'
+ssh_cam "$(build_remote_env) bash -s" <<'REMOTE'
 set -uo pipefail
 export NDI_RUNTIME_DIR_V6=/usr/lib/ndi
 chmod +x /tmp/frame-probe
