@@ -152,6 +152,10 @@ jobs:
         #   (verified by the on-device loopback E2E). The genlock DECISION logic
         #   they drive (ndi::genlock_emit_gate) is a separate, fully
         #   mutation-tested pure function.
+        # --exclude-re set_external_pacing: a one-line setter storing a bool flag
+        #   consumed only on the FFI send path (NdiSender::send_frame_data, also
+        #   excluded). Its body-replacement mutant is uncatchable by a unit test
+        #   without a live NDI sender and is covered by the on-device loopback E2E.
         run: |
           if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe \
@@ -163,6 +167,7 @@ jobs:
               -e 'src/bin/frame-probe.rs' \
               -e 'src/bin/multitap-probe.rs' \
               --exclude-re 'NdiSender::send_frame_data' \
+              --exclude-re 'NdiSender::set_external_pacing' \
               --exclude-re 'wall_clock_ns' \
               --exclude-re 'run_capture_loop' \
               --timeout 120

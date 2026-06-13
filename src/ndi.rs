@@ -1519,6 +1519,21 @@ mod tests {
     }
 
     #[test]
+    fn genlock_gate_advance_is_boundary_plus_interval_not_resync() {
+        // Misaligned boundary, now exactly at it (and < boundary+interval, so the
+        // resync branch must NOT fire): next must be boundary + interval exactly.
+        // With an aligned boundary the resync value coincides with boundary+interval
+        // and masks a '+' -> '-' mutation; a misaligned boundary distinguishes them
+        // (resync would give 8*I30, the correct advance gives 8*I30 + 5).
+        let boundary = 7 * I30 + 5;
+        let now = boundary;
+        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        assert!(emit);
+        assert_eq!(next, boundary + I30);
+        assert_ne!(next, now - (now % I30) + I30); // != the resync-realigned value
+    }
+
+    #[test]
     fn genlock_gate_resyncs_when_far_behind() {
         // now is several intervals past the boundary (gap/jump): emit, and the
         // next boundary must jump forward to just-after-now, not boundary+1.
