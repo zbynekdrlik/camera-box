@@ -110,14 +110,16 @@ fn version_status_compares_numerically_and_flags_unknown() {
 }
 
 #[test]
-fn subtree_pull_cmd_emits_exact_catch_up_command() {
+fn subtree_pull_cmd_emits_exact_catch_up_command_with_message() {
+    // The `-m` is mandatory: a bare `git subtree pull --squash` opens $EDITOR for the merge
+    // commit on a tty and hangs the interactive/autonomous --apply flow.
     let out = run_sourced(
         "subtree_pull_cmd vendor/obs-studio https://github.com/obsproject/obs-studio.git 32.2.0",
         &[],
     );
     assert_eq!(
         out.trim(),
-        "git subtree pull --prefix=vendor/obs-studio https://github.com/obsproject/obs-studio.git 32.2.0 --squash"
+        "git subtree pull --prefix=vendor/obs-studio https://github.com/obsproject/obs-studio.git 32.2.0 --squash -m 'vendor: update vendor/obs-studio to 32.2.0'"
     );
 }
 
@@ -142,4 +144,44 @@ fn normalize_url_canonicalizes_all_input_shapes() {
         let out = run_sourced("normalize_url \"$RAW\"", &[("RAW", raw)]);
         assert_eq!(out.trim(), want, "normalize_url({raw:?})");
     }
+}
+
+/// `--check` against an UNREACHABLE upstream must NOT report "up to date" and must exit
+/// non-zero (11). A transient `git ls-remote` failure reporting drift as "current" is the
+/// exact false-positive the UNKNOWN signal exists to prevent. The `.invalid` TLD is
+/// RFC-2606 reserved → immediate NXDOMAIN, so this is fast and needs no real network egress.
+#[test]
+fn check_treats_unreachable_upstream_as_unknown_not_uptodate() {
+    let readme = std::env::temp_dir().join(format!("av_unreach_{}.md", std::process::id()));
+    let table = "\
+| dir | upstream | version | imported as |
+|---|---|---|---|
+| `vendor/obs-studio` | nonexistent.invalid/obsproject/obs-studio | **32.1.2** (commit `deadbeef`) | git subtree --squash |
+";
+    std::fs::write(&readme, table).expect("write temp readme");
+
+    let out = Command::new(script())
+        .arg("--check")
+        .arg("--readme")
+        .arg(&readme)
+        .output()
+        .expect("failed to run script");
+    let _ = std::fs::remove_file(&readme);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let code = out.status.code().unwrap_or(-1);
+
+    assert_eq!(
+        code, 11,
+        "unreachable upstream must exit 11 (drift UNKNOWN), got {code}. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("up to date"),
+        "must NOT claim 'up to date' when upstream is unreachable. stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("UNKNOWN"),
+        "report should show the component as UNKNOWN. stdout={stdout:?}"
+    );
 }

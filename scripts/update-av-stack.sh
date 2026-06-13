@@ -18,7 +18,8 @@
 #   scripts/update-av-stack.sh --apply  [--readme PATH]     # run git subtree pull for behind comps
 #   scripts/update-av-stack.sh --help
 #
-# --check exit codes: 0 = every component up to date, 10 = at least one behind, 1 = error.
+# Exit codes: 0 = every component up to date, 10 = at least one behind, 11 = upstream
+# unreachable for at least one component (drift UNKNOWN — never reported as up to date), 1 = error.
 
 set -euo pipefail
 
@@ -78,8 +79,11 @@ version_status() {
 }
 
 # subtree_pull_cmd PREFIX URL TAG  ->  the exact catch-up command for that component.
+# The explicit `-m` is required: `git subtree pull --squash` with no message opens $EDITOR
+# for the merge commit on a tty, which would hang the interactive/autonomous --apply flow.
 subtree_pull_cmd() {
-  printf 'git subtree pull --prefix=%s %s %s --squash' "$1" "$2" "$3"
+  printf "git subtree pull --prefix=%s %s %s --squash -m 'vendor: update %s to %s'" \
+    "$1" "$2" "$3" "$1" "$3"
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -------------------------------
@@ -95,7 +99,9 @@ fi
 # script (returns "" so version_status reports UNKNOWN rather than a false UP-TO-DATE).
 latest_stable_tag() {
   local url="$1"
-  git ls-remote --tags --refs "$url" 2>/dev/null \
+  # GIT_TERMINAL_PROMPT=0: never block on a credential prompt for a moved/auth-gated URL —
+  # fail fast to "" (-> UNKNOWN) instead of hanging --check.
+  GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs "$url" 2>/dev/null \
     | sed -E 's#.*refs/tags/##' \
     | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
     | sed 's/^v//' \
@@ -104,7 +110,22 @@ latest_stable_tag() {
 }
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+update-av-stack.sh — engine for the /update-av-stack slash command (#44).
+
+Checks each vendored subtree component (vendor/obs-studio, vendor/distroav) against the
+latest upstream STABLE release tag and, for anything behind, emits/runs the exact
+`git subtree pull --squash` catch-up — re-applying our genlock patches through the subtree
+merge and reporting conflicts loudly.
+
+Usage:
+  scripts/update-av-stack.sh [--check] [--readme PATH]   # default: report drift (read-only)
+  scripts/update-av-stack.sh --apply  [--readme PATH]     # run git subtree pull for behind comps
+  scripts/update-av-stack.sh --help
+
+Exit codes: 0 = all up to date, 10 = at least one behind, 11 = upstream unreachable for at
+least one component (drift UNKNOWN — never reported as up to date), 1 = error.
+EOF
 }
 
 print_checklist() {
@@ -136,7 +157,7 @@ main() {
 
   [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
 
-  local manifest behind=0 prefix url cur latest status cmd
+  local manifest behind=0 unknown=0 prefix url cur latest status
   manifest="$(parse_manifest "$readme")"
   [ -n "$manifest" ] || { echo "ERROR: no subtree components found in $readme" >&2; exit 1; }
 
@@ -150,55 +171,76 @@ main() {
   echo "== /update-av-stack — vendored AV stack vs upstream =="
   printf '%-22s %-12s %-12s %s\n' "component" "pinned" "upstream" "status"
 
-  local -a behind_cmds=()
+  # Parallel arrays of the behind components (TSV record per slot) so --check can print the
+  # catch-up command and --apply can run it directly (no eval).
+  local -a behind_prefix=() behind_url=() behind_tag=()
   while IFS=$'\t' read -r prefix url cur _commit; do
     [ -n "$prefix" ] || continue
     latest="$(latest_stable_tag "$url")"
     status="$(version_status "$cur" "$latest")"
     printf '%-22s %-12s %-12s %s\n' "$prefix" "$cur" "${latest:-?}" "$status"
-    if [ "$status" = "BEHIND" ]; then
-      behind=$((behind + 1))
-      cmd="$(subtree_pull_cmd "$prefix" "$url" "$latest")"
-      behind_cmds+=("$cmd")
-    fi
+    case "$status" in
+      BEHIND)
+        behind=$((behind + 1))
+        behind_prefix+=("$prefix"); behind_url+=("$url"); behind_tag+=("$latest")
+        ;;
+      UNKNOWN) unknown=$((unknown + 1)) ;;
+    esac
   done <<< "$manifest"
 
-  if [ "$behind" -eq 0 ]; then
+  # UNKNOWN = upstream lookup failed. NEVER let it masquerade as up-to-date (the whole point
+  # of the UNKNOWN signal). Warn loudly; it forces a non-zero exit below.
+  if [ "$unknown" -gt 0 ]; then
     echo
-    echo "All vendored components are up to date with upstream stable releases."
-    exit 0
+    echo "!! Could not reach upstream for $unknown component(s) — drift UNKNOWN, NOT up to date." >&2
+    echo "!! Re-run when the network/remote is reachable before trusting this report." >&2
+  fi
+
+  if [ "$behind" -eq 0 ]; then
+    if [ "$unknown" -eq 0 ]; then
+      echo
+      echo "All vendored components are up to date with upstream stable releases."
+      exit 0
+    fi
+    exit 11
   fi
 
   echo
   echo "$behind component(s) BEHIND upstream. Catch-up command(s):"
-  local c
-  for c in "${behind_cmds[@]}"; do
-    echo "  $c"
+  local i
+  for i in "${!behind_prefix[@]}"; do
+    echo "  $(subtree_pull_cmd "${behind_prefix[$i]}" "${behind_url[$i]}" "${behind_tag[$i]}")"
   done
 
   if [ "$mode" = "check" ]; then
     print_checklist
+    [ "$unknown" -gt 0 ] && exit 11
     exit 10
   fi
 
-  # --apply: run each catch-up pull, stopping loudly on any merge conflict.
-  for c in "${behind_cmds[@]}"; do
+  # --apply: run each catch-up pull as an argv array (no eval), stopping loudly on conflict.
+  # -m makes the squash-merge non-interactive (no $EDITOR) and the commit message deterministic.
+  for i in "${!behind_prefix[@]}"; do
+    prefix="${behind_prefix[$i]}"; url="${behind_url[$i]}"; latest="${behind_tag[$i]}"
     echo
-    echo ">> $c"
-    if ! eval "$c"; then
-      echo "!! subtree pull FAILED for: $c" >&2
+    echo ">> git subtree pull --prefix=$prefix $url $latest --squash"
+    if ! git subtree pull --prefix="$prefix" "$url" "$latest" --squash \
+           -m "vendor: update $prefix to $latest"; then
+      echo "!! subtree pull FAILED for $prefix -> $latest" >&2
       echo "!! Likely a conflict between an upstream change and a genlock patch. Conflicting files:" >&2
       git diff --name-only --diff-filter=U >&2 || true
       echo "!! Resolve patch-by-patch, \`git add\`, commit the merge, then re-run --apply." >&2
       exit 1
     fi
     if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
-      echo "!! Unresolved conflict markers after: $c" >&2
+      echo "!! Unresolved conflict markers after $prefix -> $latest" >&2
       git diff --name-only --diff-filter=U >&2
       exit 1
     fi
   done
   print_checklist
+  [ "$unknown" -gt 0 ] && exit 11
+  exit 0
 }
 
 main "$@"
