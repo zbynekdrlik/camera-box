@@ -30,3 +30,8 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - **Action: STOPPED for authorization.** No silent destructive/security-sensitive action
   under auto-merge. Awaiting user choice: authorize #9 runner setup, or make the #8
   chrony-vs-PTP design call + authorize the production off-air clock deploy.
+
+## 2026-06-13 — auto-merge run
+
+- **#39 Harden loopback-e2e.sh remote env interpolation (printf %q).** dev bumped → `1.7.0-dev.23` (c6ae5cad3). TDD: RED `e5f1e6fb3` extracted `build_remote_env()` (still single-quote interpolation) behind a `BASH_SOURCE != $0` source-guard + added behavioral test `tests/harness_remote_env_quoting.rs::loopback_remote_env_is_injection_safe` (injects a `'`-bearing SOURCE, evals the prefix as the remote shell would, asserts no command runs + value round-trips) → injection executed = RED. GREEN `02a2823b7` switched the builder to `printf %q` → safe, test passes. Full suite 140/0/0; clippy/fmt/shellcheck clean.
+- **Decision:** repo-only script change — NO production/device deploy (no cam2 hardware re-verify needed for the quoting fix; the env handoff is unit-proven injection-safe). multitap-e2e.sh checked — uses `$VAR` (numeric/local) in double-quoted ssh, NOT the free-text single-quote env class, so not vulnerable to #39; no follow-up filed.
