@@ -33,3 +33,6 @@ frame-probe-*.json
 # Python bytecode cache (from scripts/*.py)
 __pycache__/
 *.pyc
+
+# Autopilot/session local logs
+.claude/command-history.log
