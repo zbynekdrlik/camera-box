@@ -168,8 +168,8 @@ jobs:
               -e 'src/bin/multitap-probe.rs' \
               --exclude-re 'NdiSender::send_frame_data' \
               --exclude-re 'NdiSender::set_external_pacing' \
-              --exclude-re 'wall_clock_ns' \
-              --exclude-re 'run_capture_loop' \
+              --exclude-re '\bwall_clock_ns\b' \
+              --exclude-re '\brun_capture_loop\b' \
               --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
