@@ -1,5 +1,6 @@
 {
   "worktree": {
     "bgIsolation": "none"
-  }
+  },
+  "enableAllProjectMcpServers": true
 }
