@@ -25,13 +25,27 @@ the runtime upgrade is part of the rollout.
   our local genlock patches instead of overwriting them. This is the mechanism the
   release-bump slash command (#44) builds on.
 
-## Updating to a new upstream release (#44 will automate this)
+## Updating to a new upstream release — `/update-av-stack` (#44)
+
+Use the slash command `/update-av-stack` (engine `scripts/update-av-stack.sh`, unit-tested in
+`tests/av_stack_update.rs`). It parses the version table above, checks each subtree component
+against the latest upstream **stable** tag, and — for anything behind — runs the catch-up pull,
+re-applying our genlock patches through the subtree merge and reporting conflicts loudly:
+
+```bash
+./scripts/update-av-stack.sh --check    # read-only: report drift + the exact catch-up commands
+./scripts/update-av-stack.sh --apply    # run the git subtree pulls (clean tree required)
+```
+
+Each pull is equivalent to:
 
 ```bash
 git subtree pull --prefix=vendor/obs-studio https://github.com/obsproject/obs-studio.git <NEW_TAG> --squash
 git subtree pull --prefix=vendor/distroav  https://github.com/DistroAV/DistroAV.git  <NEW_TAG> --squash
-# resolve conflicts with our patches, rebuild, run the strict harness (#35), update the table above
 ```
+
+After applying: resolve conflicts patch-by-patch (each `genlock:` commit is one patch), rebuild
+per `BUILD.md`, run the strict harness (#35), and update the table above with the new tag/commit.
 
 ## Our patches
 
