@@ -44,7 +44,10 @@ ssh_cam() { sshpass -p "$CAM_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTim
 # These values include the free-text `source` workflow input, so the quoting MUST be
 # injection-safe (see #39 regression test).
 build_remote_env() {
-  printf "MODE='%s' DURATION='%s' SOURCE='%s' QR_SIZE='%s' SETTLE_MS='%s' CAPTURE_FPS='%s' MAX_P99_MS='%s' MAX_FREEZE_PERIODS='%s' OUT='%s'" \
+  # printf %q emits a shell-safe quoting of every value, so a single quote (or any
+  # metacharacter) in a free-text value cannot break out and inject into the remote
+  # root shell — the #39 hardening.
+  printf 'MODE=%q DURATION=%q SOURCE=%q QR_SIZE=%q SETTLE_MS=%q CAPTURE_FPS=%q MAX_P99_MS=%q MAX_FREEZE_PERIODS=%q OUT=%q' \
     "$MODE" "$DURATION_SECS" "$SOURCE" "$QR_SIZE" "$SETTLE_MS" "$CAPTURE_FPS" "$MAX_P99_MS" "$MAX_FREEZE_PERIODS" "$REMOTE_OUT"
 }
 
