@@ -72,7 +72,16 @@ bool opt_start_virtualcam = false;
 bool opt_minimize_tray = false;
 bool opt_allow_opengl = false;
 bool opt_always_on_top = false;
-bool opt_disable_updater = false;
+/* genlock (#43): force the built-in OBS updater OFF in this vendored build.
+ * The genlocked OBS must never offer to overwrite itself with a stock release on
+ * the production boxes (strih/stream) — the only update path is the camera-box
+ * controlled release-bump flow. This bakes the upstream `--disable-updater` /
+ * `disable_updater` file mechanism to default-ON: opt_disable_updater is never
+ * assigned false anywhere else, so IsUpdaterDisabled() is permanently true, which
+ * stops the timed check, disables the "Check For Updates" menu action, and hides
+ * the auto-update settings. Do NOT let a `git subtree pull` revert this to false
+ * (guarded by tests/obs_updater_disabled.rs). */
+bool opt_disable_updater = true;
 bool opt_disable_missing_files_check = false;
 string opt_starting_collection;
 string opt_starting_profile;
