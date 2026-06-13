@@ -76,6 +76,17 @@ fn updater_disabled_flag_gates_the_updater() {
          IsUpdaterDisabled() — the auto-update chokepoint changed upstream; re-verify."
     );
 
+    // Defense-in-depth: CheckForUpdates() (the single entry to the update dialog) must
+    // itself no-op when disabled, so no caller can spawn an update prompt regardless of
+    // the menu action's enabled state (e.g. the settings forceUpdateCheck path).
+    assert!(
+        updater.contains(
+            "void OBSBasic::CheckForUpdates(bool manualUpdate) { if (App()->IsUpdaterDisabled()) return;"
+        ),
+        "{OBS_UPDATER}: CheckForUpdates() no longer force-returns when the updater is \
+         disabled — the #43 defense-in-depth guard was reverted/refactored; re-apply it."
+    );
+
     // The manual "Help -> Check For Updates" menu action must be disabled when the
     // updater is off, so it can't reach CheckForUpdates() directly.
     let basic = squish(&vendor_file(OBS_BASIC));
