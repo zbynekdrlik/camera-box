@@ -194,8 +194,16 @@ void OBSBasic::TimedCheckForUpdates()
 #endif
 }
 
+/* genlock (#43): defense-in-depth — CheckForUpdates() is the single entry to the
+ * update dialog (AutoUpdateThread / Sparkle). Force it to no-op whenever the updater
+ * is disabled, so no caller — the timed check, the menu action, or the settings
+ * update-channel forceUpdateCheck path — can ever spawn an update prompt, even if a
+ * future upstream merge adds a path that bypasses the menu action's disabled state. */
 void OBSBasic::CheckForUpdates(bool manualUpdate)
 {
+	if (App()->IsUpdaterDisabled())
+		return;
+
 #if _WIN32
 	ui->actionCheckForUpdates->setEnabled(false);
 	ui->actionRepair->setEnabled(false);
