@@ -53,23 +53,48 @@ When setting up a new camera device:
 
 ## Build & Deploy
 
+The release binary is built by **CI on GitHub free `ubuntu` runners** — never locally.
+The cameras run x86_64 Ubuntu, the same architecture as the runners, so the CI artifact
+runs directly on the devices (no cross-compilation).
+
+Every push to `dev`/`main` runs `ci.yml`, whose `build` job uploads the
+`camera-box-linux-amd64` artifact (`target/release/camera-box`). Tagged releases
+(`v*`) also publish a tarball via `release.yml`.
+
 **IMPORTANT:** Use IP addresses, not hostnames (`.lan` DNS may not resolve):
 
 ```bash
-# Build release
-cargo build --release
+# 1. Download the CI-built binary for the commit you want to deploy.
+#    Latest run on the current branch:
+gh run download --repo zbynekdrlik/camera-box -n camera-box-linux-amd64 --dir ./dist
+#    …or pin a specific run: gh run download <run-id> -n camera-box-linux-amd64 --dir ./dist
+chmod +x ./dist/camera-box
 
-# Deploy to device (use IP from table above, password: newlevel)
+# 2. Deploy to device (use IP from table above, password: newlevel)
 sshpass -p 'newlevel' ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
-sshpass -p 'newlevel' scp target/release/camera-box root@10.77.9.6X:/usr/local/bin/
+sshpass -p 'newlevel' scp ./dist/camera-box root@10.77.9.6X:/usr/local/bin/
 sshpass -p 'newlevel' ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
 ```
 
 Note: `rw-mode`/`ro-mode` scripts may not exist on all devices. Use `mount -o remount,rw /` instead.
+Deploy only CI artifacts from a committed, pushed ref (per `deploy-from-clean-tree.md`) — never a locally built binary.
 
 ## Local Build Policy
 
-<!-- airuleset:local-builds=allowed -->
+**Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**
 
-**Local builds (Tier 1) ENABLED.** Full `cargo build --release` / `cargo test` allowed.
-Reason: embedded NDI camera app deployed to CAM1-4 devices by building the release binary locally and `scp`-ing it to the device — there is no CI/device build path, so the dev machine IS the build target.
+The cameras (CAM1-4) are x86_64 Ubuntu, identical to the GitHub free `ubuntu` runners, so
+CI produces the exact binary that ships to the devices — there is no need for a local
+release build. Deploy the CI artifact (see Build & Deploy above).
+
+Run locally before every push:
+
+```bash
+cargo fmt --all --check
+cargo check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --no-run
+```
+
+Heavy builds run in CI only: `cargo build --release`, running `cargo test`, `cargo bench`.
+Purge `target/` when stale — CI rebuilds it.
