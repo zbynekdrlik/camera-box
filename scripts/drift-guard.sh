@@ -26,7 +26,7 @@
 # Usage:
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
 #   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
-#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=0
+#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1
 #   scripts/drift-guard.sh --help
 #
 # Exit codes: 0 = clean (pins valid / no drift), 20 = DRIFT detected, 11 = at least one observed
@@ -99,12 +99,17 @@ ndi_runtime_from_log() {
 # long-lived MCP/launcher process holding a stale env snapshot) can disagree with the running
 # process; the log line cannot.
 genlock_from_log() {
-  local text="$1"
-  if printf '%s\n' "$text" | grep -qiE 'genlock:.*render tick ENABLED'; then
-    echo 1
-  elif printf '%s\n' "$text" | grep -qiE 'genlock:.*render tick DISABLED'; then
-    echo 0
-  fi
+  local text="$1" line
+  # Drain-safe (matches the sibling *_from_log parsers): `grep -q` would exit on the first match
+  # and leave printf writing into a closed pipe -> SIGPIPE -> pipefail flips the if-condition false
+  # and the function wrongly returns UNKNOWN on a large real log. `grep | head -1` reads the input
+  # through instead. `|| true` keeps a no-match from tripping the caller's set -e.
+  line="$(printf '%s\n' "$text" \
+    | grep -iE 'genlock:.*render tick (ENABLED|DISABLED)' | head -1 || true)"
+  case "$line" in
+    *ENABLED*) echo 1 ;;
+    *DISABLED*) echo 0 ;;
+  esac
 }
 
 # fps_from_log TEXT -> "30"  (the OUTPUT fps = the first `fps:` line INSIDE the OBS

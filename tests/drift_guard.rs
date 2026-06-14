@@ -170,6 +170,31 @@ fn genlock_parser_reads_running_state_from_log() {
         "",
         "no genlock line -> UNKNOWN (empty): {out:?}"
     );
+
+    // Real OBS logs are thousands of lines with the genlock line near the top. A `grep -q`-style
+    // parser SIGPIPEs printf under `set -euo pipefail` (printf blocks on a full pipe after grep -q
+    // already exited) and wrongly returns UNKNOWN — but only once the log exceeds the pipe buffer
+    // (~64 KB), so the small fixtures above don't trigger it. This >64 KB log is the regression
+    // guard. It is passed via a temp FILE (cat'd into a bash-internal arg) rather than an env var,
+    // which would blow ARG_MAX at spawn.
+    let mut big = String::from(
+        "11:40:39.718: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)\n",
+    );
+    for i in 0..5000 {
+        big.push_str(&format!("11:40:40.{i:04}: filler log line {i}\n"));
+    }
+    let logfile = std::env::temp_dir().join(format!("dg_biglog_{}.txt", std::process::id()));
+    std::fs::write(&logfile, &big).expect("write big log");
+    let out = run_sourced(
+        "genlock_from_log \"$(cat \"$LOGFILE\")\"",
+        &[("LOGFILE", logfile.to_str().unwrap())],
+    );
+    let _ = std::fs::remove_file(&logfile);
+    assert_eq!(
+        out.trim(),
+        "1",
+        "must read ENABLED from a large log without SIGPIPE/UNKNOWN: {out:?}"
+    );
 }
 
 #[test]
