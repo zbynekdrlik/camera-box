@@ -38,21 +38,20 @@ DEFAULT_README="vendor/README.md"
 
 # --- PURE functions (no network, no MCP, no git mutation — unit-tested) --------------------
 
-# pinned_obs_version README -> "32.1.2"  (the vendor/obs-studio subtree row's **bold** version).
-pinned_obs_version() {
-  local readme="$1"
-  [ -f "$readme" ] || { echo "pinned_obs_version: no such file: $readme" >&2; return 1; }
-  grep -E 'vendor/obs-studio' "$readme" | grep 'subtree' \
-    | sed -n 's/.*\*\*\([0-9][0-9.]*\)\*\*.*/\1/p' | head -1
+# pinned_subtree_version README PREFIX -> the **bold** version on PREFIX's subtree table row
+# ("" if absent). The trailing `|| true` keeps a no-match from tripping `set -e` in the caller's
+# command substitution, so an incomplete manifest surfaces as a loud MISSING in check_pins rather
+# than a silent abort (same survives-no-match convention as update-av-stack.sh's latest_stable_tag).
+pinned_subtree_version() {
+  local readme="$1" prefix="$2"
+  [ -f "$readme" ] || { echo "pinned_subtree_version: no such file: $readme" >&2; return 1; }
+  grep -E "$prefix" "$readme" | grep 'subtree' \
+    | sed -n 's/.*\*\*\([0-9][0-9.]*\)\*\*.*/\1/p' | head -1 || true
 }
 
-# pinned_distroav_version README -> "6.2.1"  (the vendor/distroav subtree row's **bold** version).
-pinned_distroav_version() {
-  local readme="$1"
-  [ -f "$readme" ] || { echo "pinned_distroav_version: no such file: $readme" >&2; return 1; }
-  grep -E 'vendor/distroav' "$readme" | grep 'subtree' \
-    | sed -n 's/.*\*\*\([0-9][0-9.]*\)\*\*.*/\1/p' | head -1
-}
+# pinned_obs_version / pinned_distroav_version README -> their subtree row's **bold** version.
+pinned_obs_version()      { pinned_subtree_version "$1" 'vendor/obs-studio'; }
+pinned_distroav_version() { pinned_subtree_version "$1" 'vendor/distroav'; }
 
 # pinned_ndi_min README -> "6.3.0"  (the "NDI >= X.Y.Z" minimum the DistroAV plugin requires).
 # Greedy ".*" lands on the last uppercase "NDI"; the digits that follow are the minimum version.
@@ -60,7 +59,7 @@ pinned_ndi_min() {
   local readme="$1"
   [ -f "$readme" ] || { echo "pinned_ndi_min: no such file: $readme" >&2; return 1; }
   grep -E 'NDI[^0-9]*[0-9]+\.[0-9]+\.[0-9]+' "$readme" \
-    | sed -n 's/.*NDI[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -1
+    | sed -n 's/.*NDI[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -1 || true
 }
 
 # pinned_setting README KEY -> value from the "Pinned production settings" table row
@@ -72,7 +71,7 @@ pinned_setting() {
   # substitution — they sit inside a double-quoted string and a single-quoted sed program.
   # shellcheck disable=SC2016
   grep -E "\| *\`${key}\` *\|" "$readme" \
-    | sed -n 's/^[^|]*|[^|]*|[[:space:]]*`\([^`]*\)`.*/\1/p' | head -1
+    | sed -n 's/^[^|]*|[^|]*|[[:space:]]*`\([^`]*\)`.*/\1/p' | head -1 || true
 }
 
 # obs_version_from_log TEXT -> "32.1.2"  (OBS log header line "OBS 32.1.2 (64-bit, windows)").

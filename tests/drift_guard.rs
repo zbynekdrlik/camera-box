@@ -255,6 +255,48 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 }
 
 #[test]
+fn check_pins_fails_loudly_on_incomplete_manifest() {
+    // A manifest missing a required pin (here the `output_fps` row) must fail LOUDLY — a MISSING
+    // diagnostic naming the absent pin + the "cannot enforce an incomplete pin set" banner + exit
+    // 1 — never a silent opaque abort. This guards the `|| true` in the parsers: without it, the
+    // no-match `grep|sed|head` trips `set -e` in main()'s command substitution and the script dies
+    // before check_pins can report which pin is missing.
+    let dir = std::env::temp_dir().join(format!("dg_incomplete_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let readme = dir.join("README.md");
+    std::fs::write(
+        &readme,
+        // output_fps row intentionally absent.
+        "\
+| `vendor/obs-studio` | x | **32.1.2** (commit `a`) | git subtree --squash |
+| `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
+| NDI | x | requires **NDI ≥ 6.3.0** | tree |
+| `genlock_wall_clock` | `0` | env |
+",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) =
+        run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        code, 1,
+        "incomplete manifest must exit 1, not a silent abort. stdout={stdout:?} stderr={stderr:?}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("output_fps") && all.to_lowercase().contains("missing"),
+        "must name the missing pin loudly. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("cannot enforce an incomplete pin set"),
+        "must emit the incomplete-pin-set banner. stderr={stderr:?}"
+    );
+}
+
+#[test]
 fn compare_clean_when_observed_matches_the_pinned_set() {
     // The real known-good values verified live on strih/stream 2026-06-14.
     let (code, stdout, _stderr) = run_script(&[
