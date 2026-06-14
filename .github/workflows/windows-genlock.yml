@@ -23,6 +23,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PRIMARY updater-disable gate (#55): assert the SOURCE mechanism that actually
+      # disables the in-app updater, NOT the packaging outcome. The genlock #43 patch
+      # defaults `opt_disable_updater` to true and wires `IsUpdaterDisabled()` to it —
+      # that is what stops every timed/menu/whatsnew update prompt. A future
+      # `git subtree pull` (#44) that reverts the flag fails HERE — fast, before the
+      # 150-min build, and independently of whether `updater.exe` lands in the rundir
+      # (the secondary packaging check, below). Mirrors the canonical Linux-CI guard
+      # tests/obs_updater_disabled.rs; that crate is Linux-only (v4l/alsa/evdev) and
+      # cannot compile on this Windows runner, so the same source tokens are re-asserted
+      # here in pwsh. The Rust guard keeps these two checks in lock-step.
+      - name: Assert updater disabled at SOURCE (#43 primary mechanism, #55)
+        shell: pwsh
+        run: |
+          $main = (Get-Content "vendor/obs-studio/frontend/obs-main.cpp" -Raw) -replace '\s+', ' '
+          if ($main -notmatch [regex]::Escape('bool opt_disable_updater = true;')) {
+            Write-Error "obs-main.cpp: opt_disable_updater no longer defaults to true — genlock #43 patch reverted (#55)"; exit 1
+          }
+          if ($main -match [regex]::Escape('bool opt_disable_updater = false;')) {
+            Write-Error "obs-main.cpp: upstream 'opt_disable_updater = false' default is back — genlock #43 patch reverted (#55)"; exit 1
+          }
+          $app = (Get-Content "vendor/obs-studio/frontend/OBSApp.cpp" -Raw) -replace '\s+', ' '
+          if ($app -notmatch [regex]::Escape('bool OBSApp::IsUpdaterDisabled() { return opt_disable_updater; }')) {
+            Write-Error "OBSApp.cpp: IsUpdaterDisabled() no longer returns opt_disable_updater — #43 source wiring broken (#55)"; exit 1
+          }
+          Write-Output "source-flag updater-disable patch present (opt_disable_updater=true + IsUpdaterDisabled wiring) — OK"
+
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
       # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)
@@ -59,12 +85,18 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
-      - name: Assert no updater/What's New in the artifact (#43)
+      # SECONDARY / defense-in-depth (#55): the disable MECHANISM is the SOURCE gate at
+      # the top of this job; this is a packaging-layout check that the built rundir ships
+      # no `updater.exe` binary at all. It is intentionally redundant — belt-and-braces
+      # against a rundir copy-rule change — and is NOT, on its own, proof the in-app
+      # updater is disabled (a subtree bump could add/remove the copy rule independently
+      # of the source flag). Keep both: source-flag primary, this packaging check secondary.
+      - name: Assert no updater.exe in the artifact (#43 defense-in-depth, secondary to source gate, #55)
         shell: pwsh
         run: |
           $rundir = "vendor/obs-studio/build_x64/rundir/RelWithDebInfo"
-          if (Test-Path "$rundir/bin/64bit/updater.exe") { Write-Error "updater.exe present — #43 violated"; exit 1 }
-          Write-Output "no updater.exe — OK"
+          if (Test-Path "$rundir/bin/64bit/updater.exe") { Write-Error "updater.exe present in artifact — defense-in-depth packaging check failed (#43)"; exit 1 }
+          Write-Output "no updater.exe in artifact — OK"
 
       - name: Stage artifact
         shell: pwsh
