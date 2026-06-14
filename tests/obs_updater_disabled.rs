@@ -34,6 +34,7 @@ const OBS_MAIN: &str = "vendor/obs-studio/frontend/obs-main.cpp";
 const OBS_APP: &str = "vendor/obs-studio/frontend/OBSApp.cpp";
 const OBS_UPDATER: &str = "vendor/obs-studio/frontend/widgets/OBSBasic_Updater.cpp";
 const OBS_BASIC: &str = "vendor/obs-studio/frontend/widgets/OBSBasic.cpp";
+const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
 
 #[test]
 fn updater_global_defaults_to_disabled() {
@@ -97,5 +98,37 @@ fn updater_disabled_flag_gates_the_updater() {
         "{OBS_BASIC}: the Check-For-Updates menu action is no longer disabled when \
          IsUpdaterDisabled() is true — the manual-update chokepoint changed upstream; \
          re-verify."
+    );
+}
+
+#[test]
+fn windows_genlock_workflow_gates_on_the_source_flag_not_only_packaging() {
+    // #55: the Windows production-build workflow (.github/workflows/windows-genlock.yml)
+    // must gate the artifact on the SOURCE mechanism that disables the in-app updater —
+    // the `opt_disable_updater = true` default and the `IsUpdaterDisabled()` wiring
+    // asserted above — and NOT only on the packaging outcome (`updater.exe` absent from
+    // the rundir). A packaging-only check can flip in EITHER direction on a future
+    // `git subtree pull` (#44) that changes the rundir copy rules, independently of
+    // whether the updater is actually disabled — a false signal either way.
+    //
+    // The canonical guard is the two tests above, but this crate is Linux-only
+    // (v4l/alsa/evdev) and cannot compile on the windows-2022 runner, so the workflow
+    // re-asserts the same source tokens in pwsh. This test keeps that pwsh gate in
+    // lock-step with the canonical assertions: drop the source check from the workflow
+    // and CI fails here. (Same vendored-source-assertion convention as the tests above
+    // and tests/av_stack_update.rs.)
+    let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+
+    assert!(
+        wf.contains("bool opt_disable_updater = true;"),
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the \
+         `opt_disable_updater = true` SOURCE flag (#55) — a future subtree bump could ship \
+         a re-enabled updater while the packaging check still passes. Re-add the pwsh \
+         source-flag gate."
+    );
+    assert!(
+        wf.contains("bool OBSApp::IsUpdaterDisabled() { return opt_disable_updater; }"),
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the \
+         `IsUpdaterDisabled()` source wiring (#55). Re-add the pwsh source-flag gate."
     );
 }
