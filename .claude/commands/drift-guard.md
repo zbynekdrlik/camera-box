@@ -33,7 +33,10 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    if(Test-Path $dll){ "ndi_runtime=$((Get-Item $dll).VersionInfo.FileVersion)" }
    # OUTPUT fps = the `fps:` line inside the "video settings reset:" block:
    $vs=($log -split "`n"); for($i=0;$i -lt $vs.Count;$i++){ if($vs[$i] -match 'video settings reset:'){ for($j=$i;$j -lt $vs.Count;$j++){ if($vs[$j] -match 'fps:\s+(\d+)/'){ "output_fps=$($Matches[1])"; break } }; break } }
-   "genlock_wall_clock=$([int]([bool]$env:OBS_GENLOCK_WALL_CLOCK))"
+   # Mirror OBS's own gate parsing (vendor/obs-studio/libobs/obs-video.c:829:
+   # `enabled = (v && *v && strcmp(v,"0") != 0) ? 1 : 0`): unset/empty/"0" = dormant(0),
+   # anything else = active(1). NB: PowerShell `[bool]"0"` is $true, so test `-ne '0'` explicitly.
+   $g=$env:OBS_GENLOCK_WALL_CLOCK; "genlock_wall_clock=$([int]([bool]($g -and $g -ne '0')))"
    ```
 
    (`ndi_runtime` from the DLL `FileVersion` is the robust source; the OBS log
