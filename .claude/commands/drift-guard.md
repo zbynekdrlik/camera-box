@@ -33,15 +33,21 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    if(Test-Path $dll){ "ndi_runtime=$((Get-Item $dll).VersionInfo.FileVersion)" }
    # OUTPUT fps = the `fps:` line inside the "video settings reset:" block:
    $vs=($log -split "`n"); for($i=0;$i -lt $vs.Count;$i++){ if($vs[$i] -match 'video settings reset:'){ for($j=$i;$j -lt $vs.Count;$j++){ if($vs[$j] -match 'fps:\s+(\d+)/'){ "output_fps=$($Matches[1])"; break } }; break } }
-   # Mirror OBS's own gate parsing (vendor/obs-studio/libobs/obs-video.c:829:
-   # `enabled = (v && *v && strcmp(v,"0") != 0) ? 1 : 0`): unset/empty/"0" = dormant(0),
-   # anything else = active(1). NB: PowerShell `[bool]"0"` is $true, so test `-ne '0'` explicitly.
-   $g=$env:OBS_GENLOCK_WALL_CLOCK; "genlock_wall_clock=$([int]([bool]($g -and $g -ne '0')))"
+   # genlock master gate = the RUNNING OBS state from the log (the gate is read at OBS launch, so
+   # a later $env: read can be stale — esp. via a long-lived launcher/MCP process). ENABLED -> 1,
+   # DISABLED -> 0. Cross-check the PERSISTENT Machine setting in HKLM (survives reboot); if the log
+   # says 1 but HKLM != 1 (or vice versa), report it — a reboot would then launch the other state.
+   if($log -match 'genlock:.*render tick ENABLED'){ "genlock_wall_clock=1" } elseif($log -match 'genlock:.*render tick DISABLED'){ "genlock_wall_clock=0" }
+   $hklm=(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name OBS_GENLOCK_WALL_CLOCK -EA SilentlyContinue).OBS_GENLOCK_WALL_CLOCK
+   "# persistent HKLM OBS_GENLOCK_WALL_CLOCK=[$hklm] (must agree with the log gate)"
    ```
 
    (`ndi_runtime` from the DLL `FileVersion` is the robust source; the OBS log
    `NDI Library Version detected:` line is an equivalent fallback. If OBS is **not running**, the
-   newest log is stale — note that, do not treat a stale read as live truth.)
+   newest log is stale — note that, do not treat a stale read as live truth. Do **not** read the
+   genlock gate from `$env:OBS_GENLOCK_WALL_CLOCK` via the MCP shell: that shell inherits an env
+   snapshot from a long-lived parent and showed empty on 2026-06-14 while HKLM + the OBS log both
+   correctly read `1`.)
 
 2. **Compare against the pinned set** — feed every observed value to the engine:
 

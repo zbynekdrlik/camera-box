@@ -29,7 +29,7 @@ part of that change; an *unexpected* difference is drift and the guard fails lou
 | setting | pinned value | live source (read-only) |
 |---|---|---|
 | `output_fps` | `30` | OBS log `video settings reset: … fps: <n>/1` (current zero-loss rate; re-pin to `60` on the #11 rollout) |
-| `genlock_wall_clock` | `0` | env `OBS_GENLOCK_WALL_CLOCK` master gate — `0` = genlock dormant; set `1` (+ per-input FIFO) when genlock goes live |
+| `genlock_wall_clock` | `1` | OBS log `genlock: wall-clock-slaved render tick ENABLED` (running state) — the genlock master gate, **active** on both boxes since 2026-06-13 (the measured 0-drop strih→stream state). Persistent source is the **Machine** env var `OBS_GENLOCK_WALL_CLOCK=1` (`HKLM\…\Session Manager\Environment`); the gate is read at OBS launch, so the *running* truth is the log line, not a later `$env:` read (which a long-lived launcher/MCP process can hold stale) |
 
 The OBS/DistroAV **versions** come from the version table above (single source of truth); the NDI
 runtime is checked `≥` the `NDI ≥ 6.3.0` minimum stated there. The two facets:
