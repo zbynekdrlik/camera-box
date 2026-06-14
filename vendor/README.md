@@ -15,7 +15,38 @@ The NDI **runtime** (`libndi.so` / `Processing.NDI.Lib.x64.dll`) is NOT committe
 licensing forbids redistribution (see the License Agreement PDF in `lib/ndi/`). Each
 machine gets it via the NDI installer / `vendor/distroav/CI/libndi-get.sh`.
 **Note:** dev1 + cam2 currently run NDI runtime 6.2.1 — DistroAV 6.2.1 needs ≥ 6.3.0, so
-the runtime upgrade is part of the rollout.
+the runtime upgrade is part of the rollout. The production OBS boxes strih + stream already
+run NDI runtime **6.3.2.0** (≥ 6.3.0 ✓, verified 2026-06-14).
+
+## Pinned production settings — drift guard (#45)
+
+`scripts/drift-guard.sh` (unit-tested in `tests/drift_guard.rs`) enforces that strih
+(`10.77.9.202`) + stream (`10.77.9.204`) stay on the versions above **and** these critical
+runtime settings — the known-good zero-loss state verified live on both boxes 2026-06-14. A
+*deliberate* rollout (the 30→60 fps step #11, or activating genlock) re-pins the value here as
+part of that change; an *unexpected* difference is drift and the guard fails loudly.
+
+| setting | pinned value | live source (read-only) |
+|---|---|---|
+| `output_fps` | `30` | OBS log `video settings reset: … fps: <n>/1` (current zero-loss rate; re-pin to `60` on the #11 rollout) |
+| `genlock_wall_clock` | `0` | env `OBS_GENLOCK_WALL_CLOCK` master gate — `0` = genlock dormant; set `1` (+ per-input FIFO) when genlock goes live |
+
+The OBS/DistroAV **versions** come from the version table above (single source of truth); the NDI
+runtime is checked `≥` the `NDI ≥ 6.3.0` minimum stated there. The two facets:
+
+```bash
+./scripts/drift-guard.sh --check-pins    # CI: validate the pin set + cross-check vs vendored source
+./scripts/drift-guard.sh --compare host=strih obs_version=… distroav_version=… \
+    ndi_runtime=… output_fps=… genlock_wall_clock=…   # live box (values read via win-* MCP)
+```
+
+The live read-only run is driven by `/drift-guard` (`.claude/commands/drift-guard.md`), which gathers
+the observed values off strih/stream through the win-* MCP tools and feeds them to `--compare` —
+CI runners can't reach the production LAN, so the live facet is operator/agent-driven, not in CI.
+
+The OBS **auto-update dialog stays disabled** (#43) is a *build-time* property, not runtime-readable
+off a running box, so it is guarded at its proper layer — `tests/obs_updater_disabled.rs` against the
+vendored source — rather than by this runtime guard.
 
 ## Why subtree --squash
 
