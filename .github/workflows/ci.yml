@@ -215,6 +215,21 @@ jobs:
       - name: Security audit
         run: cargo audit
 
+  drift-guard:
+    name: Drift Guard (pin set)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Validates that vendor/README.md declares a complete, well-formed pinned set
+      # (OBS/DistroAV/NDI versions + critical settings) AND cross-checks the manifest's
+      # DistroAV pin against the vendored source (vendor/distroav/buildspec.json) — catching
+      # the "subtree bumped but manifest stale" drift class with no production access (#45).
+      # The live-prod facet (--compare against strih/stream) is operator/agent-driven via the
+      # win-* MCP tools (see .claude/commands/drift-guard.md); CI runners can't reach that LAN.
+      - name: Check pinned set (manifest + vendored source)
+        run: ./scripts/drift-guard.sh --check-pins
+
   notify-on-failure:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
@@ -225,7 +240,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, build, security]
+    needs: [lint, test, coverage, mutants, build, security, drift-guard]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
