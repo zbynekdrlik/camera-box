@@ -71,7 +71,7 @@ const MANIFEST_FIXTURE: &str = "\
 | setting | pinned value | live source |
 |---|---|---|
 | `output_fps` | `30` | OBS log |
-| `genlock_wall_clock` | `0` | env |
+| `genlock_wall_clock` | `1` | OBS log |
 ";
 
 /// The ACTUAL OBS log lines captured from strih/stream 2026-06-14. Note the graphics-adapter
@@ -85,6 +85,7 @@ const OBS_LOG_FIXTURE: &str = "\
 11:40:39.714: video settings reset:
 11:40:39.714: \tbase resolution:   1920x1080
 11:40:39.714: \tfps:               30/1
+11:40:39.718: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK, slew cap 2000000 ns/tick)
 11:40:40.092: [distroav] obs_module_load: you can haz DistroAV (Version 6.2.1)
 11:37:09.025: [distroav] NDI Library Version detected: 6.3.2.0
 11:37:09.027: [distroav] plugin loaded (full NDI features) (version 6.2.1)
@@ -120,7 +121,7 @@ fn parses_pinned_versions_and_settings_from_manifest() {
             .to_string()
     };
     assert_eq!(setting("output_fps"), "30");
-    assert_eq!(setting("genlock_wall_clock"), "0");
+    assert_eq!(setting("genlock_wall_clock"), "1");
 
     let _ = std::fs::remove_file(&readme);
 }
@@ -148,6 +149,26 @@ fn fps_parser_picks_output_fps_not_adapter_fps() {
         out.trim(),
         "30",
         "must pick the OUTPUT fps inside 'video settings reset:', not the adapter fps"
+    );
+}
+
+#[test]
+fn genlock_parser_reads_running_state_from_log() {
+    // The genlock master gate's TRUE running state is the OBS log line (the gate is read at
+    // launch), not a later env read. ENABLED -> 1, DISABLED -> 0, no line -> UNKNOWN ("").
+    let enabled = run_sourced("genlock_from_log \"$LOG\"", &[("LOG", OBS_LOG_FIXTURE)]);
+    assert_eq!(enabled.trim(), "1", "ENABLED log line -> 1: {enabled:?}");
+
+    let dis = "12:00:00.000: genlock: wall-clock-slaved render tick DISABLED (stock tick)\n";
+    let out = run_sourced("genlock_from_log \"$LOG\"", &[("LOG", dis)]);
+    assert_eq!(out.trim(), "0", "DISABLED log line -> 0: {out:?}");
+
+    let none = "12:00:00.000: OBS 32.1.2 (64-bit, windows)\n";
+    let out = run_sourced("genlock_from_log \"$LOG\"", &[("LOG", none)]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "no genlock line -> UNKNOWN (empty): {out:?}"
     );
 }
 
@@ -306,7 +327,7 @@ fn compare_clean_when_observed_matches_the_pinned_set() {
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
-        "genlock_wall_clock=0",
+        "genlock_wall_clock=1",
     ]);
     assert_eq!(
         code, 0,
@@ -324,7 +345,7 @@ fn compare_fails_loudly_on_drift() {
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=60", // drifted
-        "genlock_wall_clock=0",
+        "genlock_wall_clock=1",
     ]);
     assert_eq!(
         code, 20,
@@ -350,7 +371,7 @@ fn compare_never_silently_passes_when_a_value_is_unread() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "output_fps=30",
-        "genlock_wall_clock=0",
+        "genlock_wall_clock=1",
         // ndi_runtime intentionally missing
     ]);
     assert_eq!(

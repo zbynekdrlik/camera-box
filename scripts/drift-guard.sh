@@ -92,6 +92,21 @@ ndi_runtime_from_log() {
     | sed -n 's/.*NDI Library Version detected: \([0-9][0-9.]*\).*/\1/p' | head -1
 }
 
+# genlock_from_log TEXT -> "1" if the running OBS reports the wall-clock genlock master gate
+# ENABLED ("genlock: wall-clock-slaved render tick ENABLED"), "0" if it reports DISABLED, ""
+# (UNKNOWN) if the build emits no genlock line at all. This is the AUTHORITATIVE runtime signal —
+# the env var the gate is read from is captured at OBS launch, so a later `$env:` read (esp. via a
+# long-lived MCP/launcher process holding a stale env snapshot) can disagree with the running
+# process; the log line cannot.
+genlock_from_log() {
+  local text="$1"
+  if printf '%s\n' "$text" | grep -qiE 'genlock:.*render tick ENABLED'; then
+    echo 1
+  elif printf '%s\n' "$text" | grep -qiE 'genlock:.*render tick DISABLED'; then
+    echo 0
+  fi
+}
+
 # fps_from_log TEXT -> "30"  (the OUTPUT fps = the first `fps:` line INSIDE the OBS
 # "video settings reset:" block — deliberately NOT the earlier graphics-adapter/monitor `fps:`).
 fps_from_log() {
