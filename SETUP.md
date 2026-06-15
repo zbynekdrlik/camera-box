@@ -198,9 +198,10 @@ does not yet exist):
 - **After** (cam3 re-enrolled to master `10.77.9.202`): the four cameras' wall clocks agree within
   a measured spread of **max 380 µs** (cam2 +382 µs to cam4 +2 µs), all PTP NANO-locked. By the
   argument above, their genlock frame boundaries therefore agree to within **≤ 380 µs** — about
-  **44× tighter than the 16.7 ms (60 fps) frame period** and ~500× tighter than one frame at the
-  worst case. The cluster's wall-clock genlock boundary divergence is well inside one frame on
-  every camera; the genlock clock assumption stated in `src/ndi.rs:25-35` holds across cam1-4.
+  **44× tighter than the 16.7 ms (60 fps) frame period** (and the worst single-node offset, cam2's
+  382 µs against UTC, is itself ~44× under one frame). The cluster's wall-clock genlock boundary
+  divergence is well inside one frame on every camera; the genlock clock assumption stated in
+  `src/ndi.rs:25-35` holds across cam1-4.
 
 The continuous guard (`scripts/clock-offset-guard.sh`, exit non-zero if any node exceeds ±2 ms)
 keeps this bound — and therefore the boundary agreement — from silently regressing.
