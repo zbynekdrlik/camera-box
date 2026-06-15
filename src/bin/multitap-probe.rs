@@ -7,10 +7,10 @@ use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, decompose_missing, diff_hop,
-    earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns, overall_verdict,
-    settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport, FullSpanBounds,
-    FullSpanReport, HopInput, HopReport, HopVerdict,
+    abs_emit_latency, absolute_latency_gate_pass, absolute_latency_stats, decompose_missing,
+    diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns,
+    overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport,
+    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -232,6 +232,12 @@ struct TapSummary {
     /// output proves whether id-level `dropped_ids` is true hop loss or just tap
     /// decode misses.
     decoded: u64,
+    /// Per-tap ABSOLUTE emit latency `node_emit_tc − gen_ts` (ms) on the shared
+    /// DanteSync clock: paint→this-node's-emit. gen_ts-anchored, oversample-immune.
+    /// cam tap = paint→camera-NDI-emit (rig); strih/stream = paint→their emit.
+    /// Adjacent taps' difference is a clean per-hop latency. `None` if this tap's
+    /// source stamped no usable NDI timecode.
+    abs_emit_latency: Option<LatencyStats>,
 }
 
 fn main() -> Result<()> {
@@ -415,6 +421,9 @@ fn main() -> Result<()> {
             // Raw (untrimmed) decoded-frame count for this tap — the run_id QR
             // frames it actually decoded, oversample dups included.
             decoded: r.observed.lock().unwrap().len() as u64,
+            // paint→this-node-emit on the shared DanteSync clock (over the trimmed,
+            // steady-state observations). Adjacent taps' difference = per-hop.
+            abs_emit_latency: abs_emit_latency(obs),
         })
         .collect();
 

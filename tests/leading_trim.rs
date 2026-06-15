@@ -12,6 +12,7 @@ fn o(frame_id: u32, recv_ms: i64) -> Observed {
         frame_id,
         gen_ts_ns: 0,
         recv_ts_ns: recv_ms * 1_000_000,
+        node_emit_tc_ns: 0,
     }
 }
 

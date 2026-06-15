@@ -26,6 +26,7 @@ fn obs(frame_id: u32, recv_ts_ns: i64) -> Observed {
         frame_id,
         gen_ts_ns: 0,
         recv_ts_ns,
+        node_emit_tc_ns: 0,
     }
 }
 
