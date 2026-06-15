@@ -1,0 +1,204 @@
+//! #7 Phase 3: source→endpoint full-span aggregate + ABSOLUTE end-to-end latency.
+//!
+//! These exercise the pure logic the full-path gate adds on top of Phase 2's
+//! adjacent-hop differencing:
+//!   * `full_span_diff` — a SINGLE source-tap vs endpoint-tap ID-set aggregate
+//!     (the headline "every source frame reached the last endpoint" number), not
+//!     a sum of adjacent-pair diffs. Reuses the span-clip + single-copy logic.
+//!   * `absolute_latency_stats` — `recv_ts(endpoint) − gen_ts(source)` paired by
+//!     frame_id. Sound ONLY when both timestamps share one synced wall clock
+//!     (DanteSync CLOCK_REALTIME, strih = master); the arithmetic itself is pure.
+//!   * `absolute_latency_gate_pass` — the hard bound on the absolute end-to-end
+//!     p99, mirroring the per-hop latency gate convention (None ⇒ report-only).
+//!
+//! Hardware-free: every Observed is constructed in the test, no NDI/QR/clock.
+
+use camera_box::probe::analyzer::Observed;
+use camera_box::probe::differ::{
+    absolute_latency_gate_pass, absolute_latency_stats, full_span_diff, FullSpanReport,
+};
+
+/// Source observation: a painted frame at `gen_ms` on the synced wall clock.
+/// `recv_ts_ns` at the SOURCE tap is irrelevant to absolute latency (we pair the
+/// endpoint's recv against the source's gen), set it equal to gen for realism.
+fn src(frame_id: u32, gen_ms: i64) -> Observed {
+    Observed {
+        frame_id,
+        gen_ts_ns: gen_ms * 1_000_000,
+        recv_ts_ns: gen_ms * 1_000_000,
+    }
+}
+
+/// Endpoint observation: frame `frame_id` arrived at the endpoint tap at
+/// `recv_ms` on the same synced wall clock. `gen_ts_ns` carries the SOURCE's
+/// emission stamp end-to-end through the QR payload (unchanged across hops).
+fn ep(frame_id: u32, gen_ms: i64, recv_ms: i64) -> Observed {
+    Observed {
+        frame_id,
+        gen_ts_ns: gen_ms * 1_000_000,
+        recv_ts_ns: recv_ms * 1_000_000,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// full_span_diff — source→endpoint zero-loss aggregate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn full_span_zero_loss_when_every_source_id_reaches_endpoint() {
+    let source = vec![src(0, 0), src(1, 33), src(2, 66), src(3, 99), src(4, 132)];
+    let endpoint = vec![
+        ep(0, 0, 120),
+        ep(1, 33, 153),
+        ep(2, 66, 186),
+        ep(3, 99, 219),
+        ep(4, 132, 252),
+    ];
+    let r: FullSpanReport = full_span_diff(&source, &endpoint);
+    assert_eq!(r.source_unique, 5);
+    assert_eq!(r.endpoint_unique, 5);
+    assert!(
+        r.dropped_ids.is_empty(),
+        "no source id should be missing at the endpoint: {:?}",
+        r.dropped_ids
+    );
+    assert!(r.zero_loss, "a complete chain must report zero_loss=true");
+}
+
+#[test]
+fn full_span_flags_a_mid_stream_drop_against_the_endpoint() {
+    // Source emits 0..=4; the endpoint never carries id 2 -> headline source→
+    // endpoint drop, regardless of which intermediate hop lost it.
+    let source = vec![src(0, 0), src(1, 33), src(2, 66), src(3, 99), src(4, 132)];
+    let endpoint = vec![ep(0, 0, 120), ep(1, 33, 153), ep(3, 99, 219), ep(4, 132, 252)];
+    let r = full_span_diff(&source, &endpoint);
+    assert_eq!(r.dropped_ids, vec![2], "id 2 must be flagged source→endpoint");
+    assert!(!r.zero_loss, "a source→endpoint drop must set zero_loss=false");
+}
+
+#[test]
+fn full_span_clips_to_endpoint_active_span_not_tap_startup_skew() {
+    // The endpoint tap connects late (first sees id 2) and stops early (last id
+    // 4): source ids 0,1 (before its first) and 6,7 (after its last) are tap
+    // start/stop skew, NOT hop drops — exactly the diff_hop span-clip semantics.
+    // Only an id INSIDE [2,4] that is absent counts as a real drop.
+    let source = vec![
+        src(0, 0),
+        src(1, 33),
+        src(2, 66),
+        src(3, 99),
+        src(4, 132),
+        src(6, 198),
+        src(7, 231),
+    ];
+    let endpoint = vec![ep(2, 66, 186), ep(4, 132, 252)]; // missing 3, inside span
+    let r = full_span_diff(&source, &endpoint);
+    assert_eq!(
+        r.dropped_ids,
+        vec![3],
+        "only id 3 (inside the endpoint active span) is a real drop; 0,1,6,7 are skew"
+    );
+    assert!(!r.zero_loss);
+}
+
+#[test]
+fn full_span_empty_endpoint_is_not_a_vacuous_pass() {
+    // An endpoint that decoded nothing must NOT report zero_loss=true: there is
+    // no evidence any frame arrived. (The orchestrator's min_frames check is the
+    // hard gate; the aggregate must not lie that a dead endpoint is clean.)
+    let source = vec![src(0, 0), src(1, 33)];
+    let endpoint: Vec<Observed> = vec![];
+    let r = full_span_diff(&source, &endpoint);
+    assert_eq!(r.endpoint_unique, 0);
+    assert!(
+        !r.zero_loss,
+        "an endpoint with zero decoded frames must not pass as zero-loss"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// absolute_latency_stats — recv(endpoint) − gen(source), wall-clock paired
+// ---------------------------------------------------------------------------
+
+#[test]
+fn absolute_latency_is_endpoint_recv_minus_source_gen() {
+    // Each frame: gen at source wall-clock T, arrives at endpoint T + 120 ms.
+    // Absolute end-to-end latency must be exactly 120 ms (NOT a per-hop delta).
+    let source = vec![src(0, 0), src(1, 33), src(2, 66)];
+    let endpoint = vec![ep(0, 0, 120), ep(1, 33, 153), ep(2, 66, 186)];
+    let s = absolute_latency_stats(&source, &endpoint).expect("samples exist");
+    assert_eq!(s.samples, 3);
+    assert!((s.p50_ms - 120.0).abs() < 1e-6, "p50 was {}", s.p50_ms);
+    assert!((s.min_ms - 120.0).abs() < 1e-6);
+    assert!((s.max_ms - 120.0).abs() < 1e-6);
+}
+
+#[test]
+fn absolute_latency_pairs_by_frame_id_uses_source_gen_not_endpoint_gen() {
+    // The endpoint Observed also carries gen_ts (propagated through the QR), but
+    // the pairing must take the SOURCE tap's gen for the frame and the ENDPOINT
+    // tap's recv. Here the source genuinely emitted id 5 at 50 ms; the endpoint
+    // saw it at 230 ms -> 180 ms absolute. An id present only at one tap is
+    // dropped from the latency set (no pair).
+    let source = vec![src(5, 50), src(6, 83)];
+    let endpoint = vec![ep(5, 50, 230)]; // id 6 never reached endpoint
+    let s = absolute_latency_stats(&source, &endpoint).expect("one pair");
+    assert_eq!(s.samples, 1, "only id 5 is paired");
+    assert!((s.p50_ms - 180.0).abs() < 1e-6, "p50 was {}", s.p50_ms);
+}
+
+#[test]
+fn absolute_latency_none_when_no_common_ids() {
+    let source = vec![src(0, 0)];
+    let endpoint = vec![ep(9, 0, 120)];
+    assert!(absolute_latency_stats(&source, &endpoint).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// absolute_latency_gate_pass — hard bound on the end-to-end p99
+// ---------------------------------------------------------------------------
+
+#[test]
+fn absolute_latency_gate_none_is_report_only() {
+    let source = vec![src(0, 0), src(1, 33)];
+    let endpoint = vec![ep(0, 0, 500), ep(1, 33, 533)]; // 500 ms — huge
+    let s = absolute_latency_stats(&source, &endpoint);
+    assert!(
+        absolute_latency_gate_pass(&s, None),
+        "no bound ⇒ report-only ⇒ always passes the gate"
+    );
+}
+
+#[test]
+fn absolute_latency_gate_fails_when_p99_exceeds_bound() {
+    // Four frames at 120 ms, one at 600 ms -> p99 (nearest-rank, n=5) = 600 ms.
+    let source = vec![src(0, 0), src(1, 33), src(2, 66), src(3, 99), src(4, 132)];
+    let endpoint = vec![
+        ep(0, 0, 120),
+        ep(1, 33, 153),
+        ep(2, 66, 186),
+        ep(3, 99, 219),
+        ep(4, 132, 732), // 600 ms
+    ];
+    let s = absolute_latency_stats(&source, &endpoint);
+    assert!(
+        !absolute_latency_gate_pass(&s, Some(350.0)),
+        "p99 600 ms must fail a 350 ms bound"
+    );
+    assert!(
+        absolute_latency_gate_pass(&s, Some(650.0)),
+        "p99 600 ms must pass a 650 ms bound"
+    );
+}
+
+#[test]
+fn absolute_latency_gate_fails_when_no_samples_but_bound_set() {
+    // A bound was requested but no end-to-end pair exists -> the gate cannot be
+    // satisfied; it must FAIL, never vacuously pass (test-strictness: a gate that
+    // could not run must not report green).
+    let none: Option<camera_box::probe::analyzer::LatencyStats> = None;
+    assert!(
+        !absolute_latency_gate_pass(&none, Some(350.0)),
+        "a requested bound with zero samples must fail, not pass vacuously"
+    );
+}
