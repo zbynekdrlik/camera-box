@@ -16,9 +16,10 @@
 //!
 //! Hardware-free: every Observed is constructed in the test, no NDI/QR/clock.
 
-use camera_box::probe::analyzer::Observed;
+use camera_box::probe::analyzer::{LatencyStats, Observed};
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, full_span_diff, FullSpanBounds, HopVerdict,
+    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, overall_verdict,
+    FullSpanBounds, HopInput, HopReport, HopVerdict,
 };
 
 /// Source observation: a painted frame at `gen_ms` on the synced wall clock.
@@ -226,6 +227,130 @@ fn full_span_inconclusive_when_too_few_single_copy_frames() {
 }
 
 // ---------------------------------------------------------------------------
+// overall_verdict — the central pass/fail fold (the #important review finding)
+// ---------------------------------------------------------------------------
+
+/// Build a real `HopReport` with the requested verdict via `diff_hop` (no
+/// hand-constructed structs): clean inputs → Pass; an in-span drop → Fail; clean
+/// but below the single-copy guard → Inconclusive.
+fn hop(verdict: HopVerdict) -> HopReport {
+    let up = vec![src(0, 0), src(1, 33), src(2, 66)];
+    let (down, max_loss_pct, min_single_copy) = match verdict {
+        HopVerdict::Pass => (
+            vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)],
+            None,
+            0usize,
+        ),
+        HopVerdict::Fail => (vec![ep(0, 0, 10), ep(2, 66, 76)], None, 0), // id 1 dropped in span
+        HopVerdict::Inconclusive => {
+            (vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)], None, 10) // clean but < guard
+        }
+    };
+    let r = diff_hop(HopInput {
+        name: "h".to_string(),
+        upstream: &up,
+        downstream: &down,
+        capture_fps: 30.0,
+        freeze_periods: f64::MAX,
+        min_frames: 1,
+        max_p99_latency_ms: None,
+        max_freeze_periods_gate: None,
+        max_loss_pct,
+        min_single_copy,
+    });
+    assert_eq!(
+        r.verdict, verdict,
+        "fixture must yield the requested verdict"
+    );
+    r
+}
+
+/// A full-span report with the requested verdict, built the same way.
+fn span(verdict: HopVerdict) -> camera_box::probe::differ::FullSpanReport {
+    let source = vec![src(0, 0), src(1, 33), src(2, 66)];
+    let (endpoint, bounds) = match verdict {
+        HopVerdict::Pass => (vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)], strict()),
+        HopVerdict::Fail => (vec![ep(0, 0, 10), ep(2, 66, 76)], strict()),
+        HopVerdict::Inconclusive => (
+            vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)],
+            FullSpanBounds {
+                min_frames: 1,
+                max_loss_pct: None,
+                min_single_copy: 10,
+            },
+        ),
+    };
+    let r = full_span_diff(&source, &endpoint, &bounds);
+    assert_eq!(r.verdict, verdict);
+    r
+}
+
+#[test]
+fn overall_pass_only_when_every_gate_passes() {
+    assert_eq!(
+        overall_verdict(&[hop(HopVerdict::Pass)], &span(HopVerdict::Pass), true),
+        HopVerdict::Pass
+    );
+}
+
+#[test]
+fn overall_fails_on_a_hop_fail() {
+    assert_eq!(
+        overall_verdict(
+            &[hop(HopVerdict::Pass), hop(HopVerdict::Fail)],
+            &span(HopVerdict::Pass),
+            true
+        ),
+        HopVerdict::Fail
+    );
+}
+
+#[test]
+fn overall_fails_on_full_span_loss_even_when_all_hops_pass() {
+    // The exact round-1 regression class: hops clean, but the source→endpoint
+    // full span lost a frame ⇒ the run must FAIL, not PASS.
+    assert_eq!(
+        overall_verdict(&[hop(HopVerdict::Pass)], &span(HopVerdict::Fail), true),
+        HopVerdict::Fail
+    );
+}
+
+#[test]
+fn overall_fails_when_absolute_latency_gate_fails() {
+    assert_eq!(
+        overall_verdict(&[hop(HopVerdict::Pass)], &span(HopVerdict::Pass), false),
+        HopVerdict::Fail
+    );
+}
+
+#[test]
+fn overall_inconclusive_when_only_inconcl_no_hard_fail() {
+    // A hop INCONCL (too few single-copy frames) with no hard FAIL anywhere ⇒
+    // INCONCL, not FAIL: "need a longer/denser run", not "the pipeline broke".
+    assert_eq!(
+        overall_verdict(
+            &[hop(HopVerdict::Inconclusive)],
+            &span(HopVerdict::Pass),
+            true
+        ),
+        HopVerdict::Inconclusive
+    );
+}
+
+#[test]
+fn overall_hard_fail_outranks_inconclusive() {
+    // A real FAIL alongside an INCONCL is reported as FAIL (the worse signal).
+    assert_eq!(
+        overall_verdict(
+            &[hop(HopVerdict::Inconclusive), hop(HopVerdict::Fail)],
+            &span(HopVerdict::Pass),
+            true
+        ),
+        HopVerdict::Fail
+    );
+}
+
+// ---------------------------------------------------------------------------
 // absolute_latency_stats — recv(endpoint) − gen(source), wall-clock paired
 // ---------------------------------------------------------------------------
 
@@ -305,9 +430,30 @@ fn absolute_latency_gate_fails_when_no_samples_but_bound_set() {
     // A bound was requested but no end-to-end pair exists -> the gate cannot be
     // satisfied; it must FAIL, never vacuously pass (test-strictness: a gate that
     // could not run must not report green).
-    let none: Option<camera_box::probe::analyzer::LatencyStats> = None;
+    let none: Option<LatencyStats> = None;
     assert!(
         !absolute_latency_gate_pass(&none, Some(350.0)),
         "a requested bound with zero samples must fail, not pass vacuously"
+    );
+}
+
+#[test]
+fn absolute_latency_gate_fails_on_negative_latency_even_under_bound() {
+    // A negative min (recv before gen) is physically impossible = cluster clock
+    // desync; the measurement is untrustworthy so the gate must FAIL even though
+    // p99 sits under the bound. Backstop for a probe run without the e2e
+    // clock-offset pre-flight (#7/#8).
+    let source = vec![src(0, 0), src(1, 33), src(2, 66)];
+    // id 0 arrives "before" it was generated (−20 ms) due to a +offset on the
+    // camera clock; the rest look fine and p99 stays small.
+    let endpoint = vec![ep(0, 0, -20), ep(1, 33, 53), ep(2, 66, 86)];
+    let s = absolute_latency_stats(&source, &endpoint);
+    assert!(
+        s.as_ref().unwrap().min_ms < 0.0,
+        "fixture has a negative min"
+    );
+    assert!(
+        !absolute_latency_gate_pass(&s, Some(350.0)),
+        "a negative (impossible) latency must FAIL the gate, not pass under the bound"
     );
 }

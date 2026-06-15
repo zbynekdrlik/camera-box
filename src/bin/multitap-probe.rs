@@ -6,8 +6,8 @@
 use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, FullSpanBounds,
-    FullSpanReport, HopInput, HopReport, HopVerdict,
+    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, overall_verdict,
+    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -422,14 +422,11 @@ fn main() -> Result<()> {
         _ => absolute_latency_note,
     };
 
-    // INCONCL (insufficient oversample-independent evidence) counts as NOT-pass,
-    // exactly like FAIL — a run that cannot certify must not exit green (#29). The
-    // full-path verdict folds in: every per-hop verdict PASS, the source→endpoint
-    // full-span verdict PASS (same contract: strict-or-documented loss + INCONCL),
-    // AND the absolute-latency gate (a no-op pass when --max-abs-latency-ms is
-    // unset). Any one not-pass fails the run.
-    let verdict_pass =
-        hops.iter().all(|h| h.verdict.is_pass()) && full_span.verdict.is_pass() && abs_gate_pass;
+    // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
+    // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as
+    // NOT-pass like FAIL (#29: a run that cannot certify must not exit green).
+    let overall_v = overall_verdict(&hops, &full_span, abs_gate_pass);
+    let verdict_pass = overall_v.is_pass();
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
@@ -541,16 +538,11 @@ fn main() -> Result<()> {
     // an untrustworthy green (only a hop INCONCL: gates passed but too few
     // single-copy samples). Both exit non-zero via `verdict_pass`; the label tells
     // the operator which so an INCONCL reads as "need a longer/denser run", not
-    // "the pipeline broke".
-    let hard_fail = report.hops.iter().any(|h| h.verdict == HopVerdict::Fail)
-        || report.full_span.verdict == HopVerdict::Fail
-        || !abs_gate_pass;
-    let overall = if verdict_pass {
-        "PASS"
-    } else if hard_fail {
-        "FAIL"
-    } else {
-        "INCONCL"
+    // "the pipeline broke". Derived from the same pure fold as `verdict_pass`.
+    let overall = match overall_v {
+        HopVerdict::Pass => "PASS",
+        HopVerdict::Fail => "FAIL",
+        HopVerdict::Inconclusive => "INCONCL",
     };
     println!("VERDICT={overall} ARTIFACT={}", args.out);
 

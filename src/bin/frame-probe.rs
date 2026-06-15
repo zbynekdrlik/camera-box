@@ -98,6 +98,16 @@ fn main() -> Result<()> {
             args.duration_secs
         );
     }
+    // --wall-clock only affects the painted gen_ts (paint-only / synth-ndi). The
+    // Phase-1 loopback `run()` is forced monotonic (painter+reader share one
+    // process clock), so --wall-clock there is silently inert — bail rather than
+    // let a user believe they enabled wall-clock stamping when they did not.
+    if args.wall_clock && !args.paint_only && args.synth_ndi.is_none() {
+        anyhow::bail!(
+            "--wall-clock only applies with --paint-only or --synth-ndi (the multi-node #7 \
+             absolute-latency path); the single-box loopback run is always monotonic"
+        );
+    }
     let mode = match args.mode.as_str() {
         "coverage" => PaintMode::Coverage,
         "full-rate" | "fullrate" => PaintMode::FullRate,

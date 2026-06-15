@@ -343,11 +343,50 @@ pub fn absolute_latency_stats(source: &[Observed], endpoint: &[Observed]) -> Opt
 /// passes), mirroring the per-hop `max_p99_latency_ms` convention. A requested
 /// bound with NO samples FAILS — a gate that could not run must never report
 /// green (test-strictness). Strict `>` so a p99 exactly at the bound passes.
+///
+/// A NEGATIVE measured latency (`min_ms < 0`, recv before gen) is physically
+/// impossible — it can only mean the cluster wall clocks desynced past the
+/// transit time (the camera clock ahead of dev1), so the whole measurement is
+/// untrustworthy and the gate FAILS rather than passing on a number that may be a
+/// large true latency masquerading as a small/negative one. The `multitap-e2e.sh`
+/// clock-offset pre-flight is the first line of defence; this is the backstop for
+/// a probe invoked directly without it.
 pub fn absolute_latency_gate_pass(latency: &Option<LatencyStats>, max_p99_ms: Option<f64>) -> bool {
     match (max_p99_ms, latency) {
         (None, _) => true,
         (Some(_), None) => false,
+        (Some(_), Some(l)) if l.min_ms < 0.0 => false,
         (Some(bound), Some(l)) => l.p99_ms <= bound,
+    }
+}
+
+/// The overall run verdict, folding the per-hop verdicts, the source→endpoint
+/// full-span verdict, and the absolute-latency gate into ONE outcome. This is the
+/// central pass/fail logic the whole gate hinges on — kept pure and testable
+/// rather than inline in `main()`, because an `&&`/`||` slip here (or a dropped
+/// term) would let a run exit green while a gate is red. A run PASSES only when
+/// EVERY per-hop verdict is `Pass`, the full-span verdict is `Pass`, and the
+/// absolute-latency gate passes. Otherwise it FAILS if any hop or the full span
+/// is a hard `Fail` or the absolute-latency gate failed (a proven regression),
+/// else it is `Inconclusive` (gates passed but a hop/full-span lacked enough
+/// single-copy evidence — #29; "need a longer/denser run", not "broken").
+pub fn overall_verdict(
+    hops: &[HopReport],
+    full_span: &FullSpanReport,
+    abs_gate_pass: bool,
+) -> HopVerdict {
+    let all_pass =
+        hops.iter().all(|h| h.verdict.is_pass()) && full_span.verdict.is_pass() && abs_gate_pass;
+    if all_pass {
+        return HopVerdict::Pass;
+    }
+    let hard_fail = hops.iter().any(|h| h.verdict == HopVerdict::Fail)
+        || full_span.verdict == HopVerdict::Fail
+        || !abs_gate_pass;
+    if hard_fail {
+        HopVerdict::Fail
+    } else {
+        HopVerdict::Inconclusive
     }
 }
 
