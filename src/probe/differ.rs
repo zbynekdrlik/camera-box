@@ -127,6 +127,44 @@ pub fn trim_to_settle(observed: &[Observed], cutoff_ns: i64) -> Vec<Observed> {
         .collect()
 }
 
+/// #68 Task C: the global earliest `recv_ts_ns` across ALL taps — the instant the
+/// run's very first frame landed at any tap. The leading-discard window is
+/// measured from this single origin (not per-tap), so every tap drops the SAME
+/// wall-clock prefix and the hops stay comparable. `None` when no tap saw a
+/// frame. Same clock-domain contract as `settle_cutoff_ns`: every `recv_ts_ns`
+/// must share one domain (all monotonic, or all CLOCK_REALTIME with
+/// `--wall-clock`).
+pub fn earliest_recv_ns(taps: &[&[Observed]]) -> Option<i64> {
+    taps.iter()
+        .flat_map(|t| t.iter())
+        .map(|o| o.recv_ts_ns)
+        .min()
+}
+
+/// #68 Task C: the leading-discard cutoff — frames received BEFORE this instant
+/// are the post-reset prime window and are dropped. `earliest_ns` is the run's
+/// global earliest recv (`earliest_recv_ns`); `discard_ms` is the window length in
+/// MILLISECONDS (mirrors `settle_cutoff_ns`'s ms unit). A frame received exactly
+/// at the cutoff is already steady-state (kept by `trim_after`'s inclusive `>=`).
+pub fn lead_cutoff_ns(earliest_ns: i64, discard_ms: u64) -> i64 {
+    earliest_ns + (discard_ms as i64) * 1_000_000
+}
+
+/// #68 Task C: keep only the frames received AT or AFTER `cutoff_ns` (drop the
+/// leading post-reset prime window). The mirror of `trim_to_settle` (which drops
+/// the trailing in-flight window); applied together they leave only the
+/// steady-state middle. Inclusive `>=` so a frame exactly at the cutoff — the
+/// first steady-state frame — is kept. `cutoff_ns == 0` (zero discard, or no
+/// earliest) keeps everything, since all real recv timestamps are positive. Pure
+/// so the clock-domain contract is testable without a live NDI rig.
+pub fn trim_after(observed: &[Observed], cutoff_ns: i64) -> Vec<Observed> {
+    observed
+        .iter()
+        .filter(|o| o.recv_ts_ns >= cutoff_ns)
+        .cloned()
+        .collect()
+}
+
 fn first_recv(observed: &[Observed]) -> HashMap<u32, i64> {
     let mut m: HashMap<u32, i64> = HashMap::new();
     for o in observed {
@@ -338,6 +376,138 @@ pub fn full_span_diff(
         single_copy_dropped: hop.single_copy_dropped,
         verdict: hop.verdict,
     }
+}
+
+/// #68 Task B: the ENDPOINT tap's sequence checked against the GENERATOR's known
+/// contiguous emission — not against another tap. The painter emits a strictly
+/// monotonic, CONTIGUOUS id sequence (`0,1,2,…`), so for the span the endpoint
+/// actually decoded `[first_id..=last_id]`, EVERY integer in that range was
+/// generated. Therefore an integer absent from the endpoint is a real
+/// generator→endpoint drop — and crucially this catches generator→cam loss that
+/// the source-tap-vs-endpoint-tap difference (`full_span_diff`) can never see,
+/// because that diff can only flag ids the SOURCE tap decoded. Out-of-order ids
+/// (an id that arrives after a strictly higher id already passed) are real
+/// reorders. Together this is the "every frame the QR generator emitted has
+/// exactly one delivered counterpart at the OBS output, in order" check.
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointSequenceReport {
+    /// Lowest id decoded at the endpoint (start of the verified contiguous span).
+    pub first_id: u32,
+    /// Highest id decoded at the endpoint (end of the verified contiguous span).
+    pub last_id: u32,
+    /// Count of integers in `[first_id..=last_id]` — every one was generated.
+    pub expected_count: usize,
+    /// Distinct ids actually present at the endpoint within the span.
+    pub delivered_count: usize,
+    /// Generated ids in `[first_id..=last_id]` that NEVER reached the endpoint —
+    /// real generator→endpoint drops (incl. generator→cam loss). Sorted ascending.
+    pub missing_ids: Vec<u32>,
+    /// Ids decoded out of monotonic order: each id that appears after a strictly
+    /// higher id already passed (a genuine reorder, not an oversample duplicate of
+    /// the current/previous id). Sorted ascending.
+    pub out_of_order_ids: Vec<u32>,
+}
+
+impl EndpointSequenceReport {
+    /// A clean endpoint: no internal gap, no reorder, and a NON-VACUOUS span
+    /// (at least two distinct ids — a 0- or 1-id span cannot demonstrate
+    /// contiguity, so it never certifies zero-loss).
+    pub fn is_clean(&self) -> bool {
+        self.delivered_count >= 2 && self.missing_ids.is_empty() && self.out_of_order_ids.is_empty()
+    }
+}
+
+/// Check the endpoint tap's decoded stream against the generator's contiguous
+/// emission (#68 Task B). Pure / unit-tested: the painter's contiguity is the
+/// source of truth, so the implied generated set is exactly the integers in
+/// `[min_decoded..=max_decoded]` and any absentee is a drop. `observed` is the
+/// endpoint tap's frames IN CAPTURE ORDER (the order matters for reorder
+/// detection); duplicates (oversample) and held ids are fine.
+pub fn endpoint_sequence_check(observed: &[Observed]) -> EndpointSequenceReport {
+    let present: HashSet<u32> = observed.iter().map(|o| o.frame_id).collect();
+    let (first_id, last_id) = match (present.iter().min(), present.iter().max()) {
+        (Some(&lo), Some(&hi)) => (lo, hi),
+        _ => {
+            return EndpointSequenceReport {
+                first_id: 0,
+                last_id: 0,
+                expected_count: 0,
+                delivered_count: 0,
+                missing_ids: Vec::new(),
+                out_of_order_ids: Vec::new(),
+            };
+        }
+    };
+
+    // Every integer in [first..=last] was generated (painter contiguity); flag the
+    // absentees. `last - first + 1` is the count of generated ids in the span.
+    let expected_count = (last_id - first_id) as usize + 1;
+    let mut missing_ids: Vec<u32> = (first_id..=last_id)
+        .filter(|id| !present.contains(id))
+        .collect();
+    missing_ids.sort_unstable();
+
+    // Reorder: an id that arrives strictly below the highest id seen so far. An
+    // oversample duplicate (== current running max) or a held id is NOT a reorder.
+    // Each offending id is reported once.
+    let mut out_of_order: HashSet<u32> = HashSet::new();
+    let mut running_max: Option<u32> = None;
+    for o in observed {
+        match running_max {
+            Some(m) if o.frame_id < m => {
+                out_of_order.insert(o.frame_id);
+            }
+            _ => {
+                running_max = Some(running_max.map_or(o.frame_id, |m| m.max(o.frame_id)));
+            }
+        }
+    }
+    let mut out_of_order_ids: Vec<u32> = out_of_order.into_iter().collect();
+    out_of_order_ids.sort_unstable();
+
+    EndpointSequenceReport {
+        first_id,
+        last_id,
+        expected_count,
+        delivered_count: present.len(),
+        missing_ids,
+        out_of_order_ids,
+    }
+}
+
+/// #68: split the endpoint's missing ids (from `endpoint_sequence_check`) into the
+/// two physically-distinct loss classes, using the SOURCE tap's decoded set:
+///
+/// - **emission artifact** — ids ABSENT at the source tap too: the QR rig never
+///   put them on the source NDI in the first place. On the fb-loopback this is the
+///   discrete-painter-into-genlock-decimation phase artifact (the painter writes a
+///   new id every ~33 ms but the 60 Hz HDMI scanout + 60→30 wall-clock decimator
+///   sample on their own boundaries, so ~5-13% of painted ids are never captured
+///   into NDI). This is NOT pipeline loss and must not fail a pipeline zero-loss
+///   gate. (On a synth-ndi source — no fb, no capture, no decimation — this set is
+///   empty, proven live.)
+/// - **pipeline loss** — ids PRESENT at the source tap but absent at the endpoint:
+///   they reached the source NDI and then vanished downstream. THIS is real
+///   source→endpoint loss, the only kind a zero-loss gate must fail on (and it
+///   equals `full_span_diff`'s `dropped_ids` by construction).
+///
+/// Returns `(emission_artifact, pipeline_loss)`, each sorted ascending. Pure /
+/// unit-tested so the harness can be HONEST: it reports the artifact (a QR-rig
+/// limitation, not a stream defect) separately from genuine pipeline drops.
+pub fn decompose_missing(endpoint_missing: &[u32], source: &[Observed]) -> (Vec<u32>, Vec<u32>) {
+    let src_present: HashSet<u32> = source.iter().map(|o| o.frame_id).collect();
+    let mut emission_artifact: Vec<u32> = Vec::new();
+    let mut pipeline_loss: Vec<u32> = Vec::new();
+    for &id in endpoint_missing {
+        if src_present.contains(&id) {
+            pipeline_loss.push(id); // was at source, lost downstream → real loss
+        } else {
+            emission_artifact.push(id); // never at source → rig emission artifact
+        }
+    }
+    emission_artifact.sort_unstable();
+    pipeline_loss.sort_unstable();
+    (emission_artifact, pipeline_loss)
 }
 
 /// #7 Phase 3: ABSOLUTE end-to-end latency = `recv_ts(endpoint) − gen_ts(source)`
@@ -886,6 +1056,141 @@ mod tests {
         let r = diff_hop(input(&up, &down));
         assert_eq!(r.dropped_ids, vec![5]);
         assert!(!r.verdict.is_pass());
+    }
+
+    // ---- #68 Task B: endpoint sequence vs the generator's contiguity + order ----
+
+    #[test]
+    fn endpoint_seq_contiguous_in_order_is_clean() {
+        let ep = vec![o(3, 30), o(4, 40), o(5, 50), o(6, 60)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.first_id, 3);
+        assert_eq!(r.last_id, 6);
+        assert_eq!(r.expected_count, 4);
+        assert_eq!(r.delivered_count, 4);
+        assert!(r.missing_ids.is_empty());
+        assert!(r.out_of_order_ids.is_empty());
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_flags_internal_gap() {
+        // id 4 absent inside [3..=6] → a real generator→endpoint drop.
+        let ep = vec![o(3, 30), o(5, 50), o(6, 60)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.missing_ids, vec![4]);
+        assert_eq!(r.expected_count, 4);
+        assert_eq!(r.delivered_count, 3);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_flags_reorder_only() {
+        // 3,4,6,5,7 — id 5 after the higher id 6 → reorder; nothing missing.
+        let ep = vec![o(3, 30), o(4, 40), o(6, 50), o(5, 60), o(7, 70)];
+        let r = endpoint_sequence_check(&ep);
+        assert!(r.missing_ids.is_empty());
+        assert_eq!(r.out_of_order_ids, vec![5]);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_oversample_dups_are_clean() {
+        // Held/duplicated ids (==running max) are not reorders, not gaps.
+        let ep = vec![o(3, 30), o(3, 31), o(4, 40), o(4, 41), o(5, 50)];
+        let r = endpoint_sequence_check(&ep);
+        assert!(r.missing_ids.is_empty());
+        assert!(r.out_of_order_ids.is_empty());
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_empty_is_not_clean() {
+        let r = endpoint_sequence_check(&[]);
+        assert_eq!(r.delivered_count, 0);
+        assert_eq!(r.expected_count, 0);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_single_frame_is_not_clean() {
+        // A length-1 span (delivered_count==1) cannot demonstrate contiguity.
+        // Pins is_clean's `>= 2` floor (kills a `>= 1` / `> 0` mutant).
+        let r = endpoint_sequence_check(&[o(9, 90)]);
+        assert_eq!(r.first_id, 9);
+        assert_eq!(r.last_id, 9);
+        assert_eq!(r.expected_count, 1);
+        assert_eq!(r.delivered_count, 1);
+        assert!(r.missing_ids.is_empty());
+        assert!(r.out_of_order_ids.is_empty());
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_two_frame_contiguous_is_clean() {
+        // delivered_count == 2 is the minimum non-vacuous span → clean. The other
+        // side of the is_clean `>= 2` boundary (kills a `> 2` mutant).
+        let ep = vec![o(7, 70), o(8, 80)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.delivered_count, 2);
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_gap_and_reorder_both_reported() {
+        // 3,5,4,7 over [3..=7]: id 6 missing AND id 4 out of order (after 5).
+        let ep = vec![o(3, 30), o(5, 40), o(4, 50), o(7, 70)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.missing_ids, vec![6]);
+        assert_eq!(r.out_of_order_ids, vec![4]);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn decompose_missing_classifies_by_source_presence() {
+        // {7,8} missing at endpoint; source has 8 (→pipeline loss) not 7 (→artifact).
+        let src = vec![o(6, 60), o(8, 80), o(9, 90)];
+        let (artifact, pipeline) = decompose_missing(&[7, 8], &src);
+        assert_eq!(artifact, vec![7]);
+        assert_eq!(pipeline, vec![8]);
+    }
+
+    #[test]
+    fn decompose_missing_all_artifact_when_source_lacks_all() {
+        let src = vec![o(5, 50), o(6, 60)];
+        let (artifact, pipeline) = decompose_missing(&[7, 8, 9], &src);
+        assert_eq!(artifact, vec![7, 8, 9]);
+        assert!(pipeline.is_empty());
+    }
+
+    #[test]
+    fn decompose_missing_all_pipeline_when_source_has_all() {
+        let src = vec![o(7, 70), o(8, 80), o(9, 90)];
+        let (artifact, pipeline) = decompose_missing(&[7, 8, 9], &src);
+        assert!(artifact.is_empty());
+        assert_eq!(pipeline, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn decompose_missing_empty_is_empty() {
+        let src = vec![o(1, 10)];
+        let (artifact, pipeline) = decompose_missing(&[], &src);
+        assert!(artifact.is_empty());
+        assert!(pipeline.is_empty());
+    }
+
+    #[test]
+    fn endpoint_seq_expected_count_spans_full_range() {
+        // [10..=20] = 11 generated ids; pins expected_count = last-first+1 against
+        // an off-by-one mutant. All present except 15 → 1 missing.
+        let mut ep: Vec<Observed> = (10u32..=20).map(|i| o(i, i as i64 * 10)).collect();
+        ep.retain(|o| o.frame_id != 15);
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.first_id, 10);
+        assert_eq!(r.last_id, 20);
+        assert_eq!(r.expected_count, 11);
+        assert_eq!(r.delivered_count, 10);
+        assert_eq!(r.missing_ids, vec![15]);
     }
 
     #[test]

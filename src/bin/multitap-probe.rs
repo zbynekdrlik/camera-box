@@ -7,9 +7,10 @@ use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, overall_verdict,
-    settle_cutoff_ns, trim_to_settle, FullSpanBounds, FullSpanReport, HopInput, HopReport,
-    HopVerdict,
+    absolute_latency_gate_pass, absolute_latency_stats, decompose_missing, diff_hop,
+    earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns, overall_verdict,
+    settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport, FullSpanBounds,
+    FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -49,6 +50,16 @@ struct Args {
     /// trimmed so in-flight frames are not counted as hop drops.
     #[arg(long, default_value_t = 500)]
     settle_ms: u64,
+    /// #68 Task C — leading-discard window (seconds): frames received within this
+    /// many seconds of the run's FIRST decoded frame (across all taps) are trimmed
+    /// before the loss/contiguity check. The harness re-points the OBS receiver
+    /// right before a run, which transiently primes the genlock FIFO so the first
+    /// seconds look cleaner than steady state and can MASK the steady-state loss
+    /// the persistence test sees. Discard 30-60 s to measure only steady state.
+    /// Default 0 = no leading trim (the prior behaviour); set it for a
+    /// reset-confound-free zero-loss run.
+    #[arg(long, default_value_t = 0)]
+    lead_discard_secs: u64,
     /// A tap with fewer than this many run_id-matching frames FAILS (not vacuous).
     #[arg(long, default_value_t = 100)]
     min_frames: usize,
@@ -169,12 +180,33 @@ fn validate_count_bounds(bounds: &[(String, f64)], flag: &str) -> Result<()> {
 struct MultiTapReport {
     run_id: u32,
     duration_secs: u64,
+    /// #68 Task C: the leading-discard window (seconds) trimmed from the start of
+    /// the run before the loss/contiguity check, so a post-reset genlock-FIFO prime
+    /// cannot mask steady-state loss. 0 = no leading trim. The artifact records it
+    /// so a "zero loss" verdict is self-describing about WHICH window it certified.
+    lead_discard_secs: u64,
     taps: Vec<TapSummary>,
     hops: Vec<HopReport>,
     /// #7: source→endpoint full-span zero-loss aggregate (first tap vs last tap),
     /// the HEADLINE number — "did every camera frame reach the last endpoint",
     /// not a sum of adjacent-hop diffs.
     full_span: FullSpanReport,
+    /// #68 Task B: the ENDPOINT tap's sequence checked against the GENERATOR's
+    /// contiguous emission (every integer in the endpoint's decoded span was
+    /// painted), not against the source tap. Reports any internal gap and any
+    /// reorder. The gap is decomposed below into emission-artifact vs pipeline-loss.
+    endpoint_sequence: EndpointSequenceReport,
+    /// #68: of `endpoint_sequence.missing_ids`, the ids ALSO absent at the SOURCE
+    /// tap — a generator→source-NDI EMISSION ARTIFACT of the QR rig (the discrete
+    /// painter through the 60→30 genlock decimation never put them on NDI), NOT a
+    /// pipeline drop. Reported, never gated. (Empty on a synth-ndi source.)
+    endpoint_missing_emission_artifact: Vec<u32>,
+    /// #68: of `endpoint_sequence.missing_ids`, the ids PRESENT at the SOURCE tap
+    /// but absent at the endpoint — REAL source→endpoint pipeline loss (== full_span
+    /// dropped_ids). The HARD gate term: `verdict_pass` fails if this is non-empty
+    /// (strict mode). This is what makes the harness agree with reality without
+    /// falsely failing on the QR rig's own source-emission artifact.
+    endpoint_pipeline_loss: Vec<u32>,
     /// #7: ABSOLUTE end-to-end latency `recv_ts(endpoint) − gen_ts(source)` on the
     /// DanteSync wall clock. Present (and gated when `--max-abs-latency-ms` is set)
     /// only with `--wall-clock`; otherwise `None` with `absolute_latency_note`
@@ -219,6 +251,23 @@ fn main() -> Result<()> {
     if args.settle_ms >= args.duration_secs.saturating_mul(1000) {
         bail!(
             "--settle-ms ({}) must be less than the run duration ({} s)",
+            args.settle_ms,
+            args.duration_secs
+        );
+    }
+    // The leading-discard + trailing-settle windows must leave a non-empty
+    // steady-state middle, or there is nothing left to certify (and the loss check
+    // would vacuously pass on zero frames). Reject the combination up front.
+    if args
+        .lead_discard_secs
+        .saturating_mul(1000)
+        .saturating_add(args.settle_ms)
+        >= args.duration_secs.saturating_mul(1000)
+    {
+        bail!(
+            "--lead-discard-secs ({} s) + --settle-ms ({} ms) must leave a non-empty \
+             steady-state window within the run duration ({} s)",
+            args.lead_discard_secs,
             args.settle_ms,
             args.duration_secs
         );
@@ -297,10 +346,28 @@ fn main() -> Result<()> {
 
     // Snapshot + trim the trailing settle window (in-flight frames are not drops).
     let cutoff_ns = settle_cutoff_ns(stop_ns, args.settle_ms);
-    let trimmed: Vec<Vec<_>> = results
+    let settled: Vec<Vec<_>> = results
         .iter()
         .map(|r| trim_to_settle(&r.observed.lock().unwrap(), cutoff_ns))
         .collect();
+
+    // #68 Task C: also trim the LEADING post-reset prime window so a transiently
+    // primed genlock FIFO can't mask steady-state loss. Measure the window from the
+    // run's global earliest recv (across all settled taps) so every tap drops the
+    // same wall-clock prefix and the hops stay comparable. `lead_discard_secs == 0`
+    // ⇒ cutoff 0 ⇒ keeps everything (prior behaviour).
+    let lead_cut_ns = earliest_recv_ns(&settled.iter().map(|t| t.as_slice()).collect::<Vec<_>>())
+        .map(|e| lead_cutoff_ns(e, args.lead_discard_secs * 1000))
+        .unwrap_or(0);
+    let trimmed: Vec<Vec<_>> = settled.iter().map(|t| trim_after(t, lead_cut_ns)).collect();
+    if args.lead_discard_secs > 0 {
+        tracing::info!(
+            "#68 Task C: discarded leading {} s (cutoff_ns={}); steady-state per-tap frames: {:?}",
+            args.lead_discard_secs,
+            lead_cut_ns,
+            trimmed.iter().map(|t| t.len()).collect::<Vec<_>>()
+        );
+    }
 
     // Per-hop gate bounds, keyed by the hop's DOWNSTREAM tap name (the tap the
     // hop feeds). Absent ⇒ None ⇒ report-only.
@@ -421,17 +488,54 @@ fn main() -> Result<()> {
         _ => absolute_latency_note,
     };
 
+    // #68 Task B: check the ENDPOINT tap's decoded stream against the generator's
+    // KNOWN contiguity (the painter emits 0,1,2,… so every integer in the
+    // endpoint's decoded span was generated). A gap here is a real
+    // generator→endpoint drop — including generator→cam loss the source-vs-endpoint
+    // diff cannot see — and a reorder is a real reorder. Computed on the endpoint
+    // tap (last tap), in its CAPTURE order (results[].observed is push-order), so
+    // reorder detection is meaningful. The settle-trimmed endpoint is used (same
+    // window as full_span) so trailing in-flight frames are not false gaps.
+    let endpoint_sequence = endpoint_sequence_check(endpoint);
+    // #68: decompose the endpoint's missing ids using the SOURCE tap. An id absent
+    // at the source too is a generator→source-NDI EMISSION ARTIFACT of the QR rig
+    // (the discrete fb painter through the 60→30 genlock decimation never put it on
+    // NDI — ~5-13% on the fb-loopback, ZERO on synth-ndi), NOT a stream defect. An
+    // id present at the source but absent at the endpoint is REAL source→endpoint
+    // PIPELINE LOSS. Only the latter may fail a zero-loss gate — gating on the
+    // artifact would make the harness falsely RED on a perfectly-fine pipeline.
+    let (endpoint_missing_emission_artifact, endpoint_pipeline_loss) =
+        decompose_missing(&endpoint_sequence.missing_ids, source);
+
+    // The sequence GATE is active only in strict mode (the genlock zero-loss path
+    // #68 targets). When the operator deliberately opts the endpoint into the #21
+    // documented-loss bound (`--max-loss-pct endpoint=N`), the gap is EXPECTED and
+    // stays REPORT-ONLY, exactly as full_span honours the same opt-out. In strict
+    // mode the gate fails on REAL pipeline loss (present-at-source, lost
+    // downstream) and on any reorder — but NOT on the emission artifact.
+    let endpoint_seq_gated = !loss_bounds.contains_key(endpoint_name);
+    let endpoint_seq_pass = !endpoint_seq_gated
+        || (endpoint_pipeline_loss.is_empty() && endpoint_sequence.out_of_order_ids.is_empty());
+
     // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
     // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as
     // NOT-pass like FAIL (#29: a run that cannot certify must not exit green).
+    // #68: the endpoint-sequence check adds a hard gate (strict mode) on REAL
+    // source→endpoint pipeline loss + reorder — the generator→endpoint guarantee
+    // the tap-vs-tap diff was blind to — while the QR rig's source-emission
+    // artifact is reported, not gated, so the harness stays honest AND trustworthy.
     let overall_v = overall_verdict(&hops, &full_span, abs_gate_pass);
-    let verdict_pass = overall_v.is_pass();
+    let verdict_pass = overall_v.is_pass() && endpoint_seq_pass;
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
+        lead_discard_secs: args.lead_discard_secs,
         taps: tap_summaries,
         hops,
         full_span,
+        endpoint_sequence,
+        endpoint_missing_emission_artifact,
+        endpoint_pipeline_loss,
         absolute_latency,
         absolute_latency_note,
         verdict_pass,
@@ -532,16 +636,76 @@ fn main() -> Result<()> {
         None => println!("ABS_LATENCY=UNAVAILABLE — {}", report.absolute_latency_note),
     }
 
+    // #68 Task B: endpoint sequence vs the generator's contiguity + order. The
+    // "every emitted frame has exactly one delivered counterpart at the OBS
+    // output, in order" check — gaps here are real generator→endpoint drops the
+    // tap-vs-tap diff cannot see, so the first 20 of each are printed for triage.
+    let es = &report.endpoint_sequence;
+    // Headline reflects the GATED criterion (real pipeline loss + reorder), with
+    // the QR-rig source-emission artifact reported separately so a green pipeline
+    // is never falsely RED on the discrete-painter-into-decimation artifact.
+    let pipeline = &report.endpoint_pipeline_loss;
+    let artifact = &report.endpoint_missing_emission_artifact;
+    let seq_state = if !pipeline.is_empty() || !es.out_of_order_ids.is_empty() {
+        "PIPELINE-LOSS"
+    } else if artifact.is_empty() {
+        "CONTIGUOUS"
+    } else {
+        "PIPELINE-CLEAN (source-emission artifact only)"
+    };
+    println!(
+        "ENDPOINT_SEQ {} span=[{}..={}] expected={} delivered={} \
+         missing={} (pipeline_loss={} emission_artifact={}) out_of_order={}{}",
+        seq_state,
+        es.first_id,
+        es.last_id,
+        es.expected_count,
+        es.delivered_count,
+        es.missing_ids.len(),
+        pipeline.len(),
+        artifact.len(),
+        es.out_of_order_ids.len(),
+        if endpoint_seq_gated {
+            ""
+        } else {
+            " (report-only — endpoint in documented-loss-bound mode)"
+        },
+    );
+    if !pipeline.is_empty() {
+        println!(
+            "  PIPELINE_LOSS_IDS (present at source, lost downstream — REAL, first 20): {:?}",
+            &pipeline[..pipeline.len().min(20)]
+        );
+    }
+    if !artifact.is_empty() {
+        println!(
+            "  EMISSION_ARTIFACT_IDS (never on source NDI — QR-rig decimation, not a drop; first 20): {:?}",
+            &artifact[..artifact.len().min(20)]
+        );
+    }
+    if !es.out_of_order_ids.is_empty() {
+        println!(
+            "  OUT_OF_ORDER_IDS (first 20): {:?}",
+            &es.out_of_order_ids[..es.out_of_order_ids.len().min(20)]
+        );
+    }
+
     // Top-level label distinguishes a proven regression (a real FAIL — any hop
-    // FAIL, a source→endpoint full-span loss, or an absolute-latency breach) from
-    // an untrustworthy green (only a hop INCONCL: gates passed but too few
-    // single-copy samples). Both exit non-zero via `verdict_pass`; the label tells
-    // the operator which so an INCONCL reads as "need a longer/denser run", not
-    // "the pipeline broke". Derived from the same pure fold as `verdict_pass`.
-    let overall = match overall_v {
-        HopVerdict::Pass => "PASS",
-        HopVerdict::Fail => "FAIL",
-        HopVerdict::Inconclusive => "INCONCL",
+    // FAIL, a source→endpoint full-span loss, an absolute-latency breach, or a
+    // #68 endpoint-sequence gap/reorder) from an untrustworthy green (only a hop
+    // INCONCL: gates passed but too few single-copy samples). Both exit non-zero
+    // via `verdict_pass`; the label tells the operator which so an INCONCL reads as
+    // "need a longer/denser run", not "the pipeline broke". An unclean endpoint
+    // sequence is a hard FAIL (a real drop/reorder the tap-vs-tap diff missed), so
+    // it overrides an otherwise-INCONCL/Pass overall_v to FAIL.
+    let overall = if !endpoint_seq_pass {
+        "FAIL"
+    } else {
+        match overall_v {
+            HopVerdict::Pass => "PASS",
+            HopVerdict::Fail => "FAIL",
+            HopVerdict::Inconclusive => "INCONCL",
+        }
     };
     println!("VERDICT={overall} ARTIFACT={}", args.out);
 
