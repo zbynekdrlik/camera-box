@@ -1333,6 +1333,12 @@ static void async_tick(obs_source_t *source)
 	pthread_mutex_lock(&source->async_mutex);
 
 	if (deinterlacing_enabled(source)) {
+		/* camera-box #70: deinterlaced sources take this path and never reach
+		 * get_closest_frame, so they get neither the genlock preload gate nor
+		 * the audit counters. The genlock NDI camera sources are progressive
+		 * (deinterlacing off), so this is a non-issue in the production rig; if
+		 * a genlock source ever needs deinterlacing the gate must be added here
+		 * too. */
 		deinterlace_process_last_frame(source, sys_time);
 	} else {
 		if (source->cur_async_frame) {
@@ -4105,7 +4111,10 @@ void remove_async_frame(obs_source_t *source, struct obs_source_frame *frame)
  * rebuild to change depth), exactly like OBS_GENLOCK_WALL_CLOCK.
  */
 #define GENLOCK_PRELOAD_DEFAULT 1
-#define GENLOCK_PRELOAD_MAX 29 /* < MAX_ASYNC_FRAMES (30) so a steady queue never drains */
+/* The steady-state queue parks at preload+1, so the cap must keep preload+1 STRICTLY
+ * below MAX_ASYNC_FRAMES (30): a preload of 29 would steady at depth 30 == the cap,
+ * force-draining every refill and FREEZING the source. 28 -> steady depth 29 < 30. */
+#define GENLOCK_PRELOAD_MAX 28
 #define GENLOCK_AUDIT_LOG_INTERVAL_NS (5ULL * 1000 * 1000 * 1000) /* ~5 s */
 
 /* Pure decision: how deep a jitter reserve the genlock FIFO should hold, parsed
@@ -4159,12 +4168,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	source->genlock_last_log_ns = now_ns;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "overruns=%llu depth=%lu peak=%u preload=%u (#70)",
+	     "overruns=%llu depth=%zu peak=%u preload=%u (#70)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
-	     (unsigned long long)source->genlock_overruns, (unsigned long)source->async_frames.num,
+	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
 	     source->genlock_peak_depth, genlock_preload_frames());
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
@@ -4289,11 +4298,14 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, uint64_t sys_time)
 {
 	if (!source->async_frames.num) {
-		/* camera-box #70: an empty FIFO at a render tick is the most severe
-		 * underrun (the compositor repeats the last frame). ready_async_frame
-		 * is never reached when num==0, so count it here. Only after the FIFO
-		 * has started (last_frame_ts set) - a not-yet-active source isn't an
-		 * underrun, it just hasn't received its first frame. */
+		/* camera-box #70: an empty FIFO at a render tick is the worst underrun
+		 * (the compositor repeats the last frame). ready_async_frame is never
+		 * reached when num==0, so count it here. Only once the FIFO has started
+		 * (last_frame_ts set): a not-yet-active source isn't an underrun, it
+		 * just hasn't received its first frame. NB an overrun force-drain
+		 * (cache_video) resets last_frame_ts to 0, so the empty ticks right
+		 * after a drain are re-bootstrap, not counted as underruns - the
+		 * overrun counter already records that episode. */
 		if (source->genlock_fifo && source->last_frame_ts) {
 			source->genlock_underruns++;
 			genlock_audit_log(source, sys_time);

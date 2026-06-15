@@ -46,18 +46,26 @@ fn out_of_range_is_clamped_not_default() {
 }
 
 #[test]
-fn cap_is_below_max_async_frames() {
-    // MAX_ASYNC_FRAMES is 30 in libobs; a preload at/above it would mean the
-    // steady queue (preload+1) can never be reached without hitting the drain.
-    // Read the libobs literal from the vendored source so this stays honest if
-    // upstream ever changes the cap (rather than hard-coding 30 here too).
+fn steady_state_at_cap_stays_below_max_async_frames() {
+    // The real invariant: the steady-state queue parks at preload+1, which MUST
+    // stay strictly below libobs' MAX_ASYNC_FRAMES (30). At preload == cap, depth
+    // == cap+1; if that reaches MAX_ASYNC_FRAMES the FIFO force-drains every refill
+    // and the source FREEZES. This catches the off-by-one (cap=29 -> depth 30 ==
+    // MAX). Read the libobs literal from the vendored source so the bound tracks
+    // upstream instead of being hard-coded twice.
     const LIBOBS_MAX_ASYNC_FRAMES: u32 = 30;
-    assert!(
-        vendored_source::max_async_frames() == LIBOBS_MAX_ASYNC_FRAMES,
-        "libobs MAX_ASYNC_FRAMES changed from {LIBOBS_MAX_ASYNC_FRAMES}; \
-         re-check GENLOCK_PRELOAD_MAX bound"
+    assert_eq!(
+        vendored_source::max_async_frames(),
+        LIBOBS_MAX_ASYNC_FRAMES,
+        "libobs MAX_ASYNC_FRAMES changed; re-check the GENLOCK_PRELOAD_MAX bound"
     );
-    assert!(GENLOCK_PRELOAD_MAX < vendored_source::max_async_frames());
+    assert!(
+        steady_state_depth(GENLOCK_PRELOAD_MAX) < vendored_source::max_async_frames(),
+        "preload={GENLOCK_PRELOAD_MAX} steady-state depth {} reaches MAX_ASYNC_FRAMES \
+         {} -> the FIFO force-drains every refill and the source FREEZES. Lower the cap.",
+        steady_state_depth(GENLOCK_PRELOAD_MAX),
+        vendored_source::max_async_frames()
+    );
 }
 
 #[test]
@@ -122,7 +130,9 @@ mod vendored_source {
                     .split_whitespace()
                     .next()
                     .and_then(|t| t.parse::<u32>().ok())
-                    .unwrap_or_else(|| panic!("could not parse MAX_ASYNC_FRAMES from {OBS_SOURCE}"));
+                    .unwrap_or_else(|| {
+                        panic!("could not parse MAX_ASYNC_FRAMES from {OBS_SOURCE}")
+                    });
             }
         }
         panic!("MAX_ASYNC_FRAMES not found in {OBS_SOURCE}");

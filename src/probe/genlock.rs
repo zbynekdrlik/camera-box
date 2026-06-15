@@ -25,10 +25,11 @@
 /// (= one frame of latency per hop, the "1 frame per hop" the task calls for).
 pub const GENLOCK_PRELOAD_DEFAULT: u32 = 1;
 
-/// Hard cap on the reserve. Must stay strictly below libobs' `MAX_ASYNC_FRAMES`
-/// (30): the steady-state queue parks at `preload + 1`, so a `preload` at/above
-/// the cap could never reach steady state without triggering the force-drain.
-pub const GENLOCK_PRELOAD_MAX: u32 = 29;
+/// Hard cap on the reserve. The steady-state queue parks at `preload + 1`, which
+/// must stay STRICTLY below libobs' `MAX_ASYNC_FRAMES` (30): a `preload` of 29
+/// would steady at depth 30 == the cap, force-draining every refill and FREEZING
+/// the source. 28 ⇒ steady depth 29 < 30 — the highest safe reserve.
+pub const GENLOCK_PRELOAD_MAX: u32 = 28;
 
 /// Parse the `OBS_GENLOCK_PRELOAD_FRAMES` env value into a reserve depth.
 ///
