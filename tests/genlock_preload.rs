@@ -49,7 +49,15 @@ fn out_of_range_is_clamped_not_default() {
 fn cap_is_below_max_async_frames() {
     // MAX_ASYNC_FRAMES is 30 in libobs; a preload at/above it would mean the
     // steady queue (preload+1) can never be reached without hitting the drain.
-    assert!(GENLOCK_PRELOAD_MAX < 30);
+    // Read the libobs literal from the vendored source so this stays honest if
+    // upstream ever changes the cap (rather than hard-coding 30 here too).
+    const LIBOBS_MAX_ASYNC_FRAMES: u32 = 30;
+    assert!(
+        vendored_source::max_async_frames() == LIBOBS_MAX_ASYNC_FRAMES,
+        "libobs MAX_ASYNC_FRAMES changed from {LIBOBS_MAX_ASYNC_FRAMES}; \
+         re-check GENLOCK_PRELOAD_MAX bound"
+    );
+    assert!(GENLOCK_PRELOAD_MAX < vendored_source::max_async_frames());
 }
 
 #[test]
@@ -101,6 +109,24 @@ mod vendored_source {
 
     const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
     const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
+
+    /// Read the libobs `#define MAX_ASYNC_FRAMES <n>` literal from the vendored
+    /// source so the preload-cap invariant tracks upstream instead of being
+    /// hard-coded twice.
+    pub fn max_async_frames() -> u32 {
+        let src = vendor_file(OBS_SOURCE);
+        for line in src.lines() {
+            let l = line.trim();
+            if let Some(rest) = l.strip_prefix("#define MAX_ASYNC_FRAMES ") {
+                return rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|t| t.parse::<u32>().ok())
+                    .unwrap_or_else(|| panic!("could not parse MAX_ASYNC_FRAMES from {OBS_SOURCE}"));
+            }
+        }
+        panic!("MAX_ASYNC_FRAMES not found in {OBS_SOURCE}");
+    }
 
     #[test]
     fn preload_env_is_read() {

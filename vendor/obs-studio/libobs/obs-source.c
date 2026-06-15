@@ -17,6 +17,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdlib.h> /* camera-box #70: getenv/strtol for OBS_GENLOCK_PRELOAD_FRAMES */
 
 #include "media-io/format-conversion.h"
 #include "media-io/video-frame.h"
@@ -3509,6 +3510,12 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 	pthread_mutex_lock(&source->async_mutex);
 
 	if (source->async_frames.num >= MAX_ASYNC_FRAMES) {
+		/* camera-box #70: the FIFO hit the hard cap and is force-drained.
+		 * For a genlock source this is an overrun - the consumer fell behind
+		 * the producer (or the preload was set too deep). Count it; the
+		 * audit log surfaces it so the preload depth can be tuned. */
+		if (source->genlock_fifo)
+			source->genlock_overruns++;
 		free_async_cache(source);
 		source->last_frame_ts = 0;
 		pthread_mutex_unlock(&source->async_mutex);
@@ -3587,6 +3594,8 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		} else {
 			da_push_back(source->async_frames, &output);
 			source->async_active = true;
+			if (source->genlock_fifo)
+				source->genlock_frames_received++; /* #70 audit */
 		}
 	}
 	pthread_mutex_unlock(&source->async_mutex);
@@ -4084,6 +4093,82 @@ void remove_async_frame(obs_source_t *source, struct obs_source_frame *frame)
 
 /* #define DEBUG_ASYNC_FRAMES 1 */
 
+/* ---- genlock FIFO preload + audit (camera-box #70) -----------------------
+ * The #42 genlock FIFO consumed exactly one queued frame per wall-clock render
+ * tick with ZERO slack: any NDI arrival jitter left the queue empty at the next
+ * tick (underrun) -> a dropped/repeated frame. Measured ~0.38%/frame loss on
+ * each OBS hop on the production rig (camera-box #68/#69 QR instrument). The fix
+ * keeps a small jitter buffer: hold consumption until the queue exceeds
+ * `genlock_preload` frames, then consume one per tick. preload=1 -> one frame of
+ * reserve per genlock source = one frame of latency per hop, in exchange for
+ * absorbing one tick of jitter. Tunable at OBS launch via the env var (no
+ * rebuild to change depth), exactly like OBS_GENLOCK_WALL_CLOCK.
+ */
+#define GENLOCK_PRELOAD_DEFAULT 1
+#define GENLOCK_PRELOAD_MAX 29 /* < MAX_ASYNC_FRAMES (30) so a steady queue never drains */
+#define GENLOCK_AUDIT_LOG_INTERVAL_NS (5ULL * 1000 * 1000 * 1000) /* ~5 s */
+
+/* Pure decision: how deep a jitter reserve the genlock FIFO should hold, parsed
+ * from the OBS_GENLOCK_PRELOAD_FRAMES env value. NULL/empty/invalid -> default;
+ * clamped to [0, GENLOCK_PRELOAD_MAX]. preload=0 reproduces the old zero-slack
+ * behavior (consume whenever num>0). Kept as a tiny standalone function so the
+ * camera-box harness can mirror & unit-test the clamp (tests/genlock_preload.rs). */
+static uint32_t genlock_parse_preload(const char *env)
+{
+	if (!env || !*env)
+		return GENLOCK_PRELOAD_DEFAULT;
+	char *end = NULL;
+	long v = strtol(env, &end, 10);
+	if (end == env || *end != '\0' || v < 0)
+		return GENLOCK_PRELOAD_DEFAULT;
+	if (v > GENLOCK_PRELOAD_MAX)
+		return GENLOCK_PRELOAD_MAX;
+	return (uint32_t)v;
+}
+
+static uint32_t genlock_preload_frames(void)
+{
+	static int preload = -1;
+	if (preload == -1) {
+		preload = (int)genlock_parse_preload(getenv("OBS_GENLOCK_PRELOAD_FRAMES"));
+		blog(LOG_INFO,
+		     "genlock: FIFO preload reserve = %d frame(s) "
+		     "(OBS_GENLOCK_PRELOAD_FRAMES) -- jitter buffer per genlock source (#70)",
+		     preload);
+	}
+	return (uint32_t)preload;
+}
+
+/* Pure decision mirrored by the unit test: at a render tick, consume one frame
+ * only once the queue is deeper than the preload reserve. queue_depth<=preload
+ * (incl. 0) -> hold (underrun) so the reserve refills. */
+static inline bool genlock_should_consume(size_t queue_depth, uint32_t preload)
+{
+	return queue_depth > (size_t)preload;
+}
+
+/* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
+ * visible in the OBS log before AND after the fix (the verification evidence).
+ * `now_ns` is the monotonic render-tick stamp (obs->video.video_time). */
+static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
+{
+	if (source->genlock_last_log_ns == 0)
+		source->genlock_last_log_ns = now_ns;
+	if (now_ns - source->genlock_last_log_ns < GENLOCK_AUDIT_LOG_INTERVAL_NS)
+		return;
+	source->genlock_last_log_ns = now_ns;
+	blog(LOG_INFO,
+	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
+	     "overruns=%llu depth=%lu peak=%u preload=%u (#70)",
+	     source->context.name ? source->context.name : "?",
+	     (unsigned long long)source->genlock_frames_received,
+	     (unsigned long long)source->genlock_frames_consumed,
+	     (unsigned long long)source->genlock_underruns,
+	     (unsigned long long)source->genlock_overruns, (unsigned long)source->async_frames.num,
+	     source->genlock_peak_depth, genlock_preload_frames());
+}
+/* ---- end genlock FIFO preload + audit ------------------------------------ */
+
 static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 {
 	struct obs_source_frame *next_frame = source->async_frames.array[0];
@@ -4093,12 +4178,31 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 	uint64_t frame_offset = 0;
 
 	if (source->genlock_fifo) {
-		/* camera-box #42: pure FIFO - exactly one queued frame per render
-		 * tick, no timestamp cursor, nothing erased ahead. With the
-		 * wall-clock-slaved tick the source and compositor rates match,
-		 * so the queue depth stays constant and no frame is ever lost
-		 * or duplicated in steady state. */
+		/* camera-box #42 + #70: pure FIFO with a preload jitter reserve.
+		 * Consume exactly one queued frame per render tick, but only once
+		 * the queue is deeper than the preload reserve - so a single tick
+		 * of NDI arrival jitter no longer empties the FIFO (underrun). The
+		 * audit counters record received/consumed/underruns/overruns and
+		 * the queue high-water mark; they are logged periodically as the
+		 * before/after evidence that underruns drop to zero. */
+		const uint32_t preload = genlock_preload_frames();
+		const uint64_t now_ns = sys_time; /* monotonic render-tick stamp */
+
+		if (source->async_frames.num > source->genlock_peak_depth)
+			source->genlock_peak_depth = (uint32_t)source->async_frames.num;
+
+		if (!genlock_should_consume(source->async_frames.num, preload)) {
+			/* hold: not enough reserve yet - this tick repeats the
+			 * last frame so the buffer can refill. This is the
+			 * underrun the zero-slack FIFO suffered on every jitter. */
+			source->genlock_underruns++;
+			genlock_audit_log(source, now_ns);
+			return false;
+		}
+
+		source->genlock_frames_consumed++;
 		source->last_frame_ts = next_frame->timestamp;
+		genlock_audit_log(source, now_ns);
 		return true;
 	}
 
@@ -4184,8 +4288,18 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 
 static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, uint64_t sys_time)
 {
-	if (!source->async_frames.num)
+	if (!source->async_frames.num) {
+		/* camera-box #70: an empty FIFO at a render tick is the most severe
+		 * underrun (the compositor repeats the last frame). ready_async_frame
+		 * is never reached when num==0, so count it here. Only after the FIFO
+		 * has started (last_frame_ts set) - a not-yet-active source isn't an
+		 * underrun, it just hasn't received its first frame. */
+		if (source->genlock_fifo && source->last_frame_ts) {
+			source->genlock_underruns++;
+			genlock_audit_log(source, sys_time);
+		}
 		return NULL;
+	}
 
 	if (!source->last_frame_ts || ready_async_frame(source, sys_time)) {
 		struct obs_source_frame *frame = source->async_frames.array[0];

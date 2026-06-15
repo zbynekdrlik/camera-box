@@ -908,6 +908,18 @@ struct obs_source {
 	bool async_unbuffered;
 	bool async_decoupled;
 	bool genlock_fifo; /* camera-box #42: consume exactly one queued frame per render tick */
+	/* camera-box #70: genlock FIFO preload reserve + audit counters. The FIFO
+	 * holds `genlock_preload` frames of jitter buffer (set once at startup from
+	 * OBS_GENLOCK_PRELOAD_FRAMES) and consumes one per tick only once the queue
+	 * exceeds that depth, so NDI arrival jitter no longer empties it (underrun =
+	 * a dropped/repeated frame). The counters are the audit evidence that
+	 * underruns happen before the fix and stop after. */
+	uint64_t genlock_frames_received;  /* video frames queued onto async_frames */
+	uint64_t genlock_frames_consumed;  /* frames handed to the compositor (one per tick) */
+	uint64_t genlock_underruns;        /* consume ticks where the FIFO was at/below preload */
+	uint64_t genlock_overruns;         /* MAX_ASYNC_FRAMES drains (queue forced empty) */
+	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
+	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;
