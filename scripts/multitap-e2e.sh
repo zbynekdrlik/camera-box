@@ -43,7 +43,30 @@ OUT="${OUT:-/tmp/multitap-probe.json}"
 # default): the 30 fps NDI taps decode it 100% (decode_failed=0), so no shrink is
 # needed; smaller would only risk robustness across the NDI/OBS compression hops.
 PAINT_FPS="${PAINT_FPS:-30}"
+# #7 ABSOLUTE end-to-end latency: stamp gen_ts (painter, on the camera) and
+# recv_ts (taps, on dev1) on the DanteSync-disciplined CLOCK_REALTIME (strih =
+# master) so the source→endpoint latency recv(endpoint) − gen(source) is a true
+# absolute number, not a per-hop relative delta. ON by default — the cluster is
+# clock-synced (#8 CLOSED; scripts/clock-offset-guard.sh verifies the offset
+# stays within ±2 ms). Set WALL_CLOCK=0 to fall back to Phase-2 relative-latency
+# only. Per-hop relative latency is correct either way (both taps one domain).
+WALL_CLOCK="${WALL_CLOCK:-1}"
+# Resolved on dev1 to a literal flag, then interpolated into the (dev1-expanded)
+# remote painter command and the local tap command — never evaluated remotely.
+[ "$WALL_CLOCK" = "1" ] && PAINT_WALL_FLAG="--wall-clock" || PAINT_WALL_FLAG=""
+# Optional hard gate (ms) on the absolute source→endpoint p99. Requires WALL_CLOCK
+# (multitap-probe bails otherwise). Empty ⇒ absolute latency is report-only (still
+# WRITTEN to the artifact). Baseline with a report-only run, then ratchet.
+MAX_ABS_LATENCY="${MAX_ABS_LATENCY:-}"
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
+
+# Pre-flight: when measuring absolute latency, the gen/recv stamps are only
+# comparable if the cluster wall clocks are synced. Fail loudly up front (rather
+# than emitting a meaningless absolute number) if the source camera has drifted.
+if [ "$WALL_CLOCK" = "1" ]; then
+  echo "[0/5] verify cluster clock sync for absolute latency (#7/#8): ${CAM:-cam2}"
+  CLOCK_GUARD_TARGETS="${CAM:-cam2}=$CAM_IP" "$HERE/clock-offset-guard.sh" --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
+fi
 
 # shellcheck disable=SC2317  # cleanup() is invoked indirectly via the EXIT/HUP/INT/TERM trap
 cleanup() {
@@ -87,7 +110,8 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
    sleep 4; \
-   (nohup /tmp/frame-probe --paint-only --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+   (nohup /tmp/frame-probe --paint-only $PAINT_WALL_FLAG \
+      --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
       >/tmp/painter.log 2>&1 &)"
 # NOTE: camera-box is started WITHOUT --display so /dev/fb0 is free for the
 # painter; it still runs capture->NDI, carrying the QR frames onto the network.
@@ -153,6 +177,11 @@ MIN_SC_STRIH="${MIN_SC_STRIH-100}"
 MIN_SC_STREAM="${MIN_SC_STREAM-100}"
 [ -n "$MIN_SC_STRIH" ]  && GATE_ARGS+=(--min-single-copy "strih=$MIN_SC_STRIH")
 [ -n "$MIN_SC_STREAM" ] && GATE_ARGS+=(--min-single-copy "stream=$MIN_SC_STREAM")
+
+# #7 absolute end-to-end latency: tap on the wall clock (matches the painter) so
+# the source→endpoint absolute latency is sound, and optionally gate its p99.
+[ "$WALL_CLOCK" = "1" ] && GATE_ARGS+=(--wall-clock)
+[ -n "$MAX_ABS_LATENCY" ] && GATE_ARGS+=(--max-abs-latency-ms "$MAX_ABS_LATENCY")
 
 # Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
 [ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")
