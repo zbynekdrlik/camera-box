@@ -48,8 +48,6 @@ pub const GENLOCK_PRELOAD_MAX: u32 = 28;
 /// any in-range or overflowing non-negative integer ⇒ clamped to
 /// [`GENLOCK_PRELOAD_MAX`]; `0` is valid (reproduces the old zero-slack FIFO).
 pub fn parse_preload(env: Option<&str>) -> u32 {
-    use std::num::IntErrorKind;
-
     let Some(raw) = env else {
         return GENLOCK_PRELOAD_DEFAULT;
     };
@@ -67,11 +65,12 @@ pub fn parse_preload(env: Option<&str>) -> u32 {
     }
     match digits.parse::<i64>() {
         Ok(v) => v.min(GENLOCK_PRELOAD_MAX as i64) as u32,
-        // All chars are digits, so the only parse error is positive overflow →
-        // strtol would saturate to LONG_MAX → clamp to MAX. Any other error kind
-        // is impossible here, but fall to default defensively.
-        Err(e) if *e.kind() == IntErrorKind::PosOverflow => GENLOCK_PRELOAD_MAX,
-        Err(_) => GENLOCK_PRELOAD_DEFAULT,
+        // `digits` is non-empty and all-ASCII-digit (no sign), so the ONLY
+        // reachable parse error is positive overflow — strtol saturates that to
+        // LONG_MAX, which then hits the `> MAX` clamp ⇒ MAX. No other error kind
+        // can occur, so there is no separate default-on-error arm (a guarded arm
+        // here would leave an equivalent, untestable mutant).
+        Err(_) => GENLOCK_PRELOAD_MAX,
     }
 }
 
