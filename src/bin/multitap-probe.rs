@@ -423,7 +423,16 @@ fn main() -> Result<()> {
             decoded: r.observed.lock().unwrap().len() as u64,
             // paint→this-node-emit on the shared DanteSync clock (over the trimmed,
             // steady-state observations). Adjacent taps' difference = per-hop.
-            abs_emit_latency: abs_emit_latency(obs),
+            // ONLY valid with --wall-clock: it differences gen_ts (painter stamp)
+            // against node_emit_tc (NDI epoch-100ns). Without --wall-clock gen_ts is
+            // dev1-monotonic ns, so the difference is meaningless (and a near-zero
+            // gen_ts at run start would also trip the 0-is-unstamped sentinel) — emit
+            // None there rather than a garbage number.
+            abs_emit_latency: if args.wall_clock {
+                abs_emit_latency(obs)
+            } else {
+                None
+            },
         })
         .collect();
 
@@ -604,10 +613,28 @@ fn main() -> Result<()> {
             h.single_copy_total,
             sc_pct,
         );
+        // TRUSTWORTHY first: per-node EMIT timecode difference (true transit; only
+        // valid between nodes that stamp the SAME timecode basis — OBS↔OBS today,
+        // see #76 for cam→OBS).
+        if let Some(l) = &h.emit_latency {
+            println!(
+                "  EMIT_LATENCY_MS min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={}) [per-node emit, trustworthy OBS↔OBS]",
+                l.min_ms, l.mean_ms, l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms, l.samples
+            );
+        }
         if let Some(l) = &h.latency {
             println!(
-                "  REL_LATENCY_MS min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={})",
+                "  REL_LATENCY_MS  min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={}) [dev1 recv-recv, NOT trustworthy — buffer-jitter, can go negative]",
                 l.min_ms, l.mean_ms, l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms, l.samples
+            );
+        }
+    }
+    // Per-tap paint→node-emit (gen_ts-anchored; trustworthy with --wall-clock).
+    for t in &report.taps {
+        if let Some(l) = &t.abs_emit_latency {
+            println!(
+                "TAP {} ABS_EMIT_MS p50={:.1} p99={:.1} max={:.1} (n={}) [paint→{}-emit on shared clock]",
+                t.name, l.p50_ms, l.p99_ms, l.max_ms, l.samples, t.name
             );
         }
     }

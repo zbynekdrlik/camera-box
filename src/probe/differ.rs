@@ -239,6 +239,12 @@ pub fn per_hop_emit_latency(
 /// per-hop latency is the difference of two adjacent taps' stats here. Skips
 /// frames with no emit stamp (`node_emit_tc_ns == 0`) or no gen stamp
 /// (`gen_ts_ns == 0`); `None` when none qualify.
+///
+/// REQUIRES the wall-clock domain (`gen_ts` stamped on CLOCK_REALTIME via the
+/// painter's `--wall-clock`): `node_emit_tc_ns` is always NDI epoch-100ns, so a
+/// monotonic `gen_ts` (the non-wall-clock path) would make the difference
+/// meaningless. Callers gate this on `--wall-clock` (the `0`-is-unstamped sentinel
+/// is also only safe for the huge epoch-domain stamps, never a monotonic ~0).
 pub fn abs_emit_latency(observed: &[Observed]) -> Option<LatencyStats> {
     let deltas: Vec<f64> = observed
         .iter()
