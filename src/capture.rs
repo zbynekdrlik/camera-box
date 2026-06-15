@@ -60,6 +60,18 @@ pub fn frame_rate_from_interval(interval_numerator: u32, interval_denominator: u
     }
 }
 
+/// Number of frames the CAPTURE DEVICE silently dropped between two consecutive
+/// delivered buffers, from their V4L2 `sequence` numbers (the kernel increments
+/// `sequence` once per CAPTURED frame, skipping the value of any frame the driver
+/// could not deliver). Consecutive frames (`cur == prev + 1`) ⇒ 0. A jump ⇒ the
+/// skipped count. `u32` wrapping is handled (`wrapping_sub`), and `cur == prev`
+/// (a duplicate/no-advance, never expected) ⇒ 0. This is capture-card loss —
+/// distinct from genlock-pipeline loss — that the QR instrument was previously
+/// blind to (the `sequence` was discarded at the `stream.next()` call sites).
+pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
+    cur.wrapping_sub(prev).saturating_sub(1)
+}
+
 /// V4L2 video capture wrapper
 pub struct VideoCapture {
     stream: Stream<'static>,
@@ -68,6 +80,11 @@ pub struct VideoCapture {
     fourcc: FourCC,
     stride: u32,
     frame_rate: FrameRate,
+    /// V4L2 `sequence` of the last delivered buffer, for capture-drop detection
+    /// ([`sequence_gap`]). `None` until the first frame.
+    last_sequence: Option<u32>,
+    /// Cumulative count of frames the capture device dropped over this stream's life.
+    dropped_captures: u64,
 }
 
 impl VideoCapture {
@@ -144,16 +161,48 @@ impl VideoCapture {
             fourcc,
             stride,
             frame_rate,
+            last_sequence: None,
+            dropped_captures: 0,
         })
+    }
+
+    /// Record a delivered buffer's V4L2 `sequence`, accounting for any frames the
+    /// capture device dropped since the previous buffer ([`sequence_gap`]). Logs
+    /// each gap with the surrounding sequence numbers and keeps a running total.
+    fn record_sequence(&mut self, seq: u32) {
+        if let Some(prev) = self.last_sequence {
+            let gap = sequence_gap(prev, seq);
+            if gap > 0 {
+                self.dropped_captures += gap as u64;
+                tracing::warn!(
+                    "capture device dropped {} frame(s): v4l2 sequence {} -> {} (total dropped {})",
+                    gap,
+                    prev,
+                    seq,
+                    self.dropped_captures
+                );
+            }
+        }
+        self.last_sequence = Some(seq);
+    }
+
+    /// Total frames the capture device has dropped over this stream's life
+    /// (cumulative [`sequence_gap`]). Capture-card loss, not pipeline loss.
+    #[allow(dead_code)]
+    pub fn dropped_captures(&self) -> u64 {
+        self.dropped_captures
     }
 
     /// Capture next frame (blocking) - COPIES DATA
     #[allow(dead_code)]
     pub fn next_frame(&mut self) -> Result<Frame> {
-        let (buffer, _metadata) = self.stream.next()?;
+        let (buffer, metadata) = self.stream.next()?;
+        let seq = metadata.sequence;
 
         // Copy frame data (zero-copy would require unsafe lifetime tricks)
         let data = buffer.to_vec();
+        // `buffer`/`metadata` borrow self.stream; record AFTER that borrow ends.
+        self.record_sequence(seq);
 
         Ok(Frame {
             data,
@@ -172,7 +221,8 @@ impl VideoCapture {
     where
         F: FnMut(&[u8], FrameInfo),
     {
-        let (buffer, _metadata) = self.stream.next()?;
+        let (buffer, metadata) = self.stream.next()?;
+        let seq = metadata.sequence;
 
         let info = FrameInfo {
             width: self.width,
@@ -184,6 +234,10 @@ impl VideoCapture {
         // Zero-copy: pass buffer slice directly to callback
         #[allow(clippy::needless_borrow)]
         callback(&buffer, info);
+
+        // `buffer`/`metadata` borrow self.stream; record AFTER that borrow ends
+        // (after the callback) so the capture-drop accounting can take &mut self.
+        self.record_sequence(seq);
 
         // Buffer automatically requeued when it goes out of scope
         Ok(())
@@ -352,5 +406,30 @@ mod tests {
         let debug = format!("{:?}", rate);
         assert!(debug.contains("FrameRate"));
         assert!(debug.contains("30"));
+    }
+
+    #[test]
+    fn sequence_gap_consecutive_is_zero() {
+        assert_eq!(sequence_gap(10, 11), 0);
+        assert_eq!(sequence_gap(0, 1), 0);
+    }
+
+    #[test]
+    fn sequence_gap_counts_skipped_frames() {
+        assert_eq!(sequence_gap(10, 12), 1); // frame 11 dropped
+        assert_eq!(sequence_gap(10, 15), 4); // frames 11..14 dropped
+    }
+
+    #[test]
+    fn sequence_gap_handles_u32_wrap() {
+        // wraparound at u32::MAX -> 0 with no intervening drop is consecutive.
+        assert_eq!(sequence_gap(u32::MAX, 0), 0);
+        assert_eq!(sequence_gap(u32::MAX - 1, 1), 2); // MAX and 0 dropped
+    }
+
+    #[test]
+    fn sequence_gap_same_or_no_advance_is_zero() {
+        // A duplicate/no-advance (never expected) must not report a giant gap.
+        assert_eq!(sequence_gap(10, 10), 0);
     }
 }
