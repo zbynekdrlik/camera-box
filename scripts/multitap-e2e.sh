@@ -110,17 +110,24 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # self-match the remote shell) and WAIT until /dev/video0 is actually free; uvcvideo
 # teardown completes asynchronously after the process dies, and a fixed sleep races it
 # into EBUSY on the manual start. (\$-escaped so the loop runs REMOTELY, not on dev1.)
+# #66 GENLOCK env: the deployed camera-box service gets CAMERA_BOX_GENLOCK_FPS=30 from its
+# systemd drop-in (#50); the manual launch here MUST carry the same env (GENLOCK_FPS, dev1-
+# expanded to a literal, single source of truth in camera-set.sh) or the sender free-runs at
+# the ~60fps capture rate (no decimation, no wall-clock external pacing) and strih's 30fps
+# genlock FIFO drops ~half the frames / renders black — the ~49% cam→strih loss this harness
+# falsely showed. With the env present, cam→strih is 0-loss from t+0s (no settling transient).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
   "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; \
    pkill -x camera-box 2>/dev/null; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-   (NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
+   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
    sleep 4; \
    (nohup /tmp/frame-probe --paint-only $PAINT_WALL_FLAG \
       --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
       >/tmp/painter.log 2>&1 &)"
 # NOTE: camera-box is started WITHOUT --display so /dev/fb0 is free for the
-# painter; it still runs capture->NDI, carrying the QR frames onto the network.
+# painter; it still runs capture->NDI (genlock-decimated to $GENLOCK_FPS), carrying the QR
+# frames onto the network.
 # Painter outlasts the tap window by +40s because OBS setup ([3]) now runs AFTER
 # the painter starts and consumes a few seconds before the taps begin.
 sleep 3  # let the fresh "CAM2 (usb)" NDI sender become discoverable on the LAN

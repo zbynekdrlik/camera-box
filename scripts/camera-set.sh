@@ -22,6 +22,17 @@
 # subset, e.g. `CAMERA_SET="cam1 cam3 cam4"`. Defaults to the four cameras.
 CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4}"
 
+# GENLOCK_FPS = the genlock/broadcast emit rate the harness starts the manual camera-box
+# sender at, so it genlock-decimates EXACTLY like the deployed camera-box service (#66). The
+# deployed devices get this from the systemd drop-in
+# `/etc/systemd/system/camera-box.service.d/genlock.conf` = `CAMERA_BOX_GENLOCK_FPS=30` (#50);
+# the harness must mirror it or the manually-launched sender free-runs at the ~60fps capture
+# rate (no decimation, no wall-clock external pacing) and the downstream 30fps genlock FIFO in
+# OBS (one frame per render tick) drops ~half the frames / renders black. Single source of
+# truth, env-overridable (set GENLOCK_FPS to match the live drop-in if the broadcast rate ever
+# changes, e.g. the #11 60fps step). Default 30 = the current live rate.
+GENLOCK_FPS="${GENLOCK_FPS:-30}"
+
 # camera_resolve <name>
 # On success: sets CAMERA_NAME / CAMERA_IP / CAMERA_SOURCE and returns 0.
 # On an unknown/empty name: prints an error to stderr and returns 1 (fail loudly — never
