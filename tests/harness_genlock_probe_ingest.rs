@@ -6,20 +6,17 @@
 //!
 //! The genlock build runs a wall-clock-slaved render tick (`OBS_GENLOCK_WALL_CLOCK=1`)
 //! AND a per-source pure-FIFO consumption path (`obs_source_set_genlock_fifo`, camera-box
-//! #42). The PRODUCTION camera inputs (`NDI cam1/3/5`) run with:
-//!   - `genlock_fifo = ENABLED`  (the FIFO bypass: exactly one queued frame per render tick)
-//!   - `ndi_sync     = 1`        (PROP_SYNC_NDI_TIMESTAMP — the NDI *receiver*-side
-//!                                timestamp, monotonic on the receiving box's clock)
-//! …and they render perfectly.
+//! #42). The PRODUCTION camera inputs (`NDI cam1/3/5`) run with `genlock_fifo` ENABLED (the
+//! FIFO bypass: exactly one queued frame per render tick) and `ndi_sync` = 1
+//! (PROP_SYNC_NDI_TIMESTAMP, the NDI receiver-side timestamp, monotonic on the receiving
+//! box's clock) — and they render perfectly.
 //!
 //! `obs_phase2.py` created/updated the probe input (`phase2-probe-src`) with ONLY
-//! `ndi_source_name` + `ndi_bw_mode`, so it inherited the DistroAV defaults:
-//!   - `genlock_fifo = disabled`  (log: "genlock: FIFO frame consumption disabled for
-//!                                 source 'phase2-probe-src'")
-//!   - `ndi_sync     = 2`         (PROP_SYNC_NDI_SOURCE_TIMECODE — the *sender*-supplied
-//!                                timecode; the camera-box sender stamps a wall-clock-epoch
-//!                                boundary timecode in 100ns, src/ndi.rs:792, while
-//!                                `timestamp` is left 0).
+//! `ndi_source_name` + `ndi_bw_mode`, so it inherited the DistroAV defaults `genlock_fifo`
+//! disabled (log: "genlock: FIFO frame consumption disabled for source 'phase2-probe-src'")
+//! and `ndi_sync` = 2 (PROP_SYNC_NDI_SOURCE_TIMECODE, the sender-supplied timecode; the
+//! camera-box sender stamps a wall-clock-epoch boundary timecode in 100ns, src/ndi.rs, while
+//! `timestamp` is left 0).
 //!
 //! With FIFO disabled the probe takes the normal async timestamp-cursor path, which advances
 //! `last_frame_ts` by `sys_offset` derived from `obs->video.video_time` (the MONOTONIC
