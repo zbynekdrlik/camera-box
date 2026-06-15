@@ -79,20 +79,26 @@ fn phase2_probe_input_uses_ndi_receiver_timestamp_sync() {
 }
 
 /// Both the CreateInput path (first run) and the SetInputSettings re-point path (reuse, #22)
-/// must carry the genlock settings — otherwise a reused dormant input keeps the old black
-/// config on the next run. Assert the genlock keys appear at least twice (create + re-point).
+/// must apply the genlock probe settings — otherwise a reused dormant input keeps the old
+/// black config on the next run. The settings are kept DRY in one `_PROBE_NDI_SETTINGS`
+/// dict that is spread (`**_PROBE_NDI_SETTINGS`) into BOTH call sites; assert that.
 #[test]
 fn phase2_probe_genlock_config_applied_on_create_and_reuse() {
     let py = obs_py();
     assert!(
-        py.matches("\"genlock_fifo\": True").count() >= 2,
-        "#63: genlock_fifo=True must be applied both when the probe input is first CREATED \
-         and when an existing dormant input is RE-POINTED (reuse path, #22) — otherwise a \
-         reused input keeps its old (black) genlock-disabled config on the next run."
+        py.contains("_PROBE_NDI_SETTINGS = {"),
+        "#63: the probe genlock NDI settings (genlock_fifo + ndi_sync) must live in one \
+         shared _PROBE_NDI_SETTINGS dict so create and reuse can't drift apart."
+    );
+    // The genlock-critical keys must be in that shared dict (so both paths get them).
+    assert!(
+        py.contains("\"genlock_fifo\": True") && py.contains("\"ndi_sync\": 1"),
+        "#63: _PROBE_NDI_SETTINGS must carry genlock_fifo=True and ndi_sync=1."
     );
     assert!(
-        py.matches("\"ndi_sync\": 1").count() >= 2,
-        "#63: ndi_sync=1 must be applied on BOTH the create and the re-point paths so a \
-         reused dormant probe input never falls back to the black NDI_SOURCE_TIMECODE sync."
+        py.matches("**_PROBE_NDI_SETTINGS").count() >= 2,
+        "#63: _PROBE_NDI_SETTINGS must be spread into BOTH the CreateInput path and the \
+         SetInputSettings re-point (reuse) path — otherwise a reused dormant probe input \
+         keeps its old (black) genlock-disabled config on the next run."
     );
 }
