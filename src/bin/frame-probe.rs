@@ -61,6 +61,15 @@ struct Args {
     /// camera box in Phase 2 (taps run on dev1).
     #[arg(long, default_value_t = false)]
     paint_only: bool,
+    /// Stamp each frame's `gen_ts_ns` on CLOCK_REALTIME (the DanteSync-disciplined
+    /// wall clock) instead of this process's monotonic clock. Set this for the #7
+    /// multi-node ABSOLUTE end-to-end latency path (paint-only on the camera; the
+    /// dev1 endpoint tap runs `multitap-probe --wall-clock` so recv − gen is a
+    /// true absolute latency). Leave OFF for the Phase-1 single-box loopback,
+    /// where painter+reader share one process clock. Requires the cluster to be
+    /// clock-synced (verify with scripts/clock-offset-guard.sh).
+    #[arg(long, default_value_t = false)]
+    wall_clock: bool,
     /// Paint QR frames DIRECTLY into an NDI sender with this name (no
     /// framebuffer, no capture hardware) at an exact --paint-fps. The
     /// software-only source for genlock validation (#42) and the OBS-bypass
@@ -87,6 +96,16 @@ fn main() -> Result<()> {
             "--settle-ms ({}) must be less than the run duration ({} s) — otherwise no frames are tested",
             args.settle_ms,
             args.duration_secs
+        );
+    }
+    // --wall-clock only affects the painted gen_ts (paint-only / synth-ndi). The
+    // Phase-1 loopback `run()` is forced monotonic (painter+reader share one
+    // process clock), so --wall-clock there is silently inert — bail rather than
+    // let a user believe they enabled wall-clock stamping when they did not.
+    if args.wall_clock && !args.paint_only && args.synth_ndi.is_none() {
+        anyhow::bail!(
+            "--wall-clock only applies with --paint-only or --synth-ndi (the multi-node #7 \
+             absolute-latency path); the single-box loopback run is always monotonic"
         );
     }
     let mode = match args.mode.as_str() {
@@ -135,6 +154,7 @@ fn main() -> Result<()> {
         settle_ms: args.settle_ms,
         max_p99_latency_ms: args.max_p99_latency_ms,
         max_freeze_periods_gate: args.max_freeze_periods,
+        wall_clock: args.wall_clock,
     };
 
     if let Some(name) = args.synth_ndi.as_deref() {
@@ -259,7 +279,9 @@ fn synth_ndi_paint(name: &str, cfg: &camera_box::probe::run::RunConfig) -> Resul
         let payload = Payload {
             run_id: cfg.run_id,
             frame_id,
-            gen_ts_ns: start.elapsed().as_nanos() as i64,
+            // Wall-clock gen_ts (#7) when requested so a dev1 endpoint tap's
+            // wall-clock recv − this gen is true absolute latency; else monotonic.
+            gen_ts_ns: camera_box::probe::clock_ns(start, cfg.wall_clock),
         };
         let bgra = render_qr_bgra(&payload, w, h, cfg.qr_size);
         bgra_gray_to_uyvy(&bgra, &mut uyvy);

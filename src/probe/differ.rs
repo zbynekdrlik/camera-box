@@ -221,6 +221,175 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     }
 }
 
+/// #7 Phase 3: the HEADLINE source→endpoint aggregate. Unlike a chain of
+/// adjacent `diff_hop`s, this differences the SOURCE tap directly against the
+/// final ENDPOINT tap, so the number is "did every frame the source tap saw
+/// reach the last endpoint", not a sum of per-hop diffs that could each look
+/// clean while the chain as a whole lost a frame (a drop at hop A whose id is
+/// masked by oversample on the next hop but is genuinely absent end-to-end).
+///
+/// The full span is itself just a hop (source = upstream, endpoint = downstream),
+/// so its verdict obeys the SAME contract as every other hop: strict zero-loss by
+/// default, the documented single-copy bound when `max_loss_pct` is set, the
+/// `min_frames` non-vacuous floor, and the `min_single_copy` INCONCL guard (#29).
+/// This keeps the headline consistent with the per-hop diffs and, critically,
+/// makes the documented-loss escape hatch (`--max-loss-pct`) apply end-to-end
+/// instead of a strict full-span gate silently overriding a deliberately-relaxed
+/// per-hop budget.
+#[derive(Debug, Clone, Serialize)]
+pub struct FullSpanReport {
+    /// Unique source-emitted ids decoded at the source tap.
+    pub source_unique: usize,
+    /// Unique ids decoded at the final endpoint tap.
+    pub endpoint_unique: usize,
+    /// Source ids absent at the endpoint, clipped to the endpoint's active span
+    /// (the same start/stop-skew handling as `diff_hop` — a frame the endpoint
+    /// tap had no chance to see before its first or after its last decode is tap
+    /// skew, not a chain drop). A real mid-stream loss still lies inside [lo,hi].
+    pub dropped_ids: Vec<u32>,
+    /// Source→endpoint single-copy (oversample-independent) frames within the span.
+    pub single_copy_total: usize,
+    /// Of `single_copy_total`, how many are absent at the endpoint.
+    pub single_copy_dropped: usize,
+    /// The full-span verdict, computed by `diff_hop` so it honours the SAME
+    /// loss/min_frames/min_single_copy contract as the per-hop gates. `is_pass()`
+    /// is the headline "every source frame reached the endpoint" certification.
+    pub verdict: HopVerdict,
+}
+
+/// Bounds for the full-span (source→endpoint) gate. Mirrors the relevant
+/// `diff_hop` knobs so the headline obeys the same contract; defaults (`None` /
+/// `0`) reproduce strict zero-loss with no INCONCL guard.
+pub struct FullSpanBounds {
+    /// Non-vacuous floor: a source or endpoint tap with fewer than this many
+    /// run-id frames FAILS rather than certifying off near-zero data.
+    pub min_frames: usize,
+    /// `None` ⇒ STRICT zero-loss. `Some(pct)` ⇒ documented-bound: judged by the
+    /// oversample-independent single-copy loss percentage staying `<= pct` — the
+    /// same escape hatch the per-hop endpoint gate uses for the OBS render-clock
+    /// drop pending genlock (#8).
+    pub max_loss_pct: Option<f64>,
+    /// `#29` oversample-masking guard: certify (Pass) only with at least this many
+    /// single-copy source→endpoint frames; below it the verdict is Inconclusive.
+    pub min_single_copy: usize,
+}
+
+/// Difference the source tap against the final endpoint tap (the full span),
+/// delegating to `diff_hop` (source = upstream, endpoint = downstream) so the
+/// span-clip, single-copy, documented-bound and INCONCL semantics are IDENTICAL
+/// to the per-hop diffs by construction — not a hand-kept parallel copy.
+/// Latency/freeze are report-only here (`None` bounds): the full span's meaningful
+/// latency is the ABSOLUTE one (`absolute_latency_stats`), not a relative recv−recv
+/// delta, and freezes are localised per hop.
+pub fn full_span_diff(
+    source: &[Observed],
+    endpoint: &[Observed],
+    bounds: &FullSpanBounds,
+) -> FullSpanReport {
+    let hop = diff_hop(HopInput {
+        name: "source→endpoint".to_string(),
+        upstream: source,
+        downstream: endpoint,
+        // Freezes are localised per hop and never gated/reported for the full
+        // span; a never-tripped threshold keeps detect_freezes a no-op without
+        // touching the verdict. (1.0 fps avoids a 1/0 period; MAX is unreachable.)
+        capture_fps: 1.0,
+        freeze_periods: f64::MAX,
+        min_frames: bounds.min_frames,
+        max_p99_latency_ms: None,
+        max_freeze_periods_gate: None,
+        max_loss_pct: bounds.max_loss_pct,
+        min_single_copy: bounds.min_single_copy,
+    });
+    FullSpanReport {
+        source_unique: hop.upstream_unique,
+        endpoint_unique: hop.downstream_unique,
+        dropped_ids: hop.dropped_ids,
+        single_copy_total: hop.single_copy_total,
+        single_copy_dropped: hop.single_copy_dropped,
+        verdict: hop.verdict,
+    }
+}
+
+/// #7 Phase 3: ABSOLUTE end-to-end latency = `recv_ts(endpoint) − gen_ts(source)`
+/// paired by `frame_id`. SOUND ONLY when both timestamps live on one synced wall
+/// clock (DanteSync CLOCK_REALTIME, strih = master) — the painter must emit
+/// `gen_ts_ns` as a wall-clock stamp and the endpoint tap must record
+/// `recv_ts_ns` as a wall-clock stamp; this function is the pure arithmetic that
+/// assumes the caller arranged that shared origin. It takes the SOURCE tap's
+/// `gen_ts` for each frame (the true emission instant) and the ENDPOINT tap's
+/// first `recv_ts` for the same frame. An id present at only one tap yields no
+/// pair. `None` when no frame is common to both taps.
+pub fn absolute_latency_stats(source: &[Observed], endpoint: &[Observed]) -> Option<LatencyStats> {
+    // First gen_ts per id at the source (the emission instant), first recv_ts per
+    // id at the endpoint (its arrival instant). First-occurrence so an oversample
+    // duplicate cannot skew the pairing.
+    let mut src_gen: HashMap<u32, i64> = HashMap::new();
+    for o in source {
+        src_gen.entry(o.frame_id).or_insert(o.gen_ts_ns);
+    }
+    let ep_recv = first_recv(endpoint);
+
+    let mut lat_ms: Vec<f64> = Vec::new();
+    for (id, recv) in &ep_recv {
+        if let Some(gen) = src_gen.get(id) {
+            lat_ms.push((recv - gen) as f64 / 1_000_000.0);
+        }
+    }
+    latency_stats(&lat_ms)
+}
+
+/// Hard gate on the absolute end-to-end p99. `None` bound ⇒ report-only (always
+/// passes), mirroring the per-hop `max_p99_latency_ms` convention. A requested
+/// bound with NO samples FAILS — a gate that could not run must never report
+/// green (test-strictness). Strict `>` so a p99 exactly at the bound passes.
+///
+/// A NEGATIVE measured latency (`min_ms < 0`, recv before gen) is physically
+/// impossible — it can only mean the cluster wall clocks desynced past the
+/// transit time (the camera clock ahead of dev1), so the whole measurement is
+/// untrustworthy and the gate FAILS rather than passing on a number that may be a
+/// large true latency masquerading as a small/negative one. The `multitap-e2e.sh`
+/// clock-offset pre-flight is the first line of defence; this is the backstop for
+/// a probe invoked directly without it.
+pub fn absolute_latency_gate_pass(latency: &Option<LatencyStats>, max_p99_ms: Option<f64>) -> bool {
+    match (max_p99_ms, latency) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(_), Some(l)) if l.min_ms < 0.0 => false,
+        (Some(bound), Some(l)) => l.p99_ms <= bound,
+    }
+}
+
+/// The overall run verdict, folding the per-hop verdicts, the source→endpoint
+/// full-span verdict, and the absolute-latency gate into ONE outcome. This is the
+/// central pass/fail logic the whole gate hinges on — kept pure and testable
+/// rather than inline in `main()`, because an `&&`/`||` slip here (or a dropped
+/// term) would let a run exit green while a gate is red. A run PASSES only when
+/// EVERY per-hop verdict is `Pass`, the full-span verdict is `Pass`, and the
+/// absolute-latency gate passes. Otherwise it FAILS if any hop or the full span
+/// is a hard `Fail` or the absolute-latency gate failed (a proven regression),
+/// else it is `Inconclusive` (gates passed but a hop/full-span lacked enough
+/// single-copy evidence — #29; "need a longer/denser run", not "broken").
+pub fn overall_verdict(
+    hops: &[HopReport],
+    full_span: &FullSpanReport,
+    abs_gate_pass: bool,
+) -> HopVerdict {
+    let all_pass =
+        hops.iter().all(|h| h.verdict.is_pass()) && full_span.verdict.is_pass() && abs_gate_pass;
+    if all_pass {
+        return HopVerdict::Pass;
+    }
+    let hard_fail = hops.iter().any(|h| h.verdict == HopVerdict::Fail)
+        || full_span.verdict == HopVerdict::Fail
+        || !abs_gate_pass;
+    if hard_fail {
+        HopVerdict::Fail
+    } else {
+        HopVerdict::Inconclusive
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

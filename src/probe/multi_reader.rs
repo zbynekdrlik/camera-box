@@ -5,6 +5,7 @@
 
 use crate::ndi::NdiReceiver;
 use crate::probe::analyzer::Observed;
+use crate::probe::clock_ns;
 use crate::probe::qr::decode_capture;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,6 +21,14 @@ pub struct TapSpec {
     pub connect_timeout_secs: u32,
     /// Side of the centered square the QR decode is restricted to (ROI speed fix).
     pub decode_crop: u32,
+    /// Clock domain for `recv_ts_ns`. `false` (default) ⇒ dev1's shared monotonic
+    /// `Instant` — correct for per-hop RELATIVE latency (recv−recv between two
+    /// taps on this one machine). `true` ⇒ CLOCK_REALTIME epoch ns — required for
+    /// ABSOLUTE end-to-end latency (recv(endpoint) − gen(source)), which is only
+    /// sound when the painter's `gen_ts` and this `recv_ts` share the
+    /// DanteSync-disciplined wall clock (#7 / #8, strih = master). Per-hop
+    /// relative latency stays valid either way (both taps use the same domain).
+    pub wall_clock: bool,
 }
 
 /// A tap's accumulating buffer, readable by the differ after the run.
@@ -68,7 +77,7 @@ fn tap_loop(
             Some(f) => f,
             None => continue,
         };
-        let recv_ts_ns = start.elapsed().as_nanos() as i64;
+        let recv_ts_ns = clock_ns(start, spec.wall_clock);
         // Count every frame that physically arrived BEFORE attempting QR decode,
         // so a torn-QR frame still increments `captured`. This is what separates
         // hop frame-loss from tap decode-failure.
