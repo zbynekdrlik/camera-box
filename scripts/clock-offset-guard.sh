@@ -158,7 +158,11 @@ EOF
 # nonzero if the node is unreachable / the daemon has no output. Read-only (journalctl). Requires
 # sshpass; an unreachable node is reported by the caller as UNKNOWN, never a silent pass.
 query_node_journal() {
-  local ip="$2"
+  local ip="$2"   # $1 (name) is the caller's label; the query only needs the IP.
+  # BatchMode=no so sshpass can feed the password (BatchMode would disable password auth). Both
+  # the remote journalctl and the local ssh suppress stderr: an auth failure and a down host are
+  # DELIBERATELY collapsed to "empty output" here — the caller maps empty -> UNKNOWN (never a
+  # silent pass), so the guard fails loudly either way without leaking SSH banners into the report.
   sshpass -p "$CLOCK_GUARD_SSH_PASS" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${CLOCK_GUARD_SSH_TIMEOUT}" \
