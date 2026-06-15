@@ -33,24 +33,65 @@ pub const GENLOCK_PRELOAD_MAX: u32 = 28;
 
 /// Parse the `OBS_GENLOCK_PRELOAD_FRAMES` env value into a reserve depth.
 ///
-/// Mirrors the C `genlock_parse_preload()`:
-/// * `None` / empty / all-whitespace / non-numeric / negative ⇒ default.
-/// * Above the cap ⇒ clamped to [`GENLOCK_PRELOAD_MAX`] (NOT silently default).
-/// * `0` is valid and reproduces the old zero-slack behavior.
+/// This is a FAITHFUL mirror of the C `genlock_parse_preload()`, which uses
+/// `strtol(env, &end, 10)` and then `if (end == env || *end != '\0' || v < 0)
+/// return default; if (v > MAX) return MAX;`. To match it exactly (the test crate
+/// exists to prove the C contract), it replicates `strtol`'s quirks rather than
+/// using Rust's `parse`, which differs on two pathological inputs:
+/// * `strtol` skips only *leading* whitespace; a trailing non-digit (e.g. `"5 "`)
+///   leaves `*end != '\0'` ⇒ default. (Rust `trim()` would have accepted `"5 "`.)
+/// * `strtol` *saturates* an out-of-range magnitude to `LONG_MAX`, which then
+///   passes the `v >= 0` guard and hits the `v > MAX` clamp ⇒ MAX. (Rust
+///   `parse::<i64>()` would `Err` on overflow and fall to default.)
+///
+/// Net contract: `None`/empty/leading-junk/trailing-junk/negative ⇒ default;
+/// any in-range or overflowing non-negative integer ⇒ clamped to
+/// [`GENLOCK_PRELOAD_MAX`]; `0` is valid (reproduces the old zero-slack FIFO).
 pub fn parse_preload(env: Option<&str>) -> u32 {
     let Some(raw) = env else {
         return GENLOCK_PRELOAD_DEFAULT;
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let bytes = raw.as_bytes();
+    // strtol skips leading ASCII whitespace, then reads an optional sign + digits.
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut negative = false;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        negative = bytes[i] == b'-';
+        i += 1;
+    }
+    let digits_start = i;
+    // Accumulate digits, saturating to i64::MAX like strtol saturates to LONG_MAX.
+    let mut value: i64 = 0;
+    let mut overflow = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        if !overflow {
+            let d = (bytes[i] - b'0') as i64;
+            match value.checked_mul(10).and_then(|v| v.checked_add(d)) {
+                Some(v) => value = v,
+                None => {
+                    value = i64::MAX;
+                    overflow = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    // No digits consumed (end == env) OR a trailing non-digit (*end != '\0') ⇒ default.
+    if i == digits_start || i != bytes.len() {
         return GENLOCK_PRELOAD_DEFAULT;
     }
-    match trimmed.parse::<i64>() {
-        Ok(v) if v < 0 => GENLOCK_PRELOAD_DEFAULT,
-        Ok(v) if v > GENLOCK_PRELOAD_MAX as i64 => GENLOCK_PRELOAD_MAX,
-        Ok(v) => v as u32,
-        Err(_) => GENLOCK_PRELOAD_DEFAULT,
+    // Negative ⇒ default (the C `v < 0` guard). LONG_MAX from a `-` overflow is
+    // still negative-intent, so honour the sign first.
+    if negative {
+        return GENLOCK_PRELOAD_DEFAULT;
     }
+    if value > GENLOCK_PRELOAD_MAX as i64 {
+        return GENLOCK_PRELOAD_MAX;
+    }
+    value as u32
 }
 
 /// At a render tick, should the FIFO consume one frame?

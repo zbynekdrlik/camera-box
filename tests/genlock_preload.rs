@@ -46,6 +46,34 @@ fn out_of_range_is_clamped_not_default() {
 }
 
 #[test]
+fn matches_c_strtol_quirks() {
+    // The mirror must replicate the C strtol path EXACTLY (the test crate's
+    // purpose is to prove the C contract). Two pathological inputs where naive
+    // Rust parsing diverges from C:
+    //  1. An i64-OVERFLOWING magnitude: C strtol saturates to LONG_MAX, which
+    //     passes `v >= 0` and hits the `v > MAX` clamp ⇒ MAX (NOT default).
+    assert_eq!(
+        parse_preload(Some("99999999999999999999")),
+        GENLOCK_PRELOAD_MAX
+    );
+    //  2. A TRAILING non-digit: C strtol leaves `*end != '\0'` ⇒ default. (A
+    //     trailing space must NOT be trimmed-then-accepted.)
+    assert_eq!(parse_preload(Some("5 ")), GENLOCK_PRELOAD_DEFAULT);
+    // Leading whitespace IS skipped by strtol (and so by the mirror).
+    assert_eq!(parse_preload(Some("  2")), 2);
+    // A leading '+' sign is accepted by strtol.
+    assert_eq!(parse_preload(Some("+3")), 3);
+    // A negative magnitude that overflows is still negative-intent ⇒ default.
+    assert_eq!(
+        parse_preload(Some("-99999999999999999999")),
+        GENLOCK_PRELOAD_DEFAULT
+    );
+    // A lone sign with no digits ⇒ no conversion ⇒ default.
+    assert_eq!(parse_preload(Some("-")), GENLOCK_PRELOAD_DEFAULT);
+    assert_eq!(parse_preload(Some("+")), GENLOCK_PRELOAD_DEFAULT);
+}
+
+#[test]
 fn steady_state_at_cap_stays_below_max_async_frames() {
     // The real invariant: the steady-state queue parks at preload+1, which MUST
     // stay strictly below libobs' MAX_ASYNC_FRAMES (30). At preload == cap, depth
