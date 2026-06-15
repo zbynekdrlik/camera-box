@@ -48,50 +48,31 @@ pub const GENLOCK_PRELOAD_MAX: u32 = 28;
 /// any in-range or overflowing non-negative integer ⇒ clamped to
 /// [`GENLOCK_PRELOAD_MAX`]; `0` is valid (reproduces the old zero-slack FIFO).
 pub fn parse_preload(env: Option<&str>) -> u32 {
+    use std::num::IntErrorKind;
+
     let Some(raw) = env else {
         return GENLOCK_PRELOAD_DEFAULT;
     };
-    let bytes = raw.as_bytes();
-    // strtol skips leading ASCII whitespace, then reads an optional sign + digits.
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    let mut negative = false;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        negative = bytes[i] == b'-';
-        i += 1;
-    }
-    let digits_start = i;
-    // Accumulate digits, saturating to i64::MAX like strtol saturates to LONG_MAX.
-    let mut value: i64 = 0;
-    let mut overflow = false;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        if !overflow {
-            let d = (bytes[i] - b'0') as i64;
-            match value.checked_mul(10).and_then(|v| v.checked_add(d)) {
-                Some(v) => value = v,
-                None => {
-                    value = i64::MAX;
-                    overflow = true;
-                }
-            }
-        }
-        i += 1;
-    }
-    // No digits consumed (end == env) OR a trailing non-digit (*end != '\0') ⇒ default.
-    if i == digits_start || i != bytes.len() {
+    // strtol skips leading ASCII whitespace, then reads an optional sign + digits;
+    // a trailing non-digit leaves `*end != '\0'`. `trim_start` + an all-ASCII-digit
+    // body (after an optional leading '+') reproduces that without a hand-rolled
+    // arithmetic loop. `i64::from_str` does the accumulation, and its
+    // `PosOverflow` error is the strtol LONG_MAX-saturation case ⇒ clamp to MAX.
+    let body = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let digits = body.strip_prefix('+').unwrap_or(body);
+    // Reject empty / leading-sign-only / any non-digit char (incl. trailing junk
+    // and a leading '-', so every negative falls to default like the C `v < 0`).
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return GENLOCK_PRELOAD_DEFAULT;
     }
-    // Negative ⇒ default (the C `v < 0` guard). LONG_MAX from a `-` overflow is
-    // still negative-intent, so honour the sign first.
-    if negative {
-        return GENLOCK_PRELOAD_DEFAULT;
+    match digits.parse::<i64>() {
+        Ok(v) => v.min(GENLOCK_PRELOAD_MAX as i64) as u32,
+        // All chars are digits, so the only parse error is positive overflow →
+        // strtol would saturate to LONG_MAX → clamp to MAX. Any other error kind
+        // is impossible here, but fall to default defensively.
+        Err(e) if *e.kind() == IntErrorKind::PosOverflow => GENLOCK_PRELOAD_MAX,
+        Err(_) => GENLOCK_PRELOAD_DEFAULT,
     }
-    if value > GENLOCK_PRELOAD_MAX as i64 {
-        return GENLOCK_PRELOAD_MAX;
-    }
-    value as u32
 }
 
 /// At a render tick, should the FIFO consume one frame?

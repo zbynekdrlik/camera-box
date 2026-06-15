@@ -36,6 +36,15 @@ fn valid_value_is_parsed() {
 }
 
 #[test]
+fn clamp_boundary_at_cap() {
+    // Pin the clamp boundary so a mutated comparison can't survive: just below
+    // the cap stays itself, exactly at the cap stays itself, above clamps down.
+    assert_eq!(parse_preload(Some("27")), 27);
+    assert_eq!(parse_preload(Some("28")), GENLOCK_PRELOAD_MAX); // == 28, unchanged
+    assert_eq!(parse_preload(Some("29")), GENLOCK_PRELOAD_MAX); // clamped to 28
+}
+
+#[test]
 fn out_of_range_is_clamped_not_default() {
     // Above the cap → clamp to MAX (NOT silently fall back to default).
     assert_eq!(parse_preload(Some("99")), GENLOCK_PRELOAD_MAX);
