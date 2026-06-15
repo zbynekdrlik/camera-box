@@ -112,8 +112,7 @@ fn camera_set_resolution_is_injection_safe() {
     // sourced and the name is looked up. A safe resolver rejects unknown names with no
     // eval/word-splitting of the value, so nothing executes.
     let script = manifest_dir().join("scripts/camera-set.sh");
-    let marker =
-        std::env::temp_dir().join(format!("camset_inject_marker_{}", std::process::id()));
+    let marker = std::env::temp_dir().join(format!("camset_inject_marker_{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
 
     let evil = format!("cam2; touch {}", marker.display());

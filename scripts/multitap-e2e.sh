@@ -17,11 +17,21 @@
 # python3 + websocket-client. OBS WebSocket :4455 reachable on strih and stream.
 set -euo pipefail
 
-CAM2=10.77.9.62
+# Camera selection (#24): set CAM=cam1|cam2|cam3|cam4 to drive the full path from a chosen
+# source camera. Its IP + NDI source are resolved from scripts/camera-set.sh (the single
+# source of truth), not hard-coded — defaults to cam2 for back-compat. CAM_IP / CAM_SOURCE
+# still override the resolved values.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/camera-set.sh
+. "$HERE/camera-set.sh"
+camera_resolve "${CAM:-cam2}"
+
+# CAM_IP is the device IP of the selected source camera (was the hard-coded `CAM2` var).
+CAM_IP="${CAM_IP:-$CAMERA_IP}"
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 CAM_PW=newlevel
-CAM_SOURCE="CAM2 (usb)"
+CAM_SOURCE="${CAM_SOURCE:-$CAMERA_SOURCE}"
 RUN_ID=$(( (RANDOM << 16) | RANDOM ))
 DURATION="${DURATION:-300}"
 OUT="${OUT:-/tmp/multitap-probe.json}"
@@ -38,7 +48,7 @@ export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 # shellcheck disable=SC2317  # cleanup() is invoked indirectly via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
-  echo "[cleanup] restoring OBS program scenes + cam2 service"
+  echo "[cleanup] restoring OBS program scenes + ${CAMERA_NAME} service ($CAM_IP)"
   python3 scripts/obs_phase2.py teardown --host "$STREAM"
   python3 scripts/obs_phase2.py teardown --host "$STRIH"
   # pkill -x ONLY (exact process-name match). The old full-cmdline pkill form matched the
@@ -47,7 +57,7 @@ cleanup() {
   # the service left stopped (which then broke the #9 loopback dispatch with EBUSY).
   # (sleep 1 only: if video0 is still settling, the unit's Restart=always/RestartSec=3
   # absorbs a transient first-start EBUSY — the safety lives in the unit file.)
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
     "pkill -x frame-probe 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      systemctl restart camera-box 2>/dev/null; true"
 }
@@ -66,12 +76,12 @@ echo "[2/5] bring up the cam2 NDI sender FIRST (run_id=$RUN_ID), then the painte
 # live sender that then persists for the entire tap window — no mid-run teardown,
 # no reconnect, no race.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  target/release/frame-probe root@"$CAM2":/tmp/frame-probe
+  target/release/frame-probe root@"$CAM_IP":/tmp/frame-probe
 # After the stop: sweep any orphaned manual camera-box (pkill -x — exact name, can't
 # self-match the remote shell) and WAIT until /dev/video0 is actually free; uvcvideo
 # teardown completes asynchronously after the process dies, and a fixed sleep races it
 # into EBUSY on the manual start. (\$-escaped so the loop runs REMOTELY, not on dev1.)
-sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM2" \
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
   "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; \
    pkill -x camera-box 2>/dev/null; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
