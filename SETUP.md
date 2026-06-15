@@ -127,10 +127,10 @@ captured by `scripts/clock-offset-guard.sh` from dev1:
 
 | Node | Absolute offset | State |
 |------|-----------------|-------|
-| cam1 (10.77.9.61) | ~+21..+66 µs | PTP NANO lock (drift ≈ −334 ns/s) |
-| cam2 (10.77.9.62) | ~+371..+382 µs | PTP NANO lock (drift ≈ +382 ns/s) |
-| cam3 (10.77.9.63) | ~+14..+24 µs | PTP NANO lock (drift ≈ −236 ns/s) |
-| cam4 (10.77.9.64) | ~0..+9 µs | PTP NANO lock (drift ≈ +481 ns/s) |
+| cam1 (10.77.9.61) | ~+21..+66 µs | PTP NANO lock (drift within ±1 µs/s) |
+| cam2 (10.77.9.62) | ~+371..+382 µs | PTP NANO lock (drift within ±1 µs/s) |
+| cam3 (10.77.9.63) | ~+14..+24 µs | PTP NANO lock (drift within ±1 µs/s) |
+| cam4 (10.77.9.64) | ~0..+9 µs | PTP NANO lock (drift within ±1 µs/s) |
 | strih (master→GM 10.77.9.184) | ~+1249 µs | PTP NANO lock, settled |
 
 All four cameras are enrolled, NTP-disciplined to master `10.77.9.202` and PTP NANO-locked to
@@ -139,6 +139,7 @@ read-only rootfs, production state):
 
 ```
 == clock-offset-guard (#8): bound 2000 us (|offset| must stay within) ==
+   master = strih (DanteSync NTP anchor + PTP servo); frame period @60fps = 16667 us
   cam1           OK       (offset 21 us, |21| <= 2000)
   cam2           OK       (offset 382 us, |382| <= 2000)
   cam3           OK       (offset 24 us, |24| <= 2000)
@@ -201,7 +202,7 @@ does not yet exist):
   **44× tighter than the 16.7 ms (60 fps) frame period** (and the worst single-node offset, cam2's
   382 µs against UTC, is itself ~44× under one frame). The cluster's wall-clock genlock boundary
   divergence is well inside one frame on every camera; the genlock clock assumption stated in
-  `src/ndi.rs:25-35` holds across cam1-4.
+  `src/ndi.rs:62-65` holds across cam1-4.
 
 The continuous guard (`scripts/clock-offset-guard.sh`, exit non-zero if any node exceeds ±2 ms)
 keeps this bound — and therefore the boundary agreement — from silently regressing.
