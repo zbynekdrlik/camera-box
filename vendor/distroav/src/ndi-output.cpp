@@ -18,12 +18,67 @@
 #include "plugin-main.h"
 #include <util/threading.h>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 
 // #include "plugin-support.h"
 
 static FORCE_INLINE uint32_t min_uint32(uint32_t a, uint32_t b)
 {
 	return a < b ? a : b;
+}
+
+// ---------------------------------------------------------------------------
+// Genlock-aligned EMIT timecode (camera-box genlock fork).
+//
+// Stock DistroAV stamps the outgoing NDI frame timecode with
+// NDIlib_send_timecode_synthesize — a counter the NDI SDK seeds ONCE from system
+// time at stream start, then advances by frame period. That freezes the
+// start-time pipeline buffering into a FIXED ~150ms lag between the timecode and
+// the real wall-clock emit. The bias cancels between two OBS senders but breaks
+// any comparison against a sender that stamps the real clock (the camera boxes do
+// — src/ndi.rs). The QR latency instrument needs the timecode to be the ACTUAL
+// per-frame emit time so cam->OBS and OBS<->OBS share one timebase.
+//
+// Fix: stamp the OS wall clock (DanteSync-disciplined on the broadcast boxes,
+// every node sub-ms-locked) snapped to the next 1/fps frame boundary, in 100ns
+// units since the Unix epoch — the SAME basis and boundary math as the camera-box
+// sender's next_boundary_100ns (src/ndi.rs), so the two timebases align.
+// ---------------------------------------------------------------------------
+static const int64_t GENLOCK_UNITS_PER_SECOND = 10000000; // 100ns units / second
+
+// Current wall clock in 100ns units since the Unix epoch. std::chrono::system_clock
+// is the OS wall clock (DanteSync owns it on strih/stream); its epoch is the Unix
+// epoch on all supported platforms.
+static int64_t genlock_wall_now_100ns()
+{
+	using namespace std::chrono;
+	return duration_cast<duration<int64_t, std::ratio<1, 10000000>>>(system_clock::now().time_since_epoch())
+		.count();
+}
+
+// Next 1/fps frame boundary at or after now_100ns, computed relative to each
+// second to avoid drift. Direct port of camera-box next_boundary_100ns
+// (src/ndi.rs) so OBS emit timecodes fall on the SAME grid the cameras use.
+// fps <= 0 -> now (no alignment).
+static int64_t genlock_next_boundary_100ns(int64_t now_100ns, int64_t fps)
+{
+	if (fps <= 0)
+		return now_100ns;
+	int64_t current_second = (now_100ns / GENLOCK_UNITS_PER_SECOND) * GENLOCK_UNITS_PER_SECOND;
+	int64_t offset_in_second = now_100ns - current_second;
+	int64_t frame_in_second = (offset_in_second * fps) / GENLOCK_UNITS_PER_SECOND;
+	int64_t next_frame_in_second = frame_in_second + 1;
+	if (next_frame_in_second >= fps)
+		return current_second + GENLOCK_UNITS_PER_SECOND;
+	return current_second + (next_frame_in_second * GENLOCK_UNITS_PER_SECOND / fps);
+}
+
+// Boundary-aligned real wall-clock emit timecode for a frame at `framerate` fps.
+static int64_t genlock_emit_timecode_100ns(double framerate)
+{
+	int64_t fps = (int64_t)llround(framerate);
+	return genlock_next_boundary_100ns(genlock_wall_now_100ns(), fps);
 }
 
 typedef void (*uyvy_conv_function)(uint8_t *input[], uint32_t in_linesize[], uint32_t start_y, uint32_t end_y,
@@ -369,7 +424,10 @@ void ndi_output_rawvideo(void *data, video_data *frame)
 	video_frame.frame_rate_D =
 		100; // TODO : investigate if there is a better way to get both _D & _N set to the proper framerate from OBS output.
 	video_frame.frame_format_type = NDIlib_frame_format_type_progressive;
-	video_frame.timecode = NDIlib_send_timecode_synthesize;
+	// Genlock fork: real DanteSync wall-clock boundary, NOT synthesize (see helper
+	// above) — so the emitted timecode is the ACTUAL per-frame emit instant and
+	// cam->OBS / OBS<->OBS latency share one timebase.
+	video_frame.timecode = genlock_emit_timecode_100ns(o->video_framerate);
 	video_frame.FourCC = o->frame_fourcc;
 
 	if (video_frame.FourCC == NDIlib_FourCC_type_UYVY) {
@@ -420,7 +478,10 @@ void ndi_output_rawaudio(void *data, audio_data *frame)
 	NDIlib_audio_frame_v3_t audio_frame = {0};
 	audio_frame.sample_rate = o->audio_samplerate;
 	audio_frame.no_channels = (int)o->audio_channels;
-	audio_frame.timecode = NDIlib_send_timecode_synthesize;
+	// Genlock fork: real DanteSync wall-clock emit time (not synthesize), so audio
+	// timecodes share the same timebase as video + the cameras. Audio is not frame-
+	// gridded, so stamp raw wall-clock now (no boundary snap).
+	audio_frame.timecode = genlock_wall_now_100ns();
 	audio_frame.no_samples = frame->frames;
 	audio_frame.channel_stride_in_bytes = frame->frames * 4;
 	audio_frame.FourCC = NDIlib_FourCC_audio_type_FLTP;
