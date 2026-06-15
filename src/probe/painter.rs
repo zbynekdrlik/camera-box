@@ -7,7 +7,33 @@ use crate::probe::qr::render_qr_bgra;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// #68: the strictly-next wall-clock frame boundary at or after `now_ns`, for a
+/// frame period of `period_ns`. Pure pacing math (mirrors src/ndi.rs's genlock
+/// `next_boundary_100ns`): the painter must advance ids on the SAME absolute
+/// wall-clock boundaries the genlock decimator samples on, or the two equal-rate
+/// cadences drift out of phase and the decimator skips painted ids (~13% measured
+/// on the live cam2 rig at 30 fps paint into 60→30 decimation), which the
+/// endpoint-sequence check then reports as spurious "missing" generator ids.
+///
+/// "Strictly next" (so an exact boundary advances one period) keeps the painter
+/// from emitting two ids at the same instant. `period_ns == 0` (fps 0) is guarded
+/// — returns `now_ns` (zero wait) rather than dividing by zero.
+pub fn next_wall_boundary_ns(now_ns: u64, period_ns: u64) -> u64 {
+    if period_ns == 0 {
+        return now_ns;
+    }
+    (now_ns / period_ns + 1) * period_ns
+}
+
+/// Absolute wall-clock now in ns since the Unix epoch (the genlock clock domain).
+fn wall_now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wall clock before epoch")
+        .as_nanos() as u64
+}
 
 pub struct PaintParams {
     pub run_id: u32,
@@ -34,8 +60,18 @@ pub fn run_painter(
     emitted: Arc<Mutex<Vec<(u32, i64)>>>,
 ) -> Result<()> {
     let mut fb = VsyncFb::open(&params.fb_device)?;
-    let period = Duration::from_secs_f64(1.0 / params.paint_fps);
     let mut frame_id: u32 = 0;
+
+    // #68: pace on absolute WALL-CLOCK frame boundaries in the multi-node path
+    // (`wall_clock` true — the genlock-decimated camera path) so the painter ticks
+    // at the SAME phase as the genlock decimator (src/ndi.rs wall-boundary pacing).
+    // A monotonic-paced 30 fps painter into a 60→30 wall-clock decimator drifts out
+    // of phase and ~13% of ids are never sampled into NDI (measured live). For the
+    // Phase-1 single-box loopback (`wall_clock` false) the painter+reader share one
+    // monotonic process clock, so monotonic pacing is correct there — keep it.
+    let period_ns: u64 = (1_000_000_000f64 / params.paint_fps).round() as u64;
+    // Monotonic-pacing state (used only when !wall_clock).
+    let period = Duration::from_secs_f64(1.0 / params.paint_fps);
     let mut next = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
@@ -50,12 +86,20 @@ pub fn run_painter(
         emitted.lock().unwrap().push((frame_id, gen_ts_ns));
 
         frame_id = frame_id.wrapping_add(1);
-        next += period;
-        let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
+
+        if params.wall_clock {
+            // Sleep to the next absolute wall-clock boundary (decimator-phase-locked).
+            let now = wall_now_ns();
+            let target = next_wall_boundary_ns(now, period_ns);
+            std::thread::sleep(Duration::from_nanos(target - now));
         } else {
-            next = now;
+            next += period;
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else {
+                next = now;
+            }
         }
     }
     tracing::info!("painter: emitted {} frames", frame_id);
