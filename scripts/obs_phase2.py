@@ -44,6 +44,22 @@ MAIN_OUTPUT = "NDI Main Output"
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
 
+# #63: the probe ndi_source MUST be configured exactly like the live, proven-working camera
+# inputs (NDI cam1/3/5) so it renders on the GENLOCK OBS build (OBS_GENLOCK_WALL_CLOCK=1).
+# Defaults are wrong for the genlock compositor and make the probe render BLACK (0 decoded):
+#   - genlock_fifo=True  -> the wall-clock-slaved render tick consumes exactly one queued
+#                           frame per tick (camera-box #42 FIFO bypass). Without it the probe
+#                           takes the normal async timestamp-cursor path, which can't be
+#                           reconciled against the disciplined tick -> frames discarded.
+#   - ndi_sync=1         -> PROP_SYNC_NDI_TIMESTAMP (the NDI *receiver*-side, monotonic
+#                           timestamp). The DistroAV default is 2 (NDI_SOURCE_TIMECODE), which
+#                           binds the cursor to the camera-box sender's WALL-CLOCK-epoch
+#                           boundary timecode (src/ndi.rs) -> out-of-bounds vs the monotonic
+#                           compositor cursor -> BLACK.
+#   - ndi_bw_mode=0      -> highest bandwidth (full quality), as before.
+# Merged FIRST in each settings dict so the per-call ndi_source_name still overrides cleanly.
+_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1}
+
 
 def _load_state():
     """Read the per-host prev-scene state. Tolerates a MISSING or CORRUPT/truncated file
@@ -140,13 +156,13 @@ def setup(a):
     if INPUT not in inputs:
         _rpc(ws, "CreateInput", {
             "sceneName": SCENE, "inputName": INPUT, "inputKind": "ndi_source",
-            "inputSettings": {"ndi_source_name": a.upstream, "ndi_bw_mode": 0},
+            "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
         }, ignore_err=True)
     else:
         # Reuse: re-point the existing dormant input at this run's upstream ...
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
-            "inputSettings": {"ndi_source_name": a.upstream, "ndi_bw_mode": 0},
+            "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
             "overlay": True,
         }, ignore_err=True)
         # ... and make sure it is an item of the stable scene (re-add if the scene was
