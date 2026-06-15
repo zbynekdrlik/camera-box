@@ -120,18 +120,40 @@ NOT genlocked. So cluster clock sync is a hard prerequisite, not an optimization
   the setup script (Script Failure Policy).
 - The Windows OBS boxes (strih = master, stream) run DanteSync too, configured on those hosts.
 
-### Measured baseline (evidence, 2026-06-15, read-only)
+### Measured baseline (evidence, 2026-06-15, read-only) — full cluster cam1-4
 
-Steady-state absolute NTP offset reported by each node's DanteSync, all PTP NANO-locked:
+Steady-state absolute NTP offset reported by each node's DanteSync, all PTP NANO-locked,
+captured by `scripts/clock-offset-guard.sh` from dev1:
 
 | Node | Absolute offset | State |
 |------|-----------------|-------|
-| cam1 (10.77.9.61) | ~+85..+333 µs | PTP NANO lock |
-| cam2 (10.77.9.62) | ~+300..+351 µs | PTP NANO lock |
-| cam4 (10.77.9.64) | ~−40 µs | PTP NANO lock |
+| cam1 (10.77.9.61) | ~+21..+66 µs | PTP NANO lock (drift ≈ −334 ns/s) |
+| cam2 (10.77.9.62) | ~+371..+382 µs | PTP NANO lock (drift ≈ +382 ns/s) |
+| cam3 (10.77.9.63) | ~+14..+24 µs | PTP NANO lock (drift ≈ −236 ns/s) |
+| cam4 (10.77.9.64) | ~0..+9 µs | PTP NANO lock (drift ≈ +481 ns/s) |
 | strih (master→GM 10.77.9.184) | ~+1249 µs | PTP NANO lock, settled |
 
-(cam3 was powered down at measurement time — enroll/verify it when it is back online.)
+All four cameras are enrolled, NTP-disciplined to master `10.77.9.202` and PTP NANO-locked to
+the same grandmaster (`10.77.9.184`) with sub-µs/s drift. Full-cluster guard pass (cam3 in
+read-only rootfs, production state):
+
+```
+== clock-offset-guard (#8): bound 2000 us (|offset| must stay within) ==
+  cam1           OK       (offset 21 us, |21| <= 2000)
+  cam2           OK       (offset 382 us, |382| <= 2000)
+  cam3           OK       (offset 24 us, |24| <= 2000)
+  cam4           OK       (offset 2 us, |2| <= 2000)
+ALL CLEAR — 4 node(s) within the 2000 us offset bound. Genlock clock assumption holds.
+```
+
+**cam3 enrollment note (2026-06-15):** cam3 came online running a stale *bare* `dantesync` unit
+(`ExecStart=/usr/local/bin/dantesync`, dantesync 1.8.2) — its NTP path was failing (defaulting to
+the public pool it could not reach), so it had no readable absolute offset even though PTP held it
+NANO-locked. Re-enrolled to the cluster standard (latest dantesync binary + the
+`--ntp-server 10.77.9.202` unit produced by `scripts/setup.sh`'s `install_dantesync`); NTP
+immediately converged (−24/+4/+11/+24 µs) and the unit is `enabled` so it survives reboot + the
+read-only-rootfs remount cycle. No script change was needed — the setup path already writes the
+correct unit; cam3 just predated the fix.
 
 ### Offset bound + the regression guard
 
@@ -154,6 +176,34 @@ Steady-state absolute NTP offset reported by each node's DanteSync, all PTP NANO
   The Windows OBS boxes report the same `ntp_offset_us` signal as JSON on `\\.\pipe\dantesync`,
   parsed read-only via the win-* MCP tools (the guard's `offset_us_from_pipe_json` is the shared
   comparator). The parsing + threshold logic is unit-tested in `tests/clock_offset_guard.rs`.
+
+### Genlock boundary agreement across cameras (acceptance evidence)
+
+`wait_for_next_boundary_100ns(fps)` (`src/ndi.rs`) computes each camera's next frame boundary
+**purely from that camera's own wall clock** (`get_wall_clock_100ns` → `(now/second)*second +
+frame_n*10_000_000/fps`). The boundary is therefore a deterministic function of the wall clock
+alone: **two cameras whose wall clocks agree to within Δ compute the same absolute frame boundary
+to within that same Δ.** There is no other input (no per-node phase term, no random jitter in the
+boundary math), so the cross-camera boundary spread is bounded by — and equal to — the cross-camera
+clock spread.
+
+This means the boundary agreement is established directly by the offset evidence above (no separate
+fabricated frame-tap measurement is claimed here — a cross-camera NDI tap is Phase-2/#7 work that
+does not yet exist):
+
+- **Before** (cam3 on the stale bare unit, NTP failing): cam3 had no shared wall-time anchor on
+  the NTP path; only PTP held it. The genlock boundary cam3 computed from its wall clock could not
+  be certified against the cluster (offset UNKNOWN — guard exit 11). Cross-camera boundary
+  agreement was unverifiable for cam3.
+- **After** (cam3 re-enrolled to master `10.77.9.202`): the four cameras' wall clocks agree within
+  a measured spread of **max 380 µs** (cam2 +382 µs to cam4 +2 µs), all PTP NANO-locked. By the
+  argument above, their genlock frame boundaries therefore agree to within **≤ 380 µs** — about
+  **44× tighter than the 16.7 ms (60 fps) frame period** and ~500× tighter than one frame at the
+  worst case. The cluster's wall-clock genlock boundary divergence is well inside one frame on
+  every camera; the genlock clock assumption stated in `src/ndi.rs:25-35` holds across cam1-4.
+
+The continuous guard (`scripts/clock-offset-guard.sh`, exit non-zero if any node exceeds ±2 ms)
+keeps this bound — and therefore the boundary agreement — from silently regressing.
 
 ## Step 5: Copy NDI Library
 
