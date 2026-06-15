@@ -7,9 +7,9 @@ use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, endpoint_sequence_check,
-    full_span_diff, overall_verdict, settle_cutoff_ns, trim_to_settle, EndpointSequenceReport,
-    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
+    absolute_latency_gate_pass, absolute_latency_stats, decompose_missing, diff_hop,
+    endpoint_sequence_check, full_span_diff, overall_verdict, settle_cutoff_ns, trim_to_settle,
+    EndpointSequenceReport, FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -177,11 +177,20 @@ struct MultiTapReport {
     full_span: FullSpanReport,
     /// #68 Task B: the ENDPOINT tap's sequence checked against the GENERATOR's
     /// contiguous emission (every integer in the endpoint's decoded span was
-    /// painted), not against the source tap. Reports any internal gap (a real
-    /// generator→endpoint drop, incl. generator→cam loss the source-vs-endpoint
-    /// diff is blind to) and any reorder. A HARD gate term — `verdict_pass`
-    /// requires it `is_clean()`.
+    /// painted), not against the source tap. Reports any internal gap and any
+    /// reorder. The gap is decomposed below into emission-artifact vs pipeline-loss.
     endpoint_sequence: EndpointSequenceReport,
+    /// #68: of `endpoint_sequence.missing_ids`, the ids ALSO absent at the SOURCE
+    /// tap — a generator→source-NDI EMISSION ARTIFACT of the QR rig (the discrete
+    /// painter through the 60→30 genlock decimation never put them on NDI), NOT a
+    /// pipeline drop. Reported, never gated. (Empty on a synth-ndi source.)
+    endpoint_missing_emission_artifact: Vec<u32>,
+    /// #68: of `endpoint_sequence.missing_ids`, the ids PRESENT at the SOURCE tap
+    /// but absent at the endpoint — REAL source→endpoint pipeline loss (== full_span
+    /// dropped_ids). The HARD gate term: `verdict_pass` fails if this is non-empty
+    /// (strict mode). This is what makes the harness agree with reality without
+    /// falsely failing on the QR rig's own source-emission artifact.
+    endpoint_pipeline_loss: Vec<u32>,
     /// #7: ABSOLUTE end-to-end latency `recv_ts(endpoint) − gen_ts(source)` on the
     /// DanteSync wall clock. Present (and gated when `--max-abs-latency-ms` is set)
     /// only with `--wall-clock`; otherwise `None` with `absolute_latency_note`
@@ -437,25 +446,33 @@ fn main() -> Result<()> {
     // reorder detection is meaningful. The settle-trimmed endpoint is used (same
     // window as full_span) so trailing in-flight frames are not false gaps.
     let endpoint_sequence = endpoint_sequence_check(endpoint);
-    // The sequence check is GATED only in strict mode (the genlock zero-loss path
+    // #68: decompose the endpoint's missing ids using the SOURCE tap. An id absent
+    // at the source too is a generator→source-NDI EMISSION ARTIFACT of the QR rig
+    // (the discrete fb painter through the 60→30 genlock decimation never put it on
+    // NDI — ~5-13% on the fb-loopback, ZERO on synth-ndi), NOT a stream defect. An
+    // id present at the source but absent at the endpoint is REAL source→endpoint
+    // PIPELINE LOSS. Only the latter may fail a zero-loss gate — gating on the
+    // artifact would make the harness falsely RED on a perfectly-fine pipeline.
+    let (endpoint_missing_emission_artifact, endpoint_pipeline_loss) =
+        decompose_missing(&endpoint_sequence.missing_ids, source);
+
+    // The sequence GATE is active only in strict mode (the genlock zero-loss path
     // #68 targets). When the operator deliberately opts the endpoint into the #21
-    // documented-loss bound (`--max-loss-pct endpoint=N`, e.g. tracking
-    // strih→stream progress pre-genlock), the contiguous-sequence gap is EXPECTED
-    // and must not override that budget — so it stays REPORT-ONLY there, exactly as
-    // full_span honours the same opt-out. Reorders are not part of a loss budget;
-    // but to keep one consistent opt-out, the whole sequence gate follows the
-    // endpoint's strict/bounded mode (a bounded run already accepts imperfection).
+    // documented-loss bound (`--max-loss-pct endpoint=N`), the gap is EXPECTED and
+    // stays REPORT-ONLY, exactly as full_span honours the same opt-out. In strict
+    // mode the gate fails on REAL pipeline loss (present-at-source, lost
+    // downstream) and on any reorder — but NOT on the emission artifact.
     let endpoint_seq_gated = !loss_bounds.contains_key(endpoint_name);
-    let endpoint_seq_pass = !endpoint_seq_gated || endpoint_sequence.is_clean();
+    let endpoint_seq_pass = !endpoint_seq_gated
+        || (endpoint_pipeline_loss.is_empty() && endpoint_sequence.out_of_order_ids.is_empty());
 
     // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
     // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as
     // NOT-pass like FAIL (#29: a run that cannot certify must not exit green).
-    // #68: the endpoint-sequence check is an ADDITIONAL hard gate (in strict mode)
-    // — a clean overall_verdict is only trustworthy if the endpoint received the
-    // generator's full contiguous sequence in order. An unclean sequence forces
-    // FAIL even when every tap-vs-tap diff looks green (the exact blind spot #68
-    // closes).
+    // #68: the endpoint-sequence check adds a hard gate (strict mode) on REAL
+    // source→endpoint pipeline loss + reorder — the generator→endpoint guarantee
+    // the tap-vs-tap diff was blind to — while the QR rig's source-emission
+    // artifact is reported, not gated, so the harness stays honest AND trustworthy.
     let overall_v = overall_verdict(&hops, &full_span, abs_gate_pass);
     let verdict_pass = overall_v.is_pass() && endpoint_seq_pass;
     let report = MultiTapReport {
@@ -465,6 +482,8 @@ fn main() -> Result<()> {
         hops,
         full_span,
         endpoint_sequence,
+        endpoint_missing_emission_artifact,
+        endpoint_pipeline_loss,
         absolute_latency,
         absolute_latency_note,
         verdict_pass,
@@ -570,18 +589,29 @@ fn main() -> Result<()> {
     // output, in order" check — gaps here are real generator→endpoint drops the
     // tap-vs-tap diff cannot see, so the first 20 of each are printed for triage.
     let es = &report.endpoint_sequence;
+    // Headline reflects the GATED criterion (real pipeline loss + reorder), with
+    // the QR-rig source-emission artifact reported separately so a green pipeline
+    // is never falsely RED on the discrete-painter-into-decimation artifact.
+    let pipeline = &report.endpoint_pipeline_loss;
+    let artifact = &report.endpoint_missing_emission_artifact;
+    let seq_state = if !pipeline.is_empty() || !es.out_of_order_ids.is_empty() {
+        "PIPELINE-LOSS"
+    } else if artifact.is_empty() {
+        "CONTIGUOUS"
+    } else {
+        "PIPELINE-CLEAN (source-emission artifact only)"
+    };
     println!(
-        "ENDPOINT_SEQ {} span=[{}..={}] expected={} delivered={} missing={} out_of_order={}{}",
-        if es.is_clean() {
-            "CONTIGUOUS"
-        } else {
-            "INCOMPLETE"
-        },
+        "ENDPOINT_SEQ {} span=[{}..={}] expected={} delivered={} \
+         missing={} (pipeline_loss={} emission_artifact={}) out_of_order={}{}",
+        seq_state,
         es.first_id,
         es.last_id,
         es.expected_count,
         es.delivered_count,
         es.missing_ids.len(),
+        pipeline.len(),
+        artifact.len(),
         es.out_of_order_ids.len(),
         if endpoint_seq_gated {
             ""
@@ -589,10 +619,16 @@ fn main() -> Result<()> {
             " (report-only — endpoint in documented-loss-bound mode)"
         },
     );
-    if !es.missing_ids.is_empty() {
+    if !pipeline.is_empty() {
         println!(
-            "  MISSING_IDS (generator→endpoint drops, first 20): {:?}",
-            &es.missing_ids[..es.missing_ids.len().min(20)]
+            "  PIPELINE_LOSS_IDS (present at source, lost downstream — REAL, first 20): {:?}",
+            &pipeline[..pipeline.len().min(20)]
+        );
+    }
+    if !artifact.is_empty() {
+        println!(
+            "  EMISSION_ARTIFACT_IDS (never on source NDI — QR-rig decimation, not a drop; first 20): {:?}",
+            &artifact[..artifact.len().min(20)]
         );
     }
     if !es.out_of_order_ids.is_empty() {

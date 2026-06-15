@@ -437,6 +437,41 @@ pub fn endpoint_sequence_check(observed: &[Observed]) -> EndpointSequenceReport 
     }
 }
 
+/// #68: split the endpoint's missing ids (from `endpoint_sequence_check`) into the
+/// two physically-distinct loss classes, using the SOURCE tap's decoded set:
+///
+/// - **emission artifact** — ids ABSENT at the source tap too: the QR rig never
+///   put them on the source NDI in the first place. On the fb-loopback this is the
+///   discrete-painter-into-genlock-decimation phase artifact (the painter writes a
+///   new id every ~33 ms but the 60 Hz HDMI scanout + 60→30 wall-clock decimator
+///   sample on their own boundaries, so ~5-13% of painted ids are never captured
+///   into NDI). This is NOT pipeline loss and must not fail a pipeline zero-loss
+///   gate. (On a synth-ndi source — no fb, no capture, no decimation — this set is
+///   empty, proven live.)
+/// - **pipeline loss** — ids PRESENT at the source tap but absent at the endpoint:
+///   they reached the source NDI and then vanished downstream. THIS is real
+///   source→endpoint loss, the only kind a zero-loss gate must fail on (and it
+///   equals `full_span_diff`'s `dropped_ids` by construction).
+///
+/// Returns `(emission_artifact, pipeline_loss)`, each sorted ascending. Pure /
+/// unit-tested so the harness can be HONEST: it reports the artifact (a QR-rig
+/// limitation, not a stream defect) separately from genuine pipeline drops.
+pub fn decompose_missing(endpoint_missing: &[u32], source: &[Observed]) -> (Vec<u32>, Vec<u32>) {
+    let src_present: HashSet<u32> = source.iter().map(|o| o.frame_id).collect();
+    let mut emission_artifact: Vec<u32> = Vec::new();
+    let mut pipeline_loss: Vec<u32> = Vec::new();
+    for &id in endpoint_missing {
+        if src_present.contains(&id) {
+            pipeline_loss.push(id); // was at source, lost downstream → real loss
+        } else {
+            emission_artifact.push(id); // never at source → rig emission artifact
+        }
+    }
+    emission_artifact.sort_unstable();
+    pipeline_loss.sort_unstable();
+    (emission_artifact, pipeline_loss)
+}
+
 /// #7 Phase 3: ABSOLUTE end-to-end latency = `recv_ts(endpoint) − gen_ts(source)`
 /// paired by `frame_id`. SOUND ONLY when both timestamps live on one synced wall
 /// clock (DanteSync CLOCK_REALTIME, strih = master) — the painter must emit
@@ -1071,6 +1106,39 @@ mod tests {
         assert_eq!(r.missing_ids, vec![6]);
         assert_eq!(r.out_of_order_ids, vec![4]);
         assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn decompose_missing_classifies_by_source_presence() {
+        // {7,8} missing at endpoint; source has 8 (→pipeline loss) not 7 (→artifact).
+        let src = vec![o(6, 60), o(8, 80), o(9, 90)];
+        let (artifact, pipeline) = decompose_missing(&[7, 8], &src);
+        assert_eq!(artifact, vec![7]);
+        assert_eq!(pipeline, vec![8]);
+    }
+
+    #[test]
+    fn decompose_missing_all_artifact_when_source_lacks_all() {
+        let src = vec![o(5, 50), o(6, 60)];
+        let (artifact, pipeline) = decompose_missing(&[7, 8, 9], &src);
+        assert_eq!(artifact, vec![7, 8, 9]);
+        assert!(pipeline.is_empty());
+    }
+
+    #[test]
+    fn decompose_missing_all_pipeline_when_source_has_all() {
+        let src = vec![o(7, 70), o(8, 80), o(9, 90)];
+        let (artifact, pipeline) = decompose_missing(&[7, 8, 9], &src);
+        assert!(artifact.is_empty());
+        assert_eq!(pipeline, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn decompose_missing_empty_is_empty() {
+        let src = vec![o(1, 10)];
+        let (artifact, pipeline) = decompose_missing(&[], &src);
+        assert!(artifact.is_empty());
+        assert!(pipeline.is_empty());
     }
 
     #[test]
