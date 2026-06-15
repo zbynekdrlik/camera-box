@@ -337,20 +337,23 @@ async fn run_capture_loop(
                     if elapsed.as_secs() >= 5 {
                         let secs = elapsed.as_secs_f64();
                         let cap_fps = frame_count as f64 / secs;
+                        let dropped = capture.dropped_captures();
                         if out_interval_ns > 0 {
                             let emit_fps = emit_count as f64 / secs;
                             tracing::info!(
-                                "Streaming: {:.1} fps emitted / {:.1} fps captured ({} sent, {} captured)",
+                                "Streaming: {:.1} fps emitted / {:.1} fps captured ({} sent, {} captured, {} capture-dropped)",
                                 emit_fps,
                                 cap_fps,
                                 emit_count,
-                                frame_count
+                                frame_count,
+                                dropped
                             );
                         } else {
                             tracing::info!(
-                                "Streaming: {:.1} fps ({} frames)",
+                                "Streaming: {:.1} fps ({} frames, {} capture-dropped)",
                                 cap_fps,
-                                frame_count
+                                frame_count,
+                                dropped
                             );
                         }
                         frame_count = 0;

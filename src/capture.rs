@@ -188,7 +188,7 @@ impl VideoCapture {
 
     /// Total frames the capture device has dropped over this stream's life
     /// (cumulative [`sequence_gap`]). Capture-card loss, not pipeline loss.
-    #[allow(dead_code)]
+    /// Surfaced in the periodic streaming report (`main.rs`).
     pub fn dropped_captures(&self) -> u64 {
         self.dropped_captures
     }
