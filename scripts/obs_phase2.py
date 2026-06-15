@@ -185,6 +185,10 @@ def setup(a):
             f"name; aborting before touching the program scene."
         )
     if ingest_full != a.upstream:
+        # Re-point to the resolved full NDI name only. overlay=True MERGES with the
+        # existing settings, so the #63 genlock keys (genlock_fifo/ndi_sync) applied
+        # above are PRESERVED — never set overlay=False here or this re-point would
+        # full-replace the input and silently drop the genlock config (black render).
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
             "inputSettings": {"ndi_source_name": ingest_full},

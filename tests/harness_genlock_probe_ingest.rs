@@ -99,3 +99,22 @@ fn phase2_probe_genlock_config_applied_on_create_and_reuse() {
          keeps its old (black) genlock-disabled config on the next run."
     );
 }
+
+/// Review #3: setup() has a THIRD SetInputSettings (the full-NDI-name resolve re-point) that
+/// sets only ndi_source_name and relies on overlay=True to MERGE-preserve the genlock keys.
+/// Every SetInputSettings on the probe input must use overlay=True; a full-replace
+/// (overlay=False) on the resolve re-point would silently drop genlock config → black render.
+#[test]
+fn phase2_probe_setinputsettings_never_full_replaces() {
+    let py = obs_py();
+    let su = py.find("def setup(").expect("setup() not found");
+    let end = py[su..].find("\ndef ").map(|i| su + i).unwrap_or(py.len());
+    let body = &py[su..end];
+    // Within setup(), there must be NO overlay: False on the probe input — every probe
+    // SetInputSettings merges (overlay True), so genlock keys are never clobbered.
+    assert!(
+        !body.contains("\"overlay\": False") && !body.contains("'overlay': False"),
+        "#63: no probe SetInputSettings in setup() may use overlay=False — a full replace \
+         drops the genlock_fifo/ndi_sync config the prior calls set, sending the probe black."
+    );
+}
