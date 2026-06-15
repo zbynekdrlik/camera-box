@@ -438,6 +438,21 @@ fn absolute_latency_gate_fails_when_no_samples_but_bound_set() {
 }
 
 #[test]
+fn absolute_latency_gate_passes_at_exactly_zero_latency() {
+    // A zero (recv == gen) latency is valid/possible — only a NEGATIVE one is
+    // impossible. The gate must use strict `< 0.0` (not `<= 0.0`): a min of
+    // exactly 0 ms PASSES under a positive bound. Pins the `<` vs `<=` boundary.
+    let source = vec![src(0, 0), src(1, 33)];
+    let endpoint = vec![ep(0, 0, 0), ep(1, 33, 33)]; // recv == gen ⇒ 0 ms each
+    let s = absolute_latency_stats(&source, &endpoint);
+    assert_eq!(s.as_ref().unwrap().min_ms, 0.0, "fixture min is exactly 0");
+    assert!(
+        absolute_latency_gate_pass(&s, Some(350.0)),
+        "an exactly-zero latency is valid and must PASS (only negative is impossible)"
+    );
+}
+
+#[test]
 fn absolute_latency_gate_fails_on_negative_latency_even_under_bound() {
     // A negative min (recv before gen) is physically impossible = cluster clock
     // desync; the measurement is untrustworthy so the gate must FAIL even though
