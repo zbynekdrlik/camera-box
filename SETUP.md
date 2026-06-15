@@ -96,6 +96,65 @@ sshpass -p 'newlevel' ssh root@<DEVICE_IP>
 14. **Install required packages** - avahi-daemon, v4l-utils, alsa-utils
 15. **Summary** - Shows what was configured
 
+## Cluster clock synchronization (genlock prerequisite) — #8
+
+The software genlock in `src/ndi.rs` aligns every camera's NDI send timecode to **absolute
+wall-clock frame boundaries** (`wait_for_next_boundary_100ns`). That only produces a *common*
+boundary across cameras if their wall clocks are synchronized to the **same reference**. If a
+node's clock is offset, every node computes a *different* boundary and the cameras are silently
+NOT genlocked. So cluster clock sync is a hard prerequisite, not an optimization.
+
+### Mechanism (the decision)
+
+- **DanteSync** is the chosen mechanism (chosen over plain chrony/NTP because the broadcast rig
+  needs sub-ms, PTP-grade alignment, and DanteSync already disciplines the Windows OBS boxes).
+- **Master / reference clock: strih = `10.77.9.202`** (the DanteTime master; NTP anchor + PTP
+  fine servo). The setup scripts use the **IP, not `strih.lan`**: per `CLAUDE.md`/`targets.md`,
+  `.lan` DNS may not resolve on a freshly-provisioned read-only-rootfs camera, and a failed
+  resolve makes dantesync fall back to its public-pool default and silently desync.
+- Every Linux camera runs `dantesync --ntp-server 10.77.9.202` as an enabled systemd service,
+  written by `scripts/setup.sh` / `scripts/setup-device.sh` so it survives the read-only rootfs
+  and a reboot. **The `--ntp-server 10.77.9.202` arg is essential** — a bare `dantesync` defaults
+  to a *public* NTP pool (e.g. `time.cloudflare.com`), which would discipline the camera to a
+  clock *different* from the rest of the cluster and break genlock. Do not hand-edit the unit; fix
+  the setup script (Script Failure Policy).
+- The Windows OBS boxes (strih = master, stream) run DanteSync too, configured on those hosts.
+
+### Measured baseline (evidence, 2026-06-15, read-only)
+
+Steady-state absolute NTP offset reported by each node's DanteSync, all PTP NANO-locked:
+
+| Node | Absolute offset | State |
+|------|-----------------|-------|
+| cam1 (10.77.9.61) | ~+85..+333 µs | PTP NANO lock |
+| cam2 (10.77.9.62) | ~+300..+351 µs | PTP NANO lock |
+| cam4 (10.77.9.64) | ~−40 µs | PTP NANO lock |
+| strih (master→GM 10.77.9.184) | ~+1249 µs | PTP NANO lock, settled |
+
+(cam3 was powered down at measurement time — enroll/verify it when it is back online.)
+
+### Offset bound + the regression guard
+
+- **Bound: ±2000 µs (2 ms).** Rationale: the 60 fps frame period is 16.7 ms (16667 µs); a clock
+  offset that large would put a camera a whole frame off the common genlock boundary, and the
+  unsynced failure mode is tens-to-hundreds of ms. **2 ms is ~8× under the frame period** (so any
+  boundary divergence stays well within a frame) yet comfortably **above** the legitimate
+  steady-state offsets above (notably strih's ~1.25 ms master-to-grandmaster offset), so the
+  guard does not false-positive on a healthy cluster while still catching real drift.
+- **Regression check: `scripts/clock-offset-guard.sh`** queries each reachable camera's DanteSync
+  offset over SSH and exits non-zero if any node exceeds the bound (or is unreachable / unknown —
+  never a silent pass). Run it from dev1:
+
+  ```bash
+  scripts/clock-offset-guard.sh                 # default: cam1-4, ±2000 µs bound
+  scripts/clock-offset-guard.sh --bound-us 1000 # tighter bound
+  ```
+
+  Exit codes: `0` all within bound, `20` drift, `11` a node unreachable/unknown, `1` usage error.
+  The Windows OBS boxes report the same `ntp_offset_us` signal as JSON on `\\.\pipe\dantesync`,
+  parsed read-only via the win-* MCP tools (the guard's `offset_us_from_pipe_json` is the shared
+  comparator). The parsing + threshold logic is unit-tested in `tests/clock_offset_guard.rs`.
+
 ## Step 5: Copy NDI Library
 
 NDI library cannot be distributed - must copy from existing device:

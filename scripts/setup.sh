@@ -418,7 +418,13 @@ Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dantesync
+# Sync to the cluster master strih (10.77.9.202), NOT the dantesync binary's default public NTP
+# pool (sk.pool.ntp.org / time.cloudflare.com) — every node must discipline its clock to the SAME
+# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Use the
+# IP, not strih.lan: per CLAUDE.md/targets.md .lan DNS may not resolve on a freshly-provisioned
+# read-only-rootfs camera, and a failed resolve makes dantesync fall back to its public-pool
+# default and silently desync — the exact regression #8 guards against.
+ExecStart=/usr/local/bin/dantesync --ntp-server 10.77.9.202
 Restart=always
 RestartSec=5
 StandardOutput=journal
