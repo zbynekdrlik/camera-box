@@ -4,7 +4,7 @@
 #
 # The software genlock in src/ndi.rs aligns every camera's NDI send timecode to ABSOLUTE
 # wall-clock frame boundaries (wait_for_next_boundary_100ns), which only yields a COMMON boundary
-# across nodes if their wall clocks are synchronized (src/ndi.rs:25-35 states this verbatim). The
+# across nodes if their wall clocks are synchronized (src/ndi.rs:62-65 states this verbatim). The
 # cluster is disciplined by DanteSync (strih = master; NTP anchor + PTP fine servo — see SETUP.md
 # "Cluster clock synchronization"). If a node's clock silently drifts past a fraction of the
 # 16.7 ms (60 fps) frame period, multi-camera genlock degrades with NO error and cross-node
