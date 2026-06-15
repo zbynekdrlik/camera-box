@@ -29,6 +29,13 @@ pub struct Observed {
     pub frame_id: u32,
     pub gen_ts_ns: i64,
     pub recv_ts_ns: i64,
+    /// Per-NODE emit time of THIS tap's source, in ns since the Unix epoch,
+    /// read from the NDI frame `timecode` (see [`crate::ndi::ReceivedFrame`]).
+    /// This is the EMIT instant on the shared DanteSync clock — per-hop latency =
+    /// `downstream.node_emit_tc_ns − upstream.node_emit_tc_ns` for a paired id,
+    /// which (unlike dev1 recv−recv) is true node-to-node transit. 0 when the
+    /// source did not stamp a usable timecode (then this tap can't anchor a hop).
+    pub node_emit_tc_ns: i64,
 }
 
 pub struct AnalysisInput {
@@ -325,6 +332,7 @@ mod tests {
             frame_id,
             gen_ts_ns: gen,
             recv_ts_ns: recv,
+            node_emit_tc_ns: 0,
         }
     }
 

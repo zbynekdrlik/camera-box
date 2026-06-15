@@ -32,6 +32,7 @@ pub fn run_reader(
             None => continue,
         };
         let recv_ts_ns = start.elapsed().as_nanos() as i64;
+        let node_emit_tc_ns = frame.timecode_100ns.saturating_mul(100);
         if let Some(p) = crate::probe::qr::decode_capture(
             frame.fourcc,
             &frame.data,
@@ -45,6 +46,7 @@ pub fn run_reader(
                     frame_id: p.frame_id,
                     gen_ts_ns: p.gen_ts_ns,
                     recv_ts_ns,
+                    node_emit_tc_ns,
                 });
             }
         }

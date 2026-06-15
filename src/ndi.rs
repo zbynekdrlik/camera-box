@@ -862,6 +862,14 @@ pub struct ReceivedFrame {
     #[allow(dead_code)]
     pub stride: u32,
     pub data: Vec<u8>,
+    /// The NDI frame `timecode`, in 100ns units since the Unix epoch, as stamped
+    /// by the EMITTING node (camera-box sender stamps the DanteSync wall clock at
+    /// the genlock boundary; OBS/DistroAV re-emit regenerates it from the emitting
+    /// OBS node's clock). With the whole cluster DanteSync-locked sub-ms, this is a
+    /// per-node EMIT time on a shared clock — the basis for exact per-hop latency
+    /// (the probe taps read it to compute `downstream_emit − upstream_emit`).
+    /// May be 0 or the SDK sentinel on sources that do not stamp a real timecode.
+    pub timecode_100ns: i64,
 }
 
 /// NDI receiver wrapper - receives video from an NDI source
@@ -1012,6 +1020,9 @@ impl NdiReceiver {
             fourcc: video_frame.fourcc,
             stride: video_frame.line_stride_in_bytes as u32,
             data,
+            // Per-node EMIT time stamped by the source (100ns since epoch). Read
+            // BEFORE recv_free_video_v2 frees the frame below.
+            timecode_100ns: video_frame.timecode,
         };
 
         // Free the NDI frame
@@ -1482,6 +1493,7 @@ mod tests {
             fourcc: NDILIBD_FOURCC_UYVY,
             stride: 3840,
             data: vec![0u8; 1920 * 1080 * 2],
+            timecode_100ns: 0,
         };
         assert_eq!(frame.width, 1920);
         assert_eq!(frame.height, 1080);

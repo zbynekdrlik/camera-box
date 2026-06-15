@@ -7,10 +7,10 @@ use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, decompose_missing, diff_hop,
-    earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns, overall_verdict,
-    settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport, FullSpanBounds,
-    FullSpanReport, HopInput, HopReport, HopVerdict,
+    abs_emit_latency, absolute_latency_gate_pass, absolute_latency_stats, decompose_missing,
+    diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns,
+    overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport,
+    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -232,6 +232,12 @@ struct TapSummary {
     /// output proves whether id-level `dropped_ids` is true hop loss or just tap
     /// decode misses.
     decoded: u64,
+    /// Per-tap ABSOLUTE emit latency `node_emit_tc − gen_ts` (ms) on the shared
+    /// DanteSync clock: paint→this-node's-emit. gen_ts-anchored, oversample-immune.
+    /// cam tap = paint→camera-NDI-emit (rig); strih/stream = paint→their emit.
+    /// Adjacent taps' difference is a clean per-hop latency. `None` if this tap's
+    /// source stamped no usable NDI timecode.
+    abs_emit_latency: Option<LatencyStats>,
 }
 
 fn main() -> Result<()> {
@@ -415,6 +421,18 @@ fn main() -> Result<()> {
             // Raw (untrimmed) decoded-frame count for this tap — the run_id QR
             // frames it actually decoded, oversample dups included.
             decoded: r.observed.lock().unwrap().len() as u64,
+            // paint→this-node-emit on the shared DanteSync clock (over the trimmed,
+            // steady-state observations). Adjacent taps' difference = per-hop.
+            // ONLY valid with --wall-clock: it differences gen_ts (painter stamp)
+            // against node_emit_tc (NDI epoch-100ns). Without --wall-clock gen_ts is
+            // dev1-monotonic ns, so the difference is meaningless (and a near-zero
+            // gen_ts at run start would also trip the 0-is-unstamped sentinel) — emit
+            // None there rather than a garbage number.
+            abs_emit_latency: if args.wall_clock {
+                abs_emit_latency(obs)
+            } else {
+                None
+            },
         })
         .collect();
 
@@ -595,10 +613,28 @@ fn main() -> Result<()> {
             h.single_copy_total,
             sc_pct,
         );
+        // TRUSTWORTHY first: per-node EMIT timecode difference (true transit; only
+        // valid between nodes that stamp the SAME timecode basis — OBS↔OBS today,
+        // see #76 for cam→OBS).
+        if let Some(l) = &h.emit_latency {
+            println!(
+                "  EMIT_LATENCY_MS min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={}) [per-node emit, trustworthy OBS↔OBS]",
+                l.min_ms, l.mean_ms, l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms, l.samples
+            );
+        }
         if let Some(l) = &h.latency {
             println!(
-                "  REL_LATENCY_MS min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={})",
+                "  REL_LATENCY_MS  min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={}) [dev1 recv-recv, NOT trustworthy — buffer-jitter, can go negative]",
                 l.min_ms, l.mean_ms, l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms, l.samples
+            );
+        }
+    }
+    // Per-tap paint→node-emit (gen_ts-anchored; trustworthy with --wall-clock).
+    for t in &report.taps {
+        if let Some(l) = &t.abs_emit_latency {
+            println!(
+                "TAP {} ABS_EMIT_MS p50={:.1} p99={:.1} max={:.1} (n={}) [paint→{}-emit on shared clock]",
+                t.name, l.p50_ms, l.p99_ms, l.max_ms, l.samples, t.name
             );
         }
     }

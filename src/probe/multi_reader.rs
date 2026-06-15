@@ -78,6 +78,11 @@ fn tap_loop(
             None => continue,
         };
         let recv_ts_ns = clock_ns(start, spec.wall_clock);
+        // Per-node EMIT time stamped by THIS tap's source (NDI timecode, 100ns
+        // units since epoch) -> ns. 0 stays 0 (source did not stamp a usable
+        // timecode). saturating_mul guards the SDK sentinel (INT64_MAX) if it
+        // ever surfaces on a received frame.
+        let node_emit_tc_ns = frame.timecode_100ns.saturating_mul(100);
         // Count every frame that physically arrived BEFORE attempting QR decode,
         // so a torn-QR frame still increments `captured`. This is what separates
         // hop frame-loss from tap decode-failure.
@@ -95,6 +100,7 @@ fn tap_loop(
                     frame_id: p.frame_id,
                     gen_ts_ns: p.gen_ts_ns,
                     recv_ts_ns,
+                    node_emit_tc_ns,
                 });
             }
         }

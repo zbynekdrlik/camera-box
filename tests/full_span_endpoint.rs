@@ -30,6 +30,7 @@ fn src(frame_id: u32, gen_ms: i64) -> Observed {
         frame_id,
         gen_ts_ns: gen_ms * 1_000_000,
         recv_ts_ns: gen_ms * 1_000_000,
+        node_emit_tc_ns: 0,
     }
 }
 
@@ -41,6 +42,7 @@ fn ep(frame_id: u32, gen_ms: i64, recv_ms: i64) -> Observed {
         frame_id,
         gen_ts_ns: gen_ms * 1_000_000,
         recv_ts_ns: recv_ms * 1_000_000,
+        node_emit_tc_ns: 0,
     }
 }
 

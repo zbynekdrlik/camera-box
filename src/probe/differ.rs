@@ -82,7 +82,15 @@ pub struct HopReport {
     pub dropped_ids: Vec<u32>,
     pub reorders: Vec<(u32, u32)>,
     pub freezes: Vec<Freeze>,
+    /// Per-hop latency from dev1 `recv−recv` first-occurrence. RETAINED for
+    /// continuity but NOT trustworthy: it conflates real transit with per-stream
+    /// NDI-receiver buffer jitter and can go negative. Prefer `emit_latency`.
     pub latency: Option<LatencyStats>,
+    /// Per-hop latency from per-NODE EMIT timecodes (`per_hop_emit_latency`) — the
+    /// trustworthy figure when both taps' sources stamp the NDI timecode on the
+    /// shared DanteSync clock. `None` when the upstream/downstream source does not
+    /// stamp a usable timecode (no id pairs with stamps on both sides).
+    pub emit_latency: Option<LatencyStats>,
     /// Upstream ids within the downstream active span carried by exactly ONE
     /// frame (no oversample redundancy). Their loss rate is the unmasked,
     /// oversample-independent estimate of the hop's per-frame drop probability —
@@ -173,6 +181,79 @@ fn first_recv(observed: &[Observed]) -> HashMap<u32, i64> {
     m
 }
 
+/// Earliest per-NODE EMIT timecode (ns since epoch) for each id at this tap,
+/// ignoring frames with no usable stamp (`node_emit_tc_ns == 0`). The earliest
+/// emit of an id is the instant the node first put that frame on the wire; pairing
+/// the two taps' earliest emits gives the first-delivery transit for the hop.
+fn first_emit_tc(observed: &[Observed]) -> HashMap<u32, i64> {
+    let mut m: HashMap<u32, i64> = HashMap::new();
+    for o in observed {
+        if o.node_emit_tc_ns == 0 {
+            continue;
+        }
+        m.entry(o.frame_id)
+            .and_modify(|e| {
+                if o.node_emit_tc_ns < *e {
+                    *e = o.node_emit_tc_ns;
+                }
+            })
+            .or_insert(o.node_emit_tc_ns);
+    }
+    m
+}
+
+/// Per-hop latency from per-NODE EMIT timecodes — the TRUSTWORTHY method.
+///
+/// For each id present at BOTH taps with a usable emit stamp,
+/// `downstream_emit − upstream_emit` on the shared DanteSync clock = true
+/// node-to-node transit. Unlike the dev1 `recv−recv` delta (`diff_hop`'s
+/// `latency`), this cannot go negative from per-stream NDI-receiver buffer
+/// asymmetry, because both numbers are EMIT instants stamped at the nodes
+/// themselves, not arrival instants at a shared central receiver — a negative
+/// here would be a genuine cross-node clock-sync breach. Returns `None` when no
+/// id pairs with usable stamps on both sides (e.g. a source that never stamps a
+/// timecode), so a tap without timecodes degrades to "no per-hop latency", never
+/// a wrong number.
+pub fn per_hop_emit_latency(
+    upstream: &[Observed],
+    downstream: &[Observed],
+) -> Option<LatencyStats> {
+    let up = first_emit_tc(upstream);
+    let down = first_emit_tc(downstream);
+    let mut deltas: Vec<f64> = Vec::new();
+    for (id, d_emit) in &down {
+        if let Some(u_emit) = up.get(id) {
+            deltas.push((d_emit - u_emit) as f64 / 1_000_000.0);
+        }
+    }
+    latency_stats(&deltas)
+}
+
+/// Per-TAP ABSOLUTE emit latency: for each decoded frame, `node_emit_tc_ns −
+/// gen_ts_ns` — the time from the painter's PAINT instant (`gen_ts`, carried in
+/// the QR, identical at every tap) to THIS node's EMIT of that frame, both on the
+/// shared DanteSync clock. Anchored on the per-frame `gen_ts`, so it needs NO
+/// cross-tap pairing and is immune to the oversample first-occurrence ambiguity
+/// that corrupts dev1 `recv−recv`. The cam tap's value is paint→camera-NDI-emit
+/// (rig); strih's is paint→strih-emit; stream's is paint→stream-emit. A clean
+/// per-hop latency is the difference of two adjacent taps' stats here. Skips
+/// frames with no emit stamp (`node_emit_tc_ns == 0`) or no gen stamp
+/// (`gen_ts_ns == 0`); `None` when none qualify.
+///
+/// REQUIRES the wall-clock domain (`gen_ts` stamped on CLOCK_REALTIME via the
+/// painter's `--wall-clock`): `node_emit_tc_ns` is always NDI epoch-100ns, so a
+/// monotonic `gen_ts` (the non-wall-clock path) would make the difference
+/// meaningless. Callers gate this on `--wall-clock` (the `0`-is-unstamped sentinel
+/// is also only safe for the huge epoch-domain stamps, never a monotonic ~0).
+pub fn abs_emit_latency(observed: &[Observed]) -> Option<LatencyStats> {
+    let deltas: Vec<f64> = observed
+        .iter()
+        .filter(|o| o.node_emit_tc_ns != 0 && o.gen_ts_ns != 0)
+        .map(|o| (o.node_emit_tc_ns - o.gen_ts_ns) as f64 / 1_000_000.0)
+        .collect();
+    latency_stats(&deltas)
+}
+
 pub fn diff_hop(input: HopInput) -> HopReport {
     let up_unique: HashSet<u32> = input.upstream.iter().map(|o| o.frame_id).collect();
     let down_unique: HashSet<u32> = input.downstream.iter().map(|o| o.frame_id).collect();
@@ -239,6 +320,9 @@ pub fn diff_hop(input: HopInput) -> HopReport {
         }
     }
     let latency = latency_stats(&deltas);
+    // The trustworthy per-hop latency: per-node EMIT timecode differences on the
+    // shared DanteSync clock (None when the sources don't stamp a timecode).
+    let emit_latency = per_hop_emit_latency(input.upstream, input.downstream);
 
     // Loss gate: STRICT zero (any in-span drop fails) by default; or, when a
     // documented per-hop bound is set, judged by the oversample-independent
@@ -282,6 +366,7 @@ pub fn diff_hop(input: HopInput) -> HopReport {
         reorders,
         freezes,
         latency,
+        emit_latency,
         single_copy_total,
         single_copy_dropped,
         verdict,
@@ -598,6 +683,29 @@ mod tests {
             frame_id,
             gen_ts_ns: 0,
             recv_ts_ns: recv_ms * 1_000_000,
+            node_emit_tc_ns: 0,
+        }
+    }
+
+    /// Like [`o`], but also sets the per-node emit timecode (ms) — for the
+    /// per-hop-from-emit-timecode tests.
+    fn oe(frame_id: u32, recv_ms: i64, emit_ms: i64) -> Observed {
+        Observed {
+            frame_id,
+            gen_ts_ns: 0,
+            recv_ts_ns: recv_ms * 1_000_000,
+            node_emit_tc_ns: emit_ms * 1_000_000,
+        }
+    }
+
+    /// Sets the paint `gen_ts` (ms) and the per-node emit timecode (ms) — for the
+    /// per-tap absolute-emit-latency tests.
+    fn oe_gen(frame_id: u32, gen_ms: i64, emit_ms: i64) -> Observed {
+        Observed {
+            frame_id,
+            gen_ts_ns: gen_ms * 1_000_000,
+            recv_ts_ns: 0,
+            node_emit_tc_ns: emit_ms * 1_000_000,
         }
     }
 
@@ -614,6 +722,87 @@ mod tests {
             max_loss_pct: None,
             min_single_copy: 0,
         }
+    }
+
+    #[test]
+    fn per_hop_emit_latency_is_downstream_minus_upstream_emit() {
+        // up emits id1@100ms id2@200ms; down (next node) emits both +30ms.
+        let up = [oe(1, 0, 100), oe(2, 0, 200)];
+        let down = [oe(1, 0, 130), oe(2, 0, 230)];
+        let l = per_hop_emit_latency(&up, &down).expect("paired stamps");
+        assert_eq!(l.min_ms, 30.0);
+        assert_eq!(l.p50_ms, 30.0);
+        assert_eq!(l.max_ms, 30.0);
+        // Emit-based latency is true transit: never negative for a real hop.
+        assert!(l.min_ms >= 0.0);
+    }
+
+    #[test]
+    fn per_hop_emit_latency_takes_earliest_emit_per_id() {
+        // id1 oversampled upstream: emitted at 100 then 116 (earliest = 100);
+        // downstream earliest at 140 -> transit = 40, not 24.
+        let up = [oe(1, 0, 116), oe(1, 0, 100)];
+        let down = [oe(1, 0, 140), oe(1, 0, 156)];
+        let l = per_hop_emit_latency(&up, &down).expect("paired stamps");
+        assert_eq!(l.min_ms, 40.0);
+    }
+
+    #[test]
+    fn per_hop_emit_latency_ignores_unstamped_and_unpaired() {
+        // id1 stamped both sides (+40); id2 unstamped downstream (o => emit_tc 0);
+        // id3 only upstream. Only id1 contributes.
+        let up = [oe(1, 0, 100), oe(3, 0, 100)];
+        let down = [oe(1, 0, 140), o(2, 0)];
+        let l = per_hop_emit_latency(&up, &down).expect("id1 pairs");
+        assert_eq!(l.min_ms, 40.0);
+        assert_eq!(l.max_ms, 40.0);
+    }
+
+    #[test]
+    fn abs_emit_latency_is_node_emit_minus_gen() {
+        // gen_ts 0 is the "unstamped" sentinel, so use non-zero paint times:
+        // id1 gen 5ms emit 75ms -> 70; id2 gen 10ms emit 100ms -> 90.
+        let obs = [oe_gen(1, 5, 75), oe_gen(2, 10, 100)];
+        let l = abs_emit_latency(&obs).expect("stamped");
+        assert_eq!(l.min_ms, 70.0);
+        assert_eq!(l.max_ms, 90.0);
+    }
+
+    #[test]
+    fn abs_emit_latency_skips_unstamped() {
+        // o() has emit_tc 0 -> skipped; nothing qualifies.
+        let obs = [o(1, 0), o(2, 0)];
+        assert!(abs_emit_latency(&obs).is_none());
+    }
+
+    #[test]
+    fn per_hop_emit_latency_none_when_no_stamps() {
+        // No source stamps a timecode (all emit_tc 0) -> no per-hop emit latency,
+        // never a wrong number.
+        let up = [o(1, 0), o(2, 0)];
+        let down = [o(1, 0), o(2, 0)];
+        assert!(per_hop_emit_latency(&up, &down).is_none());
+    }
+
+    #[test]
+    fn diff_hop_populates_emit_latency_from_timecodes() {
+        let up = [oe(1, 0, 100), oe(2, 0, 200), oe(3, 0, 300)];
+        let down = [oe(1, 0, 133), oe(2, 0, 233), oe(3, 0, 333)];
+        let r = diff_hop(HopInput {
+            name: "cam→strih".to_string(),
+            upstream: &up,
+            downstream: &down,
+            capture_fps: 30.0,
+            freeze_periods: 3.0,
+            min_frames: 2,
+            max_p99_latency_ms: None,
+            max_freeze_periods_gate: None,
+            max_loss_pct: None,
+            min_single_copy: 0,
+        });
+        let e = r.emit_latency.expect("emit latency present");
+        assert_eq!(e.p50_ms, 33.0);
+        assert!(e.min_ms >= 0.0);
     }
 
     /// A hop whose downstream per-id relative latency p99 == `hi_ms`: four ids at
