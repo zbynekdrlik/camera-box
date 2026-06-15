@@ -418,7 +418,10 @@ Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dantesync
+# Sync to the cluster master strih.lan, NOT the dantesync binary's default public NTP pool
+# (sk.pool.ntp.org / time.cloudflare.com) — every node must discipline its clock to the SAME
+# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8).
+ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan
 Restart=always
 RestartSec=5
 StandardOutput=journal

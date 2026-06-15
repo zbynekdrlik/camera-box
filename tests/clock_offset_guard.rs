@@ -20,10 +20,10 @@
 //!
 //! The status-line fixtures below are the ACTUAL formats captured read-only from live nodes on
 //! 2026-06-15, so the parsers are proven against the real production formats, not a guess:
-//!   * Linux cameras + stream — DanteSync logs to journald, e.g.
-//!       `Jun 15 09:11:53 CAM2 dantesync[3649]: [NTP] offset:+300us (threshold:520us, adaptive)`
-//!   * Windows OBS boxes (strih/stream) — DanteSync status pipe emits JSON, e.g.
-//!       `{"offset_ns":..,"ntp_offset_us":1249,"is_locked":true,"mode":"NANO",...}`
+//! * Linux cameras + stream — DanteSync logs to journald, e.g.
+//!   `Jun 15 09:11:53 CAM2 dantesync[3649]: [NTP] offset:+300us (threshold:520us, adaptive)`
+//! * Windows OBS boxes (strih/stream) — DanteSync status pipe emits JSON, e.g.
+//!   `{"offset_ns":..,"ntp_offset_us":1249,"is_locked":true,"mode":"NANO",...}`
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -101,7 +101,8 @@ fn parses_offset_us_from_real_journal() {
     );
 
     // A negative offset must keep its sign (the bound is on |offset|, computed by offset_check).
-    let neg = "Jun 15 09:00:00 CAM4 dantesync[1]: [NTP] offset:-742us (threshold:550us, adaptive)\n";
+    let neg =
+        "Jun 15 09:00:00 CAM4 dantesync[1]: [NTP] offset:-742us (threshold:550us, adaptive)\n";
     let out = run_sourced("offset_us_from_journal \"$J\"", &[("J", neg)]);
     assert_eq!(out.trim(), "-742", "must preserve the sign: {out:?}");
 
@@ -150,14 +151,14 @@ fn offset_check_flags_in_bound_out_of_bound_and_missing() {
     // so a negative offset of the same magnitude as a positive one is treated identically.
     // rc: 0 = OK (|offset| <= bound), 2 = DRIFT (|offset| > bound), 3 = UNKNOWN (unread).
     let cases = [
-        ("300", "2000", "OK", 0),     // typical camera, in bound
-        ("1249", "2000", "OK", 0),    // strih master-to-GM offset, in bound
-        ("-742", "2000", "OK", 0),    // negative, in bound by magnitude
-        ("2000", "2000", "OK", 0),    // exactly at the bound -> OK
-        ("2001", "2000", "DRIFT", 2), // one µs over -> DRIFT
-        ("-5000", "2000", "DRIFT", 2),// negative drift past the bound
-        ("50000", "2000", "DRIFT", 2),// the unsynced failure mode (50 ms)
-        ("", "2000", "UNKNOWN", 3),   // unread value is NEVER OK
+        ("300", "2000", "OK", 0),      // typical camera, in bound
+        ("1249", "2000", "OK", 0),     // strih master-to-GM offset, in bound
+        ("-742", "2000", "OK", 0),     // negative, in bound by magnitude
+        ("2000", "2000", "OK", 0),     // exactly at the bound -> OK
+        ("2001", "2000", "DRIFT", 2),  // one µs over -> DRIFT
+        ("-5000", "2000", "DRIFT", 2), // negative drift past the bound
+        ("50000", "2000", "DRIFT", 2), // the unsynced failure mode (50 ms)
+        ("", "2000", "UNKNOWN", 3),    // unread value is NEVER OK
     ];
     for (offset, bound, want_sub, want_rc) in cases {
         let body = "rc=0; offset_check node \"$OFF\" \"$BOUND\" || rc=$?; echo \"RC=$rc\"";
@@ -181,13 +182,19 @@ fn offset_check_uses_numeric_not_lexical_comparison() {
         "rc=0; offset_check n \"$OFF\" \"$B\" || rc=$?; echo RC=$rc",
         &[("OFF", "9"), ("B", "2000")],
     );
-    assert!(small.contains("OK") && small.contains("RC=0"), "9 <= 2000 numerically: {small:?}");
+    assert!(
+        small.contains("OK") && small.contains("RC=0"),
+        "9 <= 2000 numerically: {small:?}"
+    );
 
     let big = run_sourced(
         "rc=0; offset_check n \"$OFF\" \"$B\" || rc=$?; echo RC=$rc",
         &[("OFF", "30000"), ("B", "2000")],
     );
-    assert!(big.contains("DRIFT") && big.contains("RC=2"), "30000 > 2000 numerically: {big:?}");
+    assert!(
+        big.contains("DRIFT") && big.contains("RC=2"),
+        "30000 > 2000 numerically: {big:?}"
+    );
 }
 
 #[test]
@@ -197,9 +204,18 @@ fn default_bound_is_documented_and_well_under_the_frame_period() {
     // clock would cause — yet above the observed steady-state offsets (cam ~300 µs, strih ~1249
     // µs) so it does not false-positive on the healthy cluster.
     let out = run_sourced("echo \"$DEFAULT_BOUND_US\"", &[]);
-    let bound: i64 = out.trim().parse().unwrap_or_else(|_| panic!("DEFAULT_BOUND_US not an int: {out:?}"));
-    assert!(bound > 1249, "bound must clear strih's real 1249 µs offset: {bound}");
-    assert!(bound < 16667, "bound must be well under the 16.7 ms frame period: {bound}");
+    let bound: i64 = out
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("DEFAULT_BOUND_US not an int: {out:?}"));
+    assert!(
+        bound > 1249,
+        "bound must clear strih's real 1249 µs offset: {bound}"
+    );
+    assert!(
+        bound < 16667,
+        "bound must be well under the 16.7 ms frame period: {bound}"
+    );
 }
 
 #[test]
