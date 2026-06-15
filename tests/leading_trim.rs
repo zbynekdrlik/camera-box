@@ -20,10 +20,7 @@ fn earliest_recv_is_the_min_across_taps() {
     let a = vec![o(0, 500), o(1, 600)];
     let b = vec![o(0, 300), o(1, 700)]; // 300 ms is the global earliest
     let c: Vec<Observed> = vec![];
-    assert_eq!(
-        earliest_recv_ns(&[&a, &b, &c]),
-        Some(300 * 1_000_000)
-    );
+    assert_eq!(earliest_recv_ns(&[&a, &b, &c]), Some(300 * 1_000_000));
 }
 
 #[test]
@@ -35,10 +32,7 @@ fn earliest_recv_none_when_all_empty() {
 #[test]
 fn lead_cutoff_adds_the_discard_window() {
     // earliest 300 ms + 2 s discard = 2300 ms cutoff (in ns).
-    assert_eq!(
-        lead_cutoff_ns(300 * 1_000_000, 2000),
-        2300 * 1_000_000
-    );
+    assert_eq!(lead_cutoff_ns(300 * 1_000_000, 2000), 2300 * 1_000_000);
 }
 
 #[test]

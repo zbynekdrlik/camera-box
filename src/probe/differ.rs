@@ -127,6 +127,44 @@ pub fn trim_to_settle(observed: &[Observed], cutoff_ns: i64) -> Vec<Observed> {
         .collect()
 }
 
+/// #68 Task C: the global earliest `recv_ts_ns` across ALL taps — the instant the
+/// run's very first frame landed at any tap. The leading-discard window is
+/// measured from this single origin (not per-tap), so every tap drops the SAME
+/// wall-clock prefix and the hops stay comparable. `None` when no tap saw a
+/// frame. Same clock-domain contract as `settle_cutoff_ns`: every `recv_ts_ns`
+/// must share one domain (all monotonic, or all CLOCK_REALTIME with
+/// `--wall-clock`).
+pub fn earliest_recv_ns(taps: &[&[Observed]]) -> Option<i64> {
+    taps.iter()
+        .flat_map(|t| t.iter())
+        .map(|o| o.recv_ts_ns)
+        .min()
+}
+
+/// #68 Task C: the leading-discard cutoff — frames received BEFORE this instant
+/// are the post-reset prime window and are dropped. `earliest_ns` is the run's
+/// global earliest recv (`earliest_recv_ns`); `discard_ms` is the window length in
+/// MILLISECONDS (mirrors `settle_cutoff_ns`'s ms unit). A frame received exactly
+/// at the cutoff is already steady-state (kept by `trim_after`'s inclusive `>=`).
+pub fn lead_cutoff_ns(earliest_ns: i64, discard_ms: u64) -> i64 {
+    earliest_ns + (discard_ms as i64) * 1_000_000
+}
+
+/// #68 Task C: keep only the frames received AT or AFTER `cutoff_ns` (drop the
+/// leading post-reset prime window). The mirror of `trim_to_settle` (which drops
+/// the trailing in-flight window); applied together they leave only the
+/// steady-state middle. Inclusive `>=` so a frame exactly at the cutoff — the
+/// first steady-state frame — is kept. `cutoff_ns == 0` (zero discard, or no
+/// earliest) keeps everything, since all real recv timestamps are positive. Pure
+/// so the clock-domain contract is testable without a live NDI rig.
+pub fn trim_after(observed: &[Observed], cutoff_ns: i64) -> Vec<Observed> {
+    observed
+        .iter()
+        .filter(|o| o.recv_ts_ns >= cutoff_ns)
+        .cloned()
+        .collect()
+}
+
 fn first_recv(observed: &[Observed]) -> HashMap<u32, i64> {
     let mut m: HashMap<u32, i64> = HashMap::new();
     for o in observed {

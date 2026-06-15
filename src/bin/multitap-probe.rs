@@ -8,8 +8,9 @@ use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
     absolute_latency_gate_pass, absolute_latency_stats, decompose_missing, diff_hop,
-    endpoint_sequence_check, full_span_diff, overall_verdict, settle_cutoff_ns, trim_to_settle,
-    EndpointSequenceReport, FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
+    earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns, overall_verdict,
+    settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport, FullSpanBounds,
+    FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -49,6 +50,16 @@ struct Args {
     /// trimmed so in-flight frames are not counted as hop drops.
     #[arg(long, default_value_t = 500)]
     settle_ms: u64,
+    /// #68 Task C — leading-discard window (seconds): frames received within this
+    /// many seconds of the run's FIRST decoded frame (across all taps) are trimmed
+    /// before the loss/contiguity check. The harness re-points the OBS receiver
+    /// right before a run, which transiently primes the genlock FIFO so the first
+    /// seconds look cleaner than steady state and can MASK the steady-state loss
+    /// the persistence test sees. Discard 30-60 s to measure only steady state.
+    /// Default 0 = no leading trim (the prior behaviour); set it for a
+    /// reset-confound-free zero-loss run.
+    #[arg(long, default_value_t = 0)]
+    lead_discard_secs: u64,
     /// A tap with fewer than this many run_id-matching frames FAILS (not vacuous).
     #[arg(long, default_value_t = 100)]
     min_frames: usize,
@@ -169,6 +180,11 @@ fn validate_count_bounds(bounds: &[(String, f64)], flag: &str) -> Result<()> {
 struct MultiTapReport {
     run_id: u32,
     duration_secs: u64,
+    /// #68 Task C: the leading-discard window (seconds) trimmed from the start of
+    /// the run before the loss/contiguity check, so a post-reset genlock-FIFO prime
+    /// cannot mask steady-state loss. 0 = no leading trim. The artifact records it
+    /// so a "zero loss" verdict is self-describing about WHICH window it certified.
+    lead_discard_secs: u64,
     taps: Vec<TapSummary>,
     hops: Vec<HopReport>,
     /// #7: source→endpoint full-span zero-loss aggregate (first tap vs last tap),
@@ -235,6 +251,23 @@ fn main() -> Result<()> {
     if args.settle_ms >= args.duration_secs.saturating_mul(1000) {
         bail!(
             "--settle-ms ({}) must be less than the run duration ({} s)",
+            args.settle_ms,
+            args.duration_secs
+        );
+    }
+    // The leading-discard + trailing-settle windows must leave a non-empty
+    // steady-state middle, or there is nothing left to certify (and the loss check
+    // would vacuously pass on zero frames). Reject the combination up front.
+    if args
+        .lead_discard_secs
+        .saturating_mul(1000)
+        .saturating_add(args.settle_ms)
+        >= args.duration_secs.saturating_mul(1000)
+    {
+        bail!(
+            "--lead-discard-secs ({} s) + --settle-ms ({} ms) must leave a non-empty \
+             steady-state window within the run duration ({} s)",
+            args.lead_discard_secs,
             args.settle_ms,
             args.duration_secs
         );
@@ -313,10 +346,28 @@ fn main() -> Result<()> {
 
     // Snapshot + trim the trailing settle window (in-flight frames are not drops).
     let cutoff_ns = settle_cutoff_ns(stop_ns, args.settle_ms);
-    let trimmed: Vec<Vec<_>> = results
+    let settled: Vec<Vec<_>> = results
         .iter()
         .map(|r| trim_to_settle(&r.observed.lock().unwrap(), cutoff_ns))
         .collect();
+
+    // #68 Task C: also trim the LEADING post-reset prime window so a transiently
+    // primed genlock FIFO can't mask steady-state loss. Measure the window from the
+    // run's global earliest recv (across all settled taps) so every tap drops the
+    // same wall-clock prefix and the hops stay comparable. `lead_discard_secs == 0`
+    // ⇒ cutoff 0 ⇒ keeps everything (prior behaviour).
+    let lead_cut_ns = earliest_recv_ns(&settled.iter().map(|t| t.as_slice()).collect::<Vec<_>>())
+        .map(|e| lead_cutoff_ns(e, args.lead_discard_secs * 1000))
+        .unwrap_or(0);
+    let trimmed: Vec<Vec<_>> = settled.iter().map(|t| trim_after(t, lead_cut_ns)).collect();
+    if args.lead_discard_secs > 0 {
+        tracing::info!(
+            "#68 Task C: discarded leading {} s (cutoff_ns={}); steady-state per-tap frames: {:?}",
+            args.lead_discard_secs,
+            lead_cut_ns,
+            trimmed.iter().map(|t| t.len()).collect::<Vec<_>>()
+        );
+    }
 
     // Per-hop gate bounds, keyed by the hop's DOWNSTREAM tap name (the tap the
     // hop feeds). Absent ⇒ None ⇒ report-only.
@@ -478,6 +529,7 @@ fn main() -> Result<()> {
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
+        lead_discard_secs: args.lead_discard_secs,
         taps: tap_summaries,
         hops,
         full_span,

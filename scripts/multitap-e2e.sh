@@ -191,6 +191,16 @@ MIN_SC_STREAM="${MIN_SC_STREAM-100}"
 [ -n "$MIN_SC_STRIH" ]  && GATE_ARGS+=(--min-single-copy "strih=$MIN_SC_STRIH")
 [ -n "$MIN_SC_STREAM" ] && GATE_ARGS+=(--min-single-copy "stream=$MIN_SC_STREAM")
 
+# #68 Task C — leading-discard window (seconds). The harness re-points the OBS
+# receiver right before a run (SetInputSettings), which transiently primes the
+# genlock FIFO so the first seconds look cleaner than steady state and can MASK
+# the ~1/12s loss the persistence test sees. Discard the first LEAD_DISCARD
+# seconds so only the steady-state window feeds the loss/contiguity check. Default
+# 0 = no leading trim (prior behaviour); set e.g. LEAD_DISCARD=60 for a
+# reset-confound-free steady-state zero-loss run.
+LEAD_DISCARD="${LEAD_DISCARD:-0}"
+[ "$LEAD_DISCARD" -gt 0 ] && GATE_ARGS+=(--lead-discard-secs "$LEAD_DISCARD")
+
 # #7 absolute end-to-end latency: tap on the wall clock (matches the painter) so
 # the source→endpoint absolute latency is sound, and optionally gate its p99.
 [ "$WALL_CLOCK" = "1" ] && GATE_ARGS+=(--wall-clock)
