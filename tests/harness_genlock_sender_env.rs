@@ -47,6 +47,17 @@ fn camera_set() -> String {
     fs::read_to_string(path).expect("read scripts/camera-set.sh")
 }
 
+/// The ACTIVE (non-comment) shell line that launches camera-box manually
+/// (`nohup /usr/local/bin/camera-box`). Comment lines (leading `#`, ignoring whitespace) are
+/// excluded so a mention of the env in a `# …` comment can never satisfy the assertions — the
+/// guard must pin the real command, not documentation about it.
+fn active_camera_box_launch_line(script: &str) -> &str {
+    script
+        .lines()
+        .find(|l| l.contains("nohup /usr/local/bin/camera-box") && !l.trim_start().starts_with('#'))
+        .expect("active (non-comment) manual camera-box launch line not found in multitap-e2e.sh")
+}
+
 /// The manual camera-box launch in multitap-e2e.sh MUST export `CAMERA_BOX_GENLOCK_FPS` so the
 /// sender genlock-decimates exactly like the deployed systemd service (#50 drop-in). Without
 /// it the manual sender free-runs at the capture rate (~60 fps) and strih's 30 fps genlock
@@ -54,38 +65,36 @@ fn camera_set() -> String {
 #[test]
 fn manual_camera_box_launch_sets_genlock_fps() {
     let s = multitap();
-    // Locate the manual launch: `nohup /usr/local/bin/camera-box`. The env must be on (or
-    // exported into) that same command — a bare launch with only NDI_RUNTIME_DIR_V6 is the bug.
-    let launch = s
+    // Assert ON THE ACTIVE LAUNCH LINE ITSELF (not anywhere in the file) so a comment mention
+    // of the env can't spuriously pass — the env must precede the binary on that very command.
+    let line = active_camera_box_launch_line(&s);
+    let env_pos = line.find("CAMERA_BOX_GENLOCK_FPS=").unwrap_or(usize::MAX);
+    let launch = line
         .find("nohup /usr/local/bin/camera-box")
-        .expect("manual camera-box launch (nohup /usr/local/bin/camera-box) not found");
-    // The genlock env must appear in the remote command BEFORE the manual launch (it is set on
-    // the same `(VAR=… nohup … &)` line, so it precedes the binary on that command).
-    let env_pos = s.find("CAMERA_BOX_GENLOCK_FPS=").expect(
-        "#66 regression: multitap-e2e.sh must set CAMERA_BOX_GENLOCK_FPS on the manual \
-                 camera-box launch so the sender genlock-decimates like the deployed service; \
-                 without it strih's 30fps genlock FIFO drops ~49% of frames / renders black.",
-    );
+        .expect("launch token missing on the located line");
     assert!(
-        env_pos < launch,
-        "#66 regression: CAMERA_BOX_GENLOCK_FPS (@{env_pos}) must be set on the same command \
-         that launches camera-box (@{launch}) — a manual launch without genlock decimation \
+        env_pos != usize::MAX && env_pos < launch,
+        "#66 regression: CAMERA_BOX_GENLOCK_FPS must be set on the SAME active command that \
+         launches camera-box (line: `{line}`) — a manual launch without genlock decimation \
          emits the full ~60fps capture and strih's 30fps genlock FIFO drops ~half the frames."
     );
 }
 
 /// The genlock rate must be sourced from the single `GENLOCK_FPS` knob (default 30), not a
-/// bare literal scattered in the launch — so it stays in lock-step with the deployed drop-in
-/// and an operator can override it (e.g. when the live OBS rate changes for the #11 60fps step).
+/// bare literal — so it stays in lock-step with the deployed drop-in and an operator can
+/// override it (e.g. when the live OBS rate changes for the #11 60fps step). Checked on the
+/// ACTIVE launch line (comments excluded).
 #[test]
 fn multitap_uses_genlock_fps_knob_not_a_bare_literal() {
     let s = multitap();
+    let line = active_camera_box_launch_line(&s);
     assert!(
-        s.contains("CAMERA_BOX_GENLOCK_FPS=${GENLOCK_FPS")
-            || s.contains("CAMERA_BOX_GENLOCK_FPS=\"$GENLOCK_FPS\"")
-            || s.contains("CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS"),
-        "#66: multitap-e2e.sh must drive CAMERA_BOX_GENLOCK_FPS from the GENLOCK_FPS knob \
-         (single source of truth, env-overridable) so it tracks the deployed genlock rate."
+        line.contains("CAMERA_BOX_GENLOCK_FPS=${GENLOCK_FPS")
+            || line.contains("CAMERA_BOX_GENLOCK_FPS=\"$GENLOCK_FPS\"")
+            || line.contains("CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS"),
+        "#66: the active camera-box launch must drive CAMERA_BOX_GENLOCK_FPS from the \
+         GENLOCK_FPS knob (single source of truth, env-overridable) so it tracks the deployed \
+         genlock rate — got: `{line}`"
     );
 }
 

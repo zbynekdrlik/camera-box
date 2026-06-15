@@ -114,6 +114,12 @@ if fuser -s /dev/video0 2>/dev/null; then
 fi
 
 echo ">> start camera-box WITHOUT --display (capture->NDI only)"
+# #66 NOTE: loopback INTENTIONALLY does NOT set CAMERA_BOX_GENLOCK_FPS here (unlike
+# multitap-e2e.sh, which must — see that script). Loopback measures cam->NDI->tap on the SAME
+# box with frame-probe reading the NDI source directly; there is NO downstream genlocked OBS
+# FIFO in this path, so the #66 genlock-decimation requirement does not apply. Loopback
+# deliberately exercises the raw ~60fps capture path (CAPTURE_FPS=60). Do NOT add the genlock
+# env here "to match multitap" — it would change what loopback measures.
 nohup /usr/local/bin/camera-box >/tmp/cam-manual.log 2>&1 &
 MANUAL_PID=$!
 sleep 7
