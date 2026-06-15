@@ -81,12 +81,16 @@ offset_us_from_journal() {
 # offset_us_from_pipe_json TEXT -> the SIGNED integer value of the JSON "ntp_offset_us" field
 # ("" if absent). This is the Windows DanteSync status-pipe signal. It deliberately reads
 # ntp_offset_us (the absolute NTP offset the master/boxes report), NOT offset_ns or
-# accumulated_phase_us. `|| true` survives a no-match under set -e.
+# accumulated_phase_us. The real status blob carries exactly one such field; if it ever carries
+# more than one, the WORST (largest |offset|) is returned, never the first — a guard whose
+# contract is "never silently pass an out-of-bound offset" must not let a later drifted value be
+# masked by an earlier in-bound one. `|| true` survives a no-match under set -e.
 offset_us_from_pipe_json() {
   printf '%s\n' "$1" \
     | grep -oE '"ntp_offset_us"[[:space:]]*:[[:space:]]*-?[0-9]+' \
     | sed -n 's/.*:[[:space:]]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p' \
-    | head -1 || true
+    | awk 'NR==1 || ($1<0?-$1:$1) > (m<0?-m:m) { m=$1 } END { if (NR) print m }' \
+    || true
 }
 
 # abs_int N -> |N| (strips a leading '+' or '-'). Empty stays empty.
@@ -181,10 +185,14 @@ main() {
   fi
 
   # Normalise the target list and fail LOUDLY if it is empty — a guard that checks nothing must
-  # never report "all clear" (test-strictness: a check that can't run fails, not passes).
+  # never report "all clear" (test-strictness: a check that can't run fails, not passes). Split on
+  # whitespace with globbing DISABLED (set -f): a target token containing a shell glob char
+  # (`*`/`?`/`[`) must NOT be expanded against the cwd into a bogus node name.
   local -a pairs=()
+  set -f
   # shellcheck disable=SC2206
   pairs=($targets)
+  set +f
   if [ "${#pairs[@]}" -eq 0 ]; then
     echo "ERROR: no targets to check (CLOCK_GUARD_TARGETS / --targets is empty)." >&2
     echo "The clock-offset guard cannot certify the cluster with zero nodes — refusing to pass." >&2

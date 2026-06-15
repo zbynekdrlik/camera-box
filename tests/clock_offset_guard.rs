@@ -143,6 +143,17 @@ fn parses_offset_us_from_real_pipe_json() {
         "",
         "missing ntp_offset_us -> UNKNOWN (empty): {out:?}"
     );
+
+    // Anomalous blob with MORE than one ntp_offset_us: the guard must return the WORST (largest
+    // |offset|) so a later drifted value cannot be masked by an earlier in-bound one — a guard
+    // that "never silently passes an out-of-bound offset" must not pick the first occurrence.
+    let multi = "{\"ntp_offset_us\":50,\"peer\":{\"ntp_offset_us\":-99999}}";
+    let out = run_sourced("offset_us_from_pipe_json \"$JSON\"", &[("JSON", multi)]);
+    assert_eq!(
+        out.trim(),
+        "-99999",
+        "multiple ntp_offset_us -> the worst (largest magnitude), not the first 50: {out:?}"
+    );
 }
 
 #[test]
@@ -194,6 +205,18 @@ fn offset_check_uses_numeric_not_lexical_comparison() {
     assert!(
         big.contains("DRIFT") && big.contains("RC=2"),
         "30000 > 2000 numerically: {big:?}"
+    );
+
+    // The DISCRIMINATING case: offset 100, bound 30. Lexically "100" < "30" (so a string compare
+    // would wrongly call it OK); numerically 100 > 30 -> DRIFT. A regression to lexical compare
+    // fails HERE, where the 30000-vs-2000 case above (DRIFT under both orderings) would not.
+    let lex = run_sourced(
+        "rc=0; offset_check n \"$OFF\" \"$B\" || rc=$?; echo RC=$rc",
+        &[("OFF", "100"), ("B", "30")],
+    );
+    assert!(
+        lex.contains("DRIFT") && lex.contains("RC=2"),
+        "100 > 30 numerically (but lexically '100' < '30') — must be DRIFT: {lex:?}"
     );
 }
 
