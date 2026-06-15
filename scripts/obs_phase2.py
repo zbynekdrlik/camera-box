@@ -58,7 +58,10 @@ INPUT = "phase2-probe-src"
 #                           compositor cursor -> BLACK.
 #   - ndi_bw_mode=0      -> highest bandwidth (full quality), as before.
 # Merged FIRST in each settings dict so the per-call ndi_source_name still overrides cleanly.
-_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1}
+# latency=2 (Lowest/unbuffered) MIRRORS the live cam inputs' min-latency config — the
+# genlock FIFO preload (OBS_GENLOCK_PRELOAD_FRAMES) is the ONLY jitter buffer; the DistroAV
+# receive buffer (Normal=0) must be off so the harness measures the real minimum-latency path.
+_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 2}
 
 
 def _load_state():
@@ -118,6 +121,16 @@ def _rpc(ws, rtype, rdata=None, ignore_err=False):
 def setup(a):
     ws = _conn(a.host, a.password)
     prev = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+    # In Studio Mode the PREVIEW scene's sources stay active (rendered). If teardown leaves
+    # our probe scene in preview, its idle ndi_source keeps render-ticking the genlock FIFO
+    # with an empty queue -> perpetual underrun-audit spam that corrupts the cumulative FIFO
+    # audit (#70). Record the prior preview so teardown can restore it.
+    studio = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
+    prev_preview = (
+        _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get("currentPreviewSceneName")
+        if studio
+        else None
+    )
 
     out = _rpc(ws, "GetOutputSettings", {"outputName": MAIN_OUTPUT}, ignore_err=True)
     ndi_name = (out.get("outputSettings") or {}).get("ndi_name")
@@ -144,8 +157,14 @@ def setup(a):
             f"[obs] {a.host}: WARN prior program unknown/was the probe scene; "
             f"will restore to '{prev}'\n"
         )
+    # Same probe-scene guard for the preview target: never restore the probe scene into
+    # preview. Fall back to the (already-sanitized) program scene when unknown.
+    if prev_preview == SCENE:
+        prev_preview = _load_state().get(a.host, {}).get("prev_preview") or prev
+    if not prev_preview or prev_preview == SCENE:
+        prev_preview = prev
     state = _load_state()
-    state[a.host] = {"prev_scene": prev}
+    state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
     _save_state(state)
 
     # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
@@ -265,23 +284,33 @@ def teardown(a):
     state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
         ws = _conn(a.host, a.password)
-        prev = state.get(a.host, {}).get("prev_scene")
+        host_state = state.get(a.host, {})
+        prev = host_state.get("prev_scene")
         if prev:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": prev}, ignore_err=True)
+        # Restore the prior PREVIEW too (Studio Mode): leaving the probe scene in preview
+        # keeps its idle ndi_source active and render-ticking the genlock FIFO (#70 underrun
+        # spam). Falls back to the program scene when no prior preview was recorded.
+        prev_preview = host_state.get("prev_preview") or prev
+        if prev_preview:
+            _rpc(ws, "SetCurrentPreviewScene", {"sceneName": prev_preview}, ignore_err=True)
         # Idle the NDI receiver but KEEP the stable scene+input for the next run (#22).
         # Clearing ndi_source_name makes DistroAV tear the receiver down cleanly (destroying
         # an ndi_source while it is actively receiving the 1080p feed faults the NDI runtime
-        # and crashes OBS). We deliberately keep the one stable scene+input dormant rather
-        # than destroy and recreate them — reuse is exactly what stops the per-run
+        # and crashes OBS). genlock_fifo is also turned OFF so the dormant input does not run
+        # the genlock consume path against an empty queue -> the perpetual underrun-audit spam
+        # that corrupted the cumulative FIFO audit (#70). setup re-applies _PROBE_NDI_SETTINGS
+        # (genlock_fifo=True) on the next run. Reuse is what stops the per-run input
         # accumulation the fork caused.
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
-            "inputSettings": {"ndi_source_name": ""},
+            "inputSettings": {"ndi_source_name": "", "genlock_fifo": False},
             "overlay": True,
         }, ignore_err=True)
         ws.close()
         sys.stderr.write(
-            f"[obs] {a.host}: restored program -> {prev}, probe input idled (reused next run)\n"
+            f"[obs] {a.host}: restored program -> {prev}, preview -> {prev_preview}, "
+            f"probe input idled (genlock off, reused next run)\n"
         )
     except Exception as e:  # teardown must never raise
         sys.stderr.write(f"[obs] {a.host}: teardown warning: {e}\n")
