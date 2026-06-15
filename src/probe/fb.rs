@@ -5,7 +5,20 @@
 //! and will not decode. That surfaces as occasional single-frame "loss" that is a
 //! rig artifact, not a real pipeline drop. This presenter writes each frame to an
 //! off-screen page and flips it at vblank, so the capture only ever sees complete
-//! frames. If the driver cannot double-buffer, it falls back to a direct write.
+//! frames.
+//!
+//! #68: on the live cam2 rig the DRM fbdev emulation (`i915drmfb`) exposes
+//! `yres_virtual == yres` (1080), so `FBIOPUT_VSCREENINFO` cannot allocate a
+//! second page and page-flip double buffering is UNAVAILABLE — every painter
+//! write went straight to the scanned-out buffer, tearing ~2.2% of captured QR
+//! frames (the measured decode-failure blind spot). The fallback now writes
+//! TEAR-FREE without a second page by gating the write on the vertical blank:
+//! `FBIO_WAITFORVSYNC` blocks until vblank, then the full ~8 MB frame is written
+//! in one shot during/just after the blanking interval, so the QR is settled
+//! before the camera's next sample reads it. Combined with the painter holding
+//! each id across multiple capture periods (sub-capture-rate paint), the camera
+//! never samples a half-written QR. If `FBIO_WAITFORVSYNC` is unsupported the
+//! presenter degrades to a plain direct write (the original behaviour).
 
 use anyhow::{bail, Context, Result};
 use std::fs::{File, OpenOptions};
@@ -91,6 +104,12 @@ pub struct VsyncFb {
     vinfo: FbVarScreenInfo,
     double_buffered: bool,
     back_page: u32,
+    /// #68: when page-flip double buffering is unavailable, gate each direct write
+    /// on `FBIO_WAITFORVSYNC` so the frame is written during/just after vblank and
+    /// is settled before the camera samples it (tear-free single-buffer write).
+    /// `false` if the driver does not support the ioctl — then a plain direct write
+    /// (the original behaviour) is used.
+    vsync_wait: bool,
 }
 
 impl VsyncFb {
@@ -128,6 +147,16 @@ impl VsyncFb {
         unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut got) };
         let double_buffered = put_ok && got.yres_virtual >= height * 2;
 
+        // #68: if we can't page-flip, probe whether FBIO_WAITFORVSYNC works so the
+        // single-buffer fallback can gate writes on vblank (tear-free). One probe
+        // call at open: if the driver rejects it, plain direct writes are used.
+        let vsync_wait = if double_buffered {
+            false // page-flip path already waits for vsync on each flip
+        } else {
+            let mut crtc: u32 = 0;
+            unsafe { libc::ioctl(fd, FBIO_WAITFORVSYNC, &mut crtc) >= 0 }
+        };
+
         if double_buffered {
             tracing::info!(
                 "VsyncFb: double-buffered {}x{} (virtual {}x{}), vsync flips enabled",
@@ -136,9 +165,16 @@ impl VsyncFb {
                 got.xres_virtual,
                 got.yres_virtual
             );
+        } else if vsync_wait {
+            tracing::info!(
+                "VsyncFb: single-buffer (yres_virtual={}), vsync-gated direct writes \
+                 (tear-free, #68)",
+                got.yres_virtual
+            );
         } else {
             tracing::warn!(
-                "VsyncFb: double-buffer unavailable (yres_virtual={}); direct write, tearing possible",
+                "VsyncFb: single-buffer (yres_virtual={}) AND no FBIO_WAITFORVSYNC; \
+                 plain direct write, tearing possible",
                 got.yres_virtual
             );
         }
@@ -151,6 +187,7 @@ impl VsyncFb {
             vinfo: got,
             double_buffered,
             back_page: 1,
+            vsync_wait,
         })
     }
 
@@ -159,7 +196,10 @@ impl VsyncFb {
     }
 
     /// Present a full BGRA frame (`width*height*4` bytes). Tear-free when
-    /// double-buffered; otherwise a direct write to page 0.
+    /// double-buffered (write off-screen page → pan at vblank); on a single-buffer
+    /// fb, tear-free via a vsync-gated direct write (#68): wait for vblank, then
+    /// write the whole frame so it is settled before the camera's next sample. If
+    /// neither is available, a plain direct write (tearing possible).
     pub fn present(&mut self, bgra: &[u8]) -> Result<()> {
         let page = if self.double_buffered {
             self.back_page
@@ -168,6 +208,20 @@ impl VsyncFb {
         };
         let page_off = (page as u64) * (self.height as u64) * (self.line_length as u64);
         let src_stride = (self.width * 4) as usize;
+
+        // #68: single-buffer tear-free write — block until vblank so the write
+        // lands during/just after the blanking interval and the full QR is settled
+        // before the camera samples the next scanned-out frame. (Double-buffered
+        // writes go to the off-screen page, so they don't need this; their vsync
+        // wait happens at the pan-flip below.)
+        if !self.double_buffered && self.vsync_wait {
+            let fd = self.file.as_raw_fd();
+            let mut crtc: u32 = 0;
+            if unsafe { libc::ioctl(fd, FBIO_WAITFORVSYNC, &mut crtc) } < 0 {
+                // The ioctl started working then stopped — degrade to plain writes.
+                self.vsync_wait = false;
+            }
+        }
 
         if self.line_length as usize == src_stride {
             self.file.write_all_at(bgra, page_off)?;

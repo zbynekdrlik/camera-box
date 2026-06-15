@@ -340,6 +340,103 @@ pub fn full_span_diff(
     }
 }
 
+/// #68 Task B: the ENDPOINT tap's sequence checked against the GENERATOR's known
+/// contiguous emission — not against another tap. The painter emits a strictly
+/// monotonic, CONTIGUOUS id sequence (`0,1,2,…`), so for the span the endpoint
+/// actually decoded `[first_id..=last_id]`, EVERY integer in that range was
+/// generated. Therefore an integer absent from the endpoint is a real
+/// generator→endpoint drop — and crucially this catches generator→cam loss that
+/// the source-tap-vs-endpoint-tap difference (`full_span_diff`) can never see,
+/// because that diff can only flag ids the SOURCE tap decoded. Out-of-order ids
+/// (an id that arrives after a strictly higher id already passed) are real
+/// reorders. Together this is the "every frame the QR generator emitted has
+/// exactly one delivered counterpart at the OBS output, in order" check.
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointSequenceReport {
+    /// Lowest id decoded at the endpoint (start of the verified contiguous span).
+    pub first_id: u32,
+    /// Highest id decoded at the endpoint (end of the verified contiguous span).
+    pub last_id: u32,
+    /// Count of integers in `[first_id..=last_id]` — every one was generated.
+    pub expected_count: usize,
+    /// Distinct ids actually present at the endpoint within the span.
+    pub delivered_count: usize,
+    /// Generated ids in `[first_id..=last_id]` that NEVER reached the endpoint —
+    /// real generator→endpoint drops (incl. generator→cam loss). Sorted ascending.
+    pub missing_ids: Vec<u32>,
+    /// Ids decoded out of monotonic order: each id that appears after a strictly
+    /// higher id already passed (a genuine reorder, not an oversample duplicate of
+    /// the current/previous id). Sorted ascending.
+    pub out_of_order_ids: Vec<u32>,
+}
+
+impl EndpointSequenceReport {
+    /// A clean endpoint: no internal gap, no reorder, and a NON-VACUOUS span
+    /// (at least two distinct ids — a 0- or 1-id span cannot demonstrate
+    /// contiguity, so it never certifies zero-loss).
+    pub fn is_clean(&self) -> bool {
+        self.delivered_count >= 2 && self.missing_ids.is_empty() && self.out_of_order_ids.is_empty()
+    }
+}
+
+/// Check the endpoint tap's decoded stream against the generator's contiguous
+/// emission (#68 Task B). Pure / unit-tested: the painter's contiguity is the
+/// source of truth, so the implied generated set is exactly the integers in
+/// `[min_decoded..=max_decoded]` and any absentee is a drop. `observed` is the
+/// endpoint tap's frames IN CAPTURE ORDER (the order matters for reorder
+/// detection); duplicates (oversample) and held ids are fine.
+pub fn endpoint_sequence_check(observed: &[Observed]) -> EndpointSequenceReport {
+    let present: HashSet<u32> = observed.iter().map(|o| o.frame_id).collect();
+    let (first_id, last_id) = match (present.iter().min(), present.iter().max()) {
+        (Some(&lo), Some(&hi)) => (lo, hi),
+        _ => {
+            return EndpointSequenceReport {
+                first_id: 0,
+                last_id: 0,
+                expected_count: 0,
+                delivered_count: 0,
+                missing_ids: Vec::new(),
+                out_of_order_ids: Vec::new(),
+            };
+        }
+    };
+
+    // Every integer in [first..=last] was generated (painter contiguity); flag the
+    // absentees. `last - first + 1` is the count of generated ids in the span.
+    let expected_count = (last_id - first_id) as usize + 1;
+    let mut missing_ids: Vec<u32> = (first_id..=last_id)
+        .filter(|id| !present.contains(id))
+        .collect();
+    missing_ids.sort_unstable();
+
+    // Reorder: an id that arrives strictly below the highest id seen so far. An
+    // oversample duplicate (== current running max) or a held id is NOT a reorder.
+    // Each offending id is reported once.
+    let mut out_of_order: HashSet<u32> = HashSet::new();
+    let mut running_max: Option<u32> = None;
+    for o in observed {
+        match running_max {
+            Some(m) if o.frame_id < m => {
+                out_of_order.insert(o.frame_id);
+            }
+            _ => {
+                running_max = Some(running_max.map_or(o.frame_id, |m| m.max(o.frame_id)));
+            }
+        }
+    }
+    let mut out_of_order_ids: Vec<u32> = out_of_order.into_iter().collect();
+    out_of_order_ids.sort_unstable();
+
+    EndpointSequenceReport {
+        first_id,
+        last_id,
+        expected_count,
+        delivered_count: present.len(),
+        missing_ids,
+        out_of_order_ids,
+    }
+}
+
 /// #7 Phase 3: ABSOLUTE end-to-end latency = `recv_ts(endpoint) − gen_ts(source)`
 /// paired by `frame_id`. SOUND ONLY when both timestamps live on one synced wall
 /// clock (DanteSync CLOCK_REALTIME, strih = master) — the painter must emit
@@ -886,6 +983,108 @@ mod tests {
         let r = diff_hop(input(&up, &down));
         assert_eq!(r.dropped_ids, vec![5]);
         assert!(!r.verdict.is_pass());
+    }
+
+    // ---- #68 Task B: endpoint sequence vs the generator's contiguity + order ----
+
+    #[test]
+    fn endpoint_seq_contiguous_in_order_is_clean() {
+        let ep = vec![o(3, 30), o(4, 40), o(5, 50), o(6, 60)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.first_id, 3);
+        assert_eq!(r.last_id, 6);
+        assert_eq!(r.expected_count, 4);
+        assert_eq!(r.delivered_count, 4);
+        assert!(r.missing_ids.is_empty());
+        assert!(r.out_of_order_ids.is_empty());
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_flags_internal_gap() {
+        // id 4 absent inside [3..=6] → a real generator→endpoint drop.
+        let ep = vec![o(3, 30), o(5, 50), o(6, 60)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.missing_ids, vec![4]);
+        assert_eq!(r.expected_count, 4);
+        assert_eq!(r.delivered_count, 3);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_flags_reorder_only() {
+        // 3,4,6,5,7 — id 5 after the higher id 6 → reorder; nothing missing.
+        let ep = vec![o(3, 30), o(4, 40), o(6, 50), o(5, 60), o(7, 70)];
+        let r = endpoint_sequence_check(&ep);
+        assert!(r.missing_ids.is_empty());
+        assert_eq!(r.out_of_order_ids, vec![5]);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_oversample_dups_are_clean() {
+        // Held/duplicated ids (==running max) are not reorders, not gaps.
+        let ep = vec![o(3, 30), o(3, 31), o(4, 40), o(4, 41), o(5, 50)];
+        let r = endpoint_sequence_check(&ep);
+        assert!(r.missing_ids.is_empty());
+        assert!(r.out_of_order_ids.is_empty());
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_empty_is_not_clean() {
+        let r = endpoint_sequence_check(&[]);
+        assert_eq!(r.delivered_count, 0);
+        assert_eq!(r.expected_count, 0);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_single_frame_is_not_clean() {
+        // A length-1 span (delivered_count==1) cannot demonstrate contiguity.
+        // Pins is_clean's `>= 2` floor (kills a `>= 1` / `> 0` mutant).
+        let r = endpoint_sequence_check(&[o(9, 90)]);
+        assert_eq!(r.first_id, 9);
+        assert_eq!(r.last_id, 9);
+        assert_eq!(r.expected_count, 1);
+        assert_eq!(r.delivered_count, 1);
+        assert!(r.missing_ids.is_empty());
+        assert!(r.out_of_order_ids.is_empty());
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_two_frame_contiguous_is_clean() {
+        // delivered_count == 2 is the minimum non-vacuous span → clean. The other
+        // side of the is_clean `>= 2` boundary (kills a `> 2` mutant).
+        let ep = vec![o(7, 70), o(8, 80)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.delivered_count, 2);
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_gap_and_reorder_both_reported() {
+        // 3,5,4,7 over [3..=7]: id 6 missing AND id 4 out of order (after 5).
+        let ep = vec![o(3, 30), o(5, 40), o(4, 50), o(7, 70)];
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.missing_ids, vec![6]);
+        assert_eq!(r.out_of_order_ids, vec![4]);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn endpoint_seq_expected_count_spans_full_range() {
+        // [10..=20] = 11 generated ids; pins expected_count = last-first+1 against
+        // an off-by-one mutant. All present except 15 → 1 missing.
+        let mut ep: Vec<Observed> = (10u32..=20).map(|i| o(i, i as i64 * 10)).collect();
+        ep.retain(|o| o.frame_id != 15);
+        let r = endpoint_sequence_check(&ep);
+        assert_eq!(r.first_id, 10);
+        assert_eq!(r.last_id, 20);
+        assert_eq!(r.expected_count, 11);
+        assert_eq!(r.delivered_count, 10);
+        assert_eq!(r.missing_ids, vec![15]);
     }
 
     #[test]
