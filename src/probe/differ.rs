@@ -98,6 +98,35 @@ pub struct HopReport {
     pub verdict: HopVerdict,
 }
 
+/// Trailing settle-window cutoff for the tap-recv timestamps.
+///
+/// `stop_ns` MUST be in the SAME clock domain as each `Observed.recv_ts_ns`
+/// (both monotonic for the Phase-1/relative path, or both CLOCK_REALTIME epoch
+/// for the #7 wall-clock path). Frames received within `settle_ms` of the stop
+/// are still in flight through the pipeline and are NOT drops, so they are
+/// excluded from the loss check by keeping only `recv_ts_ns <= cutoff`.
+///
+/// Bug #63 fix: the binary previously derived `stop_ns` from `Instant::elapsed`
+/// (monotonic, ~1e10 ns) while wall-clock taps stamp `recv_ts_ns` on
+/// CLOCK_REALTIME (epoch, ~1.8e18 ns). The mismatched cutoff rejected EVERY
+/// wall-clock frame, zeroing `unique` even when frames decoded fine — making a
+/// fixed live OBS ingest still read as 0 decoded. The cutoff must be taken in
+/// the recv-timestamp domain.
+pub fn settle_cutoff_ns(stop_ns: i64, settle_ms: u64) -> i64 {
+    stop_ns - (settle_ms as i64) * 1_000_000
+}
+
+/// Keep only the frames received at or before `cutoff_ns` (drop the trailing
+/// in-flight settle window). Pure so the clock-domain contract above is testable
+/// without a live NDI rig.
+pub fn trim_to_settle(observed: &[Observed], cutoff_ns: i64) -> Vec<Observed> {
+    observed
+        .iter()
+        .filter(|o| o.recv_ts_ns <= cutoff_ns)
+        .cloned()
+        .collect()
+}
+
 fn first_recv(observed: &[Observed]) -> HashMap<u32, i64> {
     let mut m: HashMap<u32, i64> = HashMap::new();
     for o in observed {

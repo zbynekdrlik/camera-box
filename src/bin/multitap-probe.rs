@@ -5,9 +5,11 @@
 
 use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
+use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
     absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, overall_verdict,
-    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
+    settle_cutoff_ns, trim_to_settle, FullSpanBounds, FullSpanReport, HopInput, HopReport,
+    HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -283,24 +285,21 @@ fn main() -> Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
     stop.store(true, Ordering::Relaxed);
-    let stop_ns = start.elapsed().as_nanos() as i64;
+    // #63: stop_ns MUST share the clock domain of each tap's recv_ts_ns. Taps
+    // stamp recv_ts_ns via clock_ns(start, wall_clock); deriving stop from
+    // start.elapsed() (always monotonic) made the wall-clock settle cutoff
+    // ~1.8e18 ns too small, trimming EVERY frame to unique=0 even when they
+    // decoded. Take stop in the same domain the taps recorded in.
+    let stop_ns = clock_ns(start, args.wall_clock);
     for h in handles {
         h.join().expect("tap thread panicked")?;
     }
 
     // Snapshot + trim the trailing settle window (in-flight frames are not drops).
-    let cutoff_ns = stop_ns - (args.settle_ms as i64) * 1_000_000;
+    let cutoff_ns = settle_cutoff_ns(stop_ns, args.settle_ms);
     let trimmed: Vec<Vec<_>> = results
         .iter()
-        .map(|r| {
-            r.observed
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|o| o.recv_ts_ns <= cutoff_ns)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
+        .map(|r| trim_to_settle(&r.observed.lock().unwrap(), cutoff_ns))
         .collect();
 
     // Per-hop gate bounds, keyed by the hop's DOWNSTREAM tap name (the tap the
