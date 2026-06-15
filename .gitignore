@@ -2,6 +2,9 @@
 /target/
 Cargo.lock
 
+# Deploy-download staging dir (gh run download -n camera-box-linux-amd64 --dir ./dist)
+/dist/
+
 # IDE
 .idea/
 .vscode/

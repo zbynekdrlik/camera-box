@@ -10,13 +10,25 @@
 # camera-box WITHOUT --display for the duration (keeps capture->NDI alive, frees
 # fb0), then ALWAYS restores the service via a trap — even on failure.
 #
-# Env overrides: CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS
+# Env overrides: CAM CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS
 #                CAPTURE_FPS MAX_P99_MS MAX_FREEZE_PERIODS LOCAL_OUT
+#
+# Camera selection (#24): set CAM=cam1|cam2|cam3|cam4 to target a camera by NAME — its IP
+# and NDI source are resolved from scripts/camera-set.sh (the single source of truth for
+# the cam1-4 map). Defaults to cam2 (the off-air dev rig) so existing behaviour is
+# unchanged. Explicit CAM_IP / SOURCE still override the resolved values (back-compat).
+# To drive the whole set in one go, use scripts/loopback-e2e-all.sh.
 set -euo pipefail
 
-CAM_IP="${CAM_IP:-10.77.9.62}"
+# Resolve the selected camera's IP + NDI source from the shared set.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/camera-set.sh
+. "$HERE/camera-set.sh"
+camera_resolve "${CAM:-cam2}"
+
+CAM_IP="${CAM_IP:-$CAMERA_IP}"
 CAM_PASS="${CAM_PASS:-newlevel}"
-SOURCE="${SOURCE:-CAM2 (usb)}"        # NDI name is "<machine> (<ndi_name>)"
+SOURCE="${SOURCE:-$CAMERA_SOURCE}"    # NDI name is "<machine> (<ndi_name>)"
 MODE="${MODE:-coverage}"               # coverage (gate) | full-rate (stress)
 DURATION_SECS="${DURATION_SECS:-300}"  # default 5 min evidence run
 QR_SIZE="${QR_SIZE:-700}"
