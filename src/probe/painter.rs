@@ -6,7 +6,7 @@ use crate::probe::qr::render_qr_bgra;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct PaintParams {
     pub run_id: u32,
@@ -15,6 +15,28 @@ pub struct PaintParams {
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub qr_size: u32,
+    /// Clock domain stamped into each frame's `gen_ts_ns`. `false` (default) ⇒
+    /// the shared monotonic `Instant` — correct for Phase-1 single-box loopback
+    /// where painter+reader share one process clock. `true` ⇒ CLOCK_REALTIME
+    /// epoch ns — required for the #7 ABSOLUTE end-to-end latency, so the
+    /// camera-emitted `gen_ts` and the dev1 endpoint tap's wall-clock `recv_ts`
+    /// share the DanteSync-disciplined origin (strih = master). MUST match the
+    /// taps' `wall_clock` or the subtraction is meaningless.
+    pub wall_clock: bool,
+}
+
+/// `gen_ts_ns` on the configured clock domain — epoch ns when `wall_clock`, else
+/// ns since the shared monotonic `start`. Single place that picks the painter's
+/// time origin so it cannot diverge between the fb and synth-NDI paths.
+pub fn gen_now(start: Instant, wall_clock: bool) -> i64 {
+    if wall_clock {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("wall clock before epoch")
+            .as_nanos() as i64
+    } else {
+        start.elapsed().as_nanos() as i64
+    }
 }
 
 /// Paint until `stop` is set. Records `(frame_id, gen_ts_ns)` of every emitted frame.
@@ -30,7 +52,7 @@ pub fn run_painter(
     let mut next = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let gen_ts_ns = start.elapsed().as_nanos() as i64;
+        let gen_ts_ns = gen_now(start, params.wall_clock);
         let payload = Payload {
             run_id: params.run_id,
             frame_id,

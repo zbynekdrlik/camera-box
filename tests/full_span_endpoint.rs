@@ -70,10 +70,22 @@ fn full_span_flags_a_mid_stream_drop_against_the_endpoint() {
     // Source emits 0..=4; the endpoint never carries id 2 -> headline source→
     // endpoint drop, regardless of which intermediate hop lost it.
     let source = vec![src(0, 0), src(1, 33), src(2, 66), src(3, 99), src(4, 132)];
-    let endpoint = vec![ep(0, 0, 120), ep(1, 33, 153), ep(3, 99, 219), ep(4, 132, 252)];
+    let endpoint = vec![
+        ep(0, 0, 120),
+        ep(1, 33, 153),
+        ep(3, 99, 219),
+        ep(4, 132, 252),
+    ];
     let r = full_span_diff(&source, &endpoint);
-    assert_eq!(r.dropped_ids, vec![2], "id 2 must be flagged source→endpoint");
-    assert!(!r.zero_loss, "a source→endpoint drop must set zero_loss=false");
+    assert_eq!(
+        r.dropped_ids,
+        vec![2],
+        "id 2 must be flagged source→endpoint"
+    );
+    assert!(
+        !r.zero_loss,
+        "a source→endpoint drop must set zero_loss=false"
+    );
 }
 
 #[test]

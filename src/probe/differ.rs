@@ -221,6 +221,102 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     }
 }
 
+/// #7 Phase 3: the HEADLINE source→endpoint zero-loss aggregate. Unlike
+/// `diff_hop` (one adjacent pair), this differences the SOURCE tap directly
+/// against the final ENDPOINT tap, so the number is "did every frame the camera
+/// emitted reach the last endpoint", not a sum of per-hop diffs that could each
+/// look clean while the chain as a whole lost a frame (e.g. a drop at hop A whose
+/// id was masked by oversample but is genuinely absent end-to-end).
+#[derive(Debug, Clone, Serialize)]
+pub struct FullSpanReport {
+    /// Unique source-emitted ids decoded at the source tap.
+    pub source_unique: usize,
+    /// Unique ids decoded at the final endpoint tap.
+    pub endpoint_unique: usize,
+    /// Source ids absent at the endpoint, clipped to the endpoint's active span
+    /// (the same start/stop-skew handling as `diff_hop` — a frame the endpoint
+    /// tap had no chance to see before its first or after its last decode is tap
+    /// skew, not a chain drop). A real mid-stream loss still lies inside [lo,hi].
+    pub dropped_ids: Vec<u32>,
+    /// True iff the endpoint decoded at least one frame AND no in-span source id
+    /// is missing end-to-end. An endpoint that decoded NOTHING is never
+    /// zero-loss — there is no evidence any frame arrived (no vacuous pass).
+    pub zero_loss: bool,
+}
+
+/// Difference the source tap against the final endpoint tap (the full span).
+/// Span-clipped to the endpoint's `[min,max]` active id range, identical in
+/// semantics to `diff_hop` so the headline number and the per-hop diffs agree.
+pub fn full_span_diff(source: &[Observed], endpoint: &[Observed]) -> FullSpanReport {
+    let src_unique: HashSet<u32> = source.iter().map(|o| o.frame_id).collect();
+    let ep_unique: HashSet<u32> = endpoint.iter().map(|o| o.frame_id).collect();
+
+    let dropped_ids: Vec<u32> = match (ep_unique.iter().min(), ep_unique.iter().max()) {
+        (Some(&lo), Some(&hi)) => {
+            let mut v: Vec<u32> = src_unique
+                .iter()
+                .copied()
+                .filter(|id| *id >= lo && *id <= hi && !ep_unique.contains(id))
+                .collect();
+            v.sort_unstable();
+            v
+        }
+        // Endpoint decoded nothing ⇒ no active span ⇒ cannot certify any arrival.
+        _ => Vec::new(),
+    };
+
+    // An endpoint that decoded zero frames is NOT zero-loss (no proof of arrival),
+    // even though `dropped_ids` is empty (there is no span to test against).
+    let zero_loss = !ep_unique.is_empty() && dropped_ids.is_empty();
+
+    FullSpanReport {
+        source_unique: src_unique.len(),
+        endpoint_unique: ep_unique.len(),
+        dropped_ids,
+        zero_loss,
+    }
+}
+
+/// #7 Phase 3: ABSOLUTE end-to-end latency = `recv_ts(endpoint) − gen_ts(source)`
+/// paired by `frame_id`. SOUND ONLY when both timestamps live on one synced wall
+/// clock (DanteSync CLOCK_REALTIME, strih = master) — the painter must emit
+/// `gen_ts_ns` as a wall-clock stamp and the endpoint tap must record
+/// `recv_ts_ns` as a wall-clock stamp; this function is the pure arithmetic that
+/// assumes the caller arranged that shared origin. It takes the SOURCE tap's
+/// `gen_ts` for each frame (the true emission instant) and the ENDPOINT tap's
+/// first `recv_ts` for the same frame. An id present at only one tap yields no
+/// pair. `None` when no frame is common to both taps.
+pub fn absolute_latency_stats(source: &[Observed], endpoint: &[Observed]) -> Option<LatencyStats> {
+    // First gen_ts per id at the source (the emission instant), first recv_ts per
+    // id at the endpoint (its arrival instant). First-occurrence so an oversample
+    // duplicate cannot skew the pairing.
+    let mut src_gen: HashMap<u32, i64> = HashMap::new();
+    for o in source {
+        src_gen.entry(o.frame_id).or_insert(o.gen_ts_ns);
+    }
+    let ep_recv = first_recv(endpoint);
+
+    let mut lat_ms: Vec<f64> = Vec::new();
+    for (id, recv) in &ep_recv {
+        if let Some(gen) = src_gen.get(id) {
+            lat_ms.push((recv - gen) as f64 / 1_000_000.0);
+        }
+    }
+    latency_stats(&lat_ms)
+}
+
+/// Hard gate on the absolute end-to-end p99. `None` bound ⇒ report-only (always
+/// passes), mirroring the per-hop `max_p99_latency_ms` convention. A requested
+/// bound with NO samples FAILS — a gate that could not run must never report
+/// green (test-strictness). Strict `>` so a p99 exactly at the bound passes.
+pub fn absolute_latency_gate_pass(latency: &Option<LatencyStats>, max_p99_ms: Option<f64>) -> bool {
+    match (max_p99_ms, latency) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(bound), Some(l)) => l.p99_ms <= bound,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

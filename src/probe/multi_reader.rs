@@ -10,7 +10,7 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// One tap: a named NDI source to subscribe to, filtered to `run_id`.
 pub struct TapSpec {
@@ -20,6 +20,28 @@ pub struct TapSpec {
     pub connect_timeout_secs: u32,
     /// Side of the centered square the QR decode is restricted to (ROI speed fix).
     pub decode_crop: u32,
+    /// Clock domain for `recv_ts_ns`. `false` (default) ⇒ dev1's shared monotonic
+    /// `Instant` — correct for per-hop RELATIVE latency (recv−recv between two
+    /// taps on this one machine). `true` ⇒ CLOCK_REALTIME epoch ns — required for
+    /// ABSOLUTE end-to-end latency (recv(endpoint) − gen(source)), which is only
+    /// sound when the painter's `gen_ts` and this `recv_ts` share the
+    /// DanteSync-disciplined wall clock (#7 / #8, strih = master). Per-hop
+    /// relative latency stays valid either way (both taps use the same domain).
+    pub wall_clock: bool,
+}
+
+/// The tap's `recv_ts_ns` sample on the configured clock domain. Epoch-ns
+/// (CLOCK_REALTIME) when `wall_clock`, else ns since the shared monotonic
+/// `start`. Pulled out so the choice is made in exactly one place.
+fn recv_now(start: Instant, wall_clock: bool) -> i64 {
+    if wall_clock {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("wall clock before epoch")
+            .as_nanos() as i64
+    } else {
+        start.elapsed().as_nanos() as i64
+    }
 }
 
 /// A tap's accumulating buffer, readable by the differ after the run.
@@ -68,7 +90,7 @@ fn tap_loop(
             Some(f) => f,
             None => continue,
         };
-        let recv_ts_ns = start.elapsed().as_nanos() as i64;
+        let recv_ts_ns = recv_now(start, spec.wall_clock);
         // Count every frame that physically arrived BEFORE attempting QR decode,
         // so a torn-QR frame still increments `captured`. This is what separates
         // hop frame-loss from tap decode-failure.

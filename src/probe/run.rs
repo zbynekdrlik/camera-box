@@ -29,6 +29,12 @@ pub struct RunConfig {
     pub max_p99_latency_ms: Option<f64>,
     /// Hard gate: fail the verdict if a freeze run exceeds this (`None` ⇒ off).
     pub max_freeze_periods_gate: Option<f64>,
+    /// Stamp `gen_ts_ns` on CLOCK_REALTIME (wall clock) instead of the monotonic
+    /// `Instant`. Set ONLY for the #7 multi-node absolute-latency path (paint-only
+    /// on the camera, taps on dev1, both DanteSync-disciplined). For the Phase-1
+    /// single-box loopback `run()` this MUST stay false — painter and reader share
+    /// one process clock there and a wall-clock gen would break that latency.
+    pub wall_clock: bool,
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
@@ -61,6 +67,10 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
             qr_size: cfg.qr_size,
+            // Phase-1 single-box loopback: painter + reader share THIS process's
+            // monotonic clock, so latency is exact without any sync. A wall-clock
+            // gen here would break that — force monotonic regardless of cfg.
+            wall_clock: false,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };
@@ -123,6 +133,10 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
             qr_size: cfg.qr_size,
+            // Multi-node (#7): stamp gen_ts on the DanteSync wall clock when asked
+            // so the dev1 endpoint tap's wall-clock recv − this gen is true
+            // absolute latency. Defaults false (Phase-2 relative latency only).
+            wall_clock: cfg.wall_clock,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };

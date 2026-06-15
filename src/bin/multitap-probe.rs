@@ -4,7 +4,11 @@
 //! camera box (frame-probe --paint-only) with the same --run-id.
 
 use anyhow::{bail, Result};
-use camera_box::probe::differ::{diff_hop, HopInput, HopReport, HopVerdict};
+use camera_box::probe::analyzer::LatencyStats;
+use camera_box::probe::differ::{
+    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, FullSpanReport,
+    HopInput, HopReport, HopVerdict,
+};
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
 use serde::Serialize;
@@ -79,6 +83,23 @@ struct Args {
     /// the evidence and leave the starved one ungated. An omitted hop is ungated.
     #[arg(long = "min-single-copy", value_parser = parse_bound)]
     min_single_copy: Vec<(String, f64)>,
+    /// #7 ABSOLUTE end-to-end latency gate (ms): FAIL the run if the source→
+    /// endpoint p99 of `recv_ts(endpoint) − gen_ts(source)` exceeds this. The
+    /// first tap is the source, the last tap is the endpoint. REQUIRES
+    /// `--wall-clock` (so gen and recv share the DanteSync wall clock) — without
+    /// it the absolute number is meaningless and this flag is rejected. Omitted ⇒
+    /// absolute latency is report-only (still WRITTEN to the artifact, no gate).
+    #[arg(long)]
+    max_abs_latency_ms: Option<f64>,
+    /// Record every tap's `recv_ts_ns` on CLOCK_REALTIME (the DanteSync-disciplined
+    /// wall clock) instead of dev1's monotonic clock, so the source→endpoint
+    /// ABSOLUTE latency (recv(endpoint) − gen(source)) is sound. The painter must
+    /// run with the matching `frame-probe --wall-clock`. Per-hop RELATIVE latency
+    /// stays valid either way (both taps use the same domain). Verify the cluster
+    /// offset first with scripts/clock-offset-guard.sh. Default off (Phase-2
+    /// relative-latency behaviour, unchanged).
+    #[arg(long, default_value_t = false)]
+    wall_clock: bool,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -148,7 +169,18 @@ struct MultiTapReport {
     duration_secs: u64,
     taps: Vec<TapSummary>,
     hops: Vec<HopReport>,
-    absolute_latency: String,
+    /// #7: source→endpoint full-span zero-loss aggregate (first tap vs last tap),
+    /// the HEADLINE number — "did every camera frame reach the last endpoint",
+    /// not a sum of adjacent-hop diffs.
+    full_span: FullSpanReport,
+    /// #7: ABSOLUTE end-to-end latency `recv_ts(endpoint) − gen_ts(source)` on the
+    /// DanteSync wall clock. Present (and gated when `--max-abs-latency-ms` is set)
+    /// only with `--wall-clock`; otherwise `None` with `absolute_latency_note`
+    /// explaining why. Replaces the old hard-coded "UNAVAILABLE" string.
+    absolute_latency: Option<LatencyStats>,
+    /// Human-readable status for `absolute_latency` (why it is/ isn't available,
+    /// and the gate outcome) — so the artifact is self-describing.
+    absolute_latency_note: String,
     verdict_pass: bool,
 }
 
@@ -189,6 +221,16 @@ fn main() -> Result<()> {
             args.duration_secs
         );
     }
+    // The absolute-latency gate is only sound on the shared wall clock. Reject the
+    // combination that would silently gate a meaningless number (gen on the
+    // camera's clock, recv on dev1's monotonic clock) rather than no-op the gate.
+    if args.max_abs_latency_ms.is_some() && !args.wall_clock {
+        bail!(
+            "--max-abs-latency-ms requires --wall-clock (absolute latency = \
+             recv(endpoint) − gen(source) is only valid when both stamps share the \
+             DanteSync wall clock; verify with scripts/clock-offset-guard.sh)"
+        );
+    }
     // Every hop's downstream is a tap after the first; a bound must key one of
     // them or it silently no-ops. Reject orphan keys before doing any work.
     let downstream_taps: std::collections::HashSet<&str> =
@@ -223,6 +265,7 @@ fn main() -> Result<()> {
                 run_id: args.run_id,
                 connect_timeout_secs: args.connect_timeout_secs,
                 decode_crop,
+                wall_clock: args.wall_clock,
             },
             start,
             stop.clone(),
@@ -309,15 +352,63 @@ fn main() -> Result<()> {
         })
         .collect();
 
+    // #7 HEADLINE: source→endpoint full-span zero-loss aggregate — first tap is
+    // the source (camera-box NDI), last tap is the endpoint (stream's OBS program
+    // NDI). This is the "every camera frame reached the last endpoint" number, not
+    // a sum of adjacent-hop diffs (a drop can hide per-hop yet be absent end-to-
+    // end). >= 2 taps is already enforced above, so first/last are distinct.
+    let source = &trimmed[0];
+    let endpoint = &trimmed[trimmed.len() - 1];
+    let full_span = full_span_diff(source, endpoint);
+
+    // #7 ABSOLUTE end-to-end latency: recv(endpoint) − gen(source) on the shared
+    // wall clock. Only meaningful with --wall-clock (gen on the camera and recv on
+    // dev1 both DanteSync-disciplined). Always WRITTEN to the artifact; gated only
+    // when --max-abs-latency-ms is set (which already required --wall-clock).
+    let absolute_latency = if args.wall_clock {
+        absolute_latency_stats(source, endpoint)
+    } else {
+        None
+    };
+    let abs_gate_pass = absolute_latency_gate_pass(&absolute_latency, args.max_abs_latency_ms);
+    let absolute_latency_note = if !args.wall_clock {
+        "report-only — run with --wall-clock (+ frame-probe --wall-clock) for the \
+         DanteSync-disciplined absolute end-to-end latency (#7/#8)"
+            .to_string()
+    } else {
+        match (&absolute_latency, args.max_abs_latency_ms) {
+            (None, _) => "wall-clock on but NO source↔endpoint frame pair decoded \
+                          (cannot compute absolute latency)"
+                .to_string(),
+            (Some(l), None) => format!(
+                "wall-clock absolute end-to-end p99={:.1} ms (n={}) — report-only (no --max-abs-latency-ms)",
+                l.p99_ms, l.samples
+            ),
+            (Some(l), Some(b)) => format!(
+                "wall-clock absolute end-to-end p99={:.1} ms (n={}) vs bound {:.1} ms → {}",
+                l.p99_ms,
+                l.samples,
+                b,
+                if abs_gate_pass { "PASS" } else { "FAIL" }
+            ),
+        }
+    };
+
     // INCONCL (insufficient oversample-independent evidence) counts as NOT-pass,
-    // exactly like FAIL — a run that cannot certify must not exit green (#29).
-    let verdict_pass = hops.iter().all(|h| h.verdict.is_pass());
+    // exactly like FAIL — a run that cannot certify must not exit green (#29). The
+    // full-path verdict folds in: every per-hop verdict PASS, the source→endpoint
+    // full-span zero-loss aggregate, AND the absolute-latency gate (a no-op pass
+    // when --max-abs-latency-ms is unset). Any one failing fails the run.
+    let verdict_pass =
+        hops.iter().all(|h| h.verdict.is_pass()) && full_span.zero_loss && abs_gate_pass;
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
         taps: tap_summaries,
         hops,
-        absolute_latency: "UNAVAILABLE — clock not synced (Phase 3 / #8)".to_string(),
+        full_span,
+        absolute_latency,
+        absolute_latency_note,
         verdict_pass,
     };
 
@@ -382,14 +473,39 @@ fn main() -> Result<()> {
             );
         }
     }
-    // Top-level label distinguishes a proven regression (any hop FAIL) from an
-    // untrustworthy green (a hop INCONCL: gates passed but too few single-copy
-    // samples). Both exit non-zero via `verdict_pass`; the label tells the
-    // operator which so an INCONCL is read as "need a longer/denser run", not
+    // #7 HEADLINE source→endpoint full-span aggregate (first tap → last tap).
+    let fs = &report.full_span;
+    println!(
+        "FULL_SPAN {}→{} {} source_unique={} endpoint_unique={} dropped={}",
+        report.taps.first().map(|t| t.name.as_str()).unwrap_or("?"),
+        report.taps.last().map(|t| t.name.as_str()).unwrap_or("?"),
+        if fs.zero_loss { "ZERO-LOSS" } else { "LOSS" },
+        fs.source_unique,
+        fs.endpoint_unique,
+        fs.dropped_ids.len(),
+    );
+    // #7 ABSOLUTE end-to-end latency line — the value that replaced "UNAVAILABLE".
+    match &report.absolute_latency {
+        Some(l) => println!(
+            "ABS_LATENCY_MS min={:.1} mean={:.1} p50={:.1} p95={:.1} p99={:.1} max={:.1} (n={}) — {}",
+            l.min_ms, l.mean_ms, l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms, l.samples,
+            report.absolute_latency_note,
+        ),
+        None => println!("ABS_LATENCY=UNAVAILABLE — {}", report.absolute_latency_note),
+    }
+
+    // Top-level label distinguishes a proven regression (a real FAIL — any hop
+    // FAIL, a source→endpoint full-span loss, or an absolute-latency breach) from
+    // an untrustworthy green (only a hop INCONCL: gates passed but too few
+    // single-copy samples). Both exit non-zero via `verdict_pass`; the label tells
+    // the operator which so an INCONCL reads as "need a longer/denser run", not
     // "the pipeline broke".
+    let hard_fail = report.hops.iter().any(|h| h.verdict == HopVerdict::Fail)
+        || !report.full_span.zero_loss
+        || !abs_gate_pass;
     let overall = if verdict_pass {
         "PASS"
-    } else if report.hops.iter().any(|h| h.verdict == HopVerdict::Fail) {
+    } else if hard_fail {
         "FAIL"
     } else {
         "INCONCL"
