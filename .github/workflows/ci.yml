@@ -5,6 +5,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main]
+  workflow_dispatch:  # on-demand mutation window (#70: mutation is NOT a blocking PR/dev gate)
 
 env:
   CARGO_TERM_COLOR: always
@@ -105,9 +106,11 @@ jobs:
   mutants:
     name: Mutation Testing
     runs-on: ubuntu-latest
-    # PR-only: --in-diff has nothing to mutate on a push to main (diff is empty),
-    # which would waste a full cold baseline build on a trivial no-op.
-    if: github.event_name == 'pull_request'
+    # ON-DEMAND ONLY (#70): mutation testing must NOT block PR/dev — per the
+    # user's global policy it runs in its OWN window via `gh workflow run ci.yml`
+    # (or the /mutation-sweep skill), never on push/pull_request, so development
+    # is never gated on it. Diff is taken against origin/main for the manual run.
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -130,7 +133,7 @@ jobs:
           key: mutants
 
       - name: Build PR diff
-        run: git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+        run: git diff origin/main...HEAD > pr.diff
 
       - name: Mutation testing (PR diff only)
         # cargo-mutants runs a full unmutated baseline build+test first; skip it
@@ -164,7 +167,7 @@ jobs:
         #   its output (absolute_latency_stats, the gate, the differ) are fully
         #   mutation-tested pure functions.
         run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '\.rs$'; then
+          if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe \
               -e 'src/probe/painter.rs' \
               -e 'src/probe/reader.rs' \
