@@ -13,7 +13,7 @@
 //! RED before the `endpoint_sequence_check` impl exists; GREEN after.
 
 use camera_box::probe::analyzer::Observed;
-use camera_box::probe::differ::endpoint_sequence_check;
+use camera_box::probe::differ::{decompose_missing, endpoint_sequence_check};
 
 fn o(frame_id: u32, recv_ms: i64) -> Observed {
     Observed {
@@ -120,6 +120,49 @@ fn gap_and_reorder_together_both_reported() {
     assert_eq!(r.missing_ids, vec![8]);
     assert_eq!(r.out_of_order_ids, vec![6]);
     assert!(!r.is_clean());
+}
+
+// ---- #68: decompose missing ids into source-emission artifact vs pipeline loss ----
+//
+// The fb-loopback painter (discrete writes through a 60→30 genlock decimation) does
+// NOT emit every generated id at the SOURCE NDI — ~5-13% of painted ids are never
+// sampled into NDI (proven live). So an endpoint "missing" id is one of two very
+// different things: (1) it was never at the SOURCE either (a generator→source-NDI
+// emission artifact of the QR rig, NOT a pipeline drop), or (2) it WAS at the source
+// but vanished downstream (a REAL source→endpoint pipeline drop — the only kind that
+// must fail a zero-loss gate). `decompose_missing` splits them using the source tap.
+
+#[test]
+fn missing_absent_at_source_is_emission_artifact() {
+    // Endpoint missing ids {7, 9}; the SOURCE tap also never had them → both are
+    // generator→source emission artifacts, NOT pipeline loss.
+    let endpoint_missing = vec![7u32, 9];
+    let source = vec![o(5, 50), o(6, 60), o(8, 80), o(10, 100)]; // no 7, no 9
+    let (artifact, pipeline) = decompose_missing(&endpoint_missing, &source);
+    assert_eq!(artifact, vec![7, 9]);
+    assert!(pipeline.is_empty());
+}
+
+#[test]
+fn missing_present_at_source_is_pipeline_loss() {
+    // Endpoint missing id 8; the SOURCE tap HAD 8 → it was dropped DOWNSTREAM →
+    // real pipeline loss, the kind a zero-loss gate must fail on.
+    let endpoint_missing = vec![8u32];
+    let source = vec![o(7, 70), o(8, 80), o(9, 90)]; // 8 present at source
+    let (artifact, pipeline) = decompose_missing(&endpoint_missing, &source);
+    assert!(artifact.is_empty());
+    assert_eq!(pipeline, vec![8]);
+}
+
+#[test]
+fn missing_split_into_both_classes() {
+    // Endpoint missing {7, 8}: 7 absent at source (artifact), 8 present at source
+    // (pipeline loss). Both classes reported distinctly.
+    let endpoint_missing = vec![7u32, 8];
+    let source = vec![o(6, 60), o(8, 80), o(9, 90)]; // has 8, not 7
+    let (artifact, pipeline) = decompose_missing(&endpoint_missing, &source);
+    assert_eq!(artifact, vec![7]);
+    assert_eq!(pipeline, vec![8]);
 }
 
 #[test]
