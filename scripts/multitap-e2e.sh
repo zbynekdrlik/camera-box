@@ -66,7 +66,7 @@ trap cleanup EXIT HUP INT TERM
 echo "[1/5] build frame-probe + multitap-probe"
 cargo build --release --features probe --bin frame-probe --bin multitap-probe
 
-echo "[2/5] bring up the cam2 NDI sender FIRST (run_id=$RUN_ID), then the painter"
+echo "[2/5] bring up the ${CAMERA_NAME} NDI sender FIRST (run_id=$RUN_ID), then the painter"
 # #30 ordering fix: camera-box's "CAM2 (usb)" NDI sender must EXIST before OBS
 # binds its ndi_source to it. Previously OBS setup ran first and bound to the
 # sender that this step then RESTARTED — DistroAV intermittently failed to

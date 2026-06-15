@@ -15,6 +15,10 @@
 # an explicit maintenance window + operator approval. This script does NOT enforce that —
 # the operator who names a live camera in CAMERA_SET is the guard. Per-run env (MODE,
 # DURATION_SECS, the gate bounds, etc.) is passed straight through to loopback-e2e.sh.
+#
+# Artifacts are written per camera as <LOCAL_OUT_PREFIX>-<mode>-<cam>.json (default prefix
+# ./frame-probe). Do NOT pass LOCAL_OUT here — it would collapse every camera onto one file;
+# set LOCAL_OUT_PREFIX to redirect the directory/name base instead.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,9 +44,12 @@ for cam in $SET; do
   echo "================================================================"
   echo ">> [$cam] $CAMERA_IP / '$CAMERA_SOURCE'"
   echo "================================================================"
-  # Per-camera artifact so runs don't clobber each other.
-  if CAM="$cam" LOCAL_OUT="${LOCAL_OUT:-./frame-probe-${MODE:-coverage}-${cam}.json}" \
-      bash "$HERE/loopback-e2e.sh"; then
+  # Per-camera artifact so runs don't clobber each other. The per-camera suffix is ALWAYS
+  # appended (we set the inner LOCAL_OUT, not honour an inherited one) — otherwise an
+  # exported LOCAL_OUT would make every camera write the same file and clobber the previous
+  # camera's evidence. Override the base/dir with LOCAL_OUT_PREFIX (default ./frame-probe).
+  out="${LOCAL_OUT_PREFIX:-./frame-probe}-${MODE:-coverage}-${cam}.json"
+  if CAM="$cam" LOCAL_OUT="$out" bash "$HERE/loopback-e2e.sh"; then
     echo ">> [$cam] PASS"
   else
     rc=$?
