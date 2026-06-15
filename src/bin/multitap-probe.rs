@@ -6,8 +6,8 @@
 use anyhow::{bail, Result};
 use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, FullSpanReport,
-    HopInput, HopReport, HopVerdict,
+    absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, FullSpanBounds,
+    FullSpanReport, HopInput, HopReport, HopVerdict,
 };
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use clap::Parser;
@@ -352,14 +352,28 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    // #7 HEADLINE: source→endpoint full-span zero-loss aggregate — first tap is
-    // the source (camera-box NDI), last tap is the endpoint (stream's OBS program
-    // NDI). This is the "every camera frame reached the last endpoint" number, not
-    // a sum of adjacent-hop diffs (a drop can hide per-hop yet be absent end-to-
-    // end). >= 2 taps is already enforced above, so first/last are distinct.
+    // #7 HEADLINE: source→endpoint full-span aggregate — first tap is the source
+    // (camera-box NDI), last tap is the endpoint (stream's OBS program NDI). This
+    // is the "every source frame reached the last endpoint" number, not a sum of
+    // adjacent-hop diffs (a drop can hide per-hop yet be absent end-to-end). The
+    // full span is itself a hop, so it obeys the SAME contract as the per-hop
+    // gates: the documented loss bound (`--max-loss-pct`), the min_frames floor,
+    // and the #29 single-copy INCONCL guard — all keyed to the ENDPOINT tap (the
+    // last hop's downstream), so a deliberately-relaxed per-hop budget is NOT
+    // silently overridden by a strict full-span gate. >= 2 taps is already
+    // enforced above, so first/last are distinct.
     let source = &trimmed[0];
     let endpoint = &trimmed[trimmed.len() - 1];
-    let full_span = full_span_diff(source, endpoint);
+    let endpoint_name = results[results.len() - 1].name.as_str();
+    let full_span = full_span_diff(
+        source,
+        endpoint,
+        &FullSpanBounds {
+            min_frames: args.min_frames,
+            max_loss_pct: loss_bounds.get(endpoint_name).copied(),
+            min_single_copy: sc_bounds.get(endpoint_name).copied().unwrap_or(0.0) as usize,
+        },
+    );
 
     // #7 ABSOLUTE end-to-end latency: recv(endpoint) − gen(source) on the shared
     // wall clock. Only meaningful with --wall-clock (gen on the camera and recv on
@@ -393,14 +407,29 @@ fn main() -> Result<()> {
             ),
         }
     };
+    // A negative absolute latency is physically impossible (recv before gen) —
+    // it can only mean the source camera's wall clock is AHEAD of dev1's by more
+    // than the transit time, i.e. the cluster desynced past what the e2e
+    // pre-flight (clock-offset-guard) would have caught, or this probe was run
+    // directly without that pre-flight. Flag it loudly so the number is not
+    // trusted; the guard, not this arithmetic, is the sync gate.
+    let absolute_latency_note = match &absolute_latency {
+        Some(l) if l.min_ms < 0.0 => format!(
+            "{absolute_latency_note} — WARNING: min={:.1} ms < 0 (impossible) → cluster clock \
+             desync; re-run scripts/clock-offset-guard.sh, do NOT trust this latency",
+            l.min_ms
+        ),
+        _ => absolute_latency_note,
+    };
 
     // INCONCL (insufficient oversample-independent evidence) counts as NOT-pass,
     // exactly like FAIL — a run that cannot certify must not exit green (#29). The
     // full-path verdict folds in: every per-hop verdict PASS, the source→endpoint
-    // full-span zero-loss aggregate, AND the absolute-latency gate (a no-op pass
-    // when --max-abs-latency-ms is unset). Any one failing fails the run.
+    // full-span verdict PASS (same contract: strict-or-documented loss + INCONCL),
+    // AND the absolute-latency gate (a no-op pass when --max-abs-latency-ms is
+    // unset). Any one not-pass fails the run.
     let verdict_pass =
-        hops.iter().all(|h| h.verdict.is_pass()) && full_span.zero_loss && abs_gate_pass;
+        hops.iter().all(|h| h.verdict.is_pass()) && full_span.verdict.is_pass() && abs_gate_pass;
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
@@ -475,14 +504,27 @@ fn main() -> Result<()> {
     }
     // #7 HEADLINE source→endpoint full-span aggregate (first tap → last tap).
     let fs = &report.full_span;
+    let fs_sc_pct = if fs.single_copy_total > 0 {
+        100.0 * fs.single_copy_dropped as f64 / fs.single_copy_total as f64
+    } else {
+        0.0
+    };
     println!(
-        "FULL_SPAN {}→{} {} source_unique={} endpoint_unique={} dropped={}",
+        "FULL_SPAN {}→{} {} source_unique={} endpoint_unique={} dropped={} \
+         single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
         report.taps.first().map(|t| t.name.as_str()).unwrap_or("?"),
         report.taps.last().map(|t| t.name.as_str()).unwrap_or("?"),
-        if fs.zero_loss { "ZERO-LOSS" } else { "LOSS" },
+        match fs.verdict {
+            HopVerdict::Pass => "ZERO-LOSS",
+            HopVerdict::Fail => "LOSS",
+            HopVerdict::Inconclusive => "INCONCL",
+        },
         fs.source_unique,
         fs.endpoint_unique,
         fs.dropped_ids.len(),
+        fs.single_copy_dropped,
+        fs.single_copy_total,
+        fs_sc_pct,
     );
     // #7 ABSOLUTE end-to-end latency line — the value that replaced "UNAVAILABLE".
     match &report.absolute_latency {
@@ -501,7 +543,7 @@ fn main() -> Result<()> {
     // the operator which so an INCONCL reads as "need a longer/denser run", not
     // "the pipeline broke".
     let hard_fail = report.hops.iter().any(|h| h.verdict == HopVerdict::Fail)
-        || !report.full_span.zero_loss
+        || report.full_span.verdict == HopVerdict::Fail
         || !abs_gate_pass;
     let overall = if verdict_pass {
         "PASS"

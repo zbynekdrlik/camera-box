@@ -58,6 +58,12 @@ WALL_CLOCK="${WALL_CLOCK:-1}"
 # (multitap-probe bails otherwise). Empty ⇒ absolute latency is report-only (still
 # WRITTEN to the artifact). Baseline with a report-only run, then ratchet.
 MAX_ABS_LATENCY="${MAX_ABS_LATENCY:-}"
+# Catch the illegal combination up front, before the multi-minute remote painter
+# launch — multitap-probe also bails, but only after the whole rig is brought up.
+if [ -n "$MAX_ABS_LATENCY" ] && [ "$WALL_CLOCK" != "1" ]; then
+  echo "ERROR: MAX_ABS_LATENCY requires WALL_CLOCK=1 (absolute latency needs the shared wall clock)" >&2
+  exit 1
+fi
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
 # Pre-flight: when measuring absolute latency, the gen/recv stamps are only

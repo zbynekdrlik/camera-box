@@ -5,12 +5,13 @@
 
 use crate::ndi::NdiReceiver;
 use crate::probe::analyzer::Observed;
+use crate::probe::clock_ns;
 use crate::probe::qr::decode_capture;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 /// One tap: a named NDI source to subscribe to, filtered to `run_id`.
 pub struct TapSpec {
@@ -28,20 +29,6 @@ pub struct TapSpec {
     /// DanteSync-disciplined wall clock (#7 / #8, strih = master). Per-hop
     /// relative latency stays valid either way (both taps use the same domain).
     pub wall_clock: bool,
-}
-
-/// The tap's `recv_ts_ns` sample on the configured clock domain. Epoch-ns
-/// (CLOCK_REALTIME) when `wall_clock`, else ns since the shared monotonic
-/// `start`. Pulled out so the choice is made in exactly one place.
-fn recv_now(start: Instant, wall_clock: bool) -> i64 {
-    if wall_clock {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("wall clock before epoch")
-            .as_nanos() as i64
-    } else {
-        start.elapsed().as_nanos() as i64
-    }
 }
 
 /// A tap's accumulating buffer, readable by the differ after the run.
@@ -90,7 +77,7 @@ fn tap_loop(
             Some(f) => f,
             None => continue,
         };
-        let recv_ts_ns = recv_now(start, spec.wall_clock);
+        let recv_ts_ns = clock_ns(start, spec.wall_clock);
         // Count every frame that physically arrived BEFORE attempting QR decode,
         // so a torn-QR frame still increments `captured`. This is what separates
         // hop frame-loss from tap decode-failure.

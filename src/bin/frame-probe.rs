@@ -271,7 +271,7 @@ fn synth_ndi_paint(name: &str, cfg: &camera_box::probe::run::RunConfig) -> Resul
             frame_id,
             // Wall-clock gen_ts (#7) when requested so a dev1 endpoint tap's
             // wall-clock recv − this gen is true absolute latency; else monotonic.
-            gen_ts_ns: camera_box::probe::painter::gen_now(start, cfg.wall_clock),
+            gen_ts_ns: camera_box::probe::clock_ns(start, cfg.wall_clock),
         };
         let bgra = render_qr_bgra(&payload, w, h, cfg.qr_size);
         bgra_gray_to_uyvy(&bgra, &mut uyvy);

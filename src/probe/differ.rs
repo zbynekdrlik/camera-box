@@ -221,12 +221,21 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     }
 }
 
-/// #7 Phase 3: the HEADLINE source→endpoint zero-loss aggregate. Unlike
-/// `diff_hop` (one adjacent pair), this differences the SOURCE tap directly
-/// against the final ENDPOINT tap, so the number is "did every frame the camera
-/// emitted reach the last endpoint", not a sum of per-hop diffs that could each
-/// look clean while the chain as a whole lost a frame (e.g. a drop at hop A whose
-/// id was masked by oversample but is genuinely absent end-to-end).
+/// #7 Phase 3: the HEADLINE source→endpoint aggregate. Unlike a chain of
+/// adjacent `diff_hop`s, this differences the SOURCE tap directly against the
+/// final ENDPOINT tap, so the number is "did every frame the source tap saw
+/// reach the last endpoint", not a sum of per-hop diffs that could each look
+/// clean while the chain as a whole lost a frame (a drop at hop A whose id is
+/// masked by oversample on the next hop but is genuinely absent end-to-end).
+///
+/// The full span is itself just a hop (source = upstream, endpoint = downstream),
+/// so its verdict obeys the SAME contract as every other hop: strict zero-loss by
+/// default, the documented single-copy bound when `max_loss_pct` is set, the
+/// `min_frames` non-vacuous floor, and the `min_single_copy` INCONCL guard (#29).
+/// This keeps the headline consistent with the per-hop diffs and, critically,
+/// makes the documented-loss escape hatch (`--max-loss-pct`) apply end-to-end
+/// instead of a strict full-span gate silently overriding a deliberately-relaxed
+/// per-hop budget.
 #[derive(Debug, Clone, Serialize)]
 pub struct FullSpanReport {
     /// Unique source-emitted ids decoded at the source tap.
@@ -238,42 +247,67 @@ pub struct FullSpanReport {
     /// tap had no chance to see before its first or after its last decode is tap
     /// skew, not a chain drop). A real mid-stream loss still lies inside [lo,hi].
     pub dropped_ids: Vec<u32>,
-    /// True iff the endpoint decoded at least one frame AND no in-span source id
-    /// is missing end-to-end. An endpoint that decoded NOTHING is never
-    /// zero-loss — there is no evidence any frame arrived (no vacuous pass).
-    pub zero_loss: bool,
+    /// Source→endpoint single-copy (oversample-independent) frames within the span.
+    pub single_copy_total: usize,
+    /// Of `single_copy_total`, how many are absent at the endpoint.
+    pub single_copy_dropped: usize,
+    /// The full-span verdict, computed by `diff_hop` so it honours the SAME
+    /// loss/min_frames/min_single_copy contract as the per-hop gates. `is_pass()`
+    /// is the headline "every source frame reached the endpoint" certification.
+    pub verdict: HopVerdict,
 }
 
-/// Difference the source tap against the final endpoint tap (the full span).
-/// Span-clipped to the endpoint's `[min,max]` active id range, identical in
-/// semantics to `diff_hop` so the headline number and the per-hop diffs agree.
-pub fn full_span_diff(source: &[Observed], endpoint: &[Observed]) -> FullSpanReport {
-    let src_unique: HashSet<u32> = source.iter().map(|o| o.frame_id).collect();
-    let ep_unique: HashSet<u32> = endpoint.iter().map(|o| o.frame_id).collect();
+/// Bounds for the full-span (source→endpoint) gate. Mirrors the relevant
+/// `diff_hop` knobs so the headline obeys the same contract; defaults (`None` /
+/// `0`) reproduce strict zero-loss with no INCONCL guard.
+pub struct FullSpanBounds {
+    /// Non-vacuous floor: a source or endpoint tap with fewer than this many
+    /// run-id frames FAILS rather than certifying off near-zero data.
+    pub min_frames: usize,
+    /// `None` ⇒ STRICT zero-loss. `Some(pct)` ⇒ documented-bound: judged by the
+    /// oversample-independent single-copy loss percentage staying `<= pct` — the
+    /// same escape hatch the per-hop endpoint gate uses for the OBS render-clock
+    /// drop pending genlock (#8).
+    pub max_loss_pct: Option<f64>,
+    /// `#29` oversample-masking guard: certify (Pass) only with at least this many
+    /// single-copy source→endpoint frames; below it the verdict is Inconclusive.
+    pub min_single_copy: usize,
+}
 
-    let dropped_ids: Vec<u32> = match (ep_unique.iter().min(), ep_unique.iter().max()) {
-        (Some(&lo), Some(&hi)) => {
-            let mut v: Vec<u32> = src_unique
-                .iter()
-                .copied()
-                .filter(|id| *id >= lo && *id <= hi && !ep_unique.contains(id))
-                .collect();
-            v.sort_unstable();
-            v
-        }
-        // Endpoint decoded nothing ⇒ no active span ⇒ cannot certify any arrival.
-        _ => Vec::new(),
-    };
-
-    // An endpoint that decoded zero frames is NOT zero-loss (no proof of arrival),
-    // even though `dropped_ids` is empty (there is no span to test against).
-    let zero_loss = !ep_unique.is_empty() && dropped_ids.is_empty();
-
+/// Difference the source tap against the final endpoint tap (the full span),
+/// delegating to `diff_hop` (source = upstream, endpoint = downstream) so the
+/// span-clip, single-copy, documented-bound and INCONCL semantics are IDENTICAL
+/// to the per-hop diffs by construction — not a hand-kept parallel copy.
+/// Latency/freeze are report-only here (`None` bounds): the full span's meaningful
+/// latency is the ABSOLUTE one (`absolute_latency_stats`), not a relative recv−recv
+/// delta, and freezes are localised per hop.
+pub fn full_span_diff(
+    source: &[Observed],
+    endpoint: &[Observed],
+    bounds: &FullSpanBounds,
+) -> FullSpanReport {
+    let hop = diff_hop(HopInput {
+        name: "source→endpoint".to_string(),
+        upstream: source,
+        downstream: endpoint,
+        // Freezes are localised per hop and never gated/reported for the full
+        // span; a never-tripped threshold keeps detect_freezes a no-op without
+        // touching the verdict. (1.0 fps avoids a 1/0 period; MAX is unreachable.)
+        capture_fps: 1.0,
+        freeze_periods: f64::MAX,
+        min_frames: bounds.min_frames,
+        max_p99_latency_ms: None,
+        max_freeze_periods_gate: None,
+        max_loss_pct: bounds.max_loss_pct,
+        min_single_copy: bounds.min_single_copy,
+    });
     FullSpanReport {
-        source_unique: src_unique.len(),
-        endpoint_unique: ep_unique.len(),
-        dropped_ids,
-        zero_loss,
+        source_unique: hop.upstream_unique,
+        endpoint_unique: hop.downstream_unique,
+        dropped_ids: hop.dropped_ids,
+        single_copy_total: hop.single_copy_total,
+        single_copy_dropped: hop.single_copy_dropped,
+        verdict: hop.verdict,
     }
 }
 

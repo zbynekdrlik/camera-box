@@ -2,9 +2,12 @@
 //!
 //! These exercise the pure logic the full-path gate adds on top of Phase 2's
 //! adjacent-hop differencing:
-//!   * `full_span_diff` — a SINGLE source-tap vs endpoint-tap ID-set aggregate
-//!     (the headline "every source frame reached the last endpoint" number), not
-//!     a sum of adjacent-pair diffs. Reuses the span-clip + single-copy logic.
+//!   * `full_span_diff` — a SINGLE source-tap vs endpoint-tap aggregate (the
+//!     headline "every source frame reached the last endpoint" number), not a sum
+//!     of adjacent-pair diffs. It delegates to `diff_hop`, so it obeys the SAME
+//!     contract as the per-hop gates: strict zero-loss by default, the documented
+//!     single-copy bound (`max_loss_pct`), the `min_frames` non-vacuous floor, and
+//!     the #29 single-copy INCONCL guard.
 //!   * `absolute_latency_stats` — `recv_ts(endpoint) − gen_ts(source)` paired by
 //!     frame_id. Sound ONLY when both timestamps share one synced wall clock
 //!     (DanteSync CLOCK_REALTIME, strih = master); the arithmetic itself is pure.
@@ -15,7 +18,7 @@
 
 use camera_box::probe::analyzer::Observed;
 use camera_box::probe::differ::{
-    absolute_latency_gate_pass, absolute_latency_stats, full_span_diff, FullSpanReport,
+    absolute_latency_gate_pass, absolute_latency_stats, full_span_diff, FullSpanBounds, HopVerdict,
 };
 
 /// Source observation: a painted frame at `gen_ms` on the synced wall clock.
@@ -40,12 +43,22 @@ fn ep(frame_id: u32, gen_ms: i64, recv_ms: i64) -> Observed {
     }
 }
 
+/// Strict zero-loss bounds (the default): no documented loss budget, a low
+/// `min_frames` floor so small fixtures are not vacuous, no INCONCL guard.
+fn strict() -> FullSpanBounds {
+    FullSpanBounds {
+        min_frames: 1,
+        max_loss_pct: None,
+        min_single_copy: 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
-// full_span_diff — source→endpoint zero-loss aggregate
+// full_span_diff — source→endpoint aggregate (strict default)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn full_span_zero_loss_when_every_source_id_reaches_endpoint() {
+fn full_span_passes_when_every_source_id_reaches_endpoint() {
     let source = vec![src(0, 0), src(1, 33), src(2, 66), src(3, 99), src(4, 132)];
     let endpoint = vec![
         ep(0, 0, 120),
@@ -54,7 +67,7 @@ fn full_span_zero_loss_when_every_source_id_reaches_endpoint() {
         ep(3, 99, 219),
         ep(4, 132, 252),
     ];
-    let r: FullSpanReport = full_span_diff(&source, &endpoint);
+    let r = full_span_diff(&source, &endpoint, &strict());
     assert_eq!(r.source_unique, 5);
     assert_eq!(r.endpoint_unique, 5);
     assert!(
@@ -62,11 +75,15 @@ fn full_span_zero_loss_when_every_source_id_reaches_endpoint() {
         "no source id should be missing at the endpoint: {:?}",
         r.dropped_ids
     );
-    assert!(r.zero_loss, "a complete chain must report zero_loss=true");
+    assert_eq!(
+        r.verdict,
+        HopVerdict::Pass,
+        "a complete chain must certify PASS"
+    );
 }
 
 #[test]
-fn full_span_flags_a_mid_stream_drop_against_the_endpoint() {
+fn full_span_fails_on_a_mid_stream_drop_against_the_endpoint() {
     // Source emits 0..=4; the endpoint never carries id 2 -> headline source→
     // endpoint drop, regardless of which intermediate hop lost it.
     let source = vec![src(0, 0), src(1, 33), src(2, 66), src(3, 99), src(4, 132)];
@@ -76,15 +93,16 @@ fn full_span_flags_a_mid_stream_drop_against_the_endpoint() {
         ep(3, 99, 219),
         ep(4, 132, 252),
     ];
-    let r = full_span_diff(&source, &endpoint);
+    let r = full_span_diff(&source, &endpoint, &strict());
     assert_eq!(
         r.dropped_ids,
         vec![2],
         "id 2 must be flagged source→endpoint"
     );
-    assert!(
-        !r.zero_loss,
-        "a source→endpoint drop must set zero_loss=false"
+    assert_eq!(
+        r.verdict,
+        HopVerdict::Fail,
+        "a strict source→endpoint drop must FAIL"
     );
 }
 
@@ -104,27 +122,106 @@ fn full_span_clips_to_endpoint_active_span_not_tap_startup_skew() {
         src(7, 231),
     ];
     let endpoint = vec![ep(2, 66, 186), ep(4, 132, 252)]; // missing 3, inside span
-    let r = full_span_diff(&source, &endpoint);
+    let r = full_span_diff(&source, &endpoint, &strict());
     assert_eq!(
         r.dropped_ids,
         vec![3],
         "only id 3 (inside the endpoint active span) is a real drop; 0,1,6,7 are skew"
     );
-    assert!(!r.zero_loss);
+    assert_eq!(r.verdict, HopVerdict::Fail);
 }
 
 #[test]
 fn full_span_empty_endpoint_is_not_a_vacuous_pass() {
-    // An endpoint that decoded nothing must NOT report zero_loss=true: there is
-    // no evidence any frame arrived. (The orchestrator's min_frames check is the
-    // hard gate; the aggregate must not lie that a dead endpoint is clean.)
+    // An endpoint that decoded nothing must NOT certify: there is no evidence any
+    // frame arrived. (min_frames floor catches it, like every other hop.)
     let source = vec![src(0, 0), src(1, 33)];
     let endpoint: Vec<Observed> = vec![];
-    let r = full_span_diff(&source, &endpoint);
+    let r = full_span_diff(&source, &endpoint, &strict());
     assert_eq!(r.endpoint_unique, 0);
-    assert!(
-        !r.zero_loss,
+    assert_ne!(
+        r.verdict,
+        HopVerdict::Pass,
         "an endpoint with zero decoded frames must not pass as zero-loss"
+    );
+}
+
+#[test]
+fn full_span_min_frames_floor_rejects_a_one_frame_endpoint() {
+    // A near-dead endpoint that decoded a single in-span frame must NOT certify
+    // ZERO-LOSS (the #2 review finding): with min_frames=100, one endpoint frame
+    // is below the floor and the full span FAILs rather than lying clean.
+    let source: Vec<Observed> = (0..200).map(|i| src(i, i as i64 * 33)).collect();
+    let endpoint = vec![ep(7, 231, 351)]; // one frame, span [7,7], no in-span drop
+    let bounds = FullSpanBounds {
+        min_frames: 100,
+        max_loss_pct: None,
+        min_single_copy: 0,
+    };
+    let r = full_span_diff(&source, &endpoint, &bounds);
+    assert!(
+        r.dropped_ids.is_empty(),
+        "no id is missing within the 1-wide span"
+    );
+    assert_ne!(
+        r.verdict,
+        HopVerdict::Pass,
+        "a 1-frame endpoint is below min_frames and must NOT certify ZERO-LOSS"
+    );
+}
+
+#[test]
+fn full_span_honours_the_documented_loss_bound_not_strict_zero() {
+    // The #1 review finding (verdict regression): with a documented per-hop loss
+    // budget set on the endpoint, a small loss within the budget must PASS the
+    // full span — a strict full-span gate must NOT override the deliberately
+    // relaxed budget. 100 single-copy source ids, the endpoint drops 3 (3%) ->
+    // under a 10% documented bound -> PASS; strict (None) would FAIL.
+    let source: Vec<Observed> = (0..100).map(|i| src(i, i as i64 * 33)).collect();
+    // Endpoint carries every id EXCEPT 10, 20, 30 (3 drops), spanning [0,99].
+    let endpoint: Vec<Observed> = (0..100)
+        .filter(|i| ![10u32, 20, 30].contains(i))
+        .map(|i| ep(i, i as i64 * 33, i as i64 * 33 + 120))
+        .collect();
+
+    let bounded = FullSpanBounds {
+        min_frames: 1,
+        max_loss_pct: Some(10.0),
+        min_single_copy: 0,
+    };
+    let r = full_span_diff(&source, &endpoint, &bounded);
+    assert_eq!(r.single_copy_total, 100);
+    assert_eq!(r.single_copy_dropped, 3);
+    assert_eq!(
+        r.verdict,
+        HopVerdict::Pass,
+        "3% loss under a 10% documented bound must PASS (no strict override)"
+    );
+
+    // Same data, strict (no documented bound) -> the 3 drops FAIL the run.
+    let r_strict = full_span_diff(&source, &endpoint, &strict());
+    assert_eq!(r_strict.verdict, HopVerdict::Fail);
+}
+
+#[test]
+fn full_span_inconclusive_when_too_few_single_copy_frames() {
+    // The #29 oversample guard applies end-to-end too: a clean run with fewer
+    // single-copy source→endpoint frames than the guard cannot be CERTIFIED.
+    // Three unique ids, each carried by ONE source frame and present downstream
+    // (zero loss), but min_single_copy=10 -> not enough evidence -> INCONCL.
+    let source = vec![src(0, 0), src(1, 33), src(2, 66)];
+    let endpoint = vec![ep(0, 0, 120), ep(1, 33, 153), ep(2, 66, 186)];
+    let bounds = FullSpanBounds {
+        min_frames: 1,
+        max_loss_pct: None,
+        min_single_copy: 10,
+    };
+    let r = full_span_diff(&source, &endpoint, &bounds);
+    assert!(r.dropped_ids.is_empty());
+    assert_eq!(
+        r.verdict,
+        HopVerdict::Inconclusive,
+        "zero loss but too few single-copy frames must be INCONCL, not PASS"
     );
 }
 

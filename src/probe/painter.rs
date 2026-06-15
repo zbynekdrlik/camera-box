@@ -1,12 +1,13 @@
 //! Painter thread: draw QR frames to /dev/fb0, paced, recording emitted IDs.
 
+use crate::probe::clock_ns;
 use crate::probe::fb::VsyncFb;
 use crate::probe::payload::Payload;
 use crate::probe::qr::render_qr_bgra;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub struct PaintParams {
     pub run_id: u32,
@@ -25,20 +26,6 @@ pub struct PaintParams {
     pub wall_clock: bool,
 }
 
-/// `gen_ts_ns` on the configured clock domain — epoch ns when `wall_clock`, else
-/// ns since the shared monotonic `start`. Single place that picks the painter's
-/// time origin so it cannot diverge between the fb and synth-NDI paths.
-pub fn gen_now(start: Instant, wall_clock: bool) -> i64 {
-    if wall_clock {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("wall clock before epoch")
-            .as_nanos() as i64
-    } else {
-        start.elapsed().as_nanos() as i64
-    }
-}
-
 /// Paint until `stop` is set. Records `(frame_id, gen_ts_ns)` of every emitted frame.
 pub fn run_painter(
     params: PaintParams,
@@ -52,7 +39,7 @@ pub fn run_painter(
     let mut next = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let gen_ts_ns = gen_now(start, params.wall_clock);
+        let gen_ts_ns = clock_ns(start, params.wall_clock);
         let payload = Payload {
             run_id: params.run_id,
             frame_id,
