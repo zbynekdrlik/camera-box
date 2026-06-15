@@ -61,11 +61,11 @@ fn manual_camera_box_launch_sets_genlock_fps() {
         .expect("manual camera-box launch (nohup /usr/local/bin/camera-box) not found");
     // The genlock env must appear in the remote command BEFORE the manual launch (it is set on
     // the same `(VAR=… nohup … &)` line, so it precedes the binary on that command).
-    let env_pos = s
-        .find("CAMERA_BOX_GENLOCK_FPS=")
-        .expect("#66 regression: multitap-e2e.sh must set CAMERA_BOX_GENLOCK_FPS on the manual \
+    let env_pos = s.find("CAMERA_BOX_GENLOCK_FPS=").expect(
+        "#66 regression: multitap-e2e.sh must set CAMERA_BOX_GENLOCK_FPS on the manual \
                  camera-box launch so the sender genlock-decimates like the deployed service; \
-                 without it strih's 30fps genlock FIFO drops ~49% of frames / renders black.");
+                 without it strih's 30fps genlock FIFO drops ~49% of frames / renders black.",
+    );
     assert!(
         env_pos < launch,
         "#66 regression: CAMERA_BOX_GENLOCK_FPS (@{env_pos}) must be set on the same command \
