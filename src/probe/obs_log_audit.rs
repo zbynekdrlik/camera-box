@@ -33,8 +33,11 @@ pub struct ObsLogAudit {
     /// … Failed to create 2D texture (887A000x)` OR a `Device Removed Reason:
     /// 887A000x` line). In the wedged log this climbs into the thousands.
     pub device_removed_count: usize,
-    /// The timestamp prefix (`HH:MM:SS.mmm`) of the FIRST device-lost line, for
-    /// triage. `None` when no signature was found.
+    /// The `HH:MM:SS.mmm` timestamp prefix of the first device-lost line that
+    /// carries a parseable OBS timestamp, for triage. (A device-lost line with no
+    /// timestamp prefix still counts toward `device_removed_count` but is skipped
+    /// here, so this is the first *timestamped* occurrence.) `None` when no
+    /// signature carried a parseable timestamp.
     pub first_timestamp: Option<String>,
     /// The distinct DXGI codes observed (e.g. `["887A0005", "887A0007"]`), in first-
     /// seen order. Empty when no signature was found.
@@ -73,15 +76,35 @@ fn line_is_device_lost(line: &str) -> bool {
 
 /// Extract the leading `HH:MM:SS.mmm` timestamp from an OBS log line, if present.
 /// OBS prefixes every line with `HH:MM:SS.mmm: `; return the part before the first
-/// `": "`. Returns `None` for a line without that prefix.
+/// `": "` only when it is EXACTLY that strict shape (`\d\d:\d\d:\d\d.\d\d\d`), so a
+/// message that merely happens to contain a colon-space can never be mistaken for a
+/// timestamp. Returns `None` for a line without that prefix.
 fn timestamp_prefix(line: &str) -> Option<String> {
-    let ts = line.split_once(": ").map(|(ts, _)| ts.trim())?;
-    // Sanity: an OBS timestamp looks like "03:33:39.533" — has two ':' and one '.'.
-    if ts.matches(':').count() == 2 && ts.contains('.') {
+    let ts = line.split_once(": ").map(|(ts, _)| ts)?;
+    if is_obs_timestamp(ts) {
         Some(ts.to_string())
     } else {
         None
     }
+}
+
+/// True iff `ts` is exactly an OBS timestamp: `HH:MM:SS.mmm` (two digits, `:`, two
+/// digits, `:`, two digits, `.`, three digits) — no trimming, no extra chars.
+fn is_obs_timestamp(ts: &str) -> bool {
+    let b = ts.as_bytes();
+    b.len() == 12
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2] == b':'
+        && b[3].is_ascii_digit()
+        && b[4].is_ascii_digit()
+        && b[5] == b':'
+        && b[6].is_ascii_digit()
+        && b[7].is_ascii_digit()
+        && b[8] == b'.'
+        && b[9].is_ascii_digit()
+        && b[10].is_ascii_digit()
+        && b[11].is_ascii_digit()
 }
 
 /// Audit raw OBS log text for the GPU device-removed (TDR) signature (#81).
@@ -163,5 +186,32 @@ mod tests {
         let a = audit_obs_log(log);
         assert!(a.device_removed);
         assert!(a.first_timestamp.is_none());
+    }
+
+    #[test]
+    fn strict_timestamp_rejects_colon_space_message() {
+        // A device-lost line whose message contains a ': ' but no real OBS
+        // timestamp prefix must NOT yield a bogus first_timestamp (the strict
+        // HH:MM:SS.mmm shape rejects it), while still being counted.
+        let log = "module: failed 887A0005 with reason: device lost\n";
+        let a = audit_obs_log(log);
+        assert!(a.device_removed);
+        assert_eq!(a.device_removed_count, 1);
+        assert!(
+            a.first_timestamp.is_none(),
+            "a colon-space message must not be parsed as a timestamp, got {:?}",
+            a.first_timestamp
+        );
+    }
+
+    #[test]
+    fn first_timestamp_skips_leading_untimestamped_line() {
+        // The first device-lost line has no timestamp; the second does — the
+        // reported first_timestamp must be the second's (the first TIMESTAMPED
+        // occurrence), matching the field doc.
+        let log = "preamble 887A0005 no ts\n12:34:56.789: device-lost 887A0007\n";
+        let a = audit_obs_log(log);
+        assert_eq!(a.device_removed_count, 2);
+        assert_eq!(a.first_timestamp.as_deref(), Some("12:34:56.789"));
     }
 }

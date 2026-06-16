@@ -38,6 +38,30 @@ pub enum LivenessVerdict {
     DeadOutput { tap: String, message: String },
 }
 
+/// Whether the liveness capture window may START yet, given how many taps have
+/// finished connecting and how long we have already waited.
+///
+/// The capture window must only judge taps that have actually had a chance to
+/// capture — i.e. taps whose `NdiReceiver::connect` has returned. NDI discovery
+/// can legitimately take up to `connect_timeout_secs`, so a healthy but
+/// slow-to-advertise source can still be inside `connect` (captured == 0) well
+/// into the run. Starting the capture window before every tap is connected would
+/// read that 0 and FALSELY flag the tap as a dead output (#81 race: a 30 s
+/// window starting at spawn vs a 30 s connect timeout).
+///
+/// Returns `true` (start the window now) when EITHER every tap is connected OR
+/// the connect budget (`connect_timeout_secs`) has elapsed — past that budget a
+/// tap that still isn't connected is a genuine connect failure that the tap
+/// thread surfaces as an error on join, so the dead-output check no longer needs
+/// to wait on it.
+pub fn window_may_start(
+    connected_taps: usize,
+    total_taps: usize,
+    connect_budget_elapsed: bool,
+) -> bool {
+    connected_taps >= total_taps || connect_budget_elapsed
+}
+
 /// Decide whether any single tap's downstream output is dead, given each tap's
 /// captured-frame count over the first `window_secs` of the run.
 ///
@@ -119,6 +143,26 @@ mod tests {
             check_tap_liveness(&taps, 30, 2),
             LivenessVerdict::AllAlive
         ));
+    }
+
+    #[test]
+    fn window_waits_until_all_taps_connected() {
+        // Not every tap connected yet and the connect budget has NOT elapsed:
+        // do NOT start the capture window (a slow tap is still connecting, its
+        // captured == 0 must not be read as a dead output).
+        assert!(!window_may_start(2, 3, false));
+    }
+
+    #[test]
+    fn window_starts_once_all_taps_connected() {
+        assert!(window_may_start(3, 3, false));
+    }
+
+    #[test]
+    fn window_starts_when_connect_budget_elapsed_even_if_not_all_connected() {
+        // Past the connect budget a still-unconnected tap is a genuine connect
+        // failure (surfaced on join), so the window may start without it.
+        assert!(window_may_start(2, 3, true));
     }
 
     #[test]

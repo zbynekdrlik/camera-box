@@ -12,7 +12,9 @@ use camera_box::probe::differ::{
     overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport,
     FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
 };
-use camera_box::probe::liveness::{check_tap_liveness, LivenessVerdict, TapLiveness};
+use camera_box::probe::liveness::{
+    check_tap_liveness, window_may_start, LivenessVerdict, TapLiveness,
+};
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
 use camera_box::probe::obs_log_audit::audit_obs_log;
 use clap::Parser;
@@ -362,10 +364,39 @@ fn main() -> Result<()> {
     // duration and reporting a silent zero-frames mystery 30 min later. `0` = skip.
     let deadline = Instant::now() + Duration::from_secs(args.duration_secs);
     if args.liveness_window_secs > 0 {
+        // First WAIT for every tap to finish connecting (bounded by the connect
+        // budget): a tap still inside `NdiReceiver::connect` has captured nothing
+        // for a legitimate reason (NDI discovery can take up to
+        // connect_timeout_secs), and judging its captured==0 then would FALSELY
+        // flag a healthy-but-slow source as a dead output (#81 race). Only once
+        // every tap is connected (or the connect budget elapsed — past which an
+        // unconnected tap is a real connect failure surfaced on join) do we start
+        // the capture window.
+        let connect_deadline =
+            (Instant::now() + Duration::from_secs(args.connect_timeout_secs as u64)).min(deadline);
+        let mut tap_thread_died = false;
+        loop {
+            if handles.iter().any(|h| h.is_finished()) {
+                tap_thread_died = true;
+                break;
+            }
+            let connected = results
+                .iter()
+                .filter(|r| r.connected.load(Ordering::Relaxed))
+                .count();
+            let budget_elapsed = Instant::now() >= connect_deadline;
+            if window_may_start(connected, results.len(), budget_elapsed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        // Now run the capture window: every tap that is going to connect has, so
+        // a captured==0 across the window is a genuine dead output, not a tap that
+        // simply hadn't connected. The window is clamped to the run deadline.
         let window_deadline =
             (Instant::now() + Duration::from_secs(args.liveness_window_secs)).min(deadline);
-        let mut tap_thread_died = false;
-        while Instant::now() < window_deadline {
+        while !tap_thread_died && Instant::now() < window_deadline {
             if handles.iter().any(|h| h.is_finished()) {
                 tap_thread_died = true;
                 break;
@@ -394,14 +425,18 @@ fn main() -> Result<()> {
                 for h in handles {
                     let _ = h.join();
                 }
-                eprintln!("DEAD_OUTPUT tap={tap}: {message}");
+                // Emit the diagnosis + the OBS-log audit on STDOUT alongside the
+                // VERDICT line — every other operator-facing diagnostic in this
+                // binary uses stdout, so the LOUD cause+evidence must travel with
+                // the verdict (a stdout-only capture would otherwise lose it).
+                println!("DEAD_OUTPUT tap={tap}: {message}");
                 // Audit the downstream OBS log if provided — surface the proximate
                 // cause (the GPU device-removed signature) right next to the verdict.
                 if let Some(path) = &args.stream_obs_log {
                     match std::fs::read_to_string(path) {
                         Ok(log) => {
                             let audit = audit_obs_log(&log);
-                            eprintln!("STREAM_OBS_LOG_AUDIT ({path}): {}", audit.diagnosis());
+                            println!("STREAM_OBS_LOG_AUDIT ({path}): {}", audit.diagnosis());
                         }
                         Err(e) => {
                             eprintln!("STREAM_OBS_LOG_AUDIT: could not read {path}: {e}");

@@ -44,6 +44,14 @@ pub struct TapResult {
     /// over-report loss. Capture-count parity across a hop proves the hop
     /// delivered every frame even when some ids fail to decode at the tap.
     pub captured: Arc<AtomicU64>,
+    /// Set once `NdiReceiver::connect` returns for this tap. Until it is set the
+    /// tap is still discovering/connecting to its NDI source (up to
+    /// `connect_timeout_secs`) and has had NO chance to capture, so its
+    /// `captured == 0` is "not connected yet", NOT "dead output". The #81
+    /// liveness pre-check waits for every tap to be `connected` before it starts
+    /// the capture window, so a healthy-but-slow-to-discover tap can never be
+    /// mis-flagged as a dead downstream output / GPU device-removed.
+    pub connected: Arc<AtomicBool>,
 }
 
 /// Spawn a reader thread for one tap. Returns its join handle plus a handle to
@@ -55,12 +63,15 @@ pub fn spawn_tap(
 ) -> (JoinHandle<Result<()>>, TapResult) {
     let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::new(AtomicU64::new(0));
+    let connected = Arc::new(AtomicBool::new(false));
     let result = TapResult {
         name: spec.name.clone(),
         observed: observed.clone(),
         captured: captured.clone(),
+        connected: connected.clone(),
     };
-    let handle = std::thread::spawn(move || tap_loop(spec, start, stop, observed, captured));
+    let handle =
+        std::thread::spawn(move || tap_loop(spec, start, stop, observed, captured, connected));
     (handle, result)
 }
 
@@ -70,8 +81,13 @@ fn tap_loop(
     stop: Arc<AtomicBool>,
     observed: Arc<Mutex<Vec<Observed>>>,
     captured: Arc<AtomicU64>,
+    connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut rx = NdiReceiver::connect(&spec.source, spec.connect_timeout_secs)?;
+    // The NDI source was found and the receiver is up: from here the tap is
+    // capturing, so a subsequent `captured == 0` is a dead output, not a tap
+    // that simply hadn't connected yet (#81 liveness pre-check gate).
+    connected.store(true, Ordering::Relaxed);
     while !stop.load(Ordering::Relaxed) {
         let frame = match rx.capture_frame(100)? {
             Some(f) => f,
