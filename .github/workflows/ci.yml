@@ -91,9 +91,12 @@ jobs:
           key: coverage
 
       - name: Generate coverage report
-        # Probe hardware glue (painter/reader/run) and the bin drive /dev/fb0 + NDI and
-        # cannot be unit-tested; exclude them so the threshold reflects testable logic.
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|multi_reader)\.rs|src/bin/(frame-probe|multitap-probe)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        # Probe hardware glue (painter/reader/run/fb/kms) and the bin drive /dev/fb0,
+        # /dev/dri (DRM page-flip) + NDI and cannot be unit-tested; exclude them so the
+        # threshold reflects testable logic. kms.rs's PURE decision functions (pick_mode,
+        # copy_plan, copy_bgra_into, next_bo_index) are unit-tested, but its live DRM
+        # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|multitap-probe)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -166,6 +169,13 @@ jobs:
         #   by any unit test that cannot pin a live clock reading; the CONSUMERS of
         #   its output (absolute_latency_stats, the gate, the differ) are fully
         #   mutation-tested pure functions.
+        # --exclude-re KmsPresenter / fbcon:: : the DRM/KMS page-flip glue (#79) —
+        #   open card / take master / set_crtc / page_flip / map dumb buffer, and the
+        #   fbcon sysfs bind/unbind — drives /dev/dri + the live HDMI console and is
+        #   verified by the on-device tear-free loopback, not unit tests. Its PURE
+        #   decision functions (pick_mode, copy_plan, copy_bgra_into, next_bo_index,
+        #   is_phase_lockable) are free functions OUTSIDE these patterns and stay
+        #   mutated + are covered by kms unit + kms_pitch_roundtrip integration tests.
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe \
@@ -181,6 +191,8 @@ jobs:
               --exclude-re '\bwall_clock_ns\b' \
               --exclude-re '\brun_capture_loop\b' \
               --exclude-re '\bclock_ns\b' \
+              --exclude-re 'KmsPresenter' \
+              --exclude-re 'fbcon::' \
               --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
