@@ -72,7 +72,7 @@ const MANIFEST_FIXTURE: &str = "\
 |---|---|---|
 | `output_fps` | `30` | OBS log |
 | `genlock_wall_clock` | `1` | OBS log |
-| `ndi_input_latency` | `2` | obs-websocket GetInputSettings |
+| `ndi_input_latency` | `0` | obs-websocket GetInputSettings |
 ";
 
 /// The ACTUAL OBS log lines captured from strih/stream 2026-06-14. Note the graphics-adapter
@@ -125,8 +125,8 @@ fn parses_pinned_versions_and_settings_from_manifest() {
     assert_eq!(setting("genlock_wall_clock"), "1");
     assert_eq!(
         setting("ndi_input_latency"),
-        "2",
-        "must read the pinned NDI input latency mode (2=Lowest, #84)"
+        "0",
+        "must read the pinned NDI input latency mode (0=Normal, certified low-latency, #84)"
     );
 
     let _ = std::fs::remove_file(&readme);
@@ -353,7 +353,8 @@ fn check_pins_fails_loudly_on_incomplete_manifest() {
 #[test]
 fn compare_clean_when_observed_matches_the_pinned_set() {
     // The real known-good values verified live on strih 2026-06-14 + the broadcast-path NDI
-    // inputs all at the pinned Lowest latency (the #84 post-fix state verified 2026-06-16).
+    // inputs all at the pinned Normal(0) latency (the #84 certified low-latency re-pin verified
+    // live 2026-06-16: Normal is ~33 ms lower abs_emit than Lowest and zero-loss over 30 min).
     let (code, stdout, _stderr) = run_script(&[
         "--compare",
         "host=strih",
@@ -362,7 +363,7 @@ fn compare_clean_when_observed_matches_the_pinned_set() {
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
         "genlock_wall_clock=1",
-        "ndi_input_latency=NDI cam5=2,NDI cam1=2,NDI cam3=2",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
     ]);
     assert_eq!(
         code, 0,
@@ -433,18 +434,19 @@ fn drift_check_inputs_pure_flags_per_input_latency_drift() {
     // so the CSV split on commas is unambiguous.
     let case = |csv: &str| {
         let body = "rc=0; drift_check_inputs \"$EXP\" \"$CSV\" || rc=$?; echo \"RC=$rc\"";
-        run_sourced(body, &[("EXP", "2"), ("CSV", csv)])
+        run_sourced(body, &[("EXP", "0"), ("CSV", csv)])
     };
 
-    let ok = case("NDI cam5=2,NDI cam1=2,NDI cam3=2");
+    let ok = case("NDI cam5=0,NDI cam1=0,NDI cam3=0");
     assert!(ok.contains("RC=0"), "all-on-pin must be OK: {ok:?}");
     assert!(
-        ok.contains("NDI cam5") && ok.contains("latency=2"),
+        ok.contains("NDI cam5") && ok.contains("latency=0"),
         "must echo each input's observed latency: {ok:?}"
     );
 
-    // The exact #84 regression: an ingest input drifted to latency=0 (added buffering).
-    let drift = case("NDI cam5=0,NDI cam1=2,NDI cam3=2");
+    // The exact #84 regression: an ingest input drifted OFF the certified Normal(0) to
+    // latency=2 (extra ingest buffer, ~33 ms HIGHER abs_emit — the slower state).
+    let drift = case("NDI cam5=2,NDI cam1=0,NDI cam3=0");
     assert!(
         drift.contains("RC=2"),
         "a drifted input must be DRIFT: {drift:?}"
@@ -452,7 +454,7 @@ fn drift_check_inputs_pure_flags_per_input_latency_drift() {
     assert!(
         drift.contains("NDI cam5")
             && drift.contains("DRIFT")
-            && drift.contains("expected latency=2"),
+            && drift.contains("expected latency=0"),
         "must name the drifted input + expected vs observed: {drift:?}"
     );
 
@@ -465,8 +467,8 @@ fn drift_check_inputs_pure_flags_per_input_latency_drift() {
 
 #[test]
 fn compare_fails_loudly_when_an_input_latency_drifted() {
-    // End-to-end: the strih box with `NDI cam5` (=CAM1) drifted off the pinned Lowest latency to
-    // 0 — the exact state found live 2026-06-16 (#84). The guard must exit 20 and name the input.
+    // End-to-end: the strih box with `NDI cam5` (=CAM1) drifted OFF the certified Normal(0) latency
+    // to 2 (extra ingest buffer). The guard must exit 20 and name the input vs the pinned 0 (#84).
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
@@ -475,14 +477,14 @@ fn compare_fails_loudly_when_an_input_latency_drifted() {
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
         "genlock_wall_clock=1",
-        "ndi_input_latency=NDI cam5=0,NDI cam1=2,NDI cam3=2",
+        "ndi_input_latency=NDI cam5=2,NDI cam1=0,NDI cam3=0",
     ]);
     assert_eq!(
         code, 20,
         "an input drifted off the pinned latency must exit 20. stdout={stdout:?} stderr={stderr:?}"
     );
     assert!(
-        stdout.contains("NDI cam5") && stdout.contains("DRIFT") && stdout.contains("latency=2"),
+        stdout.contains("NDI cam5") && stdout.contains("DRIFT") && stdout.contains("latency=0"),
         "must name the drifted input + the pinned latency. stdout={stdout:?}"
     );
     assert!(

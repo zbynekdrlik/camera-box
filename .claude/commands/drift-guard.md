@@ -54,7 +54,7 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    `ws://stream.lan:4455`, pw `JhRfqdTmuifYq60y`), NOT the OBS log/registry. For each genlocked
    **broadcast-path** input — on strih the camera ingests (`NDI cam5`=CAM1, `NDI cam1`=CAM3,
    `NDI cam3`=CAM4), on stream the strih→stream program feed (`NDI 2ME PGM`) — read
-   `GetInputSettings`→`latency` (`2`=Lowest is the pin) and build a comma-separated
+   `GetInputSettings`→`latency` (`0`=Normal is the pin — the certified low-latency zero-loss mode, #84) and build a comma-separated
    `input name=latency` list. (Non-broadcast inputs — preview/CG/lyrics — are out of scope of the
    pin; do not include them.) The reusable reader is `~/.cache/obsprobe/obs_inputs.py <host> <pw>`
    (read-only; lists every NDI input + its settings). If OBS is not running there is no live

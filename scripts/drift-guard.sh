@@ -27,7 +27,7 @@
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
 #   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
 #       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1 \
-#       ndi_input_latency="NDI cam5=2,NDI cam1=2,NDI cam3=2"
+#       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0"
 #   scripts/drift-guard.sh --help
 #
 # Exit codes: 0 = clean (pins valid / no drift), 20 = DRIFT detected, 11 = at least one observed
@@ -173,7 +173,7 @@ drift_check() {
 }
 
 # drift_check_inputs EXPECTED OBSERVED_CSV -> per-input latency drift on the genlocked
-# broadcast-path NDI inputs (#84). EXPECTED is the single pinned latency mode (e.g. "2"=Lowest);
+# broadcast-path NDI inputs (#84). EXPECTED is the single pinned latency mode (e.g. "0"=Normal);
 # OBSERVED_CSV is a comma-separated "input name=latency" list gathered live (the obs-websocket
 # GetInputSettings `latency` field per input). Each entry that differs from EXPECTED is DRIFT;
 # an EMPTY observed set is UNKNOWN (never OK — a path we could not read must not look clean).
@@ -253,9 +253,9 @@ Usage:
 
 --compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock,
   ndi_input_latency (a comma-separated "input name=latency" list for the genlocked broadcast-path
-  NDI inputs, e.g. ndi_input_latency="NDI cam5=2,NDI cam1=2,NDI cam3=2" on strih or
-  ndi_input_latency="NDI 2ME PGM=2" on stream — each input's obs-websocket GetInputSettings
-  `latency` field; 2=Lowest is the pinned zero-loss mode).
+  NDI inputs, e.g. ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" on strih or
+  ndi_input_latency="NDI 2ME PGM=0" on stream — each input's obs-websocket GetInputSettings
+  `latency` field; 0=Normal is the pinned certified low-latency zero-loss mode, #84).
   (gather them read-only off strih/stream via the win-* MCP tools — see
    .claude/commands/drift-guard.md). Any key you omit is reported UNKNOWN.
 
