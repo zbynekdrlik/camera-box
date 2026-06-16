@@ -70,6 +70,40 @@ jobs:
           }
           Write-Output "genlock FIFO preload-reserve patch present (OBS_GENLOCK_PRELOAD_FRAMES + preload-gated consume + audit) — OK"
 
+      # #85: assert the #78 "B′" real-wall-clock emit-timecode patch is present in the
+      # vendored DistroAV OUTPUT source BEFORE the 150-min build, so a future `git
+      # subtree pull` (#44) that restores `NDIlib_send_timecode_synthesize` fails HERE
+      # rather than shipping a distroav.dll that reintroduces the ~150 ms emit-timecode
+      # lag (#76) — which drift-guard.sh would NOT catch (it pins the DistroAV VERSION
+      # 6.2.1, not fork-patch CONTENT). Mirrors the canonical Linux-CI guard
+      # tests/distroav_timecode_patch.rs (that crate is Linux-only and cannot compile on
+      # this Windows runner). Keep both in lock-step. The negative check targets the
+      # assignment, NOT the bare token (which legitimately appears in the explanatory
+      # comment here and in the unrelated ndi-filter.cpp path).
+      - name: Assert DistroAV real-wall-clock emit-timecode patch present (#78, #85)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('genlock_wall_now_100ns')) {
+            Write-Error "ndi-output.cpp: genlock_wall_now_100ns missing — #78 real-wall-clock timecode patch reverted (#85)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('genlock_emit_timecode_100ns')) {
+            Write-Error "ndi-output.cpp: genlock_emit_timecode_100ns missing — #78 real-wall-clock timecode patch reverted (#85)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('video_frame.timecode = genlock_emit_timecode_100ns(')) {
+            Write-Error "ndi-output.cpp: video output frame no longer stamps genlock_emit_timecode_100ns — #78 emit patch reverted (#85)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('audio_frame.timecode = genlock_wall_now_100ns()')) {
+            Write-Error "ndi-output.cpp: audio output frame no longer stamps genlock_wall_now_100ns — #78 emit patch reverted (#85)"; exit 1
+          }
+          if ($src -match [regex]::Escape('video_frame.timecode = NDIlib_send_timecode_synthesize')) {
+            Write-Error "ndi-output.cpp: stock NDIlib_send_timecode_synthesize video assignment is BACK — #78 reverted, ~150ms lag (#76) reintroduced (#85)"; exit 1
+          }
+          if ($src -match [regex]::Escape('audio_frame.timecode = NDIlib_send_timecode_synthesize')) {
+            Write-Error "ndi-output.cpp: stock NDIlib_send_timecode_synthesize audio assignment is BACK — #78 reverted (#85)"; exit 1
+          }
+          Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
+
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
       # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)
