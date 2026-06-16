@@ -196,6 +196,9 @@ drift_check_inputs() {
     # trim surrounding whitespace from the name/value
     name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
     lat="${lat#"${lat%%[![:space:]]*}"}"; lat="${lat%"${lat##*[![:space:]]}"}"
+    # A whitespace-only entry (e.g. a doubled comma " , ") trims to a blank name — it
+    # carries no input, so skip it rather than emit a confusing blank-named DRIFT line.
+    [ -z "$name" ] && continue
     n=$((n + 1))
     if [ "$lat" = "$expected" ]; then
       printf '  input %-20s OK       (latency=%s)\n' "$name" "$lat"
