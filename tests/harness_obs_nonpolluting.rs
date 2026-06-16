@@ -85,14 +85,28 @@ fn phase2_obs_resolves_ndi_names_by_polling_discovery() {
          helper that waits for the full 'MACHINE (name)' form), not race it — binding the \
          bare Main-Output name connects to nothing (black render, 0 decode downstream)."
     );
+    // #22: BOTH the ingest source AND this box's own Main Output must be resolved via
+    // _resolve_full (poll-until-full), so a cold-discovery run never binds a bare,
+    // unconnectable NDI name (the strih→stream black-render flake). #91 factored the
+    // OWN-output resolution out of setup() into the _resolve_own_output helper (which
+    // setup() calls), so the two _resolve_full call sites now live across setup() +
+    // _resolve_own_output — count them together to keep guarding the same invariant.
     let su = py.find("def setup(").expect("setup() not found");
-    let end = py[su..].find("\ndef ").map(|i| su + i).unwrap_or(py.len());
-    let body = &py[su..end];
+    let su_end = py[su..].find("\ndef ").map(|i| su + i).unwrap_or(py.len());
+    let setup_body = &py[su..su_end];
+    let ro = py
+        .find("def _resolve_own_output(")
+        .expect("#91: _resolve_own_output helper not found");
+    let ro_end = py[ro..].find("\ndef ").map(|i| ro + i).unwrap_or(py.len());
+    let resolve_own_body = &py[ro..ro_end];
+    let resolve_full_calls = setup_body.matches("_resolve_full(").count()
+        + resolve_own_body.matches("_resolve_full(").count();
     assert!(
-        body.matches("_resolve_full(").count() >= 2,
-        "#22: setup() must resolve BOTH the ingest source AND this box's own Main Output \
-         name via _resolve_full (poll-until-full), so a cold-discovery run never binds a \
-         bare, unconnectable NDI name (the strih→stream black-render flake)."
+        resolve_full_calls >= 2,
+        "#22: setup() (+ the #91 _resolve_own_output helper it calls) must resolve BOTH \
+         the ingest source AND this box's own Main Output via _resolve_full (poll-until-\
+         full), so a cold-discovery run never binds a bare, unconnectable NDI name (the \
+         strih→stream black-render flake). Found {resolve_full_calls} _resolve_full call(s)."
     );
 }
 

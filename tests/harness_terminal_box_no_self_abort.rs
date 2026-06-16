@@ -73,16 +73,19 @@ fn own_output_abort_is_skipped_for_terminal_box() {
         .find("the next hop would ingest a dead name")
         .expect("#91: the own-Main-Output abort message must remain for non-terminal boxes");
 
-    // It must be guarded by the terminal flag: somewhere before the abort, the code
-    // branches on `terminal` (e.g. `if not terminal:` / `if a.terminal`) so the abort
-    // is skipped on the terminal box and only fires for a box that feeds a next OBS hop.
+    // It must be guarded by an explicit CODE branch on the terminal flag — not merely
+    // a docstring mention. Assert the literal `if not terminal:` guard appears before
+    // the abort: the abort is inside the non-terminal branch, so it is SKIPPED for the
+    // terminal box and only fires for a box that feeds a next OBS hop. (Anchoring on
+    // the bare word "terminal" would be satisfied by a docstring alone — we require the
+    // actual branch token so deleting the guard fails this test.)
     let before_abort = &py[..abort_idx];
     assert!(
-        before_abort.contains("terminal"),
-        "#91: the own-Main-Output abort (`{}`) must be gated by the terminal flag so it \
-         is SKIPPED for the terminal box (stream), whose own OBS cannot self-discover its \
-         own output and which has no downstream OBS hop to protect. It must not fire \
-         unconditionally.",
+        before_abort.contains("if not terminal:"),
+        "#91: the own-Main-Output abort (`{}`) must be inside an explicit `if not \
+         terminal:` branch so it is SKIPPED for the terminal box (stream), whose own OBS \
+         cannot self-discover its own output and which has no downstream OBS hop to \
+         protect. It must not fire unconditionally (a docstring mention is not enough).",
         "own Main Output ... aborting"
     );
 }

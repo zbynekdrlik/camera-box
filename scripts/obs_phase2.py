@@ -356,11 +356,12 @@ def _resolve_own_output(ws, host, ndi_name, terminal):
     # output, so don't burn the full 20s poll), then fall back to the precise suffix.
     out_full, _ = _resolve_full(ws, INPUT, ndi_name, timeout=2.0)
     if "(" in out_full:
+        # Self-resolved to the full 'MACHINE (name)', OR ndi_name was already
+        # parenthesised — either way it contains '(' and binds directly.
         return out_full
-    if ndi_name.startswith("(") or ndi_name.endswith(")"):
-        suffix_form = ndi_name  # already parenthesised — emit as-is
-    else:
-        suffix_form = f"({ndi_name})"
+    # ndi_name here cannot contain '(' (that path returned above), so the bare name is
+    # a plain token (e.g. 'stream'); wrap it as the parenthesised suffix discriminator.
+    suffix_form = f"({ndi_name})"
     sys.stderr.write(
         f"[obs] {host}: WARN terminal box's own Main Output '{ndi_name}' not "
         f"self-discoverable via its own OBS (NDI loopback suppression); no downstream "
