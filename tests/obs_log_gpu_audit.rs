@@ -48,11 +48,12 @@ fn wedged_log_diagnoses_dead_gpu() {
         audit.device_removed,
         "the 887A0007 / device-removed signature must be detected as a dead GPU"
     );
-    // Counts BOTH the texture-create failures and the device-removed reason lines
-    // (3 of each in the fixture).
+    // Counts EVERY device-lost line — both the texture-create failures and the
+    // device-removed reason lines (3 of each in the fixture = 6). Each line is an
+    // independent symptom of the wedged GPU.
     assert_eq!(
-        audit.device_removed_count, 3,
-        "must count every 'Device Removed Reason: 887A000x' occurrence"
+        audit.device_removed_count, 6,
+        "must count every device-lost line (887A000x texture-create + reason)"
     );
     assert_eq!(
         audit.first_timestamp.as_deref(),
@@ -107,7 +108,8 @@ fn healthy_log_has_no_dead_gpu_diagnosis() {
 /// output.
 #[test]
 fn texture_create_failure_alone_is_caught() {
-    let log = "12:00:00.000: device_texture_create (D3D11): Failed to create 2D texture (887A0005)\n";
+    let log =
+        "12:00:00.000: device_texture_create (D3D11): Failed to create 2D texture (887A0005)\n";
     let audit = audit_obs_log(log);
     assert!(
         audit.device_removed,

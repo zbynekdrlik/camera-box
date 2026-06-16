@@ -12,7 +12,9 @@ use camera_box::probe::differ::{
     overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport,
     FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
 };
+use camera_box::probe::liveness::{check_tap_liveness, LivenessVerdict, TapLiveness};
 use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
+use camera_box::probe::obs_log_audit::audit_obs_log;
 use clap::Parser;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +65,27 @@ struct Args {
     /// A tap with fewer than this many run_id-matching frames FAILS (not vacuous).
     #[arg(long, default_value_t = 100)]
     min_frames: usize,
+    /// #81 dead-output liveness pre-check window (seconds). After this many seconds
+    /// of the run, each tap's RAW captured-frame count is checked: if one tap has
+    /// captured at-or-below `--dead-output-floor` frames while a peer has captured
+    /// plenty, its downstream OBS output is dead (e.g. a GPU device-removed crash
+    /// black-holed it, #81) and the run ABORTS EARLY + LOUD with a DISTINCT verdict
+    /// instead of running the full duration and reporting a silent zero-frames
+    /// mystery. 0 = disable the pre-check (prior behaviour).
+    #[arg(long, default_value_t = 30)]
+    liveness_window_secs: u64,
+    /// #81 dead-output floor: a tap that captured at-or-below this many frames in the
+    /// liveness window (while a peer is alive) is treated as a dead downstream
+    /// output. Inclusive `<=`; a frame or two in 30s is not "emitting".
+    #[arg(long, default_value_t = 2)]
+    dead_output_floor: u64,
+    /// #81 optional path to the downstream stream OBS log. When the liveness
+    /// pre-check trips a dead output, this log is audited for the
+    /// `Device Removed` / 887A000x GPU device-removed (TDR) signature and the
+    /// dead-GPU diagnosis is printed as the proximate cause. Read locally (e.g. a
+    /// path mirrored/copied from the stream box); absent ⇒ no log audit.
+    #[arg(long)]
+    stream_obs_log: Option<String>,
     /// Per-hop latency gate as DOWNSTREAM_TAP=MS (repeat per hop, e.g.
     /// `--max-p99-latency-ms strih=130 --max-p99-latency-ms stream=220`). The hop
     /// feeding tap X FAILs if its relative-latency p99 exceeds X's bound (strict
@@ -331,8 +354,67 @@ fn main() -> Result<()> {
         results.push(r);
     }
 
-    // Run for the duration, short-circuit if any tap thread dies.
+    // #81 dead-output liveness pre-check: run only the early window first, then
+    // snapshot each tap's RAW captured count and check for a dead downstream output
+    // (one tap emitting ~0 while a peer is alive — a GPU device-removed crash
+    // black-holed its OBS). If found, ABORT EARLY + LOUD with a DISTINCT verdict
+    // and (optionally) the OBS-log dead-GPU diagnosis, instead of running the full
+    // duration and reporting a silent zero-frames mystery 30 min later. `0` = skip.
     let deadline = Instant::now() + Duration::from_secs(args.duration_secs);
+    if args.liveness_window_secs > 0 {
+        let window_deadline =
+            (Instant::now() + Duration::from_secs(args.liveness_window_secs)).min(deadline);
+        let mut tap_thread_died = false;
+        while Instant::now() < window_deadline {
+            if handles.iter().any(|h| h.is_finished()) {
+                tap_thread_died = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !tap_thread_died {
+            let liveness: Vec<TapLiveness> = results
+                .iter()
+                .map(|r| TapLiveness {
+                    name: r.name.clone(),
+                    captured_in_window: r.captured.load(Ordering::Relaxed),
+                })
+                .collect();
+            for t in &liveness {
+                tracing::info!(
+                    tap = %t.name, captured_in_window = t.captured_in_window,
+                    window_secs = args.liveness_window_secs,
+                    "#81 liveness pre-check"
+                );
+            }
+            if let LivenessVerdict::DeadOutput { tap, message } =
+                check_tap_liveness(&liveness, args.liveness_window_secs, args.dead_output_floor)
+            {
+                stop.store(true, Ordering::Relaxed);
+                for h in handles {
+                    let _ = h.join();
+                }
+                eprintln!("DEAD_OUTPUT tap={tap}: {message}");
+                // Audit the downstream OBS log if provided — surface the proximate
+                // cause (the GPU device-removed signature) right next to the verdict.
+                if let Some(path) = &args.stream_obs_log {
+                    match std::fs::read_to_string(path) {
+                        Ok(log) => {
+                            let audit = audit_obs_log(&log);
+                            eprintln!("STREAM_OBS_LOG_AUDIT ({path}): {}", audit.diagnosis());
+                        }
+                        Err(e) => {
+                            eprintln!("STREAM_OBS_LOG_AUDIT: could not read {path}: {e}");
+                        }
+                    }
+                }
+                println!("VERDICT=DEAD_OUTPUT tap={tap} (#81)");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Run the remainder of the duration, short-circuit if any tap thread dies.
     while Instant::now() < deadline {
         if handles.iter().any(|h| h.is_finished()) {
             break;
