@@ -58,10 +58,15 @@ INPUT = "phase2-probe-src"
 #                           compositor cursor -> BLACK.
 #   - ndi_bw_mode=0      -> highest bandwidth (full quality), as before.
 # Merged FIRST in each settings dict so the per-call ndi_source_name still overrides cleanly.
-# latency=2 (Lowest/unbuffered) MIRRORS the live cam inputs' min-latency config — the
-# genlock FIFO preload (OBS_GENLOCK_PRELOAD_FRAMES) is the ONLY jitter buffer; the DistroAV
-# receive buffer (Normal=0) must be off so the harness measures the real minimum-latency path.
-_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 2}
+# latency=0 (Normal) MIRRORS the live, proven cam inputs (NDI cam1/3/5 are all latency=0 on
+# strih) and IS THE CERTIFIED low-latency zero-loss ingest mode (#84): the A/B measurement
+# found the DistroAV receive buffer is NOT a real latency lever once genlock is active — the
+# wall-clock render tick dominates emit timing, and Normal(0) gives a ~33 ms LOWER strih
+# abs_emit p50 than Lowest(2) while staying zero-loss. The genlock FIFO preload
+# (OBS_GENLOCK_PRELOAD_FRAMES) is the jitter buffer that matters. The probe MUST run at the
+# pinned 0 (vendor/README.md ndi_input_latency) so this harness measures the certified config,
+# not a different one. (Was latency=2 pre-#84, before the A/B re-pin to Normal(0).)
+_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 0}
 
 
 def _load_state():

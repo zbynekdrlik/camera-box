@@ -424,7 +424,7 @@ fn compare_never_silently_passes_when_a_value_is_unread() {
     );
 }
 
-// --- #84: per-input NDI ingest latency (latency=Lowest=2) drift guard ----------------------
+// --- #84: per-input NDI ingest latency (pinned latency=Normal=0) drift guard ---------------
 
 #[test]
 fn drift_check_inputs_pure_flags_per_input_latency_drift() {
