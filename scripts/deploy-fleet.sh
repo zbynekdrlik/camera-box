@@ -66,6 +66,14 @@ command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get instal
 ssh_box()  { sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
 scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
 
+# Clean up a downloaded-artifact temp dir on exit (no-op when --binary was used).
+DIST=""
+# shellcheck disable=SC2317  # invoked indirectly via the EXIT trap below
+# NB: must not leak a non-zero status from the trap (it would override the script's exit code) —
+# end with `:` so EXIT preserves the real exit status.
+cleanup() { [ -n "$DIST" ] && rm -rf "$DIST"; :; }
+trap cleanup EXIT
+
 # --- 1. Obtain the pinned CI binary -------------------------------------------------------
 if [ -n "$BINARY" ]; then
   [ -f "$BINARY" ] || { err "--binary '$BINARY' not found"; exit 1; }
@@ -103,7 +111,7 @@ for cam in $SET; do
   echo ">> [$cam] $ip"
   echo "================================================================"
 
-  before="$(ssh_box "$ip" "camera-box --version 2>/dev/null | awk '{print \$NF}'" || echo "unreachable")"
+  before="$(ssh_box "$ip" "/usr/local/bin/camera-box --version 2>/dev/null | awk '{print \$NF}'" || echo "unreachable")"
   if [ "$before" = "unreachable" ]; then
     err "[$cam] unreachable — skipping"; FAILED+=("$cam(unreachable)"); continue
   fi
@@ -113,30 +121,56 @@ for cam in $SET; do
     log "[$cam] already on $NEW_VER — re-pushing anyway to guarantee byte-identical binary"
   fi
 
+  # Each deploy step is guarded: a failure on ONE box records it and moves on to the next box
+  # (never aborts the whole fleet under set -e). The remount-ro is best-effort (2>/dev/null; true)
+  # — some devices have no read-only rootfs.
   info "[$cam] stop service + remount rw + copy + start + remount ro"
-  ssh_box "$ip" "mount -o remount,rw / && systemctl stop camera-box"
-  scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box"
-  ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)"
+  if ! ssh_box "$ip" "mount -o remount,rw / && systemctl stop camera-box"; then
+    err "[$cam] remount-rw / stop failed"; FAILED+=("$cam(stop-failed)"); continue
+  fi
+  if ! scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box"; then
+    err "[$cam] scp failed"; FAILED+=("$cam(scp-failed)")
+    ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)" || true
+    continue
+  fi
+  if ! ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)"; then
+    err "[$cam] start failed"; FAILED+=("$cam(start-failed)"); continue
+  fi
 
-  # Verify version.
-  after="$(ssh_box "$ip" "camera-box --version 2>/dev/null | awk '{print \$NF}'" || echo "unknown")"
+  # Byte-verify: the deployed binary must hash-match the artifact we shipped (deploy-from-clean-tree.md
+  # Layer 3 — a --version match alone does NOT prove byte-identity; a partial scp or a stale same-version
+  # binary would pass a version check but fail this).
+  local_sha="$(sha256sum "$BINARY" | awk '{print $1}')"
+  remote_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/camera-box 2>/dev/null | awk '{print \$1}'" || echo "")"
+  if [ "$local_sha" != "$remote_sha" ]; then
+    err "[$cam] byte-verify FAILED: local $local_sha != remote ${remote_sha:-<none>}"
+    FAILED+=("$cam(sha-mismatch)"); continue
+  fi
+  info "[$cam] byte-verify OK (sha256 ${local_sha:0:12})"
+
+  # Verify version (absolute path — don't rely on the remote PATH resolving camera-box).
+  after="$(ssh_box "$ip" "/usr/local/bin/camera-box --version 2>/dev/null | awk '{print \$NF}'" || echo "unknown")"
   if [ "$after" != "$NEW_VER" ]; then
     err "[$cam] version mismatch after deploy: expected $NEW_VER, got '$after'"
     FAILED+=("$cam(version=$after)"); continue
   fi
   log "[$cam] version $before -> $after"
 
-  # Give the service a moment to produce a streaming report, then verify genlock emit + no panic.
+  # Give the service a moment to produce a streaming report, then verify genlock emit + no FATAL.
   # GENLOCK_WAIT_TRIES / GENLOCK_WAIT_SECS are overridable (the test harness sets them small).
   info "[$cam] waiting for genlock report..."
   genlock_line=""
-  panic_line=""
   for _ in $(seq 1 "${GENLOCK_WAIT_TRIES:-12}"); do
     sleep "${GENLOCK_WAIT_SECS:-5}"
     genlock_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E 'fps emitted .* fps captured' | tail -1" || true)"
     [ -n "$genlock_line" ] && break
   done
-  panic_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -iE 'panic|error|fatal' | tail -3" || true)"
+
+  # FATAL scan: only genuinely unrecoverable signals (a panic / process crash), scoped to the
+  # CURRENT boot of the just-restarted service. We deliberately do NOT trip on `error!`-level
+  # lines — the app logs recoverable events at that level in normal operation (intercom restart,
+  # NDI reconnect, capture retry), so greping for 'error' would false-fail a healthy, genlocking box.
+  fatal_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep -E \"panic|thread '.*' panicked|SIGSEGV|SIGABRT|core dumped|FATAL\" | tail -3" || true)"
 
   if [ -z "$genlock_line" ]; then
     err "[$cam] NO genlock report ('fps emitted / fps captured') seen — not genlocking"
@@ -144,10 +178,10 @@ for cam in $SET; do
   else
     log "[$cam] genlocking: ${genlock_line##*camera_box: }"
   fi
-  if [ -n "$panic_line" ]; then
-    warn "[$cam] journal contains error/panic lines:"
-    echo "$panic_line"
-    FAILED+=("$cam(errors)")
+  if [ -n "$fatal_line" ]; then
+    warn "[$cam] journal contains FATAL/panic lines:"
+    echo "$fatal_line"
+    FAILED+=("$cam(fatal)")
   fi
   echo ""
 done

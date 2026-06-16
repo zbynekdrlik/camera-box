@@ -137,17 +137,38 @@ fn deploy_fleet_verifies_version_after_deploy() {
     );
 }
 
-/// Exercise the real failure-accounting logic: stub out `sshpass`, `gh`, `camera-box` and
-/// drive the script against fake cameras whose journals do NOT contain the genlock report.
-/// The script must exit nonzero (the no-false-green contract) — proving the genlock gate is
-/// not merely present in text but actually wired into the exit status.
-#[test]
-fn deploy_fleet_exits_nonzero_when_a_box_is_not_genlocking() {
-    let tmp = std::env::temp_dir().join(format!("deployfleet_test_{}", std::process::id()));
+/// Outcome of running deploy-fleet.sh under stubs.
+struct RunResult {
+    success: bool,
+    output: String,
+}
+
+/// Drive the REAL script against ONE fake camera, with stubbed `sshpass`/`gh` and stubbed
+/// remote tools (`camera-box`, `journalctl`, `mount`, `systemctl`, `sha256sum`). The sshpass
+/// stub EXECUTES the remote command string through bash, so the script's real pipes
+/// (`… | awk '{print $NF}'`, the genlock grep, the fatal grep) actually run — this tests the
+/// wired-in behavior + exit status, not a re-spelling.
+///
+/// * `remote_version` — what `camera-box --version` reports on the box AFTER deploy.
+/// * `journal_line`   — the single streaming line `journalctl` emits (genlock vs old form vs panic).
+/// * `sha_match`      — when false, the remote `sha256sum` returns a different hash (byte-verify fails).
+///
+/// The artifact's version is fixed to `9.9.9-test`; pass a different `remote_version` to force a
+/// post-deploy mismatch.
+fn run_fleet(remote_version: &str, journal_line: &str, sha_match: bool) -> RunResult {
+    let tmp = std::env::temp_dir().join(format!(
+        "deployfleet_test_{}_{}",
+        std::process::id(),
+        // unique per call so concurrent test threads don't collide
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let bin = tmp.join("bin");
     fs::create_dir_all(&bin).unwrap();
 
-    // Fake binary to "deploy": prints a version so NEW_VER resolves to `9.9.9-test`.
+    // The artifact to "deploy": prints version 9.9.9-test so NEW_VER resolves.
     let fakebin = tmp.join("camera-box-artifact");
     fs::write(
         &fakebin,
@@ -156,54 +177,54 @@ fn deploy_fleet_exits_nonzero_when_a_box_is_not_genlocking() {
     .unwrap();
     set_exec(&fakebin);
 
-    // Fake remote tools that the script's remote command strings invoke. The sshpass stub
-    // EXECUTES the remote command string (so the real `… | awk '{print $NF}'` pipe and the
-    // real genlock grep run), but against these fakes instead of a live camera:
-    //   * camera-box --version -> the NEW version (so the post-deploy version check passes)
-    //   * journalctl           -> a log with NO genlock report (box not genlocking)
-    //   * mount / systemctl    -> succeed silently
-    // This isolates the ONE thing under test: a box with no genlock report must fail the run.
-    for (name, body) in [
-        (
-            "camera-box",
-            "#!/usr/bin/env bash\necho 'camera-box 9.9.9-test'\n",
-        ),
-        // journalctl prints the OLD single-rate line — never `fps emitted / fps captured`.
-        (
-            "journalctl",
-            "#!/usr/bin/env bash\necho 'INFO camera_box: Streaming: 59.8 fps (299 frames)'\n",
-        ),
-        ("mount", "#!/usr/bin/env bash\nexit 0\n"),
-        ("systemctl", "#!/usr/bin/env bash\nexit 0\n"),
-    ] {
+    // The REMOTE camera-box reports `remote_version` (controls the post-deploy version check).
+    let stub = |name: &str, body: String| {
         let p = bin.join(name);
         fs::write(&p, body).unwrap();
         set_exec(&p);
-    }
+    };
+    stub(
+        "camera-box",
+        format!("#!/usr/bin/env bash\necho 'camera-box {remote_version}'\n"),
+    );
+    // journalctl emits the chosen streaming text (genlock present/absent/panic). `printf '%b'`
+    // so an embedded `\n` in `journal_line` yields multiple log lines.
+    stub(
+        "journalctl",
+        format!("#!/usr/bin/env bash\nprintf '%b\\n' '{journal_line}'\n"),
+    );
+    stub("mount", "#!/usr/bin/env bash\nexit 0\n".to_string());
+    stub("systemctl", "#!/usr/bin/env bash\nexit 0\n".to_string());
+    // sha256sum: the script calls it BOTH locally (on the artifact) and remotely (on the deployed
+    // file). Return a fixed hash for the local artifact path; for the remote path return the same
+    // hash when sha_match, else a different one (forces a byte-verify mismatch).
+    let remote_hash = if sha_match { "aaaa" } else { "bbbb" };
+    stub(
+        "sha256sum",
+        format!(
+            "#!/usr/bin/env bash\ncase \"$1\" in\n  */usr/local/bin/camera-box) echo '{remote_hash}  /usr/local/bin/camera-box' ;;\n  *) echo 'aaaa  '\"$1\" ;;\nesac\n"
+        ),
+    );
 
-    // Stub `sshpass`: drop the leading `-p <pass>` and the ssh/scp option+target args, then
-    // EXECUTE the remote command (the last arg, for ssh) through bash so the real pipes run.
-    // For scp (no trailing remote command) it is a no-op success.
-    let sshpass = bin.join("sshpass");
-    fs::write(
-        &sshpass,
+    // sshpass: drop `-p <pass>`, then for scp no-op success; for ssh EXECUTE the remote command
+    // (the last arg) through bash so the real pipes run against the stubs above. Rewrite the
+    // absolute `/usr/local/bin/camera-box --version` invocation to bare `camera-box` so the PATH
+    // stub catches it (the absolute path the script uses in prod won't resolve to a PATH stub).
+    // The sha256sum invocation keeps its absolute path arg (the sha256sum stub matches on it).
+    stub(
+        "sshpass",
         r#"#!/usr/bin/env bash
-# args: -p <pass> <ssh|scp> <opts...> root@host [remote-cmd]
 shift 2          # drop -p <pass>
 mode="$1"; shift # ssh | scp
-if [ "$mode" = "scp" ]; then exit 0; fi   # file copy: no-op success
-# ssh: the remote command is the LAST argument; everything before is opts + target.
+if [ "$mode" = "scp" ]; then exit 0; fi
 cmd="${@: -1}"
+cmd="${cmd//\/usr\/local\/bin\/camera-box --version/camera-box --version}"
 bash -c "$cmd"
-"#,
-    )
-    .unwrap();
-    set_exec(&sshpass);
-
-    // Stub `gh` (must not be invoked because we pass --binary, but be safe).
-    let gh = bin.join("gh");
-    fs::write(&gh, "#!/usr/bin/env bash\nexit 1\n").unwrap();
-    set_exec(&gh);
+"#
+        .to_string(),
+    );
+    // gh must not be needed (we pass --binary) — make it fail loudly if invoked.
+    stub("gh", "#!/usr/bin/env bash\nexit 1\n".to_string());
 
     let script = manifest_dir().join("scripts/deploy-fleet.sh");
     let path_env = format!(
@@ -219,29 +240,109 @@ bash -c "$cmd"
         .env("PATH", &path_env)
         .env("CAMERA_SET", "cam2") // single box keeps the test fast
         .env("SSH_PASS", "x")
-        .env("GENLOCK_WAIT_TRIES", "1") // don't wait the full 60s for the (absent) genlock line
+        .env("GENLOCK_WAIT_TRIES", "1") // don't wait the full timeout for an absent genlock line
         .env("GENLOCK_WAIT_SECS", "0")
         .output()
         .expect("failed to run deploy-fleet.sh under stubs");
 
     let _ = fs::remove_dir_all(&tmp);
+    RunResult {
+        success: out.status.success(),
+        output: format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
+}
 
+const GENLOCK_LINE: &str =
+    "INFO camera_box: Streaming: 30.0 fps emitted / 60.0 fps captured (150 sent, 300 captured)";
+const OLD_NON_GENLOCK_LINE: &str = "INFO camera_box: Streaming: 59.8 fps (299 frames)";
+
+/// no-false-green: a box whose journal has NO genlock report must make the run exit nonzero
+/// and be flagged `no-genlock`. Proves the genlock gate is wired into the exit status (the #73
+/// cam2-regression: an old build that deploys fine but never genlocks must NOT report success).
+#[test]
+fn deploy_fleet_exits_nonzero_when_a_box_is_not_genlocking() {
+    let r = run_fleet("9.9.9-test", OLD_NON_GENLOCK_LINE, true);
     assert!(
-        !out.status.success(),
-        "deploy-fleet.sh exited 0 for a box that emits NO genlock report — the genlock gate \
-         is not wired into the exit status (no-false-green broken). stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    // And it must say WHY (the box is flagged no-genlock), not fail for an unrelated reason.
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        !r.success,
+        "exited 0 for a box that emits NO genlock report (no-false-green broken). output:\n{}",
+        r.output
     );
     assert!(
-        combined.contains("no-genlock") || combined.contains("NO genlock"),
-        "deploy-fleet.sh failed but not for the missing genlock report; output:\n{combined}"
+        r.output.contains("no-genlock") || r.output.contains("NO genlock"),
+        "failed, but not for the missing genlock report; output:\n{}",
+        r.output
+    );
+}
+
+/// Happy path: a box on the new version that IS emitting the genlock report and byte-matches
+/// must make the run exit 0 with "FLEET ALIGNED". Without this, a future edit that breaks the
+/// success path (e.g. always-fail) goes uncaught.
+#[test]
+fn deploy_fleet_exits_zero_when_box_genlocks_and_matches() {
+    let r = run_fleet("9.9.9-test", GENLOCK_LINE, true);
+    assert!(
+        r.success,
+        "exited nonzero for a healthy, genlocking, byte-matched box. output:\n{}",
+        r.output
+    );
+    assert!(
+        r.output.contains("FLEET ALIGNED"),
+        "success but no FLEET ALIGNED line; output:\n{}",
+        r.output
+    );
+}
+
+/// no-false-green: a post-deploy version that differs from the shipped artifact must fail the
+/// run and be flagged `version=…` — even though the box IS genlocking.
+#[test]
+fn deploy_fleet_exits_nonzero_on_version_mismatch() {
+    let r = run_fleet("1.2.3-stale", GENLOCK_LINE, true);
+    assert!(
+        !r.success,
+        "exited 0 despite a post-deploy version mismatch (no-false-green broken). output:\n{}",
+        r.output
+    );
+    assert!(
+        r.output.contains("version mismatch") || r.output.contains("version="),
+        "failed, but not for the version mismatch; output:\n{}",
+        r.output
+    );
+}
+
+/// no-false-green: if the deployed bytes do NOT hash-match the artifact (partial scp / stale
+/// same-version binary), the run must fail with `sha-mismatch` — deploy-from-clean-tree byte
+/// diff-verify, not just a --version check.
+#[test]
+fn deploy_fleet_exits_nonzero_on_byte_mismatch() {
+    let r = run_fleet("9.9.9-test", GENLOCK_LINE, false);
+    assert!(
+        !r.success,
+        "exited 0 despite a byte (sha256) mismatch on the deployed binary. output:\n{}",
+        r.output
+    );
+    assert!(
+        r.output.contains("sha-mismatch") || r.output.contains("byte-verify"),
+        "failed, but not for the byte mismatch; output:\n{}",
+        r.output
+    );
+}
+
+/// A healthy box that logs a RECOVERABLE `error!`-level line (intercom restart / NDI reconnect —
+/// normal operation) must STILL pass: the fatal scan must not trip on `error`, only on genuine
+/// panics/crashes. Guards against the false-RED the reviewer caught.
+#[test]
+fn deploy_fleet_tolerates_recoverable_error_log_lines() {
+    let recoverable = "INFO camera_box: Streaming: 30.0 fps emitted / 60.0 fps captured (150 sent, 300 captured)\nERROR camera_box::intercom: Intercom error: foo - restarting in 2 seconds";
+    let r = run_fleet("9.9.9-test", recoverable, true);
+    assert!(
+        r.success,
+        "a recoverable `error!` log line false-failed a healthy genlocking box (fatal scan too \
+         broad). output:\n{}",
+        r.output
     );
 }
 
