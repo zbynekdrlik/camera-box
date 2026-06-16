@@ -6,7 +6,9 @@
 pub mod analyzer;
 pub mod differ;
 pub mod genlock;
+pub mod liveness;
 pub mod luma;
+pub mod obs_log_audit;
 pub mod payload;
 pub mod qr;
 
