@@ -62,23 +62,21 @@ fn setup_accepts_a_terminal_flag() {
 #[test]
 fn own_output_abort_is_skipped_for_terminal_box() {
     let py = obs_py();
-    let su = py.find("def setup(").expect("setup() not found");
-    let end = py[su..].find("\ndef ").map(|i| su + i).unwrap_or(py.len());
-    let body = &py[su..end];
 
     // The own-output abort message must still exist (we keep protecting the next
     // OBS hop for NON-terminal boxes). Anchor on its UNIQUE phrase — "the next hop
     // would ingest a dead name" only appears in the own-output SystemExit, never in
     // the ingest-source abort nor the pre-existing comments — so we target the real
-    // abort statement, not an unrelated mention of "own Main Output".
-    let abort_idx = body
+    // abort statement. (Searched file-wide because the own-output resolution + abort
+    // is factored into the `_resolve_own_output` helper, not inlined in setup().)
+    let abort_idx = py
         .find("the next hop would ingest a dead name")
         .expect("#91: the own-Main-Output abort message must remain for non-terminal boxes");
 
-    // ... but it must be guarded by the terminal flag: somewhere before the abort,
-    // setup() branches on `terminal` (e.g. `if not a.terminal:` / `if a.terminal:`)
-    // so the abort is skipped on the terminal box.
-    let before_abort = &body[..abort_idx];
+    // It must be guarded by the terminal flag: somewhere before the abort, the code
+    // branches on `terminal` (e.g. `if not terminal:` / `if a.terminal`) so the abort
+    // is skipped on the terminal box and only fires for a box that feeds a next OBS hop.
+    let before_abort = &py[..abort_idx];
     assert!(
         before_abort.contains("terminal"),
         "#91: the own-Main-Output abort (`{}`) must be gated by the terminal flag so it \
@@ -86,6 +84,48 @@ fn own_output_abort_is_skipped_for_terminal_box() {
          own output and which has no downstream OBS hop to protect. It must not fire \
          unconditionally.",
         "own Main Output ... aborting"
+    );
+}
+
+/// Review hardening (#91): when the terminal box's own OBS cannot self-discover its
+/// own output, setup MUST NOT emit the BARE generic Main-Output name. dev1's tap
+/// binds by substring (`name.contains` in src/ndi.rs), so a short generic bare word
+/// (the stream box's output name is literally `stream`) would collide with ANY other
+/// LAN source whose name merely contains it (`livestream`, `mainstream`, …) and bind
+/// the WRONG source — silently corrupting the strih→stream hop verdict, which is
+/// worse than the old hard abort. The terminal fallback must emit the parenthesised
+/// suffix form `(name)` — the codebase's canonical full-name discriminator (see
+/// `_match_full`'s `endswith(f"({bare})")`) — so the match anchors on the exact
+/// `MACHINE (name)` source.
+#[test]
+fn terminal_box_fallback_emits_parenthesized_suffix_not_bare_name() {
+    let py = obs_py();
+    let start = py
+        .find("def _resolve_own_output(")
+        .expect("#91: _resolve_own_output helper not found");
+    let end = py[start..]
+        .find("\ndef ")
+        .map(|i| start + i)
+        .unwrap_or(py.len());
+    let body = &py[start..end];
+
+    // The terminal fallback constructs the parenthesised suffix form, e.g.
+    // `f"({ndi_name})"` — NOT a bare name handed straight to dev1's substring match.
+    assert!(
+        body.contains("f\"({ndi_name})\"") || body.contains("f'({ndi_name})'"),
+        "#91: the terminal-box own-output fallback must emit the parenthesised suffix \
+         form '(ndi_name)' (the canonical full-name discriminator), not the bare \
+         generic name — a bare short word like 'stream' substring-collides with other \
+         LAN sources in dev1's `name.contains` match and binds the wrong source."
+    );
+
+    // And it must NOT return the bare `ndi_name` on the non-resolving path. Guard
+    // against a regression that falls back to `return ndi_name` (bare).
+    assert!(
+        !body.contains("return ndi_name\n"),
+        "#91: the terminal fallback must never `return ndi_name` (the bare generic \
+         name) — emit the parenthesised '(ndi_name)' suffix so dev1's substring match \
+         can't collide with an unrelated LAN source."
     );
 }
 
