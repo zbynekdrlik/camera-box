@@ -49,11 +49,23 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    snapshot from a long-lived parent and showed empty on 2026-06-14 while HKLM + the OBS log both
    correctly read `1`.)
 
+1b. **Gather the per-input NDI ingest latency off the running OBS (#84).** The `latency` mode is a
+   per-input DistroAV setting, read from the live obs-websocket (`ws://strih.lan:4455` /
+   `ws://stream.lan:4455`, pw `JhRfqdTmuifYq60y`), NOT the OBS log/registry. For each genlocked
+   **broadcast-path** input — on strih the camera ingests (`NDI cam5`=CAM1, `NDI cam1`=CAM3,
+   `NDI cam3`=CAM4), on stream the strih→stream program feed (`NDI 2ME PGM`) — read
+   `GetInputSettings`→`latency` (`2`=Lowest is the pin) and build a comma-separated
+   `input name=latency` list. (Non-broadcast inputs — preview/CG/lyrics — are out of scope of the
+   pin; do not include them.) The reusable reader is `~/.cache/obsprobe/obs_inputs.py <host> <pw>`
+   (read-only; lists every NDI input + its settings). If OBS is not running there is no live
+   obs-websocket — omit the key so the engine reports it UNKNOWN rather than a stale guess.
+
 2. **Compare against the pinned set** — feed every observed value to the engine:
 
    ```bash
    ./scripts/drift-guard.sh --compare host=strih \
-     obs_version=<v> distroav_version=<v> ndi_runtime=<v> output_fps=<n> genlock_wall_clock=<0|1>
+     obs_version=<v> distroav_version=<v> ndi_runtime=<v> output_fps=<n> genlock_wall_clock=<0|1> \
+     ndi_input_latency="NDI cam5=<n>,NDI cam1=<n>,NDI cam3=<n>"   # stream: "NDI 2ME PGM=<n>"
    ```
 
    - Exit `0` → **NO DRIFT**, the box matches the pinned zero-loss set. Report it.
