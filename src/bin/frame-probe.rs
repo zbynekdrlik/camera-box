@@ -15,9 +15,20 @@ struct Args {
     /// NDI source substring to receive (e.g. "usb (CAM2)")
     #[arg(long, default_value = "usb (CAM2)")]
     source: String,
-    /// Framebuffer device (HDMI out)
+    /// Framebuffer device (HDMI out, fbdev presenter fallback)
     #[arg(long, default_value = "/dev/fb0")]
     fb_device: String,
+    /// DRM card device for the KMS page-flip presenter (#79). The tear-free 1:1
+    /// vblank-locked path; falls back to the fbdev framebuffer when KMS can't
+    /// take DRM master (see --presenter).
+    #[arg(long, default_value = "/dev/dri/card1")]
+    drm_device: String,
+    /// Presenter: auto (KMS page-flip, fall back to fbdev) | kms (force DRM,
+    /// tear-free 1:1) | fbdev (force the #68 single-buffer vsync-gated write).
+    /// KMS paces the painter on the HDMI vblank (one id per flip, 60fps 1:1) so
+    /// --paint-fps is ignored under kms/auto-on-kms.
+    #[arg(long, default_value = "auto")]
+    presenter: String,
     /// Run duration in seconds
     #[arg(long, default_value_t = 300)]
     duration_secs: u64,
@@ -108,6 +119,7 @@ fn main() -> Result<()> {
              absolute-latency path); the single-box loopback run is always monotonic"
         );
     }
+    let presenter = camera_box::probe::presenter::PresenterKind::parse(&args.presenter)?;
     let mode = match args.mode.as_str() {
         "coverage" => PaintMode::Coverage,
         "full-rate" | "fullrate" => PaintMode::FullRate,
@@ -120,7 +132,19 @@ fn main() -> Result<()> {
     // can be torn -> >= 1 clean sample always exists -> tearing cannot cause a
     // false loss. (Full-rate runs at the capture rate to stress the real path;
     // it is report-only for loss.)
+    //
+    // #79: the KMS page-flip presenter is vblank-locked — it emits exactly one
+    // new id per HDMI vblank (1:1 with the 60 Hz capture), ignoring --paint-fps.
+    // So when KMS may be used (kms / auto), the *expected* emission rate is the
+    // capture rate; default paint_fps to capture_fps so the analyzer's oversample
+    // math (capture/paint ratio) sees the true 1:1 cadence. fbdev keeps the
+    // sub-capture coverage default. An explicit --paint-fps always wins.
+    let kms_capable = !matches!(
+        presenter,
+        camera_box::probe::presenter::PresenterKind::Fbdev
+    );
     let paint_fps = args.paint_fps.unwrap_or(match mode {
+        PaintMode::Coverage if kms_capable => args.capture_fps,
         PaintMode::Coverage => 12.0,
         PaintMode::FullRate => args.capture_fps,
     });
@@ -143,6 +167,8 @@ fn main() -> Result<()> {
         run_id,
         source: args.source,
         fb_device: args.fb_device,
+        drm_device: args.drm_device,
+        presenter,
         duration: Duration::from_secs(args.duration_secs),
         paint_fps,
         capture_fps: args.capture_fps,

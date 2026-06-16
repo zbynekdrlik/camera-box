@@ -2,6 +2,7 @@
 
 use crate::probe::analyzer::{analyze, AnalysisInput, AnalysisReport, Observed, PaintMode};
 use crate::probe::painter::{run_painter, PaintParams};
+use crate::probe::presenter::PresenterKind;
 use crate::probe::reader::{run_reader, ReadParams};
 use anyhow::Result;
 use std::sync::atomic::AtomicBool;
@@ -13,6 +14,10 @@ pub struct RunConfig {
     pub run_id: u32,
     pub source: String,
     pub fb_device: String,
+    /// DRM card device for the KMS page-flip presenter (e.g. `/dev/dri/card1`).
+    pub drm_device: String,
+    /// Presenter selection: `Auto` (KMS with fbdev fallback), `Kms`, or `Fbdev`.
+    pub presenter: PresenterKind,
     pub duration: Duration,
     pub paint_fps: f64,
     pub capture_fps: f64,
@@ -63,6 +68,8 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
         let params = PaintParams {
             run_id: cfg.run_id,
             fb_device: cfg.fb_device.clone(),
+            drm_device: cfg.drm_device.clone(),
+            presenter: cfg.presenter,
             paint_fps: cfg.paint_fps,
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
@@ -129,6 +136,8 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
         let params = PaintParams {
             run_id: cfg.run_id,
             fb_device: cfg.fb_device.clone(),
+            drm_device: cfg.drm_device.clone(),
+            presenter: cfg.presenter,
             paint_fps: cfg.paint_fps,
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,

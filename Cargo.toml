@@ -55,6 +55,8 @@ crc = { version = "3", optional = true }
 qrcode = { version = "0.14", optional = true, features = ["image"] }
 rqrr = { version = "0.9", optional = true }
 image = { version = "0.25", optional = true, default-features = false }
+# DRM/KMS page-flip presenter for the tear-free 1:1 painter (#79, Linux-only).
+drm = { version = "0.15", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions
@@ -67,7 +69,7 @@ tempfile = "3.9"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
-probe = ["dep:serde_json", "dep:crc", "dep:qrcode", "dep:rqrr", "dep:image"]
+probe = ["dep:serde_json", "dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm"]
 
 [[bin]]
 name = "frame-probe"
