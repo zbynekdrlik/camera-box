@@ -253,13 +253,31 @@ def setup(a):
             "inputSettings": {"ndi_source_name": ingest_full},
             "overlay": True,
         }, ignore_err=True)
+    # #91: the own-output resolution gate protects the NEXT OBS hop from ingesting a
+    # dead bare name — but only a NON-terminal box HAS a next OBS hop. On the TERMINAL
+    # box (stream) the box's own OBS can NEVER self-discover its own Main Output (NDI
+    # suppresses self/loopback discovery of an output on the same machine), so this
+    # resolve never completes and the abort would always fire — blocking the strih→
+    # stream hop measurement. The terminal box's output is tapped DIRECTLY by dev1,
+    # whose own LAN NDI finder (multi_reader → ndi.rs substring match) discovers the
+    # full "MACHINE (name)" form independently of this box's OBS. So for the terminal
+    # box we best-effort resolve (to print the full name when its own OBS happens to
+    # know it) but WARN-and-continue instead of aborting on the bare name.
     out_full, _ = _resolve_full(ws, INPUT, ndi_name)
     if "(" not in out_full:
-        raise SystemExit(
-            f"[obs] {a.host}: own Main Output '{ndi_name}' did not resolve to a full NDI "
-            f"name (the next hop would ingest a dead name); aborting before touching the "
-            f"program scene."
-        )
+        if a.terminal:
+            sys.stderr.write(
+                f"[obs] {a.host}: WARN terminal box's own Main Output '{ndi_name}' not "
+                f"self-discoverable via its own OBS (NDI loopback suppression); emitting "
+                f"the bare name — dev1's tap resolves the full NDI name directly. No "
+                f"downstream OBS hop to protect.\n"
+            )
+        else:
+            raise SystemExit(
+                f"[obs] {a.host}: own Main Output '{ndi_name}' did not resolve to a full NDI "
+                f"name (the next hop would ingest a dead name); aborting before touching the "
+                f"program scene."
+            )
     # Everything resolved — NOW switch program to the probe scene (kept to the last step so
     # any failure above leaves the live program where it was).
     _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
@@ -365,6 +383,14 @@ def main():
         p.add_argument("--password", default="")
         if name == "setup":
             p.add_argument("--upstream", required=True)
+            # #91: mark a TERMINAL box — one whose Main Output feeds NO downstream OBS
+            # hop (it is tapped directly by dev1). For such a box the own-output
+            # self-resolution abort is spurious (the box's own OBS can't self-discover
+            # its own output via NDI loopback suppression) and there is no next hop to
+            # protect, so setup() skips that abort and emits the bare name (dev1's tap
+            # resolves the full NDI name itself). NON-terminal boxes (strih) keep the
+            # protective abort. Defaults False — strih and teardown are non-terminal.
+            p.add_argument("--terminal", action="store_true")
     a = ap.parse_args()
     (setup if a.cmd == "setup" else teardown)(a)
 

@@ -67,9 +67,12 @@ fn own_output_abort_is_skipped_for_terminal_box() {
     let body = &py[su..end];
 
     // The own-output abort message must still exist (we keep protecting the next
-    // OBS hop for NON-terminal boxes) ...
+    // OBS hop for NON-terminal boxes). Anchor on its UNIQUE phrase — "the next hop
+    // would ingest a dead name" only appears in the own-output SystemExit, never in
+    // the ingest-source abort nor the pre-existing comments — so we target the real
+    // abort statement, not an unrelated mention of "own Main Output".
     let abort_idx = body
-        .find("own Main Output")
+        .find("the next hop would ingest a dead name")
         .expect("#91: the own-Main-Output abort message must remain for non-terminal boxes");
 
     // ... but it must be guarded by the terminal flag: somewhere before the abort,

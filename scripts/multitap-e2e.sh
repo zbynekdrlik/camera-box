@@ -136,7 +136,12 @@ echo "[3/5] OBS setup — route the chain to the LIVE sender, discover program N
 # strih ingests the camera's live QR NDI; STRIH_OUT = strih program NDI name.
 STRIH_OUT=$(python3 scripts/obs_phase2.py setup --host "$STRIH" --upstream "$CAM_SOURCE")
 # stream ingests strih's program NDI; STREAM_OUT = stream program NDI name.
-STREAM_OUT=$(python3 scripts/obs_phase2.py setup --host "$STREAM" --upstream "$STRIH_OUT")
+# #91: stream is the TERMINAL box — its Main Output feeds NO downstream OBS hop, it
+# is tapped DIRECTLY by dev1 (which resolves the full NDI name via its own LAN
+# finder). The stream box's own OBS can never self-discover its own output (NDI
+# loopback suppression), so --terminal skips obs_phase2.py's spurious own-output
+# self-resolution abort (which previously blocked this whole hop measurement).
+STREAM_OUT=$(python3 scripts/obs_phase2.py setup --host "$STREAM" --upstream "$STRIH_OUT" --terminal)
 echo "    tap names: cam='$CAM_SOURCE'  strih='$STRIH_OUT'  stream='$STREAM_OUT'"
 
 echo "[4/5] dev1 taps (run_id=$RUN_ID, ${DURATION}s)"
