@@ -83,8 +83,13 @@ pub fn run_painter(
     stop: Arc<AtomicBool>,
     emitted: Arc<Mutex<Vec<(u32, i64)>>>,
 ) -> Result<()> {
-    let mut presenter: Box<dyn Presenter> =
-        open_presenter(params.presenter, &params.fb_device, &params.drm_device)?;
+    let mut presenter: Box<dyn Presenter> = open_presenter(
+        params.presenter,
+        &params.fb_device,
+        &params.drm_device,
+        params.canvas_w,
+        params.canvas_h,
+    )?;
     let flip_paced = presenter.paces_on_present();
     if flip_paced {
         if presenter.phase_locked() {

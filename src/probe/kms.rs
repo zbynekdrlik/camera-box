@@ -71,21 +71,56 @@ pub struct ModeCandidate {
 ///
 /// The decisive hardware fact (#79 recon): the cam2 HDMI CRTC and the
 /// ShadowCast 2 capture both run exactly 60.000 Hz, so a 60.000 Hz mode is what
-/// makes the 1:1 phase lock physically realizable. Selection order:
+/// makes the 1:1 phase lock physically realizable. BUT the painter renders a
+/// FIXED `target_w`×`target_h` QR canvas (1920×1080) and the ShadowCast captures
+/// 1080p60 — so the scanned-out mode MUST match that canvas resolution, or the
+/// painter's 1080p frame does not fit the BO and the run fails (live cam2 bug:
+/// the connector lists `1920x1080@60` AND several `4096x2160@60`, and picking the
+/// largest 60 Hz mode drove a 4K scanout the 1080p painter could not fill).
 ///
-/// 1. Prefer a mode at exactly `target_refresh_mhz` (60_000) — required for the
-///    1:1 lock; among those, the largest resolution, then the connector's
-///    preferred flag as a tiebreak.
-/// 2. If none is exactly the target, fall back to the connector's preferred
-///    mode (so a non-60 Hz panel still lights up rather than failing the run).
-/// 3. Otherwise the largest-resolution / highest-refresh mode available.
+/// Selection order:
+///
+/// 1. The mode that BOTH matches the painter canvas (`target_w`×`target_h`) AND
+///    runs at exactly `target_refresh_mhz` (60_000) — the only mode that is both
+///    fillable by the painter and 1:1 phase-lockable with the capture. Connector
+///    `preferred` flag is the tiebreak among equal candidates.
+/// 2. Any other mode at exactly the canvas resolution (so the painter's frame
+///    still fits even if it can't run at 60 Hz — a non-locked but working run).
+/// 3. Any mode at exactly `target_refresh_mhz`, largest resolution (legacy
+///    behaviour — only reached when NO mode matches the canvas; the painter would
+///    then need a matching canvas, but a 60 Hz mode is at least phase-lockable).
+/// 4. The connector's preferred mode, if any.
+/// 5. Otherwise the largest-resolution / highest-refresh mode available.
 ///
 /// Returns `None` only when the candidate list is empty (no usable mode).
-pub fn pick_mode(modes: &[ModeCandidate], target_refresh_mhz: u32) -> Option<ModeCandidate> {
+pub fn pick_mode(
+    modes: &[ModeCandidate],
+    target_w: u32,
+    target_h: u32,
+    target_refresh_mhz: u32,
+) -> Option<ModeCandidate> {
     if modes.is_empty() {
         return None;
     }
-    // 1) exact target refresh — the tear-free lock requires it.
+    let matches_canvas = |m: &ModeCandidate| m.width == target_w && m.height == target_h;
+
+    // 1) canvas-matching AND exact 60 Hz — fillable by the painter AND lockable.
+    let canvas_and_locked = modes
+        .iter()
+        .filter(|m| matches_canvas(m) && m.refresh_mhz == target_refresh_mhz)
+        .max_by_key(|m| m.preferred);
+    if let Some(m) = canvas_and_locked {
+        return Some(*m);
+    }
+    // 2) canvas-matching at any refresh — the painter's frame still fits.
+    let canvas_any_refresh = modes
+        .iter()
+        .filter(|m| matches_canvas(m))
+        .max_by_key(|m| (m.refresh_mhz, m.preferred));
+    if let Some(m) = canvas_any_refresh {
+        return Some(*m);
+    }
+    // 3) exact target refresh, largest resolution — no canvas match exists.
     let exact = modes
         .iter()
         .filter(|m| m.refresh_mhz == target_refresh_mhz)
@@ -93,11 +128,11 @@ pub fn pick_mode(modes: &[ModeCandidate], target_refresh_mhz: u32) -> Option<Mod
     if let Some(m) = exact {
         return Some(*m);
     }
-    // 2) the connector's preferred mode, if any.
+    // 4) the connector's preferred mode, if any.
     if let Some(m) = modes.iter().find(|m| m.preferred) {
         return Some(*m);
     }
-    // 3) largest area, then highest refresh.
+    // 5) largest area, then highest refresh.
     modes
         .iter()
         .max_by_key(|m| (m.width as u64 * m.height as u64, m.refresh_mhz))
@@ -265,10 +300,12 @@ mod hw {
 
     impl KmsPresenter {
         /// Open `device` (e.g. `/dev/dri/card1`), take DRM master (detaching
-        /// fbcon if needed), pick the 60 Hz HDMI mode, allocate two dumb BOs,
-        /// and set the initial scanout. Returns an error (so the caller can
-        /// fall back to fbdev) if any step fails.
-        pub fn open(device: &str) -> Result<Self> {
+        /// fbcon if needed), pick the 60 Hz HDMI mode that matches the painter's
+        /// `canvas_w`×`canvas_h` (the fixed QR canvas, e.g. 1920×1080 — driving a
+        /// larger mode the painter cannot fill is the live cam2 bug this guards),
+        /// allocate two dumb BOs, and set the initial scanout. Returns an error
+        /// (so the caller can fall back to fbdev) if any step fails.
+        pub fn open(device: &str, canvas_w: u32, canvas_h: u32) -> Result<Self> {
             // Detaching fbcon frees the CRTC so DRM master can drive it. Best
             // effort: if there is no fbcon (already detached / headless) this is
             // a no-op. We record whether WE detached it so drop rebinds it.
@@ -302,8 +339,24 @@ mod hw {
                         .contains(drm::control::ModeTypeFlags::PREFERRED),
                 })
                 .collect();
-            let chosen = pick_mode(&candidates, TARGET_REFRESH_MHZ)
+            let chosen = pick_mode(&candidates, canvas_w, canvas_h, TARGET_REFRESH_MHZ)
                 .ok_or_else(|| anyhow!("connector has no usable mode"))?;
+            // The painter renders a fixed canvas_w×canvas_h frame; if no mode at
+            // that exact resolution exists, the scanned-out buffer would be a
+            // different size than every painted frame and present() would reject
+            // each one. Fail to open (so the caller falls back to fbdev) rather
+            // than light up a mode the painter can never fill.
+            if chosen.width != canvas_w || chosen.height != canvas_h {
+                bail!(
+                    "no DRM mode matches the painter canvas {}x{} (best available {}x{}@{} mHz) — \
+                     the painter cannot fill a different scanout size",
+                    canvas_w,
+                    canvas_h,
+                    chosen.width,
+                    chosen.height,
+                    chosen.refresh_mhz
+                );
+            }
             let phase_locked = is_phase_lockable(&chosen, TARGET_REFRESH_MHZ);
             // Map the chosen candidate back to the real Mode (match w/h/refresh).
             let mode = *modes
@@ -599,39 +652,62 @@ mod tests {
         }
     }
 
+    // The painter's fixed QR canvas (and the ShadowCast capture) is 1080p.
+    const CW: u32 = 1920;
+    const CH: u32 = 1080;
+
     #[test]
     fn pick_mode_none_when_empty() {
-        assert_eq!(pick_mode(&[], TARGET_REFRESH_MHZ), None);
+        assert_eq!(pick_mode(&[], CW, CH, TARGET_REFRESH_MHZ), None);
     }
 
     #[test]
     fn pick_mode_prefers_exact_60hz_over_preferred_flag() {
-        // A 75 Hz preferred mode AND a 60.000 Hz mode — the 60 Hz one wins
-        // because the 1:1 phase lock requires it, even though it is not flagged
-        // preferred.
+        // A 75 Hz preferred mode AND a 60.000 Hz mode at the canvas resolution —
+        // the 60 Hz one wins because the 1:1 phase lock requires it, even though
+        // it is not flagged preferred.
         let modes = [m(1920, 1080, 75_000, true), m(1920, 1080, 60_000, false)];
-        let got = pick_mode(&modes, TARGET_REFRESH_MHZ).unwrap();
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
         assert_eq!(got.refresh_mhz, 60_000);
         assert!(is_phase_lockable(&got, TARGET_REFRESH_MHZ));
     }
 
     #[test]
-    fn pick_mode_picks_largest_at_exact_60hz() {
+    fn pick_mode_picks_canvas_match_not_largest_at_exact_60hz() {
+        // The LIVE cam2 bug: HDMI-A-2 lists a 1920x1080@60 mode AND several
+        // 4096x2160@60 modes. The painter renders a fixed 1920x1080 canvas and
+        // the ShadowCast captures 1080p60, so the canvas-matching 1080p mode MUST
+        // win — NOT the largest 60 Hz mode (4K), which the painter cannot fill.
         let modes = [
-            m(1280, 720, 60_000, true),
             m(1920, 1080, 60_000, false),
-            m(1024, 768, 60_000, false),
+            m(4096, 2160, 60_000, true),
+            m(4096, 2160, 60_000, false),
         ];
-        let got = pick_mode(&modes, TARGET_REFRESH_MHZ).unwrap();
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
+        assert_eq!(
+            (got.width, got.height, got.refresh_mhz),
+            (1920, 1080, 60_000),
+            "must pick the canvas-matching 1080p60 mode, not the larger 4K mode"
+        );
+        assert!(is_phase_lockable(&got, TARGET_REFRESH_MHZ));
+    }
+
+    #[test]
+    fn pick_mode_canvas_match_beats_larger_even_when_4k_is_preferred() {
+        // Even if the 4K mode is the connector's preferred mode, the painter's
+        // 1080p canvas must still win — preferred does not override fillability.
+        let modes = [m(4096, 2160, 60_000, true), m(1920, 1080, 60_000, false)];
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
         assert_eq!((got.width, got.height), (1920, 1080));
     }
 
     #[test]
-    fn pick_mode_falls_back_to_preferred_when_no_exact_target() {
-        // No 60.000 Hz mode at all — fall back to the connector's preferred mode
-        // so the panel still lights up (just not phase-lockable).
-        let modes = [m(3840, 2160, 30_000, false), m(1920, 1080, 59_940, true)];
-        let got = pick_mode(&modes, TARGET_REFRESH_MHZ).unwrap();
+    fn pick_mode_canvas_match_at_non_60hz_when_no_60hz_canvas_mode() {
+        // No 1080p60 mode, but a 1080p59.94 mode exists — take the canvas-matching
+        // one (the painter's frame fits) over a 60 Hz 4K mode it cannot fill. Not
+        // phase-lockable, but a working (non-1:1) run beats a guaranteed failure.
+        let modes = [m(4096, 2160, 60_000, true), m(1920, 1080, 59_940, false)];
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
         assert_eq!(
             (got.width, got.height, got.refresh_mhz),
             (1920, 1080, 59_940)
@@ -640,10 +716,38 @@ mod tests {
     }
 
     #[test]
+    fn pick_mode_largest_60hz_when_no_canvas_match() {
+        // No mode at the canvas resolution at all — fall back to the largest
+        // exact-60Hz mode (legacy behaviour; the open() guard then bails so the
+        // caller falls back to fbdev, but pick_mode itself still returns a 60 Hz
+        // candidate).
+        let modes = [
+            m(1280, 720, 60_000, true),
+            m(3840, 2160, 60_000, false),
+            m(1024, 768, 60_000, false),
+        ];
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
+        assert_eq!((got.width, got.height), (3840, 2160));
+    }
+
+    #[test]
+    fn pick_mode_falls_back_to_preferred_when_no_canvas_no_60hz() {
+        // No canvas-matching mode and no 60.000 Hz mode — fall back to the
+        // connector's preferred mode so the panel still lights up.
+        let modes = [m(3840, 2160, 30_000, false), m(2560, 1440, 59_940, true)];
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
+        assert_eq!(
+            (got.width, got.height, got.refresh_mhz),
+            (2560, 1440, 59_940)
+        );
+        assert!(!is_phase_lockable(&got, TARGET_REFRESH_MHZ));
+    }
+
+    #[test]
     fn pick_mode_falls_back_to_largest_when_no_target_no_preferred() {
-        let modes = [m(1280, 720, 50_000, false), m(1920, 1080, 50_000, false)];
-        let got = pick_mode(&modes, TARGET_REFRESH_MHZ).unwrap();
-        assert_eq!((got.width, got.height), (1920, 1080));
+        let modes = [m(1280, 720, 50_000, false), m(2560, 1440, 50_000, false)];
+        let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
+        assert_eq!((got.width, got.height), (2560, 1440));
     }
 
     #[test]

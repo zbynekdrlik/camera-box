@@ -83,19 +83,26 @@ impl Presenter for VsyncFb {
 }
 
 /// Open a presenter per `kind` for the given `fb_device` (fbdev path) and
-/// `drm_device` (DRM card path). `Auto` tries KMS then falls back to fbdev,
-/// logging which path it landed on.
+/// `drm_device` (DRM card path). The KMS path drives the HDMI mode matching the
+/// painter's `canvas_w`×`canvas_h` (it cannot scan out a different size than the
+/// painter renders — driving a larger mode the painter can't fill is the live
+/// cam2 bug this guards). `Auto` tries KMS then falls back to fbdev, logging
+/// which path it landed on.
 #[cfg(target_os = "linux")]
 pub fn open_presenter(
     kind: PresenterKind,
     fb_device: &str,
     drm_device: &str,
+    canvas_w: u32,
+    canvas_h: u32,
 ) -> Result<Box<dyn Presenter>> {
     use crate::probe::kms::KmsPresenter;
     match kind {
         PresenterKind::Fbdev => Ok(Box::new(VsyncFb::open(fb_device)?)),
-        PresenterKind::Kms => Ok(Box::new(KmsPresenter::open(drm_device)?)),
-        PresenterKind::Auto => match KmsPresenter::open(drm_device) {
+        PresenterKind::Kms => Ok(Box::new(KmsPresenter::open(
+            drm_device, canvas_w, canvas_h,
+        )?)),
+        PresenterKind::Auto => match KmsPresenter::open(drm_device, canvas_w, canvas_h) {
             Ok(p) => {
                 tracing::info!("presenter: using DRM/KMS page-flip ({})", drm_device);
                 Ok(Box::new(p))
@@ -118,6 +125,8 @@ pub fn open_presenter(
     kind: PresenterKind,
     fb_device: &str,
     _drm_device: &str,
+    _canvas_w: u32,
+    _canvas_h: u32,
 ) -> Result<Box<dyn Presenter>> {
     match kind {
         PresenterKind::Kms => anyhow::bail!("DRM/KMS presenter is Linux-only"),
