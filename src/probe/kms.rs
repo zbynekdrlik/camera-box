@@ -480,14 +480,28 @@ mod hw {
             // Pick a CRTC that can drive this connector (via its encoder).
             let crtc = tryc!(Self::pick_crtc(&card, &res, connector));
 
-            // Two dumb BOs + framebuffers — the real double buffer.
+            // Two dumb BOs + framebuffers — the real double buffer. If a later
+            // step fails, destroy the slots already created so they don't leak
+            // their ~8 MB BO + FB (Slot has no Drop, and on the error path the
+            // returned `Self` — whose Drop would free them — is never built).
             let slot0 = tryc!(Self::make_slot(&card, width, height));
-            let slot1 = tryc!(Self::make_slot(&card, width, height));
+            let slot1 = match Self::make_slot(&card, width, height) {
+                Ok(s) => s,
+                Err(e) => {
+                    Self::destroy_slot(&card, &slot0);
+                    return Err((card, e));
+                }
+            };
 
             // Initial scanout: BO 0.
-            tryc!(card
+            if let Err(e) = card
                 .set_crtc(crtc, Some(slot0.fb), (0, 0), &[connector], Some(mode))
-                .context("set initial CRTC scanout"));
+                .context("set initial CRTC scanout")
+            {
+                Self::destroy_slot(&card, &slot0);
+                Self::destroy_slot(&card, &slot1);
+                return Err((card, e));
+            }
 
             if !phase_locked {
                 tracing::warn!(
@@ -609,19 +623,38 @@ mod hw {
             let mut db = card
                 .create_dumb_buffer((width, height), DrmFourcc::Xrgb8888, 32)
                 .context("create dumb buffer")?;
-            let fb = card
-                .add_framebuffer(&db, 24, 32)
-                .context("add framebuffer for dumb buffer")?;
+            // From here, any failure must destroy `db` or it leaks (it is only
+            // wrapped in a Slot — whose teardown frees it — on success).
+            let fb = match card.add_framebuffer(&db, 24, 32) {
+                Ok(fb) => fb,
+                Err(e) => {
+                    let _ = card.destroy_dumb_buffer(db);
+                    return Err(anyhow::Error::from(e).context("add framebuffer for dumb buffer"));
+                }
+            };
             // Clear to white so the first frame before paint is not garbage.
-            {
+            if let Err(e) = (|| -> Result<()> {
                 let mut map = card
                     .map_dumb_buffer(&mut db)
                     .context("map dumb buffer for clear")?;
                 for b in map.as_mut() {
                     *b = 0xFF;
                 }
+                Ok(())
+            })() {
+                let _ = card.destroy_framebuffer(fb);
+                let _ = card.destroy_dumb_buffer(db);
+                return Err(e);
             }
             Ok(Slot { db, fb })
+        }
+
+        /// Destroy a slot's framebuffer AND its backing dumb buffer (the GEM BO).
+        /// Used by both the `build` error paths and `Drop` so the two-object
+        /// teardown lives in one place (`DumbBuffer` is `Copy`, no `Drop`).
+        fn destroy_slot(card: &Card, slot: &Slot) {
+            let _ = card.destroy_framebuffer(slot.fb);
+            let _ = card.destroy_dumb_buffer(slot.db);
         }
 
         /// Block until the next page-flip completes (vblank), with a timeout so a
@@ -703,15 +736,12 @@ mod hw {
             // Restore the console: drop master and rebind fbcon so cam2's normal
             // HDMI display returns after the run. Best-effort — log failures.
             let _ = (self.crtc, self.connector, self.mode); // keep fields used
+                                                            // Tear down BOTH objects each slot allocated: the framebuffer
+                                                            // (metadata) AND the backing dumb buffer (the GEM BO). `drm` 0.15's
+                                                            // `DumbBuffer` has no `Drop`, so omitting `destroy_dumb_buffer`
+                                                            // leaks the ~8 MB (1080p XRGB) kernel allocation on every teardown.
             for slot in &self.slots {
-                // Tear down BOTH objects each slot allocated: the framebuffer
-                // (metadata) AND the backing dumb buffer (the GEM BO). `drm`
-                // 0.15's `DumbBuffer` has no `Drop`, so omitting
-                // `destroy_dumb_buffer` leaks the ~8 MB (1080p XRGB) kernel
-                // allocation on every teardown. `DumbBuffer` is `Copy`, so we
-                // can destroy the FB first then the BO by value.
-                let _ = self.card.destroy_framebuffer(slot.fb);
-                let _ = self.card.destroy_dumb_buffer(slot.db);
+                Self::destroy_slot(&self.card, slot);
             }
             if self.held_master {
                 if let Err(e) = self.card.release_master_lock() {
