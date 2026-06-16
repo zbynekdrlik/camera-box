@@ -283,7 +283,7 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | NDI | x | requires **NDI ≥ 6.3.0** | tree |
 | `output_fps` | `30` | log |
 | `genlock_wall_clock` | `0` | env |
-| `ndi_input_latency` | `2` | obs-websocket |
+| `ndi_input_latency` | `0` | obs-websocket |
 ",
     )
     .unwrap();
@@ -326,7 +326,7 @@ fn check_pins_fails_loudly_on_incomplete_manifest() {
 | `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
 | NDI | x | requires **NDI ≥ 6.3.0** | tree |
 | `genlock_wall_clock` | `0` | env |
-| `ndi_input_latency` | `2` | obs-websocket |
+| `ndi_input_latency` | `0` | obs-websocket |
 ",
     )
     .unwrap();
