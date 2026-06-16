@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --run)    RUN_ID="${2:?--run needs a run id}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     *) echo "deploy-fleet: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
