@@ -53,6 +53,7 @@ fn squish(s: &str) -> String {
 }
 
 const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
+const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
 
 #[test]
 fn source_struct_has_config_mutex() {
@@ -142,5 +143,35 @@ fn av_thread_uses_owned_string_copies_not_borrowed_config_pointers() {
          s->config.ndi_receiver_name again (the stock code). on_ndi_source_renamed \
          reallocs that string while the av_thread reads it → heap corruption (#93). \
          Re-apply the owned-copy fix."
+    );
+}
+
+#[test]
+fn windows_genlock_workflow_gates_on_the_source_config_lock_patch() {
+    // #93: the Windows production-build workflow must gate the artifact on the #93
+    // source-name UAF fix BEFORE the 150-min build — the Linux Rust guard above can't
+    // compile on the windows-2022 runner, so the workflow re-asserts the same source
+    // tokens in pwsh. This test keeps that pwsh gate in lock-step with the canonical
+    // assertion: drop the source check from the workflow and CI fails here. (Same
+    // lock-step convention as tests/distroav_timecode_patch.rs.)
+    let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+
+    assert!(
+        wf.contains("pthread_mutex_t config_mutex"),
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #93 \
+         config_mutex SOURCE patch — a future subtree bump could reship the strih \
+         heap-corruption crash while the version pin still passes. Re-add the pwsh \
+         source-patch gate."
+    );
+    assert!(
+        wf.contains("recv_desc.source_to_connect_to.p_ndi_name = owned_source_name"),
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #93 \
+         av_thread-owned source-name copy. Re-add the pwsh source-patch gate."
+    );
+    assert!(
+        wf.contains("recv_desc.source_to_connect_to.p_ndi_name = s->config.ndi_source_name"),
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts that the stock \
+         live-config-pointer borrow is ABSENT from recv_desc (#93) — the negative \
+         guard that catches a silent UAF revert. Re-add the pwsh source-patch gate."
     );
 }
