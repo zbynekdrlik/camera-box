@@ -253,13 +253,14 @@ def setup(a):
             "inputSettings": {"ndi_source_name": ingest_full},
             "overlay": True,
         }, ignore_err=True)
-    out_full, _ = _resolve_full(ws, INPUT, ndi_name)
-    if "(" not in out_full:
-        raise SystemExit(
-            f"[obs] {a.host}: own Main Output '{ndi_name}' did not resolve to a full NDI "
-            f"name (the next hop would ingest a dead name); aborting before touching the "
-            f"program scene."
-        )
+    # #91: the own-output resolution gate protects the NEXT OBS hop from ingesting a
+    # dead bare name — but only a NON-terminal box HAS a next OBS hop. On the TERMINAL
+    # box (stream) the box's own OBS can NEVER self-discover its own Main Output (NDI
+    # suppresses self/loopback discovery of an output on the same machine), so a full
+    # poll is GUARANTEED to exhaust its timeout doing nothing, and the abort would
+    # always fire — blocking the strih→stream hop measurement. The terminal box's
+    # output is tapped DIRECTLY by dev1; there is no next OBS hop to protect.
+    out_full = _resolve_own_output(ws, a.host, ndi_name, terminal=a.terminal)
     # Everything resolved — NOW switch program to the probe scene (kept to the last step so
     # any failure above leaves the live program where it was).
     _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
@@ -320,6 +321,56 @@ def _resolve_full(ws, inp, bare, timeout=20.0, interval=1.0):
         time.sleep(interval)
 
 
+def _resolve_own_output(ws, host, ndi_name, terminal):
+    """#91: resolve THIS box's own Main Output NDI name to the form the next consumer
+    binds against, and decide whether a non-resolution is fatal.
+
+    NON-terminal box: its output feeds the NEXT OBS hop, which binds the full
+    'MACHINE (name)' network name — a bare name connects to nothing (black render,
+    0 decode downstream). So poll discovery for the full form and ABORT (before
+    touching the program scene) if it never resolves: a dead next-hop ingest is a
+    fatal misconfiguration.
+
+    TERMINAL box (stream): its output is tapped DIRECTLY by dev1, and the box's own
+    OBS can NEVER self-discover its own output (NDI suppresses self/loopback
+    discovery of an output on the same machine) — so a full poll is guaranteed to
+    exhaust its timeout for nothing and there is no next OBS hop to protect. We do a
+    SHORT best-effort resolve (in case the box's OBS happens to list it), and on
+    failure emit the PARENTHESIZED suffix form '(ndi_name)' rather than the bare,
+    generic name. dev1's tap matches by substring (ndi.rs `name.contains`), so the
+    '(name)' suffix — the codebase's canonical full-name discriminator (see
+    _match_full's `endswith(f"({bare})")`) — anchors the match on the exact source
+    'MACHINE (ndi_name)' instead of letting a short generic bare word (e.g. 'stream')
+    collide with any other LAN source whose name merely contains it (livestream, …).
+    Returns the name string to print on stdout for the next consumer to tap/chain."""
+    if not terminal:
+        out_full, _ = _resolve_full(ws, INPUT, ndi_name)
+        if "(" not in out_full:
+            raise SystemExit(
+                f"[obs] {host}: own Main Output '{ndi_name}' did not resolve to a full NDI "
+                f"name (the next hop would ingest a dead name); aborting before touching the "
+                f"program scene."
+            )
+        return out_full
+    # Terminal box: short best-effort resolve (its own OBS almost never lists its own
+    # output, so don't burn the full 20s poll), then fall back to the precise suffix.
+    out_full, _ = _resolve_full(ws, INPUT, ndi_name, timeout=2.0)
+    if "(" in out_full:
+        # Self-resolved to the full 'MACHINE (name)', OR ndi_name was already
+        # parenthesised — either way it contains '(' and binds directly.
+        return out_full
+    # ndi_name here cannot contain '(' (that path returned above), so the bare name is
+    # a plain token (e.g. 'stream'); wrap it as the parenthesised suffix discriminator.
+    suffix_form = f"({ndi_name})"
+    sys.stderr.write(
+        f"[obs] {host}: WARN terminal box's own Main Output '{ndi_name}' not "
+        f"self-discoverable via its own OBS (NDI loopback suppression); no downstream "
+        f"OBS hop to protect — emitting the suffix form '{suffix_form}' so dev1's tap "
+        f"binds the exact 'MACHINE {suffix_form}' source (not a generic substring).\n"
+    )
+    return suffix_form
+
+
 def teardown(a):
     state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
@@ -365,6 +416,14 @@ def main():
         p.add_argument("--password", default="")
         if name == "setup":
             p.add_argument("--upstream", required=True)
+            # #91: mark a TERMINAL box — one whose Main Output feeds NO downstream OBS
+            # hop (it is tapped directly by dev1). For such a box the own-output
+            # self-resolution abort is spurious (the box's own OBS can't self-discover
+            # its own output via NDI loopback suppression) and there is no next hop to
+            # protect, so setup() skips that abort and emits the bare name (dev1's tap
+            # resolves the full NDI name itself). NON-terminal boxes (strih) keep the
+            # protective abort. Defaults False — strih and teardown are non-terminal.
+            p.add_argument("--terminal", action="store_true")
     a = ap.parse_args()
     (setup if a.cmd == "setup" else teardown)(a)
 

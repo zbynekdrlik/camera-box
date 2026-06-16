@@ -331,8 +331,9 @@ compare_observed() {
   done
 
   # Per-input NDI ingest latency (#84): every genlocked broadcast-path input must run the pinned
-  # Lowest mode. drift_check_inputs prints one line per observed input and rolls up to OK/DRIFT/
-  # UNKNOWN, so a single drifted input (the failure this guard exists to catch) fails the box.
+  # Normal(0) mode (the certified low-latency zero-loss pin). drift_check_inputs prints one line per
+  # observed input and rolls up to OK/DRIFT/UNKNOWN, so a single drifted input (the failure this
+  # guard exists to catch) fails the box.
   rc=0
   drift_check_inputs "$p_latency" "$o_latency" || rc=$?
   [ "$rc" -eq 2 ] && drift=$((drift + 1))
