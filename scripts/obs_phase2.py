@@ -123,6 +123,28 @@ def _rpc(ws, rtype, rdata=None, ignore_err=False):
             return m["d"].get("responseData") or {}
 
 
+# #93: how long to wait after idling the probe receiver for the DistroAV av_thread to
+# fully exit its reset_ndi_receiver block before we re-point the source. One render tick
+# is ~20 ms at 50 fps; 0.25 s is comfortably several ticks of margin (the av_thread polls
+# its reset flag once per loop iteration, ~5–100 ms) without slowing the run meaningfully.
+_QUIESCE_RENDER_TICK_S = 0.25
+
+
+def _quiesce_probe_input(ws):
+    """#93: idle the reused probe ndi_source BEFORE re-pointing it, so the re-point lands
+    on a dormant receiver instead of racing a live av_thread. Clearing ndi_source_name
+    makes DistroAV tear the receiver down cleanly (the same idle discipline teardown uses);
+    genlock_fifo off stops the dormant input running the consume path against an empty queue
+    (#70). Then wait one render tick for the av_thread to exit its reset block. Best-effort:
+    a quiesce failure must not abort setup (the C++ config_mutex fix is the real guard)."""
+    _rpc(ws, "SetInputSettings", {
+        "inputName": INPUT,
+        "inputSettings": {"ndi_source_name": "", "genlock_fifo": False},
+        "overlay": True,
+    }, ignore_err=True)
+    time.sleep(_QUIESCE_RENDER_TICK_S)
+
+
 def setup(a):
     ws = _conn(a.host, a.password)
     prev = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
@@ -183,7 +205,20 @@ def setup(a):
             "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
         }, ignore_err=True)
     else:
-        # Reuse: re-point the existing dormant input at this run's upstream ...
+        # #93: QUIESCE before re-pointing a possibly-LIVE probe input. If a prior run
+        # left the probe scene on program (a crash, or back-to-back runs), the
+        # ndi_source receiver+av_thread are still live on the old upstream. Re-pointing
+        # it in place (SetInputSettings → ndi_source_update) frees/reallocs the NDI
+        # source-name string the av_thread is mid-read on → DistroAV heap corruption
+        # (the strih OBS crash). The C++ config_mutex+owned-copies fix makes that race
+        # safe, but the harness ALSO idles the receiver first (mirror teardown's idle
+        # discipline) so the re-point lands on a dormant source: clear ndi_source_name
+        # (DistroAV tears the receiver down cleanly) + genlock_fifo off, then wait one
+        # render tick for the av_thread to fully exit its reset before re-pointing.
+        _quiesce_probe_input(ws)
+        # Reuse: re-point the now-idle input at this run's upstream, applying the full
+        # certified probe settings idempotently in ONE update (no per-cycle HW-accel /
+        # Latency churn on a live source).
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
             "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},

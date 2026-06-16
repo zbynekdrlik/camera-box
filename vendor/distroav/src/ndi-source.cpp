@@ -153,6 +153,16 @@ typedef struct ndi_source_t {
 	obs_source_t *obs_source;
 	ndi_source_config_t config;
 
+	/* camera-box #93: serialises the config-mutation section of ndi_source_update
+	 * (the bfree/bstrdup of the name strings + scalar config writes + thread
+	 * start/stop) against the av_thread's reset_ndi_receiver block, which reads
+	 * those strings into recv_desc. Without it, update (UI/obs-websocket thread)
+	 * frees the string the av_thread is mid-read on → STATUS_HEAP_CORRUPTION
+	 * (the strih OBS crash). Held for microseconds only — NEVER across the
+	 * blocking recv_capture_v3 — and NEVER on the render path (OBS already
+	 * guards the async frame queue with source->async_mutex). */
+	pthread_mutex_t config_mutex;
+
 	bool running;
 	pthread_t av_thread;
 
@@ -434,6 +444,15 @@ void *ndi_source_thread(void *data)
 	NDIlib_recv_create_v3_t recv_desc;
 	recv_desc.allow_video_fields = true;
 
+	/* camera-box #93 (defense in depth): the av_thread owns DUPLICATED copies of
+	 * the NDI name strings. recv_desc binds to these owned copies, NEVER to the
+	 * live s->config.* pointers — which ndi_source_update frees/reallocs. So even
+	 * a future caller that mutates config WITHOUT taking config_mutex cannot
+	 * use-after-free the receiver-create path. Refreshed inside the locked
+	 * reset_ndi_receiver block; freed on thread exit. */
+	char *owned_source_name = nullptr;
+	char *owned_receiver_name = nullptr;
+
 	NDIlib_recv_instance_t ndi_receiver = nullptr;
 	NDIlib_video_frame_v2_t video_frame;
 
@@ -453,24 +472,46 @@ void *ndi_source_thread(void *data)
 		// reset_ndi_receiver: BEGIN
 		//
 		if (s->config.reset_ndi_receiver) {
+			//
+			// camera-box #93: read the (mutable) config into recv_desc + local
+			// snapshots UNDER config_mutex, so ndi_source_update cannot
+			// free/realloc the name strings or flip the scalars while we copy
+			// them. The lock is dropped before recv_create_v3 — it is held only
+			// for the few microseconds of the copy below, NEVER across a blocking
+			// NDI call, and NEVER on the render path.
+			//
+			bool snap_hw_accel_enabled;
+			bool snap_framesync_enabled;
+			pthread_mutex_lock(&s->config_mutex);
+
 			s->config.reset_ndi_receiver = false;
 
 			// If config.ndi_receiver_name changed, then so did obs_source_name
 			obs_source_name = obs_source_get_name(s->obs_source);
 
 			//
-			// Update recv_desc.p_ndi_recv_name
+			// Refresh the av_thread-OWNED copies of the name strings (defense in
+			// depth): bind recv_desc to these, NOT to the live config.* pointers
+			// that ndi_source_update frees. bfree(nullptr) is a safe no-op.
 			//
-			recv_desc.p_ndi_recv_name = s->config.ndi_receiver_name;
+			bfree(owned_source_name);
+			owned_source_name = bstrdup(s->config.ndi_source_name);
+			bfree(owned_receiver_name);
+			owned_receiver_name = bstrdup(s->config.ndi_receiver_name);
+
+			//
+			// Update recv_desc.p_ndi_recv_name (owned copy)
+			//
+			recv_desc.p_ndi_recv_name = owned_receiver_name;
 			obs_log(LOG_DEBUG,
 				"'%s' ndi_source_thread: reset_ndi_receiver; Setting recv_desc.p_ndi_recv_name='%s'",
 				obs_source_name, //
 				recv_desc.p_ndi_recv_name);
 
 			//
-			// Update recv_desc.source_to_connect_to.p_ndi_name
+			// Update recv_desc.source_to_connect_to.p_ndi_name (owned copy)
 			//
-			recv_desc.source_to_connect_to.p_ndi_name = s->config.ndi_source_name;
+			recv_desc.source_to_connect_to.p_ndi_name = owned_source_name;
 			obs_log(LOG_DEBUG,
 				"'%s' ndi_source_thread: reset_ndi_receiver; Setting recv_desc.source_to_connect_to.p_ndi_name='%s'",
 				obs_source_name, //
@@ -510,6 +551,13 @@ void *ndi_source_thread(void *data)
 			video_format_get_parameters(s->config.yuv_colorspace, s->config.yuv_range,
 						    obs_video_frame.color_matrix, obs_video_frame.color_range_min,
 						    obs_video_frame.color_range_max);
+
+			// Snapshot the remaining reset-relevant scalars while still locked, so
+			// the (slower) receiver create/destroy below reads stable values.
+			snap_hw_accel_enabled = s->config.hw_accel_enabled;
+			snap_framesync_enabled = s->config.framesync_enabled;
+
+			pthread_mutex_unlock(&s->config_mutex);
 
 			//
 			// recv_desc is fully populated;
@@ -555,7 +603,7 @@ void *ndi_source_thread(void *data)
 				break;
 			}
 
-			if (s->config.hw_accel_enabled) {
+			if (snap_hw_accel_enabled) {
 				//
 				// From https://docs.ndi.video/docs/sdk/performance-and-implementation#receiving-video :
 				// > * In the modern versions of NDI, there are internal heuristics that attempt to guess whether hardware
@@ -594,7 +642,7 @@ void *ndi_source_thread(void *data)
 				ndiLib->recv_send_metadata(ndi_receiver, &hwAccelMetadata);
 			}
 
-			if (s->config.framesync_enabled) {
+			if (snap_framesync_enabled) {
 				timestamp_audio = 0;
 				timestamp_video = 0;
 				obs_log(LOG_DEBUG,
@@ -788,6 +836,12 @@ void *ndi_source_thread(void *data)
 		ndi_receiver = nullptr;
 	}
 
+	// camera-box #93: free the av_thread-owned name copies. bfree(nullptr) is a no-op.
+	bfree(owned_source_name);
+	owned_source_name = nullptr;
+	bfree(owned_receiver_name);
+	owned_receiver_name = nullptr;
+
 	obs_log(LOG_DEBUG, "'%s' -ndi_source_thread(…)", obs_source_name);
 
 	return nullptr;
@@ -937,6 +991,18 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	auto obs_source = s->obs_source;
 	auto obs_source_name = obs_source_get_name(obs_source);
 	obs_log(LOG_DEBUG, "'%s' +ndi_source_update(…)", obs_source_name);
+
+	//
+	// camera-box #93: take config_mutex around the ENTIRE config-mutation section
+	// below — the bfree/bstrdup of the name strings and every scalar s->config.*
+	// write — so the av_thread's reset_ndi_receiver block can never read a string
+	// mid-free or a half-written scalar. This thread (UI / obs-websocket) never
+	// calls back into the av_thread, and the lock is RELEASED before the thread
+	// start/stop block (whose pthread_join would otherwise deadlock against the
+	// av_thread taking config_mutex). It is NOT the render path (OBS guards the
+	// async frame queue with source->async_mutex).
+	//
+	pthread_mutex_lock(&s->config_mutex);
 
 	//
 	// reset_ndi_receiver: BEGIN
@@ -1121,18 +1187,28 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	s->config.tally.on_preview = tally_on_preview(obs_source);
 	s->config.tally.on_program = tally_on_program(obs_source);
 
-	if (strlen(s->config.ndi_source_name) == 0) {
+	// camera-box #93: config mutation done. Snapshot the empty-name decision while
+	// still holding the lock, then RELEASE before the thread lifecycle block so the
+	// pthread_join inside ndi_source_thread_stop cannot deadlock against the
+	// av_thread taking config_mutex in its reset block.
+	bool ndi_source_name_empty = (strlen(s->config.ndi_source_name) == 0);
+	pthread_mutex_unlock(&s->config_mutex);
+
+	if (ndi_source_name_empty) {
 		obs_log(LOG_DEBUG, "'%s' ndi_source_update: No NDI Source selected; Requesting Source Thread Stop.",
 			obs_source_name);
 		ndi_source_thread_stop(s);
 	} else {
-		obs_log(LOG_DEBUG, "'%s' ndi_source_update: NDI Source '%s' selected.", obs_source_name,
-			s->config.ndi_source_name);
+		obs_log(LOG_DEBUG, "'%s' ndi_source_update: NDI Source selected.", obs_source_name);
 		if (s->running) {
 			//
-			// Thread is running; notify it if it needs to reset the NDI receiver
+			// Thread is running; notify it if it needs to reset the NDI receiver.
+			// camera-box #93: the reset flag is read by the av_thread's reset
+			// block (also under config_mutex), so set it under the lock too.
 			//
+			pthread_mutex_lock(&s->config_mutex);
 			s->config.reset_ndi_receiver = reset_ndi_receiver;
+			pthread_mutex_unlock(&s->config_mutex);
 		} else {
 			//
 			// Thread is not running; start it if either:
@@ -1236,6 +1312,10 @@ void *ndi_source_create(obs_data_t *settings, obs_source_t *obs_source)
 
 	auto s = (ndi_source_t *)bzalloc(sizeof(ndi_source_t));
 	s->obs_source = obs_source;
+	// camera-box #93: init the config lock BEFORE ndi_source_update (called below)
+	// can take it. A recursive mutex is unnecessary (update never re-enters itself
+	// while holding it), but it costs nothing to be explicit about the default.
+	pthread_mutex_init(&s->config_mutex, nullptr);
 	new_ndi_receiver_name(obs_source_name, &(s->config.ndi_receiver_name));
 
 	auto sh = obs_source_get_signal_handler(s->obs_source);
@@ -1268,6 +1348,10 @@ void ndi_source_destroy(void *data)
 		bfree(s->config.ndi_source_name);
 		s->config.ndi_source_name = nullptr;
 	}
+
+	// camera-box #93: the av_thread is joined (ndi_source_thread_stop above), so no
+	// one can be holding config_mutex now — safe to destroy it.
+	pthread_mutex_destroy(&s->config_mutex);
 
 	bfree(s);
 

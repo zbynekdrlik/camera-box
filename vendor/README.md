@@ -85,6 +85,19 @@ Genlock changes (#42) are normal commits in THIS repo touching `vendor/` files �
 -- vendor/` after the two import commits IS the patch series. Keep each patch commit
 focused and prefixed `genlock:` so the #44 update flow can review conflicts patch-by-patch.
 
+Beyond the genlock patches, the fork also carries a CORRECTNESS patch on top of upstream
+DistroAV:
+
+- **#93 NDI source-name use-after-free fix** (`src/ndi-source.cpp`): stock DistroAV
+  `ndi_source_update` (UI / obs-websocket thread) `bfree`s + `bstrdup`s
+  `config.ndi_source_name` on every update while the A/V thread borrows that exact pointer
+  into `recv_desc` → heap corruption when a live source is re-pointed (the strih OBS
+  crash). The patch adds a per-source `pthread_mutex_t config_mutex` (held only around the
+  config-mutation section of `update` and the A/V thread's `reset_ndi_receiver` copy — never
+  the render path, never across a blocking NDI call) plus A/V-thread-owned `bstrdup` copies
+  of the name strings that `recv_desc` binds to. Guarded by
+  `tests/distroav_source_config_lock.rs` so a `git subtree pull` can't silently revert it.
+
 ## Build
 
 Local prototyping happens on dev1 (Linux). The production target is a Windows build for
