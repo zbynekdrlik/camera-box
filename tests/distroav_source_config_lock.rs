@@ -96,6 +96,40 @@ fn ndi_source_update_locks_config_mutation() {
          block); found {locks} lock / {unlocks} unlock call(s). The source-name UAF \
          fix (#93) is incomplete or reverted; re-apply it."
     );
+    // Every lock must have a matching unlock (no path holds the lock across a return).
+    assert_eq!(
+        locks, unlocks,
+        "{NDI_SOURCE}: #93 — config_mutex lock/unlock counts differ ({locks} vs \
+         {unlocks}); a critical section is unbalanced (lock held across a return \
+         path?)."
+    );
+}
+
+#[test]
+fn on_ndi_source_renamed_takes_the_config_lock() {
+    // #93 (review): on_ndi_source_renamed is the SECOND writer of
+    // config.ndi_receiver_name — new_ndi_receiver_name() bfree()s + bstrdup()s it while
+    // the av_thread reads that field under config_mutex (the owned_receiver_name copy).
+    // It MUST take the lock too, or the free/realloc races the av_thread read. Assert
+    // the lock appears inside the renamed handler's body.
+    let src = vendor_file(NDI_SOURCE);
+    let start = src
+        .find("void on_ndi_source_renamed(")
+        .expect("on_ndi_source_renamed not found in ndi-source.cpp");
+    // Body ends at the next top-level function definition.
+    let rest = &src[start..];
+    let end = rest[1..]
+        .find("\nvoid ")
+        .map(|i| start + 1 + i)
+        .unwrap_or(src.len());
+    let body = squish(&src[start..end]);
+    assert!(
+        body.contains("pthread_mutex_lock(&s->config_mutex")
+            && body.contains("pthread_mutex_unlock(&s->config_mutex"),
+        "{NDI_SOURCE}: #93 — on_ndi_source_renamed no longer holds config_mutex around \
+         the ndi_receiver_name free/realloc. That free races the av_thread's locked \
+         read of config.ndi_receiver_name → use-after-free. Re-apply the lock."
+    );
 }
 
 #[test]

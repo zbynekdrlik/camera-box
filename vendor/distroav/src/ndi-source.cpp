@@ -480,8 +480,8 @@ void *ndi_source_thread(void *data)
 			// for the few microseconds of the copy below, NEVER across a blocking
 			// NDI call, and NEVER on the render path.
 			//
-			bool snap_hw_accel_enabled;
-			bool snap_framesync_enabled;
+			bool snap_hw_accel_enabled = false;
+			bool snap_framesync_enabled = false;
 			pthread_mutex_lock(&s->config_mutex);
 
 			s->config.reset_ndi_receiver = false;
@@ -1223,7 +1223,12 @@ void ndi_source_update(void *data, obs_data_t *settings)
 			}
 		}
 	}
-	// Provide all the source config when updated
+	// Provide all the source config when updated.
+	// camera-box #93: reads s->config.* AFTER config_mutex was released — safe because
+	// only ndi_source_update / ndi_source_destroy ever FREE these, OBS serializes
+	// update() calls per source, and the av_thread only reads them. Do NOT "fix" this
+	// by widening the lock to here: it is a log line, not a config write, and the read
+	// cannot race a free.
 	obs_log(LOG_INFO,
 		"NDI Source Updated: '%s', 'Bandwidth'='%d', Latency='%d', Framesync='%s', HardwareAcceleration='%s', behavior='%d', timeoutmode='%d', sync_mode='%d', yuv_range='%d', yuv_colorspace='%d'",
 		s->config.ndi_source_name, s->config.bandwidth, s->config.latency,
@@ -1299,10 +1304,20 @@ void on_ndi_source_renamed(void *data, calldata_t *)
 {
 	auto s = (ndi_source_t *)data;
 	auto obs_source_name = obs_source_get_name(s->obs_source);
+	// camera-box #93: this is the SECOND writer of config.ndi_receiver_name (the
+	// other is ndi_source_update). new_ndi_receiver_name() bfree()s + bstrdup()s it,
+	// and the av_thread reads it under config_mutex (the bstrdup into
+	// owned_receiver_name in reset_ndi_receiver). Take the lock here too so this
+	// free/realloc can never race that read. Snapshot for the log so the lock is
+	// dropped before logging.
+	pthread_mutex_lock(&s->config_mutex);
 	new_ndi_receiver_name(obs_source_name, &(s->config.ndi_receiver_name));
 	s->config.reset_ndi_receiver = true;
+	char *renamed_copy = bstrdup(s->config.ndi_receiver_name);
+	pthread_mutex_unlock(&s->config_mutex);
 	obs_log(LOG_DEBUG, "'%s' on_ndi_source_renamed: new ndi_receiver_name='%s'", obs_source_name,
-		s->config.ndi_receiver_name);
+		renamed_copy);
+	bfree(renamed_copy);
 }
 
 void *ndi_source_create(obs_data_t *settings, obs_source_t *obs_source)
