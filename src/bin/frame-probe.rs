@@ -135,16 +135,21 @@ fn main() -> Result<()> {
     //
     // #79: the KMS page-flip presenter is vblank-locked — it emits exactly one
     // new id per HDMI vblank (1:1 with the 60 Hz capture), ignoring --paint-fps.
-    // So when KMS may be used (kms / auto), the *expected* emission rate is the
-    // capture rate; default paint_fps to capture_fps so the analyzer's oversample
-    // math (capture/paint ratio) sees the true 1:1 cadence. fbdev keeps the
-    // sub-capture coverage default. An explicit --paint-fps always wins.
-    let kms_capable = !matches!(
+    // So when KMS may actually drive the HDMI output (kms / auto presenter AND
+    // the real painter path — NOT --synth-ndi / --paint-only, which never open a
+    // presenter), the painter's true emission rate IS the capture rate; default
+    // paint_fps to capture_fps so the configured rate matches the cadence the
+    // vblank flip will produce (the analyzer classifies oversample from actual
+    // decoded-sample counts, not a configured ratio). fbdev — and the
+    // presenter-less synth-ndi / paint-only paths — keep the sub-capture coverage
+    // default. An explicit --paint-fps always wins.
+    let kms_presenter_path = !matches!(
         presenter,
         camera_box::probe::presenter::PresenterKind::Fbdev
-    );
+    ) && args.synth_ndi.is_none()
+        && !args.paint_only;
     let paint_fps = args.paint_fps.unwrap_or(match mode {
-        PaintMode::Coverage if kms_capable => args.capture_fps,
+        PaintMode::Coverage if kms_presenter_path => args.capture_fps,
         PaintMode::Coverage => 12.0,
         PaintMode::FullRate => args.capture_fps,
     });

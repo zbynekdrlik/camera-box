@@ -146,6 +146,41 @@ pub fn is_phase_lockable(mode: &ModeCandidate, target_refresh_mhz: u32) -> bool 
     mode.refresh_mhz == target_refresh_mhz
 }
 
+/// Compute a mode's vertical refresh in **milli-Hz** from its raw timing, the
+/// way the kernel does — `clock_khz * 1e6 / (htotal * vtotal)`, doubled for
+/// interlace and halved for double-scan.
+///
+/// `ModeCandidate::refresh_mhz` is documented as milli-Hz precisely so the
+/// 59.94-vs-60.00 distinction is expressible and the exact-60.000 Hz phase lock
+/// is real. The `drm` crate's `Mode::vrefresh()` returns ROUNDED INTEGER Hz, so
+/// a 59.94 Hz mode reports `60` and would be falsely treated as the exact
+/// 60.000 Hz lock — defeating [`is_phase_lockable`]. Deriving from the timing
+/// gives true milli-Hz so a 59.94 mode reads as 59_940, not 60_000.
+///
+/// Returns `0` if the timing is degenerate (`htotal == 0` or `vtotal == 0`),
+/// which the caller treats as "no usable refresh" (never the 60.000 target).
+pub fn refresh_mhz_from_timing(
+    clock_khz: u32,
+    htotal: u32,
+    vtotal: u32,
+    interlace: bool,
+    dblscan: bool,
+) -> u32 {
+    let denom = (htotal as u64).saturating_mul(vtotal as u64);
+    if denom == 0 {
+        return 0;
+    }
+    // clock is in kHz; * 1e6 (kHz->Hz is *1000, Hz->mHz is *1000) / lines.
+    let mut mhz = (clock_khz as u64).saturating_mul(1_000_000) / denom;
+    if interlace {
+        mhz = mhz.saturating_mul(2); // two fields per frame -> double the field rate
+    }
+    if dblscan {
+        mhz /= 2; // each line scanned twice -> half the frame rate
+    }
+    mhz.min(u32::MAX as u64) as u32
+}
+
 /// The next back-buffer index for a double-buffered flip, given the index that
 /// is currently scanned out (the front buffer). With exactly two BOs this is
 /// just the other one; kept as a named pure function so the toggle is tested and
@@ -311,9 +346,45 @@ mod hw {
             // a no-op. We record whether WE detached it so drop rebinds it.
             let detached_fbcon = super::fbcon::detach().unwrap_or(false);
 
+            // From here on any failure must UNDO the detach (and any master we
+            // grab), because `Self` — and thus its `Drop` cleanup — is only
+            // constructed on the success path. Without this, a failure after
+            // detach (the EXPECTED path in `Auto` mode: master held by a
+            // compositor, or no canvas-matching mode → the bail below) would
+            // leave the live HDMI console orphaned while the caller "falls back
+            // to fbdev". So run the fallible body, and on error rebind fbcon.
+            Self::open_inner(device, canvas_w, canvas_h, detached_fbcon).inspect_err(|_| {
+                if detached_fbcon {
+                    if let Err(e) = super::fbcon::attach() {
+                        tracing::warn!(
+                            "KmsPresenter: rebind fbcon after failed open() failed: {:?}",
+                            e
+                        );
+                    }
+                }
+            })
+        }
+
+        /// The fallible body of [`open`](Self::open). Any DRM master it acquires
+        /// is released here on the error paths (so a failure after master-grab
+        /// does not leak the lock); fbcon rebind on error is handled by the
+        /// caller via `detached_fbcon`.
+        fn open_inner(
+            device: &str,
+            canvas_w: u32,
+            canvas_h: u32,
+            detached_fbcon: bool,
+        ) -> Result<Self> {
+            // O_NONBLOCK so `receive_events()` returns EAGAIN instead of blocking
+            // the read forever when no page-flip event is queued — this is what
+            // makes `wait_flip_complete`'s 500 ms timeout actually able to fire
+            // on a wedged/lost flip (a blocking fd would park the painter thread
+            // inside read() and never reach the deadline check).
+            use std::os::unix::fs::OpenOptionsExt;
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
+                .custom_flags(libc::O_NONBLOCK)
                 .open(device)
                 .with_context(|| format!("open DRM device {}", device))?;
             let card = Card(file);
@@ -321,33 +392,72 @@ mod hw {
             // Become DRM master so set_crtc / page_flip are permitted.
             card.acquire_master_lock()
                 .context("acquire DRM master (is another compositor holding the CRTC?)")?;
+            // Master is held now; every error path below must release it (the
+            // `Card` File close alone does NOT drop master cleanly on all
+            // kernels). `with_master` runs the rest and releases on Err.
+            Self::with_master(card, canvas_w, canvas_h, detached_fbcon)
+        }
 
-            let res = card
-                .resource_handles()
-                .context("read DRM resource handles")?;
+        /// Runs the post-master setup; releases the DRM master lock if any step
+        /// errors (so a partial open does not leave the lock held).
+        fn with_master(
+            card: Card,
+            canvas_w: u32,
+            canvas_h: u32,
+            detached_fbcon: bool,
+        ) -> Result<Self> {
+            match Self::build(card, canvas_w, canvas_h, detached_fbcon) {
+                Ok(this) => Ok(this),
+                Err((card, e)) => {
+                    if let Err(re) = card.release_master_lock() {
+                        tracing::warn!(
+                            "KmsPresenter: release DRM master after failed open() failed: {:?}",
+                            re
+                        );
+                    }
+                    Err(e)
+                }
+            }
+        }
+
+        /// The CRTC/mode/buffer setup. On error returns the `Card` back so the
+        /// caller can release master (we can't run `?` and still hand the card
+        /// back, so map each step's error to `(card, err)`).
+        fn build(
+            card: Card,
+            canvas_w: u32,
+            canvas_h: u32,
+            detached_fbcon: bool,
+        ) -> std::result::Result<Self, (Card, anyhow::Error)> {
+            macro_rules! tryc {
+                ($e:expr) => {
+                    match $e {
+                        Ok(v) => v,
+                        Err(e) => return Err((card, anyhow::Error::from(e))),
+                    }
+                };
+            }
+            macro_rules! bailc {
+                ($($arg:tt)*) => {
+                    return Err((card, anyhow!($($arg)*)))
+                };
+            }
+            let res = tryc!(card.resource_handles().context("read DRM resource handles"));
 
             // Find a connected connector (prefer HDMI) and its modes.
-            let (connector, modes) = Self::find_connected(&card, &res)?;
-            let candidates: Vec<ModeCandidate> = modes
-                .iter()
-                .map(|m| ModeCandidate {
-                    width: m.size().0 as u32,
-                    height: m.size().1 as u32,
-                    refresh_mhz: m.vrefresh().saturating_mul(1000),
-                    preferred: m
-                        .mode_type()
-                        .contains(drm::control::ModeTypeFlags::PREFERRED),
-                })
-                .collect();
-            let chosen = pick_mode(&candidates, canvas_w, canvas_h, TARGET_REFRESH_MHZ)
-                .ok_or_else(|| anyhow!("connector has no usable mode"))?;
+            let (connector, modes) = tryc!(Self::find_connected(&card, &res));
+            let candidates: Vec<ModeCandidate> = modes.iter().map(Self::mode_candidate).collect();
+            let chosen = match pick_mode(&candidates, canvas_w, canvas_h, TARGET_REFRESH_MHZ) {
+                Some(c) => c,
+                None => bailc!("connector has no usable mode"),
+            };
             // The painter renders a fixed canvas_w×canvas_h frame; if no mode at
             // that exact resolution exists, the scanned-out buffer would be a
             // different size than every painted frame and present() would reject
             // each one. Fail to open (so the caller falls back to fbdev) rather
             // than light up a mode the painter can never fill.
             if chosen.width != canvas_w || chosen.height != canvas_h {
-                bail!(
+                bailc!(
                     "no DRM mode matches the painter canvas {}x{} (best available {}x{}@{} mHz) — \
                      the painter cannot fill a different scanout size",
                     canvas_w,
@@ -358,28 +468,26 @@ mod hw {
                 );
             }
             let phase_locked = is_phase_lockable(&chosen, TARGET_REFRESH_MHZ);
-            // Map the chosen candidate back to the real Mode (match w/h/refresh).
-            let mode = *modes
-                .iter()
-                .find(|m| {
-                    m.size().0 as u32 == chosen.width
-                        && m.size().1 as u32 == chosen.height
-                        && m.vrefresh().saturating_mul(1000) == chosen.refresh_mhz
-                })
-                .ok_or_else(|| anyhow!("chosen mode vanished from connector list"))?;
+            // Map the chosen candidate back to the real Mode (match on the same
+            // derived candidate, so the milli-Hz refresh comparison is exact).
+            let mode = match modes.iter().find(|m| Self::mode_candidate(m) == chosen) {
+                Some(m) => *m,
+                None => bailc!("chosen mode vanished from connector list"),
+            };
 
             let (width, height) = (chosen.width, chosen.height);
 
             // Pick a CRTC that can drive this connector (via its encoder).
-            let crtc = Self::pick_crtc(&card, &res, connector)?;
+            let crtc = tryc!(Self::pick_crtc(&card, &res, connector));
 
             // Two dumb BOs + framebuffers — the real double buffer.
-            let slot0 = Self::make_slot(&card, width, height)?;
-            let slot1 = Self::make_slot(&card, width, height)?;
+            let slot0 = tryc!(Self::make_slot(&card, width, height));
+            let slot1 = tryc!(Self::make_slot(&card, width, height));
 
             // Initial scanout: BO 0.
-            card.set_crtc(crtc, Some(slot0.fb), (0, 0), &[connector], Some(mode))
-                .context("set initial CRTC scanout")?;
+            tryc!(card
+                .set_crtc(crtc, Some(slot0.fb), (0, 0), &[connector], Some(mode))
+                .context("set initial CRTC scanout"));
 
             if !phase_locked {
                 tracing::warn!(
@@ -413,6 +521,27 @@ mod hw {
                 detached_fbcon,
                 held_master: true,
             })
+        }
+
+        /// Reduce a real DRM `Mode` to a [`ModeCandidate`], deriving the exact
+        /// milli-Hz refresh from the timing (not the rounded integer `vrefresh`)
+        /// so the 60.000 Hz phase lock is real — see [`refresh_mhz_from_timing`].
+        fn mode_candidate(m: &Mode) -> ModeCandidate {
+            let flags = m.flags();
+            ModeCandidate {
+                width: m.size().0 as u32,
+                height: m.size().1 as u32,
+                refresh_mhz: refresh_mhz_from_timing(
+                    m.clock(),
+                    m.hsync().2 as u32,
+                    m.vsync().2 as u32,
+                    flags.contains(drm::control::ModeFlags::INTERLACE),
+                    flags.contains(drm::control::ModeFlags::DBLSCAN),
+                ),
+                preferred: m
+                    .mode_type()
+                    .contains(drm::control::ModeTypeFlags::PREFERRED),
+            }
         }
 
         fn find_connected(
@@ -497,17 +626,30 @@ mod hw {
 
         /// Block until the next page-flip completes (vblank), with a timeout so a
         /// stuck flip surfaces as an error rather than hanging the run forever.
+        ///
+        /// The fd is O_NONBLOCK (see `open_inner`), so `receive_events()` returns
+        /// EAGAIN/`WouldBlock` when nothing is queued — we treat that as "no
+        /// event yet, sleep and re-check the deadline", which is what lets the
+        /// timeout actually fire on a wedged flip (a blocking read would never
+        /// return control to the deadline check).
         fn wait_flip_complete(&self) -> Result<()> {
             let deadline = Instant::now() + Duration::from_millis(500);
             loop {
                 if Instant::now() >= deadline {
                     bail!("timed out waiting for DRM page-flip completion event");
                 }
-                let events = self.card.receive_events().context("receive DRM events")?;
-                for ev in events {
-                    if let Event::PageFlip(_) = ev {
-                        return Ok(());
+                match self.card.receive_events() {
+                    Ok(events) => {
+                        for ev in events {
+                            if let Event::PageFlip(_) = ev {
+                                return Ok(());
+                            }
+                        }
                     }
+                    // No event ready yet on the non-blocking fd — fall through to
+                    // the sleep and re-check the deadline next iteration.
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(anyhow::Error::from(e).context("receive DRM events")),
                 }
                 // No event yet; brief sleep so we don't spin the CPU.
                 std::thread::sleep(Duration::from_micros(200));
@@ -562,7 +704,14 @@ mod hw {
             // HDMI display returns after the run. Best-effort — log failures.
             let _ = (self.crtc, self.connector, self.mode); // keep fields used
             for slot in &self.slots {
+                // Tear down BOTH objects each slot allocated: the framebuffer
+                // (metadata) AND the backing dumb buffer (the GEM BO). `drm`
+                // 0.15's `DumbBuffer` has no `Drop`, so omitting
+                // `destroy_dumb_buffer` leaks the ~8 MB (1080p XRGB) kernel
+                // allocation on every teardown. `DumbBuffer` is `Copy`, so we
+                // can destroy the FB first then the BO by value.
                 let _ = self.card.destroy_framebuffer(slot.fb);
+                let _ = self.card.destroy_dumb_buffer(slot.db);
             }
             if self.held_master {
                 if let Err(e) = self.card.release_master_lock() {
@@ -748,6 +897,43 @@ mod tests {
         let modes = [m(1280, 720, 50_000, false), m(2560, 1440, 50_000, false)];
         let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
         assert_eq!((got.width, got.height), (2560, 1440));
+    }
+
+    #[test]
+    fn refresh_mhz_from_timing_distinguishes_5994_from_6000() {
+        // CTA-861 1080p60.000: pixel clock 148.5 MHz, 2200x1125 total.
+        // 148_500_000 / (2200*1125) = 60.000 Hz exactly -> 60_000 mHz.
+        assert_eq!(
+            refresh_mhz_from_timing(148_500, 2200, 1125, false, false),
+            60_000
+        );
+        // CTA-861 1080p59.94: pixel clock 148.352 MHz, same totals.
+        // 148_352_000 / 2_475_000 = 59.940... -> 59_940 mHz (NOT 60_000).
+        let r = refresh_mhz_from_timing(148_352, 2200, 1125, false, false);
+        assert!(
+            (59_930..=59_950).contains(&r),
+            "59.94 must read ~59_940 mHz, not 60_000 — got {r}"
+        );
+        assert_ne!(
+            r, TARGET_REFRESH_MHZ,
+            "59.94 must NOT match the 60.000 lock"
+        );
+    }
+
+    #[test]
+    fn refresh_mhz_from_timing_interlace_doubles_dblscan_halves() {
+        // Same base timing; interlace -> field rate doubled, dblscan -> halved.
+        let base = refresh_mhz_from_timing(74_250, 2200, 562, false, false);
+        let inter = refresh_mhz_from_timing(74_250, 2200, 562, true, false);
+        let dbl = refresh_mhz_from_timing(74_250, 2200, 562, false, true);
+        assert_eq!(inter, base * 2);
+        assert_eq!(dbl, base / 2);
+    }
+
+    #[test]
+    fn refresh_mhz_from_timing_zero_total_is_zero() {
+        assert_eq!(refresh_mhz_from_timing(148_500, 0, 1125, false, false), 0);
+        assert_eq!(refresh_mhz_from_timing(148_500, 2200, 0, false, false), 0);
     }
 
     #[test]
