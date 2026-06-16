@@ -58,10 +58,15 @@ INPUT = "phase2-probe-src"
 #                           compositor cursor -> BLACK.
 #   - ndi_bw_mode=0      -> highest bandwidth (full quality), as before.
 # Merged FIRST in each settings dict so the per-call ndi_source_name still overrides cleanly.
-# latency=2 (Lowest/unbuffered) MIRRORS the live cam inputs' min-latency config — the
-# genlock FIFO preload (OBS_GENLOCK_PRELOAD_FRAMES) is the ONLY jitter buffer; the DistroAV
-# receive buffer (Normal=0) must be off so the harness measures the real minimum-latency path.
-_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 2}
+# latency=0 (Normal) MIRRORS the live, proven cam inputs (NDI cam1/3/5 are all latency=0 on
+# strih) and IS THE CERTIFIED low-latency zero-loss ingest mode (#84): the A/B measurement
+# found the DistroAV receive buffer is NOT a real latency lever once genlock is active — the
+# wall-clock render tick dominates emit timing, and Normal(0) gives a ~33 ms LOWER strih
+# abs_emit p50 than Lowest(2) while staying zero-loss. The genlock FIFO preload
+# (OBS_GENLOCK_PRELOAD_FRAMES) is the jitter buffer that matters. The probe MUST run at the
+# pinned 0 (vendor/README.md ndi_input_latency) so this harness measures the certified config,
+# not a different one. (Was latency=2 pre-#84, before the A/B re-pin to Normal(0).)
+_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 0}
 
 
 def _load_state():
@@ -116,6 +121,28 @@ def _rpc(ws, rtype, rdata=None, ignore_err=False):
             if not st["result"] and not ignore_err:
                 raise RuntimeError(f"{rtype} failed: {st}")
             return m["d"].get("responseData") or {}
+
+
+# #93: how long to wait after idling the probe receiver for the DistroAV av_thread to
+# fully exit its reset_ndi_receiver block before we re-point the source. One render tick
+# is ~20 ms at 50 fps; 0.25 s is comfortably several ticks of margin (the av_thread polls
+# its reset flag once per loop iteration, ~5–100 ms) without slowing the run meaningfully.
+_QUIESCE_RENDER_TICK_S = 0.25
+
+
+def _quiesce_probe_input(ws):
+    """#93: idle the reused probe ndi_source BEFORE re-pointing it, so the re-point lands
+    on a dormant receiver instead of racing a live av_thread. Clearing ndi_source_name
+    makes DistroAV tear the receiver down cleanly (the same idle discipline teardown uses);
+    genlock_fifo off stops the dormant input running the consume path against an empty queue
+    (#70). Then wait one render tick for the av_thread to exit its reset block. Best-effort:
+    a quiesce failure must not abort setup (the C++ config_mutex fix is the real guard)."""
+    _rpc(ws, "SetInputSettings", {
+        "inputName": INPUT,
+        "inputSettings": {"ndi_source_name": "", "genlock_fifo": False},
+        "overlay": True,
+    }, ignore_err=True)
+    time.sleep(_QUIESCE_RENDER_TICK_S)
 
 
 def setup(a):
@@ -178,7 +205,20 @@ def setup(a):
             "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
         }, ignore_err=True)
     else:
-        # Reuse: re-point the existing dormant input at this run's upstream ...
+        # #93: QUIESCE before re-pointing a possibly-LIVE probe input. If a prior run
+        # left the probe scene on program (a crash, or back-to-back runs), the
+        # ndi_source receiver+av_thread are still live on the old upstream. Re-pointing
+        # it in place (SetInputSettings → ndi_source_update) frees/reallocs the NDI
+        # source-name string the av_thread is mid-read on → DistroAV heap corruption
+        # (the strih OBS crash). The C++ config_mutex+owned-copies fix makes that race
+        # safe, but the harness ALSO idles the receiver first (mirror teardown's idle
+        # discipline) so the re-point lands on a dormant source: clear ndi_source_name
+        # (DistroAV tears the receiver down cleanly) + genlock_fifo off, then wait one
+        # render tick for the av_thread to fully exit its reset before re-pointing.
+        _quiesce_probe_input(ws)
+        # Reuse: re-point the now-idle input at this run's upstream, applying the full
+        # certified probe settings idempotently in ONE update (no per-cycle HW-accel /
+        # Latency churn on a live source).
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
             "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},

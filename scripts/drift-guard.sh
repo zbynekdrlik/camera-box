@@ -26,7 +26,8 @@
 # Usage:
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
 #   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
-#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1
+#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1 \
+#       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0"
 #   scripts/drift-guard.sh --help
 #
 # Exit codes: 0 = clean (pins valid / no drift), 20 = DRIFT detected, 11 = at least one observed
@@ -171,6 +172,50 @@ drift_check() {
   esac
 }
 
+# drift_check_inputs EXPECTED OBSERVED_CSV -> per-input latency drift on the genlocked
+# broadcast-path NDI inputs (#84). EXPECTED is the single pinned latency mode (e.g. "0"=Normal);
+# OBSERVED_CSV is a comma-separated "input name=latency" list gathered live (the obs-websocket
+# GetInputSettings `latency` field per input). Each entry that differs from EXPECTED is DRIFT;
+# an EMPTY observed set is UNKNOWN (never OK — a path we could not read must not look clean).
+# Prints one status line per input and a verdict; returns 0 OK / 2 DRIFT / 3 UNKNOWN.
+drift_check_inputs() {
+  local expected="$1" csv="$2" entry name lat drift=0 n=0
+  if [ -z "$csv" ]; then
+    printf '  %-20s UNKNOWN  (expected every broadcast input = %s, observed <none>)\n' \
+      "ndi_input_latency" "$expected"
+    return 3
+  fi
+  # Split on commas (input names may contain spaces — "NDI cam5" — but never commas).
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    [ -z "$entry" ] && continue
+    name="${entry%%=*}"; lat="${entry#*=}"
+    # trim surrounding whitespace from the name/value
+    name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+    lat="${lat#"${lat%%[![:space:]]*}"}"; lat="${lat%"${lat##*[![:space:]]}"}"
+    # A whitespace-only entry (e.g. a doubled comma " , ") trims to a blank name — it
+    # carries no input, so skip it rather than emit a confusing blank-named DRIFT line.
+    [ -z "$name" ] && continue
+    n=$((n + 1))
+    if [ "$lat" = "$expected" ]; then
+      printf '  input %-20s OK       (latency=%s)\n' "$name" "$lat"
+    else
+      printf '  input %-20s DRIFT    (expected latency=%s, observed %s)\n' "$name" "$expected" "$lat"
+      drift=$((drift + 1))
+    fi
+  done
+  if [ "$n" -eq 0 ]; then
+    printf '  %-20s UNKNOWN  (expected every broadcast input = %s, observed <none>)\n' \
+      "ndi_input_latency" "$expected"
+    return 3
+  fi
+  [ "$drift" -gt 0 ] && return 2
+  return 0
+}
+
 # validate_semver / validate_nonempty -> 0 if the pinned value is present + shaped, else 1 (loud).
 validate_semver() {
   local name="$1" val="$2"
@@ -206,7 +251,11 @@ Usage:
   scripts/drift-guard.sh --compare KEY=VAL ...            # compare live-observed values vs pins
   scripts/drift-guard.sh --help
 
---compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock
+--compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock,
+  ndi_input_latency (a comma-separated "input name=latency" list for the genlocked broadcast-path
+  NDI inputs, e.g. ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" on strih or
+  ndi_input_latency="NDI 2ME PGM=0" on stream — each input's obs-websocket GetInputSettings
+  `latency` field; 0=Normal is the pinned certified low-latency zero-loss mode, #84).
   (gather them read-only off strih/stream via the win-* MCP tools — see
    .claude/commands/drift-guard.md). Any key you omit is reported UNKNOWN.
 
@@ -216,7 +265,7 @@ EOF
 }
 
 check_pins() {
-  local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6"
+  local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
   validate_semver   "obs_version"        "$p_obs"      || errs=$((errs + 1))
@@ -224,6 +273,7 @@ check_pins() {
   validate_semver   "ndi_runtime_min"    "$p_ndi"      || errs=$((errs + 1))
   validate_nonempty "output_fps"         "$p_fps"      || errs=$((errs + 1))
   validate_nonempty "genlock_wall_clock" "$p_genlock"  || errs=$((errs + 1))
+  validate_nonempty "ndi_input_latency"  "$p_latency"  || errs=$((errs + 1))
   if [ "$errs" -gt 0 ]; then
     echo >&2
     echo "!! $errs pinned value(s) missing or malformed in $readme." >&2
@@ -232,7 +282,7 @@ check_pins() {
   fi
   echo
   echo "All pins present + well-formed:"
-  echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps=$p_fps genlock_wall_clock=$p_genlock"
+  echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps=$p_fps genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
   # This catches a `git subtree pull` that bumped vendor/distroav without updating the table
@@ -259,8 +309,8 @@ check_pins() {
 }
 
 compare_observed() {
-  local host="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6"
-  local o_obs="$7" o_distroav="$8" o_ndi="$9" o_fps="${10}" o_genlock="${11}"
+  local host="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7"
+  local o_obs="$8" o_distroav="$9" o_ndi="${10}" o_fps="${11}" o_genlock="${12}" o_latency="${13}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -279,6 +329,14 @@ compare_observed() {
     [ "$rc" -eq 2 ] && drift=$((drift + 1))
     [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
   done
+
+  # Per-input NDI ingest latency (#84): every genlocked broadcast-path input must run the pinned
+  # Lowest mode. drift_check_inputs prints one line per observed input and rolls up to OK/DRIFT/
+  # UNKNOWN, so a single drifted input (the failure this guard exists to catch) fails the box.
+  rc=0
+  drift_check_inputs "$p_latency" "$o_latency" || rc=$?
+  [ "$rc" -eq 2 ] && drift=$((drift + 1))
+  [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
 
   echo
   if [ "$drift" -gt 0 ]; then
@@ -313,20 +371,21 @@ main() {
 
   [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
 
-  local p_obs p_distroav p_ndi p_fps p_genlock
+  local p_obs p_distroav p_ndi p_fps p_genlock p_latency
   p_obs="$(pinned_obs_version "$readme")"
   p_distroav="$(pinned_distroav_version "$readme")"
   p_ndi="$(pinned_ndi_min "$readme")"
   p_fps="$(pinned_setting "$readme" output_fps)"
   p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
+  p_latency="$(pinned_setting "$readme" ndi_input_latency)"
 
   if [ "$mode" = "check-pins" ]; then
-    check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock"
+    check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency"
     exit $?
   fi
 
   # --compare: collect observed key=val pairs.
-  local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" pair k v
+  local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" pair k v
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -336,12 +395,13 @@ main() {
       ndi_runtime)        o_ndi="$v" ;;
       output_fps)         o_fps="$v" ;;
       genlock_wall_clock) o_genlock="$v" ;;
+      ndi_input_latency)  o_latency="$v" ;;
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
 
-  compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" \
-    "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock"
+  compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" \
+    "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency"
 }
 
 main "$@"

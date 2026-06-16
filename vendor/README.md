@@ -30,6 +30,7 @@ part of that change; an *unexpected* difference is drift and the guard fails lou
 |---|---|---|
 | `output_fps` | `30` | OBS log `video settings reset: … fps: <n>/1` (current zero-loss rate; re-pin to `60` on the #11 rollout) |
 | `genlock_wall_clock` | `1` | OBS log `genlock: wall-clock-slaved render tick ENABLED` (running state) — the genlock master gate, **active** on both boxes since 2026-06-13 (the measured 0-drop strih→stream state). Persistent source is the **Machine** env var `OBS_GENLOCK_WALL_CLOCK=1` (`HKLM\…\Session Manager\Environment`); the gate is read at OBS launch, so the *running* truth is the log line, not a later `$env:` read (which a long-lived launcher/MCP process can hold stale) |
+| `ndi_input_latency` | `0` | DistroAV NDI **input** `latency` mode = **Normal** (the obs-websocket `GetInputSettings` `latency` field; `2`=Lowest, `1`=Low, `0`=Normal). This is the **certified LOW-LATENCY zero-loss** ingest mode for the genlocked path (#84). A/B measurement (twice, reversed) found the DistroAV ingest buffer is NOT a real latency lever once genlock is active: the wall-clock render tick dominates emit timing, so **Normal(0) gives a ~33 ms LOWER strih abs_emit p50** (216 ms vs 249 ms at Lowest(2)) while staying zero-loss over a 30-min run — Normal is the more-buffered, lower-latency, loss-free state. It is checked on the **genlocked broadcast-path inputs**: on strih the camera ingests (`NDI cam5`=CAM1, `NDI cam1`=CAM3, `NDI cam3`=CAM4), on stream the strih→stream program feed (`NDI 2ME PGM`). Re-pin only on a deliberate latency rollout (this `0` value IS such a deliberate re-pin, applied + verified live 2026-06-16); an input drifted off `0` is drift the guard flags. Non-broadcast inputs (preview/CG/lyrics) are out of scope of the pin |
 
 The OBS/DistroAV **versions** come from the version table above (single source of truth); the NDI
 runtime is checked `≥` the `NDI ≥ 6.3.0` minimum stated there. The two facets:
@@ -83,6 +84,19 @@ per `BUILD.md`, run the strict harness (#35), and update the table above with th
 Genlock changes (#42) are normal commits in THIS repo touching `vendor/` files — `git log
 -- vendor/` after the two import commits IS the patch series. Keep each patch commit
 focused and prefixed `genlock:` so the #44 update flow can review conflicts patch-by-patch.
+
+Beyond the genlock patches, the fork also carries a CORRECTNESS patch on top of upstream
+DistroAV:
+
+- **#93 NDI source-name use-after-free fix** (`src/ndi-source.cpp`): stock DistroAV
+  `ndi_source_update` (UI / obs-websocket thread) `bfree`s + `bstrdup`s
+  `config.ndi_source_name` on every update while the A/V thread borrows that exact pointer
+  into `recv_desc` → heap corruption when a live source is re-pointed (the strih OBS
+  crash). The patch adds a per-source `pthread_mutex_t config_mutex` (held only around the
+  config-mutation section of `update` and the A/V thread's `reset_ndi_receiver` copy — never
+  the render path, never across a blocking NDI call) plus A/V-thread-owned `bstrdup` copies
+  of the name strings that `recv_desc` binds to. Guarded by
+  `tests/distroav_source_config_lock.rs` so a `git subtree pull` can't silently revert it.
 
 ## Build
 

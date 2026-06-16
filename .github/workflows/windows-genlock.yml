@@ -104,6 +104,54 @@ jobs:
           }
           Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
 
+      # #93: assert the NDI source-name use-after-free fix is present in the vendored
+      # DistroAV source BEFORE the 150-min build, so a future `git subtree pull` (#44)
+      # that reverts it fails HERE rather than shipping a distroav.dll that re-crashes
+      # strih OBS with STATUS_HEAP_CORRUPTION when a live source is re-pointed. Mirrors
+      # the canonical Linux-CI guard tests/distroav_source_config_lock.rs (that crate is
+      # Linux-only and cannot compile on this Windows runner). Keep both in lock-step.
+      # The negative checks target the stock direct config-pointer borrows into recv_desc
+      # (the exact UAF); the positive checks require the config_mutex + av_thread-owned
+      # name copies.
+      - name: Assert DistroAV NDI source-name UAF fix present (#93)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/distroav/src/ndi-source.cpp" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('pthread_mutex_t config_mutex')) {
+            Write-Error "ndi-source.cpp: per-source config_mutex missing — #93 source-name UAF fix reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('pthread_mutex_init(&s->config_mutex')) {
+            Write-Error "ndi-source.cpp: config_mutex never pthread_mutex_init'd — #93 fix reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('pthread_mutex_destroy(&s->config_mutex')) {
+            Write-Error "ndi-source.cpp: config_mutex never pthread_mutex_destroy'd — #93 fix reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('recv_desc.source_to_connect_to.p_ndi_name = owned_source_name')) {
+            Write-Error "ndi-source.cpp: recv_desc no longer binds the av_thread-owned source-name copy — #93 fix reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('recv_desc.p_ndi_recv_name = owned_receiver_name')) {
+            Write-Error "ndi-source.cpp: recv_desc no longer binds the av_thread-owned receiver-name copy — #93 fix reverted"; exit 1
+          }
+          if ($src -match [regex]::Escape('recv_desc.source_to_connect_to.p_ndi_name = s->config.ndi_source_name')) {
+            Write-Error "ndi-source.cpp: recv_desc is borrowing the live s->config.ndi_source_name again (stock code) — #93 UAF is BACK"; exit 1
+          }
+          if ($src -match [regex]::Escape('recv_desc.p_ndi_recv_name = s->config.ndi_receiver_name')) {
+            Write-Error "ndi-source.cpp: recv_desc is borrowing the live s->config.ndi_receiver_name again (stock code) — #93 UAF is BACK"; exit 1
+          }
+          # on_ndi_source_renamed is the SECOND writer of ndi_receiver_name and must hold
+          # the lock too (review). Assert the renamed handler still takes config_mutex.
+          # Capture from its signature to its closing brace (the handler currently has no
+          # inner '{ }' block, so [^}]*?\} reaches the right brace). The canonical robust
+          # guard is the Rust test on_ndi_source_renamed_takes_the_config_lock (next-
+          # function-boundary extraction); this pwsh check keeps the prod build in
+          # lock-step with it.
+          $renamed = ''
+          if ($src -match 'void on_ndi_source_renamed\([^}]*?\}') { $renamed = $matches[0] }
+          if ($renamed -notmatch [regex]::Escape('pthread_mutex_lock(&s->config_mutex')) {
+            Write-Error "ndi-source.cpp: on_ndi_source_renamed no longer locks config_mutex around the ndi_receiver_name realloc — #93 residual UAF"; exit 1
+          }
+          Write-Output "DistroAV NDI source-name UAF fix present (config_mutex at update + reset + rename, av_thread-owned name copies, no live config-pointer borrow) — OK"
+
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
       # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)
