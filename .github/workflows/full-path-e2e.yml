@@ -10,8 +10,8 @@ name: Full-path E2E (hardware · self-hosted dev1)
 #     stream OBS program to the probe scene for the run duration, taking the chain
 #     OFF-AIR. An operator must dispatch it knowing the chain is free to disrupt —
 #     the operator is the guard (project decision: no automated streaming guard).
-#     The harness teardown trap restores each box's program+preview scene on exit
-#     (incl. cancel), and the cam2 service is re-asserted below.
+#     The harness teardown trap restores each box's program+preview scene AND the
+#     cam2 service on exit (incl. cancel) — see scripts/multitap-e2e.sh cleanup().
 #   * runs-on the self-hosted dev1 runner (label `camera-lan`) — GitHub-hosted
 #     runners cannot reach cam2/strih/stream on the 10.77.9.0/24 LAN.
 #   * NOT part of ci.yml — a per-PR run would reroute prod on every push. This is
@@ -37,10 +37,10 @@ on:
 permissions:
   contents: read
 
-# Share ONE hardware concurrency group with loopback-e2e so two runs never fight
-# for cam2 / the OBS chain at once.
+# Share ONE hardware concurrency group with loopback-e2e (its exact group string)
+# so the two hardware workflows never fight for cam2 / the OBS chain at once.
 concurrency:
-  group: camera-box-hardware-e2e
+  group: loopback-e2e-hardware
   cancel-in-progress: false
 
 jobs:
