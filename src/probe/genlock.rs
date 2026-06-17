@@ -140,17 +140,24 @@ pub fn preload_to_ms(frames: u32, fps_num: u32, fps_den: u32) -> u64 {
 /// libobs force-drains a source's async FIFO when it reaches the drop-cap (an
 /// overrun). For a NON-genlock source the cap stays the fixed [`MAX_ASYNC_FRAMES`]
 /// (30) — those sources never deliberately buffer, so a deep cap would only mask a
-/// runaway producer. For a **genlock** source the operator may deliberately hold a
-/// large delay buffer (`preload` frames), so the cap must scale with the preload:
-/// `preload + RESERVE`, clamped to an absolute maximum of
-/// `GENLOCK_PRELOAD_MAX + RESERVE` (= 132). This keeps memory bounded (only a
-/// deliberately-delayed source holds a big buffer — stream.lan is RAM-tight, #89)
-/// while letting a ~1 s delay (30 frames) park without force-draining.
+/// runaway producer. For a **genlock** source the cap =
+/// `max(MAX_ASYNC_FRAMES, preload + RESERVE)`, clamped to an absolute maximum of
+/// `GENLOCK_PRELOAD_MAX + RESERVE` (= 132).
+///
+/// The [`MAX_ASYNC_FRAMES`] floor is load-bearing: before #97 every source (genlock
+/// included) had the fixed 30-frame cap, which absorbed NDI catch-up bursts after a
+/// LAN hiccup. Scaling the cap to `preload + RESERVE` *alone* would, at the
+/// production default `preload = 1`, drop the cap to 5 — a 6× cut in burst tolerance
+/// on exactly the jittery sources the genlock FIFO exists to protect, so a momentary
+/// stall delivering a 5-frame catch-up burst would force-drain the whole buffer.
+/// Keeping the 30-frame floor preserves the pre-#97 burst tolerance; the cap only
+/// GROWS above it once the operator dials in a deep delay (memory stays bounded —
+/// only a deliberately-delayed source holds a big buffer, stream.lan is RAM-tight #89).
 pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
     if !genlock_fifo {
         return MAX_ASYNC_FRAMES;
     }
     let want = preload.saturating_add(GENLOCK_DROP_CAP_RESERVE);
     let abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
-    want.min(abs_max)
+    want.min(abs_max).max(MAX_ASYNC_FRAMES)
 }

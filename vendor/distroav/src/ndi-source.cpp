@@ -25,7 +25,8 @@
 #include <QUrl>
 
 #include <thread>
-#include <cstdio> /* camera-box #97: snprintf for the preload ms info-text label */
+#include <cstdio>  /* camera-box #97: snprintf for the preload ms info-text label */
+#include <cstdlib> /* camera-box #97: getenv/strtol for OBS_GENLOCK_PRELOAD_FRAMES default */
 
 #define PROP_SOURCE "ndi_source_name"
 #define PROP_BEHAVIOR "ndi_behavior"
@@ -79,6 +80,28 @@ static set_genlock_fifo_fn resolve_set_genlock_fifo()
 				"the Genlock checkbox is inert (stock OBS?)");
 	}
 	return fn;
+}
+
+/* camera-box #97: the default genlock-preload depth for a NDI source the operator
+ * never touched — derived from OBS_GENLOCK_PRELOAD_FRAMES so the #70 env mechanism
+ * ("tune depth without a rebuild") still works on the very DistroAV sources it was
+ * built for. Without this, a hardcoded default of 1 in ndi_source_getdefaults would
+ * OVERWRITE the libobs env seed on every scene load (defaults are applied before
+ * create → update reads the setting → set_preload), silently reverting a non-1 env
+ * value to 1 (review finding). Clamped to [0, PROP_GENLOCK_PRELOAD_MAX]; invalid /
+ * unset → 1 (GENLOCK_PRELOAD_DEFAULT, mirrors the libobs parse). */
+static long genlock_preload_env_default()
+{
+	const char *env = getenv("OBS_GENLOCK_PRELOAD_FRAMES");
+	if (!env || !*env)
+		return 1;
+	char *end = nullptr;
+	long v = strtol(env, &end, 10);
+	if (end == env || *end != '\0' || v < 0)
+		return 1;
+	if (v > PROP_GENLOCK_PRELOAD_MAX)
+		return PROP_GENLOCK_PRELOAD_MAX;
+	return v;
 }
 
 /* camera-box #97: per-source genlock preload (video-delay) setter, runtime-resolved. */
@@ -367,28 +390,43 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	obs_property_t *preload_slider =
 		obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD, "Genlock preload (video delay)", 0,
 					      PROP_GENLOCK_PRELOAD_MAX, 1);
-	obs_property_t *preload_ms =
-		obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
-	obs_property_set_enabled(preload_ms, false);
-	obs_property_set_modified_callback(
-		preload_slider, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
-			const long long frames = obs_data_get_int(settings_, PROP_GENLOCK_PRELOAD);
-			struct obs_video_info ovi;
-			char buf[128];
-			if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
-				const unsigned long long ms =
-					(unsigned long long)frames * 1000ULL * ovi.fps_den / ovi.fps_num;
-				const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
+	obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
+	/* camera-box #97: recompute the read-only ms label whenever EITHER the preload
+	 * slider OR the genlock-fifo checkbox changes. The label is updated via the
+	 * property DESCRIPTION only — it is NOT written back into `settings`, so no
+	 * derived/locale string is persisted into the saved scene JSON (review finding).
+	 * The preload is only APPLIED when genlock_fifo is ON (ready_async_frame's
+	 * genlock branch), so when the box is off the label says the delay is inactive —
+	 * otherwise the slider looks like it should delay video when it does nothing
+	 * (review finding). Shared lambda for both callbacks. */
+	auto update_preload_ms = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
+		const long long frames = obs_data_get_int(settings_, PROP_GENLOCK_PRELOAD);
+		const bool fifo_on = obs_data_get_bool(settings_, PROP_GENLOCK_FIFO);
+		struct obs_video_info ovi;
+		char buf[160];
+		if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
+			const unsigned long long ms =
+				(unsigned long long)frames * 1000ULL * ovi.fps_den / ovi.fps_num;
+			const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
+			if (fifo_on)
 				snprintf(buf, sizeof(buf), "≈ %llu ms (@ %.3f fps)", ms, fps);
-			} else {
-				snprintf(buf, sizeof(buf), "≈ ? ms (output fps unknown)");
-			}
-			obs_data_set_string(settings_, PROP_GENLOCK_PRELOAD_MS, buf);
-			obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
-			if (ms_prop)
-				obs_property_set_description(ms_prop, buf);
-			return true; /* properties UI changed -> refresh */
-		});
+			else
+				snprintf(buf, sizeof(buf), "≈ %llu ms (@ %.3f fps) — enable Genlock to apply",
+					 ms, fps);
+		} else {
+			snprintf(buf, sizeof(buf), "≈ ? ms (output fps unknown)");
+		}
+		obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
+		if (ms_prop)
+			obs_property_set_description(ms_prop, buf);
+		return true; /* properties UI changed -> refresh */
+	};
+	obs_property_set_modified_callback(preload_slider, update_preload_ms);
+	/* Re-run the same label update when the genlock-fifo checkbox is toggled, so the
+	 * "enable Genlock to apply" hint appears/clears immediately. */
+	obs_property_t *genlock_fifo_prop = obs_properties_get(props, PROP_GENLOCK_FIFO);
+	if (genlock_fifo_prop)
+		obs_property_set_modified_callback(genlock_fifo_prop, update_preload_ms);
 
 	obs_properties_add_bool(props, PROP_HW_ACCEL, obs_module_text("NDIPlugin.SourceProps.HWAccel"));
 
@@ -447,10 +485,11 @@ void ndi_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709);
 	obs_data_set_default_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL);
 	obs_data_set_default_bool(settings, PROP_AUDIO, true);
-	/* camera-box #97: default genlock preload (video delay) = 1 frame, matching
-	 * libobs GENLOCK_PRELOAD_DEFAULT / the #70 env default — a source the operator
-	 * never touches keeps the original 1-frame jitter reserve. */
-	obs_data_set_default_int(settings, PROP_GENLOCK_PRELOAD, 1);
+	/* camera-box #97: default genlock preload (video delay) = the OBS_GENLOCK_PRELOAD_FRAMES
+	 * env value (or 1 when unset), matching the libobs #70 env default — so a source the
+	 * operator never touches keeps the env-tuned jitter reserve instead of silently
+	 * reverting it to 1 on scene load (review finding). */
+	obs_data_set_default_int(settings, PROP_GENLOCK_PRELOAD, genlock_preload_env_default());
 	obs_log(LOG_DEBUG, "-ndi_source_getdefaults(…)");
 }
 

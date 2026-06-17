@@ -4144,9 +4144,9 @@ void remove_async_frame(obs_source_t *source, struct obs_source_frame *frame)
 #define GENLOCK_DROP_CAP_RESERVE 4
 #define GENLOCK_AUDIT_LOG_INTERVAL_NS (5ULL * 1000 * 1000 * 1000) /* ~5 s */
 
-/* Pure clamp: a preload reserve / video-delay depth, clamped to
- * [0, GENLOCK_PRELOAD_MAX]. Mirrored & unit-tested in camera-box
- * tests/genlock_preload.rs (parse_preload). */
+/* Pure clamp of a strtol `long` to a preload reserve / video-delay depth in
+ * [0, GENLOCK_PRELOAD_MAX]. Used by the env parser (which produces a `long`).
+ * Mirrored & unit-tested in camera-box tests/genlock_preload.rs (parse_preload). */
 static uint32_t genlock_clamp_preload(long v)
 {
 	if (v < 0)
@@ -4154,6 +4154,15 @@ static uint32_t genlock_clamp_preload(long v)
 	if (v > GENLOCK_PRELOAD_MAX)
 		return GENLOCK_PRELOAD_MAX;
 	return (uint32_t)v;
+}
+
+/* Clamp an UNSIGNED preload to [0, GENLOCK_PRELOAD_MAX]. The setter takes a
+ * uint32_t, so it must clamp the unsigned value directly — NOT round-trip through
+ * `long`: on Windows (LLP64, 32-bit long) a uint32_t above LONG_MAX would cast to a
+ * negative long and the upper clamp would silently invert to 0 (review finding). */
+static uint32_t genlock_clamp_preload_u32(uint32_t v)
+{
+	return v > GENLOCK_PRELOAD_MAX ? (uint32_t)GENLOCK_PRELOAD_MAX : v;
 }
 
 /* Parse the OBS_GENLOCK_PRELOAD_FRAMES env value into a reserve depth. NULL/empty/
@@ -4187,10 +4196,18 @@ static uint32_t genlock_preload_default(void)
 }
 
 /* Per-source async-FIFO drop-cap (#97). A NON-genlock source keeps libobs' fixed
- * MAX_ASYNC_FRAMES (those sources never deliberately buffer). A genlock source may
- * hold a deliberately-deep delay buffer, so its cap scales with the preload:
- * preload + RESERVE, capped at GENLOCK_PRELOAD_MAX + RESERVE. Mirrored & unit-tested
- * in camera-box tests/genlock_preload.rs (genlock_drop_cap). */
+ * MAX_ASYNC_FRAMES (those sources never deliberately buffer). A genlock source's cap
+ * = max(MAX_ASYNC_FRAMES, preload + RESERVE), capped at GENLOCK_PRELOAD_MAX + RESERVE.
+ *
+ * The MAX_ASYNC_FRAMES floor matters: BEFORE #97 every source (genlock included) had
+ * the fixed 30-frame cap, which absorbed NDI catch-up bursts after a LAN hiccup.
+ * Scaling the cap to preload+RESERVE ALONE would, at the production default preload=1,
+ * drop the cap to 5 — a 6x cut in burst tolerance on exactly the jittery sources the
+ * genlock FIFO exists to protect (a momentary stall delivering a 5-frame catch-up
+ * burst would force-drain the whole buffer). Keeping the 30-frame floor preserves the
+ * pre-#97 burst tolerance; the cap only GROWS above it once the operator dials in a
+ * deep delay. Mirrored & unit-tested in camera-box tests/genlock_preload.rs
+ * (genlock_drop_cap). */
 static size_t genlock_source_drop_cap(const obs_source_t *source)
 {
 	if (!source->genlock_fifo)
@@ -4199,6 +4216,8 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 	const uint32_t abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
 	if (want > abs_max || want < source->genlock_preload /* overflow guard */)
 		want = abs_max;
+	if (want < MAX_ASYNC_FRAMES) /* never below the pre-#97 burst-tolerance floor */
+		want = MAX_ASYNC_FRAMES;
 	return (size_t)want;
 }
 
@@ -5835,7 +5854,7 @@ void obs_source_set_genlock_preload(obs_source_t *source, uint32_t frames)
 	 * ready_async_frame()/cache_video() (both run holding async_mutex), so an
 	 * unlocked write would race that read (the #93 UAF lesson the spec calls out).
 	 * The mutex is recursive, so this is safe even if a caller already holds it. */
-	const uint32_t clamped = genlock_clamp_preload((long)frames);
+	const uint32_t clamped = genlock_clamp_preload_u32(frames);
 	pthread_mutex_lock(&source->async_mutex);
 	const uint32_t prev = source->genlock_preload;
 	source->genlock_preload = clamped;

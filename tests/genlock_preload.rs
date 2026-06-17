@@ -112,10 +112,11 @@ fn non_genlock_drop_cap_is_max_async_frames() {
 
 #[test]
 fn genlock_drop_cap_scales_with_preload_and_clamps() {
-    // #97: a genlock source's drop-cap = preload + RESERVE, so a deliberately
-    // delayed source can hold its full buffer without an overrun force-drain. The
-    // cap MUST sit strictly above the steady-state depth (preload+1) or normal
-    // jitter trips it; with RESERVE=4 there are 3 frames of slack above steady.
+    // #97: a genlock source's drop-cap = max(MAX_ASYNC_FRAMES, preload + RESERVE),
+    // so a deliberately delayed source can hold its full buffer without an overrun
+    // force-drain, while a shallow preload keeps the pre-#97 30-frame burst-tolerance
+    // floor. The cap MUST sit strictly above the steady-state depth (preload+1) or
+    // normal jitter trips it.
     assert_eq!(GENLOCK_DROP_CAP_RESERVE, 4);
     for preload in [0u32, 1, 2, 30, 100, GENLOCK_PRELOAD_MAX] {
         let cap = genlock_drop_cap(true, preload);
@@ -125,10 +126,23 @@ fn genlock_drop_cap_scales_with_preload_and_clamps() {
              normal jitter force-drains the buffer",
             steady_state_depth(preload)
         );
+        // The cap NEVER drops below the pre-#97 fixed floor — that floor absorbed
+        // NDI catch-up bursts and must be preserved (review finding).
+        assert!(
+            cap >= MAX_ASYNC_FRAMES,
+            "preload={preload}: drop-cap {cap} fell below the MAX_ASYNC_FRAMES floor \
+             ({MAX_ASYNC_FRAMES}) — a 6x cut in NDI burst tolerance"
+        );
     }
-    // Below the absolute max, the cap is exactly preload + RESERVE.
-    assert_eq!(genlock_drop_cap(true, 0), GENLOCK_DROP_CAP_RESERVE);
-    assert_eq!(genlock_drop_cap(true, 30), 34);
+    // Shallow preloads (preload + RESERVE < 30) are floored at MAX_ASYNC_FRAMES, so
+    // the production default preload=1 keeps the full 30-frame burst buffer, NOT 5.
+    assert_eq!(genlock_drop_cap(true, 0), MAX_ASYNC_FRAMES);
+    assert_eq!(genlock_drop_cap(true, 1), MAX_ASYNC_FRAMES); // NOT 5
+    assert_eq!(genlock_drop_cap(true, 25), MAX_ASYNC_FRAMES); // 25+4=29 < 30 -> floored
+                                                              // At/above the floor crossover the cap is exactly preload + RESERVE.
+    assert_eq!(genlock_drop_cap(true, 26), 30); // 26+4 = 30 == floor
+    assert_eq!(genlock_drop_cap(true, 30), 34); // ~1 s delay -> 34, above the floor
+    assert_eq!(genlock_drop_cap(true, 100), 104);
     assert_eq!(
         genlock_drop_cap(true, GENLOCK_PRELOAD_MAX),
         GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE
@@ -368,6 +382,33 @@ mod vendored_source {
              genlock_drop_cap (preload+RESERVE); a deep preload force-drains every \
              refill and the delayed source FREEZES. Re-apply."
         );
+        // (review) The per-source cap MUST keep a floor at MAX_ASYNC_FRAMES so a
+        // shallow preload (the production default 1) doesn't cut burst tolerance from
+        // 30 to 5. The C helper carries an explicit `< MAX_ASYNC_FRAMES` floor.
+        assert!(
+            src.contains("want < MAX_ASYNC_FRAMES"),
+            "{OBS_SOURCE}: #97 — genlock_source_drop_cap dropped the MAX_ASYNC_FRAMES \
+             floor; a shallow preload cuts NDI burst tolerance 6x (30 -> 5). Re-apply."
+        );
+    }
+
+    #[test]
+    fn setter_clamps_unsigned_not_via_long() {
+        // (review) The setter takes a uint32_t and MUST clamp the unsigned value
+        // directly — round-tripping through `long` inverts the upper clamp to 0 on
+        // Windows LLP64 (32-bit long) for values above LONG_MAX.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("genlock_clamp_preload_u32(frames)"),
+            "{OBS_SOURCE}: #97 — obs_source_set_genlock_preload no longer clamps via \
+             the unsigned genlock_clamp_preload_u32; a (long) cast inverts the clamp on \
+             LLP64. Re-apply."
+        );
+        assert!(
+            !src.contains("genlock_clamp_preload((long)frames)"),
+            "{OBS_SOURCE}: #97 — the setter is back to genlock_clamp_preload((long)frames), \
+             which inverts the upper clamp to 0 on Windows LLP64. Use the u32 clamp."
+        );
     }
 
     #[test]
@@ -459,6 +500,27 @@ mod distroav_source {
             src.contains("PROP_GENLOCK_PRELOAD)"),
             "{NDI_SOURCE}: #97 — ndi_source_update no longer reads the \
              PROP_GENLOCK_PRELOAD setting; re-apply."
+        );
+    }
+
+    #[test]
+    fn preload_default_derives_from_env_for_back_compat() {
+        // #97 (review): ndi_source_getdefaults must derive the PROP_GENLOCK_PRELOAD
+        // default from OBS_GENLOCK_PRELOAD_FRAMES, NOT hardcode 1 — else the #70 env
+        // mechanism is silently reverted to 1 on every scene load for DistroAV sources.
+        let src = squish(&vendor_file(NDI_SOURCE));
+        assert!(
+            src.contains("genlock_preload_env_default")
+                && src.contains("getenv(\"OBS_GENLOCK_PRELOAD_FRAMES\")"),
+            "{NDI_SOURCE}: #97 — the genlock-preload default no longer derives from \
+             OBS_GENLOCK_PRELOAD_FRAMES; a hardcoded default overwrites the libobs env \
+             seed on scene load (#70 back-compat regression). Re-apply."
+        );
+        // The default must NOT be the bare literal 1 (the reverted form).
+        assert!(
+            src.contains("obs_data_set_default_int(settings, PROP_GENLOCK_PRELOAD, genlock_preload_env_default())"),
+            "{NDI_SOURCE}: #97 — PROP_GENLOCK_PRELOAD default is not wired to \
+             genlock_preload_env_default(); re-apply the env back-compat fix."
         );
     }
 
