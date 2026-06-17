@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.55"
+version = "1.7.0-dev.56"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"

@@ -3519,6 +3519,14 @@ static void clean_cache(obs_source_t *source)
 }
 
 #define MAX_ASYNC_FRAMES 30
+
+/* forward decl (#97): per-source async-FIFO drop-cap. Defined below alongside the
+ * genlock preload helpers, but used here by cache_video(); without this prototype
+ * MSVC assumes implicit `extern int genlock_source_drop_cap()` (C4013 -> C2220
+ * warning-as-error) and the real `static size_t(const obs_source_t*)` definition
+ * then clashes as a redefinition (C2371). */
+static size_t genlock_source_drop_cap(const obs_source_t *source);
+
 //if return value is not null then do (os_atomic_dec_long(&output->refs) == 0) && obs_source_frame_destroy(output)
 static inline struct obs_source_frame *cache_video(struct obs_source *source, const struct obs_source_frame *frame)
 {
