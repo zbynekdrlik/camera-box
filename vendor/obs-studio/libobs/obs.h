@@ -1552,6 +1552,15 @@ EXPORT bool obs_source_async_unbuffered(const obs_source_t *source);
 EXPORT void obs_source_set_genlock_fifo(obs_source_t *source, bool enabled);
 EXPORT bool obs_source_get_genlock_fifo(const obs_source_t *source);
 
+/* camera-box #97: per-source, runtime-settable genlock preload = frames of
+ * genlock-disciplined VIDEO DELAY (one preload frame = one frame of delay). Used
+ * to push the program video back to line up with late audio (~1 s on stream.lan).
+ * Clamped to [0, 128]. Setting it takes effect on the next render tick. Both
+ * read/write the field under the source's async_mutex (the A/V thread reads it in
+ * the render path), so the live change is crash-safe. */
+EXPORT void obs_source_set_genlock_preload(obs_source_t *source, uint32_t frames);
+EXPORT uint32_t obs_source_get_genlock_preload(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */

@@ -25,11 +25,37 @@
 /// (= one frame of latency per hop, the "1 frame per hop" the task calls for).
 pub const GENLOCK_PRELOAD_DEFAULT: u32 = 1;
 
-/// Hard cap on the reserve. The steady-state queue parks at `preload + 1`, which
-/// must stay STRICTLY below libobs' `MAX_ASYNC_FRAMES` (30): a `preload` of 29
-/// would steady at depth 30 == the cap, force-draining every refill and FREEZING
-/// the source. 28 ⇒ steady depth 29 < 30 — the highest safe reserve.
-pub const GENLOCK_PRELOAD_MAX: u32 = 28;
+/// Hard cap on the reserve.
+///
+/// History (#70): originally 28, because the FIFO drop-cap was a single global
+/// `MAX_ASYNC_FRAMES = 30` and the steady-state queue parks at `preload + 1`, so
+/// any `preload` whose `preload + 1` reached 30 force-drained every refill and
+/// FROZE the source. 28 ⇒ steady depth 29 < 30 was the highest safe reserve.
+///
+/// (#97) The preload is now a per-source, runtime-settable **video-delay** control
+/// (one preload frame = one frame of genlock-disciplined delay), used to push the
+/// program video back ~1 s to line up with late audio on stream.lan. At 30 fps,
+/// ~1 s is 30 frames — already above the old cap — so the ceiling is raised to
+/// **128** (≈ 4.3 s @ 30 fps / ≈ 2.1 s @ 60 fps), enough headroom for any realistic
+/// audio offset. The old "must stay below MAX_ASYNC_FRAMES" invariant is replaced
+/// by the per-source drop-cap ([`genlock_drop_cap`]): a delayed source's FIFO is
+/// allowed to hold `preload + RESERVE` frames, so a deep preload no longer
+/// force-drains. See [`genlock_drop_cap`] / [`GENLOCK_DROP_CAP_RESERVE`].
+pub const GENLOCK_PRELOAD_MAX: u32 = 128;
+
+/// Headroom above a genlock source's `preload` for the per-source FIFO drop-cap.
+///
+/// The drop-cap must sit a few frames ABOVE the steady-state depth (`preload + 1`)
+/// so normal producer/consumer jitter never reaches it and force-drains the buffer
+/// (an overrun that resets the FIFO and re-introduces a glitch). `+4` leaves three
+/// frames of slack above steady state. See [`genlock_drop_cap`].
+pub const GENLOCK_DROP_CAP_RESERVE: u32 = 4;
+
+/// libobs' fixed async FIFO drop-cap for NON-genlock sources (`MAX_ASYNC_FRAMES`).
+/// Mirrored here so the per-source drop-cap logic ([`genlock_drop_cap`]) can be
+/// unit-tested without an OBS build; the vendored-source guard
+/// (`tests/genlock_preload.rs`) keeps this in lock-step with the C `#define`.
+pub const MAX_ASYNC_FRAMES: u32 = 30;
 
 /// Parse the `OBS_GENLOCK_PRELOAD_FRAMES` env value into a reserve depth.
 ///
@@ -89,4 +115,49 @@ pub fn should_consume(queue_depth: usize, preload: u32) -> bool {
 /// slack remain at the instant of consumption.
 pub fn steady_state_depth(preload: u32) -> u32 {
     preload + 1
+}
+
+/// Convert a preload depth (frames of genlock-disciplined delay) into the
+/// equivalent **delay in milliseconds** at a given output frame rate.
+///
+/// `ms = frames * 1000 * fps_den / fps_num` (e.g. 30 frames @ 30000/1001 ≈ 1001 ms;
+/// 30 frames @ 30/1 = 1000 ms). This is the EXACT integer arithmetic the C/C++ side
+/// performs (`obs_get_video_info()` → `fps_num`/`fps_den`), mirrored here so the GUI
+/// info-text label and the audit-log ms are unit-tested. Uses `u64` intermediates so
+/// `frames * 1000 * fps_den` cannot overflow at the cap (128 * 1000 * fps_den).
+///
+/// Returns 0 if `fps_num` is 0 (no valid video info yet) — the caller shows a
+/// "fps unknown" label rather than dividing by zero.
+pub fn preload_to_ms(frames: u32, fps_num: u32, fps_den: u32) -> u64 {
+    if fps_num == 0 {
+        return 0;
+    }
+    (frames as u64) * 1000 * (fps_den as u64) / (fps_num as u64)
+}
+
+/// The per-source async-FIFO drop-cap (#97).
+///
+/// libobs force-drains a source's async FIFO when it reaches the drop-cap (an
+/// overrun). For a NON-genlock source the cap stays the fixed [`MAX_ASYNC_FRAMES`]
+/// (30) — those sources never deliberately buffer, so a deep cap would only mask a
+/// runaway producer. For a **genlock** source the cap =
+/// `max(MAX_ASYNC_FRAMES, preload + RESERVE)`, clamped to an absolute maximum of
+/// `GENLOCK_PRELOAD_MAX + RESERVE` (= 132).
+///
+/// The [`MAX_ASYNC_FRAMES`] floor is load-bearing: before #97 every source (genlock
+/// included) had the fixed 30-frame cap, which absorbed NDI catch-up bursts after a
+/// LAN hiccup. Scaling the cap to `preload + RESERVE` *alone* would, at the
+/// production default `preload = 1`, drop the cap to 5 — a 6× cut in burst tolerance
+/// on exactly the jittery sources the genlock FIFO exists to protect, so a momentary
+/// stall delivering a 5-frame catch-up burst would force-drain the whole buffer.
+/// Keeping the 30-frame floor preserves the pre-#97 burst tolerance; the cap only
+/// GROWS above it once the operator dials in a deep delay (memory stays bounded —
+/// only a deliberately-delayed source holds a big buffer, stream.lan is RAM-tight #89).
+pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
+    if !genlock_fifo {
+        return MAX_ASYNC_FRAMES;
+    }
+    let want = preload.saturating_add(GENLOCK_DROP_CAP_RESERVE);
+    let abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
+    want.min(abs_max).max(MAX_ASYNC_FRAMES)
 }
