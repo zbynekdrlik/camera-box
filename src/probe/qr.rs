@@ -1,7 +1,7 @@
 //! Render a payload to a centered QR on a white BGRA canvas, and decode a payload
 //! from a grayscale image.
 
-use crate::probe::luma::{bgra_to_luma, crop_center, uyvy_to_luma};
+use crate::probe::luma::{bgra_to_luma, crop_center, crop_center_luma, uyvy_to_luma};
 use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
@@ -106,11 +106,17 @@ pub fn decode_capture(
     stride: u32,
     decode_crop: u32,
 ) -> Option<Payload> {
-    let full = match &fourcc.to_le_bytes() {
-        b"BGRA" | b"BGRX" => bgra_to_luma(data, width, height, stride),
-        _ => uyvy_to_luma(data, width, height, stride),
-    };
-    let img = crop_center(&full, decode_crop, decode_crop);
+    // Convert ONLY the centered QR ROI from the raw frame (skip the full-frame luma),
+    // so the live tap can track a full 30 fps (full-frame conversion left it ~2.6% short).
+    let img = crop_center_luma(
+        fourcc,
+        data,
+        width,
+        height,
+        stride,
+        decode_crop,
+        decode_crop,
+    );
     decode_qr_luma(img)
 }
 

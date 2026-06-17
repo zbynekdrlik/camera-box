@@ -61,9 +61,96 @@ pub fn crop_center(img: &GrayImage, cw: u32, ch: u32) -> GrayImage {
     GrayImage::from_raw(cw, ch, out).expect("buffer sized cw*ch")
 }
 
+/// Convert ONLY the centered `cw`×`ch` region of a raw frame to luma, directly from
+/// the source bytes — skipping the full-frame luma conversion. The QR is centered, so
+/// the live tap only needs this ROI; converting just it (≈0.7 MP) instead of the whole
+/// 2-8 MP frame shaves enough per-frame time to let the dev1 tap track a full 30 fps
+/// (the full-frame `bgra_to_luma`/`uyvy_to_luma` + `crop_center` left it at ~29.2 fps,
+/// a ~2.6% receiver drop that contaminated the loss measurement). `fourcc` BGRA/BGRX ⇒
+/// BT.601 weights, else UYVY luma byte. Identical output to
+/// `crop_center(&{bgra,uyvy}_to_luma(..), cw, ch)`.
+pub fn crop_center_luma(
+    fourcc: u32,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    cw: u32,
+    ch: u32,
+) -> GrayImage {
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    if w == 0 || h == 0 {
+        return GrayImage::from_raw(1, 1, vec![0]).expect("1x1");
+    }
+    let cw = cw.min(width).max(1) as usize;
+    let ch = ch.min(height).max(1) as usize;
+    let ox = (w - cw) / 2;
+    let oy = (h - ch) / 2;
+    let is_bgra = matches!(&fourcc.to_le_bytes(), b"BGRA" | b"BGRX");
+    let mut out = vec![0u8; cw * ch];
+    for yy in 0..ch {
+        let row = (oy + yy) * s;
+        for xx in 0..cw {
+            let sx = ox + xx;
+            out[yy * cw + xx] = if is_bgra {
+                let o = row + sx * 4;
+                if o + 2 < data.len() {
+                    let b = data[o] as u32;
+                    let g = data[o + 1] as u32;
+                    let r = data[o + 2] as u32;
+                    ((r * 299 + g * 587 + b * 114) / 1000) as u8
+                } else {
+                    0
+                }
+            } else {
+                let idx = row + sx * 2 + 1; // Y in [U Y V Y]
+                if idx < data.len() {
+                    data[idx]
+                } else {
+                    0
+                }
+            };
+        }
+    }
+    GrayImage::from_raw(cw as u32, ch as u32, out).expect("buffer sized cw*ch")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_center_luma_matches_full_then_crop_bgra() {
+        // A 16x8 BGRA frame with a per-pixel gradient; the ROI-direct luma must equal
+        // converting the whole frame then center-cropping.
+        let (w, h) = (16u32, 8u32);
+        let mut data = vec![0u8; (w * h * 4) as usize];
+        for i in 0..(w * h) as usize {
+            data[i * 4] = (i % 256) as u8; // B
+            data[i * 4 + 1] = ((i * 3) % 256) as u8; // G
+            data[i * 4 + 2] = ((i * 7) % 256) as u8; // R
+            data[i * 4 + 3] = 255;
+        }
+        let fourcc = u32::from_le_bytes(*b"BGRA");
+        let want = crop_center(&bgra_to_luma(&data, w, h, w * 4), 6, 4);
+        let got = crop_center_luma(fourcc, &data, w, h, w * 4, 6, 4);
+        assert_eq!(want.dimensions(), got.dimensions());
+        assert_eq!(want.as_raw(), got.as_raw());
+    }
+
+    #[test]
+    fn crop_center_luma_matches_full_then_crop_uyvy() {
+        let (w, h) = (16u32, 8u32);
+        let mut data = vec![0u8; (w * h * 2) as usize];
+        for i in 0..(w * h) as usize {
+            data[i * 2] = (i % 256) as u8; // chroma
+            data[i * 2 + 1] = ((i * 5) % 256) as u8; // Y
+        }
+        let fourcc = u32::from_le_bytes(*b"UYVY");
+        let want = crop_center(&uyvy_to_luma(&data, w, h, w * 2), 6, 4);
+        let got = crop_center_luma(fourcc, &data, w, h, w * 2, 6, 4);
+        assert_eq!(want.as_raw(), got.as_raw());
+    }
 
     #[test]
     fn crop_center_extracts_middle() {
