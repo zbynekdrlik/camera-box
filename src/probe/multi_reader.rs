@@ -8,6 +8,7 @@ use crate::probe::analyzer::Observed;
 use crate::probe::clock_ns;
 use crate::probe::qr::{decode_capture, decode_capture_dual};
 use anyhow::Result;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -33,6 +34,11 @@ pub struct TapSpec {
     /// half from a side-by-side dual-QR frame). Matches the painter's `dual_qr`
     /// flag on the camera's frame-probe run.
     pub dual: bool,
+    /// When `Some(path)`, capture every frame to disk with NO live QR decoding and
+    /// NO `observed` updates during the run; decode_spool is called AFTER the taps
+    /// join so the NDI receiver is never stalled by QR decode latency. When `None`
+    /// the existing live-decode path is used (behaviour unchanged).
+    pub spool: Option<String>,
 }
 
 /// A tap's accumulating buffer, readable by the differ after the run.
@@ -92,6 +98,52 @@ fn tap_loop(
     // capturing, so a subsequent `captured == 0` is a dead output, not a tap
     // that simply hadn't connected yet (#81 liveness pre-check gate).
     connected.store(true, Ordering::Relaxed);
+
+    // Spool-mode: open the spool file once, write raw lz4-compressed frames to it,
+    // skip QR decoding entirely so the NDI receiver is never stalled.
+    if let Some(ref path) = spec.spool {
+        let file = std::fs::File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        while !stop.load(Ordering::Relaxed) {
+            let frame = match rx.capture_frame(100)? {
+                Some(f) => f,
+                None => continue,
+            };
+            let recv_ts_ns = clock_ns(start, spec.wall_clock);
+            let node_emit_tc_ns = frame.timecode_100ns.saturating_mul(100);
+            // Count BEFORE compression so captured is always the raw-arrival count.
+            captured.fetch_add(1, Ordering::Relaxed);
+
+            // Compress the raw pixel data with lz4 (prepend_size variant so
+            // decode_spool can decompress without a separate length field).
+            let compressed = lz4_flex::compress_prepend_size(&frame.data);
+            let clen = compressed.len() as u32;
+
+            // Record: recv_ts_ns(i64 LE) + node_emit_tc_ns(i64 LE) +
+            //         fourcc(u32 LE) + width(u32 LE) + height(u32 LE) +
+            //         stride(u32 LE) + clen(u32 LE) + <clen bytes>
+            writer.write_all(&recv_ts_ns.to_le_bytes())?;
+            writer.write_all(&node_emit_tc_ns.to_le_bytes())?;
+            writer.write_all(&frame.fourcc.to_le_bytes())?;
+            writer.write_all(&frame.width.to_le_bytes())?;
+            writer.write_all(&frame.height.to_le_bytes())?;
+            writer.write_all(&frame.stride.to_le_bytes())?;
+            writer.write_all(&clen.to_le_bytes())?;
+            writer.write_all(&compressed)?;
+        }
+
+        writer.flush()?;
+        let total = captured.load(Ordering::Relaxed);
+        tracing::info!(
+            tap = %spec.name, source = %spec.source,
+            captured = total,
+            "tap finished (spool mode — decode deferred)"
+        );
+        return Ok(());
+    }
+
+    // Live-decode path (unchanged behaviour when spool is None).
     while !stop.load(Ordering::Relaxed) {
         let frame = match rx.capture_frame(100)? {
             Some(f) => f,
@@ -146,4 +198,66 @@ fn tap_loop(
         "tap finished"
     );
     Ok(())
+}
+
+/// Decode a spool file written by `tap_loop` in spool mode. Reads every record,
+/// decompresses the pixel data with lz4, decodes the QR payload, and returns
+/// all observations whose `run_id` matches the caller's `run_id`.
+///
+/// Call AFTER all tap threads have joined (i.e. the spool file is complete) and
+/// BEFORE the snapshot/trim step so the differ sees a fully-populated
+/// `observed` vector.
+pub fn decode_spool(
+    path: &str,
+    run_id: u32,
+    dual: bool,
+    decode_crop: u32,
+) -> anyhow::Result<Vec<Observed>> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut out = Vec::new();
+
+    let mut header = [0u8; 8 + 8 + 4 + 4 + 4 + 4 + 4]; // 36 bytes
+
+    loop {
+        // Try to read the fixed header; a clean EOF at a record boundary is the
+        // normal end-of-file condition.
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+
+        let recv_ts_ns = i64::from_le_bytes(header[0..8].try_into().unwrap());
+        let node_emit_tc_ns = i64::from_le_bytes(header[8..16].try_into().unwrap());
+        let fourcc = u32::from_le_bytes(header[16..20].try_into().unwrap());
+        let width = u32::from_le_bytes(header[20..24].try_into().unwrap());
+        let height = u32::from_le_bytes(header[24..28].try_into().unwrap());
+        let stride = u32::from_le_bytes(header[28..32].try_into().unwrap());
+        let clen = u32::from_le_bytes(header[32..36].try_into().unwrap()) as usize;
+
+        let mut buf = vec![0u8; clen];
+        reader.read_exact(&mut buf)?;
+
+        let data = lz4_flex::decompress_size_prepended(&buf)?;
+
+        let decoded = if dual {
+            decode_capture_dual(fourcc, &data, width, height, stride, decode_crop)
+        } else {
+            decode_capture(fourcc, &data, width, height, stride, decode_crop)
+        };
+
+        if let Some(p) = decoded {
+            if p.run_id == run_id {
+                out.push(Observed {
+                    frame_id: p.frame_id,
+                    gen_ts_ns: p.gen_ts_ns,
+                    recv_ts_ns,
+                    node_emit_tc_ns,
+                });
+            }
+        }
+    }
+
+    Ok(out)
 }

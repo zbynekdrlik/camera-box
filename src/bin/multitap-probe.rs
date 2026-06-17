@@ -16,7 +16,7 @@ use camera_box::probe::differ::{
 use camera_box::probe::liveness::{
     check_tap_liveness, window_may_start, LivenessVerdict, TapLiveness,
 };
-use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
+use camera_box::probe::multi_reader::{decode_spool, spawn_tap, TapResult, TapSpec};
 use camera_box::probe::obs_log_audit::audit_obs_log;
 use clap::Parser;
 use serde::Serialize;
@@ -145,6 +145,15 @@ struct Args {
     /// half survives mid-transition captures.
     #[arg(long, default_value_t = false)]
     dual_qr: bool,
+    /// Offline spool directory: when set, each tap writes raw lz4-compressed
+    /// frames to `<DIR>/<name>.bin` with NO live QR decoding during the capture
+    /// window (removes the ~2.6% live-decode tap-drop that inflates loss
+    /// measurements). After all taps join, the spool files are decoded
+    /// sequentially and the results injected into each tap's observed buffer
+    /// before the existing trim/differ/report pipeline runs unchanged. When
+    /// absent (default), live-decode mode is used (prior behaviour).
+    #[arg(long)]
+    spool_dir: Option<String>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -359,13 +368,30 @@ fn main() -> Result<()> {
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
+    // Offline spool mode: create the spool directory once, then each tap gets its
+    // own spool file path (tap name sanitised to alnum+underscore). When absent,
+    // every tap gets spool=None and the existing live-decode path is used.
+    if let Some(ref dir) = args.spool_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
 
     // Spawn one reader thread per tap.
     let mut handles = Vec::new();
     let mut results: Vec<TapResult> = Vec::new();
+    // Track the spool path per tap (same index as results) for post-join decode.
+    let mut spool_paths: Vec<Option<String>> = Vec::new();
     for (name, source) in &args.taps {
+        let spool = args.spool_dir.as_ref().map(|dir| {
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            format!("{dir}/{safe}.bin")
+        });
+        spool_paths.push(spool.clone());
         let (h, r) = spawn_tap(
             TapSpec {
                 name: name.clone(),
@@ -375,6 +401,7 @@ fn main() -> Result<()> {
                 decode_crop,
                 wall_clock: args.wall_clock,
                 dual: args.dual_qr,
+                spool,
             },
             start,
             stop.clone(),
@@ -492,6 +519,22 @@ fn main() -> Result<()> {
     let stop_ns = clock_ns(start, args.wall_clock);
     for h in handles {
         h.join().expect("tap thread panicked")?;
+    }
+
+    // Offline spool mode: after all tap threads have joined (spool files complete),
+    // decode each spool file and replace each tap's observed buffer with the full
+    // decoded set. This runs BEFORE the trim step so trim/differ/report are
+    // unchanged — they see a fully-populated observed vec just as in live-decode mode.
+    if args.spool_dir.is_some() {
+        for (i, path_opt) in spool_paths.iter().enumerate() {
+            if let Some(ref path) = path_opt {
+                let name = &results[i].name;
+                let decoded = decode_spool(path, args.run_id, args.dual_qr, decode_crop)?;
+                let n = decoded.len();
+                *results[i].observed.lock().unwrap() = decoded;
+                println!("SPOOL tap={name} records_decoded={n}");
+            }
+        }
     }
 
     // Snapshot + trim the trailing settle window (in-flight frames are not drops).
