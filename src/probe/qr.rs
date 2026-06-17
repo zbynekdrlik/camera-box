@@ -45,7 +45,15 @@ fn blit_qr_bgra(
 /// Returns a `canvas_w * canvas_h * 4` BGRA byte buffer.
 pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: u32) -> Vec<u8> {
     let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize]; // white BGRA
-    blit_qr_bgra(&mut canvas, canvas_w, canvas_h, 0, canvas_w, payload, qr_size);
+    blit_qr_bgra(
+        &mut canvas,
+        canvas_w,
+        canvas_h,
+        0,
+        canvas_w,
+        payload,
+        qr_size,
+    );
     canvas
 }
 
@@ -104,6 +112,35 @@ pub fn decode_capture(
     };
     let img = crop_center(&full, decode_crop, decode_crop);
     decode_qr_luma(img)
+}
+
+/// Decode both QR regions of a dual-QR frame and reconcile. Each half is converted
+/// to luma, the QR-ROI cropped, and decoded; a blurred (mid-transition) QR fails
+/// CRC inside `Payload::decode` and is silently dropped. The frame's identity is
+/// the CRC-valid payload with the highest `frame_id` (freshest sharp region); at
+/// least one region is always sharp on the Vernier display, so this returns `Some`
+/// for every well-framed capture. `None` only when neither half decodes.
+pub fn decode_capture_dual(
+    fourcc: u32,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    roi: u32,
+) -> Option<Payload> {
+    let full = match &fourcc.to_le_bytes() {
+        b"BGRA" | b"BGRX" => bgra_to_luma(data, width, height, stride),
+        _ => uyvy_to_luma(data, width, height, stride),
+    };
+    let half = width / 2;
+    let left = image::imageops::crop_imm(&full, 0, 0, half, height).to_image();
+    let right = image::imageops::crop_imm(&full, half, 0, width - half, height).to_image();
+    let roi = roi.min(half).min(height);
+    let cand = [
+        decode_qr_luma(crop_center(&left, roi, roi)),
+        decode_qr_luma(crop_center(&right, roi, roi)),
+    ];
+    cand.into_iter().flatten().max_by_key(|p| p.frame_id)
 }
 
 #[cfg(test)]
@@ -233,5 +270,46 @@ mod tests {
         let right_img = image::imageops::crop_imm(&full, cw / 2, 0, cw / 2, ch).to_image();
         assert_eq!(decode_qr_luma(left_img), Some(l));
         assert_eq!(decode_qr_luma(right_img), Some(r));
+    }
+
+    #[test]
+    fn dual_decode_returns_highest_frame_id_and_tolerates_one_blurred() {
+        let l = Payload {
+            run_id: 7,
+            frame_id: 200,
+            gen_ts_ns: 1,
+        };
+        let r = Payload {
+            run_id: 7,
+            frame_id: 201,
+            gen_ts_ns: 2,
+        };
+        let (cw, ch, qs) = (1920u32, 1080u32, 520u32);
+        let fourcc = u32::from_le_bytes(*b"BGRA");
+
+        // Both sharp -> highest frame_id (201).
+        let both = render_qr_dual_bgra(&l, &r, cw, ch, qs);
+        assert_eq!(
+            decode_capture_dual(fourcc, &both, cw, ch, cw * 4, 620),
+            Some(r)
+        );
+
+        // Right region blanked (simulating an unreadable/blurred QR) -> falls back to left (200).
+        let l_only = render_qr_dual_bgra(&l, &r, cw, ch, qs);
+        let mut blanked = l_only.clone();
+        let half = (cw / 2) as usize;
+        for y in 0..ch as usize {
+            for x in half..cw as usize {
+                let i = (y * cw as usize + x) * 4;
+                blanked[i] = 255;
+                blanked[i + 1] = 255;
+                blanked[i + 2] = 255;
+                blanked[i + 3] = 255;
+            }
+        }
+        assert_eq!(
+            decode_capture_dual(fourcc, &blanked, cw, ch, cw * 4, 620),
+            Some(l)
+        );
     }
 }
