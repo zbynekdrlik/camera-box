@@ -153,7 +153,11 @@ fn read_frames(
     loop {
         match stdout.read_exact(&mut buf) {
             Ok(()) => {
-                let luma = GrayImage::from_raw(width, height, buf.clone())
+                // Move `buf` into the GrayImage (no per-frame clone) and replace it
+                // with a fresh buffer for the next read — on a 54k-frame clip this
+                // avoids 54k redundant width*height copies.
+                let owned = std::mem::replace(&mut buf, vec![0u8; frame_bytes]);
+                let luma = GrayImage::from_raw(width, height, owned)
                     .context("luma buffer sized width*height")?;
                 on_frame(frame_index, luma);
                 frame_index += 1;
