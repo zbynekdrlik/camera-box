@@ -68,6 +68,59 @@ INPUT = "phase2-probe-src"
 # not a different one. (Was latency=2 pre-#84, before the A/B re-pin to Normal(0).)
 _PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 0}
 
+# Per-source genlock TUNING to copy from a production input onto the probe input so the
+# probe measures the SAME delay behaviour as the live chain. Copy ONLY the per-source
+# preload (the #97 video-delay / FIFO depth) — NOT the #63-critical baseline
+# (genlock_fifo / ndi_sync), which MUST stay pinned in _PROBE_NDI_SETTINGS so a prod input
+# with a different value can never send the probe black. We read prod read-only and never
+# touch the prod input or its scene; on read failure we just use the baseline (logged).
+_GENLOCK_COPY_KEYS = ("genlock_preload",)
+
+
+def _read_prod_genlock_settings(ws, host, upstream_ndi_name):
+    """Read genlock-relevant settings from the production input whose ndi_source_name
+    matches *upstream_ndi_name* (exact or substring match) on *host*.
+
+    Returns a dict with the keys from _GENLOCK_COPY_KEYS that were present in the
+    prod input, or {} if the prod input cannot be found / its settings cannot be read.
+    NEVER modifies any prod input or scene. Best-effort: exceptions are caught and
+    logged as warnings so the caller always falls back gracefully.
+    """
+    try:
+        inputs = _rpc(ws, "GetInputList", ignore_err=True).get("inputs", [])
+        ndi_inputs = [
+            i["inputName"] for i in inputs
+            if i.get("inputKind") == "ndi_source" and i["inputName"] != INPUT
+        ]
+        # Find the prod input whose ndi_source_name matches the upstream we are
+        # ingesting (e.g. "CAM1 (usb)" on strih, or the strih NDI name on stream).
+        for inp_name in ndi_inputs:
+            try:
+                s = _rpc(ws, "GetInputSettings", {"inputName": inp_name},
+                         ignore_err=True).get("inputSettings", {})
+                src = s.get("ndi_source_name", "")
+                if src == upstream_ndi_name or (upstream_ndi_name and upstream_ndi_name in src):
+                    copied = {k: s[k] for k in _GENLOCK_COPY_KEYS if k in s}
+                    if copied:
+                        sys.stderr.write(
+                            f"[obs] {host}: copying genlock settings from prod input "
+                            f"'{inp_name}' (ndi_source_name='{src}'): {copied}\n"
+                        )
+                    return copied
+            except Exception:
+                continue
+        sys.stderr.write(
+            f"[obs] {host}: WARN could not find a prod ndi_source input matching "
+            f"'{upstream_ndi_name}'; probe will use default genlock settings\n"
+        )
+        return {}
+    except Exception as e:
+        sys.stderr.write(
+            f"[obs] {host}: WARN reading prod genlock settings failed ({e}); "
+            f"probe will use default genlock settings\n"
+        )
+        return {}
+
 
 def _load_state():
     """Read the per-host prev-scene state. Tolerates a MISSING or CORRUPT/truncated file
@@ -194,6 +247,18 @@ def setup(a):
     state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
     _save_state(state)
 
+    # Read the production input's genlock settings and overlay them on the probe.
+    # This ensures the probe runs with the SAME certified genlock config as the live
+    # prod inputs (e.g. the cam1 NDI input on strih, or the strih NDI input on stream)
+    # without ever touching those prod inputs or their scenes.
+    # Falls back to _PROBE_NDI_SETTINGS if the prod read fails (logged as a warning).
+    prod_genlock = _read_prod_genlock_settings(ws, a.host, a.upstream)
+    # _PROBE_NDI_SETTINGS is the certified #63 baseline (genlock_fifo/ndi_sync/latency);
+    # prod_genlock adds ONLY the per-source preload (no key overlap), so the baseline is
+    # never overridden. Both are spread into BOTH the create and the reuse call below — the
+    # #63 regression guard requires _PROBE_NDI_SETTINGS reach both paths. ndi_source_name is
+    # always set explicitly so it is never inherited from prod.
+
     # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
     # what made the fork's un-removable ndi_source inputs pile up.
     if SCENE not in scenes:
@@ -202,7 +267,7 @@ def setup(a):
     if INPUT not in inputs:
         _rpc(ws, "CreateInput", {
             "sceneName": SCENE, "inputName": INPUT, "inputKind": "ndi_source",
-            "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
+            "inputSettings": {**_PROBE_NDI_SETTINGS, **prod_genlock, "ndi_source_name": a.upstream},
         }, ignore_err=True)
     else:
         # #93: QUIESCE before re-pointing a possibly-LIVE probe input. If a prior run
@@ -218,10 +283,11 @@ def setup(a):
         _quiesce_probe_input(ws)
         # Reuse: re-point the now-idle input at this run's upstream, applying the full
         # certified probe settings idempotently in ONE update (no per-cycle HW-accel /
-        # Latency churn on a live source).
+        # Latency churn on a live source). Spreads _PROBE_NDI_SETTINGS (the #63 baseline)
+        # plus prod_genlock (the per-source preload copy) so the probe mirrors prod.
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
-            "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
+            "inputSettings": {**_PROBE_NDI_SETTINGS, **prod_genlock, "ndi_source_name": a.upstream},
             "overlay": True,
         }, ignore_err=True)
         # ... and make sure it is an item of the stable scene (re-add if the scene was
@@ -231,6 +297,31 @@ def setup(a):
         if not any(it.get("sourceName") == INPUT for it in items):
             _rpc(ws, "CreateSceneItem",
                  {"sceneName": SCENE, "sourceName": INPUT}, ignore_err=True)
+
+    # Make the probe source FILL the canvas so a centered QR stays centered (and full
+    # size) in this box's program / Main Output. Without this OBS renders the ndi_source
+    # at its native size/position, so a centered single QR lands off-center downstream and
+    # the centered decode ROI misses it (decode_failed=100% at strih/stream). STRETCH the
+    # item to the base canvas from (0,0). Touches ONLY the probe scene item, never prod.
+    vs = _rpc(ws, "GetVideoSettings", ignore_err=True)
+    base_w = int(vs.get("baseWidth") or 1920)
+    base_h = int(vs.get("baseHeight") or 1080)
+    item_id = _rpc(ws, "GetSceneItemId", {"sceneName": SCENE, "sourceName": INPUT},
+                   ignore_err=True).get("sceneItemId")
+    if item_id is not None:
+        _rpc(ws, "SetSceneItemTransform", {
+            "sceneName": SCENE,
+            "sceneItemId": item_id,
+            "sceneItemTransform": {
+                "boundsType": "OBS_BOUNDS_STRETCH",
+                "boundsAlignment": 0,
+                "boundsWidth": base_w,
+                "boundsHeight": base_h,
+                "positionX": 0,
+                "positionY": 0,
+                "alignment": 5,
+            },
+        }, ignore_err=True)
 
     # OBS ndi_source binds by the FULL "MACHINE (name)" network name; binding a bare name
     # (e.g. "2ME PGM") connects to nothing. Resolve BOTH the ingest source and this box's
@@ -296,14 +387,19 @@ def _match_full(vals, bare):
     return bare
 
 
-def _resolve_full(ws, inp, bare, timeout=20.0, interval=1.0):
+def _resolve_full(ws, inp, bare, timeout=45.0, interval=1.0):
     """Resolve `bare` to its full 'MACHINE (name)' NDI form, POLLING DistroAV discovery
     until it appears (or timeout). An OBS ndi_source binds by the full network name;
     binding the BARE Main-Output name (e.g. '2ME PGM') connects to nothing → black render
     → 0 decode on the next hop. Cold discovery may not list a just-started upstream/own
     output for a few seconds, so we wait for it rather than racing it with a fixed sleep
     (#22 verification exposed this on strih→stream). Names that are already full (contain
-    '(') bind directly and pass through. Returns (full_or_bare, last_vals)."""
+    '(') bind directly and pass through. Returns (full_or_bare, last_vals).
+
+    timeout=45s (was 20s): after the harness stops cam2's camera-box + re-points the OBS
+    ingest, the NDI discovery landscape reshuffles and strih's own Main Output ('2ME PGM')
+    intermittently took >20s to re-appear in dev1's finder, aborting otherwise-good runs.
+    This is an async network-advertisement wait, not a processing timeout."""
     if "(" in bare:  # already a full "MACHINE (name)" — binds directly, no discovery wait
         return bare, _ndi_source_list(ws, inp)
     end = time.time() + timeout

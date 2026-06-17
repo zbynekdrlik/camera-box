@@ -8,14 +8,15 @@ use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
     abs_emit_latency, absolute_latency_gate_pass, absolute_latency_stats, decompose_missing,
-    diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns,
-    overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport,
-    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
+    diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, grid_continuity,
+    lead_cutoff_ns, overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle,
+    EndpointSequenceReport, FullSpanBounds, FullSpanReport, GridContinuity, HopInput, HopReport,
+    HopVerdict,
 };
 use camera_box::probe::liveness::{
     check_tap_liveness, window_may_start, LivenessVerdict, TapLiveness,
 };
-use camera_box::probe::multi_reader::{spawn_tap, TapResult, TapSpec};
+use camera_box::probe::multi_reader::{decode_spool, spawn_tap, TapResult, TapSpec};
 use camera_box::probe::obs_log_audit::audit_obs_log;
 use clap::Parser;
 use serde::Serialize;
@@ -138,6 +139,21 @@ struct Args {
     /// relative-latency behaviour, unchanged).
     #[arg(long, default_value_t = false)]
     wall_clock: bool,
+    /// Decode from both halves of each received frame (Vernier dual-QR path).
+    /// The painter on the camera must run with `frame-probe --dual-qr`; this
+    /// flag switches every tap to `decode_capture_dual` so at least one sharp
+    /// half survives mid-transition captures.
+    #[arg(long, default_value_t = false)]
+    dual_qr: bool,
+    /// Offline spool directory: when set, each tap writes raw lz4-compressed
+    /// frames to `<DIR>/<name>.bin` with NO live QR decoding during the capture
+    /// window (removes the ~2.6% live-decode tap-drop that inflates loss
+    /// measurements). After all taps join, the spool files are decoded
+    /// sequentially and the results injected into each tap's observed buffer
+    /// before the existing trim/differ/report pipeline runs unchanged. When
+    /// absent (default), live-decode mode is used (prior behaviour).
+    #[arg(long)]
+    spool_dir: Option<String>,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -146,6 +162,13 @@ struct Args {
     /// and their oversample multiplicity; off unless set.
     #[arg(long)]
     dump_raw: Option<String>,
+    /// Minimum steady-state window (seconds) required to certify zero-loss. A run
+    /// whose measured window (duration - lead_discard - settle) is shorter than this
+    /// floor cannot certify zero-loss even if no drops were observed: it is
+    /// downgraded from PASS to INCONCLUSIVE and exits non-zero. The 300 s default
+    /// aligns with the QR harness honesty gate (#102). A FAIL is never upgraded.
+    #[arg(long, default_value_t = 300.0)]
+    min_zero_loss_secs: f64,
 }
 
 fn parse_tap(s: &str) -> Result<(String, String), String> {
@@ -240,6 +263,10 @@ struct MultiTapReport {
     /// Human-readable status for `absolute_latency` (why it is/ isn't available,
     /// and the gate outcome) — so the artifact is self-describing.
     absolute_latency_note: String,
+    /// Per-tap grid-continuity check (stride 1): starvation and FIFO-underrun
+    /// diagnosis for each tap's trimmed steady-state observations. One entry per tap,
+    /// in the same order as `taps`. Consumed by the report graph script.
+    grid: Vec<GridContinuity>,
     verdict_pass: bool,
 }
 
@@ -263,6 +290,14 @@ struct TapSummary {
     /// Adjacent taps' difference is a clean per-hop latency. `None` if this tap's
     /// source stamped no usable NDI timecode.
     abs_emit_latency: Option<LatencyStats>,
+}
+
+/// True when the measured steady-state window is long enough to certify zero-loss.
+/// A run claiming zero-loss MUST observe it over at least `min_secs` of steady
+/// state (duration − lead_discard − settle); shorter runs are INCONCLUSIVE — they
+/// cannot rule out the loss that would appear given more time.
+pub fn zero_loss_window_ok(measured_window_secs: f64, min_secs: f64) -> bool {
+    measured_window_secs >= min_secs
 }
 
 fn main() -> Result<()> {
@@ -333,13 +368,30 @@ fn main() -> Result<()> {
 
     let decode_crop = (args.qr_size + 120).min(1080);
 
+    // Offline spool mode: create the spool directory once, then each tap gets its
+    // own spool file path (tap name sanitised to alnum+underscore). When absent,
+    // every tap gets spool=None and the existing live-decode path is used.
+    if let Some(ref dir) = args.spool_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
 
     // Spawn one reader thread per tap.
     let mut handles = Vec::new();
     let mut results: Vec<TapResult> = Vec::new();
+    // Track the spool path per tap (same index as results) for post-join decode.
+    let mut spool_paths: Vec<Option<String>> = Vec::new();
     for (name, source) in &args.taps {
+        let spool = args.spool_dir.as_ref().map(|dir| {
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            format!("{dir}/{safe}.bin")
+        });
+        spool_paths.push(spool.clone());
         let (h, r) = spawn_tap(
             TapSpec {
                 name: name.clone(),
@@ -348,6 +400,8 @@ fn main() -> Result<()> {
                 connect_timeout_secs: args.connect_timeout_secs,
                 decode_crop,
                 wall_clock: args.wall_clock,
+                dual: args.dual_qr,
+                spool,
             },
             start,
             stop.clone(),
@@ -465,6 +519,22 @@ fn main() -> Result<()> {
     let stop_ns = clock_ns(start, args.wall_clock);
     for h in handles {
         h.join().expect("tap thread panicked")?;
+    }
+
+    // Offline spool mode: after all tap threads have joined (spool files complete),
+    // decode each spool file and replace each tap's observed buffer with the full
+    // decoded set. This runs BEFORE the trim step so trim/differ/report are
+    // unchanged — they see a fully-populated observed vec just as in live-decode mode.
+    if args.spool_dir.is_some() {
+        for (i, path_opt) in spool_paths.iter().enumerate() {
+            if let Some(ref path) = path_opt {
+                let name = &results[i].name;
+                let decoded = decode_spool(path, args.run_id, args.dual_qr, decode_crop)?;
+                let n = decoded.len();
+                *results[i].observed.lock().unwrap() = decoded;
+                println!("SPOOL tap={name} records_decoded={n}");
+            }
+        }
     }
 
     // Snapshot + trim the trailing settle window (in-flight frames are not drops).
@@ -652,6 +722,16 @@ fn main() -> Result<()> {
     let endpoint_seq_pass = !endpoint_seq_gated
         || (endpoint_pipeline_loss.is_empty() && endpoint_sequence.out_of_order_ids.is_empty());
 
+    // Per-tap grid-continuity: starvation + FIFO-underrun per tap over the trimmed
+    // steady-state observations. One entry per tap, same order as taps. Stride 2 in
+    // dual-QR mode (the painter advances the logical id at the 60 Hz vblank but each
+    // tap decodes a 30 fps sample, so consecutive ids differ by ~2); stride 1 otherwise.
+    let grid_stride = if args.dual_qr { 2 } else { 1 };
+    let grid: Vec<GridContinuity> = trimmed
+        .iter()
+        .map(|obs| grid_continuity(obs, grid_stride))
+        .collect();
+
     // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
     // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as
     // NOT-pass like FAIL (#29: a run that cannot certify must not exit green).
@@ -661,6 +741,19 @@ fn main() -> Result<()> {
     // artifact is reported, not gated, so the harness stays honest AND trustworthy.
     let overall_v = overall_verdict(&hops, &full_span, abs_gate_pass);
     let verdict_pass = overall_v.is_pass() && endpoint_seq_pass;
+
+    // Compute the measured steady-state window: the portion of the run that is
+    // neither the leading discard (transient genlock-FIFO prime) nor the trailing
+    // settle (in-flight frames). This is what the zero-loss gate certifies over.
+    let measured_window_secs =
+        args.duration_secs as f64 - args.lead_discard_secs as f64 - args.settle_ms as f64 / 1000.0;
+
+    // Zero-loss honesty gate: a would-be PASS is downgraded to INCONCLUSIVE when
+    // the measured steady-state window is shorter than the minimum certifying floor.
+    // An early FAIL is unaffected — it's already not a green verdict.
+    let window_ok = zero_loss_window_ok(measured_window_secs, args.min_zero_loss_secs);
+    let verdict_pass = verdict_pass && window_ok;
+
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
@@ -673,11 +766,31 @@ fn main() -> Result<()> {
         endpoint_pipeline_loss,
         absolute_latency,
         absolute_latency_note,
+        grid,
         verdict_pass,
     };
 
     let json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&args.out, &json)?;
+
+    // Per-frame JSONL series: one line per decoded observation across all taps,
+    // written to <out>.series.jsonl for the report graph script.
+    {
+        use std::io::Write;
+        let series_path = format!("{}.series.jsonl", args.out);
+        let mut f = std::fs::File::create(&series_path)?;
+        for (tap_result, obs_slice) in results.iter().zip(&trimmed) {
+            let name = &tap_result.name;
+            for o in obs_slice.iter() {
+                writeln!(
+                    f,
+                    "{{\"tap\":\"{}\",\"frame_id\":{},\"recv_ts_ns\":{},\"node_emit_tc_ns\":{}}}",
+                    name, o.frame_id, o.recv_ts_ns, o.node_emit_tc_ns
+                )?;
+            }
+        }
+        tracing::info!(path = %series_path, "per-frame series JSONL written");
+    }
 
     if let Some(path) = &args.dump_raw {
         use std::io::Write;
@@ -851,13 +964,19 @@ fn main() -> Result<()> {
     // "need a longer/denser run", not "the pipeline broke". An unclean endpoint
     // sequence is a hard FAIL (a real drop/reorder the tap-vs-tap diff missed), so
     // it overrides an otherwise-INCONCL/Pass overall_v to FAIL.
+    // The zero-loss window gate downgrades a would-be PASS to INCONCLUSIVE when the
+    // measured steady-state window is too short to certify zero-loss (#102).
     let overall = if !endpoint_seq_pass {
-        "FAIL"
+        "FAIL".to_string()
     } else {
         match overall_v {
-            HopVerdict::Pass => "PASS",
-            HopVerdict::Fail => "FAIL",
-            HopVerdict::Inconclusive => "INCONCL",
+            HopVerdict::Pass if !window_ok => format!(
+                "INCONCLUSIVE (window {measured_window_secs}s < {}s — cannot certify zero-loss)",
+                args.min_zero_loss_secs
+            ),
+            HopVerdict::Pass => "PASS".to_string(),
+            HopVerdict::Fail => "FAIL".to_string(),
+            HopVerdict::Inconclusive => "INCONCL".to_string(),
         }
     };
     println!("VERDICT={overall} ARTIFACT={}", args.out);
@@ -922,5 +1041,13 @@ mod tests {
             parse_bound("stream=220").unwrap(),
             ("stream".to_string(), 220.0)
         );
+    }
+
+    #[test]
+    fn zero_loss_requires_min_window() {
+        assert!(zero_loss_window_ok(300.0, 300.0)); // exactly the floor passes
+        assert!(zero_loss_window_ok(1800.0, 300.0));
+        assert!(!zero_loss_window_ok(120.0, 300.0)); // 120s ad-hoc cannot claim zero-loss
+        assert!(!zero_loss_window_ok(299.9, 300.0));
     }
 }

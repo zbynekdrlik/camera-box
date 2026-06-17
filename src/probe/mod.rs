@@ -1,7 +1,9 @@
 //! Frame-loss & latency E2E probe (Phase 1).
 //!
 //! Pure, unit-tested logic: `payload`, `luma`, `qr`, `analyzer`, `differ`,
-//! `genlock`, plus the `kms`/`presenter` decision functions.
+//! `genlock`, plus the `kms`/`presenter` decision functions. `recording`'s
+//! per-frame decode is pure-tested; its ffmpeg/ffprobe glue is exercised
+//! end-to-end by the `recording_decode` integration test.
 //! Hardware glue (excluded from coverage): `fb`, `kms` (live DRM), `painter`,
 //! `reader`, `run`, `multi_reader`.
 
@@ -13,6 +15,7 @@ pub mod luma;
 pub mod obs_log_audit;
 pub mod payload;
 pub mod qr;
+pub mod recording;
 
 pub mod fb;
 pub mod kms;

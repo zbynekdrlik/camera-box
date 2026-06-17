@@ -60,6 +60,13 @@ pub fn frame_rate_from_interval(interval_numerator: u32, interval_denominator: u
     }
 }
 
+/// The v4l2 capture-interval denominator (frames/sec) to request. The rig runs a
+/// true-30 fps chain (no 60→30 decimation), so `CAMERA_BOX_CAPTURE_FPS=30` lets the
+/// device negotiate native 30; unset / 0 / invalid keeps the 60 fps default (#11).
+pub fn requested_capture_denominator(override_fps: Option<u32>) -> u32 {
+    override_fps.filter(|&f| f > 0).unwrap_or(60)
+}
+
 /// Number of frames the CAPTURE DEVICE silently dropped between two consecutive
 /// delivered buffers, from their V4L2 `sequence` numbers (the kernel increments
 /// `sequence` once per CAPTURED frame, skipping the value of any frame the driver
@@ -123,14 +130,19 @@ impl VideoCapture {
         let fourcc = final_format.fourcc;
         let stride = final_format.stride;
 
-        // Request 1080p60 for the genlock/NDI pipeline (#11 quality bar). The
+        // Request frame rate for the genlock/NDI pipeline (#11 quality bar). The
         // frame rate is derived from the rate the driver actually negotiates,
         // not hard-coded — so NDI metadata and genlock pacing stay honest about
         // what the capture device delivers.
         let frame_rate = match Capture::params(&device) {
             Ok(mut params) => {
                 params.interval.numerator = 1;
-                params.interval.denominator = 60;
+                let req = requested_capture_denominator(
+                    std::env::var("CAMERA_BOX_CAPTURE_FPS")
+                        .ok()
+                        .and_then(|s| s.parse().ok()),
+                );
+                params.interval.denominator = req;
                 let negotiated = Capture::set_params(&device, &params).unwrap_or(params);
                 frame_rate_from_interval(
                     negotiated.interval.numerator,
@@ -431,5 +443,13 @@ mod tests {
     fn sequence_gap_same_or_no_advance_is_zero() {
         // A duplicate/no-advance (never expected) must not report a giant gap.
         assert_eq!(sequence_gap(10, 10), 0);
+    }
+
+    #[test]
+    fn capture_denominator_defaults_to_60_and_honors_override() {
+        assert_eq!(requested_capture_denominator(None), 60);
+        assert_eq!(requested_capture_denominator(Some(0)), 60); // 0 is invalid -> default
+        assert_eq!(requested_capture_denominator(Some(30)), 30);
+        assert_eq!(requested_capture_denominator(Some(60)), 60);
     }
 }

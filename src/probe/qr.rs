@@ -1,14 +1,22 @@
 //! Render a payload to a centered QR on a white BGRA canvas, and decode a payload
 //! from a grayscale image.
 
-use crate::probe::luma::{bgra_to_luma, crop_center, uyvy_to_luma};
+use crate::probe::luma::{bgra_to_luma, crop_center, crop_center_luma, uyvy_to_luma};
 use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
 
-/// Render `payload` as a QR (EC level H), centered on a white BGRA canvas.
-/// Returns a `canvas_w * canvas_h * 4` BGRA byte buffer.
-pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: u32) -> Vec<u8> {
+/// Blit `payload`'s QR (EC-H), centered within the horizontal band
+/// `[band_x, band_x + band_w)`, onto an existing white BGRA `canvas`.
+fn blit_qr_bgra(
+    canvas: &mut [u8],
+    canvas_w: u32,
+    canvas_h: u32,
+    band_x: u32,
+    band_w: u32,
+    payload: &Payload,
+    qr_size: u32,
+) {
     let s = payload.encode();
     let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
         .expect("payload is small, encodes within QR capacity");
@@ -18,10 +26,8 @@ pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: 
         .max_dimensions(qr_size, qr_size)
         .quiet_zone(true)
         .build();
-
-    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize]; // white BGRA
-    let (qw, qh) = (qr.width().min(canvas_w), qr.height().min(canvas_h));
-    let ox = (canvas_w - qw) / 2;
+    let (qw, qh) = (qr.width().min(band_w), qr.height().min(canvas_h));
+    let ox = band_x + (band_w - qw) / 2;
     let oy = (canvas_h - qh) / 2;
     for y in 0..qh {
         for x in 0..qw {
@@ -33,6 +39,44 @@ pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: 
             canvas[ci + 3] = 255;
         }
     }
+}
+
+/// Render `payload` as a QR (EC level H), centered on a white BGRA canvas.
+/// Returns a `canvas_w * canvas_h * 4` BGRA byte buffer.
+pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: u32) -> Vec<u8> {
+    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize]; // white BGRA
+    blit_qr_bgra(
+        &mut canvas,
+        canvas_w,
+        canvas_h,
+        0,
+        canvas_w,
+        payload,
+        qr_size,
+    );
+    canvas
+}
+
+/// Two QRs side by side: `left` centered in `[0, w/2)`, `right` in `[w/2, w)`.
+pub fn render_qr_dual_bgra(
+    left: &Payload,
+    right: &Payload,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+) -> Vec<u8> {
+    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize];
+    let half = canvas_w / 2;
+    blit_qr_bgra(&mut canvas, canvas_w, canvas_h, 0, half, left, qr_size);
+    blit_qr_bgra(
+        &mut canvas,
+        canvas_w,
+        canvas_h,
+        half,
+        canvas_w - half,
+        right,
+        qr_size,
+    );
     canvas
 }
 
@@ -49,11 +93,32 @@ pub fn decode_qr_luma(img: GrayImage) -> Option<Payload> {
     None
 }
 
+/// Long-side cap (px) the single-QR ROI is downscaled to before `rqrr`. Decouples
+/// the on-screen QR size from the decode cost: a BIG QR (low spatial frequency →
+/// survives the DistroAV NDI re-compression at the OBS outputs, ~0.5% torn instead of
+/// ~3%) can be used while the decode ROI is shrunk to this cap so the dev1 tap still
+/// tracks 30 fps. The big-module QR is already past NDI compression by the time the tap
+/// has it, so downscaling for decode is lossless to the pattern.
+const SINGLE_DECODE_CAP: u32 = 760;
+
+/// Downscale a luma image so its long side is at most `cap` px (Triangle filter);
+/// returns it unchanged when already within `cap`.
+fn downscale_luma(img: GrayImage, cap: u32) -> GrayImage {
+    let m = img.width().max(img.height());
+    if m <= cap {
+        return img;
+    }
+    let nw = (img.width() * cap / m).max(1);
+    let nh = (img.height() * cap / m).max(1);
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// Turn one captured NDI frame into a decoded `Payload`, or None.
 /// Dispatches BGRA/BGRX vs UYVY by fourcc, converts to luma (padded-stride
 /// aware), restricts the QR decode to the centered `decode_crop` square (the
-/// ROI speed fix), and decodes. Shared by the single-tap reader and the
-/// multi-tap reader so the decode path has one tested implementation.
+/// ROI speed fix), downscales it to `SINGLE_DECODE_CAP` so a big QR still decodes
+/// fast, and decodes. Shared by the single-tap reader and the multi-tap reader so
+/// the decode path has one tested implementation.
 pub fn decode_capture(
     fourcc: u32,
     data: &[u8],
@@ -62,12 +127,83 @@ pub fn decode_capture(
     stride: u32,
     decode_crop: u32,
 ) -> Option<Payload> {
+    // Convert ONLY the centered QR ROI from the raw frame (skip the full-frame luma),
+    // then downscale it so the live tap tracks a full 30 fps even with a big QR.
+    let img = crop_center_luma(
+        fourcc,
+        data,
+        width,
+        height,
+        stride,
+        decode_crop,
+        decode_crop,
+    );
+    decode_qr_luma(downscale_luma(img, SINGLE_DECODE_CAP))
+}
+
+/// Width (px) the dual-QR band is downscaled to before the single `rqrr` pass. Both QRs
+/// live in ONE horizontal band, so dual decode is ONE prepare+detect (rqrr finds both
+/// grids), not two — that is what keeps the 3 concurrent dev1 taps tracking 30 fps (two
+/// separate ROI passes bottlenecked them to ~12-15 fps, dropping half the frames at the
+/// NDI receiver and inflating apparent loss). 1280 px keeps each ~700 px QR at ~470 px
+/// (rqrr needs a few px/module) while keeping the prepare cost at ~the single-QR path's.
+const DUAL_BAND_WIDTH: u32 = 1280;
+
+/// Decode ALL CRC-valid QR payloads in one grayscale image (one `rqrr` prepare + detect).
+/// `detect_grids` returns every QR it finds, so the two side-by-side dual-QR codes are read
+/// in a SINGLE pass — half the work of decoding two cropped ROIs separately.
+pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
+    let mut prepared = rqrr::PreparedImage::prepare(img);
+    let mut out = Vec::new();
+    for grid in prepared.detect_grids() {
+        if let Ok((_meta, content)) = grid.decode() {
+            if let Some(p) = Payload::decode(&content) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
+/// full width (left QR in the left half, right in the right half), so we crop that single
+/// band, downscale it to `DUAL_BAND_WIDTH`, and decode it in ONE `rqrr` pass that finds
+/// BOTH codes — roughly the cost of the single-QR path, which is what lets the dev1 taps
+/// keep up with 30 fps. A blurred (mid-transition) QR fails CRC inside `Payload::decode`
+/// and is dropped; the frame's identity is the CRC-valid payload with the highest
+/// `frame_id` (freshest sharp region). At least one region is always sharp on the Vernier
+/// display, so this returns `Some` for every well-framed capture. `None` only when neither
+/// code decodes.
+pub fn decode_capture_dual(
+    fourcc: u32,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    roi: u32,
+) -> Option<Payload> {
     let full = match &fourcc.to_le_bytes() {
         b"BGRA" | b"BGRX" => bgra_to_luma(data, width, height, stride),
         _ => uyvy_to_luma(data, width, height, stride),
     };
-    let img = crop_center(&full, decode_crop, decode_crop);
-    decode_qr_luma(img)
+    // One full-width band tall enough to hold both QRs (centered vertically), then a single
+    // downscaled rqrr pass over both. crop_center clamps the requested size to the image.
+    let band_h = roi.min(height);
+    let band = crop_center(&full, width, band_h);
+    let band = if band.width() > DUAL_BAND_WIDTH {
+        let nh = (band.height() * DUAL_BAND_WIDTH / band.width()).max(1);
+        image::imageops::resize(
+            &band,
+            DUAL_BAND_WIDTH,
+            nh,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        band
+    };
+    decode_qr_luma_all(band)
+        .into_iter()
+        .max_by_key(|p| p.frame_id)
 }
 
 #[cfg(test)]
@@ -173,6 +309,70 @@ mod tests {
         assert!(
             (top - bottom).abs() <= 1,
             "y-centered: top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn dual_render_places_two_decodable_qrs_left_and_right() {
+        let l = Payload {
+            run_id: 7,
+            frame_id: 100,
+            gen_ts_ns: 1,
+        };
+        let r = Payload {
+            run_id: 7,
+            frame_id: 101,
+            gen_ts_ns: 2,
+        };
+        let (cw, ch, qs) = (1920u32, 1080u32, 520u32);
+        let bgra = render_qr_dual_bgra(&l, &r, cw, ch, qs);
+        assert_eq!(bgra.len(), (cw * ch * 4) as usize);
+        let full = bgra_to_luma(&bgra, cw, ch, cw * 4);
+        // Left half image and right half image each decode to their own payload.
+        let left_img = image::imageops::crop_imm(&full, 0, 0, cw / 2, ch).to_image();
+        let right_img = image::imageops::crop_imm(&full, cw / 2, 0, cw / 2, ch).to_image();
+        assert_eq!(decode_qr_luma(left_img), Some(l));
+        assert_eq!(decode_qr_luma(right_img), Some(r));
+    }
+
+    #[test]
+    fn dual_decode_returns_highest_frame_id_and_tolerates_one_blurred() {
+        let l = Payload {
+            run_id: 7,
+            frame_id: 200,
+            gen_ts_ns: 1,
+        };
+        let r = Payload {
+            run_id: 7,
+            frame_id: 201,
+            gen_ts_ns: 2,
+        };
+        let (cw, ch, qs) = (1920u32, 1080u32, 520u32);
+        let fourcc = u32::from_le_bytes(*b"BGRA");
+
+        // Both sharp -> highest frame_id (201).
+        let both = render_qr_dual_bgra(&l, &r, cw, ch, qs);
+        assert_eq!(
+            decode_capture_dual(fourcc, &both, cw, ch, cw * 4, 620),
+            Some(r)
+        );
+
+        // Right region blanked (simulating an unreadable/blurred QR) -> falls back to left (200).
+        let l_only = render_qr_dual_bgra(&l, &r, cw, ch, qs);
+        let mut blanked = l_only.clone();
+        let half = (cw / 2) as usize;
+        for y in 0..ch as usize {
+            for x in half..cw as usize {
+                let i = (y * cw as usize + x) * 4;
+                blanked[i] = 255;
+                blanked[i + 1] = 255;
+                blanked[i + 2] = 255;
+                blanked[i + 3] = 255;
+            }
+        }
+        assert_eq!(
+            decode_capture_dual(fourcc, &blanked, cw, ch, cw * 4, 620),
+            Some(l)
         );
     }
 }

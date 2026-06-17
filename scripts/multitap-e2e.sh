@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Phase 2 multi-tap NDI per-hop frame-loss/latency E2E (dev1-orchestrated).
 #
-# Topology: cam2 paints QR (frame-probe --paint-only) -> camera-box capture->NDI
-# "CAM2 (usb)" -> OBS strih program (DistroAV "NDI Main Output", e.g. "2ME PGM")
-# -> OBS stream program (its own DistroAV "NDI Main Output"). dev1 taps all three
-# and differences adjacent pairs (cam->strih, strih->stream). The OBS program NDI
-# names are DISCOVERED at setup (not hardcoded) and echoed by scripts/obs_phase2.py.
+# Topology (real-camera rig): cam2 (10.77.9.62) paints dual-QR to its physical
+# monitor (frame-probe --paint-only --dual-qr); cam1 (10.77.9.61) films that
+# monitor -> camera-box capture->NDI "CAM1 (usb)" -> OBS strih program
+# (DistroAV "NDI Main Output", e.g. "2ME PGM") -> OBS stream program (its own
+# DistroAV "NDI Main Output"). dev1 taps all three and differences adjacent pairs
+# (cam->strih, strih->stream). The OBS program NDI names are DISCOVERED at setup
+# (not hardcoded) and echoed by scripts/obs_phase2.py.
 # strih + stream are off-air-freely during the run; their program scene is saved
 # and restored by the trap.
+#
+# PAINTER vs SOURCE: PAINTER_IP is the device that runs frame-probe (cam2, which
+# has the physical monitor); CAM_IP / CAM_SOURCE is the NDI source filmed by the
+# real camera (cam1 films cam2's monitor). These are INDEPENDENT variables so the
+# topology can be changed without touching one another.
 #
 # PREREQUISITE: DistroAV "NDI Main Output" must be ENABLED in OBS (Tools menu) on
 # BOTH strih and stream so each re-emits its program as NDI. obs_phase2.py fails
@@ -17,23 +24,32 @@
 # python3 + websocket-client. OBS WebSocket :4455 reachable on strih and stream.
 set -euo pipefail
 
-# Camera selection (#24): set CAM=cam1|cam2|cam3|cam4 to drive the full path from a chosen
-# source camera. Its IP + NDI source are resolved from scripts/camera-set.sh (the single
-# source of truth), not hard-coded — defaults to cam2 for back-compat. CAM_IP / CAM_SOURCE
-# still override the resolved values.
+# Camera selection for the SOURCE TAP: cam1 films cam2's monitor and emits NDI
+# "CAM1 (usb)". Default changed from cam2 to cam1 for the real-camera rig.
+# CAM_IP / CAM_SOURCE still override the resolved values if set externally.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
-camera_resolve "${CAM:-cam2}"
+camera_resolve "${CAM:-cam1}"
 
-# CAM_IP is the device IP of the selected source camera (was the hard-coded `CAM2` var).
+# CAM_IP is the device IP of the SOURCE camera (cam1 = 10.77.9.61, the real camera).
 CAM_IP="${CAM_IP:-$CAMERA_IP}"
+# PAINTER_IP is the device that runs frame-probe --paint-only (cam2 = 10.77.9.62,
+# the one with the physical monitor that cam1 films). Independent from CAM_IP.
+PAINTER_IP="${PAINTER_IP:-10.77.9.62}"
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 CAM_PW=newlevel
 CAM_SOURCE="${CAM_SOURCE:-$CAMERA_SOURCE}"
 RUN_ID=$(( (RANDOM << 16) | RANDOM ))
-DURATION="${DURATION:-300}"
+DURATION="${DURATION:-1800}"
+# Duration floor: the harness cannot certify zero-loss below 300 s (insufficient
+# statistics for single-copy guard and min-zero-loss window). Reject early before
+# bringing the rig up.
+if [ "$DURATION" -lt 300 ]; then
+  echo "ERROR: DURATION=${DURATION} is below the minimum of 300 s — cannot certify zero-loss over so short a window. Set DURATION>=300 (default: 1800)." >&2
+  exit 1
+fi
 OUT="${OUT:-/tmp/multitap-probe.json}"
 # #32: paint at the pipeline rate (the OBS clocks run ~30 fps), NOT the 12 fps
 # coverage default. At 30 fps each painted id is carried ~once per hop (oversample
@@ -54,6 +70,18 @@ WALL_CLOCK="${WALL_CLOCK:-1}"
 # Resolved on dev1 to a literal flag, then interpolated into the (dev1-expanded)
 # remote painter command and the local tap command — never evaluated remotely.
 [ "$WALL_CLOCK" = "1" ] && PAINT_WALL_FLAG="--wall-clock" || PAINT_WALL_FLAG=""
+# Dual-QR Vernier anti-blur source (DUAL=1, default) or single-QR (DUAL=0). The dual path
+# defeats optical-transition blur but costs ~2x decode (two QR detections per frame), which
+# can bottleneck the dev1 taps below 30 fps. With a short camera shutter (e.g. 1/250) blur
+# is negligible, so single-QR (DUAL=0) decodes fine AND lets the taps track full 30 fps —
+# use it when the camera shutter is short enough that decode_failed stays ~0.
+[ "${DUAL:-1}" = "1" ] && DUAL_QR_FLAG="--dual-qr" || DUAL_QR_FLAG=""
+# QR module size (px). Bigger = lower spatial frequency = survives the NDI SpeedHQ
+# re-compression at the DistroAV OBS outputs (which torns ~3% of the fine 700px QR at
+# strih/stream while cam, the source, decodes ~0.3%). Both painter and probe MUST use
+# the same value (the probe derives its decode ROI from it). Max ~960 so the decode ROI
+# (qr_size+120) stays within the 1080 frame height.
+QR_SIZE="${QR_SIZE:-700}"
 # Optional hard gate (ms) on the absolute source→endpoint p99. Requires WALL_CLOCK
 # (multitap-probe bails otherwise). Empty ⇒ absolute latency is report-only (still
 # WRITTEN to the artifact). Baseline with a report-only run, then ratchet.
@@ -70,8 +98,8 @@ export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 # comparable if the cluster wall clocks are synced. Fail loudly up front (rather
 # than emitting a meaningless absolute number) if the source camera has drifted.
 if [ "$WALL_CLOCK" = "1" ]; then
-  echo "[0/5] verify cluster clock sync for absolute latency (#7/#8): ${CAM:-cam2}"
-  CLOCK_GUARD_TARGETS="${CAM:-cam2}=$CAM_IP" "$HERE/clock-offset-guard.sh" --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
+  echo "[0/5] verify cluster clock sync for absolute latency (#7/#8): ${CAM:-cam1}"
+  CLOCK_GUARD_TARGETS="${CAM:-cam1}=$CAM_IP" "$HERE/clock-offset-guard.sh" --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
 fi
 
 # shellcheck disable=SC2317  # cleanup() is invoked indirectly via the EXIT/HUP/INT/TERM trap
@@ -89,23 +117,36 @@ cleanup() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
     "pkill -x frame-probe 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      systemctl restart camera-box 2>/dev/null; true"
+  # Kill the painter process on PAINTER_IP (cam2). If PAINTER_IP == CAM_IP (loopback
+  # mode) the pkill -x above already covered it; the second one is a no-op.
+  if [ "$PAINTER_IP" != "$CAM_IP" ]; then
+    # cam2 is the painter box. We STOPPED its camera-box in [2b] to free /dev/fb0 (it
+    # runs --display and owns the monitor); restart it to restore its display + NDI.
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+      "pkill -x frame-probe 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
+  fi
+  # cam1 is NOT reconfigured by this harness — the real camera is already 30 fps / 1-250
+  # and cam1 emits a 30 fps NDI via its deployed genlock drop-in — so there is nothing to
+  # restore on cam1.
+  # Purge the (large) spool dir if offline-decode mode was used.
+  [ -n "${SPOOL_DIR:-}" ] && rm -rf "$SPOOL_DIR" 2>/dev/null
 }
 trap cleanup EXIT HUP INT TERM
 
 echo "[1/5] build frame-probe + multitap-probe"
 cargo build --release --features probe --bin frame-probe --bin multitap-probe
 
-echo "[2/5] bring up the ${CAMERA_NAME} NDI sender FIRST (run_id=$RUN_ID), then the painter"
-# #30 ordering fix: camera-box's "CAM2 (usb)" NDI sender must EXIST before OBS
-# binds its ndi_source to it. Previously OBS setup ran first and bound to the
-# sender that this step then RESTARTED — DistroAV intermittently failed to
-# reconnect to the new sender, so strih/stream rendered black and every tap
-# downstream of OBS decoded 0 for the whole run (false-RED on min_frames).
+echo "[2/5] cam1 (${CAMERA_NAME}) already emits 30fps NDI (run_id=$RUN_ID) — start the painter on cam2"
+# #30 ordering fix: camera-box's NDI sender must EXIST before OBS binds its
+# ndi_source to it. Previously OBS setup ran first and bound to the sender that
+# this step then RESTARTED — DistroAV intermittently failed to reconnect to the
+# new sender, so strih/stream rendered black and every tap downstream of OBS
+# decoded 0 for the whole run (false-RED on min_frames).
 # Starting (restarting) camera-box up front means OBS binds, in step [3], to the
 # live sender that then persists for the entire tap window — no mid-run teardown,
 # no reconnect, no race.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  target/release/frame-probe root@"$CAM_IP":/tmp/frame-probe
+  target/release/frame-probe root@"$PAINTER_IP":/tmp/frame-probe
 # After the stop: sweep any orphaned manual camera-box (pkill -x — exact name, can't
 # self-match the remote shell) and WAIT until /dev/video0 is actually free; uvcvideo
 # teardown completes asynchronously after the process dies, and a fixed sleep races it
@@ -116,21 +157,46 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # the ~60fps capture rate (no decimation, no wall-clock external pacing) and strih's 30fps
 # genlock FIFO drops ~half the frames / renders black — the ~49% cam→strih loss this harness
 # falsely showed. With the env present, cam→strih is 0-loss from t+0s (no settling transient).
-sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
-  "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; \
-   pkill -x camera-box 2>/dev/null; \
-   i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
-   sleep 4; \
-   (nohup /tmp/frame-probe --paint-only $PAINT_WALL_FLAG \
-      --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
-      >/tmp/painter.log 2>&1 &)"
-# NOTE: camera-box is started WITHOUT --display so /dev/fb0 is free for the
-# painter; it still runs capture->NDI (genlock-decimated to $GENLOCK_FPS), carrying the QR
-# frames onto the network.
+
+# [2b] Bring up the painter. cam1 (the SOURCE) runs its DEPLOYED camera-box service
+# UNCHANGED — the real camera is already 30 fps / 1-250 and cam1 emits a 30 fps NDI via
+# its deployed CAMERA_BOX_GENLOCK_FPS=30 drop-in (#50/#66). We do NOT reconfigure cam1
+# (no capture-fps change): the camera + capture chain are already at the test rate.
+# Only when CAM_IP == PAINTER_IP (loopback mode — not the real-camera default) do we
+# stop+relaunch camera-box so frame-probe can claim /dev/fb0.
+if [ "$CAM_IP" = "$PAINTER_IP" ]; then
+  # Loopback mode (not the real-camera rig default): same box paints AND sources.
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
+    "systemctl stop camera-box; \
+     pkill -x camera-box 2>/dev/null; \
+     i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+     (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
+     sleep 4; \
+     (nohup /tmp/frame-probe --paint-only $DUAL_QR_FLAG $PAINT_WALL_FLAG \
+        --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+        >/tmp/painter.log 2>&1 &)"
+else
+  # Real-camera rig (default): cam1 runs its DEPLOYED camera-box service UNCHANGED and is
+  # the SOURCE (real 30 fps / 1-250 camera, emits 30 fps NDI). cam2 is the
+  # PAINTER box — it has the physical monitor cam1 films. cam2's camera-box runs with
+  # `--display` and HOLDS /dev/fb0 (it paints the interkom return onto that monitor), so
+  # it MUST be stopped to free the display before frame-probe can paint QR there. cam2's
+  # own camera/NDI is NOT part of the measured cam1->strih->stream chain, so stopping it
+  # is safe; the cleanup trap restarts it (restoring its --display + NDI) on exit.
+  echo "[2b/5] free cam2 (${PAINTER_IP}) display: stop camera-box (holds /dev/fb0 via --display), then paint"
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+    "systemctl stop camera-box; \
+     pkill -x camera-box 2>/dev/null; \
+     i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+     (nohup /tmp/frame-probe --paint-only $DUAL_QR_FLAG $PAINT_WALL_FLAG \
+        --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+        >/tmp/painter.log 2>&1 &)"
+fi
+# NOTE: cam1 runs capture->NDI (genlock-decimated to $GENLOCK_FPS) via its service,
+# carrying the QR frames (filmed off cam2's monitor) onto the network as "$CAM_SOURCE".
 # Painter outlasts the tap window by +40s because OBS setup ([3]) now runs AFTER
 # the painter starts and consumes a few seconds before the taps begin.
-sleep 3  # let the fresh "CAM2 (usb)" NDI sender become discoverable on the LAN
+sleep 3  # let the "${CAM_SOURCE}" NDI sender become discoverable on the LAN
 
 echo "[3/5] OBS setup — route the chain to the LIVE sender, discover program NDI names"
 # strih ingests the camera's live QR NDI; STRIH_OUT = strih program NDI name.
@@ -214,6 +280,13 @@ LEAD_DISCARD="${LEAD_DISCARD:-0}"
 # Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
 [ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")
 
+# Offline-decode mode (SPOOL_DIR set): taps write every frame to disk during the
+# window (no live decode → ZERO tap-drop), then multitap-probe decodes the spools
+# AFTER the window. This is what makes the loss number trustworthy (live decode
+# always drops ~2-3% at the NDI receiver, which contaminates the id-match). ~1.8 GB
+# per tap per 300 s; the trap purges the spool dir on exit.
+[ -n "${SPOOL_DIR:-}" ] && GATE_ARGS+=(--spool-dir "$SPOOL_DIR")
+
 # A failing per-hop gate is multitap-probe exiting 1 — its designed FAIL signal.
 # Capture it without `set -e` aborting before the artifact dump (the failure case
 # is exactly when we want the JSON shown), then propagate the code as the exit.
@@ -223,6 +296,9 @@ if ./target/release/multitap-probe \
   --tap strih="$STRIH_OUT" \
   --tap stream="$STREAM_OUT" \
   --duration-secs "$DURATION" \
+  --min-zero-loss-secs 300 \
+  --qr-size "$QR_SIZE" \
+  $DUAL_QR_FLAG \
   ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
   --out "$OUT"; then
   GATE=0
@@ -232,4 +308,13 @@ fi
 
 echo "[5/5] artifact: $OUT"
 cat "$OUT"
+
+# Generate the visual E2E report PNG and print the LAN URL.
+# multitap-probe writes the series to "<out>.series.jsonl" (append, not replace-ext).
+SERIES="${OUT}.series.jsonl"
+REPORT_PNG="/tmp/e2e-report-${RUN_ID}.png"
+echo "[5/5] generating E2E report PNG: $REPORT_PNG"
+python3 scripts/e2e-report.py --json "$OUT" --series "$SERIES" --out "$REPORT_PNG" || \
+  echo "WARNING: e2e-report.py failed (non-fatal; artifact still at $OUT)" >&2
+
 exit "$GATE"

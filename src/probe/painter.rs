@@ -19,7 +19,7 @@
 use crate::probe::clock_ns;
 use crate::probe::payload::Payload;
 use crate::probe::presenter::{open_presenter, Presenter, PresenterKind};
-use crate::probe::qr::render_qr_bgra;
+use crate::probe::qr::{render_qr_bgra, render_qr_dual_bgra};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -74,6 +74,22 @@ pub struct PaintParams {
     /// share the DanteSync-disciplined origin (strih = master). MUST match the
     /// taps' `wall_clock` or the subtraction is meaningless.
     pub wall_clock: bool,
+    /// Paint two QRs side by side using the Vernier anti-blur scheme (spec §dual-QR).
+    /// When `true`, `run_painter` drives a `refresh_tick` counter and alternates
+    /// which half is freshly painted each tick so at least one half is always
+    /// settled (sharp) when the camera fires. When `false` (default) the original
+    /// single-QR path is used unchanged.
+    pub dual_qr: bool,
+}
+
+/// Vernier dual-QR ids for refresh counter `tick`. LEFT carries the latest EVEN
+/// tick, RIGHT the latest ODD tick, so exactly one region changes per refresh and
+/// the two are never freshly-painted on the same refresh — at least one is settled
+/// (sharp) when the camera fires (the anti-blur guarantee, spec §dual-QR).
+pub fn vernier_ids(tick: u64) -> (u32, u32) {
+    let left = tick & !1; // latest even <= tick
+    let right = if tick == 0 { 0 } else { (tick - 1) | 1 }.min(tick); // latest odd <= tick
+    (left as u32, right as u32)
 }
 
 /// Paint until `stop` is set. Records `(frame_id, gen_ts_ns)` of every emitted frame.
@@ -120,20 +136,53 @@ pub fn run_painter(
     let period = Duration::from_secs_f64(1.0 / params.paint_fps);
     let mut next = Instant::now();
 
+    // Dual-QR Vernier: counts refreshes so vernier_ids can assign stable left/right ids.
+    let mut refresh_tick: u64 = 0;
+
     while !stop.load(Ordering::Relaxed) {
         let gen_ts_ns = clock_ns(start, params.wall_clock);
-        let payload = Payload {
-            run_id: params.run_id,
-            frame_id,
-            gen_ts_ns,
+
+        let bgra = if params.dual_qr {
+            // Vernier anti-blur: LEFT carries the latest EVEN tick, RIGHT the latest ODD
+            // tick. Exactly one half changes per refresh — the other is settled (sharp).
+            let (l, r) = vernier_ids(refresh_tick);
+            let logical_id = l.max(r); // the freshly-painted half's id
+            let left_payload = Payload {
+                run_id: params.run_id,
+                frame_id: l,
+                gen_ts_ns,
+            };
+            let right_payload = Payload {
+                run_id: params.run_id,
+                frame_id: r,
+                gen_ts_ns,
+            };
+            emitted.lock().unwrap().push((logical_id, gen_ts_ns));
+            render_qr_dual_bgra(
+                &left_payload,
+                &right_payload,
+                params.canvas_w,
+                params.canvas_h,
+                params.qr_size,
+            )
+        } else {
+            let payload = Payload {
+                run_id: params.run_id,
+                frame_id,
+                gen_ts_ns,
+            };
+            emitted.lock().unwrap().push((frame_id, gen_ts_ns));
+            render_qr_bgra(&payload, params.canvas_w, params.canvas_h, params.qr_size)
         };
-        let bgra = render_qr_bgra(&payload, params.canvas_w, params.canvas_h, params.qr_size);
+
         // For KMS this blocks until the vblank flip completes — that block IS the
         // 1:1 pacing (one new id per HDMI vblank). For fbdev it returns at once.
         presenter.present(&bgra)?;
-        emitted.lock().unwrap().push((frame_id, gen_ts_ns));
+        refresh_tick = refresh_tick.wrapping_add(1);
 
-        frame_id = frame_id.wrapping_add(1);
+        if !params.dual_qr {
+            frame_id = frame_id.wrapping_add(1);
+        }
 
         if flip_paced {
             // The vblank flip in present() already paced this iteration — no sleep.
@@ -155,6 +204,31 @@ pub fn run_painter(
             }
         }
     }
-    tracing::info!("painter: emitted {} frames", frame_id);
+    tracing::info!("painter: emitted {} frames", emitted.lock().unwrap().len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vernier_ids;
+
+    #[test]
+    fn vernier_ids_interleave_even_left_odd_right() {
+        assert_eq!(vernier_ids(0), (0, 0)); // tick 0: left fresh=0, no odd yet -> right 0
+        assert_eq!(vernier_ids(1), (0, 1)); // right updates to 1
+        assert_eq!(vernier_ids(2), (2, 1)); // left updates to 2
+        assert_eq!(vernier_ids(3), (2, 3)); // right updates to 3
+        assert_eq!(vernier_ids(4), (4, 3));
+        // The fresh side equals the tick; the other is the previous parity -> the two
+        // are never both freshly-changed on the same tick (the anti-blur guarantee).
+        for t in 1..1000u64 {
+            let (l, r) = vernier_ids(t);
+            let fresh_is_left = t % 2 == 0;
+            if fresh_is_left {
+                assert_eq!(l as u64, t);
+            } else {
+                assert_eq!(r as u64, t);
+            }
+        }
+    }
 }
