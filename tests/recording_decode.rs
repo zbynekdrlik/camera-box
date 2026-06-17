@@ -46,12 +46,8 @@ fn strih_6519_dual_qr_frame_decodes_both_qrs() {
 
     // Both painted ticks are present (left even 6518, right odd 6519); the Vernier
     // effective tick is the max of the two.
-    let ids: Vec<u32> = frame.payloads.iter().map(|p| p.frame_id).collect();
-    assert!(ids.contains(&6518), "left (even) QR tick 6518 present: {ids:?}");
-    assert!(ids.contains(&6519), "right (odd) QR tick 6519 present: {ids:?}");
-    assert_eq!(
-        frame.tick,
-        Some(6519),
-        "effective Vernier tick = max(left, right)"
-    );
+    let mut ids: Vec<u32> = frame.payloads.iter().map(|p| p.frame_id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![6518, 6519], "both painted QR ticks present");
+    assert_eq!(frame.tick, Some(6519), "Vernier tick = max(left, right)");
 }

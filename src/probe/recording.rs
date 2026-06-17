@@ -118,8 +118,15 @@ fn probe_dimensions(path: &Path) -> Result<(u32, u32)> {
 
 /// Stream every native-resolution gray8 (luma) frame out of `path` via ffmpeg,
 /// invoking `on_frame(frame_index, luma)` for each. Frames are read by exact
-/// byte count (`width * height`), so a truncated trailing frame is ignored. The
-/// ffmpeg stderr is suppressed; a non-zero ffmpeg exit fails the call.
+/// byte count (`width * height`), so a truncated trailing frame is ignored.
+///
+/// ffmpeg's stderr is INHERITED (not piped): on a 30-min / 54k-frame clip a piped
+/// stderr we only drain after the stdout loop could fill its ~64 KB OS pipe buffer
+/// while we block reading stdout — ffmpeg then blocks writing stderr and we block
+/// reading stdout, a classic two-pipe deadlock. Inheriting routes any `-v error`
+/// output straight to this process's stderr/logs with no buffer to fill. A
+/// non-zero ffmpeg exit fails the call (the inherited error text is already in the
+/// log).
 fn read_frames(
     path: &Path,
     width: u32,
@@ -132,7 +139,7 @@ fn read_frames(
         .arg(path)
         .args(["-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .context("spawn ffmpeg (install ffmpeg: apt install ffmpeg)")?;
 
@@ -158,15 +165,10 @@ fn read_frames(
 
     let status = child.wait().context("wait for ffmpeg")?;
     if !status.success() {
-        let mut err = String::new();
-        if let Some(mut s) = child.stderr.take() {
-            let _ = s.read_to_string(&mut err);
-        }
         anyhow::bail!(
-            "ffmpeg decode failed on {} (status {:?}): {}",
+            "ffmpeg decode failed on {} (status {:?}); see ffmpeg stderr above",
             path.display(),
             status.code(),
-            err.trim()
         );
     }
     tracing::info!(
