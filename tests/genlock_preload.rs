@@ -15,8 +15,9 @@
 //!     `git subtree pull` (#44) can't silently revert it.
 
 use camera_box::probe::genlock::{
-    genlock_drop_cap, parse_preload, preload_to_ms, should_consume, steady_state_depth,
-    GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX, MAX_ASYNC_FRAMES,
+    genlock_decide, genlock_drop_cap, parse_preload, preload_to_ms, steady_state_depth,
+    GenlockDecision, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
+    MAX_ASYNC_FRAMES,
 };
 
 // ---- pure decision logic ---------------------------------------------------
@@ -115,8 +116,9 @@ fn genlock_drop_cap_scales_with_preload_and_clamps() {
     // #97: a genlock source's drop-cap = max(MAX_ASYNC_FRAMES, preload + RESERVE),
     // so a deliberately delayed source can hold its full buffer without an overrun
     // force-drain, while a shallow preload keeps the pre-#97 30-frame burst-tolerance
-    // floor. The cap MUST sit strictly above the steady-state depth (preload+1) or
-    // normal jitter trips it.
+    // floor. The cap MUST sit strictly above the steady-state depth (#102: the
+    // consume-when-queued gate parks at `preload`) plus headroom, or normal jitter
+    // trips it.
     assert_eq!(GENLOCK_DROP_CAP_RESERVE, 4);
     for preload in [0u32, 1, 2, 30, 100, GENLOCK_PRELOAD_MAX] {
         let cap = genlock_drop_cap(true, preload);
@@ -180,31 +182,172 @@ fn default_is_one_frame() {
     assert_eq!(GENLOCK_PRELOAD_DEFAULT, 1);
 }
 
+// ---- #102: consume-when-queued + one-time startup fill (the loss fix) --------
+//
+// The #70 gate (`depth > preload` → repeat) HELD and repeated the last frame on
+// every arrival-jitter dip below the preload reserve, losing one DISTINCT frame
+// each time. At a deep #97 preload (=1 s) it was catastrophic: after any drain
+// the FIFO had to REFILL PAST the whole reserve (~30 repeats) before one new
+// frame escaped (11.6% @ preload=1 → 34.3% @ preload=30, underrun-dominated 990
+// vs 72 overruns on the live stream box). #102 makes a deep preload a CLEAN delay
+// line: BUILD to preload once at startup (the delay), then consume a distinct
+// frame EVERY tick a frame is queued (never repeat-on-hold). Repeat only on a
+// TRUE empty (depth==0). The pure decision is `genlock_decide(depth, preload,
+// filled) -> { consume, filled }`, mirrored from the C genlock branch.
+
 #[test]
-fn consume_only_when_deeper_than_preload() {
-    // preload = 0 reproduces the OLD zero-slack behavior: consume whenever num>0.
-    assert!(!should_consume(0, 0));
-    assert!(should_consume(1, 0));
-
-    // preload = 1: hold at depth 0 and 1 (underrun), consume at depth ≥ 2.
-    assert!(!should_consume(0, 1));
-    assert!(!should_consume(1, 1));
-    assert!(should_consume(2, 1));
-    assert!(should_consume(3, 1));
-
-    // preload = 2: hold up to and including depth 2, consume at ≥ 3.
-    assert!(!should_consume(2, 2));
-    assert!(should_consume(3, 2));
+fn build_phase_fills_to_preload_then_latches() {
+    // Before the delay line is full (`filled == false`) the FIFO BUILDS: it holds
+    // (consume=false) until the queue is deeper than `preload`, establishing the
+    // ~preload-frame delay. The moment depth EXCEEDS preload it latches filled and
+    // consumes. This one-time startup fill is the ONLY place repeats are emitted.
+    let preload = 30;
+    // Filling: every depth at/below preload holds and stays unfilled.
+    for depth in 0..=preload as usize {
+        let d = genlock_decide(depth, preload, false);
+        assert_eq!(
+            d,
+            GenlockDecision {
+                consume: false,
+                filled: false
+            },
+            "build phase: depth {depth} <= preload {preload} must HOLD (fill the delay) \
+             and stay unfilled"
+        );
+    }
+    // depth > preload → delay established → latch filled AND consume this tick.
+    let d = genlock_decide(preload as usize + 1, preload, false);
+    assert_eq!(
+        d,
+        GenlockDecision {
+            consume: true,
+            filled: true
+        },
+        "build phase: depth preload+1 means the {preload}-frame delay is buffered — \
+         latch filled and emit the first (delayed) distinct frame"
+    );
 }
 
 #[test]
-fn steady_state_depth_is_preload_plus_one() {
-    // With producer==consumer rate, the gate parks the queue one frame above the
-    // reserve: depth oscillates around preload+1, leaving `preload` frames of
-    // jitter slack at the moment of consumption.
+fn steady_state_consumes_every_queued_distinct_frame() {
+    // THE FIX: once filled, consume a distinct frame on EVERY tick a frame is
+    // queued (depth >= 1) — NEVER repeat-on-hold while a distinct frame is
+    // available. A jitter dip below the preload reserve still delivers a distinct
+    // frame; the reserve simply shrinks and refills naturally. This is what takes
+    // the loss to ~0 at ANY preload depth.
+    for preload in [0u32, 1, 2, 30, 128] {
+        for depth in 1..=(preload as usize + 5) {
+            let d = genlock_decide(depth, preload, true);
+            assert!(
+                d.consume,
+                "steady state (filled): preload={preload} depth={depth} — a queued \
+                 distinct frame MUST be consumed, never held/repeated (the #102 fix)"
+            );
+            assert!(d.filled, "steady state stays filled while frames flow");
+        }
+    }
+}
+
+#[test]
+fn steady_state_repeats_only_on_true_empty() {
+    // The ONLY hold in steady state is a genuine empty queue (depth==0): there is
+    // no distinct frame to deliver, so the compositor repeats the last one. This is
+    // an unavoidable underrun, NOT a repeat-while-a-frame-is-queued. `filled` stays
+    // true — a transient empty does not re-trigger the whole startup refill.
+    for preload in [0u32, 1, 30, 128] {
+        let d = genlock_decide(0, preload, true);
+        assert_eq!(
+            d,
+            GenlockDecision {
+                consume: false,
+                filled: true
+            },
+            "steady state: empty FIFO (depth 0, preload={preload}) holds (true \
+             underrun) but stays filled — no full-reserve refill run"
+        );
+    }
+}
+
+#[test]
+fn deep_preload_never_repeats_while_a_frame_is_queued() {
+    // The regression guard for the headline #102 symptom: at the production
+    // preload=30, once filled, a depth WELL BELOW the reserve (the jitter dip the
+    // old gate repeated on) must STILL consume a distinct frame. The old
+    // `depth > preload` gate returned HOLD here (depth 5 <= preload 30) → the
+    // ~34% loss. The new gate consumes.
+    let preload = 30;
+    for depth in [1usize, 2, 5, 15, 29, 30, 31] {
+        let d = genlock_decide(depth, preload, true);
+        assert!(
+            d.consume,
+            "deep preload regression: preload={preload} depth={depth} below the \
+             reserve must consume a distinct frame, not repeat (the old gate's bug)"
+        );
+    }
+    // Only a true empty holds, even at a deep preload.
+    assert!(!genlock_decide(0, preload, true).consume);
+}
+
+#[test]
+fn preload_zero_consumes_whenever_queued_once_filled() {
+    // preload=0 means no delay line: it fills immediately (depth>0 latches filled)
+    // and then consumes whenever a frame is queued — i.e. the classic 1-per-tick
+    // FIFO with NO repeat-on-hold. (Build phase: depth 0 holds-unfilled, depth 1
+    // latches+consumes.)
+    assert_eq!(
+        genlock_decide(0, 0, false),
+        GenlockDecision {
+            consume: false,
+            filled: false
+        }
+    );
+    assert_eq!(
+        genlock_decide(1, 0, false),
+        GenlockDecision {
+            consume: true,
+            filled: true
+        }
+    );
+    // Once filled, consume whenever queued; hold only on empty.
+    assert!(genlock_decide(1, 0, true).consume);
+    assert!(!genlock_decide(0, 0, true).consume);
+}
+
+#[test]
+fn steady_state_depth_is_preload_plus_one_at_the_decision_instant() {
+    // #102: the FIFO builds to preload+1 (the latch fires when depth first EXCEEDS
+    // preload), then at each tick the producer adds one (-> preload+1) and the gate
+    // consumes one (-> preload). So the DECISION-instant depth is preload+1, leaving
+    // `preload` frames of reserve after consuming — the SAME single-tick jitter
+    // tolerance #70 gave (it takes preload+1 consecutive missed deliveries to reach a
+    // true empty). The drop-cap must clear this preload+1 peak.
     assert_eq!(steady_state_depth(0), 1);
     assert_eq!(steady_state_depth(1), 2);
-    assert_eq!(steady_state_depth(2), 3);
+    assert_eq!(steady_state_depth(30), 31);
+}
+
+#[test]
+fn single_tick_jitter_below_the_reserve_still_consumes_no_repeat() {
+    // The #102 jitter-tolerance guard: once filled and parked at the decision-instant
+    // depth preload+1, a single missed delivery drops the depth to `preload` (>= 1),
+    // which STILL consumes a distinct frame — never a repeat (the old #70 gate
+    // repeated here, losing the frame). It takes preload+1 consecutive missed
+    // deliveries to drain to a true empty (depth 0), the only repeat case.
+    for preload in [1u32, 2, 30] {
+        let p = preload as usize;
+        // parked at preload+1; lose one delivery -> depth preload (>= 1) -> still consume.
+        assert!(genlock_decide(p, preload, true).consume);
+        // every non-empty depth below the reserve still consumes (no repeat-on-hold).
+        for depth in 1..=p {
+            assert!(
+                genlock_decide(depth, preload, true).consume,
+                "preload={preload} depth={depth}: a queued frame below the reserve must \
+                 still consume, never repeat (the old #70 gate's bug)"
+            );
+        }
+        // only a fully drained queue (depth 0) repeats.
+        assert!(!genlock_decide(0, preload, true).consume);
+    }
 }
 
 // ---- vendored-source guard (the C patch must stay applied) ------------------
@@ -259,19 +402,75 @@ mod vendored_source {
     }
 
     #[test]
-    fn fifo_gates_on_preload_not_zero_slack() {
+    fn fifo_consumes_when_queued_with_startup_fill() {
         let src = squish(&vendor_file(OBS_SOURCE));
-        // The genlock branch must hold until the queue exceeds the preload reserve.
+        // #102: the genlock branch must use the NEW consume-when-queued decision
+        // (genlock_decide) — BUILD to preload once, then consume a distinct frame on
+        // every tick a frame is queued, repeating only on a true empty. The old
+        // hard-hold gate (`genlock_should_consume(num, preload)` → repeat whenever
+        // depth<=preload) is GONE: it lost a distinct frame on every jitter dip
+        // (11.6%→34.3% on the live rig). A subtree pull (#44) re-introducing the old
+        // gate would silently revert the loss fix.
         assert!(
-            src.contains("genlock_should_consume(source->async_frames.num, preload)"),
-            "{OBS_SOURCE}: #70 — the genlock_fifo branch no longer gates consumption on \
-             the preload reserve (genlock_should_consume). The zero-slack FIFO (#42) is \
-             back; re-apply the #70 patch."
+            src.contains(
+                "genlock_decide(source->async_frames.num, preload, source->genlock_filled)"
+            ),
+            "{OBS_SOURCE}: #102 — the genlock_fifo branch no longer uses the \
+             consume-when-queued decision (genlock_decide with the startup-fill latch). \
+             The #70 hard-hold repeat-on-underrun gate is back; re-apply the #102 fix."
         );
-        // The audit counters that prove underruns → 0 must still be wired.
+        // The old hard-hold gate string must NOT be back (it caused the loss).
+        assert!(
+            !src.contains("genlock_should_consume(source->async_frames.num, preload)"),
+            "{OBS_SOURCE}: #102 — the old hard-hold gate genlock_should_consume is back; \
+             it repeats-on-hold and loses a distinct frame per jitter dip. Use \
+             genlock_decide (consume-when-queued)."
+        );
+        // The one-time startup-fill latch must be present (the delay-line build).
+        assert!(
+            src.contains("genlock_filled"),
+            "{OBS_SOURCE}: #102 — the startup-fill latch (genlock_filled) is missing; \
+             without it the FIFO cannot BUILD the preload delay then switch to \
+             consume-when-queued. Re-apply."
+        );
+        // The audit counters that prove underruns → ~0 must still be wired.
         assert!(
             src.contains("source->genlock_underruns++"),
-            "{OBS_SOURCE}: #70 — the genlock underrun audit counter is gone; re-apply."
+            "{OBS_SOURCE}: #70/#102 — the genlock underrun audit counter is gone; re-apply."
+        );
+    }
+
+    #[test]
+    fn genlock_bypasses_get_closest_frame_bootstrap_shortcut() {
+        // #102 (review fix): get_closest_frame's `!last_frame_ts` bootstrap short-circuit
+        // must EXCLUDE genlock sources, so a genlock FIFO always routes through
+        // ready_async_frame/genlock_decide and rebuilds the preload delay after an overrun
+        // drain (cache_video resets last_frame_ts=0 AND genlock_filled=false) or a source
+        // resume — instead of leaking one undelayed distinct frame (a ~preload-frame phase
+        // jump). The guard pins the `&& !source->genlock_fifo` exclusion.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("!source->last_frame_ts && !source->genlock_fifo"),
+            "{OBS_SOURCE}: #102 — get_closest_frame's bootstrap bypass no longer excludes \
+             genlock sources; the post-overrun/post-resume delay-line rebuild is silently \
+             skipped and one undelayed frame leaks. Re-apply the `&& !source->genlock_fifo` \
+             exclusion."
+        );
+        // Every path that empties/re-bootstraps the FIFO must re-arm the latch (reset to
+        // false) so the delay line rebuilds. There are exactly FOUR `genlock_filled = false`
+        // sites: create-init, overrun force-drain (cache_video), inactive/flush
+        // (obs_source_output_video_internal), and the runtime preload-change re-arm
+        // (obs_source_set_genlock_preload). The render-tick writeback uses gd.filled, not a
+        // literal false, so it does not count. Assert >=4 so deleting ANY single re-arm site
+        // turns this RED (a >=3 floor would let one deletion slip — review finding).
+        let raw = vendor_file(OBS_SOURCE);
+        let resets = raw.matches("source->genlock_filled = false;").count();
+        assert!(
+            resets >= 4,
+            "{OBS_SOURCE}: #102 — expected >=4 `source->genlock_filled = false;` re-arm \
+             sites (create init + overrun drain + inactive/flush + preload-change), found \
+             {resets}. A path that drops the latch reset leaks an undelayed frame after that \
+             drain/flush/resize."
         );
     }
 

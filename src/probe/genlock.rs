@@ -1,25 +1,28 @@
-//! Genlock FIFO preload-reserve decision logic (camera-box #70).
+//! Genlock FIFO consume / preload decision logic (camera-box #42 → #70 → #97 → #102).
 //!
 //! This is the camera-box-side, pure, unit-tested MIRROR of the C decision logic
 //! baked into the vendored OBS genlock FIFO
 //! (`vendor/obs-studio/libobs/obs-source.c`, the `genlock_fifo` branch of
-//! `ready_async_frame()` + `genlock_parse_preload()`). Keeping the contract here
-//! lets CI prove the parse/clamp + consume rules without an OBS build, and the
-//! `tests/genlock_preload.rs` vendored-source guard keeps the C side in lock-step.
+//! `ready_async_frame()` + `genlock_parse_preload()` + `genlock_decide()`). Keeping
+//! the contract here lets CI prove the parse/clamp + consume rules without an OBS
+//! build, and the `tests/genlock_preload.rs` vendored-source guard keeps the C side
+//! in lock-step.
 //!
-//! ## Why the reserve exists
+//! ## The preload is a video-delay; the consume gate must not drop distinct frames
 //!
-//! The original genlock FIFO (#42) consumed exactly one queued frame per
-//! wall-clock render tick with ZERO slack. With the wall-clock-slaved tick the
-//! producer (NDI sender) and consumer (compositor) run at the same average rate,
-//! so the queue parks around depth 1 — but any NDI arrival *jitter* (one late
-//! packet) leaves the queue empty at the next tick: an **underrun**, which the
-//! compositor renders as a dropped/repeated frame. The #68/#69 QR instrument
-//! measured ~0.38%/frame loss on each OBS hop from exactly this.
+//! The genlock FIFO (#42) consumes queued frames against a wall-clock render tick.
+//! `preload` is the depth of a deliberate jitter buffer / **video delay** (#97):
+//! `preload` frames buffered = `preload` frames of genlock-disciplined delay, used to
+//! push the program video back ~1 s to match late audio on stream.lan.
 //!
-//! The fix holds consumption until the queue is *deeper than* `preload`, so the
-//! FIFO keeps `preload` frames of jitter buffer. `preload = 1` ⇒ one frame of
-//! reserve = one frame of added latency per hop, absorbing one tick of jitter.
+//! The #70 attempt gated consumption on `queue_depth > preload` on EVERY tick, so any
+//! NDI arrival-*jitter* dip below the reserve REPEATED the last frame and lost one
+//! DISTINCT frame; a deep #97 preload (≈1 s) made this catastrophic (11.6 % @
+//! preload=1 → 34.3 % @ preload=30 on the live rig, underrun-dominated). #102 fixes
+//! it: BUILD the delay once at startup ([`genlock_decide`] with the `filled` latch),
+//! then consume a distinct frame on EVERY tick a frame is queued, repeating ONLY on a
+//! true empty. A deep preload is then a CLEAN delay line — it holds the delay but
+//! never drops a distinct frame ⇒ ~0 distinct-frame loss at any depth.
 
 /// Default reserve when `OBS_GENLOCK_PRELOAD_FRAMES` is unset/invalid: one frame
 /// (= one frame of latency per hop, the "1 frame per hop" the task calls for).
@@ -45,10 +48,11 @@ pub const GENLOCK_PRELOAD_MAX: u32 = 128;
 
 /// Headroom above a genlock source's `preload` for the per-source FIFO drop-cap.
 ///
-/// The drop-cap must sit a few frames ABOVE the steady-state depth (`preload + 1`)
-/// so normal producer/consumer jitter never reaches it and force-drains the buffer
-/// (an overrun that resets the FIFO and re-introduces a glitch). `+4` leaves three
-/// frames of slack above steady state. See [`genlock_drop_cap`].
+/// The drop-cap must sit a few frames ABOVE the steady-state depth (#102: the
+/// consume-when-queued gate parks at `preload`) so normal producer/consumer jitter
+/// never reaches it and force-drains the buffer (an overrun that resets the FIFO and
+/// re-introduces a glitch). `+4` leaves slack above steady state. See
+/// [`genlock_drop_cap`].
 pub const GENLOCK_DROP_CAP_RESERVE: u32 = 4;
 
 /// libobs' fixed async FIFO drop-cap for NON-genlock sources (`MAX_ASYNC_FRAMES`).
@@ -100,19 +104,81 @@ pub fn parse_preload(env: Option<&str>) -> u32 {
     }
 }
 
-/// At a render tick, should the FIFO consume one frame?
+/// The genlock consume decision for one render tick (#102).
 ///
-/// Consume only once the queue is *deeper than* the reserve, so a `queue_depth`
-/// at or below `preload` (including an empty queue) holds — repeating the last
-/// frame for one tick so the reserve refills. Mirrors the C
-/// `genlock_should_consume()`.
-pub fn should_consume(queue_depth: usize, preload: u32) -> bool {
-    queue_depth > preload as usize
+/// `consume` — hand a distinct queued frame to the compositor this tick.
+/// `filled`  — the new value of the source's one-time startup-fill latch (the
+///             delay line has reached its `preload` depth at least once).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenlockDecision {
+    pub consume: bool,
+    pub filled: bool,
 }
 
-/// The steady-state queue depth the gate parks at when producer and consumer run
-/// at the same rate: one frame above the reserve, so `preload` frames of jitter
-/// slack remain at the instant of consumption.
+/// At a render tick, decide whether the genlock FIFO consumes a distinct frame
+/// (#102 — the frame-loss fix).
+///
+/// The #70 gate held consumption until `queue_depth > preload` on **every** tick,
+/// so any NDI arrival-jitter dip below the reserve REPEATED the last frame and lost
+/// one DISTINCT frame. At a deep #97 preload (≈1 s) it was catastrophic: after any
+/// drain the FIFO had to refill PAST the whole reserve before a single new frame
+/// escaped (11.6 % @ preload=1 → 34.3 % @ preload=30, underrun-dominated on the live
+/// stream box).
+///
+/// The fix splits the FIFO's life into two phases via a one-time `filled` latch:
+///
+/// 1. **Build (`filled == false`)** — establish the delay line. Hold (no consume)
+///    until `queue_depth > preload`, i.e. `preload` frames are buffered plus one to
+///    emit; then **latch `filled` and consume** the first (now `preload`-frames-late)
+///    frame. This startup fill is the ONLY place repeats are emitted, and only once.
+///
+/// 2. **Steady (`filled == true`)** — **consume a distinct frame on EVERY tick a
+///    frame is queued** (`queue_depth >= 1`). A jitter dip below the reserve still
+///    delivers a distinct frame (the reserve shrinks and refills naturally) — it is
+///    never repeated. The ONLY hold is a TRUE empty (`queue_depth == 0`): a genuine
+///    underrun with no frame to deliver. `filled` stays `true` across a transient
+///    empty, so a momentary dip does NOT re-trigger the whole startup refill run.
+///
+/// Result: a deep preload is a CLEAN delay line — it holds the delay but emits a
+/// distinct frame every tick one is queued ⇒ ~0 distinct-frame loss at ANY depth.
+/// Mirrors the C `genlock_decide()` in the vendored OBS genlock branch. The latch is
+/// reset (back to `filled == false`) only on an overrun force-drain (`cache_video`
+/// empties the FIFO), so the delay rebuilds after a drain.
+pub fn genlock_decide(queue_depth: usize, preload: u32, filled: bool) -> GenlockDecision {
+    if !filled {
+        // Build phase: fill to the preload delay depth before emitting anything.
+        if queue_depth > preload as usize {
+            GenlockDecision {
+                consume: true,
+                filled: true,
+            }
+        } else {
+            GenlockDecision {
+                consume: false,
+                filled: false,
+            }
+        }
+    } else {
+        // Steady phase: consume whenever a distinct frame is queued; hold only on
+        // a true empty (an unavoidable underrun, never a repeat-while-queued).
+        GenlockDecision {
+            consume: queue_depth >= 1,
+            filled: true,
+        }
+    }
+}
+
+/// The peak steady-state queue depth seen at the consume DECISION instant when
+/// producer and consumer run at the same rate.
+///
+/// #102: the FIFO builds to `preload + 1` (the latch fires when depth first exceeds
+/// `preload`), then each tick the producer adds one (depth → `preload + 1`) and the
+/// gate consumes one (depth → `preload`). So the depth oscillates `preload + 1` (at the
+/// decision, before consuming) ↔ `preload` (after) — leaving `preload` frames of reserve
+/// at the instant of consumption, the SAME single-tick jitter tolerance the #70 gate
+/// gave (it takes `preload + 1` consecutive missed deliveries to reach a true empty).
+/// The drop-cap must clear this `preload + 1` peak, which is what
+/// [`genlock_drop_cap`]'s `+ RESERVE` guarantees.
 pub fn steady_state_depth(preload: u32) -> u32 {
     preload + 1
 }

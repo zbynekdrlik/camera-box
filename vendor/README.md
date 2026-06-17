@@ -114,6 +114,24 @@ DistroAV:
   stream.lan. Guarded by `tests/genlock_preload.rs` (+ the windows-genlock.yml pwsh gate)
   so a `git subtree pull` can't silently revert it.
 
+- **#102 genlock consume-when-queued (the strih→stream frame-loss fix)**
+  (`libobs/obs-source.c`, `libobs/obs-internal.h`): the #70 consume gate held until
+  `depth > preload` on EVERY tick, so any NDI arrival-jitter dip below the preload reserve
+  REPEATED the last frame and lost one DISTINCT frame; at a deep #97 preload (≈1 s) this was
+  catastrophic — after any drain the FIFO refilled PAST the whole reserve (~30 repeats)
+  before one new frame escaped (11.6 % @ preload=1 → 34.3 % @ preload=30 on the live stream
+  box, underrun-dominated 990 vs 72 overruns). The patch replaces `genlock_should_consume`
+  (`depth>preload` → repeat) with `genlock_decide(depth, preload, filled)` + a per-source
+  one-time startup-fill latch `genlock_filled`: the FIFO BUILDS to the preload delay depth
+  once (the delay), then consumes a distinct frame on EVERY tick a frame is queued, repeating
+  ONLY on a TRUE empty. So a deep preload becomes a CLEAN delay line — it holds the ~1 s delay
+  but never repeats/drops a distinct frame ⇒ ~0 distinct-frame loss at any depth. The latch
+  re-arms on an overrun force-drain (`cache_video`) and on a runtime preload change
+  (`obs_source_set_genlock_preload`), all under `async_mutex` (the #93 lesson). Preserves the
+  #97 per-source drop-cap (with its `MAX_ASYNC_FRAMES` floor for burst tolerance) intact.
+  Guarded by `tests/genlock_preload.rs` (+ the windows-genlock.yml pwsh gate) so a
+  `git subtree pull` can't silently revert it.
+
 ## Build
 
 Local prototyping happens on dev1 (Linux). The production target is a Windows build for

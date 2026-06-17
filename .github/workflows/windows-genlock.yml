@@ -49,26 +49,34 @@ jobs:
           }
           Write-Output "source-flag updater-disable patch present (opt_disable_updater=true + IsUpdaterDisabled wiring) — OK"
 
-      # #70: assert the genlock FIFO preload-reserve patch is present in the
-      # vendored OBS source BEFORE the 150-min build, so a future `git subtree
-      # pull` (#44) that reverts the zero-loss fix fails HERE rather than shipping
-      # a regressed binary. Mirrors the canonical Linux-CI guard
-      # tests/genlock_preload.rs (that crate is Linux-only and cannot compile on
-      # this Windows runner). Keep both in lock-step.
-      - name: Assert genlock FIFO preload-reserve patch present (#70)
+      # #70/#102: assert the genlock FIFO patch is present in the vendored OBS source
+      # BEFORE the 150-min build, so a future `git subtree pull` (#44) that reverts the
+      # zero-loss fix fails HERE rather than shipping a regressed binary. #102 changed
+      # the consume gate from the #70 hard-hold (`depth>preload` -> repeat, which lost a
+      # distinct frame per jitter dip: 11.6%->34.3% on the live rig) to consume-when-
+      # queued with a one-time startup-fill latch. Mirrors the canonical Linux-CI guard
+      # tests/genlock_preload.rs (that crate is Linux-only and cannot compile on this
+      # Windows runner). Keep both in lock-step.
+      - name: Assert genlock FIFO consume-when-queued patch present (#70/#102)
         shell: pwsh
         run: |
           $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
           if ($src -notmatch [regex]::Escape('getenv("OBS_GENLOCK_PRELOAD_FRAMES")')) {
             Write-Error "obs-source.c: OBS_GENLOCK_PRELOAD_FRAMES no longer read — #70 genlock preload patch reverted"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('genlock_should_consume(source->async_frames.num, preload)')) {
-            Write-Error "obs-source.c: genlock_fifo no longer gates on the preload reserve — #70 zero-slack FIFO is back"; exit 1
+          if ($src -notmatch [regex]::Escape('genlock_decide(source->async_frames.num, preload, source->genlock_filled)')) {
+            Write-Error "obs-source.c: genlock_fifo no longer uses the #102 consume-when-queued decision (genlock_decide + startup-fill latch) — the loss fix reverted"; exit 1
+          }
+          if ($src -match [regex]::Escape('genlock_should_consume(source->async_frames.num, preload)')) {
+            Write-Error "obs-source.c: the old #70 hard-hold gate genlock_should_consume is back — it repeats-on-hold and loses a distinct frame per jitter dip (#102)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('source->genlock_filled')) {
+            Write-Error "obs-source.c: the #102 startup-fill latch (genlock_filled) is missing — the delay line cannot build before consume-when-queued"; exit 1
           }
           if ($src -notmatch [regex]::Escape('source->genlock_underruns++')) {
-            Write-Error "obs-source.c: genlock underrun audit counter missing — #70 patch reverted"; exit 1
+            Write-Error "obs-source.c: genlock underrun audit counter missing — #70/#102 patch reverted"; exit 1
           }
-          Write-Output "genlock FIFO preload-reserve patch present (OBS_GENLOCK_PRELOAD_FRAMES + preload-gated consume + audit) — OK"
+          Write-Output "genlock FIFO consume-when-queued patch present (OBS_GENLOCK_PRELOAD_FRAMES + genlock_decide + startup-fill latch + audit) — OK"
 
       # #97: assert the per-source runtime preload (video-delay) patch is present in
       # BOTH the vendored libobs (the API + per-source field + raised cap) and the
