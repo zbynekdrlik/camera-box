@@ -309,6 +309,31 @@ const char *ndi_source_getname(void *)
 	return obs_module_text("NDIPlugin.NDISourceName");
 }
 
+/* camera-box #97: format the read-only "≈ N ms (@ F fps)" video-delay label for the
+ * current PROP_GENLOCK_PRELOAD value at the current output fps. Shared by the initial
+ * property build (so the label shows immediately on first dialog open, before any
+ * callback fires — review finding) AND the slider/checkbox modified_callbacks. The
+ * label is for the property DESCRIPTION only; it is NEVER written back into settings
+ * (no derived string persisted into the saved scene JSON). When genlock_fifo is OFF
+ * the preload is inert (ready_async_frame's genlock branch is skipped), so the label
+ * says so rather than implying a delay that is not applied. */
+static void format_preload_ms_label(obs_data_t *settings, char *buf, size_t buflen)
+{
+	const long long frames = obs_data_get_int(settings, PROP_GENLOCK_PRELOAD);
+	const bool fifo_on = obs_data_get_bool(settings, PROP_GENLOCK_FIFO);
+	struct obs_video_info ovi;
+	if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
+		const unsigned long long ms = (unsigned long long)frames * 1000ULL * ovi.fps_den / ovi.fps_num;
+		const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
+		if (fifo_on)
+			snprintf(buf, buflen, "≈ %llu ms (@ %.3f fps)", ms, fps);
+		else
+			snprintf(buf, buflen, "≈ %llu ms (@ %.3f fps) — enable Genlock to apply", ms, fps);
+	} else {
+		snprintf(buf, buflen, "≈ ? ms (output fps unknown)");
+	}
+}
+
 obs_properties_t *ndi_source_getproperties(void *data)
 {
 	auto s = (ndi_source_t *)data;
@@ -390,32 +415,28 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	obs_property_t *preload_slider =
 		obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD, "Genlock preload (video delay)", 0,
 					      PROP_GENLOCK_PRELOAD_MAX, 1);
-	obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
-	/* camera-box #97: recompute the read-only ms label whenever EITHER the preload
-	 * slider OR the genlock-fifo checkbox changes. The label is updated via the
-	 * property DESCRIPTION only — it is NOT written back into `settings`, so no
-	 * derived/locale string is persisted into the saved scene JSON (review finding).
-	 * The preload is only APPLIED when genlock_fifo is ON (ready_async_frame's
-	 * genlock branch), so when the box is off the label says the delay is inactive —
-	 * otherwise the slider looks like it should delay video when it does nothing
-	 * (review finding). Shared lambda for both callbacks. */
-	auto update_preload_ms = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
-		const long long frames = obs_data_get_int(settings_, PROP_GENLOCK_PRELOAD);
-		const bool fifo_on = obs_data_get_bool(settings_, PROP_GENLOCK_FIFO);
-		struct obs_video_info ovi;
-		char buf[160];
-		if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
-			const unsigned long long ms =
-				(unsigned long long)frames * 1000ULL * ovi.fps_den / ovi.fps_num;
-			const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
-			if (fifo_on)
-				snprintf(buf, sizeof(buf), "≈ %llu ms (@ %.3f fps)", ms, fps);
-			else
-				snprintf(buf, sizeof(buf), "≈ %llu ms (@ %.3f fps) — enable Genlock to apply",
-					 ms, fps);
-		} else {
-			snprintf(buf, sizeof(buf), "≈ ? ms (output fps unknown)");
+	obs_property_t *preload_ms = obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
+	/* camera-box #97: set the ms label immediately from the current settings so it
+	 * shows on FIRST dialog open — OBS does not fire modified_callbacks at initial
+	 * property population, so without this the operator would see the bare "↳ delay"
+	 * placeholder until they move the slider (review finding). The data ptr is the
+	 * source on a populated dialog; guard for the null-data (add-source) case. */
+	if (s && s->obs_source) {
+		obs_data_t *cur = obs_source_get_settings(s->obs_source);
+		if (cur) {
+			char init_buf[160];
+			format_preload_ms_label(cur, init_buf, sizeof(init_buf));
+			obs_property_set_description(preload_ms, init_buf);
+			obs_data_release(cur);
 		}
+	}
+	/* Recompute the read-only ms label whenever EITHER the preload slider OR the
+	 * genlock-fifo checkbox changes, via the shared formatter (description only — never
+	 * written back into settings). Non-capturing lambda so it converts to the C
+	 * obs_property_modified_t function pointer. */
+	auto update_preload_ms = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
+		char buf[160];
+		format_preload_ms_label(settings_, buf, sizeof(buf));
 		obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
 		if (ms_prop)
 			obs_property_set_description(ms_prop, buf);
@@ -1159,9 +1180,16 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	/* camera-box #97: apply the per-source genlock preload (video delay). Runtime-
 	 * resolved like the fifo setter. libobs clamps to [0, 128] and writes under
 	 * async_mutex, so the live change is crash-safe (the #93 UAF lesson). Persists
-	 * in the scene via PROP_GENLOCK_PRELOAD. */
-	if (auto set_preload = resolve_set_genlock_preload())
-		set_preload(obs_source, (uint32_t)obs_data_get_int(settings, PROP_GENLOCK_PRELOAD));
+	 * in the scene via PROP_GENLOCK_PRELOAD. Floor a negative value (only reachable
+	 * via a corrupt/hand-edited scene, never the 0-128 slider) at 0 BEFORE the
+	 * uint32_t cast — otherwise e.g. -1 would wrap to UINT32_MAX and libobs would
+	 * clamp it to the MAXIMUM delay instead of zero (review finding). */
+	if (auto set_preload = resolve_set_genlock_preload()) {
+		long long pl = obs_data_get_int(settings, PROP_GENLOCK_PRELOAD);
+		if (pl < 0)
+			pl = 0;
+		set_preload(obs_source, (uint32_t)pl);
+	}
 
 	auto new_hw_accel_enabled = obs_data_get_bool(settings, PROP_HW_ACCEL);
 	reset_ndi_receiver |= (s->config.hw_accel_enabled != new_hw_accel_enabled);

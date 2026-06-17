@@ -504,6 +504,31 @@ mod distroav_source {
     }
 
     #[test]
+    fn ms_label_set_on_first_open_and_negative_floored() {
+        let src = squish(&vendor_file(NDI_SOURCE));
+        // (review) The ms label must be set from the current settings at property-build
+        // time (shared formatter), so it shows on first dialog open before any callback
+        // fires — not the bare "↳ delay" placeholder.
+        assert!(
+            src.contains("format_preload_ms_label"),
+            "{NDI_SOURCE}: #97 — the shared ms-label formatter is gone; the label no \
+             longer shows on first dialog open. Re-apply."
+        );
+        assert!(
+            src.contains("obs_source_get_settings(s->obs_source)"),
+            "{NDI_SOURCE}: #97 — the initial ms label is not seeded from the source \
+             settings at build time; it stays the placeholder until interaction. Re-apply."
+        );
+        // (review) A negative scene-JSON preload must be floored at 0 before the
+        // uint32_t cast, or -1 wraps to UINT32_MAX and clamps to MAX delay.
+        assert!(
+            src.contains("if (pl < 0) pl = 0;"),
+            "{NDI_SOURCE}: #97 — ndi_source_update no longer floors a negative preload \
+             at 0 before the uint32_t cast; -1 would wrap to the MAX delay. Re-apply."
+        );
+    }
+
+    #[test]
     fn preload_default_derives_from_env_for_back_compat() {
         // #97 (review): ndi_source_getdefaults must derive the PROP_GENLOCK_PRELOAD
         // default from OBS_GENLOCK_PRELOAD_FRAMES, NOT hardcode 1 — else the #70 env
