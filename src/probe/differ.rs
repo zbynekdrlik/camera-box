@@ -674,6 +674,92 @@ pub fn overall_verdict(
     }
 }
 
+/// Per-output 30 fps grid-continuity report. Checks a single output's decoded id
+/// sequence over the span `[first_id..=last_id]`, stepping by `stride`, to detect
+/// two failure classes:
+///
+/// - **missing_slots** — stride-aligned ids in the span absent from `observed`:
+///   the output did not decode that slot at all (output starvation).
+/// - **repeated_ids** — ids decoded more than once by this output (FIFO underrun:
+///   the same frame was served on two consecutive decode calls).
+///
+/// `is_clean()` = no missing slots, no repeats, and at least 2 ids present
+/// (a 0- or 1-id span cannot demonstrate continuity, so it never certifies clean).
+#[derive(Debug, Clone, Serialize)]
+pub struct GridContinuity {
+    pub first_id: u32,
+    pub last_id: u32,
+    /// Number of stride-aligned slots in `[first_id..=last_id]`.
+    pub expected: usize,
+    /// Number of distinct ids present in `observed`.
+    pub present: usize,
+    /// Stride-aligned ids absent from `observed` (output starvation). Sorted ascending.
+    pub missing_slots: Vec<u32>,
+    /// Ids decoded more than once (FIFO underrun). Sorted ascending.
+    pub repeated_ids: Vec<u32>,
+}
+
+impl GridContinuity {
+    /// True only when there are no missing slots, no repeated ids, and at least
+    /// two distinct ids — a 0- or 1-id span cannot certify continuity.
+    pub fn is_clean(&self) -> bool {
+        self.missing_slots.is_empty() && self.repeated_ids.is_empty() && self.present >= 2
+    }
+}
+
+/// Check a single output's decoded id sequence for starvation (missing slots) and
+/// FIFO underrun (repeated ids). `stride` is the logical-id step the output advances
+/// per frame (1 for a 30 fps output on a 30 fps id sequence; 2 on a 60 Hz dual-QR
+/// counter). Only multiples of `stride` within the span are checked for absence.
+pub fn grid_continuity(observed: &[Observed], stride: u32) -> GridContinuity {
+    if observed.is_empty() || stride == 0 {
+        return GridContinuity {
+            first_id: 0,
+            last_id: 0,
+            expected: 0,
+            present: 0,
+            missing_slots: Vec::new(),
+            repeated_ids: Vec::new(),
+        };
+    }
+
+    // Count occurrences of each id.
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for obs in observed {
+        *counts.entry(obs.frame_id).or_insert(0) += 1;
+    }
+
+    let first_id = *counts.keys().min().unwrap();
+    let last_id = *counts.keys().max().unwrap();
+
+    // Stride-aligned slots: starting from first_id, every `stride` steps up to last_id.
+    let slots: Vec<u32> = (first_id..=last_id).step_by(stride as usize).collect();
+    let expected = slots.len();
+
+    let mut missing_slots: Vec<u32> = slots
+        .iter()
+        .copied()
+        .filter(|id| !counts.contains_key(id))
+        .collect();
+    missing_slots.sort_unstable();
+
+    let mut repeated_ids: Vec<u32> = counts
+        .iter()
+        .filter(|(_, &cnt)| cnt > 1)
+        .map(|(&id, _)| id)
+        .collect();
+    repeated_ids.sort_unstable();
+
+    GridContinuity {
+        first_id,
+        last_id,
+        expected,
+        present: counts.len(),
+        missing_slots,
+        repeated_ids,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1366,6 +1452,22 @@ mod tests {
         let (artifact, pipeline) = decompose_missing(&[], &src);
         assert!(artifact.is_empty());
         assert!(pipeline.is_empty());
+    }
+
+    #[test]
+    fn grid_continuity_flags_starvation_and_underrun() {
+        // ids 10..=14 each once, stride 1 -> clean.
+        let clean: Vec<Observed> = (10..=14).map(|i| o(i, i as i64)).collect();
+        let g = grid_continuity(&clean, 1);
+        assert!(g.missing_slots.is_empty() && g.repeated_ids.is_empty());
+        assert!(g.is_clean());
+
+        // id 12 missing (starvation), id 13 repeated (underrun).
+        let bad = vec![o(10, 0), o(11, 1), o(13, 2), o(13, 3), o(14, 4)];
+        let g = grid_continuity(&bad, 1);
+        assert_eq!(g.missing_slots, vec![12]);
+        assert_eq!(g.repeated_ids, vec![13]);
+        assert!(!g.is_clean());
     }
 
     #[test]
