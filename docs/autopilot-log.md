@@ -2,6 +2,16 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-06-17 — verification run (#102 CLOSED — consume-logic fix PROVEN ~0 loss)
+
+- **#102 strih→stream frame loss — deploy the consume-when-queued fix + PROVE ~0 loss.** No code change (fix already merged `f0152d6c5` = main HEAD, PR #103); this run = redeploy the genlock OBS build to BOTH prod boxes + A/B measure. Verification-only, no version bump.
+- **Deploy:** artifact `obs-genlock-windows-x64` (run 27679723119, built at committed main `f0152d6c5`) HTTP-pulled (md5-verified) to strih (10.77.9.202) + stream (10.77.9.204), surgical overwrite-keep-extras swap (bin\64bit + data + first-party obs-plugins\64bit minus distroav; ProgramData distroav.dll+data). Diff-verify PASS both boxes == artifact: obs.dll `c330a22e` (the #102 fix), obs64 `dbf2b8f8`, libobs-d3d11 `f3a1c3a5`, distroav `882e0789`, GENLOCK_BUILD_SHA `f0152d6c5`. OBS 32.1.2 relaunched genlock-on (render tick ENABLED), DistroAV 6.2.1 + NDI 6.3.2.0, no module-load failures. Backups C:\obs-backup\2026-06-17-115956 (stream) + 2026-06-17-120109 (strih).
+- **drift-guard:** stream NO-DRIFT (full pinned set). strih 1 PRE-EXISTING drift: NDI cam1+cam3 ingest latency=2 (Lowest) vs pin 0 — NOT introduced by this binary-only deploy, on the cam→strih hop (unrelated to #102's strih→stream fix) → filed **#104**.
+- **A/B PROOF (the gate):** full path cam2→strih→stream, multitap-probe DIRECT (not the run.sh wrapper), 120 s steady-state, lead-discard 30 s. strih→stream distinct-frame loss: **preload=1 11.5%→0.000%** (0/2640 single_copy); **preload=30 33.5%→0.000%** (0/2637). cam→strih 0% both. **1 s delay HOLDS** at preload=30: strih→stream emit_p50=**1066.7 ms**. Genlock audit corroborates: underruns frozen at one-time startup fill (907, not climbing), depth steady 31, overruns 0. BEFORE artifacts (prior session) in /tmp/p102/BEFORE-*, AFTER proof in /tmp/p102/PROOF-AFTER-*.
+- **Harness gotcha (fixed in-run):** run.sh's back-to-back A→B didn't settle strih's freshly-routed `phase2-probe-src` → strih program rendered BLACK → strih+stream taps decoded 0 (invalid run). Fixed by manual setup + adequate settle (screenshots confirmed QR on both strih PHASE2-PROBE + stream P97-PRELOAD programs) then probe DIRECT.
+- **Restore:** stream → PRO KLAPKA program, NDI 2ME PGM genlock_preload=30 (operator's 1 s delay) latency=0 src='STRIH-SNV (2ME PGM)' (read-back confirmed); strih → Test, probe idled; cam2 painter stopped, camera-box service active.
+- **#102 CLOSED** with before/after proof (comment 4728691105). The full path cam→strih→stream is finally loss-free WITH the video delay. Filed: **#104** (strih cam1/cam3 latency drift).
+
 ## 2026-06-15 — auto-merge run (#8, partial — left OPEN)
 
 - **#8 Synchronize cluster clocks (NTP/PTP) — offset-check regression guard + setup.sh fold-in.** dev was already at `1.7.0-dev.31` (bumped by the prior #24 run; strictly > main dev.30). Validated PARTIAL (ticket-validator): core sync ALREADY live (DanteSync, strih=master, PTP NANO lock cluster-wide). Live read-only 2026-06-15: cam1 +85..+333µs, cam2 +351µs, cam4 −40µs, strih(master→GM) +1249µs — all PTP NANO lock, all ≪ 16.7ms frame period.
