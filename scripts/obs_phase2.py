@@ -298,6 +298,31 @@ def setup(a):
             _rpc(ws, "CreateSceneItem",
                  {"sceneName": SCENE, "sourceName": INPUT}, ignore_err=True)
 
+    # Make the probe source FILL the canvas so a centered QR stays centered (and full
+    # size) in this box's program / Main Output. Without this OBS renders the ndi_source
+    # at its native size/position, so a centered single QR lands off-center downstream and
+    # the centered decode ROI misses it (decode_failed=100% at strih/stream). STRETCH the
+    # item to the base canvas from (0,0). Touches ONLY the probe scene item, never prod.
+    vs = _rpc(ws, "GetVideoSettings", ignore_err=True)
+    base_w = int(vs.get("baseWidth") or 1920)
+    base_h = int(vs.get("baseHeight") or 1080)
+    item_id = _rpc(ws, "GetSceneItemId", {"sceneName": SCENE, "sourceName": INPUT},
+                   ignore_err=True).get("sceneItemId")
+    if item_id is not None:
+        _rpc(ws, "SetSceneItemTransform", {
+            "sceneName": SCENE,
+            "sceneItemId": item_id,
+            "sceneItemTransform": {
+                "boundsType": "OBS_BOUNDS_STRETCH",
+                "boundsAlignment": 0,
+                "boundsWidth": base_w,
+                "boundsHeight": base_h,
+                "positionX": 0,
+                "positionY": 0,
+                "alignment": 5,
+            },
+        }, ignore_err=True)
+
     # OBS ndi_source binds by the FULL "MACHINE (name)" network name; binding a bare name
     # (e.g. "2ME PGM") connects to nothing. Resolve BOTH the ingest source and this box's
     # own Main Output name to their full forms (polling discovery) BEFORE switching the
