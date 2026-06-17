@@ -8,9 +8,10 @@ use camera_box::probe::analyzer::LatencyStats;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
     abs_emit_latency, absolute_latency_gate_pass, absolute_latency_stats, decompose_missing,
-    diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, lead_cutoff_ns,
-    overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle, EndpointSequenceReport,
-    FullSpanBounds, FullSpanReport, HopInput, HopReport, HopVerdict,
+    diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, grid_continuity,
+    lead_cutoff_ns, overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle,
+    EndpointSequenceReport, FullSpanBounds, FullSpanReport, GridContinuity, HopInput, HopReport,
+    HopVerdict,
 };
 use camera_box::probe::liveness::{
     check_tap_liveness, window_may_start, LivenessVerdict, TapLiveness,
@@ -152,6 +153,13 @@ struct Args {
     /// and their oversample multiplicity; off unless set.
     #[arg(long)]
     dump_raw: Option<String>,
+    /// Minimum steady-state window (seconds) required to certify zero-loss. A run
+    /// whose measured window (duration - lead_discard - settle) is shorter than this
+    /// floor cannot certify zero-loss even if no drops were observed: it is
+    /// downgraded from PASS to INCONCLUSIVE and exits non-zero. The 300 s default
+    /// aligns with the QR harness honesty gate (#102). A FAIL is never upgraded.
+    #[arg(long, default_value_t = 300.0)]
+    min_zero_loss_secs: f64,
 }
 
 fn parse_tap(s: &str) -> Result<(String, String), String> {
@@ -246,6 +254,10 @@ struct MultiTapReport {
     /// Human-readable status for `absolute_latency` (why it is/ isn't available,
     /// and the gate outcome) — so the artifact is self-describing.
     absolute_latency_note: String,
+    /// Per-tap grid-continuity check (stride 1): starvation and FIFO-underrun
+    /// diagnosis for each tap's trimmed steady-state observations. One entry per tap,
+    /// in the same order as `taps`. Consumed by the report graph script.
+    grid: Vec<GridContinuity>,
     verdict_pass: bool,
 }
 
@@ -269,6 +281,14 @@ struct TapSummary {
     /// Adjacent taps' difference is a clean per-hop latency. `None` if this tap's
     /// source stamped no usable NDI timecode.
     abs_emit_latency: Option<LatencyStats>,
+}
+
+/// True when the measured steady-state window is long enough to certify zero-loss.
+/// A run claiming zero-loss MUST observe it over at least `min_secs` of steady
+/// state (duration − lead_discard − settle); shorter runs are INCONCLUSIVE — they
+/// cannot rule out the loss that would appear given more time.
+pub fn zero_loss_window_ok(measured_window_secs: f64, min_secs: f64) -> bool {
+    measured_window_secs >= min_secs
 }
 
 fn main() -> Result<()> {
@@ -659,6 +679,10 @@ fn main() -> Result<()> {
     let endpoint_seq_pass = !endpoint_seq_gated
         || (endpoint_pipeline_loss.is_empty() && endpoint_sequence.out_of_order_ids.is_empty());
 
+    // Per-tap grid-continuity (stride 1): starvation + FIFO-underrun per tap over
+    // the trimmed steady-state observations. One entry per tap, same order as taps.
+    let grid: Vec<GridContinuity> = trimmed.iter().map(|obs| grid_continuity(obs, 1)).collect();
+
     // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
     // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as
     // NOT-pass like FAIL (#29: a run that cannot certify must not exit green).
@@ -668,6 +692,19 @@ fn main() -> Result<()> {
     // artifact is reported, not gated, so the harness stays honest AND trustworthy.
     let overall_v = overall_verdict(&hops, &full_span, abs_gate_pass);
     let verdict_pass = overall_v.is_pass() && endpoint_seq_pass;
+
+    // Compute the measured steady-state window: the portion of the run that is
+    // neither the leading discard (transient genlock-FIFO prime) nor the trailing
+    // settle (in-flight frames). This is what the zero-loss gate certifies over.
+    let measured_window_secs =
+        args.duration_secs as f64 - args.lead_discard_secs as f64 - args.settle_ms as f64 / 1000.0;
+
+    // Zero-loss honesty gate: a would-be PASS is downgraded to INCONCLUSIVE when
+    // the measured steady-state window is shorter than the minimum certifying floor.
+    // An early FAIL is unaffected — it's already not a green verdict.
+    let window_ok = zero_loss_window_ok(measured_window_secs, args.min_zero_loss_secs);
+    let verdict_pass = verdict_pass && window_ok;
+
     let report = MultiTapReport {
         run_id: args.run_id,
         duration_secs: args.duration_secs,
@@ -680,11 +717,31 @@ fn main() -> Result<()> {
         endpoint_pipeline_loss,
         absolute_latency,
         absolute_latency_note,
+        grid,
         verdict_pass,
     };
 
     let json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&args.out, &json)?;
+
+    // Per-frame JSONL series: one line per decoded observation across all taps,
+    // written to <out>.series.jsonl for the report graph script.
+    {
+        use std::io::Write;
+        let series_path = format!("{}.series.jsonl", args.out);
+        let mut f = std::fs::File::create(&series_path)?;
+        for (tap_result, obs_slice) in results.iter().zip(&trimmed) {
+            let name = &tap_result.name;
+            for o in obs_slice.iter() {
+                writeln!(
+                    f,
+                    "{{\"tap\":\"{}\",\"frame_id\":{},\"recv_ts_ns\":{},\"node_emit_tc_ns\":{}}}",
+                    name, o.frame_id, o.recv_ts_ns, o.node_emit_tc_ns
+                )?;
+            }
+        }
+        tracing::info!(path = %series_path, "per-frame series JSONL written");
+    }
 
     if let Some(path) = &args.dump_raw {
         use std::io::Write;
@@ -858,13 +915,19 @@ fn main() -> Result<()> {
     // "need a longer/denser run", not "the pipeline broke". An unclean endpoint
     // sequence is a hard FAIL (a real drop/reorder the tap-vs-tap diff missed), so
     // it overrides an otherwise-INCONCL/Pass overall_v to FAIL.
+    // The zero-loss window gate downgrades a would-be PASS to INCONCLUSIVE when the
+    // measured steady-state window is too short to certify zero-loss (#102).
     let overall = if !endpoint_seq_pass {
-        "FAIL"
+        "FAIL".to_string()
     } else {
         match overall_v {
-            HopVerdict::Pass => "PASS",
-            HopVerdict::Fail => "FAIL",
-            HopVerdict::Inconclusive => "INCONCL",
+            HopVerdict::Pass if !window_ok => format!(
+                "INCONCLUSIVE (window {measured_window_secs}s < {}s — cannot certify zero-loss)",
+                args.min_zero_loss_secs
+            ),
+            HopVerdict::Pass => "PASS".to_string(),
+            HopVerdict::Fail => "FAIL".to_string(),
+            HopVerdict::Inconclusive => "INCONCL".to_string(),
         }
     };
     println!("VERDICT={overall} ARTIFACT={}", args.out);
@@ -929,5 +992,13 @@ mod tests {
             parse_bound("stream=220").unwrap(),
             ("stream".to_string(), 220.0)
         );
+    }
+
+    #[test]
+    fn zero_loss_requires_min_window() {
+        assert!(zero_loss_window_ok(300.0, 300.0)); // exactly the floor passes
+        assert!(zero_loss_window_ok(1800.0, 300.0));
+        assert!(!zero_loss_window_ok(120.0, 300.0)); // 120s ad-hoc cannot claim zero-loss
+        assert!(!zero_loss_window_ok(299.9, 300.0));
     }
 }
