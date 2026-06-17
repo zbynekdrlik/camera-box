@@ -114,35 +114,39 @@ pub fn decode_capture(
     decode_qr_luma(img)
 }
 
-/// Max ROI long-side (px) fed to `rqrr` in the dual-QR path. Dual decode runs TWO rqrr
-/// passes per frame, so each must be ~2x cheaper than the single-QR path or the dev1 tap
-/// can't keep up with 30 fps — a full-res dual decode bottlenecked the taps to ~15 fps,
-/// dropping half the frames at the NDI receiver and inflating apparent loss. Downscaling
-/// to 480 px keeps a 700 px QR at ~16 px/module (rqrr needs a few), and QR EC-H plus the
-/// dual redundancy preserve robustness through the resize.
-const DUAL_DECODE_CAP: u32 = 480;
+/// Width (px) the dual-QR band is downscaled to before the single `rqrr` pass. Both QRs
+/// live in ONE horizontal band, so dual decode is ONE prepare+detect (rqrr finds both
+/// grids), not two — that is what keeps the 3 concurrent dev1 taps tracking 30 fps (two
+/// separate ROI passes bottlenecked them to ~12-15 fps, dropping half the frames at the
+/// NDI receiver and inflating apparent loss). 1280 px keeps each ~700 px QR at ~470 px
+/// (rqrr needs a few px/module) while keeping the prepare cost at ~the single-QR path's.
+const DUAL_BAND_WIDTH: u32 = 1280;
 
-/// Decode one ROI, first downscaling its long side to at most `DUAL_DECODE_CAP` px so the
-/// two-ROI dual path stays fast enough for the dev1 tap to track 30 fps (see the const).
-fn decode_roi_downscaled(img: GrayImage) -> Option<Payload> {
-    let (w, h) = (img.width(), img.height());
-    let m = w.max(h);
-    let img = if m > DUAL_DECODE_CAP {
-        let nw = (w * DUAL_DECODE_CAP / m).max(1);
-        let nh = (h * DUAL_DECODE_CAP / m).max(1);
-        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
-    decode_qr_luma(img)
+/// Decode ALL CRC-valid QR payloads in one grayscale image (one `rqrr` prepare + detect).
+/// `detect_grids` returns every QR it finds, so the two side-by-side dual-QR codes are read
+/// in a SINGLE pass — half the work of decoding two cropped ROIs separately.
+pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
+    let mut prepared = rqrr::PreparedImage::prepare(img);
+    let mut out = Vec::new();
+    for grid in prepared.detect_grids() {
+        if let Ok((_meta, content)) = grid.decode() {
+            if let Some(p) = Payload::decode(&content) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
-/// Decode both QR regions of a dual-QR frame and reconcile. Each half is converted
-/// to luma, the QR-ROI cropped, and decoded; a blurred (mid-transition) QR fails
-/// CRC inside `Payload::decode` and is silently dropped. The frame's identity is
-/// the CRC-valid payload with the highest `frame_id` (freshest sharp region); at
-/// least one region is always sharp on the Vernier display, so this returns `Some`
-/// for every well-framed capture. `None` only when neither half decodes.
+/// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
+/// full width (left QR in the left half, right in the right half), so we crop that single
+/// band, downscale it to `DUAL_BAND_WIDTH`, and decode it in ONE `rqrr` pass that finds
+/// BOTH codes — roughly the cost of the single-QR path, which is what lets the dev1 taps
+/// keep up with 30 fps. A blurred (mid-transition) QR fails CRC inside `Payload::decode`
+/// and is dropped; the frame's identity is the CRC-valid payload with the highest
+/// `frame_id` (freshest sharp region). At least one region is always sharp on the Vernier
+/// display, so this returns `Some` for every well-framed capture. `None` only when neither
+/// code decodes.
 pub fn decode_capture_dual(
     fourcc: u32,
     data: &[u8],
@@ -155,15 +159,24 @@ pub fn decode_capture_dual(
         b"BGRA" | b"BGRX" => bgra_to_luma(data, width, height, stride),
         _ => uyvy_to_luma(data, width, height, stride),
     };
-    let half = width / 2;
-    let left = image::imageops::crop_imm(&full, 0, 0, half, height).to_image();
-    let right = image::imageops::crop_imm(&full, half, 0, width - half, height).to_image();
-    let roi = roi.min(half).min(height);
-    let cand = [
-        decode_roi_downscaled(crop_center(&left, roi, roi)),
-        decode_roi_downscaled(crop_center(&right, roi, roi)),
-    ];
-    cand.into_iter().flatten().max_by_key(|p| p.frame_id)
+    // One full-width band tall enough to hold both QRs (centered vertically), then a single
+    // downscaled rqrr pass over both. crop_center clamps the requested size to the image.
+    let band_h = roi.min(height);
+    let band = crop_center(&full, width, band_h);
+    let band = if band.width() > DUAL_BAND_WIDTH {
+        let nh = (band.height() * DUAL_BAND_WIDTH / band.width()).max(1);
+        image::imageops::resize(
+            &band,
+            DUAL_BAND_WIDTH,
+            nh,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        band
+    };
+    decode_qr_luma_all(band)
+        .into_iter()
+        .max_by_key(|p| p.frame_id)
 }
 
 #[cfg(test)]
