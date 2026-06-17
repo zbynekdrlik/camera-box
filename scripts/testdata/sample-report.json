@@ -1,0 +1,159 @@
+{
+  "run_id": 42,
+  "duration_secs": 300,
+  "lead_discard_secs": 0,
+  "taps": [
+    {
+      "name": "cam1",
+      "unique_frames": 30,
+      "captured": 95,
+      "decoded": 90,
+      "abs_emit_latency": {
+        "samples": 30,
+        "min_ms": 12.1,
+        "mean_ms": 14.3,
+        "p50_ms": 14.0,
+        "p95_ms": 18.2,
+        "p99_ms": 20.5,
+        "max_ms": 22.1
+      }
+    },
+    {
+      "name": "strih",
+      "unique_frames": 30,
+      "captured": 92,
+      "decoded": 88,
+      "abs_emit_latency": {
+        "samples": 30,
+        "min_ms": 55.0,
+        "mean_ms": 58.7,
+        "p50_ms": 58.0,
+        "p95_ms": 65.1,
+        "p99_ms": 68.0,
+        "max_ms": 70.2
+      }
+    },
+    {
+      "name": "stream",
+      "unique_frames": 28,
+      "captured": 88,
+      "decoded": 82,
+      "abs_emit_latency": {
+        "samples": 28,
+        "min_ms": 110.0,
+        "mean_ms": 115.5,
+        "p50_ms": 115.0,
+        "p95_ms": 125.3,
+        "p99_ms": 130.0,
+        "max_ms": 133.5
+      }
+    }
+  ],
+  "hops": [
+    {
+      "name": "cam1→strih",
+      "upstream_unique": 30,
+      "downstream_unique": 30,
+      "dropped_ids": [],
+      "reorders": [],
+      "freezes": [],
+      "latency": {
+        "samples": 30,
+        "min_ms": 40.2,
+        "mean_ms": 44.5,
+        "p50_ms": 44.0,
+        "p95_ms": 50.8,
+        "p99_ms": 53.0,
+        "max_ms": 55.1
+      },
+      "emit_latency": {
+        "samples": 30,
+        "min_ms": 41.0,
+        "mean_ms": 44.4,
+        "p50_ms": 44.0,
+        "p95_ms": 50.1,
+        "p99_ms": 52.5,
+        "max_ms": 54.0
+      },
+      "single_copy_total": 18,
+      "single_copy_dropped": 0,
+      "verdict": "Pass"
+    },
+    {
+      "name": "strih→stream",
+      "upstream_unique": 30,
+      "downstream_unique": 28,
+      "dropped_ids": [14, 21],
+      "reorders": [],
+      "freezes": [],
+      "latency": {
+        "samples": 28,
+        "min_ms": 52.0,
+        "mean_ms": 56.8,
+        "p50_ms": 56.0,
+        "p95_ms": 63.2,
+        "p99_ms": 67.0,
+        "max_ms": 70.0
+      },
+      "emit_latency": {
+        "samples": 28,
+        "min_ms": 53.1,
+        "mean_ms": 57.0,
+        "p50_ms": 57.0,
+        "p95_ms": 64.0,
+        "p99_ms": 68.5,
+        "max_ms": 71.0
+      },
+      "single_copy_total": 16,
+      "single_copy_dropped": 2,
+      "verdict": "Fail"
+    }
+  ],
+  "full_span": {
+    "source_unique": 30,
+    "endpoint_unique": 28,
+    "dropped_ids": [14, 21],
+    "single_copy_total": 16,
+    "single_copy_dropped": 2,
+    "verdict": "Fail"
+  },
+  "endpoint_sequence": {
+    "first_id": 0,
+    "last_id": 29,
+    "expected_count": 30,
+    "delivered_count": 28,
+    "missing_ids": [14, 21],
+    "out_of_order_ids": []
+  },
+  "endpoint_missing_emission_artifact": [],
+  "endpoint_pipeline_loss": [14, 21],
+  "absolute_latency": null,
+  "absolute_latency_note": "report-only — run with --wall-clock (+ frame-probe --wall-clock) for the DanteSync-disciplined absolute end-to-end latency (#7/#8)",
+  "grid": [
+    {
+      "first_id": 0,
+      "last_id": 29,
+      "expected": 30,
+      "present": 30,
+      "missing_slots": [],
+      "repeated_ids": []
+    },
+    {
+      "first_id": 0,
+      "last_id": 29,
+      "expected": 30,
+      "present": 30,
+      "missing_slots": [],
+      "repeated_ids": []
+    },
+    {
+      "first_id": 0,
+      "last_id": 29,
+      "expected": 30,
+      "present": 28,
+      "missing_slots": [14, 21],
+      "repeated_ids": []
+    }
+  ],
+  "verdict_pass": false
+}
