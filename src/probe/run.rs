@@ -78,6 +78,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             // monotonic clock, so latency is exact without any sync. A wall-clock
             // gen here would break that — force monotonic regardless of cfg.
             wall_clock: false,
+            dual_qr: false,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };
@@ -146,6 +147,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             // so the dev1 endpoint tap's wall-clock recv − this gen is true
             // absolute latency. Defaults false (Phase-2 relative latency only).
             wall_clock: cfg.wall_clock,
+            dual_qr: false,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };
