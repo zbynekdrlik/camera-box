@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Phase 2 multi-tap NDI per-hop frame-loss/latency E2E (dev1-orchestrated).
 #
-# Topology: cam2 paints QR (frame-probe --paint-only) -> camera-box capture->NDI
-# "CAM2 (usb)" -> OBS strih program (DistroAV "NDI Main Output", e.g. "2ME PGM")
-# -> OBS stream program (its own DistroAV "NDI Main Output"). dev1 taps all three
-# and differences adjacent pairs (cam->strih, strih->stream). The OBS program NDI
-# names are DISCOVERED at setup (not hardcoded) and echoed by scripts/obs_phase2.py.
+# Topology (real-camera rig): cam2 (10.77.9.62) paints dual-QR to its physical
+# monitor (frame-probe --paint-only --dual-qr); cam1 (10.77.9.61) films that
+# monitor -> camera-box capture->NDI "CAM1 (usb)" -> OBS strih program
+# (DistroAV "NDI Main Output", e.g. "2ME PGM") -> OBS stream program (its own
+# DistroAV "NDI Main Output"). dev1 taps all three and differences adjacent pairs
+# (cam->strih, strih->stream). The OBS program NDI names are DISCOVERED at setup
+# (not hardcoded) and echoed by scripts/obs_phase2.py.
 # strih + stream are off-air-freely during the run; their program scene is saved
 # and restored by the trap.
+#
+# PAINTER vs SOURCE: PAINTER_IP is the device that runs frame-probe (cam2, which
+# has the physical monitor); CAM_IP / CAM_SOURCE is the NDI source filmed by the
+# real camera (cam1 films cam2's monitor). These are INDEPENDENT variables so the
+# topology can be changed without touching one another.
 #
 # PREREQUISITE: DistroAV "NDI Main Output" must be ENABLED in OBS (Tools menu) on
 # BOTH strih and stream so each re-emits its program as NDI. obs_phase2.py fails
@@ -17,23 +24,32 @@
 # python3 + websocket-client. OBS WebSocket :4455 reachable on strih and stream.
 set -euo pipefail
 
-# Camera selection (#24): set CAM=cam1|cam2|cam3|cam4 to drive the full path from a chosen
-# source camera. Its IP + NDI source are resolved from scripts/camera-set.sh (the single
-# source of truth), not hard-coded — defaults to cam2 for back-compat. CAM_IP / CAM_SOURCE
-# still override the resolved values.
+# Camera selection for the SOURCE TAP: cam1 films cam2's monitor and emits NDI
+# "CAM1 (usb)". Default changed from cam2 to cam1 for the real-camera rig.
+# CAM_IP / CAM_SOURCE still override the resolved values if set externally.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
-camera_resolve "${CAM:-cam2}"
+camera_resolve "${CAM:-cam1}"
 
-# CAM_IP is the device IP of the selected source camera (was the hard-coded `CAM2` var).
+# CAM_IP is the device IP of the SOURCE camera (cam1 = 10.77.9.61, the real camera).
 CAM_IP="${CAM_IP:-$CAMERA_IP}"
+# PAINTER_IP is the device that runs frame-probe --paint-only (cam2 = 10.77.9.62,
+# the one with the physical monitor that cam1 films). Independent from CAM_IP.
+PAINTER_IP="${PAINTER_IP:-10.77.9.62}"
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 CAM_PW=newlevel
 CAM_SOURCE="${CAM_SOURCE:-$CAMERA_SOURCE}"
 RUN_ID=$(( (RANDOM << 16) | RANDOM ))
-DURATION="${DURATION:-300}"
+DURATION="${DURATION:-1800}"
+# Duration floor: the harness cannot certify zero-loss below 300 s (insufficient
+# statistics for single-copy guard and min-zero-loss window). Reject early before
+# bringing the rig up.
+if [ "$DURATION" -lt 300 ]; then
+  echo "ERROR: DURATION=${DURATION} is below the minimum of 300 s — cannot certify zero-loss over so short a window. Set DURATION>=300 (default: 1800)." >&2
+  exit 1
+fi
 OUT="${OUT:-/tmp/multitap-probe.json}"
 # #32: paint at the pipeline rate (the OBS clocks run ~30 fps), NOT the 12 fps
 # coverage default. At 30 fps each painted id is carried ~once per hop (oversample
@@ -70,8 +86,8 @@ export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 # comparable if the cluster wall clocks are synced. Fail loudly up front (rather
 # than emitting a meaningless absolute number) if the source camera has drifted.
 if [ "$WALL_CLOCK" = "1" ]; then
-  echo "[0/5] verify cluster clock sync for absolute latency (#7/#8): ${CAM:-cam2}"
-  CLOCK_GUARD_TARGETS="${CAM:-cam2}=$CAM_IP" "$HERE/clock-offset-guard.sh" --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
+  echo "[0/5] verify cluster clock sync for absolute latency (#7/#8): ${CAM:-cam1}"
+  CLOCK_GUARD_TARGETS="${CAM:-cam1}=$CAM_IP" "$HERE/clock-offset-guard.sh" --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
 fi
 
 # shellcheck disable=SC2317  # cleanup() is invoked indirectly via the EXIT/HUP/INT/TERM trap
@@ -89,23 +105,37 @@ cleanup() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
     "pkill -x frame-probe 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      systemctl restart camera-box 2>/dev/null; true"
+  # Kill the painter process on PAINTER_IP (cam2). If PAINTER_IP == CAM_IP (loopback
+  # mode) the pkill above already covered it; the second one is a no-op.
+  if [ "$PAINTER_IP" != "$CAM_IP" ]; then
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+      "pkill -x frame-probe 2>/dev/null; true"
+  fi
+  # Restore cam1 to its prior capture fps: remove the CAMERA_BOX_CAPTURE_FPS drop-in
+  # we added in [2a], daemon-reload, and restart camera-box so it comes back at its
+  # normal rate (the genlock drop-in still governs CAMERA_BOX_GENLOCK_FPS).
+  echo "[cleanup] removing CAMERA_BOX_CAPTURE_FPS drop-in from cam1 ($CAM_IP)"
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
+    "rm -f /etc/systemd/system/camera-box.service.d/e2e-capture-fps.conf && \
+     systemctl daemon-reload && \
+     systemctl restart camera-box 2>/dev/null; true"
 }
 trap cleanup EXIT HUP INT TERM
 
 echo "[1/5] build frame-probe + multitap-probe"
 cargo build --release --features probe --bin frame-probe --bin multitap-probe
 
-echo "[2/5] bring up the ${CAMERA_NAME} NDI sender FIRST (run_id=$RUN_ID), then the painter"
-# #30 ordering fix: camera-box's "CAM2 (usb)" NDI sender must EXIST before OBS
-# binds its ndi_source to it. Previously OBS setup ran first and bound to the
-# sender that this step then RESTARTED — DistroAV intermittently failed to
-# reconnect to the new sender, so strih/stream rendered black and every tap
-# downstream of OBS decoded 0 for the whole run (false-RED on min_frames).
+echo "[2/5] bring up the ${CAMERA_NAME} NDI sender FIRST (run_id=$RUN_ID), then set true-30 capture, then the painter"
+# #30 ordering fix: camera-box's NDI sender must EXIST before OBS binds its
+# ndi_source to it. Previously OBS setup ran first and bound to the sender that
+# this step then RESTARTED — DistroAV intermittently failed to reconnect to the
+# new sender, so strih/stream rendered black and every tap downstream of OBS
+# decoded 0 for the whole run (false-RED on min_frames).
 # Starting (restarting) camera-box up front means OBS binds, in step [3], to the
 # live sender that then persists for the entire tap window — no mid-run teardown,
 # no reconnect, no race.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  target/release/frame-probe root@"$CAM_IP":/tmp/frame-probe
+  target/release/frame-probe root@"$PAINTER_IP":/tmp/frame-probe
 # After the stop: sweep any orphaned manual camera-box (pkill -x — exact name, can't
 # self-match the remote shell) and WAIT until /dev/video0 is actually free; uvcvideo
 # teardown completes asynchronously after the process dies, and a fixed sleep races it
@@ -116,21 +146,55 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # the ~60fps capture rate (no decimation, no wall-clock external pacing) and strih's 30fps
 # genlock FIFO drops ~half the frames / renders black — the ~49% cam→strih loss this harness
 # falsely showed. With the env present, cam→strih is 0-loss from t+0s (no settling transient).
+
+# [2a] Set cam1 (the SOURCE camera, not the painter) to TRUE 30 fps capture via a
+# systemd drop-in. This ensures the camera captures at exactly 30 fps so the genlock
+# FIFO gets the right rate from the source. Cleanup trap removes this drop-in on exit
+# so cam1 returns to its prior state.
+echo "[2a/5] setting cam1 (${CAM_IP}) to true-30 capture fps via systemd drop-in"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
-  "mount -o remount,rw / 2>/dev/null; systemctl stop camera-box; \
-   pkill -x camera-box 2>/dev/null; \
-   i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
-   sleep 4; \
-   (nohup /tmp/frame-probe --paint-only $PAINT_WALL_FLAG \
-      --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
-      >/tmp/painter.log 2>&1 &)"
-# NOTE: camera-box is started WITHOUT --display so /dev/fb0 is free for the
-# painter; it still runs capture->NDI (genlock-decimated to $GENLOCK_FPS), carrying the QR
-# frames onto the network.
+  "mount -o remount,rw / 2>/dev/null; \
+   mkdir -p /etc/systemd/system/camera-box.service.d && \
+   printf '[Service]\nEnvironment=CAMERA_BOX_CAPTURE_FPS=30\n' \
+     > /etc/systemd/system/camera-box.service.d/e2e-capture-fps.conf && \
+   systemctl daemon-reload && \
+   systemctl restart camera-box"
+
+# [2b] Bring up the SOURCE camera-box (cam1) with genlock env and wait for its NDI
+# sender to be live. The service was just restarted above with the drop-in; it may
+# need a moment to bind /dev/video0 and emit NDI.  We do NOT stop it again here —
+# the service restart in [2a] is sufficient.  However, if the CAM_IP == PAINTER_IP
+# (loopback mode — not the default), we also need to stop service + launch manually
+# so frame-probe can claim /dev/fb0.
+if [ "$CAM_IP" = "$PAINTER_IP" ]; then
+  # Loopback mode (not the real-camera rig default): same box paints AND sources.
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
+    "systemctl stop camera-box; \
+     pkill -x camera-box 2>/dev/null; \
+     i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+     (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
+     sleep 4; \
+     (nohup /tmp/frame-probe --paint-only --dual-qr $PAINT_WALL_FLAG \
+        --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+        >/tmp/painter.log 2>&1 &)"
+else
+  # Real-camera rig (default): cam1 runs the deployed camera-box service (already
+  # restarted in [2a] with CAMERA_BOX_CAPTURE_FPS=30).  cam2 runs the painter only
+  # (it has the physical monitor cam1 films); we do NOT interfere with cam2's
+  # camera-box service — only the painter runs there.
+  # NOTE: camera-box on cam2 is left running its normal service so it keeps
+  # emitting its own NDI; the painter uses /dev/fb0 (the monitor) which is separate.
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+    "(nohup /tmp/frame-probe --paint-only --dual-qr $PAINT_WALL_FLAG \
+       --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+       >/tmp/painter.log 2>&1 &)"
+fi
+# NOTE: camera-box on cam1 is started by the service (not manually), so /dev/fb0
+# is free for cam2's painter.  cam1 still runs capture->NDI (genlock-decimated to
+# $GENLOCK_FPS), carrying the QR frames (filmed off cam2's monitor) onto the network.
 # Painter outlasts the tap window by +40s because OBS setup ([3]) now runs AFTER
 # the painter starts and consumes a few seconds before the taps begin.
-sleep 3  # let the fresh "CAM2 (usb)" NDI sender become discoverable on the LAN
+sleep 3  # let the "${CAM_SOURCE}" NDI sender become discoverable on the LAN
 
 echo "[3/5] OBS setup — route the chain to the LIVE sender, discover program NDI names"
 # strih ingests the camera's live QR NDI; STRIH_OUT = strih program NDI name.
@@ -223,6 +287,8 @@ if ./target/release/multitap-probe \
   --tap strih="$STRIH_OUT" \
   --tap stream="$STREAM_OUT" \
   --duration-secs "$DURATION" \
+  --min-zero-loss-secs 300 \
+  --dual-qr \
   ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
   --out "$OUT"; then
   GATE=0
@@ -232,4 +298,12 @@ fi
 
 echo "[5/5] artifact: $OUT"
 cat "$OUT"
+
+# Generate the visual E2E report PNG and print the LAN URL.
+SERIES="${OUT%.json}.series.jsonl"
+REPORT_PNG="/tmp/e2e-report-${RUN_ID}.png"
+echo "[5/5] generating E2E report PNG: $REPORT_PNG"
+python3 scripts/e2e-report.py --json "$OUT" --series "$SERIES" --out "$REPORT_PNG" || \
+  echo "WARNING: e2e-report.py failed (non-fatal; artifact still at $OUT)" >&2
+
 exit "$GATE"

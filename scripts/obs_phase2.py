@@ -68,6 +68,57 @@ INPUT = "phase2-probe-src"
 # not a different one. (Was latency=2 pre-#84, before the A/B re-pin to Normal(0).)
 _PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 0}
 
+# Genlock-relevant keys to copy from a production input onto the probe input. We
+# read the prod input's settings for THESE keys only and overlay them on the probe —
+# we never touch the prod input or its scene. If the read fails (prod input not found,
+# websocket error), we fall back to _PROBE_NDI_SETTINGS and log a warning.
+_GENLOCK_COPY_KEYS = ("genlock_fifo", "ndi_sync", "latency", "ndi_bw_mode")
+
+
+def _read_prod_genlock_settings(ws, host, upstream_ndi_name):
+    """Read genlock-relevant settings from the production input whose ndi_source_name
+    matches *upstream_ndi_name* (exact or substring match) on *host*.
+
+    Returns a dict with the keys from _GENLOCK_COPY_KEYS that were present in the
+    prod input, or {} if the prod input cannot be found / its settings cannot be read.
+    NEVER modifies any prod input or scene. Best-effort: exceptions are caught and
+    logged as warnings so the caller always falls back gracefully.
+    """
+    try:
+        inputs = _rpc(ws, "GetInputList", ignore_err=True).get("inputs", [])
+        ndi_inputs = [
+            i["inputName"] for i in inputs
+            if i.get("inputKind") == "ndi_source" and i["inputName"] != INPUT
+        ]
+        # Find the prod input whose ndi_source_name matches the upstream we are
+        # ingesting (e.g. "CAM1 (usb)" on strih, or the strih NDI name on stream).
+        for inp_name in ndi_inputs:
+            try:
+                s = _rpc(ws, "GetInputSettings", {"inputName": inp_name},
+                         ignore_err=True).get("inputSettings", {})
+                src = s.get("ndi_source_name", "")
+                if src == upstream_ndi_name or (upstream_ndi_name and upstream_ndi_name in src):
+                    copied = {k: s[k] for k in _GENLOCK_COPY_KEYS if k in s}
+                    if copied:
+                        sys.stderr.write(
+                            f"[obs] {host}: copying genlock settings from prod input "
+                            f"'{inp_name}' (ndi_source_name='{src}'): {copied}\n"
+                        )
+                    return copied
+            except Exception:
+                continue
+        sys.stderr.write(
+            f"[obs] {host}: WARN could not find a prod ndi_source input matching "
+            f"'{upstream_ndi_name}'; probe will use default genlock settings\n"
+        )
+        return {}
+    except Exception as e:
+        sys.stderr.write(
+            f"[obs] {host}: WARN reading prod genlock settings failed ({e}); "
+            f"probe will use default genlock settings\n"
+        )
+        return {}
+
 
 def _load_state():
     """Read the per-host prev-scene state. Tolerates a MISSING or CORRUPT/truncated file
@@ -194,6 +245,17 @@ def setup(a):
     state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
     _save_state(state)
 
+    # Read the production input's genlock settings and overlay them on the probe.
+    # This ensures the probe runs with the SAME certified genlock config as the live
+    # prod inputs (e.g. the cam1 NDI input on strih, or the strih NDI input on stream)
+    # without ever touching those prod inputs or their scenes.
+    # Falls back to _PROBE_NDI_SETTINGS if the prod read fails (logged as a warning).
+    prod_genlock = _read_prod_genlock_settings(ws, a.host, a.upstream)
+    # Merge: _PROBE_NDI_SETTINGS provides the certified baseline; prod_genlock OVERRIDES
+    # only the keys actually present in the prod input.  ndi_source_name is always set
+    # explicitly so it is never inherited from prod.
+    effective_settings = {**_PROBE_NDI_SETTINGS, **prod_genlock}
+
     # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
     # what made the fork's un-removable ndi_source inputs pile up.
     if SCENE not in scenes:
@@ -202,7 +264,7 @@ def setup(a):
     if INPUT not in inputs:
         _rpc(ws, "CreateInput", {
             "sceneName": SCENE, "inputName": INPUT, "inputKind": "ndi_source",
-            "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
+            "inputSettings": {**effective_settings, "ndi_source_name": a.upstream},
         }, ignore_err=True)
     else:
         # #93: QUIESCE before re-pointing a possibly-LIVE probe input. If a prior run
@@ -218,10 +280,11 @@ def setup(a):
         _quiesce_probe_input(ws)
         # Reuse: re-point the now-idle input at this run's upstream, applying the full
         # certified probe settings idempotently in ONE update (no per-cycle HW-accel /
-        # Latency churn on a live source).
+        # Latency churn on a live source). Uses effective_settings (baseline merged
+        # with prod genlock copy) so the probe mirrors the live production config.
         _rpc(ws, "SetInputSettings", {
             "inputName": INPUT,
-            "inputSettings": {**_PROBE_NDI_SETTINGS, "ndi_source_name": a.upstream},
+            "inputSettings": {**effective_settings, "ndi_source_name": a.upstream},
             "overlay": True,
         }, ignore_err=True)
         # ... and make sure it is an item of the stable scene (re-add if the scene was
