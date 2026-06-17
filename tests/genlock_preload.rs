@@ -456,19 +456,21 @@ mod vendored_source {
              skipped and one undelayed frame leaks. Re-apply the `&& !source->genlock_fifo` \
              exclusion."
         );
-        // Both the inactive/flush path AND the overrun force-drain must re-arm the latch
-        // (reset to false) so the delay line rebuilds after a flush or drain. Each path
-        // resets last_frame_ts=0; the matching genlock_filled=false must accompany it. We
-        // assert the latch-reset assignment appears at least twice (drain + inactive) on
-        // top of the create-time init — the render-tick writeback uses gd.filled, not a
-        // literal false.
+        // Every path that empties/re-bootstraps the FIFO must re-arm the latch (reset to
+        // false) so the delay line rebuilds. There are exactly FOUR `genlock_filled = false`
+        // sites: create-init, overrun force-drain (cache_video), inactive/flush
+        // (obs_source_output_video_internal), and the runtime preload-change re-arm
+        // (obs_source_set_genlock_preload). The render-tick writeback uses gd.filled, not a
+        // literal false, so it does not count. Assert >=4 so deleting ANY single re-arm site
+        // turns this RED (a >=3 floor would let one deletion slip — review finding).
         let raw = vendor_file(OBS_SOURCE);
         let resets = raw.matches("source->genlock_filled = false;").count();
         assert!(
-            resets >= 3,
-            "{OBS_SOURCE}: #102 — expected >=3 `source->genlock_filled = false;` re-arm \
-             sites (create init + overrun drain + inactive/flush), found {resets}. A path \
-             that drops the latch reset leaks an undelayed frame after that drain/flush."
+            resets >= 4,
+            "{OBS_SOURCE}: #102 — expected >=4 `source->genlock_filled = false;` re-arm \
+             sites (create init + overrun drain + inactive/flush + preload-change), found \
+             {resets}. A path that drops the latch reset leaks an undelayed frame after that \
+             drain/flush/resize."
         );
     }
 
