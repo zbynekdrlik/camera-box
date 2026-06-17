@@ -113,21 +113,16 @@ cleanup() {
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
       "pkill -x frame-probe 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   fi
-  # Restore cam1 to its prior capture fps: remove the CAMERA_BOX_CAPTURE_FPS drop-in
-  # we added in [2a], daemon-reload, and restart camera-box so it comes back at its
-  # normal rate (the genlock drop-in still governs CAMERA_BOX_GENLOCK_FPS).
-  echo "[cleanup] removing CAMERA_BOX_CAPTURE_FPS drop-in from cam1 ($CAM_IP)"
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
-    "rm -f /etc/systemd/system/camera-box.service.d/e2e-capture-fps.conf && \
-     systemctl daemon-reload && \
-     systemctl restart camera-box 2>/dev/null; true"
+  # cam1 is NOT reconfigured by this harness — the real camera is already 30 fps / 1-250
+  # and cam1 emits a 30 fps NDI via its deployed genlock drop-in — so there is nothing to
+  # restore on cam1.
 }
 trap cleanup EXIT HUP INT TERM
 
 echo "[1/5] build frame-probe + multitap-probe"
 cargo build --release --features probe --bin frame-probe --bin multitap-probe
 
-echo "[2/5] bring up the ${CAMERA_NAME} NDI sender FIRST (run_id=$RUN_ID), then set true-30 capture, then the painter"
+echo "[2/5] cam1 (${CAMERA_NAME}) already emits 30fps NDI (run_id=$RUN_ID) — start the painter on cam2"
 # #30 ordering fix: camera-box's NDI sender must EXIST before OBS binds its
 # ndi_source to it. Previously OBS setup ran first and bound to the sender that
 # this step then RESTARTED — DistroAV intermittently failed to reconnect to the
@@ -149,25 +144,12 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # genlock FIFO drops ~half the frames / renders black — the ~49% cam→strih loss this harness
 # falsely showed. With the env present, cam→strih is 0-loss from t+0s (no settling transient).
 
-# [2a] Set cam1 (the SOURCE camera, not the painter) to TRUE 30 fps capture via a
-# systemd drop-in. This ensures the camera captures at exactly 30 fps so the genlock
-# FIFO gets the right rate from the source. Cleanup trap removes this drop-in on exit
-# so cam1 returns to its prior state.
-echo "[2a/5] setting cam1 (${CAM_IP}) to true-30 capture fps via systemd drop-in"
-sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
-  "mount -o remount,rw / 2>/dev/null; \
-   mkdir -p /etc/systemd/system/camera-box.service.d && \
-   printf '[Service]\nEnvironment=CAMERA_BOX_CAPTURE_FPS=30\n' \
-     > /etc/systemd/system/camera-box.service.d/e2e-capture-fps.conf && \
-   systemctl daemon-reload && \
-   systemctl restart camera-box"
-
-# [2b] Bring up the SOURCE camera-box (cam1) with genlock env and wait for its NDI
-# sender to be live. The service was just restarted above with the drop-in; it may
-# need a moment to bind /dev/video0 and emit NDI.  We do NOT stop it again here —
-# the service restart in [2a] is sufficient.  However, if the CAM_IP == PAINTER_IP
-# (loopback mode — not the default), we also need to stop service + launch manually
-# so frame-probe can claim /dev/fb0.
+# [2b] Bring up the painter. cam1 (the SOURCE) runs its DEPLOYED camera-box service
+# UNCHANGED — the real camera is already 30 fps / 1-250 and cam1 emits a 30 fps NDI via
+# its deployed CAMERA_BOX_GENLOCK_FPS=30 drop-in (#50/#66). We do NOT reconfigure cam1
+# (no capture-fps change): the camera + capture chain are already at the test rate.
+# Only when CAM_IP == PAINTER_IP (loopback mode — not the real-camera default) do we
+# stop+relaunch camera-box so frame-probe can claim /dev/fb0.
 if [ "$CAM_IP" = "$PAINTER_IP" ]; then
   # Loopback mode (not the real-camera rig default): same box paints AND sources.
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM_IP" \
@@ -180,8 +162,8 @@ if [ "$CAM_IP" = "$PAINTER_IP" ]; then
         --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
         >/tmp/painter.log 2>&1 &)"
 else
-  # Real-camera rig (default): cam1 runs the deployed camera-box service (already
-  # restarted in [2a] with CAMERA_BOX_CAPTURE_FPS=30) and is the SOURCE. cam2 is the
+  # Real-camera rig (default): cam1 runs its DEPLOYED camera-box service UNCHANGED and is
+  # the SOURCE (real 30 fps / 1-250 camera, emits 30 fps NDI). cam2 is the
   # PAINTER box — it has the physical monitor cam1 films. cam2's camera-box runs with
   # `--display` and HOLDS /dev/fb0 (it paints the interkom return onto that monitor), so
   # it MUST be stopped to free the display before frame-probe can paint QR there. cam2's
@@ -306,7 +288,8 @@ echo "[5/5] artifact: $OUT"
 cat "$OUT"
 
 # Generate the visual E2E report PNG and print the LAN URL.
-SERIES="${OUT%.json}.series.jsonl"
+# multitap-probe writes the series to "<out>.series.jsonl" (append, not replace-ext).
+SERIES="${OUT}.series.jsonl"
 REPORT_PNG="/tmp/e2e-report-${RUN_ID}.png"
 echo "[5/5] generating E2E report PNG: $REPORT_PNG"
 python3 scripts/e2e-report.py --json "$OUT" --series "$SERIES" --out "$REPORT_PNG" || \

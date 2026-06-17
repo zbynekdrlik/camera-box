@@ -114,6 +114,29 @@ pub fn decode_capture(
     decode_qr_luma(img)
 }
 
+/// Max ROI long-side (px) fed to `rqrr` in the dual-QR path. Dual decode runs TWO rqrr
+/// passes per frame, so each must be ~2x cheaper than the single-QR path or the dev1 tap
+/// can't keep up with 30 fps — a full-res dual decode bottlenecked the taps to ~15 fps,
+/// dropping half the frames at the NDI receiver and inflating apparent loss. Downscaling
+/// to 480 px keeps a 700 px QR at ~16 px/module (rqrr needs a few), and QR EC-H plus the
+/// dual redundancy preserve robustness through the resize.
+const DUAL_DECODE_CAP: u32 = 480;
+
+/// Decode one ROI, first downscaling its long side to at most `DUAL_DECODE_CAP` px so the
+/// two-ROI dual path stays fast enough for the dev1 tap to track 30 fps (see the const).
+fn decode_roi_downscaled(img: GrayImage) -> Option<Payload> {
+    let (w, h) = (img.width(), img.height());
+    let m = w.max(h);
+    let img = if m > DUAL_DECODE_CAP {
+        let nw = (w * DUAL_DECODE_CAP / m).max(1);
+        let nh = (h * DUAL_DECODE_CAP / m).max(1);
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    decode_qr_luma(img)
+}
+
 /// Decode both QR regions of a dual-QR frame and reconcile. Each half is converted
 /// to luma, the QR-ROI cropped, and decoded; a blurred (mid-transition) QR fails
 /// CRC inside `Payload::decode` and is silently dropped. The frame's identity is
@@ -137,8 +160,8 @@ pub fn decode_capture_dual(
     let right = image::imageops::crop_imm(&full, half, 0, width - half, height).to_image();
     let roi = roi.min(half).min(height);
     let cand = [
-        decode_qr_luma(crop_center(&left, roi, roi)),
-        decode_qr_luma(crop_center(&right, roi, roi)),
+        decode_roi_downscaled(crop_center(&left, roi, roi)),
+        decode_roi_downscaled(crop_center(&right, roi, roi)),
     ];
     cand.into_iter().flatten().max_by_key(|p| p.frame_id)
 }

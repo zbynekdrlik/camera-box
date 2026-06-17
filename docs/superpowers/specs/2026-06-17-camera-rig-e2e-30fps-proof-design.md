@@ -41,8 +41,12 @@ stream (10.77.9.204): vendored OBS 32.1.2 + DistroAV 6.2.1 ──render──> N
 1. **Reference = painted sequence, loss decomposed per hop**, but the **strict 1:1 zero-loss
    verdict is anchored at cam1 capture (TAP A) → stream PGM (TAP C)**. The optical hop is
    measured and reported, never folded into the strict verdict.
-2. **True 30 fps across the whole chain** — ShadowCast 60→30, camera HDMI set to 1080p30 (user
-   action on the camera), OBS already 30. No 60→30 downsample anywhere.
+2. **30 fps across the whole chain — already in place, no reconfiguration.** The real camera is
+   already 1080p30 with a 1/250 s shutter (operator-confirmed); cam1 emits a 30 fps NDI via its
+   deployed `CAMERA_BOX_GENLOCK_FPS=30` drop-in (the ShadowCast card captures 60 and duplicates the
+   30 fps source, which camera-box decimates back to 30 — the emitted NDI is 30 fps of distinct
+   camera frames). The harness does NOT touch cam1's config. The `CAMERA_BOX_CAPTURE_FPS` knob
+   (Task 1) exists as an available capture-rate override but is unused by this harness.
 3. **Dedicated separate probe scenes** on strih + stream (the existing PHASE2-PROBE approach).
    **Do NOT touch production scenes.** Copy the genlock per-input settings *from* the production
    cam1 (on strih) / strih (on stream) inputs onto the probe input so the path is representative.
@@ -176,11 +180,12 @@ Create (new):
   regression gate for any genlock change.
 - Bug-fix changes follow RED→GREEN commit order per `regression-test-first.md`.
 
-## User action required (hardware, outside the repo)
+## Rig state (already set up — no action needed)
 
-- Set the broadcast camera HDMI output to **1080p30** (so the capture card receives 30, not 60).
-- Set a **short camera shutter — MANDATORY for the dual-QR Vernier**, ≤ ~1/120 s, ideally
-  1/250–1/500 s, so one exposure spans less than one monitor refresh. A long (1/30 s) exposure
-  straddles both QR regions' transitions and blurs both, defeating the scheme.
-- Frame the camera so the monitor fills the shot — both side-by-side QR regions must be large
-  and in focus for reliable decode.
+The rig is already configured and needs no operator action:
+
+- The camera is **1080p30 with a 1/250 s shutter**, framed on cam2's monitor (operator-confirmed).
+  The 1/250 s shutter already satisfies the dual-QR Vernier's short-exposure requirement — measured
+  `decode_failed=0` at all three taps, so at least one QR half is always sharp.
+- cam1 already emits **30 fps NDI** (`CAM1 (usb)`) via its deployed genlock drop-in.
+- The harness performs **no camera or capture-card reconfiguration**.
