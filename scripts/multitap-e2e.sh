@@ -108,8 +108,10 @@ cleanup() {
   # Kill the painter process on PAINTER_IP (cam2). If PAINTER_IP == CAM_IP (loopback
   # mode) the pkill -x above already covered it; the second one is a no-op.
   if [ "$PAINTER_IP" != "$CAM_IP" ]; then
+    # cam2 is the painter box. We STOPPED its camera-box in [2b] to free /dev/fb0 (it
+    # runs --display and owns the monitor); restart it to restore its display + NDI.
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-      "pkill -x frame-probe 2>/dev/null; true"
+      "pkill -x frame-probe 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   fi
   # Restore cam1 to its prior capture fps: remove the CAMERA_BOX_CAPTURE_FPS drop-in
   # we added in [2a], daemon-reload, and restart camera-box so it comes back at its
@@ -179,19 +181,23 @@ if [ "$CAM_IP" = "$PAINTER_IP" ]; then
         >/tmp/painter.log 2>&1 &)"
 else
   # Real-camera rig (default): cam1 runs the deployed camera-box service (already
-  # restarted in [2a] with CAMERA_BOX_CAPTURE_FPS=30).  cam2 runs the painter only
-  # (it has the physical monitor cam1 films); we do NOT interfere with cam2's
-  # camera-box service — only the painter runs there.
-  # NOTE: camera-box on cam2 is left running its normal service so it keeps
-  # emitting its own NDI; the painter uses /dev/fb0 (the monitor) which is separate.
+  # restarted in [2a] with CAMERA_BOX_CAPTURE_FPS=30) and is the SOURCE. cam2 is the
+  # PAINTER box — it has the physical monitor cam1 films. cam2's camera-box runs with
+  # `--display` and HOLDS /dev/fb0 (it paints the interkom return onto that monitor), so
+  # it MUST be stopped to free the display before frame-probe can paint QR there. cam2's
+  # own camera/NDI is NOT part of the measured cam1->strih->stream chain, so stopping it
+  # is safe; the cleanup trap restarts it (restoring its --display + NDI) on exit.
+  echo "[2b/5] free cam2 (${PAINTER_IP}) display: stop camera-box (holds /dev/fb0 via --display), then paint"
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-    "(nohup /tmp/frame-probe --paint-only --dual-qr $PAINT_WALL_FLAG \
-       --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
-       >/tmp/painter.log 2>&1 &)"
+    "systemctl stop camera-box; \
+     pkill -x camera-box 2>/dev/null; \
+     i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+     (nohup /tmp/frame-probe --paint-only --dual-qr $PAINT_WALL_FLAG \
+        --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+        >/tmp/painter.log 2>&1 &)"
 fi
-# NOTE: camera-box on cam1 is started by the service (not manually), so /dev/fb0
-# is free for cam2's painter.  cam1 still runs capture->NDI (genlock-decimated to
-# $GENLOCK_FPS), carrying the QR frames (filmed off cam2's monitor) onto the network.
+# NOTE: cam1 runs capture->NDI (genlock-decimated to $GENLOCK_FPS) via its service,
+# carrying the QR frames (filmed off cam2's monitor) onto the network as "$CAM_SOURCE".
 # Painter outlasts the tap window by +40s because OBS setup ([3]) now runs AFTER
 # the painter starts and consumes a few seconds before the taps begin.
 sleep 3  # let the "${CAM_SOURCE}" NDI sender become discoverable on the LAN
