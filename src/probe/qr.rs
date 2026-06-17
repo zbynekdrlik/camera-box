@@ -6,9 +6,17 @@ use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
 
-/// Render `payload` as a QR (EC level H), centered on a white BGRA canvas.
-/// Returns a `canvas_w * canvas_h * 4` BGRA byte buffer.
-pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: u32) -> Vec<u8> {
+/// Blit `payload`'s QR (EC-H), centered within the horizontal band
+/// `[band_x, band_x + band_w)`, onto an existing white BGRA `canvas`.
+fn blit_qr_bgra(
+    canvas: &mut [u8],
+    canvas_w: u32,
+    canvas_h: u32,
+    band_x: u32,
+    band_w: u32,
+    payload: &Payload,
+    qr_size: u32,
+) {
     let s = payload.encode();
     let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
         .expect("payload is small, encodes within QR capacity");
@@ -18,10 +26,8 @@ pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: 
         .max_dimensions(qr_size, qr_size)
         .quiet_zone(true)
         .build();
-
-    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize]; // white BGRA
-    let (qw, qh) = (qr.width().min(canvas_w), qr.height().min(canvas_h));
-    let ox = (canvas_w - qw) / 2;
+    let (qw, qh) = (qr.width().min(band_w), qr.height().min(canvas_h));
+    let ox = band_x + (band_w - qw) / 2;
     let oy = (canvas_h - qh) / 2;
     for y in 0..qh {
         for x in 0..qw {
@@ -33,6 +39,36 @@ pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: 
             canvas[ci + 3] = 255;
         }
     }
+}
+
+/// Render `payload` as a QR (EC level H), centered on a white BGRA canvas.
+/// Returns a `canvas_w * canvas_h * 4` BGRA byte buffer.
+pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: u32) -> Vec<u8> {
+    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize]; // white BGRA
+    blit_qr_bgra(&mut canvas, canvas_w, canvas_h, 0, canvas_w, payload, qr_size);
+    canvas
+}
+
+/// Two QRs side by side: `left` centered in `[0, w/2)`, `right` in `[w/2, w)`.
+pub fn render_qr_dual_bgra(
+    left: &Payload,
+    right: &Payload,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+) -> Vec<u8> {
+    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize];
+    let half = canvas_w / 2;
+    blit_qr_bgra(&mut canvas, canvas_w, canvas_h, 0, half, left, qr_size);
+    blit_qr_bgra(
+        &mut canvas,
+        canvas_w,
+        canvas_h,
+        half,
+        canvas_w - half,
+        right,
+        qr_size,
+    );
     canvas
 }
 
@@ -174,5 +210,28 @@ mod tests {
             (top - bottom).abs() <= 1,
             "y-centered: top={top} bottom={bottom}"
         );
+    }
+
+    #[test]
+    fn dual_render_places_two_decodable_qrs_left_and_right() {
+        let l = Payload {
+            run_id: 7,
+            frame_id: 100,
+            gen_ts_ns: 1,
+        };
+        let r = Payload {
+            run_id: 7,
+            frame_id: 101,
+            gen_ts_ns: 2,
+        };
+        let (cw, ch, qs) = (1920u32, 1080u32, 520u32);
+        let bgra = render_qr_dual_bgra(&l, &r, cw, ch, qs);
+        assert_eq!(bgra.len(), (cw * ch * 4) as usize);
+        let full = bgra_to_luma(&bgra, cw, ch, cw * 4);
+        // Left half image and right half image each decode to their own payload.
+        let left_img = image::imageops::crop_imm(&full, 0, 0, cw / 2, ch).to_image();
+        let right_img = image::imageops::crop_imm(&full, cw / 2, 0, cw / 2, ch).to_image();
+        assert_eq!(decode_qr_luma(left_img), Some(l));
+        assert_eq!(decode_qr_luma(right_img), Some(r));
     }
 }
