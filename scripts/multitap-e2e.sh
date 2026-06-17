@@ -70,6 +70,12 @@ WALL_CLOCK="${WALL_CLOCK:-1}"
 # Resolved on dev1 to a literal flag, then interpolated into the (dev1-expanded)
 # remote painter command and the local tap command — never evaluated remotely.
 [ "$WALL_CLOCK" = "1" ] && PAINT_WALL_FLAG="--wall-clock" || PAINT_WALL_FLAG=""
+# Dual-QR Vernier anti-blur source (DUAL=1, default) or single-QR (DUAL=0). The dual path
+# defeats optical-transition blur but costs ~2x decode (two QR detections per frame), which
+# can bottleneck the dev1 taps below 30 fps. With a short camera shutter (e.g. 1/250) blur
+# is negligible, so single-QR (DUAL=0) decodes fine AND lets the taps track full 30 fps —
+# use it when the camera shutter is short enough that decode_failed stays ~0.
+[ "${DUAL:-1}" = "1" ] && DUAL_QR_FLAG="--dual-qr" || DUAL_QR_FLAG=""
 # Optional hard gate (ms) on the absolute source→endpoint p99. Requires WALL_CLOCK
 # (multitap-probe bails otherwise). Empty ⇒ absolute latency is report-only (still
 # WRITTEN to the artifact). Baseline with a report-only run, then ratchet.
@@ -158,7 +164,7 @@ if [ "$CAM_IP" = "$PAINTER_IP" ]; then
      i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
      (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
      sleep 4; \
-     (nohup /tmp/frame-probe --paint-only --dual-qr $PAINT_WALL_FLAG \
+     (nohup /tmp/frame-probe --paint-only $DUAL_QR_FLAG $PAINT_WALL_FLAG \
         --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
         >/tmp/painter.log 2>&1 &)"
 else
@@ -174,7 +180,7 @@ else
     "systemctl stop camera-box; \
      pkill -x camera-box 2>/dev/null; \
      i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-     (nohup /tmp/frame-probe --paint-only --dual-qr $PAINT_WALL_FLAG \
+     (nohup /tmp/frame-probe --paint-only $DUAL_QR_FLAG $PAINT_WALL_FLAG \
         --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
         >/tmp/painter.log 2>&1 &)"
 fi
@@ -276,7 +282,7 @@ if ./target/release/multitap-probe \
   --tap stream="$STREAM_OUT" \
   --duration-secs "$DURATION" \
   --min-zero-loss-secs 300 \
-  --dual-qr \
+  $DUAL_QR_FLAG \
   ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
   --out "$OUT"; then
   GATE=0
