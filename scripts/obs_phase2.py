@@ -387,14 +387,19 @@ def _match_full(vals, bare):
     return bare
 
 
-def _resolve_full(ws, inp, bare, timeout=20.0, interval=1.0):
+def _resolve_full(ws, inp, bare, timeout=45.0, interval=1.0):
     """Resolve `bare` to its full 'MACHINE (name)' NDI form, POLLING DistroAV discovery
     until it appears (or timeout). An OBS ndi_source binds by the full network name;
     binding the BARE Main-Output name (e.g. '2ME PGM') connects to nothing → black render
     → 0 decode on the next hop. Cold discovery may not list a just-started upstream/own
     output for a few seconds, so we wait for it rather than racing it with a fixed sleep
     (#22 verification exposed this on strih→stream). Names that are already full (contain
-    '(') bind directly and pass through. Returns (full_or_bare, last_vals)."""
+    '(') bind directly and pass through. Returns (full_or_bare, last_vals).
+
+    timeout=45s (was 20s): after the harness stops cam2's camera-box + re-points the OBS
+    ingest, the NDI discovery landscape reshuffles and strih's own Main Output ('2ME PGM')
+    intermittently took >20s to re-appear in dev1's finder, aborting otherwise-good runs.
+    This is an async network-advertisement wait, not a processing timeout."""
     if "(" in bare:  # already a full "MACHINE (name)" — binds directly, no discovery wait
         return bare, _ndi_source_list(ws, inp)
     end = time.time() + timeout
