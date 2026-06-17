@@ -923,9 +923,18 @@ struct obs_source {
 	 * set/get also take the lock — no unlocked mutation of a field the A/V thread
 	 * reads (the #93 UAF lesson). One preload frame = one frame of delay. */
 	uint32_t genlock_preload;          /* per-source jitter reserve / video delay (#97) */
+	/* camera-box #102: one-time startup-fill latch. While false the FIFO BUILDS to
+	 * the `genlock_preload` delay depth (holding/repeating only during this initial
+	 * fill); once the queue first exceeds preload it latches true and the FIFO then
+	 * consumes a distinct frame on EVERY tick a frame is queued — repeating only on a
+	 * TRUE empty, never on a jitter dip below the reserve (which the old #70 gate did,
+	 * losing a distinct frame each time: 11.6%->34.3% on the live rig). Reset to false
+	 * on an overrun force-drain (cache_video) so the delay line rebuilds. Read/written
+	 * by the A/V thread under async_mutex (same as genlock_preload, the #93 lesson). */
+	bool genlock_filled;
 	uint64_t genlock_frames_received;  /* video frames queued onto async_frames */
 	uint64_t genlock_frames_consumed;  /* frames handed to the compositor (one per tick) */
-	uint64_t genlock_underruns;        /* consume ticks where the FIFO was at/below preload */
+	uint64_t genlock_underruns;        /* holds with no distinct frame to emit (build fill + true empty) */
 	uint64_t genlock_overruns;         /* per-source drop-cap drains (queue forced empty) */
 	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
 	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */

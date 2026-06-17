@@ -270,6 +270,9 @@ static bool obs_source_init(struct obs_source *source)
 	 * touches keeps the launch-time depth (back-compat with #70). The DistroAV
 	 * slider overrides this per source at runtime via obs_source_set_genlock_preload(). */
 	source->genlock_preload = genlock_preload_default();
+	/* camera-box #102: start UNfilled — the FIFO builds the preload delay line
+	 * before emitting (bzalloc already zeroes this; explicit for intent). */
+	source->genlock_filled = false;
 
 	source->private_settings = obs_data_create();
 	return true;
@@ -3550,6 +3553,11 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 			source->genlock_overruns++;
 		free_async_cache(source);
 		source->last_frame_ts = 0;
+		/* camera-box #102: an overrun force-drained the FIFO to empty, so the
+		 * delay line is gone — re-enter the BUILD phase to rebuild the preload
+		 * delay before emitting again (otherwise the next tick would emit a
+		 * frame with no delay, a phase jump). */
+		source->genlock_filled = false;
 		pthread_mutex_unlock(&source->async_mutex);
 		return NULL;
 	}
@@ -4241,12 +4249,45 @@ static uint64_t genlock_preload_ms(uint32_t frames)
 	return (uint64_t)frames * 1000 * ovi.fps_den / ovi.fps_num;
 }
 
-/* Pure decision mirrored by the unit test: at a render tick, consume one frame
- * only once the queue is deeper than the preload reserve. queue_depth<=preload
- * (incl. 0) -> hold (underrun) so the reserve refills. */
-static inline bool genlock_should_consume(size_t queue_depth, uint32_t preload)
+/* camera-box #102: the genlock consume decision for one render tick. Mirrored by
+ * the camera-box unit test (src/probe/genlock.rs genlock_decide / tests).
+ *
+ * `filled` is the per-source one-time startup-fill latch (passed by value; the
+ * caller writes back `.filled`):
+ *
+ *  - BUILD (`!filled`): establish the delay line. Hold (consume=false) until the
+ *    queue is deeper than `preload`; the moment it exceeds preload, LATCH filled
+ *    and consume the first (preload-frames-late) frame. This is the ONLY place a
+ *    repeat is emitted, and only once at startup.
+ *  - STEADY (`filled`): consume a distinct frame on EVERY tick a frame is queued
+ *    (queue_depth >= 1). A jitter dip below the reserve still delivers a distinct
+ *    frame (no repeat) — the reserve just shrinks and refills. The ONLY hold is a
+ *    TRUE empty (queue_depth == 0), an unavoidable underrun. filled stays set so a
+ *    transient empty does NOT re-trigger the whole startup refill (which is exactly
+ *    what made the old #70 `depth>preload` gate lose ~34% of distinct frames at a
+ *    deep preload). The latch is reset to false only on an overrun force-drain
+ *    (cache_video), so the delay line rebuilds after a drain. */
+struct genlock_decision {
+	bool consume; /* hand a distinct queued frame to the compositor this tick */
+	bool filled;  /* new value of the startup-fill latch */
+};
+
+static inline struct genlock_decision genlock_decide(size_t queue_depth, uint32_t preload, bool filled)
 {
-	return queue_depth > (size_t)preload;
+	struct genlock_decision d;
+	if (!filled) {
+		if (queue_depth > (size_t)preload) {
+			d.consume = true;
+			d.filled = true; /* delay line established */
+		} else {
+			d.consume = false;
+			d.filled = false; /* still building the preload delay */
+		}
+	} else {
+		d.consume = queue_depth >= 1; /* emit whenever a distinct frame is queued */
+		d.filled = true;
+	}
+	return d;
 }
 
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
@@ -4288,28 +4329,36 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 	uint64_t frame_offset = 0;
 
 	if (source->genlock_fifo) {
-		/* camera-box #42 + #70: pure FIFO with a preload jitter reserve.
-		 * Consume exactly one queued frame per render tick, but only once
-		 * the queue is deeper than the preload reserve - so a single tick
-		 * of NDI arrival jitter no longer empties the FIFO (underrun). The
-		 * audit counters record received/consumed/underruns/overruns and
-		 * the queue high-water mark; they are logged periodically as the
-		 * before/after evidence that underruns drop to zero. */
+		/* camera-box #42/#70/#102: FIFO genlock with a preload VIDEO DELAY.
+		 * #102: BUILD to the preload delay depth once at startup, then consume
+		 * a distinct frame on EVERY tick a frame is queued (repeat only on a
+		 * TRUE empty) — so NDI arrival jitter below the reserve no longer loses
+		 * a distinct frame (the old #70 `depth>preload` hard-hold gate did, up
+		 * to ~34% at a deep preload). The audit counters record
+		 * received/consumed/underruns(now build-fill + true-empty only)/overruns
+		 * and the queue high-water mark, logged periodically as the
+		 * before/after evidence that distinct-frame loss drops to ~zero. */
 		/* camera-box #97: read the PER-SOURCE preload (video-delay depth),
 		 * not the global env default. The whole render path runs under
 		 * async_mutex (get_closest_frame is only called there), so this read
 		 * is serialised with obs_source_set_genlock_preload() — no unlocked
-		 * mutation of a field the A/V thread reads (the #93 UAF lesson). */
+		 * mutation of a field the A/V thread reads (the #93 UAF lesson).
+		 * source->genlock_filled (the #102 startup-fill latch) is read+written
+		 * under the same async_mutex. */
 		const uint32_t preload = source->genlock_preload;
 		const uint64_t now_ns = sys_time; /* monotonic render-tick stamp */
 
 		if (source->async_frames.num > source->genlock_peak_depth)
 			source->genlock_peak_depth = (uint32_t)source->async_frames.num;
 
-		if (!genlock_should_consume(source->async_frames.num, preload)) {
-			/* hold: not enough reserve yet - this tick repeats the
-			 * last frame so the buffer can refill. This is the
-			 * underrun the zero-slack FIFO suffered on every jitter. */
+		const struct genlock_decision gd =
+			genlock_decide(source->async_frames.num, preload, source->genlock_filled);
+		source->genlock_filled = gd.filled; /* latch the build->steady transition */
+
+		if (!gd.consume) {
+			/* hold: either still BUILDING the preload delay at startup, or
+			 * a TRUE empty (depth==0) in steady state — there is no distinct
+			 * frame to emit this tick, so the compositor repeats the last. */
 			source->genlock_underruns++;
 			genlock_audit_log(source, now_ns);
 			return false;
@@ -5866,6 +5915,14 @@ void obs_source_set_genlock_preload(obs_source_t *source, uint32_t frames)
 	pthread_mutex_lock(&source->async_mutex);
 	const uint32_t prev = source->genlock_preload;
 	source->genlock_preload = clamped;
+	/* camera-box #102: a runtime preload change re-arms the startup-fill latch so
+	 * the delay line rebuilds to the new depth. On an INCREASE the FIFO holds while
+	 * it fills up to the deeper delay (the #97 1->30 transition); on a DECREASE the
+	 * current depth already exceeds the new preload, so genlock_decide re-latches
+	 * filled on the very next tick with no repeat. Written under async_mutex (the
+	 * A/V thread reads it in ready_async_frame). */
+	if (clamped != prev)
+		source->genlock_filled = false;
 	pthread_mutex_unlock(&source->async_mutex);
 
 	if (clamped != prev)
