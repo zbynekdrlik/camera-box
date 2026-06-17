@@ -83,6 +83,11 @@ name = "multitap-probe"
 path = "src/bin/multitap-probe.rs"
 required-features = ["probe"]
 
+[[bin]]
+name = "recording-probe"
+path = "src/bin/recording-probe.rs"
+required-features = ["probe"]
+
 [[bench]]
 name = "format_conversions"
 harness = false
