@@ -122,6 +122,8 @@ cleanup() {
   # cam1 is NOT reconfigured by this harness — the real camera is already 30 fps / 1-250
   # and cam1 emits a 30 fps NDI via its deployed genlock drop-in — so there is nothing to
   # restore on cam1.
+  # Purge the (large) spool dir if offline-decode mode was used.
+  [ -n "${SPOOL_DIR:-}" ] && rm -rf "$SPOOL_DIR" 2>/dev/null
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -271,6 +273,13 @@ LEAD_DISCARD="${LEAD_DISCARD:-0}"
 
 # Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
 [ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")
+
+# Offline-decode mode (SPOOL_DIR set): taps write every frame to disk during the
+# window (no live decode → ZERO tap-drop), then multitap-probe decodes the spools
+# AFTER the window. This is what makes the loss number trustworthy (live decode
+# always drops ~2-3% at the NDI receiver, which contaminates the id-match). ~1.8 GB
+# per tap per 300 s; the trap purges the spool dir on exit.
+[ -n "${SPOOL_DIR:-}" ] && GATE_ARGS+=(--spool-dir "$SPOOL_DIR")
 
 # A failing per-hop gate is multitap-probe exiting 1 — its designed FAIL signal.
 # Capture it without `set -e` aborting before the artifact dump (the failure case
