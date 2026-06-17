@@ -6,7 +6,7 @@
 use crate::ndi::NdiReceiver;
 use crate::probe::analyzer::Observed;
 use crate::probe::clock_ns;
-use crate::probe::qr::decode_capture;
+use crate::probe::qr::{decode_capture, decode_capture_dual};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,10 @@ pub struct TapSpec {
     /// DanteSync-disciplined wall clock (#7 / #8, strih = master). Per-hop
     /// relative latency stays valid either way (both taps use the same domain).
     pub wall_clock: bool,
+    /// When true, use `decode_capture_dual` (picks the highest frame_id CRC-valid
+    /// half from a side-by-side dual-QR frame). Matches the painter's `dual_qr`
+    /// flag on the camera's frame-probe run.
+    pub dual: bool,
 }
 
 /// A tap's accumulating buffer, readable by the differ after the run.
@@ -103,14 +107,26 @@ fn tap_loop(
         // so a torn-QR frame still increments `captured`. This is what separates
         // hop frame-loss from tap decode-failure.
         captured.fetch_add(1, Ordering::Relaxed);
-        if let Some(p) = decode_capture(
-            frame.fourcc,
-            &frame.data,
-            frame.width,
-            frame.height,
-            frame.stride,
-            spec.decode_crop,
-        ) {
+        let decoded = if spec.dual {
+            decode_capture_dual(
+                frame.fourcc,
+                &frame.data,
+                frame.width,
+                frame.height,
+                frame.stride,
+                spec.decode_crop,
+            )
+        } else {
+            decode_capture(
+                frame.fourcc,
+                &frame.data,
+                frame.width,
+                frame.height,
+                frame.stride,
+                spec.decode_crop,
+            )
+        };
+        if let Some(p) = decoded {
             if p.run_id == spec.run_id {
                 observed.lock().unwrap().push(Observed {
                     frame_id: p.frame_id,

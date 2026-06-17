@@ -138,6 +138,12 @@ struct Args {
     /// relative-latency behaviour, unchanged).
     #[arg(long, default_value_t = false)]
     wall_clock: bool,
+    /// Decode from both halves of each received frame (Vernier dual-QR path).
+    /// The painter on the camera must run with `frame-probe --dual-qr`; this
+    /// flag switches every tap to `decode_capture_dual` so at least one sharp
+    /// half survives mid-transition captures.
+    #[arg(long, default_value_t = false)]
+    dual_qr: bool,
     /// JSON artifact output path.
     #[arg(long, default_value = "/tmp/multitap-probe.json")]
     out: String,
@@ -348,6 +354,7 @@ fn main() -> Result<()> {
                 connect_timeout_secs: args.connect_timeout_secs,
                 decode_crop,
                 wall_clock: args.wall_clock,
+                dual: args.dual_qr,
             },
             start,
             stop.clone(),

@@ -81,6 +81,12 @@ struct Args {
     /// clock-synced (verify with scripts/clock-offset-guard.sh).
     #[arg(long, default_value_t = false)]
     wall_clock: bool,
+    /// Paint two QR codes side-by-side (Vernier dual-QR path) and decode from both
+    /// halves on receive. At least one half is always sharp on a mid-transition
+    /// capture, eliminating the false-loss artifact from the single-QR path.
+    /// Painter and reader both switch; use together with multitap-probe --dual-qr.
+    #[arg(long, default_value_t = false)]
+    dual_qr: bool,
     /// Paint QR frames DIRECTLY into an NDI sender with this name (no
     /// framebuffer, no capture hardware) at an exact --paint-fps. The
     /// software-only source for genlock validation (#42) and the OBS-bypass
@@ -186,6 +192,7 @@ fn main() -> Result<()> {
         max_p99_latency_ms: args.max_p99_latency_ms,
         max_freeze_periods_gate: args.max_freeze_periods,
         wall_clock: args.wall_clock,
+        dual_qr: args.dual_qr,
     };
 
     if let Some(name) = args.synth_ndi.as_deref() {

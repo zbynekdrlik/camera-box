@@ -40,6 +40,10 @@ pub struct RunConfig {
     /// single-box loopback `run()` this MUST stay false — painter and reader share
     /// one process clock there and a wall-clock gen would break that latency.
     pub wall_clock: bool,
+    /// Paint two QR codes side-by-side (Vernier dual-QR path) and decode from both
+    /// halves on receive. At least one half is always sharp on a mid-transition
+    /// capture, eliminating the false-loss artifact from the single-QR path.
+    pub dual_qr: bool,
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
@@ -58,6 +62,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             // Decode only the centered ROI where the QR is painted (+margin for
             // quiet zone and capture jitter), so decode keeps up in real time.
             decode_crop: (cfg.qr_size + 120).min(cfg.canvas_h),
+            dual_qr: cfg.dual_qr,
         };
         std::thread::spawn(move || run_reader(params, start, stop, observed))
     };
@@ -78,7 +83,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             // monotonic clock, so latency is exact without any sync. A wall-clock
             // gen here would break that — force monotonic regardless of cfg.
             wall_clock: false,
-            dual_qr: false,
+            dual_qr: cfg.dual_qr,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };
@@ -147,7 +152,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             // so the dev1 endpoint tap's wall-clock recv − this gen is true
             // absolute latency. Defaults false (Phase-2 relative latency only).
             wall_clock: cfg.wall_clock,
-            dual_qr: false,
+            dual_qr: cfg.dual_qr,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };

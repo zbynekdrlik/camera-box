@@ -15,6 +15,9 @@ pub struct ReadParams {
     /// The painter centers the QR, so decoding only this ROI keeps per-frame
     /// decode fast enough to track the capture without backlog.
     pub decode_crop: u32,
+    /// When true, use `decode_capture_dual` (picks the highest frame_id CRC-valid
+    /// half from a side-by-side dual-QR frame). Matches `RunConfig.dual_qr`.
+    pub dual_qr: bool,
 }
 
 /// Receive until `stop` is set. Records every decoded frame whose run_id matches.
@@ -33,14 +36,26 @@ pub fn run_reader(
         };
         let recv_ts_ns = start.elapsed().as_nanos() as i64;
         let node_emit_tc_ns = frame.timecode_100ns.saturating_mul(100);
-        if let Some(p) = crate::probe::qr::decode_capture(
-            frame.fourcc,
-            &frame.data,
-            frame.width,
-            frame.height,
-            frame.stride,
-            params.decode_crop,
-        ) {
+        let decoded = if params.dual_qr {
+            crate::probe::qr::decode_capture_dual(
+                frame.fourcc,
+                &frame.data,
+                frame.width,
+                frame.height,
+                frame.stride,
+                params.decode_crop,
+            )
+        } else {
+            crate::probe::qr::decode_capture(
+                frame.fourcc,
+                &frame.data,
+                frame.width,
+                frame.height,
+                frame.stride,
+                params.decode_crop,
+            )
+        };
+        if let Some(p) = decoded {
             if p.run_id == params.run_id {
                 observed.lock().unwrap().push(Observed {
                     frame_id: p.frame_id,
