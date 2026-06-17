@@ -406,11 +406,20 @@ mod distroav_source {
             "{NDI_SOURCE}: #97 — the genlock-preload int slider is gone from the NDI \
              source properties; re-apply."
         );
-        // The slider range top must be 128 (the raised cap).
+        // The slider label + min(0) + step(1) are pinned; the max may be the literal
+        // 128 OR the symbolic PROP_GENLOCK_PRELOAD_MAX (== 128, asserted separately).
         assert!(
-            src.contains("PROP_GENLOCK_PRELOAD, \"Genlock preload (video delay)\", 0, 128, 1"),
+            src.contains("PROP_GENLOCK_PRELOAD, \"Genlock preload (video delay)\", 0, 128, 1")
+                || src.contains(
+                    "PROP_GENLOCK_PRELOAD, \"Genlock preload (video delay)\", 0, PROP_GENLOCK_PRELOAD_MAX, 1"
+                ),
             "{NDI_SOURCE}: #97 — the preload slider range/label changed; expected \
-             (\"Genlock preload (video delay)\", 0, 128, 1)."
+             (\"Genlock preload (video delay)\", 0, 128|PROP_GENLOCK_PRELOAD_MAX, 1)."
+        );
+        // The symbolic cap must equal the libobs cap (128).
+        assert!(
+            src.contains("#define PROP_GENLOCK_PRELOAD_MAX 128"),
+            "{NDI_SOURCE}: #97 — PROP_GENLOCK_PRELOAD_MAX must be 128 to match libobs."
         );
     }
 

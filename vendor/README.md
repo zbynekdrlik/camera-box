@@ -98,6 +98,22 @@ DistroAV:
   of the name strings that `recv_desc` binds to. Guarded by
   `tests/distroav_source_config_lock.rs` so a `git subtree pull` can't silently revert it.
 
+- **#97 per-source genlock preload as a runtime video-delay control**
+  (`libobs/obs-source.c`, `libobs/obs-internal.h`, `libobs/obs.h`, `src/ndi-source.cpp`):
+  promotes the #70 global env-set-at-launch preload into a **per-source, runtime-settable**
+  `uint32_t genlock_preload` field (one preload frame = one frame of genlock-disciplined
+  VIDEO DELAY), exposed via `obs_source_set/get_genlock_preload()` (clamped `[0,128]`,
+  read/written under `async_mutex` — the #93 UAF lesson). `GENLOCK_PRELOAD_MAX` raised
+  28→128 and the async FIFO drop-cap made per-source (`genlock_source_drop_cap()` =
+  `preload+RESERVE` for a genlock source, fixed `MAX_ASYNC_FRAMES` otherwise) so a
+  deliberately-delayed source parks its full buffer without force-draining (memory-safe,
+  #89). DistroAV adds a "Genlock preload (video delay)" int slider (0–128) + a read-only
+  "≈ N ms (@ F fps)" info text recomputed from `obs_get_video_info()`, applied in
+  `ndi_source_update` via the runtime-resolved setter; the audit log gains the ms
+  equivalent. Lets the operator delay the program video ~1 s to match late audio on
+  stream.lan. Guarded by `tests/genlock_preload.rs` (+ the windows-genlock.yml pwsh gate)
+  so a `git subtree pull` can't silently revert it.
+
 ## Build
 
 Local prototyping happens on dev1 (Linux). The production target is a Windows build for

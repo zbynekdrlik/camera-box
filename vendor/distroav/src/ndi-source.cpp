@@ -25,6 +25,7 @@
 #include <QUrl>
 
 #include <thread>
+#include <cstdio> /* camera-box #97: snprintf for the preload ms info-text label */
 
 #define PROP_SOURCE "ndi_source_name"
 #define PROP_BEHAVIOR "ndi_behavior"
@@ -32,7 +33,10 @@
 #define PROP_BANDWIDTH "ndi_bw_mode"
 #define PROP_SYNC "ndi_sync"
 #define PROP_FRAMESYNC "ndi_framesync"
-#define PROP_GENLOCK_FIFO "genlock_fifo" /* camera-box #42 */
+#define PROP_GENLOCK_FIFO "genlock_fifo"            /* camera-box #42 */
+#define PROP_GENLOCK_PRELOAD "genlock_preload"      /* camera-box #97: video-delay slider */
+#define PROP_GENLOCK_PRELOAD_MS "genlock_preload_ms" /* camera-box #97: read-only ms label */
+#define PROP_GENLOCK_PRELOAD_MAX 128                /* mirrors libobs GENLOCK_PRELOAD_MAX (#97) */
 
 /* camera-box #42: resolve the genlock export at RUNTIME. On Windows the
  * DistroAV build system fetches stock OBS SDK headers (no genlock symbols), so
@@ -44,6 +48,23 @@
 #else
 #include <dlfcn.h>
 #endif
+/* camera-box #97: resolve an OBS genlock export at RUNTIME by name. Same rationale
+ * as the genlock-fifo resolver below: the Windows DistroAV build fetches stock OBS
+ * SDK headers (no genlock symbols), so a link-time call cannot build; runtime
+ * binding works against any headers AND keeps the plugin loadable on a stock OBS
+ * (the control becomes an inert no-op with a loud warning instead of a load fail). */
+static void *resolve_obs_export(const char *name)
+{
+#ifdef _WIN32
+	HMODULE m = GetModuleHandleA("obs.dll");
+	if (!m)
+		m = GetModuleHandleA("libobs.dll");
+	return m ? (void *)GetProcAddress(m, name) : nullptr;
+#else
+	return dlsym(RTLD_DEFAULT, name);
+#endif
+}
+
 typedef void (*set_genlock_fifo_fn)(obs_source_t *, bool);
 static set_genlock_fifo_fn resolve_set_genlock_fifo()
 {
@@ -51,19 +72,28 @@ static set_genlock_fifo_fn resolve_set_genlock_fifo()
 	static bool tried = false;
 	if (!tried) {
 		tried = true;
-#ifdef _WIN32
-		HMODULE m = GetModuleHandleA("obs.dll");
-		if (!m)
-			m = GetModuleHandleA("libobs.dll");
-		if (m)
-			fn = (set_genlock_fifo_fn)GetProcAddress(m, "obs_source_set_genlock_fifo");
-#else
-		fn = (set_genlock_fifo_fn)dlsym(RTLD_DEFAULT, "obs_source_set_genlock_fifo");
-#endif
+		fn = (set_genlock_fifo_fn)resolve_obs_export("obs_source_set_genlock_fifo");
 		if (!fn)
 			obs_log(LOG_WARNING,
 				"genlock: obs_source_set_genlock_fifo not exported by this OBS build — "
 				"the Genlock checkbox is inert (stock OBS?)");
+	}
+	return fn;
+}
+
+/* camera-box #97: per-source genlock preload (video-delay) setter, runtime-resolved. */
+typedef void (*set_genlock_preload_fn)(obs_source_t *, uint32_t);
+static set_genlock_preload_fn resolve_set_genlock_preload()
+{
+	static set_genlock_preload_fn fn = nullptr;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+		fn = (set_genlock_preload_fn)resolve_obs_export("obs_source_set_genlock_preload");
+		if (!fn)
+			obs_log(LOG_WARNING,
+				"genlock: obs_source_set_genlock_preload not exported by this OBS build — "
+				"the Genlock preload (video delay) slider is inert (stock OBS?)");
 	}
 	return fn;
 }
@@ -329,6 +359,37 @@ obs_properties_t *ndi_source_getproperties(void *data)
 
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock (FIFO frame consumption, camera-box #42)");
 
+	/* camera-box #97: per-source genlock preload as a runtime VIDEO-DELAY control.
+	 * Each preload frame = one frame of genlock-disciplined delay; raise it to push
+	 * the program video back to line up with late audio (~1 s on stream.lan). The
+	 * read-only info text below shows the live ms equivalent at the current output
+	 * fps, recomputed by the slider's modified_callback from obs_get_video_info(). */
+	obs_property_t *preload_slider =
+		obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD, "Genlock preload (video delay)", 0,
+					      PROP_GENLOCK_PRELOAD_MAX, 1);
+	obs_property_t *preload_ms =
+		obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
+	obs_property_set_enabled(preload_ms, false);
+	obs_property_set_modified_callback(
+		preload_slider, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
+			const long long frames = obs_data_get_int(settings_, PROP_GENLOCK_PRELOAD);
+			struct obs_video_info ovi;
+			char buf[128];
+			if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
+				const unsigned long long ms =
+					(unsigned long long)frames * 1000ULL * ovi.fps_den / ovi.fps_num;
+				const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
+				snprintf(buf, sizeof(buf), "≈ %llu ms (@ %.3f fps)", ms, fps);
+			} else {
+				snprintf(buf, sizeof(buf), "≈ ? ms (output fps unknown)");
+			}
+			obs_data_set_string(settings_, PROP_GENLOCK_PRELOAD_MS, buf);
+			obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
+			if (ms_prop)
+				obs_property_set_description(ms_prop, buf);
+			return true; /* properties UI changed -> refresh */
+		});
+
 	obs_properties_add_bool(props, PROP_HW_ACCEL, obs_module_text("NDIPlugin.SourceProps.HWAccel"));
 
 	obs_properties_add_bool(props, PROP_FIX_ALPHA, obs_module_text("NDIPlugin.SourceProps.AlphaBlendingFix"));
@@ -386,6 +447,10 @@ void ndi_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709);
 	obs_data_set_default_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL);
 	obs_data_set_default_bool(settings, PROP_AUDIO, true);
+	/* camera-box #97: default genlock preload (video delay) = 1 frame, matching
+	 * libobs GENLOCK_PRELOAD_DEFAULT / the #70 env default — a source the operator
+	 * never touches keeps the original 1-frame jitter reserve. */
+	obs_data_set_default_int(settings, PROP_GENLOCK_PRELOAD, 1);
 	obs_log(LOG_DEBUG, "-ndi_source_getdefaults(…)");
 }
 
@@ -1051,6 +1116,13 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	 * plugin builds against stock SDK headers and loads on any OBS. */
 	if (auto set_genlock = resolve_set_genlock_fifo())
 		set_genlock(obs_source, obs_data_get_bool(settings, PROP_GENLOCK_FIFO));
+
+	/* camera-box #97: apply the per-source genlock preload (video delay). Runtime-
+	 * resolved like the fifo setter. libobs clamps to [0, 128] and writes under
+	 * async_mutex, so the live change is crash-safe (the #93 UAF lesson). Persists
+	 * in the scene via PROP_GENLOCK_PRELOAD. */
+	if (auto set_preload = resolve_set_genlock_preload())
+		set_preload(obs_source, (uint32_t)obs_data_get_int(settings, PROP_GENLOCK_PRELOAD));
 
 	auto new_hw_accel_enabled = obs_data_get_bool(settings, PROP_HW_ACCEL);
 	reset_ndi_receiver |= (s->config.hw_accel_enabled != new_hw_accel_enabled);

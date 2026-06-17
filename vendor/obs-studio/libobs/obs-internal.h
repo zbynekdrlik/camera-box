@@ -914,10 +914,19 @@ struct obs_source {
 	 * exceeds that depth, so NDI arrival jitter no longer empties it (underrun =
 	 * a dropped/repeated frame). The counters are the audit evidence that
 	 * underruns happen before the fix and stop after. */
+	/* camera-box #97: per-source, runtime-settable preload reserve = frames of
+	 * genlock-disciplined VIDEO DELAY. Initialized at source create from the
+	 * OBS_GENLOCK_PRELOAD_FRAMES env default (back-compat with #70), then settable
+	 * live via obs_source_set_genlock_preload() from the DistroAV slider to push
+	 * the program video back ~1 s to line up with late audio on stream.lan. Read by
+	 * the A/V thread in ready_async_frame()/cache_video() UNDER async_mutex, so
+	 * set/get also take the lock — no unlocked mutation of a field the A/V thread
+	 * reads (the #93 UAF lesson). One preload frame = one frame of delay. */
+	uint32_t genlock_preload;          /* per-source jitter reserve / video delay (#97) */
 	uint64_t genlock_frames_received;  /* video frames queued onto async_frames */
 	uint64_t genlock_frames_consumed;  /* frames handed to the compositor (one per tick) */
 	uint64_t genlock_underruns;        /* consume ticks where the FIFO was at/below preload */
-	uint64_t genlock_overruns;         /* MAX_ASYNC_FRAMES drains (queue forced empty) */
+	uint64_t genlock_overruns;         /* per-source drop-cap drains (queue forced empty) */
 	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
 	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */
 	struct obs_source_frame *async_preload_frame;

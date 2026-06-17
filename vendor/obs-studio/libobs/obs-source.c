@@ -213,6 +213,11 @@ static inline bool requires_canvas(const struct obs_source *source)
 extern char *find_libobs_data_file(const char *file);
 
 /* internal initialization */
+/* camera-box #97: forward decl — the genlock preload helpers are defined further
+ * down (next to the FIFO consume logic), but obs_source_init seeds the per-source
+ * preload from the env default. */
+static uint32_t genlock_preload_default(void);
+
 static bool obs_source_init(struct obs_source *source)
 {
 	source->user_volume = 1.0f;
@@ -259,6 +264,12 @@ static bool obs_source_init(struct obs_source *source)
 
 	source->deinterlace_top_first = true;
 	source->audio_mixers = 0xFF;
+
+	/* camera-box #97: seed the per-source genlock preload (video-delay depth) from
+	 * the OBS_GENLOCK_PRELOAD_FRAMES env default, so a source the operator never
+	 * touches keeps the launch-time depth (back-compat with #70). The DistroAV
+	 * slider overrides this per source at runtime via obs_source_set_genlock_preload(). */
+	source->genlock_preload = genlock_preload_default();
 
 	source->private_settings = obs_data_create();
 	return true;
@@ -3515,11 +3526,18 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 
 	pthread_mutex_lock(&source->async_mutex);
 
-	if (source->async_frames.num >= MAX_ASYNC_FRAMES) {
-		/* camera-box #70: the FIFO hit the hard cap and is force-drained.
-		 * For a genlock source this is an overrun - the consumer fell behind
-		 * the producer (or the preload was set too deep). Count it; the
-		 * audit log surfaces it so the preload depth can be tuned. */
+	/* camera-box #97: the drop-cap is PER-SOURCE. A non-genlock source keeps the
+	 * fixed MAX_ASYNC_FRAMES; a genlock source the operator deliberately delays is
+	 * allowed to hold preload+RESERVE frames so its full delay buffer parks without
+	 * force-draining (only delayed sources hold a big buffer -- memory-safe on the
+	 * RAM-tight stream.lan box, #89). Read under async_mutex (already held here),
+	 * same lock as obs_source_set_genlock_preload(). */
+	if (source->async_frames.num >= genlock_source_drop_cap(source)) {
+		/* camera-box #70/#97: the FIFO hit the per-source drop-cap and is
+		 * force-drained. For a genlock source this is an overrun - the
+		 * consumer fell behind the producer (or the preload is deeper than
+		 * the cap allows). Count it; the audit log surfaces it so the preload
+		 * depth can be tuned. */
 		if (source->genlock_fifo)
 			source->genlock_overruns++;
 		free_async_cache(source);
@@ -4111,17 +4129,36 @@ void remove_async_frame(obs_source_t *source, struct obs_source_frame *frame)
  * rebuild to change depth), exactly like OBS_GENLOCK_WALL_CLOCK.
  */
 #define GENLOCK_PRELOAD_DEFAULT 1
-/* The steady-state queue parks at preload+1, so the cap must keep preload+1 STRICTLY
- * below MAX_ASYNC_FRAMES (30): a preload of 29 would steady at depth 30 == the cap,
- * force-draining every refill and FREEZING the source. 28 -> steady depth 29 < 30. */
-#define GENLOCK_PRELOAD_MAX 28
+/* camera-box #97: the preload is now a per-source, runtime-settable VIDEO DELAY
+ * (one preload frame = one frame of genlock-disciplined delay), used to push the
+ * program video back ~1 s to match late audio on stream.lan. ~1 s @ 30 fps = 30
+ * frames, already above the old #70 cap of 28, so the ceiling is raised to 128
+ * (~4.3 s @ 30 fps). The old "preload+1 must stay below MAX_ASYNC_FRAMES (30)"
+ * invariant is GONE: a genlock source's async FIFO drop-cap now scales with its
+ * preload (genlock_source_drop_cap() = preload + RESERVE), so a deep preload no
+ * longer force-drains every refill. Non-genlock sources keep the fixed cap. */
+#define GENLOCK_PRELOAD_MAX 128
+/* Headroom above a genlock source's preload for its per-source FIFO drop-cap. The
+ * cap must sit above the steady-state depth (preload+1) so normal jitter never
+ * trips an overrun drain; +4 leaves 3 frames of slack above steady state. */
+#define GENLOCK_DROP_CAP_RESERVE 4
 #define GENLOCK_AUDIT_LOG_INTERVAL_NS (5ULL * 1000 * 1000 * 1000) /* ~5 s */
 
-/* Pure decision: how deep a jitter reserve the genlock FIFO should hold, parsed
- * from the OBS_GENLOCK_PRELOAD_FRAMES env value. NULL/empty/invalid -> default;
- * clamped to [0, GENLOCK_PRELOAD_MAX]. preload=0 reproduces the old zero-slack
- * behavior (consume whenever num>0). Kept as a tiny standalone function so the
- * camera-box harness can mirror & unit-test the clamp (tests/genlock_preload.rs). */
+/* Pure clamp: a preload reserve / video-delay depth, clamped to
+ * [0, GENLOCK_PRELOAD_MAX]. Mirrored & unit-tested in camera-box
+ * tests/genlock_preload.rs (parse_preload). */
+static uint32_t genlock_clamp_preload(long v)
+{
+	if (v < 0)
+		return 0;
+	if (v > GENLOCK_PRELOAD_MAX)
+		return GENLOCK_PRELOAD_MAX;
+	return (uint32_t)v;
+}
+
+/* Parse the OBS_GENLOCK_PRELOAD_FRAMES env value into a reserve depth. NULL/empty/
+ * invalid -> default; valid non-negative -> clamped to [0, GENLOCK_PRELOAD_MAX].
+ * preload=0 reproduces the old zero-slack behavior (consume whenever num>0). */
 static uint32_t genlock_parse_preload(const char *env)
 {
 	if (!env || !*env)
@@ -4130,22 +4167,51 @@ static uint32_t genlock_parse_preload(const char *env)
 	long v = strtol(env, &end, 10);
 	if (end == env || *end != '\0' || v < 0)
 		return GENLOCK_PRELOAD_DEFAULT;
-	if (v > GENLOCK_PRELOAD_MAX)
-		return GENLOCK_PRELOAD_MAX;
-	return (uint32_t)v;
+	return genlock_clamp_preload(v);
 }
 
-static uint32_t genlock_preload_frames(void)
+/* The launch-time env default a source's per-source preload is initialized from at
+ * create (back-compat with #70: a source the operator never touches keeps the env
+ * depth). Read once and cached; the GUI overrides it per source at runtime. */
+static uint32_t genlock_preload_default(void)
 {
 	static int preload = -1;
 	if (preload == -1) {
 		preload = (int)genlock_parse_preload(getenv("OBS_GENLOCK_PRELOAD_FRAMES"));
 		blog(LOG_INFO,
-		     "genlock: FIFO preload reserve = %d frame(s) "
-		     "(OBS_GENLOCK_PRELOAD_FRAMES) -- jitter buffer per genlock source (#70)",
+		     "genlock: FIFO preload default = %d frame(s) "
+		     "(OBS_GENLOCK_PRELOAD_FRAMES) -- per-source video-delay default (#70/#97)",
 		     preload);
 	}
 	return (uint32_t)preload;
+}
+
+/* Per-source async-FIFO drop-cap (#97). A NON-genlock source keeps libobs' fixed
+ * MAX_ASYNC_FRAMES (those sources never deliberately buffer). A genlock source may
+ * hold a deliberately-deep delay buffer, so its cap scales with the preload:
+ * preload + RESERVE, capped at GENLOCK_PRELOAD_MAX + RESERVE. Mirrored & unit-tested
+ * in camera-box tests/genlock_preload.rs (genlock_drop_cap). */
+static size_t genlock_source_drop_cap(const obs_source_t *source)
+{
+	if (!source->genlock_fifo)
+		return MAX_ASYNC_FRAMES;
+	uint32_t want = source->genlock_preload + GENLOCK_DROP_CAP_RESERVE;
+	const uint32_t abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
+	if (want > abs_max || want < source->genlock_preload /* overflow guard */)
+		want = abs_max;
+	return (size_t)want;
+}
+
+/* Convert a preload depth (frames of video delay) to milliseconds at the current
+ * output frame rate. ms = frames * 1000 * fps_den / fps_num. Returns 0 when no
+ * valid video info is available (fps_num == 0). Mirrored & unit-tested in
+ * camera-box tests/genlock_preload.rs (preload_to_ms). */
+static uint64_t genlock_preload_ms(uint32_t frames)
+{
+	struct obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || ovi.fps_num == 0)
+		return 0;
+	return (uint64_t)frames * 1000 * ovi.fps_den / ovi.fps_num;
 }
 
 /* Pure decision mirrored by the unit test: at a render tick, consume one frame
@@ -4166,15 +4232,23 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	if (now_ns - source->genlock_last_log_ns < GENLOCK_AUDIT_LOG_INTERVAL_NS)
 		return;
 	source->genlock_last_log_ns = now_ns;
+	/* camera-box #97: print the per-source preload AND its ms-equivalent video
+	 * delay (preload=N (=M ms @ Ffps)) so the live delay is visible in the OBS log
+	 * for the operator + post-deploy verification. */
+	struct obs_video_info ovi;
+	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0;
+	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "overruns=%llu depth=%zu peak=%u preload=%u (#70)",
+	     "overruns=%llu depth=%zu peak=%u preload=%u (=%llu ms @ %.3ffps) cap=%zu (#70/#97)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
 	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
-	     source->genlock_peak_depth, genlock_preload_frames());
+	     source->genlock_peak_depth, source->genlock_preload,
+	     (unsigned long long)genlock_preload_ms(source->genlock_preload), fps,
+	     genlock_source_drop_cap(source));
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -4194,7 +4268,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 		 * audit counters record received/consumed/underruns/overruns and
 		 * the queue high-water mark; they are logged periodically as the
 		 * before/after evidence that underruns drop to zero. */
-		const uint32_t preload = genlock_preload_frames();
+		/* camera-box #97: read the PER-SOURCE preload (video-delay depth),
+		 * not the global env default. The whole render path runs under
+		 * async_mutex (get_closest_frame is only called there), so this read
+		 * is serialised with obs_source_set_genlock_preload() — no unlocked
+		 * mutation of a field the A/V thread reads (the #93 UAF lesson). */
+		const uint32_t preload = source->genlock_preload;
 		const uint64_t now_ns = sys_time; /* monotonic render-tick stamp */
 
 		if (source->async_frames.num > source->genlock_peak_depth)
@@ -5744,6 +5823,40 @@ void obs_source_set_genlock_fifo(obs_source_t *source, bool enabled)
 bool obs_source_get_genlock_fifo(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_genlock_fifo") ? source->genlock_fifo : false;
+}
+
+void obs_source_set_genlock_preload(obs_source_t *source, uint32_t frames)
+{
+	if (!obs_source_valid(source, "obs_source_set_genlock_preload"))
+		return;
+
+	/* camera-box #97: clamp to [0, GENLOCK_PRELOAD_MAX] and write UNDER
+	 * async_mutex — the A/V thread reads source->genlock_preload in
+	 * ready_async_frame()/cache_video() (both run holding async_mutex), so an
+	 * unlocked write would race that read (the #93 UAF lesson the spec calls out).
+	 * The mutex is recursive, so this is safe even if a caller already holds it. */
+	const uint32_t clamped = genlock_clamp_preload((long)frames);
+	pthread_mutex_lock(&source->async_mutex);
+	const uint32_t prev = source->genlock_preload;
+	source->genlock_preload = clamped;
+	pthread_mutex_unlock(&source->async_mutex);
+
+	if (clamped != prev)
+		blog(LOG_INFO,
+		     "genlock: preload (video delay) set to %u frame(s) (=%llu ms) for source '%s' (#97)",
+		     clamped, (unsigned long long)genlock_preload_ms(clamped), obs_source_get_name(source));
+}
+
+uint32_t obs_source_get_genlock_preload(const obs_source_t *source)
+{
+	if (!obs_source_valid(source, "obs_source_get_genlock_preload"))
+		return 0;
+	/* Read under async_mutex (cast away const for the lock op only — the field
+	 * value is not mutated here) to pair with the locked write above. */
+	pthread_mutex_lock(&((obs_source_t *)source)->async_mutex);
+	const uint32_t v = source->genlock_preload;
+	pthread_mutex_unlock(&((obs_source_t *)source)->async_mutex);
+	return v;
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)

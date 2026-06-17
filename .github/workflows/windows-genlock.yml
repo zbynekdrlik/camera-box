@@ -70,6 +70,38 @@ jobs:
           }
           Write-Output "genlock FIFO preload-reserve patch present (OBS_GENLOCK_PRELOAD_FRAMES + preload-gated consume + audit) — OK"
 
+      # #97: assert the per-source runtime preload (video-delay) patch is present in
+      # BOTH the vendored libobs (the API + per-source field + raised cap) and the
+      # DistroAV NDI source (the slider + apply) BEFORE the 150-min build, so a future
+      # `git subtree pull` (#44) that drops the runtime video-delay control fails HERE
+      # rather than shipping a build without it while the version pins still pass.
+      # Mirrors the canonical Linux-CI guard tests/genlock_preload.rs (Linux-only,
+      # can't compile on this windows runner). Keep both in lock-step.
+      - name: Assert per-source genlock preload video-delay patch present (#97)
+        shell: pwsh
+        run: |
+          $obs = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($obs -notmatch [regex]::Escape('void obs_source_set_genlock_preload(obs_source_t *source, uint32_t')) {
+            Write-Error "obs-source.c: obs_source_set_genlock_preload missing — #97 per-source preload API reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('source->genlock_preload')) {
+            Write-Error "obs-source.c: per-source source->genlock_preload not read in the render path — #97 reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_PRELOAD_MAX 128')) {
+            Write-Error "obs-source.c: GENLOCK_PRELOAD_MAX no longer 128 — #97 video-delay headroom reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('genlock_drop_cap') -and $obs -notmatch [regex]::Escape('genlock_source_drop_cap')) {
+            Write-Error "obs-source.c: per-source FIFO drop-cap (genlock_source_drop_cap) missing — #97 reverted"; exit 1
+          }
+          $ndi = (Get-Content "vendor/distroav/src/ndi-source.cpp" -Raw) -replace '\s+', ' '
+          if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_preload')) {
+            Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_preload — #97 slider inert"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD')) {
+            Write-Error "ndi-source.cpp: the genlock-preload int slider is gone — #97 reverted"; exit 1
+          }
+          Write-Output "per-source genlock preload video-delay patch present (API + per-source field + cap 128 + drop-cap + DistroAV slider + apply) — OK"
+
       # #85: assert the #78 "B′" real-wall-clock emit-timecode patch is present in the
       # vendored DistroAV OUTPUT source BEFORE the 150-min build, so a future `git
       # subtree pull` (#44) that restores `NDIlib_send_timecode_synthesize` fails HERE
