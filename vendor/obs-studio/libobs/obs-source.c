@@ -3616,6 +3616,11 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		pthread_mutex_lock(&source->async_mutex);
 		source->async_active = false;
 		source->last_frame_ts = 0;
+		/* camera-box #102: the source went inactive (flushed) — the delay line is
+		 * gone, so re-arm the startup-fill latch. On resume the FIFO rebuilds the
+		 * preload delay before emitting again instead of leaking one undelayed frame
+		 * (the stale filled=true + the bootstrap path). Written under async_mutex. */
+		source->genlock_filled = false;
 		free_async_cache(source);
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
@@ -4356,9 +4361,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 		source->genlock_filled = gd.filled; /* latch the build->steady transition */
 
 		if (!gd.consume) {
-			/* hold: either still BUILDING the preload delay at startup, or
-			 * a TRUE empty (depth==0) in steady state — there is no distinct
-			 * frame to emit this tick, so the compositor repeats the last. */
+			/* hold: still BUILDING the preload delay (depth>0 but not yet past
+			 * preload, so the latch is unset) — repeat the last frame this tick
+			 * while the reserve fills. ready_async_frame is only reached with
+			 * num>=1 (get_closest_frame returns earlier on a TRUE empty, counting
+			 * that underrun at its num==0 guard), so once filled this branch is not
+			 * taken: a steady-state queued frame is ALWAYS consumed (the #102 fix). */
 			source->genlock_underruns++;
 			genlock_audit_log(source, now_ns);
 			return false;
@@ -4468,7 +4476,17 @@ static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, u
 		return NULL;
 	}
 
-	if (!source->last_frame_ts || ready_async_frame(source, sys_time)) {
+	/* camera-box #102: a genlock source must ALWAYS route through ready_async_frame
+	 * so genlock_decide governs even the bootstrap/first frame. The stock
+	 * `!last_frame_ts` short-circuit (kept for non-genlock sources, which need it to
+	 * emit their first frame) would otherwise bypass the build phase after every
+	 * overrun force-drain (cache_video resets last_frame_ts=0 AND genlock_filled=false)
+	 * and on the first frame after a source resume — emitting one undelayed distinct
+	 * frame (a ~preload-frame phase jump) before the delay line rebuilds. Excluding
+	 * genlock from the bypass makes the cache_video/resume rebuild actually engage; the
+	 * genlock branch seeds last_frame_ts itself on its first consume. */
+	const bool bootstrap_bypass = !source->last_frame_ts && !source->genlock_fifo;
+	if (bootstrap_bypass || ready_async_frame(source, sys_time)) {
 		struct obs_source_frame *frame = source->async_frames.array[0];
 		da_erase(source->async_frames, 0);
 

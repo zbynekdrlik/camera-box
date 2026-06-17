@@ -168,16 +168,19 @@ pub fn genlock_decide(queue_depth: usize, preload: u32, filled: bool) -> Genlock
     }
 }
 
-/// The steady-state queue depth the consume-when-queued gate parks at when producer
-/// and consumer run at the same rate.
+/// The peak steady-state queue depth seen at the consume DECISION instant when
+/// producer and consumer run at the same rate.
 ///
-/// #102: each tick consumes one and the producer adds ~one, so the queue holds at
-/// the `preload` delay depth itself — that depth IS the established video delay.
-/// (The #70 gate parked at `preload + 1` because it kept one frame as an untouchable
-/// reserve it never emitted; the #102 gate emits that frame, so the delay is exactly
-/// `preload` frames deep.)
+/// #102: the FIFO builds to `preload + 1` (the latch fires when depth first exceeds
+/// `preload`), then each tick the producer adds one (depth → `preload + 1`) and the
+/// gate consumes one (depth → `preload`). So the depth oscillates `preload + 1` (at the
+/// decision, before consuming) ↔ `preload` (after) — leaving `preload` frames of reserve
+/// at the instant of consumption, the SAME single-tick jitter tolerance the #70 gate
+/// gave (it takes `preload + 1` consecutive missed deliveries to reach a true empty).
+/// The drop-cap must clear this `preload + 1` peak, which is what
+/// [`genlock_drop_cap`]'s `+ RESERVE` guarantees.
 pub fn steady_state_depth(preload: u32) -> u32 {
-    preload
+    preload + 1
 }
 
 /// Convert a preload depth (frames of genlock-disciplined delay) into the
