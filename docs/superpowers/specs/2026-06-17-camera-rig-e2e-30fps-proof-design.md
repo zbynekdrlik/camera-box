@@ -50,9 +50,11 @@ stream (10.77.9.204): vendored OBS 32.1.2 + DistroAV 6.2.1 ──render──> N
 4. **Per-frame proof = QR id matching + per-output 30 fps timecode-grid continuity.** A drop shows
    as a missing grid slot (output starved), a repeated QR (FIFO underrun), a skipped id (frame
    discarded), or a backward jump (reorder). Strict zero-loss: any of these in-span = FAIL.
-5. **Optical hop (monitor → camera) measured separately** as a readability %, NOT counted against
-   the digital verdict. It is the only un-genlocked link (camera samples the monitor
-   asynchronously); minimised by a short camera shutter, eliminated only by hardware genlock.
+5. **Optical hop (monitor → camera) blur defeated by a dual-QR Vernier display** (user's idea —
+   see its own section below), not by hardware genlock. The un-genlocked camera still samples
+   asynchronously, but the two phase-offset QR regions guarantee at least one is sharp on every
+   exposure, so every camera frame yields a CRC-valid id. The optical hop's residual readability
+   is still reported separately and is NOT folded into the strict digital verdict.
 6. **Visual report** — two PNG graphs + a per-hop table, delivered as a **clickable LAN URL**
    (`airuleset.py share`), never a /tmp path.
 7. **Duration policy** — ≥ **300 s** to declare zero-loss, ideal **1800 s**, **early-abort on ANY
@@ -90,12 +92,48 @@ delivered frame and still occupies a grid slot). The differ then asserts, per st
 - **Latency:** per-frame `emit_tc(down) − emit_tc(up)` on the shared DanteSync wall-clock (hop 1,
   hop 2) and absolute `recv(C) − gen(painter)` (full span). Report p50/p99 and the per-frame series.
 
+## Source display: dual-QR Vernier (defeats optical-transition blur)
+
+The monitor→camera optical hop is un-genlocked, so a single QR that changes every frame is
+caught mid-transition by a meaningful fraction of camera exposures (~6–30 % depending on
+shutter) → unreadable, CRC-fail. The fix (user's idea): paint **two QR regions side by side**
+whose updates are **phase-offset by half a frame period**, so at least one is always settled
+(sharp) when the camera fires.
+
+- The painter advances one logical counter at the **monitor refresh rate** (e.g. 60 Hz, on the
+  KMS/vblank page-flip path already used by #79). The **LEFT** region updates on **even**
+  refreshes, the **RIGHT** on **odd** refreshes; each holds its value for two refreshes. The only
+  refresh on which a region's scanout can blur it is its "fresh" refresh, and the two never
+  coincide — they interleave.
+- Both regions encode the standard `Payload` (`run_id.frame_id.gen_ts.crc`) with the logical
+  counter value at their last update.
+- **Decode reconciliation = the CRC does the work.** The reader decodes BOTH ROIs; a blurred
+  (mid-transition) QR fails CRC and is discarded automatically; a settled QR passes. The camera
+  frame's identity = the CRC-valid payload with the **highest `frame_id`** (the freshest sharp
+  region). At least one ROI is always sharp, so EVERY camera frame yields a valid id — no blur
+  gap, no timecode-continuity crutch.
+- This makes each cam1 NDI frame carry a readable, monotonic id assignable to a concrete frame,
+  and (bonus) makes the optical hop itself per-frame measurable.
+
+**Hard requirement:** the camera shutter MUST be short (≤ ~1/120 s, ideally 1/250–1/500 s) so one
+exposure spans less than one refresh; a long (1/30 s) exposure straddles BOTH regions' transitions
+and blurs both. Short shutter is mandatory for this scheme, not optional.
+
 ## Components / files
 
 Modify (existing):
 
-- `src/bin/frame-probe.rs` — lock paint to 30 fps; QR sized/contrasted for an optical camera shot
-  of a monitor (large module size, max EC, high contrast); paint reference log unchanged.
+- `src/bin/frame-probe.rs` + `src/probe/painter.rs` + `src/probe/qr.rs` — paint **two**
+  phase-offset QR regions (LEFT on even refreshes, RIGHT on odd) on the vblank/KMS path; one
+  logical counter at the monitor refresh rate; QR sized/contrasted for an optical camera shot
+  (large module, max EC, high contrast); the paint reference log records the logical sequence.
+- `src/probe/qr.rs` + `src/probe/reader.rs` / `src/probe/multi_reader.rs` — decode BOTH ROIs
+  (left-center, right-center crops), keep only CRC-valid payloads, reconcile to the highest
+  `frame_id`. A new `decode_capture_dual(...) -> Option<Payload>` wraps the existing single-ROI
+  `decode_capture`.
+- `src/capture.rs` + `src/main.rs` — make the capture interval configurable (env/flag, default
+  unchanged) so the rig can request **native 30 fps** capture instead of 60→30 decimation, giving
+  a true 30 fps chain end-to-end. `capture.rs:130-134` currently hard-sets denominator = 60.
 - `src/bin/multitap-probe.rs` — source tap = `CAM1 (usb)` (was `CAM2 (usb)`); add per-output
   30 fps timecode-grid continuity capture; anchor = cam1; emit the per-frame series into the JSON.
 - `src/probe/differ.rs` — add per-output grid-continuity check; add hop-0 readability
@@ -141,5 +179,8 @@ Create (new):
 ## User action required (hardware, outside the repo)
 
 - Set the broadcast camera HDMI output to **1080p30** (so the capture card receives 30, not 60).
-- Set a **short camera shutter** (e.g. 1/250–1/500 s) to minimise optical-transition blur on the
-  monitor→camera hop.
+- Set a **short camera shutter — MANDATORY for the dual-QR Vernier**, ≤ ~1/120 s, ideally
+  1/250–1/500 s, so one exposure spans less than one monitor refresh. A long (1/30 s) exposure
+  straddles both QR regions' transitions and blurs both, defeating the scheme.
+- Frame the camera so the monitor fills the shot — both side-by-side QR regions must be large
+  and in focus for reliable decode.
