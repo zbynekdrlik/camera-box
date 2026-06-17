@@ -76,6 +76,12 @@ WALL_CLOCK="${WALL_CLOCK:-1}"
 # is negligible, so single-QR (DUAL=0) decodes fine AND lets the taps track full 30 fps —
 # use it when the camera shutter is short enough that decode_failed stays ~0.
 [ "${DUAL:-1}" = "1" ] && DUAL_QR_FLAG="--dual-qr" || DUAL_QR_FLAG=""
+# QR module size (px). Bigger = lower spatial frequency = survives the NDI SpeedHQ
+# re-compression at the DistroAV OBS outputs (which torns ~3% of the fine 700px QR at
+# strih/stream while cam, the source, decodes ~0.3%). Both painter and probe MUST use
+# the same value (the probe derives its decode ROI from it). Max ~960 so the decode ROI
+# (qr_size+120) stays within the 1080 frame height.
+QR_SIZE="${QR_SIZE:-700}"
 # Optional hard gate (ms) on the absolute source→endpoint p99. Requires WALL_CLOCK
 # (multitap-probe bails otherwise). Empty ⇒ absolute latency is report-only (still
 # WRITTEN to the artifact). Baseline with a report-only run, then ratchet.
@@ -167,7 +173,7 @@ if [ "$CAM_IP" = "$PAINTER_IP" ]; then
      (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup /usr/local/bin/camera-box >/tmp/cbox.log 2>&1 &); \
      sleep 4; \
      (nohup /tmp/frame-probe --paint-only $DUAL_QR_FLAG $PAINT_WALL_FLAG \
-        --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+        --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+40)) \
         >/tmp/painter.log 2>&1 &)"
 else
   # Real-camera rig (default): cam1 runs its DEPLOYED camera-box service UNCHANGED and is
@@ -183,7 +189,7 @@ else
      pkill -x camera-box 2>/dev/null; \
      i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
      (nohup /tmp/frame-probe --paint-only $DUAL_QR_FLAG $PAINT_WALL_FLAG \
-        --paint-fps $PAINT_FPS --run-id $RUN_ID --duration-secs $((DURATION+40)) \
+        --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+40)) \
         >/tmp/painter.log 2>&1 &)"
 fi
 # NOTE: cam1 runs capture->NDI (genlock-decimated to $GENLOCK_FPS) via its service,
@@ -291,6 +297,7 @@ if ./target/release/multitap-probe \
   --tap stream="$STREAM_OUT" \
   --duration-secs "$DURATION" \
   --min-zero-loss-secs 300 \
+  --qr-size "$QR_SIZE" \
   $DUAL_QR_FLAG \
   ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
   --out "$OUT"; then
