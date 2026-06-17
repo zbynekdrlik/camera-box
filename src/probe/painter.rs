@@ -204,7 +204,7 @@ pub fn run_painter(
             }
         }
     }
-    tracing::info!("painter: emitted {} frames", frame_id);
+    tracing::info!("painter: emitted {} frames", emitted.lock().unwrap().len());
     Ok(())
 }
 

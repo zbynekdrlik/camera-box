@@ -679,9 +679,15 @@ fn main() -> Result<()> {
     let endpoint_seq_pass = !endpoint_seq_gated
         || (endpoint_pipeline_loss.is_empty() && endpoint_sequence.out_of_order_ids.is_empty());
 
-    // Per-tap grid-continuity (stride 1): starvation + FIFO-underrun per tap over
-    // the trimmed steady-state observations. One entry per tap, same order as taps.
-    let grid: Vec<GridContinuity> = trimmed.iter().map(|obs| grid_continuity(obs, 1)).collect();
+    // Per-tap grid-continuity: starvation + FIFO-underrun per tap over the trimmed
+    // steady-state observations. One entry per tap, same order as taps. Stride 2 in
+    // dual-QR mode (the painter advances the logical id at the 60 Hz vblank but each
+    // tap decodes a 30 fps sample, so consecutive ids differ by ~2); stride 1 otherwise.
+    let grid_stride = if args.dual_qr { 2 } else { 1 };
+    let grid: Vec<GridContinuity> = trimmed
+        .iter()
+        .map(|obs| grid_continuity(obs, grid_stride))
+        .collect();
 
     // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
     // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as

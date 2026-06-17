@@ -50,8 +50,7 @@ def load_json(path):
 
 
 def load_series(path):
-    """Return dict tap_name -> sorted list of frame_ids (with duplicates collapsed)."""
-    # Also return raw rows for latency computation
+    """Return a list of raw observation rows (dicts: tap, frame_id, recv_ts_ns, node_emit_tc_ns)."""
     rows = []
     with open(path) as f:
         for line in f:

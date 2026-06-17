@@ -106,7 +106,7 @@ cleanup() {
     "pkill -x frame-probe 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      systemctl restart camera-box 2>/dev/null; true"
   # Kill the painter process on PAINTER_IP (cam2). If PAINTER_IP == CAM_IP (loopback
-  # mode) the pkill above already covered it; the second one is a no-op.
+  # mode) the pkill -x above already covered it; the second one is a no-op.
   if [ "$PAINTER_IP" != "$CAM_IP" ]; then
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
       "pkill -x frame-probe 2>/dev/null; true"
