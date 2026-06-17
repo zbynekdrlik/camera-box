@@ -93,11 +93,32 @@ pub fn decode_qr_luma(img: GrayImage) -> Option<Payload> {
     None
 }
 
+/// Long-side cap (px) the single-QR ROI is downscaled to before `rqrr`. Decouples
+/// the on-screen QR size from the decode cost: a BIG QR (low spatial frequency →
+/// survives the DistroAV NDI re-compression at the OBS outputs, ~0.5% torn instead of
+/// ~3%) can be used while the decode ROI is shrunk to this cap so the dev1 tap still
+/// tracks 30 fps. The big-module QR is already past NDI compression by the time the tap
+/// has it, so downscaling for decode is lossless to the pattern.
+const SINGLE_DECODE_CAP: u32 = 760;
+
+/// Downscale a luma image so its long side is at most `cap` px (Triangle filter);
+/// returns it unchanged when already within `cap`.
+fn downscale_luma(img: GrayImage, cap: u32) -> GrayImage {
+    let m = img.width().max(img.height());
+    if m <= cap {
+        return img;
+    }
+    let nw = (img.width() * cap / m).max(1);
+    let nh = (img.height() * cap / m).max(1);
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// Turn one captured NDI frame into a decoded `Payload`, or None.
 /// Dispatches BGRA/BGRX vs UYVY by fourcc, converts to luma (padded-stride
 /// aware), restricts the QR decode to the centered `decode_crop` square (the
-/// ROI speed fix), and decodes. Shared by the single-tap reader and the
-/// multi-tap reader so the decode path has one tested implementation.
+/// ROI speed fix), downscales it to `SINGLE_DECODE_CAP` so a big QR still decodes
+/// fast, and decodes. Shared by the single-tap reader and the multi-tap reader so
+/// the decode path has one tested implementation.
 pub fn decode_capture(
     fourcc: u32,
     data: &[u8],
@@ -107,7 +128,7 @@ pub fn decode_capture(
     decode_crop: u32,
 ) -> Option<Payload> {
     // Convert ONLY the centered QR ROI from the raw frame (skip the full-frame luma),
-    // so the live tap can track a full 30 fps (full-frame conversion left it ~2.6% short).
+    // then downscale it so the live tap tracks a full 30 fps even with a big QR.
     let img = crop_center_luma(
         fourcc,
         data,
@@ -117,7 +138,7 @@ pub fn decode_capture(
         decode_crop,
         decode_crop,
     );
-    decode_qr_luma(img)
+    decode_qr_luma(downscale_luma(img, SINGLE_DECODE_CAP))
 }
 
 /// Width (px) the dual-QR band is downscaled to before the single `rqrr` pass. Both QRs
