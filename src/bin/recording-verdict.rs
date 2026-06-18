@@ -26,7 +26,7 @@
 use anyhow::{Context, Result};
 use camera_box::probe::recording::{analyze_recording, extract_frames_png, RecordingFrame};
 use camera_box::probe::recording_latency::{
-    cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, BURN_RUN_ID_STREAM,
+    cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, RunIds, BURN_RUN_ID_STREAM,
     BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
@@ -71,6 +71,13 @@ struct Args {
     /// (stream_burn.gen_ts_ns − strih_burn.gen_ts_ns, paired by cam2 tick).
     #[arg(long, default_value_t = BURN_RUN_ID_STREAM)]
     burn_stream_run_id: u32,
+    /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
+    /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
+    /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
+    /// strih→stream. Unset (0) ⇒ cam2 = the first non-burn QR (safe for the strih
+    /// recording, which has no foreign burn).
+    #[arg(long, default_value_t = 0)]
+    cam2_run_id: u32,
 }
 
 /// Parse the painter ticks from either a bare one-`tick`-per-line file or the
@@ -301,20 +308,30 @@ fn main() -> Result<()> {
     // that already share the DanteSync wall clock. Reported, never gated (a latency
     // gate is a separate decision; #108 asks for the stable, defined numbers).
     println!();
-    let cam_strih_lat = hop_latency(
-        "cam→strih",
-        &cam_strih_samples(&strih_frames, args.burn_strih_run_id),
-    );
+    let cam2_pin = if args.cam2_run_id != 0 {
+        Some(args.cam2_run_id)
+    } else {
+        None
+    };
+    // strih recording: node burn = strih; no foreign burn forwarded INTO strih.
+    let strih_ids = RunIds {
+        node_burn: args.burn_strih_run_id,
+        cam2: cam2_pin,
+        other_burns: vec![],
+    };
+    let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(&strih_frames, &strih_ids));
     report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
     if let Some(stream_frames) = &stream_frames_opt {
+        // stream recording: node burn = stream; strih's burn is FOREIGN (forwarded in
+        // the program feed) and MUST be excluded so it is never read as cam2.
+        let stream_ids = RunIds {
+            node_burn: args.burn_stream_run_id,
+            cam2: cam2_pin,
+            other_burns: vec![args.burn_strih_run_id],
+        };
         let ss_lat = hop_latency(
             "strih→stream",
-            &strih_stream_samples(
-                &strih_frames,
-                stream_frames,
-                args.burn_strih_run_id,
-                args.burn_stream_run_id,
-            ),
+            &strih_stream_samples(&strih_frames, stream_frames, &strih_ids, &stream_ids),
         );
         report_hop_latency(&ss_lat, "strih→stream", "strih render gen_ts_ns");
     }

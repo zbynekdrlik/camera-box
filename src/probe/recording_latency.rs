@@ -105,23 +105,59 @@ pub struct LatencySample {
     pub at_ns: i64,
 }
 
-/// Split a recorded frame's payloads into `(cam2 payloads, node-burn payloads)` by
-/// run_id. A payload whose run_id equals `burn_run_id` is THIS node's burn stamp;
-/// everything else is treated as cam2 content. Returns the FIRST of each kind
-/// (a frame carries at most one of each on the probe scene; the dual-QR cam2 halves
-/// share one `gen_ts_ns`, so either half gives the same cam2 paint instant).
-pub fn split_payloads(
-    frame: &RecordingFrame,
-    burn_run_id: u32,
-) -> (Option<Payload>, Option<Payload>) {
+/// How a recorded frame's QR payloads are classified into the cam2 (optical
+/// content) stamp and THIS node's burn stamp.
+///
+/// CRITICAL for strih→stream: the STREAM recording carries THREE QRs — cam2's
+/// (center, forwarded from strih's program), strih's burn (bottom, also forwarded),
+/// and stream's own burn (bottom). The classifier MUST tell cam2 apart from the
+/// FOREIGN strih burn, or strih's burn would be misread as the "cam2 tick" and the
+/// strih→stream pairing would be nonsense. So cam2 is identified by a POSITIVE
+/// allowlist (`cam2_run_id`) whenever known, and the foreign burn run_ids are
+/// excluded; only when `cam2_run_id` is `None` (operator didn't pin it) does it fall
+/// back to "any non-burn payload is cam2", which is safe ONLY when no foreign burn is
+/// present (e.g. the strih recording, which has no stream burn).
+#[derive(Debug, Clone)]
+pub struct RunIds {
+    /// THIS node's burn run_id (the stamp whose gen_ts_ns is this node's render time).
+    pub node_burn: u32,
+    /// cam2's painter run_id, if the operator pinned it. `Some` ⇒ cam2 is matched
+    /// EXACTLY by this run_id (foreign burns can never be mistaken for cam2). `None`
+    /// ⇒ cam2 = the first payload that is neither `node_burn` nor in `other_burns`.
+    pub cam2: Option<u32>,
+    /// Other (foreign) burn run_ids present in the recording that are NOT cam2 — e.g.
+    /// in the stream recording, strih's burn run_id. Excluded from the cam2 fallback
+    /// so a forwarded foreign burn is never misread as cam2.
+    pub other_burns: Vec<u32>,
+}
+
+impl RunIds {
+    /// Is `run_id` a known burn stamp (this node's or a foreign node's)?
+    fn is_any_burn(&self, run_id: u32) -> bool {
+        run_id == self.node_burn || self.other_burns.contains(&run_id)
+    }
+    /// Does `run_id` qualify as cam2? Exact match when pinned; otherwise any non-burn.
+    fn is_cam2(&self, run_id: u32) -> bool {
+        match self.cam2 {
+            Some(c) => run_id == c,
+            None => !self.is_any_burn(run_id),
+        }
+    }
+}
+
+/// Split a recorded frame's payloads into `(cam2 payload, this-node burn payload)`,
+/// classified per [`RunIds`]. Returns the FIRST of each kind (a frame carries at
+/// most one of each that matters; the dual-QR cam2 halves share one `gen_ts_ns`, so
+/// either half gives the same cam2 paint instant).
+pub fn split_payloads(frame: &RecordingFrame, ids: &RunIds) -> (Option<Payload>, Option<Payload>) {
     let mut cam2: Option<Payload> = None;
     let mut node: Option<Payload> = None;
     for p in &frame.payloads {
-        if p.run_id == burn_run_id {
+        if p.run_id == ids.node_burn {
             if node.is_none() {
                 node = Some(*p);
             }
-        } else if cam2.is_none() {
+        } else if cam2.is_none() && ids.is_cam2(p.run_id) {
             cam2 = Some(*p);
         }
     }
@@ -188,11 +224,12 @@ pub fn hop_latency(hop: &str, samples: &[LatencySample]) -> Option<HopLatency> {
 /// and a strih burn QR, `latency = strih_burn.gen_ts_ns − cam2.gen_ts_ns`, anchored
 /// at the cam2 paint instant (`cam2.gen_ts_ns`). A frame missing either stamp, or
 /// with a non-positive cam2 stamp (an unstamped / monotonic sentinel), is skipped —
-/// never a wrong number.
-pub fn cam_strih_samples(strih: &[RecordingFrame], strih_burn_run_id: u32) -> Vec<LatencySample> {
+/// never a wrong number. `ids.node_burn` is strih's burn run_id; the strih recording
+/// has no foreign burn, so `ids.cam2`/`other_burns` may be left default.
+pub fn cam_strih_samples(strih: &[RecordingFrame], ids: &RunIds) -> Vec<LatencySample> {
     let mut out = Vec::new();
     for f in strih {
-        let (cam2, node) = split_payloads(f, strih_burn_run_id);
+        let (cam2, node) = split_payloads(f, ids);
         if let (Some(c), Some(n)) = (cam2, node) {
             // gen_ts_ns must be the wall-clock domain (huge epoch ns). A 0 is the
             // unstamped sentinel; guard it so a missing stamp can't read as a giant
@@ -221,14 +258,16 @@ pub fn cam_strih_samples(strih: &[RecordingFrame], strih_burn_run_id: u32) -> Ve
 pub fn strih_stream_samples(
     strih: &[RecordingFrame],
     stream: &[RecordingFrame],
-    strih_burn_run_id: u32,
-    stream_burn_run_id: u32,
+    strih_ids: &RunIds,
+    stream_ids: &RunIds,
 ) -> Vec<LatencySample> {
     // Map cam2 tick → strih burn gen_ts (first occurrence; the burn is 1:1 with the
     // rendered frame, and the first time strih renders a given cam2 tick is its
-    // render instant for that optical content).
-    let strih_by_tick: HashMap<u32, i64> = burn_by_cam2_tick(strih, strih_burn_run_id);
-    let stream_by_tick: HashMap<u32, i64> = burn_by_cam2_tick(stream, stream_burn_run_id);
+    // render instant for that optical content). The stream side uses stream_ids,
+    // which MUST list strih's burn in `other_burns` so the forwarded strih burn in
+    // stream's frames is never misread as cam2.
+    let strih_by_tick: HashMap<u32, i64> = burn_by_cam2_tick(strih, strih_ids);
+    let stream_by_tick: HashMap<u32, i64> = burn_by_cam2_tick(stream, stream_ids);
 
     let mut ticks: Vec<u32> = stream_by_tick.keys().copied().collect();
     ticks.sort_unstable();
@@ -251,10 +290,10 @@ pub fn strih_stream_samples(
 /// may be sampled by several camera frames; the first render is the canonical
 /// instant for that optical content). Skips frames missing either stamp or with a
 /// non-positive burn stamp.
-fn burn_by_cam2_tick(frames: &[RecordingFrame], burn_run_id: u32) -> HashMap<u32, i64> {
+fn burn_by_cam2_tick(frames: &[RecordingFrame], ids: &RunIds) -> HashMap<u32, i64> {
     let mut m: HashMap<u32, i64> = HashMap::new();
     for f in frames {
-        let (cam2, node) = split_payloads(f, burn_run_id);
+        let (cam2, node) = split_payloads(f, ids);
         if let (Some(c), Some(n)) = (cam2, node) {
             if n.gen_ts_ns > 0 {
                 m.entry(c.frame_id).or_insert(n.gen_ts_ns);
@@ -307,6 +346,24 @@ mod tests {
 
     const CAM2: u32 = 6519; // a representative cam2 run_id (outside the burn range)
 
+    /// strih-side ids: strih burn is this node; cam2 pinned; no foreign burn.
+    fn strih_ids() -> RunIds {
+        RunIds {
+            node_burn: BURN_RUN_ID_STRIH,
+            cam2: Some(CAM2),
+            other_burns: vec![],
+        }
+    }
+    /// stream-side ids: stream burn is this node; cam2 pinned; strih burn is FOREIGN
+    /// (forwarded into stream's frames) and must be excluded from the cam2 match.
+    fn stream_ids() -> RunIds {
+        RunIds {
+            node_burn: BURN_RUN_ID_STREAM,
+            cam2: Some(CAM2),
+            other_burns: vec![BURN_RUN_ID_STRIH],
+        }
+    }
+
     #[test]
     fn split_separates_node_from_cam2_by_run_id() {
         let f = frame(
@@ -314,7 +371,7 @@ mod tests {
             Some((CAM2, 100, 1_000)),
             Some((BURN_RUN_ID_STRIH, 7, 2_000)),
         );
-        let (cam2, node) = split_payloads(&f, BURN_RUN_ID_STRIH);
+        let (cam2, node) = split_payloads(&f, &strih_ids());
         assert_eq!(cam2.unwrap().run_id, CAM2);
         assert_eq!(node.unwrap().run_id, BURN_RUN_ID_STRIH);
         assert_eq!(node.unwrap().gen_ts_ns, 2_000);
@@ -324,9 +381,85 @@ mod tests {
     fn split_node_absent_when_no_burn_run_id() {
         // A production (non-probe) frame: only cam2, no burn.
         let f = frame(0, Some((CAM2, 100, 1_000)), None);
-        let (cam2, node) = split_payloads(&f, BURN_RUN_ID_STRIH);
+        let (cam2, node) = split_payloads(&f, &strih_ids());
         assert!(cam2.is_some());
         assert!(node.is_none());
+    }
+
+    #[test]
+    fn split_excludes_foreign_burn_from_cam2_in_stream_frame() {
+        // CRITICAL: a STREAM frame carries cam2 (center) + strih's FOREIGN burn
+        // (911002, forwarded) + stream's own burn (911004). With cam2 pinned and
+        // strih's burn in other_burns, split must pick the REAL cam2 — never strih's
+        // burn — as cam2, and stream's burn as the node stamp.
+        let mut payloads = vec![
+            Payload {
+                run_id: BURN_RUN_ID_STRIH, // foreign strih burn forwarded into stream
+                frame_id: 11,
+                gen_ts_ns: 50,
+            },
+            Payload {
+                run_id: CAM2, // the real cam2 content
+                frame_id: 777,
+                gen_ts_ns: 10,
+            },
+            Payload {
+                run_id: BURN_RUN_ID_STREAM, // stream's own burn
+                frame_id: 22,
+                gen_ts_ns: 90,
+            },
+        ];
+        // Order it so the foreign burn comes FIRST (the old "first non-burn" logic
+        // would have wrongly returned it before the cam2 if it weren't excluded).
+        payloads.rotate_left(0);
+        let f = RecordingFrame {
+            frame_index: 0,
+            payloads,
+            tick: Some(777),
+        };
+        let (cam2, node) = split_payloads(&f, &stream_ids());
+        assert_eq!(
+            cam2.unwrap().run_id,
+            CAM2,
+            "must pick real cam2, not strih burn"
+        );
+        assert_eq!(cam2.unwrap().frame_id, 777);
+        assert_eq!(node.unwrap().run_id, BURN_RUN_ID_STREAM);
+    }
+
+    #[test]
+    fn split_fallback_excludes_burns_when_cam2_unpinned() {
+        // With cam2 = None, the foreign strih burn must STILL be excluded (it's in
+        // other_burns) so the fallback "first non-burn" picks cam2, not strih's burn.
+        let f = RecordingFrame {
+            frame_index: 0,
+            payloads: vec![
+                Payload {
+                    run_id: BURN_RUN_ID_STRIH,
+                    frame_id: 11,
+                    gen_ts_ns: 50,
+                },
+                Payload {
+                    run_id: CAM2,
+                    frame_id: 777,
+                    gen_ts_ns: 10,
+                },
+                Payload {
+                    run_id: BURN_RUN_ID_STREAM,
+                    frame_id: 22,
+                    gen_ts_ns: 90,
+                },
+            ],
+            tick: Some(777),
+        };
+        let ids = RunIds {
+            node_burn: BURN_RUN_ID_STREAM,
+            cam2: None,
+            other_burns: vec![BURN_RUN_ID_STRIH],
+        };
+        let (cam2, node) = split_payloads(&f, &ids);
+        assert_eq!(cam2.unwrap().run_id, CAM2);
+        assert_eq!(node.unwrap().run_id, BURN_RUN_ID_STREAM);
     }
 
     #[test]
@@ -345,7 +478,7 @@ mod tests {
                 )
             })
             .collect();
-        let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
+        let samples = cam_strih_samples(&frames, &strih_ids());
         assert_eq!(samples.len(), 5);
         let h = hop_latency("cam→strih", &samples).unwrap();
         assert!(
@@ -378,7 +511,7 @@ mod tests {
                 Some((BURN_RUN_ID_STRIH, 12, base + 1 + 100_000_000)),
             ),
         ];
-        let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
+        let samples = cam_strih_samples(&frames, &strih_ids());
         assert_eq!(
             samples.len(),
             2,
@@ -404,7 +537,7 @@ mod tests {
                 Some((BURN_RUN_ID_STRIH, 11, 0)),
             ),
         ];
-        let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
+        let samples = cam_strih_samples(&frames, &strih_ids());
         assert!(samples.is_empty(), "unstamped frames produce no sample");
         assert!(hop_latency("cam→strih", &samples).is_none());
     }
@@ -437,7 +570,7 @@ mod tests {
                 )
             })
             .collect();
-        let samples = strih_stream_samples(&strih, &stream, BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM);
+        let samples = strih_stream_samples(&strih, &stream, &strih_ids(), &stream_ids());
         assert_eq!(samples.len(), 6, "all six shared cam2 ticks pair");
         let h = hop_latency("strih→stream", &samples).unwrap();
         assert!(
@@ -486,7 +619,7 @@ mod tests {
                 Some((BURN_RUN_ID_STREAM, 22, base + 14_000_000)),
             ),
         ];
-        let samples = strih_stream_samples(&strih, &stream, BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM);
+        let samples = strih_stream_samples(&strih, &stream, &strih_ids(), &stream_ids());
         // tick 2: 12-2=10 ms ; tick 3: 13-3=10 ms ; tick 1 & 4 unshared.
         assert_eq!(samples.len(), 2);
         let h = hop_latency("strih→stream", &samples).unwrap();

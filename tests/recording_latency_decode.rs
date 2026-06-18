@@ -19,10 +19,18 @@ use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::render_qr_bgra;
 use camera_box::probe::recording::decode_recording_frame;
 use camera_box::probe::recording_latency::{
-    cam_strih_samples, hop_latency, split_payloads, BURN_RUN_ID_STRIH,
+    cam_strih_samples, hop_latency, split_payloads, RunIds, BURN_RUN_ID_STRIH,
 };
 
 const CAM2_RUN_ID: u32 = 6519; // representative cam2 run_id (outside the burn range)
+
+fn strih_ids() -> RunIds {
+    RunIds {
+        node_burn: BURN_RUN_ID_STRIH,
+        cam2: Some(CAM2_RUN_ID),
+        other_burns: vec![],
+    }
+}
 
 /// Build one recorded-frame luma carrying cam2's QR in the TOP half and the node's
 /// #111 burn QR in the BOTTOM half — two non-overlapping QRs in one frame, exactly
@@ -77,7 +85,7 @@ fn decoded_frame_yields_cam_strih_latency_from_real_pixels() {
             rf.payloads
         );
         // The engine's splitter must find both stamps by run_id.
-        let (c, n) = split_payloads(&rf, BURN_RUN_ID_STRIH);
+        let (c, n) = split_payloads(&rf, &strih_ids());
         assert!(
             c.is_some() && n.is_some(),
             "frame {i}: split must find both"
@@ -85,7 +93,7 @@ fn decoded_frame_yields_cam_strih_latency_from_real_pixels() {
         frames.push(rf);
     }
 
-    let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
+    let samples = cam_strih_samples(&frames, &strih_ids());
     assert_eq!(samples.len(), 4, "every decoded frame yields a sample");
     let h = hop_latency("cam→strih", &samples).expect("non-empty hop");
     assert!(
