@@ -580,13 +580,16 @@ fn sustained_empty_then_resume_rearms_and_rebuilds_deep_preload() {
     // Frames RESUME (queue refills): the re-arm decision is taken on the resume tick.
     let filled_before_resume = true;
     let rearm = genlock_rearm_on_resume(empty_run, filled_before_resume);
-    assert!(rearm, "a sustained empty (>= threshold) then resume must re-arm");
+    assert!(
+        rearm,
+        "a sustained empty (>= threshold) then resume must re-arm"
+    );
 
     // Re-armed: filled=false → the FIFO re-enters the #102 BUILD phase. It holds while
     // depth <= preload, then latches at the first tick depth > preload, and #116 drains
     // any startup burst straight down to the deterministic target (preload+1).
     let filled = !rearm; // false
-    // Build phase holds until past preload.
+                         // Build phase holds until past preload.
     for depth in 0..=preload as usize {
         assert!(
             !genlock_decide(depth, preload, filled).consume,
@@ -595,7 +598,10 @@ fn sustained_empty_then_resume_rearms_and_rebuilds_deep_preload() {
     }
     // First tick past preload: latch + consume; the deep refill burst is drained to target.
     let d = genlock_decide(preload as usize + 1, preload, filled);
-    assert!(d.consume && d.filled, "latch fires once depth exceeds preload again");
+    assert!(
+        d.consume && d.filled,
+        "latch fires once depth exceeds preload again"
+    );
     // Any refill burst (>= target) settles at the deterministic target = preload+1 = 27.
     for burst in target..=target + 40 {
         let settled = burst - genlock_build_drain(burst, preload);
@@ -643,7 +649,10 @@ fn empty_run_counter_resets_on_each_distinct_consume() {
     // 10 cycles of {1 empty, 1 consume} — jitter that never sustains.
     for _ in 0..10 {
         empty_run = genlock_empty_run_next(empty_run, false); // empty
-        assert!(!genlock_rearm_on_resume(empty_run, true), "1 empty never re-arms");
+        assert!(
+            !genlock_rearm_on_resume(empty_run, true),
+            "1 empty never re-arms"
+        );
         empty_run = genlock_empty_run_next(empty_run, true); // consume
         assert_eq!(empty_run, 0, "a consume must reset the empty-run counter");
     }
@@ -666,7 +675,10 @@ fn rearm_preserves_102_steady_consume_and_116_drain() {
         // True empty in steady state still holds, filled stays set (no spurious refill).
         assert_eq!(
             genlock_decide(0, preload, true),
-            GenlockDecision { consume: false, filled: true }
+            GenlockDecision {
+                consume: false,
+                filled: true
+            }
         );
         // #116 build drain unchanged: trims to target = preload+1.
         let target = steady_state_depth(preload) as usize;

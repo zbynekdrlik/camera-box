@@ -932,6 +932,17 @@ struct obs_source {
 	 * on an overrun force-drain (cache_video) so the delay line rebuilds. Read/written
 	 * by the A/V thread under async_mutex (same as genlock_preload, the #93 lesson). */
 	bool genlock_filled;
+	/* camera-box #126: consecutive true-empty (underrun) render ticks in steady
+	 * state. On an upstream OBS restart the NDI source underruns to empty but
+	 * genlock_filled stays true (DistroAV KEEP_CONTENT blocks the NULL-emit reset; an
+	 * underrun never fires the overrun force-drain), so the #102 steady gate consumes
+	 * 1/tick on reconnect WITHOUT rebuilding the preload reserve — the video delay
+	 * silently collapses to ~0. This counter increments at the get_closest_frame
+	 * num==0 underrun and resets to 0 on every consume; when frames RESUME after a
+	 * SUSTAINED run (>= GENLOCK_REARM_EMPTY_TICKS) ready_async_frame re-arms
+	 * genlock_filled=false so the existing build path + #116 drain rebuild the reserve.
+	 * Read/written by the A/V thread under async_mutex (same as genlock_filled). */
+	uint32_t genlock_empty_run;
 	uint64_t genlock_frames_received;  /* video frames queued onto async_frames */
 	uint64_t genlock_frames_consumed;  /* frames handed to the compositor (one per tick) */
 	uint64_t genlock_underruns;        /* holds with no distinct frame to emit (build fill + true empty) */

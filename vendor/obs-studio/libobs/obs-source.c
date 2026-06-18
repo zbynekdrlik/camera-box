@@ -273,6 +273,9 @@ static bool obs_source_init(struct obs_source *source)
 	/* camera-box #102: start UNfilled — the FIFO builds the preload delay line
 	 * before emitting (bzalloc already zeroes this; explicit for intent). */
 	source->genlock_filled = false;
+	/* camera-box #126: start with no recorded empty run (bzalloc zeroes it; explicit
+	 * for intent — the reconnect re-arm counts consecutive steady-state true-empties). */
+	source->genlock_empty_run = 0;
 
 	source->private_settings = obs_data_create();
 	return true;
@@ -3558,6 +3561,10 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 		 * delay before emitting again (otherwise the next tick would emit a
 		 * frame with no delay, a phase jump). */
 		source->genlock_filled = false;
+		/* camera-box #126: the overrun drain already re-arms the build latch above;
+		 * clear the consecutive-empty run so a stale count can't carry into the rebuild
+		 * (the post-drain re-bootstrap empties are excluded by last_frame_ts=0 anyway). */
+		source->genlock_empty_run = 0;
 		pthread_mutex_unlock(&source->async_mutex);
 		return NULL;
 	}
@@ -3621,6 +3628,9 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		 * preload delay before emitting again instead of leaking one undelayed frame
 		 * (the stale filled=true + the bootstrap path). Written under async_mutex. */
 		source->genlock_filled = false;
+		/* camera-box #126: an explicit flush re-arms the latch here; clear the
+		 * consecutive-empty run too so it can't carry a stale count into the rebuild. */
+		source->genlock_empty_run = 0;
 		free_async_cache(source);
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
@@ -4164,6 +4174,14 @@ void remove_async_frame(obs_source_t *source, struct obs_source_frame *frame)
  * trips an overrun drain; +4 leaves 3 frames of slack above steady state. */
 #define GENLOCK_DROP_CAP_RESERVE 4
 #define GENLOCK_AUDIT_LOG_INTERVAL_NS (5ULL * 1000 * 1000 * 1000) /* ~5 s */
+/* camera-box #126: consecutive true-empty (underrun) ticks before a resume re-arms the
+ * build latch. 30 ticks ≈ 1 s @ 30 fps — deliberately FAR above any arrival-jitter dip
+ * (the #102 reserve makes even one true empty take preload+1 consecutive misses, so only
+ * a real upstream disconnect sustains empties this long). A lower value would risk a
+ * spurious re-arm at the shallow cam preload=1, where a 1-2 tick transient empty MUST NOT
+ * re-arm (a spurious re-arm forces a ~preload-frame rebuild hold on every blip). Mirrored
+ * & unit-tested in camera-box src/probe/genlock.rs (GENLOCK_REARM_EMPTY_TICKS). */
+#define GENLOCK_REARM_EMPTY_TICKS 30
 
 /* Pure clamp of a strtol `long` to a preload reserve / video-delay depth in
  * [0, GENLOCK_PRELOAD_MAX]. Used by the env parser (which produces a `long`).
@@ -4336,7 +4354,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "overruns=%llu depth=%zu peak=%u preload=%u (=%llu ms @ %.3ffps) cap=%zu (#70/#97)",
+	     "overruns=%llu depth=%zu peak=%u preload=%u (=%llu ms @ %.3ffps) cap=%zu "
+	     "empty_run=%u (re-arm@%u) (#70/#97/#126)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
@@ -4344,7 +4363,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
 	     source->genlock_peak_depth, source->genlock_preload,
 	     (unsigned long long)genlock_preload_ms(source->genlock_preload), fps,
-	     genlock_source_drop_cap(source));
+	     genlock_source_drop_cap(source), source->genlock_empty_run,
+	     (unsigned)GENLOCK_REARM_EMPTY_TICKS);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -4378,6 +4398,37 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 
 		if (source->async_frames.num > source->genlock_peak_depth)
 			source->genlock_peak_depth = (uint32_t)source->async_frames.num;
+
+		/* camera-box #126: frames have RESUMED (this branch is reached only with
+		 * num>=1). If a SUSTAINED true-empty run preceded this resume while the source
+		 * was in steady state, that is a reconnect (e.g. an upstream strih OBS restart):
+		 * DistroAV KEEP_CONTENT blocked the NULL-emit reset and an underrun never fired
+		 * the overrun force-drain, so genlock_filled is still TRUE and the #102 steady
+		 * gate would consume 1/tick WITHOUT rebuilding the preload reserve — collapsing
+		 * the deliberate video delay to ~0 (A/V drift) until a manual nudge. Re-arm the
+		 * build latch (genlock_filled=false) so the EXISTING #102 build path + #116
+		 * build-latch drain rebuild the reserve to exactly preload+1 — no new draining
+		 * logic. The >= GENLOCK_REARM_EMPTY_TICKS guard keeps normal arrival jitter (a
+		 * brief sub-threshold dip, esp. at the shallow cam preload=1) from spuriously
+		 * re-arming (a spurious re-arm would force a ~preload-frame rebuild hold on every
+		 * blip). Decided BEFORE genlock_decide so the build branch engages this tick;
+		 * read/written under async_mutex (same as genlock_filled). */
+		if (source->genlock_filled &&
+		    source->genlock_empty_run >= GENLOCK_REARM_EMPTY_TICKS) {
+			blog(LOG_INFO,
+			     "genlock-fifo reconnect re-arm '%s': %u consecutive empty tick(s) "
+			     ">= %u (≈%llu ms @ tick) — re-arming build latch to rebuild the "
+			     "preload reserve (preload=%u, target=%u) (#126)",
+			     source->context.name ? source->context.name : "?",
+			     source->genlock_empty_run, (unsigned)GENLOCK_REARM_EMPTY_TICKS,
+			     (unsigned long long)genlock_preload_ms(source->genlock_empty_run),
+			     preload, preload + 1);
+			source->genlock_filled = false; /* re-enter the #102 BUILD phase */
+		}
+		/* The empty run has ended (a frame is queued again) — reset it so a flickering
+		 * empty/non-empty queue (ordinary jitter) can never creep up to the threshold;
+		 * only a genuine sustained disconnect can. Mirrors genlock_empty_run_next(_, true). */
+		source->genlock_empty_run = 0;
 
 		const bool was_building = !source->genlock_filled;
 		const struct genlock_decision gd =
@@ -4523,6 +4574,16 @@ static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, u
 		 * overrun counter already records that episode. */
 		if (source->genlock_fifo && source->last_frame_ts) {
 			source->genlock_underruns++;
+			/* camera-box #126: count CONSECUTIVE true-empty ticks in steady state.
+			 * last_frame_ts!=0 here means at least one consume already happened, so
+			 * genlock_filled is latched true — this is a steady-state underrun, the
+			 * reconnect signature (NOT a build-phase or post-overrun-drain empty: a
+			 * drain resets last_frame_ts=0, so those ticks don't reach this counter).
+			 * When frames resume, ready_async_frame compares this run against
+			 * GENLOCK_REARM_EMPTY_TICKS to decide whether to re-arm the build latch.
+			 * Saturating so a very long outage can't wrap the counter. */
+			if (source->genlock_empty_run != UINT32_MAX)
+				source->genlock_empty_run++;
 			genlock_audit_log(source, sys_time);
 		}
 		return NULL;
