@@ -65,7 +65,20 @@ jobs:
       # drives that full path. ffmpeg is already a camera-box runtime dependency
       # (ndi.rs MJPEG decode).
       - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: |
+          # Robust install: apt-get install of ffmpeg (+ its recommends) intermittently
+          # HANGS on free GitHub runners (mirror stalls), wedging CI ~20 min. Fix: refresh
+          # the index, drop recommends (much smaller download), bound each attempt with a
+          # timeout, and retry. ffmpeg's core libs (libav*) are Depends, not Recommends,
+          # so --no-install-recommends still gives the binary the recording path needs.
+          ok=0
+          for i in 1 2 3; do
+            sudo apt-get update -y && \
+              sudo timeout 180 apt-get install -y --no-install-recommends ffmpeg && { ok=1; break; }
+            echo "::warning::ffmpeg apt attempt $i stalled/failed — retrying"; sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::ffmpeg install failed after 3 attempts"; exit 1; }
+          ffmpeg -version | head -1
 
       - name: Run tests
         run: cargo test --all-features --verbose
@@ -92,7 +105,20 @@ jobs:
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
       - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: |
+          # Robust install: apt-get install of ffmpeg (+ its recommends) intermittently
+          # HANGS on free GitHub runners (mirror stalls), wedging CI ~20 min. Fix: refresh
+          # the index, drop recommends (much smaller download), bound each attempt with a
+          # timeout, and retry. ffmpeg's core libs (libav*) are Depends, not Recommends,
+          # so --no-install-recommends still gives the binary the recording path needs.
+          ok=0
+          for i in 1 2 3; do
+            sudo apt-get update -y && \
+              sudo timeout 180 apt-get install -y --no-install-recommends ffmpeg && { ok=1; break; }
+            echo "::warning::ffmpeg apt attempt $i stalled/failed — retrying"; sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::ffmpeg install failed after 3 attempts"; exit 1; }
+          ffmpeg -version | head -1
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
