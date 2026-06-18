@@ -66,18 +66,16 @@ jobs:
       # (ndi.rs MJPEG decode).
       - name: Install ffmpeg
         run: |
-          # Robust install: apt-get install of ffmpeg (+ its recommends) intermittently
-          # HANGS on free GitHub runners (mirror stalls), wedging CI ~20 min. Fix: refresh
-          # the index, drop recommends (much smaller download), bound each attempt with a
-          # timeout, and retry. ffmpeg's core libs (libav*) are Depends, not Recommends,
-          # so --no-install-recommends still gives the binary the recording path needs.
-          ok=0
-          for i in 1 2 3; do
-            sudo apt-get update -y && \
-              sudo timeout 180 apt-get install -y --no-install-recommends ffmpeg && { ok=1; break; }
-            echo "::warning::ffmpeg apt attempt $i stalled/failed — retrying"; sleep 10
-          done
-          [ "$ok" = 1 ] || { echo "::error::ffmpeg install failed after 3 attempts"; exit 1; }
+          # ffmpeg via a prebuilt STATIC binary from GitHub releases (BtbN), NOT apt.
+          # `apt-get install ffmpeg` pulls 87 packages / ~63 MB from the (often throttled)
+          # Ubuntu mirror and intermittently stalls for many minutes, wedging CI (#114/#127).
+          # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
+          # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
+          # path needs.
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
+          sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
 
       - name: Run tests
@@ -106,18 +104,16 @@ jobs:
       # recording_decode integration test (run under llvm-cov here too).
       - name: Install ffmpeg
         run: |
-          # Robust install: apt-get install of ffmpeg (+ its recommends) intermittently
-          # HANGS on free GitHub runners (mirror stalls), wedging CI ~20 min. Fix: refresh
-          # the index, drop recommends (much smaller download), bound each attempt with a
-          # timeout, and retry. ffmpeg's core libs (libav*) are Depends, not Recommends,
-          # so --no-install-recommends still gives the binary the recording path needs.
-          ok=0
-          for i in 1 2 3; do
-            sudo apt-get update -y && \
-              sudo timeout 180 apt-get install -y --no-install-recommends ffmpeg && { ok=1; break; }
-            echo "::warning::ffmpeg apt attempt $i stalled/failed — retrying"; sleep 10
-          done
-          [ "$ok" = 1 ] || { echo "::error::ffmpeg install failed after 3 attempts"; exit 1; }
+          # ffmpeg via a prebuilt STATIC binary from GitHub releases (BtbN), NOT apt.
+          # `apt-get install ffmpeg` pulls 87 packages / ~63 MB from the (often throttled)
+          # Ubuntu mirror and intermittently stalls for many minutes, wedging CI (#114/#127).
+          # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
+          # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
+          # path needs.
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
+          sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
 
       - name: Install cargo-llvm-cov
