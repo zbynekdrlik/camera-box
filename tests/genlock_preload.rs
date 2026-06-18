@@ -15,9 +15,9 @@
 //!     `git subtree pull` (#44) can't silently revert it.
 
 use camera_box::probe::genlock::{
-    genlock_decide, genlock_drop_cap, parse_preload, preload_to_ms, steady_state_depth,
-    GenlockDecision, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
-    MAX_ASYNC_FRAMES,
+    genlock_build_drain, genlock_decide, genlock_drop_cap, parse_preload, preload_to_ms,
+    steady_state_depth, GenlockDecision, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT,
+    GENLOCK_PRELOAD_MAX, MAX_ASYNC_FRAMES,
 };
 
 // ---- pure decision logic ---------------------------------------------------
@@ -350,6 +350,200 @@ fn single_tick_jitter_below_the_reserve_still_consumes_no_repeat() {
     }
 }
 
+// ---- #116: drain-to-target at build latch + on preload change ----------------
+//
+// The #102 build latch (`genlock_decide`) latched `filled=true` the instant
+// `queue_depth > preload`, at WHATEVER depth the NDI startup burst left in the
+// queue, and never trimmed down. So two inputs with different startup bursts froze
+// at different depths (different latency → camera time-jump on switch), a preload
+// DECREASE re-latched at the old deep depth (the lower delay never took effect —
+// "only goes up"), and a restart's random arrival phase gave a non-deterministic
+// depth. #116 adds `genlock_build_drain(queue_depth, preload)`: at the build latch
+// (and re-armed on a preload change), erase the OLDEST `queue_depth - target`
+// frames so every input settles at exactly `target = steady_state_depth(preload) =
+// preload + 1`, regardless of startup burst → equal cams, restart-deterministic,
+// bidirectional preload. The drain fires ONLY at the build latch / preload change —
+// NEVER in steady state (the #102 consume-when-queued 0-loss gate is untouched).
+
+#[test]
+fn build_drain_trims_burst_to_target_depth() {
+    // The headline #116 fix: when the build latch fires (queue_depth > preload), the
+    // FIFO must erase the excess oldest frames so it settles at exactly the target
+    // depth (preload + 1), NOT freeze at the startup-burst depth. The drain count is
+    // `queue_depth - target`. After the drain the FIFO holds `target` frames; the
+    // same-tick consume then leaves `preload` (the steady-state reserve).
+    for preload in [0u32, 1, 2, 30, 128] {
+        let target = steady_state_depth(preload) as usize; // preload + 1
+                                                           // A queue exactly at target needs no trim (the latch fires at preload+1).
+        assert_eq!(
+            genlock_build_drain(target, preload),
+            0,
+            "preload={preload}: depth already at target {target} → drain 0"
+        );
+        // A deep startup burst trims down to target.
+        for burst_extra in [1usize, 4, 10, 50] {
+            let depth = target + burst_extra;
+            assert_eq!(
+                genlock_build_drain(depth, preload),
+                burst_extra,
+                "preload={preload}: build latch at depth {depth} must drain \
+                 {burst_extra} oldest frames to reach target {target}"
+            );
+        }
+    }
+}
+
+#[test]
+fn build_drain_is_zero_below_the_latch_and_in_steady_state() {
+    // The drain fires ONLY at the build latch (queue_depth > preload). Below the
+    // latch (still building) there is nothing to trim. And a queue at/below target
+    // must never trim (no negative / wraparound drain).
+    for preload in [0u32, 1, 30, 128] {
+        // Still building (depth <= preload): no drain.
+        for depth in 0..=preload as usize {
+            assert_eq!(
+                genlock_build_drain(depth, preload),
+                0,
+                "preload={preload} depth={depth}: still building, nothing to drain"
+            );
+        }
+        // At target (preload+1): exactly the latch instant, depth == target → 0.
+        assert_eq!(
+            genlock_build_drain(steady_state_depth(preload) as usize, preload),
+            0
+        );
+    }
+}
+
+#[test]
+fn two_different_bursts_settle_at_same_target_depth() {
+    // Symptom 1: cameras with IDENTICAL preload but DIFFERENT startup bursts froze at
+    // different depths (different latency). After the build drain BOTH settle at the
+    // identical target depth → equal per-cam latency, no time-jump on switch.
+    let preload = 1; // the live default (all inputs preload=1)
+    let target = steady_state_depth(preload) as usize;
+    // cam A: shallow burst (depth 2), cam B: deep burst (depth 6) — the live spread.
+    let depth_a = 2usize; // already at target
+    let depth_b = 6usize; // the deep NDI burst (live: cam5 depth 6)
+    let settled_a = depth_a - genlock_build_drain(depth_a, preload);
+    let settled_b = depth_b - genlock_build_drain(depth_b, preload);
+    assert_eq!(settled_a, target, "cam A settles at target");
+    assert_eq!(
+        settled_b, target,
+        "cam B (deep burst) settles at SAME target"
+    );
+    assert_eq!(
+        settled_a, settled_b,
+        "both cams settle at identical depth regardless of startup burst (#116 symptom 1)"
+    );
+}
+
+#[test]
+fn preload_decrease_drains_immediately_to_new_lower_target() {
+    // Symptom 2 ("only goes up"): a preload DECREASE re-armed the latch but the deep
+    // queue immediately re-latched filled at the OLD depth — the lower delay never
+    // took effect. With the build drain, after the re-arm the next build latch trims
+    // the deep queue straight down to the NEW (lower) target → the delay drops at
+    // once. Model: deep queue at the old steady depth, preload lowered, re-armed.
+    let old_preload = 30u32; // ~1 s delay
+    let new_preload = 5u32; // operator dials it DOWN
+    let new_target = steady_state_depth(new_preload) as usize; // 6
+                                                               // The FIFO is parked deep at the old steady depth (old preload+1 = 31).
+    let deep_depth = steady_state_depth(old_preload) as usize; // 31
+                                                               // After the preload-change re-arm, the build latch fires at deep_depth >
+                                                               // new_preload and drains down to the NEW target.
+    let drained = genlock_build_drain(deep_depth, new_preload);
+    let settled = deep_depth - drained;
+    assert_eq!(
+        settled, new_target,
+        "preload decrease 30→5 must drain the deep FIFO straight to the new lower \
+         target {new_target} (not stay stuck at the old {deep_depth}) — the delay \
+         actually DROPS (#116 symptom 2, bidirectional knob)"
+    );
+    assert!(
+        settled < deep_depth,
+        "the depth (delay) must DECREASE, not stay/grow — the 'only goes up' bug"
+    );
+}
+
+#[test]
+fn preload_increase_builds_up_to_new_higher_target() {
+    // The increase path: dialing preload UP must rebuild to the new (deeper) target.
+    // On an increase the current depth is BELOW the new preload, so the build latch
+    // holds (genlock_decide build branch) until the FIFO fills past the new preload —
+    // no drain (nothing to trim while building UP). The drain is 0 until depth
+    // exceeds the new preload; at the new latch instant (depth = new target) it's 0.
+    let new_preload = 30u32; // dialed UP from a shallow value
+    let new_target = steady_state_depth(new_preload) as usize; // 31
+                                                               // While filling up to the deeper delay (depth <= new preload): no drain, hold.
+    for depth in 0..=new_preload as usize {
+        assert_eq!(
+            genlock_build_drain(depth, new_preload),
+            0,
+            "increase: building up at depth {depth} (<= preload {new_preload}) → no drain"
+        );
+        // genlock_decide still HOLDS (building) at these depths when not yet filled.
+        assert!(!genlock_decide(depth, new_preload, false).consume);
+    }
+    // The latch fires at the new target depth (preload+1) with 0 drain.
+    assert_eq!(genlock_build_drain(new_target, new_preload), 0);
+    assert!(genlock_decide(new_target, new_preload, false).consume);
+}
+
+#[test]
+fn rebuild_from_empty_settles_at_identical_deterministic_depth() {
+    // Symptom 3 (restart non-determinism): each boot the random NDI arrival phase
+    // left a different startup-burst depth, which froze at a different latency. With
+    // the build drain, ANY burst depth ≥ target settles at the SAME deterministic
+    // target → restart-deterministic latency. Sweep a range of possible startup
+    // bursts; every one must settle identically.
+    let preload = 1u32;
+    let target = steady_state_depth(preload) as usize;
+    let mut settled_depths = std::collections::BTreeSet::new();
+    for burst in target..=target + 40 {
+        // any boot-time burst depth
+        let settled = burst - genlock_build_drain(burst, preload);
+        settled_depths.insert(settled);
+    }
+    assert_eq!(
+        settled_depths.len(),
+        1,
+        "every possible startup burst must settle at ONE deterministic depth; got {settled_depths:?}"
+    );
+    assert_eq!(
+        *settled_depths.iter().next().unwrap(),
+        target,
+        "the single deterministic settle depth must be the target (preload+1)"
+    );
+}
+
+#[test]
+fn steady_state_consume_gate_unchanged_by_116() {
+    // PRESERVE #102: the steady-state consume-when-queued behavior (the proven
+    // 0-loss gate) is UNCHANGED. The drain is a SEPARATE function that fires only at
+    // the build latch; it must NEVER alter the steady-state consume decision, and in
+    // steady state (filled=true) there is no build latch so no drain is taken by the
+    // caller. genlock_decide's steady branch still consumes on every queued frame.
+    for preload in [0u32, 1, 2, 30, 128] {
+        for depth in 1..=(preload as usize + 5) {
+            // Steady state: still consume every queued distinct frame (the #102 fix).
+            assert!(
+                genlock_decide(depth, preload, true).consume,
+                "preload={preload} depth={depth}: #102 steady consume-when-queued must \
+                 be untouched by #116"
+            );
+        }
+        // True empty still holds, filled stays set (no startup refill re-trigger).
+        assert_eq!(
+            genlock_decide(0, preload, true),
+            GenlockDecision {
+                consume: false,
+                filled: true
+            }
+        );
+    }
+}
+
 // ---- vendored-source guard (the C patch must stay applied) ------------------
 
 mod vendored_source {
@@ -437,6 +631,43 @@ mod vendored_source {
         assert!(
             src.contains("source->genlock_underruns++"),
             "{OBS_SOURCE}: #70/#102 — the genlock underrun audit counter is gone; re-apply."
+        );
+    }
+
+    #[test]
+    fn build_latch_drains_burst_to_target_in_vendored_source() {
+        // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
+        // oldest frames at the build latch (and after a preload-change re-arm) so every
+        // input settles at exactly the target depth (preload+1), regardless of the NDI
+        // startup burst. Without this, a deep burst freezes at a deep depth (unequal
+        // per-cam latency, non-deterministic restart, "preload only goes up"). A subtree
+        // pull (#44) reverting the drain would silently bring the bug back.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // The pure drain decision must be called from the render path (mirror of the
+        // Rust genlock_build_drain — the C name is genlock_build_drain).
+        assert!(
+            src.contains("genlock_build_drain(source->async_frames.num, preload)"),
+            "{OBS_SOURCE}: #116 — ready_async_frame no longer computes the build-latch \
+             drain (genlock_build_drain) to trim a startup burst down to the target \
+             depth. Cameras freeze at unequal depths and preload becomes one-directional. \
+             Re-apply the #116 drain."
+        );
+        // The drain must erase the OLDEST frames using the same da_erase(.,0) +
+        // remove_async_frame idiom the async_unbuffered path uses (so each dropped
+        // frame is freed once, no leak/double-free).
+        assert!(
+            src.contains("da_erase(source->async_frames, 0)")
+                && src.contains("remove_async_frame(source, dropped)"),
+            "{OBS_SOURCE}: #116 — the build-latch drain must erase the oldest frames via \
+             da_erase(async_frames,0) + remove_async_frame(source, dropped) (the same \
+             free idiom as the async_unbuffered drain) so no frame leaks or double-frees. \
+             Re-apply."
+        );
+        // The drain count must come from the target = steady_state_depth(preload) =
+        // preload + 1 contract, surfaced in a comment/identifier so the intent is pinned.
+        assert!(
+            src.contains("genlock_build_drain"),
+            "{OBS_SOURCE}: #116 — the build-drain helper genlock_build_drain is missing."
         );
     }
 
