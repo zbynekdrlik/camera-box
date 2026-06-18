@@ -40,3 +40,4 @@ __pycache__/
 # Autopilot/session local logs
 .claude/command-history.log
 dist-genlock/
+.playwright-mcp/
