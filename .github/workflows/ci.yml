@@ -108,7 +108,7 @@ jobs:
         # threshold reflects testable logic. kms.rs's PURE decision functions (pick_mode,
         # copy_plan, copy_bgra_into, next_bo_index) are unit-tested, but its live DRM
         # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|multitap-probe|recording-probe)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|multitap-probe|recording-probe|recording-verdict)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
