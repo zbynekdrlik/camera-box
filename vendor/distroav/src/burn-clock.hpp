@@ -25,11 +25,20 @@ namespace burn_clock {
 // "Strictly next" (an exact boundary advances one full period) keeps two equal-rate
 // cadences from emitting two ids at the same instant. `period_ns == 0` (fps 0) is
 // guarded — returns `now_ns` (zero alignment) rather than dividing by zero.
+//
+// The Rust mirror computes in u64 (wraps in release, never UB). Real epoch-ns values
+// (~1.7e18) are far below i64::MAX so the multiply never overflows in practice — but to
+// keep the function well-defined (no signed-overflow UB) for ANY input AND bit-identical
+// to Rust's u64 path, the divide/add/multiply are done in uint64_t (well-defined modular
+// arithmetic), then cast back. now_ns/period_ns are non-negative here (period_ns>0 by the
+// guard; now_ns is a wall-clock epoch ns, always >= 0 in operation).
 inline int64_t next_wall_boundary_ns(int64_t now_ns, int64_t period_ns)
 {
 	if (period_ns <= 0)
 		return now_ns;
-	return (now_ns / period_ns + 1) * period_ns;
+	const uint64_t now = static_cast<uint64_t>(now_ns);
+	const uint64_t period = static_cast<uint64_t>(period_ns);
+	return static_cast<int64_t>((now / period + 1) * period);
 }
 
 // Frame period in ns for `fps` (rounded). fps <= 0 -> 0 (no alignment).

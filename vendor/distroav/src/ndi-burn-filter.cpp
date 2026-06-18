@@ -283,6 +283,10 @@ static void burn_filter_videorender(void *data, gs_effect_t *)
 	gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+	// Degenerate case (filter directly on a source with no chain): mirrors ndi-filter.cpp.
+	// The texrender stays cleared/transparent and we still burn the QR onto it — only a
+	// MISCONFIGURATION (the probe scene attaches this filter to a real program source, not
+	// a bare source), so this path is cosmetic, not the intended use.
 	if (target == parent)
 		obs_source_skip_video_filter(f->context);
 	else

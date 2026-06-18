@@ -393,6 +393,104 @@ int main(int argc, char **argv) {{
     assert!(decoded_strs.contains(&r), "right tick {r:?} not decoded");
 }
 
+#[test]
+fn cpp_production_geometry_bottom_strip_qr_decodes() {
+    // The PRODUCTION filter (ndi-burn-filter.cpp burn_draw_qr) burns a SINGLE full-width
+    // bottom-strip QR — render(buf, w*4, w, h, payload, /*band_x*/0, /*band_w*/w,
+    // /*band_cy*/ h - qr_px/2 - margin, qr_px) — distinct from cam2's centered QR so both
+    // survive in one recorded frame. The dual-QR test above proves the encoder/decoder
+    // identity; THIS test proves the EXACT production placement (the clamp/origin path with
+    // band_cy near the bottom edge) is in-bounds and rqrr-decodable, so the burned node QR
+    // is actually readable in a recording.
+    let dir = std::env::temp_dir().join(format!("burn_prodgeo_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_cpp = dir.join("prodgeo_main.cpp");
+    let bin = dir.join("prodgeo_main");
+    let out_bgra = dir.join("frame.bgra");
+
+    let payload_hpp = manifest().join(BURN_PAYLOAD_HPP);
+    let qr_hpp = manifest().join(BURN_QR_HPP);
+    let qrcg_cpp = manifest().join(QRCODEGEN_CPP);
+    let qrcg_inc = manifest().join("vendor/distroav/src");
+
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    const QR_PX: u32 = 700;
+    const MARGIN: u32 = 40; // == burn_draw_qr's margin
+    let node = (911004u32, 12345u32, 1_718_600_000_000_000_000i64); // stream node stamp
+
+    let src = format!(
+        r#"
+#include "{payload}"
+#include "{qr}"
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+int main(int argc, char **argv) {{
+    if (argc < 2) return 2;
+    const uint32_t W = {w}, H = {h}, QR_PX = {qr_px}, MARGIN = {margin};
+    std::vector<uint8_t> buf((size_t)W * H * 4, 255);
+    const uint32_t stride = W * 4;
+    std::string p = burn_payload::encode({nr}, {nf}, {ng});
+    // EXACT production call (burn_draw_qr): full-width band, bottom strip.
+    uint32_t band_cy = (H > QR_PX/2 + MARGIN) ? (H - QR_PX/2 - MARGIN) : (H/2);
+    burn_qr::render(buf.data(), stride, W, H, p, 0, W, band_cy, QR_PX);
+    FILE *f = fopen(argv[1], "wb");
+    if (!f) return 3;
+    fwrite(buf.data(), 1, buf.size(), f);
+    fclose(f);
+    printf("%s\n", p.c_str());
+    return 0;
+}}
+"#,
+        payload = payload_hpp.display(),
+        qr = qr_hpp.display(),
+        w = W,
+        h = H,
+        qr_px = QR_PX,
+        margin = MARGIN,
+        nr = node.0,
+        nf = node.1,
+        ng = node.2,
+    );
+    std::fs::write(&main_cpp, src).unwrap();
+
+    let compile = Command::new("g++")
+        .args(["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg("-I")
+        .arg(&qrcg_inc)
+        .arg(&main_cpp)
+        .arg(&qrcg_cpp)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("g++ must be installed");
+    assert!(
+        compile.status.success(),
+        "production-geometry render did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&bin)
+        .arg(&out_bgra)
+        .output()
+        .expect("run prodgeo main");
+    assert!(run.status.success(), "prodgeo renderer exited nonzero");
+    let burned = String::from_utf8(run.stdout).unwrap().trim().to_string();
+
+    let data = std::fs::read(&out_bgra).unwrap();
+    let luma = bgra_to_luma(&data, W, H, W * 4);
+    let decoded: Vec<String> = decode_qr_luma_all(luma)
+        .iter()
+        .map(|p| p.encode())
+        .collect();
+    assert!(
+        decoded.contains(&burned),
+        "rqrr did NOT decode the PRODUCTION bottom-strip QR {burned:?}. Decoded: {decoded:?}. \
+         The real filter placement is not readable in a recording."
+    );
+}
+
 // ---- 2. Vendored-source / build-wiring guards --------------------------------
 
 #[test]
@@ -450,12 +548,29 @@ fn burn_filter_source_is_vendored_and_wired() {
         "{BURN_FILTER}: the burn is no longer gated behind an env var (OBS_BURN_QR); it \
          must default OFF so the production install is unaffected until #108 enables it."
     );
+    // The QR pixel size is tunable per-rig (OBS_BURN_QR_PX) so the operator can pick a
+    // size that survives the NDI re-compression at the OBS outputs.
+    assert!(
+        flt.contains("OBS_BURN_QR_PX"),
+        "{BURN_FILTER}: the OBS_BURN_QR_PX size override is gone — the rig can no longer \
+         tune the NDI-survivable QR size. #111 reverted."
+    );
     // It renders the target then draws the QR (the texrender/stage pattern, or a
     // texture overlay) — assert it actually renders the source through, not replaces it.
     assert!(
         flt.contains("obs_source_process_filter") || flt.contains("gs_texrender_begin"),
         "{BURN_FILTER}: the filter does not render its target through — the burned output \
          would lose the underlying video."
+    );
+    // (review C1) The output sprite draw MUST be sRGB-correct (mirror libobs
+    // render_filter_tex) or the composited program video is gamma-shifted downstream into
+    // the recording under OBS's default linear-sRGB pipeline. Guard the sRGB-aware path so
+    // a refactor/subtree-pull can't silently drop it again.
+    assert!(
+        flt.contains("gs_get_linear_srgb") && flt.contains("gs_effect_set_texture_srgb"),
+        "{BURN_FILTER}: the output draw is not sRGB-correct (gs_get_linear_srgb + \
+         gs_effect_set_texture_srgb missing) — the burned program video would be \
+         color-shifted in the recording (review C1)."
     );
 }
 

@@ -216,6 +216,9 @@ jobs:
           if ($flt -notmatch [regex]::Escape('OBS_BURN_QR')) {
             Write-Error "ndi-burn-filter.cpp: the burn is no longer gated behind OBS_BURN_QR (default OFF) — it must not affect the production install until #108 enables it (#111 reverted)"; exit 1
           }
+          if ($flt -notmatch [regex]::Escape('OBS_BURN_QR_PX')) {
+            Write-Error "ndi-burn-filter.cpp: the OBS_BURN_QR_PX size override is gone — the rig can no longer tune the NDI-survivable QR size (#111 reverted)"; exit 1
+          }
           $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
           if ($pm -notmatch [regex]::Escape('create_ndi_burn_filter_info')) {
             Write-Error "plugin-main.cpp: the burn filter is not registered (create_ndi_burn_filter_info) — OBS would not expose it (#111 reverted)"; exit 1
