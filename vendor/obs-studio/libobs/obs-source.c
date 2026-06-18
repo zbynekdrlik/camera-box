@@ -4295,6 +4295,29 @@ static inline struct genlock_decision genlock_decide(size_t queue_depth, uint32_
 	return d;
 }
 
+/* camera-box #116: how many OLDEST frames to ERASE at the build-latch instant so the
+ * FIFO settles at exactly the target depth (= preload + 1), regardless of the NDI
+ * startup burst. Mirrored & unit-tested in camera-box src/probe/genlock.rs
+ * (genlock_build_drain / tests).
+ *
+ * The #102 build latch (genlock_decide) latched filled=true at WHATEVER depth the
+ * startup burst left (queue_depth>preload) and consumed one — it never trimmed down,
+ * so: (1) two inputs with the same preload but different bursts froze at different
+ * depths => unequal per-camera latency + a time-jump on switch; (2) a preload
+ * DECREASE re-latched at the OLD deep depth => the lower delay never took effect
+ * ("only goes up"); (3) each restart's random arrival phase froze at a different
+ * depth => non-deterministic latency. Erasing queue_depth-target oldest frames at
+ * the latch (and on a preload-change re-arm) makes every input + every restart settle
+ * at the IDENTICAL deterministic target, and makes the preload knob BIDIRECTIONAL.
+ *
+ * Returns 0 below the latch (still building) and at/under the target (size_t is
+ * unsigned; the explicit guard avoids a wraparound to a huge erase count). */
+static inline size_t genlock_build_drain(size_t queue_depth, uint32_t preload)
+{
+	const size_t target = (size_t)preload + 1; /* steady_state_depth(preload) */
+	return queue_depth > target ? queue_depth - target : 0;
+}
+
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
  * visible in the OBS log before AND after the fix (the verification evidence).
  * `now_ns` is the monotonic render-tick stamp (obs->video.video_time). */
@@ -4356,6 +4379,7 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 		if (source->async_frames.num > source->genlock_peak_depth)
 			source->genlock_peak_depth = (uint32_t)source->async_frames.num;
 
+		const bool was_building = !source->genlock_filled;
 		const struct genlock_decision gd =
 			genlock_decide(source->async_frames.num, preload, source->genlock_filled);
 		source->genlock_filled = gd.filled; /* latch the build->steady transition */
@@ -4370,6 +4394,34 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 			source->genlock_underruns++;
 			genlock_audit_log(source, now_ns);
 			return false;
+		}
+
+		/* camera-box #116: the build latch just FIRED (was_building && now consuming).
+		 * Trim the startup burst down to the target depth (preload+1) by ERASING the
+		 * excess OLDEST frames, so every input — and every restart — settles at the
+		 * IDENTICAL deterministic depth (equal per-camera latency) and a preload change
+		 * takes effect immediately in BOTH directions (a decrease re-arms the latch
+		 * (obs_source_set_genlock_preload) and this drains the deep queue straight to
+		 * the new lower target on the next build latch). This fires ONLY at the build
+		 * latch — NEVER in steady state — so the #102 consume-when-queued 0-loss gate is
+		 * untouched. Each dropped frame is freed once via the same da_erase(.,0) +
+		 * remove_async_frame() idiom the async_unbuffered drain uses (no leak / no
+		 * double-free); the kept frames slide forward and next_frame is re-read. */
+		if (was_building) {
+			size_t to_drain = genlock_build_drain(source->async_frames.num, preload);
+			if (to_drain) {
+				blog(LOG_INFO,
+				     "genlock-fifo build drain '%s': depth %zu -> target %u (preload %u), "
+				     "erasing %zu oldest frame(s) (#116)",
+				     source->context.name ? source->context.name : "?",
+				     source->async_frames.num, preload + 1, preload, to_drain);
+				while (to_drain-- && source->async_frames.num > 1) {
+					struct obs_source_frame *dropped = source->async_frames.array[0];
+					da_erase(source->async_frames, 0);
+					remove_async_frame(source, dropped);
+				}
+				next_frame = source->async_frames.array[0];
+			}
 		}
 
 		source->genlock_frames_consumed++;

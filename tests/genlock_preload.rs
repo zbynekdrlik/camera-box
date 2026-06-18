@@ -408,7 +408,10 @@ fn build_drain_is_zero_below_the_latch_and_in_steady_state() {
             );
         }
         // At target (preload+1): exactly the latch instant, depth == target → 0.
-        assert_eq!(genlock_build_drain(steady_state_depth(preload) as usize, preload), 0);
+        assert_eq!(
+            genlock_build_drain(steady_state_depth(preload) as usize, preload),
+            0
+        );
     }
 }
 
@@ -425,7 +428,10 @@ fn two_different_bursts_settle_at_same_target_depth() {
     let settled_a = depth_a - genlock_build_drain(depth_a, preload);
     let settled_b = depth_b - genlock_build_drain(depth_b, preload);
     assert_eq!(settled_a, target, "cam A settles at target");
-    assert_eq!(settled_b, target, "cam B (deep burst) settles at SAME target");
+    assert_eq!(
+        settled_b, target,
+        "cam B (deep burst) settles at SAME target"
+    );
     assert_eq!(
         settled_a, settled_b,
         "both cams settle at identical depth regardless of startup burst (#116 symptom 1)"
@@ -442,10 +448,10 @@ fn preload_decrease_drains_immediately_to_new_lower_target() {
     let old_preload = 30u32; // ~1 s delay
     let new_preload = 5u32; // operator dials it DOWN
     let new_target = steady_state_depth(new_preload) as usize; // 6
-                                                              // The FIFO is parked deep at the old steady depth (old preload+1 = 31).
+                                                               // The FIFO is parked deep at the old steady depth (old preload+1 = 31).
     let deep_depth = steady_state_depth(old_preload) as usize; // 31
-                                                              // After the preload-change re-arm, the build latch fires at deep_depth >
-                                                              // new_preload and drains down to the NEW target.
+                                                               // After the preload-change re-arm, the build latch fires at deep_depth >
+                                                               // new_preload and drains down to the NEW target.
     let drained = genlock_build_drain(deep_depth, new_preload);
     let settled = deep_depth - drained;
     assert_eq!(
@@ -469,7 +475,7 @@ fn preload_increase_builds_up_to_new_higher_target() {
     // exceeds the new preload; at the new latch instant (depth = new target) it's 0.
     let new_preload = 30u32; // dialed UP from a shallow value
     let new_target = steady_state_depth(new_preload) as usize; // 31
-                                                              // While filling up to the deeper delay (depth <= new preload): no drain, hold.
+                                                               // While filling up to the deeper delay (depth <= new preload): no drain, hold.
     for depth in 0..=new_preload as usize {
         assert_eq!(
             genlock_build_drain(depth, new_preload),
@@ -530,7 +536,10 @@ fn steady_state_consume_gate_unchanged_by_116() {
         // True empty still holds, filled stays set (no startup refill re-trigger).
         assert_eq!(
             genlock_decide(0, preload, true),
-            GenlockDecision { consume: false, filled: true }
+            GenlockDecision {
+                consume: false,
+                filled: true
+            }
         );
     }
 }

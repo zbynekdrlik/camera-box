@@ -183,6 +183,49 @@ pub fn steady_state_depth(preload: u32) -> u32 {
     preload + 1
 }
 
+/// How many OLDEST frames to ERASE at the build-latch instant so the FIFO settles
+/// at exactly the target depth, regardless of the NDI startup burst (#116).
+///
+/// ## The bug this fixes
+///
+/// The #102 build latch ([`genlock_decide`]) latches `filled = true` the instant
+/// `queue_depth > preload`, at WHATEVER depth the NDI startup burst left in the
+/// queue, and consumes exactly one frame — it never trims down. So:
+///
+/// 1. Two inputs with the SAME preload but DIFFERENT startup bursts freeze at
+///    different depths ⇒ different per-camera latency ⇒ a time-jump when switching
+///    cameras (live: NDI cam5(=CAM1) latched depth 6 vs cam1/cam3 depth 2 at an
+///    identical preload=1, a ~133 ms spread).
+/// 2. A preload DECREASE re-arms the latch ([`obs_source_set_genlock_preload`]),
+///    but the deep queue re-latches `filled` immediately at the OLD deep depth, so
+///    the lower delay never takes effect ("preload only goes up").
+/// 3. Each restart's random NDI arrival phase gives a different frozen depth ⇒
+///    non-deterministic latency after an OBS restart.
+///
+/// ## The fix
+///
+/// When the build latch is about to fire (`queue_depth > preload`), erase the
+/// `queue_depth - target` OLDEST frames so the FIFO holds exactly `target =
+/// steady_state_depth(preload) = preload + 1` frames, then the same-tick consume
+/// leaves `preload` (the steady-state reserve). Every input — and every restart —
+/// then settles at the IDENTICAL deterministic depth, and a preload change takes
+/// effect immediately in BOTH directions (a decrease drains to the lower target on
+/// the next build latch; an increase rebuilds up to the higher target). The C
+/// `ready_async_frame` calls this at the build latch and erases that many oldest
+/// frames via the `da_erase(async_frames, 0)` + `remove_async_frame()` idiom (the
+/// same per-frame free path the `async_unbuffered` drain uses — no leak, no
+/// double-free).
+///
+/// The drain fires ONLY at the build latch (and on a preload-change re-arm) — NEVER
+/// in steady state. The #102 consume-when-queued 0-loss gate ([`genlock_decide`]'s
+/// steady branch) is untouched. Below the latch (`queue_depth <= preload`, still
+/// building) and at/under the target there is nothing to trim ⇒ 0 (saturating, so
+/// it can never underflow/wrap).
+pub fn genlock_build_drain(queue_depth: usize, preload: u32) -> usize {
+    let target = steady_state_depth(preload) as usize;
+    queue_depth.saturating_sub(target)
+}
+
 /// Convert a preload depth (frames of genlock-disciplined delay) into the
 /// equivalent **delay in milliseconds** at a given output frame rate.
 ///
