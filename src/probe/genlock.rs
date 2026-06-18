@@ -227,3 +227,52 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
     let abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
     want.min(abs_max).max(MAX_ASYNC_FRAMES)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_drain_unit_trims_to_target() {
+        // At the build latch (depth > preload) drain down to target = preload+1.
+        assert_eq!(genlock_build_drain(2, 1), 0); // depth == target → 0
+        assert_eq!(genlock_build_drain(6, 1), 4); // deep burst → trim 4 to reach 2
+        assert_eq!(genlock_build_drain(31, 30), 0); // target
+        assert_eq!(genlock_build_drain(41, 30), 10);
+    }
+
+    #[test]
+    fn build_drain_unit_zero_while_building_or_at_target() {
+        // Below the latch (still building, depth <= preload): nothing to drain.
+        for depth in 0..=30usize {
+            assert_eq!(genlock_build_drain(depth, 30), 0);
+        }
+        // Exactly at target (preload+1): the latch instant, no trim.
+        assert_eq!(genlock_build_drain(31, 30), 0);
+    }
+
+    #[test]
+    fn build_drain_unit_never_underflows() {
+        // A queue at or below target never produces a negative/wrapped drain.
+        assert_eq!(genlock_build_drain(0, 0), 0);
+        assert_eq!(genlock_build_drain(1, 0), 0); // target for preload 0 is 1
+        assert_eq!(genlock_build_drain(0, 128), 0);
+    }
+
+    #[test]
+    fn build_drain_unit_equals_depth_minus_target_above_latch() {
+        // The exact contract: drain = depth - steady_state_depth(preload) when
+        // depth > steady_state_depth, else 0.
+        for preload in [0u32, 1, 2, 30, 128] {
+            let target = steady_state_depth(preload) as usize;
+            for depth in 0..target + 20 {
+                let expected = depth.saturating_sub(target);
+                assert_eq!(
+                    genlock_build_drain(depth, preload),
+                    expected,
+                    "preload={preload} depth={depth}"
+                );
+            }
+        }
+    }
+}
