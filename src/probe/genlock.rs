@@ -246,14 +246,21 @@ pub const GENLOCK_REARM_EMPTY_TICKS: u32 = 30;
 
 /// Advance the per-source consecutive-true-empty counter for one render tick (#126).
 ///
-/// `consumed` — whether a distinct frame was handed to the compositor this tick.
-/// * a consume **resets** the run to 0 (so a flickering empty/non-empty queue — normal
-///   jitter — can NEVER accumulate to [`GENLOCK_REARM_EMPTY_TICKS`]; only a genuine
-///   sustained disconnect can);
+/// `consumed` — whether a frame was QUEUED (`num >= 1`) this tick. The counter is only
+/// ever nonzero in steady state, where the #102 invariant guarantees a queued frame is
+/// always consumed (`queue_depth >= 1` ⇒ consume) — so "a frame was queued again" and
+/// "a frame was consumed" coincide for every tick that can reset a nonzero counter, and
+/// modelling the reset as `consumed=true` is exact. (The C side resets at the same
+/// instant: on entry to the genlock branch of `ready_async_frame`, which is reached only
+/// with `num >= 1`.)
+/// * a queued/consumed tick **resets** the run to 0 (so a flickering empty/non-empty
+///   queue — normal jitter — can NEVER accumulate to [`GENLOCK_REARM_EMPTY_TICKS`]; only
+///   a genuine sustained disconnect can);
 /// * a true empty **increments** the run (saturating, so a very long outage never wraps).
 ///
 /// Mirrors the C `source->genlock_empty_run` bookkeeping in `obs-source.c`
-/// (`++` at the `get_closest_frame` num==0 underrun site, `= 0` on each consume).
+/// (`++` at the `get_closest_frame` num==0 underrun site, `= 0` on the next tick a frame
+/// is queued — i.e. on entry to the `ready_async_frame` genlock branch).
 pub fn genlock_empty_run_next(empty_run: u32, consumed: bool) -> u32 {
     if consumed {
         0

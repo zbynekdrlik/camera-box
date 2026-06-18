@@ -868,6 +868,29 @@ mod vendored_source {
             GENLOCK_REARM_EMPTY_TICKS, 30,
             "Rust mirror must equal the C re-arm threshold"
         );
+        // (review) Pin the relative ORDER: the re-arm guard must READ genlock_empty_run
+        // BEFORE the resume-site reset zeroes it. A subtree pull that reordered them
+        // (reset above the guard) would pass the token-presence checks above yet silently
+        // break the re-arm (the counter is always 0 at the read → never re-arms). Find the
+        // guard position in the squished source, then the FIRST reset that follows it (the
+        // resume-site reset) — the guard index must be the smaller.
+        let guard_at = src
+            .find("genlock_empty_run >= GENLOCK_REARM_EMPTY_TICKS")
+            .expect("the #126 re-arm guard must be present");
+        let reset_after_guard = src[guard_at..]
+            .find("genlock_empty_run = 0")
+            .map(|i| guard_at + i)
+            .expect(
+                "a genlock_empty_run reset must follow the #126 re-arm guard (the resume-site \
+                 reset)",
+            );
+        assert!(
+            guard_at < reset_after_guard,
+            "{OBS_SOURCE}: #126 — the re-arm guard (genlock_empty_run >= …) must READ the \
+             counter BEFORE the resume-site reset zeroes it; they appear reordered, which \
+             makes the counter always 0 at the read → the FIFO never re-arms after a \
+             reconnect. Re-order so the guard precedes the reset."
+        );
     }
 
     #[test]

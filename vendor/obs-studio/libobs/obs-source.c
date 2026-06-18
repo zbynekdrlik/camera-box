@@ -4421,13 +4421,22 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 			     "preload reserve (preload=%u, target=%u) (#126)",
 			     source->context.name ? source->context.name : "?",
 			     source->genlock_empty_run, (unsigned)GENLOCK_REARM_EMPTY_TICKS,
+			     /* genlock_preload_ms() is a generic frames->ms (ticks * period)
+			      * converter; here it turns the empty-RUN tick count into the
+			      * outage duration in ms (not a preload value) — the "@ tick"
+			      * label disambiguates. */
 			     (unsigned long long)genlock_preload_ms(source->genlock_empty_run),
 			     preload, preload + 1);
 			source->genlock_filled = false; /* re-enter the #102 BUILD phase */
 		}
-		/* The empty run has ended (a frame is queued again) — reset it so a flickering
-		 * empty/non-empty queue (ordinary jitter) can never creep up to the threshold;
-		 * only a genuine sustained disconnect can. Mirrors genlock_empty_run_next(_, true). */
+		/* The empty run has ended — a frame is queued again (this branch is reached only
+		 * with num>=1). Reset UNCONDITIONALLY on entry (before genlock_decide), so a
+		 * flickering empty/non-empty queue (ordinary jitter) can never creep up to the
+		 * threshold; only a genuine sustained disconnect can. The counter is only ever
+		 * nonzero in steady state, where num>=1 always consumes (#102), so resetting "on
+		 * the next queued tick" and "on the next consume" coincide — this mirrors
+		 * genlock_empty_run_next(_, true). NB this runs AFTER the re-arm guard above reads
+		 * the counter (the read must precede the zeroing). */
 		source->genlock_empty_run = 0;
 
 		const bool was_building = !source->genlock_filled;
@@ -6052,8 +6061,16 @@ void obs_source_set_genlock_preload(obs_source_t *source, uint32_t frames)
 	 * current depth already exceeds the new preload, so genlock_decide re-latches
 	 * filled on the very next tick with no repeat. Written under async_mutex (the
 	 * A/V thread reads it in ready_async_frame). */
-	if (clamped != prev)
+	if (clamped != prev) {
 		source->genlock_filled = false;
+		/* camera-box #126: keep the invariant "every site that re-arms the build latch
+		 * also clears the consecutive-empty run" total across all five latch sites
+		 * (create, overrun drain, flush, resume re-arm, and here). Harmless today (this
+		 * path sets filled=false and the resume re-arm requires filled==true, so a stale
+		 * count is already suppressed), but clearing it removes a latent spurious-re-arm
+		 * hazard if a future preload path ever left filled==true. Under async_mutex. */
+		source->genlock_empty_run = 0;
+	}
 	pthread_mutex_unlock(&source->async_mutex);
 
 	if (clamped != prev)
