@@ -110,7 +110,10 @@ pub struct LatencySample {
 /// everything else is treated as cam2 content. Returns the FIRST of each kind
 /// (a frame carries at most one of each on the probe scene; the dual-QR cam2 halves
 /// share one `gen_ts_ns`, so either half gives the same cam2 paint instant).
-pub fn split_payloads(frame: &RecordingFrame, burn_run_id: u32) -> (Option<Payload>, Option<Payload>) {
+pub fn split_payloads(
+    frame: &RecordingFrame,
+    burn_run_id: u32,
+) -> (Option<Payload>, Option<Payload>) {
     let mut cam2: Option<Payload> = None;
     let mut node: Option<Payload> = None;
     for p in &frame.payloads {
@@ -306,7 +309,11 @@ mod tests {
 
     #[test]
     fn split_separates_node_from_cam2_by_run_id() {
-        let f = frame(0, Some((CAM2, 100, 1_000)), Some((BURN_RUN_ID_STRIH, 7, 2_000)));
+        let f = frame(
+            0,
+            Some((CAM2, 100, 1_000)),
+            Some((BURN_RUN_ID_STRIH, 7, 2_000)),
+        );
         let (cam2, node) = split_payloads(&f, BURN_RUN_ID_STRIH);
         assert_eq!(cam2.unwrap().run_id, CAM2);
         assert_eq!(node.unwrap().run_id, BURN_RUN_ID_STRIH);
@@ -341,23 +348,42 @@ mod tests {
         let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
         assert_eq!(samples.len(), 5);
         let h = hop_latency("cam→strih", &samples).unwrap();
-        assert!((h.stats.p50_ms - 200.0).abs() < 1e-6, "p50 {}", h.stats.p50_ms);
+        assert!(
+            (h.stats.p50_ms - 200.0).abs() < 1e-6,
+            "p50 {}",
+            h.stats.p50_ms
+        );
         assert!((h.stats.p99_ms - 200.0).abs() < 1e-6);
         assert!((h.jitter_ms).abs() < 1e-6, "no jitter on a constant offset");
-        assert!(h.drift_ms_per_min.abs() < 1e-6, "no drift on a constant offset");
+        assert!(
+            h.drift_ms_per_min.abs() < 1e-6,
+            "no drift on a constant offset"
+        );
     }
 
     #[test]
     fn cam_strih_skips_frames_missing_either_stamp() {
         let base = 1_700_000_000_000_000_000i64;
         let frames = vec![
-            frame(0, Some((CAM2, 1, base)), Some((BURN_RUN_ID_STRIH, 10, base + 100_000_000))),
+            frame(
+                0,
+                Some((CAM2, 1, base)),
+                Some((BURN_RUN_ID_STRIH, 10, base + 100_000_000)),
+            ),
             frame(1, Some((CAM2, 2, base)), None), // no burn → skip
             frame(2, None, Some((BURN_RUN_ID_STRIH, 11, base))), // no cam2 → skip
-            frame(3, Some((CAM2, 3, base + 1)), Some((BURN_RUN_ID_STRIH, 12, base + 1 + 100_000_000))),
+            frame(
+                3,
+                Some((CAM2, 3, base + 1)),
+                Some((BURN_RUN_ID_STRIH, 12, base + 1 + 100_000_000)),
+            ),
         ];
         let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
-        assert_eq!(samples.len(), 2, "only the two complete frames yield samples");
+        assert_eq!(
+            samples.len(),
+            2,
+            "only the two complete frames yield samples"
+        );
         let h = hop_latency("cam→strih", &samples).unwrap();
         assert!((h.stats.p50_ms - 100.0).abs() < 1e-6);
     }
@@ -367,8 +393,16 @@ mod tests {
         // gen_ts_ns == 0 is the unstamped sentinel; a frame with it must NOT produce
         // a giant false latency.
         let frames = vec![
-            frame(0, Some((CAM2, 1, 0)), Some((BURN_RUN_ID_STRIH, 10, 200_000_000))),
-            frame(1, Some((CAM2, 2, 1_700_000_000_000_000_000)), Some((BURN_RUN_ID_STRIH, 11, 0))),
+            frame(
+                0,
+                Some((CAM2, 1, 0)),
+                Some((BURN_RUN_ID_STRIH, 10, 200_000_000)),
+            ),
+            frame(
+                1,
+                Some((CAM2, 2, 1_700_000_000_000_000_000)),
+                Some((BURN_RUN_ID_STRIH, 11, 0)),
+            ),
         ];
         let samples = cam_strih_samples(&frames, BURN_RUN_ID_STRIH);
         assert!(samples.is_empty(), "unstamped frames produce no sample");
@@ -384,7 +418,11 @@ mod tests {
         let strih: Vec<RecordingFrame> = (0..6u64)
             .map(|i| {
                 let strih_g = base + i as i64 * 33_000_000;
-                frame(i, Some((CAM2, 500 + i as u32, base - 1)), Some((BURN_RUN_ID_STRIH, 70 + i as u32, strih_g)))
+                frame(
+                    i,
+                    Some((CAM2, 500 + i as u32, base - 1)),
+                    Some((BURN_RUN_ID_STRIH, 70 + i as u32, strih_g)),
+                )
             })
             .collect();
         // stream: same cam2 ticks (500..505) but shifted capture position, +40 ms render.
@@ -392,13 +430,21 @@ mod tests {
             .map(|i| {
                 let strih_g = base + i as i64 * 33_000_000;
                 let stream_g = strih_g + 40_000_000; // +40 ms
-                frame(i + 3, Some((CAM2, 500 + i as u32, base - 1)), Some((BURN_RUN_ID_STREAM, 90 + i as u32, stream_g)))
+                frame(
+                    i + 3,
+                    Some((CAM2, 500 + i as u32, base - 1)),
+                    Some((BURN_RUN_ID_STREAM, 90 + i as u32, stream_g)),
+                )
             })
             .collect();
         let samples = strih_stream_samples(&strih, &stream, BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM);
         assert_eq!(samples.len(), 6, "all six shared cam2 ticks pair");
         let h = hop_latency("strih→stream", &samples).unwrap();
-        assert!((h.stats.p50_ms - 40.0).abs() < 1e-6, "p50 {}", h.stats.p50_ms);
+        assert!(
+            (h.stats.p50_ms - 40.0).abs() < 1e-6,
+            "p50 {}",
+            h.stats.p50_ms
+        );
         assert!(h.jitter_ms.abs() < 1e-6);
     }
 
@@ -407,14 +453,38 @@ mod tests {
         let base = 1_700_000_000_000_000_000i64;
         // strih has ticks 1,2,3; stream has ticks 2,3,4 — only 2,3 are shared.
         let strih = vec![
-            frame(0, Some((CAM2, 1, base)), Some((BURN_RUN_ID_STRIH, 10, base + 1_000_000))),
-            frame(1, Some((CAM2, 2, base)), Some((BURN_RUN_ID_STRIH, 11, base + 2_000_000))),
-            frame(2, Some((CAM2, 3, base)), Some((BURN_RUN_ID_STRIH, 12, base + 3_000_000))),
+            frame(
+                0,
+                Some((CAM2, 1, base)),
+                Some((BURN_RUN_ID_STRIH, 10, base + 1_000_000)),
+            ),
+            frame(
+                1,
+                Some((CAM2, 2, base)),
+                Some((BURN_RUN_ID_STRIH, 11, base + 2_000_000)),
+            ),
+            frame(
+                2,
+                Some((CAM2, 3, base)),
+                Some((BURN_RUN_ID_STRIH, 12, base + 3_000_000)),
+            ),
         ];
         let stream = vec![
-            frame(0, Some((CAM2, 2, base)), Some((BURN_RUN_ID_STREAM, 20, base + 12_000_000))),
-            frame(1, Some((CAM2, 3, base)), Some((BURN_RUN_ID_STREAM, 21, base + 13_000_000))),
-            frame(2, Some((CAM2, 4, base)), Some((BURN_RUN_ID_STREAM, 22, base + 14_000_000))),
+            frame(
+                0,
+                Some((CAM2, 2, base)),
+                Some((BURN_RUN_ID_STREAM, 20, base + 12_000_000)),
+            ),
+            frame(
+                1,
+                Some((CAM2, 3, base)),
+                Some((BURN_RUN_ID_STREAM, 21, base + 13_000_000)),
+            ),
+            frame(
+                2,
+                Some((CAM2, 4, base)),
+                Some((BURN_RUN_ID_STREAM, 22, base + 14_000_000)),
+            ),
         ];
         let samples = strih_stream_samples(&strih, &stream, BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM);
         // tick 2: 12-2=10 ms ; tick 3: 13-3=10 ms ; tick 1 & 4 unshared.
@@ -428,9 +498,15 @@ mod tests {
         // Latencies 100×98 then 300×2 → p50≈100, p99≈300, jitter≈200.
         let base = 1_700_000_000_000_000_000i64;
         let mut samples: Vec<LatencySample> = (0..98)
-            .map(|i| LatencySample { latency_ms: 100.0, at_ns: base + i })
+            .map(|i| LatencySample {
+                latency_ms: 100.0,
+                at_ns: base + i,
+            })
             .collect();
-        samples.extend((0..2).map(|i| LatencySample { latency_ms: 300.0, at_ns: base + 98 + i }));
+        samples.extend((0..2).map(|i| LatencySample {
+            latency_ms: 300.0,
+            at_ns: base + 98 + i,
+        }));
         let h = hop_latency("x", &samples).unwrap();
         assert!((h.stats.p50_ms - 100.0).abs() < 1e-9);
         assert!((h.stats.p99_ms - 300.0).abs() < 1e-9);
@@ -443,7 +519,7 @@ mod tests {
         let base = 1_700_000_000_000_000_000i64;
         let samples: Vec<LatencySample> = (0..=10)
             .map(|m| LatencySample {
-                latency_ms: 200.0 + m as f64, // +1 ms each minute
+                latency_ms: 200.0 + m as f64,            // +1 ms each minute
                 at_ns: base + m as i64 * 60_000_000_000, // one sample per minute
             })
             .collect();
@@ -465,7 +541,10 @@ mod tests {
             })
             .collect();
         let h = hop_latency("x", &samples).unwrap();
-        assert!(h.drift_ms_per_min.abs() < 1e-6, "constant latency = zero drift");
+        assert!(
+            h.drift_ms_per_min.abs() < 1e-6,
+            "constant latency = zero drift"
+        );
         assert!(h.jitter_ms.abs() < 1e-9);
     }
 
