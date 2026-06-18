@@ -226,6 +226,76 @@ pub fn genlock_build_drain(queue_depth: usize, preload: u32) -> usize {
     queue_depth.saturating_sub(target)
 }
 
+/// Re-arm threshold: the number of CONSECUTIVE true-empty (underrun) render ticks a
+/// genlock FIFO must see in steady state before a resume counts as a reconnect and
+/// re-arms the build latch (#126).
+///
+/// Chosen at **30 ticks ≈ 1 s @ 30 fps** — deliberately FAR above any realistic
+/// arrival-jitter dip. The #102 reserve already makes a single-tick (or even a few
+/// consecutive) empties impossible without a real outage: in steady state the queue
+/// parks at `preload` after each consume, so it takes `preload + 1` consecutive missed
+/// deliveries even to REACH a true empty, and only a genuine upstream disconnect (the
+/// strih OBS restart this fixes) sustains true-empties for ~1 s. A LOWER threshold
+/// would risk a spurious re-arm at the shallow cam `preload = 1`, where a 1–2 tick
+/// transient empty must NOT re-arm — a spurious re-arm forces a ~`preload`-frame
+/// rebuild HOLD on every blip. The cost of the chosen value is bounded and acceptable:
+/// recovery after a real reconnect is ~1 s (the detection window) plus one rebuild hold
+/// (~`preload + 1` frames) — versus the silent video-delay collapse (A/V drift) the bug
+/// causes until a manual nudge. Mirrors the C `#define GENLOCK_REARM_EMPTY_TICKS`.
+pub const GENLOCK_REARM_EMPTY_TICKS: u32 = 30;
+
+/// Advance the per-source consecutive-true-empty counter for one render tick (#126).
+///
+/// `consumed` — whether a frame was QUEUED (`num >= 1`) this tick. The counter is only
+/// ever nonzero in steady state, where the #102 invariant guarantees a queued frame is
+/// always consumed (`queue_depth >= 1` ⇒ consume) — so "a frame was queued again" and
+/// "a frame was consumed" coincide for every tick that can reset a nonzero counter, and
+/// modelling the reset as `consumed=true` is exact. (The C side resets at the same
+/// instant: on entry to the genlock branch of `ready_async_frame`, which is reached only
+/// with `num >= 1`.)
+/// * a queued/consumed tick **resets** the run to 0 (so a flickering empty/non-empty
+///   queue — normal jitter — can NEVER accumulate to [`GENLOCK_REARM_EMPTY_TICKS`]; only
+///   a genuine sustained disconnect can);
+/// * a true empty **increments** the run (saturating, so a very long outage never wraps).
+///
+/// Mirrors the C `source->genlock_empty_run` bookkeeping in `obs-source.c`
+/// (`++` at the `get_closest_frame` num==0 underrun site, `= 0` on the next tick a frame
+/// is queued — i.e. on entry to the `ready_async_frame` genlock branch).
+pub fn genlock_empty_run_next(empty_run: u32, consumed: bool) -> u32 {
+    if consumed {
+        0
+    } else {
+        empty_run.saturating_add(1)
+    }
+}
+
+/// Decide whether a resuming genlock FIFO should RE-ARM its build latch (#126).
+///
+/// On an upstream OBS (strih) restart the downstream NDI source underruns to EMPTY, but
+/// DistroAV's default `KEEP_CONTENT` blocks the only NULL-emit reset, and an underrun
+/// (not an overrun) never fires the `cache_video` force-drain reset — so `genlock_filled`
+/// stays **true**. The #102 steady branch then consumes 1/tick the instant the queue
+/// refills WITHOUT rebuilding the preload reserve, so the deliberate ~26-frame video
+/// delay silently collapses to ~0 (A/V drift) until a manual preload nudge.
+///
+/// The fix: when frames RESUME after a SUSTAINED true-empty run, re-arm `genlock_filled`
+/// to `false` so the EXISTING #102 build path + #116 drain rebuild the reserve to exactly
+/// `preload + 1` — no manual nudge, NO new draining logic.
+///
+/// Returns `true` (re-arm) only when BOTH:
+/// * the source is in STEADY state (`filled == true`) — while building, the reserve is
+///   already being rebuilt, so re-arming is meaningless; AND
+/// * the consecutive-empty run is at/above [`GENLOCK_REARM_EMPTY_TICKS`] — the
+///   jitter-safety guard that keeps a brief (sub-threshold) dip from spuriously
+///   re-arming (which would force a ~`preload`-frame hold on every blip, catastrophic at
+///   the shallow cam `preload = 1`).
+///
+/// Mirrors the C `genlock_empty_run >= GENLOCK_REARM_EMPTY_TICKS && source->genlock_filled`
+/// guard taken on the resume tick in `ready_async_frame`.
+pub fn genlock_rearm_on_resume(empty_run: u32, filled: bool) -> bool {
+    filled && empty_run >= GENLOCK_REARM_EMPTY_TICKS
+}
+
 /// Convert a preload depth (frames of genlock-disciplined delay) into the
 /// equivalent **delay in milliseconds** at a given output frame rate.
 ///
@@ -274,6 +344,78 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #126: reconnect re-arm (sustained-empty → rebuild) ----------------
+
+    #[test]
+    fn rearm_unit_fires_only_after_sustained_empty_in_steady_state() {
+        // Re-arm fires when the source is in STEADY state (filled) AND it has just
+        // resumed after a sustained true-empty run >= the threshold.
+        assert!(
+            genlock_rearm_on_resume(GENLOCK_REARM_EMPTY_TICKS, true),
+            "an empty run AT the threshold while filled must re-arm"
+        );
+        assert!(
+            genlock_rearm_on_resume(GENLOCK_REARM_EMPTY_TICKS + 50, true),
+            "an empty run past the threshold while filled must re-arm"
+        );
+    }
+
+    #[test]
+    fn rearm_unit_brief_empty_below_threshold_never_rearms() {
+        // The jitter-safety guard: a brief empty (1..threshold-1) must NOT re-arm —
+        // a spurious re-arm would force a ~preload-frame rebuild hold on every blip,
+        // catastrophic at the shallow cam preload=1.
+        for run in 0..GENLOCK_REARM_EMPTY_TICKS {
+            assert!(
+                !genlock_rearm_on_resume(run, true),
+                "empty run {run} < threshold {GENLOCK_REARM_EMPTY_TICKS} must NOT re-arm"
+            );
+        }
+    }
+
+    #[test]
+    fn rearm_unit_never_fires_while_building() {
+        // While !filled the FIFO is already in the build phase rebuilding the reserve;
+        // re-arming again is a no-op concept — never fire when not filled, at ANY run.
+        for run in [
+            0u32,
+            1,
+            GENLOCK_REARM_EMPTY_TICKS,
+            GENLOCK_REARM_EMPTY_TICKS + 100,
+        ] {
+            assert!(
+                !genlock_rearm_on_resume(run, false),
+                "must never re-arm while !filled (run {run})"
+            );
+        }
+    }
+
+    #[test]
+    fn rearm_threshold_is_safely_above_jitter() {
+        // ~1 s @ 30 fps. Must be far above any realistic single-dip jitter so normal
+        // operation NEVER re-arms (only a real disconnect sustains empties this long).
+        assert_eq!(GENLOCK_REARM_EMPTY_TICKS, 30);
+    }
+
+    #[test]
+    fn rearm_empty_run_resets_on_any_consume() {
+        // The empty-run counter must reset to 0 whenever a distinct frame is consumed
+        // (modelled by genlock_empty_run_next: a consume zeroes it, a true-empty +1).
+        assert_eq!(genlock_empty_run_next(5, true), 0, "consume resets the run");
+        assert_eq!(
+            genlock_empty_run_next(5, false),
+            6,
+            "true-empty increments the run"
+        );
+        assert_eq!(
+            genlock_empty_run_next(0, false),
+            1,
+            "first empty after a consume"
+        );
+        // Saturates — never wraps on a very long disconnect.
+        assert_eq!(genlock_empty_run_next(u32::MAX, false), u32::MAX);
+    }
 
     #[test]
     fn build_drain_unit_trims_to_target() {

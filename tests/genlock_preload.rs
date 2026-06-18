@@ -15,9 +15,10 @@
 //!     `git subtree pull` (#44) can't silently revert it.
 
 use camera_box::probe::genlock::{
-    genlock_build_drain, genlock_decide, genlock_drop_cap, parse_preload, preload_to_ms,
-    steady_state_depth, GenlockDecision, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT,
-    GENLOCK_PRELOAD_MAX, MAX_ASYNC_FRAMES,
+    genlock_build_drain, genlock_decide, genlock_drop_cap, genlock_empty_run_next,
+    genlock_rearm_on_resume, parse_preload, preload_to_ms, steady_state_depth, GenlockDecision,
+    GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
+    GENLOCK_REARM_EMPTY_TICKS, MAX_ASYNC_FRAMES,
 };
 
 // ---- pure decision logic ---------------------------------------------------
@@ -544,10 +545,152 @@ fn steady_state_consume_gate_unchanged_by_116() {
     }
 }
 
+// ---- #126: reconnect re-arm (upstream OBS restart → rebuild the reserve) -----
+//
+// On an upstream (strih) OBS restart the downstream (stream) NDI source underruns to
+// EMPTY, but DistroAV's default KEEP_CONTENT blocks the NULL-emit reset path, and an
+// underrun (not an overrun) never fires the cache_video force-drain reset — so
+// `genlock_filled` stays TRUE. The #102 steady branch then consumes 1/tick the moment
+// the queue refills WITHOUT rebuilding the preload reserve, so the ~26-frame video
+// delay silently collapses to ~0 (A/V drift) until a manual nudge.
+//
+// #126 tracks consecutive true-empty (underrun) ticks; when frames RESUME after a
+// SUSTAINED empty run (>= GENLOCK_REARM_EMPTY_TICKS) it re-arms `genlock_filled=false`
+// so the existing #102 build path + #116 drain rebuild the reserve to exactly
+// `preload+1` deterministically — no manual nudge. The threshold is large enough that
+// normal jitter (esp. shallow cam preload=1) NEVER spuriously re-arms.
+
+#[test]
+fn sustained_empty_then_resume_rearms_and_rebuilds_deep_preload() {
+    // The headline scenario: deep preload=26 (the ~0.9s stream-box video delay). A
+    // real reconnect sustains true-empties past the threshold; on resume the source
+    // re-arms and the build path + #116 drain rebuild the reserve to preload+1 = 27.
+    let preload = 26u32;
+    let target = steady_state_depth(preload) as usize; // 27
+
+    // Steady state, then a sustained disconnect: the empty-run counter climbs.
+    let mut empty_run = 0u32;
+    for _ in 0..GENLOCK_REARM_EMPTY_TICKS {
+        // No re-arm WHILE empty (ready_async_frame is not even reached at num==0);
+        // the counter just accumulates per the empty-tick model.
+        empty_run = genlock_empty_run_next(empty_run, /*consumed=*/ false);
+    }
+    assert_eq!(empty_run, GENLOCK_REARM_EMPTY_TICKS);
+
+    // Frames RESUME (queue refills): the re-arm decision is taken on the resume tick.
+    let filled_before_resume = true;
+    let rearm = genlock_rearm_on_resume(empty_run, filled_before_resume);
+    assert!(
+        rearm,
+        "a sustained empty (>= threshold) then resume must re-arm"
+    );
+
+    // Re-armed: filled=false → the FIFO re-enters the #102 BUILD phase. It holds while
+    // depth <= preload, then latches at the first tick depth > preload, and #116 drains
+    // any startup burst straight down to the deterministic target (preload+1).
+    let filled = !rearm; // false
+                         // Build phase holds until past preload.
+    for depth in 0..=preload as usize {
+        assert!(
+            !genlock_decide(depth, preload, filled).consume,
+            "depth={depth}: must HOLD (rebuild) while filling back to the preload reserve"
+        );
+    }
+    // First tick past preload: latch + consume; the deep refill burst is drained to target.
+    let d = genlock_decide(preload as usize + 1, preload, filled);
+    assert!(
+        d.consume && d.filled,
+        "latch fires once depth exceeds preload again"
+    );
+    // Any refill burst (>= target) settles at the deterministic target = preload+1 = 27.
+    for burst in target..=target + 40 {
+        let settled = burst - genlock_build_drain(burst, preload);
+        assert_eq!(
+            settled, target,
+            "burst={burst}: the rebuilt reserve must settle at preload+1 ({target})"
+        );
+    }
+}
+
+#[test]
+fn brief_empty_then_resume_does_not_rearm_no_rebuild_hold() {
+    // The jitter-safety guard (the dangerous direction): a BRIEF empty (1..3 ticks),
+    // e.g. ordinary NDI arrival jitter at the shallow cam preload=1, must NEVER re-arm.
+    // A spurious re-arm would force a ~preload-frame rebuild HOLD on every jitter blip.
+    for preload in [1u32, 2, 26] {
+        for brief in 1..GENLOCK_REARM_EMPTY_TICKS.min(4) {
+            let mut empty_run = 0u32;
+            for _ in 0..brief {
+                empty_run = genlock_empty_run_next(empty_run, false);
+            }
+            assert_eq!(empty_run, brief);
+            assert!(
+                !genlock_rearm_on_resume(empty_run, true),
+                "preload={preload}: a brief empty of {brief} (< threshold \
+                 {GENLOCK_REARM_EMPTY_TICKS}) must NOT re-arm — no spurious rebuild hold"
+            );
+            // Because filled STAYS true, the #102 steady gate keeps consuming on resume
+            // (no rebuild hold). The reserve is preserved across the transient dip.
+            assert!(
+                genlock_decide(1, preload, /*filled=*/ true).consume,
+                "preload={preload}: after a brief dip the steady gate keeps consuming \
+                 (no rebuild) — the reserve is preserved"
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_run_counter_resets_on_each_distinct_consume() {
+    // The counter only sustains across CONSECUTIVE empties; any consumed frame zeroes
+    // it. So a queue that flickers empty/non-empty (jitter) can never accumulate to the
+    // threshold — only a genuine sustained disconnect can.
+    let mut empty_run = 0u32;
+    // 10 cycles of {1 empty, 1 consume} — jitter that never sustains.
+    for _ in 0..10 {
+        empty_run = genlock_empty_run_next(empty_run, false); // empty
+        assert!(
+            !genlock_rearm_on_resume(empty_run, true),
+            "1 empty never re-arms"
+        );
+        empty_run = genlock_empty_run_next(empty_run, true); // consume
+        assert_eq!(empty_run, 0, "a consume must reset the empty-run counter");
+    }
+}
+
+#[test]
+fn rearm_preserves_102_steady_consume_and_116_drain() {
+    // PRESERVE #102 + #116: the re-arm reuses the EXISTING build+drain path and adds NO
+    // new draining logic. In steady state with no sustained empty, behavior is exactly
+    // the proven #102 gate; the #116 drain is unchanged.
+    for preload in [0u32, 1, 2, 26, 30, 128] {
+        // No sustained empty → no re-arm → #102 steady consume-when-queued is untouched.
+        assert!(!genlock_rearm_on_resume(0, true));
+        for depth in 1..=(preload as usize + 5) {
+            assert!(
+                genlock_decide(depth, preload, true).consume,
+                "preload={preload} depth={depth}: #102 steady consume must survive #126"
+            );
+        }
+        // True empty in steady state still holds, filled stays set (no spurious refill).
+        assert_eq!(
+            genlock_decide(0, preload, true),
+            GenlockDecision {
+                consume: false,
+                filled: true
+            }
+        );
+        // #116 build drain unchanged: trims to target = preload+1.
+        let target = steady_state_depth(preload) as usize;
+        assert_eq!(genlock_build_drain(target + 7, preload), 7);
+        assert_eq!(genlock_build_drain(target, preload), 0);
+    }
+}
+
 // ---- vendored-source guard (the C patch must stay applied) ------------------
 
 mod vendored_source {
-    use camera_box::probe::genlock::GENLOCK_PRELOAD_MAX;
+    use camera_box::probe::genlock::{GENLOCK_PRELOAD_MAX, GENLOCK_REARM_EMPTY_TICKS};
     use std::path::PathBuf;
 
     pub fn vendor_file(rel: &str) -> String {
@@ -668,6 +811,97 @@ mod vendored_source {
         assert!(
             src.contains("genlock_build_drain"),
             "{OBS_SOURCE}: #116 — the build-drain helper genlock_build_drain is missing."
+        );
+    }
+
+    #[test]
+    fn reconnect_rearm_on_sustained_empty_in_vendored_source() {
+        // #126: on an upstream OBS restart the downstream NDI source underruns to empty
+        // but genlock_filled stays TRUE (KEEP_CONTENT blocks the NULL-emit reset; an
+        // underrun never fires the overrun force-drain), so the #102 steady gate consumes
+        // 1/tick on reconnect WITHOUT rebuilding the preload reserve — the video delay
+        // silently collapses to ~0 until a manual nudge. The fix tracks consecutive
+        // true-empty ticks (genlock_empty_run) and, on resume after a SUSTAINED empty run
+        // (>= GENLOCK_REARM_EMPTY_TICKS), re-arms genlock_filled=false so the existing
+        // build path + #116 drain rebuild the reserve. A subtree pull (#44) reverting this
+        // would silently bring the A/V-drift-on-restart bug back.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // The consecutive-empty counter must be incremented at the true-empty
+        // (num==0) underrun site so a sustained gap is detectable.
+        assert!(
+            src.contains("source->genlock_empty_run++"),
+            "{OBS_SOURCE}: #126 — the consecutive true-empty counter \
+             (genlock_empty_run) is no longer incremented at the num==0 underrun; the \
+             reconnect re-arm can't detect a sustained gap. Re-apply the #126 fix."
+        );
+        // The re-arm decision must be taken on resume (in ready_async_frame), guarded by
+        // the threshold so brief jitter NEVER re-arms (the shallow-preload spurious-hold
+        // hazard the issue calls out).
+        assert!(
+            src.contains("GENLOCK_REARM_EMPTY_TICKS"),
+            "{OBS_SOURCE}: #126 — the re-arm threshold GENLOCK_REARM_EMPTY_TICKS is \
+             missing; without a high threshold normal jitter would spuriously re-arm and \
+             force a ~preload-frame rebuild hold on every blip. Re-apply."
+        );
+        // The re-arm must reset the latch (filled=false) so the EXISTING build path
+        // rebuilds — no new draining logic is added (#102/#116 preserved).
+        assert!(
+            src.contains("genlock_empty_run >= GENLOCK_REARM_EMPTY_TICKS"),
+            "{OBS_SOURCE}: #126 — the sustained-empty re-arm guard \
+             (genlock_empty_run >= GENLOCK_REARM_EMPTY_TICKS) is gone; re-apply."
+        );
+        // The counter must reset on a consume so jitter (flicker empty/non-empty) can
+        // never accumulate to the threshold — only a genuine sustained disconnect can.
+        assert!(
+            src.contains("source->genlock_empty_run = 0"),
+            "{OBS_SOURCE}: #126 — genlock_empty_run is never reset on a consume; a \
+             flickering queue would creep to the threshold and spuriously re-arm. Re-apply."
+        );
+        // The threshold must be ~1 s @ 30 fps (30 ticks) — large enough that a real
+        // disconnect, not jitter, is required to trip it. Pin the value to the mirror.
+        assert!(
+            src.contains("#define GENLOCK_REARM_EMPTY_TICKS 30"),
+            "{OBS_SOURCE}: #126 — GENLOCK_REARM_EMPTY_TICKS must be 30 (~1 s @ 30 fps); \
+             the Rust mirror is {GENLOCK_REARM_EMPTY_TICKS}."
+        );
+        assert_eq!(
+            GENLOCK_REARM_EMPTY_TICKS, 30,
+            "Rust mirror must equal the C re-arm threshold"
+        );
+        // (review) Pin the relative ORDER: the re-arm guard must READ genlock_empty_run
+        // BEFORE the resume-site reset zeroes it. A subtree pull that reordered them
+        // (reset above the guard) would pass the token-presence checks above yet silently
+        // break the re-arm (the counter is always 0 at the read → never re-arms). Find the
+        // guard position in the squished source, then the FIRST reset that follows it (the
+        // resume-site reset) — the guard index must be the smaller.
+        let guard_at = src
+            .find("genlock_empty_run >= GENLOCK_REARM_EMPTY_TICKS")
+            .expect("the #126 re-arm guard must be present");
+        let reset_after_guard = src[guard_at..]
+            .find("genlock_empty_run = 0")
+            .map(|i| guard_at + i)
+            .expect(
+                "a genlock_empty_run reset must follow the #126 re-arm guard (the resume-site \
+                 reset)",
+            );
+        assert!(
+            guard_at < reset_after_guard,
+            "{OBS_SOURCE}: #126 — the re-arm guard (genlock_empty_run >= …) must READ the \
+             counter BEFORE the resume-site reset zeroes it; they appear reordered, which \
+             makes the counter always 0 at the read → the FIFO never re-arms after a \
+             reconnect. Re-order so the guard precedes the reset."
+        );
+    }
+
+    #[test]
+    fn empty_run_field_in_struct() {
+        // #126: the consecutive true-empty counter must be a per-source field (read +
+        // written by the A/V thread under async_mutex, same as genlock_filled, #93 lesson).
+        let hdr = squish(&vendor_file(OBS_INTERNAL));
+        assert!(
+            hdr.contains("genlock_empty_run"),
+            "{OBS_INTERNAL}: #126 — the per-source consecutive-empty counter field \
+             genlock_empty_run is missing from obs_source; re-apply."
         );
     }
 

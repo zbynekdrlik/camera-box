@@ -65,7 +65,18 @@ jobs:
       # drives that full path. ffmpeg is already a camera-box runtime dependency
       # (ndi.rs MJPEG decode).
       - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: |
+          # ffmpeg via a prebuilt STATIC binary from GitHub releases (BtbN), NOT apt.
+          # `apt-get install ffmpeg` pulls 87 packages / ~63 MB from the (often throttled)
+          # Ubuntu mirror and intermittently stalls for many minutes, wedging CI (#114/#127).
+          # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
+          # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
+          # path needs.
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
+          sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
+          ffmpeg -version | head -1
 
       - name: Run tests
         run: cargo test --all-features --verbose
@@ -92,7 +103,18 @@ jobs:
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
       - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: |
+          # ffmpeg via a prebuilt STATIC binary from GitHub releases (BtbN), NOT apt.
+          # `apt-get install ffmpeg` pulls 87 packages / ~63 MB from the (often throttled)
+          # Ubuntu mirror and intermittently stalls for many minutes, wedging CI (#114/#127).
+          # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
+          # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
+          # path needs.
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
+          sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
+          ffmpeg -version | head -1
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
