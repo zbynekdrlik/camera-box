@@ -145,9 +145,10 @@ static void *burn_filter_create(obs_data_t *, obs_source_t *source)
 	return f;
 }
 
-static void burn_free_gfx(burn_filter *f)
+// Destroy the GPU composite resources. Caller MUST already hold the graphics context
+// (e.g. from inside video_render, or wrapped by burn_free_gfx off-thread).
+static void burn_destroy_gfx_locked(burn_filter *f)
 {
-	obs_enter_graphics();
 	if (f->texrender) {
 		gs_texrender_destroy(f->texrender);
 		f->texrender = nullptr;
@@ -160,6 +161,16 @@ static void burn_free_gfx(burn_filter *f)
 		gs_texture_destroy(f->out_texture);
 		f->out_texture = nullptr;
 	}
+}
+
+// Off-graphics-thread free (e.g. from destroy): take the graphics context, then destroy.
+// gs_enter_context is refcount-recursive, so this is also safe if ever called with the
+// context held, but the render path uses burn_destroy_gfx_locked directly (no redundant
+// enter) per the libobs idiom.
+static void burn_free_gfx(burn_filter *f)
+{
+	obs_enter_graphics();
+	burn_destroy_gfx_locked(f);
 	obs_leave_graphics();
 }
 
@@ -181,7 +192,10 @@ static bool burn_ensure_size(burn_filter *f, uint32_t width, uint32_t height)
 	    f->out_texture && f->work)
 		return true;
 
-	burn_free_gfx(f);
+	// Called from video_render with the graphics context already held: destroy + recreate
+	// directly (no redundant obs_enter_graphics — the libobs idiom, matches ndi-filter.cpp
+	// which calls gs_stagesurface_create inside video_render without entering the context).
+	burn_destroy_gfx_locked(f);
 	if (f->work) {
 		bfree(f->work);
 		f->work = nullptr;
@@ -299,10 +313,29 @@ static void burn_filter_videorender(void *data, gs_effect_t *)
 	gs_texture_set_image(f->out_texture, f->work, tight, false);
 
 	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	gs_eparam_t *image = gs_effect_get_param_by_name(def, "image");
-	gs_effect_set_texture(image, f->out_texture);
+	gs_eparam_t *image = def ? gs_effect_get_param_by_name(def, "image") : nullptr;
+	if (!def || !image) {
+		// Default effect unavailable (graphics-reset window): pass the source through
+		// rather than crash the graphics thread (the burn is dropped for this frame).
+		obs_log(LOG_WARNING, "[burn] default effect/param unavailable; passing frame through");
+		obs_source_skip_video_filter(f->context);
+		return;
+	}
+
+	// Draw sRGB-correctly, exactly as libobs render_filter_tex (obs-source.c) does: under
+	// OBS's default linear-sRGB pipeline the texture MUST be bound via the _srgb setter and
+	// the framebuffer-sRGB state enabled, or the composited program video is drawn with the
+	// wrong gamma (washed/shifted colors) downstream into the recording.
+	const bool linear_srgb = gs_get_linear_srgb();
+	const bool prev_srgb = gs_framebuffer_srgb_enabled();
+	gs_enable_framebuffer_srgb(linear_srgb);
+	if (linear_srgb)
+		gs_effect_set_texture_srgb(image, f->out_texture);
+	else
+		gs_effect_set_texture(image, f->out_texture);
 	while (gs_effect_loop(def, "Draw"))
 		gs_draw_sprite(f->out_texture, 0, width, height);
+	gs_enable_framebuffer_srgb(prev_srgb);
 }
 
 struct obs_source_info create_ndi_burn_filter_info()
