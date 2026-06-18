@@ -80,6 +80,11 @@ target_sources(
     src/ndi-finder.cpp
     src/ndi-output.cpp
     src/ndi-source.cpp
+    # #111: QR render-time burn filter (Path B) + its vendored QR encoder (Nayuki
+    # qrcodegen, MIT). Header-only burn-payload/burn-clock/burn-qr are pulled in by the
+    # filter TU; only the qrcodegen .cpp needs compiling. No external build dependency.
+    src/ndi-burn-filter.cpp
+    src/qrcodegen/qrcodegen.cpp
     src/plugin-main.cpp
     src/plugin-main.h
     src/premultiplied-alpha-filter.cpp

@@ -65,6 +65,10 @@ struct obs_source_info ndi_audiofilter_info;
 extern struct obs_source_info create_alpha_filter_info();
 struct obs_source_info alpha_filter_info;
 
+// #111: QR render-time burn filter (frame-exact per-hop latency foundation, Path B).
+extern struct obs_source_info create_ndi_burn_filter_info();
+struct obs_source_info ndi_burn_filter_info;
+
 const NDIlib_v6 *load_ndilib();
 
 typedef const NDIlib_v6 *(*NDIlib_v6_load_)(void);
@@ -276,6 +280,14 @@ static void register_plugin_features()
 	obs_register_source(&alpha_filter_info);
 
 	obs_log(LOG_DEBUG, "Plugin features registered: Alpha filter");
+
+	// #111: register the QR render-time burn filter (the #108 per-hop latency probe
+	// foundation). Inert by default — its render path is a transparent pass-through
+	// until OBS_BURN_QR is set, so registering it on the production install is safe.
+	ndi_burn_filter_info = create_ndi_burn_filter_info();
+	obs_register_source(&ndi_burn_filter_info);
+
+	obs_log(LOG_DEBUG, "Plugin features registered: QR burn filter (#111)");
 
 	plugin_features_registered = true;
 	obs_log(LOG_INFO, "register_plugin_features: NDI plugin features registered");

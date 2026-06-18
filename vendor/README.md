@@ -132,6 +132,57 @@ DistroAV:
   Guarded by `tests/genlock_preload.rs` (+ the windows-genlock.yml pwsh gate) so a
   `git subtree pull` can't silently revert it.
 
+- **#111 QR render-time burn filter (per-hop latency probe foundation, Path B)**
+  (`src/ndi-burn-filter.cpp`, `src/burn-payload.hpp`, `src/burn-clock.hpp`,
+  `src/burn-qr.hpp`, `src/qrcodegen/` [Nayuki, MIT], `src/plugin-main.cpp`,
+  `CMakeLists.txt`): a NEW DistroAV effect filter ("DistroAV QR Burn (latency probe)")
+  that burns a per-render QR into the rendered video each frame. The QR carries a payload
+  **byte-identical** to the camera-box probe payload (`src/probe/payload.rs`:
+  `P{run_id}.{frame_id}.{gen_ts_ns}.{crc32}`, CRC-32/ISO-HDLC) so the existing `rqrr`
+  recorded-file decoder (`src/probe/recording.rs`, #106) reads the node's stamp UNCHANGED.
+  `gen_ts_ns` is the boundary-snapped wall-clock (epoch ns — cam2's timebase via
+  `burn_clock::gen_ts_ns`), so #108 (post-event) can subtract `node_stamp − cam2_gen_ts`
+  per hop on one shared clock. NO libobs core change — render flow is
+  texrender → `gs_stage_texture`/map → CPU-draw the QR (qrcodegen EC-High, white quiet
+  zone) → re-upload → `gs_draw_sprite` (the same render→stage path as `ndi-filter.cpp`).
+  Node identity: reserved per-node `run_id`, env-overridable via `OBS_BURN_RUN_ID`
+  (defaults 911002 strih / 911004 stream — outside cam2's range). **Gated behind
+  `OBS_BURN_QR` (default OFF)**: with the env unset the filter is a transparent
+  pass-through, so registering it on the production install is inert until #108 enables it
+  on the dedicated PROBE scene. Guarded by `tests/burn_payload_parity.rs` (which
+  compiles+runs the C++ encoder via g++ and asserts byte-identity with `Payload::encode`,
+  round-trip through the decoder, and that the rendered QR decodes back via rqrr) + the
+  windows-genlock.yml pwsh #111 gate, so a `git subtree pull` can't silently revert it.
+  Scope: this is the BURN only — decoding the burned stamps + computing per-hop latency is
+  #108 (post-event).
+
+### POST-EVENT deploy + enable (#111) — USER-TIMED, do NOT run before the live event
+
+The #111 code ships in the genlock distroav.dll. Deploying it is the **same in-place
+DistroAV artifact swap as the 2026-06-13 / 2026-06-17 genlock upgrades** — user-timed,
+off the live-event window (the user controls when). Steps:
+
+1. **Build:** dispatch `windows-genlock.yml` on the merged `main` commit; download the
+   `obs-genlock-windows-x64` artifact (the #111 pwsh gate proves the burn filter compiled
+   in). `GENLOCK_BUILD_SHA.txt` records the commit.
+2. **Deploy (per box, strih + stream):** back up the current install
+   (`C:\obs-backup\<date>-pre111`), then surgical overwrite-keep-extras of
+   `obs64.exe` + `obs.dll` + first-party `obs-plugins` into `C:\Program Files\obs-studio`
+   and the genlock `distroav.dll` into
+   `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit` (3rd-party plugins preserved).
+   Byte-for-byte diff-verify against the artifact. Graceful OBS shutdown (WebSocket
+   `ExitOBS` / `CloseMainWindow`, never force-kill), relaunch with `cwd = bin\64bit`.
+   `drift-guard --check-pins` must show NO DRIFT.
+3. **PROBE scene + enable:** on a DEDICATED probe scene (NOT a production scene), add the
+   "DistroAV QR Burn (latency probe)" filter to the node's program source. Launch that
+   OBS with `OBS_BURN_QR=1` and `OBS_BURN_RUN_ID=911002` (strih) / `911004` (stream)
+   (optionally `OBS_BURN_QR_PX=700`). The node QR renders in a BOTTOM strip; cam2's QR
+   rides through CENTERED, so both survive in one recorded frame. RECORD the probe scene's
+   program output; #108 decodes the burned + ridden-through stamps and computes per-hop
+   latency.
+4. **Disable after the probe run:** unset `OBS_BURN_QR` (or remove the filter) and relaunch
+   so the production install is unaffected. The filter is inert by default regardless.
+
 ## Build
 
 Local prototyping happens on dev1 (Linux). The production target is a Windows build for

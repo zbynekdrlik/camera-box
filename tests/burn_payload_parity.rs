@@ -15,8 +15,10 @@
 //!      `git subtree pull` (#44) or a build-wiring regression can't silently drop the
 //!      burn filter / encoder.
 
+use camera_box::probe::luma::bgra_to_luma;
 use camera_box::probe::painter::next_wall_boundary_ns;
 use camera_box::probe::payload::Payload;
+use camera_box::probe::qr::decode_qr_luma_all;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -35,6 +37,8 @@ fn squish(s: &str) -> String {
 
 const BURN_PAYLOAD_HPP: &str = "vendor/distroav/src/burn-payload.hpp";
 const BURN_CLOCK_HPP: &str = "vendor/distroav/src/burn-clock.hpp";
+const BURN_QR_HPP: &str = "vendor/distroav/src/burn-qr.hpp";
+const QRCODEGEN_CPP: &str = "vendor/distroav/src/qrcodegen/qrcodegen.cpp";
 const BURN_FILTER: &str = "vendor/distroav/src/ndi-burn-filter.cpp";
 const DISTROAV_CMAKE: &str = "vendor/distroav/CMakeLists.txt";
 const PLUGIN_MAIN: &str = "vendor/distroav/src/plugin-main.cpp";
@@ -50,9 +54,9 @@ fn parity_triples() -> Vec<(u32, u32, i64)> {
         (42, 9001, 1_234_567_890),
         (0, 0, 0),
         (1, 2, 3),
-        (911002, 7, 1_718_600_000_000_000_000),     // strih node stamp
-        (911004, 1, 1_718_600_000_033_333_333),     // stream node stamp
-        (u32::MAX, u32::MAX, i64::MAX),              // upper edges
+        (911002, 7, 1_718_600_000_000_000_000), // strih node stamp
+        (911004, 1, 1_718_600_000_033_333_333), // stream node stamp
+        (u32::MAX, u32::MAX, i64::MAX),         // upper edges
         (123456, 4294967295, 9_000_000_000_000_000), // mixed
     ]
 }
@@ -62,7 +66,12 @@ fn parity_triples() -> Vec<(u32, u32, i64)> {
 /// C++-produced wire strings, one per triple. PANICS (fails the test) if the header is
 /// missing or does not compile — that IS the RED state before the filter is built.
 fn cpp_encode(triples: &[(u32, u32, i64)]) -> Vec<String> {
-    let dir = std::env::temp_dir().join(format!("burn_parity_{}", std::process::id()));
+    // Unique dir PER CALL: tests run concurrently in one process, so a PID-only path
+    // races two writers on the same binary ("Text file busy"). A monotonic counter
+    // isolates each invocation.
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("burn_parity_{}_{}", std::process::id(), seq));
     std::fs::create_dir_all(&dir).unwrap();
     let main_cpp = dir.join("parity_main.cpp");
     let bin = dir.join("parity_main");
@@ -234,7 +243,10 @@ int main(int argc, char **argv) {{
         args.push(now.to_string());
         args.push(period.to_string());
     }
-    let run = Command::new(&bin).args(&args).output().expect("run boundary main");
+    let run = Command::new(&bin)
+        .args(&args)
+        .output()
+        .expect("run boundary main");
     let cpp_out: Vec<i64> = String::from_utf8(run.stdout)
         .unwrap()
         .lines()
@@ -248,6 +260,137 @@ int main(int argc, char **argv) {{
             "boundary math mismatch for now={now} period={period}: C++={cpp} Rust={rust}"
         );
     }
+}
+
+#[test]
+fn cpp_rendered_burn_qr_decodes_back_through_rqrr() {
+    // THE end-to-end proof: the C++ render path (qrcodegen modules -> BGRA, EC-High,
+    // white quiet zone — burn-qr.hpp) must produce a QR that the PRODUCTION recorded-file
+    // decoder (rqrr -> decode_qr_luma_all, src/probe/qr.rs / #106) reads back to the EXACT
+    // burned payloads. A dual-QR frame (left=even tick, right=odd tick — the anti-blur
+    // Vernier layout the rig uses) is rendered by a compiled C++ harness to a raw BGRA
+    // file; Rust loads it, converts to luma, decodes BOTH QRs, and asserts they equal the
+    // C++-burned Payload::encode strings. This is what proves the burn is usable, not just
+    // byte-identical on the wire.
+    let dir = std::env::temp_dir().join(format!("burn_render_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_cpp = dir.join("render_main.cpp");
+    let bin = dir.join("render_main");
+    let out_bgra = dir.join("frame.bgra");
+
+    let payload_hpp = manifest().join(BURN_PAYLOAD_HPP);
+    let qr_hpp = manifest().join(BURN_QR_HPP);
+    let qrcg_cpp = manifest().join(QRCODEGEN_CPP);
+    let qrcg_inc = manifest().join("vendor/distroav/src"); // so qrcodegen/qrcodegen.hpp resolves
+
+    // 1920x1080 BGRA, two QRs at ~700px in the L/R halves — the production dual-QR layout.
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    const QR_PX: u32 = 700;
+    let left = (911002u32, 6518u32, 1_718_600_000_000_000_000i64); // even tick
+    let right = (911002u32, 6519u32, 1_718_600_000_033_333_333i64); // odd tick
+
+    let src = format!(
+        r#"
+#include "{payload}"
+#include "{qr}"
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+int main(int argc, char **argv) {{
+    if (argc < 2) return 2;
+    const uint32_t W = {w}, H = {h}, QR_PX = {qr_px};
+    std::vector<uint8_t> buf((size_t)W * H * 4, 255); // white BGRA canvas
+    const uint32_t stride = W * 4;
+    const uint32_t half = W / 2;
+    std::string l = burn_payload::encode({lr}, {lf}, {lg});
+    std::string r = burn_payload::encode({rr}, {rf}, {rg});
+    burn_qr::render(buf.data(), stride, W, H, l, 0, half, H/2, QR_PX);
+    burn_qr::render(buf.data(), stride, W, H, r, half, W - half, H/2, QR_PX);
+    FILE *f = fopen(argv[1], "wb");
+    if (!f) return 3;
+    fwrite(buf.data(), 1, buf.size(), f);
+    fclose(f);
+    // also print the two payloads so the test compares against the SAME bytes the C++ used
+    printf("%s\n%s\n", l.c_str(), r.c_str());
+    return 0;
+}}
+"#,
+        payload = payload_hpp.display(),
+        qr = qr_hpp.display(),
+        w = W,
+        h = H,
+        qr_px = QR_PX,
+        lr = left.0,
+        lf = left.1,
+        lg = left.2,
+        rr = right.0,
+        rf = right.1,
+        rg = right.2,
+    );
+    std::fs::write(&main_cpp, src).unwrap();
+
+    let compile = Command::new("g++")
+        .args(["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg("-I")
+        .arg(&qrcg_inc)
+        .arg(&main_cpp)
+        .arg(&qrcg_cpp)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("g++ must be installed");
+    assert!(
+        compile.status.success(),
+        "burn-qr.hpp / qrcodegen did not compile (#111 RED):\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr),
+    );
+
+    let run = Command::new(&bin)
+        .arg(&out_bgra)
+        .output()
+        .expect("running the C++ renderer failed");
+    assert!(
+        run.status.success(),
+        "C++ renderer exited nonzero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let burned: Vec<String> = String::from_utf8(run.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(burned.len(), 2, "expected 2 burned payload strings");
+
+    let data = std::fs::read(&out_bgra).unwrap();
+    assert_eq!(data.len(), (W * H * 4) as usize, "BGRA frame size mismatch");
+    let luma = bgra_to_luma(&data, W, H, W * 4);
+    let decoded = decode_qr_luma_all(luma);
+    let decoded_strs: Vec<String> = decoded.iter().map(|p| p.encode()).collect();
+
+    for b in &burned {
+        assert!(
+            decoded_strs.contains(b),
+            "rqrr did NOT decode the C++-burned QR {b:?}. Decoded: {decoded_strs:?}. The burn \
+             produces a QR the production recorded-file decoder cannot read."
+        );
+    }
+    // Both distinct ticks decoded (dual-QR Vernier intact).
+    let l = Payload {
+        run_id: left.0,
+        frame_id: left.1,
+        gen_ts_ns: left.2,
+    }
+    .encode();
+    let r = Payload {
+        run_id: right.0,
+        frame_id: right.1,
+        gen_ts_ns: right.2,
+    }
+    .encode();
+    assert!(decoded_strs.contains(&l), "left tick {l:?} not decoded");
+    assert!(decoded_strs.contains(&r), "right tick {r:?} not decoded");
 }
 
 // ---- 2. Vendored-source / build-wiring guards --------------------------------

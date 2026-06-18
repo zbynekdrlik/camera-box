@@ -193,6 +193,45 @@ jobs:
           Write-Output "DistroAV NDI source-name UAF fix present (config_mutex at update + reset + rename, av_thread-owned name copies, no live config-pointer borrow) — OK"
 
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
+      # #111: assert the QR render-time burn filter (Path B) is present + build-wired in
+      # the vendored DistroAV BEFORE the 150-min build, so a future `git subtree pull`
+      # (#44) or a build-wiring regression that drops the burn filter fails HERE rather
+      # than shipping a distroav.dll without the #108 per-hop-latency probe foundation.
+      # Mirrors the canonical Linux-CI guard tests/burn_payload_parity.rs (Linux-only —
+      # it compiles+runs the C++ encoder with g++, which can't run in this build job).
+      # Keep both in lock-step.
+      - name: Assert QR render-time burn filter present (#111)
+        shell: pwsh
+        run: |
+          $flt = (Get-Content "vendor/distroav/src/ndi-burn-filter.cpp" -Raw) -replace '\s+', ' '
+          if ($flt -notmatch [regex]::Escape('burn_payload::encode')) {
+            Write-Error "ndi-burn-filter.cpp: no longer calls burn_payload::encode — the burned payload would not match the Rust decoder (#111 reverted)"; exit 1
+          }
+          if (($flt -notmatch [regex]::Escape('burn_clock::gen_ts_ns')) -and ($flt -notmatch [regex]::Escape('burn_clock::next_wall_boundary_ns'))) {
+            Write-Error "ndi-burn-filter.cpp: no longer stamps the boundary-snapped wall-clock gen_ts_ns — node stamp would not share cam2's timebase (#108 subtraction breaks)"; exit 1
+          }
+          if ($flt -notmatch [regex]::Escape('OBS_BURN_RUN_ID')) {
+            Write-Error "ndi-burn-filter.cpp: per-node run_id no longer env-configurable (OBS_BURN_RUN_ID) — #108 cannot distinguish node-stamp from cam2-stamp (#111 reverted)"; exit 1
+          }
+          if ($flt -notmatch [regex]::Escape('OBS_BURN_QR')) {
+            Write-Error "ndi-burn-filter.cpp: the burn is no longer gated behind OBS_BURN_QR (default OFF) — it must not affect the production install until #108 enables it (#111 reverted)"; exit 1
+          }
+          $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
+          if ($pm -notmatch [regex]::Escape('create_ndi_burn_filter_info')) {
+            Write-Error "plugin-main.cpp: the burn filter is not registered (create_ndi_burn_filter_info) — OBS would not expose it (#111 reverted)"; exit 1
+          }
+          $cm = (Get-Content "vendor/distroav/CMakeLists.txt" -Raw) -replace '\s+', ' '
+          if ($cm -notmatch [regex]::Escape('src/ndi-burn-filter.cpp')) {
+            Write-Error "CMakeLists.txt: ndi-burn-filter.cpp not in target_sources — it would not compile into distroav.dll (#111 build-wiring reverted)"; exit 1
+          }
+          if ($cm -notmatch [regex]::Escape('src/qrcodegen/qrcodegen.cpp')) {
+            Write-Error "CMakeLists.txt: vendored qrcodegen.cpp not in target_sources — the burn filter would not link (#111 build-wiring reverted)"; exit 1
+          }
+          if (!(Test-Path "vendor/distroav/src/qrcodegen/qrcodegen.hpp")) {
+            Write-Error "vendor/distroav/src/qrcodegen/qrcodegen.hpp missing — the vendored QR encoder (Nayuki, MIT) was dropped (#111 reverted)"; exit 1
+          }
+          Write-Output "QR render-time burn filter present (burn_payload::encode + gen_ts_ns + OBS_BURN_RUN_ID + OBS_BURN_QR gate + registered + CMake-wired + vendored qrcodegen) — OK"
+
       # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)
         working-directory: vendor/obs-studio
