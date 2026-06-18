@@ -196,7 +196,7 @@ pub fn cam_strih_samples(strih: &[RecordingFrame], strih_burn_run_id: u32) -> Ve
             // negative/positive latency.
             if c.gen_ts_ns > 0 && n.gen_ts_ns > 0 {
                 out.push(LatencySample {
-                    latency_ms: (c.gen_ts_ns - n.gen_ts_ns) as f64 / 1_000_000.0, // [red] wrong sign, fixed in GREEN
+                    latency_ms: (n.gen_ts_ns - c.gen_ts_ns) as f64 / 1_000_000.0,
                     at_ns: c.gen_ts_ns,
                 });
             }
@@ -235,7 +235,7 @@ pub fn strih_stream_samples(
             (strih_by_tick.get(&tick), stream_by_tick.get(&tick))
         {
             out.push(LatencySample {
-                latency_ms: (strih_ts - stream_ts) as f64 / 1_000_000.0, // [red] wrong sign, fixed in GREEN
+                latency_ms: (stream_ts - strih_ts) as f64 / 1_000_000.0,
                 at_ns: strih_ts,
             });
         }
