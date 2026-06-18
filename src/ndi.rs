@@ -423,7 +423,16 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
         return (false, next_boundary_ns);
     }
     // Initialize (or keep) the next absolute wall-clock boundary.
-    let boundary = if next_boundary_ns == 0 {
+    //
+    // #131: guard a BACKWARD clock step, symmetric to the forward resync below.
+    // The boundary is latched from CLOCK_REALTIME; on a cold boot dantesync can
+    // acquire NTP late and step the realtime clock BACKWARD well below the latched
+    // boundary. The latched boundary is then many intervals in the future
+    // (`boundary - now > interval`), so `now < boundary` would stay true forever
+    // and the gate would wedge at emit=false (0 NDI emitted) until a warm restart.
+    // Re-latch to the rewound clock (same formula as the init / forward-resync
+    // branches) so emit resumes within one interval, exactly as a restart does.
+    let boundary = if next_boundary_ns == 0 || next_boundary_ns > now_ns + interval_ns {
         now_ns - (now_ns % interval_ns) + interval_ns
     } else {
         next_boundary_ns
