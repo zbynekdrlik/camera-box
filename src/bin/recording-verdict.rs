@@ -70,14 +70,23 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
             continue; // header / blank
         }
         // recording-probe CSV: the tick is the 3rd column; a bare file has it 1st.
+        // A comma-containing row with fewer than 3 columns is a MALFORMED CSV — error
+        // loudly rather than silently dropping it (a silently-shrunk painter set
+        // would manufacture false phantom faults in cam_strih_assessment).
         let field = if line.contains(',') {
-            line.split(',').nth(2).unwrap_or("")
+            line.split(',').nth(2).with_context(|| {
+                format!(
+                    "painter CSV row at line {} has fewer than 3 columns (expected \
+                     frame_index,n_qr,tick,...): {line:?}",
+                    lineno + 1
+                )
+            })?
         } else {
             line
         };
         let field = field.trim();
         if field.is_empty() {
-            continue; // an undecodable recording-probe row has an empty tick
+            continue; // an undecodable recording-probe row has an empty tick column
         }
         let t: u32 = field
             .parse()
@@ -197,44 +206,70 @@ fn main() -> Result<()> {
         all_pass &= report_recording("stream", stream_path, &stream_v, &args.out_dir)?;
 
         let ss = strih_stream_verdict(&strih_ticks, &stream_ticks, &cfg);
-        println!("=== strih→stream hop verdict (direct per-frame tick compare) ===");
+        println!("=== strih→stream hop verdict (direct tick-SEQUENCE compare, offset-immune) ===");
         println!(
-            "  compared={} divergent={}",
-            ss.compared_frames,
-            ss.divergent_frames.len()
+            "  compared_ticks={} strih_only(stream dropped)={} stream_only(reorder/phantom)={}",
+            ss.compared_ticks,
+            ss.strih_only_ticks.len(),
+            ss.stream_only_ticks.len()
         );
-        if !ss.divergent_frames.is_empty() {
-            let shown: Vec<u64> = ss.divergent_frames.iter().copied().take(20).collect();
-            println!("  divergent frames (first 20): {shown:?}");
+        if !ss.strih_only_ticks.is_empty() {
+            let shown: Vec<u32> = ss.strih_only_ticks.iter().copied().take(20).collect();
+            println!("  strih-only ticks (first 20, = stream dropped these): {shown:?}");
+        }
+        if !ss.stream_only_ticks.is_empty() {
+            let shown: Vec<u32> = ss.stream_only_ticks.iter().copied().take(20).collect();
+            println!("  stream-only ticks (first 20): {shown:?}");
         }
         println!("  RESULT: {}", if ss.is_pass() { "PASS" } else { "FAIL" });
         all_pass &= ss.is_pass();
     }
 
     // cam→strih honest assessment (no false zero claim).
+    let mut cam_strih_clean: Option<bool> = None;
     if let Some(painter_path) = &args.painter {
         let painter_ticks = parse_painter_ticks(painter_path)?;
         let a = cam_strih_assessment(&strih_ticks, &painter_ticks, &cfg);
         println!("=== cam→strih assessment (honest, NOT a zero-loss claim) ===");
         println!("  claims_zero_loss={}", a.claims_zero_loss);
         println!(
-            "  unknown_ticks (never painted, = real fault)={}",
+            "  unknown_ticks (in-range, never painted = real fault)={}",
             a.unknown_ticks.len()
+        );
+        println!(
+            "  out_of_painter_range_ticks (uncertain, painter CSV didn't cover)={}",
+            a.out_of_painter_range_ticks.len()
         );
         if !a.unknown_ticks.is_empty() {
             let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
             println!("  unknown ticks (first 20): {shown:?}");
-            all_pass = false; // a never-painted tick is a provable cam→strih fault
+            all_pass = false; // an in-range never-painted tick is a provable fault
         }
         println!("  LIMITATION: {}", a.limitation);
+        cam_strih_clean = Some(a.unknown_ticks.is_empty());
     }
 
-    println!(
-        "\nOVERALL: {}",
-        if all_pass { "PASS (zero loss)" } else { "FAIL" }
-    );
+    // Headline. Be HONEST about scope: a clean strih(+stream) verdict proves the
+    // DIGITAL path (per-output continuity + strih→stream hop) is zero-loss, but the
+    // strih recording ALONE cannot certify cam→strih zero-loss (the camera beat
+    // overlaps loss without a clean cam-side reference). Only qualify as full
+    // cam→endpoint zero-loss when a painter ground truth was supplied AND clean.
+    println!();
     if !all_pass {
+        println!("OVERALL: FAIL");
         std::process::exit(1);
+    }
+    match cam_strih_clean {
+        Some(true) => println!(
+            "OVERALL: PASS — digital path zero-loss; cam→strih shows no in-range phantom \
+             (necessary, NOT sufficient — see cam→strih limitation)"
+        ),
+        _ => println!(
+            "OVERALL: PASS (DIGITAL PATH ONLY) — per-output continuity + strih→stream hop are \
+             zero-loss. This is NOT a cam→strih / end-to-end zero-loss claim: the strih \
+             recording alone cannot certify the optical hop. Supply --painter for the cam→strih \
+             assessment."
+        ),
     }
     Ok(())
 }

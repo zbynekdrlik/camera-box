@@ -182,7 +182,11 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
     // The expected per-camera-frame tick advance for the free-running 60→30 beat.
     // Integer for the documented rig (60/30 = 2); the math below uses i64 so the
     // balance test is EXACT (no float tolerance leaking a sub-1-frame net loss).
-    let expected_step = (cfg.refresh_hz / cfg.capture_fps).round() as i64;
+    // Clamped to >= 1: a refresh ≤ capture (ratio < 1.5 rounds toward 0/1) still
+    // means the counter advances at least one tick per camera frame, so a 0 (or
+    // negative, from a bad config) expected step would make `max_balanced` invalid
+    // and every forward motion read as a gap. The documented rig is always 60/30=2.
+    let expected_step = ((cfg.refresh_hz / cfg.capture_fps).round() as i64).max(1);
 
     // Walk the DECODABLE adjacent pairs; an undecodable frame breaks the chain
     // (we never bridge a step across a None — that hole is already a hard fault).
@@ -215,24 +219,21 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
     let mut real_copy_frames: Vec<u64> = Vec::new();
 
     // When the beat is net-IMBALANCED (surplus != 0 = real loss), name the offending
-    // frames for the pixel-proof report. The PASS/FAIL gate itself is `beat_balanced`
-    // (surplus == 0) — see `is_pass` — so even a GRADUAL imbalance that never breaks
-    // the beat's per-step bounds still FAILS (then `avg_step != expected` is the
-    // evidence and no individual frame is singled out, which is honest). The frames
-    // named here are the UNAMBIGUOUS offenders: steps outside the balanced beat's
-    // natural range {min_balanced..=max_balanced}. For a symmetric beat around the
-    // expected step that range is `[1, 2*expected-1]` (e.g. {1,2,3} for expected 2):
-    // a step above `2*expected-1` is a clear gap, a step below `1` (i.e. <= 0, a held
-    // or backward tick) is a clear stale copy.
-    let max_balanced = 2 * expected_step - 1;
-    let min_balanced = 1;
+    // frames so EVERY FAIL has at least one frame to extract as pixel proof
+    // (acceptance #6). The PASS/FAIL gate itself is `beat_balanced` (surplus == 0),
+    // see `is_pass`. Frames are named by how far each step deviates from the expected
+    // step, MOST-DEVIANT FIRST (the real offenders), continuing until the whole
+    // surplus/deficit is accounted for. A clear overshoot (step > 2*expected-1) or
+    // stall (step < 1, i.e. <= 0) is the unambiguous culprit; a GRADUAL imbalance
+    // whose steps all sit inside the beat's natural {1..=2*expected-1} range still
+    // names its most-deviant contributors (honest: a real-loss FAIL is never left
+    // with no pixel proof).
     if surplus > 0 {
-        // NET gaps: name the clear overshoots (step > max_balanced), largest first;
-        // ties broken by frame order for determinism.
+        // NET gaps: name the longest steps (above the expected step) first.
         let mut over: Vec<(u64, i64)> = steps
             .iter()
             .copied()
-            .filter(|(_, s)| *s > max_balanced)
+            .filter(|(_, s)| *s > expected_step)
             .collect();
         over.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let mut accounted: i64 = 0;
@@ -245,13 +246,12 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
         }
         real_gap_frames.sort_unstable();
     } else if surplus < 0 {
-        // NET copies: name the clear stalls (step < min_balanced, i.e. <= 0 — a held
-        // tick or backward repeat), smallest/most-negative first.
+        // NET copies: name the shortest steps (below the expected step) first.
         let deficit = -surplus;
         let mut stalls: Vec<(u64, i64)> = steps
             .iter()
             .copied()
-            .filter(|(_, s)| *s < min_balanced)
+            .filter(|(_, s)| *s < expected_step)
             .collect();
         stalls.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
         let mut accounted: i64 = 0;
@@ -290,45 +290,109 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
 /// exact equality check.
 #[derive(Debug, Clone, Serialize)]
 pub struct StrihStreamVerdict {
-    /// Camera-frame indices compared (the overlap of the two recordings).
-    pub compared_frames: usize,
-    /// Indices where strih and stream resolved ticks differ — real hop faults.
-    pub divergent_frames: Vec<u64>,
+    /// Distinct resolved ticks compared — the overlapping tick range present in
+    /// BOTH recordings. The compare is on the tick SEQUENCES, not per-file capture
+    /// positions, so it is immune to a start offset between the two independent
+    /// recordings (the camera beat is common to both, so both record the SAME
+    /// ordered tick set on a lossless hop).
+    pub compared_ticks: usize,
+    /// Ticks present at strih but ABSENT at stream within the overlap span — frames
+    /// the stream output dropped on the strih→stream hop. Sorted ascending.
+    pub strih_only_ticks: Vec<u32>,
+    /// Ticks present at stream but ABSENT at strih within the overlap span — frames
+    /// stream has that strih does not (reorder / phantom). Sorted ascending.
+    pub stream_only_ticks: Vec<u32>,
 }
 
 impl StrihStreamVerdict {
-    /// PASS = the two outputs agree on every compared camera frame.
+    /// All divergent ticks (strih-only ∪ stream-only) within the overlap span.
+    pub fn divergent_ticks(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self
+            .strih_only_ticks
+            .iter()
+            .chain(self.stream_only_ticks.iter())
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// PASS = the two outputs carry the SAME tick set across their overlap, and the
+    /// overlap is non-vacuous (at least 2 ticks — a 0/1-tick overlap cannot
+    /// demonstrate a clean hop).
     pub fn is_pass(&self) -> bool {
-        self.divergent_frames.is_empty() && self.compared_frames > 0
+        self.strih_only_ticks.is_empty()
+            && self.stream_only_ticks.is_empty()
+            && self.compared_ticks >= 2
     }
 }
 
-/// Compare the strih and stream per-frame tick sequences directly. Pairs frames by
-/// `frame_index` (capture position); a frame present at one output and absent at
-/// the other, or decoded differently, is divergent.
+/// Compare the strih and stream per-frame tick SEQUENCES directly (acceptance #4).
+///
+/// The camera beat is common to BOTH digital outputs (it is upstream of both), so a
+/// lossless strih→stream hop records the SAME ordered set of resolved ticks at each
+/// output. This compares the tick SETS within the overlapping tick range
+/// `[max(lo), min(hi)]` — NOT the per-file capture positions (`frame_index` is each
+/// recording's own 0-based counter; two independent OBS recordings never start on
+/// the identical camera frame, so a positional pair-up would compare different
+/// camera moments). Offset-immune by construction. A tick present at one output and
+/// absent at the other within the overlap is a real hop fault: a strih-only tick is a
+/// frame the stream output dropped; a stream-only tick is a reorder / phantom.
+/// Undecodable frames (`None`) carry no tick and are excluded here — each is already
+/// a hard fault in its own recording's [`verdict`].
 pub fn strih_stream_verdict(
     strih: &[FrameTick],
     stream: &[FrameTick],
     _cfg: &VerdictConfig,
 ) -> StrihStreamVerdict {
-    use std::collections::BTreeMap;
-    let stream_by_idx: BTreeMap<u64, Option<u32>> =
-        stream.iter().map(|f| (f.frame_index, f.tick)).collect();
+    use std::collections::BTreeSet;
+    let strih_ticks: BTreeSet<u32> = strih.iter().filter_map(|f| f.tick).collect();
+    let stream_ticks: BTreeSet<u32> = stream.iter().filter_map(|f| f.tick).collect();
 
-    let mut compared = 0usize;
-    let mut divergent_frames: Vec<u64> = Vec::new();
-    for f in strih {
-        if let Some(&s_tick) = stream_by_idx.get(&f.frame_index) {
-            compared += 1;
-            if s_tick != f.tick {
-                divergent_frames.push(f.frame_index);
-            }
+    // Overlap span: only ticks that BOTH recordings had a chance to carry. A tick
+    // outside one recording's [lo,hi] is tap start/stop skew (the two outputs
+    // connect/disconnect independently), not a hop drop — the same active-span
+    // handling the NDI-tap differ uses, applied here to the recorded tick sets.
+    let (lo, hi) = match (
+        strih_ticks.iter().next().max(stream_ticks.iter().next()),
+        strih_ticks
+            .iter()
+            .next_back()
+            .min(stream_ticks.iter().next_back()),
+    ) {
+        (Some(&a), Some(&b)) if a <= b => (a, b),
+        // Disjoint or empty: no overlap to compare.
+        _ => {
+            return StrihStreamVerdict {
+                compared_ticks: 0,
+                strih_only_ticks: Vec::new(),
+                stream_only_ticks: Vec::new(),
+            };
         }
-    }
-    divergent_frames.sort_unstable();
+    };
+
+    let in_span = |t: u32| t >= lo && t <= hi;
+    let strih_only_ticks: Vec<u32> = strih_ticks
+        .iter()
+        .copied()
+        .filter(|&t| in_span(t) && !stream_ticks.contains(&t))
+        .collect();
+    let stream_only_ticks: Vec<u32> = stream_ticks
+        .iter()
+        .copied()
+        .filter(|&t| in_span(t) && !strih_ticks.contains(&t))
+        .collect();
+    // Compared = distinct ticks in the overlap span present in BOTH.
+    let compared_ticks = strih_ticks
+        .iter()
+        .filter(|&&t| in_span(t) && stream_ticks.contains(&t))
+        .count();
+
     StrihStreamVerdict {
-        compared_frames: compared,
-        divergent_frames,
+        compared_ticks,
+        strih_only_ticks,
+        stream_only_ticks,
     }
 }
 
@@ -346,14 +410,31 @@ pub fn strih_stream_verdict(
 pub struct CamStrihAssessment {
     /// Always `false`: the strih recording cannot prove cam→strih zero-loss.
     pub claims_zero_loss: bool,
-    /// strih ticks the painter never displayed — real corruption / phantom ids.
+    /// strih ticks the painter never displayed, WITHIN the painter's covered range —
+    /// real corruption / phantom ids. Ticks OUTSIDE the painter's range are NOT
+    /// flagged (see `out_of_painter_range_ticks`): a partial painter capture would
+    /// otherwise false-flag legitimate ticks. Sorted ascending.
     pub unknown_ticks: Vec<u32>,
+    /// strih ticks that fall OUTSIDE the painter ground-truth's `[min,max]` range —
+    /// the painter CSV did not cover them, so their validity is UNKNOWN (not a
+    /// fault, but not provably clean either). Surfaced so a partial painter capture
+    /// is visible rather than silently treated as all-phantom or all-fine. Sorted.
+    pub out_of_painter_range_ticks: Vec<u32>,
     /// Plain-language statement of what the strih recording cannot prove.
     pub limitation: String,
 }
 
 /// Compare strih's recorded ticks against the cam2 painter's displayed-tick set
 /// (`painter_ticks` = every logical tick the painter actually put on the monitor).
+///
+/// PRECONDITION for `unknown_ticks` to be meaningful: the painter ground truth must
+/// span the strih recording. Only strih ticks INSIDE the painter's `[min,max]` range
+/// are checked for membership — a strih tick the painter displayed-range covers but
+/// that is absent from the painted set is a real phantom (`unknown_ticks`); a strih
+/// tick OUTSIDE the painter's covered range is reported separately
+/// (`out_of_painter_range_ticks`), never as a phantom fault, so a partial painter
+/// capture (started late / stopped early / counter wrap) does not manufacture false
+/// cam→strih faults.
 pub fn cam_strih_assessment(
     strih: &[FrameTick],
     painter_ticks: &[u32],
@@ -361,24 +442,43 @@ pub fn cam_strih_assessment(
 ) -> CamStrihAssessment {
     use std::collections::BTreeSet;
     let painted: BTreeSet<u32> = painter_ticks.iter().copied().collect();
+    let (p_lo, p_hi) = (
+        painted.iter().next().copied(),
+        painted.iter().next_back().copied(),
+    );
+
     let mut unknown: BTreeSet<u32> = BTreeSet::new();
+    let mut out_of_range: BTreeSet<u32> = BTreeSet::new();
     for f in strih {
         if let Some(t) = f.tick {
-            if !painted.contains(&t) {
-                unknown.insert(t);
+            match (p_lo, p_hi) {
+                (Some(lo), Some(hi)) if t >= lo && t <= hi => {
+                    // Inside the painter's covered range: a miss here is a phantom.
+                    if !painted.contains(&t) {
+                        unknown.insert(t);
+                    }
+                }
+                // Outside the covered range (or no painter data): uncertain, not a fault.
+                _ => {
+                    out_of_range.insert(t);
+                }
             }
         }
     }
     CamStrihAssessment {
         claims_zero_loss: false,
         unknown_ticks: unknown.into_iter().collect(),
+        out_of_painter_range_ticks: out_of_range.into_iter().collect(),
         limitation: "cam→strih zero-loss is NOT provable from the strih recording \
             alone: the free-running 60→30 camera beat overlaps loss without a clean \
             per-frame cam-side reference (a frame the camera never captured and a \
-            frame strih dropped both present as a missing painted tick). Only a \
-            strih tick the painter never displayed (unknown_ticks) is a provable \
-            cam→strih fault; absence of those is necessary but NOT sufficient for a \
-            zero-loss claim."
+            frame strih dropped both present as a missing painted tick). Only a strih \
+            tick the painter never displayed WITHIN the painter's covered range \
+            (unknown_ticks) is a provable cam→strih fault; ticks outside that range \
+            (out_of_painter_range_ticks) are uncertain, not faults; and the absence \
+            of phantom ticks is necessary but NOT sufficient for a zero-loss claim. \
+            The painter ground truth must span the strih recording for this check to \
+            be complete."
             .to_string(),
     }
 }
@@ -429,13 +529,13 @@ mod tests {
     }
 
     #[test]
-    fn gradual_imbalance_fails_via_beat_balanced_even_with_no_named_frame() {
-        // CRITICAL: a NET imbalance whose every step stays inside the beat's
-        // natural {1,2,3} range (more 3s than 1s ⇒ surplus > 0, but NO step > 3)
-        // must still FAIL — `beat_balanced` is the authoritative gate, not the
-        // named-frame lists. Here: steps 3,3,3 ⇒ surplus = 3 over expected, no
-        // step exceeds the ceiling so `real_gap_frames` is empty, yet is_pass()
-        // MUST be false (kills an is_pass that only checks the frame lists).
+    fn gradual_imbalance_fails_and_still_names_frames_for_pixel_proof() {
+        // CRITICAL: a NET imbalance whose every step stays inside the beat's natural
+        // {1,2,3} range (steps all 3 ⇒ surplus > 0, NO step exceeds the ceiling)
+        // must (a) FAIL — `beat_balanced` is the authoritative gate — AND (b) still
+        // name its most-deviant contributors so the FAIL has pixel proof (acceptance
+        // #6: every real-loss FAIL extracts ≥1 PNG). Here steps are 3,3,3 ⇒ surplus
+        // = 3; the longest steps (all 3 > expected 2) are named until accounted.
         let frames = vec![
             ft(0, Some(0)),
             ft(1, Some(3)),
@@ -450,12 +550,12 @@ mod tests {
         assert!(v.avg_step > 2.0, "more 3s than 1s ⇒ avg > 2.0");
         assert!(!v.beat_balanced, "net imbalance ⇒ not a balanced beat");
         assert!(
-            v.real_gap_frames.is_empty(),
-            "no single step exceeds the beat ceiling — gradual drift"
+            !v.is_pass(),
+            "a gradual net imbalance must FAIL (beat_balanced is the gate)"
         );
         assert!(
-            !v.is_pass(),
-            "a gradual net imbalance must FAIL even with no individual frame named"
+            !v.real_gap_frames.is_empty(),
+            "a real-loss FAIL must name ≥1 frame so it has pixel proof"
         );
     }
 
@@ -587,39 +687,105 @@ mod tests {
         let same = strih.clone();
         let v = strih_stream_verdict(&strih, &same, &VerdictConfig::default());
         assert!(v.is_pass());
-        assert_eq!(v.compared_frames, 3);
+        assert_eq!(v.compared_ticks, 3);
 
+        // stream decoded a tick (99) strih never had -> stream-only divergence.
         let mut diff = strih.clone();
         diff[1].tick = Some(99);
         let v2 = strih_stream_verdict(&strih, &diff, &VerdictConfig::default());
         assert!(!v2.is_pass());
-        assert_eq!(v2.divergent_frames, vec![1]);
+        // tick 4 is strih-only (stream replaced it with 99); 99 is outside the
+        // overlap span [2,6] so only the strih-only 4 is flagged.
+        assert_eq!(v2.strih_only_ticks, vec![4]);
     }
 
     #[test]
-    fn strih_stream_compares_only_overlapping_indices() {
-        // stream is missing index 2 entirely; only 0,1 overlap and they agree.
-        let strih = vec![ft(0, Some(2)), ft(1, Some(4)), ft(2, Some(6))];
-        let stream = vec![ft(0, Some(2)), ft(1, Some(4))];
+    fn strih_stream_is_offset_immune() {
+        // CRITICAL (review): the two recordings start on DIFFERENT camera frames,
+        // so the SAME tick sequence has different per-file frame_index. A
+        // sequence/tick compare must PASS (the hop is lossless); a positional
+        // frame_index pairing would falsely diverge everywhere.
+        let strih = vec![ft(0, Some(10)), ft(1, Some(12)), ft(2, Some(14))];
+        // stream: identical ticks but shifted +5 in capture position (later start).
+        let stream = vec![ft(5, Some(10)), ft(6, Some(12)), ft(7, Some(14))];
         let v = strih_stream_verdict(&strih, &stream, &VerdictConfig::default());
-        assert_eq!(v.compared_frames, 2);
-        assert!(v.is_pass());
+        assert!(
+            v.is_pass(),
+            "identical tick sequence at a capture offset must PASS (offset-immune)"
+        );
+        assert_eq!(v.compared_ticks, 3);
+    }
+
+    #[test]
+    fn strih_stream_stream_dropped_frame_fails() {
+        // CRITICAL (review): stream DROPPED a frame (tick 12) the strih output had,
+        // inside the overlap span [10,14]. A positional map-get on the missing index
+        // would silently skip it -> false PASS. The tick-set compare flags it.
+        let strih = vec![ft(0, Some(10)), ft(1, Some(12)), ft(2, Some(14))];
+        let stream = vec![ft(0, Some(10)), ft(1, Some(14))]; // 12 missing
+        let v = strih_stream_verdict(&strih, &stream, &VerdictConfig::default());
+        assert!(!v.is_pass(), "a stream-dropped frame must FAIL the hop");
+        assert_eq!(v.strih_only_ticks, vec![12]);
+        assert_eq!(v.divergent_ticks(), vec![12]);
+    }
+
+    #[test]
+    fn strih_stream_ignores_start_stop_skew_outside_overlap() {
+        // strih ran longer at both ends (ticks 8 and 20 outside the stream span):
+        // those are tap start/stop skew, NOT hop drops — excluded from the overlap.
+        let strih = vec![
+            ft(0, Some(8)),
+            ft(1, Some(10)),
+            ft(2, Some(12)),
+            ft(3, Some(14)),
+            ft(4, Some(20)),
+        ];
+        let stream = vec![ft(0, Some(10)), ft(1, Some(12)), ft(2, Some(14))];
+        let v = strih_stream_verdict(&strih, &stream, &VerdictConfig::default());
+        assert!(
+            v.is_pass(),
+            "skew outside the overlap span must not fail the hop"
+        );
+        assert_eq!(v.compared_ticks, 3);
+        assert!(v.strih_only_ticks.is_empty());
     }
 
     #[test]
     fn strih_stream_empty_overlap_is_not_pass() {
         let v = strih_stream_verdict(&[], &[], &VerdictConfig::default());
-        assert!(!v.is_pass(), "no compared frames must not vacuously pass");
+        assert!(!v.is_pass(), "no compared ticks must not vacuously pass");
+        assert_eq!(v.compared_ticks, 0);
+
+        // Disjoint tick ranges (no overlap at all) also must not pass.
+        let strih = vec![ft(0, Some(1)), ft(1, Some(2))];
+        let stream = vec![ft(0, Some(100)), ft(1, Some(101))];
+        let v2 = strih_stream_verdict(&strih, &stream, &VerdictConfig::default());
+        assert!(!v2.is_pass(), "disjoint tick ranges must not pass");
     }
 
     #[test]
-    fn cam_strih_never_claims_zero_loss_and_flags_phantom() {
-        let strih = vec![ft(0, Some(10)), ft(1, Some(12)), ft(2, Some(777))];
-        let painter: Vec<u32> = (10..=20).collect(); // 777 was never painted
+    fn cam_strih_never_claims_zero_loss_and_flags_in_range_phantom() {
+        // tick 13 is INSIDE the painter range [10,20] but the painter set has a hole
+        // there (never displayed) -> a real in-range phantom fault.
+        let strih = vec![ft(0, Some(10)), ft(1, Some(13)), ft(2, Some(20))];
+        let painter: Vec<u32> = (10..=20).filter(|&t| t != 13).collect();
         let a = cam_strih_assessment(&strih, &painter, &VerdictConfig::default());
         assert!(!a.claims_zero_loss);
-        assert_eq!(a.unknown_ticks, vec![777]);
+        assert_eq!(a.unknown_ticks, vec![13]);
+        assert!(a.out_of_painter_range_ticks.is_empty());
         assert!(!a.limitation.is_empty());
+    }
+
+    #[test]
+    fn cam_strih_out_of_range_tick_is_uncertain_not_phantom() {
+        // tick 777 is OUTSIDE the painter range [10,20] -> uncertain (the painter
+        // CSV didn't cover it), NOT a phantom fault. A partial painter capture must
+        // not manufacture false cam→strih faults.
+        let strih = vec![ft(0, Some(10)), ft(1, Some(12)), ft(2, Some(777))];
+        let painter: Vec<u32> = (10..=20).collect();
+        let a = cam_strih_assessment(&strih, &painter, &VerdictConfig::default());
+        assert!(a.unknown_ticks.is_empty(), "out-of-range is not a phantom");
+        assert_eq!(a.out_of_painter_range_ticks, vec![777]);
     }
 
     #[test]

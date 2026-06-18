@@ -187,7 +187,7 @@ fn span_exactly_at_floor_passes_duration_gate() {
     assert!((v.analyzed_secs - 300.0).abs() < 0.5);
 }
 
-// ---- strih→stream: direct per-frame tick-sequence compare (beat cancels) ----
+// ---- strih→stream: direct tick-SEQUENCE compare (beat cancels, offset-immune) ----
 
 #[test]
 fn strih_stream_identical_ticks_pass() {
@@ -197,22 +197,41 @@ fn strih_stream_identical_ticks_pass() {
     let stream = beat_for_secs(300.0);
     let v = strih_stream_verdict(&strih, &stream, &cfg());
     assert!(v.is_pass(), "identical strih/stream ticks must PASS: {v:?}");
-    assert!(v.divergent_frames.is_empty());
+    assert!(v.divergent_ticks().is_empty());
 }
 
 #[test]
-fn strih_stream_divergence_fails_and_names_frame() {
+fn strih_stream_offset_does_not_cause_false_divergence() {
+    // The two recordings start on DIFFERENT camera frames (capture offset): the
+    // SAME tick sequence at a positional offset must still PASS — the compare is on
+    // tick sequences, not per-file frame_index positions.
     let strih = beat_for_secs(300.0);
     let mut stream = beat_for_secs(300.0);
-    // stream dropped a frame the strih output had: tick diverges at `bad`.
-    let bad = 6000usize;
-    stream[bad].tick = Some(stream[bad].tick.unwrap() + 2);
+    for (i, f) in stream.iter_mut().enumerate() {
+        f.frame_index = i as u64 + 137; // later start, same tick sequence
+    }
     let v = strih_stream_verdict(&strih, &stream, &cfg());
-    assert!(!v.is_pass(), "a strih≠stream divergence must FAIL");
     assert!(
-        v.divergent_frames.contains(&(bad as u64)),
-        "divergent frame {bad} must be named, got {:?}",
-        v.divergent_frames
+        v.is_pass(),
+        "a capture-offset with identical ticks must PASS (offset-immune): {v:?}"
+    );
+}
+
+#[test]
+fn strih_stream_dropped_frame_fails_and_names_tick() {
+    // stream DROPPED a frame the strih output had (a real strih→stream hop loss):
+    // the dropped tick is flagged strih-only.
+    let strih = beat_for_secs(300.0);
+    let mut stream = beat_for_secs(300.0);
+    let bad = 6000usize;
+    let dropped_tick = stream[bad].tick.unwrap();
+    stream.remove(bad); // stream is missing that camera frame entirely
+    let v = strih_stream_verdict(&strih, &stream, &cfg());
+    assert!(!v.is_pass(), "a stream-dropped frame must FAIL");
+    assert!(
+        v.strih_only_ticks.contains(&dropped_tick),
+        "dropped tick {dropped_tick} must be flagged strih-only, got {:?}",
+        v.strih_only_ticks
     );
 }
 
@@ -246,26 +265,49 @@ fn cam_strih_matches_painter_ground_truth() {
 }
 
 #[test]
-fn cam_strih_flags_tick_never_painted() {
-    // A strih tick the painter never displayed = corruption / phantom id =
-    // provable cam→strih fault.
+fn cam_strih_flags_tick_never_painted_within_range() {
+    // A strih tick the painter never displayed, but WITHIN the painter's covered
+    // range = corruption / phantom id = a provable cam→strih fault. The painter
+    // range covers [lo,hi] except for a single held-out value `phantom`; strih
+    // records that value -> it must be flagged unknown (in-range but never painted).
     let mut strih = beat_for_secs(300.0);
-    let bad = 1234usize;
-    let phantom = 99_999_999u32; // far outside the painted range
-    strih[bad].tick = Some(phantom);
     let lo = 1000u32;
-    let hi = strih
-        .iter()
-        .filter_map(|f| f.tick)
-        .filter(|&t| t != phantom)
-        .max()
-        .unwrap();
-    let painter: Vec<u32> = (lo..=hi).collect();
+    let hi = strih.iter().filter_map(|f| f.tick).max().unwrap();
+    let phantom = lo + 5; // a value inside [lo,hi] that the painter will NOT have
+    let bad = 1234usize;
+    strih[bad].tick = Some(phantom);
+    // Painter ground truth = full contiguous range EXCEPT the phantom (a hole).
+    let painter: Vec<u32> = (lo..=hi).filter(|&t| t != phantom).collect();
     let a = cam_strih_assessment(&strih, &painter, &cfg());
     assert!(
         a.unknown_ticks.contains(&phantom),
-        "a never-painted strih tick must be flagged, got {:?}",
+        "an in-range never-painted strih tick must be flagged unknown, got {:?}",
         a.unknown_ticks
+    );
+}
+
+#[test]
+fn cam_strih_partial_painter_does_not_false_flag_uncovered_ticks() {
+    // The painter CSV covers only a WINDOW of the run (started late / stopped
+    // early). strih ticks outside the painter's covered range must NOT be reported
+    // as phantom faults — they are uncertain (out_of_painter_range_ticks), not
+    // corruption. A perfectly clean chain with a partial painter capture must not
+    // produce false unknown_ticks.
+    let strih = beat_for_secs(300.0);
+    let all_lo = strih.first().unwrap().tick.unwrap();
+    let all_hi = strih.last().unwrap().tick.unwrap();
+    // Painter only covers the middle third of the run.
+    let third = (all_hi - all_lo) / 3;
+    let painter: Vec<u32> = (all_lo + third..=all_hi - third).collect();
+    let a = cam_strih_assessment(&strih, &painter, &cfg());
+    assert!(
+        a.unknown_ticks.is_empty(),
+        "a partial painter must not false-flag uncovered ticks as phantom, got {:?}",
+        a.unknown_ticks
+    );
+    assert!(
+        !a.out_of_painter_range_ticks.is_empty(),
+        "ticks outside the painter window must be surfaced as out-of-range, not faults"
     );
 }
 
