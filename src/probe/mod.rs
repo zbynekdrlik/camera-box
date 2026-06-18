@@ -16,6 +16,7 @@ pub mod obs_log_audit;
 pub mod payload;
 pub mod qr;
 pub mod recording;
+pub mod recording_verdict;
 
 pub mod fb;
 pub mod kms;

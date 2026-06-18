@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.59"
+version = "1.7.0-dev.60"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -54,7 +54,9 @@ serde_json = { version = "1", optional = true }
 crc = { version = "3", optional = true }
 qrcode = { version = "0.14", optional = true, features = ["image"] }
 rqrr = { version = "0.9", optional = true }
-image = { version = "0.25", optional = true, default-features = false }
+# `png` enables PNG encoding for the #107 pixel-proof extraction of flagged
+# (undecodable / real-loss) frames; the QR render/decode path needs no codec.
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 # DRM/KMS page-flip presenter for the tear-free 1:1 painter (#79, Linux-only).
 drm = { version = "0.15", optional = true }
 # Offline spool mode: lz4 compression for captured frame spool files (probe only).
@@ -86,6 +88,11 @@ required-features = ["probe"]
 [[bin]]
 name = "recording-probe"
 path = "src/bin/recording-probe.rs"
+required-features = ["probe"]
+
+[[bin]]
+name = "recording-verdict"
+path = "src/bin/recording-verdict.rs"
 required-features = ["probe"]
 
 [[bench]]

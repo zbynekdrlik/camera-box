@@ -208,6 +208,94 @@ pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
     Ok(frames)
 }
 
+/// One extracted pixel-proof PNG of a frame the #107 verdict flagged.
+#[derive(Debug, Clone)]
+pub struct ExtractedFrame {
+    /// The flagged camera-frame index (matches the verdict's named frame).
+    pub frame_index: u64,
+    /// Where the PNG was written.
+    pub png_path: std::path::PathBuf,
+    /// True when this frame was flagged UNDECODABLE yet rqrr finds a CRC-valid QR
+    /// in the extracted pixels — i.e. a SHARP decodable QR was counted undecodable.
+    /// That is a Step-1 / #106 DECODER BUG (the proof shows a readable code), not a
+    /// chain loss, and the caller MUST surface it as a regression rather than a
+    /// camera-delivery fault. `false` for a genuinely black/garbage frame (real
+    /// loss) and for non-undecodable (copy/gap) frames.
+    pub sharp_qr_but_flagged_undecodable: bool,
+}
+
+/// Extract pixel proof for the frames the #107 verdict flagged. Re-streams the
+/// recording (the per-frame decode is not retained in memory at scale) and, for
+/// each `frame_index` in `flagged`, writes its native-resolution luma as a PNG into
+/// `out_dir` (`frame-<index>.png`). For frames in `undecodable` it also re-decodes
+/// the extracted pixels: a CRC-valid QR there means a SHARP code was wrongly counted
+/// undecodable — a decoder regression, flagged on the returned [`ExtractedFrame`].
+///
+/// This is the I/O glue (ffmpeg/image), excluded from coverage like the rest of the
+/// recording process boundary; the verdict ENGINE that decides which frames are
+/// flagged is the pure, unit-tested `recording_verdict` module.
+pub fn extract_frames_png(
+    path: &Path,
+    flagged: &[u64],
+    undecodable: &std::collections::HashSet<u64>,
+    out_dir: &Path,
+) -> Result<Vec<ExtractedFrame>> {
+    use std::collections::HashSet;
+    let want: HashSet<u64> = flagged.iter().copied().collect();
+    if want.is_empty() {
+        tracing::info!("extract_frames_png: no flagged frames — nothing to extract");
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("create PNG output dir {}", out_dir.display()))?;
+
+    let (width, height) = probe_dimensions(path)?;
+    let mut extracted: Vec<ExtractedFrame> = Vec::new();
+    let mut io_err: Option<anyhow::Error> = None;
+    read_frames(path, width, height, |idx, luma| {
+        if io_err.is_some() || !want.contains(&idx) {
+            return;
+        }
+        let png_path = out_dir.join(format!("frame-{idx}.png"));
+        // Re-decode BEFORE moving the luma into the PNG save, only for frames the
+        // verdict called undecodable: a CRC-valid payload here = sharp-but-flagged
+        // = decoder bug.
+        let sharp_qr_but_flagged_undecodable = if undecodable.contains(&idx) {
+            !decode_qr_luma_all(luma.clone()).is_empty()
+        } else {
+            false
+        };
+        if let Err(e) = luma.save_with_format(&png_path, image::ImageFormat::Png) {
+            io_err = Some(anyhow::Error::new(e).context(format!(
+                "save pixel-proof PNG {} for flagged frame {idx}",
+                png_path.display()
+            )));
+            return;
+        }
+        tracing::warn!(
+            frame = idx,
+            png = %png_path.display(),
+            sharp_qr_but_flagged_undecodable,
+            "extracted pixel proof for flagged frame"
+        );
+        extracted.push(ExtractedFrame {
+            frame_index: idx,
+            png_path,
+            sharp_qr_but_flagged_undecodable,
+        });
+    })?;
+    if let Some(e) = io_err {
+        return Err(e);
+    }
+    tracing::info!(
+        extracted = extracted.len(),
+        requested = want.len(),
+        out_dir = %out_dir.display(),
+        "pixel-proof extraction complete"
+    );
+    Ok(extracted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
