@@ -1596,6 +1596,55 @@ mod tests {
     }
 
     #[test]
+    fn genlock_gate_recovers_after_backward_clock_step() {
+        // #131 regression: dantesync acquires NTP late on a cold boot and steps
+        // CLOCK_REALTIME BACKWARD below the already-latched boundary. The latched
+        // boundary is then many intervals AHEAD of `now` (boundary - now >> interval).
+        //
+        // Pre-fix the gate had only a FORWARD resync, so `now < boundary` stayed true
+        // on every subsequent frame -> emit=false FOREVER -> 0 NDI emitted (capture
+        // unaffected). Only a warm `systemctl restart` (next_boundary_ns=0) recovered.
+        //
+        // Post-fix a symmetric BACKWARD-step guard must re-latch the boundary to the
+        // rewound clock and resume emitting within ~1 interval.
+        let boundary = 100 * I30; // latched at the pre-rewind ("future") time T
+                                  // Clock steps backward by ~3 min worth of intervals (Δ >> interval).
+        let rewound = boundary - 90 * I30; // boundary - now == 90 intervals >> interval
+
+        // First frame after the backward step must NOT wedge: it re-latches and the
+        // returned boundary must be just above the rewound `now`, not the stale future T.
+        let (_emit0, nb0) = genlock_emit_gate(rewound, boundary, I30);
+        assert!(
+            nb0 <= rewound + I30,
+            "backward step must re-latch the boundary to the rewound clock \
+             (got {nb0}, expected <= {})",
+            rewound + I30
+        );
+        assert_ne!(
+            nb0, boundary,
+            "must not keep the stale future boundary after a backward step"
+        );
+
+        // Drive a few more frames at the rewound clock and confirm emit resumes
+        // within ~1 interval (i.e. the gate is no longer wedged at 0fps).
+        let mut next_b = nb0;
+        let mut emitted = 0;
+        for k in 0..3u64 {
+            let now = rewound + k * I30 + I30; // step forward one interval each frame
+            let (emit, nb) = genlock_emit_gate(now, next_b, I30);
+            next_b = nb;
+            if emit {
+                emitted += 1;
+            }
+        }
+        assert!(
+            emitted >= 1,
+            "emit must resume within ~1 interval after a backward clock step, \
+             got {emitted} emits (pre-fix: 0 forever => wedged at 0fps)"
+        );
+    }
+
+    #[test]
     fn genlock_gate_emits_at_30fps_over_a_60fps_capture_stream() {
         // Drive ~1s of 60 fps captures through the gate; exactly ~30 must emit
         // (the 60->30 decimation), one per wall boundary.
