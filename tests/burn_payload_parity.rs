@@ -188,10 +188,13 @@ fn cpp_burned_payload_round_trips_through_the_rust_decoder() {
 
 #[test]
 fn cpp_boundary_math_matches_rust_next_wall_boundary_ns() {
-    // gen_ts_ns is wall_now snapped to the next 1/fps boundary. The C++ pure pacing math
-    // (burn_clock::next_wall_boundary_ns) must equal Rust next_wall_boundary_ns for the
-    // same inputs, or the node stamp lands on a different grid than cam2's and #108's
-    // subtraction is biased by up to one frame. Compile a tiny harness and compare.
+    // The burned gen_ts_ns is the RAW render-instant wall clock (NOT boundary-snapped) so
+    // it shares the camera-box painter's RAW basis — that is what makes #108's cam→strih
+    // subtraction bias-free (#108 finding #2; snapping the burn against the raw cam2 stamp
+    // would inject a ~½-frame bias). burn_clock::next_wall_boundary_ns is the retained,
+    // documented port of the painter's PACING grid (the cadence it sleeps to, not the
+    // stamp). This parity test guards that port's C++↔Rust bit-identity so the documented
+    // relationship can't silently drift. Compile a tiny harness and compare.
     let dir = std::env::temp_dir().join(format!("burn_boundary_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let main_cpp = dir.join("boundary_main.cpp");
@@ -523,9 +526,10 @@ fn burn_filter_source_is_vendored_and_wired() {
          burn the wrong/no payload. #111 reverted."
     );
     assert!(
-        flt.contains("burn_clock::gen_ts_ns") || flt.contains("burn_clock::next_wall_boundary_ns"),
-        "{BURN_FILTER}: the burn filter no longer stamps the boundary-snapped wall-clock \
-         gen_ts_ns; the node stamp would not share cam2's timebase (#108 subtraction breaks)."
+        flt.contains("burn_clock::gen_ts_ns"),
+        "{BURN_FILTER}: the burn filter no longer stamps the RAW render-instant wall-clock \
+         gen_ts_ns (burn_clock::gen_ts_ns); the node stamp would not share cam2's RAW \
+         painter timebase and #108's cam→strih subtraction would be biased (finding #2)."
     );
     // Node identity: the run_id is env-overridable (OBS_BURN_RUN_ID) with the reserved
     // strih/stream defaults that sit OUTSIDE cam2's range so #108 distinguishes nodes.

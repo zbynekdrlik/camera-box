@@ -207,8 +207,8 @@ jobs:
           if ($flt -notmatch [regex]::Escape('burn_payload::encode')) {
             Write-Error "ndi-burn-filter.cpp: no longer calls burn_payload::encode — the burned payload would not match the Rust decoder (#111 reverted)"; exit 1
           }
-          if (($flt -notmatch [regex]::Escape('burn_clock::gen_ts_ns')) -and ($flt -notmatch [regex]::Escape('burn_clock::next_wall_boundary_ns'))) {
-            Write-Error "ndi-burn-filter.cpp: no longer stamps the boundary-snapped wall-clock gen_ts_ns — node stamp would not share cam2's timebase (#108 subtraction breaks)"; exit 1
+          if ($flt -notmatch [regex]::Escape('burn_clock::gen_ts_ns')) {
+            Write-Error "ndi-burn-filter.cpp: no longer stamps the RAW render-instant wall-clock gen_ts_ns (burn_clock::gen_ts_ns) — node stamp would not share cam2's RAW painter timebase and #108's cam->strih subtraction would be biased (finding #2)"; exit 1
           }
           if ($flt -notmatch [regex]::Escape('OBS_BURN_RUN_ID')) {
             Write-Error "ndi-burn-filter.cpp: per-node run_id no longer env-configurable (OBS_BURN_RUN_ID) — #108 cannot distinguish node-stamp from cam2-stamp (#111 reverted)"; exit 1

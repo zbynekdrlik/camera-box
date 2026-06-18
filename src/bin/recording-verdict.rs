@@ -25,6 +25,10 @@
 
 use anyhow::{Context, Result};
 use camera_box::probe::recording::{analyze_recording, extract_frames_png, RecordingFrame};
+use camera_box::probe::recording_latency::{
+    cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, RunIds, BURN_RUN_ID_STREAM,
+    BURN_RUN_ID_STRIH,
+};
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, strih_stream_verdict, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
@@ -56,6 +60,24 @@ struct Args {
     /// Monitor refresh Hz of the painted logical counter.
     #[arg(long, default_value_t = 60.0)]
     refresh_hz: f64,
+    /// #108 per-hop ABSOLUTE latency: the strih node's burn-QR run_id (the value
+    /// `OBS_BURN_RUN_ID` was set to on strih; default mirrors the #111 burn filter).
+    /// When present in the strih recording, cam→strih latency is computed
+    /// (strih_burn.gen_ts_ns − cam2.gen_ts_ns).
+    #[arg(long, default_value_t = BURN_RUN_ID_STRIH)]
+    burn_strih_run_id: u32,
+    /// #108 per-hop ABSOLUTE latency: the stream node's burn-QR run_id. When both
+    /// recordings carry their node burn, strih→stream latency is computed
+    /// (stream_burn.gen_ts_ns − strih_burn.gen_ts_ns, paired by cam2 tick).
+    #[arg(long, default_value_t = BURN_RUN_ID_STREAM)]
+    burn_stream_run_id: u32,
+    /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
+    /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
+    /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
+    /// strih→stream. Unset (0) ⇒ cam2 = the first non-burn QR (safe for the strih
+    /// recording, which has no foreign burn).
+    #[arg(long, default_value_t = 0)]
+    cam2_run_id: u32,
 }
 
 /// Parse the painter ticks from either a bare one-`tick`-per-line file or the
@@ -169,6 +191,34 @@ fn report_recording(
     Ok(pass)
 }
 
+/// Print one #108 per-hop ABSOLUTE latency block (p50, p99, jitter, drift). Returns
+/// whether a non-empty hop was computed (so a recording carrying no burn QR is
+/// reported as such rather than silently omitted).
+fn report_hop_latency(h: &Option<HopLatency>, label: &str, anchor: &str) -> bool {
+    match h {
+        Some(h) => {
+            println!("=== {label} per-hop ABSOLUTE latency (#108, anchor: {anchor}) ===");
+            println!(
+                "  samples={} p50={:.2}ms p99={:.2}ms jitter(p99-p50)={:.2}ms drift={:+.4}ms/min",
+                h.samples, h.stats.p50_ms, h.stats.p99_ms, h.jitter_ms, h.drift_ms_per_min
+            );
+            println!(
+                "  (min={:.2} mean={:.2} p95={:.2} max={:.2} ms)",
+                h.stats.min_ms, h.stats.mean_ms, h.stats.p95_ms, h.stats.max_ms
+            );
+            true
+        }
+        None => {
+            println!(
+                "=== {label} per-hop ABSOLUTE latency (#108) ===\n  NO SAMPLES — no node burn QR \
+                 paired in the recording(s). Enable the #111 burn (OBS_BURN_QR) on the PROBE scene \
+                 and pass the matching --burn-*-run-id."
+            );
+            false
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -194,14 +244,16 @@ fn main() -> Result<()> {
 
     let mut all_pass = true;
 
-    // strih recording verdict (strict hop-1 endpoint).
-    let (_strih_frames, strih_ticks) = ticks_of(&args.strih)?;
+    // strih recording verdict (strict hop-1 endpoint). Keep the decoded frames so the
+    // #108 per-hop latency engine can read each frame's cam2 + node-burn gen_ts_ns.
+    let (strih_frames, strih_ticks) = ticks_of(&args.strih)?;
     let strih_v = verdict(&strih_ticks, &cfg);
     all_pass &= report_recording("strih", &args.strih, &strih_v, &args.out_dir)?;
 
     // stream recording verdict (headline endpoint) + strih→stream direct compare.
+    let mut stream_frames_opt: Option<Vec<RecordingFrame>> = None;
     if let Some(stream_path) = &args.stream {
-        let (_stream_frames, stream_ticks) = ticks_of(stream_path)?;
+        let (stream_frames, stream_ticks) = ticks_of(stream_path)?;
         let stream_v = verdict(&stream_ticks, &cfg);
         all_pass &= report_recording("stream", stream_path, &stream_v, &args.out_dir)?;
 
@@ -223,6 +275,7 @@ fn main() -> Result<()> {
         }
         println!("  RESULT: {}", if ss.is_pass() { "PASS" } else { "FAIL" });
         all_pass &= ss.is_pass();
+        stream_frames_opt = Some(stream_frames);
     }
 
     // cam→strih honest assessment (no false zero claim).
@@ -247,6 +300,40 @@ fn main() -> Result<()> {
         }
         println!("  LIMITATION: {}", a.limitation);
         cam_strih_clean = Some(a.unknown_ticks.is_empty());
+    }
+
+    // #108 — per-hop ABSOLUTE latency from the in-frame node-burn + cam2 gen_ts_ns
+    // stamps (the #111 burn must be live on the boxes for these to be non-empty). NO
+    // networked record_start, NO idx/30 — every number is a difference of two stamps
+    // that already share the DanteSync wall clock. Reported, never gated (a latency
+    // gate is a separate decision; #108 asks for the stable, defined numbers).
+    println!();
+    let cam2_pin = if args.cam2_run_id != 0 {
+        Some(args.cam2_run_id)
+    } else {
+        None
+    };
+    // strih recording: node burn = strih; no foreign burn forwarded INTO strih.
+    let strih_ids = RunIds {
+        node_burn: args.burn_strih_run_id,
+        cam2: cam2_pin,
+        other_burns: vec![],
+    };
+    let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(&strih_frames, &strih_ids));
+    report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
+    if let Some(stream_frames) = &stream_frames_opt {
+        // stream recording: node burn = stream; strih's burn is FOREIGN (forwarded in
+        // the program feed) and MUST be excluded so it is never read as cam2.
+        let stream_ids = RunIds {
+            node_burn: args.burn_stream_run_id,
+            cam2: cam2_pin,
+            other_burns: vec![args.burn_strih_run_id],
+        };
+        let ss_lat = hop_latency(
+            "strih→stream",
+            &strih_stream_samples(&strih_frames, stream_frames, &strih_ids, &stream_ids),
+        );
+        report_hop_latency(&ss_lat, "strih→stream", "strih render gen_ts_ns");
     }
 
     // Headline. Be HONEST about scope: a clean strih(+stream) verdict proves the
