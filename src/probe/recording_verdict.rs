@@ -128,14 +128,26 @@ pub struct RecordingVerdict {
     /// The 60→30 sampling beat is balanced: mean step exactly the expected ratio
     /// (`refresh_hz / capture_fps`) AND no net copy/gap imbalance. The beat is
     /// recognized and NOT counted as loss.
+    ///
+    /// SEMANTICS — this is a NET (global) balance, the threshold-free discriminator
+    /// proven on the rig (a real drop pushes avg step > 2.0, a real duplicate pulls
+    /// it < 2.0). A single stale-copy that is EXACTLY cancelled by a distant dropped
+    /// frame nets to surplus 0 and reads as balanced — two independent random faults
+    /// cancelling exactly over a 300 s / 9000-frame window is vanishingly unlikely,
+    /// and any non-cancelling residue still surfaces in `real_copy_frames` /
+    /// `real_gap_frames`. A stronger gate would also assert the LOCAL 0↔4 / 1↔3 pair
+    /// balance; the net gate is the rig-validated method and is what #107 specifies.
     pub beat_balanced: bool,
     /// Camera frames with no CRC-valid QR (undecodable) — always a FAIL, 0 tol.
     pub undecodable_frames: Vec<u64>,
-    /// Camera frames that are a NET stale-copy (tick did not advance, unmatched by
-    /// a compensating overshoot) — real duplication, FAIL.
+    /// Camera frames carrying the NET stale-copy deficit (steps below the expected
+    /// step, most-deviant first) — real duplication, FAIL. Names enough frames to
+    /// account for the net deficit so the FAIL has pixel proof; the authoritative
+    /// gate is `beat_balanced` (net), not this list's emptiness.
     pub real_copy_frames: Vec<u64>,
-    /// Camera frames that are a NET gap (tick overshot the beat / jumped backward,
-    /// unmatched by a compensating copy) — real loss / reorder, FAIL.
+    /// Camera frames carrying the NET gap surplus (steps above the expected step, or
+    /// a backward jump, most-deviant first) — real loss / reorder, FAIL. Same
+    /// net-accounting + pixel-proof contract as `real_copy_frames`.
     pub real_gap_frames: Vec<u64>,
 }
 
@@ -338,9 +350,20 @@ impl StrihStreamVerdict {
 /// the identical camera frame, so a positional pair-up would compare different
 /// camera moments). Offset-immune by construction. A tick present at one output and
 /// absent at the other within the overlap is a real hop fault: a strih-only tick is a
-/// frame the stream output dropped; a stream-only tick is a reorder / phantom.
-/// Undecodable frames (`None`) carry no tick and are excluded here — each is already
-/// a hard fault in its own recording's [`verdict`].
+/// frame the stream output DROPPED; a stream-only tick is a frame stream has that
+/// strih does not (a phantom id, or a reorder that carried a tick across the span
+/// boundary). Undecodable frames (`None`) carry no tick and are excluded here — each
+/// is already a hard fault in its own recording's [`verdict`].
+///
+/// SCOPE — this set compare catches DROPS and phantoms on the hop. Two cases it does
+/// NOT catch, both handled elsewhere or unreachable on this pipeline: (1) a stream
+/// FIFO underrun (stream serves the same tick twice) collapses in the set but is
+/// caught by the stream recording's OWN [`verdict`] (its net surplus goes negative —
+/// see the binary, which runs `verdict()` on the stream recording too); (2) a
+/// same-span, same-magnitude REORDER yields neither a strih-only nor a stream-only
+/// tick — but OBS/NDI program output is a strict in-order FIFO, not a reordering
+/// packet network, so true frame reorder does not occur on this hop (the
+/// per-recording backward-jump check covers any local reorder regardless).
 pub fn strih_stream_verdict(
     strih: &[FrameTick],
     stream: &[FrameTick],
