@@ -24,7 +24,9 @@
 	    to 911002 (strih); stream sets OBS_BURN_RUN_ID=911004. Both sit OUTSIDE cam2's
 	    normal run_id range so #108 distinguishes node-stamp from cam2-stamp by run_id.
 	  - frame_id: this filter's own per-render monotonic counter.
-	  - gen_ts_ns: boundary-snapped wall-clock (burn_clock::gen_ts_ns) — cam2's timebase.
+	  - gen_ts_ns: RAW render-instant wall-clock (burn_clock::gen_ts_ns, NOT boundary-
+	    snapped) — shares the camera-box painter's RAW basis so cam→strih is bias-free (#108
+	    finding #2). The genlock EMIT timecode (ndi-output.cpp) stays snapped; separate path.
 	  - Gated behind OBS_BURN_QR (mirrors OBS_GENLOCK_WALL_CLOCK): default OFF, so the
 	    production install is UNAFFECTED until #108 enables it on the dedicated PROBE scene.
 	    When OFF the filter is a transparent pass-through (renders the target, no burn).

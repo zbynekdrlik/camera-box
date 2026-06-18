@@ -3,14 +3,26 @@
 
 	The burned `gen_ts_ns` MUST share cam2's timebase so #108's per-hop subtraction
 	(`node_stamp − cam2_gen_ts`) is valid: epoch NANOSECONDS on the wall clock
-	(DanteSync-disciplined on strih/stream), snapped to the strictly-next 1/fps frame
-	boundary. This is the SAME basis + boundary math as the camera-box painter's
-	`gen_ts_ns` (src/probe/painter.rs `wall_now_ns` + `next_wall_boundary_ns`) and the
-	DistroAV output emit-timecode (ndi-output.cpp), just expressed in ns (the painter's
-	unit) rather than 100ns (the NDI timecode unit).
+	(DanteSync-disciplined on strih/stream), read RAW at render time.
 
-	Pure pacing math is split out (no <chrono>) so it can be unit-tested for parity with
-	the Rust `next_wall_boundary_ns`. The wall-clock read is a thin <chrono> wrapper.
+	BASIS PARITY WITH THE CAMERA-BOX PAINTER (finding #2 — bias-free).
+	The cam2 painter stamps the RAW wall clock at paint time: src/probe/painter.rs
+	stamps `clock_ns()` (== `SystemTime::now()` epoch ns) into the QR `gen_ts_ns`. Its
+	`next_wall_boundary_ns` is used ONLY to pick the next *sleep* target (pacing); it is
+	NOT applied to the stamp the QR carries. So the burn's `gen_ts_ns` is likewise the
+	RAW `wall_now_ns()` — NOT boundary-snapped. Snapping the burn against a raw cam2
+	stamp would inject a systematic ~½-frame offset (~16.7 ms @ 30 fps) plus up to a
+	full-frame of quantization jitter into cam→strih. Sharing the RAW basis on both
+	sides is what makes the per-hop number genuinely bias-free.
+
+	NOT to be confused with the genlock EMIT timecode. The outgoing NDI frame's
+	timecode (ndi-output.cpp `genlock_emit_timecode_100ns`) IS boundary-snapped — it
+	must fall on the genlock grid the cameras emit on. That is a SEPARATE value on a
+	SEPARATE path; this QR burn stamp does not touch it and it is unchanged by this fix.
+
+	The pure boundary math below stays as a documented, unit-testable port of the Rust
+	`next_wall_boundary_ns` (it describes the painter's pacing grid), but `gen_ts_ns`
+	deliberately does NOT call it. The wall-clock read is a thin <chrono> wrapper.
 ******************************************************************************/
 
 #pragma once
@@ -22,9 +34,9 @@ namespace burn_clock {
 // Strictly-next wall-clock frame boundary at or after `now_ns`, for a frame period of
 // `period_ns`. EXACT port of Rust `next_wall_boundary_ns` (src/probe/painter.rs):
 //   (now_ns / period_ns + 1) * period_ns
-// "Strictly next" (an exact boundary advances one full period) keeps two equal-rate
-// cadences from emitting two ids at the same instant. `period_ns == 0` (fps 0) is
-// guarded — returns `now_ns` (zero alignment) rather than dividing by zero.
+// Retained as a documented description of the painter's PACING grid (the cadence the
+// painter sleeps to). The QR `gen_ts_ns` stamp does NOT apply it — see the file header
+// (finding #2): the painter stamps the RAW wall clock, so the burn must too.
 //
 // The Rust mirror computes in u64 (wraps in release, never UB). Real epoch-ns values
 // (~1.7e18) are far below i64::MAX so the multiply never overflows in practice — but to
@@ -68,12 +80,16 @@ inline int64_t wall_now_ns()
 	return duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-// Boundary-snapped emit timestamp (epoch ns) for a frame at `fps` — the value burned
-// into the QR as gen_ts_ns. Mirrors painter.rs: snap wall_now_ns() to the next 1/fps
-// boundary.
-inline int64_t gen_ts_ns(double fps)
+// RAW render-instant emit timestamp (epoch ns) for a frame — the value burned into the
+// QR as gen_ts_ns. Shares the camera-box painter's RAW basis (painter.rs stamps
+// `clock_ns()`, NOT the pacing boundary), so cam→strih = burn_gen_ts − cam2_gen_ts is
+// bias-free (finding #2). `fps` is accepted for call-site symmetry but is deliberately
+// unused: the stamp is NOT boundary-snapped (snapping would re-introduce the ~½-frame
+// bias this fix removes). The genlock EMIT timecode that DOES snap lives separately in
+// ndi-output.cpp and is unchanged.
+inline int64_t gen_ts_ns(double /*fps*/)
 {
-	return next_wall_boundary_ns(wall_now_ns(), period_ns_for_fps(fps));
+	return wall_now_ns();
 }
 
 } // namespace burn_clock

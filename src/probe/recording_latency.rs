@@ -179,8 +179,13 @@ pub fn split_payloads(frame: &RecordingFrame, ids: &RunIds) -> (Option<Payload>,
             if node.is_none() {
                 node = Some(*p);
             }
-        } else if cam2.is_none() && ids.is_cam2(p.run_id) {
-            cam2 = Some(*p);
+        } else if ids.is_cam2(p.run_id) {
+            // Canonical Vernier tick: keep the cam2 half with the HIGHEST frame_id
+            // (the freshly-painted half), matching the dual-decode path everywhere.
+            match cam2 {
+                Some(c) if c.frame_id >= p.frame_id => {}
+                _ => cam2 = Some(*p),
+            }
         }
     }
     (cam2, node)
@@ -339,7 +344,13 @@ fn burn_by_cam2_tick(frames: &[RecordingFrame], ids: &RunIds) -> HashMap<u32, i6
         let (cam2, node) = split_payloads(f, ids);
         if let (Some(c), Some(n)) = (cam2, node) {
             if n.gen_ts_ns > 0 {
-                m.entry(c.frame_id).or_insert(n.gen_ts_ns);
+                m.entry(c.frame_id)
+                    .and_modify(|ts| {
+                        if n.gen_ts_ns < *ts {
+                            *ts = n.gen_ts_ns;
+                        }
+                    })
+                    .or_insert(n.gen_ts_ns);
             }
         }
     }
