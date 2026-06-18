@@ -275,6 +275,65 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
 mod tests {
     use super::*;
 
+    // ---- #126: reconnect re-arm (sustained-empty → rebuild) ----------------
+
+    #[test]
+    fn rearm_unit_fires_only_after_sustained_empty_in_steady_state() {
+        // Re-arm fires when the source is in STEADY state (filled) AND it has just
+        // resumed after a sustained true-empty run >= the threshold.
+        assert!(
+            genlock_rearm_on_resume(GENLOCK_REARM_EMPTY_TICKS, true),
+            "an empty run AT the threshold while filled must re-arm"
+        );
+        assert!(
+            genlock_rearm_on_resume(GENLOCK_REARM_EMPTY_TICKS + 50, true),
+            "an empty run past the threshold while filled must re-arm"
+        );
+    }
+
+    #[test]
+    fn rearm_unit_brief_empty_below_threshold_never_rearms() {
+        // The jitter-safety guard: a brief empty (1..threshold-1) must NOT re-arm —
+        // a spurious re-arm would force a ~preload-frame rebuild hold on every blip,
+        // catastrophic at the shallow cam preload=1.
+        for run in 0..GENLOCK_REARM_EMPTY_TICKS {
+            assert!(
+                !genlock_rearm_on_resume(run, true),
+                "empty run {run} < threshold {GENLOCK_REARM_EMPTY_TICKS} must NOT re-arm"
+            );
+        }
+    }
+
+    #[test]
+    fn rearm_unit_never_fires_while_building() {
+        // While !filled the FIFO is already in the build phase rebuilding the reserve;
+        // re-arming again is a no-op concept — never fire when not filled, at ANY run.
+        for run in [0u32, 1, GENLOCK_REARM_EMPTY_TICKS, GENLOCK_REARM_EMPTY_TICKS + 100] {
+            assert!(
+                !genlock_rearm_on_resume(run, false),
+                "must never re-arm while !filled (run {run})"
+            );
+        }
+    }
+
+    #[test]
+    fn rearm_threshold_is_safely_above_jitter() {
+        // ~1 s @ 30 fps. Must be far above any realistic single-dip jitter so normal
+        // operation NEVER re-arms (only a real disconnect sustains empties this long).
+        assert_eq!(GENLOCK_REARM_EMPTY_TICKS, 30);
+    }
+
+    #[test]
+    fn rearm_empty_run_resets_on_any_consume() {
+        // The empty-run counter must reset to 0 whenever a distinct frame is consumed
+        // (modelled by genlock_empty_run_next: a consume zeroes it, a true-empty +1).
+        assert_eq!(genlock_empty_run_next(5, true), 0, "consume resets the run");
+        assert_eq!(genlock_empty_run_next(5, false), 6, "true-empty increments the run");
+        assert_eq!(genlock_empty_run_next(0, false), 1, "first empty after a consume");
+        // Saturates — never wraps on a very long disconnect.
+        assert_eq!(genlock_empty_run_next(u32::MAX, false), u32::MAX);
+    }
+
     #[test]
     fn build_drain_unit_trims_to_target() {
         // At the build latch (depth > preload) drain down to target = preload+1.
