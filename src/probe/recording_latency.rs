@@ -19,6 +19,15 @@
 //!   frame_id = <node's own monotonic counter>, gen_ts_ns = <node RENDER instant
 //!   on the SAME wall clock> }`.
 //!
+//! Both stamps are the RAW wall-clock read at paint/render — the cam2 painter stamps
+//! `clock_ns()` (raw `SystemTime::now`, NOT the pacing boundary it sleeps to), and the
+//! #111 burn's `burn_clock::gen_ts_ns()` returns the raw `wall_now_ns()` (NOT boundary-
+//! snapped). Sharing the RAW basis is what makes cam→strih genuinely bias-free: a snapped burn
+//! against a raw cam2 stamp would inject a systematic ~½-frame (~16.7 ms @ 30 fps) offset
+//! plus up to a full-frame of quantization jitter (finding #2). The EMIT timecode the
+//! genlock fork puts on the outgoing NDI frame (`ndi-output.cpp`) stays boundary-snapped —
+//! that path is unrelated to the QR burn stamp and is unchanged.
+//!
 //! The two run_ids are disjoint by construction (the burn defaults 911002/911004
 //! sit far outside cam2's range), so [`split_payloads`] separates them with no
 //! ambiguity.
@@ -55,7 +64,7 @@
 //! (`recording-verdict --burn-strih …`) is the I/O glue that runs it on the real
 //! recordings.
 
-use crate::probe::analyzer::{percentile, LatencyStats};
+use crate::probe::analyzer::LatencyStats;
 use crate::probe::payload::Payload;
 use crate::probe::recording::RecordingFrame;
 use serde::Serialize;
@@ -146,12 +155,25 @@ impl RunIds {
 }
 
 /// Split a recorded frame's payloads into `(cam2 payload, this-node burn payload)`,
-/// classified per [`RunIds`]. Returns the FIRST of each kind (a frame carries at
-/// most one of each that matters; the dual-QR cam2 halves share one `gen_ts_ns`, so
-/// either half gives the same cam2 paint instant).
+/// classified per [`RunIds`].
+///
+/// cam2 selection is the **canonical Vernier tick**: the cam2 painter emits a DUAL-QR
+/// Vernier — TWO cam2 QRs per frame, same `run_id`, DIFFERENT `frame_id` (left = latest
+/// even tick, right = latest odd tick). The two halves share one `gen_ts_ns` (the paint
+/// instant), but they do NOT carry the same `frame_id`, and across a refresh straddle a
+/// recorded frame can show one fresh half + one settled half. The canonical tick is
+/// therefore `max_by_key(frame_id)` — IDENTICAL to [`crate::probe::qr::decode_capture_dual`]
+/// and [`crate::probe::recording::RecordingFrame::tick`]. Taking the FIRST cam2 payload
+/// rqrr happens to return is WRONG: rqrr grid order is not stable across two independent
+/// MKVs, so the strih and stream recordings could key on different halves of the SAME
+/// optical instant and never pair (finding #1). Selecting the max-frame_id half makes both
+/// sides agree on one tick per optical instant.
+///
+/// The node burn is the FIRST payload matching `ids.node_burn` (the burn filter emits
+/// exactly one burn QR per render, so there is only ever one to find).
 pub fn split_payloads(frame: &RecordingFrame, ids: &RunIds) -> (Option<Payload>, Option<Payload>) {
-    let mut cam2: Option<Payload> = None;
     let mut node: Option<Payload> = None;
+    let mut cam2: Option<Payload> = None;
     for p in &frame.payloads {
         if p.run_id == ids.node_burn {
             if node.is_none() {
@@ -250,22 +272,31 @@ pub fn cam_strih_samples(strih: &[RecordingFrame], ids: &RunIds) -> Vec<LatencyS
 /// `latency = stream_burn.gen_ts_ns − strih_burn.gen_ts_ns`, anchored at the strih
 /// render instant (`strih_burn.gen_ts_ns`).
 ///
-/// Pairing by the cam2 tick (NOT by capture position) makes this offset-immune: the
-/// two independent recordings never start on the same camera frame, but the cam2
-/// optical tick is identical at both outputs. A tick present in only one recording
-/// is tap start/stop skew (or a real drop, already caught by the #107 loss verdict)
-/// and contributes no latency sample.
+/// Pairing by the CANONICAL cam2 tick (NOT by capture position) makes this offset-immune:
+/// the two independent recordings never start on the same camera frame and rqrr returns the
+/// two dual-QR halves in a different order across the two MKVs, but the canonical tick
+/// (`max_by_key(frame_id)`, per [`split_payloads`]) is identical at both outputs for one
+/// optical instant. A tick present in only one recording is tap start/stop skew (or a real
+/// drop, already caught by the #107 loss verdict) and contributes no latency sample.
+///
+/// Honesty (finding #4): each side reduces a canonical tick to ONE node-render stamp via the
+/// deterministic earliest-render rule in [`burn_by_cam2_tick`] (same rule on both sides, so
+/// no capture-position bias). The 60→30 camera oversample can still place the two outputs'
+/// captures on different members of a tick's oversampled cluster; any residual beat that the
+/// recordings alone cannot resolve is the SAME oversample #107 isolates — it is surfaced as
+/// jitter/drift on the hop, never absorbed into the p50 nor claimed as sub-frame precision
+/// the data does not back.
 pub fn strih_stream_samples(
     strih: &[RecordingFrame],
     stream: &[RecordingFrame],
     strih_ids: &RunIds,
     stream_ids: &RunIds,
 ) -> Vec<LatencySample> {
-    // Map cam2 tick → strih burn gen_ts (first occurrence; the burn is 1:1 with the
-    // rendered frame, and the first time strih renders a given cam2 tick is its
-    // render instant for that optical content). The stream side uses stream_ids,
-    // which MUST list strih's burn in `other_burns` so the forwarded strih burn in
-    // stream's frames is never misread as cam2.
+    // Map canonical cam2 tick → this node's EARLIEST burn gen_ts for that tick (the
+    // deterministic per-tick representative, same rule both sides — see
+    // burn_by_cam2_tick). The stream side uses stream_ids, which MUST list strih's burn
+    // in `other_burns` so the forwarded strih burn in stream's frames is never misread
+    // as cam2.
     let strih_by_tick: HashMap<u32, i64> = burn_by_cam2_tick(strih, strih_ids);
     let stream_by_tick: HashMap<u32, i64> = burn_by_cam2_tick(stream, stream_ids);
 
@@ -285,11 +316,23 @@ pub fn strih_stream_samples(
     out
 }
 
-/// Build `cam2 tick → this node's burn gen_ts_ns` for one recording. Uses the FIRST
-/// frame that carries both a cam2 QR and a node burn QR for each cam2 tick (a tick
-/// may be sampled by several camera frames; the first render is the canonical
-/// instant for that optical content). Skips frames missing either stamp or with a
-/// non-positive burn stamp.
+/// Build `canonical cam2 tick → this node's burn gen_ts_ns` for one recording.
+///
+/// The key is the canonical Vernier tick from [`split_payloads`] (`max_by_key(frame_id)`),
+/// so strih and stream key on the SAME tick for the SAME optical instant even though rqrr
+/// returns the two dual-QR halves in a different order across the two MKVs (finding #1).
+///
+/// Per-tick representative (finding #4 — the 60→30 oversample): the camera paints at the
+/// genlock 30 fps grid but a single optical tick can be captured by more than one recorded
+/// frame on each side (the 60→30 beat #107 separates). To keep the per-tick choice
+/// DETERMINISTIC and the strih/stream pairing honest, we take the EARLIEST node render
+/// (smallest `gen_ts_ns`) for each canonical tick on each side — the first instant this
+/// node put that optical content on the wire — using an explicit `min` keep, NOT
+/// "whichever frame rqrr decoded first". Choosing the same representative rule on both
+/// sides removes capture-position bias; any residual beat that cannot be resolved from the
+/// recordings alone is the same oversample #107 isolates and is reported honestly, never
+/// hidden inside a percentile. Skips frames missing either stamp or with a non-positive
+/// burn stamp.
 fn burn_by_cam2_tick(frames: &[RecordingFrame], ids: &RunIds) -> HashMap<u32, i64> {
     let mut m: HashMap<u32, i64> = HashMap::new();
     for f in frames {
@@ -301,12 +344,6 @@ fn burn_by_cam2_tick(frames: &[RecordingFrame], ids: &RunIds) -> HashMap<u32, i6
         }
     }
     m
-}
-
-/// Percentile re-export so the binary can render an extra cut without importing the
-/// analyzer directly (keeps the #108 surface in one module).
-pub fn pctl(sorted: &[f64], q: f64) -> f64 {
-    percentile(sorted, q)
 }
 
 #[cfg(test)]
@@ -460,6 +497,181 @@ mod tests {
         let (cam2, node) = split_payloads(&f, &ids);
         assert_eq!(cam2.unwrap().run_id, CAM2);
         assert_eq!(node.unwrap().run_id, BURN_RUN_ID_STREAM);
+    }
+
+    /// Build a frame with BOTH cam2 Vernier halves (same run_id + gen_ts_ns, DIFFERENT
+    /// frame_id) plus a node burn, in the rqrr payload order given.
+    /// `cam2 = (run_id, even_tick, odd_tick, gen_ts_ns)`, `node = (run_id, frame_id, gen_ts_ns)`.
+    /// `halves_first`: true → cam2 halves before node; false → node first (swapped order).
+    fn dual_cam2_frame(
+        idx: u64,
+        cam2: (u32, u32, u32, i64),
+        node: (u32, u32, i64),
+        halves_first: bool,
+    ) -> RecordingFrame {
+        let (cam2_run, even_tick, odd_tick, cam2_gen) = cam2;
+        let (node_run, node_fid, node_gen) = node;
+        let even = Payload {
+            run_id: cam2_run,
+            frame_id: even_tick,
+            gen_ts_ns: cam2_gen,
+        };
+        let odd = Payload {
+            run_id: cam2_run,
+            frame_id: odd_tick,
+            gen_ts_ns: cam2_gen,
+        };
+        let node = Payload {
+            run_id: node_run,
+            frame_id: node_fid,
+            gen_ts_ns: node_gen,
+        };
+        let payloads = if halves_first {
+            vec![even, odd, node]
+        } else {
+            // node first, then odd half, then even half — rqrr grid order varies per MKV.
+            vec![node, odd, even]
+        };
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index: idx,
+            payloads,
+            tick,
+        }
+    }
+
+    #[test]
+    fn split_picks_canonical_max_frame_id_cam2_half_both_orderings() {
+        // The cam2 painter emits a dual Vernier: two QRs, same run_id+gen_ts_ns, DIFFERENT
+        // frame_id (even tick vs odd tick). The canonical tick is max_by_key(frame_id) —
+        // matching decode_capture_dual / RecordingFrame.tick. split_payloads must return
+        // that half regardless of rqrr's payload order (finding #1).
+        for halves_first in [true, false] {
+            let f = dual_cam2_frame(
+                0,
+                (CAM2, 100, 101, 1_000),
+                (BURN_RUN_ID_STRIH, 7, 2_000),
+                halves_first,
+            );
+            let (cam2, node) = split_payloads(&f, &strih_ids());
+            assert_eq!(
+                cam2.unwrap().frame_id,
+                101,
+                "canonical cam2 tick must be max(frame_id)=101 (ordering halves_first={halves_first})"
+            );
+            assert_eq!(node.unwrap().run_id, BURN_RUN_ID_STRIH);
+        }
+    }
+
+    #[test]
+    fn cam_strih_latency_with_dual_cam2_halves_uses_canonical_tick() {
+        // cam→strih over frames that each carry BOTH cam2 halves. gen_ts_ns is shared
+        // across halves, so the latency is correct AND the anchor tick is the canonical
+        // max-frame_id half.
+        let off = 150_000_000i64; // 150 ms
+        let base = 1_700_000_000_000_000_000i64;
+        let frames: Vec<RecordingFrame> = (0..4u64)
+            .map(|i| {
+                let g = base + i as i64 * 33_333_333;
+                // even tick 200+2i, odd tick 200+2i+1 -> canonical = odd.
+                dual_cam2_frame(
+                    i,
+                    (CAM2, 200 + 2 * i as u32, 201 + 2 * i as u32, g),
+                    (BURN_RUN_ID_STRIH, 5000 + i as u32, g + off),
+                    i % 2 == 0, // alternate rqrr ordering frame to frame
+                )
+            })
+            .collect();
+        let samples = cam_strih_samples(&frames, &strih_ids());
+        assert_eq!(samples.len(), 4);
+        let h = hop_latency("cam→strih", &samples).unwrap();
+        assert!(
+            (h.stats.p50_ms - 150.0).abs() < 1e-6,
+            "p50 {}",
+            h.stats.p50_ms
+        );
+        assert!(h.jitter_ms.abs() < 1e-6);
+    }
+
+    #[test]
+    fn strih_stream_pairs_same_optical_instant_despite_swapped_decode_order() {
+        // CRITICAL (finding #1): the two independent MKVs decode the cam2 dual halves in
+        // DIFFERENT rqrr order. If split took the FIRST cam2 payload, strih could key on
+        // the even half while stream keyed on the odd half of the SAME optical instant —
+        // and they would never pair. Selecting the canonical max-frame_id half makes both
+        // sides key on the SAME tick, so the pair survives.
+        let base = 1_700_000_000_000_000_000i64;
+        let off = 40_000_000i64; // stream renders 40 ms after strih
+                                 // Shared optical instants: even ticks 300,302,304 ; odd ticks 301,303,305.
+                                 // Canonical (max) ticks = 301,303,305.
+        let strih: Vec<RecordingFrame> = (0..3u64)
+            .map(|i| {
+                let g = base + i as i64 * 33_000_000;
+                dual_cam2_frame(
+                    i,
+                    (CAM2, 300 + 2 * i as u32, 301 + 2 * i as u32, base - 1),
+                    (BURN_RUN_ID_STRIH, 70 + i as u32, g),
+                    true, // strih: cam2 halves first (even before odd)
+                )
+            })
+            .collect();
+        let stream: Vec<RecordingFrame> = (0..3u64)
+            .map(|i| {
+                let g = base + i as i64 * 33_000_000 + off;
+                dual_cam2_frame(
+                    i + 5, // different capture position
+                    (CAM2, 300 + 2 * i as u32, 301 + 2 * i as u32, base - 1),
+                    (BURN_RUN_ID_STREAM, 90 + i as u32, g),
+                    false, // stream: SWAPPED rqrr order (node first, odd, even)
+                )
+            })
+            .collect();
+        let samples = strih_stream_samples(&strih, &stream, &strih_ids(), &stream_ids());
+        assert_eq!(
+            samples.len(),
+            3,
+            "all three shared canonical ticks must pair despite swapped decode order"
+        );
+        let h = hop_latency("strih→stream", &samples).unwrap();
+        assert!(
+            (h.stats.p50_ms - 40.0).abs() < 1e-6,
+            "p50 {}",
+            h.stats.p50_ms
+        );
+        assert!(h.jitter_ms.abs() < 1e-6);
+    }
+
+    #[test]
+    fn burn_by_cam2_tick_takes_earliest_render_for_oversampled_tick() {
+        // finding #4: a single canonical tick captured by TWO recorded frames (the 60→30
+        // oversample) must reduce DETERMINISTICALLY to the EARLIEST node render, not
+        // "whichever rqrr decoded first". Feed the later render FIRST and assert the map
+        // keeps the earlier one.
+        let base = 1_700_000_000_000_000_000i64;
+        // SAME rqrr ordering on both frames so the canonical tick key is constant (this
+        // isolates the earliest-render REDUCTION, independent of the canonical-tick fix):
+        // both frames carry cam2 ticks 400/401 → canonical 401. Capture order feeds the
+        // LATER render (base+20ms) FIRST; the deterministic min-keep must keep base+5ms.
+        let frames = vec![
+            dual_cam2_frame(
+                0,
+                (CAM2, 400, 401, base),
+                (BURN_RUN_ID_STRIH, 10, base + 20_000_000),
+                true,
+            ),
+            dual_cam2_frame(
+                1,
+                (CAM2, 400, 401, base),
+                (BURN_RUN_ID_STRIH, 11, base + 5_000_000),
+                true,
+            ),
+        ];
+        let m = burn_by_cam2_tick(&frames, &strih_ids());
+        assert_eq!(
+            m.get(&401),
+            Some(&(base + 5_000_000)),
+            "per-tick representative must be the earliest node render, deterministically"
+        );
     }
 
     #[test]
