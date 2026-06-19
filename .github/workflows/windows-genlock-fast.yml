@@ -11,6 +11,14 @@ name: Windows genlock FAST (libobs / obs.dll only)
 
 on:
   workflow_dispatch:
+  # camera-box #136: also fire on a dev push that touches libobs, so a hot obs.dll
+  # build is available WITHOUT first merging the workflow to the default branch
+  # (GitHub only lets workflow_dispatch run from the default branch).
+  push:
+    branches: [dev]
+    paths:
+      - 'vendor/obs-studio/libobs/**'
+      - '.github/workflows/windows-genlock-fast.yml'
 
 permissions:
   contents: read

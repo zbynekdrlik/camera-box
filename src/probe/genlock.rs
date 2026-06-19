@@ -385,7 +385,20 @@ pub struct GenlockRelease {
 /// the uniform end-to-end latency and the jitter headroom (it must cover worst-case
 /// capture→strih delivery, like `preload` did, but now as a true time budget).
 pub fn genlock_present_ts(tick_wall_ns: u64, delay_frames: u32, interval_ns: u64) -> u64 {
-    tick_wall_ns.saturating_sub((delay_frames as u64) * interval_ns)
+    // Half-interval tolerance (#136 boundary-churn fix). A frame whose capture
+    // timestamp lands exactly on the nominal deadline (wall - delay*interval) jitters
+    // in/out of the `ts <= present_ts` test from tick to tick — the wall-clock render
+    // tick has ±slew, so present_ts hovers around the frame's timestamp and the frame
+    // alternates due/not-due, producing hold-then-catch-up churn (measured ~3 fps on
+    // the deep-preload chained strih->stream PGM feed: every boundary-aligned frame
+    // landed on the deadline). Biasing the deadline FORWARD by half a frame makes a
+    // boundary-landing frame robustly due (the ±2 ms slew is far below interval/2 ≈
+    // 16 ms @ 30 fps), giving a clean one-frame-per-tick release. Every source shares
+    // the same bias, so multi-source alignment is preserved; effective latency just
+    // drops by interval/2 (~16 ms, negligible).
+    tick_wall_ns
+        .saturating_sub((delay_frames as u64) * interval_ns)
+        .saturating_add(interval_ns / 2)
 }
 
 /// Decide the timestamp-aligned release for one source at one render tick (#136).
@@ -541,14 +554,41 @@ mod tests {
     }
 
     #[test]
-    fn present_ts_subtracts_the_common_delay() {
-        // present_ts = tick_wall - delay_frames*interval (saturating).
+    fn present_ts_subtracts_the_common_delay_with_half_interval_bias() {
+        // present_ts = tick_wall - delay_frames*interval + interval/2 (saturating).
+        // The +interval/2 is the #136 boundary-churn tolerance.
         let tick = WBASE + 100 * NS30;
-        assert_eq!(genlock_present_ts(tick, 6, NS30), tick - 6 * NS30);
+        assert_eq!(
+            genlock_present_ts(tick, 6, NS30),
+            tick - 6 * NS30 + NS30 / 2
+        );
+        // sub saturates to 0, then the half-interval bias is added.
         assert_eq!(
             genlock_present_ts(NS30, 6, NS30),
-            0,
+            NS30 / 2,
             "saturates, never wraps below 0"
+        );
+    }
+
+    #[test]
+    fn release_no_churn_for_a_boundary_landing_frame() {
+        // #136 boundary-churn regression guard. A frame captured EXACTLY on the nominal
+        // deadline (wall - preload*interval) must be robustly DUE even when wall_now is a
+        // hair before the boundary (render-tick slew) — otherwise it alternates hold/drop
+        // tick-to-tick (the ~3 fps stream churn). With the half-interval bias it is due.
+        let interval = NS30;
+        let wall = WBASE + 100 * interval;
+        let q = vec![wall - interval, wall]; // head captured at the nominal deadline (preload=1)
+        assert!(
+            genlock_release(genlock_present_ts(wall, 1, interval), &q).present,
+            "boundary-landing frame must be due (no hold churn)"
+        );
+        // wall a hair BEFORE the boundary (−2ms slew): WITHOUT the bias this would HOLD;
+        // with the half-interval bias it stays due.
+        let slewed = wall - 2_000_000;
+        assert!(
+            genlock_release(genlock_present_ts(slewed, 1, interval), &q).present,
+            "still due under −2ms render-tick slew (the fix kills the boundary jitter)"
         );
     }
 

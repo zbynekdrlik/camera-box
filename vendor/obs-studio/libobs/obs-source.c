@@ -4417,12 +4417,18 @@ static inline uint64_t genlock_frame_interval_ns(void)
 }
 
 /* The presentation deadline for this tick: the wall-clock instant whose frame is due
- * now = wall_now - delay_frames*interval (saturating, never wraps below 0). Mirror of
- * camera-box src/probe/genlock.rs genlock_present_ts. */
+ * now = wall_now - delay_frames*interval + interval/2 (saturating, never wraps below 0).
+ * The +interval/2 is the #136 boundary-churn fix: a frame whose timestamp lands exactly
+ * on the nominal deadline jitters in/out of the `ts <= present_ts` test from tick to tick
+ * (the render tick has ±slew), producing hold/drop churn (~3 fps on the deep-preload
+ * chained strih->stream PGM feed). Biasing forward by half a frame makes a boundary frame
+ * robustly due (±2ms slew << interval/2 ≈ 16ms @ 30fps); all sources share the bias so
+ * in-sync is preserved. Mirror of camera-box src/probe/genlock.rs genlock_present_ts. */
 static inline uint64_t genlock_present_ts(uint64_t wall_now_ns, uint32_t delay_frames, uint64_t interval_ns)
 {
 	const uint64_t delay = (uint64_t)delay_frames * interval_ns;
-	return wall_now_ns > delay ? wall_now_ns - delay : 0;
+	const uint64_t base = wall_now_ns > delay ? wall_now_ns - delay : 0;
+	return base + interval_ns / 2;
 }
 /* ---- end #136 ------------------------------------------------------------- */
 
