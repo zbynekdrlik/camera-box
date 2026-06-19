@@ -778,6 +778,43 @@ mod vendored_source {
     }
 
     #[test]
+    fn timestamp_aligned_release_present() {
+        // #136: the genlock_fifo branch must offer the timestamp-aligned release path
+        // (multi-source IN-SYNC) — env-gated (OBS_GENLOCK_TS_ALIGN, default OFF) + a
+        // per-frame wall-clock guard, presenting the frame captured at
+        // present_ts = wall_now - preload*interval. A subtree pull (#44) dropping it
+        // silently reverts the desync fix. Mirror of src/probe/genlock.rs genlock_release.
+        use camera_box::probe::genlock::{WALLCLOCK_TS_MAX_NS, WALLCLOCK_TS_MIN_NS};
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("getenv(\"OBS_GENLOCK_TS_ALIGN\")"),
+            "{OBS_SOURCE}: #136 — the timestamp-aligned release gate (OBS_GENLOCK_TS_ALIGN) is gone; re-apply."
+        );
+        assert!(
+            src.contains("genlock_is_wallclock_ts(next_frame->timestamp)"),
+            "{OBS_SOURCE}: #136 — the ts-align path no longer guards on \
+             genlock_is_wallclock_ts(next_frame->timestamp) (the count-gate fallback for \
+             non-camera sources); re-apply."
+        );
+        assert!(
+            src.contains("genlock_present_ts(genlock_wall_now_ns(), preload, interval)"),
+            "{OBS_SOURCE}: #136 — the presentation deadline (genlock_present_ts from the real \
+             wall clock genlock_wall_now_ns) is gone; re-apply."
+        );
+        // The C wall-clock bounds MUST equal the Rust mirror constants (lock-step).
+        assert!(
+            src.contains(&format!("{WALLCLOCK_TS_MIN_NS}ULL")),
+            "{OBS_SOURCE}: #136 — GENLOCK_WALLCLOCK_TS_MIN_NS drifted from the Rust mirror \
+             WALLCLOCK_TS_MIN_NS ({WALLCLOCK_TS_MIN_NS}); keep them in lock-step."
+        );
+        assert!(
+            src.contains(&format!("{WALLCLOCK_TS_MAX_NS}ULL")),
+            "{OBS_SOURCE}: #136 — GENLOCK_WALLCLOCK_TS_MAX_NS drifted from the Rust mirror \
+             WALLCLOCK_TS_MAX_NS ({WALLCLOCK_TS_MAX_NS}); keep them in lock-step."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every
