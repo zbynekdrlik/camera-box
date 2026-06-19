@@ -341,9 +341,236 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
     want.min(abs_max).max(MAX_ASYNC_FRAMES)
 }
 
+// ---- #136: timestamp-aligned release (multi-source IN-SYNC) ----------------
+//
+// The count-based gate above ([`genlock_decide`]) keeps a per-source jitter buffer of
+// a fixed DEPTH and consumes one frame per render tick. That cannot hold MULTIPLE
+// sources in sync: each source's depth drifts independently (the render pass consumes
+// slightly slower than the cameras produce, and any per-source dropout/reconnect/
+// preload-change leaves that source at a different depth that never re-converges), so
+// camera A ends up N frames behind camera B — visible desync (measured ~300 ms / 9
+// frames spread live, #136). A depth/count buffer fundamentally only chooses WHERE the
+// rate difference accumulates; it cannot eliminate it.
+//
+// Timestamp-aligned release fixes it. Every camera-box frame carries its real
+// DanteSync wall-clock CAPTURE instant (src/ndi.rs stamps the NDI timecode; DistroAV
+// passes it into `obs_source_frame->timestamp` in Source-Timecode mode). The strih
+// render tick is ALSO on the shared DanteSync wall clock. So at each tick we present,
+// from every source, the frame captured at the SAME instant `present_ts = tick_wall -
+// COMMON_DELAY`. Identical capture instant on every source ⇒ **in-sync by
+// construction**, regardless of buffered depth, delivery jitter, or a transient.
+// Latency is exactly `COMMON_DELAY` (bounded + uniform, never drifting), and a slow/
+// lagged render pass just drops the stale past-due frames uniformly instead of filling
+// the buffer toward the overrun cap. `preload` (a frame COUNT) is reinterpreted as a
+// TIME delay via the wall clock — same operator knob, sync-correct semantics.
+
+/// A timestamp-aligned genlock RELEASE decision for one source at one render tick (#136).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenlockRelease {
+    /// Free this many OLDEST queued frames UNSHOWN — they are already past the
+    /// presentation deadline (stale). A lagged render pass makes this > 0; at matched
+    /// rates it is 0. This replaces the unbounded FIFO fill of the count gate.
+    pub drop_oldest: usize,
+    /// Present a newly-due frame this tick (the head after `drop_oldest`). If `false`,
+    /// no queued frame has reached its presentation deadline yet (source early or
+    /// stalled) → repeat the current frame, drop nothing.
+    pub present: bool,
+}
+
+/// The presentation deadline (capture instant due NOW) for a render tick.
+///
+/// `present_ts = tick_wall_ns - delay_frames * interval_ns` (saturating, so an early
+/// boot wall clock can never wrap below 0). `delay_frames` is the genlock `preload`
+/// reinterpreted as a COMMON delay shared by every source — the single knob that sets
+/// the uniform end-to-end latency and the jitter headroom (it must cover worst-case
+/// capture→strih delivery, like `preload` did, but now as a true time budget).
+pub fn genlock_present_ts(tick_wall_ns: u64, delay_frames: u32, interval_ns: u64) -> u64 {
+    tick_wall_ns.saturating_sub((delay_frames as u64) * interval_ns)
+}
+
+/// Decide the timestamp-aligned release for one source at one render tick (#136).
+///
+/// `present_ts_ns` — the shared presentation deadline ([`genlock_present_ts`]).
+/// `queued_ts_ascending` — the source's queued frames' CAPTURE timestamps, oldest
+/// first (a single NDI source delivers in monotonic capture order, so the due frames
+/// are a prefix).
+///
+/// Rule: let `due` = the queued frames whose capture ts is at/before the deadline. If
+/// none are due, HOLD (`present = false`, drop nothing) — the source is early or
+/// stalled, repeat the current frame. Otherwise present the NEWEST due frame (the head
+/// after dropping the `due - 1` stale older ones). Because every genlock source shares
+/// `present_ts` and a common wall-clock capture cadence, the presented frame's
+/// timestamp is identical across sources ⇒ in-sync.
+pub fn genlock_release(present_ts_ns: u64, queued_ts_ascending: &[u64]) -> GenlockRelease {
+    let due = queued_ts_ascending
+        .iter()
+        .take_while(|&&ts| ts <= present_ts_ns)
+        .count();
+    if due == 0 {
+        GenlockRelease {
+            drop_oldest: 0,
+            present: false,
+        }
+    } else {
+        GenlockRelease {
+            drop_oldest: due - 1,
+            present: true,
+        }
+    }
+}
+
+/// Lower plausible-wall-clock bound (Unix epoch ns): 2020-01-01T00:00:00Z.
+pub const WALLCLOCK_TS_MIN_NS: u64 = 1_577_836_800_000_000_000;
+/// Upper plausible-wall-clock bound (exclusive, Unix epoch ns): 2100-01-01T00:00:00Z.
+pub const WALLCLOCK_TS_MAX_NS: u64 = 4_102_444_800_000_000_000;
+
+/// Is a frame timestamp a plausible DanteSync wall-clock instant (Unix-epoch ns)?
+///
+/// Timestamp-aligned release ([`genlock_release`]) is correct ONLY when frames carry a
+/// real shared wall-clock capture instant — the camera-box genlock inputs in
+/// Source-Timecode mode. A `0` (no timecode), a small monotonic-style value, or any
+/// out-of-range garbage (a non-camera source: CG, preview, lyrics) fails this, and the
+/// C side then falls back to the count-based [`genlock_decide`] gate so non-broadcast
+/// sources are never broken by the new path.
+pub fn is_wallclock_ts(ts_ns: u64) -> bool {
+    (WALLCLOCK_TS_MIN_NS..WALLCLOCK_TS_MAX_NS).contains(&ts_ns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #136: timestamp-aligned release (multi-source IN-SYNC) -------------
+
+    const NS30: u64 = 33_333_333; // ~one 30fps frame interval in ns
+    const WBASE: u64 = WALLCLOCK_TS_MIN_NS + 1_000_000_000; // a plausible wall-clock base
+
+    /// `n` frames captured at a steady 30fps cadence from `WBASE` (oldest-first).
+    fn caps(n: usize) -> Vec<u64> {
+        (0..n).map(|i| WBASE + i as u64 * NS30).collect()
+    }
+
+    #[test]
+    fn release_steady_presents_one_drops_none() {
+        // Steady state at matched rates: each tick drops the presented frame, so the
+        // queue HEAD is the next due frame and the rest are future. Exactly one frame
+        // is due → present it, drop nothing.
+        let q = caps(6); // head q[0]=WBASE is due; q[1..] are future
+        let present_ts = WBASE; // only the head has ts <= deadline
+        let d = genlock_release(present_ts, &q);
+        assert_eq!(
+            d,
+            GenlockRelease {
+                drop_oldest: 0,
+                present: true
+            },
+            "with only the due frame at the head, present it and drop nothing"
+        );
+        assert_eq!(
+            q[d.drop_oldest], present_ts,
+            "the presented frame is the due head"
+        );
+    }
+
+    #[test]
+    fn release_drops_stale_when_render_pass_lagged() {
+        // The rate-leak / lagged-render case: present_ts jumped two intervals, so TWO
+        // frames are now past-due. Present the NEWEST, drop the stale one — a uniform
+        // controlled drop, NOT an unbounded FIFO fill (the depth-FIFO failure #136 fixes).
+        let q = caps(6); // indices 0..5 due-able
+        let present_ts = WBASE + 4 * NS30; // indices 0..=4 are due (5 frames)
+        let d = genlock_release(present_ts, &q);
+        assert_eq!(
+            d,
+            GenlockRelease {
+                drop_oldest: 4,
+                present: true
+            },
+            "five frames past-due → drop the four stale, present the newest"
+        );
+        // the presented frame (queue[drop_oldest]) is the one captured at present_ts
+        assert_eq!(q[d.drop_oldest], present_ts);
+    }
+
+    #[test]
+    fn release_holds_when_source_early_or_empty() {
+        // Source ahead: every queued frame is in the future relative to the deadline.
+        let q = caps(4); // ts >= WBASE
+        let present_ts = WBASE - 1; // nothing due yet
+        assert_eq!(
+            genlock_release(present_ts, &q),
+            GenlockRelease {
+                drop_oldest: 0,
+                present: false
+            },
+            "no frame at/before the deadline → hold (repeat last), drop nothing"
+        );
+        // Source empty (stalled): nothing to present.
+        assert_eq!(
+            genlock_release(WBASE + 100 * NS30, &[]),
+            GenlockRelease {
+                drop_oldest: 0,
+                present: false
+            }
+        );
+    }
+
+    #[test]
+    fn release_keeps_two_sources_in_sync_despite_different_depths() {
+        // THE core property (#136). Two genlock cams capture at the SAME wall-clock
+        // cadence but sit at DIFFERENT FIFO depths (the exact desync cause under the
+        // old count gate: cam A shallow=5, cam B deep=20). At ONE shared presentation
+        // deadline, both present the frame with the IDENTICAL capture timestamp →
+        // in-sync BY CONSTRUCTION, independent of buffered depth.
+        let a = caps(5);
+        let b = caps(20);
+        let present_ts = WBASE + 3 * NS30;
+        let da = genlock_release(present_ts, &a);
+        let db = genlock_release(present_ts, &b);
+        assert!(da.present && db.present, "both have a due frame");
+        let pres_a = a[da.drop_oldest];
+        let pres_b = b[db.drop_oldest];
+        assert_eq!(
+            pres_a, pres_b,
+            "different depths must present the SAME capture instant"
+        );
+        assert_eq!(
+            pres_a, present_ts,
+            "the presented frame is the one captured at the deadline"
+        );
+    }
+
+    #[test]
+    fn present_ts_subtracts_the_common_delay() {
+        // present_ts = tick_wall - delay_frames*interval (saturating).
+        let tick = WBASE + 100 * NS30;
+        assert_eq!(genlock_present_ts(tick, 6, NS30), tick - 6 * NS30);
+        assert_eq!(
+            genlock_present_ts(NS30, 6, NS30),
+            0,
+            "saturates, never wraps below 0"
+        );
+    }
+
+    #[test]
+    fn wallclock_guard_accepts_real_ts_rejects_garbage() {
+        assert!(
+            is_wallclock_ts(WBASE),
+            "a real DanteSync wall-clock ts is accepted"
+        );
+        assert!(
+            !is_wallclock_ts(0),
+            "0 (no timecode) is rejected → count-gate fallback"
+        );
+        assert!(
+            !is_wallclock_ts(NS30),
+            "a small monotonic-style ts is rejected"
+        );
+        assert!(
+            !is_wallclock_ts(WALLCLOCK_TS_MAX_NS),
+            "upper bound is exclusive"
+        );
+    }
 
     // ---- #126: reconnect re-arm (sustained-empty → rebuild) ----------------
 
