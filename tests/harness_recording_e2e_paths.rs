@@ -112,3 +112,81 @@ fn dantesync_gate_runs_before_any_recording() {
         "the DanteSync NTP+PTP gate must run BEFORE StartRecord (fail fast on an unlocked cluster)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #163 — record the PRODUCTION scene program, never a colliding probe input.
+//
+// Root cause (live-confirmed strih 2026-06-22): the harness routed program to the
+// PHASE2-PROBE scene whose `phase2-probe-src` ndi_source was pointed at "CAM1 (usb)" —
+// the SAME source-name the ALWAYS-ON prod input `NDI cam5` already holds. DistroAV
+// allows ONE receiver per (source-name) on a host, so the probe input received NO NDI
+// and the probe scene recorded pure BLACK (luma min=max=0; every frame undecodable),
+// blocking the strict cam1→strih + strih→stream measurement.
+//
+// Fix: record the EXISTING certified prod scene program directly — strih's prod scene
+// already shows cam1 via `NDI cam5` (genlock-certified), and stream's full-screen scene
+// already shows strih via `NDI 2ME PGM`. No second receiver, no source-name collision.
+// recording-e2e.sh must therefore route program via the `prod-scene` action (not the
+// colliding probe `setup`).
+// ---------------------------------------------------------------------------
+
+/// recording-e2e.sh must route the strih + stream OBS PROGRAM via `obs_phase2.py
+/// prod-scene` (record the certified production scene program), NOT via the probe
+/// `setup` action that points the colliding `phase2-probe-src` ndi_source at a
+/// source-name the always-on prod input already holds (→ black recording, #163).
+#[test]
+fn recording_e2e_records_prod_scene_not_colliding_probe() {
+    let s = read("scripts/recording-e2e.sh");
+    // The new prod-scene program routing must be used for BOTH boxes.
+    assert!(
+        s.contains("obs_phase2.py\" prod-scene") || s.contains("obs_phase2.py prod-scene"),
+        "#163: recording-e2e.sh must route the OBS program via the `prod-scene` action \
+         (record the certified prod scene program), not the colliding probe setup."
+    );
+    // The colliding probe `setup` action must NOT be used by the recording harness any
+    // more — that is what created the second receiver on the prod source-name → black.
+    assert!(
+        !s.contains("obs_phase2.py\" setup") && !s.contains("obs_phase2.py setup"),
+        "#163: recording-e2e.sh must NOT use `obs_phase2.py setup` (the probe-input path \
+         that collides with the always-on prod NDI input and records black). Record the \
+         prod scene program via `prod-scene` instead."
+    );
+}
+
+/// The harness must name the certified PROD scenes it records: strih's prod scene that
+/// already shows cam1 via the certified genlock input (`Cam 5`), and stream's
+/// full-screen scene that shows strih's feed (`NDI 2ME PGM`). These are the scenes
+/// proven (live + the prior 3-node run) to record NON-black; the probe scene records
+/// black.
+#[test]
+fn recording_e2e_names_the_certified_prod_scenes() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("STRIH_PROG_SCENE") && s.contains("Cam 5"),
+        "#163: the strih program scene must be the certified prod scene 'Cam 5' (already \
+         shows cam1 via the genlock-certified `NDI cam5` input — no probe receiver)."
+    );
+    assert!(
+        s.contains("STREAM_PROG_SCENE"),
+        "#163: the stream program scene must be a named full-screen scene showing strih's \
+         feed (`NDI 2ME PGM`), recorded directly — not the colliding probe scene."
+    );
+}
+
+/// Teardown must restore the prior PROGRAM scenes on BOTH boxes (it routed them to the
+/// prod recording scene for the run). The prod-scene action records prev program/preview
+/// to state; teardown restores it — never strands the recording scene as live program.
+#[test]
+fn recording_e2e_teardown_restores_program_scenes() {
+    let s = read("scripts/recording-e2e.sh");
+    // teardown still runs for both boxes in cleanup (restoring prev program scene).
+    let cleanup = s
+        .find("cleanup()")
+        .expect("recording-e2e.sh must define cleanup()");
+    let body = &s[cleanup..];
+    assert!(
+        body.contains("teardown --host \"$STREAM\"") && body.contains("teardown --host \"$STRIH\""),
+        "#163: cleanup() must teardown (restore prior program scene) on BOTH strih and \
+         stream after recording the prod scene program."
+    );
+}
