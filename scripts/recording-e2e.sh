@@ -62,6 +62,10 @@ GRAB_FPS="${GRAB_FPS:-$GENLOCK_FPS}"
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
 CAM1_MKV="$OUTDIR/cam1-${RUN_ID}.mkv"
+# The grab-ts sidecar is WRITTEN by camera-box on cam1, so its --record-grab-ts path
+# must exist ON CAM1 (a dev1 $OUTDIR path fails with ENOENT and kills the grab). Use a
+# cam1-LOCAL path for the write, and a separate dev1 path for the scp-back destination.
+CAM1_GRAB_TS_REMOTE="/tmp/cam1-grab-ts-${RUN_ID}.csv"
 CAM1_GRAB_TS="$OUTDIR/cam1-grab-ts-${RUN_ID}.csv"
 PAINTER_CSV="$OUTDIR/painter-${RUN_ID}.csv"
 STRIH_REC="$OUTDIR/strih-${RUN_ID}.mkv"
@@ -183,7 +187,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      nohup /usr/local/bin/camera-box \
        --record-grab tcp://${DEV1_IP}:${GRAB_PORT} \
-       --record-grab-ts ${CAM1_GRAB_TS} \
+       --record-grab-ts ${CAM1_GRAB_TS_REMOTE} \
        >/tmp/cbox-grab.log 2>&1 &)"
 sleep 4  # let cam1's NDI sender become discoverable + the grab stream connect
 
@@ -222,9 +226,10 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" "pkill -x c
 sleep 2  # let cam1 flush the grab stream + ffmpeg finalise the mkv
 [ -n "$FFMPEG_PID" ] && { wait "$FFMPEG_PID" 2>/dev/null || true; FFMPEG_PID=""; }
 
-# Download cam1's grab-ts sidecar (cam1 is Linux — scp works).
+# Download cam1's grab-ts sidecar (cam1 is Linux — scp works). It was written to the
+# cam1-LOCAL path; pull it to the dev1 $OUTDIR path the verdict reads.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  root@"$CAM1_IP":"$CAM1_GRAB_TS" "$CAM1_GRAB_TS" 2>/dev/null || \
+  root@"$CAM1_IP":"$CAM1_GRAB_TS_REMOTE" "$CAM1_GRAB_TS" 2>/dev/null || \
   echo "WARNING: could not fetch cam1 grab-ts sidecar (cam2→cam1 latency will be omitted)" >&2
 # Download the cam2 painter ground-truth CSV.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
