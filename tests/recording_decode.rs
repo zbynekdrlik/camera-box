@@ -17,13 +17,113 @@
 
 #![cfg(feature = "probe")]
 
+use camera_box::capture::yuyv_to_gray8;
+use camera_box::probe::luma::bgra_to_luma;
+use camera_box::probe::payload::Payload;
+use camera_box::probe::qr::render_qr_dual_bgra;
 use camera_box::probe::recording::analyze_recording;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn fixture(name: &str) -> PathBuf {
     [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", name]
         .iter()
         .collect()
+}
+
+/// FIX 1 round-trip (#156 regression lock): a SHARP dual-QR gray8 frame must survive the
+/// FULL cam1 grab-record store→decode path — the EXACT luma extraction the camera-box
+/// `--record-grab` mode performs (`capture::yuyv_to_gray8`), through ffmpeg ffv1 (the dev1
+/// listener), back through `analyze_recording` — and STILL decode BOTH QRs.
+///
+/// This locks the live-rig finding that the cam1 grab decodes ~100% when the camera is sharp:
+/// the prior "~5% decode" was NOT the gray8 plane, the ffv1 params, or the decoder (a live
+/// re-capture decoded 846/846 frames both-QR), it was the device losing its certified picture
+/// controls on restart (fixed durably in `VideoCapture::open_with_controls`). A future
+/// regression in any of those store→decode steps now fails CI here, not silently on the rig.
+/// Requires ffmpeg (a documented camera-box runtime dependency, installed in CI).
+#[test]
+fn sharp_dual_qr_gray8_round_trips_through_grab_record_store_and_decode() {
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        // ffmpeg is a HARD dependency of the recording path; its absence is an environment
+        // fault, surfaced loudly — NOT a silent skip of the assertion logic.
+        panic!("ffmpeg not found — the grab-record round-trip cannot run; install ffmpeg");
+    }
+
+    // 1) Render a SHARP dual-QR luma frame (what cam1 films off the cam2 monitor).
+    let (w, h, qs) = (960u32, 540u32, 260u32);
+    let left = Payload {
+        run_id: 6519,
+        frame_id: 424,
+        gen_ts_ns: 1,
+    };
+    let right = Payload {
+        run_id: 6519,
+        frame_id: 425,
+        gen_ts_ns: 2,
+    };
+    let bgra = render_qr_dual_bgra(&left, &right, w, h, qs);
+    let luma = bgra_to_luma(&bgra, w, h, w * 4);
+    assert_eq!(luma.dimensions(), (w, h));
+
+    // 2) Pack that luma into a YUYV buffer (luma in even bytes, neutral 128 chroma in odd
+    //    bytes) — the on-the-wire capture format — then run the EXACT grab extraction the
+    //    --record-grab path uses. The extracted gray8 MUST be byte-identical to the source
+    //    luma (the path is lossless).
+    let stride = (2 * w) as usize;
+    let mut yuyv = vec![128u8; stride * h as usize];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            yuyv[y * stride + 2 * x] = luma.get_pixel(x as u32, y as u32)[0];
+        }
+    }
+    let gray = yuyv_to_gray8(&yuyv, w, h, stride as u32);
+    assert_eq!(
+        gray.as_slice(),
+        luma.as_raw().as_slice(),
+        "grab gray8 extraction must be lossless for a tightly-packed YUYV frame"
+    );
+
+    // 3) Encode the gray8 plane (3 identical frames) to a lossless ffv1 mkv EXACTLY as
+    //    scripts/recording-e2e.sh's dev1 listener does (gray rawvideo → ffv1).
+    let dir = std::env::temp_dir().join(format!("grab-roundtrip-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let raw = dir.join("frames.gray8");
+    let mkv = dir.join("cam1.mkv");
+    let mut raw_bytes = Vec::with_capacity(gray.len() * 3);
+    for _ in 0..3 {
+        raw_bytes.extend_from_slice(&gray);
+    }
+    std::fs::write(&raw, &raw_bytes).unwrap();
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "rawvideo", "-pix_fmt", "gray", "-s"])
+        .arg(format!("{w}x{h}"))
+        .args(["-r", "30", "-i"])
+        .arg(&raw)
+        .args(["-c:v", "ffv1", "-level", "3"])
+        .arg(&mkv)
+        .status()
+        .expect("spawn ffmpeg ffv1 encode");
+    assert!(status.success(), "ffmpeg ffv1 encode failed");
+
+    // 4) Decode it back through the SAME analyze_recording the 4-node verdict uses — EVERY
+    //    frame must carry BOTH dual-QR halves (the sharp-grab 100% guarantee).
+    let frames = analyze_recording(&mkv).expect("analyze the round-tripped recording");
+    assert!(!frames.is_empty(), "decoded at least one frame");
+    for f in &frames {
+        assert_eq!(
+            f.payloads.len(),
+            2,
+            "every sharp gray8 frame decodes BOTH QRs through the grab-record path: {:?}",
+            f.payloads
+        );
+        let mut ids: Vec<u32> = f.payloads.iter().map(|p| p.frame_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![424, 425], "both painted ticks recovered");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
