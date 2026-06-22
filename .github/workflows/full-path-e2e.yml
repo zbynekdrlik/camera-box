@@ -1,26 +1,41 @@
-name: Full-path E2E (hardware · self-hosted dev1)
+name: Full-path E2E (recording-based · hardware · self-hosted dev1)
 
-# Full-path source→endpoint zero-loss + per-hop latency HARD GATE (#7): drives the
-# real broadcast chain cam2 → strih OBS → stream OBS and fails the run on ANY real
-# frame loss (scripts/multitap-e2e.sh exits non-zero on a strict-zero-loss verdict
-# breach; the cam2 loopback Phase-1 twin is loopback-e2e.yml).
+# Recording-based 4-NODE full-path zero-loss + per-hop latency HARD GATE (#105/#7):
+# drives the real broadcast chain cam2 → cam1 → strih OBS → stream OBS and decides the
+# verdict ONLY from RECORDED output — the cam2 painter ground truth, cam1's grab
+# recording, and the strih/stream OBS PROGRAM recordings — NEVER an NDI tap (the tap
+# harness scripts/multitap-e2e.sh produced false sampling artifacts and is superseded).
+# scripts/recording-e2e.sh exits non-zero on ANY strict-hop loss / undecodable / a span
+# below 300 s. The cam2 loopback Phase-1 twin is loopback-e2e.yml.
+#
+# THE FOUR EVIDENCE NODES (per-frame id + ts at each, dual-QR tick=max):
+#   1. cam2  — QR GENERATED: painter `tick,gen_ts_ns` CSV (--paint-log).
+#   2. cam1  — camera GRAB: camera-box --record-grab streams gray8 to a dev1 ffmpeg
+#              listener (cam1 has no ffmpeg) → ffv1 cam1.mkv + a grab-ts sidecar.
+#   3. strih — OBS PROGRAM recording (obs-ws StartRecord/StopRecord).
+#   4. stream— OBS PROGRAM recording.
 #
 # Deliberately, like loopback-e2e.yml:
 #   * MANUAL by default (workflow_dispatch) — this REROUTES the production strih +
-#     stream OBS program to the probe scene for the run duration, taking the chain
-#     OFF-AIR. An operator must dispatch it knowing the chain is free to disrupt —
-#     the operator is the guard (project decision: no automated streaming guard).
-#     The harness teardown trap restores each box's program+preview scene AND the
-#     cam2 service on exit (incl. cancel) — see scripts/multitap-e2e.sh cleanup().
-#   * runs-on the self-hosted dev1 runner (label `camera-lan`) — GitHub-hosted
-#     runners cannot reach cam2/strih/stream on the 10.77.9.0/24 LAN.
-#   * NOT part of ci.yml — a per-PR run would reroute prod on every push. This is
-#     the standing full-path regression gate: dispatch it after rig/genlock changes
-#     and on a cadence the operator chooses.
+#     stream OBS program to the probe scene AND RECORDS it for the run duration. An
+#     operator must dispatch it knowing the chain is free to disrupt — the operator is
+#     the guard (project decision: no automated streaming guard). The harness teardown
+#     trap restores each box's program+preview scene AND the cam1/cam2 services AND kills
+#     the dev1 grab listener on exit (incl. cancel) — see scripts/recording-e2e.sh
+#     cleanup().
+#   * runs-on the self-hosted dev1 runner (label `camera-lan`) — GitHub-hosted runners
+#     cannot reach cam1/cam2/strih/stream on the 10.77.9.0/24 LAN, and the cam1 grab
+#     stream is encoded by ffmpeg ON dev1.
+#   * NOT part of ci.yml — a per-PR run would reroute prod on every push. This is the
+#     standing full-path regression gate: dispatch it after rig/genlock changes and on
+#     a cadence the operator chooses.
+#   * PREREQS on the boxes: DistroAV "NDI Main Output" enabled on strih+stream; OBS
+#     WebSocket :4455 reachable; a standing `python -m http.server 8899` on each Windows
+#     box serving its OBS record directory (dev1 curls the recordings from it — scp to
+#     Windows is denied); ffmpeg on dev1 (encodes cam1's grab stream).
 #
 # OPTIONAL nightly schedule (commented): only enable after the operator confirms a
-# fixed hour at which auto-rerouting the prod chain off-air is always safe — that
-# overrides the manual-guard model above, so it stays OFF until the operator opts in.
+# fixed hour at which auto-rerouting + recording the prod chain off-air is always safe.
 #   schedule:
 #     - cron: "30 3 * * *"   # 03:30 UTC = ~05:30 CEST, off-peak — OPERATOR MUST CONFIRM
 
@@ -28,17 +43,14 @@ on:
   workflow_dispatch:
     inputs:
       duration_secs:
-        description: "Steady-state run seconds (job ceiling 60 min incl. build)"
+        description: "Steady-state run seconds (>=300; job ceiling 60 min incl. build)"
         default: "1800"
-      lead_discard_secs:
-        description: "Leading-discard window (s) — drop the post-reset genlock prime"
-        default: "60"
 
 permissions:
   contents: read
 
 # Share ONE hardware concurrency group with loopback-e2e (its exact group string)
-# so the two hardware workflows never fight for cam2 / the OBS chain at once.
+# so the two hardware workflows never fight for the cam chain / OBS at once.
 concurrency:
   group: loopback-e2e-hardware
   cancel-in-progress: false
@@ -50,22 +62,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Full-path cam→strih→stream zero-loss E2E (HARD GATE)
-        # multitap-e2e.sh passes NO --max-loss-pct => multitap-probe uses the strict
-        # any-drop-fails verdict and exits non-zero on real pipeline loss. set -e in
-        # the script + this step's default shell make that a hard CI failure.
+      - name: Recording-based 4-node cam2→cam1→strih→stream zero-loss E2E (HARD GATE)
+        # recording-e2e.sh runs recording-verdict with the strict any-drop-fails verdict
+        # on the cam1→strih + strih→stream hops (0 undecodable, 0 net loss, >=300 s).
+        # set -e in the script + this step's default shell make a breach a hard CI fail.
         env:
           NDI_RUNTIME_DIR_V6: /usr/lib/ndi
           DURATION: ${{ inputs.duration_secs }}
-          LEAD_DISCARD: ${{ inputs.lead_discard_secs }}
-        run: bash scripts/multitap-e2e.sh
+        run: bash scripts/recording-e2e.sh
 
-      - name: Upload metrics artifact
+      - name: Upload verdict JSON + report PNG + pixel proof
         if: always() # keep the evidence even on a failing verdict
         uses: actions/upload-artifact@v4
         with:
-          name: multitap-probe-full-path
-          path: /tmp/multitap-probe.json
+          name: recording-e2e-full-path
+          path: |
+            /tmp/recording-e2e-*/verdict-*.json
+            /tmp/recording-e2e-*/report-*.png
+            /tmp/recording-e2e-*/pixel-proof/**
           if-no-files-found: warn
 
       - name: Discord alert on frame-loss regression (bot API → #notifications)
@@ -81,7 +95,7 @@ jobs:
             echo "DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID not set — skipping alert."
             exit 0
           fi
-          content="🔴 **camera-box full-path E2E FAILED** (${SHA:0:7}) — cam→strih→stream frame-loss/latency gate breached — ${RUN_URL}"
+          content="🔴 **camera-box recording-based full-path E2E FAILED** (${SHA:0:7}) — cam2→cam1→strih→stream frame-loss/latency gate breached — ${RUN_URL}"
           payload=$(jq -n --arg c "$content" '{content:$c}')
           curl -fsS --max-time 10 -X POST \
             -H "Authorization: Bot ${BOT_TOKEN}" \

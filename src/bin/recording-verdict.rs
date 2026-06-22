@@ -89,6 +89,24 @@ struct Args {
     /// recording, which has no foreign burn).
     #[arg(long, default_value_t = 0)]
     cam2_run_id: u32,
+    /// #105 4-node report: write a machine-readable JSON summary (per-node verdict +
+    /// per-hop loss + per-hop latency) to this path, consumed by
+    /// scripts/recording-e2e-report.py to render the 2-graph report PNG.
+    #[arg(long)]
+    json: Option<PathBuf>,
+}
+
+/// Reduce a HopLatency option to a compact JSON object (or null) for the report.
+fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
+    match h {
+        Some(h) => serde_json::json!({
+            "samples": h.samples,
+            "p50_ms": h.stats.p50_ms, "p95_ms": h.stats.p95_ms, "p99_ms": h.stats.p99_ms,
+            "min_ms": h.stats.min_ms, "mean_ms": h.stats.mean_ms, "max_ms": h.stats.max_ms,
+            "jitter_ms": h.jitter_ms, "drift_ms_per_min": h.drift_ms_per_min,
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// Parse the painter ticks from either a bare one-`tick`-per-line file or the
@@ -296,12 +314,20 @@ fn main() -> Result<()> {
     };
 
     let mut all_pass = true;
+    // #105 4-node machine-readable report (per-node verdict + per-hop loss + latency),
+    // built incrementally and written to --json for the 2-graph report renderer.
+    let mut report = serde_json::json!({ "nodes": {}, "hops": {}, "latency": {} });
 
     // strih recording verdict (strict hop-1 endpoint). Keep the decoded frames so the
     // #108 per-hop latency engine can read each frame's cam2 + node-burn gen_ts_ns.
     let (strih_frames, strih_ticks) = ticks_of(&args.strih)?;
     let strih_v = verdict(&strih_ticks, &cfg);
     all_pass &= report_recording("strih", &args.strih, &strih_v, &args.out_dir)?;
+    report["nodes"]["strih"] = serde_json::json!({
+        "pass": strih_v.is_pass(), "frames": strih_v.total_frames,
+        "analyzed_secs": strih_v.analyzed_secs, "undecodable": strih_v.undecodable_frames.len(),
+        "avg_step": strih_v.avg_step, "beat_balanced": strih_v.beat_balanced,
+    });
 
     // stream recording verdict (headline endpoint) + strih→stream direct compare.
     let mut stream_frames_opt: Option<Vec<RecordingFrame>> = None;
@@ -328,6 +354,15 @@ fn main() -> Result<()> {
         }
         println!("  RESULT: {}", if ss.is_pass() { "PASS" } else { "FAIL" });
         all_pass &= ss.is_pass();
+        report["nodes"]["stream"] = serde_json::json!({
+            "pass": stream_v.is_pass(), "frames": stream_v.total_frames,
+            "analyzed_secs": stream_v.analyzed_secs,
+            "undecodable": stream_v.undecodable_frames.len(),
+        });
+        report["hops"]["strih_stream"] = serde_json::json!({
+            "strict": true, "pass": ss.is_pass(), "compared_ticks": ss.compared_ticks,
+            "dropped": ss.strih_only_ticks.len(), "phantom": ss.stream_only_ticks.len(),
+        });
         stream_frames_opt = Some(stream_frames);
     }
 
@@ -343,6 +378,11 @@ fn main() -> Result<()> {
         // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
         let cam1_v = verdict(&cam1_ticks, &cfg);
         all_pass &= report_recording("cam1", cam1_path, &cam1_v, &args.out_dir)?;
+        report["nodes"]["cam1"] = serde_json::json!({
+            "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
+            "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
+            "avg_step": cam1_v.avg_step, "beat_balanced": cam1_v.beat_balanced,
+        });
 
         // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
         // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
@@ -369,6 +409,10 @@ fn main() -> Result<()> {
         }
         println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
         all_pass &= cs.is_pass();
+        report["hops"]["cam1_strih"] = serde_json::json!({
+            "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
+            "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
+        });
 
         // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
         if let Some(painter_path) = &args.painter {
@@ -388,6 +432,11 @@ fn main() -> Result<()> {
                 println!("  unknown ticks (first 20): {shown:?}");
                 all_pass = false; // an in-range never-painted tick is a provable fault
             }
+            report["hops"]["cam2_cam1"] = serde_json::json!({
+                "strict": false, "claims_zero_loss": a.claims_zero_loss,
+                "unknown_ticks": a.unknown_ticks.len(),
+                "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
+            });
         }
         cam1_frames_opt = Some(cam1_frames);
     }
@@ -414,6 +463,11 @@ fn main() -> Result<()> {
         }
         println!("  LIMITATION: {}", a.limitation);
         cam_strih_clean = Some(a.unknown_ticks.is_empty());
+        report["hops"]["cam_strih"] = serde_json::json!({
+            "strict": false, "claims_zero_loss": a.claims_zero_loss,
+            "unknown_ticks": a.unknown_ticks.len(),
+            "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
+        });
     }
 
     // #108 — per-hop ABSOLUTE latency from the in-frame node-burn + cam2 gen_ts_ns
@@ -435,6 +489,7 @@ fn main() -> Result<()> {
     };
     let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(&strih_frames, &strih_ids));
     report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
+    report["latency"]["cam_strih"] = hop_lat_json(&cam_strih_lat);
 
     // cam2→cam1 OPTICAL+GRAB latency (#105 node 2) — REAL, no #111 burn needed.
     // grab_ts (cam1 grab instant, sidecar) − cam2 paint gen_ts, both wall clock.
@@ -452,6 +507,7 @@ fn main() -> Result<()> {
                     &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin_c1),
                 );
                 report_hop_latency(&c1_lat, "cam2→cam1 (optical+grab)", "cam2 paint gen_ts_ns");
+                report["latency"]["cam2_cam1"] = hop_lat_json(&c1_lat);
             }
             None => println!(
                 "=== cam2→cam1 (optical+grab) per-hop ABSOLUTE latency (#105 node 2) ===\n  \
@@ -482,6 +538,21 @@ fn main() -> Result<()> {
             &strih_stream_samples(&strih_frames, stream_frames, &strih_ids, &stream_ids),
         );
         report_hop_latency(&ss_lat, "strih→stream", "strih render gen_ts_ns");
+        report["latency"]["strih_stream"] = hop_lat_json(&ss_lat);
+    }
+
+    // Record the headline verdict and write the machine-readable report (BEFORE any
+    // exit, so a FAIL run still produces the JSON the report renderer consumes).
+    report["overall_pass"] = serde_json::Value::Bool(all_pass);
+    report["cam_strih_clean"] = match cam_strih_clean {
+        Some(b) => serde_json::Value::Bool(b),
+        None => serde_json::Value::Null,
+    };
+    report["min_secs"] = serde_json::json!(args.min_secs);
+    if let Some(json_path) = &args.json {
+        std::fs::write(json_path, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("write report json {}", json_path.display()))?;
+        tracing::info!(path = %json_path.display(), "4-node report JSON written");
     }
 
     // Headline. Be HONEST about scope: a clean strih(+stream) verdict proves the

@@ -658,13 +658,65 @@ def teardown(a):
         sys.stderr.write(f"[obs] {a.host}: teardown warning: {e}\n")
 
 
+def record(a):
+    """#105 recording-based E2E: control OBS program recording over the WebSocket.
+
+    --action start : begin recording the program output (the probe scene is on
+                     program from setup()). Prints nothing on success.
+    --action stop  : stop recording; prints the recorded file's ABSOLUTE PATH on the
+                     OBS host (StopRecord returns outputPath in obs-ws 5.1+). The
+                     harness then downloads that file from the host to dev1.
+    --action status: prints `active=<bool> path=<current>` (for diagnostics).
+
+    Recording uses OBS's CONFIGURED recording output (format/encoder/dir set in
+    OBS Settings > Output). The harness sets the program scene to the probe scene via
+    setup() first, so what is recorded is exactly the program a viewer would see —
+    the #105 acceptance #1 "delivered only when OBS shows it in program out".
+    """
+    ws = _conn(a.host, a.password)
+    try:
+        if a.action == "start":
+            st = _rpc(ws, "GetRecordStatus").get("outputActive", False)
+            if st:
+                # Already recording (a prior run's leftover) — stop it first so this
+                # run gets a clean single file, never appended to a stale one.
+                _rpc(ws, "StopRecord", ignore_err=True)
+                time.sleep(1.0)
+            _rpc(ws, "StartRecord")
+            sys.stderr.write(f"[obs] {a.host}: recording STARTED\n")
+        elif a.action == "stop":
+            out = _rpc(ws, "StopRecord", ignore_err=True)
+            path = (out or {}).get("outputPath", "")
+            if not path:
+                # Fallback: some obs-ws builds return no path on StopRecord — read the
+                # record directory + last status so the caller still gets a location.
+                sys.stderr.write(
+                    f"[obs] {a.host}: StopRecord returned no outputPath; "
+                    f"check the OBS record directory\n"
+                )
+            print(path)  # the ONLY stdout line: the recorded file path on the host
+            sys.stderr.write(f"[obs] {a.host}: recording STOPPED -> {path}\n")
+        elif a.action == "status":
+            s = _rpc(ws, "GetRecordStatus")
+            print(f"active={s.get('outputActive', False)} "
+                  f"path={s.get('outputPath', '')}")
+        else:
+            raise SystemExit(f"unknown --action {a.action!r}")
+    finally:
+        ws.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("setup", "teardown"):
+    for name in ("setup", "teardown", "record"):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "record":
+            p.add_argument(
+                "--action", required=True, choices=("start", "stop", "status")
+            )
         if name == "setup":
             p.add_argument("--upstream", required=True)
             # #91: mark a TERMINAL box — one whose Main Output feeds NO downstream OBS
@@ -676,7 +728,7 @@ def main():
             # protective abort. Defaults False — strih and teardown are non-terminal.
             p.add_argument("--terminal", action="store_true")
     a = ap.parse_args()
-    (setup if a.cmd == "setup" else teardown)(a)
+    {"setup": setup, "teardown": teardown, "record": record}[a.cmd](a)
 
 
 if __name__ == "__main__":
