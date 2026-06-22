@@ -149,10 +149,8 @@ pub fn decode_capture(
 /// (rqrr needs a few px/module) while keeping the prepare cost at ~the single-QR path's.
 const DUAL_BAND_WIDTH: u32 = 1280;
 
-/// Decode ALL CRC-valid QR payloads in one grayscale image (one `rqrr` prepare + detect).
-/// `detect_grids` returns every QR it finds, so the two side-by-side dual-QR codes are read
-/// in a SINGLE pass — half the work of decoding two cropped ROIs separately.
-pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
+/// Run one rqrr prepare+detect pass over a luma image, returning all CRC-valid payloads.
+fn rqrr_decode_all(img: GrayImage) -> Vec<Payload> {
     let mut prepared = rqrr::PreparedImage::prepare(img);
     let mut out = Vec::new();
     for grid in prepared.detect_grids() {
@@ -163,6 +161,83 @@ pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
         }
     }
     out
+}
+
+/// Otsu's global threshold (0..=255) maximizing between-class variance of a gray
+/// histogram. PURE + total: an empty/flat image returns 128 (a neutral mid-gray cut).
+/// Used to binarize a SOFT optical capture before rqrr (a QR filmed off a monitor is
+/// low-contrast/anti-aliased gray8; rqrr's own adaptive prepare can miss it, but a hard
+/// black/white cut at the Otsu split recovers it — proven on the live cam1 grab).
+pub fn otsu_threshold(hist: &[u64; 256]) -> u8 {
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        return 128;
+    }
+    let sum_all: f64 = hist
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| i as f64 * c as f64)
+        .sum();
+    let (mut w_bg, mut sum_bg) = (0u64, 0.0f64);
+    // Track the between-class-variance PLATEAU (a clean bimodal histogram maximizes the
+    // variance across the whole gap between the two peaks), and return its MIDPOINT — so a
+    // dark peak at 20 and a light peak at 230 cut at ~125, not at the dark peak itself
+    // (which would binarize the dark cluster to white). This is the standard Otsu
+    // plateau-averaging refinement.
+    let (mut best_var, mut plateau_lo, mut plateau_hi) = (-1.0f64, 128usize, 128usize);
+    for (t, &count) in hist.iter().enumerate() {
+        w_bg += count;
+        if w_bg == 0 {
+            continue;
+        }
+        let w_fg = total - w_bg;
+        if w_fg == 0 {
+            break;
+        }
+        sum_bg += t as f64 * count as f64;
+        let m_bg = sum_bg / w_bg as f64;
+        let m_fg = (sum_all - sum_bg) / w_fg as f64;
+        let between = w_bg as f64 * w_fg as f64 * (m_bg - m_fg) * (m_bg - m_fg);
+        if between > best_var + f64::EPSILON {
+            best_var = between;
+            plateau_lo = t;
+            plateau_hi = t;
+        } else if (between - best_var).abs() <= f64::EPSILON {
+            plateau_hi = t; // extend the plateau
+        }
+    }
+    ((plateau_lo + plateau_hi) / 2) as u8
+}
+
+/// Binarize a luma image at its Otsu threshold (>= threshold → 255, else 0). The hard
+/// black/white image is what rqrr's finder pattern locking needs from a soft capture.
+fn binarize_otsu(img: &GrayImage) -> GrayImage {
+    let mut hist = [0u64; 256];
+    for p in img.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let t = otsu_threshold(&hist);
+    let mut out = img.clone();
+    for p in out.pixels_mut() {
+        p.0[0] = if p.0[0] >= t { 255 } else { 0 };
+    }
+    out
+}
+
+/// Decode ALL CRC-valid QR payloads in one grayscale image. First the plain rqrr pass
+/// (rqrr's own adaptive prepare — best for the clean genlocked strih/stream recordings);
+/// if it finds NOTHING, retry once on the Otsu-binarized image. The binarized retry
+/// recovers the SOFT optical cam1 grab (a QR filmed off a monitor at gray8) that the
+/// plain pass misses, WITHOUT changing the clean-path result (which already decodes on
+/// pass 1, so the retry never runs there). `detect_grids` returns every QR in one pass,
+/// so the two side-by-side dual-QR codes are read together.
+pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
+    let first = rqrr_decode_all(img.clone());
+    if !first.is_empty() {
+        return first;
+    }
+    // Nothing on the plain pass — the soft optical capture. Retry on a hard Otsu cut.
+    rqrr_decode_all(binarize_otsu(&img))
 }
 
 /// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
@@ -269,6 +344,47 @@ mod tests {
         let blank = vec![255u8; (640 * 480 * 4) as usize];
         let fourcc = u32::from_le_bytes(*b"BGRA");
         assert_eq!(decode_capture(fourcc, &blank, 640, 480, 640 * 4, 400), None);
+    }
+
+    #[test]
+    fn otsu_splits_a_bimodal_histogram_between_the_two_peaks() {
+        // A clean black/white image: mass at 0 and 255. Otsu must cut between them.
+        let mut hist = [0u64; 256];
+        hist[20] = 1000; // dark cluster
+        hist[230] = 1000; // light cluster
+        let t = super::otsu_threshold(&hist);
+        assert!(
+            t > 20 && t < 230,
+            "threshold between the two peaks, got {t}"
+        );
+    }
+
+    #[test]
+    fn otsu_empty_histogram_is_neutral_midgray() {
+        assert_eq!(super::otsu_threshold(&[0u64; 256]), 128);
+    }
+
+    #[test]
+    fn decode_recovers_soft_low_contrast_qr_via_binarized_retry() {
+        // A SOFT optical capture: render a QR, then compress its dynamic range into a
+        // narrow low-contrast band (sim. a QR filmed off a monitor at gray8). The plain
+        // rqrr pass struggles; the Otsu-binarized retry in decode_qr_luma_all recovers it.
+        let p = Payload {
+            run_id: 9,
+            frame_id: 123,
+            gen_ts_ns: 7,
+        };
+        let bgra = render_qr_bgra(&p, 1280, 720, 600);
+        let mut luma = bgra_to_luma(&bgra, 1280, 720, 1280 * 4);
+        // Squash contrast: map 0..255 -> ~96..160 (a soft, low-contrast gray8 capture).
+        for px in luma.pixels_mut() {
+            px.0[0] = 96 + (px.0[0] as u32 * 64 / 255) as u8;
+        }
+        let got = decode_qr_luma_all(luma);
+        assert!(
+            got.contains(&p),
+            "the Otsu-binarized retry must recover the soft low-contrast QR"
+        );
     }
 
     #[test]
