@@ -1,41 +1,42 @@
-//! Regression guard for #63 — the Phase-2/3 probe `ndi_source` rendered BLACK (0 decoded)
-//! at strih/stream on the live genlock OBS build, so the full-path zero-loss gate (#7)
-//! could never certify the live endpoint.
+//! Regression guard for #63 + #149 — the Phase-2/3 probe `ndi_source` must be configured
+//! EXACTLY like the certified production genlock camera inputs so the full-path zero-loss /
+//! latency gate (#7/#133/#108) measures the SAME config that ships in production.
 //!
-//! ## Root cause (proven live on strih 10.77.9.202, 2026-06-15)
+//! ## #63 origin (proven live on strih 10.77.9.202, 2026-06-15)
 //!
 //! The genlock build runs a wall-clock-slaved render tick (`OBS_GENLOCK_WALL_CLOCK=1`)
 //! AND a per-source pure-FIFO consumption path (`obs_source_set_genlock_fifo`, camera-box
 //! #42). The PRODUCTION camera inputs (`NDI cam1/3/5`) run with `genlock_fifo` ENABLED (the
-//! FIFO bypass: exactly one queued frame per render tick) and `ndi_sync` = 1
-//! (PROP_SYNC_NDI_TIMESTAMP, the NDI receiver-side timestamp, monotonic on the receiving
-//! box's clock) — and they render perfectly.
+//! FIFO bypass: exactly one queued frame per render tick). The probe originally inherited the
+//! DistroAV default `genlock_fifo` disabled → took the normal async timestamp-cursor path →
+//! rendered BLACK. Fix: pin `genlock_fifo=true` on the probe (still required, still asserted).
 //!
-//! `obs_phase2.py` created/updated the probe input (`phase2-probe-src`) with ONLY
-//! `ndi_source_name` + `ndi_bw_mode`, so it inherited the DistroAV defaults `genlock_fifo`
-//! disabled (log: "genlock: FIFO frame consumption disabled for source 'phase2-probe-src'")
-//! and `ndi_sync` = 2 (PROP_SYNC_NDI_SOURCE_TIMECODE, the sender-supplied timecode; the
-//! camera-box sender stamps a wall-clock-epoch boundary timecode in 100ns, src/ndi.rs, while
-//! `timestamp` is left 0).
+//! ## #149 correction (verified live on strih 10.77.9.202, 2026-06-22)
 //!
-//! With FIFO disabled the probe takes the normal async timestamp-cursor path, which advances
-//! `last_frame_ts` by `sys_offset` derived from `obs->video.video_time` (the MONOTONIC
-//! timebase). Reconciling a wall-clock-epoch *source timecode* against a monotonic-epoch
-//! cursor leaves every frame out of bounds → discarded → BLACK. The cameras escape this two
-//! ways at once: FIFO bypasses the cursor entirely, and sync_mode=1 uses the receiver
-//! timestamp instead of the sender timecode.
+//! `ndi_sync` was pinned to 1 (PROP_SYNC_NDI_TIMESTAMP, receiver-side timestamp) under the
+//! pre-#136 belief that the camera-box sender's wall-clock-epoch SOURCE timecode would go
+//! out-of-bounds vs the monotonic compositor cursor. That belief is OBSOLETE:
+//!
+//!   * #136 (timestamp-aligned release, now deployed with TS_ALIGN=1 on both boxes) REQUIRES
+//!     the frame to carry the wall-clock SOURCE timecode (`is_wallclock_ts` on
+//!     `next_frame->timestamp`, src/ndi.rs). With `ndi_sync=1` the frame carries the
+//!     RECEIVER's monotonic ts, so the #136 ts-align path silently NO-OPS — the harness then
+//!     "proves" a path it never exercised.
+//!   * The live PRODUCTION genlock cam inputs (`NDI cam1/3/5`) ALL run `ndi_sync=2`
+//!     (NDI_SOURCE_TIMECODE, source timing) — read live 2026-06-22. The probe on `ndi_sync=1`
+//!     was therefore measuring a DIFFERENT timing regime than production.
+//!
+//! So the certified config is `ndi_sync=2` (source timing) + `genlock_fifo=true`. The probe
+//! MUST mirror it. (A live smoke on source timing confirmed the probe renders + decodes at
+//! every tap and the #149 self-verify guard passes against prod.)
 //!
 //! ## Fix layer: CONFIG / HARNESS (no prod OBS rebuild)
 //!
-//! Make the probe input match the proven-working camera config: set `genlock_fifo=true` and
-//! `ndi_sync=1` (NDI_TIMESTAMP) whenever obs_phase2.py creates OR re-points the probe input.
-//! This is light and non-destructive — it does not touch the vendored genlock code, which is
-//! correct: the genlock build does not black-out non-FIFO sources by design; the probe was
-//! simply mis-configured relative to every other source on the genlocked compositor.
-//!
-//! This test reads the script statically (it does NOT run python or touch OBS). If anyone
-//! drops the genlock_fifo / NDI-timestamp sync from the probe input setup, the live probe
-//! goes black again and this fails.
+//! Pin `genlock_fifo=true` and `ndi_sync=2` whenever obs_phase2.py creates OR re-points the
+//! probe input, AND self-verify the probe's locked baseline equals the matching prod genlock
+//! input before measuring (the #149 machine-guard). This reads the script statically (it does
+//! NOT run python or touch OBS). If anyone drops genlock_fifo, or reverts ndi_sync back to 1
+//! (re-introducing the #149 bug), this fails.
 
 use std::fs;
 
@@ -59,19 +60,21 @@ fn phase2_probe_input_enables_genlock_fifo() {
     );
 }
 
-/// The probe input MUST use `ndi_sync = 1` (PROP_SYNC_NDI_TIMESTAMP — the NDI receiver-side
-/// timestamp), matching the live camera inputs. The DistroAV default is 2
-/// (NDI_SOURCE_TIMECODE), which binds the async cursor to the sender's wall-clock-epoch
-/// timecode and goes out-of-bounds against the monotonic compositor cursor → black (#63).
+/// #149: the probe input MUST use `ndi_sync = 2` (NDI_SOURCE_TIMECODE — SOURCE timing),
+/// mirroring the certified production genlock cam inputs (`NDI cam1/3/5`, all ndi_sync=2,
+/// verified live 2026-06-22) AND driving the #136 timestamp-aligned release the harness
+/// claims to prove (ts-align needs the wall-clock SOURCE timecode on the frame; ndi_sync=1
+/// would carry the receiver's monotonic ts and silently no-op it). Reverting to 1
+/// re-introduces the #149 bug (harness measures the wrong timing regime), so this fails.
 #[test]
-fn phase2_probe_input_uses_ndi_receiver_timestamp_sync() {
+fn phase2_probe_input_uses_ndi_source_timecode_sync() {
     let py = obs_py();
     assert!(
-        py.contains("\"ndi_sync\": 1"),
-        "#63 regression: obs_phase2.py must set ndi_sync=1 (PROP_SYNC_NDI_TIMESTAMP, the NDI \
-         receiver-side timestamp) on the probe input, matching the live camera inputs. The \
-         DistroAV default (2, NDI_SOURCE_TIMECODE) binds the cursor to the sender's \
-         wall-clock-epoch timecode and renders BLACK on the genlock build."
+        py.contains("\"ndi_sync\": 2"),
+        "#149 regression: obs_phase2.py must set ndi_sync=2 (NDI_SOURCE_TIMECODE, SOURCE \
+         timing) on the probe input, mirroring the certified prod genlock cam inputs (all \
+         ndi_sync=2) and exercising the #136 ts-align path. ndi_sync=1 (receiver timestamp) \
+         measures a different timing regime than prod and silently no-ops #136 ts-align."
     );
 }
 
@@ -88,9 +91,11 @@ fn phase2_probe_genlock_config_applied_on_create_and_reuse() {
          shared _PROBE_NDI_SETTINGS dict so create and reuse can't drift apart."
     );
     // The genlock-critical keys must be in that shared dict (so both paths get them).
+    // #149: ndi_sync MUST be 2 (source timing), mirroring the certified prod cam inputs.
     assert!(
-        py.contains("\"genlock_fifo\": True") && py.contains("\"ndi_sync\": 1"),
-        "#63: _PROBE_NDI_SETTINGS must carry genlock_fifo=True and ndi_sync=1."
+        py.contains("\"genlock_fifo\": True") && py.contains("\"ndi_sync\": 2"),
+        "#63/#149: _PROBE_NDI_SETTINGS must carry genlock_fifo=True and ndi_sync=2 (source \
+         timing, mirroring the certified prod genlock cam inputs)."
     );
     assert!(
         py.matches("**_PROBE_NDI_SETTINGS").count() >= 2,
