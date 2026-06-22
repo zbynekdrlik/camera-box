@@ -272,6 +272,53 @@ pub fn cam_strih_samples(strih: &[RecordingFrame], ids: &RunIds) -> Vec<LatencyS
     out
 }
 
+/// cam2→cam1 OPTICAL+GRAB latency samples (#105 node 2) — REAL, available WITHOUT
+/// the #111 burn.
+///
+/// cam1's grab recording carries ONLY the cam2 painter QR (cam1 IS the camera —
+/// there is no node-burn in cam1's grab). Its `gen_ts_ns` is the cam2 PAINT instant
+/// (wall clock). cam1's OWN grab instant is in the grab-timestamp SIDECAR the
+/// `--record-grab` mode writes (`frame_index → grab_ts_ns`, same wall clock). So for
+/// each decoded cam1 grab frame:
+///
+///   `latency = cam1_grab_ts_ns[frame_index] − cam2_paint.gen_ts_ns`
+///
+/// anchored at the cam2 paint instant. Both stamps are CLOCK_REALTIME (DanteSync),
+/// so this is a true absolute number — the optical + capture latency of the camera
+/// filming cam2's monitor. NO #111 burn is needed (cam1 is not an OBS node).
+///
+/// A frame missing its cam2 QR, missing a sidecar grab_ts, or with a non-positive
+/// stamp is skipped (never a wrong number). `cam2_run_id` pins cam2 exactly; on the
+/// cam1 grab there is no foreign burn, so `None` (any non-burn = cam2) is also safe.
+pub fn cam2_cam1_samples(
+    cam1_frames: &[RecordingFrame],
+    grab_ts_by_index: &HashMap<u64, i64>,
+    cam2_run_id: Option<u32>,
+) -> Vec<LatencySample> {
+    let ids = RunIds {
+        node_burn: 0, // cam1 grab has no node burn; 0 matches nothing real
+        cam2: cam2_run_id,
+        other_burns: vec![],
+    };
+    let mut out = Vec::new();
+    for f in cam1_frames {
+        let (cam2, _node) = split_payloads(f, &ids);
+        if let Some(c) = cam2 {
+            if let Some(&grab) = grab_ts_by_index.get(&f.frame_index) {
+                // Both wall-clock; guard the unstamped 0 sentinel on either side so a
+                // missing stamp can't read as a giant latency.
+                if c.gen_ts_ns > 0 && grab > 0 {
+                    out.push(LatencySample {
+                        latency_ms: (grab - c.gen_ts_ns) as f64 / 1_000_000.0,
+                        at_ns: c.gen_ts_ns,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// strih→stream per-cam2-tick samples: pair the strih and stream recordings by the
 /// cam2 logical tick (`frame_id` of the cam2 QR, common to both outputs), then
 /// `latency = stream_burn.gen_ts_ns − strih_burn.gen_ts_ns`, anchored at the strih
@@ -410,6 +457,44 @@ mod tests {
             cam2: Some(CAM2),
             other_burns: vec![BURN_RUN_ID_STRIH],
         }
+    }
+
+    #[test]
+    fn cam2_cam1_latency_is_grab_minus_paint_both_wall_clock() {
+        // cam1 grab frames carry ONLY the cam2 painter QR (gen_ts = PAINT instant).
+        // cam1's grab instant comes from the sidecar (frame_index → grab_ts). The
+        // optical+grab latency is grab_ts − paint_gen_ts, both wall clock. No #111 burn.
+        let cam1 = vec![
+            frame(0, Some((CAM2, 100, 1_000_000_000)), None),
+            frame(1, Some((CAM2, 102, 1_033_000_000)), None),
+        ];
+        let mut grab: HashMap<u64, i64> = HashMap::new();
+        grab.insert(0, 1_050_000_000); // +50 ms after paint
+        grab.insert(1, 1_073_000_000); // +40 ms after paint
+        let s = cam2_cam1_samples(&cam1, &grab, Some(CAM2));
+        assert_eq!(s.len(), 2);
+        assert!((s[0].latency_ms - 50.0).abs() < 1e-6, "frame 0 = +50 ms");
+        assert!((s[1].latency_ms - 40.0).abs() < 1e-6, "frame 1 = +40 ms");
+        assert_eq!(s[0].at_ns, 1_000_000_000, "anchored at the paint instant");
+    }
+
+    #[test]
+    fn cam2_cam1_skips_frame_with_no_sidecar_grab_ts_or_no_cam2() {
+        // A cam1 frame with no decoded cam2 QR, or with no sidecar grab_ts for its
+        // index, or a 0 sentinel stamp, contributes NO sample (never a wrong number).
+        let cam1 = vec![
+            frame(0, Some((CAM2, 100, 1_000_000_000)), None), // has grab below
+            frame(1, None, None),                             // no cam2 QR → skip
+            frame(2, Some((CAM2, 104, 1_066_000_000)), None), // no sidecar entry → skip
+            frame(3, Some((CAM2, 106, 0)), None),             // 0 paint sentinel → skip
+        ];
+        let mut grab: HashMap<u64, i64> = HashMap::new();
+        grab.insert(0, 1_050_000_000);
+        grab.insert(1, 9); // present but frame 1 has no cam2
+        grab.insert(3, 1_100_000_000);
+        let s = cam2_cam1_samples(&cam1, &grab, Some(CAM2));
+        assert_eq!(s.len(), 1, "only frame 0 yields a valid sample");
+        assert!((s[0].latency_ms - 50.0).abs() < 1e-6);
     }
 
     #[test]
