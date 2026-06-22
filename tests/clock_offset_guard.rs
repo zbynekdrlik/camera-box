@@ -313,6 +313,40 @@ fn ptp_locked_from_journal_empty_when_ntp_only_fallback() {
 }
 
 #[test]
+fn ptp_locked_from_journal_degraded_when_servo_stopped_but_stale_lines_linger() {
+    // THE freshness case (the gate's whole point): `journalctl -n N` is count-bounded, so when
+    // PTP degrades the servo lines STOP but stale NANO/LOCK lines linger in the window while new
+    // `[NTP] offset:` lines accrue. A naive "any servo line anywhere -> LOCKED" would pass this
+    // freshly-degraded node. The parser must see the NTP line is NEWER than the last servo line
+    // and report DEGRADED.
+    let stale = "Jun 22 16:10:00 CAM1 dantesync[655]: [PTP] NANO  Drift: -67ns/s  Adj:+10.02ppm\n\
+                 Jun 22 16:10:01 CAM1 dantesync[655]: [PTP] LOCK  Drift: -10ns/s  Adj:+10.01ppm\n\
+                 Jun 22 16:11:30 CAM1 dantesync[655]: [NTP] offset:+402us (threshold:530us)\n\
+                 Jun 22 16:12:00 CAM1 dantesync[655]: [NTP] offset:+880us (threshold:530us)\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", stale)]);
+    assert_eq!(
+        out.trim(),
+        "DEGRADED",
+        "servo stopped (NTP newer than last servo line) -> DEGRADED, not stale LOCKED: {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_journal_locked_when_servo_is_newest_among_ntp_lines() {
+    // Interleaved NANO Drift + NTP offset, with a servo line as the MOST RECENT clock event ->
+    // servo currently ticking -> LOCKED (the steady-state cam1 shape).
+    let interleaved = "Jun 22 16:18:41 CAM1 dantesync[655]: [NTP] offset:+16us (threshold:530us)\n\
+         Jun 22 16:18:42 CAM1 dantesync[655]: [PTP] NANO  Drift: +5ns/s  Adj:+10.0ppm\n\
+         Jun 22 16:18:43 CAM1 dantesync[655]: [PTP] NANO  Drift: -3ns/s  Adj:+10.0ppm\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", interleaved)]);
+    assert_eq!(
+        out.trim(),
+        "LOCKED",
+        "servo is the newest clock event -> LOCKED: {out:?}"
+    );
+}
+
+#[test]
 fn ptp_locked_from_journal_ignores_mode_transition_banner() {
     // The `[PTP] === NANO MODE ===` transition banner is an EVENT, not the steady servo signal;
     // if only a banner (no `Drift:` servo line) is present, that is not proof the servo is running.

@@ -125,13 +125,15 @@ fetch_dante_status() {
 }
 fetch_dante_status "$STRIH"  "$DANTE_STRIH_STATUS"  || true
 fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
-GATE_WIN_ARGS=()
-[ -s "$DANTE_STRIH_STATUS" ]  && GATE_WIN_ARGS+=(--win-status "strih=$DANTE_STRIH_STATUS")
-[ -s "$DANTE_STREAM_STATUS" ] && GATE_WIN_ARGS+=(--win-status "stream=$DANTE_STREAM_STATUS")
+# ALWAYS pass --win-status for strih AND stream (NOT conditional on the file existing). If a
+# fetch failed and the file is absent, the gate marks that node UNKNOWN and FAILS — never a
+# silent pass with the Windows boxes unverified. Dropping the node here (the previous bug) let
+# the gate certify only cam1+cam2 and exit 0 with strih/stream NTP/PTP never checked.
 CLOCK_GUARD_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}" "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --linux "cam1=$CAM1_IP cam2=$PAINTER_IP" \
-  "${GATE_WIN_ARGS[@]}"
+  --win-status "strih=$DANTE_STRIH_STATUS" \
+  --win-status "stream=$DANTE_STREAM_STATUS"
 
 # cam1 v4l2 capture controls (#156 durable): apply the certified sharp-grab controls
 # (saturation=0, contrast=75) BEFORE the run so a soft-default device can never silently

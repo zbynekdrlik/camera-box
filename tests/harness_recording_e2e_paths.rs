@@ -72,6 +72,29 @@ fn grab_ts_sidecar_is_pulled_from_the_cam1_local_path_to_the_dev1_outdir_path() 
     );
 }
 
+/// The gate must ALWAYS receive a --win-status for strih AND stream (NOT conditional on the
+/// status file existing). If the fetch failed and the file is absent, the gate must mark that
+/// node UNKNOWN and FAIL — never silently drop it and certify only cam1+cam2 (the review bug).
+#[test]
+fn gate_always_passes_win_status_for_both_windows_nodes() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("--win-status \"strih=$DANTE_STRIH_STATUS\""),
+        "the gate must ALWAYS be given strih=--win-status (so a missing file -> UNKNOWN -> fail)"
+    );
+    assert!(
+        s.contains("--win-status \"stream=$DANTE_STREAM_STATUS\""),
+        "the gate must ALWAYS be given stream=--win-status (so a missing file -> UNKNOWN -> fail)"
+    );
+    // The previous bug gated the --win-status args on `[ -s "$DANTE_..._STATUS" ]` (file exists),
+    // which dropped a node whose fetch failed. That conditional must be gone.
+    assert!(
+        !s.contains("[ -s \"$DANTE_STRIH_STATUS\" ]  && GATE_WIN_ARGS")
+            && !s.contains("GATE_WIN_ARGS+=(--win-status \"strih="),
+        "the --win-status args must NOT be conditional on the status file existing"
+    );
+}
+
 /// The DanteSync NTP+PTP gate must be the FIRST hard step (#7): it must appear in the
 /// script BEFORE the cam1/cam2 launch and the OBS recording start, so a not-locked cluster
 /// fails fast before any measurement.

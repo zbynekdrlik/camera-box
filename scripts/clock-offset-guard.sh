@@ -112,25 +112,42 @@ abs_int() {
 #  * Windows OBS boxes (status pipe JSON): `"is_locked":true` AND `"mode":"NANO"|"LOCK"` =
 #    PTP servo locked; `"is_locked":false` (or a non-NANO/LOCK mode) = degraded/NTP-only.
 
-# ptp_locked_from_journal TEXT -> "LOCKED" if the journal's MOST RECENT PTP servo line is a
-# `[PTP] (NANO|LOCK)  Drift:` (servo running); "DEGRADED" if PTP servo lines exist but the
-# latest sample is NOT one (mode dropped out); "" (UNKNOWN) if NO `[PTP]` servo line is present
-# at all (PTP never seen / fully degraded to NTP). The `[PTP] === … MODE ===` transition banners
-# are excluded (they are events, not the steady servo signal). `|| true` survives set -e.
+# ptp_locked_from_journal TEXT -> "LOCKED" if the journal's MOST RECENT DanteSync clock event
+# is a `[PTP] (NANO|LOCK)  Drift:` servo line (servo CURRENTLY running); "DEGRADED" if servo
+# line(s) exist in the buffer but the LATEST clock event is an `[NTP] offset:` (the servo has
+# STOPPED — degraded to the NTP-only sawtooth, GM down); "" (UNKNOWN) if NO `[PTP]` servo line
+# is present at all (PTP never observed).
+#
+# The freshness check is ESSENTIAL: `journalctl -n N` is count-bounded, NOT time-bounded, so when
+# PTP degrades the servo lines stop but stale ones linger in the last-N window. Returning LOCKED
+# on any stale servo line anywhere would pass a freshly-degraded node. So we compare the POSITION
+# of the last servo line against the last NTP-offset line: a servo line AFTER the most recent NTP
+# line = servo still ticking = LOCKED; an NTP line after the last servo line = servo stopped =
+# DEGRADED. The `[PTP] === … MODE ===` transition banners are excluded (events, not the steady
+# servo signal). `|| true`/`echo 0` keep set -e happy on a no-match.
 ptp_locked_from_journal() {
-  local last_servo
-  # The last steady servo line of either mode (NANO best, LOCK acceptable). Exclude the
-  # `=== … MODE ===` banners (they contain "MODE", the Drift lines do not).
-  last_servo="$(printf '%s\n' "$1" \
-    | grep -E '\[PTP\] +(NANO|LOCK) +Drift:' \
-    | grep -v 'MODE ===' \
-    | tail -1 || true)"
-  if [ -z "$last_servo" ]; then
-    # No servo line at all -> PTP not observed (UNKNOWN/degraded).
-    printf ''
+  local text="$1" last_servo_n last_ntp_n
+  # 1-based line number of the LAST steady servo line (NANO/LOCK Drift), 0 if none. Exclude the
+  # `=== … MODE ===` banners (they contain "MODE"; the Drift lines do not). The `|| true` on each
+  # grep keeps a NO-MATCH (grep exit 1) from tripping the caller's `set -e`/`pipefail`.
+  last_servo_n="$(printf '%s\n' "$text" \
+    | { grep -nE '\[PTP\] +(NANO|LOCK) +Drift:' || true; } | { grep -v 'MODE ===' || true; } \
+    | tail -1 | cut -d: -f1)"
+  last_servo_n="${last_servo_n:-0}"
+  if [ "$last_servo_n" = 0 ]; then
+    printf ''        # no servo line at all -> PTP never observed (UNKNOWN)
     return 0
   fi
-  printf 'LOCKED'
+  # 1-based line number of the LAST `[NTP] offset:` line, 0 if none.
+  last_ntp_n="$(printf '%s\n' "$text" | { grep -nE '\[NTP\] offset:' || true; } | tail -1 | cut -d: -f1)"
+  last_ntp_n="${last_ntp_n:-0}"
+  # Servo line is the more-recent of the two -> servo currently ticking -> LOCKED. Otherwise an
+  # NTP line is newer than the last servo line -> the servo has stopped -> DEGRADED.
+  if [ "$last_servo_n" -ge "$last_ntp_n" ]; then
+    printf 'LOCKED'
+  else
+    printf 'DEGRADED'
+  fi
 }
 
 # ptp_locked_from_pipe_json TEXT -> "LOCKED" iff the status blob reports `"is_locked":true` AND
