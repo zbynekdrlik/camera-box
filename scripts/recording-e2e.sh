@@ -22,10 +22,13 @@
 #   strih→stream: STRICT zero-loss + latency.
 #   PASS = 0 undecodable AND 0 net loss on the strict hops AND span ≥ 300 s.
 #
-# TEST RIG: this reroutes the strih + stream OBS program to the probe scene and RECORDS
-# them for the run; the teardown trap restores both program scenes + the cam1/cam2
-# camera-box services + kills the dev1 ffmpeg listener on exit (incl. cancel). The
-# operator is the guard (project decision: no automated streaming guard).
+# TEST RIG: this routes the strih + stream OBS program to the CERTIFIED PRODUCTION scenes
+# (strih 'Cam 5' = cam1 via the genlock 'NDI cam5' input; stream a full-screen scene over
+# the prod 'NDI 2ME PGM' = strih's feed) and RECORDS that program for the run — NEVER a
+# probe ndi_source (which collides with the always-on prod input on the same NDI
+# source-name and records black, #163). The teardown trap restores both program scenes +
+# the cam1/cam2 camera-box services + kills the dev1 ffmpeg listener on exit (incl.
+# cancel). The operator is the guard (project decision: no automated streaming guard).
 #
 # Prereqs (dev1): NDI_RUNTIME_DIR_V6=/usr/lib/ndi, cargo, sshpass, ffmpeg, python3 +
 # websocket-client, matplotlib (for the report). OBS WebSocket :4455 on strih+stream,
@@ -204,9 +207,25 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
       >/tmp/painter.log 2>&1 &)"
 sleep 3  # let the painter put the QR on the monitor cam1 films
 
-echo "[5/8] OBS setup — route strih program ← cam1 NDI, stream program ← strih NDI"
-STRIH_OUT=$(python3 "$HERE/obs_phase2.py" setup --host "$STRIH"  --upstream "$CAMERA_SOURCE")
-STREAM_OUT=$(python3 "$HERE/obs_phase2.py" setup --host "$STREAM" --upstream "$STRIH_OUT" --terminal)
+# #163: record the CERTIFIED PRODUCTION scene program on each box — NOT a probe
+# ndi_source. The old probe path pointed `phase2-probe-src` at "CAM1 (usb)", the SAME
+# NDI source-name the always-on prod input `NDI cam5` already holds; DistroAV allows ONE
+# receiver per source-name, so the probe got no NDI and the probe scene recorded pure
+# BLACK (every frame undecodable). Instead we route program to the EXISTING prod scenes:
+#   strih  : 'Cam 5'  already shows cam1 via the genlock-certified `NDI cam5` input.
+#   stream : a full-screen scene over the prod `NDI 2ME PGM` input (shows strih's feed).
+# No second receiver, no source-name collision — proven NON-black on the live rig and by
+# the prior 3-node run (~0.35% real strih→stream loss). prod-scene runs a fail-fast
+# non-black self-check before returning so a black ingest never wastes a full run.
+STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
+STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
+STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+echo "[5/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
+echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
+STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
+  --program-scene "$STRIH_PROG_SCENE")
+STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
+  --program-scene "$STREAM_PROG_SCENE" --ensure-source "$STREAM_PROG_SOURCE")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
