@@ -94,6 +94,34 @@ if [ -n "$MAX_ABS_LATENCY" ] && [ "$WALL_CLOCK" != "1" ]; then
 fi
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
+# #153 reachability preflight: dev1 taps cam1 (10.77.9.61), strih (10.77.9.202) and
+# stream (10.77.9.204) over the LAN. A route problem on dev1 (e.g. a tailscale rule
+# hijacking the 10.77.8.0/23 LAN subnet) makes the NDI receiver "connect" but receive
+# ZERO video frames — which previously masqueraded as a silent 0-capture run and burned
+# a 30-min proof. FAIL FAST here with a precise diagnostic if any tap host is unreachable,
+# so a route problem can never again be misread as a content/genlock failure.
+echo "[0/5] reachability preflight — ping every tap + painter host (#153)"
+# cam1/strih/stream are the three taps dev1 differences; cam2 (PAINTER_IP) paints the QR
+# the whole chain carries. All four are load-bearing — an unreachable painter would only
+# fail the painter SSH mid-bring-up instead of fast here. Dedupe in loopback mode
+# (PAINTER_IP == CAM_IP, where the same box paints AND sources).
+_reach_hosts=("cam1=$CAM_IP" "strih=$STRIH" "stream=$STREAM")
+[ "$PAINTER_IP" != "$CAM_IP" ] && _reach_hosts+=("painter=$PAINTER_IP")
+_reach_fail=0
+for hp in "${_reach_hosts[@]}"; do
+  _name="${hp%%=*}"; _ip="${hp#*=}"
+  if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then
+    echo "    ok: $_name ($_ip) reachable"
+  else
+    echo "ERROR: host $_name ($_ip) is UNREACHABLE from dev1 — route hijacked or host down." >&2
+    echo "       The NDI receiver would connect but capture 0 frames (silent 0-capture, #153)." >&2
+    echo "       Check 'ip rule'/'ip route get $_ip' (LAN 10.77.8.0/23 must use the main table," >&2
+    echo "       not a tailscale rule), confirm the host is powered, then re-run." >&2
+    _reach_fail=1
+  fi
+done
+[ "$_reach_fail" = 0 ] || exit 1
+
 # Pre-flight: when measuring absolute latency, the gen/recv stamps are only
 # comparable if the cluster wall clocks are synced. Fail loudly up front (rather
 # than emitting a meaningless absolute number) if the source camera has drifted.

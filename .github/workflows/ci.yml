@@ -232,6 +232,30 @@ jobs:
             echo "No Rust source changes in this PR — skipping mutation testing."
           fi
 
+  python-tests:
+    name: Python harness tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        # websocket-client: obs_phase2.py imports it at module load (sys.exit if
+        # missing), so it must be present for the test module to import.
+        run: pip install pytest websocket-client
+
+      - name: Run harness unit tests (#149 self-verify guard)
+        # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
+        # pytest plugins). These tests pin the obs_phase2 self-verify guard that
+        # asserts the probe NDI config mirrors the certified prod genlock input.
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python -m pytest tests/python -v
+
   build:
     name: Build
     runs-on: ubuntu-22.04
@@ -297,7 +321,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, build, security, drift-guard]
+    needs: [lint, test, coverage, mutants, python-tests, build, security, drift-guard]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
