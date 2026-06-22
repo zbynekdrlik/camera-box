@@ -44,19 +44,30 @@ MAIN_OUTPUT = "NDI Main Output"
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
 
-# #63: the probe ndi_source MUST be configured exactly like the live, proven-working camera
-# inputs (NDI cam1/3/5) so it renders on the GENLOCK OBS build (OBS_GENLOCK_WALL_CLOCK=1).
-# Defaults are wrong for the genlock compositor and make the probe render BLACK (0 decoded):
+# #63/#149: the probe ndi_source MUST be configured EXACTLY like the live, certified, proven-
+# working genlock camera inputs (NDI cam1/3/5 on strih) so the harness measures the SAME config
+# that ships in production — never a divergent one. _LOCKED_BASELINE_KEYS below are asserted to
+# equal the matching prod genlock input before any measurement (the #149 self-verify guard), so
+# the MACHINE catches a drift between this harness and prod, not a human after a misconfigured run.
 #   - genlock_fifo=True  -> the wall-clock-slaved render tick consumes exactly one queued
 #                           frame per tick (camera-box #42 FIFO bypass). Without it the probe
 #                           takes the normal async timestamp-cursor path, which can't be
 #                           reconciled against the disciplined tick -> frames discarded.
-#   - ndi_sync=1         -> PROP_SYNC_NDI_TIMESTAMP (the NDI *receiver*-side, monotonic
-#                           timestamp). The DistroAV default is 2 (NDI_SOURCE_TIMECODE), which
-#                           binds the cursor to the camera-box sender's WALL-CLOCK-epoch
-#                           boundary timecode (src/ndi.rs) -> out-of-bounds vs the monotonic
-#                           compositor cursor -> BLACK.
-#   - ndi_bw_mode=0      -> highest bandwidth (full quality), as before.
+#   - ndi_sync=2         -> NDI_SOURCE_TIMECODE (SOURCE timing). This is the #149 fix. The prod
+#                           genlock cam inputs ALL run ndi_sync=2 (verified live: NDI cam1/3/5 =
+#                           ndi_sync=2), and #136 timestamp-aligned release REQUIRES the frame to
+#                           carry the wall-clock SOURCE timecode (is_wallclock_ts on
+#                           next_frame->timestamp, src/ndi.rs). With ndi_sync=1
+#                           (PROP_SYNC_NDI_TIMESTAMP, the NDI *receiver*-side monotonic
+#                           timestamp) the frame carries the receiver's monotonic ts, so the
+#                           #136 ts-align path silently NO-OPS — the harness then "proves" a
+#                           code path it never actually exercised. ndi_sync MUST be 2 to mirror
+#                           prod and to drive the #136 ts-align release the test claims to verify.
+#                           (Was 1 here pre-#149 — a STALE pre-#136 value whose old justifying
+#                           comment claimed the camera-box boundary timecode went out-of-bounds
+#                           vs the monotonic cursor; that is obsolete now that #136 ships and
+#                           prod itself runs ndi_sync=2.)
+#   - ndi_bw_mode=0      -> highest bandwidth (full quality), matching prod.
 # Merged FIRST in each settings dict so the per-call ndi_source_name still overrides cleanly.
 # latency=0 (Normal) MIRRORS the live, proven cam inputs (NDI cam1/3/5 are all latency=0 on
 # strih) and IS THE CERTIFIED low-latency zero-loss ingest mode (#84): the A/B measurement
@@ -66,7 +77,16 @@ INPUT = "phase2-probe-src"
 # (OBS_GENLOCK_PRELOAD_FRAMES) is the jitter buffer that matters. The probe MUST run at the
 # pinned 0 (vendor/README.md ndi_input_latency) so this harness measures the certified config,
 # not a different one. (Was latency=2 pre-#84, before the A/B re-pin to Normal(0).)
-_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "latency": 0}
+_PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 0}
+
+# #149: the locked baseline keys that the probe ingest MUST share BIT-FOR-BIT with the certified
+# prod genlock input under test. These define the timing/quality regime the harness measures;
+# if ANY of them diverges from prod, the harness is no longer measuring the production config and
+# the run is invalid. The per-source genlock_preload (the #97 copied tuning, _GENLOCK_COPY_KEYS)
+# is DELIBERATELY excluded — it is allowed to differ per source. The self-verify guard
+# (_diverging_locked_keys + _assert_probe_matches_prod) asserts equality on exactly these keys
+# before measuring and FAILS FAST with a precise per-key diagnostic on any mismatch.
+_LOCKED_BASELINE_KEYS = ("ndi_sync", "genlock_fifo", "ndi_bw_mode", "latency")
 
 # Per-source genlock TUNING to copy from a production input onto the probe input so the
 # probe measures the SAME delay behaviour as the live chain. Copy ONLY the per-source
@@ -77,14 +97,26 @@ _PROBE_NDI_SETTINGS = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 1, "l
 _GENLOCK_COPY_KEYS = ("genlock_preload",)
 
 
-def _read_prod_genlock_settings(ws, host, upstream_ndi_name):
-    """Read genlock-relevant settings from the production input whose ndi_source_name
-    matches *upstream_ndi_name* (exact or substring match) on *host*.
+def _is_genlock_prod_input(settings):
+    """#149: True iff a prod ndi_source input's settings look like a CERTIFIED GENLOCK
+    cam input (genlock_fifo enabled) rather than a non-genlock NDI input. The non-genlock
+    inputs on a box (e.g. 'NDI 2ME PVW', 'NDI Bible' — preview/graphics feeds) run
+    ndi_sync=1 and have no genlock_fifo; matching one of THOSE for the baseline would make
+    the guard demand ndi_sync=1 and re-introduce the #149 bug. Only an input that is itself
+    genlocked (genlock_fifo truthy) is a valid certified baseline for the probe."""
+    return bool(settings.get("genlock_fifo"))
 
-    Returns a dict with the keys from _GENLOCK_COPY_KEYS that were present in the
-    prod input, or {} if the prod input cannot be found / its settings cannot be read.
-    NEVER modifies any prod input or scene. Best-effort: exceptions are caught and
-    logged as warnings so the caller always falls back gracefully.
+
+def _find_prod_genlock_input(ws, host, upstream_ndi_name):
+    """#149: locate the CERTIFIED prod GENLOCK input whose ndi_source_name matches
+    *upstream_ndi_name* (exact or substring) on *host*, and return
+    ``(input_name, full_settings_dict)`` for it — or ``(None, {})`` if none is found / a
+    read fails.
+
+    The returned full settings drive BOTH (a) the per-source preload copy (_GENLOCK_COPY_KEYS)
+    and (b) the #149 self-verify guard (_LOCKED_BASELINE_KEYS), so we read the prod input
+    ONCE. NEVER modifies any prod input or scene. Best-effort: exceptions are caught and the
+    caller falls back gracefully (with NO certified baseline → the guard cannot run).
     """
     try:
         inputs = _rpc(ws, "GetInputList", ignore_err=True).get("inputs", [])
@@ -94,32 +126,94 @@ def _read_prod_genlock_settings(ws, host, upstream_ndi_name):
         ]
         # Find the prod input whose ndi_source_name matches the upstream we are
         # ingesting (e.g. "CAM1 (usb)" on strih, or the strih NDI name on stream).
+        # Skip non-genlock inputs (they share the same source name family but run a
+        # different timing regime — they are NOT a valid certified baseline, #149).
         for inp_name in ndi_inputs:
             try:
                 s = _rpc(ws, "GetInputSettings", {"inputName": inp_name},
                          ignore_err=True).get("inputSettings", {})
                 src = s.get("ndi_source_name", "")
-                if src == upstream_ndi_name or (upstream_ndi_name and upstream_ndi_name in src):
-                    copied = {k: s[k] for k in _GENLOCK_COPY_KEYS if k in s}
-                    if copied:
-                        sys.stderr.write(
-                            f"[obs] {host}: copying genlock settings from prod input "
-                            f"'{inp_name}' (ndi_source_name='{src}'): {copied}\n"
-                        )
-                    return copied
+                matches = src == upstream_ndi_name or (upstream_ndi_name and upstream_ndi_name in src)
+                if matches and _is_genlock_prod_input(s):
+                    sys.stderr.write(
+                        f"[obs] {host}: certified prod genlock input '{inp_name}' "
+                        f"(ndi_source_name='{src}') matched for "
+                        f"'{upstream_ndi_name}'\n"
+                    )
+                    return inp_name, s
             except Exception:
                 continue
         sys.stderr.write(
-            f"[obs] {host}: WARN could not find a prod ndi_source input matching "
-            f"'{upstream_ndi_name}'; probe will use default genlock settings\n"
+            f"[obs] {host}: WARN could not find a certified prod GENLOCK ndi_source "
+            f"input matching '{upstream_ndi_name}'; probe will use default genlock "
+            f"settings and the #149 self-verify guard cannot assert against prod\n"
         )
-        return {}
+        return None, {}
     except Exception as e:
         sys.stderr.write(
             f"[obs] {host}: WARN reading prod genlock settings failed ({e}); "
             f"probe will use default genlock settings\n"
         )
-        return {}
+        return None, {}
+
+
+def _diverging_locked_keys(certified, probe, keys=_LOCKED_BASELINE_KEYS):
+    """#149 self-verify CORE (pure, testable): given the CERTIFIED prod genlock input's
+    settings *certified* and the PROBE ingest's effective settings *probe*, return the
+    sorted list of *keys* whose values differ between them (or are missing from probe).
+
+    A returned list that is non-empty means the harness would measure a config that
+    DIVERGES from the certified production config — the caller must FAIL FAST. An empty
+    list means the probe's locked baseline mirrors prod exactly. This compares ONLY the
+    locked baseline keys; per-source tuning (genlock_preload) is intentionally not here.
+
+    Each diverging entry is a dict: {"key", "expected" (prod), "actual" (probe)}."""
+    diverging = []
+    for k in keys:
+        exp = certified.get(k)
+        act = probe.get(k)
+        if exp != act:
+            diverging.append({"key": k, "expected": exp, "actual": act})
+    return diverging
+
+
+def _assert_probe_matches_prod(host, prod_input_name, certified, probe_effective):
+    """#149 self-verify GUARD: assert the probe ingest's effective locked baseline equals
+    the CERTIFIED prod genlock input's, EXACTLY, before any measurement. On ANY mismatch
+    raise SystemExit with a precise per-key diagnostic (which key, prod-expected vs
+    probe-actual) so a config drift between the harness and prod can NEVER again produce a
+    silently-invalid measurement that a human has to catch. The machine guards the config.
+
+    If no certified prod genlock input was found (certified is falsy / empty), the guard
+    cannot assert and aborts loudly — measuring against an UNKNOWN prod config is exactly
+    the failure mode #149 closes, so we never proceed without a baseline to verify against."""
+    if not certified:
+        raise SystemExit(
+            f"[obs] {host}: #149 self-verify ABORT — no certified prod GENLOCK input found "
+            f"to verify the probe against. Refusing to measure a config that cannot be "
+            f"confirmed to mirror production. Ensure the prod genlock cam input for this "
+            f"source is configured (genlock_fifo on) and discoverable over obs-websocket."
+        )
+    diverging = _diverging_locked_keys(certified, probe_effective)
+    if diverging:
+        lines = "\n".join(
+            f"    - {d['key']}: prod(certified)={d['expected']!r}  probe={d['actual']!r}"
+            for d in diverging
+        )
+        raise SystemExit(
+            f"[obs] {host}: #149 self-verify FAIL — probe ingest config DIVERGES from the "
+            f"certified prod genlock input '{prod_input_name}' on these locked baseline "
+            f"keys:\n{lines}\n"
+            f"  The harness MUST measure the exact production config. Aborting before any "
+            f"measurement (a divergent config would silently invalidate the proof). Fix "
+            f"_PROBE_NDI_SETTINGS in scripts/obs_phase2.py to mirror prod, or fix the prod "
+            f"input, then re-run."
+        )
+    sys.stderr.write(
+        f"[obs] {host}: #149 self-verify OK — probe locked baseline "
+        f"{ {k: probe_effective.get(k) for k in _LOCKED_BASELINE_KEYS} } matches certified "
+        f"prod genlock input '{prod_input_name}'\n"
+    )
 
 
 def _load_state():
@@ -247,16 +341,25 @@ def setup(a):
     state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
     _save_state(state)
 
-    # Read the production input's genlock settings and overlay them on the probe.
-    # This ensures the probe runs with the SAME certified genlock config as the live
-    # prod inputs (e.g. the cam1 NDI input on strih, or the strih NDI input on stream)
-    # without ever touching those prod inputs or their scenes.
-    # Falls back to _PROBE_NDI_SETTINGS if the prod read fails (logged as a warning).
-    prod_genlock = _read_prod_genlock_settings(ws, a.host, a.upstream)
-    # _PROBE_NDI_SETTINGS is the certified #63 baseline (genlock_fifo/ndi_sync/latency);
-    # prod_genlock adds ONLY the per-source preload (no key overlap), so the baseline is
-    # never overridden. Both are spread into BOTH the create and the reuse call below — the
-    # #63 regression guard requires _PROBE_NDI_SETTINGS reach both paths. ndi_source_name is
+    # Read the CERTIFIED production genlock input ONCE (its name + full settings). This
+    # ensures the probe runs with the SAME certified genlock config as the live prod inputs
+    # (e.g. the cam1 NDI input on strih, or the strih NDI input on stream) without ever
+    # touching those prod inputs or their scenes, AND gives the #149 self-verify guard the
+    # baseline to assert against. Falls back to _PROBE_NDI_SETTINGS if the prod read fails.
+    prod_input_name, prod_settings = _find_prod_genlock_input(ws, a.host, a.upstream)
+    # Per-source preload copy: ONLY the _GENLOCK_COPY_KEYS (no overlap with the locked
+    # baseline), so the #63/#149 baseline in _PROBE_NDI_SETTINGS is never overridden.
+    prod_genlock = {k: prod_settings[k] for k in _GENLOCK_COPY_KEYS if k in prod_settings}
+    if prod_genlock:
+        sys.stderr.write(
+            f"[obs] {a.host}: copying per-source genlock tuning from prod input "
+            f"'{prod_input_name}': {prod_genlock}\n"
+        )
+    # _PROBE_NDI_SETTINGS is the certified #63/#149 baseline (genlock_fifo/ndi_sync/
+    # ndi_bw_mode/latency); prod_genlock adds ONLY the per-source preload (no key overlap),
+    # so the baseline is never overridden. Both are spread into BOTH the create and the reuse
+    # call below — the #63 regression guard requires _PROBE_NDI_SETTINGS reach both paths.
+    # ndi_source_name is
     # always set explicitly so it is never inherited from prod.
 
     # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
@@ -352,8 +455,20 @@ def setup(a):
     # always fire — blocking the strih→stream hop measurement. The terminal box's
     # output is tapped DIRECTLY by dev1; there is no next OBS hop to protect.
     out_full = _resolve_own_output(ws, a.host, ndi_name, terminal=a.terminal)
-    # Everything resolved — NOW switch program to the probe scene (kept to the last step so
-    # any failure above leaves the live program where it was).
+
+    # #149 SELF-VERIFY GUARD — the MACHINE guards the config, never the human. Read back the
+    # probe ingest's EFFECTIVE locked baseline (after every SetInputSettings above) and assert
+    # it equals the certified prod genlock input's EXACTLY. On any divergence — or no certified
+    # prod baseline found — FAIL FAST with a precise per-key diagnostic, before switching the
+    # program scene, so the production program is left UNTOUCHED and a config that diverges from
+    # prod can never be silently measured. This runs LAST (after the resolved-name re-point) so
+    # it verifies the input's true final state, mirroring the resolution gates' fail-fast order.
+    probe_effective = _rpc(ws, "GetInputSettings", {"inputName": INPUT},
+                           ignore_err=True).get("inputSettings", {})
+    _assert_probe_matches_prod(a.host, prod_input_name, prod_settings, probe_effective)
+
+    # Everything resolved AND self-verified — NOW switch program to the probe scene (kept to
+    # the last step so any failure above leaves the live program where it was).
     _rpc(ws, "SetCurrentProgramScene", {"sceneName": SCENE})
     ws.close()
     sys.stderr.write(
