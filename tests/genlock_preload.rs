@@ -801,6 +801,18 @@ mod vendored_source {
             "{OBS_SOURCE}: #136 — the presentation deadline (genlock_present_ts from the real \
              wall clock genlock_wall_now_ns) is gone; re-apply."
         );
+        // #136 boundary-churn fix: the C genlock_present_ts BODY must carry the +interval/2
+        // half-interval bias (mirror of src/probe/genlock.rs genlock_present_ts'
+        // .saturating_add(interval_ns / 2)). Without asserting the body, a subtree pull (#44)
+        // could revert it to `return base;` while every Rust unit test AND the call-site guard
+        // above stay green — silently reintroducing the ~3 fps boundary hold/drop churn on the
+        // deep-preload chained strih->stream PGM feed.
+        assert!(
+            src.contains("return base + interval_ns / 2"),
+            "{OBS_SOURCE}: #136 — genlock_present_ts lost the +interval/2 boundary-churn bias \
+             (`return base + interval_ns / 2`); the deployed DLL would silently regress to the \
+             boundary hold/drop churn the fix removed. Re-apply the half-interval tolerance."
+        );
         // The C wall-clock bounds MUST equal the Rust mirror constants (lock-step).
         assert!(
             src.contains(&format!("{WALLCLOCK_TS_MIN_NS}ULL")),
