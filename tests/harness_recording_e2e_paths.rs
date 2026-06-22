@@ -9,10 +9,35 @@
 //! and pin that the cam1-side arg is the local path and the scp source matches it.
 
 use std::fs;
+use std::process::Command;
 
 fn read(p: &str) -> String {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// Source recording-fetch-windows.sh and call `urlencode_name <arg>`, returning its
+/// stdout. The script's `main` is guarded by a sourced-vs-executed check, so sourcing it
+/// runs only the function definitions.
+fn urlencode_name(arg: &str) -> String {
+    let script = format!(
+        "{}/scripts/recording-fetch-windows.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; urlencode_name \"$2\"")
+        .arg("bash") // $0
+        .arg(&script) // $1 — the script to source
+        .arg(arg) // $2 — the name to encode
+        .output()
+        .expect("run urlencode_name");
+    assert!(
+        out.status.success(),
+        "urlencode_name failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
 
 /// The `--record-grab-ts` value handed to camera-box ON cam1 must be the cam1-LOCAL
@@ -188,5 +213,53 @@ fn recording_e2e_teardown_restores_program_scenes() {
         body.contains("teardown --host \"$STREAM\"") && body.contains("teardown --host \"$STRIH\""),
         "#163: cleanup() must teardown (restore prior program scene) on BOTH strih and \
          stream after recording the prod scene program."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #163: recording-fetch-windows.sh must URL-ENCODE the OBS recording filename.
+//
+// OBS's default recording name is `YYYY-MM-DD HH-MM-SS.ext` — it contains a SPACE.
+// python http.server serves it only at the percent-encoded path (`.../...%20...`). The
+// fetch built the URL from the RAW name, so curl sent a malformed request and the fetch
+// FAILED — the strih/stream recordings (recorded fine, prod-scene program, NON-black)
+// never reached the verdict, so the strict cam1→strih + strih→stream hops were
+// unmeasured. RED on the raw-name URL; GREEN once the name is URL-encoded.
+// ---------------------------------------------------------------------------
+
+/// The fetch must URL-encode the recording filename's spaces (a raw space breaks curl).
+#[test]
+fn fetch_windows_url_encodes_spaces_in_the_recording_name() {
+    // The exact OBS default name shape that broke the run.
+    assert_eq!(
+        urlencode_name("2026-06-22 20-58-26.mkv"),
+        "2026-06-22%2020-58-26.mkv",
+        "#163: recording-fetch-windows.sh must percent-encode spaces in the OBS recording \
+         filename (python http.server serves it only at the %20-encoded path); a raw space \
+         makes curl send a malformed request and the fetch fails."
+    );
+    // A name with no spaces is unchanged (no double-encoding, no corruption).
+    assert_eq!(urlencode_name("clip.mp4"), "clip.mp4");
+}
+
+/// The URL must be built from the ENCODED name, never the raw `${name}` (the bug). Static
+/// guard so a regression that drops the encode step fails even where bash isn't run.
+#[test]
+fn fetch_windows_builds_url_from_encoded_name_not_raw() {
+    let s = read("scripts/recording-fetch-windows.sh");
+    assert!(
+        s.contains("urlencode_name"),
+        "#163: recording-fetch-windows.sh must URL-encode the filename via urlencode_name."
+    );
+    // The url must use the encoded var, not the raw ${name}.
+    assert!(
+        s.contains("${WIN_HTTP_PORT}/${enc}"),
+        "#163: the fetch URL must use the ENCODED name (${{enc}}), not the raw ${{name}} \
+         (a raw space in the path makes curl fail)."
+    );
+    assert!(
+        !s.contains("${WIN_HTTP_PORT}/${name}"),
+        "#163 regression: the fetch URL must NOT be built from the raw ${{name}} (unencoded \
+         spaces break the request)."
     );
 }
