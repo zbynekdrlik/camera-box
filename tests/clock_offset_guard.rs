@@ -380,7 +380,10 @@ fn ptp_check_maps_state_to_exit_code() {
         // `set +e` first: sourcing the guard re-enables its top-level `set -e`, which would
         // abort the harness the moment ptp_check returns a NON-zero rc (the very thing under
         // test). Capture the rc explicitly instead.
-        let out = run_sourced("set +e; ptp_check node \"$S\"; echo \"rc=$?\"", &[("S", state)]);
+        let out = run_sourced(
+            "set +e; ptp_check node \"$S\"; echo \"rc=$?\"",
+            &[("S", state)],
+        );
         assert!(
             out.contains(&format!("rc={want}")),
             "ptp_check({state:?}) must exit {want}: {out:?}"
