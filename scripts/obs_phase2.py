@@ -630,11 +630,11 @@ def _resolve_own_output(ws, host, ndi_name, terminal):
 # We key on the PEAK (max), NOT the mean: a legitimately dark-but-live camera frame can
 # have a very low mean (the live 'Cam 5' read mean ~30, but a darker scene could be ~1)
 # while still carrying a decodable QR — only an all-zero frame (max==0) is truly black.
-def _luma_is_black(luma_max, luma_mean):  # noqa: ARG001 (mean kept for diagnostics/log)
+def _luma_is_black(luma_max):
     """#163 fail-fast self-check (pure): True iff the rendered program frame is black
-    (no signal). Black == peak luma 0; any non-zero peak is real content. `luma_mean`
-    is accepted for the diagnostic log line only and never gates the decision (a dark
-    live frame has a low mean but a non-zero peak)."""
+    (no signal). Black == peak luma 0; any non-zero peak is real content. The decision
+    is on the PEAK only — the caller logs the mean separately for diagnostics, but the
+    mean never gates this (a dark-but-live frame has a low mean and a non-zero peak)."""
     return int(luma_max) == 0
 
 
@@ -730,7 +730,9 @@ def prod_scene(a):
         # (strih 'Cam 5'): if it WAS the live program, restoring it to ITSELF is the most
         # faithful restore — don't bump the box off a legit prod scene onto an arbitrary one.
         ephemeral = bool(a.ensure_source)
-        saved = _load_state().get(a.host, {})
+        # ONE state read: reused both for the crash-recovery fallbacks and the write-back.
+        state = _load_state()
+        saved = state.get(a.host, {})
         prev = _restore_target(prev, target, ephemeral, scenes, saved.get("prev_scene"))
         # Preview restore mirrors the program decision (never strand the ephemeral scene
         # in preview either; for a real prod scene keep what was shown, falling back to the
@@ -743,7 +745,6 @@ def prod_scene(a):
                 f"[obs] {a.host}: WARN prior program unknown/was the ephemeral record "
                 f"scene; will restore to '{prev_preview}'\n"
             )
-        state = _load_state()
         state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
         _save_state(state)
 
@@ -811,7 +812,7 @@ def prod_scene(a):
                 f"self-check (GetSourceScreenshot/PIL unavailable) — proceeding without "
                 f"it; recording-verdict will still catch an all-black recording.\n"
             )
-        elif _luma_is_black(luma_max, luma_mean):
+        elif _luma_is_black(luma_max):
             raise SystemExit(
                 f"[obs] {a.host}: #163 self-check FAIL — program scene '{target}' renders "
                 f"BLACK (luma peak={luma_max}, mean={luma_mean:.1f}). The source is not "

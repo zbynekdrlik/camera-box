@@ -106,13 +106,13 @@ def test_prod_scene_requires_program_scene(monkeypatch):
 def test_is_black_luma_helper_flags_black_and_passes_nonblack():
     # The fail-fast non-black self-check (#163 candidate fix 3): a recorded-black probe
     # ingest must be caught BEFORE StartRecord wastes a full run. The pure decision
-    # helper treats an all-zero (max luma 0) frame as black and a frame with any signal
-    # as non-black.
-    assert obs_phase2._luma_is_black(luma_max=0, luma_mean=0.0) is True
-    assert obs_phase2._luma_is_black(luma_max=255, luma_mean=30.8) is False
-    # A near-zero mean but real peak (a mostly-dark but signal-bearing camera frame, e.g.
-    # the live 'Cam 5' read at mean≈30, max=255) must NOT be flagged black.
-    assert obs_phase2._luma_is_black(luma_max=255, luma_mean=1.0) is False
+    # helper treats an all-zero (peak luma 0) frame as black and a frame with any signal
+    # (non-zero peak) as non-black — the decision is on the PEAK only.
+    assert obs_phase2._luma_is_black(luma_max=0) is True
+    assert obs_phase2._luma_is_black(luma_max=255) is False
+    # A frame with a real peak (e.g. the live 'Cam 5' read peak=255) is NON-black even
+    # when its mean is low (a mostly-dark but signal-bearing camera frame).
+    assert obs_phase2._luma_is_black(luma_max=1) is False
 
 
 SCENES = ["Cam 5", "Cam 1", "test 2", "REC-STRIH-TMP", "POST"]
