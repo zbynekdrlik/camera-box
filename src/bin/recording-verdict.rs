@@ -25,9 +25,10 @@
 
 use anyhow::{Context, Result};
 use camera_box::probe::recording::{analyze_recording, extract_frames_png, RecordingFrame};
+use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
-    cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, RunIds, BURN_RUN_ID_STREAM,
-    BURN_RUN_ID_STRIH,
+    cam2_cam1_samples, cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, RunIds,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, strih_stream_verdict, verdict, FrameTick, RecordingVerdict, VerdictConfig,
@@ -45,6 +46,16 @@ struct Args {
     /// stream OBS-program recording — the headline endpoint. Enables strih→stream.
     #[arg(long)]
     stream: Option<PathBuf>,
+    /// cam1 GRAB recording (#105 node 2) — the camera-box `--record-grab` mkv of
+    /// cam1's filmed frames. Enables the STRICT cam1→strih hop verdict and the HONEST
+    /// cam2→cam1 optical assessment (and, with --cam1-grab-ts, the cam2→cam1 latency).
+    #[arg(long)]
+    cam1: Option<PathBuf>,
+    /// cam1 grab-timestamp SIDECAR CSV (`frame_index,grab_ts_ns`) the `--record-grab`
+    /// mode writes — cam1's per-frame GRAB instant on the DanteSync wall clock. With
+    /// --cam1 it yields the REAL cam2→cam1 optical+grab latency (no #111 burn needed).
+    #[arg(long)]
+    cam1_grab_ts: Option<PathBuf>,
     /// CSV of the cam2 painter's displayed ticks (enables the cam→strih assessment).
     #[arg(long)]
     painter: Option<PathBuf>,
@@ -117,6 +128,48 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
     }
     tracing::info!(file = %path.display(), ticks = ticks.len(), "painter ticks parsed");
     Ok(ticks)
+}
+
+/// Parse the cam1 grab-timestamp sidecar CSV (`frame_index,grab_ts_ns`, header
+/// `frame_index,grab_ts_ns`) the `--record-grab` mode writes into a
+/// `frame_index → grab_ts_ns` map. A malformed row (wrong column count, non-integer)
+/// errors loudly rather than silently dropping — a silently-shrunk grab-ts map would
+/// drop legitimate cam2→cam1 latency samples without any signal.
+fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read cam1 grab-ts sidecar {}", path.display()))?;
+    let mut m = std::collections::HashMap::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("frame_index") {
+            continue; // header / blank
+        }
+        let mut it = line.split(',');
+        let idx_s = it
+            .next()
+            .with_context(|| format!("grab-ts row at line {} is empty: {line:?}", lineno + 1))?;
+        let ts_s = it.next().with_context(|| {
+            format!(
+                "grab-ts row at line {} has <2 columns (expected frame_index,grab_ts_ns): {line:?}",
+                lineno + 1
+            )
+        })?;
+        let idx: u64 = idx_s.trim().parse().with_context(|| {
+            format!(
+                "grab-ts frame_index not a u64 at line {}: {idx_s:?}",
+                lineno + 1
+            )
+        })?;
+        let ts: i64 = ts_s.trim().parse().with_context(|| {
+            format!(
+                "grab-ts grab_ts_ns not an i64 at line {}: {ts_s:?}",
+                lineno + 1
+            )
+        })?;
+        m.insert(idx, ts);
+    }
+    tracing::info!(file = %path.display(), entries = m.len(), "cam1 grab-ts sidecar parsed");
+    Ok(m)
 }
 
 /// Analyze a recording into the per-frame tick stream (the #106 decode → #107 input).
@@ -278,6 +331,67 @@ fn main() -> Result<()> {
         stream_frames_opt = Some(stream_frames);
     }
 
+    // cam1 GRAB node (#105 node 2): per-recording continuity verdict, the STRICT
+    // cam1→strih hop, and the HONEST cam2→cam1 optical assessment + latency. cam1's
+    // grab and strih's program carry the SAME camera frames, so cam1→strih is a strict
+    // offset-immune tick-SET compare (the camera beat cancels) — a cam1 tick absent at
+    // strih is a real cam1→strih DROP.
+    let mut cam1_frames_opt: Option<Vec<RecordingFrame>> = None;
+    if let Some(cam1_path) = &args.cam1 {
+        let (cam1_frames, cam1_ticks) = ticks_of(cam1_path)?;
+
+        // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
+        let cam1_v = verdict(&cam1_ticks, &cfg);
+        all_pass &= report_recording("cam1", cam1_path, &cam1_v, &args.out_dir)?;
+
+        // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
+        // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
+        // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
+        let cs = cam1_strih_verdict(&cam1_ticks, &strih_ticks, &cfg);
+        println!(
+            "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
+        );
+        println!(
+            "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
+            cs.compared_ticks,
+            cs.strih_only_ticks.len(),
+            cs.stream_only_ticks.len()
+        );
+        if !cs.strih_only_ticks.is_empty() {
+            let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
+            println!(
+                "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+            );
+        }
+        if !cs.stream_only_ticks.is_empty() {
+            let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
+            println!("  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}");
+        }
+        println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
+        all_pass &= cs.is_pass();
+
+        // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
+        if let Some(painter_path) = &args.painter {
+            let painter_ticks = parse_painter_ticks(painter_path)?;
+            let a = cam1_optical_assessment(&cam1_ticks, &painter_ticks, &cfg);
+            println!("=== cam2→cam1 OPTICAL assessment (honest, NOT a zero-loss claim) ===");
+            println!(
+                "  unknown_ticks (in-range, never painted = real optical fault)={}",
+                a.unknown_ticks.len()
+            );
+            println!(
+                "  out_of_painter_range_ticks (painter CSV didn't cover)={}",
+                a.out_of_painter_range_ticks.len()
+            );
+            if !a.unknown_ticks.is_empty() {
+                let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
+                println!("  unknown ticks (first 20): {shown:?}");
+                all_pass = false; // an in-range never-painted tick is a provable fault
+            }
+        }
+        cam1_frames_opt = Some(cam1_frames);
+    }
+
     // cam→strih honest assessment (no false zero claim).
     let mut cam_strih_clean: Option<bool> = None;
     if let Some(painter_path) = &args.painter {
@@ -321,6 +435,40 @@ fn main() -> Result<()> {
     };
     let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(&strih_frames, &strih_ids));
     report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
+
+    // cam2→cam1 OPTICAL+GRAB latency (#105 node 2) — REAL, no #111 burn needed.
+    // grab_ts (cam1 grab instant, sidecar) − cam2 paint gen_ts, both wall clock.
+    if let Some(cam1_frames) = &cam1_frames_opt {
+        match &args.cam1_grab_ts {
+            Some(grab_ts_path) => {
+                let grab_ts = parse_grab_ts(grab_ts_path)?;
+                let cam2_pin_c1 = if args.cam2_run_id != 0 {
+                    Some(args.cam2_run_id)
+                } else {
+                    None
+                };
+                let c1_lat = hop_latency(
+                    "cam2→cam1",
+                    &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin_c1),
+                );
+                report_hop_latency(&c1_lat, "cam2→cam1 (optical+grab)", "cam2 paint gen_ts_ns");
+            }
+            None => println!(
+                "=== cam2→cam1 (optical+grab) per-hop ABSOLUTE latency (#105 node 2) ===\n  \
+                 RELATIVE/UNAVAILABLE — pass --cam1-grab-ts <sidecar.csv> (the --record-grab \
+                 grab-timestamp log) to compute it (grab_ts − cam2 paint gen_ts, both wall clock)."
+            ),
+        }
+        // cam1→strih ABSOLUTE latency needs strih's #111 burn paired against cam1's grab
+        // instant; the #111 burn is NOT deployed, so this hop's absolute latency is marked
+        // unavailable rather than faked. cam2→cam1 (above) and cam→strih (cam2→strih) ARE
+        // available; cam1→strih = (cam→strih) − (cam2→cam1) once the burn lands.
+        println!(
+            "=== cam1→strih per-hop ABSOLUTE latency (#105 node 2) ===\n  \
+             RELATIVE/UNAVAILABLE — needs the #111 strih burn QR (not deployed) paired with \
+             cam1's grab instant. Derivable as (cam→strih) − (cam2→cam1) once #111 is live."
+        );
+    }
     if let Some(stream_frames) = &stream_frames_opt {
         // stream recording: node burn = stream; strih's burn is FOREIGN (forwarded in
         // the program feed) and MUST be excluded so it is never read as cam2.

@@ -79,6 +79,36 @@ pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
     cur.wrapping_sub(prev).saturating_sub(1)
 }
 
+/// Extract the gray8 (luma) plane from a packed YUYV (YUY2) capture buffer.
+///
+/// YUYV packs `Y0 U0 Y1 V0` per 4 bytes = 2 pixels: the luma is every EVEN byte
+/// (`Y` at 0,2,4,…), chroma the odd bytes. This returns one luma byte per pixel
+/// (`width*height` bytes), honoring `stride` (bytes per row; YUYV stride = `2*width`
+/// for a tightly packed frame but a device may pad). This is the cam1 GRAB-RECORD
+/// extraction (#105 node 2): a prod-clean, dependency-free luma plane the
+/// `--record-grab` mode streams to dev1 for ffv1 encoding + QR decode. It deliberately
+/// drops chroma — the QR the camera filmed is fully readable from luma, and gray8
+/// halves the wire bytes vs full YUYV (so the grab-stream perturbs the measured
+/// pipeline less). Rows/cols beyond the buffer are skipped (defensive against a short
+/// final buffer); a too-small input yields a zero-padded plane rather than panicking.
+pub fn yuyv_to_gray8(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let stride = stride as usize;
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        let row = y * stride;
+        for x in 0..w {
+            // luma byte for pixel x is at row + 2*x (even byte in the YUYV pair).
+            let idx = row + 2 * x;
+            if idx < data.len() {
+                out[y * w + x] = data[idx];
+            }
+        }
+    }
+    out
+}
+
 /// V4L2 video capture wrapper
 pub struct VideoCapture {
     stream: Stream<'static>,
@@ -443,6 +473,47 @@ mod tests {
     fn sequence_gap_same_or_no_advance_is_zero() {
         // A duplicate/no-advance (never expected) must not report a giant gap.
         assert_eq!(sequence_gap(10, 10), 0);
+    }
+
+    #[test]
+    fn yuyv_to_gray8_picks_even_luma_bytes() {
+        // 2x1 YUYV: Y0=10 U0=200 Y1=20 V0=201 → gray8 = [10, 20] (the even bytes).
+        let yuyv = [10u8, 200, 20, 201];
+        let gray = yuyv_to_gray8(&yuyv, 2, 1, 4);
+        assert_eq!(gray, vec![10, 20], "luma is the even (Y) bytes only");
+    }
+
+    #[test]
+    fn yuyv_to_gray8_honors_stride_padding() {
+        // 2x2 with a padded stride of 6 bytes/row (4 luma+chroma + 2 pad). Row 0:
+        // Y=1,Y=2; row 1: Y=3,Y=4. The 2 pad bytes per row must be skipped.
+        let row0 = [1u8, 0, 2, 0, 0, 0]; // Y0=1 U Y1=2 V pad pad
+        let row1 = [3u8, 0, 4, 0, 0, 0];
+        let mut data = Vec::new();
+        data.extend_from_slice(&row0);
+        data.extend_from_slice(&row1);
+        let gray = yuyv_to_gray8(&data, 2, 2, 6);
+        assert_eq!(
+            gray,
+            vec![1, 2, 3, 4],
+            "stride padding skipped, luma row-major"
+        );
+    }
+
+    #[test]
+    fn yuyv_to_gray8_short_buffer_zero_pads_no_panic() {
+        // A truncated final buffer must not panic; missing pixels are 0.
+        let yuyv = [9u8, 0]; // only 1 luma byte available for a 2x1 request
+        let gray = yuyv_to_gray8(&yuyv, 2, 1, 4);
+        assert_eq!(gray, vec![9, 0], "missing pixel zero-padded, no panic");
+    }
+
+    #[test]
+    fn yuyv_to_gray8_output_is_one_byte_per_pixel() {
+        let yuyv = vec![128u8; 4 * 4]; // 4 pixels (2x2) packed YUYV
+        let gray = yuyv_to_gray8(&yuyv, 2, 2, 4);
+        assert_eq!(gray.len(), 4, "one luma byte per pixel = width*height");
+        assert!(gray.iter().all(|&b| b == 128));
     }
 
     #[test]
