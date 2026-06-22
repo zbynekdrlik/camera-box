@@ -266,6 +266,46 @@ jobs:
           }
           Write-Output "DistroAV NDI source-name UAF fix present (config_mutex at update + reset + rename, av_thread-owned name copies, no live config-pointer borrow) — OK"
 
+      # #150: assert the genlock NDI-source config LOCKDOWN is present in the vendored
+      # DistroAV BEFORE the 150-min build. The root fix (confirmed live 2026-06-22): a
+      # genlock NDI source must EXPOSE ONLY source-selection + genlock preload and
+      # HARDCODE every other certified zero-loss value at the code level, so no input,
+      # scene, human or harness can misconfigure it (an incompletely-configured probe
+      # ingest decoded 0 at strih while the certified prod input decoded 100% off the
+      # SAME NDI source). Mirrors the canonical Linux-CI guard
+      # tests/distroav_genlock_lockdown.rs (that crate is Linux-only — it can't compile
+      # on this windows-2022 runner), so the same source tokens are re-asserted here in
+      # pwsh. A future `git subtree pull` (#44) that drops the lockdown fails HERE.
+      - name: Assert genlock NDI-source config lockdown present (#150)
+        shell: pwsh
+        run: |
+          $ndi = (Get-Content "vendor/distroav/src/ndi-source.cpp" -Raw) -replace '\s+', ' '
+          if ($ndi -notmatch [regex]::Escape('force_genlock_certified_settings')) {
+            Write-Error "ndi-source.cpp: the #150 certified-value forcer (force_genlock_certified_settings) is gone — a genlock source could come up misconfigured. Re-apply the #150 lockdown"; exit 1
+          }
+          # The forcer must set every certified key. Spot-check the critical ones that
+          # caused the live 0-decode (hw_accel, audio) plus the timing trio (sync/bw/latency).
+          foreach ($needle in @(
+            'obs_data_set_int(settings, PROP_SYNC, PROP_SYNC_NDI_SOURCE_TIMECODE)',
+            'obs_data_set_int(settings, PROP_BEHAVIOR, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME)',
+            'obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_HIGHEST)',
+            'obs_data_set_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL)',
+            'obs_data_set_bool(settings, PROP_HW_ACCEL, true)',
+            'obs_data_set_bool(settings, PROP_AUDIO, false)',
+            'obs_data_set_bool(settings, PROP_FRAMESYNC, false)',
+            'obs_data_set_bool(settings, PROP_FIX_ALPHA, false)')) {
+            if ($ndi -notmatch [regex]::Escape($needle)) {
+              Write-Error "ndi-source.cpp: the #150 forcer no longer performs '$needle' — that key could be left misconfigured on the genlock path. Re-apply the full #150 lockdown"; exit 1
+            }
+          }
+          if ($ndi -notmatch [regex]::Escape('force_genlock_certified_settings(settings)')) {
+            Write-Error "ndi-source.cpp: ndi_source_update no longer CALLS force_genlock_certified_settings(settings) — the certified values are not enforced at update time. Re-apply the #150 lockdown"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('apply_genlock_lockdown_visibility')) {
+            Write-Error "ndi-source.cpp: the #150 property-visibility lockdown (apply_genlock_lockdown_visibility) is gone — the forced keys would still be user-editable in the UI. Re-apply the #150 lockdown"; exit 1
+          }
+          Write-Output "Genlock NDI-source config lockdown present (force_genlock_certified_settings forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha, called from ndi_source_update, non-essential props hidden via apply_genlock_lockdown_visibility) — OK"
+
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
       # #111: assert the QR render-time burn filter (Path B) is present + build-wired in
       # the vendored DistroAV BEFORE the 150-min build, so a future `git subtree pull`

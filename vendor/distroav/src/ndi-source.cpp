@@ -334,6 +334,65 @@ static void format_preload_ms_label(obs_data_t *settings, char *buf, size_t bufl
 	}
 }
 
+/* camera-box #150: FORCE every certified zero-loss genlock value into `settings`,
+ * regardless of any saved scene value, UI edit, or harness-set value. Called from
+ * ndi_source_update ONLY when genlock_fifo is on (NOT from ndi_source_getdefaults —
+ * defaults run before create with no per-source genlock state to gate on; update is
+ * the authoritative enforcement point and ndi_source_create calls update at the end,
+ * so a newly-added genlock source is forced at creation), so a genlock NDI source —
+ * prod, probe, or a newly-added one, in ANY scene — is correct by construction. This
+ * closes the misconfig class root-caused live 2026-06-22 (an
+ * incompletely-configured probe ingest decoded 0 at the strih output while the
+ * fully-configured prod input decoded 100%, same NDI source). The two LEGITIMATE
+ * operator knobs — PROP_SOURCE and PROP_GENLOCK_PRELOAD — are NEVER touched here, and
+ * PROP_GENLOCK_FIFO itself is the operator's gate (left as the operator set it). The
+ * certified values were read live from the working prod input `NDI cam5`:
+ *   ndi_sync=2 (SOURCE_TIMECODE / source timing), ndi_behavior=2 (LAST_FRAME),
+ *   ndi_bw_mode=0 (highest), latency=0 (NORMAL), ndi_recv_hw_accel=true,
+ *   ndi_audio=false, ndi_framesync=false, ndi_fix_alpha_blending=false,
+ *   yuv_range=partial, yuv_colorspace=BT.709, timeout=KEEP_CONTENT.
+ * Writing into `settings` (not just s->config) means the values persist into the saved
+ * scene JSON on the next OBS save, so the source stays correct across restarts. */
+static void force_genlock_certified_settings(obs_data_t *settings)
+{
+	obs_data_set_int(settings, PROP_SYNC, PROP_SYNC_NDI_SOURCE_TIMECODE);
+	obs_data_set_int(settings, PROP_BEHAVIOR, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME);
+	obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_HIGHEST);
+	obs_data_set_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL);
+	obs_data_set_int(settings, PROP_TIMEOUT, PROP_TIMEOUT_KEEP_CONTENT);
+	obs_data_set_int(settings, PROP_YUV_RANGE, PROP_YUV_RANGE_PARTIAL);
+	obs_data_set_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709);
+	obs_data_set_bool(settings, PROP_HW_ACCEL, true);
+	obs_data_set_bool(settings, PROP_AUDIO, false);
+	obs_data_set_bool(settings, PROP_FRAMESYNC, false);
+	obs_data_set_bool(settings, PROP_FIX_ALPHA, false);
+}
+
+/* camera-box #150: hide every non-essential property when genlock is enabled, so a
+ * human or a tool CANNOT set a forced key wrong from the UI — leaving ONLY the two
+ * legitimate knobs (PROP_SOURCE selection + PROP_GENLOCK_PRELOAD video delay) plus the
+ * PROP_GENLOCK_FIFO toggle visible. When genlock is OFF the FULL normal property set is
+ * shown (non-genlock aux/preview inputs — NDI 2ME PVW / Bible / Camera info, ndi_sync=1
+ * — are unaffected, #150 constraint #3). Returns true (properties UI changed → refresh)
+ * so it can drive the genlock-checkbox modified-callback directly. PROP_SOURCE,
+ * PROP_GENLOCK_FIFO and PROP_GENLOCK_PRELOAD (+ the read-only ms label) are deliberately
+ * NEVER hidden. */
+static bool apply_genlock_lockdown_visibility(obs_properties_t *props, bool genlock_on)
+{
+	/* The forced (non-essential) properties: shown only when genlock is OFF. */
+	static const char *const locked_props[] = {
+		PROP_BEHAVIOR, PROP_BANDWIDTH, PROP_SYNC,           PROP_FRAMESYNC,
+		PROP_HW_ACCEL, PROP_LATENCY,   PROP_AUDIO,          PROP_YUV_RANGE,
+		PROP_YUV_COLORSPACE, PROP_FIX_ALPHA, PROP_TIMEOUT,
+	};
+	for (const char *name : locked_props) {
+		obs_property_t *p = obs_properties_get(props, name);
+		if (p)
+			obs_property_set_visible(p, !genlock_on);
+	}
+	return true;
+}
+
 obs_properties_t *ndi_source_getproperties(void *data)
 {
 	auto s = (ndi_source_t *)data;
@@ -385,12 +444,20 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	obs_property_set_modified_callback(bw_modes, [](obs_properties_t *props_, obs_property_t *,
 							obs_data_t *settings_) {
 		bool is_audio_only = (obs_data_get_int(settings_, PROP_BANDWIDTH) == PROP_BW_AUDIO_ONLY);
+		/* camera-box #150: this callback also governs the two YUV controls' visibility,
+		 * so it MUST be genlock-aware — otherwise, under the genlock lockdown (which
+		 * forces bandwidth=HIGHEST, i.e. NOT audio-only), a property refresh that
+		 * re-fires this callback would set the YUV controls visible again and LEAK the
+		 * lockdown for exactly those two props. When genlock is on, keep them hidden
+		 * regardless of audio-only — the lockdown is authoritative. */
+		bool genlock_on = obs_data_get_bool(settings_, PROP_GENLOCK_FIFO);
+		bool yuv_visible = !is_audio_only && !genlock_on;
 
 		obs_property_t *yuv_range = obs_properties_get(props_, PROP_YUV_RANGE);
 		obs_property_t *yuv_colorspace = obs_properties_get(props_, PROP_YUV_COLORSPACE);
 
-		obs_property_set_visible(yuv_range, !is_audio_only);
-		obs_property_set_visible(yuv_colorspace, !is_audio_only);
+		obs_property_set_visible(yuv_range, yuv_visible);
+		obs_property_set_visible(yuv_colorspace, yuv_visible);
 
 		return true;
 	});
@@ -443,11 +510,24 @@ obs_properties_t *ndi_source_getproperties(void *data)
 		return true; /* properties UI changed -> refresh */
 	};
 	obs_property_set_modified_callback(preload_slider, update_preload_ms);
-	/* Re-run the same label update when the genlock-fifo checkbox is toggled, so the
-	 * "enable Genlock to apply" hint appears/clears immediately. */
+	/* camera-box #150 + #97: when the genlock-fifo checkbox is toggled, do BOTH —
+	 * update the preload ms-label hint AND re-apply the lockdown visibility so the
+	 * non-essential properties hide (genlock on) / re-appear (genlock off) live. A
+	 * property has a single modified-callback, so the two actions are combined here.
+	 * Non-capturing lambda so it converts to the C obs_property_modified_t pointer. */
+	auto on_genlock_fifo_changed = [](obs_properties_t *props_, obs_property_t *,
+					  obs_data_t *settings_) -> bool {
+		char buf[160];
+		format_preload_ms_label(settings_, buf, sizeof(buf));
+		obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
+		if (ms_prop)
+			obs_property_set_description(ms_prop, buf);
+		apply_genlock_lockdown_visibility(props_, obs_data_get_bool(settings_, PROP_GENLOCK_FIFO));
+		return true; /* properties UI changed -> refresh */
+	};
 	obs_property_t *genlock_fifo_prop = obs_properties_get(props, PROP_GENLOCK_FIFO);
 	if (genlock_fifo_prop)
-		obs_property_set_modified_callback(genlock_fifo_prop, update_preload_ms);
+		obs_property_set_modified_callback(genlock_fifo_prop, on_genlock_fifo_changed);
 
 	obs_properties_add_bool(props, PROP_HW_ACCEL, obs_module_text("NDIPlugin.SourceProps.HWAccel"));
 
@@ -489,6 +569,22 @@ obs_properties_t *ndi_source_getproperties(void *data)
 					0.001);
 	obs_properties_add_group(props, PROP_PTZ, obs_module_text("NDIPlugin.SourceProps.PTZ"), OBS_GROUP_CHECKABLE,
 				 group_ptz);
+
+	/* camera-box #150: apply the lockdown visibility ONCE on first dialog open from
+	 * the source's CURRENT genlock_fifo state — OBS does not fire modified-callbacks
+	 * at initial property population, so without this a genlock source would show all
+	 * the (forced, non-editable-in-effect) properties until the operator toggled the
+	 * checkbox. Guard the null-data (add-source) case: a brand-new source has genlock
+	 * off, so the full set shows until the operator enables genlock. */
+	bool genlock_on_now = false;
+	if (s && s->obs_source) {
+		obs_data_t *cur = obs_source_get_settings(s->obs_source);
+		if (cur) {
+			genlock_on_now = obs_data_get_bool(cur, PROP_GENLOCK_FIFO);
+			obs_data_release(cur);
+		}
+	}
+	apply_genlock_lockdown_visibility(props, genlock_on_now);
 
 	obs_log(LOG_DEBUG, "-ndi_source_getproperties(…)");
 
@@ -1128,6 +1224,29 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	// async frame queue with source->async_mutex).
 	//
 	pthread_mutex_lock(&s->config_mutex);
+
+	/* camera-box #150: LOCK DOWN the genlock path. When the operator has enabled
+	 * genlock (PROP_GENLOCK_FIFO), FORCE every certified zero-loss value into
+	 * `settings` BEFORE any of the per-key reads below — so the rest of this function
+	 * (and the persisted scene JSON) sees the certified config regardless of any saved
+	 * value, UI edit, or harness-set value. This makes every genlock NDI source —
+	 * prod, probe, or a newly-added one, in ANY scene — correct by construction, which
+	 * is the root fix for the misconfig class found live 2026-06-22 (an
+	 * incompletely-configured probe ingest decoded 0 while the certified prod input
+	 * decoded 100% off the SAME NDI source). The forcing is GATED on genlock_fifo, so
+	 * non-genlock aux/preview inputs (NDI 2ME PVW / Bible / Camera info, ndi_sync=1)
+	 * are entirely unaffected (#150 constraint #3). The two legitimate operator knobs —
+	 * PROP_SOURCE and PROP_GENLOCK_PRELOAD — are never touched by the forcer. */
+	const bool genlock_lockdown = obs_data_get_bool(settings, PROP_GENLOCK_FIFO);
+	if (genlock_lockdown) {
+		force_genlock_certified_settings(settings);
+		obs_log(LOG_INFO,
+			"'%s' ndi_source_update: #150 genlock lockdown ACTIVE — forced certified "
+			"values (ndi_sync=2, ndi_behavior=2, ndi_bw_mode=0, latency=0, "
+			"ndi_recv_hw_accel=true, ndi_audio=false, ndi_framesync=false, "
+			"ndi_fix_alpha_blending=false); only source + genlock preload are operator-set",
+			obs_source_name);
+	}
 
 	//
 	// reset_ndi_receiver: BEGIN
