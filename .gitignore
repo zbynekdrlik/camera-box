@@ -41,3 +41,9 @@ __pycache__/
 .claude/command-history.log
 dist-genlock/
 .playwright-mcp/
+
+# Session-local deploy staging + verify scratch (#136)
+deploy-136/
+deploy-136b/
+dist-136/
+.obs-verify/

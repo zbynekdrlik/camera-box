@@ -18,6 +18,12 @@
 #include <inttypes.h>
 #include <math.h>
 #include <stdlib.h> /* camera-box #70: getenv/strtol for OBS_GENLOCK_PRELOAD_FRAMES */
+#include <time.h>   /* camera-box #136: clock_gettime/timespec for genlock_wall_now_ns */
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h> /* camera-box #136: GetSystemTimePreciseAsFileTime for genlock_wall_now_ns */
+#endif
 
 #include "media-io/format-conversion.h"
 #include "media-io/video-frame.h"
@@ -4336,6 +4342,96 @@ static inline size_t genlock_build_drain(size_t queue_depth, uint32_t preload)
 	return queue_depth > target ? queue_depth - target : 0;
 }
 
+/* ---- camera-box #136: timestamp-aligned release (multi-source IN-SYNC) -----
+ * The count-based genlock_decide above keeps a fixed-DEPTH per-source jitter
+ * buffer; it cannot hold MULTIPLE sources in sync because each source's depth
+ * drifts independently (the render pass consumes slightly slower than the cams
+ * produce, and any per-source dropout/reconnect/preload-change leaves that source
+ * at a different depth that never re-converges) — measured ~300 ms / 9-frame spread
+ * live. Timestamp-aligned release instead presents, from every source, the frame
+ * captured at the SAME shared wall-clock instant present_ts = wall_now -
+ * preload*interval; identical capture instant on every source => in-sync by
+ * construction, latency bounded+uniform = preload*interval, and a slow/lagged
+ * render pass just drops the stale past-due frames uniformly (NO buffer fill toward
+ * the overrun cap). preload (a frame COUNT) is reinterpreted as a TIME delay.
+ *
+ * Mirrored & unit-tested in camera-box src/probe/genlock.rs (genlock_release /
+ * genlock_present_ts / is_wallclock_ts). Gated behind OBS_GENLOCK_TS_ALIGN (default
+ * OFF => behaviour is byte-identical to the count gate) AND a per-frame wall-clock
+ * sanity check, so non-camera sources (CG/preview, no wall-clock timecode) always
+ * fall back to the count gate and the rollout is reversible by env alone. */
+
+/* Plausible DanteSync wall-clock bounds (Unix epoch ns): 2020-01-01 .. 2100-01-01.
+ * Mirror of camera-box src/probe/genlock.rs WALLCLOCK_TS_{MIN,MAX}_NS. */
+#define GENLOCK_WALLCLOCK_TS_MIN_NS 1577836800000000000ULL
+#define GENLOCK_WALLCLOCK_TS_MAX_NS 4102444800000000000ULL
+
+static inline bool genlock_is_wallclock_ts(uint64_t ts_ns)
+{
+	return ts_ns >= GENLOCK_WALLCLOCK_TS_MIN_NS && ts_ns < GENLOCK_WALLCLOCK_TS_MAX_NS;
+}
+
+/* OBS_GENLOCK_TS_ALIGN=1 enables the #136 timestamp-aligned release path. Default
+ * OFF => the count gate (genlock_decide) runs exactly as before. Cached like the
+ * render-tick env gate (obs-video.c); takes effect on the next OBS launch. */
+static bool genlock_ts_align_enabled(void)
+{
+	static int enabled = -1;
+	if (enabled == -1) {
+		const char *v = getenv("OBS_GENLOCK_TS_ALIGN");
+		enabled = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+		if (enabled)
+			blog(LOG_INFO, "genlock: timestamp-aligned release ENABLED "
+				       "(OBS_GENLOCK_TS_ALIGN) — multi-source in-sync (#136)");
+	}
+	return enabled == 1;
+}
+
+/* Real DanteSync wall clock NOW in ns since the Unix epoch — the SAME basis the
+ * wall-clock-slaved render tick (obs-video.c genlock_wall_ns) and the cam-box NDI
+ * timecode (src/ndi.rs) use, so frame->timestamp and present_ts share one timeline. */
+static inline uint64_t genlock_wall_now_ns(void)
+{
+#ifdef _WIN32
+	FILETIME ft;
+	ULARGE_INTEGER u;
+	GetSystemTimePreciseAsFileTime(&ft);
+	u.LowPart = ft.dwLowDateTime;
+	u.HighPart = ft.dwHighDateTime;
+	/* FILETIME (100ns since 1601) -> unix epoch ns */
+	return (u.QuadPart - 116444736000000000ULL) * 100ULL;
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+/* One output frame interval in ns from the current video info (0 if unknown). */
+static inline uint64_t genlock_frame_interval_ns(void)
+{
+	struct obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || ovi.fps_num == 0)
+		return 0;
+	return (uint64_t)1000000000ULL * ovi.fps_den / ovi.fps_num;
+}
+
+/* The presentation deadline for this tick: the wall-clock instant whose frame is due
+ * now = wall_now - delay_frames*interval + interval/2 (saturating, never wraps below 0).
+ * The +interval/2 is the #136 boundary-churn fix: a frame whose timestamp lands exactly
+ * on the nominal deadline jitters in/out of the `ts <= present_ts` test from tick to tick
+ * (the render tick has ±slew), producing hold/drop churn (~3 fps on the deep-preload
+ * chained strih->stream PGM feed). Biasing forward by half a frame makes a boundary frame
+ * robustly due (±2ms slew << interval/2 ≈ 16ms @ 30fps); all sources share the bias so
+ * in-sync is preserved. Mirror of camera-box src/probe/genlock.rs genlock_present_ts. */
+static inline uint64_t genlock_present_ts(uint64_t wall_now_ns, uint32_t delay_frames, uint64_t interval_ns)
+{
+	const uint64_t delay = (uint64_t)delay_frames * interval_ns;
+	const uint64_t base = wall_now_ns > delay ? wall_now_ns - delay : 0;
+	return base + interval_ns / 2;
+}
+/* ---- end #136 ------------------------------------------------------------- */
+
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
  * visible in the OBS log before AND after the fix (the verification evidence).
  * `now_ns` is the monotonic render-tick stamp (obs->video.video_time). */
@@ -4398,6 +4494,54 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 
 		if (source->async_frames.num > source->genlock_peak_depth)
 			source->genlock_peak_depth = (uint32_t)source->async_frames.num;
+
+		/* camera-box #136: timestamp-aligned release (multi-source IN-SYNC).
+		 * When enabled AND the head frame carries a real wall-clock capture ts (a
+		 * camera-box genlock input in Source-Timecode mode), present the frame
+		 * captured at the shared deadline present_ts = wall_now - preload*interval:
+		 * drop the stale past-due frames, hold (repeat) when none are due. Every
+		 * genlock source shares the strih wall-clock tick + the cam DanteSync capture
+		 * timeline, so the presented timestamp is identical across sources => in-sync.
+		 * Falls through to the count gate below for non-wallclock sources (CG/preview),
+		 * when the interval is unknown, or when OBS_GENLOCK_TS_ALIGN is off. Mirrors
+		 * src/probe/genlock.rs genlock_release(). */
+		if (genlock_ts_align_enabled() && genlock_is_wallclock_ts(next_frame->timestamp)) {
+			const uint64_t interval = genlock_frame_interval_ns();
+			if (interval != 0) {
+				const uint64_t present_ts =
+					genlock_present_ts(genlock_wall_now_ns(), preload, interval);
+				/* due = prefix of queued frames at/before the deadline (a single
+				 * NDI source delivers in monotonic capture order). */
+				size_t due = 0;
+				while (due < source->async_frames.num &&
+				       source->async_frames.array[due]->timestamp <= present_ts)
+					due++;
+				/* count-gate machinery (empty_run re-arm / fill latch) is unused on
+				 * this path — ts-align self-heals after a transient via the real ts. */
+				source->genlock_empty_run = 0;
+				source->genlock_filled = true;
+				if (due == 0) {
+					/* nothing has reached its deadline yet (source early or
+					 * stalled) — repeat the current frame this tick. */
+					source->genlock_underruns++;
+					genlock_audit_log(source, now_ns);
+					return false;
+				}
+				/* present the NEWEST due frame: erase the (due-1) stale older ones
+				 * via the same da_erase(.,0)+remove_async_frame() free idiom. */
+				size_t to_drop = due - 1;
+				while (to_drop-- && source->async_frames.num > 1) {
+					struct obs_source_frame *dropped = source->async_frames.array[0];
+					da_erase(source->async_frames, 0);
+					remove_async_frame(source, dropped);
+				}
+				next_frame = source->async_frames.array[0];
+				source->genlock_frames_consumed++;
+				source->last_frame_ts = next_frame->timestamp;
+				genlock_audit_log(source, now_ns);
+				return true;
+			}
+		}
 
 		/* camera-box #126: frames have RESUMED (this branch is reached only with
 		 * num>=1). If a SUSTAINED true-empty run preceded this resume while the source

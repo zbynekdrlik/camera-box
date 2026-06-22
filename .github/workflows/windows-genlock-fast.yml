@@ -1,0 +1,87 @@
+name: Windows genlock FAST (libobs / obs.dll only)
+
+# camera-box #136: a FAST build of ONLY the libobs target (obs.dll) from the
+# vendored, genlock-patched tree — for iterating the genlock core DURING an event.
+# The full Windows artifact (browser/CEF + DistroAV + installer layout) is
+# windows-genlock.yml (~1-2.5 h); this builds just obs.dll in minutes for a hot DLL
+# swap. obs.dll is ABI-compatible with the already-deployed distroav.dll because the
+# #136 change is libobs-INTERNAL (a static function + a branch — no obs_source_frame
+# layout change, no new public API). Manual dispatch; deploy off-air with a kept
+# fallback + the one-click desktop revert.
+
+on:
+  workflow_dispatch:
+  # camera-box #136: also fire on a dev push that touches libobs, so a hot obs.dll
+  # build is available WITHOUT first merging the workflow to the default branch
+  # (GitHub only lets workflow_dispatch run from the default branch).
+  push:
+    branches: [dev]
+    paths:
+      - 'vendor/obs-studio/libobs/**'
+      - '.github/workflows/windows-genlock-fast.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-genlock-fast
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail fast (before the configure/build) if the #136 patch is missing — mirrors
+      # the Linux-CI guard tests/genlock_preload.rs::vendored_source::
+      # timestamp_aligned_release_present.
+      - name: Assert genlock timestamp-aligned release patch present (#136)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('getenv("OBS_GENLOCK_TS_ALIGN")')) { Write-Error "OBS_GENLOCK_TS_ALIGN gate gone (#136)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_is_wallclock_ts(next_frame->timestamp)')) { Write-Error "wall-clock guard gone (#136)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_present_ts(genlock_wall_now_ns(), preload, interval)')) { Write-Error "present_ts gone (#136)"; exit 1 }
+          Write-Output "#136 timestamp-aligned release patch present — OK"
+
+      # Same configure as the full build (downloads the obs-deps bundle the preset
+      # pins); we just build a single target afterwards.
+      - name: Configure OBS (windows-x64 preset)
+        working-directory: vendor/obs-studio
+        shell: bash
+        run: >
+          cmake --preset windows-x64
+          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          -DENABLE_WHATSNEW=OFF
+          -DENABLE_AJA=OFF
+          -DENABLE_VLC=OFF
+          -DENABLE_TEST_INPUT=OFF
+
+      # Build ONLY libobs (the core lib = obs.dll). Skips CEF/browser, the Qt
+      # frontend, and all plugins — the bulk of the full build — so this finishes in
+      # minutes. libobs is self-contained (it is the base every other target links),
+      # so its obs.dll is complete and swap-valid on its own.
+      - name: Build ONLY libobs (obs.dll)
+        working-directory: vendor/obs-studio
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --target libobs --parallel
+
+      - name: Stage obs.dll
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse vendor/obs-studio/build_x64 -Filter obs.dll |
+                 Where-Object { $_.FullName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (!$dll) { Write-Error "obs.dll not found after the libobs build"; exit 1 }
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item $dll.FullName stage/
+          git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
+          Write-Output "staged obs.dll from: $($dll.FullName)"
+
+      - name: Upload obs.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-genlock-fast-dll
+          path: stage/
+          if-no-files-found: error
