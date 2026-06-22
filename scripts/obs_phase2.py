@@ -671,6 +671,26 @@ def _program_luma(ws, scene_name):
         return None, None
 
 
+def _restore_target(prev, target, ephemeral, scenes, saved_prev=None):
+    """#163 (pure, testable): decide the scene teardown should restore PROGRAM to, given
+    the program scene seen at prod-scene time (*prev*), the record *target*, whether the
+    target is *ephemeral* (a scene we built — must never be restored to), the box's
+    *scenes* list, and the last good run's *saved_prev* (for crash recovery).
+
+    - ephemeral target: never restore to it; if prev was the target, recover saved_prev,
+      else fall back to any other existing scene (the stream temp scene case).
+    - real prod target: faithful restore — keep whatever was program, INCLUDING the target
+      itself if it was already live program (don't bump the box off a legit prod scene)."""
+    if ephemeral:
+        if prev == target:
+            prev = saved_prev or prev
+        if not prev or prev == target:
+            prev = next((s for s in scenes if s != target), None)
+        return prev
+    # Real prod scene: keep what was shown (target included). Only fill a missing prev.
+    return prev or next((s for s in scenes), None)
+
+
 def prod_scene(a):
     """#163: route this box's OBS PROGRAM to a CERTIFIED PRODUCTION scene and verify it
     is rendering NON-BLACK, so the recording-based E2E records the REAL production scene
@@ -704,21 +724,25 @@ def prod_scene(a):
 
         scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
         target = a.program_scene
-
-        # Never record OUR prod-recording target as the restore target (a prior crash
-        # could have left it on program); recover the real prior scene, else any other.
-        if prev == target:
-            prev = _load_state().get(a.host, {}).get("prev_scene") or prev
-        if not prev or prev == target:
-            prev = next((s for s in scenes if s != target), None)
+        # A scene we BUILD (--ensure-source, the stream temp scene) is EPHEMERAL: it must
+        # never be a restore target (restoring program to the throwaway record scene would
+        # strand it as live program). A plain --program-scene is a real existing prod scene
+        # (strih 'Cam 5'): if it WAS the live program, restoring it to ITSELF is the most
+        # faithful restore — don't bump the box off a legit prod scene onto an arbitrary one.
+        ephemeral = bool(a.ensure_source)
+        saved = _load_state().get(a.host, {})
+        prev = _restore_target(prev, target, ephemeral, scenes, saved.get("prev_scene"))
+        # Preview restore mirrors the program decision (never strand the ephemeral scene
+        # in preview either; for a real prod scene keep what was shown, falling back to the
+        # restored program scene).
+        prev_preview = _restore_target(
+            prev_preview, target, ephemeral, scenes, saved.get("prev_preview")
+        ) or prev
+        if ephemeral and prev is None:
             sys.stderr.write(
-                f"[obs] {a.host}: WARN prior program unknown/was the record scene; "
-                f"will restore to '{prev}'\n"
+                f"[obs] {a.host}: WARN prior program unknown/was the ephemeral record "
+                f"scene; will restore to '{prev_preview}'\n"
             )
-        if prev_preview == target:
-            prev_preview = _load_state().get(a.host, {}).get("prev_preview") or prev
-        if not prev_preview or prev_preview == target:
-            prev_preview = prev
         state = _load_state()
         state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
         _save_state(state)

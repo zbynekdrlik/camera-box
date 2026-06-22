@@ -113,3 +113,38 @@ def test_is_black_luma_helper_flags_black_and_passes_nonblack():
     # A near-zero mean but real peak (a mostly-dark but signal-bearing camera frame, e.g.
     # the live 'Cam 5' read at mean≈30, max=255) must NOT be flagged black.
     assert obs_phase2._luma_is_black(luma_max=255, luma_mean=1.0) is False
+
+
+SCENES = ["Cam 5", "Cam 1", "test 2", "REC-STRIH-TMP", "POST"]
+
+
+def test_restore_target_real_prod_scene_is_faithful_even_when_it_was_program():
+    # strih 'Cam 5' is a REAL prod scene. If it was ALREADY the live program when the run
+    # started, the faithful restore keeps the box on 'Cam 5' — never bumps it onto an
+    # arbitrary other scene (the smoke-run regression that left strih on 'test 2').
+    assert obs_phase2._restore_target(
+        prev="Cam 5", target="Cam 5", ephemeral=False, scenes=SCENES
+    ) == "Cam 5"
+    # And if a different scene was program, that scene is restored.
+    assert obs_phase2._restore_target(
+        prev="POST", target="Cam 5", ephemeral=False, scenes=SCENES
+    ) == "POST"
+
+
+def test_restore_target_ephemeral_scene_is_never_restored_to_itself():
+    # The stream temp scene (built via --ensure-source) is EPHEMERAL: restoring program to
+    # it would strand the throwaway record scene as live program. If it was program (a
+    # crash), recover the saved prior; else fall back to any OTHER existing scene.
+    assert obs_phase2._restore_target(
+        prev="REC-STRIH-TMP", target="REC-STRIH-TMP", ephemeral=True, scenes=SCENES,
+        saved_prev="POST",
+    ) == "POST"
+    # No saved prior → fall back to some other (never the ephemeral target).
+    got = obs_phase2._restore_target(
+        prev="REC-STRIH-TMP", target="REC-STRIH-TMP", ephemeral=True, scenes=SCENES,
+    )
+    assert got != "REC-STRIH-TMP" and got in SCENES
+    # A normal prior program (the usual case) is restored verbatim.
+    assert obs_phase2._restore_target(
+        prev="POST", target="REC-STRIH-TMP", ephemeral=True, scenes=SCENES,
+    ) == "POST"
