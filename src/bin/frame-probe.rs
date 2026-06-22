@@ -72,6 +72,12 @@ struct Args {
     /// camera box in Phase 2 (taps run on dev1).
     #[arg(long, default_value_t = false)]
     paint_only: bool,
+    /// With --paint-only: write the painter's emitted-tick CSV (`tick,gen_ts_ns`)
+    /// to this path — the cam→strih GROUND TRUTH (#105) consumed by
+    /// `recording-verdict --painter`. scp it back to dev1 after the run. Omitted
+    /// ⇒ no log written (the painted-tick set is then unavailable to the verdict).
+    #[arg(long)]
+    paint_log: Option<String>,
     /// Stamp each frame's `gen_ts_ns` on CLOCK_REALTIME (the DanteSync-disciplined
     /// wall clock) instead of this process's monotonic clock. Set this for the #7
     /// multi-node ABSOLUTE end-to-end latency path (paint-only on the camera; the
@@ -123,6 +129,14 @@ fn main() -> Result<()> {
         anyhow::bail!(
             "--wall-clock only applies with --paint-only or --synth-ndi (the multi-node #7 \
              absolute-latency path); the single-box loopback run is always monotonic"
+        );
+    }
+    // --paint-log records the painter's emitted ticks; only the paint-only path
+    // (run_paint_only) writes it. Fail loudly so the user isn't misled into
+    // believing the ground-truth CSV was produced on a non-paint-only run.
+    if args.paint_log.is_some() && !args.paint_only {
+        anyhow::bail!(
+            "--paint-log only applies with --paint-only (it records the painter's emitted ticks)"
         );
     }
     let presenter = camera_box::probe::presenter::PresenterKind::parse(&args.presenter)?;
@@ -193,6 +207,7 @@ fn main() -> Result<()> {
         max_freeze_periods_gate: args.max_freeze_periods,
         wall_clock: args.wall_clock,
         dual_qr: args.dual_qr,
+        paint_log: args.paint_log.clone(),
     };
 
     if let Some(name) = args.synth_ndi.as_deref() {
