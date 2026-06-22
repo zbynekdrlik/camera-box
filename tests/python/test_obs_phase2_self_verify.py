@@ -103,6 +103,48 @@ def test_extra_non_locked_probe_keys_are_ignored():
 
 
 # ---------------------------------------------------------------------------
+# Default-omission soundness — the reason the guard reads EFFECTIVE settings
+# (GetInputSettings omits default-valued keys; 3 of the 4 locked values ARE the
+# DistroAV defaults). _effective_input_settings merges defaults so this never bites;
+# these tests pin both the failure-without-merge and the success-with-merge.
+# ---------------------------------------------------------------------------
+
+# DistroAV ndi_source type defaults (vendored ndi-source.cpp): ndi_bw_mode=0 (HIGHEST),
+# ndi_sync=2 (SOURCE_TIMECODE), latency=0 (NORMAL). genlock_fifo is NOT a default.
+NDI_SOURCE_DEFAULTS = {"ndi_bw_mode": 0, "ndi_sync": 2, "latency": 0}
+
+
+def test_raw_prod_dict_with_omitted_default_keys_would_false_fail():
+    # If the certified dict came STRAIGHT from GetInputSettings (no defaults merge), a prod
+    # genlock input that left ndi_sync/ndi_bw_mode/latency at default would OMIT them, so the
+    # comparison sees None vs the probe's explicit 2/0/0 -> spurious divergence. This test
+    # documents exactly the false-FAIL that _effective_input_settings prevents.
+    raw_prod_only_genlock = {"ndi_source_name": "CAM1 (usb)", "genlock_fifo": True}
+    diverging = obs_phase2._diverging_locked_keys(raw_prod_only_genlock, _probe_from_baseline())
+    keys = {d["key"] for d in diverging}
+    assert keys == {"ndi_sync", "ndi_bw_mode", "latency"}  # the three omitted defaults
+
+
+def test_defaults_merged_prod_dict_does_not_false_fail():
+    # With defaults merged underneath (what _effective_input_settings produces), the omitted
+    # keys are restored to their default values — which equal the probe's locked values — so
+    # NO divergence is reported. This is the GREEN behaviour the 🟡 fix guarantees.
+    raw_prod_only_genlock = {"ndi_source_name": "CAM1 (usb)", "genlock_fifo": True}
+    effective_prod = {**NDI_SOURCE_DEFAULTS, **raw_prod_only_genlock}
+    assert obs_phase2._diverging_locked_keys(effective_prod, _probe_from_baseline()) == []
+
+
+def test_defaults_merge_still_catches_a_real_divergence():
+    # The defaults merge must NOT mask a genuine mismatch: a prod input that EXPLICITLY
+    # persisted ndi_sync=1 (the bug) overrides the default in the merge, so the divergence
+    # is still reported.
+    effective_prod = {**NDI_SOURCE_DEFAULTS, "ndi_source_name": "CAM1 (usb)",
+                      "genlock_fifo": True, "ndi_sync": 1}
+    diverging = obs_phase2._diverging_locked_keys(effective_prod, _probe_from_baseline())
+    assert diverging == [{"key": "ndi_sync", "expected": 1, "actual": 2}]
+
+
+# ---------------------------------------------------------------------------
 # _assert_probe_matches_prod — the fail-fast guard
 # ---------------------------------------------------------------------------
 

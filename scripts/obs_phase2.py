@@ -97,13 +97,40 @@ _LOCKED_BASELINE_KEYS = ("ndi_sync", "genlock_fifo", "ndi_bw_mode", "latency")
 _GENLOCK_COPY_KEYS = ("genlock_preload",)
 
 
+def _effective_input_settings(ws, input_name):
+    """#149: return an input's EFFECTIVE settings = its TYPE DEFAULTS overlaid with the
+    explicitly-persisted (non-default) settings.
+
+    This is REQUIRED for a sound self-verify comparison. obs-websocket's GetInputSettings
+    returns ONLY explicitly-saved (non-default) settings — it omits any key left at its
+    default (the obs-websocket RequestHandler docstring states this verbatim). And THREE of
+    the four #149 locked baseline values ARE the DistroAV ndi_source defaults
+    (ndi_sync=2 SOURCE_TIMECODE, ndi_bw_mode=0 HIGHEST, latency=0 NORMAL). So a prod genlock
+    input that left any of them at default would have that key ABSENT from GetInputSettings,
+    making a raw dict comparison see None-vs-2 and FALSE-FAIL a perfectly valid run. Merging
+    GetInputDefaultSettings underneath makes the dict reflect the input's TRUE effective
+    config — the same effective config the compositor actually runs — so the guard compares
+    like-for-like. Best-effort: a defaults read failure falls back to the explicit-only dict
+    (the prior, brittle behaviour) rather than raising."""
+    explicit = _rpc(ws, "GetInputSettings", {"inputName": input_name},
+                    ignore_err=True).get("inputSettings", {})
+    defaults = _rpc(ws, "GetInputDefaultSettings", {"inputKind": "ndi_source"},
+                    ignore_err=True).get("defaultInputSettings", {})
+    return {**defaults, **explicit}
+
+
 def _is_genlock_prod_input(settings):
     """#149: True iff a prod ndi_source input's settings look like a CERTIFIED GENLOCK
     cam input (genlock_fifo enabled) rather than a non-genlock NDI input. The non-genlock
     inputs on a box (e.g. 'NDI 2ME PVW', 'NDI Bible' — preview/graphics feeds) run
     ndi_sync=1 and have no genlock_fifo; matching one of THOSE for the baseline would make
     the guard demand ndi_sync=1 and re-introduce the #149 bug. Only an input that is itself
-    genlocked (genlock_fifo truthy) is a valid certified baseline for the probe."""
+    genlocked (genlock_fifo truthy) is a valid certified baseline for the probe.
+
+    NOTE: genlock_fifo is a DistroAV addition that is NOT in the type defaults, so it only
+    appears here when it was explicitly persisted — which is exactly when the input is a
+    genlock input. So this stays correct whether settings come from the raw GetInputSettings
+    or the defaults-merged effective dict."""
     return bool(settings.get("genlock_fifo"))
 
 
@@ -124,25 +151,38 @@ def _find_prod_genlock_input(ws, host, upstream_ndi_name):
             i["inputName"] for i in inputs
             if i.get("inputKind") == "ndi_source" and i["inputName"] != INPUT
         ]
-        # Find the prod input whose ndi_source_name matches the upstream we are
+        # Find the prod GENLOCK input whose ndi_source_name matches the upstream we are
         # ingesting (e.g. "CAM1 (usb)" on strih, or the strih NDI name on stream).
         # Skip non-genlock inputs (they share the same source name family but run a
         # different timing regime — they are NOT a valid certified baseline, #149).
+        # Collect ALL genlock matches and PREFER an EXACT ndi_source_name match over a
+        # mere substring match, so a longer name that merely CONTAINS the upstream can't
+        # be picked ahead of the exact source (which would copy the wrong genlock_preload).
+        exact = None
+        substring = None
         for inp_name in ndi_inputs:
             try:
-                s = _rpc(ws, "GetInputSettings", {"inputName": inp_name},
-                         ignore_err=True).get("inputSettings", {})
+                s = _effective_input_settings(ws, inp_name)
+                if not _is_genlock_prod_input(s):
+                    continue
                 src = s.get("ndi_source_name", "")
-                matches = src == upstream_ndi_name or (upstream_ndi_name and upstream_ndi_name in src)
-                if matches and _is_genlock_prod_input(s):
-                    sys.stderr.write(
-                        f"[obs] {host}: certified prod genlock input '{inp_name}' "
-                        f"(ndi_source_name='{src}') matched for "
-                        f"'{upstream_ndi_name}'\n"
-                    )
-                    return inp_name, s
+                if src == upstream_ndi_name:
+                    exact = (inp_name, s)
+                    break  # exact match is the best possible — stop
+                if substring is None and upstream_ndi_name and upstream_ndi_name in src:
+                    substring = (inp_name, s)
             except Exception:
                 continue
+        chosen = exact or substring
+        if chosen:
+            inp_name, s = chosen
+            how = "exact" if exact else "substring"
+            sys.stderr.write(
+                f"[obs] {host}: certified prod genlock input '{inp_name}' "
+                f"(ndi_source_name='{s.get('ndi_source_name', '')}') matched ({how}) "
+                f"for '{upstream_ndi_name}'\n"
+            )
+            return inp_name, s
         sys.stderr.write(
             f"[obs] {host}: WARN could not find a certified prod GENLOCK ndi_source "
             f"input matching '{upstream_ndi_name}'; probe will use default genlock "
@@ -359,8 +399,7 @@ def setup(a):
     # ndi_bw_mode/latency); prod_genlock adds ONLY the per-source preload (no key overlap),
     # so the baseline is never overridden. Both are spread into BOTH the create and the reuse
     # call below — the #63 regression guard requires _PROBE_NDI_SETTINGS reach both paths.
-    # ndi_source_name is
-    # always set explicitly so it is never inherited from prod.
+    # ndi_source_name is always set explicitly so it is never inherited from prod.
 
     # Ensure the ONE stable scene+input exist, then reuse them (#22). Creating per run is
     # what made the fork's un-removable ndi_source inputs pile up.
@@ -463,8 +502,9 @@ def setup(a):
     # program scene, so the production program is left UNTOUCHED and a config that diverges from
     # prod can never be silently measured. This runs LAST (after the resolved-name re-point) so
     # it verifies the input's true final state, mirroring the resolution gates' fail-fast order.
-    probe_effective = _rpc(ws, "GetInputSettings", {"inputName": INPUT},
-                           ignore_err=True).get("inputSettings", {})
+    # Read the probe's EFFECTIVE settings (defaults-merged) so the comparison is symmetric
+    # with the certified prod settings (also defaults-merged) — see _effective_input_settings.
+    probe_effective = _effective_input_settings(ws, INPUT)
     _assert_probe_matches_prod(a.host, prod_input_name, prod_settings, probe_effective)
 
     # Everything resolved AND self-verified — NOW switch program to the probe scene (kept to

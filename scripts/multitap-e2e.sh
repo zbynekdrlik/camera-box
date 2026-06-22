@@ -100,14 +100,20 @@ export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 # ZERO video frames — which previously masqueraded as a silent 0-capture run and burned
 # a 30-min proof. FAIL FAST here with a precise diagnostic if any tap host is unreachable,
 # so a route problem can never again be misread as a content/genlock failure.
-echo "[0/5] reachability preflight — ping every tap host (#153)"
+echo "[0/5] reachability preflight — ping every tap + painter host (#153)"
+# cam1/strih/stream are the three taps dev1 differences; cam2 (PAINTER_IP) paints the QR
+# the whole chain carries. All four are load-bearing — an unreachable painter would only
+# fail the painter SSH mid-bring-up instead of fast here. Dedupe in loopback mode
+# (PAINTER_IP == CAM_IP, where the same box paints AND sources).
+_reach_hosts=("cam1=$CAM_IP" "strih=$STRIH" "stream=$STREAM")
+[ "$PAINTER_IP" != "$CAM_IP" ] && _reach_hosts+=("painter=$PAINTER_IP")
 _reach_fail=0
-for hp in "cam1=$CAM_IP" "strih=$STRIH" "stream=$STREAM"; do
+for hp in "${_reach_hosts[@]}"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then
     echo "    ok: $_name ($_ip) reachable"
   else
-    echo "ERROR: tap host $_name ($_ip) is UNREACHABLE from dev1 — route hijacked or host down." >&2
+    echo "ERROR: host $_name ($_ip) is UNREACHABLE from dev1 — route hijacked or host down." >&2
     echo "       The NDI receiver would connect but capture 0 frames (silent 0-capture, #153)." >&2
     echo "       Check 'ip rule'/'ip route get $_ip' (LAN 10.77.8.0/23 must use the main table," >&2
     echo "       not a tailscale rule), confirm the host is powered, then re-run." >&2
