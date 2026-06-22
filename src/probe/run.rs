@@ -4,7 +4,7 @@ use crate::probe::analyzer::{analyze, AnalysisInput, AnalysisReport, Observed, P
 use crate::probe::painter::{run_painter, PaintParams};
 use crate::probe::presenter::PresenterKind;
 use crate::probe::reader::{run_reader, ReadParams};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,6 +44,10 @@ pub struct RunConfig {
     /// halves on receive. At least one half is always sharp on a mid-transition
     /// capture, eliminating the false-loss artifact from the single-QR path.
     pub dual_qr: bool,
+    /// Optional path for `run_paint_only` to write the painter's emitted-tick
+    /// CSV (`tick,gen_ts_ns`) — the cam→strih ground truth consumed by
+    /// `recording-verdict --painter` (#105). `None` ⇒ no log written.
+    pub paint_log: Option<String>,
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
@@ -128,6 +132,24 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     }))
 }
 
+/// Serialize the painter's emitted `(logical_tick, gen_ts_ns)` sequence into the
+/// `recording-verdict --painter` CSV (`tick,gen_ts_ns`, one row per painted
+/// frame, header `tick,gen_ts_ns`). This is the cam→strih GROUND TRUTH (#105):
+/// every logical tick the painter actually displayed. The recording-verdict
+/// parser reads the `tick` column (its CSV reader takes the 1st column of a bare
+/// file or the 3rd of a recording-probe CSV; here `tick` is the 1st column, so a
+/// strih tick the painter never displayed is provably a phantom/corruption).
+///
+/// PURE (no I/O): the caller writes the returned string to the chosen path so the
+/// formatting is unit-testable without spawning a painter or a presenter.
+pub fn serialize_painter_log(emitted: &[(u32, i64)]) -> String {
+    let mut s = String::from("tick,gen_ts_ns\n");
+    for (tick, gen_ts_ns) in emitted {
+        s.push_str(&format!("{tick},{gen_ts_ns}\n"));
+    }
+    s
+}
+
 /// Paint QR frames for `duration` without receiving/analyzing — used on the
 /// camera box in Phase 2, where the QR reaches NDI via camera-box's own
 /// capture→NDI path and the taps run elsewhere (dev1).
@@ -167,6 +189,38 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     painter_handle.join().expect("painter panicked")?;
 
-    let count = emitted.lock().unwrap().len() as u64;
-    Ok(count)
+    let emitted_vec = emitted.lock().unwrap();
+    // Write the cam→strih ground-truth CSV (#105) when a path was given, BEFORE
+    // returning, so the recording-verdict has the painted-tick set this run
+    // actually displayed (a strih tick the painter never painted = real phantom).
+    if let Some(path) = &cfg.paint_log {
+        std::fs::write(path, serialize_painter_log(&emitted_vec))
+            .with_context(|| format!("write painter log {path}"))?;
+        tracing::info!(path = %path, ticks = emitted_vec.len(), "painter log written");
+    }
+    Ok(emitted_vec.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serialize_painter_log;
+
+    #[test]
+    fn painter_log_csv_has_header_and_one_row_per_tick() {
+        // The cam→strih ground-truth CSV: header `tick,gen_ts_ns` then one row per
+        // painted frame, the `tick` first so recording-verdict's --painter reads it
+        // as the painted-tick set (a strih tick absent here = phantom/corruption).
+        let csv = serialize_painter_log(&[(0, 1000), (1, 1016), (2, 1033)]);
+        assert_eq!(
+            csv, "tick,gen_ts_ns\n0,1000\n1,1016\n2,1033\n",
+            "CSV: header + one `tick,gen_ts_ns` row per painted frame"
+        );
+    }
+
+    #[test]
+    fn painter_log_empty_is_header_only() {
+        // No painted frames ⇒ just the header (never an empty file the parser can't
+        // distinguish from a missing log).
+        assert_eq!(serialize_painter_log(&[]), "tick,gen_ts_ns\n");
+    }
 }

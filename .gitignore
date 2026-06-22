@@ -47,3 +47,7 @@ deploy-136/
 deploy-136b/
 dist-136/
 .obs-verify/
+
+# Session-local deploy staging (#105/#150 grab-record validation)
+dist-150/
+deploy-150/

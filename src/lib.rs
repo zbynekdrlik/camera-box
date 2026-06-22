@@ -5,6 +5,7 @@
 pub mod capture;
 pub mod config;
 pub mod display;
+pub mod grab_record;
 pub mod intercom;
 pub mod ndi;
 pub mod ndi_display;

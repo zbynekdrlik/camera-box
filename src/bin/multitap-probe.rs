@@ -4,14 +4,14 @@
 //! camera box (frame-probe --paint-only) with the same --run-id.
 
 use anyhow::{bail, Result};
-use camera_box::probe::analyzer::LatencyStats;
+use camera_box::probe::analyzer::{latency_freeze_gate_pass, LatencyStats};
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{
     abs_emit_latency, absolute_latency_gate_pass, absolute_latency_stats, decompose_missing,
     diff_hop, earliest_recv_ns, endpoint_sequence_check, full_span_diff, grid_continuity,
-    lead_cutoff_ns, overall_verdict, settle_cutoff_ns, trim_after, trim_to_settle,
-    EndpointSequenceReport, FullSpanBounds, FullSpanReport, GridContinuity, HopInput, HopReport,
-    HopVerdict,
+    lead_cutoff_ns, overall_verdict, settle_cutoff_ns, step_distribution, trim_after,
+    trim_to_settle, EndpointSequenceReport, FullSpanBounds, FullSpanReport, GridContinuity,
+    HopInput, HopReport, HopVerdict, StepDistribution,
 };
 use camera_box::probe::liveness::{
     check_tap_liveness, window_may_start, LivenessVerdict, TapLiveness,
@@ -169,6 +169,28 @@ struct Args {
     /// aligns with the QR harness honesty gate (#102). A FAIL is never upgraded.
     #[arg(long, default_value_t = 300.0)]
     min_zero_loss_secs: f64,
+    /// #105 dual-QR Vernier net-loss verdict. The camera + capture card run at a
+    /// different phase AND slightly different frequency, so the un-genlocked optical
+    /// sampling of the 60 Hz painter at the ~30 fps chain BEATS: consecutive endpoint
+    /// frames step the decoded id by ~2 with ±1 jitter that walks forward then back.
+    /// The single-copy metric mistakes that beat for ~50% loss. With this flag the LOSS
+    /// verdict is judged the way the dual-QR scheme was DESIGNED for — the endpoint
+    /// step distribution must have avg-step ≈ 2.0 AND BALANCED jitter (net_imbalance
+    /// 0: every forward beat matched by a backward beat) → ZERO NET loss; an
+    /// unbalanced one-sided drift is real loss. Single-copy loss is then reported as a
+    /// labelled SAMPLING-BEAT DIAGNOSTIC, NOT the verdict. Latency/freeze/window gates
+    /// still apply; undecodable must be 0 (decode 100%, already gated). Reorders are
+    /// EXPECTED under the beat (the backward −k steps), so the strict reorder gate is
+    /// relaxed in this mode — the balance, not reorder-freeness, is the proof.
+    #[arg(long, default_value_t = false)]
+    vernier_verdict: bool,
+    /// #105 max |avg-step − 2.0| tolerated by the Vernier verdict (only with
+    /// `--vernier-verdict`). The clean 60→30 chain averages exactly 2.0 per advance;
+    /// a small tolerance absorbs span-boundary truncation over a finite window while
+    /// still catching a systematic drift. The hard zero-net-loss proof is
+    /// `net_imbalance == 0` (balanced jitter); this is a secondary cadence sanity gate.
+    #[arg(long, default_value_t = 0.05)]
+    vernier_avg_step_tol: f64,
 }
 
 fn parse_tap(s: &str) -> Result<(String, String), String> {
@@ -267,7 +289,38 @@ struct MultiTapReport {
     /// diagnosis for each tap's trimmed steady-state observations. One entry per tap,
     /// in the same order as `taps`. Consumed by the report graph script.
     grid: Vec<GridContinuity>,
+    /// #105 dual-QR Vernier step distribution per tap (same order as `taps`): the
+    /// avg-step + balanced-jitter net-loss proof. The endpoint tap's entry is the
+    /// headline — `balanced` (net_imbalance 0) + avg-step ≈ 2.0 ⇒ ZERO NET loss, the
+    /// 60→30 optical beat absorbed, not counted. Always computed (report-only unless
+    /// `--vernier-verdict`, when it drives the LOSS verdict). Consumed by the graph.
+    step_distributions: Vec<StepDistribution>,
+    /// #105: true when `--vernier-verdict` drove the LOSS verdict (balanced jitter +
+    /// avg-step), so the artifact is self-describing about WHICH loss metric certified
+    /// it; false ⇒ the strict/single-copy loss gate was used (prior behaviour).
+    vernier_verdict: bool,
     verdict_pass: bool,
+}
+
+/// #105 Vernier loss verdict over the per-tap step distributions. Pure / unit-tested
+/// so the central pass/fail (the dual-QR net-loss proof) can't drift from the math.
+///
+/// Loss is JUDGED at the ENDPOINT tap (`steps.last()` — the recorded program-out tap,
+/// where #105's proof lives): zero NET loss ⇔ its jitter is `balanced` (net_imbalance
+/// 0) AND its `avg_step` is within `avg_step_tol` of 2.0. Each upstream tap is checked
+/// the same way so a per-hop net imbalance is surfaced too. A tap that saw too little
+/// to step (`advances == 0`) cannot prove anything → NOT a pass (Inconclusive-grade,
+/// folded as fail here so the run can't go green on an empty span). Returns the list of
+/// tap indices whose distribution is NOT balanced-within-tolerance (empty ⇒ all pass).
+pub fn vernier_unbalanced_taps(steps: &[StepDistribution], avg_step_tol: f64) -> Vec<usize> {
+    steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            !(s.advances > 0 && s.balanced && (s.avg_step - 2.0).abs() <= avg_step_tol)
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -575,11 +628,17 @@ fn main() -> Result<()> {
     let sc_bounds: std::collections::HashMap<String, f64> =
         args.min_single_copy.iter().cloned().collect();
 
-    // Difference each adjacent pair.
+    // Difference each adjacent pair. Collect each hop's latency/freeze bounds in
+    // parallel so the #105 Vernier verdict can re-check ONLY those gates (loss
+    // replaced by balance) without re-deriving the bound→hop mapping.
     let mut hops: Vec<HopReport> = Vec::new();
+    let mut hop_lat_freeze_bounds: Vec<(Option<f64>, Option<f64>)> = Vec::new();
     for i in 0..trimmed.len() - 1 {
         let down_name = results[i + 1].name.clone();
         let name = format!("{}→{}", results[i].name, down_name);
+        let p99 = p99_bounds.get(&down_name).copied();
+        let frz = freeze_bounds.get(&down_name).copied();
+        hop_lat_freeze_bounds.push((p99, frz));
         hops.push(diff_hop(HopInput {
             name,
             upstream: &trimmed[i],
@@ -587,8 +646,8 @@ fn main() -> Result<()> {
             capture_fps: args.capture_fps,
             freeze_periods: args.freeze_periods,
             min_frames: args.min_frames,
-            max_p99_latency_ms: p99_bounds.get(&down_name).copied(),
-            max_freeze_periods_gate: freeze_bounds.get(&down_name).copied(),
+            max_p99_latency_ms: p99,
+            max_freeze_periods_gate: frz,
             max_loss_pct: loss_bounds.get(&down_name).copied(),
             min_single_copy: sc_bounds.get(&down_name).copied().unwrap_or(0.0) as usize,
         }));
@@ -732,6 +791,13 @@ fn main() -> Result<()> {
         .map(|obs| grid_continuity(obs, grid_stride))
         .collect();
 
+    // #105 dual-QR Vernier step distribution per tap (always computed; report-only
+    // unless --vernier-verdict). The endpoint entry is the headline net-loss proof.
+    let step_distributions: Vec<StepDistribution> =
+        trimmed.iter().map(|obs| step_distribution(obs)).collect();
+    let vernier_unbalanced =
+        vernier_unbalanced_taps(&step_distributions, args.vernier_avg_step_tol);
+
     // Fold per-hop + full-span + abs-latency into ONE verdict (pure, unit-tested
     // in differ::overall_verdict — Pass / Fail / Inconclusive). INCONCL counts as
     // NOT-pass like FAIL (#29: a run that cannot certify must not exit green).
@@ -739,8 +805,33 @@ fn main() -> Result<()> {
     // source→endpoint pipeline loss + reorder — the generator→endpoint guarantee
     // the tap-vs-tap diff was blind to — while the QR rig's source-emission
     // artifact is reported, not gated, so the harness stays honest AND trustworthy.
+    //
+    // #105 VERNIER MODE: when --vernier-verdict is set, the LOSS verdict is the
+    // balanced-jitter + avg-step net-loss proof, NOT single-copy (which the 60→30
+    // optical beat confounds into a false ~50%). The LATENCY/FREEZE/window gates and
+    // the decode-100% requirement still apply; the strict reorder/sequence gate is
+    // relaxed because the beat's backward steps are EXPECTED (the −k balance side).
     let overall_v = overall_verdict(&hops, &full_span, abs_gate_pass);
-    let verdict_pass = overall_v.is_pass() && endpoint_seq_pass;
+    let verdict_pass = if args.vernier_verdict {
+        // VERNIER LOSS PROOF: the per-tap balanced-jitter + avg-step net-loss result
+        // IS the loss verdict. The single-copy/strict loss + reorder + endpoint-
+        // sequence gates are NOT applied (the 60→30 optical beat produces drops +
+        // backward steps by design; gating on them would falsely FAIL). The gates that
+        // STILL bind are the LATENCY/FREEZE per-hop gates (only when the operator set a
+        // bound — None ⇒ report-only), the abs end-to-end latency gate, and the
+        // min_frames non-vacuous floor. Each is checked here independently of loss.
+        let latency_freeze_ok = hops
+            .iter()
+            .zip(&hop_lat_freeze_bounds)
+            .all(|(h, &(p99, frz))| latency_freeze_gate_pass(&h.latency, &h.freezes, p99, frz));
+        let min_frames_ok = step_distributions.iter().all(|s| s.advances > 0)
+            && tap_summaries
+                .iter()
+                .all(|t| t.unique_frames >= args.min_frames);
+        vernier_unbalanced.is_empty() && latency_freeze_ok && abs_gate_pass && min_frames_ok
+    } else {
+        overall_v.is_pass() && endpoint_seq_pass
+    };
 
     // Compute the measured steady-state window: the portion of the run that is
     // neither the leading discard (transient genlock-FIFO prime) nor the trailing
@@ -767,6 +858,8 @@ fn main() -> Result<()> {
         absolute_latency,
         absolute_latency_note,
         grid,
+        step_distributions,
+        vernier_verdict: args.vernier_verdict,
         verdict_pass,
     };
 
@@ -819,6 +912,14 @@ fn main() -> Result<()> {
             t.name, t.captured, t.decoded, fail, pct
         );
     }
+    // #105: in Vernier mode the single-copy figure is a SAMPLING-BEAT DIAGNOSTIC, not
+    // the loss verdict (the 60→30 optical beat inflates it to a false ~50%). Label it
+    // so the report can never be misread as "~50% loss" again.
+    let sc_label = if report.vernier_verdict {
+        "sampling-beat diagnostic, NOT loss"
+    } else {
+        "per-frame, oversample-independent"
+    };
     for h in &report.hops {
         let sc_pct = if h.single_copy_total > 0 {
             100.0 * h.single_copy_dropped as f64 / h.single_copy_total as f64
@@ -827,7 +928,7 @@ fn main() -> Result<()> {
         };
         println!(
             "HOP {} {} up_unique={} down_unique={} dropped={} reorders={} freezes={} \
-             single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
+             single_copy_loss={}/{} ({:.2}% {})",
             h.name,
             match h.verdict {
                 HopVerdict::Pass => "PASS",
@@ -842,6 +943,7 @@ fn main() -> Result<()> {
             h.single_copy_dropped,
             h.single_copy_total,
             sc_pct,
+            sc_label,
         );
         // TRUSTWORTHY first: per-node EMIT timecode difference (true transit; only
         // valid between nodes that stamp the SAME timecode basis — OBS↔OBS today,
@@ -877,13 +979,19 @@ fn main() -> Result<()> {
     };
     println!(
         "FULL_SPAN {}→{} {} source_unique={} endpoint_unique={} dropped={} \
-         single_copy_loss={}/{} ({:.2}% per-frame, oversample-independent)",
+         single_copy_loss={}/{} ({:.2}% {})",
         report.taps.first().map(|t| t.name.as_str()).unwrap_or("?"),
         report.taps.last().map(|t| t.name.as_str()).unwrap_or("?"),
-        match fs.verdict {
-            HopVerdict::Pass => "ZERO-LOSS",
-            HopVerdict::Fail => "LOSS",
-            HopVerdict::Inconclusive => "INCONCL",
+        // In Vernier mode the strict full-span loss state is NOT the verdict (the beat
+        // produces drops); label it as a diagnostic so the headline isn't misread.
+        if report.vernier_verdict {
+            "single-copy-diag"
+        } else {
+            match fs.verdict {
+                HopVerdict::Pass => "ZERO-LOSS",
+                HopVerdict::Fail => "LOSS",
+                HopVerdict::Inconclusive => "INCONCL",
+            }
         },
         fs.source_unique,
         fs.endpoint_unique,
@@ -891,7 +999,47 @@ fn main() -> Result<()> {
         fs.single_copy_dropped,
         fs.single_copy_total,
         fs_sc_pct,
+        sc_label,
     );
+
+    // #105 DUAL-QR VERNIER NET-LOSS PROOF: per-tap avg-step + balanced-jitter. The
+    // ENDPOINT tap (last) is the headline. avg-step ≈ 2.0 + net_imbalance 0 (balanced)
+    // = ZERO NET loss — the 60→30 optical beat absorbed, not counted.
+    for (i, sd) in report.step_distributions.iter().enumerate() {
+        let tap_name = report.taps.get(i).map(|t| t.name.as_str()).unwrap_or("?");
+        let is_endpoint = i + 1 == report.step_distributions.len();
+        let net_state = if sd.advances == 0 {
+            "NO-DATA"
+        } else if sd.balanced {
+            "BALANCED→ZERO-NET-LOSS"
+        } else if sd.net_imbalance > 0 {
+            "NET-LOSS"
+        } else {
+            "NET-DUP"
+        };
+        println!(
+            "VERNIER {}{} {} span=[{}..={}] advances={} avg_step={:.4} net_imbalance={} balanced={} histogram={:?}",
+            tap_name,
+            if is_endpoint { " (ENDPOINT)" } else { "" },
+            net_state,
+            sd.first_id,
+            sd.last_id,
+            sd.advances,
+            sd.avg_step,
+            sd.net_imbalance,
+            sd.balanced,
+            sd.histogram,
+        );
+        // Per-deviation jitter balance: +k vs −k counts (equal = balanced beat).
+        if !sd.balance.is_empty() {
+            let bal: Vec<String> = sd
+                .balance
+                .iter()
+                .map(|(k, plus, minus)| format!("k={k}:+{plus}/-{minus}"))
+                .collect();
+            println!("  BALANCE {}", bal.join(" "));
+        }
+    }
     // #7 ABSOLUTE end-to-end latency line — the value that replaced "UNAVAILABLE".
     match &report.absolute_latency {
         Some(l) => println!(
@@ -966,7 +1114,25 @@ fn main() -> Result<()> {
     // it overrides an otherwise-INCONCL/Pass overall_v to FAIL.
     // The zero-loss window gate downgrades a would-be PASS to INCONCLUSIVE when the
     // measured steady-state window is too short to certify zero-loss (#102).
-    let overall = if !endpoint_seq_pass {
+    let overall = if args.vernier_verdict {
+        // #105 Vernier verdict: the balance proof (+ latency/freeze/abs/min_frames,
+        // already folded into verdict_pass) is the criterion; endpoint_seq/strict-loss
+        // are NOT applied (the beat produces drops+backward steps by design). Report
+        // PASS only with the window long enough to certify; otherwise INCONCLUSIVE.
+        if !window_ok {
+            format!(
+                "INCONCLUSIVE (window {measured_window_secs}s < {}s — cannot certify zero-loss)",
+                args.min_zero_loss_secs
+            )
+        } else if verdict_pass {
+            "PASS (dual-QR Vernier: balanced jitter → zero net loss)".to_string()
+        } else if vernier_unbalanced.is_empty() {
+            // Balance held, so the failure is a latency/freeze/abs/min_frames breach.
+            "FAIL (latency/freeze/abs/min_frames gate)".to_string()
+        } else {
+            "FAIL (Vernier: unbalanced jitter → real net loss)".to_string()
+        }
+    } else if !endpoint_seq_pass {
         "FAIL".to_string()
     } else {
         match overall_v {
@@ -1041,6 +1207,61 @@ mod tests {
             parse_bound("stream=220").unwrap(),
             ("stream".to_string(), 220.0)
         );
+    }
+
+    // ---- #105 dual-QR Vernier verdict: per-tap balance gate ----
+
+    fn sd(avg_step: f64, net_imbalance: i64, advances: usize) -> StepDistribution {
+        StepDistribution {
+            first_id: 0,
+            last_id: 0,
+            advances,
+            avg_step,
+            histogram: Vec::new(),
+            net_imbalance,
+            balance: Vec::new(),
+            balanced: net_imbalance == 0,
+        }
+    }
+
+    #[test]
+    fn vernier_all_balanced_at_2_passes() {
+        // Every tap: avg 2.0, net 0, real data → no unbalanced taps → PASS.
+        let steps = [sd(2.0, 0, 100), sd(2.0, 0, 200), sd(2.0, 0, 150)];
+        assert!(vernier_unbalanced_taps(&steps, 0.05).is_empty());
+    }
+
+    #[test]
+    fn vernier_one_sided_drift_is_flagged() {
+        // The endpoint tap has a NET imbalance (real loss) → it is flagged (index 2).
+        let steps = [sd(2.0, 0, 100), sd(2.0, 0, 200), sd(2.25, 5, 150)];
+        assert_eq!(vernier_unbalanced_taps(&steps, 0.05), vec![2]);
+    }
+
+    #[test]
+    fn vernier_avg_step_off_two_is_flagged_even_if_balanced() {
+        // net_imbalance 0 but avg_step far from 2.0 (e.g. a 60→60 chain stepping by 1,
+        // or systematic dup) → cadence wrong → flagged. Pins the avg-step sanity gate.
+        let steps = [sd(1.0, 0, 100)];
+        assert_eq!(vernier_unbalanced_taps(&steps, 0.05), vec![0]);
+    }
+
+    #[test]
+    fn vernier_avg_step_within_tolerance_passes() {
+        // 2.04 is within the 0.05 default tolerance (finite-window boundary truncation).
+        let steps = [sd(2.04, 0, 100)];
+        assert!(vernier_unbalanced_taps(&steps, 0.05).is_empty());
+        // 2.06 is outside → flagged. Pins the `<=` tolerance boundary.
+        let steps2 = [sd(2.06, 0, 100)];
+        assert_eq!(vernier_unbalanced_taps(&steps2, 0.05), vec![0]);
+    }
+
+    #[test]
+    fn vernier_no_advances_is_flagged() {
+        // A tap that never stepped (advances 0) cannot prove zero net loss → flagged,
+        // so the run can't go green on an empty/degenerate span.
+        let steps = [sd(0.0, 0, 0)];
+        assert_eq!(vernier_unbalanced_taps(&steps, 0.05), vec![0]);
     }
 
     #[test]

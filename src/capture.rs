@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use v4l::buffer::Type;
+use v4l::control::{Control, Value};
 use v4l::io::mmap::Stream;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
@@ -79,6 +80,112 @@ pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
     cur.wrapping_sub(prev).saturating_sub(1)
 }
 
+/// Extract the gray8 (luma) plane from a packed YUYV (YUY2) capture buffer.
+///
+/// YUYV packs `Y0 U0 Y1 V0` per 4 bytes = 2 pixels: the luma is every EVEN byte
+/// (`Y` at 0,2,4,…), chroma the odd bytes. This returns one luma byte per pixel
+/// (`width*height` bytes), honoring `stride` (bytes per row; YUYV stride = `2*width`
+/// for a tightly packed frame but a device may pad). This is the cam1 GRAB-RECORD
+/// extraction (#105 node 2): a prod-clean, dependency-free luma plane the
+/// `--record-grab` mode streams to dev1 for ffv1 encoding + QR decode. It deliberately
+/// drops chroma — the QR the camera filmed is fully readable from luma, and gray8
+/// halves the wire bytes vs full YUYV (so the grab-stream perturbs the measured
+/// pipeline less). Rows/cols beyond the buffer are skipped (defensive against a short
+/// final buffer); a too-small input yields a zero-padded plane rather than panicking.
+pub fn yuyv_to_gray8(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let stride = stride as usize;
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        let row = y * stride;
+        for x in 0..w {
+            // luma byte for pixel x is at row + 2*x (even byte in the YUYV pair).
+            let idx = row + 2 * x;
+            if idx < data.len() {
+                out[y * w + x] = data[idx];
+            }
+        }
+    }
+    out
+}
+
+/// V4L2 control id for picture CONTRAST (`V4L2_CID_CONTRAST`).
+pub const V4L2_CID_CONTRAST: u32 = 0x0098_0901;
+/// V4L2 control id for picture SATURATION (`V4L2_CID_SATURATION`).
+pub const V4L2_CID_SATURATION: u32 = 0x0098_0902;
+
+/// One certified V4L2 capture control (`id`, `value`) to apply at device open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureControl {
+    pub id: u32,
+    pub value: i64,
+}
+
+/// The CERTIFIED cam1 capture controls for a sharp, decodable optical grab
+/// (#156 durable fix): `saturation=0` (kill the chroma fringing that softens the
+/// black/white QR edges) + `contrast=75` (a hard luma separation so the filmed QR
+/// stays bimodal). These were proven on the live rig — a grab with them decodes
+/// ~100%; without them a camera-box restart silently reverts the device to its
+/// soft defaults (`contrast=50`/`saturation=50`) and decode collapses. Applying
+/// them IN the binary means a restart can never drop quality.
+pub fn certified_cam1_controls() -> Vec<CaptureControl> {
+    vec![
+        CaptureControl {
+            id: V4L2_CID_CONTRAST,
+            value: 75,
+        },
+        CaptureControl {
+            id: V4L2_CID_SATURATION,
+            value: 0,
+        },
+    ]
+}
+
+/// Parse a `CAMERA_BOX_CAPTURE_CONTROLS` env value into capture controls.
+///
+/// Format: comma-separated `name=value` pairs, where `name` is `contrast` or
+/// `saturation` (the certified set) — e.g. `"contrast=75,saturation=0"`. The
+/// special value `"certified"` (case-insensitive) expands to
+/// [`certified_cam1_controls`]. Unknown names and malformed pairs are skipped with
+/// a logged warning (a bad env must NOT crash capture). An empty / whitespace-only
+/// string yields no controls (the prod default — controls untouched).
+pub fn parse_capture_controls(spec: &str) -> Vec<CaptureControl> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Vec::new();
+    }
+    if spec.eq_ignore_ascii_case("certified") {
+        return certified_cam1_controls();
+    }
+    let mut out = Vec::new();
+    for pair in spec.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((name, val)) = pair.split_once('=') else {
+            tracing::warn!("CAMERA_BOX_CAPTURE_CONTROLS: skipping malformed pair {pair:?}");
+            continue;
+        };
+        let id = match name.trim().to_ascii_lowercase().as_str() {
+            "contrast" => V4L2_CID_CONTRAST,
+            "saturation" => V4L2_CID_SATURATION,
+            other => {
+                tracing::warn!("CAMERA_BOX_CAPTURE_CONTROLS: skipping unknown control {other:?}");
+                continue;
+            }
+        };
+        match val.trim().parse::<i64>() {
+            Ok(value) => out.push(CaptureControl { id, value }),
+            Err(_) => {
+                tracing::warn!("CAMERA_BOX_CAPTURE_CONTROLS: {name:?} value {val:?} not an integer")
+            }
+        }
+    }
+    out
+}
+
 /// V4L2 video capture wrapper
 pub struct VideoCapture {
     stream: Stream<'static>,
@@ -95,8 +202,23 @@ pub struct VideoCapture {
 }
 
 impl VideoCapture {
-    /// Open capture device and start streaming at 1920x1080 @ 60fps
+    /// Open capture device and start streaming at 1920x1080 @ 60fps.
+    ///
+    /// Applies no V4L2 picture controls — production behaviour. Use
+    /// [`open_with_controls`](Self::open_with_controls) to enforce the certified
+    /// sharp-grab controls (#156).
     pub fn open(device_path: &str) -> Result<Self> {
+        Self::open_with_controls(device_path, &[])
+    }
+
+    /// Open capture device, applying the given V4L2 picture `controls` BEFORE the
+    /// stream starts (so they take effect for every captured frame), then stream at
+    /// 1920x1080. Used by the cam1 grab-record path with [`certified_cam1_controls`]
+    /// so a camera-box restart can never silently revert the device to its soft
+    /// defaults and collapse QR decode (#156 durable fix). A control that fails to
+    /// apply is logged loudly but does NOT abort open (capture still proceeds — the
+    /// operator sees the warning).
+    pub fn open_with_controls(device_path: &str, controls: &[CaptureControl]) -> Result<Self> {
         tracing::info!("Opening capture device: {}", device_path);
 
         let device = Device::with_path(device_path)
@@ -105,6 +227,11 @@ impl VideoCapture {
         // Query device capabilities
         let caps = device.query_caps()?;
         tracing::info!("Device: {} ({})", caps.card, caps.driver);
+
+        // Apply certified picture controls (saturation/contrast) BEFORE streaming so
+        // every grabbed frame is sharp + bimodal for QR decode (#156). Read back the
+        // applied value for an honest log; a failure warns but never aborts capture.
+        Self::apply_controls(&device, controls);
 
         // Get current format as starting point
         let mut format = Capture::format(&device)?;
@@ -176,6 +303,55 @@ impl VideoCapture {
             last_sequence: None,
             dropped_captures: 0,
         })
+    }
+
+    /// Apply each [`CaptureControl`] to an open V4L2 `device` and verify it stuck by
+    /// reading the value back. A control that fails to SET (driver rejects it) or
+    /// reads back DIFFERENT than requested is logged loudly (`warn`) but never aborts
+    /// capture — a soft-but-running grab beats no grab, and the warning surfaces the
+    /// drift. Empty `controls` is a no-op (production default).
+    fn apply_controls(device: &Device, controls: &[CaptureControl]) {
+        for c in controls {
+            match device.set_control(Control {
+                id: c.id,
+                value: Value::Integer(c.value),
+            }) {
+                Ok(()) => match device.control(c.id) {
+                    Ok(ctrl) => match ctrl.value {
+                        Value::Integer(got) if got == c.value => tracing::info!(
+                            "capture control id={:#010x} set to {} (verified)",
+                            c.id,
+                            c.value
+                        ),
+                        Value::Integer(got) => tracing::warn!(
+                            "capture control id={:#010x} requested {} but device reports {} \
+                             (driver clamped/ignored — grab may be softer than certified)",
+                            c.id,
+                            c.value,
+                            got
+                        ),
+                        other => tracing::warn!(
+                            "capture control id={:#010x} read back non-integer {:?}",
+                            c.id,
+                            other
+                        ),
+                    },
+                    Err(e) => tracing::warn!(
+                        "capture control id={:#010x} set to {} but read-back failed: {}",
+                        c.id,
+                        c.value,
+                        e
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    "capture control id={:#010x} -> {} FAILED to apply: {} \
+                     (capture continues; grab may decode worse)",
+                    c.id,
+                    c.value,
+                    e
+                ),
+            }
+        }
     }
 
     /// Record a delivered buffer's V4L2 `sequence`, accounting for any frames the
@@ -446,10 +622,122 @@ mod tests {
     }
 
     #[test]
+    fn yuyv_to_gray8_picks_even_luma_bytes() {
+        // 2x1 YUYV: Y0=10 U0=200 Y1=20 V0=201 → gray8 = [10, 20] (the even bytes).
+        let yuyv = [10u8, 200, 20, 201];
+        let gray = yuyv_to_gray8(&yuyv, 2, 1, 4);
+        assert_eq!(gray, vec![10, 20], "luma is the even (Y) bytes only");
+    }
+
+    #[test]
+    fn yuyv_to_gray8_honors_stride_padding() {
+        // 2x2 with a padded stride of 6 bytes/row (4 luma+chroma + 2 pad). Row 0:
+        // Y=1,Y=2; row 1: Y=3,Y=4. The 2 pad bytes per row must be skipped.
+        let row0 = [1u8, 0, 2, 0, 0, 0]; // Y0=1 U Y1=2 V pad pad
+        let row1 = [3u8, 0, 4, 0, 0, 0];
+        let mut data = Vec::new();
+        data.extend_from_slice(&row0);
+        data.extend_from_slice(&row1);
+        let gray = yuyv_to_gray8(&data, 2, 2, 6);
+        assert_eq!(
+            gray,
+            vec![1, 2, 3, 4],
+            "stride padding skipped, luma row-major"
+        );
+    }
+
+    #[test]
+    fn yuyv_to_gray8_short_buffer_zero_pads_no_panic() {
+        // A truncated final buffer must not panic; missing pixels are 0.
+        let yuyv = [9u8, 0]; // only 1 luma byte available for a 2x1 request
+        let gray = yuyv_to_gray8(&yuyv, 2, 1, 4);
+        assert_eq!(gray, vec![9, 0], "missing pixel zero-padded, no panic");
+    }
+
+    #[test]
+    fn yuyv_to_gray8_output_is_one_byte_per_pixel() {
+        let yuyv = vec![128u8; 4 * 4]; // 4 pixels (2x2) packed YUYV
+        let gray = yuyv_to_gray8(&yuyv, 2, 2, 4);
+        assert_eq!(gray.len(), 4, "one luma byte per pixel = width*height");
+        assert!(gray.iter().all(|&b| b == 128));
+    }
+
+    #[test]
     fn capture_denominator_defaults_to_60_and_honors_override() {
         assert_eq!(requested_capture_denominator(None), 60);
         assert_eq!(requested_capture_denominator(Some(0)), 60); // 0 is invalid -> default
         assert_eq!(requested_capture_denominator(Some(30)), 30);
         assert_eq!(requested_capture_denominator(Some(60)), 60);
+    }
+
+    #[test]
+    fn certified_controls_are_contrast75_saturation0() {
+        // #156: the certified sharp-grab set is exactly contrast=75 + saturation=0.
+        let c = certified_cam1_controls();
+        assert_eq!(
+            c,
+            vec![
+                CaptureControl {
+                    id: V4L2_CID_CONTRAST,
+                    value: 75
+                },
+                CaptureControl {
+                    id: V4L2_CID_SATURATION,
+                    value: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_capture_controls_certified_keyword_expands_to_the_set() {
+        assert_eq!(
+            parse_capture_controls("certified"),
+            certified_cam1_controls()
+        );
+        assert_eq!(
+            parse_capture_controls("CERTIFIED"),
+            certified_cam1_controls()
+        );
+    }
+
+    #[test]
+    fn parse_capture_controls_explicit_pairs() {
+        let c = parse_capture_controls("contrast=75,saturation=0");
+        assert_eq!(
+            c,
+            vec![
+                CaptureControl {
+                    id: V4L2_CID_CONTRAST,
+                    value: 75
+                },
+                CaptureControl {
+                    id: V4L2_CID_SATURATION,
+                    value: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_capture_controls_empty_is_no_controls() {
+        // Production default: unset / whitespace-only env touches no controls.
+        assert!(parse_capture_controls("").is_empty());
+        assert!(parse_capture_controls("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_capture_controls_skips_unknown_and_malformed_but_keeps_valid() {
+        // A bad env must NOT crash capture: unknown names + malformed pairs are
+        // dropped, valid ones retained.
+        let c = parse_capture_controls("brightness=10,contrast=75,notapair,saturation=x");
+        assert_eq!(
+            c,
+            vec![CaptureControl {
+                id: V4L2_CID_CONTRAST,
+                value: 75
+            }],
+            "only the valid contrast pair survives"
+        );
     }
 }

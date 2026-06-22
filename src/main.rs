@@ -123,6 +123,19 @@ struct Args {
     /// VBAN intercom target host (default: strih.lan)
     #[arg(long, default_value = "strih.lan")]
     intercom_target: String,
+
+    /// #105 node 2 — cam1 GRAB-RECORD (TEST mode, OFF by default). Stream the gray8
+    /// luma of each EMITTED frame to `tcp://HOST:PORT` (dev1, which encodes ffv1) so
+    /// the recording-based 4-node verdict can decode cam1's grab WITHOUT an NDI tap.
+    /// Normal operation is unaffected when unset; pulls in no decode deps.
+    #[arg(long)]
+    record_grab: Option<String>,
+
+    /// #105 node 2 — path for the cam1 grab-timestamp sidecar CSV
+    /// (`frame_index,grab_ts_ns`, CLOCK_REALTIME) written alongside --record-grab.
+    /// Required when --record-grab is set; scp it back to dev1 after the run.
+    #[arg(long, default_value = "/tmp/cam1-grab-ts.csv")]
+    record_grab_ts: String,
 }
 
 #[tokio::main]
@@ -198,6 +211,8 @@ async fn main() -> Result<()> {
         &config.ndi_name,
         display_config,
         intercom_config,
+        args.record_grab.clone(),
+        args.record_grab_ts.clone(),
     )
     .await
 }
@@ -207,6 +222,8 @@ async fn run_capture_loop(
     ndi_name: &str,
     display_config: Option<NdiDisplayConfig>,
     intercom_config: Option<intercom::IntercomConfig>,
+    record_grab: Option<String>,
+    record_grab_ts: String,
 ) -> Result<()> {
     // Shared flag for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
@@ -246,8 +263,27 @@ async fn run_capture_loop(
         None
     };
 
-    // Open capture device at 1920x1080 @ 60fps
-    let mut capture = VideoCapture::open(device_path)?;
+    // Open capture device at 1920x1080 @ 60fps.
+    //
+    // #156 durable fix: when grab-recording (or when CAMERA_BOX_CAPTURE_CONTROLS is
+    // set) apply the certified V4L2 picture controls (saturation=0, contrast=75) so a
+    // camera-box restart can NEVER silently revert the device to its soft defaults and
+    // collapse the cam1 grab QR decode. The env overrides the default; --record-grab
+    // alone implies the certified set. Production (no grab, no env) leaves controls
+    // untouched.
+    let capture_controls: Vec<camera_box::capture::CaptureControl> =
+        match std::env::var("CAMERA_BOX_CAPTURE_CONTROLS") {
+            Ok(spec) => camera_box::capture::parse_capture_controls(&spec),
+            Err(_) if record_grab.is_some() => camera_box::capture::certified_cam1_controls(),
+            Err(_) => Vec::new(),
+        };
+    if !capture_controls.is_empty() {
+        tracing::info!(
+            "applying {} certified capture control(s) for a sharp grab (#156)",
+            capture_controls.len()
+        );
+    }
+    let mut capture = VideoCapture::open_with_controls(device_path, &capture_controls)?;
     let (width, height) = capture.dimensions();
     let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);
@@ -286,6 +322,30 @@ async fn run_capture_loop(
     tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
     tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
+    // #105 node 2 — cam1 grab recorder (TEST mode). Connect BEFORE the loop so the
+    // dev1 ffmpeg listener is bound and the sidecar header is written; a connect
+    // failure is fatal (the operator asked to record — don't silently NDI-only).
+    let (grab_width, grab_height) = capture.dimensions();
+    let grab_stride = capture.frame_info().stride;
+    let mut grab_recorder = match &record_grab {
+        Some(dest) => {
+            let rec = camera_box::grab_record::GrabRecorder::connect(
+                dest,
+                std::path::Path::new(&record_grab_ts),
+                grab_width,
+                grab_height,
+                grab_stride,
+            )?;
+            tracing::info!(
+                "cam1 GRAB-RECORD active (#105 node 2): {} → {}",
+                record_grab_ts,
+                dest
+            );
+            Some(rec)
+        }
+        None => None,
+    };
+
     // Spawn capture loop in blocking task - minimal overhead for lowest latency
     let running_capture = Arc::clone(&running);
     let capture_handle = tokio::task::spawn_blocking(move || {
@@ -323,6 +383,18 @@ async fn run_capture_loop(
                     tracing::error!("Failed to send frame: {}", e);
                 }
                 emit_count += 1; // reached only when the frame passed the gate
+
+                // #105 node 2 — tee the EMITTED frame to the cam1 grab recording. Stamp
+                // the grab instant on the SAME wall clock (CLOCK_REALTIME) the cam2
+                // painter uses, so the recording-verdict computes the real cam2→cam1
+                // latency. A broken grab stream stops recording but NEVER the NDI send
+                // (the measured pipeline must not be disturbed by a recorder fault).
+                if let Some(rec) = grab_recorder.as_mut() {
+                    if let Err(e) = rec.write_frame(data, wall_clock_ns() as i64) {
+                        tracing::error!("grab-record write failed, stopping recorder: {}", e);
+                        grab_recorder = None;
+                    }
+                }
             });
 
             match result {
@@ -366,6 +438,11 @@ async fn run_capture_loop(
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
+        }
+        // Loop exited (shutdown): flush + close the grab recording so the last frames
+        // and sidecar rows reach dev1/disk.
+        if let Some(rec) = grab_recorder.take() {
+            rec.finish();
         }
     });
 
@@ -453,6 +530,28 @@ mod tests {
     fn test_args_parse_debug_flag() {
         let args = Args::try_parse_from(["camera-box", "--debug"]).unwrap();
         assert!(args.debug);
+    }
+
+    #[test]
+    fn test_args_record_grab_off_by_default() {
+        // #105 node 2: --record-grab is OFF unless given (normal operation unaffected).
+        let args = Args::try_parse_from(["camera-box"]).unwrap();
+        assert!(args.record_grab.is_none());
+        assert_eq!(args.record_grab_ts, "/tmp/cam1-grab-ts.csv");
+    }
+
+    #[test]
+    fn test_args_record_grab_tcp_dest_and_sidecar() {
+        let args = Args::try_parse_from([
+            "camera-box",
+            "--record-grab",
+            "tcp://10.77.9.21:9099",
+            "--record-grab-ts",
+            "/tmp/grab.csv",
+        ])
+        .unwrap();
+        assert_eq!(args.record_grab.as_deref(), Some("tcp://10.77.9.21:9099"));
+        assert_eq!(args.record_grab_ts, "/tmp/grab.csv");
     }
 
     #[test]
