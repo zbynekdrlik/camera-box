@@ -79,6 +79,19 @@ done
 [ -n "$DEV1_IP" ] || { echo "ERROR: could not resolve dev1 LAN IP toward cam1." >&2; exit 1; }
 echo "    dev1 grab-stream endpoint: tcp://${DEV1_IP}:${GRAB_PORT}"
 
+# Disk preflight: cam1's ffv1 grab is ~20 MB/s on dev1 (measured on the rig). FAIL EARLY
+# if $OUTDIR's filesystem cannot hold the estimated cam1.mkv + the two OBS recordings
+# (~3x cam1 to be safe), so a multi-minute run never dies mid-flight on ENOSPC.
+EST_MB=$(( DURATION * 20 ))            # cam1.mkv estimate (MB)
+NEED_MB=$(( EST_MB * 3 ))              # + headroom for the downloaded strih/stream files
+AVAIL_MB=$(df -Pm "$(dirname "$OUTDIR")" | awk 'NR==2{print $4}')
+echo "    disk: need ~${NEED_MB} MB (cam1 grab ~${EST_MB} MB + recordings), have ${AVAIL_MB} MB"
+if [ "${AVAIL_MB:-0}" -lt "$NEED_MB" ]; then
+  echo "ERROR: insufficient disk for a ${DURATION}s run (~${NEED_MB} MB needed, ${AVAIL_MB} MB free)." >&2
+  echo "       Free space on $(dirname "$OUTDIR") or lower DURATION, then re-run." >&2
+  exit 1
+fi
+
 # Clock-sync preflight: the cam2 paint gen_ts and cam1 grab_ts must share the wall
 # clock for the cam2→cam1 latency to be sound. Fail loudly if cam1 has drifted.
 echo "[0/8] verify cluster clock sync (cam1) for cam2→cam1 latency (#7/#8)"

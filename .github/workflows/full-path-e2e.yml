@@ -43,8 +43,12 @@ on:
   workflow_dispatch:
     inputs:
       duration_secs:
-        description: "Steady-state run seconds (>=300; job ceiling 60 min incl. build)"
-        default: "1800"
+        # Default 300 s = the acceptance floor (a regression gate needs >=300 s, not a
+        # full 30-min soak each dispatch). cam1's ffv1 grab is ~20 MB/s, so 300 s ≈ 6 GB
+        # on dev1; raise toward 1800 only when dev1 has the disk headroom (the script's
+        # disk preflight fails early otherwise). Ideal soak (1800 s) is an operator opt-in.
+        description: "Steady-state run seconds (>=300; cam1 grab ~20 MB/s on dev1)"
+        default: "300"
 
 permissions:
   contents: read
