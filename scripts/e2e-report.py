@@ -199,6 +199,66 @@ def plot_latency(ax, series_rows, tap_names, hops_json):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Graph 3: dual-QR Vernier step distribution + balance (#105 net-loss proof)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def plot_vernier(ax, report):
+    """
+    Step-distribution histogram per tap. The 60Hz painter sampled by the ~30fps chain
+    steps the decoded id by ~2 with ±1 jitter that WALKS forward then back. Zero NET
+    loss = avg-step ~2.0 + balanced jitter (count(2+k) == count(2-k), net_imbalance 0).
+    A one-sided drift (more +k than -k, net_imbalance != 0) is REAL loss. This graph
+    makes the proof visually obvious: symmetric bars around step=2 = balanced = zero net.
+    """
+    steps = report.get("step_distributions", [])
+    tap_names = [t["name"] for t in report.get("taps", [])]
+    if not steps:
+        ax.set_title("Graph 3 — dual-QR Vernier step distribution (no data)")
+        ax.axis("off")
+        return
+
+    colors = plt.cm.tab10(np.linspace(0, 0.7, max(len(steps), 1)))
+    # Collect all step values present across taps to align bars.
+    all_steps = sorted({s for sd in steps for (s, _c) in sd.get("histogram", [])})
+    if not all_steps:
+        ax.set_title("Graph 3 — dual-QR Vernier step distribution (no advances)")
+        ax.axis("off")
+        return
+
+    n_taps = len(steps)
+    width = 0.8 / max(n_taps, 1)
+    x = np.arange(len(all_steps))
+    step_index = {s: i for i, s in enumerate(all_steps)}
+
+    for ti, sd in enumerate(steps):
+        counts = [0] * len(all_steps)
+        for (s, c) in sd.get("histogram", []):
+            counts[step_index[s]] = c
+        name = tap_names[ti] if ti < len(tap_names) else f"tap{ti}"
+        avg = sd.get("avg_step", 0.0)
+        net = sd.get("net_imbalance", 0)
+        bal = "BALANCED" if sd.get("balanced", False) else "IMBALANCED"
+        label = f"{name}: avg={avg:.3f} net={net:+d} ({bal})"
+        ax.bar(x + ti * width, counts, width, color=colors[ti], label=label, alpha=0.85)
+
+    # Mark the expected step=2 (every-other-tick) reference line.
+    if 2 in step_index:
+        ax.axvline(step_index[2] + (n_taps - 1) * width / 2, color="black",
+                   linestyle="--", linewidth=1, alpha=0.5)
+        ax.text(step_index[2] + (n_taps - 1) * width / 2, ax.get_ylim()[1] * 0.97,
+                "step=2\n(every-other-tick)", ha="center", va="top", fontsize=7, alpha=0.6)
+
+    ax.set_xticks(x + (n_taps - 1) * width / 2)
+    ax.set_xticklabels([str(s) for s in all_steps])
+    ax.set_xlabel("id step between consecutive captured frames (signed)")
+    ax.set_ylabel("count")
+    ax.set_title("Graph 3 — dual-QR Vernier step distribution  "
+                 "(symmetric around 2 = balanced jitter = ZERO NET loss)")
+    ax.legend(fontsize=7, loc="upper right")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Footer table
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -238,8 +298,36 @@ def build_footer_text(report):
         verd     = verdict_str(fs.get("verdict", "?"))
         lines.append(f"{name:<22}  {dropped:>7}  {sc_pct:>7.2f}%  {'n/a':>8}  {'n/a':>8}  {verd:>8}")
 
+    # #105 dual-QR Vernier net-loss proof rows (the verdict metric when active).
+    steps = report.get("step_distributions", [])
+    if steps:
+        tap_names = [t["name"] for t in report.get("taps", [])]
+        lines.append("")
+        lines.append("dual-QR Vernier net-loss proof  (avg-step ~2.0 + balanced jitter = ZERO NET loss)")
+        lines.append(f"{'Tap':<14}  {'span':>13}  {'adv':>5}  {'avg_step':>8}  {'net_imbal':>9}  {'result':>22}")
+        lines.append("-" * 84)
+        for i, sd in enumerate(steps):
+            name   = (tap_names[i] if i < len(tap_names) else f"tap{i}")[:14]
+            span   = f"{sd.get('first_id',0)}..{sd.get('last_id',0)}"
+            adv    = sd.get("advances", 0)
+            avg    = sd.get("avg_step", 0.0)
+            net    = sd.get("net_imbalance", 0)
+            ep     = " (ENDPOINT)" if i + 1 == len(steps) else ""
+            if adv == 0:
+                res = "NO-DATA"
+            elif sd.get("balanced", False):
+                res = "BALANCED -> ZERO NET LOSS"
+            elif net > 0:
+                res = "NET LOSS"
+            else:
+                res = "NET DUP"
+            lines.append(f"{name+ep:<14}  {span:>13}  {adv:>5}  {avg:>8.4f}  {net:>+9d}  {res:>22}")
+
     lines.append("")
-    vp = report.get("verdict_pass", False)
+    vp  = report.get("verdict_pass", False)
+    vv  = report.get("vernier_verdict", False)
+    mode = "dual-QR Vernier balanced-jitter" if vv else "strict/single-copy"
+    lines.append(f"Loss verdict metric: {mode}")
     lines.append(f"Overall verdict: {'PASS' if vp else 'FAIL/INCONCL'}")
     return "\n".join(lines)
 
@@ -259,17 +347,19 @@ def main():
     tap_names     = [t["name"] for t in tap_summaries]
     hops_json     = report.get("hops", [])
 
-    # ── layout: 2 graphs + footer text ──────────────────────────────────────
-    fig = plt.figure(figsize=(14, 10))
-    gs  = gridspec.GridSpec(3, 1, figure=fig, height_ratios=[2, 2, 1.2],
+    # ── layout: 3 graphs + footer text ──────────────────────────────────────
+    fig = plt.figure(figsize=(14, 14))
+    gs  = gridspec.GridSpec(4, 1, figure=fig, height_ratios=[2, 2, 2, 1.6],
                             hspace=0.45)
 
     ax_continuity = fig.add_subplot(gs[0])
     ax_latency    = fig.add_subplot(gs[1])
-    ax_footer     = fig.add_subplot(gs[2])
+    ax_vernier    = fig.add_subplot(gs[2])
+    ax_footer     = fig.add_subplot(gs[3])
 
     plot_continuity(ax_continuity, series_rows, tap_names)
     plot_latency(ax_latency, series_rows, tap_names, hops_json)
+    plot_vernier(ax_vernier, report)
 
     # Footer: monospace text table
     footer_text = build_footer_text(report)
@@ -284,9 +374,11 @@ def main():
     dur        = report.get("duration_secs", "?")
     lead       = report.get("lead_discard_secs", 0)
     vp         = report.get("verdict_pass", False)
+    vv         = report.get("vernier_verdict", False)
+    metric     = "dual-QR Vernier" if vv else "strict/SC"
     fig.suptitle(
         f"E2E report  run_id={run_id}  duration={dur}s  lead_discard={lead}s  "
-        f"verdict={'PASS' if vp else 'FAIL/INCONCL'}",
+        f"loss-metric={metric}  verdict={'PASS' if vp else 'FAIL/INCONCL'}",
         fontsize=11, fontweight="bold"
     )
 

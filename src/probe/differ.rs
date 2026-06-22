@@ -760,6 +760,147 @@ pub fn grid_continuity(observed: &[Observed], stride: u32) -> GridContinuity {
     }
 }
 
+/// Dual-QR Vernier net-loss proof (#105). The camera and capture card run at a
+/// slightly different phase AND frequency, so the un-genlocked optical sampling of a
+/// 60 Hz painter at a ~30 fps chain BEATS: consecutive endpoint frames step the decoded
+/// id by ~2 on average, but with ±1 jitter as the sampling phase walks across the
+/// painter's vblank boundary. The single-copy metric mistakes that beat for ~50% loss.
+/// This metric SEPARATES the beat from real loss the way the scheme was designed for:
+///
+/// - **`avg_step` ≈ 2.0** — the chain samples every OTHER 60 Hz tick. A value below 2
+///   means duplication/held frames advancing the id less than expected; above 2 means
+///   skips. Real NET loss pulls the average AWAY from 2.0.
+/// - **balanced jitter** — for each deviation `k` from step 2, `count(step = 2+k)` must
+///   equal `count(step = 2−k)`. The +1/−1 (and ±2 …) deviations are the sampling phase
+///   walking forward then back; if they CANCEL, no NET frame was lost, only the optical
+///   sampling beat reordered which tick was caught. A one-sided imbalance (more +k than
+///   −k) is the signature of REAL loss: the id leapt forward without a matching catch-up.
+///
+/// `net_imbalance` is the signed sum `Σ over k>0 of (count(2+k) − count(2−k)) · k` —
+/// exactly the number of NET ids the endpoint advanced BEYOND `2·(advances)`. Zero ⇒
+/// every forward beat was matched by an equal backward beat ⇒ ZERO net loss. It is
+/// computed directly as `(last_id − first_id) − 2·advances`, which is identically the
+/// balance sum (telescoping), so the two views agree by construction.
+///
+/// `observed` is the tap's frames IN CAPTURE ORDER. HELD ids (an id equal to the
+/// running value — oversample of the same painted frame) are NOT steps and are
+/// collapsed; only a CHANGE in the decoded id is a step. Steps may be negative (a
+/// reorder/backward beat) — those are kept in the histogram (they are the −k side of
+/// the balance) and are what makes a balanced run net to zero.
+#[derive(Debug, Clone, Serialize)]
+pub struct StepDistribution {
+    /// First decoded id (start of the measured span).
+    pub first_id: u32,
+    /// Last decoded id (end of the measured span).
+    pub last_id: u32,
+    /// Number of id CHANGES between consecutive captured frames (held ids excluded).
+    /// This is the count of forward+backward steps that make up the histogram.
+    pub advances: usize,
+    /// Mean id step per advance. ≈ 2.0 on a clean 60 Hz→30 fps dual-QR chain.
+    pub avg_step: f64,
+    /// Step histogram: `(step, count)` sorted by step ascending. `step` is the signed
+    /// id delta between consecutive distinct captured ids (negative = backward beat).
+    pub histogram: Vec<(i64, usize)>,
+    /// Signed NET id advance beyond `2·advances`: `(last_id − first_id) − 2·advances`.
+    /// 0 ⇒ perfectly balanced jitter ⇒ ZERO net loss. Positive ⇒ net forward drift
+    /// (real loss: ids skipped without a matching backward beat). Negative ⇒ net
+    /// duplication (the chain advanced the id LESS than every-other-tick).
+    pub net_imbalance: i64,
+    /// Per-deviation jitter balance: one row `(k, count(2+k), count(2−k))` for each
+    /// k>0 present in the histogram. A row where the two counts are EQUAL is a balanced
+    /// beat (no net loss at that deviation); an unequal row is one-sided drift.
+    pub balance: Vec<(i64, usize, usize)>,
+    /// `net_imbalance == 0`: the jitter is perfectly balanced, proving ZERO NET loss
+    /// over the span — the residual ±step jitter is the un-genlocked optical sampling
+    /// beat, not chain loss. The dual-QR Vernier PASS criterion.
+    pub balanced: bool,
+}
+
+/// Collapse a tap's capture-order observations to the sequence of DISTINCT decoded ids
+/// (held/repeated ids removed) — the input to the step analysis. A "held" id is one
+/// equal to the immediately-preceding decoded value (the chain served the same painted
+/// frame again, i.e. oversample), which is NOT a step. Keeps the order; a backward
+/// change (reorder/beat) IS kept as a (negative) step.
+fn distinct_id_sequence(observed: &[Observed]) -> Vec<u32> {
+    let mut seq: Vec<u32> = Vec::new();
+    for o in observed {
+        if seq.last() != Some(&o.frame_id) {
+            seq.push(o.frame_id);
+        }
+    }
+    seq
+}
+
+/// Compute the dual-QR Vernier step distribution over a tap's capture-order frames.
+/// Pure / unit-tested: this is the #105 net-loss proof — it judges zero NET loss from
+/// the avg-step (≈2.0) + balanced jitter, NOT from single-copy counting (which the
+/// 60→30 optical beat confounds). See [`StepDistribution`].
+pub fn step_distribution(observed: &[Observed]) -> StepDistribution {
+    let seq = distinct_id_sequence(observed);
+    let (first_id, last_id) = match (seq.first(), seq.last()) {
+        (Some(&f), Some(&l)) => (f, l),
+        _ => {
+            return StepDistribution {
+                first_id: 0,
+                last_id: 0,
+                advances: 0,
+                avg_step: 0.0,
+                histogram: Vec::new(),
+                net_imbalance: 0,
+                balance: Vec::new(),
+                balanced: true,
+            };
+        }
+    };
+
+    // Signed steps between consecutive distinct ids.
+    let mut hist: HashMap<i64, usize> = HashMap::new();
+    for w in seq.windows(2) {
+        let step = w[1] as i64 - w[0] as i64;
+        *hist.entry(step).or_insert(0) += 1;
+    }
+    let advances: usize = hist.values().sum();
+    let step_sum: i64 = hist.iter().map(|(&s, &c)| s * c as i64).sum();
+    let avg_step = if advances > 0 {
+        step_sum as f64 / advances as f64
+    } else {
+        0.0
+    };
+
+    let mut histogram: Vec<(i64, usize)> = hist.iter().map(|(&s, &c)| (s, c)).collect();
+    histogram.sort_unstable_by_key(|&(s, _)| s);
+
+    // net_imbalance = total id advance beyond 2·advances. Equals Σ_{k>0} (count(2+k) −
+    // count(2−k))·k by telescoping, so the histogram-balance view and this closed form
+    // agree by construction; computed in closed form to avoid a re-summation mutant.
+    let net_imbalance = step_sum - 2 * advances as i64;
+
+    // Per-deviation balance rows for every k>0 that appears as 2+k or 2−k.
+    let count = |s: i64| hist.get(&s).copied().unwrap_or(0);
+    let mut ks: Vec<i64> = hist
+        .keys()
+        .map(|&s| (s - 2).abs())
+        .filter(|&k| k > 0)
+        .collect();
+    ks.sort_unstable();
+    ks.dedup();
+    let balance: Vec<(i64, usize, usize)> = ks
+        .iter()
+        .map(|&k| (k, count(2 + k), count(2 - k)))
+        .collect();
+
+    StepDistribution {
+        first_id,
+        last_id,
+        advances,
+        avg_step,
+        histogram,
+        net_imbalance,
+        balance,
+        balanced: net_imbalance == 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1452,6 +1593,116 @@ mod tests {
         let (artifact, pipeline) = decompose_missing(&[], &src);
         assert!(artifact.is_empty());
         assert!(pipeline.is_empty());
+    }
+
+    // ---- #105 dual-QR Vernier net-loss proof: step distribution ----
+
+    /// Build capture-order observations from a list of decoded ids (recv ts = index).
+    fn seq_obs(ids: &[u32]) -> Vec<Observed> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, &id)| o(id, i as i64))
+            .collect()
+    }
+
+    #[test]
+    fn step_dist_clean_every_other_tick_is_balanced() {
+        // Perfect 60→30 sampling: ids 0,2,4,6,8 — every step is exactly 2, avg 2.0,
+        // no jitter, net_imbalance 0 → balanced (zero net loss).
+        let r = step_distribution(&seq_obs(&[0, 2, 4, 6, 8]));
+        assert_eq!(r.first_id, 0);
+        assert_eq!(r.last_id, 8);
+        assert_eq!(r.advances, 4);
+        assert!((r.avg_step - 2.0).abs() < 1e-9, "avg_step={}", r.avg_step);
+        assert_eq!(r.histogram, vec![(2, 4)]);
+        assert_eq!(r.net_imbalance, 0);
+        assert!(r.balanced);
+    }
+
+    #[test]
+    fn step_dist_balanced_jitter_nets_to_zero() {
+        // The un-genlocked beat: the sampling phase walks across the vblank so some
+        // steps are 1 and some are 3, but they CANCEL (equal counts) — avg still 2.0,
+        // net_imbalance 0 → balanced. ids: 0,1,4,5,8  steps: 1,3,1,3 (two 1s, two 3s).
+        let r = step_distribution(&seq_obs(&[0, 1, 4, 5, 8]));
+        assert_eq!(r.advances, 4);
+        assert!((r.avg_step - 2.0).abs() < 1e-9);
+        assert_eq!(r.histogram, vec![(1, 2), (3, 2)]);
+        // balance row for k=1: count(3)=2 == count(1)=2 → balanced.
+        assert_eq!(r.balance, vec![(1, 2, 2)]);
+        assert_eq!(r.net_imbalance, 0);
+        assert!(r.balanced, "equal +1/−1 deviations must net to zero loss");
+    }
+
+    #[test]
+    fn step_dist_one_sided_drift_is_real_loss() {
+        // A real drop: an id is skipped with NO matching backward beat. ids 0,2,5,7,9
+        // steps 2,3,2,2 — one extra step-3 (the lost frame) not balanced by a step-1.
+        // avg_step 2.25 > 2.0, net_imbalance +1 → NOT balanced (one real net loss).
+        let r = step_distribution(&seq_obs(&[0, 2, 5, 7, 9]));
+        assert_eq!(r.advances, 4);
+        assert!((r.avg_step - 2.25).abs() < 1e-9, "avg_step={}", r.avg_step);
+        // k=1: count(3)=1 vs count(1)=0 → imbalanced.
+        assert_eq!(r.balance, vec![(1, 1, 0)]);
+        assert_eq!(r.net_imbalance, 1);
+        assert!(!r.balanced, "an unmatched forward skip is real net loss");
+    }
+
+    #[test]
+    fn step_dist_collapses_held_ids() {
+        // Oversample/held frames (an id repeated by the chain) are NOT steps: the same
+        // id served twice is removed before stepping. ids 0,0,2,2,2,4 → distinct 0,2,4
+        // → two clean step-2s, balanced.
+        let r = step_distribution(&seq_obs(&[0, 0, 2, 2, 2, 4]));
+        assert_eq!(r.advances, 2);
+        assert_eq!(r.histogram, vec![(2, 2)]);
+        assert!((r.avg_step - 2.0).abs() < 1e-9);
+        assert!(r.balanced);
+    }
+
+    #[test]
+    fn step_dist_backward_beat_is_kept_and_balances() {
+        // A backward beat (reorder from the optical sampling) is a NEGATIVE step and is
+        // the −k side that cancels a +k. ids 0,2,4,3,5,7: steps 2,2,-1,2,2 — wait, that
+        // has a lone -1; use 0,3,2,5,4,7 → steps 3,-1,3,-1,3: three +1 (step3), two -1
+        // → not balanced. Use a symmetric one: 0,3,2,5 → steps 3,-1,3 → net (3-1+3)=5,
+        // 2*3=6 → -1. Construct a truly balanced reorder: 1,3,0,2 distinct → wait first
+        // must be lowest decoded. Use ids 2,4,3,5 (steps 2,-1,2): sum 3, 2*3=6 → -3.
+        // Simplest balanced backward case: 0,4,2,6 steps 4,-2,4 sum6 2*3=6 net0.
+        let r = step_distribution(&seq_obs(&[0, 4, 2, 6]));
+        assert_eq!(r.advances, 3);
+        assert_eq!(r.histogram, vec![(-2, 1), (4, 2)]);
+        // k=2: count(4)=2 vs count(0)=0; but the -2 step contributes to k via |s-2|=4.
+        // The closed-form net is what gates: sum=6, 2*3=6 → 0 → balanced.
+        assert_eq!(r.net_imbalance, 0);
+        assert!(
+            r.balanced,
+            "a backward beat that restores the span nets to zero"
+        );
+    }
+
+    #[test]
+    fn step_dist_empty_and_single_are_trivially_balanced() {
+        let r = step_distribution(&[]);
+        assert_eq!(r.advances, 0);
+        assert_eq!(r.net_imbalance, 0);
+        assert!(r.balanced);
+        let r1 = step_distribution(&seq_obs(&[7]));
+        assert_eq!(r1.first_id, 7);
+        assert_eq!(r1.last_id, 7);
+        assert_eq!(r1.advances, 0);
+        assert!(r1.balanced);
+    }
+
+    #[test]
+    fn step_dist_net_imbalance_equals_span_minus_2x_advances() {
+        // The closed form is identically (last-first) - 2*advances; pin it against a
+        // re-summation mutant. ids 0,1,4,5,8: span 8, advances 4, 8-8=0.
+        let r = step_distribution(&seq_obs(&[0, 1, 4, 5, 8]));
+        assert_eq!(
+            r.net_imbalance,
+            (r.last_id as i64 - r.first_id as i64) - 2 * r.advances as i64
+        );
     }
 
     #[test]

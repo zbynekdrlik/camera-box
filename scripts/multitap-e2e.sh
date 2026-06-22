@@ -308,6 +308,24 @@ LEAD_DISCARD="${LEAD_DISCARD:-0}"
 # Optional raw per-frame dump for drop/oversample root-cause analysis (#21).
 [ -n "${DUMP_RAW:-}" ] && GATE_ARGS+=(--dump-raw "$DUMP_RAW")
 
+# #105 dual-QR Vernier net-loss verdict (VERNIER=1). The camera + capture card run at a
+# different phase AND slightly different frequency, so the un-genlocked optical sampling
+# of the 60Hz painter at the ~30fps chain BEATS: consecutive endpoint ids step by ~2 with
+# ±1 jitter that walks forward then back. The single-copy metric mistakes that beat for a
+# false ~50% loss. With VERNIER=1 the LOSS verdict is the dual-QR proof the scheme was
+# DESIGNED for — endpoint avg-step ~2.0 AND BALANCED jitter (net_imbalance 0) = ZERO NET
+# loss; single-copy stays a labelled diagnostic. Latency/freeze/window gates still apply.
+# Requires the dual-QR painter (DUAL=1, the default). Use this for the #105 proof on the
+# decimated-source (real-camera) rig where the 60→30 beat is intrinsic.
+if [ "${VERNIER:-0}" = "1" ]; then
+  if [ "${DUAL:-1}" != "1" ]; then
+    echo "ERROR: VERNIER=1 requires DUAL=1 (the dual-QR Vernier scheme is the proof)" >&2
+    exit 1
+  fi
+  GATE_ARGS+=(--vernier-verdict)
+  [ -n "${VERNIER_AVG_STEP_TOL:-}" ] && GATE_ARGS+=(--vernier-avg-step-tol "$VERNIER_AVG_STEP_TOL")
+fi
+
 # Offline-decode mode (SPOOL_DIR set): taps write every frame to disk during the
 # window (no live decode → ZERO tap-drop), then multitap-probe decodes the spools
 # AFTER the window. This is what makes the loss number trustworthy (live decode
