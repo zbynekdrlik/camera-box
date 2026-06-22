@@ -99,6 +99,80 @@ abs_int() {
   printf '%s' "${n#-}"
 }
 
+# --- PTP-LOCK signal (the #7 precondition the recording-E2E gate requires) -----------------
+#
+# NTP offset alone is NOT enough for the recording E2E: cross-node per-hop latency/timestamps
+# are only meaningful when the cluster's FINE servo is the µs-grade PTP, not the ±1 ms NTP
+# sawtooth fallback (GM 10.77.9.184 down). DanteSync exposes the PTP servo state two ways:
+#
+#  * Linux cams (journald): while PTP is LOCKED the daemon emits a continuous stream of
+#      `[PTP] NANO  Drift: …ns/s`  (ultra-precise servo) or `[PTP] LOCK  Drift: …ns/s` (locked).
+#    When PTP degrades to NTP-only those `[PTP] (NANO|LOCK)` servo lines STOP and only
+#    `[NTP] offset:` lines remain. So "a recent `[PTP] (NANO|LOCK)` servo line exists" = PTP up.
+#  * Windows OBS boxes (status pipe JSON): `"is_locked":true` AND `"mode":"NANO"|"LOCK"` =
+#    PTP servo locked; `"is_locked":false` (or a non-NANO/LOCK mode) = degraded/NTP-only.
+
+# ptp_locked_from_journal TEXT -> "LOCKED" if the journal's MOST RECENT PTP servo line is a
+# `[PTP] (NANO|LOCK)  Drift:` (servo running); "DEGRADED" if PTP servo lines exist but the
+# latest sample is NOT one (mode dropped out); "" (UNKNOWN) if NO `[PTP]` servo line is present
+# at all (PTP never seen / fully degraded to NTP). The `[PTP] === … MODE ===` transition banners
+# are excluded (they are events, not the steady servo signal). `|| true` survives set -e.
+ptp_locked_from_journal() {
+  local last_servo
+  # The last steady servo line of either mode (NANO best, LOCK acceptable). Exclude the
+  # `=== … MODE ===` banners (they contain "MODE", the Drift lines do not).
+  last_servo="$(printf '%s\n' "$1" \
+    | grep -E '\[PTP\] +(NANO|LOCK) +Drift:' \
+    | grep -v 'MODE ===' \
+    | tail -1 || true)"
+  if [ -z "$last_servo" ]; then
+    # No servo line at all -> PTP not observed (UNKNOWN/degraded).
+    printf ''
+    return 0
+  fi
+  printf 'LOCKED'
+}
+
+# ptp_locked_from_pipe_json TEXT -> "LOCKED" iff the status blob reports `"is_locked":true` AND
+# a `"mode"` of NANO or LOCK; "DEGRADED" if is_locked is present but false / mode is not a lock
+# mode; "" (UNKNOWN) if neither field is present (unreadable status). Reads is_locked + mode only
+# (NOT offset_ns, which is the raw pre-anchor PTP phase and is legitimately large). `|| true`.
+ptp_locked_from_pipe_json() {
+  local text="$1" locked mode
+  locked="$(printf '%s' "$text" | grep -oE '"is_locked"[[:space:]]*:[[:space:]]*(true|false)' \
+    | sed -n 's/.*:[[:space:]]*\(true\|false\).*/\1/p' | tail -1 || true)"
+  mode="$(printf '%s' "$text" | grep -oE '"mode"[[:space:]]*:[[:space:]]*"[A-Za-z]+"' \
+    | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([A-Za-z][A-Za-z]*\)".*/\1/p' | tail -1 || true)"
+  if [ -z "$locked" ] && [ -z "$mode" ]; then
+    printf ''   # neither field readable -> UNKNOWN
+    return 0
+  fi
+  if [ "$locked" = "true" ] && { [ "$mode" = "NANO" ] || [ "$mode" = "LOCK" ]; }; then
+    printf 'LOCKED'
+    return 0
+  fi
+  printf 'DEGRADED'
+}
+
+# ptp_check LABEL STATE -> prints a status line; returns 0 LOCKED / 2 DEGRADED / 3 UNKNOWN.
+# STATE is the output of one of the two ptp_locked_from_* parsers ("LOCKED" / "DEGRADED" / "").
+# Empty or any non-LOCKED value is NEVER treated as OK (test-strictness: an unread/degraded PTP
+# servo must fail the gate, never silently pass — meaningless cross-node latency otherwise).
+ptp_check() {
+  local label="$1" state="$2"
+  case "$state" in
+    LOCKED)
+      printf '  %-14s PTP LOCKED   (fine servo µs-grade — cross-node latency is meaningful)\n' "$label"
+      return 0 ;;
+    DEGRADED)
+      printf '  %-14s PTP DEGRADED (NTP-only sawtooth — GM 10.77.9.184 down? latency meaningless)\n' "$label"
+      return 2 ;;
+    *)
+      printf '  %-14s PTP UNKNOWN  (no servo signal read — status incomplete)\n' "$label"
+      return 3 ;;
+  esac
+}
+
 # offset_check LABEL OFFSET_US BOUND_US -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. OK iff |OFFSET_US| <= BOUND_US (NUMERIC compare). An empty OFFSET_US is UNKNOWN,
 # never OK — an offset we could not read must never look in-bound (test-strictness: no silent

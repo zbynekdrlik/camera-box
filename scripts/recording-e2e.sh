@@ -92,11 +92,52 @@ if [ "${AVAIL_MB:-0}" -lt "$NEED_MB" ]; then
   exit 1
 fi
 
-# Clock-sync preflight: the cam2 paint gen_ts and cam1 grab_ts must share the wall
-# clock for the cam2→cam1 latency to be sound. Fail loudly if cam1 has drifted.
-echo "[0/8] verify cluster clock sync (cam1) for cam2→cam1 latency (#7/#8)"
-CLOCK_GUARD_TARGETS="cam1=$CAM1_IP" "$HERE/clock-offset-guard.sh" \
-  --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
+# DanteSync NTP+PTP precondition gate (#7) — THE FIRST hard step. The whole test is
+# worthless unless EVERY measured node (cam1, cam2, strih, stream) is BOTH NTP-synced
+# AND PTP-locked (µs-grade fine servo, GM 10.77.9.184 up — NOT the ±1 ms NTP sawtooth
+# fallback): cross-node per-hop latency and per-frame timestamp alignment are meaningless
+# otherwise. The gate fails fast (non-zero, per-node diagnostic) and the run does NOT
+# proceed to recording. The Linux cams are read over SSH; the Windows boxes (ssh denied)
+# need their DanteSync status-pipe JSON pre-fetched to a file — fetched here over the same
+# standing http.server the OBS recordings use, or supplied by the caller via
+# DANTE_STRIH_STATUS / DANTE_STREAM_STATUS (the win-* MCP holder writes them).
+echo "[0/8] DanteSync NTP+PTP gate — cam1, cam2, strih, stream must ALL be synced+locked (#7/#8)"
+WIN_DANTE_PORT="${WIN_DANTE_PORT:-8898}"
+DANTE_STRIH_STATUS="${DANTE_STRIH_STATUS:-$OUTDIR/dante-strih.json}"
+DANTE_STREAM_STATUS="${DANTE_STREAM_STATUS:-$OUTDIR/dante-stream.json}"
+# Try to fetch each Windows box's DanteSync status JSON over its http.server (a standing
+# helper on the box dumps \\.\pipe\dantesync to a file the server exposes as /dantesync.json).
+# A failure leaves the file absent -> the gate reports that node UNKNOWN and refuses to pass,
+# unless the caller already placed a status file there via the win-* MCP.
+fetch_dante_status() {
+  local host="$1" dest="$2"
+  [ -s "$dest" ] && { echo "    using pre-fetched DanteSync status: $dest"; return 0; }
+  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_DANTE_PORT}/dantesync.json" 2>/dev/null; then
+    echo "    fetched DanteSync status from ${host}:${WIN_DANTE_PORT} -> $dest"
+  else
+    echo "    NOTE: could not fetch DanteSync status from ${host} (http :$WIN_DANTE_PORT) — the" >&2
+    echo "          win-* MCP holder must write it to $dest, else the gate will fail this node." >&2
+  fi
+}
+fetch_dante_status "$STRIH"  "$DANTE_STRIH_STATUS"  || true
+fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
+GATE_WIN_ARGS=()
+[ -s "$DANTE_STRIH_STATUS" ]  && GATE_WIN_ARGS+=(--win-status "strih=$DANTE_STRIH_STATUS")
+[ -s "$DANTE_STREAM_STATUS" ] && GATE_WIN_ARGS+=(--win-status "stream=$DANTE_STREAM_STATUS")
+CLOCK_GUARD_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}" "$HERE/dantesync-gate.sh" \
+  --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
+  --linux "cam1=$CAM1_IP cam2=$PAINTER_IP" \
+  "${GATE_WIN_ARGS[@]}"
+
+# cam1 v4l2 capture controls (#156 durable): apply the certified sharp-grab controls
+# (saturation=0, contrast=75) BEFORE the run so a soft-default device can never silently
+# drop the grab decode rate. camera-box also self-applies these on --record-grab (durable
+# in the binary); this is the belt-and-braces setup step the harness owns regardless.
+echo "[0/8] apply certified cam1 v4l2 capture controls (saturation=0, contrast=75) (#156)"
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "v4l2-ctl -d /dev/video0 --set-ctrl=saturation=0,contrast=75 2>/dev/null; \
+   v4l2-ctl -d /dev/video0 --get-ctrl=saturation,contrast 2>/dev/null" \
+  || echo "WARNING: could not pre-apply cam1 v4l2 controls (camera-box self-applies on --record-grab)" >&2
 
 FFMPEG_PID=""
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap

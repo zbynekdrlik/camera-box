@@ -279,3 +279,111 @@ fn help_describes_the_offset_check_and_bound() {
         "help must describe the offset check + its bound: {stdout:?}"
     );
 }
+
+// --- PTP-lock parsers (the #7 recording-E2E precondition) -----------------------------------
+
+#[test]
+fn ptp_locked_from_journal_detects_running_servo() {
+    // A journal whose most recent PTP servo line is `[PTP] NANO Drift:` (or `[PTP] LOCK Drift:`)
+    // = the µs-grade fine servo is RUNNING -> LOCKED. This is the real cam1 shape (2026-06-22).
+    let running = "Jun 22 16:18:28 CAM1 dantesync[655]: [PTP] NANO  Drift: -67ns/s  Adj:+10.02ppm\n\
+                   Jun 22 16:18:41 CAM1 dantesync[655]: [NTP] offset:+16us (threshold:530us)\n\
+                   Jun 22 16:18:54 CAM1 dantesync[655]: [PTP] LOCK  Drift: -10ns/s  Adj:+10.01ppm\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", running)]);
+    assert_eq!(
+        out.trim(),
+        "LOCKED",
+        "a running NANO/LOCK servo is LOCKED: {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_journal_empty_when_ntp_only_fallback() {
+    // GM down -> PTP degrades to the NTP-only sawtooth: the `[PTP] (NANO|LOCK) Drift:` servo
+    // lines STOP and only `[NTP] offset:` lines remain. No servo line -> UNKNOWN (empty), never
+    // a silent LOCKED (test-strictness: an unobserved servo must NOT look locked).
+    let ntp_only = "Jun 22 16:18:41 CAM1 dantesync[655]: [NTP] offset:+16us (threshold:530us)\n\
+                    Jun 22 16:19:11 CAM1 dantesync[655]: [NTP] offset:+402us (threshold:530us)\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", ntp_only)]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "NTP-only fallback -> not LOCKED (empty/UNKNOWN): {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_journal_ignores_mode_transition_banner() {
+    // The `[PTP] === NANO MODE ===` transition banner is an EVENT, not the steady servo signal;
+    // if only a banner (no `Drift:` servo line) is present, that is not proof the servo is running.
+    let banner_only = "Jun 22 15:57:32 CAM1 dantesync[655]: [PTP] === NANO MODE === engaged\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", banner_only)]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "a bare MODE banner is not a servo line: {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_pipe_json_real_strih_status() {
+    // Real strih status-pipe JSON (2026-06-22): is_locked=true + mode=NANO -> LOCKED.
+    let locked = "{\"offset_ns\":-384280886,\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\
+                  \"is_locked\":true,\"ntp_offset_us\":154,\"mode\":\"NANO\",\"ntp_failed\":false}";
+    let out = run_sourced("ptp_locked_from_pipe_json \"$JSON\"", &[("JSON", locked)]);
+    assert_eq!(
+        out.trim(),
+        "LOCKED",
+        "is_locked=true + NANO -> LOCKED: {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_pipe_json_degraded_when_unlocked_or_nonlock_mode() {
+    // is_locked=false (or a mode that is not NANO/LOCK) = DEGRADED (NTP-only) -> must fail the gate.
+    let unlocked = "{\"is_locked\":false,\"mode\":\"NTP\",\"ntp_offset_us\":154}";
+    let out = run_sourced("ptp_locked_from_pipe_json \"$JSON\"", &[("JSON", unlocked)]);
+    assert_eq!(
+        out.trim(),
+        "DEGRADED",
+        "is_locked=false -> DEGRADED: {out:?}"
+    );
+
+    // is_locked=true but a non-lock mode is still DEGRADED (the mode must be NANO or LOCK).
+    let bad_mode = "{\"is_locked\":true,\"mode\":\"COARSE\"}";
+    let out = run_sourced("ptp_locked_from_pipe_json \"$JSON\"", &[("JSON", bad_mode)]);
+    assert_eq!(
+        out.trim(),
+        "DEGRADED",
+        "non-NANO/LOCK mode -> DEGRADED: {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_pipe_json_unknown_when_fields_absent() {
+    // Neither is_locked nor mode present -> UNKNOWN (empty), never a silent LOCKED.
+    let absent = "{\"offset_ns\":1,\"ntp_offset_us\":154}";
+    let out = run_sourced("ptp_locked_from_pipe_json \"$JSON\"", &[("JSON", absent)]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "no is_locked/mode -> UNKNOWN (empty): {out:?}"
+    );
+}
+
+#[test]
+fn ptp_check_maps_state_to_exit_code() {
+    // LOCKED -> rc 0, DEGRADED -> rc 2, anything else (UNKNOWN/empty) -> rc 3. An unread or
+    // degraded PTP servo must NEVER map to OK (the gate would otherwise pass a meaningless run).
+    let cases = [("LOCKED", 0), ("DEGRADED", 2), ("", 3), ("garbage", 3)];
+    for (state, want) in cases {
+        // `set +e` first: sourcing the guard re-enables its top-level `set -e`, which would
+        // abort the harness the moment ptp_check returns a NON-zero rc (the very thing under
+        // test). Capture the rc explicitly instead.
+        let out = run_sourced("set +e; ptp_check node \"$S\"; echo \"rc=$?\"", &[("S", state)]);
+        assert!(
+            out.contains(&format!("rc={want}")),
+            "ptp_check({state:?}) must exit {want}: {out:?}"
+        );
+    }
+}
