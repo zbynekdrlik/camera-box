@@ -336,9 +336,12 @@ static void format_preload_ms_label(obs_data_t *settings, char *buf, size_t bufl
 
 /* camera-box #150: FORCE every certified zero-loss genlock value into `settings`,
  * regardless of any saved scene value, UI edit, or harness-set value. Called from
- * ndi_source_update (and from the get_defaults path) ONLY when genlock_fifo is on, so
- * a genlock NDI source — prod, probe, or a newly-added one, in ANY scene — is correct
- * by construction. This closes the misconfig class root-caused live 2026-06-22 (an
+ * ndi_source_update ONLY when genlock_fifo is on (NOT from ndi_source_getdefaults —
+ * defaults run before create with no per-source genlock state to gate on; update is
+ * the authoritative enforcement point and ndi_source_create calls update at the end,
+ * so a newly-added genlock source is forced at creation), so a genlock NDI source —
+ * prod, probe, or a newly-added one, in ANY scene — is correct by construction. This
+ * closes the misconfig class root-caused live 2026-06-22 (an
  * incompletely-configured probe ingest decoded 0 at the strih output while the
  * fully-configured prod input decoded 100%, same NDI source). The two LEGITIMATE
  * operator knobs — PROP_SOURCE and PROP_GENLOCK_PRELOAD — are NEVER touched here, and
@@ -441,12 +444,20 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	obs_property_set_modified_callback(bw_modes, [](obs_properties_t *props_, obs_property_t *,
 							obs_data_t *settings_) {
 		bool is_audio_only = (obs_data_get_int(settings_, PROP_BANDWIDTH) == PROP_BW_AUDIO_ONLY);
+		/* camera-box #150: this callback also governs the two YUV controls' visibility,
+		 * so it MUST be genlock-aware — otherwise, under the genlock lockdown (which
+		 * forces bandwidth=HIGHEST, i.e. NOT audio-only), a property refresh that
+		 * re-fires this callback would set the YUV controls visible again and LEAK the
+		 * lockdown for exactly those two props. When genlock is on, keep them hidden
+		 * regardless of audio-only — the lockdown is authoritative. */
+		bool genlock_on = obs_data_get_bool(settings_, PROP_GENLOCK_FIFO);
+		bool yuv_visible = !is_audio_only && !genlock_on;
 
 		obs_property_t *yuv_range = obs_properties_get(props_, PROP_YUV_RANGE);
 		obs_property_t *yuv_colorspace = obs_properties_get(props_, PROP_YUV_COLORSPACE);
 
-		obs_property_set_visible(yuv_range, !is_audio_only);
-		obs_property_set_visible(yuv_colorspace, !is_audio_only);
+		obs_property_set_visible(yuv_range, yuv_visible);
+		obs_property_set_visible(yuv_colorspace, yuv_visible);
 
 		return true;
 	});

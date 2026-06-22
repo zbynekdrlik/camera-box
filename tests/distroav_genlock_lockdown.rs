@@ -98,6 +98,12 @@ fn genlock_certified_forcer_exists_and_sets_every_certified_key() {
         "obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_HIGHEST)",
         // latency = 0 (NORMAL)
         "obs_data_set_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL)",
+        // timeout = KEEP_CONTENT
+        "obs_data_set_int(settings, PROP_TIMEOUT, PROP_TIMEOUT_KEEP_CONTENT)",
+        // yuv range = partial
+        "obs_data_set_int(settings, PROP_YUV_RANGE, PROP_YUV_RANGE_PARTIAL)",
+        // yuv colorspace = BT.709
+        "obs_data_set_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709)",
         // hw accel = true
         "obs_data_set_bool(settings, PROP_HW_ACCEL, true)",
         // audio = false
