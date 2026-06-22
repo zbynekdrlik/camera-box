@@ -109,31 +109,44 @@ fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
     }
 }
 
-/// Parse the painter ticks from either a bare one-`tick`-per-line file or the
-/// recording-probe `frame_index,n_qr,tick,run_id,frame_ids` CSV (the `tick` column).
-fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read painter ticks {}", path.display()))?;
+/// Parse the painter ground-truth ticks from any of the THREE shapes the harness
+/// produces, selecting the tick column from the HEADER:
+///
+/// - `--paint-log` CSV (the cam2 painter ground truth, [`serialize_painter_log`]):
+///   header `tick,gen_ts_ns` ⇒ tick is column 0.
+/// - recording-probe CSV: header `frame_index,n_qr,tick,run_id,frame_ids` ⇒ tick is
+///   column 2.
+/// - a bare one-`tick`-per-line file (no header, no comma) ⇒ the whole line is the tick.
+///
+/// A comma-containing data row with too few columns for the detected layout is a
+/// MALFORMED CSV — error loudly (a silently-shrunk painter set would manufacture false
+/// phantom faults). Pure (operates on the file text) so the column-detection is
+/// unit-testable without a file.
+fn parse_painter_ticks_str(text: &str) -> Result<Vec<u32>> {
+    // Detect the tick column from the first non-blank line if it is a known header.
+    let header = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let tick_col: usize = match header {
+        Some(h) if h.starts_with("tick,") => 0, // --paint-log: tick,gen_ts_ns
+        Some(h) if h.starts_with("frame_index") => 2, // recording-probe: ..,..,tick,..
+        _ => 0,                                 // bare one-tick-per-line
+    };
     let mut ticks = Vec::new();
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("frame_index") {
-            continue; // header / blank
+        // Skip blanks and either known header line.
+        if line.is_empty() || line.starts_with("frame_index") || line.starts_with("tick,") {
+            continue;
         }
-        // recording-probe CSV: the tick is the 3rd column; a bare file has it 1st.
-        // A comma-containing row with fewer than 3 columns is a MALFORMED CSV — error
-        // loudly rather than silently dropping it (a silently-shrunk painter set
-        // would manufacture false phantom faults in cam_strih_assessment).
         let field = if line.contains(',') {
-            line.split(',').nth(2).with_context(|| {
+            line.split(',').nth(tick_col).with_context(|| {
                 format!(
-                    "painter CSV row at line {} has fewer than 3 columns (expected \
-                     frame_index,n_qr,tick,...): {line:?}",
+                    "painter CSV row at line {} has too few columns for the detected \
+                     tick column {tick_col}: {line:?}",
                     lineno + 1
                 )
             })?
         } else {
-            line
+            line // bare file: the whole line is the tick
         };
         let field = field.trim();
         if field.is_empty() {
@@ -144,6 +157,16 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
             .with_context(|| format!("painter tick not a u32 at line {}: {field:?}", lineno + 1))?;
         ticks.push(t);
     }
+    Ok(ticks)
+}
+
+/// Read + parse the painter ground-truth ticks from a file (see
+/// [`parse_painter_ticks_str`] for the accepted shapes).
+fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read painter ticks {}", path.display()))?;
+    let ticks = parse_painter_ticks_str(&text)
+        .with_context(|| format!("parse painter ticks {}", path.display()))?;
     tracing::info!(file = %path.display(), ticks = ticks.len(), "painter ticks parsed");
     Ok(ticks)
 }
@@ -578,4 +601,73 @@ fn main() -> Result<()> {
         ),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_grab_ts, parse_painter_ticks_str};
+    use std::io::Write;
+
+    #[test]
+    fn painter_ticks_parse_paint_log_format_tick_first_column() {
+        // REGRESSION (#105 integration): the --paint-log ground truth is `tick,gen_ts_ns`
+        // (tick in column 0). parse_painter_ticks must read column 0 for this header — the
+        // bug the live smoke caught was it forcing column 2 ("too few columns" on the
+        // header) and discarding the entire painter set.
+        let csv = "tick,gen_ts_ns\n0,1782000000000\n1,1782000016000\n2,1782000033000\n";
+        let ticks = parse_painter_ticks_str(csv).unwrap();
+        assert_eq!(ticks, vec![0, 1, 2], "paint-log tick is column 0");
+    }
+
+    #[test]
+    fn painter_ticks_parse_recording_probe_format_tick_third_column() {
+        // recording-probe CSV: frame_index,n_qr,tick,run_id,frame_ids ⇒ tick is column 2.
+        let csv = "frame_index,n_qr,tick,run_id,frame_ids\n0,2,100,7,100;99\n1,2,102,7,102;101\n";
+        let ticks = parse_painter_ticks_str(csv).unwrap();
+        assert_eq!(ticks, vec![100, 102], "recording-probe tick is column 2");
+    }
+
+    #[test]
+    fn painter_ticks_parse_bare_one_per_line() {
+        // A bare file (no header, no comma): the whole line is the tick.
+        let ticks = parse_painter_ticks_str("10\n11\n12\n").unwrap();
+        assert_eq!(ticks, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn painter_ticks_skip_empty_recording_probe_tick_column() {
+        // An undecodable recording-probe row has an empty tick column → skipped, not error.
+        let csv = "frame_index,n_qr,tick,run_id,frame_ids\n0,2,100,7,x\n1,0,,,\n2,2,104,7,y\n";
+        let ticks = parse_painter_ticks_str(csv).unwrap();
+        assert_eq!(ticks, vec![100, 104], "empty tick column skipped");
+    }
+
+    #[test]
+    fn painter_ticks_malformed_row_errors_loudly() {
+        // A paint-log header but a data row with a non-numeric tick must error, not
+        // silently drop (a shrunk painter set manufactures false phantom faults).
+        let csv = "tick,gen_ts_ns\nnotanumber,123\n";
+        assert!(parse_painter_ticks_str(csv).is_err());
+    }
+
+    #[test]
+    fn grab_ts_sidecar_parses_frame_index_to_grab_ts() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "frame_index,grab_ts_ns\n0,1782000000000\n1,1782000033000\n"
+        )
+        .unwrap();
+        let m = parse_grab_ts(f.path()).unwrap();
+        assert_eq!(m.get(&0), Some(&1782000000000));
+        assert_eq!(m.get(&1), Some(&1782000033000));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn grab_ts_sidecar_malformed_row_errors() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "frame_index,grab_ts_ns\n0\n").unwrap(); // <2 columns
+        assert!(parse_grab_ts(f.path()).is_err());
+    }
 }
