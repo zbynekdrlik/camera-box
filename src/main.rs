@@ -263,8 +263,27 @@ async fn run_capture_loop(
         None
     };
 
-    // Open capture device at 1920x1080 @ 60fps
-    let mut capture = VideoCapture::open(device_path)?;
+    // Open capture device at 1920x1080 @ 60fps.
+    //
+    // #156 durable fix: when grab-recording (or when CAMERA_BOX_CAPTURE_CONTROLS is
+    // set) apply the certified V4L2 picture controls (saturation=0, contrast=75) so a
+    // camera-box restart can NEVER silently revert the device to its soft defaults and
+    // collapse the cam1 grab QR decode. The env overrides the default; --record-grab
+    // alone implies the certified set. Production (no grab, no env) leaves controls
+    // untouched.
+    let capture_controls: Vec<camera_box::capture::CaptureControl> =
+        match std::env::var("CAMERA_BOX_CAPTURE_CONTROLS") {
+            Ok(spec) => camera_box::capture::parse_capture_controls(&spec),
+            Err(_) if record_grab.is_some() => camera_box::capture::certified_cam1_controls(),
+            Err(_) => Vec::new(),
+        };
+    if !capture_controls.is_empty() {
+        tracing::info!(
+            "applying {} certified capture control(s) for a sharp grab (#156)",
+            capture_controls.len()
+        );
+    }
+    let mut capture = VideoCapture::open_with_controls(device_path, &capture_controls)?;
     let (width, height) = capture.dimensions();
     let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);
