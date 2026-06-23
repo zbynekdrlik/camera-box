@@ -78,6 +78,13 @@ use std::collections::HashMap;
 pub const BURN_RUN_ID_STRIH: u32 = 911002;
 /// See [`BURN_RUN_ID_STRIH`].
 pub const BURN_RUN_ID_STREAM: u32 = 911004;
+/// The cam1-CAPTURE burn run_id (#174) — the value `CAMERA_BOX_BURN_RUN_ID` is set to on
+/// cam1 for a TEST run. cam1's burn rides through NDI into strih's program and on into
+/// stream's, so the single stream recording carries the cam1 burn alongside cam2's optical
+/// QR + strih's + stream's burns; the verdict pairs the cam1→strih and full-chain hops on
+/// this clean digital id. Distinct from the strih/stream burn ids so all marks are told
+/// apart by run_id. The binary lets the operator override it to match the cam1 env.
+pub const BURN_RUN_ID_CAM1: u32 = 911001;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.
@@ -497,6 +504,62 @@ fn burn_by_cam2_tick(frames: &[RecordingFrame], ids: &RunIds) -> HashMap<u32, i6
         }
     }
     m
+}
+
+/// All burn `frame_id`s for `run_id` decoded across `frames`, in capture order (#174).
+///
+/// The render-tick id a node stamps is the clean digital key the burn-id hop loss verdict
+/// ([`crate::probe::recording_verdict::burn_hop_verdict`]) pairs on. From the SINGLE stream
+/// recording this extracts, per `run_id`, the sequence of burn ids that node rendered and
+/// that reached the stream output — so cam1→strih and strih→stream loss are both decided
+/// from one recording, on the same integer end-to-end, with no 60→30 optical-beat ambiguity.
+/// A frame may carry several QRs; only payloads matching `run_id` are taken.
+pub fn burn_ids_in(frames: &[RecordingFrame], run_id: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    for f in frames {
+        for p in &f.payloads {
+            if p.run_id == run_id {
+                out.push(p.frame_id);
+            }
+        }
+    }
+    out
+}
+
+/// Per-hop ABSOLUTE latency from the SINGLE stream recording, paired on the two burns
+/// CO-LOCATED in one recorded frame (#174). For each stream frame carrying BOTH the
+/// upstream burn (`up_run_id`) and the downstream burn (`down_run_id`) — both forwarded
+/// into the stream program for the SAME optical instant — the sample is
+/// `down_burn.gen_ts_ns − up_burn.gen_ts_ns` on the shared DanteSync wall clock, anchored
+/// at the upstream render instant. Because the two stamps live in the SAME frame there is
+/// NO cross-recording / cam2-tick pairing, so the per-cluster sampling ambiguity that blew
+/// up the strih→stream p99 to 3.4 s (while p50 was ~178 ms) cannot occur. A frame missing
+/// either burn, or carrying a non-positive stamp, is skipped — never a wrong number.
+/// Works for cam1→strih (`up=cam1, down=strih`) and strih→stream (`up=strih, down=stream`).
+pub fn chain_hop_samples_from_stream(
+    stream: &[RecordingFrame],
+    up_run_id: u32,
+    down_run_id: u32,
+) -> Vec<LatencySample> {
+    let mut out = Vec::new();
+    for f in stream {
+        let mut up_ts: Option<i64> = None;
+        let mut down_ts: Option<i64> = None;
+        for p in &f.payloads {
+            if p.run_id == up_run_id && p.gen_ts_ns > 0 && up_ts.is_none() {
+                up_ts = Some(p.gen_ts_ns);
+            } else if p.run_id == down_run_id && p.gen_ts_ns > 0 && down_ts.is_none() {
+                down_ts = Some(p.gen_ts_ns);
+            }
+        }
+        if let (Some(u), Some(d)) = (up_ts, down_ts) {
+            out.push(LatencySample {
+                latency_ms: (d - u) as f64 / 1_000_000.0,
+                at_ns: u,
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1192,6 +1255,115 @@ mod tests {
             BURN_RUN_ID_STRIH,
             BURN_RUN_ID_STREAM,
         );
+        assert_eq!(s.len(), 1, "only the fully-stamped frame yields a sample");
+        assert!((s[0].latency_ms - 33.0).abs() < 1e-6);
+    }
+
+    // ---- #174 cam1 burn-id extraction + co-located chain latency from the stream ----
+
+    /// A stream frame carrying any set of (run_id, frame_id, gen_ts_ns) payloads — the
+    /// shape one stream-recorded frame has when cam1+strih+stream burns + cam2 are present.
+    fn multi(idx: u64, ps: &[(u32, u32, i64)]) -> RecordingFrame {
+        let payloads: Vec<Payload> = ps
+            .iter()
+            .map(|&(r, fid, g)| Payload {
+                run_id: r,
+                frame_id: fid,
+                gen_ts_ns: g,
+            })
+            .collect();
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index: idx,
+            payloads,
+            tick,
+        }
+    }
+
+    #[test]
+    fn burn_ids_in_extracts_only_the_requested_run_id_in_order() {
+        // Two stream frames, each with cam2 + cam1-burn + strih-burn + stream-burn.
+        let frames = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 500, 10),
+                    (BURN_RUN_ID_CAM1, 40, 11),
+                    (BURN_RUN_ID_STRIH, 80, 12),
+                    (BURN_RUN_ID_STREAM, 120, 13),
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (CAM2, 502, 20),
+                    (BURN_RUN_ID_CAM1, 41, 21),
+                    (BURN_RUN_ID_STRIH, 81, 22),
+                    (BURN_RUN_ID_STREAM, 121, 23),
+                ],
+            ),
+        ];
+        assert_eq!(burn_ids_in(&frames, BURN_RUN_ID_CAM1), vec![40, 41]);
+        assert_eq!(burn_ids_in(&frames, BURN_RUN_ID_STRIH), vec![80, 81]);
+        assert_eq!(burn_ids_in(&frames, BURN_RUN_ID_STREAM), vec![120, 121]);
+        // A run_id absent from the recording yields nothing.
+        assert!(burn_ids_in(&frames, 999_999).is_empty());
+    }
+
+    #[test]
+    fn chain_hop_latency_is_downstream_minus_upstream_colocated_in_one_frame() {
+        // cam1→strih: per stream frame carrying BOTH the cam1 burn and the strih burn,
+        // latency = strih_burn.gen_ts − cam1_burn.gen_ts. Co-located ⇒ NO cam2-tick
+        // pairing, so the p99-blowup outliers cannot occur.
+        let frames = vec![
+            multi(
+                0,
+                &[
+                    (BURN_RUN_ID_CAM1, 40, 1_000_000_000), // cam1 rendered at t=1.000s
+                    (BURN_RUN_ID_STRIH, 80, 1_018_000_000), // strih rendered 18ms later
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (BURN_RUN_ID_CAM1, 41, 2_000_000_000),
+                    (BURN_RUN_ID_STRIH, 81, 2_020_000_000), // 20ms later
+                ],
+            ),
+        ];
+        let s = chain_hop_samples_from_stream(&frames, BURN_RUN_ID_CAM1, BURN_RUN_ID_STRIH);
+        assert_eq!(s.len(), 2);
+        assert!((s[0].latency_ms - 18.0).abs() < 1e-6);
+        assert!((s[1].latency_ms - 20.0).abs() < 1e-6);
+        assert_eq!(
+            s[0].at_ns, 1_000_000_000,
+            "anchored at the upstream render instant"
+        );
+    }
+
+    #[test]
+    fn chain_hop_skips_frames_missing_a_burn_or_with_zero_stamp() {
+        let frames = vec![
+            // missing the strih burn → skipped
+            multi(0, &[(BURN_RUN_ID_CAM1, 40, 1_000_000_000)]),
+            // strih burn unstamped (0) → skipped
+            multi(
+                1,
+                &[
+                    (BURN_RUN_ID_CAM1, 41, 2_000_000_000),
+                    (BURN_RUN_ID_STRIH, 81, 0),
+                ],
+            ),
+            // fully stamped → the only sample
+            multi(
+                2,
+                &[
+                    (BURN_RUN_ID_CAM1, 42, 3_000_000_000),
+                    (BURN_RUN_ID_STRIH, 82, 3_033_000_000),
+                ],
+            ),
+        ];
+        let s = chain_hop_samples_from_stream(&frames, BURN_RUN_ID_CAM1, BURN_RUN_ID_STRIH);
         assert_eq!(s.len(), 1, "only the fully-stamped frame yields a sample");
         assert!((s[0].latency_ms - 33.0).abs() < 1e-6);
     }
