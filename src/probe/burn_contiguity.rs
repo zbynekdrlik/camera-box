@@ -112,6 +112,12 @@ pub fn burn_contiguity(node: &str, ids: &[u32]) -> NodeContiguity {
 }
 
 /// One IN-WINDOW recorded delivered frame's burn status for a node (#198).
+///
+/// The stream recording is decoded frame-by-frame; each entry here is ONE recorded
+/// DELIVERED frame (it carries cam2's optical QR ⇒ a real emitted output frame reached
+/// the recording) that falls WITHIN the signal window (after the leading-discard of
+/// pre-/post-signal frames). `burn_id` is `Some(id)` when this node's burn QR decoded on
+/// that frame, `None` when the delivered frame carried no readable burn for this node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordedBurnFrame {
     /// 0-based recorded frame_index (for slot location / pixel proof).
@@ -120,12 +126,103 @@ pub struct RecordedBurnFrame {
     pub burn_id: Option<u32>,
 }
 
-/// THE in-window contiguity check (#198). RED STUB: still delegates to the buggy
-/// integer-range `burn_contiguity` over the present ids, so it over-counts the
-/// per-render-tick forward skips as "missing". The GREEN fix replaces this body.
+/// THE in-window contiguity check (#198), correct for BOTH burn-counter rates.
+///
+/// ## Why the old integer-range check over-counted strih/stream by ~3x
+///
+/// [`burn_contiguity`] (above) treats the burn `frame_id` as a per-EMITTED-frame counter:
+/// it builds the span `min(ids)..=max(ids)` and calls every absent integer "missing".
+/// That is only valid for **cam1**, whose burn id increments once per EMITTED frame
+/// (src/main.rs — after the genlock decimation gate, right before the NDI send). For
+/// **strih/stream** the burn id is the DistroAV burn filter's `f->frame_id++`, bumped in
+/// the OBS `video_render` callback — once per RENDER/COMPOSITE TICK, which fires FASTER
+/// than the emitted/recorded output rate (vendor/distroav/src/ndi-burn-filter.cpp:261).
+/// So strih's counter ran to ~28676 while only ~9000 frames were emitted into the ~300 s
+/// recording: every render tick that produced no distinct emitted frame is an integer the
+/// recording never carries, and the old check flagged ALL of them as "missing" (the 18056
+/// false report in #198). Restricting to a window does NOT fix that alone — the render-tick
+/// skips are INTERIOR to the window; the rate is the dominant cause (#198 point 2).
+///
+/// ## The correct measure
+///
+/// A recording frame is one EMITTED output frame. For a per-render counter the only real
+/// loss signal is: an in-window DELIVERED frame (carries cam2's optical QR ⇒ a frame DID
+/// reach the recording at that instant) that carries NO readable node burn — the node's
+/// emitted frame for that optical instant was lost OR its burn QR was unreadable. FORWARD
+/// integer skips between consecutive recorded frames are EXPECTED for a free-running render
+/// counter (the un-emitted ticks) and are NOT loss. A BACKWARD jump in the id sequence is a
+/// reorder/corruption fault and IS counted (it can never happen for a monotonic counter
+/// that only advances). Out-of-window frames are excluded entirely (the caller passes only
+/// in-window delivered frames), so the pre-/post-signal ids that inflated the range can no
+/// longer be counted as missing — the #198 point-1 ask. This makes strih/stream behave like
+/// cam1 already does (cam1 is per-emit, so its window == its emitted frames == zero spurious
+/// missing).
+///
+/// `frames` MUST be the in-window DELIVERED recorded frames in recorded order. The returned
+/// [`NodeContiguity`] uses `first_id`/`last_id` = the first/last burn id actually present in
+/// the window; `present_count` = frames carrying a burn; `expected_count` = the number of
+/// in-window delivered frames (each MUST carry a burn); `missing_ids` = the burn id that
+/// SHOULD have ridden each `None`/backward-jump frame, derived from the bounding present id
+/// so each missing entry still maps to a real recorded slot for pixel classification. An
+/// empty / all-`None` window ⇒ `first_id == None` ⇒ NOT a pass (nothing proven).
 pub fn burn_contiguity_in_window(node: &str, frames: &[RecordedBurnFrame]) -> NodeContiguity {
-    let ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
-    burn_contiguity(node, &ids)
+    let present_ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
+    let first_id = present_ids.first().copied();
+    let last_id = present_ids.last().copied();
+    let present_count = present_ids.len() as u32;
+    // Expected = the number of in-window DELIVERED frames: each one is an emitted output
+    // frame that MUST carry this node's burn. (Not the integer span — that span is the
+    // free-running render-tick range, not the emitted-frame count.)
+    let expected_count = frames.len() as u32;
+
+    if first_id.is_none() {
+        return NodeContiguity {
+            node: node.to_string(),
+            first_id: None,
+            last_id: None,
+            present_count: 0,
+            expected_count,
+            missing_ids: Vec::new(),
+        };
+    }
+
+    // Walk the in-window delivered frames in order. A frame whose burn did not decode
+    // (`None`) is a candidate drop — record the id it SHOULD have carried (one past the
+    // last seen present id, so the entry is distinct and maps to this slot). A backward
+    // jump (id < the previous present id) is a reorder fault — record the offending id.
+    let mut missing_ids: Vec<u32> = Vec::new();
+    let mut prev_present: Option<u32> = None;
+    for f in frames {
+        match f.burn_id {
+            Some(id) => {
+                if let Some(prev) = prev_present {
+                    if id < prev {
+                        // Backward jump: a reorder/corruption — the monotonic counter must
+                        // only ever advance. Count this id as a fault.
+                        missing_ids.push(id);
+                    }
+                }
+                prev_present = Some(id);
+            }
+            None => {
+                // A delivered frame with no readable burn. The id it should have carried is
+                // one past the last present id (synthetic but distinct + monotone, so it
+                // bounds the recorded slot for the pixel classifier). Saturating so the
+                // degenerate u32::MAX boundary cannot panic.
+                let candidate = prev_present.map(|p| p.saturating_add(1)).unwrap_or(0);
+                missing_ids.push(candidate);
+            }
+        }
+    }
+
+    NodeContiguity {
+        node: node.to_string(),
+        first_id,
+        last_id,
+        present_count,
+        expected_count,
+        missing_ids,
+    }
 }
 
 #[cfg(test)]
