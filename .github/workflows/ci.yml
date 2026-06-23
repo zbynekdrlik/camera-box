@@ -1,14 +1,25 @@
 name: CI
 
 on:
+  # Fire CI ONCE per commit (#157): on pull_request for the dev→main gate, and
+  # on push ONLY for main (post-merge / direct main pushes). Push to dev is NOT
+  # a trigger — the open dev→main PR already runs CI on every dev commit via
+  # pull_request, so triggering push:dev too would double-fire (2 runs/commit).
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:  # on-demand mutation window (#70: mutation is NOT a blocking PR/dev gate)
 
 env:
   CARGO_TERM_COLOR: always
+
+# Cancel a superseded run when a new commit lands on the same ref (#157), so a
+# re-push doesn't leave the old run burning a runner. Keyed by workflow + ref so
+# main, each PR, and a manual dispatch each get their own independent group.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
