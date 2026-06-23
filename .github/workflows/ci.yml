@@ -1,14 +1,16 @@
 name: CI
 
 on:
-  # Fire CI ONCE per commit (#157): on pull_request for the dev→main gate, and
-  # on push ONLY for main (post-merge / direct main pushes). Push to dev is NOT
-  # a trigger — the open dev→main PR already runs CI on every dev commit via
-  # pull_request, so triggering push:dev too would double-fire (2 runs/commit).
+  # Fire CI ONCE per commit (#157). Trigger on push to the two long-lived
+  # branches and DELIBERATELY OMIT pull_request: a dev->main PR's pull_request
+  # event would re-run a full duplicate cycle for a commit the push:dev event
+  # already covered (the old push+pull_request double-fire — 2 runs/commit).
+  # push:[dev,main] gives exactly one run per commit AND still runs CI on direct
+  # pushes to dev and main (main isn't branch-protected, so no required check
+  # needs the pull_request event). Same pattern as the sibling repos devbridge /
+  # restreamer / network-monitor.
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches: [dev, main]
   workflow_dispatch:  # on-demand mutation window (#70: mutation is NOT a blocking PR/dev gate)
 
 env:
@@ -16,7 +18,7 @@ env:
 
 # Cancel a superseded run when a new commit lands on the same ref (#157), so a
 # re-push doesn't leave the old run burning a runner. Keyed by workflow + ref so
-# main, each PR, and a manual dispatch each get their own independent group.
+# dev, main, and a manual dispatch each get their own independent group.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
