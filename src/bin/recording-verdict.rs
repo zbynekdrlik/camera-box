@@ -144,6 +144,16 @@ fn report_burn_hop(v: &BurnHopVerdict, key_kind: &str) {
         v.phantom_ids.len(),
         if v.is_pass() { "PASS" } else { "FAIL" }
     );
+    if v.decode_miss_excluded > 0 {
+        // #175: ticks reclassified as single-frame burn-DECODE MISSES (the absent node's
+        // own burn counter was contiguous across the tick ⇒ it rendered, the 4K corner QR
+        // just didn't decode that one frame). These are NOT hop drops — folded into compared.
+        println!(
+            "    NOTE: {} tick(s) reclassified as single-frame burn-DECODE MISSES (#175, \
+             counter contiguous ⇒ rendered, not dropped) — excluded from loss, counted as compared.",
+            v.decode_miss_excluded
+        );
+    }
     if v.compared_ids == 0 && v.dropped_ids.is_empty() && v.phantom_ids.is_empty() {
         // compared_ids=0 with no dropped/phantom = the two key SETS had no shared overlap
         // span at all (disjoint or one side empty) — NOT a per-hop loss number. This is the
@@ -172,6 +182,8 @@ fn burn_hop_json(v: &BurnHopVerdict, key_kind: &str) -> serde_json::Value {
     serde_json::json!({
         "pass": v.is_pass(), "compared_ids": v.compared_ids, "key": key_kind,
         "dropped": v.dropped_ids.len(), "phantom": v.phantom_ids.len(),
+        // #175: single-frame burn-decode misses removed from the loss (counter-contiguous).
+        "decode_miss_excluded": v.decode_miss_excluded,
     })
 }
 
@@ -692,7 +704,28 @@ fn main() -> Result<()> {
                     &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin_c1),
                 );
                 report_hop_latency(&c1_lat, "cam2→cam1 (optical+grab)", "cam2 paint gen_ts_ns");
-                report["latency"]["cam2_cam1"] = hop_lat_json(&c1_lat);
+                let mut c1_json = hop_lat_json(&c1_lat);
+                // #175 PART 2: cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1
+                // camera lens → v4l2 capture → grab record), NOT a production hop. In
+                // production the camera films the REAL scene; there is no monitor in the
+                // path. Label it honestly so the number is never read as a production camera
+                // latency. (It IS a real measured optical+capture latency for the test rig.)
+                if let Some(obj) = c1_json.as_object_mut() {
+                    obj.insert(
+                        "note".to_string(),
+                        serde_json::Value::String(
+                            "TEST-INJECTION hop (cam2 monitor → cam1 camera optical+v4l2 \
+                             capture+grab); NOT a production camera latency — in production the \
+                             camera films the real scene, no monitor in the path"
+                                .to_string(),
+                        ),
+                    );
+                }
+                report["latency"]["cam2_cam1"] = c1_json;
+                println!(
+                    "  NOTE: cam2→cam1 is the TEST-INJECTION optical hop (monitor→camera+capture), \
+                     NOT a production camera latency (production films the real scene)."
+                );
             }
             None => println!(
                 "=== cam2→cam1 (optical+grab) per-hop ABSOLUTE latency (#105 node 2) ===\n  \

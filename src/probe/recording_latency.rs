@@ -728,14 +728,12 @@ pub fn chain_hop_loss_from_stream(
     // (down burn absent) is a decode miss when the DOWNSTREAM node's counter is contiguous
     // across it; a "phantom" tick (up burn absent) when the UPSTREAM node's counter is.
     // The continuity test can only remove false positives — a real drop breaks the counter.
-    // [red] #175 hardening NOT YET applied — the decode-miss exclusion is added in the
-    // GREEN commit. RED state leaves the raw verdict so the new #175 tests fail.
-    let _ = (
-        &down_counter,
-        &up_counter,
-        DECODE_MISS_MAX_STEP,
-        decode_miss_ticks,
-    );
+    let drop_excl = decode_miss_ticks(&v.dropped_ids, &down_counter, DECODE_MISS_MAX_STEP);
+    let phantom_excl = decode_miss_ticks(&v.phantom_ids, &up_counter, DECODE_MISS_MAX_STEP);
+    v.dropped_ids.retain(|t| !drop_excl.contains(t));
+    v.phantom_ids.retain(|t| !phantom_excl.contains(t));
+    v.compared_ids += drop_excl.len() + phantom_excl.len();
+    v.decode_miss_excluded = drop_excl.len() + phantom_excl.len();
     v
 }
 

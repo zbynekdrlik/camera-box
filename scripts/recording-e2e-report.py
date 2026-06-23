@@ -41,7 +41,9 @@ HOPS = [
 # come from the CLEAN co-located burn-id pairing (overlaid above) when the burns are
 # present; cam1→stream is the end-to-end burn-id latency.
 LAT_HOPS = [
-    ("cam2_cam1", "cam2→cam1"),
+    # #175 PART 2: cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1 camera optical
+    # + v4l2 capture + grab), NOT a production camera latency — labelled honestly on the bar.
+    ("cam2_cam1", "cam2→cam1\n(TEST-INJECTION:\nmonitor→cam)"),
     ("cam1_strih", "cam1→strih"),
     ("strih_stream", "strih→stream"),
     ("cam1_stream", "cam1→stream\n(end-to-end)"),
