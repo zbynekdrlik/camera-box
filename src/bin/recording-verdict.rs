@@ -1178,39 +1178,6 @@ fn main() -> Result<()> {
             // removed in #186 — the burn-id contiguity above is the single trustworthy
             // loss verdict; latency below is a separate, unchanged measurement.)
 
-            // cam2→cam1 LOSS = cam1's V4L2 CAPTURE-DROP count (the camera leg: cam2 monitor
-            // → cam1 lens → cam1 V4L2 capture). A dropped capture = a lost frame on that leg.
-            // This is the kernel `sequence` gap the camera-box tracks (capture.rs), NOT a
-            // painter-tick optical compare (which the 60→30 genlock decimation confounds —
-            // it flags present readable frames as lost, the false-positive source). The
-            // burn-id contiguity above covers the DIGITAL chain from cam1's EMITTED frame
-            // onward (cam1 burn increments per emit, after the genlock gate), so it cannot
-            // see a capture drop UPSTREAM of the burn — this sidecar is that separate signal.
-            if let Some(stats_path) = &args.cam1_capture_stats {
-                let stats = parse_cam1_capture_stats(stats_path)?;
-                let cam1_zero = stats.v4l2_dropped == 0;
-                if cam1_zero {
-                    println!(
-                        "  [cam2→cam1] ZERO loss — cam1 V4L2 capture dropped 0 frames \
-                         ({} captured).",
-                        stats.frames_captured
-                    );
-                } else {
-                    println!(
-                        "  [cam2→cam1] NOT zero — cam1 V4L2 capture dropped {} of {} frames \
-                         (REAL capture-card drops on the camera leg).",
-                        stats.v4l2_dropped, stats.frames_captured
-                    );
-                }
-                all_pass &= cam1_zero;
-                report["full_chain"]["loss"]["cam2_cam1"] = serde_json::json!({
-                    "zero_loss": cam1_zero,
-                    "v4l2_dropped": stats.v4l2_dropped,
-                    "frames_captured": stats.frames_captured,
-                    "source": "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare",
-                });
-            }
-
             // --- per-hop LATENCY co-located in one stream frame (no cam2-tick pairing) ---
             if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
                 let lat = hop_latency(
@@ -1359,6 +1326,43 @@ fn main() -> Result<()> {
                  (+ --burn-*-run-id) and re-run for the clean per-hop loss + latency."
             );
         }
+    }
+
+    // cam2→cam1 LOSS = cam1's V4L2 CAPTURE-DROP count (the camera leg: cam2 monitor → cam1
+    // lens → cam1 V4L2 capture). A dropped capture = a lost frame on that leg — the kernel
+    // `sequence` gap the camera-box tracks (capture.rs), NOT a painter-tick optical compare
+    // (which the 60→30 genlock decimation confounds, flagging present readable frames as
+    // lost). The burn-id contiguity above covers the DIGITAL chain from cam1's EMITTED frame
+    // onward (cam1 burn increments per emit, after the genlock gate), so it cannot see a
+    // capture drop UPSTREAM of the burn — this sidecar is that separate signal.
+    //
+    // Run at TOP LEVEL (not nested under the full-chain burn block): the cam2→cam1 loss
+    // depends ONLY on --cam1-capture-stats, so a supplied gate flag is ALWAYS parsed + gated
+    // and a missing/malformed file ALWAYS errors — even when --stream is absent or the stream
+    // carried no burns (otherwise a supplied capture-drop sidecar showing real drops could be
+    // silently ignored while OVERALL printed ZERO loss).
+    if let Some(stats_path) = &args.cam1_capture_stats {
+        let stats = parse_cam1_capture_stats(stats_path)?;
+        let cam1_zero = stats.v4l2_dropped == 0;
+        if cam1_zero {
+            println!(
+                "  [cam2→cam1] ZERO loss — cam1 V4L2 capture dropped 0 frames ({} captured).",
+                stats.frames_captured
+            );
+        } else {
+            println!(
+                "  [cam2→cam1] NOT zero — cam1 V4L2 capture dropped {} of {} frames \
+                 (REAL capture-card drops on the camera leg).",
+                stats.v4l2_dropped, stats.frames_captured
+            );
+        }
+        all_pass &= cam1_zero;
+        report["full_chain"]["loss"]["cam2_cam1"] = serde_json::json!({
+            "zero_loss": cam1_zero,
+            "v4l2_dropped": stats.v4l2_dropped,
+            "frames_captured": stats.frames_captured,
+            "source": "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare",
+        });
     }
 
     // Record the headline verdict and write the machine-readable report (BEFORE any

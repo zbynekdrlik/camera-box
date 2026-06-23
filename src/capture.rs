@@ -418,9 +418,12 @@ impl VideoCapture {
         self.dropped_captures
     }
 
-    /// Total delivered buffers (frames the device actually captured) over this stream's
-    /// life. Paired with [`dropped_captures`](Self::dropped_captures) in the
-    /// cam1-capture-stats sidecar that the verdict reads as the cam2→cam1 LOSS.
+    /// Total DELIVERED buffers (frames the device actually captured) over this stream's life.
+    /// This is the COUNT OF DELIVERED frames, NOT the full denominator — the total frames the
+    /// device should have produced is `frames_captured + dropped_captures`. Reported alongside
+    /// [`dropped_captures`](Self::dropped_captures) in the cam1-capture-stats sidecar; the
+    /// verdict's cam2→cam1 loss gate is the drop COUNT (`v4l2_dropped == 0`), so this value is
+    /// context, not part of the pass/fail.
     pub fn frames_captured(&self) -> u64 {
         self.frames_captured
     }
