@@ -1,14 +1,27 @@
 name: CI
 
 on:
+  # Fire CI ONCE per commit (#157). Trigger on push to the two long-lived
+  # branches and DELIBERATELY OMIT pull_request: a dev->main PR's pull_request
+  # event would re-run a full duplicate cycle for a commit the push:dev event
+  # already covered (the old push+pull_request double-fire — 2 runs/commit).
+  # push:[dev,main] gives exactly one run per commit AND still runs CI on direct
+  # pushes to dev and main (main isn't branch-protected, so no required check
+  # needs the pull_request event). Same pattern as the sibling repos devbridge /
+  # restreamer / network-monitor.
   push:
-    branches: [main, dev]
-  pull_request:
-    branches: [main]
+    branches: [dev, main]
   workflow_dispatch:  # on-demand mutation window (#70: mutation is NOT a blocking PR/dev gate)
 
 env:
   CARGO_TERM_COLOR: always
+
+# Cancel a superseded run when a new commit lands on the same ref (#157), so a
+# re-push doesn't leave the old run burning a runner. Keyed by workflow + ref so
+# dev, main, and a manual dispatch each get their own independent group.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -131,14 +144,6 @@ jobs:
         # copy_plan, copy_bgra_into, next_bo_index) are unit-tested, but its live DRM
         # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|multitap-probe|recording-probe|recording-verdict)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          # Upload is informational only; the real gate is --fail-under-lines above.
-          # Codecov flakiness (token/rate-limit) must not fail an already-passing build.
-          fail_ci_if_error: false
 
   mutants:
     name: Mutation Testing
