@@ -182,9 +182,9 @@ echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 captur
 # burn) to a cam1-LOCAL /tmp path and launch THAT — NOT the prod /usr/local/bin/camera-box
 # (the clean production binary with no burn). The burn is runtime-gated by
 # CAMERA_BOX_BURN_RUN_ID, so it draws the cam1 run_id + per-emit frame_id + CAPTURE
-# wall-clock ts into the EMITTED frame, which rides through NDI → strih → stream. #179: we
-# NO LONGER --record-grab — the cam1 mark in the stream recording fully replaces the 7.3GB
-# grab, so cam1 just emits NDI with the burn. Re-apply the #156 certified v4l2 controls
+# wall-clock ts into the EMITTED frame, which rides through NDI → strih → stream. #179: the
+# grab-record flags are GONE — the cam1 mark in the stream recording fully replaces the
+# 7.3GB grab, so cam1 just emits NDI with the burn. Re-apply the #156 certified v4l2 controls
 # (saturation=0/contrast=75) directly here (the grab path that used to self-apply is gone).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
@@ -270,7 +270,7 @@ echo "[8/8] recording-verdict — TRUE STREAM-ONLY (strih + stream + painter, NO
 # the cam2 QR in the same stream frame (#179 — no grab, no painter-CSV pairing). They match
 # the burn filters' defaults; when a burn is OFF the affected hop reports NO SAMPLES (never
 # a wrong number). Override via BURN_*_RUN_ID.
-# #179: --cam1 / --cam1-grab-ts are NO LONGER passed — the 7.3GB grab is never decoded.
+# #179: the cam1-grab verdict inputs are GONE — the 7.3GB grab is never decoded.
 BURN_STRIH_RUN_ID="${BURN_STRIH_RUN_ID:-911002}"
 BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
 VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \

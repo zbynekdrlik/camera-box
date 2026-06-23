@@ -1,12 +1,12 @@
-//! Regression guards for scripts/recording-e2e.sh path/host correctness (#7/#105/#156).
+//! Regression guards for scripts/recording-e2e.sh path/host correctness (#7/#105/#156/#179).
 //!
-//! Root cause found on the first real validation run: the cam1 `--record-grab-ts` sidecar
-//! path was `$OUTDIR/...`, but `$OUTDIR` exists on dev1, NOT on cam1 — so camera-box on cam1
-//! failed at startup with `create grab-ts sidecar ...: No such file or directory`, exited,
-//! and the whole cam1 grab node was silently empty (the ffv1 mkv had only its header). The
-//! fix: write the sidecar to a cam1-LOCAL path (`CAM1_GRAB_TS_REMOTE=/tmp/...`) and scp it
-//! back to the dev1 `$OUTDIR` path the verdict reads. These tests read the script as text
-//! and pin that the cam1-side arg is the local path and the scp source matches it.
+//! #179 made the harness TRUE STREAM-ONLY: the 7.3GB cam1 grab is GONE (it was the repeated
+//! ~15-40 min decode sink that stalled every proof run and OOM-crashed the full 4-node run,
+//! #187). The cam1-capture burn (#174) already rides cam1's id + CAPTURE wall-clock ts into
+//! the stream recording, so the grab is redundant. The two grab-ts path tests this file used
+//! to carry (guarding the cam1-local vs dev1 sidecar path) are therefore replaced below by
+//! the inverse guard: the grab record/download is ABSENT and the cam1 capture burn is still
+//! ENABLED, so a future refactor cannot silently re-introduce the slow grab path.
 
 use std::fs;
 use std::process::Command;
@@ -40,60 +40,64 @@ fn urlencode_name(arg: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
 
-/// The `--record-grab-ts` value handed to camera-box ON cam1 must be the cam1-LOCAL
-/// remote path, NEVER the dev1 `$OUTDIR` path (which does not exist on cam1 and ENOENTs
-/// the grab). We assert the cam1 launch uses `CAM1_GRAB_TS_REMOTE`, and that that var is
-/// rooted at /tmp (a path that always exists on the camera), not under `$OUTDIR`.
+/// #179: the harness is TRUE STREAM-ONLY — it must NOT record or stream the 7.3GB cam1
+/// grab any more. No `--record-grab` / `--record-grab-ts`, no dev1 ffmpeg grab listener,
+/// no grab-stream port. (The grab was the repeated ~15-40 min decode sink, #187.)
 #[test]
-fn cam1_record_grab_ts_uses_a_cam1_local_path_not_dev1_outdir() {
+fn recording_e2e_does_not_record_the_cam1_grab() {
     let s = read("scripts/recording-e2e.sh");
-
-    // CAM1_GRAB_TS_REMOTE is defined and is a /tmp path (exists on cam1), not $OUTDIR.
-    let remote_def = s
-        .lines()
-        .find(|l| l.trim_start().starts_with("CAM1_GRAB_TS_REMOTE="))
-        .expect("CAM1_GRAB_TS_REMOTE must be defined (the cam1-local sidecar path)");
+    // The cam1 launch must NOT pass --record-grab / --record-grab-ts (only comments may
+    // mention them historically; assert on the actual flag invocations).
     assert!(
-        remote_def.contains("/tmp/"),
-        "CAM1_GRAB_TS_REMOTE must be a /tmp (cam1-local) path: {remote_def:?}"
+        !s.contains("--record-grab "),
+        "#179: the cam1 launch must NOT pass --record-grab (the grab is dropped)."
     );
     assert!(
-        !remote_def.contains("$OUTDIR") && !remote_def.contains("${OUTDIR}"),
-        "CAM1_GRAB_TS_REMOTE must NOT live under the dev1 $OUTDIR (cam1 has no such dir): {remote_def:?}"
+        !s.contains("--record-grab-ts "),
+        "#179: the cam1 launch must NOT pass --record-grab-ts (the grab sidecar is dropped)."
     );
-
-    // The cam1 camera-box launch passes the REMOTE (local) var to --record-grab-ts.
+    // No dev1 ffmpeg grab listener is started any more.
     assert!(
-        s.contains("--record-grab-ts ${CAM1_GRAB_TS_REMOTE}")
-            || s.contains("--record-grab-ts $CAM1_GRAB_TS_REMOTE"),
-        "the cam1 --record-grab-ts arg must be CAM1_GRAB_TS_REMOTE (the cam1-local path)"
-    );
-    // It must NOT pass the dev1 $OUTDIR-rooted CAM1_GRAB_TS as the cam1-side write path.
-    assert!(
-        !s.contains("--record-grab-ts ${CAM1_GRAB_TS}")
-            && !s.contains("--record-grab-ts $CAM1_GRAB_TS "),
-        "the cam1 write path must not be the dev1 $OUTDIR CAM1_GRAB_TS (would ENOENT on cam1)"
+        !s.contains("listen=1"),
+        "#179: the dev1 ffmpeg grab listener must be gone (no tcp listen for the grab stream)."
     );
 }
 
-/// The scp that pulls the sidecar back to dev1 must read it from the cam1-LOCAL remote
-/// path and write it to the dev1 `$OUTDIR` path the verdict consumes.
+/// #179: the cam1 capture burn (#174) must stay ENABLED — that burn is what rides cam1's
+/// id + CAPTURE wall-clock ts into the stream recording, which REPLACES the grab. cam1 must
+/// still launch the probe-featured camera-box with CAMERA_BOX_BURN_RUN_ID set.
 #[test]
-fn grab_ts_sidecar_is_pulled_from_the_cam1_local_path_to_the_dev1_outdir_path() {
+fn recording_e2e_keeps_the_cam1_capture_burn_enabled() {
     let s = read("scripts/recording-e2e.sh");
-    // The scp source on cam1 is the REMOTE local path; the destination is the dev1 path.
     assert!(
-        s.contains("root@\"$CAM1_IP\":\"$CAM1_GRAB_TS_REMOTE\" \"$CAM1_GRAB_TS\""),
-        "scp must copy cam1:CAM1_GRAB_TS_REMOTE -> dev1:CAM1_GRAB_TS"
+        s.contains("CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID"),
+        "#179/#174: cam1 must launch with CAMERA_BOX_BURN_RUN_ID set so the capture burn \
+         rides into the stream recording (the cam1 mark that lets the grab be dropped)."
     );
-    // The dev1-side CAM1_GRAB_TS (what the verdict reads) stays under $OUTDIR.
-    let dev1_def = s
-        .lines()
-        .find(|l| l.trim_start().starts_with("CAM1_GRAB_TS="))
-        .expect("CAM1_GRAB_TS (dev1 path) must be defined");
     assert!(
-        dev1_def.contains("$OUTDIR") || dev1_def.contains("${OUTDIR}"),
-        "CAM1_GRAB_TS (dev1 verdict input) must live under $OUTDIR: {dev1_def:?}"
+        s.contains("--burn-cam1-run-id"),
+        "#179/#174: the verdict must be given --burn-cam1-run-id to pair the cam1 burn."
+    );
+}
+
+/// #179: the verdict must be invoked TRUE STREAM-ONLY — never with --cam1 / --cam1-grab-ts
+/// (which would decode the 7.3GB grab). The full chain + cam2→cam1 come from the stream
+/// recording's burns alone.
+#[test]
+fn recording_e2e_verdict_is_stream_only_no_cam1_grab_args() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        !s.contains("--cam1 "),
+        "#179: the verdict must NOT be passed --cam1 (no 7.3GB grab decode)."
+    );
+    assert!(
+        !s.contains("--cam1-grab-ts "),
+        "#179: the verdict must NOT be passed --cam1-grab-ts (no grab sidecar)."
+    );
+    // It MUST still pass --stream (the headline recording the whole analysis reads).
+    assert!(
+        s.contains("VERDICT_ARGS+=(--stream"),
+        "#179: the verdict must be passed --stream (the stream-only analysis input)."
     );
 }
 
