@@ -37,11 +37,14 @@ HOPS = [
     ("cam1_strih", "cam1→strih\n(STRICT)", True),
     ("strih_stream", "strih→stream\n(STRICT)", True),
 ]
-# Latency hops in flow order, with (json_key, label).
+# Latency hops in flow order, with (json_key, label). #174: cam1→strih + strih→stream
+# come from the CLEAN co-located burn-id pairing (overlaid above) when the burns are
+# present; cam1→stream is the end-to-end burn-id latency.
 LAT_HOPS = [
     ("cam2_cam1", "cam2→cam1"),
-    ("cam_strih", "cam→strih"),
+    ("cam1_strih", "cam1→strih"),
     ("strih_stream", "strih→stream"),
+    ("cam1_stream", "cam1→stream\n(end-to-end)"),
 ]
 
 
@@ -70,8 +73,26 @@ def main():
 
     with open(a.json) as f:
         r = json.load(f)
-    hops = r.get("hops", {})
-    lat = r.get("latency", {})
+    # #174: prefer the CLEAN burn-id full-chain hops (from the stream recording alone,
+    # paired on the digital burn id) when present — they replace the fragile optical-tick
+    # hops that produced the 259-vs-1 loss artifact. Fall back to the optical hops only
+    # when the burns were not in the recording.
+    full_chain = r.get("full_chain", {})
+    fc_loss = full_chain.get("loss", {})
+    fc_lat = full_chain.get("latency", {})
+    hops = dict(r.get("hops", {}))
+    lat = dict(r.get("latency", {}))
+    # Overlay the burn-id hops over the optical ones under the same keys the panels use.
+    for k in ("cam1_strih", "strih_stream"):
+        if k in fc_loss:
+            hk = dict(fc_loss[k])
+            hk["strict"] = True
+            hk["burn_id"] = True
+            hops[k] = hk
+        if k in fc_lat and fc_lat[k] is not None:
+            lat[k] = fc_lat[k]
+    if fc_lat.get("cam1_stream") is not None:
+        lat["cam1_stream"] = fc_lat["cam1_stream"]
     nodes = r.get("nodes", {})
     overall = r.get("overall_pass")
 
@@ -122,8 +143,9 @@ def main():
         ax_loss.set_ylabel("frames", fontsize=11)
         ax_loss.legend(loc="upper right", fontsize=9)
     ax_loss.set_title(
-        "Per-hop LOSS — strict hops (cam1→strih, strih→stream) FAIL on ANY drop; "
-        "cam2→cam1 is the honest optical assessment", fontsize=11)
+        "Per-hop LOSS — cam1→strih & strih→stream paired on the CLEAN digital burn id "
+        "(#174, from the stream recording alone); cam2→cam1 = honest optical assessment",
+        fontsize=11)
     ax_loss.grid(axis="y", alpha=0.3)
 
     # --- Panel 2: per-hop latency (p50/p95/p99) ---
@@ -152,7 +174,7 @@ def main():
     ax_lat.set_xticklabels(llabels, fontsize=10)
     for i, (h, miss) in enumerate(zip([lat.get(k) for k, _ in LAT_HOPS], missing)):
         if miss or h is None:
-            ax_lat.text(i, 0.5, "RELATIVE/\nUNAVAILABLE\n(needs #111 burn)",
+            ax_lat.text(i, 0.5, "UNAVAILABLE\n(no burn in\nrecording)",
                         ha="center", fontsize=8, color="#57606a", fontweight="bold")
         else:
             ax_lat.text(i, float(h.get("p99_ms", 0)) + 0.5,
@@ -160,8 +182,9 @@ def main():
                         f"n={h.get('samples', 0)}", ha="center", fontsize=8)
     ax_lat.set_ylabel("latency (ms)", fontsize=11)
     ax_lat.set_title(
-        "Per-hop LATENCY (p50/p95/p99) — cam1→strih absolute needs the #111 burn "
-        "(not deployed): shown UNAVAILABLE, never faked", fontsize=11)
+        "Per-hop LATENCY (p50/p95/p99) — cam1→strih, strih→stream & cam1→stream from the "
+        "co-located burn stamps in the stream recording (#174, no cam2-tick pairing outliers)",
+        fontsize=11)
     ax_lat.legend(loc="upper left", fontsize=9)
     ax_lat.grid(axis="y", alpha=0.3)
 

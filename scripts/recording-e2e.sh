@@ -57,6 +57,10 @@ fi
 QR_SIZE="${QR_SIZE:-700}"
 PAINT_FPS="${PAINT_FPS:-30}"
 GENLOCK_FPS="${GENLOCK_FPS:-30}"
+# #174 cam1-capture render-time burn run_id (the value CAMERA_BOX_BURN_RUN_ID is set to on
+# cam1). Mirrors the verdict's BURN_RUN_ID_CAM1 default (911001). Distinct from the strih
+# (911002) / stream (911004) burn ids so all four marks are told apart by run_id.
+BURN_CAM1_RUN_ID="${BURN_CAM1_RUN_ID:-911001}"
 # The cam1 grab is the genlock-EMITTED 30 fps grid (the frames that reach NDI), at the
 # capture resolution. ffmpeg on dev1 decodes the gray8 raw stream with these.
 GRAB_W="${GRAB_W:-1920}"
@@ -157,9 +161,11 @@ cleanup() {
   python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
   python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
   python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
-  # cam1: stop the manual --record-grab camera-box, restore the deployed service.
+  # cam1: stop the manual #174 burn binary (its own basename) AND any camera-box, remove
+  # the deployed test binary, restore the clean deployed service.
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
-    "pkill -x camera-box 2>/dev/null; sleep 1; systemctl restart camera-box 2>/dev/null; true"
+    "pkill -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+     rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it.
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
     "pkill -x frame-probe 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
@@ -175,9 +181,11 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-echo "[1/8] build frame-probe + recording-verdict + camera-box"
-cargo build --release --features probe --bin frame-probe --bin recording-verdict  # airuleset:build-ok
-cargo build --release --bin camera-box  # airuleset:build-ok
+echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 cam1 burn)"
+# #174: build camera-box WITH --features probe so the cam1-capture render-time QR burn is
+# present (the production artifact stays probe-free / clean; only this TEST binary carries
+# the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
+cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
 
 echo "[2/8] start dev1 ffmpeg grab listener → ${CAM1_MKV} (gray8 ${GRAB_W}x${GRAB_H}@${GRAB_FPS} → ffv1)"
 # ffmpeg LISTENS; cam1's --record-grab connects and streams raw gray8. ffv1 is lossless
@@ -189,14 +197,25 @@ ffmpeg -hide_banner -loglevel warning -y \
 FFMPEG_PID=$!
 sleep 1  # let the listener bind before cam1 connects
 
-echo "[3/8] cam1 (${CAM1_IP}) — manual camera-box with --record-grab (grabs cam2 monitor, records, emits NDI)"
-# Stop the deployed service (single-open /dev/video0), launch a manual camera-box that
-# grabs + emits NDI (genlock 30) AND tees the gray8 grab to dev1 + writes the sidecar.
+echo "[3/8] cam1 (${CAM1_IP}) — probe-featured camera-box with --record-grab + #174 burn (grabs cam2, records, emits NDI w/ cam1 burn)"
+# #174: deploy the freshly-built PROBE-featured camera-box (carries the cam1-capture burn)
+# to a cam1-LOCAL /tmp path and launch THAT — NOT the prod /usr/local/bin/camera-box (which
+# is the clean production binary with no burn). The burn is runtime-gated by
+# CAMERA_BOX_BURN_RUN_ID, so it draws the cam1 render-time QR into the emitted frame ONLY
+# for this test. The prod service + binary on disk are untouched.
+CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
+sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
+  target/release/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
+# Stop the deployed service (single-open /dev/video0), launch the manual probe binary that
+# grabs + emits NDI (genlock 30) WITH the #174 cam1 burn AND tees the gray8 grab to dev1 +
+# writes the sidecar. Re-apply the #156 certified v4l2 controls (saturation=0/contrast=75)
+# — camera-box self-applies them when --record-grab is set (CAMERA_BOX_CAPTURE_CONTROLS).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
   "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
+   chmod +x $CAM1_BURN_BIN; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
-     nohup /usr/local/bin/camera-box \
+   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
+     nohup $CAM1_BURN_BIN \
        --record-grab tcp://${DEV1_IP}:${GRAB_PORT} \
        --record-grab-ts ${CAM1_GRAB_TS_REMOTE} \
        >/tmp/cbox-grab.log 2>&1 &)"
@@ -249,7 +268,7 @@ echo "    strih host file:  $STRIH_HOST_PATH"
 echo "    stream host file: $STREAM_HOST_PATH"
 # Stop the painter + cam1 grab so the files finalise.
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null; true"
-sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" "pkill -x camera-box 2>/dev/null; true"
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" "pkill -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; true"
 sleep 2  # let cam1 flush the grab stream + ffmpeg finalise the mkv
 [ -n "$FFMPEG_PID" ] && { wait "$FFMPEG_PID" 2>/dev/null || true; FFMPEG_PID=""; }
 
@@ -283,6 +302,7 @@ BURN_STRIH_RUN_ID="${BURN_STRIH_RUN_ID:-911002}"
 BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
 VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
   --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+  --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
 [ -f "$STREAM_REC" ]    && VERDICT_ARGS+=(--stream "$STREAM_REC")
 [ -f "$CAM1_MKV" ]      && VERDICT_ARGS+=(--cam1 "$CAM1_MKV")
