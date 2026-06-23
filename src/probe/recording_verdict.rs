@@ -394,14 +394,6 @@ pub struct BurnHopVerdict {
     /// Downstream burn ids in the overlap span ABSENT upstream — phantom / reorder ids
     /// downstream carries that upstream never rendered.
     pub phantom_ids: Vec<u32>,
-    /// #175: flagged ticks RECLASSIFIED as single-frame burn-DECODE MISSES (not real hop
-    /// drops) and removed from `dropped_ids`/`phantom_ids` — the absent node's burn counter
-    /// was contiguous across the tick, proving it rendered (the corner QR just didn't decode
-    /// in that one 4K-scaled recorded frame). These were folded back into `compared_ids`.
-    /// Only [`crate::probe::recording_latency::chain_hop_loss_from_stream`] sets this; the
-    /// raw burn-id [`burn_hop_verdict`] leaves it 0 (no per-node counter to test).
-    #[serde(default)]
-    pub decode_miss_excluded: usize,
 }
 
 impl BurnHopVerdict {
@@ -440,7 +432,6 @@ pub fn overlap_set_verdict(
                 compared_ids: 0,
                 dropped_ids: Vec::new(),
                 phantom_ids: Vec::new(),
-                decode_miss_excluded: 0,
             };
         }
     };
@@ -464,7 +455,6 @@ pub fn overlap_set_verdict(
         compared_ids,
         dropped_ids,
         phantom_ids,
-        decode_miss_excluded: 0,
     }
 }
 

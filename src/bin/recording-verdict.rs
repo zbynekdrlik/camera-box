@@ -144,16 +144,6 @@ fn report_burn_hop(v: &BurnHopVerdict, key_kind: &str) {
         v.phantom_ids.len(),
         if v.is_pass() { "PASS" } else { "FAIL" }
     );
-    if v.decode_miss_excluded > 0 {
-        // #175: ticks reclassified as single-frame burn-DECODE MISSES (the absent node's
-        // own burn counter was contiguous across the tick ⇒ it rendered, the 4K corner QR
-        // just didn't decode that one frame). These are NOT hop drops — folded into compared.
-        println!(
-            "    NOTE: {} tick(s) reclassified as single-frame burn-DECODE MISSES (#175, \
-             counter contiguous ⇒ rendered, not dropped) — excluded from loss, counted as compared.",
-            v.decode_miss_excluded
-        );
-    }
     if v.compared_ids == 0 && v.dropped_ids.is_empty() && v.phantom_ids.is_empty() {
         // compared_ids=0 with no dropped/phantom = the two key SETS had no shared overlap
         // span at all (disjoint or one side empty) — NOT a per-hop loss number. This is the
@@ -182,8 +172,6 @@ fn burn_hop_json(v: &BurnHopVerdict, key_kind: &str) -> serde_json::Value {
     serde_json::json!({
         "pass": v.is_pass(), "compared_ids": v.compared_ids, "key": key_kind,
         "dropped": v.dropped_ids.len(), "phantom": v.phantom_ids.len(),
-        // #175: single-frame burn-decode misses removed from the loss (counter-contiguous).
-        "decode_miss_excluded": v.decode_miss_excluded,
     })
 }
 
@@ -556,81 +544,107 @@ fn main() -> Result<()> {
     // strih is a real cam1→strih DROP.
     let mut cam1_frames_opt: Option<Vec<RecordingFrame>> = None;
     if let Some(cam1_path) = &args.cam1 {
-        let (cam1_frames, cam1_ticks) = ticks_of(cam1_path)?;
-
-        // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
-        let cam1_v = verdict(&cam1_ticks, &cfg);
-        all_pass &= report_recording(
-            "cam1",
-            cam1_path,
-            &cam1_v,
-            &args.out_dir,
-            args.max_pixel_proof,
-        )?;
-        report["nodes"]["cam1"] = serde_json::json!({
-            "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
-            "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
-            "avg_step": cam1_v.avg_step, "beat_balanced": cam1_v.beat_balanced,
-        });
-
-        // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
-        // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
-        // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
-        // Needs the strih recording; skipped in cam1-only optical-readability mode.
-        if let Some((_, strih_ticks)) = &strih_data {
-            let cs = cam1_strih_verdict(&cam1_ticks, strih_ticks, &cfg);
-            println!(
-                "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
-            );
-            println!(
-                "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
-                cs.compared_ticks,
-                cs.strih_only_ticks.len(),
-                cs.stream_only_ticks.len()
-            );
-            if !cs.strih_only_ticks.is_empty() {
-                let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
-                println!(
-                    "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+        // #187: the cam1 GRAB is the large (multi-GB 4K) decode. Decode it so a failure
+        // (a decode error, or the worker pool aborting under memory pressure on a tight
+        // box) does NOT `?`-abort the WHOLE verdict — the valuable stream-only hops are
+        // computed LATER from the stream recording ALONE and must still be produced + the
+        // JSON still written. A cam1 grab failure degrades to "cam1-grab hops unavailable",
+        // not a dead run. (The #187 memory bound makes this rare; this is the belt-and-
+        // braces so a manual `--cam1` on a small box can never silently lose the rest of
+        // the verdict.) `ticks_of` returns Err on a grab failure; we catch it here.
+        let cam1_decoded = match ticks_of(cam1_path) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!(
+                    "WARNING: cam1 grab decode FAILED ({e:#}) — skipping the cam1-GRAB hops; \
+                     the stream-only per-hop verdict (incl cam2→cam1 from the cam1-capture burn) \
+                     is still computed from the stream recording below. (#187: a cam1 grab \
+                     failure no longer aborts the whole run.)"
                 );
+                report["nodes"]["cam1"] = serde_json::json!({
+                    "unavailable": true,
+                    "reason": format!("cam1 grab decode failed: {e:#}"),
+                });
+                None
             }
-            if !cs.stream_only_ticks.is_empty() {
-                let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
-                println!("  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}");
-            }
-            println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
-            all_pass &= cs.is_pass();
-            report["hops"]["cam1_strih"] = serde_json::json!({
-                "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
-                "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
+        };
+        if let Some((cam1_frames, cam1_ticks)) = cam1_decoded {
+            // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
+            let cam1_v = verdict(&cam1_ticks, &cfg);
+            all_pass &= report_recording(
+                "cam1",
+                cam1_path,
+                &cam1_v,
+                &args.out_dir,
+                args.max_pixel_proof,
+            )?;
+            report["nodes"]["cam1"] = serde_json::json!({
+                "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
+                "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
+                "avg_step": cam1_v.avg_step, "beat_balanced": cam1_v.beat_balanced,
             });
-        }
 
-        // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
-        if let Some(painter_path) = &args.painter {
-            let painter_ticks = parse_painter_ticks(painter_path)?;
-            let a = cam1_optical_assessment(&cam1_ticks, &painter_ticks, &cfg);
-            println!("=== cam2→cam1 OPTICAL assessment (honest, NOT a zero-loss claim) ===");
-            println!(
-                "  unknown_ticks (in-range, never painted = real optical fault)={}",
-                a.unknown_ticks.len()
-            );
-            println!(
-                "  out_of_painter_range_ticks (painter CSV didn't cover)={}",
-                a.out_of_painter_range_ticks.len()
-            );
-            if !a.unknown_ticks.is_empty() {
-                let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
-                println!("  unknown ticks (first 20): {shown:?}");
-                all_pass = false; // an in-range never-painted tick is a provable fault
+            // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
+            // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
+            // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
+            // Needs the strih recording; skipped in cam1-only optical-readability mode.
+            if let Some((_, strih_ticks)) = &strih_data {
+                let cs = cam1_strih_verdict(&cam1_ticks, strih_ticks, &cfg);
+                println!(
+                    "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
+                );
+                println!(
+                    "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
+                    cs.compared_ticks,
+                    cs.strih_only_ticks.len(),
+                    cs.stream_only_ticks.len()
+                );
+                if !cs.strih_only_ticks.is_empty() {
+                    let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
+                    println!(
+                        "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+                    );
+                }
+                if !cs.stream_only_ticks.is_empty() {
+                    let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
+                    println!(
+                        "  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}"
+                    );
+                }
+                println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
+                all_pass &= cs.is_pass();
+                report["hops"]["cam1_strih"] = serde_json::json!({
+                    "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
+                    "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
+                });
             }
-            report["hops"]["cam2_cam1"] = serde_json::json!({
-                "strict": false, "claims_zero_loss": a.claims_zero_loss,
-                "unknown_ticks": a.unknown_ticks.len(),
-                "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
-            });
-        }
-        cam1_frames_opt = Some(cam1_frames);
+
+            // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
+            if let Some(painter_path) = &args.painter {
+                let painter_ticks = parse_painter_ticks(painter_path)?;
+                let a = cam1_optical_assessment(&cam1_ticks, &painter_ticks, &cfg);
+                println!("=== cam2→cam1 OPTICAL assessment (honest, NOT a zero-loss claim) ===");
+                println!(
+                    "  unknown_ticks (in-range, never painted = real optical fault)={}",
+                    a.unknown_ticks.len()
+                );
+                println!(
+                    "  out_of_painter_range_ticks (painter CSV didn't cover)={}",
+                    a.out_of_painter_range_ticks.len()
+                );
+                if !a.unknown_ticks.is_empty() {
+                    let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
+                    println!("  unknown ticks (first 20): {shown:?}");
+                    all_pass = false; // an in-range never-painted tick is a provable fault
+                }
+                report["hops"]["cam2_cam1"] = serde_json::json!({
+                    "strict": false, "claims_zero_loss": a.claims_zero_loss,
+                    "unknown_ticks": a.unknown_ticks.len(),
+                    "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
+                });
+            }
+            cam1_frames_opt = Some(cam1_frames);
+        } // end: cam1 grab decoded OK (#187 non-fatal guard)
     }
 
     // cam→strih honest assessment (no false zero claim). Needs both strih + painter;

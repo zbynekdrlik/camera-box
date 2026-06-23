@@ -69,7 +69,7 @@ use crate::probe::payload::Payload;
 use crate::probe::recording::RecordingFrame;
 use crate::probe::recording_verdict::BurnHopVerdict;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 /// Default reserved per-node burn run_ids (mirrors the #111 burn filter's
 /// `BURN_RUN_ID_DEFAULT_STRIH` / `…_STREAM` in `vendor/distroav/src/ndi-burn-filter.cpp`).
@@ -645,74 +645,6 @@ pub fn chain_hop_samples_from_stream(
     out
 }
 
-/// #175: a flagged cam2 tick is a single-frame BURN-DECODE MISS, NOT a real hop drop,
-/// when the recorded frame for that optical instant DEMONSTRABLY EXISTED (the absent node
-/// rendered it) and only its small corner burn QR failed to decode in that one 4K-scaled
-/// recorded frame. Returns the subset of `flagged` ticks to EXCLUDE from the loss count.
-///
-/// The discriminator (run 172046073, forensically established): a flagged tick is a decode
-/// miss iff, between the nearest cam2 ticks that DID decode the absent burn (`lo`/`hi`),
-/// EVERY recorded cam2 tick is itself a flagged (missing-burn) tick — i.e. the gap in the
-/// absent burn's decoded sequence is fully explained by recorded frames that exist but
-/// whose burn didn't decode, with NO extra missing optical instant, AND the absent burn's
-/// own counter is strictly monotonic across the gap (no reorder). A REAL drop is different
-/// in kind: an outright dropped optical instant leaves NO recorded cam2 frame at all (the
-/// cam2 tick is absent from `recorded_ticks`, so the gap contains an unflagged "hole"), or
-/// it spans more than `max_run` consecutive recorded frames (a sustained skip, not a
-/// momentary decode glitch). Either case fails the test and the tick is KEPT as a loss.
-///
-/// Why the previous absolute-counter-step test was wrong: when several ADJACENT frames all
-/// miss the same burn, the nearest DECODED burns are 2-3 frames apart and the raw counter
-/// step (6-9) looks like a real skip even though every frame in the gap physically exists
-/// (run 172046073 ticks 3720/18324). Counting RECORDED frames in the gap — not the counter
-/// step — is the rate-free, node-agnostic invariant: the cam2 tick is the shared clock, so
-/// "is there a recorded frame for every optical instant in the gap?" answers "did the node
-/// render it?" without needing each node's burn rate.
-///
-/// Inputs: `flagged` = the dropped (or phantom) ticks; `absent_decoded` = the cam2 ticks
-/// where the ABSENT burn WAS decoded (with its frame_id, for the monotonicity check);
-/// `recorded_ticks` = EVERY cam2 tick any recorded frame carried; `max_run` = the longest
-/// run of consecutive decode-miss frames still treated as a glitch (beyond it, a sustained
-/// absence is a real drop). Conservative: an edge tick (no `lo`/`hi`), a gap with an
-/// unflagged hole, a non-monotonic counter, or a run longer than `max_run` is KEPT — only a
-/// proven short, fully-flagged, monotonic run is excluded. Cannot hide a real drop.
-pub fn decode_miss_ticks(
-    flagged: &[u32],
-    absent_decoded: &BTreeMap<u32, u32>,
-    recorded_ticks: &BTreeSet<u32>,
-    max_run: usize,
-) -> BTreeSet<u32> {
-    let flagged_set: BTreeSet<u32> = flagged.iter().copied().collect();
-    let mut excluded = BTreeSet::new();
-    for &t in flagged {
-        // Nearest cam2 ticks that DID decode the absent burn, bracketing this tick.
-        let lo = absent_decoded.range(..t).next_back();
-        let hi = absent_decoded.range((t + 1)..).next();
-        let (Some((&lo_t, &lo_c)), Some((&hi_t, &hi_c))) = (lo, hi) else {
-            continue; // edge tick — cannot prove both-sided existence → KEEP as loss
-        };
-        if hi_c <= lo_c {
-            continue; // non-monotonic absent-burn counter (reorder) → KEEP as loss
-        }
-        // Every recorded cam2 tick strictly between the bracketing decoded burns must be a
-        // flagged (decode-miss) tick — no unflagged hole = no truly-missing optical instant.
-        let between: Vec<u32> = recorded_ticks.range((lo_t + 1)..hi_t).copied().collect();
-        if between.is_empty() || between.len() > max_run {
-            continue; // no frames between (shouldn't happen) or a sustained run → KEEP
-        }
-        if between.iter().all(|c| flagged_set.contains(c)) {
-            excluded.insert(t);
-        }
-    }
-    excluded
-}
-
-/// #175: the longest run of CONSECUTIVE recorded decode-miss frames still treated as a
-/// momentary 4K-decode glitch rather than a real sustained drop. A single missed burn QR
-/// (run 172046073: every gap was 1 recorded frame) is the norm; `3` tolerates a brief
-/// 2-3-frame soft patch (compression/scaling) without masking a real multi-frame drop.
-const DECODE_MISS_MAX_RUN: usize = 3;
-
 /// Per-hop LOSS verdict from the SINGLE stream recording, paired on the SHARED cam2
 /// source tick every frame carries (#181) — NOT each node's independent burn counter.
 ///
@@ -773,29 +705,28 @@ pub fn chain_hop_loss_from_stream(
     };
     // Per canonical cam2 tick, did THIS recording carry the upstream / downstream burn?
     // A burn counts only when stamped (gen_ts_ns > 0) — an unstamped QR is not a render.
-    // We ALSO record each node's OWN burn `frame_id` at the cam2 tick where it WAS decoded
-    // (#175) so a flagged tick can be checked for burn-counter continuity: a contiguous
-    // straddle proves the node rendered through the gap and the absence is a decode miss.
+    //
+    // STRICT GATE (#186): a cam2 tick that carries the upstream burn but NOT the downstream
+    // burn IS a per-hop failure — full stop. The burns are DIGITALLY GENERATED by our own
+    // code (DistroAV burn filter + cam1-capture burn), so every delivered frame's burn MUST
+    // decode. A burn that does not decode is a REAL DEFECT (too small / soft / no quiet
+    // zone), to be FIXED by making the burn crisp — NEVER excluded from the loss count. The
+    // #189 "decode-miss exclusion" that hid these was reverted: there is no exclusion, no
+    // counter-continuity quirk, no "maybe". The gate passes only at a genuine 0.
     let mut up_ticks: BTreeSet<u32> = BTreeSet::new();
     let mut down_ticks: BTreeSet<u32> = BTreeSet::new();
-    let mut up_counter: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut down_counter: BTreeMap<u32, u32> = BTreeMap::new();
-    // EVERY cam2 tick any recorded frame carried (#175): a real dropped optical instant
-    // leaves NO recorded cam2 frame, so a gap in the absent burn's decoded sequence that is
-    // NOT fully covered by recorded cam2 ticks is a real drop, not a decode miss.
-    let mut recorded_ticks: BTreeSet<u32> = BTreeSet::new();
     for f in stream {
         let mut cam2_tick: Option<u32> = None;
-        let mut up_fid: Option<u32> = None;
-        let mut down_fid: Option<u32> = None;
+        let mut up_present = false;
+        let mut down_present = false;
         for p in &f.payloads {
             if p.run_id == up_run_id {
                 if p.gen_ts_ns > 0 {
-                    up_fid = Some(p.frame_id);
+                    up_present = true;
                 }
             } else if p.run_id == down_run_id {
                 if p.gen_ts_ns > 0 {
-                    down_fid = Some(p.frame_id);
+                    down_present = true;
                 }
             } else if is_cam2(p.run_id) {
                 // Canonical cam2 tick = the highest-frame_id cam2 half in this frame.
@@ -806,45 +737,18 @@ pub fn chain_hop_loss_from_stream(
             }
         }
         let Some(tick) = cam2_tick else { continue };
-        recorded_ticks.insert(tick);
-        if let Some(fid) = up_fid {
+        if up_present {
             up_ticks.insert(tick);
-            // Keep the earliest counter per tick (an oversampled tick repeats the frame).
-            up_counter.entry(tick).or_insert(fid);
         }
-        if let Some(fid) = down_fid {
+        if down_present {
             down_ticks.insert(tick);
-            down_counter.entry(tick).or_insert(fid);
         }
     }
 
     // Shared span/drop/phantom arithmetic — identical semantics to burn_hop_verdict, so
-    // the two loss paths can never diverge (#181 review).
-    let mut v = crate::probe::recording_verdict::overlap_set_verdict(hop, &up_ticks, &down_ticks);
-
-    // #175 hardening: drop the single-frame BURN-DECODE MISSES from the loss set so the
-    // strict gate reflects REAL hop drops, not 4K corner-QR decode noise. A "dropped" tick
-    // (down burn absent) is a decode miss when the DOWNSTREAM burn's decoded sequence skips
-    // ONLY recorded-and-flagged frames across it; a "phantom" tick (up burn absent) when the
-    // UPSTREAM burn's does. The recorded-frame-coverage test can only remove false positives
-    // — a real drop leaves an unflagged hole (no recorded cam2 frame) and is kept.
-    let drop_excl = decode_miss_ticks(
-        &v.dropped_ids,
-        &down_counter,
-        &recorded_ticks,
-        DECODE_MISS_MAX_RUN,
-    );
-    let phantom_excl = decode_miss_ticks(
-        &v.phantom_ids,
-        &up_counter,
-        &recorded_ticks,
-        DECODE_MISS_MAX_RUN,
-    );
-    v.dropped_ids.retain(|t| !drop_excl.contains(t));
-    v.phantom_ids.retain(|t| !phantom_excl.contains(t));
-    v.compared_ids += drop_excl.len() + phantom_excl.len();
-    v.decode_miss_excluded = drop_excl.len() + phantom_excl.len();
-    v
+    // the two loss paths can never diverge (#181 review). No post-processing: a dropped or
+    // phantom tick stands as a failure (the #186 strict gate).
+    crate::probe::recording_verdict::overlap_set_verdict(hop, &up_ticks, &down_ticks)
 }
 
 #[cfg(test)]
@@ -1868,24 +1772,20 @@ mod tests {
     /// burn id.
     #[test]
     fn loss_counts_a_dropped_cam2_tick_as_dropped() {
-        // A REAL drop: strih is ABSENT on a SUSTAINED run of recorded frames (502,504,506,508
-        // = 4 consecutive > DECODE_MISS_MAX_RUN=3). A run that long is not a momentary 4K
-        // decode glitch — strih genuinely skipped renders — so #175 KEEPS all four as drops
-        // (a single isolated missing-burn recorded frame would be a decode miss and excluded).
+        // STRICT (#186): a cam2 tick that carries the upstream (cam1) burn but NOT the
+        // downstream (strih) burn IS a drop — even a SINGLE frame. No exclusion, no
+        // sustained-run tolerance: one missing downstream burn fails the hop.
         let frames = vec![
             loss_frame(
                 0,
                 500,
                 &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
             ),
-            loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21)]), // strih ABSENT
-            loss_frame(2, 504, &[(BURN_RUN_ID_CAM1, 42, 31)]), // strih ABSENT
-            loss_frame(3, 506, &[(BURN_RUN_ID_CAM1, 43, 41)]), // strih ABSENT
-            loss_frame(4, 508, &[(BURN_RUN_ID_CAM1, 44, 51)]), // strih ABSENT
+            loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21)]), // strih ABSENT (the drop)
             loss_frame(
-                5,
-                510,
-                &[(BURN_RUN_ID_CAM1, 45, 61), (BURN_RUN_ID_STRIH, 90, 62)],
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 90, 32)],
             ),
         ];
         let v = chain_hop_loss_from_stream(
@@ -1896,15 +1796,11 @@ mod tests {
             BURN_RUN_ID_STRIH,
             &[],
         );
-        assert_eq!(v.compared_ids, 2, "ticks 500 and 510 survived");
+        assert_eq!(v.compared_ids, 2, "ticks 500 and 504 survived");
         assert_eq!(
             v.dropped_ids,
-            vec![502, 504, 506, 508],
-            "a sustained 4-frame strih absence ⇒ real drops, not a decode-miss glitch"
-        );
-        assert_eq!(
-            v.decode_miss_excluded, 0,
-            "a sustained run exceeds DECODE_MISS_MAX_RUN ⇒ NOT a decode miss"
+            vec![502],
+            "a single strih absence is a real drop (strict #186 gate)"
         );
         assert!(v.phantom_ids.is_empty());
         assert!(!v.is_pass(), "a dropped frame FAILS the hop");
@@ -1914,24 +1810,19 @@ mod tests {
     /// PHANTOM (downstream rendered a source frame upstream never marked).
     #[test]
     fn loss_counts_a_phantom_cam2_tick_as_phantom() {
-        // A REAL phantom: strih (the UPSTREAM node) is ABSENT on a SUSTAINED run of recorded
-        // frames (502,504,506,508 = 4 > DECODE_MISS_MAX_RUN=3) — too long for a momentary
-        // decode glitch, so #175 KEEPS all four as phantoms (an isolated one would be a decode
-        // miss). The stream (downstream) burn rendered through them.
+        // STRICT (#186): a cam2 tick that carries the downstream (stream) burn but NOT the
+        // upstream (strih) burn IS a phantom — even a SINGLE frame. No exclusion.
         let frames = vec![
             loss_frame(
                 0,
                 500,
                 &[(BURN_RUN_ID_STRIH, 80, 11), (BURN_RUN_ID_STREAM, 120, 12)],
             ),
-            loss_frame(1, 502, &[(BURN_RUN_ID_STREAM, 121, 21)]), // strih ABSENT
-            loss_frame(2, 504, &[(BURN_RUN_ID_STREAM, 122, 31)]), // strih ABSENT
-            loss_frame(3, 506, &[(BURN_RUN_ID_STREAM, 123, 41)]), // strih ABSENT
-            loss_frame(4, 508, &[(BURN_RUN_ID_STREAM, 124, 51)]), // strih ABSENT
+            loss_frame(1, 502, &[(BURN_RUN_ID_STREAM, 121, 21)]), // strih ABSENT (the phantom)
             loss_frame(
-                5,
-                510,
-                &[(BURN_RUN_ID_STRIH, 90, 61), (BURN_RUN_ID_STREAM, 125, 62)],
+                2,
+                504,
+                &[(BURN_RUN_ID_STRIH, 90, 31), (BURN_RUN_ID_STREAM, 122, 32)],
             ),
         ];
         let v = chain_hop_loss_from_stream(
@@ -1942,14 +1833,13 @@ mod tests {
             BURN_RUN_ID_STREAM,
             &[],
         );
-        assert_eq!(v.compared_ids, 2, "ticks 500 and 510 survived");
+        assert_eq!(v.compared_ids, 2, "ticks 500 and 504 survived");
         assert!(v.dropped_ids.is_empty());
         assert_eq!(
             v.phantom_ids,
-            vec![502, 504, 506, 508],
-            "a sustained 4-frame strih absence ⇒ real phantoms, not a decode-miss glitch"
+            vec![502],
+            "a single strih absence is a real phantom (strict #186 gate)"
         );
-        assert_eq!(v.decode_miss_excluded, 0);
         assert!(!v.is_pass(), "a phantom FAILS the hop");
     }
 
@@ -1992,9 +1882,9 @@ mod tests {
     }
 
     /// An unstamped (gen_ts_ns = 0) burn does not count as a render — its cam2 tick has
-    /// no upstream/downstream presence for that side. Here strih is unstamped/absent on a
-    /// SUSTAINED run (502-508 > DECODE_MISS_MAX_RUN) so the absences are kept as REAL drops
-    /// (proving the unstamped burn at 502 is treated as no-render), not #175 decode misses.
+    /// no upstream/downstream presence for that side. Here strih is unstamped at tick 502,
+    /// so that tick is a real drop (proving the unstamped burn is treated as no-render).
+    /// Under the strict #186 gate even this SINGLE unstamped frame fails the hop.
     #[test]
     fn loss_ignores_unstamped_burns() {
         let frames = vec![
@@ -2009,13 +1899,10 @@ mod tests {
                 502,
                 &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 0)],
             ),
-            loss_frame(2, 504, &[(BURN_RUN_ID_CAM1, 42, 31)]), // strih absent
-            loss_frame(3, 506, &[(BURN_RUN_ID_CAM1, 43, 41)]), // strih absent
-            loss_frame(4, 508, &[(BURN_RUN_ID_CAM1, 44, 51)]), // strih absent
             loss_frame(
-                5,
-                510,
-                &[(BURN_RUN_ID_CAM1, 45, 61), (BURN_RUN_ID_STRIH, 90, 62)],
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 90, 32)],
             ),
         ];
         let v = chain_hop_loss_from_stream(
@@ -2029,10 +1916,13 @@ mod tests {
         assert_eq!(v.compared_ids, 2);
         assert_eq!(
             v.dropped_ids,
-            vec![502, 504, 506, 508],
-            "the unstamped strih at 502 counts as no-render; a 4-frame run ⇒ real drops"
+            vec![502],
+            "the unstamped strih at 502 counts as no-render ⇒ a real drop (strict gate)"
         );
-        assert_eq!(v.decode_miss_excluded, 0);
+        assert!(
+            !v.is_pass(),
+            "one unstamped (no-render) frame FAILS the hop"
+        );
     }
 
     /// #181 review fix: when cam2 is NOT pinned, the OTHER forwarded burn (here the cam1
@@ -2084,16 +1974,19 @@ mod tests {
         assert!(v.is_pass());
     }
 
-    /// Pins WHY the exclusion matters: WITHOUT it (other_burns empty, cam2 None), the
-    /// forwarded cam1 burn — highest frame_id — is misread as the cam2 key, so the dropped
-    /// id surfaced is a cam1 BURN id, not a cam2 tick. WITH the exclusion the dropped id is
-    /// the real cam2 tick. Same frames, only the exclusion differs ⇒ proves the key flips.
+    /// Pins WHY the foreign-burn exclusion (`other_burns`, #181) matters: WITHOUT it
+    /// (other_burns empty, cam2 None), the forwarded cam1 burn — highest frame_id — is
+    /// misread as the cam2 key, so the dropped id surfaced is a cam1 BURN id, not a cam2
+    /// tick. WITH it the dropped id is the real cam2 tick. Same frames, only the foreign-burn
+    /// exclusion differs ⇒ proves the key flips. (This is the cam2-selection exclusion, NOT
+    /// the reverted #189 decode-miss exclusion — every stream-absent tick here IS a real
+    /// strict-gate drop.)
     #[test]
     fn loss_exclusion_flips_the_key_from_foreign_burn_to_cam2_tick() {
         // Frame 0: clean (both present), cam2 tick 496 — anchors the span start below 500.
-        // Frames 1-4: strih present, stream ABSENT (a SUSTAINED 4-frame run > the #175
-        //   DECODE_MISS_MAX_RUN, so it is kept as a REAL drop, not a decode-miss glitch).
-        //   The forwarded cam1 burn ids 90_100..90_103 ride along (> the cam2 ticks).
+        // Frames 1-4: strih present, stream ABSENT — each a REAL strict-gate drop (the strict
+        //   #186 gate counts every stream-absent tick). The forwarded cam1 burn ids
+        //   90_100..90_103 ride along (> the cam2 ticks) to drive the cam2-key-flip check.
         // Frame 5: clean again, cam2 tick 510.
         let frames = vec![
             multi(
@@ -2187,85 +2080,27 @@ mod tests {
         assert_eq!(good.compared_ids, 2, "ticks 496 and 510 survived");
     }
 
-    // ---- #175: single-frame burn-DECODE-MISS exclusion -----------------------------
-
-    /// #175 pure helper: a flagged tick is a DECODE MISS (excluded) when the gap between the
-    /// nearest decoded-absent-burn ticks contains ONLY recorded-and-flagged frames (a short
-    /// run that physically exists), and is KEPT when an unflagged hole or a too-long run
-    /// proves a real drop. The cam2 tick is the shared clock; the recorded-frame COVERAGE of
-    /// the gap — not the counter step — is the rate-free discriminator.
+    /// #186 STRICT GATE (the inverse of the reverted #189 behavior): a stream frame that
+    /// decoded INCOMPLETELY — cam1's burn present, strih's burn NOT decoded — even though
+    /// strih's OWN counter is contiguous (80→83 straddling the gap, i.e. strih rendered the
+    /// frame) IS counted as a cam1→strih DROP and FAILS the hop. The #189 exclusion that
+    /// folded this into `compared` and passed the hop was reverted: a burn that does not
+    /// decode is a real defect to FIX, never a pass. Pins that no counter-continuity quirk
+    /// can resurrect the exclusion.
     #[test]
-    fn decode_miss_ticks_excludes_covered_keeps_holed() {
-        // absent burn decoded at ticks 100 and 104; recorded ticks are {100,102,104} so the
-        // gap (102) is fully covered by the flagged tick 102 ⇒ decode miss ⇒ excluded.
-        let mut absent = BTreeMap::new();
-        absent.insert(100u32, 80u32);
-        absent.insert(104u32, 82u32);
-        let recorded: BTreeSet<u32> = [100u32, 102, 104].into_iter().collect();
-        let excl = decode_miss_ticks(&[102], &absent, &recorded, DECODE_MISS_MAX_RUN);
-        assert!(
-            excl.contains(&102),
-            "fully-covered single-frame gap ⇒ decode miss"
-        );
-
-        // Same flagged tick, but recorded ticks {100,102,103,104}: 103 is recorded yet NOT
-        // flagged (an unflagged hole = a real missing optical instant) ⇒ KEPT as a drop.
-        let recorded_hole: BTreeSet<u32> = [100u32, 102, 103, 104].into_iter().collect();
-        let kept = decode_miss_ticks(&[102], &absent, &recorded_hole, DECODE_MISS_MAX_RUN);
-        assert!(
-            kept.is_empty(),
-            "an unflagged hole in the gap ⇒ real drop, not a decode miss"
-        );
-    }
-
-    /// #175 pure helper: a SUSTAINED run of consecutive flagged frames longer than `max_run`
-    /// is a real drop (not a momentary glitch) and KEPT; a non-monotonic absent-burn counter
-    /// (reorder) is KEPT; an edge tick (no decoded burn on one side) is KEPT.
-    #[test]
-    fn decode_miss_ticks_keeps_long_runs_reorders_and_edges() {
-        // 4 consecutive flagged frames between decoded burns ⇒ run length 4 > max_run 3 ⇒ KEPT.
-        let mut absent = BTreeMap::new();
-        absent.insert(100u32, 80u32);
-        absent.insert(110u32, 81u32);
-        let recorded: BTreeSet<u32> = [100u32, 102, 104, 106, 108, 110].into_iter().collect();
-        let flagged = [102u32, 104, 106, 108];
-        let kept = decode_miss_ticks(&flagged, &absent, &recorded, DECODE_MISS_MAX_RUN);
-        assert!(kept.is_empty(), "a 4-frame run exceeds max_run ⇒ real drop");
-
-        // Non-monotonic absent-burn counter across the gap (82 → 80) ⇒ reorder ⇒ KEPT.
-        let mut reorder = BTreeMap::new();
-        reorder.insert(100u32, 82u32);
-        reorder.insert(104u32, 80u32);
-        let rec2: BTreeSet<u32> = [100u32, 102, 104].into_iter().collect();
-        assert!(decode_miss_ticks(&[102], &reorder, &rec2, DECODE_MISS_MAX_RUN).is_empty());
-
-        // Edge tick — only a decoded burn BELOW (none above) ⇒ cannot prove existence ⇒ KEPT.
-        let mut only_below = BTreeMap::new();
-        only_below.insert(100u32, 80u32);
-        let rec3: BTreeSet<u32> = [100u32, 102].into_iter().collect();
-        assert!(decode_miss_ticks(&[102], &only_below, &rec3, DECODE_MISS_MAX_RUN).is_empty());
-    }
-
-    /// #175 the real-run scenario (run 172046073): a stream frame decoded INCOMPLETELY —
-    /// cam1's burn present, strih's burn NOT decoded — while strih's OWN counter is
-    /// perfectly contiguous (80→83 straddling the gap). The old verdict counted this as a
-    /// cam1→strih DROP; the hardened verdict reclassifies it as a decode miss (not a loss),
-    /// folds it into compared_ids, and the hop PASSES (effectively zero-loss).
-    #[test]
-    fn chain_hop_loss_reclassifies_decode_miss_as_not_a_drop() {
+    fn chain_hop_loss_counts_decode_miss_as_a_drop_strict() {
         let frames = vec![
             loss_frame(
                 0,
                 500,
                 &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
             ),
-            // tick 502: cam1 decoded, strih burn FAILED to decode in this one 4K frame.
+            // tick 502: cam1 decoded, strih burn FAILED to decode in this one frame, yet
+            // strih's counter is contiguous (80 → 83). The strict gate counts it anyway.
             loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21)]),
             loss_frame(
                 2,
                 504,
-                // strih's counter is contiguous (80 → 83) ⇒ strih RENDERED 502, the QR just
-                // didn't decode there ⇒ decode miss, NOT a drop.
                 &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 83, 32)],
             ),
         ];
@@ -2277,58 +2112,16 @@ mod tests {
             BURN_RUN_ID_STRIH,
             &[],
         );
-        assert!(
-            v.dropped_ids.is_empty(),
-            "contiguous strih counter ⇒ the absence is a decode miss, not a drop: {:?}",
+        assert_eq!(
+            v.dropped_ids,
+            vec![502],
+            "a contiguous-counter decode miss is STILL a drop (strict, no exclusion): {:?}",
             v.dropped_ids
         );
         assert_eq!(
-            v.decode_miss_excluded, 1,
-            "the one decode-miss tick is recorded"
+            v.compared_ids, 2,
+            "only ticks 500 and 504 carried both burns"
         );
-        assert_eq!(
-            v.compared_ids, 3,
-            "the decode-miss tick folds back into compared (it WAS a real frame)"
-        );
-        assert!(
-            v.is_pass(),
-            "a chain with only decode misses is effectively zero-loss"
-        );
-    }
-
-    /// #175: a PHANTOM-side decode miss is likewise reclassified — the UPSTREAM burn failed
-    /// to decode on a frame the upstream node demonstrably rendered (contiguous counter).
-    #[test]
-    fn chain_hop_loss_reclassifies_phantom_decode_miss() {
-        let frames = vec![
-            loss_frame(
-                0,
-                500,
-                &[(BURN_RUN_ID_STRIH, 80, 11), (BURN_RUN_ID_STREAM, 120, 12)],
-            ),
-            // tick 502: stream decoded, strih (upstream) burn failed to decode here.
-            loss_frame(1, 502, &[(BURN_RUN_ID_STREAM, 121, 21)]),
-            loss_frame(
-                2,
-                504,
-                // strih (upstream) counter contiguous 80→83 ⇒ rendered ⇒ decode miss.
-                &[(BURN_RUN_ID_STRIH, 83, 31), (BURN_RUN_ID_STREAM, 122, 32)],
-            ),
-        ];
-        let v = chain_hop_loss_from_stream(
-            "strih→stream",
-            &frames,
-            Some(CAM2),
-            BURN_RUN_ID_STRIH,
-            BURN_RUN_ID_STREAM,
-            &[],
-        );
-        assert!(
-            v.phantom_ids.is_empty(),
-            "phantom decode miss reclassified: {:?}",
-            v.phantom_ids
-        );
-        assert_eq!(v.decode_miss_excluded, 1);
-        assert!(v.is_pass());
+        assert!(!v.is_pass(), "one non-decoding burn FAILS the hop");
     }
 }
