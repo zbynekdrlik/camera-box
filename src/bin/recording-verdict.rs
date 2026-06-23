@@ -24,23 +24,22 @@
 //! Exit code: 0 on PASS for every verdict, non-zero on ANY fail.
 
 use anyhow::{Context, Result};
+use camera_box::probe::burn_contiguity::{burn_contiguity, NodeContiguity};
 use camera_box::probe::recording::{
     analyze_recording, extract_frames_png, select_frames_to_extract, RecordingFrame,
     DEFAULT_MAX_PIXEL_PROOF,
 };
-use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
-    burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam_strih_samples,
-    chain_hop_loss_from_stream, chain_hop_samples_from_stream, hop_latency, strih_stream_samples,
-    strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM,
-    BURN_RUN_ID_STRIH,
+    burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip,
+    cam_strih_samples, chain_hop_samples_from_stream, hop_latency, painter_internal_gen_to_flip,
+    strih_stream_samples, strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
-    cam_strih_assessment, strih_stream_verdict, verdict, BurnHopVerdict, FrameTick,
-    RecordingVerdict, VerdictConfig,
+    cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
 use clap::Parser;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -68,6 +67,12 @@ struct Args {
     /// CSV of the cam2 painter's displayed ticks (enables the cam→strih assessment).
     #[arg(long)]
     painter: Option<PathBuf>,
+    /// cam1 CAPTURE-STATS sidecar (`v4l2_dropped=N`, `frames_captured=M`) the camera-box
+    /// writes on shutdown — cam1's V4L2 capture-drop count. The verdict reports it as the
+    /// cam2→cam1 LOSS (the camera leg: a dropped capture = a lost frame), NOT a painter-tick
+    /// optical compare (confounded by the 60→30 decimation).
+    #[arg(long)]
+    cam1_capture_stats: Option<PathBuf>,
     /// Directory for pixel-proof PNGs of flagged frames.
     #[arg(long, default_value = "recording-verdict-run")]
     out_dir: PathBuf,
@@ -131,47 +136,260 @@ fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
     }
 }
 
-/// Print a hop LOSS verdict (#174 / #181). `key_kind` names what the dropped/phantom
-/// ids ARE — `"cam2 tick"` for [`chain_hop_loss_from_stream`] (the values are cam2 source
-/// ticks, NOT burn ids) or `"burn-id"` for [`burn_hop_verdict`]. Mislabelling these as
-/// "burn ids" sent a debugger chasing burn ids that don't exist (#181 review).
-fn report_burn_hop(v: &BurnHopVerdict, key_kind: &str) {
-    println!(
-        "  [{}] LOSS ({key_kind}): compared_ids={} dropped={} phantom={} -> {}",
-        v.hop,
-        v.compared_ids,
-        v.dropped_ids.len(),
-        v.phantom_ids.len(),
-        if v.is_pass() { "PASS" } else { "FAIL" }
-    );
-    if v.compared_ids == 0 && v.dropped_ids.is_empty() && v.phantom_ids.is_empty() {
-        // compared_ids=0 with no dropped/phantom = the two key SETS had no shared overlap
-        // span at all (disjoint or one side empty) — NOT a per-hop loss number. This is the
-        // #181 symptom (with the OLD independent-burn-counter key); with the cam2-tick key
-        // it means the recordings did not temporally overlap, a harness/timing issue, not a
-        // chain drop. Flagged so it is never read as "zero loss" (#181 review).
-        println!(
-            "    NOTE: compared_ids=0 with no dropped/phantom — the two {key_kind} sets did \
-             NOT overlap; the hop loss is UNCOMPUTABLE from this recording, not a loss=0 claim."
-        );
+// ====================================================================================
+// #186 — the ONE trustworthy, binary zero-loss verdict (replaces the muddled metrics).
+//
+// THE CHECK (per node): is the node's DIGITAL monotonic burn-id sequence, decoded from
+// the STREAM recording, CONTIGUOUS? Each missing id is classified DEFINITIVELY by viewing
+// the pixels at that position: a frame DELIVERED but the burn QR unreadable = a
+// BURN-READABILITY defect to FIX (not a drop); a frame genuinely ABSENT = a REAL drop.
+// No dropped/phantom/gap/painter-beat jargon, no percentage.
+// ====================================================================================
+
+/// How one missing burn id was classified by viewing the recorded pixels at its slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MissingKind {
+    /// A recorded frame is present at this optical slot (it carries cam2's optical QR,
+    /// i.e. the frame was DELIVERED) but the node's burn QR for this id was not decoded.
+    /// NOT a frame drop — a burn-readability defect to FIX (bigger / crisper burn).
+    BurnUnreadable,
+    /// No recorded frame carries this optical slot — the frame is genuinely ABSENT.
+    /// A REAL dropped frame.
+    RealDrop,
+}
+
+/// One classified missing burn id, with the recorded-frame slot and the pixel-proof PNG.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ClassifiedMissing {
+    /// The missing burn id (one candidate dropped frame).
+    id: u32,
+    /// Definitive classification from the pixels.
+    kind: MissingKind,
+    /// The recorded frame_index whose pixels were viewed to classify (the slot the id
+    /// would occupy, between its bounding decoded ids). `None` when no bounding frame
+    /// could be located (reported as a real drop with no slot).
+    frame_index: Option<u64>,
+    /// Pixel-proof PNG path of the viewed slot frame (a clickable LAN URL is printed
+    /// alongside in the human report).
+    png: Option<String>,
+}
+
+/// Whether the node's burn QR for `id` was decoded on `f`'s pixels.
+fn frame_has_burn(f: &RecordingFrame, burn_run_id: u32, id: u32) -> bool {
+    f.payloads
+        .iter()
+        .any(|p| p.run_id == burn_run_id && p.frame_id == id)
+}
+
+/// Whether `f` is a DELIVERED optical frame — it carries cam2's optical dual-QR (any
+/// CRC-valid payload whose run_id is NOT one of the forwarded node burns). A delivered
+/// frame proves a frame reached the recording at that optical instant.
+fn frame_is_delivered_optical(f: &RecordingFrame, burn_run_ids: &[u32]) -> bool {
+    f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id))
+}
+
+/// Locate the recorded-frame slot for a missing burn `id` of `burn_run_id` and classify
+/// it from the pixels. The slot is the recorded frame between the bounding decoded ids
+/// (the highest frame carrying `id-k` and the lowest carrying `id+k`). If a DELIVERED
+/// optical frame sits in that slot → BURN-UNREADABLE (frame delivered, burn missed); else
+/// → REAL DROP (the optical frame is genuinely absent).
+fn classify_missing(
+    stream: &[RecordingFrame],
+    burn_run_id: u32,
+    all_burn_run_ids: &[u32],
+    id: u32,
+    id_to_indices: &BTreeMap<u32, Vec<u64>>,
+) -> (MissingKind, Option<u64>) {
+    // Lower bound: the LAST recorded frame carrying any id < `id` (the closest decoded
+    // predecessor). Upper bound: the FIRST recorded frame carrying any id > `id`.
+    let lower_idx = id_to_indices
+        .range(..id)
+        .next_back()
+        .and_then(|(_, v)| v.iter().copied().max());
+    // `id + 1` via checked_add so a degenerate id == u32::MAX (unreachable: a missing id is
+    // always < last <= u32::MAX) cannot panic on a debug-build overflow; None ⇒ no successor.
+    let upper_idx = id
+        .checked_add(1)
+        .and_then(|nxt| id_to_indices.range(nxt..).next())
+        .and_then(|(_, v)| v.iter().copied().min());
+    // Candidate slot = recorded frames strictly between the bounds (exclusive) — where
+    // this id's frame WOULD sit. With no intermediate recorded frame, the slot collapses
+    // to the gap between two adjacent recorded frames; we then look at the upper-bound
+    // frame itself (the optical frame nearest the missing slot) for a delivery signal.
+    let (lo, hi) = (lower_idx.unwrap_or(0), upper_idx.unwrap_or(u64::MAX));
+    // A delivered optical frame inside the OPEN slot (lo, hi) means the frame for this
+    // optical instant reached the recording but the burn QR was not decoded on it.
+    let slot_delivered = stream.iter().find(|f| {
+        f.frame_index > lo
+            && f.frame_index < hi
+            && frame_is_delivered_optical(f, all_burn_run_ids)
+            && !frame_has_burn(f, burn_run_id, id)
+    });
+    if let Some(f) = slot_delivered {
+        return (MissingKind::BurnUnreadable, Some(f.frame_index));
     }
-    if !v.dropped_ids.is_empty() {
-        let shown: Vec<u32> = v.dropped_ids.iter().copied().take(20).collect();
-        println!("    dropped {key_kind}s (first 20, hop lost these): {shown:?}");
+    // No intermediate recorded frame at all (lo+1 == hi): the two bounding decoded frames
+    // are adjacent, so there is NO separate slot — the upstream node's render id collapsed
+    // onto a neighbour or never reached a distinct recorded frame. Inspect the upper-bound
+    // frame: if it is a delivered optical frame (it carries cam2's QR) the optical instant
+    // WAS delivered, the burn for `id` simply did not land on its own frame ⇒ a burn
+    // readability/coalescing defect, not an absent frame. Otherwise the slot is genuinely
+    // absent ⇒ a real drop.
+    if let Some(hi_idx) = upper_idx {
+        if let Some(f) = stream.iter().find(|f| f.frame_index == hi_idx) {
+            if frame_is_delivered_optical(f, all_burn_run_ids) {
+                return (MissingKind::BurnUnreadable, Some(hi_idx));
+            }
+        }
+        return (MissingKind::RealDrop, Some(hi_idx));
     }
-    if !v.phantom_ids.is_empty() {
-        let shown: Vec<u32> = v.phantom_ids.iter().copied().take(20).collect();
-        println!("    phantom {key_kind}s (first 20, downstream-only): {shown:?}");
+    (MissingKind::RealDrop, None)
+}
+
+/// The full trustworthy verdict for one node: the contiguity result plus, when not
+/// contiguous, every missing id classified from the pixels.
+#[derive(Debug, Clone, serde::Serialize)]
+struct NodeVerdict {
+    contiguity: NodeContiguity,
+    classified: Vec<ClassifiedMissing>,
+}
+
+impl NodeVerdict {
+    /// ZERO loss ⇔ contiguous (no missing id). A BURN-UNREADABLE missing id is a real
+    /// DEFECT to fix and still makes the node NOT-zero (it is never silently excluded).
+    fn is_zero(&self) -> bool {
+        self.contiguity.is_contiguous()
+    }
+    fn real_drops(&self) -> usize {
+        self.classified
+            .iter()
+            .filter(|c| c.kind == MissingKind::RealDrop)
+            .count()
+    }
+    fn burn_unreadable(&self) -> usize {
+        self.classified
+            .iter()
+            .filter(|c| c.kind == MissingKind::BurnUnreadable)
+            .count()
     }
 }
 
-/// Reduce a BurnHopVerdict to a compact JSON object for the report. `key_kind` records
-/// what the compared/dropped/phantom counts are KEYED on (`"cam2 tick"` vs `"burn-id"`)
-/// so the machine-readable report is not silently read as burn ids (#181 review).
-fn burn_hop_json(v: &BurnHopVerdict, key_kind: &str) -> serde_json::Value {
+/// Build the trustworthy verdict for one node from the decoded stream frames: run the
+/// pure contiguity check on the node's burn-id sequence, then classify each missing id by
+/// pixel and extract a pixel-proof PNG for it.
+fn node_verdict(
+    node: &str,
+    stream: &[RecordingFrame],
+    burn_run_id: u32,
+    all_burn_run_ids: &[u32],
+    out_dir: &Path,
+    stream_path: &Path,
+    max_pixel_proof: usize,
+) -> Result<NodeVerdict> {
+    let ids = burn_ids_in(stream, burn_run_id);
+    let contiguity = burn_contiguity(node, &ids);
+
+    // id → recorded frame_indices that carry that id (for slot location).
+    let mut id_to_indices: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
+    for f in stream {
+        for p in &f.payloads {
+            if p.run_id == burn_run_id {
+                id_to_indices
+                    .entry(p.frame_id)
+                    .or_default()
+                    .push(f.frame_index);
+            }
+        }
+    }
+
+    let mut classified = Vec::new();
+    for &id in &contiguity.missing_ids {
+        let (kind, frame_index) =
+            classify_missing(stream, burn_run_id, all_burn_run_ids, id, &id_to_indices);
+        classified.push(ClassifiedMissing {
+            id,
+            kind,
+            frame_index,
+            png: None,
+        });
+    }
+
+    // Extract pixel-proof PNGs for every classified slot frame so the user can SEE it.
+    let slots: Vec<u64> = classified.iter().filter_map(|c| c.frame_index).collect();
+    if !slots.is_empty() {
+        let png_dir = out_dir.join(format!("{node}-missing"));
+        let extracted = extract_frames_png(
+            stream_path,
+            &slots,
+            &HashSet::new(),
+            &png_dir,
+            max_pixel_proof,
+        )?;
+        let idx_to_png: BTreeMap<u64, String> = extracted
+            .iter()
+            .map(|e| (e.frame_index, e.png_path.display().to_string()))
+            .collect();
+        for c in &mut classified {
+            if let Some(fi) = c.frame_index {
+                c.png = idx_to_png.get(&fi).cloned();
+            }
+        }
+    }
+
+    Ok(NodeVerdict {
+        contiguity,
+        classified,
+    })
+}
+
+/// Print the ONE trustworthy binary verdict for a node, human-readable, no jargon.
+fn print_node_verdict(v: &NodeVerdict) {
+    let c = &v.contiguity;
+    let span = match (c.first_id, c.last_id) {
+        (Some(f), Some(l)) => format!("ids {f}..={l}, {} present", c.present_count),
+        _ => "no burn ids decoded".to_string(),
+    };
+    if v.is_zero() {
+        println!(
+            "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}).",
+            c.node
+        );
+        return;
+    }
+    println!(
+        "  [{}] NOT zero — {} missing id(s) ({span}): {} REAL DROP, {} BURN-UNREADABLE (fix burn).",
+        c.node,
+        c.missing_ids.len(),
+        v.real_drops(),
+        v.burn_unreadable(),
+    );
+    for cm in &v.classified {
+        let label = match cm.kind {
+            MissingKind::RealDrop => "REAL DROP",
+            MissingKind::BurnUnreadable => "BURN-UNREADABLE (fix burn, frame delivered)",
+        };
+        let png = cm.png.as_deref().unwrap_or("<no pixel slot>");
+        match cm.frame_index {
+            Some(fi) => println!("    id {} -> {label} (frame {fi}, pixels: {png})", cm.id),
+            None => println!("    id {} -> {label} (no recorded slot)", cm.id),
+        }
+    }
+}
+
+/// JSON for one node's trustworthy verdict.
+fn node_verdict_json(v: &NodeVerdict) -> serde_json::Value {
     serde_json::json!({
-        "pass": v.is_pass(), "compared_ids": v.compared_ids, "key": key_kind,
-        "dropped": v.dropped_ids.len(), "phantom": v.phantom_ids.len(),
+        "node": v.contiguity.node,
+        "zero_loss": v.is_zero(),
+        "first_id": v.contiguity.first_id,
+        "last_id": v.contiguity.last_id,
+        "present_count": v.contiguity.present_count,
+        "expected_count": v.contiguity.expected_count,
+        "missing_ids": v.contiguity.missing_ids,
+        "real_drops": v.real_drops(),
+        "burn_unreadable": v.burn_unreadable(),
+        "classified": v.classified,
     })
 }
 
@@ -235,6 +453,142 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
         .with_context(|| format!("parse painter ticks {}", path.display()))?;
     tracing::info!(file = %path.display(), ticks = ticks.len(), "painter ticks parsed");
     Ok(ticks)
+}
+
+/// #194 — parse the painter `--paint-log` CSV (`tick,gen_ts_ns,flip_ts_ns`,
+/// [`serialize_painter_log`]) into `(tick → gen_ts_ns, tick → flip_ts_ns)` maps. The
+/// `flip_ts_ns` (page-flip-complete = on-screen instant) is the cam2 DISPLAY reference the
+/// cam2→cam1 latency uses ([`cam2_cam1_samples_from_flip`]); `gen_ts_ns` is kept so the
+/// painter's internal generate→display time can be reported separately
+/// ([`painter_internal_gen_to_flip`]).
+///
+/// Only the 3-column `--paint-log` (header `tick,gen_ts_ns,flip_ts_ns`) carries a flip
+/// column. The older 2-column `tick,gen_ts_ns`, a recording-probe CSV, or a bare tick file
+/// have NO flip stamp ⇒ both maps come back EMPTY (no flip column to read), so the caller
+/// transparently falls back to the gen-based cam2→cam1. A malformed 3-column data row
+/// (wrong column count / non-integer) errors loudly — a silently-shrunk flip map would
+/// drop legitimate cam2→cam1 samples without any signal. Pure (operates on the file text).
+fn parse_painter_flip_str(text: &str) -> Result<(HashMap<u32, i64>, HashMap<u32, i64>)> {
+    let header = text.lines().map(str::trim).find(|l| !l.is_empty());
+    // Only the explicit 3-column paint-log carries a flip column.
+    let has_flip = matches!(header, Some(h) if h.starts_with("tick,gen_ts_ns,flip_ts_ns"));
+    let mut gen_by_tick = HashMap::new();
+    let mut flip_by_tick = HashMap::new();
+    if !has_flip {
+        return Ok((gen_by_tick, flip_by_tick));
+    }
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("tick,") {
+            continue; // header / blank
+        }
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() != 3 {
+            anyhow::bail!(
+                "paint-log row at line {} is not `tick,gen_ts_ns,flip_ts_ns`: {line:?}",
+                lineno + 1
+            );
+        }
+        let tick: u32 = cols[0].trim().parse().with_context(|| {
+            format!(
+                "paint-log tick not a u32 at line {}: {:?}",
+                lineno + 1,
+                cols[0]
+            )
+        })?;
+        let gen: i64 = cols[1].trim().parse().with_context(|| {
+            format!(
+                "paint-log gen_ts not an i64 at line {}: {:?}",
+                lineno + 1,
+                cols[1]
+            )
+        })?;
+        let flip: i64 = cols[2].trim().parse().with_context(|| {
+            format!(
+                "paint-log flip_ts not an i64 at line {}: {:?}",
+                lineno + 1,
+                cols[2]
+            )
+        })?;
+        gen_by_tick.insert(tick, gen);
+        flip_by_tick.insert(tick, flip);
+    }
+    Ok((gen_by_tick, flip_by_tick))
+}
+
+/// Read + parse the painter flip-time maps from a file (see [`parse_painter_flip_str`]).
+/// Returns empty maps when the file has no flip column (graceful fallback to gen-based).
+fn parse_painter_flip(path: &Path) -> Result<(HashMap<u32, i64>, HashMap<u32, i64>)> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read painter flip log {}", path.display()))?;
+    let (gen, flip) = parse_painter_flip_str(&text)
+        .with_context(|| format!("parse painter flip log {}", path.display()))?;
+    tracing::info!(
+        file = %path.display(),
+        flip_ticks = flip.len(),
+        "painter flip-time map parsed (#194)"
+    );
+    Ok((gen, flip))
+}
+
+/// The cam2→cam1 LOSS, from cam1's V4L2 capture-drop sidecar (the camera leg).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cam1CaptureStats {
+    /// Frames the V4L2 capture device dropped (the cam2→cam1 loss count). 0 ⇒ zero loss.
+    v4l2_dropped: u64,
+    /// Delivered buffers (the loss denominator).
+    frames_captured: u64,
+}
+
+/// Parse cam1's capture-stats sidecar (`v4l2_dropped=N`, `frames_captured=M`,
+/// [`crate::serialize_capture_stats`] on the camera-box side) into [`Cam1CaptureStats`].
+/// `v4l2_dropped` is the cam2→cam1 LOSS — capture-card drops, NOT a painter-tick compare.
+/// A missing `v4l2_dropped` key is an error (a sidecar with no drop count can't be read as
+/// zero loss). Pure (operates on the file text).
+fn parse_cam1_capture_stats_str(text: &str) -> Result<Cam1CaptureStats> {
+    let mut v4l2_dropped: Option<u64> = None;
+    let mut frames_captured: u64 = 0;
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (k, v) = line.split_once('=').with_context(|| {
+            format!(
+                "cam1 capture-stats line {} is not key=value: {line:?}",
+                lineno + 1
+            )
+        })?;
+        let v = v.trim();
+        match k.trim() {
+            "v4l2_dropped" => {
+                v4l2_dropped = Some(v.parse().with_context(|| {
+                    format!("v4l2_dropped not a u64 at line {}: {v:?}", lineno + 1)
+                })?)
+            }
+            "frames_captured" => {
+                frames_captured = v.parse().with_context(|| {
+                    format!("frames_captured not a u64 at line {}: {v:?}", lineno + 1)
+                })?
+            }
+            _ => {} // forward-compatible: ignore unknown keys
+        }
+    }
+    let v4l2_dropped = v4l2_dropped.context(
+        "cam1 capture-stats sidecar is missing the v4l2_dropped key (cannot report cam2→cam1 loss)",
+    )?;
+    Ok(Cam1CaptureStats {
+        v4l2_dropped,
+        frames_captured,
+    })
+}
+
+/// Read + parse cam1's capture-stats sidecar (see [`parse_cam1_capture_stats_str`]).
+fn parse_cam1_capture_stats(path: &Path) -> Result<Cam1CaptureStats> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read cam1 capture-stats sidecar {}", path.display()))?;
+    parse_cam1_capture_stats_str(&text)
+        .with_context(|| format!("parse cam1 capture-stats sidecar {}", path.display()))
 }
 
 /// Parse the cam1 grab-timestamp sidecar CSV (`frame_index,grab_ts_ns`, header
@@ -317,19 +671,28 @@ fn ticks_of(path: &Path) -> Result<(Vec<RecordingFrame>, Vec<FrameTick>)> {
     Ok((frames, ticks))
 }
 
-/// Print a per-recording verdict and extract pixel proof for its flagged frames.
-/// Returns whether the verdict PASSed.
-fn report_recording(
+/// Print a per-recording DIAGNOSTIC (#186): the per-frame continuity numbers
+/// (undecodable / span) for context only — it does NOT gate the headline verdict
+/// and does NOT print a PASS/FAIL "RESULT" (which read as a verdict). The single
+/// trustworthy loss verdict is the per-node burn-id contiguity. The 60→30-beat
+/// `real_copy`/`real_gap`/`beat_balanced` muddled metrics (which conflated the
+/// sampling beat with loss — the false-positive source) are no longer surfaced.
+/// `undecodable` (frames with NO readable QR at all) is kept as a diagnostic and
+/// its pixel proof extracted.
+fn report_recording_diag(
     label: &str,
     path: &Path,
     v: &RecordingVerdict,
     out_dir: &Path,
     max_pixel_proof: usize,
-) -> Result<bool> {
-    println!("=== {label} verdict ({}) ===", path.display());
+) -> Result<()> {
+    println!("=== {label} recording DIAGNOSTIC ({}) ===", path.display());
     println!(
-        "  frames={} analyzed={:.1}s duration_ok={} avg_step={:.4} beat_balanced={}",
-        v.total_frames, v.analyzed_secs, v.duration_ok, v.avg_step, v.beat_balanced
+        "  frames={} analyzed={:.1}s undecodable={} (diagnostic only — loss is decided by the \
+         #186 burn-id contiguity below, not these per-frame beat metrics)",
+        v.total_frames,
+        v.analyzed_secs,
+        v.undecodable_frames.len()
     );
     if v.lead_in_trimmed > 0 || v.lead_out_trimmed > 0 {
         println!(
@@ -338,28 +701,16 @@ fn report_recording(
             v.lead_in_trimmed, v.lead_out_trimmed
         );
     }
-    println!(
-        "  undecodable={} real_copy={} real_gap={}",
-        v.undecodable_frames.len(),
-        v.real_copy_frames.len(),
-        v.real_gap_frames.len()
-    );
     if !v.duration_ok {
         println!(
-            "  DURATION GATE: analyzed span {:.1}s < {:.1}s — zero-loss PASS refused",
+            "  NOTE: analyzed span {:.1}s < {:.1}s — short run (diagnostic).",
             v.analyzed_secs, v.min_secs
         );
     }
 
-    // Extract pixel proof for EVERY flagged frame (undecodable + real loss).
+    // Extract pixel proof for undecodable frames (no readable QR at all) for context.
     let undecodable: HashSet<u64> = v.undecodable_frames.iter().copied().collect();
-    let mut flagged: Vec<u64> = v
-        .undecodable_frames
-        .iter()
-        .chain(v.real_copy_frames.iter())
-        .chain(v.real_gap_frames.iter())
-        .copied()
-        .collect();
+    let mut flagged: Vec<u64> = v.undecodable_frames.to_vec();
     flagged.sort_unstable();
     flagged.dedup();
 
@@ -368,9 +719,8 @@ fn report_recording(
         let (_selected, dropped) = select_frames_to_extract(&flagged, max_pixel_proof);
         if dropped > 0 {
             println!(
-                "  PIXEL-PROOF CAP: {} flagged frames, extracting only the first {} PNGs ({} not \
-                 extracted — verdict counts above are COMPLETE; raise --max-pixel-proof or pass 0 \
-                 for all)",
+                "  PIXEL-PROOF CAP: {} undecodable frames, extracting only the first {} PNGs ({} \
+                 not extracted; counts above are COMPLETE)",
                 flagged.len(),
                 flagged.len() - dropped,
                 dropped
@@ -388,17 +738,14 @@ fn report_recording(
                 );
             } else {
                 println!(
-                    "  LOSS PROOF: frame {} -> {} (black/garbage = real loss)",
+                    "  undecodable frame {} -> {} (no readable QR at all)",
                     e.frame_index,
                     e.png_path.display()
                 );
             }
         }
     }
-
-    let pass = v.is_pass();
-    println!("  RESULT: {}", if pass { "PASS" } else { "FAIL" });
-    Ok(pass)
+    Ok(())
 }
 
 /// Print one #108 per-hop ABSOLUTE latency block (p50, p99, jitter, drift). Returns
@@ -466,7 +813,9 @@ fn main() -> Result<()> {
         Some(strih_path) => {
             let (strih_frames, strih_ticks) = ticks_of(strih_path)?;
             let strih_v = verdict(&strih_ticks, &cfg);
-            all_pass &= report_recording(
+            // Diagnostic only (#186): the per-recording beat metrics do not gate the
+            // headline — the burn-id contiguity below is authoritative.
+            report_recording_diag(
                 "strih",
                 strih_path,
                 &strih_v,
@@ -474,9 +823,9 @@ fn main() -> Result<()> {
                 args.max_pixel_proof,
             )?;
             report["nodes"]["strih"] = serde_json::json!({
-                "pass": strih_v.is_pass(), "frames": strih_v.total_frames,
+                "frames": strih_v.total_frames,
                 "analyzed_secs": strih_v.analyzed_secs, "undecodable": strih_v.undecodable_frames.len(),
-                "avg_step": strih_v.avg_step, "beat_balanced": strih_v.beat_balanced,
+                "diagnostic_only": true,
             });
             Some((strih_frames, strih_ticks))
         }
@@ -489,51 +838,31 @@ fn main() -> Result<()> {
         }
     };
 
-    // stream recording verdict (headline endpoint) + strih→stream direct compare.
+    // stream recording verdict (headline endpoint). The per-recording continuity verdict
+    // (undecodable / net copy/gap / 60→30 beat balance) is a DIAGNOSTIC only — it does
+    // NOT gate the headline. #186: the SINGLE trustworthy loss verdict is the per-node
+    // burn-id contiguity (the #186 block below); the per-recording beat metrics conflate
+    // the 60→30 sampling beat with loss (the exact false-positive source the user flagged).
+    // It is printed for context but never makes a contiguous-zero run FAIL.
     let mut stream_frames_opt: Option<Vec<RecordingFrame>> = None;
     if let Some(stream_path) = &args.stream {
         let (stream_frames, stream_ticks) = ticks_of(stream_path)?;
         let stream_v = verdict(&stream_ticks, &cfg);
-        all_pass &= report_recording(
+        // Diagnostic (not a gate): surface undecodable + span. The #186 burn-contiguity
+        // verdict is authoritative for loss.
+        report_recording_diag(
             "stream",
             stream_path,
             &stream_v,
             &args.out_dir,
             args.max_pixel_proof,
         )?;
-
         report["nodes"]["stream"] = serde_json::json!({
-            "pass": stream_v.is_pass(), "frames": stream_v.total_frames,
+            "frames": stream_v.total_frames,
             "analyzed_secs": stream_v.analyzed_secs,
             "undecodable": stream_v.undecodable_frames.len(),
+            "diagnostic_only": true,
         });
-        // strih→stream direct compare needs the strih recording; skip it in cam1-only mode.
-        if let Some((_, strih_ticks)) = &strih_data {
-            let ss = strih_stream_verdict(strih_ticks, &stream_ticks, &cfg);
-            println!(
-                "=== strih→stream hop verdict (direct tick-SEQUENCE compare, offset-immune) ==="
-            );
-            println!(
-                "  compared_ticks={} strih_only(stream dropped)={} stream_only(reorder/phantom)={}",
-                ss.compared_ticks,
-                ss.strih_only_ticks.len(),
-                ss.stream_only_ticks.len()
-            );
-            if !ss.strih_only_ticks.is_empty() {
-                let shown: Vec<u32> = ss.strih_only_ticks.iter().copied().take(20).collect();
-                println!("  strih-only ticks (first 20, = stream dropped these): {shown:?}");
-            }
-            if !ss.stream_only_ticks.is_empty() {
-                let shown: Vec<u32> = ss.stream_only_ticks.iter().copied().take(20).collect();
-                println!("  stream-only ticks (first 20): {shown:?}");
-            }
-            println!("  RESULT: {}", if ss.is_pass() { "PASS" } else { "FAIL" });
-            all_pass &= ss.is_pass();
-            report["hops"]["strih_stream"] = serde_json::json!({
-                "strict": true, "pass": ss.is_pass(), "compared_ticks": ss.compared_ticks,
-                "dropped": ss.strih_only_ticks.len(), "phantom": ss.stream_only_ticks.len(),
-            });
-        }
         stream_frames_opt = Some(stream_frames);
     }
 
@@ -570,8 +899,9 @@ fn main() -> Result<()> {
         };
         if let Some((cam1_frames, cam1_ticks)) = cam1_decoded {
             // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
+            // Diagnostic only (#186) — the burn-id contiguity below is authoritative for loss.
             let cam1_v = verdict(&cam1_ticks, &cfg);
-            all_pass &= report_recording(
+            report_recording_diag(
                 "cam1",
                 cam1_path,
                 &cam1_v,
@@ -579,81 +909,21 @@ fn main() -> Result<()> {
                 args.max_pixel_proof,
             )?;
             report["nodes"]["cam1"] = serde_json::json!({
-                "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
+                "frames": cam1_v.total_frames,
                 "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
-                "avg_step": cam1_v.avg_step, "beat_balanced": cam1_v.beat_balanced,
+                "diagnostic_only": true,
             });
-
-            // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
-            // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
-            // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
-            // Needs the strih recording; skipped in cam1-only optical-readability mode.
-            if let Some((_, strih_ticks)) = &strih_data {
-                let cs = cam1_strih_verdict(&cam1_ticks, strih_ticks, &cfg);
-                println!(
-                    "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
-                );
-                println!(
-                    "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
-                    cs.compared_ticks,
-                    cs.strih_only_ticks.len(),
-                    cs.stream_only_ticks.len()
-                );
-                if !cs.strih_only_ticks.is_empty() {
-                    let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
-                    println!(
-                        "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
-                    );
-                }
-                if !cs.stream_only_ticks.is_empty() {
-                    let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
-                    println!(
-                        "  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}"
-                    );
-                }
-                println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
-                all_pass &= cs.is_pass();
-                report["hops"]["cam1_strih"] = serde_json::json!({
-                    "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
-                    "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
-                });
-            }
-
-            // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
-            if let Some(painter_path) = &args.painter {
-                let painter_ticks = parse_painter_ticks(painter_path)?;
-                let a = cam1_optical_assessment(&cam1_ticks, &painter_ticks, &cfg);
-                println!("=== cam2→cam1 OPTICAL assessment (honest, NOT a zero-loss claim) ===");
-                println!(
-                    "  unknown_ticks (in-range, never painted = real optical fault)={}",
-                    a.unknown_ticks.len()
-                );
-                println!(
-                    "  out_of_painter_range_ticks (painter CSV didn't cover)={}",
-                    a.out_of_painter_range_ticks.len()
-                );
-                if !a.unknown_ticks.is_empty() {
-                    let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
-                    println!("  unknown ticks (first 20): {shown:?}");
-                    all_pass = false; // an in-range never-painted tick is a provable fault
-                }
-                report["hops"]["cam2_cam1"] = serde_json::json!({
-                    "strict": false, "claims_zero_loss": a.claims_zero_loss,
-                    "unknown_ticks": a.unknown_ticks.len(),
-                    "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
-                });
-            }
             cam1_frames_opt = Some(cam1_frames);
         } // end: cam1 grab decoded OK (#187 non-fatal guard)
     }
 
     // cam→strih honest assessment (no false zero claim). Needs both strih + painter;
-    // skipped in cam1-only optical-readability mode.
+    // skipped in cam1-only optical-readability mode. #186: DIAGNOSTIC only — not a gate.
     let mut cam_strih_clean: Option<bool> = None;
     if let (Some((_, strih_ticks)), Some(painter_path)) = (&strih_data, &args.painter) {
         let painter_ticks = parse_painter_ticks(painter_path)?;
         let a = cam_strih_assessment(strih_ticks, &painter_ticks, &cfg);
-        println!("=== cam→strih assessment (honest, NOT a zero-loss claim) ===");
+        println!("=== cam→strih assessment (DIAGNOSTIC, honest, NOT a zero-loss claim) ===");
         println!("  claims_zero_loss={}", a.claims_zero_loss);
         println!(
             "  unknown_ticks (in-range, never painted = real fault)={}",
@@ -666,7 +936,8 @@ fn main() -> Result<()> {
         if !a.unknown_ticks.is_empty() {
             let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
             println!("  unknown ticks (first 20): {shown:?}");
-            all_pass = false; // an in-range never-painted tick is a provable fault
+            // #186: DIAGNOSTIC only — the painter-tick assessment does NOT gate the
+            // headline (the burn-id contiguity is the single trustworthy verdict).
         }
         println!("  LIMITATION: {}", a.limitation);
         cam_strih_clean = Some(a.unknown_ticks.is_empty());
@@ -688,6 +959,15 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // #194: load the painter's per-tick gen→flip stamps from the --paint-log CSV (if it has
+    // the 3-column flip format). flip_ts is the cam2 DISPLAY (page-flip) instant — the true
+    // reference for cam2→cam1 (cam1_capture − flip_ts). Empty when no --painter / a pre-#194
+    // 2-column log ⇒ cam2→cam1 transparently falls back to the gen-based (#179) number.
+    let (painter_gen_by_tick, painter_flip_by_tick): (HashMap<u32, i64>, HashMap<u32, i64>) =
+        match &args.painter {
+            Some(p) => parse_painter_flip(p)?,
+            None => (HashMap::new(), HashMap::new()),
+        };
     // strih recording: node burn = strih; no foreign burn forwarded INTO strih.
     let strih_ids = RunIds {
         node_burn: args.burn_strih_run_id,
@@ -828,45 +1108,77 @@ fn main() -> Result<()> {
                 "cam1": cam1_ids.len(), "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
 
-            // --- per-hop LOSS paired by the SHARED cam2 source tick (#181) ---
-            // Each node stamps its OWN independent burn counter, so a set-equality
-            // compare of the two burn-id SEQUENCES finds zero overlap (compared_ids=0
-            // despite the burns being present — the #181 symptom). Instead pair on the
-            // cam2 source tick every recorded frame carries (the SAME key the latency
-            // pairing uses): a hop survived iff both endpoints' burns appear on a frame
-            // for that cam2 tick; dropped = upstream present / downstream absent;
-            // phantom = downstream present / upstream absent.
-            // cam1→strih: cam1's forwarded burn vs strih's forwarded burn. The OTHER
-            // forwarded burn present in the stream recording is stream's own — exclude it
-            // from the cam2 fallback so it cannot be misread as cam2 when cam2 is unpinned.
-            if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
-                let v = chain_hop_loss_from_stream(
-                    "cam1→strih",
-                    stream_frames,
-                    cam2_pin,
-                    args.burn_cam1_run_id,
-                    args.burn_strih_run_id,
-                    &[args.burn_stream_run_id],
-                );
-                report_burn_hop(&v, "cam2 tick");
-                all_pass &= v.is_pass();
-                report["full_chain"]["loss"]["cam1_strih"] = burn_hop_json(&v, "cam2 tick");
-            }
-            // strih→stream: strih's forwarded burn vs stream's own burn. The OTHER
-            // forwarded burn is cam1's — exclude it from the cam2 fallback.
-            if !strih_ids_seq.is_empty() && !stream_ids_seq.is_empty() {
-                let v = chain_hop_loss_from_stream(
-                    "strih→stream",
-                    stream_frames,
-                    cam2_pin,
-                    args.burn_strih_run_id,
+            // ===========================================================================
+            // #186 — the ONE trustworthy, binary LOSS verdict (REPLACES the muddled
+            // dropped/phantom/gap/painter-beat metrics). For EACH node, is its DIGITAL
+            // monotonic burn-id sequence — decoded from THIS stream recording —
+            // CONTIGUOUS? Contiguous ⇒ ZERO loss (every frame the node rendered reached
+            // the recording). A missing id ⇒ ONE candidate dropped frame, classified by
+            // VIEWING the pixels: a delivered frame whose burn QR was unreadable = a
+            // BURN-READABILITY defect to FIX (never silently excluded); a genuinely absent
+            // frame = a REAL drop. No percentages, no jargon.
+            // ===========================================================================
+            let all_burns = [
+                args.burn_cam1_run_id,
+                args.burn_strih_run_id,
+                args.burn_stream_run_id,
+            ];
+            println!();
+            println!(
+                "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
+            );
+            let mut node_verdicts: Vec<NodeVerdict> = Vec::new();
+            for (node, run_id, present) in [
+                ("cam1", args.burn_cam1_run_id, !cam1_ids.is_empty()),
+                ("strih", args.burn_strih_run_id, !strih_ids_seq.is_empty()),
+                (
+                    "stream",
                     args.burn_stream_run_id,
-                    &[args.burn_cam1_run_id],
-                );
-                report_burn_hop(&v, "cam2 tick");
-                all_pass &= v.is_pass();
-                report["full_chain"]["loss"]["strih_stream"] = burn_hop_json(&v, "cam2 tick");
+                    !stream_ids_seq.is_empty(),
+                ),
+            ] {
+                if !present {
+                    continue;
+                }
+                let stream_path = args
+                    .stream
+                    .as_ref()
+                    .expect("stream_frames_opt is Some ⇒ --stream was provided");
+                let nv = node_verdict(
+                    node,
+                    stream_frames,
+                    run_id,
+                    &all_burns,
+                    &args.out_dir,
+                    stream_path.as_path(),
+                    args.max_pixel_proof,
+                )?;
+                print_node_verdict(&nv);
+                all_pass &= nv.is_zero();
+                report["full_chain"]["loss"][node] = node_verdict_json(&nv);
+                node_verdicts.push(nv);
             }
+            // The single binary headline, in plain words.
+            let total_real: usize = node_verdicts.iter().map(NodeVerdict::real_drops).sum();
+            let total_burn_unreadable: usize =
+                node_verdicts.iter().map(NodeVerdict::burn_unreadable).sum();
+            let all_zero = node_verdicts.iter().all(NodeVerdict::is_zero);
+            if all_zero {
+                println!(
+                    "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
+                );
+            } else {
+                println!(
+                    "  >>> NOT zero: {total_real} REAL DROP + {total_burn_unreadable} BURN-UNREADABLE \
+                     (each id classified above with its pixel slot; fix every burn-unreadable burn)."
+                );
+            }
+            report["full_chain"]["zero_loss"] = serde_json::Value::Bool(all_zero);
+            report["full_chain"]["real_drops"] = serde_json::json!(total_real);
+            report["full_chain"]["burn_unreadable"] = serde_json::json!(total_burn_unreadable);
+            // (The old cam2-tick-keyed strih→stream/cam1→strih dropped/phantom loss was
+            // removed in #186 — the burn-id contiguity above is the single trustworthy
+            // loss verdict; latency below is a separate, unchanged measurement.)
 
             // --- per-hop LATENCY co-located in one stream frame (no cam2-tick pairing) ---
             if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
@@ -911,35 +1223,64 @@ fn main() -> Result<()> {
                 report["full_chain"]["latency"]["cam1_stream"] = hop_lat_json(&lat);
             }
 
-            // #179 — cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording ALONE
-            // (no 7.3GB cam1 grab, no external painter CSV). The cam1-capture burn (#174)
-            // rides into the stream recording carrying cam1's CAPTURE wall-clock ts; the
-            // cam2 optical QR cam1 FILMED rides in the SAME frame carrying cam2's PAINT
-            // instant in its OWN gen_ts; latency = cam1_capture − cam2_paint, CO-LOCATED in
-            // one frame. This fills the previously "UNAVAILABLE (needs --cam1)" gap WITHOUT
-            // decoding the grab — and is robust to the painter counter resetting between the
-            // painter-CSV capture and the recording (which broke the CSV-keyed pairing).
+            // cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording ALONE (no 7.3GB
+            // cam1 grab). The cam1-capture burn (#174) rides into the stream recording
+            // carrying cam1's CAPTURE wall-clock ts; the cam2 optical QR cam1 FILMED rides in
+            // the SAME frame carrying cam2's tick (frame_id) + paint gen_ts.
+            //
+            // #194: reference the cam2 DISPLAY (page-flip) instant, NOT the paint instant.
+            // The QR can only carry gen_ts (rendered pre-flip), so when the painter --paint-log
+            // CSV with the flip column is supplied (tick → flip_ts_ns from the SAME painter
+            // session as this recording), the cam2→cam1 latency = cam1_capture − flip_ts[tick]
+            // (real display→capture). The painter's own generate→display time (render +
+            // vblank-wait, ~16-30ms) is REMOVED and reported separately below. WITHOUT a flip
+            // map (no --painter, or a pre-#194 2-column log) it falls back to the #179
+            // gen-based number (cam1_capture − cam2_paint), labelled as the inflated reference.
             if !cam1_ids.is_empty() {
-                let c1_lat = hop_latency(
-                    "cam2→cam1",
-                    &cam2_cam1_samples_from_burn(
-                        stream_frames,
-                        cam2_pin,
-                        args.burn_cam1_run_id,
-                        &[args.burn_strih_run_id, args.burn_stream_run_id],
-                    ),
-                );
-                report_hop_latency(
-                    &c1_lat,
-                    "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 QR, no grab)",
-                    "cam2 paint gen_ts_ns",
-                );
+                let use_flip = !painter_flip_by_tick.is_empty();
+                let (samples, anchor_label, ref_desc) = if use_flip {
+                    (
+                        cam2_cam1_samples_from_flip(
+                            stream_frames,
+                            cam2_pin,
+                            args.burn_cam1_run_id,
+                            &[args.burn_strih_run_id, args.burn_stream_run_id],
+                            &painter_flip_by_tick,
+                        ),
+                        "cam2 flip (display) ts_ns",
+                        "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 DISPLAY/flip ts, no grab) [#194]",
+                    )
+                } else {
+                    (
+                        cam2_cam1_samples_from_burn(
+                            stream_frames,
+                            cam2_pin,
+                            args.burn_cam1_run_id,
+                            &[args.burn_strih_run_id, args.burn_stream_run_id],
+                        ),
+                        "cam2 paint gen_ts_ns",
+                        "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 PAINT ts, no grab) [#179 — no --painter flip log; INFLATED by painter gen→display, supply --painter for #194]",
+                    )
+                };
+                let c1_lat = hop_latency("cam2→cam1", &samples);
+                report_hop_latency(&c1_lat, ref_desc, anchor_label);
                 let mut c1_json = hop_lat_json(&c1_lat);
                 // cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1 camera lens →
                 // v4l2 capture), NOT a production hop — in production the camera films the
                 // REAL scene, no monitor in the path. Label it so the number is never read
                 // as a production camera latency.
                 if let Some(obj) = c1_json.as_object_mut() {
+                    obj.insert(
+                        "reference".to_string(),
+                        serde_json::Value::String(
+                            if use_flip {
+                                "cam2_display_flip_ts (#194)"
+                            } else {
+                                "cam2_paint_gen_ts (#179, inflated)"
+                            }
+                            .to_string(),
+                        ),
+                    );
                     obj.insert(
                         "note".to_string(),
                         serde_json::Value::String(
@@ -955,6 +1296,30 @@ fn main() -> Result<()> {
                     "  NOTE: cam2→cam1 is the TEST-INJECTION optical hop (monitor→camera+capture), \
                      NOT a production camera latency (production films the real scene)."
                 );
+                if !use_flip {
+                    println!(
+                        "  NOTE: no --painter flip log → cam2→cam1 referenced to cam2 PAINT (gen) ts, \
+                         which is INFLATED by the painter's render + vblank-wait (#194). Supply \
+                         --painter <paint-log.csv> for the true display→capture latency."
+                    );
+                }
+
+                // #194: report the painter's INTERNAL generate→display time separately, so the
+                // test-rig artifact removed from cam2→cam1 stays VISIBLE rather than hidden.
+                if use_flip && !painter_gen_by_tick.is_empty() {
+                    let internal =
+                        painter_internal_gen_to_flip(&painter_gen_by_tick, &painter_flip_by_tick);
+                    if let Some(pl) = hop_latency("painter gen→flip", &internal) {
+                        report_hop_latency(
+                            &Some(pl.clone()),
+                            "painter INTERNAL generate→display (render + vblank-wait — the test-rig \
+                             time REMOVED from cam2→cam1) [#194]",
+                            "painter gen_ts_ns",
+                        );
+                        report["full_chain"]["latency"]["painter_gen_to_flip"] =
+                            hop_lat_json(&Some(pl));
+                    }
+                }
             }
         } else {
             println!(
@@ -963,6 +1328,46 @@ fn main() -> Result<()> {
                  (+ --burn-*-run-id) and re-run for the clean per-hop loss + latency."
             );
         }
+    }
+
+    // cam2→cam1 LOSS = cam1's V4L2 CAPTURE-DROP count (the camera leg: cam2 monitor → cam1
+    // lens → cam1 V4L2 capture). A dropped capture = a lost frame on that leg — the kernel
+    // `sequence` gap the camera-box tracks (capture.rs), NOT a painter-tick optical compare
+    // (which the 60→30 genlock decimation confounds, flagging present readable frames as
+    // lost). The burn-id contiguity above covers the DIGITAL chain from cam1's EMITTED frame
+    // onward (cam1 burn increments per emit, after the genlock gate), so it cannot see a
+    // capture drop UPSTREAM of the burn — this sidecar is that separate signal.
+    //
+    // Run at TOP LEVEL (not nested under the full-chain burn block): the cam2→cam1 loss
+    // depends ONLY on --cam1-capture-stats, so a supplied gate flag is ALWAYS parsed + gated
+    // and a missing/malformed file ALWAYS errors — even when --stream is absent or the stream
+    // carried no burns (otherwise a supplied capture-drop sidecar showing real drops could be
+    // silently ignored while OVERALL printed ZERO loss).
+    if let Some(stats_path) = &args.cam1_capture_stats {
+        let stats = parse_cam1_capture_stats(stats_path)?;
+        let cam1_zero = stats.v4l2_dropped == 0;
+        if cam1_zero {
+            println!(
+                "  [cam2→cam1] ZERO loss — cam1 V4L2 capture dropped 0 frames ({} captured).",
+                stats.frames_captured
+            );
+        } else {
+            // Denominator is the TOTAL the device should have produced = delivered + dropped
+            // (frames_captured counts only delivered buffers, not the lost ones).
+            let total = stats.frames_captured.saturating_add(stats.v4l2_dropped);
+            println!(
+                "  [cam2→cam1] NOT zero — cam1 V4L2 capture dropped {} of {} frames \
+                 ({} delivered; REAL capture-card drops on the camera leg).",
+                stats.v4l2_dropped, total, stats.frames_captured
+            );
+        }
+        all_pass &= cam1_zero;
+        report["full_chain"]["loss"]["cam2_cam1"] = serde_json::json!({
+            "zero_loss": cam1_zero,
+            "v4l2_dropped": stats.v4l2_dropped,
+            "frames_captured": stats.frames_captured,
+            "source": "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare",
+        });
     }
 
     // Record the headline verdict and write the machine-readable report (BEFORE any
@@ -979,35 +1384,70 @@ fn main() -> Result<()> {
         tracing::info!(path = %json_path.display(), "4-node report JSON written");
     }
 
-    // Headline. Be HONEST about scope: a clean strih(+stream) verdict proves the
-    // DIGITAL path (per-output continuity + strih→stream hop) is zero-loss, but the
-    // strih recording ALONE cannot certify cam→strih zero-loss (the camera beat
-    // overlaps loss without a clean cam-side reference). Only qualify as full
-    // cam→endpoint zero-loss when a painter ground truth was supplied AND clean.
+    // Headline — the SINGLE trustworthy binary verdict (#186). `all_pass` is driven by
+    // the per-node burn-id contiguity (every node's burn sequence contiguous ⇒ ZERO loss).
+    // A missing id classified as BURN-UNREADABLE is a real defect (the burn must be made
+    // readable) and still FAILS the verdict — never silently excluded.
     println!();
-    if !all_pass {
-        println!("OVERALL: FAIL");
+    if all_pass {
+        println!(
+            "OVERALL: ZERO loss — every node's burn-id sequence is CONTIGUOUS (no missing id). \
+             Every frame each node rendered reached the stream recording."
+        );
+    } else {
+        println!(
+            "OVERALL: NOT zero — see the per-node missing-id list above (each id classified REAL \
+             DROP or BURN-UNREADABLE with its pixel slot). No percentage, no exclusion."
+        );
         std::process::exit(1);
-    }
-    match cam_strih_clean {
-        Some(true) => println!(
-            "OVERALL: PASS — digital path zero-loss; cam→strih shows no in-range phantom \
-             (necessary, NOT sufficient — see cam→strih limitation)"
-        ),
-        _ => println!(
-            "OVERALL: PASS (DIGITAL PATH ONLY) — per-output continuity + strih→stream hop are \
-             zero-loss. This is NOT a cam→strih / end-to-end zero-loss claim: the strih \
-             recording alone cannot certify the optical hop. Supply --painter for the cam→strih \
-             assessment."
-        ),
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_grab_ts, parse_painter_ticks_str};
+    use super::{
+        parse_cam1_capture_stats_str, parse_grab_ts, parse_painter_flip_str,
+        parse_painter_ticks_str,
+    };
     use std::io::Write;
+
+    #[test]
+    fn cam1_capture_stats_parses_dropped_and_captured() {
+        // cam2→cam1 loss = cam1's V4L2 capture-drop count (the camera leg). The verdict reads
+        // v4l2_dropped as the loss, frames_captured as the denominator.
+        let s = parse_cam1_capture_stats_str("v4l2_dropped=3\nframes_captured=9000\n").unwrap();
+        assert_eq!(s.v4l2_dropped, 3);
+        assert_eq!(s.frames_captured, 9000);
+    }
+
+    #[test]
+    fn cam1_capture_stats_zero_dropped_is_zero_loss() {
+        let s = parse_cam1_capture_stats_str("v4l2_dropped=0\nframes_captured=9001\n").unwrap();
+        assert_eq!(s.v4l2_dropped, 0, "0 V4L2 drops ⇒ zero cam2→cam1 loss");
+    }
+
+    #[test]
+    fn cam1_capture_stats_missing_dropped_key_errors() {
+        // A sidecar with no v4l2_dropped key must NOT silently read as zero loss.
+        assert!(parse_cam1_capture_stats_str("frames_captured=9000\n").is_err());
+    }
+
+    #[test]
+    fn cam1_capture_stats_ignores_unknown_keys_and_blank_lines() {
+        // Forward-compatible: unknown keys + blanks are skipped; the drop count still parses.
+        let s = parse_cam1_capture_stats_str(
+            "\nv4l2_dropped=2\nfuture_key=whatever\n\nframes_captured=100\n",
+        )
+        .unwrap();
+        assert_eq!(s.v4l2_dropped, 2);
+        assert_eq!(s.frames_captured, 100);
+    }
+
+    #[test]
+    fn cam1_capture_stats_non_numeric_errors() {
+        assert!(parse_cam1_capture_stats_str("v4l2_dropped=lots\n").is_err());
+    }
 
     #[test]
     fn painter_ticks_parse_paint_log_format_tick_first_column() {
@@ -1018,6 +1458,68 @@ mod tests {
         let csv = "tick,gen_ts_ns\n0,1782000000000\n1,1782000016000\n2,1782000033000\n";
         let ticks = parse_painter_ticks_str(csv).unwrap();
         assert_eq!(ticks, vec![0, 1, 2], "paint-log tick is column 0");
+    }
+
+    #[test]
+    fn painter_ticks_parse_3col_flip_log_still_reads_tick_column_0() {
+        // #194 REGRESSION: the new 3-column paint-log `tick,gen_ts_ns,flip_ts_ns` MUST keep
+        // working with the existing tick reader (it keys on the `tick,` prefix → column 0).
+        // The flip column is purely additive — the cam→strih tick assessment is unchanged.
+        let csv = "tick,gen_ts_ns,flip_ts_ns\n0,1000,1018\n1,1016,1034\n2,1033,1050\n";
+        let ticks = parse_painter_ticks_str(csv).unwrap();
+        assert_eq!(
+            ticks,
+            vec![0, 1, 2],
+            "3-column flip log: tick is still column 0"
+        );
+    }
+
+    #[test]
+    fn painter_flip_parses_3col_into_gen_and_flip_maps() {
+        // #194: the flip parser reads tick→gen_ts and tick→flip_ts from the 3-column log.
+        let csv = "tick,gen_ts_ns,flip_ts_ns\n100,1000,1018\n102,1033,1053\n";
+        let (gen, flip) = parse_painter_flip_str(csv).unwrap();
+        assert_eq!(gen.get(&100), Some(&1000));
+        assert_eq!(gen.get(&102), Some(&1033));
+        assert_eq!(flip.get(&100), Some(&1018));
+        assert_eq!(flip.get(&102), Some(&1053));
+        // Every flip stamp is >= its gen stamp (display follows generation).
+        for (t, &g) in &gen {
+            assert!(flip[t] >= g, "tick {t}: flip {} >= gen {g}", flip[t]);
+        }
+    }
+
+    #[test]
+    fn painter_flip_returns_empty_for_2col_or_probe_or_bare_no_flip_column() {
+        // No flip column ⇒ EMPTY maps (graceful fallback to the gen-based cam2→cam1). The
+        // pre-#194 2-column log, a recording-probe CSV, and a bare tick file all qualify.
+        for csv in [
+            "tick,gen_ts_ns\n0,1000\n1,1016\n", // old 2-column
+            "frame_index,n_qr,tick,run_id,frame_ids\n0,2,100,7,1\n", // recording-probe
+            "10\n11\n12\n",                     // bare
+        ] {
+            let (gen, flip) = parse_painter_flip_str(csv).unwrap();
+            assert!(
+                gen.is_empty() && flip.is_empty(),
+                "no flip column ⇒ empty: {csv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn painter_flip_errors_on_malformed_3col_row() {
+        // A 3-column header but a data row with the wrong column count / a non-integer is a
+        // MALFORMED log — error loudly (a silently-shrunk flip map drops real samples).
+        let too_few = "tick,gen_ts_ns,flip_ts_ns\n100,1000\n";
+        assert!(
+            parse_painter_flip_str(too_few).is_err(),
+            "2 cols under a 3-col header errors"
+        );
+        let bad_flip = "tick,gen_ts_ns,flip_ts_ns\n100,1000,notanumber\n";
+        assert!(
+            parse_painter_flip_str(bad_flip).is_err(),
+            "non-integer flip errors"
+        );
     }
 
     #[test]

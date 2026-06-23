@@ -409,6 +409,107 @@ pub fn cam2_cam1_samples_from_burn(
     out
 }
 
+/// #194 — cam2→cam1 OPTICAL-INJECTION latency referenced to the cam2 DISPLAY (page-flip)
+/// instant, NOT the paint instant. This is the trustworthy cam2→cam1 the issue asks for.
+///
+/// [`cam2_cam1_samples_from_burn`] anchors on the cam2 QR's `gen_ts_ns` — the painter's
+/// frame-GENERATION stamp, baked into the QR. But the camera films what is ON SCREEN, and
+/// the frame reaches the screen only after the painter renders it AND the HDMI vblank
+/// page-flip completes — `present()` blocks for that. So `cam1_capture − cam2_gen` includes
+/// the painter's own generate→render→wait-for-vblank time (~16-30ms @ 60Hz), a TEST-RIG
+/// artifact that inflates the optical hop above the true display→capture latency.
+///
+/// The QR cannot carry the post-flip time (it is rendered before the flip), so the painter
+/// LOGS a per-frame flip-complete stamp (`flip_ts_ns`, captured after `present()` returns)
+/// into its `--paint-log` CSV (`tick,gen_ts_ns,flip_ts_ns`, [`serialize_painter_log`]). The
+/// caller passes that `tick → flip_ts_ns` map here. Then, for each stream frame carrying the
+/// co-located cam1-capture burn (capture wall-clock ts) AND the cam2 QR (whose `frame_id` is
+/// the painter tick), the true latency is:
+///
+///   `latency = cam1_burn.gen_ts_ns (capture) − flip_ts_ns[cam2_tick]  (display)`
+///
+/// anchored at the cam2 DISPLAY instant. Both are CLOCK_REALTIME (DanteSync), so this is the
+/// real optical+capture latency of cam1 filming cam2's monitor, with the painter's internal
+/// generate→display time REMOVED (that internal time is reported separately by
+/// [`painter_internal_gen_to_flip`]).
+///
+/// A frame whose cam2 tick has no flip stamp in the map (a different painter session, or the
+/// frame fell outside the logged window) is SKIPPED — never paired against a gen_ts fallback
+/// (that would silently re-introduce the #194 inflation). The cam2 half is the canonical
+/// highest-`frame_id` Vernier half (identical to [`split_payloads`]); `cam2_id`, when set,
+/// pins cam2 exactly so a forwarded foreign burn cannot hijack it. Non-positive stamps are
+/// guarded so a missing stamp can't read as a giant latency.
+pub fn cam2_cam1_samples_from_flip(
+    stream: &[RecordingFrame],
+    cam2_id: Option<u32>,
+    cam1_burn_id: u32,
+    other_burns: &[u32],
+    flip_ts_by_tick: &HashMap<u32, i64>,
+) -> Vec<LatencySample> {
+    let is_cam2 = |run_id: u32| match cam2_id {
+        Some(c) => run_id == c,
+        None => run_id != cam1_burn_id && !other_burns.contains(&run_id),
+    };
+    let mut out = Vec::new();
+    for f in stream {
+        // Co-located in ONE frame: cam1 burn (capture ts) + cam2 QR (its tick = frame_id,
+        // the painter counter). The canonical cam2 half is the highest-frame_id Vernier
+        // half — its frame_id is the tick to look the flip stamp up by.
+        let mut cam2_tick: Option<u32> = None;
+        let mut cam1_cap: Option<i64> = None;
+        for p in &f.payloads {
+            if p.run_id == cam1_burn_id {
+                if p.gen_ts_ns > 0 && cam1_cap.is_none() {
+                    cam1_cap = Some(p.gen_ts_ns);
+                }
+            } else if is_cam2(p.run_id) {
+                match cam2_tick {
+                    Some(t) if t >= p.frame_id => {}
+                    _ => cam2_tick = Some(p.frame_id),
+                }
+            }
+        }
+        if let (Some(cap), Some(tick)) = (cam1_cap, cam2_tick) {
+            // The cam2 DISPLAY (flip-complete) instant for this painter tick. NO gen_ts
+            // fallback: a tick absent from the flip map is skipped, never inflated (#194).
+            if let Some(&flip) = flip_ts_by_tick.get(&tick) {
+                if cap > 0 && flip > 0 {
+                    out.push(LatencySample {
+                        latency_ms: (cap - flip) as f64 / 1_000_000.0,
+                        at_ns: flip,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// #194 — the painter's INTERNAL generate→display time per painted tick: the time from
+/// the QR's `gen_ts_ns` (generation) to its `flip_ts_ns` (on screen). This is the test-rig
+/// artifact that [`cam2_cam1_samples_from_flip`] REMOVES from the cam2→cam1 hop; reporting
+/// it separately keeps it VISIBLE (the painter's render + vblank-wait latency) rather than
+/// hidden inside the optical number. Computed purely from the painter log's two stamps —
+/// `flip - gen` for each tick. A tick missing either stamp, or with `flip < gen` (impossible
+/// on a monotonic clock — a corrupt log), is skipped. Anchored at the gen instant.
+pub fn painter_internal_gen_to_flip(
+    gen_ts_by_tick: &HashMap<u32, i64>,
+    flip_ts_by_tick: &HashMap<u32, i64>,
+) -> Vec<LatencySample> {
+    let mut out = Vec::new();
+    for (tick, &gen) in gen_ts_by_tick {
+        if let Some(&flip) = flip_ts_by_tick.get(tick) {
+            if gen > 0 && flip > 0 && flip >= gen {
+                out.push(LatencySample {
+                    latency_ms: (flip - gen) as f64 / 1_000_000.0,
+                    at_ns: gen,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// strih→stream per-cam2-tick samples: pair the strih and stream recordings by the
 /// cam2 logical tick (`frame_id` of the cam2 QR, common to both outputs), then
 /// `latency = stream_burn.gen_ts_ns − strih_burn.gen_ts_ns`, anchored at the strih
@@ -1653,6 +1754,165 @@ mod tests {
             s[0].at_ns, 1_010_000_000,
             "anchored at the chosen (highest-frame_id) half's paint instant, not the older half"
         );
+    }
+
+    #[test]
+    fn cam2_cam1_from_flip_uses_flip_ts_not_gen_ts_the_194_fix() {
+        // #194: the cam2→cam1 latency must reference the cam2 DISPLAY (page-flip) instant,
+        // NOT the paint (gen) instant. Here the cam2 QR's gen_ts is 1.000s but the painter's
+        // flip-complete for that tick is 1.018s (18ms of render + vblank-wait). cam1 captured
+        // at 1.068s. The TRUE display→capture latency is 1.068 − 1.018 = 50ms. The OLD
+        // gen-based number would be 1.068 − 1.000 = 68ms — INFLATED by the painter's own
+        // generate→display time. This test FAILS if the function ever uses gen_ts.
+        let stream = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 100, 1_000_000_000), // cam2 QR: paint(gen) @ 1.000s (in the QR)
+                    (BURN_RUN_ID_CAM1, 40, 1_068_000_000), // cam1 captured @ 1.068s
+                    (BURN_RUN_ID_STRIH, 80, 1_240_000_000), // forwarded (ignored)
+                    (BURN_RUN_ID_STREAM, 90, 2_300_000_000), // forwarded (ignored)
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (CAM2, 102, 1_033_000_000),            // gen @ 1.033s
+                    (BURN_RUN_ID_CAM1, 41, 1_103_000_000), // captured @ 1.103s
+                ],
+            ),
+        ];
+        // Painter flip-complete map: tick → on-screen instant (gen + ~18/20ms each).
+        let mut flip: HashMap<u32, i64> = HashMap::new();
+        flip.insert(100, 1_018_000_000); // tick 100 on screen 18ms after paint
+        flip.insert(102, 1_053_000_000); // tick 102 on screen 20ms after paint
+        let s = cam2_cam1_samples_from_flip(
+            &stream,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            &[BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM],
+            &flip,
+        );
+        assert_eq!(
+            s.len(),
+            2,
+            "one sample per frame with cam1 burn + a mapped cam2 tick"
+        );
+        assert!(
+            (s[0].latency_ms - 50.0).abs() < 1e-6,
+            "frame 0: cam1 capture 1.068s − cam2 FLIP 1.018s = 50ms (NOT 68ms from gen)"
+        );
+        assert!(
+            (s[1].latency_ms - 50.0).abs() < 1e-6,
+            "frame 1: 1.103s − 1.053s = 50ms (NOT 70ms from gen)"
+        );
+        assert_eq!(
+            s[0].at_ns, 1_018_000_000,
+            "anchored at the cam2 DISPLAY (flip) instant, not the paint instant"
+        );
+        // Cross-check: the gen-based path on the SAME data gives the inflated 68/70ms, so the
+        // flip path is provably NOT just returning the gen number.
+        let g = cam2_cam1_samples_from_burn(
+            &stream,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            &[BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM],
+        );
+        assert!(
+            (g[0].latency_ms - 68.0).abs() < 1e-6 && (s[0].latency_ms < g[0].latency_ms),
+            "flip-based latency (50ms) is strictly LESS than gen-based (68ms) — the #194 \
+             inflation removed"
+        );
+    }
+
+    #[test]
+    fn cam2_cam1_from_flip_skips_tick_with_no_flip_stamp_no_gen_fallback() {
+        // A cam2 tick absent from the flip map (different painter session, or outside the
+        // logged window) is SKIPPED — NEVER paired against a gen_ts fallback (that would
+        // silently re-introduce the #194 inflation). Frame 1's tick 102 has no flip entry.
+        let stream = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 100, 1_000_000_000),
+                    (BURN_RUN_ID_CAM1, 40, 1_050_000_000),
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (CAM2, 102, 1_033_000_000),
+                    (BURN_RUN_ID_CAM1, 41, 1_120_000_000),
+                ],
+            ),
+        ];
+        let mut flip: HashMap<u32, i64> = HashMap::new();
+        flip.insert(100, 1_010_000_000); // only tick 100 mapped
+        let s = cam2_cam1_samples_from_flip(&stream, Some(CAM2), BURN_RUN_ID_CAM1, &[], &flip);
+        assert_eq!(
+            s.len(),
+            1,
+            "only the mapped tick 100 yields a sample; 102 is skipped"
+        );
+        assert!(
+            (s[0].latency_ms - 40.0).abs() < 1e-6,
+            "1.050s − flip 1.010s = 40ms"
+        );
+    }
+
+    #[test]
+    fn cam2_cam1_from_flip_skips_zero_stamps() {
+        // A 0-sentinel on the capture stamp OR a 0 flip stamp is guarded so a missing stamp
+        // can never read as a giant latency.
+        let stream = vec![
+            multi(0, &[(CAM2, 100, 1_000_000_000), (BURN_RUN_ID_CAM1, 40, 0)]), // 0 capture
+            multi(
+                1,
+                &[
+                    (CAM2, 102, 1_033_000_000),
+                    (BURN_RUN_ID_CAM1, 41, 1_120_000_000),
+                ],
+            ),
+        ];
+        let mut flip: HashMap<u32, i64> = HashMap::new();
+        flip.insert(100, 1_010_000_000);
+        flip.insert(102, 0); // 0 flip stamp → skip
+        let s = cam2_cam1_samples_from_flip(&stream, Some(CAM2), BURN_RUN_ID_CAM1, &[], &flip);
+        assert!(
+            s.is_empty(),
+            "0 capture and 0 flip are both guarded → no sample"
+        );
+    }
+
+    #[test]
+    fn painter_internal_gen_to_flip_is_flip_minus_gen() {
+        // #194: the painter's INTERNAL generate→display time, reported separately so the
+        // render + vblank-wait artifact removed from cam2→cam1 stays VISIBLE. flip − gen.
+        let mut gen: HashMap<u32, i64> = HashMap::new();
+        gen.insert(100, 1_000_000_000);
+        gen.insert(102, 1_033_000_000);
+        gen.insert(104, 1_066_000_000);
+        let mut flip: HashMap<u32, i64> = HashMap::new();
+        flip.insert(100, 1_018_000_000); // +18ms
+        flip.insert(102, 1_053_000_000); // +20ms
+                                         // tick 104 has NO flip entry → skipped (no half-sample)
+        let mut s = painter_internal_gen_to_flip(&gen, &flip);
+        s.sort_by_key(|x| x.at_ns);
+        assert_eq!(s.len(), 2, "only ticks with BOTH stamps contribute");
+        assert!((s[0].latency_ms - 18.0).abs() < 1e-6);
+        assert!((s[1].latency_ms - 20.0).abs() < 1e-6);
+        assert_eq!(s[0].at_ns, 1_000_000_000, "anchored at the gen instant");
+    }
+
+    #[test]
+    fn painter_internal_gen_to_flip_skips_corrupt_flip_before_gen() {
+        // flip < gen is impossible on a monotonic clock (a corrupt log) → skipped, never a
+        // negative latency.
+        let mut gen: HashMap<u32, i64> = HashMap::new();
+        gen.insert(1, 2_000_000_000);
+        let mut flip: HashMap<u32, i64> = HashMap::new();
+        flip.insert(1, 1_000_000_000); // BEFORE gen → corrupt → skip
+        assert!(painter_internal_gen_to_flip(&gen, &flip).is_empty());
     }
 
     /// Build a stream frame carrying a cam2 tick plus an arbitrary set of node burns

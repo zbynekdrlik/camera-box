@@ -289,6 +289,19 @@ jobs:
           name: camera-box-linux-amd64
           path: target/release/camera-box
 
+      # The probe/verdict tools (recording-verdict etc.) require --features probe and
+      # are NOT in the appliance binary above. Build + upload recording-verdict so the
+      # #186 trustworthy burn-id contiguity verdict can be run on a recording on the
+      # dev host without a local Tier-0 build (no-local-builds.md).
+      - name: Build probe tools (recording-verdict)
+        run: cargo build --release --features probe --bin recording-verdict
+
+      - name: Upload probe tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-tools-linux-amd64
+          path: target/release/recording-verdict
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest

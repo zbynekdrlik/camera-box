@@ -37,12 +37,21 @@ pub fn qr_origin_y(canvas_h: u32, qh: u32, anchor: VAnchor) -> u32 {
     }
 }
 
-/// Default on-screen size (px) of the cam1-capture burn QR (#174). Small — the cam1
-/// burn lives in the BOTTOM-CENTER gap between the strih (bottom-left) and stream
-/// (bottom-right) ~300px DistroAV burns, and below the top optical dual-QR, so all
-/// four marks stay non-overlapping in the composited stream recording. 200px keeps a
-/// low-EC-H module count well clear of the ~300px corner burns on a 1920×1080 frame.
-pub const CAM1_BURN_QR_PX: u32 = 200;
+/// Default on-screen size (px) of the cam1-capture burn QR (#174, enlarged in #186).
+/// The cam1 burn lives in the BOTTOM-CENTER gap between the strih (bottom-left) and
+/// stream (bottom-right) corner burns, and below the top optical dual-QR. It is burned
+/// at the cam1 CAPTURE resolution (≈1920×1080) and then RIDES through NDI → strih →
+/// the stream box's 4K upscale, where a too-small burn went SOFT and rqrr missed it
+/// (#186 — the cam1 bottom-center burn was the worst, 14 of 22 misses at 200px).
+///
+/// 320px is the largest that keeps the bottom-CENTER burn fully clear of the top dual-QR:
+/// bottom-anchored, its top row sits at `h - CAM1_BURN_BOTTOM_MARGIN_PX - 320` = 736 on a
+/// 1080-tall frame, below the top dual-QR's bottom (~724 at qr_size 700) — a real gap. The
+/// 60% bigger modules (vs 200px) survive the 4K upscale so rqrr decodes EVERY frame's burn
+/// (the #186 strict-zero gate requires it: a burn that does not decode is a defect, never
+/// excluded). The bottom-center gap is ≈1240px wide (between the ~400px corner burns), so
+/// 320px has ample horizontal clearance from both.
+pub const CAM1_BURN_QR_PX: u32 = 320;
 
 /// Bottom-edge clearance (px) for the cam1 burn — its bottom row sits this far above the
 /// frame bottom so it never bleeds off the visible raster after the downstream
@@ -655,11 +664,11 @@ mod tests {
 
     #[test]
     fn cam1_burn_lands_bottom_center_clear_of_top_dualqr_and_bottom_corner_burns() {
-        // The four-mark non-overlap contract on a 1920×1080 stream frame:
+        // The four-mark non-overlap contract on a 1920×1080 stream frame (#186 enlarged):
         //   top dual-QR band : y ∈ [TOP_MARGIN_PX, TOP_MARGIN_PX + 700)
-        //   strih burn       : bottom-LEFT  ~300×300 corner
-        //   stream burn      : bottom-RIGHT ~300×300 corner
-        //   cam1 burn        : bottom-CENTER, must miss all three.
+        //   strih burn       : bottom-LEFT  ~302×302 corner (DistroAV qr_px 0.28×1080, enlarged)
+        //   stream burn      : bottom-RIGHT ~302×302 corner
+        //   cam1 burn        : bottom-CENTER ~320×320, must miss all three.
         let (w, h) = (1920u32, 1080u32);
         let qpx = CAM1_BURN_QR_PX;
         // Use the real rendered QR size (quiet zone may round up past qpx).
@@ -687,8 +696,10 @@ mod tests {
             "cam1 burn top {cam1_t} must be below the top dual-QR band bottom {dual_band_bottom}"
         );
 
-        // Vs the bottom-corner burns (~300px squares anchored bottom-left / bottom-right).
-        let corner = 320u32; // generous DistroAV burn box (300 + slack)
+        // Vs the bottom-corner burns (#186: ~302px squares = 0.28×1080, anchored bottom-left /
+        // bottom-right with a 40px edge margin, so the corner box occupies x ∈ [0, margin+302)
+        // on the left and [w-margin-302, w) on the right).
+        let corner = 40u32 + 302u32; // DistroAV burn margin (40) + canvas-relative qr_px (302)
         let strih_right = corner; // bottom-left burn occupies x ∈ [0, corner)
         let stream_left = w - corner; // bottom-right burn occupies x ∈ [w-corner, w)
         assert!(

@@ -197,6 +197,88 @@ def _find_prod_genlock_input(ws, host, upstream_ndi_name):
         return None, {}
 
 
+# STATE key under which a prod input's pre-test genlock_preload is saved so teardown can
+# restore it (#183). One entry per host: {"input": <name>, "preload": <prod value>}.
+_TEST_PRELOAD_STATE_KEY = "test_preload_saved"
+
+
+def _force_test_preload(ws, host, upstream, test_preload, state):
+    """#183: FORCE the recorded prod GENLOCK input's genlock_preload to `test_preload` (1)
+    for the test recording window, and SAVE its prior prod value into `state[host]` so
+    teardown restores it. Production audio-sync uses a deep preload (≈31 ≈ 1s video delay)
+    that is IRRELEVANT noise for the lowest-latency zero-loss TEST — at preload=1 the test
+    measures the TRUE genlock hop (~33ms) instead of the prod audio-delay.
+
+    Touches ONLY the genlock_preload of the one certified prod input feeding this scene
+    (found by ndi_source_name == upstream), nothing else — the #63/#149 locked baseline
+    (genlock_fifo/ndi_sync/ndi_bw_mode/latency) is left exactly as prod has it. Best-effort:
+    a read/find failure logs a warning and leaves prod untouched (the test then measures
+    prod's preload, the prior behaviour) rather than aborting. Returns True iff it forced.
+
+    Mutates `state` in place and persists it (so a crash between force and teardown still
+    leaves the saved value on disk for a later teardown to restore)."""
+    if not upstream:
+        return False
+    inp_name, prod_s = _find_prod_genlock_input(ws, host, upstream)
+    if not inp_name:
+        sys.stderr.write(
+            f"[obs] {host}: #183 WARN no certified prod genlock input for upstream "
+            f"'{upstream}'; leaving prod genlock_preload untouched (test measures prod's "
+            f"preload, not {test_preload})\n"
+        )
+        return False
+    prod_preload = prod_s.get("genlock_preload")
+    if prod_preload == test_preload:
+        sys.stderr.write(
+            f"[obs] {host}: #183 prod input '{inp_name}' already at genlock_preload="
+            f"{test_preload}; nothing to force\n"
+        )
+        # Still record that we did NOT change it (so teardown won't wrongly restore).
+        host_state = state.setdefault(host, {})
+        host_state.pop(_TEST_PRELOAD_STATE_KEY, None)
+        _save_state(state)
+        return False
+    # Save the prod value FIRST + persist, THEN force — so a crash after the force still has
+    # the saved value on disk for teardown to restore.
+    host_state = state.setdefault(host, {})
+    host_state[_TEST_PRELOAD_STATE_KEY] = {"input": inp_name, "preload": prod_preload}
+    _save_state(state)
+    _rpc(ws, "SetInputSettings", {
+        "inputName": inp_name,
+        "inputSettings": {"genlock_preload": test_preload},
+        "overlay": True,
+    }, ignore_err=True)
+    sys.stderr.write(
+        f"[obs] {host}: #183 FORCED prod input '{inp_name}' genlock_preload "
+        f"{prod_preload} -> {test_preload} for the test (will restore on teardown)\n"
+    )
+    return True
+
+
+def _restore_test_preload(ws, host, state):
+    """#183: restore the prod input's genlock_preload saved by _force_test_preload (called
+    from teardown). No-op when nothing was forced. Best-effort; clears the STATE entry so a
+    re-run never double-restores."""
+    host_state = state.get(host, {})
+    saved = host_state.get(_TEST_PRELOAD_STATE_KEY)
+    if not saved:
+        return
+    inp_name = saved.get("input")
+    preload = saved.get("preload")
+    if inp_name and preload is not None:
+        _rpc(ws, "SetInputSettings", {
+            "inputName": inp_name,
+            "inputSettings": {"genlock_preload": preload},
+            "overlay": True,
+        }, ignore_err=True)
+        sys.stderr.write(
+            f"[obs] {host}: #183 RESTORED prod input '{inp_name}' genlock_preload -> "
+            f"{preload} (prod audio-sync untouched after the test)\n"
+        )
+    host_state.pop(_TEST_PRELOAD_STATE_KEY, None)
+    _save_state(state)
+
+
 def _diverging_locked_keys(certified, probe, keys=_LOCKED_BASELINE_KEYS):
     """#149 self-verify CORE (pure, testable): given the CERTIFIED prod genlock input's
     settings *certified* and the PROBE ingest's effective settings *probe*, return the
@@ -825,6 +907,13 @@ def prod_scene(a):
         if studio:
             _rpc(ws, "SetCurrentPreviewScene", {"sceneName": target}, ignore_err=True)
 
+        # #183: FORCE the recorded prod genlock input to the test preload (1) so the run
+        # measures the TRUE genlock hop (~33ms), not the prod audio-sync delay (preload≈31 ≈
+        # 1s). Saved + restored on teardown so prod audio-sync is untouched after the test.
+        # Only when --upstream identifies the prod input; omitted ⇒ prod preload left as-is.
+        _force_test_preload(ws, a.host, getattr(a, "upstream", ""),
+                            getattr(a, "test_preload", 1), state)
+
         # #163/#111 FAIL-FAST non-black self-check, POLLED: a black program records all-
         # undecodable and wastes the whole run (#163). But a cold DistroAV receiver (high
         # genlock_preload, re-establishing from idle) needs longer than the old single 2 s
@@ -877,6 +966,10 @@ def teardown(a):
     state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
         ws = _conn(a.host, a.password)
+        # #183: restore the prod input's genlock_preload that prod-scene forced to the test
+        # value, BEFORE anything else, so prod audio-sync is back to its production depth even
+        # if a later step warns. No-op when nothing was forced.
+        _restore_test_preload(ws, a.host, state)
         host_state = state.get(a.host, {})
         prev = host_state.get("prev_scene")
         if prev:
@@ -975,6 +1068,17 @@ def main():
             # prod input when --program-scene is a dedicated temp scene (the stream box).
             p.add_argument("--program-scene", required=True)
             p.add_argument("--ensure-source", default="")
+            # #183: the upstream NDI source-name of the certified prod GENLOCK input this
+            # scene records (e.g. "CAM1 (usb)" on strih, the strih NDI name on stream). When
+            # given with --test-preload, the harness FORCES that prod input's genlock_preload
+            # to the test value for the recording window (saved to STATE, restored on teardown)
+            # so the test measures the TRUE genlock latency (~33ms at preload=1) instead of the
+            # prod audio-sync delay (preload=31 ≈ 1s). Omitted ⇒ prod preload is left untouched.
+            p.add_argument("--upstream", default="")
+            # #183: the genlock_preload to FORCE on the recorded prod input for the test
+            # (default 1 = the true lowest-latency genlock hop). Only applied when --upstream
+            # is also given. The prod value is saved and restored on teardown.
+            p.add_argument("--test-preload", type=int, default=1)
         if name == "setup":
             p.add_argument("--upstream", required=True)
             # #91: mark a TERMINAL box — one whose Main Output feeds NO downstream OBS

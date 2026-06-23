@@ -8,6 +8,7 @@
 //! `reader`, `run`, `multi_reader`.
 
 pub mod analyzer;
+pub mod burn_contiguity;
 pub mod differ;
 pub mod genlock;
 pub mod liveness;

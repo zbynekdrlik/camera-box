@@ -194,7 +194,8 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    chmod +x $CAM1_BURN_BIN; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    v4l2-ctl -d /dev/video0 --set-ctrl=saturation=0,contrast=75 2>/dev/null; \
-   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
+   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID \
+     CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"
 sleep 4  # let cam1's NDI sender (with the burn) become discoverable
 
@@ -222,12 +223,24 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# #183: the upstream NDI source-name of each box's recorded prod GENLOCK input — used to
+# FORCE genlock_preload=1 on it for the test window (then restore prod on teardown), so the
+# run measures the TRUE genlock hop (~33ms) not the prod audio-sync delay (preload≈31 ≈ 1s).
+#   strih records 'NDI cam5' whose source-name is cam1's NDI name ("CAM1 (usb)").
+#   stream records 'NDI 2ME PGM' whose source-name is strih's program NDI name ($STRIH_OUT).
+STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-CAM1 (usb)}"  # cam1's NDI name (NDI cam5 input src)
+TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 for the test
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
+echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
 STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
-  --program-scene "$STRIH_PROG_SCENE")
+  --program-scene "$STRIH_PROG_SCENE" \
+  --upstream "$STRIH_UPSTREAM_NDI" --test-preload "$TEST_PRELOAD")
+# stream's upstream is strih's program NDI name (just printed above) — force preload=1 on the
+# stream box's 'NDI 2ME PGM' input (the prod copy of 31 the issue calls out).
 STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
-  --program-scene "$STREAM_PROG_SCENE" --ensure-source "$STREAM_PROG_SOURCE")
+  --program-scene "$STREAM_PROG_SCENE" --ensure-source "$STREAM_PROG_SOURCE" \
+  --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
@@ -245,7 +258,12 @@ echo "    strih host file:  $STRIH_HOST_PATH"
 echo "    stream host file: $STREAM_HOST_PATH"
 # Stop the painter + the cam1 burn binary so the files finalise (no grab stream to flush).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null; true"
-sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" "pkill -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; true"
+# cam1: send SIGINT (graceful) so camera-box's shutdown handler runs and writes the
+# cam2→cam1 LOSS sidecar (CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt — cam1's V4L2
+# capture-drop count). Give it a moment to flush, then SIGKILL any straggler.
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
+  "pkill -INT -f 'camera-box-burn-' 2>/dev/null; pkill -INT -x camera-box 2>/dev/null; \
+   sleep 3; pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -9 -x camera-box 2>/dev/null; true"
 
 # Download the cam2 painter ground-truth CSV (tick,gen_ts_ns) for the honest cam→strih
 # optical assessment. (cam2→cam1 latency no longer needs it — #179 reads cam2's paint-ts
@@ -253,6 +271,13 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" "pkill -f '
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$PAINTER_IP":/tmp/painter.csv "$PAINTER_CSV" 2>/dev/null || \
   echo "WARNING: could not fetch painter CSV (cam→strih assessment omitted)" >&2
+# Download cam1's V4L2 capture-drop sidecar (the cam2→cam1 LOSS — the camera leg). The
+# verdict reports v4l2_dropped as cam2→cam1 loss (NOT a painter-tick compare). Best effort:
+# absent ⇒ the verdict simply omits the cam2→cam1 loss line.
+CAM1_CAPTURE_STATS="$OUTDIR/cam1-capture-stats.txt"
+sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
+  root@"$CAM1_IP":/tmp/cam1-capture-stats.txt "$CAM1_CAPTURE_STATS" 2>/dev/null || \
+  echo "WARNING: could not fetch cam1 capture-stats sidecar (cam2→cam1 loss omitted)" >&2
 # Download the OBS recordings from the Windows boxes via the win-* MCP / http.server.
 # scp to Windows is DENIED on this rig; the harness expects the caller (the autopilot
 # worker or operator) to pull STRIH_HOST_PATH / STREAM_HOST_PATH via the win-* MCP and
@@ -277,8 +302,9 @@ VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
   --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
   --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
-[ -f "$STREAM_REC" ]    && VERDICT_ARGS+=(--stream "$STREAM_REC")
-[ -f "$PAINTER_CSV" ]   && VERDICT_ARGS+=(--painter "$PAINTER_CSV")
+[ -f "$STREAM_REC" ]          && VERDICT_ARGS+=(--stream "$STREAM_REC")
+[ -f "$PAINTER_CSV" ]         && VERDICT_ARGS+=(--painter "$PAINTER_CSV")
+[ -f "$CAM1_CAPTURE_STATS" ]  && VERDICT_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS")
 
 # #166 LIVENESS-GUARDED verdict run. The verdict decodes multi-GB recordings for
 # minutes; if it CRASHES (the #166 night: it died silently after >1 h) or HANGS, a

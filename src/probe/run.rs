@@ -53,7 +53,7 @@ pub struct RunConfig {
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
-    let emitted: Arc<Mutex<Vec<(u32, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
     let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
 
     let reader_handle = {
@@ -116,8 +116,8 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|(_, gen_ts)| *gen_ts <= cutoff_ns)
-        .map(|(id, _)| *id)
+        .filter(|(_, gen_ts, _flip_ts)| *gen_ts <= cutoff_ns)
+        .map(|(id, _, _)| *id)
         .collect();
     let observed_vec = observed.lock().unwrap().clone();
 
@@ -132,20 +132,29 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     }))
 }
 
-/// Serialize the painter's emitted `(logical_tick, gen_ts_ns)` sequence into the
-/// `recording-verdict --painter` CSV (`tick,gen_ts_ns`, one row per painted
-/// frame, header `tick,gen_ts_ns`). This is the cam→strih GROUND TRUTH (#105):
-/// every logical tick the painter actually displayed. The recording-verdict
-/// parser reads the `tick` column (its CSV reader takes the 1st column of a bare
-/// file or the 3rd of a recording-probe CSV; here `tick` is the 1st column, so a
-/// strih tick the painter never displayed is provably a phantom/corruption).
+/// Serialize the painter's emitted `(logical_tick, gen_ts_ns, flip_ts_ns)` sequence
+/// into the `recording-verdict --painter` CSV (`tick,gen_ts_ns,flip_ts_ns`, one row per
+/// painted frame, header `tick,gen_ts_ns,flip_ts_ns`). This is the cam→strih GROUND
+/// TRUTH (#105) AND the cam2→cam1 flip-time reference (#194):
+///
+/// - `gen_ts_ns` — the frame-GENERATION instant (baked into the QR; necessarily a
+///   pre-flip stamp). Used by the existing tick-column parser (column 0 = `tick`) so the
+///   cam→strih assessment is unchanged.
+/// - `flip_ts_ns` — the page-flip-COMPLETE instant (captured after `present()` returns =
+///   the frame on screen). recording-verdict maps `tick → flip_ts_ns` from this column so
+///   the cam2→cam1 optical latency is `cam1_capture − flip_ts` (real display→capture), NOT
+///   the inflated `cam1_capture − gen_ts` (#194).
+///
+/// The header still starts with `tick,`, so the existing tick-column reader (which keys
+/// on that prefix and takes column 0) keeps working verbatim — the flip column is purely
+/// additive.
 ///
 /// PURE (no I/O): the caller writes the returned string to the chosen path so the
 /// formatting is unit-testable without spawning a painter or a presenter.
-pub fn serialize_painter_log(emitted: &[(u32, i64)]) -> String {
-    let mut s = String::from("tick,gen_ts_ns\n");
-    for (tick, gen_ts_ns) in emitted {
-        s.push_str(&format!("{tick},{gen_ts_ns}\n"));
+pub fn serialize_painter_log(emitted: &[(u32, i64, i64)]) -> String {
+    let mut s = String::from("tick,gen_ts_ns,flip_ts_ns\n");
+    for (tick, gen_ts_ns, flip_ts_ns) in emitted {
+        s.push_str(&format!("{tick},{gen_ts_ns},{flip_ts_ns}\n"));
     }
     s
 }
@@ -156,7 +165,7 @@ pub fn serialize_painter_log(emitted: &[(u32, i64)]) -> String {
 pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
-    let emitted: Arc<Mutex<Vec<(u32, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     let painter_handle = {
         let stop = stop.clone();
@@ -207,13 +216,15 @@ mod tests {
 
     #[test]
     fn painter_log_csv_has_header_and_one_row_per_tick() {
-        // The cam→strih ground-truth CSV: header `tick,gen_ts_ns` then one row per
-        // painted frame, the `tick` first so recording-verdict's --painter reads it
-        // as the painted-tick set (a strih tick absent here = phantom/corruption).
-        let csv = serialize_painter_log(&[(0, 1000), (1, 1016), (2, 1033)]);
+        // The cam→strih ground-truth + cam2→cam1 flip-time CSV (#194): header
+        // `tick,gen_ts_ns,flip_ts_ns` then one row per painted frame. `tick` stays
+        // column 0 (the existing tick-column reader keys on the `tick,` prefix), gen_ts
+        // column 1 (baked into the QR), flip_ts column 2 (on-screen instant, after the
+        // page-flip). flip_ts >= gen_ts in every row (display follows generation).
+        let csv = serialize_painter_log(&[(0, 1000, 1018), (1, 1016, 1034), (2, 1033, 1050)]);
         assert_eq!(
-            csv, "tick,gen_ts_ns\n0,1000\n1,1016\n2,1033\n",
-            "CSV: header + one `tick,gen_ts_ns` row per painted frame"
+            csv, "tick,gen_ts_ns,flip_ts_ns\n0,1000,1018\n1,1016,1034\n2,1033,1050\n",
+            "CSV: header + one `tick,gen_ts_ns,flip_ts_ns` row per painted frame"
         );
     }
 
@@ -221,6 +232,20 @@ mod tests {
     fn painter_log_empty_is_header_only() {
         // No painted frames ⇒ just the header (never an empty file the parser can't
         // distinguish from a missing log).
-        assert_eq!(serialize_painter_log(&[]), "tick,gen_ts_ns\n");
+        assert_eq!(serialize_painter_log(&[]), "tick,gen_ts_ns,flip_ts_ns\n");
+    }
+
+    #[test]
+    fn painter_log_carries_flip_ts_distinct_from_gen_ts() {
+        // #194 REGRESSION: the flip column must be the THIRD field and carry the
+        // flip-complete instant, distinct from gen_ts — proving the CSV preserves the
+        // on-screen reference the cam2→cam1 latency needs (not just the gen_ts). A
+        // serializer that dropped flip_ts (the pre-#194 2-column format) fails here.
+        let csv = serialize_painter_log(&[(7, 2_000_000, 2_016_000)]);
+        let row = csv.lines().nth(1).unwrap();
+        let cols: Vec<&str> = row.split(',').collect();
+        assert_eq!(cols.len(), 3, "row must be tick,gen_ts_ns,flip_ts_ns");
+        assert_eq!(cols[2], "2016000", "column 2 is the flip-complete ts");
+        assert_ne!(cols[1], cols[2], "flip_ts is a distinct stamp from gen_ts");
     }
 }
