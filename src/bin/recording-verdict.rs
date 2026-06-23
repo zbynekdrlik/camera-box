@@ -243,6 +243,13 @@ fn report_recording(
         "  frames={} analyzed={:.1}s duration_ok={} avg_step={:.4} beat_balanced={}",
         v.total_frames, v.analyzed_secs, v.duration_ok, v.avg_step, v.beat_balanced
     );
+    if v.lead_in_trimmed > 0 || v.lead_out_trimmed > 0 {
+        println!(
+            "  leading-discard: {} pre-signal (console lead-in) + {} post-signal (teardown) \
+             frames trimmed — NOT counted as undecodable",
+            v.lead_in_trimmed, v.lead_out_trimmed
+        );
+    }
     println!(
         "  undecodable={} real_copy={} real_gap={}",
         v.undecodable_frames.len(),

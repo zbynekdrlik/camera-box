@@ -187,7 +187,27 @@ impl RecordingVerdict {
 ///   named, just enough to account for the deficit.
 /// - exact ⇒ balanced beat, no copy/gap counted.
 pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
-    let total_frames = frames.len();
+    // Leading-discard window (run-163163 regression): a recording always opens with
+    // a few PRE-SIGNAL frames and may close with a few POST-SIGNAL ones. At the front
+    // the painter has not yet taken cam2's monitor (the console is still showing) /
+    // strih's program does not yet carry the QR; at the back the painter/source is
+    // already removed while the recorder is still rolling (teardown). Those frames are
+    // `None` (no QR), but they are NOT pipeline loss — they exist BEFORE/AFTER the
+    // signal does. Trim the leading and trailing run of `None` frames so they are
+    // never counted as undecodable faults nor inflate the analyzed span. An undecodable
+    // hole INSIDE the signal body (between two decodable frames) is untouched and stays
+    // a hard fault — only the pre/post-signal lead-in/out is discarded.
+    let lead_in_trimmed = frames.iter().take_while(|f| f.tick.is_none()).count();
+    let lead_out_trimmed = frames.iter().rev().take_while(|f| f.tick.is_none()).count();
+    // The signal body. When the whole stream is `None` (no signal ever), both runs
+    // cover it and the body is empty — handled below (no decodable frame ⇒ never PASS).
+    let body: &[FrameTick] = if lead_in_trimmed >= frames.len() {
+        &[]
+    } else {
+        &frames[lead_in_trimmed..frames.len() - lead_out_trimmed]
+    };
+
+    let total_frames = body.len();
     let analyzed_secs = if cfg.capture_fps > 0.0 {
         total_frames as f64 / cfg.capture_fps
     } else {
@@ -195,8 +215,10 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
     };
     let duration_ok = analyzed_secs >= cfg.min_secs;
 
-    // Undecodable: any camera frame with no CRC-valid QR. Always a hard fault.
-    let undecodable_frames: Vec<u64> = frames
+    // Undecodable: any camera frame with no CRC-valid QR WITHIN the signal body
+    // (interior holes only — the pre/post-signal lead-in/out is already trimmed).
+    // Always a hard fault.
+    let undecodable_frames: Vec<u64> = body
         .iter()
         .filter(|f| f.tick.is_none())
         .map(|f| f.frame_index)
@@ -215,7 +237,7 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
     // (we never bridge a step across a None — that hole is already a hard fault).
     let mut steps: Vec<(u64, i64)> = Vec::new(); // (frame_index of the LATER frame, step)
     let mut prev: Option<u32> = None;
-    for f in frames {
+    for f in body {
         match (prev, f.tick) {
             (Some(p), Some(t)) => {
                 steps.push((f.frame_index, t as i64 - p as i64));
@@ -300,8 +322,8 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
         undecodable_frames,
         real_copy_frames,
         real_gap_frames,
-        lead_in_trimmed: 0,
-        lead_out_trimmed: 0,
+        lead_in_trimmed,
+        lead_out_trimmed,
     }
 }
 
