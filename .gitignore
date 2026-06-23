@@ -51,3 +51,8 @@ dist-136/
 # Session-local deploy staging (#105/#150 grab-record validation)
 dist-150/
 deploy-150/
+
+# Session-local Windows genlock-build artifact download (#111 burn DLL deploy)
+winartifact/
+deploy-111/
+dist-111/

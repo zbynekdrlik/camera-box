@@ -1,7 +1,7 @@
 //! Render a payload to a centered QR on a white BGRA canvas, and decode a payload
 //! from a grayscale image.
 
-use crate::probe::luma::{bgra_to_luma, crop_center, crop_center_luma, uyvy_to_luma};
+use crate::probe::luma::{bgra_to_luma, crop_center_luma, crop_top, uyvy_to_luma};
 use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
@@ -115,7 +115,7 @@ pub fn render_qr_dual_bgra(
         half,
         left,
         qr_size,
-        VAnchor::Center,
+        VAnchor::Top,
     );
     blit_qr_bgra(
         &mut canvas,
@@ -125,7 +125,7 @@ pub fn render_qr_dual_bgra(
         canvas_w - half,
         right,
         qr_size,
-        VAnchor::Center,
+        VAnchor::Top,
     );
     canvas
 }
@@ -312,13 +312,13 @@ pub fn decode_capture_dual(
         _ => uyvy_to_luma(data, width, height, stride),
     };
     // One full-width band tall enough to hold both QRs, then a single downscaled rqrr pass
-    // over both. The #111 dual-QR is TOP-anchored (render_qr_dual_bgra → VAnchor::Center, so
+    // over both. The #111 dual-QR is TOP-anchored (render_qr_dual_bgra → VAnchor::Top, so
     // the strih/stream bottom-corner burns never overlap it), so crop from the TOP — a
     // centered crop would miss the now-top QRs. The live multitap tap passes
     // roi = qr_size + 120, tall enough to cover the top margin + the full QR. crop_top
     // clamps the requested size to the image.
     let band_h = roi.min(height);
-    let band = crop_center(&full, width, band_h);
+    let band = crop_top(&full, width, band_h);
     let band = if band.width() > DUAL_BAND_WIDTH {
         let nh = (band.height() * DUAL_BAND_WIDTH / band.width()).max(1);
         image::imageops::resize(

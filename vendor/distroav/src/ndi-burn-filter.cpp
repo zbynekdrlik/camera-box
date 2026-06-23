@@ -46,6 +46,7 @@
 #include "burn-payload.hpp"
 #include "burn-clock.hpp"
 #include "burn-qr.hpp"
+#include "burn-geom.hpp"
 
 #include <graphics/graphics.h>
 #include <util/platform.h>
@@ -81,6 +82,7 @@ struct burn_filter {
 	uint32_t run_id;
 	bool enabled; // OBS_BURN_QR present -> burn; else transparent pass-through
 	uint32_t qr_px;
+	burn_geom::Corner corner; // this node's bottom corner (strih=left, stream=right)
 
 	// Per-render monotonic frame counter.
 	uint32_t frame_id;
@@ -121,9 +123,33 @@ static uint32_t resolve_qr_px()
 		if (end && *end == '\0' && v >= 64 && v <= 4096)
 			return (uint32_t)v;
 	}
-	return 700u;
+	return 300u;
 }
 
+// This node's bottom corner. OBS_BURN_CORNER ("left"/"bl"/"bottom-left" → bottom-left;
+// "right"/"br"/"bottom-right" → bottom-right) overrides; otherwise it defaults FROM the
+// run_id (strih default run_id → bottom-left, stream default run_id → bottom-right) so the
+// existing per-node env (OBS_BURN_RUN_ID) keeps the corners distinct with no new env on the
+// boxes. A custom run_id with no OBS_BURN_CORNER falls back to bottom-left.
+static burn_geom::Corner resolve_corner(uint32_t run_id)
+{
+	const char *env = getenv("OBS_BURN_CORNER");
+	if (env && *env) {
+		if (env[0] == 'r' || env[0] == 'R')
+			return burn_geom::Corner::BottomRight;
+		if (env[0] == 'l' || env[0] == 'L')
+			return burn_geom::Corner::BottomLeft;
+		// "bl"/"br"/"bottom-left"/"bottom-right": disambiguate on the 2nd char.
+		if (env[0] == 'b' && (env[1] == 'r' || env[1] == 'R'))
+			return burn_geom::Corner::BottomRight;
+		if (env[0] == 'b' && (env[1] == 'l' || env[1] == 'L'))
+			return burn_geom::Corner::BottomLeft;
+	}
+	// No explicit corner: derive from the reserved per-node run_id.
+	if (run_id == BURN_RUN_ID_DEFAULT_STREAM)
+		return burn_geom::Corner::BottomRight;
+	return burn_geom::Corner::BottomLeft; // strih default + any custom run_id
+}
 
 static const char *burn_filter_getname(void *)
 {
@@ -144,12 +170,14 @@ static void *burn_filter_create(obs_data_t *, obs_source_t *source)
 	f->run_id = resolve_run_id();
 	f->enabled = resolve_enabled();
 	f->qr_px = resolve_qr_px();
+	f->corner = resolve_corner(f->run_id);
 	f->frame_id = 0;
 
 	obs_log(LOG_INFO,
-		"[burn] filter created: enabled=%s run_id=%u qr_px=%u (env OBS_BURN_QR=%s, "
-		"OBS_BURN_RUN_ID default %u/%u strih/stream)",
+		"[burn] filter created: enabled=%s run_id=%u qr_px=%u corner=%s (env OBS_BURN_QR=%s, "
+		"OBS_BURN_RUN_ID default %u/%u strih/stream → bottom-left/bottom-right)",
 		f->enabled ? "yes" : "no(pass-through)", f->run_id, f->qr_px,
+		f->corner == burn_geom::Corner::BottomRight ? "bottom-right" : "bottom-left",
 		f->enabled ? "set" : "unset", BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM);
 	return f;
 }
@@ -244,14 +272,19 @@ static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t w, uint32_t h)
 	const int64_t gen_ts_ns = burn_clock::gen_ts_ns(fps);
 	const std::string payload = burn_payload::encode(f->run_id, fid, gen_ts_ns);
 
-	// Bottom strip: vertically centered at h - qr_px/2 - margin, horizontally centered.
+	// Place the burn in this node's bottom corner with 40px edge clearance.
 	const uint32_t margin = 40;
-	uint32_t band_cy = (h > f->qr_px / 2 + margin) ? (h - f->qr_px / 2 - margin) : (h / 2);
-	burn_qr::render(buf, w * 4, w, h, payload, 0, w, band_cy, f->qr_px);
+	const burn_geom::Placement pl =
+		burn_geom::corner_placement(w, h, f->corner, f->qr_px, margin);
+	burn_qr::render(buf, w * 4, w, h, payload, pl.band_x, pl.band_w, pl.band_cy, pl.square_px);
 
 	if ((fid % 300u) == 0u) // throttled: one log line / ~10s @ 30fps
-		obs_log(LOG_INFO, "[burn] burned QR run_id=%u frame_id=%u gen_ts_ns=%lld (%.3f fps)",
-			f->run_id, fid, (long long)gen_ts_ns, fps);
+		obs_log(LOG_INFO,
+			"[burn] burned QR run_id=%u frame_id=%u gen_ts_ns=%lld corner=%s "
+			"band_x=%u band_cy=%u px=%u (%.3f fps)",
+			f->run_id, fid, (long long)gen_ts_ns,
+			f->corner == burn_geom::Corner::BottomRight ? "BR" : "BL", pl.band_x,
+			pl.band_cy, pl.square_px, fps);
 }
 
 static void burn_filter_videorender(void *data, gs_effect_t *)

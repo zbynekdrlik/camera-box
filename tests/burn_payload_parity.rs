@@ -726,6 +726,21 @@ fn burn_filter_source_is_vendored_and_wired() {
         "{BURN_FILTER}: the OBS_BURN_QR_PX size override is gone — the rig can no longer \
          tune the NDI-survivable QR size. #111 reverted."
     );
+    // (#111 4-corner layout) The burn MUST be placed in this node's bottom CORNER via the
+    // shared corner geometry, NOT the old full-width center-bottom strip — otherwise the
+    // strih + stream burns overlap each other (strih→stream 0 paired frames) and the camera
+    // dual-QR. Guard the corner-placement call + per-node corner resolution.
+    assert!(
+        flt.contains("burn_geom::corner_placement"),
+        "{BURN_FILTER}: the burn no longer uses burn_geom::corner_placement — it would draw \
+         a center-bottom strip that overlaps the other node's burn and the camera QR (the \
+         #111 readability/0-paired-frames bug). #111 4-corner layout reverted."
+    );
+    assert!(
+        flt.contains("OBS_BURN_CORNER") || flt.contains("Corner::BottomRight"),
+        "{BURN_FILTER}: the per-node bottom corner (strih=left, stream=right) is gone — both \
+         nodes would burn into the same corner and overlap. #111 reverted."
+    );
     // It renders the target then draws the QR (the texrender/stage pattern, or a
     // texture overlay) — assert it actually renders the source through, not replaces it.
     assert!(
@@ -742,6 +757,23 @@ fn burn_filter_source_is_vendored_and_wired() {
         "{BURN_FILTER}: the output draw is not sRGB-correct (gs_get_linear_srgb + \
          gs_effect_set_texture_srgb missing) — the burned program video would be \
          color-shifted in the recording (review C1)."
+    );
+}
+
+#[test]
+fn burn_geom_header_is_vendored() {
+    // The #111 4-corner placement geometry must stay vendored + freestanding so the burn
+    // filter and the parity test share ONE tested corner-placement implementation. A
+    // subtree pull (#44) that drops it would revert the no-overlap layout.
+    let geom = squish(&vendor_file("vendor/distroav/src/burn-geom.hpp"));
+    assert!(
+        geom.contains("namespace burn_geom") && geom.contains("corner_placement"),
+        "vendor/distroav/src/burn-geom.hpp: the #111 corner-placement geometry is missing — \
+         the burn would fall back to a center strip that overlaps the other QRs."
+    );
+    assert!(
+        geom.contains("BottomLeft") && geom.contains("BottomRight"),
+        "vendor/distroav/src/burn-geom.hpp: the per-node bottom corners are gone."
     );
 }
 
