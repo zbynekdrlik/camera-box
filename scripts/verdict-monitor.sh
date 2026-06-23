@@ -88,10 +88,15 @@ read_marker_code() {
   [ -f "$EXIT_MARKER" ] || return 1
   local raw
   raw="$(cat "$EXIT_MARKER" 2>/dev/null)"
-  raw="${raw//[[:space:]]/}" # strip surrounding whitespace/newline only
-  # Must be a non-empty run of digits and nothing else (rejects "", "12\n3", "abc").
+  # Trim LEADING and TRAILING whitespace only (the wrapper's `echo "$?"` adds a
+  # trailing newline). Interior whitespace is NOT stripped — "1 2" must be REJECTED
+  # as corrupt, not silently collapsed to "12".
+  raw="${raw#"${raw%%[![:space:]]*}"}" # strip leading ws
+  raw="${raw%"${raw##*[![:space:]]}"}" # strip trailing ws
+  # Must be a non-empty run of digits and nothing else (rejects "", "1 2", "12\n3",
+  # "abc", "12x").
   case "$raw" in
-    "" | *[!0-9]*) return 1 ;;
+    "" | *[![:digit:]]*) return 1 ;;
     *) printf '%s' "$raw"; return 0 ;;
   esac
 }

@@ -255,6 +255,29 @@ fn non_numeric_marker_on_dead_process_is_not_a_false_pass() {
 }
 
 #[test]
+fn interior_space_marker_is_rejected_not_collapsed() {
+    // Defensive: a corrupt marker like "1 2" (interior space) must be REJECTED, not
+    // silently collapsed to "12" — otherwise a garbled write could yield a plausible
+    // wrong exit code. With a dead process this falls to the DEAD path (126).
+    let dir = scratch("interior-space");
+    let output = dir.join("verdict.out");
+    let marker = dir.join("verdict.exit");
+    std::fs::write(&output, "x\n").unwrap();
+    std::fs::write(&marker, "1 2").unwrap();
+
+    let mut child = spawn_silent_sleeper();
+    let pid = child.id();
+    child.kill().ok();
+    child.wait().ok();
+
+    let (code, stdout, stderr) = run_monitor(pid, &output, &marker, "300", "1");
+    assert_eq!(
+        code, 126,
+        "interior-space marker must be rejected (DEAD), not collapsed to a code\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn marker_with_trailing_whitespace_parses_the_code() {
     // The e2e wrapper writes `echo "$?" > MARKER`, which appends a newline. A
     // complete numeric code with trailing whitespace must parse correctly.
