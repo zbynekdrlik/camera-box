@@ -368,6 +368,101 @@ pub fn strih_stream_samples(
     out
 }
 
+/// strih→stream per-hop latency from the STREAM recording ALONE (#111 PART A).
+///
+/// The whole point of the #111 render-time burn is that the STREAM recording self-contains
+/// every stamp needed for the strih→stream hop: strih burns its render timestamp into the
+/// program it sends, that burn RIDES THROUGH into stream's program, and stream burns its OWN
+/// render timestamp on top. So a single stream-recorded frame carries, for one optical
+/// instant: cam2's QR (forwarded, for the canonical tick key) + strih's burn (forwarded) +
+/// stream's burn. The hop is then `stream_burn.gen_ts_ns − strih_burn.gen_ts_ns` on the
+/// shared DanteSync wall clock — NO separate strih recording, NO network record_start, NO
+/// idx/30. This is the dispatch's "whole per-hop analysis from the single stream recording".
+///
+/// Pairing key is the canonical cam2 Vernier tick (`max_by_key(frame_id)` half), identical to
+/// [`burn_by_cam2_tick`] / [`split_payloads`], so the strih-burn and stream-burn for the SAME
+/// optical instant are matched even though rqrr returns the QRs in arbitrary grid order. Per
+/// tick the EARLIEST (smallest `gen_ts_ns`) burn on EACH side is the deterministic
+/// representative (the 60→30 oversample can place one tick on several recorded frames) — the
+/// same min-keep rule [`burn_by_cam2_tick`] uses, so no capture-position bias. A frame missing
+/// either burn, the cam2 key, or carrying a non-positive stamp is skipped — never a wrong
+/// number. Requires the strih burn to be FORWARDED into the stream program (the #111 PROBE
+/// scene chains strih's burned program into stream); when it is not present the result is
+/// empty and the caller falls back to [`strih_stream_samples`] (the two-recording method).
+pub fn strih_stream_samples_from_stream(
+    stream: &[RecordingFrame],
+    cam2_id: Option<u32>,
+    strih_burn_id: u32,
+    stream_burn_id: u32,
+) -> Vec<LatencySample> {
+    // Per canonical cam2 tick, the earliest strih-burn and earliest stream-burn seen in
+    // stream's own frames. cam2 selection: pinned id if given, else any non-burn payload.
+    let is_cam2 = |run_id: u32| match cam2_id {
+        Some(c) => run_id == c,
+        None => run_id != strih_burn_id && run_id != stream_burn_id,
+    };
+    let mut strih_by_tick: HashMap<u32, i64> = HashMap::new();
+    let mut stream_by_tick: HashMap<u32, i64> = HashMap::new();
+    for f in stream {
+        // Canonical cam2 tick = the highest-frame_id cam2 half in this frame.
+        let mut cam2_tick: Option<u32> = None;
+        let mut strih_ts: Option<i64> = None;
+        let mut stream_ts: Option<i64> = None;
+        for p in &f.payloads {
+            if p.run_id == strih_burn_id {
+                if p.gen_ts_ns > 0 && strih_ts.is_none() {
+                    strih_ts = Some(p.gen_ts_ns);
+                }
+            } else if p.run_id == stream_burn_id {
+                if p.gen_ts_ns > 0 && stream_ts.is_none() {
+                    stream_ts = Some(p.gen_ts_ns);
+                }
+            } else if is_cam2(p.run_id) {
+                cam2_tick = Some(match cam2_tick {
+                    Some(t) if t >= p.frame_id => t,
+                    _ => p.frame_id,
+                });
+            }
+        }
+        let Some(tick) = cam2_tick else { continue };
+        if let Some(ts) = strih_ts {
+            strih_by_tick
+                .entry(tick)
+                .and_modify(|e| {
+                    if ts < *e {
+                        *e = ts;
+                    }
+                })
+                .or_insert(ts);
+        }
+        if let Some(ts) = stream_ts {
+            stream_by_tick
+                .entry(tick)
+                .and_modify(|e| {
+                    if ts < *e {
+                        *e = ts;
+                    }
+                })
+                .or_insert(ts);
+        }
+    }
+
+    let mut ticks: Vec<u32> = stream_by_tick.keys().copied().collect();
+    ticks.sort_unstable();
+    let mut out = Vec::new();
+    for tick in ticks {
+        if let (Some(&strih_ts), Some(&stream_ts)) =
+            (strih_by_tick.get(&tick), stream_by_tick.get(&tick))
+        {
+            out.push(LatencySample {
+                latency_ms: (stream_ts - strih_ts) as f64 / 1_000_000.0,
+                at_ns: strih_ts,
+            });
+        }
+    }
+    out
+}
+
 /// Build `canonical cam2 tick → this node's burn gen_ts_ns` for one recording.
 ///
 /// The key is the canonical Vernier tick from [`split_payloads`] (`max_by_key(frame_id)`),
@@ -1000,5 +1095,104 @@ mod tests {
     #[test]
     fn empty_samples_yield_no_hop() {
         assert!(hop_latency("x", &[]).is_none());
+    }
+
+    /// Build a stream-recorded frame carrying all three payloads the #111 PROBE chain
+    /// puts into one stream frame: cam2 (forwarded), strih burn (forwarded), stream burn.
+    fn stream_frame_3(
+        idx: u64,
+        cam2: Option<(u32, u32)>, // (run_id, frame_id/tick)
+        strih_burn: Option<i64>,  // strih render gen_ts_ns
+        stream_burn: Option<i64>, // stream render gen_ts_ns
+    ) -> RecordingFrame {
+        let mut payloads = Vec::new();
+        if let Some((r, t)) = cam2 {
+            payloads.push(Payload {
+                run_id: r,
+                frame_id: t,
+                gen_ts_ns: 1, // cam2 paint stamp; not used by the strih→stream hop
+            });
+        }
+        if let Some(g) = strih_burn {
+            payloads.push(Payload {
+                run_id: BURN_RUN_ID_STRIH,
+                frame_id: idx as u32,
+                gen_ts_ns: g,
+            });
+        }
+        if let Some(g) = stream_burn {
+            payloads.push(Payload {
+                run_id: BURN_RUN_ID_STREAM,
+                frame_id: idx as u32,
+                gen_ts_ns: g,
+            });
+        }
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index: idx,
+            payloads,
+            tick,
+        }
+    }
+
+    #[test]
+    fn strih_stream_from_stream_alone_is_stream_burn_minus_strih_burn_per_cam2_tick() {
+        // The #111 PART-A deliverable: the stream recording ALONE carries the forwarded
+        // strih burn + stream's own burn, paired by the forwarded cam2 tick. The hop is
+        // stream_burn − strih_burn on the shared wall clock — no separate strih recording.
+        let stream = vec![
+            // cam2 tick 200: strih rendered at t=1.000s, stream at t=1.040s → 40 ms.
+            stream_frame_3(
+                0,
+                Some((CAM2, 200)),
+                Some(1_000_000_000),
+                Some(1_040_000_000),
+            ),
+            // cam2 tick 202: strih t=1.033s, stream t=1.066s → 33 ms.
+            stream_frame_3(
+                1,
+                Some((CAM2, 202)),
+                Some(1_033_000_000),
+                Some(1_066_000_000),
+            ),
+        ];
+        let s = strih_stream_samples_from_stream(
+            &stream,
+            Some(CAM2),
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+        );
+        assert_eq!(s.len(), 2, "both ticks pair strih+stream burn");
+        assert!((s[0].latency_ms - 40.0).abs() < 1e-6, "tick 200 = +40 ms");
+        assert!((s[1].latency_ms - 33.0).abs() < 1e-6, "tick 202 = +33 ms");
+        assert_eq!(
+            s[0].at_ns, 1_000_000_000,
+            "anchored at the strih render instant"
+        );
+    }
+
+    #[test]
+    fn strih_stream_from_stream_skips_frames_missing_a_burn_or_cam2() {
+        // A frame without the forwarded strih burn (the chain not wired) or without a
+        // cam2 key contributes nothing — never a wrong number, the caller then falls
+        // back to the two-recording method.
+        let stream = vec![
+            stream_frame_3(0, Some((CAM2, 300)), None, Some(1_040_000_000)), // no strih burn
+            stream_frame_3(1, None, Some(1_000_000_000), Some(1_050_000_000)), // no cam2 key
+            stream_frame_3(
+                2,
+                Some((CAM2, 304)),
+                Some(1_066_000_000),
+                Some(1_099_000_000),
+            ), // good
+        ];
+        let s = strih_stream_samples_from_stream(
+            &stream,
+            Some(CAM2),
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+        );
+        assert_eq!(s.len(), 1, "only the fully-stamped frame yields a sample");
+        assert!((s[0].latency_ms - 33.0).abs() < 1e-6);
     }
 }
