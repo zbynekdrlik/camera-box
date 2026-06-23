@@ -368,6 +368,20 @@ async fn run_capture_loop(
         None => None,
     };
 
+    // cam2→cam1 LOSS sidecar (TEST mode): when CAMERA_BOX_CAPTURE_STATS is set to a path,
+    // the capture loop writes cam1's V4L2 capture-drop count there on shutdown. The
+    // recording-verdict reads it as the cam2→cam1 loss (the camera leg — a dropped capture
+    // = a lost frame), NOT a painter-tick optical compare. UNSET ⇒ no sidecar (production).
+    let capture_stats_path: Option<String> = std::env::var("CAMERA_BOX_CAPTURE_STATS")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(p) = &capture_stats_path {
+        tracing::info!(
+            "cam2→cam1 LOSS sidecar active (TEST MODE): cam1 V4L2 capture-drop stats → {} on shutdown",
+            p
+        );
+    }
+
     // Spawn capture loop in blocking task - minimal overhead for lowest latency
     let running_capture = Arc::clone(&running);
     let capture_handle = tokio::task::spawn_blocking(move || {
@@ -501,6 +515,20 @@ async fn run_capture_loop(
         // and sidecar rows reach dev1/disk.
         if let Some(rec) = grab_recorder.take() {
             rec.finish();
+        }
+        // cam2→cam1 LOSS sidecar: write cam1's final V4L2 capture-drop count so the verdict
+        // reports the camera-leg loss (a non-fatal best effort — a write failure only means
+        // the verdict can't report cam2→cam1 loss, it must not abort the shutdown).
+        if let Some(path) = &capture_stats_path {
+            match capture.write_capture_stats(path) {
+                Ok(()) => tracing::info!(
+                    "cam2→cam1 LOSS sidecar written: {} ({} V4L2 capture-drops over {} captured)",
+                    path,
+                    capture.dropped_captures(),
+                    capture.frames_captured()
+                ),
+                Err(e) => tracing::error!("failed to write cam2→cam1 capture-stats sidecar: {e:#}"),
+            }
         }
     });
 

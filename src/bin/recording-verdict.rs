@@ -30,16 +30,16 @@ use camera_box::probe::recording::{
     DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
-    burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam_strih_samples,
-    chain_hop_samples_from_stream, hop_latency, strih_stream_samples,
-    strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM,
-    BURN_RUN_ID_STRIH,
+    burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip,
+    cam_strih_samples, chain_hop_samples_from_stream, hop_latency, painter_internal_gen_to_flip,
+    strih_stream_samples, strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
 use clap::Parser;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -67,6 +67,12 @@ struct Args {
     /// CSV of the cam2 painter's displayed ticks (enables the cam→strih assessment).
     #[arg(long)]
     painter: Option<PathBuf>,
+    /// cam1 CAPTURE-STATS sidecar (`v4l2_dropped=N`, `frames_captured=M`) the camera-box
+    /// writes on shutdown — cam1's V4L2 capture-drop count. The verdict reports it as the
+    /// cam2→cam1 LOSS (the camera leg: a dropped capture = a lost frame), NOT a painter-tick
+    /// optical compare (confounded by the 60→30 decimation).
+    #[arg(long)]
+    cam1_capture_stats: Option<PathBuf>,
     /// Directory for pixel-proof PNGs of flagged frames.
     #[arg(long, default_value = "recording-verdict-run")]
     out_dir: PathBuf,
@@ -447,6 +453,142 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
     Ok(ticks)
 }
 
+/// #194 — parse the painter `--paint-log` CSV (`tick,gen_ts_ns,flip_ts_ns`,
+/// [`serialize_painter_log`]) into `(tick → gen_ts_ns, tick → flip_ts_ns)` maps. The
+/// `flip_ts_ns` (page-flip-complete = on-screen instant) is the cam2 DISPLAY reference the
+/// cam2→cam1 latency uses ([`cam2_cam1_samples_from_flip`]); `gen_ts_ns` is kept so the
+/// painter's internal generate→display time can be reported separately
+/// ([`painter_internal_gen_to_flip`]).
+///
+/// Only the 3-column `--paint-log` (header `tick,gen_ts_ns,flip_ts_ns`) carries a flip
+/// column. The older 2-column `tick,gen_ts_ns`, a recording-probe CSV, or a bare tick file
+/// have NO flip stamp ⇒ both maps come back EMPTY (no flip column to read), so the caller
+/// transparently falls back to the gen-based cam2→cam1. A malformed 3-column data row
+/// (wrong column count / non-integer) errors loudly — a silently-shrunk flip map would
+/// drop legitimate cam2→cam1 samples without any signal. Pure (operates on the file text).
+fn parse_painter_flip_str(text: &str) -> Result<(HashMap<u32, i64>, HashMap<u32, i64>)> {
+    let header = text.lines().map(str::trim).find(|l| !l.is_empty());
+    // Only the explicit 3-column paint-log carries a flip column.
+    let has_flip = matches!(header, Some(h) if h.starts_with("tick,gen_ts_ns,flip_ts_ns"));
+    let mut gen_by_tick = HashMap::new();
+    let mut flip_by_tick = HashMap::new();
+    if !has_flip {
+        return Ok((gen_by_tick, flip_by_tick));
+    }
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("tick,") {
+            continue; // header / blank
+        }
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() != 3 {
+            anyhow::bail!(
+                "paint-log row at line {} is not `tick,gen_ts_ns,flip_ts_ns`: {line:?}",
+                lineno + 1
+            );
+        }
+        let tick: u32 = cols[0].trim().parse().with_context(|| {
+            format!(
+                "paint-log tick not a u32 at line {}: {:?}",
+                lineno + 1,
+                cols[0]
+            )
+        })?;
+        let gen: i64 = cols[1].trim().parse().with_context(|| {
+            format!(
+                "paint-log gen_ts not an i64 at line {}: {:?}",
+                lineno + 1,
+                cols[1]
+            )
+        })?;
+        let flip: i64 = cols[2].trim().parse().with_context(|| {
+            format!(
+                "paint-log flip_ts not an i64 at line {}: {:?}",
+                lineno + 1,
+                cols[2]
+            )
+        })?;
+        gen_by_tick.insert(tick, gen);
+        flip_by_tick.insert(tick, flip);
+    }
+    Ok((gen_by_tick, flip_by_tick))
+}
+
+/// Read + parse the painter flip-time maps from a file (see [`parse_painter_flip_str`]).
+/// Returns empty maps when the file has no flip column (graceful fallback to gen-based).
+fn parse_painter_flip(path: &Path) -> Result<(HashMap<u32, i64>, HashMap<u32, i64>)> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read painter flip log {}", path.display()))?;
+    let (gen, flip) = parse_painter_flip_str(&text)
+        .with_context(|| format!("parse painter flip log {}", path.display()))?;
+    tracing::info!(
+        file = %path.display(),
+        flip_ticks = flip.len(),
+        "painter flip-time map parsed (#194)"
+    );
+    Ok((gen, flip))
+}
+
+/// The cam2→cam1 LOSS, from cam1's V4L2 capture-drop sidecar (the camera leg).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cam1CaptureStats {
+    /// Frames the V4L2 capture device dropped (the cam2→cam1 loss count). 0 ⇒ zero loss.
+    v4l2_dropped: u64,
+    /// Delivered buffers (the loss denominator).
+    frames_captured: u64,
+}
+
+/// Parse cam1's capture-stats sidecar (`v4l2_dropped=N`, `frames_captured=M`,
+/// [`crate::serialize_capture_stats`] on the camera-box side) into [`Cam1CaptureStats`].
+/// `v4l2_dropped` is the cam2→cam1 LOSS — capture-card drops, NOT a painter-tick compare.
+/// A missing `v4l2_dropped` key is an error (a sidecar with no drop count can't be read as
+/// zero loss). Pure (operates on the file text).
+fn parse_cam1_capture_stats_str(text: &str) -> Result<Cam1CaptureStats> {
+    let mut v4l2_dropped: Option<u64> = None;
+    let mut frames_captured: u64 = 0;
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (k, v) = line.split_once('=').with_context(|| {
+            format!(
+                "cam1 capture-stats line {} is not key=value: {line:?}",
+                lineno + 1
+            )
+        })?;
+        let v = v.trim();
+        match k.trim() {
+            "v4l2_dropped" => {
+                v4l2_dropped = Some(v.parse().with_context(|| {
+                    format!("v4l2_dropped not a u64 at line {}: {v:?}", lineno + 1)
+                })?)
+            }
+            "frames_captured" => {
+                frames_captured = v.parse().with_context(|| {
+                    format!("frames_captured not a u64 at line {}: {v:?}", lineno + 1)
+                })?
+            }
+            _ => {} // forward-compatible: ignore unknown keys
+        }
+    }
+    let v4l2_dropped = v4l2_dropped.context(
+        "cam1 capture-stats sidecar is missing the v4l2_dropped key (cannot report cam2→cam1 loss)",
+    )?;
+    Ok(Cam1CaptureStats {
+        v4l2_dropped,
+        frames_captured,
+    })
+}
+
+/// Read + parse cam1's capture-stats sidecar (see [`parse_cam1_capture_stats_str`]).
+fn parse_cam1_capture_stats(path: &Path) -> Result<Cam1CaptureStats> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read cam1 capture-stats sidecar {}", path.display()))?;
+    parse_cam1_capture_stats_str(&text)
+        .with_context(|| format!("parse cam1 capture-stats sidecar {}", path.display()))
+}
+
 /// Parse the cam1 grab-timestamp sidecar CSV (`frame_index,grab_ts_ns`, header
 /// `frame_index,grab_ts_ns`) the `--record-grab` mode writes into a
 /// `frame_index → grab_ts_ns` map. A malformed row (wrong column count, non-integer)
@@ -815,6 +957,15 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // #194: load the painter's per-tick gen→flip stamps from the --paint-log CSV (if it has
+    // the 3-column flip format). flip_ts is the cam2 DISPLAY (page-flip) instant — the true
+    // reference for cam2→cam1 (cam1_capture − flip_ts). Empty when no --painter / a pre-#194
+    // 2-column log ⇒ cam2→cam1 transparently falls back to the gen-based (#179) number.
+    let (painter_gen_by_tick, painter_flip_by_tick): (HashMap<u32, i64>, HashMap<u32, i64>) =
+        match &args.painter {
+            Some(p) => parse_painter_flip(p)?,
+            None => (HashMap::new(), HashMap::new()),
+        };
     // strih recording: node burn = strih; no foreign burn forwarded INTO strih.
     let strih_ids = RunIds {
         node_burn: args.burn_strih_run_id,
@@ -1027,6 +1178,39 @@ fn main() -> Result<()> {
             // removed in #186 — the burn-id contiguity above is the single trustworthy
             // loss verdict; latency below is a separate, unchanged measurement.)
 
+            // cam2→cam1 LOSS = cam1's V4L2 CAPTURE-DROP count (the camera leg: cam2 monitor
+            // → cam1 lens → cam1 V4L2 capture). A dropped capture = a lost frame on that leg.
+            // This is the kernel `sequence` gap the camera-box tracks (capture.rs), NOT a
+            // painter-tick optical compare (which the 60→30 genlock decimation confounds —
+            // it flags present readable frames as lost, the false-positive source). The
+            // burn-id contiguity above covers the DIGITAL chain from cam1's EMITTED frame
+            // onward (cam1 burn increments per emit, after the genlock gate), so it cannot
+            // see a capture drop UPSTREAM of the burn — this sidecar is that separate signal.
+            if let Some(stats_path) = &args.cam1_capture_stats {
+                let stats = parse_cam1_capture_stats(stats_path)?;
+                let cam1_zero = stats.v4l2_dropped == 0;
+                if cam1_zero {
+                    println!(
+                        "  [cam2→cam1] ZERO loss — cam1 V4L2 capture dropped 0 frames \
+                         ({} captured).",
+                        stats.frames_captured
+                    );
+                } else {
+                    println!(
+                        "  [cam2→cam1] NOT zero — cam1 V4L2 capture dropped {} of {} frames \
+                         (REAL capture-card drops on the camera leg).",
+                        stats.v4l2_dropped, stats.frames_captured
+                    );
+                }
+                all_pass &= cam1_zero;
+                report["full_chain"]["loss"]["cam2_cam1"] = serde_json::json!({
+                    "zero_loss": cam1_zero,
+                    "v4l2_dropped": stats.v4l2_dropped,
+                    "frames_captured": stats.frames_captured,
+                    "source": "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare",
+                });
+            }
+
             // --- per-hop LATENCY co-located in one stream frame (no cam2-tick pairing) ---
             if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
                 let lat = hop_latency(
@@ -1070,35 +1254,64 @@ fn main() -> Result<()> {
                 report["full_chain"]["latency"]["cam1_stream"] = hop_lat_json(&lat);
             }
 
-            // #179 — cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording ALONE
-            // (no 7.3GB cam1 grab, no external painter CSV). The cam1-capture burn (#174)
-            // rides into the stream recording carrying cam1's CAPTURE wall-clock ts; the
-            // cam2 optical QR cam1 FILMED rides in the SAME frame carrying cam2's PAINT
-            // instant in its OWN gen_ts; latency = cam1_capture − cam2_paint, CO-LOCATED in
-            // one frame. This fills the previously "UNAVAILABLE (needs --cam1)" gap WITHOUT
-            // decoding the grab — and is robust to the painter counter resetting between the
-            // painter-CSV capture and the recording (which broke the CSV-keyed pairing).
+            // cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording ALONE (no 7.3GB
+            // cam1 grab). The cam1-capture burn (#174) rides into the stream recording
+            // carrying cam1's CAPTURE wall-clock ts; the cam2 optical QR cam1 FILMED rides in
+            // the SAME frame carrying cam2's tick (frame_id) + paint gen_ts.
+            //
+            // #194: reference the cam2 DISPLAY (page-flip) instant, NOT the paint instant.
+            // The QR can only carry gen_ts (rendered pre-flip), so when the painter --paint-log
+            // CSV with the flip column is supplied (tick → flip_ts_ns from the SAME painter
+            // session as this recording), the cam2→cam1 latency = cam1_capture − flip_ts[tick]
+            // (real display→capture). The painter's own generate→display time (render +
+            // vblank-wait, ~16-30ms) is REMOVED and reported separately below. WITHOUT a flip
+            // map (no --painter, or a pre-#194 2-column log) it falls back to the #179
+            // gen-based number (cam1_capture − cam2_paint), labelled as the inflated reference.
             if !cam1_ids.is_empty() {
-                let c1_lat = hop_latency(
-                    "cam2→cam1",
-                    &cam2_cam1_samples_from_burn(
-                        stream_frames,
-                        cam2_pin,
-                        args.burn_cam1_run_id,
-                        &[args.burn_strih_run_id, args.burn_stream_run_id],
-                    ),
-                );
-                report_hop_latency(
-                    &c1_lat,
-                    "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 QR, no grab)",
-                    "cam2 paint gen_ts_ns",
-                );
+                let use_flip = !painter_flip_by_tick.is_empty();
+                let (samples, anchor_label, ref_desc) = if use_flip {
+                    (
+                        cam2_cam1_samples_from_flip(
+                            stream_frames,
+                            cam2_pin,
+                            args.burn_cam1_run_id,
+                            &[args.burn_strih_run_id, args.burn_stream_run_id],
+                            &painter_flip_by_tick,
+                        ),
+                        "cam2 flip (display) ts_ns",
+                        "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 DISPLAY/flip ts, no grab) [#194]",
+                    )
+                } else {
+                    (
+                        cam2_cam1_samples_from_burn(
+                            stream_frames,
+                            cam2_pin,
+                            args.burn_cam1_run_id,
+                            &[args.burn_strih_run_id, args.burn_stream_run_id],
+                        ),
+                        "cam2 paint gen_ts_ns",
+                        "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 PAINT ts, no grab) [#179 — no --painter flip log; INFLATED by painter gen→display, supply --painter for #194]",
+                    )
+                };
+                let c1_lat = hop_latency("cam2→cam1", &samples);
+                report_hop_latency(&c1_lat, ref_desc, anchor_label);
                 let mut c1_json = hop_lat_json(&c1_lat);
                 // cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1 camera lens →
                 // v4l2 capture), NOT a production hop — in production the camera films the
                 // REAL scene, no monitor in the path. Label it so the number is never read
                 // as a production camera latency.
                 if let Some(obj) = c1_json.as_object_mut() {
+                    obj.insert(
+                        "reference".to_string(),
+                        serde_json::Value::String(
+                            if use_flip {
+                                "cam2_display_flip_ts (#194)"
+                            } else {
+                                "cam2_paint_gen_ts (#179, inflated)"
+                            }
+                            .to_string(),
+                        ),
+                    );
                     obj.insert(
                         "note".to_string(),
                         serde_json::Value::String(
@@ -1114,6 +1327,30 @@ fn main() -> Result<()> {
                     "  NOTE: cam2→cam1 is the TEST-INJECTION optical hop (monitor→camera+capture), \
                      NOT a production camera latency (production films the real scene)."
                 );
+                if !use_flip {
+                    println!(
+                        "  NOTE: no --painter flip log → cam2→cam1 referenced to cam2 PAINT (gen) ts, \
+                         which is INFLATED by the painter's render + vblank-wait (#194). Supply \
+                         --painter <paint-log.csv> for the true display→capture latency."
+                    );
+                }
+
+                // #194: report the painter's INTERNAL generate→display time separately, so the
+                // test-rig artifact removed from cam2→cam1 stays VISIBLE rather than hidden.
+                if use_flip && !painter_gen_by_tick.is_empty() {
+                    let internal =
+                        painter_internal_gen_to_flip(&painter_gen_by_tick, &painter_flip_by_tick);
+                    if let Some(pl) = hop_latency("painter gen→flip", &internal) {
+                        report_hop_latency(
+                            &Some(pl.clone()),
+                            "painter INTERNAL generate→display (render + vblank-wait — the test-rig \
+                             time REMOVED from cam2→cam1) [#194]",
+                            "painter gen_ts_ns",
+                        );
+                        report["full_chain"]["latency"]["painter_gen_to_flip"] =
+                            hop_lat_json(&Some(pl));
+                    }
+                }
             }
         } else {
             println!(
@@ -1160,8 +1397,48 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_grab_ts, parse_painter_ticks_str};
+    use super::{
+        parse_cam1_capture_stats_str, parse_grab_ts, parse_painter_flip_str,
+        parse_painter_ticks_str,
+    };
     use std::io::Write;
+
+    #[test]
+    fn cam1_capture_stats_parses_dropped_and_captured() {
+        // cam2→cam1 loss = cam1's V4L2 capture-drop count (the camera leg). The verdict reads
+        // v4l2_dropped as the loss, frames_captured as the denominator.
+        let s = parse_cam1_capture_stats_str("v4l2_dropped=3\nframes_captured=9000\n").unwrap();
+        assert_eq!(s.v4l2_dropped, 3);
+        assert_eq!(s.frames_captured, 9000);
+    }
+
+    #[test]
+    fn cam1_capture_stats_zero_dropped_is_zero_loss() {
+        let s = parse_cam1_capture_stats_str("v4l2_dropped=0\nframes_captured=9001\n").unwrap();
+        assert_eq!(s.v4l2_dropped, 0, "0 V4L2 drops ⇒ zero cam2→cam1 loss");
+    }
+
+    #[test]
+    fn cam1_capture_stats_missing_dropped_key_errors() {
+        // A sidecar with no v4l2_dropped key must NOT silently read as zero loss.
+        assert!(parse_cam1_capture_stats_str("frames_captured=9000\n").is_err());
+    }
+
+    #[test]
+    fn cam1_capture_stats_ignores_unknown_keys_and_blank_lines() {
+        // Forward-compatible: unknown keys + blanks are skipped; the drop count still parses.
+        let s = parse_cam1_capture_stats_str(
+            "\nv4l2_dropped=2\nfuture_key=whatever\n\nframes_captured=100\n",
+        )
+        .unwrap();
+        assert_eq!(s.v4l2_dropped, 2);
+        assert_eq!(s.frames_captured, 100);
+    }
+
+    #[test]
+    fn cam1_capture_stats_non_numeric_errors() {
+        assert!(parse_cam1_capture_stats_str("v4l2_dropped=lots\n").is_err());
+    }
 
     #[test]
     fn painter_ticks_parse_paint_log_format_tick_first_column() {
@@ -1172,6 +1449,68 @@ mod tests {
         let csv = "tick,gen_ts_ns\n0,1782000000000\n1,1782000016000\n2,1782000033000\n";
         let ticks = parse_painter_ticks_str(csv).unwrap();
         assert_eq!(ticks, vec![0, 1, 2], "paint-log tick is column 0");
+    }
+
+    #[test]
+    fn painter_ticks_parse_3col_flip_log_still_reads_tick_column_0() {
+        // #194 REGRESSION: the new 3-column paint-log `tick,gen_ts_ns,flip_ts_ns` MUST keep
+        // working with the existing tick reader (it keys on the `tick,` prefix → column 0).
+        // The flip column is purely additive — the cam→strih tick assessment is unchanged.
+        let csv = "tick,gen_ts_ns,flip_ts_ns\n0,1000,1018\n1,1016,1034\n2,1033,1050\n";
+        let ticks = parse_painter_ticks_str(csv).unwrap();
+        assert_eq!(
+            ticks,
+            vec![0, 1, 2],
+            "3-column flip log: tick is still column 0"
+        );
+    }
+
+    #[test]
+    fn painter_flip_parses_3col_into_gen_and_flip_maps() {
+        // #194: the flip parser reads tick→gen_ts and tick→flip_ts from the 3-column log.
+        let csv = "tick,gen_ts_ns,flip_ts_ns\n100,1000,1018\n102,1033,1053\n";
+        let (gen, flip) = parse_painter_flip_str(csv).unwrap();
+        assert_eq!(gen.get(&100), Some(&1000));
+        assert_eq!(gen.get(&102), Some(&1033));
+        assert_eq!(flip.get(&100), Some(&1018));
+        assert_eq!(flip.get(&102), Some(&1053));
+        // Every flip stamp is >= its gen stamp (display follows generation).
+        for (t, &g) in &gen {
+            assert!(flip[t] >= g, "tick {t}: flip {} >= gen {g}", flip[t]);
+        }
+    }
+
+    #[test]
+    fn painter_flip_returns_empty_for_2col_or_probe_or_bare_no_flip_column() {
+        // No flip column ⇒ EMPTY maps (graceful fallback to the gen-based cam2→cam1). The
+        // pre-#194 2-column log, a recording-probe CSV, and a bare tick file all qualify.
+        for csv in [
+            "tick,gen_ts_ns\n0,1000\n1,1016\n", // old 2-column
+            "frame_index,n_qr,tick,run_id,frame_ids\n0,2,100,7,1\n", // recording-probe
+            "10\n11\n12\n",                     // bare
+        ] {
+            let (gen, flip) = parse_painter_flip_str(csv).unwrap();
+            assert!(
+                gen.is_empty() && flip.is_empty(),
+                "no flip column ⇒ empty: {csv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn painter_flip_errors_on_malformed_3col_row() {
+        // A 3-column header but a data row with the wrong column count / a non-integer is a
+        // MALFORMED log — error loudly (a silently-shrunk flip map drops real samples).
+        let too_few = "tick,gen_ts_ns,flip_ts_ns\n100,1000\n";
+        assert!(
+            parse_painter_flip_str(too_few).is_err(),
+            "2 cols under a 3-col header errors"
+        );
+        let bad_flip = "tick,gen_ts_ns,flip_ts_ns\n100,1000,notanumber\n";
+        assert!(
+            parse_painter_flip_str(bad_flip).is_err(),
+            "non-integer flip errors"
+        );
     }
 
     #[test]

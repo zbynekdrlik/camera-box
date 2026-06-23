@@ -92,12 +92,23 @@ pub fn vernier_ids(tick: u64) -> (u32, u32) {
     (left as u32, right as u32)
 }
 
-/// Paint until `stop` is set. Records `(frame_id, gen_ts_ns)` of every emitted frame.
+/// Paint until `stop` is set. Records `(frame_id, gen_ts_ns, flip_ts_ns)` of every
+/// emitted frame.
+///
+/// `gen_ts_ns` is stamped at frame GENERATION (the top of the iteration) — it is the
+/// value baked into the QR, which is necessarily a pre-flip stamp (the QR is rendered
+/// before the page-flip). `flip_ts_ns` is captured AFTER `present()` returns — for the
+/// vblank-locked KMS presenter that return IS the page-flip-complete event, i.e. the
+/// instant the frame is ACTUALLY ON SCREEN (#194). The cam2→cam1 optical latency must
+/// reference `flip_ts_ns` (real display→capture), NOT `gen_ts_ns`, or it is inflated by
+/// the painter's own generate→render→wait-for-vblank time (~16-30ms @ 60Hz). For the
+/// fbdev presenter `present()` returns immediately, so `flip_ts_ns` is the post-write
+/// instant; it is still >= `gen_ts_ns` (time only moves forward).
 pub fn run_painter(
     params: PaintParams,
     start: Instant,
     stop: Arc<AtomicBool>,
-    emitted: Arc<Mutex<Vec<(u32, i64)>>>,
+    emitted: Arc<Mutex<Vec<(u32, i64, i64)>>>,
 ) -> Result<()> {
     let mut presenter: Box<dyn Presenter> = open_presenter(
         params.presenter,
@@ -142,7 +153,10 @@ pub fn run_painter(
     while !stop.load(Ordering::Relaxed) {
         let gen_ts_ns = clock_ns(start, params.wall_clock);
 
-        let bgra = if params.dual_qr {
+        // The logical id is decided + the QR rendered here (pre-flip); the id is what the
+        // camera reads from the QR. The emitted-log push is DEFERRED until AFTER present()
+        // returns so it can carry the flip-complete timestamp (#194) alongside gen_ts.
+        let (logical_id, bgra) = if params.dual_qr {
             // Vernier anti-blur: LEFT carries the latest EVEN tick, RIGHT the latest ODD
             // tick. Exactly one half changes per refresh — the other is settled (sharp).
             let (l, r) = vernier_ids(refresh_tick);
@@ -157,13 +171,15 @@ pub fn run_painter(
                 frame_id: r,
                 gen_ts_ns,
             };
-            emitted.lock().unwrap().push((logical_id, gen_ts_ns));
-            render_qr_dual_bgra(
-                &left_payload,
-                &right_payload,
-                params.canvas_w,
-                params.canvas_h,
-                params.qr_size,
+            (
+                logical_id,
+                render_qr_dual_bgra(
+                    &left_payload,
+                    &right_payload,
+                    params.canvas_w,
+                    params.canvas_h,
+                    params.qr_size,
+                ),
             )
         } else {
             let payload = Payload {
@@ -171,13 +187,25 @@ pub fn run_painter(
                 frame_id,
                 gen_ts_ns,
             };
-            emitted.lock().unwrap().push((frame_id, gen_ts_ns));
-            render_qr_bgra(&payload, params.canvas_w, params.canvas_h, params.qr_size)
+            (
+                frame_id,
+                render_qr_bgra(&payload, params.canvas_w, params.canvas_h, params.qr_size),
+            )
         };
 
         // For KMS this blocks until the vblank flip completes — that block IS the
         // 1:1 pacing (one new id per HDMI vblank). For fbdev it returns at once.
         presenter.present(&bgra)?;
+        // #194: present() has returned ⇒ the frame is now ON SCREEN (the page-flip
+        // completed for KMS). Stamp the flip-complete instant on the SAME clock domain
+        // as gen_ts so cam2→cam1 = cam1_capture − flip_ts is the true display→capture
+        // latency, not the inflated capture − gen (which includes the painter's own
+        // render + vblank-wait time). flip_ts >= gen_ts always (time only moves forward).
+        let flip_ts_ns = clock_ns(start, params.wall_clock);
+        emitted
+            .lock()
+            .unwrap()
+            .push((logical_id, gen_ts_ns, flip_ts_ns));
         refresh_tick = refresh_tick.wrapping_add(1);
 
         if !params.dual_qr {
@@ -211,6 +239,36 @@ pub fn run_painter(
 #[cfg(test)]
 mod tests {
     use super::vernier_ids;
+    use crate::probe::clock_ns;
+    use std::time::Instant;
+
+    #[test]
+    fn flip_ts_is_taken_after_gen_ts_so_flip_ge_gen() {
+        // #194: gen_ts is stamped at generation (top of the loop, baked into the QR);
+        // flip_ts is stamped AFTER present() returns (the on-screen instant). The painter
+        // takes them in that order on the SAME clock domain, so flip_ts >= gen_ts ALWAYS
+        // (a monotonic clock only moves forward). This locks the ordering contract the
+        // cam2→cam1 flip-based latency relies on; a future refactor that stamped flip
+        // BEFORE present (re-introducing the inflation bug) would break it.
+        let start = Instant::now();
+        for _ in 0..1000 {
+            let gen_ts = clock_ns(start, false); // monotonic domain (Phase-1 path)
+                                                 // (render + present happen between the two stamps in the real loop)
+            let flip_ts = clock_ns(start, false);
+            assert!(
+                flip_ts >= gen_ts,
+                "flip_ts ({flip_ts}) must be >= gen_ts ({gen_ts}) — flip is stamped after \
+                 present() returns; a flip stamped before generation would re-inflate \
+                 cam2→cam1 (#194)"
+            );
+        }
+        // Same invariant must hold on the wall-clock (multi-node #7) domain.
+        for _ in 0..1000 {
+            let gen_ts = clock_ns(start, true);
+            let flip_ts = clock_ns(start, true);
+            assert!(flip_ts >= gen_ts, "flip_ts >= gen_ts on wall clock too");
+        }
+    }
 
     #[test]
     fn vernier_ids_interleave_even_left_odd_right() {

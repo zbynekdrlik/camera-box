@@ -80,6 +80,30 @@ pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
     cur.wrapping_sub(prev).saturating_sub(1)
 }
 
+/// Serialize cam1's V4L2 capture-drop statistics into the cam1-capture-stats SIDECAR the
+/// recording-verdict reads as the cam2→cam1 LOSS (per the trustworthy-measurement rework).
+///
+/// cam2→cam1 is the camera leg: cam2's monitor → cam1's camera lens → cam1's V4L2 capture.
+/// Loss on THIS leg is exactly the capture device dropping frames — the kernel's `sequence`
+/// gap ([`sequence_gap`], cumulative in [`VideoCapture::dropped_captures`]). It is NOT a
+/// painter-tick optical compare (which is confounded by the 60→30 genlock decimation and
+/// flags present readable frames as lost — the false-positive source). The camera-box writes
+/// this one-line-per-key sidecar on shutdown of a burn/test run; the verdict reads it.
+///
+/// Format (plain `key=value`, NO serde_json so the appliance binary stays
+/// serde_json-free):
+///
+/// ```text
+/// v4l2_dropped=<cumulative frames the capture device dropped>
+/// frames_captured=<delivered buffers counted>
+/// ```
+///
+/// PURE (no I/O) so it is unit-testable without a live V4L2 device; the caller writes the
+/// returned string to the sidecar path.
+pub fn serialize_capture_stats(v4l2_dropped: u64, frames_captured: u64) -> String {
+    format!("v4l2_dropped={v4l2_dropped}\nframes_captured={frames_captured}\n")
+}
+
 /// Extract the gray8 (luma) plane from a packed YUYV (YUY2) capture buffer.
 ///
 /// YUYV packs `Y0 U0 Y1 V0` per 4 bytes = 2 pixels: the luma is every EVEN byte
@@ -199,6 +223,10 @@ pub struct VideoCapture {
     last_sequence: Option<u32>,
     /// Cumulative count of frames the capture device dropped over this stream's life.
     dropped_captures: u64,
+    /// Count of delivered buffers (frames the device actually captured) over this
+    /// stream's life. Paired with `dropped_captures` it is the cam2→cam1 LOSS denominator
+    /// the verdict reports (`serialize_capture_stats`).
+    frames_captured: u64,
 }
 
 impl VideoCapture {
@@ -309,6 +337,7 @@ impl VideoCapture {
             frame_rate,
             last_sequence: None,
             dropped_captures: 0,
+            frames_captured: 0,
         })
     }
 
@@ -379,6 +408,7 @@ impl VideoCapture {
             }
         }
         self.last_sequence = Some(seq);
+        self.frames_captured += 1;
     }
 
     /// Total frames the capture device has dropped over this stream's life
@@ -386,6 +416,26 @@ impl VideoCapture {
     /// Surfaced in the periodic streaming report (`main.rs`).
     pub fn dropped_captures(&self) -> u64 {
         self.dropped_captures
+    }
+
+    /// Total delivered buffers (frames the device actually captured) over this stream's
+    /// life. Paired with [`dropped_captures`](Self::dropped_captures) in the
+    /// cam1-capture-stats sidecar that the verdict reads as the cam2→cam1 LOSS.
+    pub fn frames_captured(&self) -> u64 {
+        self.frames_captured
+    }
+
+    /// Write cam1's V4L2 capture-drop statistics to `path` (the cam1-capture-stats sidecar
+    /// the recording-verdict reads as the cam2→cam1 LOSS). Called on shutdown of a burn/test
+    /// run. The format is [`serialize_capture_stats`]. Errors are returned (the caller logs
+    /// + continues — a missing sidecar simply means the verdict can't report cam2→cam1 loss).
+    pub fn write_capture_stats(&self, path: &str) -> Result<()> {
+        std::fs::write(
+            path,
+            serialize_capture_stats(self.dropped_captures, self.frames_captured),
+        )
+        .with_context(|| format!("write cam1 capture-stats sidecar {path}"))?;
+        Ok(())
     }
 
     /// Capture next frame (blocking) - COPIES DATA
@@ -626,6 +676,22 @@ mod tests {
     fn sequence_gap_same_or_no_advance_is_zero() {
         // A duplicate/no-advance (never expected) must not report a giant gap.
         assert_eq!(sequence_gap(10, 10), 0);
+    }
+
+    #[test]
+    fn capture_stats_sidecar_carries_v4l2_dropped_and_frames_captured() {
+        // The cam2→cam1 LOSS sidecar: the verdict reads v4l2_dropped as the cam2→cam1 loss
+        // (capture-card drops), NOT a painter-tick optical compare. frames_captured is the
+        // denominator. Plain key=value (the appliance binary stays serde_json-free).
+        let s = serialize_capture_stats(3, 9000);
+        assert_eq!(s, "v4l2_dropped=3\nframes_captured=9000\n");
+    }
+
+    #[test]
+    fn capture_stats_zero_drops_is_zero_loss() {
+        // Zero V4L2 drops ⇒ ZERO cam2→cam1 loss (every captured frame was delivered).
+        let s = serialize_capture_stats(0, 9001);
+        assert_eq!(s, "v4l2_dropped=0\nframes_captured=9001\n");
     }
 
     #[test]
