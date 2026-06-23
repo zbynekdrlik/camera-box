@@ -171,11 +171,39 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 cam1 burn)"
-# #174: build camera-box WITH --features probe so the cam1-capture render-time QR burn is
-# present (the production artifact stays probe-free / clean; only this TEST binary carries
-# the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
-cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
+# PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
+#   $PROBE_BIN_DIR/camera-box      — PROBE-featured appliance with the #174 cam1 burn
+#   $PROBE_BIN_DIR/frame-probe     — cam2 dual-QR painter
+#   $PROBE_BIN_DIR/recording-verdict — the #186/#198 burn-id contiguity verdict
+# Default: a local Tier-0 release build into target/release (airuleset:build-ok).
+# USE_PREBUILT_PROBE_DIR (#133): point at a directory holding the CI
+# probe-tools-linux-amd64 artifact instead — NO dev1 cargo build (no-local-builds.md).
+# In that artifact the PROBE camera-box is named `camera-box-probe` (so it can never be
+# confused with the clean production camera-box-linux-amd64); the harness symlinks it to
+# the `camera-box` name it deploys.
+PROBE_BIN_DIR="${PROBE_BIN_DIR:-target/release}"
+if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
+  PROBE_BIN_DIR="$USE_PREBUILT_PROBE_DIR"
+  echo "[1/8] USE_PREBUILT_PROBE_DIR=$PROBE_BIN_DIR — using CI-built probe binaries, NO dev1 build (#133)"
+  # Normalise the CI artifact's camera-box-probe → camera-box (the name the deploy uses).
+  if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
+    cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
+  fi
+  for b in camera-box frame-probe recording-verdict; do
+    if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
+      echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
+      echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
+      exit 1
+    fi
+    chmod +x "$PROBE_BIN_DIR/$b" 2>/dev/null || true
+  done
+else
+  echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 cam1 burn)"
+  # #174: build camera-box WITH --features probe so the cam1-capture render-time QR burn is
+  # present (the production artifact stays probe-free / clean; only this TEST binary carries
+  # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
+  cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
+fi
 
 echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
 # #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the cam1-capture
@@ -188,7 +216,7 @@ echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 captur
 # (saturation=0/contrast=75) directly here (the grab path that used to self-apply is gone).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  target/release/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
+  "$PROBE_BIN_DIR"/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
   "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
    chmod +x $CAM1_BURN_BIN; \
@@ -201,7 +229,7 @@ sleep 4  # let cam1's NDI sender (with the burn) become discoverable
 
 echo "[3/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  target/release/frame-probe root@"$PAINTER_IP":/tmp/frame-probe
+  "$PROBE_BIN_DIR"/frame-probe root@"$PAINTER_IP":/tmp/frame-probe
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
   "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
@@ -329,12 +357,16 @@ echo "    verdict output: $VERDICT_OUT (stall-timeout ${VERDICT_STALL_TIMEOUT}s,
 # verdict CRASH still writes a non-zero code (so the monitor fails loud), and a total
 # death (no marker) is caught by the monitor's DEAD path.
 export RUST_LOG="${RUST_LOG:-info}"
-# bash -c body: $0=cwd, $1=marker path, $2.. = verdict args. The single-quoted body is
-# expanded by the INNER bash (SC2016 is expected here), and every path is passed as an
-# argument (no string interpolation), so a path with spaces/quotes is safe.
+# bash -c body: $0=verdict binary (absolute), $1=marker path, $2.. = verdict args. The
+# single-quoted body is expanded by the INNER bash (SC2016 is expected here), and every
+# path is passed as an argument (no string interpolation), so a path with spaces/quotes is
+# safe. The verdict binary comes from $PROBE_BIN_DIR (target/release for a local build, or
+# the downloaded CI probe-tools artifact when USE_PREBUILT_PROBE_DIR is set, #133) —
+# resolved to an absolute path so the inner bash can run it without a cwd assumption.
+VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
 # shellcheck disable=SC2016
-setsid bash -c 'cd "$0" || exit 97; m="$1"; shift; ./target/release/recording-verdict "$@"; echo "$?" > "$m"' \
-  "$(pwd)" "$VERDICT_EXIT_MARKER" "${VERDICT_ARGS[@]}" >"$VERDICT_OUT" 2>&1 &
+setsid bash -c 'v="$0"; m="$1"; shift; "$v" "$@"; echo "$?" > "$m"' \
+  "$VERDICT_BIN" "$VERDICT_EXIT_MARKER" "${VERDICT_ARGS[@]}" >"$VERDICT_OUT" 2>&1 &
 VERDICT_PID=$!
 # Monitor to a terminal state: returns the verdict's own exit code on clean completion,
 # 124 on STALL, 126 on a silent death. Either failure mode aborts the run with a clear

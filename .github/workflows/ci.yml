@@ -289,18 +289,30 @@ jobs:
           name: camera-box-linux-amd64
           path: target/release/camera-box
 
-      # The probe/verdict tools (recording-verdict etc.) require --features probe and
-      # are NOT in the appliance binary above. Build + upload recording-verdict so the
-      # #186 trustworthy burn-id contiguity verdict can be run on a recording on the
-      # dev host without a local Tier-0 build (no-local-builds.md).
-      - name: Build probe tools (recording-verdict)
-        run: cargo build --release --features probe --bin recording-verdict
+      # The probe/verdict tools require --features probe and are NOT in the appliance
+      # binary above. Build + upload ALL THREE binaries the recording-e2e harness needs
+      # so a FULL trustworthy rig run can be driven on the dev host WITHOUT a local
+      # Tier-0 build (no-local-builds.md, #133):
+      #   recording-verdict — the #186/#198 burn-id contiguity verdict (runs on dev1).
+      #   frame-probe       — the cam2 dual-QR painter ground truth (deployed to cam2).
+      #   camera-box        — the PROBE-featured appliance with the #174 cam1-capture
+      #                       burn (deployed to cam1; the clean prod camera-box above has
+      #                       NO burn). Named camera-box-probe in the artifact so it is
+      #                       never confused with the production camera-box-linux-amd64.
+      - name: Build probe tools (verdict + frame-probe + probe camera-box)
+        run: |
+          cargo build --release --features probe \
+            --bin recording-verdict --bin frame-probe --bin camera-box
+          cp target/release/camera-box target/release/camera-box-probe
 
       - name: Upload probe tools
         uses: actions/upload-artifact@v4
         with:
           name: probe-tools-linux-amd64
-          path: target/release/recording-verdict
+          path: |
+            target/release/recording-verdict
+            target/release/frame-probe
+            target/release/camera-box-probe
 
   security:
     name: Security Audit
