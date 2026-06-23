@@ -30,8 +30,8 @@ use camera_box::probe::recording::{
 };
 use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
-    burn_ids_in, cam2_cam1_samples, cam_strih_samples, chain_hop_loss_from_stream,
-    chain_hop_samples_from_stream, hop_latency, strih_stream_samples,
+    burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam_strih_samples,
+    chain_hop_loss_from_stream, chain_hop_samples_from_stream, hop_latency, strih_stream_samples,
     strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM,
     BURN_RUN_ID_STRIH,
 };
@@ -247,6 +247,67 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
         .with_context(|| format!("parse painter ticks {}", path.display()))?;
     tracing::info!(file = %path.display(), ticks = ticks.len(), "painter ticks parsed");
     Ok(ticks)
+}
+
+/// Parse the painter `--paint-log` CSV's `tick → cam2 paint gen_ts_ns` map (#179).
+///
+/// The cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording alone
+/// ([`cam2_cam1_samples_from_burn`]) needs each cam2 tick's PAINT instant, not just the
+/// tick id — the cam1-capture burn rides into the stream recording carrying cam1's
+/// CAPTURE ts, and `latency = cam1_capture − cam2_paint[tick]`. ONLY the `--paint-log`
+/// shape (`tick,gen_ts_ns` header) carries the paint timestamp; the recording-probe CSV
+/// (`frame_index,n_qr,tick,…`) does not, and a bare one-tick-per-line file does not. For
+/// those shapes the map is empty (the caller then reports cam2→cam1 unavailable, never a
+/// wrong number). A malformed `tick,gen_ts_ns` data row errors loudly (a silently-shrunk
+/// map would drop real samples). Pure (operates on the text) so it is unit-testable.
+fn parse_painter_paint_ts_str(text: &str) -> Result<std::collections::HashMap<u32, i64>> {
+    let mut m = std::collections::HashMap::new();
+    // Only the tick,gen_ts_ns paint-log shape carries the paint instant.
+    let header = text.lines().map(str::trim).find(|l| !l.is_empty());
+    if !matches!(header, Some(h) if h.starts_with("tick,")) {
+        return Ok(m); // not a paint-log → no paint timestamps available
+    }
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("tick,") {
+            continue; // header / blank
+        }
+        let mut it = line.split(',');
+        let tick_s = it
+            .next()
+            .with_context(|| format!("paint-log row at line {} is empty: {line:?}", lineno + 1))?;
+        let ts_s = it.next().with_context(|| {
+            format!(
+                "paint-log row at line {} has <2 columns (expected tick,gen_ts_ns): {line:?}",
+                lineno + 1
+            )
+        })?;
+        let tick: u32 = tick_s.trim().parse().with_context(|| {
+            format!(
+                "paint-log tick not a u32 at line {}: {tick_s:?}",
+                lineno + 1
+            )
+        })?;
+        let ts: i64 = ts_s.trim().parse().with_context(|| {
+            format!(
+                "paint-log gen_ts_ns not an i64 at line {}: {ts_s:?}",
+                lineno + 1
+            )
+        })?;
+        m.insert(tick, ts);
+    }
+    Ok(m)
+}
+
+/// Read + parse the painter `tick → paint gen_ts_ns` map (see
+/// [`parse_painter_paint_ts_str`]). Empty when the file is not a `--paint-log` CSV.
+fn parse_painter_paint_ts(path: &Path) -> Result<std::collections::HashMap<u32, i64>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read painter paint-ts {}", path.display()))?;
+    let m = parse_painter_paint_ts_str(&text)
+        .with_context(|| format!("parse painter paint-ts {}", path.display()))?;
+    tracing::info!(file = %path.display(), entries = m.len(), "painter paint-ts parsed");
+    Ok(m)
 }
 
 /// Parse the cam1 grab-timestamp sidecar CSV (`frame_index,grab_ts_ns`, header
@@ -896,6 +957,73 @@ fn main() -> Result<()> {
                 );
                 report["full_chain"]["latency"]["cam1_stream"] = hop_lat_json(&lat);
             }
+
+            // #179 — cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording + the
+            // painter paint-log ALONE (no 7.3GB cam1 grab). The cam1-capture burn (#174)
+            // rides into the stream recording carrying cam1's CAPTURE wall-clock ts; the
+            // painter CSV gives cam2's PAINT ts per tick; latency = cam1_capture −
+            // cam2_paint[tick], matched by the cam2 optical tick. This fills the previously
+            // "UNAVAILABLE (needs --cam1)" gap WITHOUT decoding the grab. Needs --painter
+            // to be the `tick,gen_ts_ns` paint-log (the recording-probe / bare-tick shapes
+            // carry no paint instant). When unavailable it is reported as such, never faked.
+            if !cam1_ids.is_empty() {
+                match &args.painter {
+                    Some(painter_path) => {
+                        let paint_ts = parse_painter_paint_ts(painter_path)?;
+                        if paint_ts.is_empty() {
+                            println!(
+                                "=== cam2→cam1 (optical-injection, from cam1 burn) per-hop ABSOLUTE \
+                                 latency (#179) ===\n  UNAVAILABLE — the --painter file carries no per-tick \
+                                 paint timestamp (need the `tick,gen_ts_ns` paint-log, not the \
+                                 recording-probe / bare-tick CSV)."
+                            );
+                        } else {
+                            let c1_lat = hop_latency(
+                                "cam2→cam1",
+                                &cam2_cam1_samples_from_burn(
+                                    stream_frames,
+                                    &paint_ts,
+                                    cam2_pin,
+                                    args.burn_cam1_run_id,
+                                    &[args.burn_strih_run_id, args.burn_stream_run_id],
+                                ),
+                            );
+                            report_hop_latency(
+                                &c1_lat,
+                                "cam2→cam1 (optical-injection, from cam1 burn, no grab)",
+                                "cam2 paint gen_ts_ns",
+                            );
+                            let mut c1_json = hop_lat_json(&c1_lat);
+                            // cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1 camera
+                            // lens → v4l2 capture), NOT a production hop — in production the
+                            // camera films the REAL scene, no monitor in the path. Label it so
+                            // the number is never read as a production camera latency.
+                            if let Some(obj) = c1_json.as_object_mut() {
+                                obj.insert(
+                                    "note".to_string(),
+                                    serde_json::Value::String(
+                                        "TEST-INJECTION hop (cam2 monitor → cam1 camera optical+v4l2 \
+                                         capture), read from the cam1-capture burn in the stream \
+                                         recording (no grab decode); NOT a production camera latency"
+                                            .to_string(),
+                                    ),
+                                );
+                            }
+                            report["full_chain"]["latency"]["cam2_cam1"] = c1_json;
+                            println!(
+                                "  NOTE: cam2→cam1 is the TEST-INJECTION optical hop (monitor→camera+capture), \
+                                 NOT a production camera latency (production films the real scene)."
+                            );
+                        }
+                    }
+                    None => println!(
+                        "=== cam2→cam1 (optical-injection, from cam1 burn) per-hop ABSOLUTE latency \
+                         (#179) ===\n  UNAVAILABLE — pass --painter <paint-log tick,gen_ts_ns> to \
+                         compute it from the cam1 burn (cam1_capture − cam2_paint, both wall clock); \
+                         no 7.3GB grab decode needed."
+                    ),
+                }
+            }
         } else {
             println!(
                 "=== #174 FULL-CHAIN burn-id verdict: SKIPPED — no cam1/strih/stream burn QR in the \
@@ -946,8 +1074,41 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_grab_ts, parse_painter_ticks_str};
+    use super::{parse_grab_ts, parse_painter_paint_ts_str, parse_painter_ticks_str};
     use std::io::Write;
+
+    #[test]
+    fn paint_ts_parses_tick_to_gen_ts_from_paint_log() {
+        // #179: the cam2→cam1-from-burn latency needs tick → paint gen_ts_ns. The
+        // --paint-log shape `tick,gen_ts_ns` carries it; parse it into the map.
+        let csv = "tick,gen_ts_ns\n0,1782000000000\n2,1782000033000\n";
+        let m = parse_painter_paint_ts_str(csv).unwrap();
+        assert_eq!(m.get(&0), Some(&1782000000000));
+        assert_eq!(m.get(&2), Some(&1782000033000));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn paint_ts_empty_for_non_paint_log_shapes() {
+        // The recording-probe CSV and a bare one-tick-per-line file carry NO paint
+        // instant → the map is empty (caller reports cam2→cam1 unavailable, not wrong).
+        assert!(parse_painter_paint_ts_str(
+            "frame_index,n_qr,tick,run_id,frame_ids\n0,2,100,7,x\n"
+        )
+        .unwrap()
+        .is_empty());
+        assert!(parse_painter_paint_ts_str("10\n11\n12\n")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn paint_ts_malformed_paint_log_row_errors_loudly() {
+        // A paint-log header but a non-numeric ts must error, not silently drop (a
+        // shrunk paint-ts map would drop real cam2→cam1 latency samples).
+        assert!(parse_painter_paint_ts_str("tick,gen_ts_ns\n0,notanumber\n").is_err());
+        assert!(parse_painter_paint_ts_str("tick,gen_ts_ns\n0\n").is_err());
+    }
 
     #[test]
     fn painter_ticks_parse_paint_log_format_tick_first_column() {

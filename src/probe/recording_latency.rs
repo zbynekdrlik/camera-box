@@ -327,6 +327,97 @@ pub fn cam2_cam1_samples(
     out
 }
 
+/// cam2→cam1 OPTICAL-INJECTION latency samples from the STREAM recording + painter
+/// alone (#179) — REAL, and WITHOUT decoding the 7.3GB cam1 grab.
+///
+/// This is the stream-only replacement for [`cam2_cam1_samples`] (which needs the cam1
+/// grab recording + its grab-ts sidecar). The cam1-capture burn (#174) stamps cam1's
+/// CAPTURE wall-clock instant into the EMITTED YUYV frame's `Payload.gen_ts_ns`
+/// (run_id = `cam1_burn_id`), and that burn rides through NDI → strih → stream, so the
+/// SINGLE stream recording carries, for one optical instant: the cam2 optical dual-QR
+/// (the tick key, filmed by cam1) AND cam1's capture-ts burn. The cam2 PAINT instant for
+/// that tick is in the painter CSV (`paint_ts_by_tick`, `tick → cam2 paint gen_ts_ns`).
+/// So for each stream frame carrying BOTH a cam2 optical tick and the cam1 burn:
+///
+///   `latency = cam1_burn.gen_ts_ns (capture) − cam2_paint_ts[tick]`
+///
+/// anchored at the cam2 paint instant. Both stamps are CLOCK_REALTIME (DanteSync), so
+/// this is the true optical+capture latency of cam1 filming cam2's monitor — the same
+/// number [`cam2_cam1_samples`] yields, but read from the stream recording's cam1 burn
+/// rather than the cam1 grab + sidecar, so the 6GB grab is never decoded.
+///
+/// cam2 selection: the pinned `cam2_id` when known (recommended — the stream recording
+/// also carries forwarded strih/stream burns), else any payload that is not the cam1
+/// burn nor a known foreign forwarded burn in `other_burns`. The canonical cam2 tick is
+/// the highest-frame_id cam2 half (the Vernier dual-QR), identical to [`split_payloads`].
+///
+/// A frame missing its cam2 tick, missing the cam1 burn, missing a painter paint-ts for
+/// its tick, or carrying a non-positive stamp is skipped — never a wrong number. Per
+/// cam2 tick the EARLIEST cam1 capture stamp is the deterministic representative (the
+/// 60→30 oversample can place one tick on several recorded frames), matching the per-tick
+/// min-keep rule [`burn_by_cam2_tick`] / [`strih_stream_samples_from_stream`] use.
+pub fn cam2_cam1_samples_from_burn(
+    stream: &[RecordingFrame],
+    paint_ts_by_tick: &HashMap<u32, i64>,
+    cam2_id: Option<u32>,
+    cam1_burn_id: u32,
+    other_burns: &[u32],
+) -> Vec<LatencySample> {
+    let is_cam2 = |run_id: u32| match cam2_id {
+        Some(c) => run_id == c,
+        // No pin: cam2 = any payload that is not the cam1 burn and not a known foreign
+        // forwarded burn (strih/stream) — so a forwarded burn can never hijack the
+        // canonical max(frame_id) cam2 tick (mirrors chain_hop_loss_from_stream).
+        None => run_id != cam1_burn_id && !other_burns.contains(&run_id),
+    };
+    // Per canonical cam2 tick, the EARLIEST cam1 capture stamp seen across the stream
+    // frames (a tick the 60→30 beat oversampled appears on several frames; keep the min).
+    let mut cap_by_tick: HashMap<u32, i64> = HashMap::new();
+    for f in stream {
+        let mut cam2_tick: Option<u32> = None;
+        let mut cam1_cap: Option<i64> = None;
+        for p in &f.payloads {
+            if p.run_id == cam1_burn_id {
+                if p.gen_ts_ns > 0 && cam1_cap.is_none() {
+                    cam1_cap = Some(p.gen_ts_ns);
+                }
+            } else if is_cam2(p.run_id) {
+                // Canonical Vernier tick = the highest-frame_id cam2 half in this frame.
+                cam2_tick = Some(match cam2_tick {
+                    Some(t) if t >= p.frame_id => t,
+                    _ => p.frame_id,
+                });
+            }
+        }
+        if let (Some(tick), Some(cap)) = (cam2_tick, cam1_cap) {
+            cap_by_tick
+                .entry(tick)
+                .and_modify(|e| {
+                    if cap < *e {
+                        *e = cap;
+                    }
+                })
+                .or_insert(cap);
+        }
+    }
+
+    let mut ticks: Vec<u32> = cap_by_tick.keys().copied().collect();
+    ticks.sort_unstable();
+    let mut out = Vec::new();
+    for tick in ticks {
+        if let (Some(&cap), Some(&paint)) = (cap_by_tick.get(&tick), paint_ts_by_tick.get(&tick)) {
+            // Both wall-clock; guard the 0 sentinel so a missing stamp can't read huge.
+            if cap > 0 && paint > 0 {
+                out.push(LatencySample {
+                    latency_ms: (cap - paint) as f64 / 1_000_000.0,
+                    at_ns: paint,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// strih→stream per-cam2-tick samples: pair the strih and stream recordings by the
 /// cam2 logical tick (`frame_id` of the cam2 QR, common to both outputs), then
 /// `latency = stream_burn.gen_ts_ns − strih_burn.gen_ts_ns`, anchored at the strih
@@ -1541,6 +1632,118 @@ mod tests {
         let s = chain_hop_samples_from_stream(&frames, BURN_RUN_ID_CAM1, BURN_RUN_ID_STRIH);
         assert_eq!(s.len(), 1, "only the fully-stamped frame yields a sample");
         assert!((s[0].latency_ms - 33.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cam2_cam1_from_burn_is_cam1_capture_minus_cam2_paint_no_grab() {
+        // #179: cam2→cam1 from the STREAM recording + painter alone — the cam1-capture
+        // burn (#174) rides into the stream recording carrying cam1's CAPTURE wall-clock
+        // ts; the painter CSV gives cam2's PAINT ts per tick. latency = cam1_capture −
+        // cam2_paint, matched by the cam2 optical tick. The 6GB grab is never touched.
+        // Stream frames each carry: cam2 optical tick + cam1 burn (capture-ts) + the
+        // forwarded strih & stream burns (must NOT be misread as cam2 / cam1).
+        let stream = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 100, 1_000_000_000),              // cam2 optical tick 100
+                    (BURN_RUN_ID_CAM1, 40, 1_068_000_000),   // cam1 captured 68ms after paint
+                    (BURN_RUN_ID_STRIH, 80, 1_240_000_000),  // forwarded strih burn (ignore)
+                    (BURN_RUN_ID_STREAM, 90, 2_300_000_000), // forwarded stream burn (ignore)
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (CAM2, 102, 1_033_000_000),
+                    (BURN_RUN_ID_CAM1, 41, 1_103_000_000), // 70ms after paint
+                    (BURN_RUN_ID_STRIH, 81, 1_280_000_000),
+                    (BURN_RUN_ID_STREAM, 91, 2_400_000_000),
+                ],
+            ),
+        ];
+        let mut paint: HashMap<u32, i64> = HashMap::new();
+        paint.insert(100, 1_000_000_000);
+        paint.insert(102, 1_033_000_000);
+        let s = cam2_cam1_samples_from_burn(
+            &stream,
+            &paint,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            &[BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM],
+        );
+        assert_eq!(
+            s.len(),
+            2,
+            "one sample per cam2 tick with a cam1 burn + paint-ts"
+        );
+        assert!((s[0].latency_ms - 68.0).abs() < 1e-6, "tick 100 = +68 ms");
+        assert!((s[1].latency_ms - 70.0).abs() < 1e-6, "tick 102 = +70 ms");
+        assert_eq!(
+            s[0].at_ns, 1_000_000_000,
+            "anchored at the cam2 paint instant"
+        );
+    }
+
+    #[test]
+    fn cam2_cam1_from_burn_skips_tick_without_cam1_burn_or_paint_or_zero_stamp() {
+        // A stream frame with no cam1 burn, or whose cam2 tick has no painter paint-ts,
+        // or a 0-sentinel capture stamp, contributes NO sample (never a wrong number).
+        let stream = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 100, 1_000_000_000),
+                    (BURN_RUN_ID_CAM1, 40, 1_050_000_000),
+                ],
+            ),
+            multi(1, &[(CAM2, 102, 1_033_000_000)]), // no cam1 burn → skip
+            multi(
+                2,
+                &[
+                    (CAM2, 104, 1_066_000_000),
+                    (BURN_RUN_ID_CAM1, 42, 1_120_000_000),
+                ],
+            ), // no paint-ts → skip
+            multi(3, &[(CAM2, 106, 1_099_000_000), (BURN_RUN_ID_CAM1, 43, 0)]), // 0 stamp → skip
+        ];
+        let mut paint: HashMap<u32, i64> = HashMap::new();
+        paint.insert(100, 1_000_000_000);
+        paint.insert(106, 1_099_000_000); // present, but frame 3 has a 0 capture stamp
+        let s = cam2_cam1_samples_from_burn(&stream, &paint, Some(CAM2), BURN_RUN_ID_CAM1, &[]);
+        assert_eq!(s.len(), 1, "only tick 100 yields a valid sample");
+        assert!((s[0].latency_ms - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cam2_cam1_from_burn_keeps_earliest_capture_for_an_oversampled_tick() {
+        // The 60→30 beat can place ONE cam2 tick on several stream frames; the
+        // deterministic per-tick representative is the EARLIEST cam1 capture stamp
+        // (matching burn_by_cam2_tick / strih_stream_samples_from_stream).
+        let stream = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 100, 1_000_000_000),
+                    (BURN_RUN_ID_CAM1, 40, 1_080_000_000),
+                ],
+            ), // later
+            multi(
+                1,
+                &[
+                    (CAM2, 100, 1_000_000_000),
+                    (BURN_RUN_ID_CAM1, 39, 1_060_000_000),
+                ],
+            ), // earlier — kept
+        ];
+        let mut paint: HashMap<u32, i64> = HashMap::new();
+        paint.insert(100, 1_000_000_000);
+        let s = cam2_cam1_samples_from_burn(&stream, &paint, Some(CAM2), BURN_RUN_ID_CAM1, &[]);
+        assert_eq!(s.len(), 1, "one tick → one sample");
+        assert!(
+            (s[0].latency_ms - 60.0).abs() < 1e-6,
+            "earliest capture (1.060s) − paint (1.000s) = 60ms, not the later 80ms frame"
+        );
     }
 
     /// Build a stream frame carrying a cam2 tick plus an arbitrary set of node burns
