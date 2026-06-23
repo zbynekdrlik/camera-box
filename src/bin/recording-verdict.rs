@@ -191,11 +191,17 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read cam1 grab-ts sidecar {}", path.display()))?;
     let mut m = std::collections::HashMap::new();
-    // The LAST non-blank line index: a partial trailing row (the cam1 --record-grab is
-    // killed at teardown mid-write, leaving "frame_index," with no flushed timestamp) is a
-    // tolerated kill-time artifact, skipped — but ONLY when it is the final line. The same
-    // shape mid-file is genuine corruption and still errors (a silently-shrunk grab-ts map
-    // would drop real cam2→cam1 latency samples without any signal).
+    // Kill-time partial-row tolerance (cam1 --record-grab is a BufWriter killed at teardown
+    // with NO flush, so the file is cut at an arbitrary byte boundary). A COMPLETE row always
+    // ends with '\n' (the writeln! emits the newline LAST, after the full `idx,ts` payload),
+    // so a file that does NOT end in '\n' has exactly one partial final line — of ANY shape
+    // ("8874,", "8874", "8874,17820"-truncated). That final fragment is skipped, whatever it
+    // is; every earlier (newline-terminated) row is parsed STRICTLY. A newline-terminated
+    // malformed row is genuine corruption (not a kill cut) and still errors loudly — a
+    // silently-shrunk grab-ts map would drop / corrupt real cam2→cam1 latency samples.
+    let has_trailing_newline = text.ends_with('\n');
+    // The byte-offset line index of the LAST non-blank, non-header data line (only meaningful
+    // when there is NO trailing newline — then THIS line is the partial fragment to skip).
     let last_data_line = text
         .lines()
         .enumerate()
@@ -210,7 +216,16 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
         if line.is_empty() || line.starts_with("frame_index") {
             continue; // header / blank
         }
-        let is_last = Some(lineno) == last_data_line;
+        // A no-trailing-newline file's final data line is a partial kill-time fragment — skip
+        // it whatever its shape (empty ts, no comma, truncated digits). Everything else parses.
+        if !has_trailing_newline && Some(lineno) == last_data_line {
+            tracing::warn!(
+                line = lineno + 1,
+                fragment = %line,
+                "grab-ts final row has no trailing newline (partial kill-time write) — skipped"
+            );
+            continue;
+        }
         let mut it = line.split(',');
         let idx_s = it
             .next()
@@ -221,14 +236,6 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
                 lineno + 1
             )
         })?;
-        // Tolerate an empty timestamp ONLY on the final line (partial kill-time write).
-        if ts_s.trim().is_empty() && is_last {
-            tracing::warn!(
-                line = lineno + 1,
-                "grab-ts trailing row has no timestamp (partial kill-time write) — skipped"
-            );
-            continue;
-        }
         let idx: u64 = idx_s.trim().parse().with_context(|| {
             format!(
                 "grab-ts frame_index not a u64 at line {}: {idx_s:?}",
