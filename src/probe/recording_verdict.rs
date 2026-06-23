@@ -404,24 +404,28 @@ impl BurnHopVerdict {
     }
 }
 
-/// Per-hop loss verdict by the clean digital burn id (#174). `upstream_ids` /
-/// `downstream_ids` are the burn `frame_id`s decoded for the upstream and downstream node
-/// (e.g. from the SINGLE stream recording: upstream = strih-burn ids, downstream =
-/// stream-burn ids — both ride through into stream's program). The compare is restricted
-/// to the OVERLAP span `[max(first), min(last)]` so independent record start/stop skew is
-/// not counted as loss (the same active-span handling [`strih_stream_verdict`] uses), then:
-/// an upstream id absent downstream is a DROP; a downstream id absent upstream is a phantom.
-/// Offset-immune and beat-free because the burn id is the SAME integer on both sides.
-pub fn burn_hop_verdict(hop: &str, upstream_ids: &[u32], downstream_ids: &[u32]) -> BurnHopVerdict {
-    use std::collections::BTreeSet;
-    let up: BTreeSet<u32> = upstream_ids.iter().copied().collect();
-    let down: BTreeSet<u32> = downstream_ids.iter().copied().collect();
-
+/// SHARED set-difference verdict over the OVERLAP span (the single source of truth for
+/// the loss arithmetic — #181 review). Given the upstream and downstream id SETS (the
+/// ids may be burn `frame_id`s — [`burn_hop_verdict`] — or shared cam2 source ticks —
+/// [`crate::probe::recording_latency::chain_hop_loss_from_stream`]), restricts the
+/// compare to `[max(first), min(last)]` so independent record start/stop skew is not
+/// counted as loss, then: an upstream id absent downstream is a DROP; a downstream id
+/// absent upstream is a phantom; an id present on BOTH sides is compared (survived).
+/// Both callers build their own set and share THIS arithmetic so the two paths can never
+/// diverge on the span / pass semantics.
+pub fn overlap_set_verdict(
+    hop: &str,
+    up: &std::collections::BTreeSet<u32>,
+    down: &std::collections::BTreeSet<u32>,
+) -> BurnHopVerdict {
     let (lo, hi) = match (
         up.iter().next().max(down.iter().next()),
         up.iter().next_back().min(down.iter().next_back()),
     ) {
         (Some(&a), Some(&b)) if a <= b => (a, b),
+        // Disjoint or one side empty: no overlap to compare. compared_ids=0 here means
+        // "no shared span" — the caller logs the two set sizes so this is distinguishable
+        // from a genuine all-dropped hop (#181 review: log which branch decided it).
         _ => {
             return BurnHopVerdict {
                 hop: hop.to_string(),
@@ -452,6 +456,24 @@ pub fn burn_hop_verdict(hop: &str, upstream_ids: &[u32], downstream_ids: &[u32])
         dropped_ids,
         phantom_ids,
     }
+}
+
+/// Per-hop loss verdict by the clean digital burn id (#174). `upstream_ids` /
+/// `downstream_ids` are the burn `frame_id`s decoded for the upstream and downstream node
+/// (e.g. from the SINGLE stream recording: upstream = strih-burn ids, downstream =
+/// stream-burn ids — both ride through into stream's program). Delegates to
+/// [`overlap_set_verdict`] (shared span/drop/phantom arithmetic): an upstream id absent
+/// downstream is a DROP; a downstream id absent upstream is a phantom. Offset-immune and
+/// beat-free because the burn id is the SAME integer on both sides. NOTE: this is correct
+/// ONLY when the two nodes share one id namespace; each node's INDEPENDENT burn counter
+/// does NOT (#181) — for the from-stream full-chain hops use
+/// [`crate::probe::recording_latency::chain_hop_loss_from_stream`], which keys on the
+/// shared cam2 tick instead.
+pub fn burn_hop_verdict(hop: &str, upstream_ids: &[u32], downstream_ids: &[u32]) -> BurnHopVerdict {
+    use std::collections::BTreeSet;
+    let up: BTreeSet<u32> = upstream_ids.iter().copied().collect();
+    let down: BTreeSet<u32> = downstream_ids.iter().copied().collect();
+    overlap_set_verdict(hop, &up, &down)
 }
 
 /// Compare the strih and stream per-frame tick SEQUENCES directly (acceptance #4).

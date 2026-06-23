@@ -67,8 +67,9 @@
 use crate::probe::analyzer::LatencyStats;
 use crate::probe::payload::Payload;
 use crate::probe::recording::RecordingFrame;
+use crate::probe::recording_verdict::BurnHopVerdict;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Default reserved per-node burn run_ids (mirrors the #111 burn filter's
 /// `BURN_RUN_ID_DEFAULT_STRIH` / `…_STREAM` in `vendor/distroav/src/ndi-burn-filter.cpp`).
@@ -560,6 +561,103 @@ pub fn chain_hop_samples_from_stream(
         }
     }
     out
+}
+
+/// Per-hop LOSS verdict from the SINGLE stream recording, paired on the SHARED cam2
+/// source tick every frame carries (#181) — NOT each node's independent burn counter.
+///
+/// Why the burn counter is the WRONG key: each node ([`burn_ids_in`] over `up_run_id`
+/// vs `down_run_id`) stamps its OWN monotonic burn `frame_id`, started from its OWN
+/// per-node default (cam1=911001-seq, strih=911002-seq, stream=911004-seq) and counting
+/// only THAT node's renders. Across two nodes the two id ranges do not coincide, so a
+/// set-equality overlap (`[max(first), min(last)]`) is empty ⇒ `compared_ids=0` and the
+/// hop loss is uncomputable — the exact symptom of #181 (burns present, `compared_ids=0`).
+///
+/// The fix: key on the cam2 source tick — the SAME key the cam2-tick latency pairing
+/// uses ([`strih_stream_samples_from_stream`]). (The co-located latency
+/// [`chain_hop_samples_from_stream`] instead pairs the two burns WITHIN one frame; loss
+/// keys on the cam2 tick across frames so the two endpoints' burns for one optical
+/// instant still pair even when the 60→30 beat splits them across recorded frames.)
+/// Every recorded stream frame carries cam2's optical dual-QR tick alongside the
+/// forwarded burns, so the cam2 tick is the common integer present on BOTH endpoints'
+/// frames. The `gen_ts_ns > 0` presence per cam2 tick is collected into two SETS over ALL
+/// frames, then handed to the shared [`crate::probe::recording_verdict::overlap_set_verdict`]:
+/// - a hop "survived" (in `compared_ids`) iff the cam2 tick carries BOTH burns,
+/// - "dropped" = the cam2 tick carries the upstream burn but not the downstream burn,
+/// - "phantom" = it carries the downstream burn but not the upstream burn,
+///
+/// all over the overlap span `[max(first), min(last)]` so record start/stop skew is excluded.
+///
+/// cam2 selection: the pinned `cam2_id` when known, else any payload that is neither the
+/// upstream nor the downstream burn AND not in `other_burns`. **`other_burns` MUST list
+/// every OTHER forwarded burn run_id present in the recording** (e.g. for strih→stream
+/// the forwarded cam1 burn) — otherwise, when `cam2_id` is `None`, that foreign burn is
+/// misread as a cam2 half and its `frame_id` hijacks the `max(frame_id)` canonical tick
+/// (#181 review), corrupting the key. This mirrors [`RunIds::other_burns`] in the
+/// per-frame split. Works for cam1→strih (`up=cam1_burn, down=strih_burn`,
+/// `other_burns=[stream_burn]`) and strih→stream (`up=strih_burn, down=stream_burn`,
+/// `other_burns=[cam1_burn]`).
+///
+/// LIMITATION (honest scope, #181 review): a frame a node DROPS outright loses BOTH that
+/// node's burn AND every burn forwarded through it for that cam2 tick, so the tick lands
+/// in NEITHER set and is invisible (not counted as dropped). The from-stream method
+/// therefore detects partial-presence faults (one endpoint's burn present, the other's
+/// absent on the same cam2 tick) and the overlap span; an outright dropped optical instant
+/// shows up instead in the per-recording continuity [`crate::probe::recording_verdict::verdict`]
+/// (its `real_gap` / backward-jump) and the cam2→cam1 / painter optical assessment — the
+/// same scope boundary the from-stream latency pairing has.
+pub fn chain_hop_loss_from_stream(
+    hop: &str,
+    stream: &[RecordingFrame],
+    cam2_id: Option<u32>,
+    up_run_id: u32,
+    down_run_id: u32,
+    other_burns: &[u32],
+) -> BurnHopVerdict {
+    let is_cam2 = |run_id: u32| match cam2_id {
+        Some(c) => run_id == c,
+        // No pin: cam2 = any payload that is not THIS hop's two burns and not a known
+        // foreign forwarded burn (#181 review — keeps the forwarded cam1/stream burn out
+        // of the cam2 fallback so it cannot hijack the canonical tick).
+        None => run_id != up_run_id && run_id != down_run_id && !other_burns.contains(&run_id),
+    };
+    // Per canonical cam2 tick, did THIS recording carry the upstream / downstream burn?
+    // A burn counts only when stamped (gen_ts_ns > 0) — an unstamped QR is not a render.
+    let mut up_ticks: BTreeSet<u32> = BTreeSet::new();
+    let mut down_ticks: BTreeSet<u32> = BTreeSet::new();
+    for f in stream {
+        let mut cam2_tick: Option<u32> = None;
+        let mut has_up = false;
+        let mut has_down = false;
+        for p in &f.payloads {
+            if p.run_id == up_run_id {
+                if p.gen_ts_ns > 0 {
+                    has_up = true;
+                }
+            } else if p.run_id == down_run_id {
+                if p.gen_ts_ns > 0 {
+                    has_down = true;
+                }
+            } else if is_cam2(p.run_id) {
+                // Canonical cam2 tick = the highest-frame_id cam2 half in this frame.
+                cam2_tick = Some(match cam2_tick {
+                    Some(t) if t >= p.frame_id => t,
+                    _ => p.frame_id,
+                });
+            }
+        }
+        let Some(tick) = cam2_tick else { continue };
+        if has_up {
+            up_ticks.insert(tick);
+        }
+        if has_down {
+            down_ticks.insert(tick);
+        }
+    }
+
+    // Shared span/drop/phantom arithmetic — identical semantics to burn_hop_verdict, so
+    // the two loss paths can never diverge (#181 review).
+    crate::probe::recording_verdict::overlap_set_verdict(hop, &up_ticks, &down_ticks)
 }
 
 #[cfg(test)]
@@ -1366,5 +1464,350 @@ mod tests {
         let s = chain_hop_samples_from_stream(&frames, BURN_RUN_ID_CAM1, BURN_RUN_ID_STRIH);
         assert_eq!(s.len(), 1, "only the fully-stamped frame yields a sample");
         assert!((s[0].latency_ms - 33.0).abs() < 1e-6);
+    }
+
+    /// Build a stream frame carrying a cam2 tick plus an arbitrary set of node burns
+    /// (run_id, burn_frame_id, gen_ts_ns). The first tuple is cam2.
+    fn loss_frame(idx: u64, cam2_tick: u32, burns: &[(u32, u32, i64)]) -> RecordingFrame {
+        let mut ps = vec![(CAM2, cam2_tick, 1_000)];
+        ps.extend_from_slice(burns);
+        multi(idx, &ps)
+    }
+
+    /// #181 ROOT CAUSE: each node's burn counter is INDEPENDENT, so a set-equality
+    /// compare of the two burn-id SEQUENCES finds zero overlap ⇒ compared_ids=0. This
+    /// is exactly what the old call site (`burn_hop_verdict(cam1_ids, strih_ids)`)
+    /// produced on the real run despite the burns being present. Pinned here so the
+    /// regression cannot silently return.
+    #[test]
+    fn independent_burn_counters_give_zero_overlap_the_181_bug() {
+        // cam1 burns 40,41,42 ; strih burns 80,81,82 — disjoint ranges.
+        let cam1_ids = vec![40u32, 41, 42];
+        let strih_ids = vec![80u32, 81, 82];
+        let v =
+            crate::probe::recording_verdict::burn_hop_verdict("cam1→strih", &cam1_ids, &strih_ids);
+        assert_eq!(
+            v.compared_ids, 0,
+            "independent per-node counters never overlap — the #181 symptom"
+        );
+    }
+
+    /// #181 FIX: pairing per-hop LOSS by the SHARED cam2 source tick yields the real
+    /// overlap (compared_ids > 0) even though the per-node burn counters are disjoint.
+    /// Every frame carries the same cam2 tick on both burns, so all ticks survive.
+    #[test]
+    fn loss_pairs_by_cam2_tick_clean_hop_all_survive() {
+        // 3 cam2 ticks; each frame has BOTH cam1 (independent ids 40..) and strih
+        // (independent ids 80..) burns, both stamped. No loss.
+        let frames = vec![
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
+            ),
+            loss_frame(
+                1,
+                502,
+                &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 22)],
+            ),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)],
+            ),
+        ];
+        let v = chain_hop_loss_from_stream(
+            "cam1→strih",
+            &frames,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            &[],
+        );
+        assert_eq!(
+            v.compared_ids, 3,
+            "all 3 cam2 ticks have both burns ⇒ overlap is real, not 0"
+        );
+        assert!(v.dropped_ids.is_empty(), "no dropped");
+        assert!(v.phantom_ids.is_empty(), "no phantom");
+        assert!(v.is_pass(), "a clean hop with real overlap PASSES");
+    }
+
+    /// A cam2 tick that carries the UPSTREAM burn but not the DOWNSTREAM burn is a DROP
+    /// on the hop (downstream lost that source frame). Keyed by the cam2 tick, not the
+    /// burn id.
+    #[test]
+    fn loss_counts_a_dropped_cam2_tick_as_dropped() {
+        let frames = vec![
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
+            ),
+            // tick 502: cam1 present, strih ABSENT → cam1→strih dropped this source frame.
+            loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21)]),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)],
+            ),
+        ];
+        let v = chain_hop_loss_from_stream(
+            "cam1→strih",
+            &frames,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            &[],
+        );
+        assert_eq!(v.compared_ids, 2, "ticks 500 and 504 survived");
+        assert_eq!(
+            v.dropped_ids,
+            vec![502],
+            "tick 502 had cam1 but no strih ⇒ dropped"
+        );
+        assert!(v.phantom_ids.is_empty());
+        assert!(!v.is_pass(), "a dropped frame FAILS the hop");
+    }
+
+    /// A cam2 tick that carries the DOWNSTREAM burn but not the UPSTREAM burn is a
+    /// PHANTOM (downstream rendered a source frame upstream never marked).
+    #[test]
+    fn loss_counts_a_phantom_cam2_tick_as_phantom() {
+        let frames = vec![
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_STRIH, 80, 11), (BURN_RUN_ID_STREAM, 120, 12)],
+            ),
+            // tick 502: stream present, strih ABSENT → phantom at stream.
+            loss_frame(1, 502, &[(BURN_RUN_ID_STREAM, 121, 21)]),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_STRIH, 82, 31), (BURN_RUN_ID_STREAM, 122, 32)],
+            ),
+        ];
+        let v = chain_hop_loss_from_stream(
+            "strih→stream",
+            &frames,
+            Some(CAM2),
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &[],
+        );
+        assert_eq!(v.compared_ids, 2, "ticks 500 and 504 survived");
+        assert!(v.dropped_ids.is_empty());
+        assert_eq!(
+            v.phantom_ids,
+            vec![502],
+            "tick 502 had stream but no strih ⇒ phantom"
+        );
+        assert!(!v.is_pass(), "a phantom FAILS the hop");
+    }
+
+    /// Record start/stop skew: an upstream-only tick OUTSIDE the shared overlap span is
+    /// NOT counted as a drop (the downstream recording simply had not started / had
+    /// stopped). Mirrors the active-span handling of `burn_hop_verdict`.
+    #[test]
+    fn loss_excludes_out_of_overlap_ticks_as_skew_not_loss() {
+        let frames = vec![
+            // tick 100: only cam1 (strih recording started later) → start skew, NOT a drop.
+            loss_frame(0, 100, &[(BURN_RUN_ID_CAM1, 40, 11)]),
+            loss_frame(
+                1,
+                500,
+                &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 80, 22)],
+            ),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 81, 32)],
+            ),
+            // tick 900: only cam1 (strih stopped earlier) → stop skew, NOT a drop.
+            loss_frame(3, 900, &[(BURN_RUN_ID_CAM1, 43, 41)]),
+        ];
+        let v = chain_hop_loss_from_stream(
+            "cam1→strih",
+            &frames,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            &[],
+        );
+        // Overlap span = [500, 504]; 100 and 900 are outside it and excluded.
+        assert_eq!(v.compared_ids, 2, "only the two in-span ticks compared");
+        assert!(
+            v.dropped_ids.is_empty(),
+            "out-of-span cam1-only ticks are skew, not loss"
+        );
+        assert!(v.phantom_ids.is_empty());
+    }
+
+    /// An unstamped (gen_ts_ns = 0) burn does not count as a render — its cam2 tick has
+    /// no upstream/downstream presence for that side.
+    #[test]
+    fn loss_ignores_unstamped_burns() {
+        let frames = vec![
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
+            ),
+            // strih burn present but unstamped (0) → strih did not render this tick ⇒ drop.
+            loss_frame(
+                1,
+                502,
+                &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 0)],
+            ),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)],
+            ),
+        ];
+        let v = chain_hop_loss_from_stream(
+            "cam1→strih",
+            &frames,
+            Some(CAM2),
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            &[],
+        );
+        assert_eq!(v.compared_ids, 2);
+        assert_eq!(
+            v.dropped_ids,
+            vec![502],
+            "an unstamped downstream burn ⇒ dropped"
+        );
+    }
+
+    /// #181 review fix: when cam2 is NOT pinned, the OTHER forwarded burn (here the cam1
+    /// burn on the strih→stream hop) must NOT be misread as a cam2 half. With its
+    /// frame_id HIGHER than the real cam2 tick, the unhardened `max(frame_id)` cam2
+    /// selection would hijack the canonical tick and collapse the overlap. Passing the
+    /// foreign burn in `other_burns` keeps it out of cam2 selection, so the real cam2 tick
+    /// keys the hop and compared_ids stays correct even with cam2_id = None.
+    #[test]
+    fn loss_excludes_foreign_forwarded_burn_from_cam2_when_unpinned() {
+        // strih→stream hop. Each frame: real cam2 tick (500/504), strih burn, stream burn,
+        // AND a forwarded cam1 burn whose frame_id (90100/90101) EXCEEDS the cam2 tick.
+        let frames = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 500, 10),
+                    (BURN_RUN_ID_CAM1, 90_100, 11), // foreign, higher frame_id than cam2
+                    (BURN_RUN_ID_STRIH, 80, 12),
+                    (BURN_RUN_ID_STREAM, 120, 13),
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (CAM2, 504, 20),
+                    (BURN_RUN_ID_CAM1, 90_101, 21),
+                    (BURN_RUN_ID_STRIH, 81, 22),
+                    (BURN_RUN_ID_STREAM, 121, 23),
+                ],
+            ),
+        ];
+        // cam2 UNPINNED (None) — the real-world omitted --cam2-run-id case. Without the
+        // other_burns exclusion the cam1 burn would be taken as cam2 and break the key.
+        let v = chain_hop_loss_from_stream(
+            "strih→stream",
+            &frames,
+            None,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &[BURN_RUN_ID_CAM1],
+        );
+        assert_eq!(
+            v.compared_ids, 2,
+            "real cam2 ticks 500/504 key the hop; the forwarded cam1 burn is excluded"
+        );
+        assert!(v.dropped_ids.is_empty());
+        assert!(v.phantom_ids.is_empty());
+        assert!(v.is_pass());
+    }
+
+    /// Pins WHY the exclusion matters: WITHOUT it (other_burns empty, cam2 None), the
+    /// forwarded cam1 burn — highest frame_id — is misread as the cam2 key, so the dropped
+    /// id surfaced is a cam1 BURN id, not a cam2 tick. WITH the exclusion the dropped id is
+    /// the real cam2 tick. Same frames, only the exclusion differs ⇒ proves the key flips.
+    #[test]
+    fn loss_exclusion_flips_the_key_from_foreign_burn_to_cam2_tick() {
+        // Frame 0: clean (both present), cam2 tick 496 — anchors the downstream span start
+        //          BELOW 500 so the drop at 500 is in-span (not start skew).
+        // Frame 1: strih present, stream ABSENT for cam2 tick 500 ⇒ a real strih→stream drop.
+        //          Forwarded cam1 burn id 90_100 (> tick 500).
+        // Frame 2: clean (both present), cam2 tick 504, cam1 burn 90_101.
+        let frames = vec![
+            multi(
+                0,
+                &[
+                    (CAM2, 496, 5),
+                    (BURN_RUN_ID_CAM1, 90_099, 6),
+                    (BURN_RUN_ID_STRIH, 79, 7),
+                    (BURN_RUN_ID_STREAM, 119, 8),
+                ],
+            ),
+            multi(
+                1,
+                &[
+                    (CAM2, 500, 10),
+                    (BURN_RUN_ID_CAM1, 90_100, 11), // foreign, higher frame_id than cam2
+                    (BURN_RUN_ID_STRIH, 80, 12),
+                    // stream burn ABSENT here → drop for this tick
+                ],
+            ),
+            multi(
+                2,
+                &[
+                    (CAM2, 504, 20),
+                    (BURN_RUN_ID_CAM1, 90_101, 21),
+                    (BURN_RUN_ID_STRIH, 81, 22),
+                    (BURN_RUN_ID_STREAM, 121, 23),
+                ],
+            ),
+        ];
+        // WITHOUT exclusion: the cam1 burn (90_099/90_100/90_101) is misread as cam2 and,
+        // being the highest frame_id, hijacks the canonical tick. The reported "dropped"
+        // id is then the cam1 BURN id 90_100 — the WRONG namespace — never the real cam2
+        // tick 500. A debugger reading 90_100 would chase a burn id that is not the drop.
+        let bad = chain_hop_loss_from_stream(
+            "strih→stream",
+            &frames,
+            None,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &[],
+        );
+        assert!(
+            bad.dropped_ids.contains(&90_100),
+            "unhardened fallback keys on the foreign cam1 burn id: {:?}",
+            bad.dropped_ids
+        );
+        assert!(
+            !bad.dropped_ids.contains(&500),
+            "and NEVER on the real cam2 tick 500: {:?}",
+            bad.dropped_ids
+        );
+
+        // WITH exclusion: the real cam2 tick keys the hop and the drop IS the cam2 tick.
+        let good = chain_hop_loss_from_stream(
+            "strih→stream",
+            &frames,
+            None,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &[BURN_RUN_ID_CAM1],
+        );
+        assert_eq!(
+            good.dropped_ids,
+            vec![500],
+            "hardened: the dropped id is the real cam2 tick 500, not a burn id"
+        );
+        assert_eq!(good.compared_ids, 2, "ticks 496 and 504 survived");
     }
 }

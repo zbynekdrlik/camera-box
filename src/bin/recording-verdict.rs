@@ -30,13 +30,14 @@ use camera_box::probe::recording::{
 };
 use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
-    burn_ids_in, cam2_cam1_samples, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
-    strih_stream_samples, strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    burn_ids_in, cam2_cam1_samples, cam_strih_samples, chain_hop_loss_from_stream,
+    chain_hop_samples_from_stream, hop_latency, strih_stream_samples,
+    strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM,
+    BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
-    burn_hop_verdict, cam_strih_assessment, strih_stream_verdict, verdict, BurnHopVerdict,
-    FrameTick, RecordingVerdict, VerdictConfig,
+    cam_strih_assessment, strih_stream_verdict, verdict, BurnHopVerdict, FrameTick,
+    RecordingVerdict, VerdictConfig,
 };
 use clap::Parser;
 use std::collections::HashSet;
@@ -130,30 +131,46 @@ fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
     }
 }
 
-/// Print a clean burn-id hop verdict (#174) and return its pass.
-fn report_burn_hop(v: &BurnHopVerdict) {
+/// Print a hop LOSS verdict (#174 / #181). `key_kind` names what the dropped/phantom
+/// ids ARE — `"cam2 tick"` for [`chain_hop_loss_from_stream`] (the values are cam2 source
+/// ticks, NOT burn ids) or `"burn-id"` for [`burn_hop_verdict`]. Mislabelling these as
+/// "burn ids" sent a debugger chasing burn ids that don't exist (#181 review).
+fn report_burn_hop(v: &BurnHopVerdict, key_kind: &str) {
     println!(
-        "  [{}] LOSS (burn-id): compared_ids={} dropped={} phantom={} -> {}",
+        "  [{}] LOSS ({key_kind}): compared_ids={} dropped={} phantom={} -> {}",
         v.hop,
         v.compared_ids,
         v.dropped_ids.len(),
         v.phantom_ids.len(),
         if v.is_pass() { "PASS" } else { "FAIL" }
     );
+    if v.compared_ids == 0 && v.dropped_ids.is_empty() && v.phantom_ids.is_empty() {
+        // compared_ids=0 with no dropped/phantom = the two key SETS had no shared overlap
+        // span at all (disjoint or one side empty) — NOT a per-hop loss number. This is the
+        // #181 symptom (with the OLD independent-burn-counter key); with the cam2-tick key
+        // it means the recordings did not temporally overlap, a harness/timing issue, not a
+        // chain drop. Flagged so it is never read as "zero loss" (#181 review).
+        println!(
+            "    NOTE: compared_ids=0 with no dropped/phantom — the two {key_kind} sets did \
+             NOT overlap; the hop loss is UNCOMPUTABLE from this recording, not a loss=0 claim."
+        );
+    }
     if !v.dropped_ids.is_empty() {
         let shown: Vec<u32> = v.dropped_ids.iter().copied().take(20).collect();
-        println!("    dropped burn ids (first 20, hop lost these): {shown:?}");
+        println!("    dropped {key_kind}s (first 20, hop lost these): {shown:?}");
     }
     if !v.phantom_ids.is_empty() {
         let shown: Vec<u32> = v.phantom_ids.iter().copied().take(20).collect();
-        println!("    phantom burn ids (first 20, downstream-only): {shown:?}");
+        println!("    phantom {key_kind}s (first 20, downstream-only): {shown:?}");
     }
 }
 
-/// Reduce a BurnHopVerdict to a compact JSON object for the report.
-fn burn_hop_json(v: &BurnHopVerdict) -> serde_json::Value {
+/// Reduce a BurnHopVerdict to a compact JSON object for the report. `key_kind` records
+/// what the compared/dropped/phantom counts are KEYED on (`"cam2 tick"` vs `"burn-id"`)
+/// so the machine-readable report is not silently read as burn ids (#181 review).
+fn burn_hop_json(v: &BurnHopVerdict, key_kind: &str) -> serde_json::Value {
     serde_json::json!({
-        "pass": v.is_pass(), "compared_ids": v.compared_ids,
+        "pass": v.is_pass(), "compared_ids": v.compared_ids, "key": key_kind,
         "dropped": v.dropped_ids.len(), "phantom": v.phantom_ids.len(),
     })
 }
@@ -764,20 +781,44 @@ fn main() -> Result<()> {
                 "cam1": cam1_ids.len(), "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
 
-            // --- per-hop LOSS by the clean digital burn id ---
-            // cam1→strih: cam1's forwarded burn vs strih's forwarded burn.
+            // --- per-hop LOSS paired by the SHARED cam2 source tick (#181) ---
+            // Each node stamps its OWN independent burn counter, so a set-equality
+            // compare of the two burn-id SEQUENCES finds zero overlap (compared_ids=0
+            // despite the burns being present — the #181 symptom). Instead pair on the
+            // cam2 source tick every recorded frame carries (the SAME key the latency
+            // pairing uses): a hop survived iff both endpoints' burns appear on a frame
+            // for that cam2 tick; dropped = upstream present / downstream absent;
+            // phantom = downstream present / upstream absent.
+            // cam1→strih: cam1's forwarded burn vs strih's forwarded burn. The OTHER
+            // forwarded burn present in the stream recording is stream's own — exclude it
+            // from the cam2 fallback so it cannot be misread as cam2 when cam2 is unpinned.
             if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
-                let v = burn_hop_verdict("cam1→strih", &cam1_ids, &strih_ids_seq);
-                report_burn_hop(&v);
+                let v = chain_hop_loss_from_stream(
+                    "cam1→strih",
+                    stream_frames,
+                    cam2_pin,
+                    args.burn_cam1_run_id,
+                    args.burn_strih_run_id,
+                    &[args.burn_stream_run_id],
+                );
+                report_burn_hop(&v, "cam2 tick");
                 all_pass &= v.is_pass();
-                report["full_chain"]["loss"]["cam1_strih"] = burn_hop_json(&v);
+                report["full_chain"]["loss"]["cam1_strih"] = burn_hop_json(&v, "cam2 tick");
             }
-            // strih→stream: strih's forwarded burn vs stream's own burn.
+            // strih→stream: strih's forwarded burn vs stream's own burn. The OTHER
+            // forwarded burn is cam1's — exclude it from the cam2 fallback.
             if !strih_ids_seq.is_empty() && !stream_ids_seq.is_empty() {
-                let v = burn_hop_verdict("strih→stream", &strih_ids_seq, &stream_ids_seq);
-                report_burn_hop(&v);
+                let v = chain_hop_loss_from_stream(
+                    "strih→stream",
+                    stream_frames,
+                    cam2_pin,
+                    args.burn_strih_run_id,
+                    args.burn_stream_run_id,
+                    &[args.burn_cam1_run_id],
+                );
+                report_burn_hop(&v, "cam2 tick");
                 all_pass &= v.is_pass();
-                report["full_chain"]["loss"]["strih_stream"] = burn_hop_json(&v);
+                report["full_chain"]["loss"]["strih_stream"] = burn_hop_json(&v, "cam2 tick");
             }
 
             // --- per-hop LATENCY co-located in one stream frame (no cam2-tick pairing) ---
