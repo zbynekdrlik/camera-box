@@ -62,6 +62,20 @@ pub fn cam1_burn_origin(canvas_w: u32, canvas_h: u32, qw: u32, qh: u32) -> (u32,
     (ox, oy)
 }
 
+/// Render `payload` as a fixed-size EC-H QR with a quiet zone — the one place the QR
+/// build idiom lives (used by both the BGRA blit and the YUYV burn). `qr_px` is the exact
+/// square size in px (min == max). The payload is small, so encoding always succeeds.
+fn render_payload_qr(payload: &Payload, qr_px: u32) -> GrayImage {
+    let s = payload.encode();
+    let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
+        .expect("payload is small, encodes within QR capacity");
+    code.render::<Luma<u8>>()
+        .min_dimensions(qr_px, qr_px)
+        .max_dimensions(qr_px, qr_px)
+        .quiet_zone(true)
+        .build()
+}
+
 /// Burn `payload`'s QR (EC-H, `qr_px` square) into a packed **YUYV** capture buffer's
 /// LUMA plane, horizontally centered and bottom-anchored (#174 cam1-capture burn).
 ///
@@ -83,15 +97,7 @@ pub fn burn_qr_yuyv(
     payload: &Payload,
     qr_px: u32,
 ) {
-    let s = payload.encode();
-    let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
-        .expect("payload is small, encodes within QR capacity");
-    let qr: GrayImage = code
-        .render::<Luma<u8>>()
-        .min_dimensions(qr_px, qr_px)
-        .max_dimensions(qr_px, qr_px)
-        .quiet_zone(true)
-        .build();
+    let qr = render_payload_qr(payload, qr_px);
     let (qw, qh) = (qr.width().min(width), qr.height().min(height));
     let (ox, oy) = cam1_burn_origin(width, height, qw, qh);
     let stride = stride as usize;
@@ -131,15 +137,7 @@ fn blit_qr_bgra(
     qr_size: u32,
     anchor: VAnchor,
 ) {
-    let s = payload.encode();
-    let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
-        .expect("payload is small, encodes within QR capacity");
-    let qr: GrayImage = code
-        .render::<Luma<u8>>()
-        .min_dimensions(qr_size, qr_size)
-        .max_dimensions(qr_size, qr_size)
-        .quiet_zone(true)
-        .build();
+    let qr = render_payload_qr(payload, qr_size);
     let (qw, qh) = (qr.width().min(band_w), qr.height().min(canvas_h));
     let ox = band_x + (band_w - qw) / 2;
     let oy = qr_origin_y(canvas_h, qh, anchor);
