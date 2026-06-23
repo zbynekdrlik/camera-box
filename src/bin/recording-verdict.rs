@@ -144,16 +144,6 @@ fn report_burn_hop(v: &BurnHopVerdict, key_kind: &str) {
         v.phantom_ids.len(),
         if v.is_pass() { "PASS" } else { "FAIL" }
     );
-    if v.decode_miss_excluded > 0 {
-        // #175: ticks reclassified as single-frame burn-DECODE MISSES (the absent node's
-        // own burn counter was contiguous across the tick ⇒ it rendered, the 4K corner QR
-        // just didn't decode that one frame). These are NOT hop drops — folded into compared.
-        println!(
-            "    NOTE: {} tick(s) reclassified as single-frame burn-DECODE MISSES (#175, \
-             counter contiguous ⇒ rendered, not dropped) — excluded from loss, counted as compared.",
-            v.decode_miss_excluded
-        );
-    }
     if v.compared_ids == 0 && v.dropped_ids.is_empty() && v.phantom_ids.is_empty() {
         // compared_ids=0 with no dropped/phantom = the two key SETS had no shared overlap
         // span at all (disjoint or one side empty) — NOT a per-hop loss number. This is the
@@ -182,8 +172,6 @@ fn burn_hop_json(v: &BurnHopVerdict, key_kind: &str) -> serde_json::Value {
     serde_json::json!({
         "pass": v.is_pass(), "compared_ids": v.compared_ids, "key": key_kind,
         "dropped": v.dropped_ids.len(), "phantom": v.phantom_ids.len(),
-        // #175: single-frame burn-decode misses removed from the loss (counter-contiguous).
-        "decode_miss_excluded": v.decode_miss_excluded,
     })
 }
 
@@ -247,67 +235,6 @@ fn parse_painter_ticks(path: &Path) -> Result<Vec<u32>> {
         .with_context(|| format!("parse painter ticks {}", path.display()))?;
     tracing::info!(file = %path.display(), ticks = ticks.len(), "painter ticks parsed");
     Ok(ticks)
-}
-
-/// Parse the painter `--paint-log` CSV's `tick → cam2 paint gen_ts_ns` map (#179).
-///
-/// The cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording alone
-/// ([`cam2_cam1_samples_from_burn`]) needs each cam2 tick's PAINT instant, not just the
-/// tick id — the cam1-capture burn rides into the stream recording carrying cam1's
-/// CAPTURE ts, and `latency = cam1_capture − cam2_paint[tick]`. ONLY the `--paint-log`
-/// shape (`tick,gen_ts_ns` header) carries the paint timestamp; the recording-probe CSV
-/// (`frame_index,n_qr,tick,…`) does not, and a bare one-tick-per-line file does not. For
-/// those shapes the map is empty (the caller then reports cam2→cam1 unavailable, never a
-/// wrong number). A malformed `tick,gen_ts_ns` data row errors loudly (a silently-shrunk
-/// map would drop real samples). Pure (operates on the text) so it is unit-testable.
-fn parse_painter_paint_ts_str(text: &str) -> Result<std::collections::HashMap<u32, i64>> {
-    let mut m = std::collections::HashMap::new();
-    // Only the tick,gen_ts_ns paint-log shape carries the paint instant.
-    let header = text.lines().map(str::trim).find(|l| !l.is_empty());
-    if !matches!(header, Some(h) if h.starts_with("tick,")) {
-        return Ok(m); // not a paint-log → no paint timestamps available
-    }
-    for (lineno, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("tick,") {
-            continue; // header / blank
-        }
-        let mut it = line.split(',');
-        let tick_s = it
-            .next()
-            .with_context(|| format!("paint-log row at line {} is empty: {line:?}", lineno + 1))?;
-        let ts_s = it.next().with_context(|| {
-            format!(
-                "paint-log row at line {} has <2 columns (expected tick,gen_ts_ns): {line:?}",
-                lineno + 1
-            )
-        })?;
-        let tick: u32 = tick_s.trim().parse().with_context(|| {
-            format!(
-                "paint-log tick not a u32 at line {}: {tick_s:?}",
-                lineno + 1
-            )
-        })?;
-        let ts: i64 = ts_s.trim().parse().with_context(|| {
-            format!(
-                "paint-log gen_ts_ns not an i64 at line {}: {ts_s:?}",
-                lineno + 1
-            )
-        })?;
-        m.insert(tick, ts);
-    }
-    Ok(m)
-}
-
-/// Read + parse the painter `tick → paint gen_ts_ns` map (see
-/// [`parse_painter_paint_ts_str`]). Empty when the file is not a `--paint-log` CSV.
-fn parse_painter_paint_ts(path: &Path) -> Result<std::collections::HashMap<u32, i64>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read painter paint-ts {}", path.display()))?;
-    let m = parse_painter_paint_ts_str(&text)
-        .with_context(|| format!("parse painter paint-ts {}", path.display()))?;
-    tracing::info!(file = %path.display(), entries = m.len(), "painter paint-ts parsed");
-    Ok(m)
 }
 
 /// Parse the cam1 grab-timestamp sidecar CSV (`frame_index,grab_ts_ns`, header
@@ -617,81 +544,107 @@ fn main() -> Result<()> {
     // strih is a real cam1→strih DROP.
     let mut cam1_frames_opt: Option<Vec<RecordingFrame>> = None;
     if let Some(cam1_path) = &args.cam1 {
-        let (cam1_frames, cam1_ticks) = ticks_of(cam1_path)?;
-
-        // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
-        let cam1_v = verdict(&cam1_ticks, &cfg);
-        all_pass &= report_recording(
-            "cam1",
-            cam1_path,
-            &cam1_v,
-            &args.out_dir,
-            args.max_pixel_proof,
-        )?;
-        report["nodes"]["cam1"] = serde_json::json!({
-            "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
-            "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
-            "avg_step": cam1_v.avg_step, "beat_balanced": cam1_v.beat_balanced,
-        });
-
-        // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
-        // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
-        // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
-        // Needs the strih recording; skipped in cam1-only optical-readability mode.
-        if let Some((_, strih_ticks)) = &strih_data {
-            let cs = cam1_strih_verdict(&cam1_ticks, strih_ticks, &cfg);
-            println!(
-                "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
-            );
-            println!(
-                "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
-                cs.compared_ticks,
-                cs.strih_only_ticks.len(),
-                cs.stream_only_ticks.len()
-            );
-            if !cs.strih_only_ticks.is_empty() {
-                let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
-                println!(
-                    "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+        // #187: the cam1 GRAB is the large (multi-GB 4K) decode. Decode it so a failure
+        // (a decode error, or the worker pool aborting under memory pressure on a tight
+        // box) does NOT `?`-abort the WHOLE verdict — the valuable stream-only hops are
+        // computed LATER from the stream recording ALONE and must still be produced + the
+        // JSON still written. A cam1 grab failure degrades to "cam1-grab hops unavailable",
+        // not a dead run. (The #187 memory bound makes this rare; this is the belt-and-
+        // braces so a manual `--cam1` on a small box can never silently lose the rest of
+        // the verdict.) `ticks_of` returns Err on a grab failure; we catch it here.
+        let cam1_decoded = match ticks_of(cam1_path) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!(
+                    "WARNING: cam1 grab decode FAILED ({e:#}) — skipping the cam1-GRAB hops; \
+                     the stream-only per-hop verdict (incl cam2→cam1 from the cam1-capture burn) \
+                     is still computed from the stream recording below. (#187: a cam1 grab \
+                     failure no longer aborts the whole run.)"
                 );
+                report["nodes"]["cam1"] = serde_json::json!({
+                    "unavailable": true,
+                    "reason": format!("cam1 grab decode failed: {e:#}"),
+                });
+                None
             }
-            if !cs.stream_only_ticks.is_empty() {
-                let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
-                println!("  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}");
-            }
-            println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
-            all_pass &= cs.is_pass();
-            report["hops"]["cam1_strih"] = serde_json::json!({
-                "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
-                "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
+        };
+        if let Some((cam1_frames, cam1_ticks)) = cam1_decoded {
+            // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
+            let cam1_v = verdict(&cam1_ticks, &cfg);
+            all_pass &= report_recording(
+                "cam1",
+                cam1_path,
+                &cam1_v,
+                &args.out_dir,
+                args.max_pixel_proof,
+            )?;
+            report["nodes"]["cam1"] = serde_json::json!({
+                "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
+                "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
+                "avg_step": cam1_v.avg_step, "beat_balanced": cam1_v.beat_balanced,
             });
-        }
 
-        // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
-        if let Some(painter_path) = &args.painter {
-            let painter_ticks = parse_painter_ticks(painter_path)?;
-            let a = cam1_optical_assessment(&cam1_ticks, &painter_ticks, &cfg);
-            println!("=== cam2→cam1 OPTICAL assessment (honest, NOT a zero-loss claim) ===");
-            println!(
-                "  unknown_ticks (in-range, never painted = real optical fault)={}",
-                a.unknown_ticks.len()
-            );
-            println!(
-                "  out_of_painter_range_ticks (painter CSV didn't cover)={}",
-                a.out_of_painter_range_ticks.len()
-            );
-            if !a.unknown_ticks.is_empty() {
-                let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
-                println!("  unknown ticks (first 20): {shown:?}");
-                all_pass = false; // an in-range never-painted tick is a provable fault
+            // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
+            // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
+            // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
+            // Needs the strih recording; skipped in cam1-only optical-readability mode.
+            if let Some((_, strih_ticks)) = &strih_data {
+                let cs = cam1_strih_verdict(&cam1_ticks, strih_ticks, &cfg);
+                println!(
+                    "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
+                );
+                println!(
+                    "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
+                    cs.compared_ticks,
+                    cs.strih_only_ticks.len(),
+                    cs.stream_only_ticks.len()
+                );
+                if !cs.strih_only_ticks.is_empty() {
+                    let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
+                    println!(
+                        "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+                    );
+                }
+                if !cs.stream_only_ticks.is_empty() {
+                    let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
+                    println!(
+                        "  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}"
+                    );
+                }
+                println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
+                all_pass &= cs.is_pass();
+                report["hops"]["cam1_strih"] = serde_json::json!({
+                    "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
+                    "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
+                });
             }
-            report["hops"]["cam2_cam1"] = serde_json::json!({
-                "strict": false, "claims_zero_loss": a.claims_zero_loss,
-                "unknown_ticks": a.unknown_ticks.len(),
-                "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
-            });
-        }
-        cam1_frames_opt = Some(cam1_frames);
+
+            // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
+            if let Some(painter_path) = &args.painter {
+                let painter_ticks = parse_painter_ticks(painter_path)?;
+                let a = cam1_optical_assessment(&cam1_ticks, &painter_ticks, &cfg);
+                println!("=== cam2→cam1 OPTICAL assessment (honest, NOT a zero-loss claim) ===");
+                println!(
+                    "  unknown_ticks (in-range, never painted = real optical fault)={}",
+                    a.unknown_ticks.len()
+                );
+                println!(
+                    "  out_of_painter_range_ticks (painter CSV didn't cover)={}",
+                    a.out_of_painter_range_ticks.len()
+                );
+                if !a.unknown_ticks.is_empty() {
+                    let shown: Vec<u32> = a.unknown_ticks.iter().copied().take(20).collect();
+                    println!("  unknown ticks (first 20): {shown:?}");
+                    all_pass = false; // an in-range never-painted tick is a provable fault
+                }
+                report["hops"]["cam2_cam1"] = serde_json::json!({
+                    "strict": false, "claims_zero_loss": a.claims_zero_loss,
+                    "unknown_ticks": a.unknown_ticks.len(),
+                    "out_of_painter_range_ticks": a.out_of_painter_range_ticks.len(),
+                });
+            }
+            cam1_frames_opt = Some(cam1_frames);
+        } // end: cam1 grab decoded OK (#187 non-fatal guard)
     }
 
     // cam→strih honest assessment (no false zero claim). Needs both strih + painter;
@@ -958,71 +911,50 @@ fn main() -> Result<()> {
                 report["full_chain"]["latency"]["cam1_stream"] = hop_lat_json(&lat);
             }
 
-            // #179 — cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording + the
-            // painter paint-log ALONE (no 7.3GB cam1 grab). The cam1-capture burn (#174)
+            // #179 — cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording ALONE
+            // (no 7.3GB cam1 grab, no external painter CSV). The cam1-capture burn (#174)
             // rides into the stream recording carrying cam1's CAPTURE wall-clock ts; the
-            // painter CSV gives cam2's PAINT ts per tick; latency = cam1_capture −
-            // cam2_paint[tick], matched by the cam2 optical tick. This fills the previously
-            // "UNAVAILABLE (needs --cam1)" gap WITHOUT decoding the grab. Needs --painter
-            // to be the `tick,gen_ts_ns` paint-log (the recording-probe / bare-tick shapes
-            // carry no paint instant). When unavailable it is reported as such, never faked.
+            // cam2 optical QR cam1 FILMED rides in the SAME frame carrying cam2's PAINT
+            // instant in its OWN gen_ts; latency = cam1_capture − cam2_paint, CO-LOCATED in
+            // one frame. This fills the previously "UNAVAILABLE (needs --cam1)" gap WITHOUT
+            // decoding the grab — and is robust to the painter counter resetting between the
+            // painter-CSV capture and the recording (which broke the CSV-keyed pairing).
             if !cam1_ids.is_empty() {
-                match &args.painter {
-                    Some(painter_path) => {
-                        let paint_ts = parse_painter_paint_ts(painter_path)?;
-                        if paint_ts.is_empty() {
-                            println!(
-                                "=== cam2→cam1 (optical-injection, from cam1 burn) per-hop ABSOLUTE \
-                                 latency (#179) ===\n  UNAVAILABLE — the --painter file carries no per-tick \
-                                 paint timestamp (need the `tick,gen_ts_ns` paint-log, not the \
-                                 recording-probe / bare-tick CSV)."
-                            );
-                        } else {
-                            let c1_lat = hop_latency(
-                                "cam2→cam1",
-                                &cam2_cam1_samples_from_burn(
-                                    stream_frames,
-                                    &paint_ts,
-                                    cam2_pin,
-                                    args.burn_cam1_run_id,
-                                    &[args.burn_strih_run_id, args.burn_stream_run_id],
-                                ),
-                            );
-                            report_hop_latency(
-                                &c1_lat,
-                                "cam2→cam1 (optical-injection, from cam1 burn, no grab)",
-                                "cam2 paint gen_ts_ns",
-                            );
-                            let mut c1_json = hop_lat_json(&c1_lat);
-                            // cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1 camera
-                            // lens → v4l2 capture), NOT a production hop — in production the
-                            // camera films the REAL scene, no monitor in the path. Label it so
-                            // the number is never read as a production camera latency.
-                            if let Some(obj) = c1_json.as_object_mut() {
-                                obj.insert(
-                                    "note".to_string(),
-                                    serde_json::Value::String(
-                                        "TEST-INJECTION hop (cam2 monitor → cam1 camera optical+v4l2 \
-                                         capture), read from the cam1-capture burn in the stream \
-                                         recording (no grab decode); NOT a production camera latency"
-                                            .to_string(),
-                                    ),
-                                );
-                            }
-                            report["full_chain"]["latency"]["cam2_cam1"] = c1_json;
-                            println!(
-                                "  NOTE: cam2→cam1 is the TEST-INJECTION optical hop (monitor→camera+capture), \
-                                 NOT a production camera latency (production films the real scene)."
-                            );
-                        }
-                    }
-                    None => println!(
-                        "=== cam2→cam1 (optical-injection, from cam1 burn) per-hop ABSOLUTE latency \
-                         (#179) ===\n  UNAVAILABLE — pass --painter <paint-log tick,gen_ts_ns> to \
-                         compute it from the cam1 burn (cam1_capture − cam2_paint, both wall clock); \
-                         no 7.3GB grab decode needed."
+                let c1_lat = hop_latency(
+                    "cam2→cam1",
+                    &cam2_cam1_samples_from_burn(
+                        stream_frames,
+                        cam2_pin,
+                        args.burn_cam1_run_id,
+                        &[args.burn_strih_run_id, args.burn_stream_run_id],
                     ),
+                );
+                report_hop_latency(
+                    &c1_lat,
+                    "cam2→cam1 (optical-injection, co-located cam1 burn vs cam2 QR, no grab)",
+                    "cam2 paint gen_ts_ns",
+                );
+                let mut c1_json = hop_lat_json(&c1_lat);
+                // cam2→cam1 is the TEST-INJECTION hop (cam2 monitor → cam1 camera lens →
+                // v4l2 capture), NOT a production hop — in production the camera films the
+                // REAL scene, no monitor in the path. Label it so the number is never read
+                // as a production camera latency.
+                if let Some(obj) = c1_json.as_object_mut() {
+                    obj.insert(
+                        "note".to_string(),
+                        serde_json::Value::String(
+                            "TEST-INJECTION hop (cam2 monitor → cam1 camera optical+v4l2 capture), \
+                             read CO-LOCATED from the cam1-capture burn + cam2 QR in the stream \
+                             recording (no grab decode); NOT a production camera latency"
+                                .to_string(),
+                        ),
+                    );
                 }
+                report["full_chain"]["latency"]["cam2_cam1"] = c1_json;
+                println!(
+                    "  NOTE: cam2→cam1 is the TEST-INJECTION optical hop (monitor→camera+capture), \
+                     NOT a production camera latency (production films the real scene)."
+                );
             }
         } else {
             println!(
@@ -1074,41 +1006,8 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_grab_ts, parse_painter_paint_ts_str, parse_painter_ticks_str};
+    use super::{parse_grab_ts, parse_painter_ticks_str};
     use std::io::Write;
-
-    #[test]
-    fn paint_ts_parses_tick_to_gen_ts_from_paint_log() {
-        // #179: the cam2→cam1-from-burn latency needs tick → paint gen_ts_ns. The
-        // --paint-log shape `tick,gen_ts_ns` carries it; parse it into the map.
-        let csv = "tick,gen_ts_ns\n0,1782000000000\n2,1782000033000\n";
-        let m = parse_painter_paint_ts_str(csv).unwrap();
-        assert_eq!(m.get(&0), Some(&1782000000000));
-        assert_eq!(m.get(&2), Some(&1782000033000));
-        assert_eq!(m.len(), 2);
-    }
-
-    #[test]
-    fn paint_ts_empty_for_non_paint_log_shapes() {
-        // The recording-probe CSV and a bare one-tick-per-line file carry NO paint
-        // instant → the map is empty (caller reports cam2→cam1 unavailable, not wrong).
-        assert!(parse_painter_paint_ts_str(
-            "frame_index,n_qr,tick,run_id,frame_ids\n0,2,100,7,x\n"
-        )
-        .unwrap()
-        .is_empty());
-        assert!(parse_painter_paint_ts_str("10\n11\n12\n")
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn paint_ts_malformed_paint_log_row_errors_loudly() {
-        // A paint-log header but a non-numeric ts must error, not silently drop (a
-        // shrunk paint-ts map would drop real cam2→cam1 latency samples).
-        assert!(parse_painter_paint_ts_str("tick,gen_ts_ns\n0,notanumber\n").is_err());
-        assert!(parse_painter_paint_ts_str("tick,gen_ts_ns\n0\n").is_err());
-    }
 
     #[test]
     fn painter_ticks_parse_paint_log_format_tick_first_column() {

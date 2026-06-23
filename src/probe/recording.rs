@@ -41,6 +41,70 @@ use std::sync::{Arc, Mutex};
 /// sequential gray8 pipe) becomes the limit and more workers just contend.
 const MAX_DECODE_WORKERS: usize = 8;
 
+/// #187: estimated PEAK resident bytes a single decode worker holds for ONE frame,
+/// per pixel of the native frame. A worker concurrently holds the source gray8 luma
+/// (1 B/px), the `decode_qr_luma_all` working copy, and rqrr's `PreparedImage` (a
+/// binarized `Box<[u8]>` ~1 B/px) plus its row-average + capstone-search scratch — so
+/// the live peak is several × the raw frame. Measured on the dev1 box: a single
+/// stream-only 3840×2160 decode at 4 workers peaks at ≈215 MB RSS (~46 MB/worker of
+/// decode-attributable memory beyond baseline ≈ 5.5 B/px). 6 B/px is the conservative
+/// upper estimate (source + clone + prepared pixels + scratch + margin) so the worker
+/// cap stays SAFE rather than optimistic. On a 3840×2160 frame this is ≈50 MB/worker;
+/// 8 workers ≈ 400 MB — added to the rest of a full multi-recording run on the 7.5 GB
+/// dev box, the unbounded `min(cpus,8)` pool was the peak that got OOM-killed (EXIT=137).
+const DECODE_PEAK_BYTES_PER_PIXEL: usize = 6;
+
+/// #187: fraction of *available* memory the decode worker pool may consume at peak.
+/// Half leaves headroom for ffmpeg, the OS page cache feeding the pipe, the small
+/// per-frame `RecordingFrame` results vector, and the rest of the process — so the
+/// pool can never be the cause of an OOM kill. Conservative on purpose: a slightly
+/// smaller pool that COMPLETES beats a faster one that gets SIGKILLed mid-decode.
+const MEM_BUDGET_FRACTION: f64 = 0.5;
+
+/// Cap `cpu_workers` so the parallel decode's PEAK memory fits an available-memory
+/// budget (#187). Each worker's per-frame peak ≈ [`DECODE_PEAK_BYTES_PER_PIXEL`] ×
+/// frame area; the pool may use up to [`MEM_BUDGET_FRACTION`] of `avail_mem_bytes`.
+/// Returns `min(cpu_workers, budget / per_worker)`, clamped to ≥ 1 so the pool always
+/// makes forward progress (a 0-worker pool would hang). A degenerate 0-pixel frame or
+/// zero per-worker cost is treated as "no memory pressure" → keep all CPU workers.
+///
+/// PURE (no I/O, no env, no syscalls) so the bound is unit-testable; the runtime entry
+/// [`decode_workers`] reads the live available memory and frame dims and calls this.
+/// This is the deterministic fix for the #187 OOM: on a small box (or a huge frame) the
+/// worker count drops automatically to keep the decode within RAM, instead of the prior
+/// unconditional `min(cpus, 8)` that blew past free memory and was OOM-killed.
+fn workers_within_mem_budget(
+    cpu_workers: usize,
+    width: u32,
+    height: u32,
+    avail_mem_bytes: u64,
+) -> usize {
+    let per_worker = DECODE_PEAK_BYTES_PER_PIXEL as u64 * (width as u64) * (height as u64);
+    if per_worker == 0 {
+        return cpu_workers.max(1); // degenerate frame → no memory pressure
+    }
+    let budget = (avail_mem_bytes as f64 * MEM_BUDGET_FRACTION) as u64;
+    let mem_cap = (budget / per_worker).max(1) as usize;
+    cpu_workers.min(mem_cap).max(1)
+}
+
+/// Best-effort live available memory in bytes (Linux `/proc/meminfo` `MemAvailable`).
+/// Returns `None` when the field can't be read/parsed (non-Linux, restricted env), in
+/// which case [`decode_workers`] skips the memory bound (CPU bound only) — the prior
+/// behavior, so this never makes the pool LARGER than before, only smaller when RAM is
+/// genuinely tight (#187).
+fn available_mem_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            // Format: "MemAvailable:    3070272 kB"
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
 /// Default cap on how many flagged frames get a pixel-proof PNG written. The
 /// verdict only needs a handful of visual examples per category; extracting a
 /// PNG for thousands of flagged frames was a large slice of the #166 runtime
@@ -219,21 +283,38 @@ fn read_frames(
     Ok(frame_index)
 }
 
-/// Number of decode worker threads to use (= available CPUs, clamped to
-/// `1..=MAX_DECODE_WORKERS`). Mirrors the #160 spool-decode pool sizing.
+/// Number of decode worker threads to use for a frame of `width`×`height`, capped by
+/// BOTH the CPU count AND an available-memory budget (#187). The CPU cap is
+/// `min(available_parallelism, MAX_DECODE_WORKERS)` (the #160/#166 sizing); the memory
+/// cap ([`workers_within_mem_budget`]) then throttles it DOWN when free RAM cannot hold
+/// `workers × per-frame peak` — the fix for the #187 OOM (the prior unconditional
+/// `min(cpus, 8)` blew past free memory on a big 4K recording and was SIGKILLed).
 ///
-/// `CAMERA_BOX_DECODE_WORKERS` overrides the auto value (still clamped to the
-/// `1..=MAX_DECODE_WORKERS` range) — useful to pin a count on a shared runner or
-/// to A/B the speedup (`=1` reproduces the prior single-threaded loop). A
-/// non-numeric or zero value is ignored (falls back to auto).
-fn decode_workers() -> usize {
-    if let Ok(v) = std::env::var("CAMERA_BOX_DECODE_WORKERS") {
-        if let Ok(n) = v.trim().parse::<usize>() {
-            if n >= 1 {
-                return n.clamp(1, MAX_DECODE_WORKERS);
-            }
-        }
+/// `CAMERA_BOX_DECODE_WORKERS` overrides the auto CPU value (still clamped to
+/// `1..=MAX_DECODE_WORKERS` AND still memory-bounded — an explicit pin must never let a
+/// shared runner OOM) — useful to A/B the speedup (`=1` reproduces the single-threaded
+/// loop). A non-numeric or zero value is ignored (falls back to auto). When available
+/// memory can't be read (non-Linux / restricted), the memory bound is skipped (CPU
+/// bound only — never larger than before).
+fn decode_workers(width: u32, height: u32) -> usize {
+    let cpu_workers = if let Ok(v) = std::env::var("CAMERA_BOX_DECODE_WORKERS") {
+        v.trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n >= 1)
+            .map(|n| n.clamp(1, MAX_DECODE_WORKERS))
+            .unwrap_or_else(auto_cpu_workers)
+    } else {
+        auto_cpu_workers()
+    };
+    match available_mem_bytes() {
+        Some(avail) => workers_within_mem_budget(cpu_workers, width, height, avail),
+        None => cpu_workers, // memory unknown → CPU bound only (prior behavior)
     }
+}
+
+/// Auto CPU worker count = available parallelism clamped to `1..=MAX_DECODE_WORKERS`.
+fn auto_cpu_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -364,10 +445,11 @@ fn decode_stream_parallel(
 /// is identical to the prior serial loop (results are re-sorted by frame_index).
 pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
-    let workers = decode_workers();
+    let workers = decode_workers(width, height);
     tracing::info!(
         file = %path.display(), width, height, workers,
-        "recording analysis start (parallel decode)"
+        avail_mb = available_mem_bytes().map(|b| b / 1_048_576),
+        "recording analysis start (parallel decode, #187 memory-bounded worker pool)"
     );
     // Emit a periodic frame-count HEARTBEAT at info level (every PROGRESS_EVERY
     // frames the producer reads). This is the liveness signal the harness stall
@@ -690,5 +772,75 @@ mod tests {
         let (sel, dropped) = select_frames_to_extract(&flagged, 3);
         assert_eq!(sel, vec![1, 2, 3]);
         assert_eq!(dropped, 1, "4 unique - 3 cap = 1 dropped");
+    }
+
+    // ---- #187: bound the parallel-decode peak memory so a big 4K recording never OOMs ----
+
+    #[test]
+    fn mem_budget_caps_workers_on_a_small_box_with_a_4k_frame() {
+        // #187 BUG: the parallel decode picked `workers = min(cpus, 8)` with NO memory
+        // bound, so a full multi-recording verdict run on a tight box — every worker
+        // holding source luma + clone + rqrr's prepared pixels (≈DECODE_PEAK_BYTES_PER_PIXEL
+        // × area) on a 3840×2160 frame, alongside ffmpeg + the grab buffers — blew past free
+        // RAM and got OOM-killed (EXIT=137) mid-decode, aborting the whole verdict. The fix
+        // caps workers by an available-memory budget: when free RAM during the run is tight,
+        // the CPU count must be throttled DOWN, never used as-is.
+        let cpu_workers = 8;
+        let (w, h) = (3840u32, 2160u32);
+        let per_worker = DECODE_PEAK_BYTES_PER_PIXEL as u64 * (w as u64) * (h as u64);
+        // Choose a genuinely TIGHT available figure so the budget (half of it) cannot hold
+        // all 8 workers: budget must be < 8 × per_worker. With per_worker ≈ 47.5 MB for 4K,
+        // 8 workers need ≈ 380 MB of budget ⇒ ≈ 760 MB available. 600 MB is below that, the
+        // "barely any free RAM left during a heavy run" case the OOM happened in.
+        let avail = 600_000_000u64;
+        let budget = (avail as f64 * MEM_BUDGET_FRACTION) as u64;
+        let expected_max = (budget / per_worker).max(1) as usize;
+        assert!(
+            expected_max < cpu_workers,
+            "test premise: at {avail} B avail the budget ({budget}) must NOT hold all \
+             {cpu_workers} 4K workers (per_worker={per_worker}, cap={expected_max})"
+        );
+        let got = workers_within_mem_budget(cpu_workers, w, h, avail);
+        assert!(got >= 1, "always at least one worker (forward progress)");
+        assert_eq!(
+            got, expected_max,
+            "workers must be throttled to the memory budget ({expected_max} for 4K \
+             @ {avail} B avail), not the {cpu_workers} CPU count"
+        );
+        assert!(
+            got < cpu_workers,
+            "a 4K frame on a {avail}-byte box must throttle below the {cpu_workers} CPU \
+             workers (got {got}) — this is the #187 OOM fix"
+        );
+    }
+
+    #[test]
+    fn mem_budget_keeps_all_cpus_when_ram_is_ample() {
+        // A roomy box (e.g. a 64 GB CI runner) with a 4K frame must NOT be throttled —
+        // the memory bound only kicks in when RAM is the binding constraint, so the #166
+        // parallel speedup is preserved everywhere it is safe.
+        let cpu_workers = 8;
+        let got = workers_within_mem_budget(cpu_workers, 3840, 2160, 64_000_000_000);
+        assert_eq!(got, cpu_workers, "ample RAM → keep all CPU workers");
+    }
+
+    #[test]
+    fn mem_budget_always_makes_forward_progress() {
+        // Pathological: almost no memory reported. We must still return at least ONE
+        // worker (a hung 0-worker pool would never decode) — bounded, not dead.
+        assert_eq!(
+            workers_within_mem_budget(8, 3840, 2160, 1),
+            1,
+            "near-zero memory still yields exactly one worker"
+        );
+        // Degenerate frame dims must not divide-by-zero / panic.
+        assert_eq!(workers_within_mem_budget(8, 0, 0, 2_500_000_000), 8);
+    }
+
+    #[test]
+    fn mem_budget_small_frame_is_never_throttled() {
+        // A small (downscaled / SD) frame is cheap, so even a tight box keeps all CPUs.
+        let got = workers_within_mem_budget(8, 640, 480, 2_500_000_000);
+        assert_eq!(got, 8, "a 640×480 frame never hits the memory bound");
     }
 }
