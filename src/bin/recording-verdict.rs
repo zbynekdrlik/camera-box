@@ -30,11 +30,13 @@ use camera_box::probe::recording::{
 };
 use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
-    cam2_cam1_samples, cam_strih_samples, hop_latency, strih_stream_samples,
-    strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    burn_ids_in, cam2_cam1_samples, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
+    strih_stream_samples, strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
-    cam_strih_assessment, strih_stream_verdict, verdict, FrameTick, RecordingVerdict, VerdictConfig,
+    burn_hop_verdict, cam_strih_assessment, strih_stream_verdict, verdict, BurnHopVerdict,
+    FrameTick, RecordingVerdict, VerdictConfig,
 };
 use clap::Parser;
 use std::collections::HashSet;
@@ -93,6 +95,14 @@ struct Args {
     /// (stream_burn.gen_ts_ns − strih_burn.gen_ts_ns, paired by cam2 tick).
     #[arg(long, default_value_t = BURN_RUN_ID_STREAM)]
     burn_stream_run_id: u32,
+    /// #174: the cam1-CAPTURE burn run_id (the value `CAMERA_BOX_BURN_RUN_ID` was set to
+    /// on cam1). cam1's render-time burn rides through NDI into strih's program and on into
+    /// stream's, so the SINGLE stream recording carries it; when present, the full chain
+    /// cam1→strih→stream is verdicted by the CLEAN digital burn-id (loss + latency), with
+    /// no 60→30 optical-beat ambiguity. When absent in the recording these hops report no
+    /// samples (never a wrong number). Default mirrors the cam1 burn's reserved id.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM1)]
+    burn_cam1_run_id: u32,
     /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
     /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
     /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
@@ -118,6 +128,34 @@ fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
         }),
         None => serde_json::Value::Null,
     }
+}
+
+/// Print a clean burn-id hop verdict (#174) and return its pass.
+fn report_burn_hop(v: &BurnHopVerdict) {
+    println!(
+        "  [{}] LOSS (burn-id): compared_ids={} dropped={} phantom={} -> {}",
+        v.hop,
+        v.compared_ids,
+        v.dropped_ids.len(),
+        v.phantom_ids.len(),
+        if v.is_pass() { "PASS" } else { "FAIL" }
+    );
+    if !v.dropped_ids.is_empty() {
+        let shown: Vec<u32> = v.dropped_ids.iter().copied().take(20).collect();
+        println!("    dropped burn ids (first 20, hop lost these): {shown:?}");
+    }
+    if !v.phantom_ids.is_empty() {
+        let shown: Vec<u32> = v.phantom_ids.iter().copied().take(20).collect();
+        println!("    phantom burn ids (first 20, downstream-only): {shown:?}");
+    }
+}
+
+/// Reduce a BurnHopVerdict to a compact JSON object for the report.
+fn burn_hop_json(v: &BurnHopVerdict) -> serde_json::Value {
+    serde_json::json!({
+        "pass": v.is_pass(), "compared_ids": v.compared_ids,
+        "dropped": v.dropped_ids.len(), "phantom": v.phantom_ids.len(),
+    })
 }
 
 /// Parse the painter ground-truth ticks from any of the THREE shapes the harness
@@ -693,6 +731,104 @@ fn main() -> Result<()> {
         report_hop_latency(&ss_lat, "strih→stream", "strih render gen_ts_ns");
         report["latency"]["strih_stream"] = hop_lat_json(&ss_lat);
         report["latency"]["strih_stream_source"] = serde_json::json!(source);
+    }
+
+    // ===================================================================================
+    // #174 — FULL-CHAIN per-hop verdict from the SINGLE stream recording, paired on the
+    // CLEAN DIGITAL BURN IDs. The cam1-capture burn (run_id = burn_cam1_run_id) rides
+    // through NDI into strih's program and on into stream's, so ONE stream recording
+    // carries every mark: cam2 optical dual-QR + cam1 burn + strih burn + stream burn.
+    // Each hop pairs on the burn `frame_id` (the SAME integer end-to-end) — NOT the
+    // 60→30 optical beat — so the 259-dropped-vs-real_gap=1 loss artifact and the
+    // p99=3.4s latency outliers of run 1530670109 cannot recur. Computed ONLY when the
+    // stream recording actually carries the burns (else each hop reports no samples).
+    // ===================================================================================
+    if let Some(stream_frames) = &stream_frames_opt {
+        let cam1_ids = burn_ids_in(stream_frames, args.burn_cam1_run_id);
+        let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
+        let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
+        let any_burn =
+            !cam1_ids.is_empty() || !strih_ids_seq.is_empty() || !stream_ids_seq.is_empty();
+        if any_burn {
+            println!();
+            println!(
+                "=== #174 FULL-CHAIN per-hop verdict from the STREAM recording ALONE (clean burn-id pairing) ==="
+            );
+            println!(
+                "  burn ids in stream recording: cam1={} strih={} stream={}",
+                cam1_ids.len(),
+                strih_ids_seq.len(),
+                stream_ids_seq.len()
+            );
+            report["full_chain"]["burn_ids_present"] = serde_json::json!({
+                "cam1": cam1_ids.len(), "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
+            });
+
+            // --- per-hop LOSS by the clean digital burn id ---
+            // cam1→strih: cam1's forwarded burn vs strih's forwarded burn.
+            if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
+                let v = burn_hop_verdict("cam1→strih", &cam1_ids, &strih_ids_seq);
+                report_burn_hop(&v);
+                all_pass &= v.is_pass();
+                report["full_chain"]["loss"]["cam1_strih"] = burn_hop_json(&v);
+            }
+            // strih→stream: strih's forwarded burn vs stream's own burn.
+            if !strih_ids_seq.is_empty() && !stream_ids_seq.is_empty() {
+                let v = burn_hop_verdict("strih→stream", &strih_ids_seq, &stream_ids_seq);
+                report_burn_hop(&v);
+                all_pass &= v.is_pass();
+                report["full_chain"]["loss"]["strih_stream"] = burn_hop_json(&v);
+            }
+
+            // --- per-hop LATENCY co-located in one stream frame (no cam2-tick pairing) ---
+            if !cam1_ids.is_empty() && !strih_ids_seq.is_empty() {
+                let lat = hop_latency(
+                    "cam1→strih",
+                    &chain_hop_samples_from_stream(
+                        stream_frames,
+                        args.burn_cam1_run_id,
+                        args.burn_strih_run_id,
+                    ),
+                );
+                report_hop_latency(&lat, "cam1→strih (burn-id)", "cam1 capture gen_ts_ns");
+                report["full_chain"]["latency"]["cam1_strih"] = hop_lat_json(&lat);
+            }
+            if !strih_ids_seq.is_empty() && !stream_ids_seq.is_empty() {
+                let lat = hop_latency(
+                    "strih→stream",
+                    &chain_hop_samples_from_stream(
+                        stream_frames,
+                        args.burn_strih_run_id,
+                        args.burn_stream_run_id,
+                    ),
+                );
+                report_hop_latency(&lat, "strih→stream (burn-id)", "strih render gen_ts_ns");
+                report["full_chain"]["latency"]["strih_stream"] = hop_lat_json(&lat);
+            }
+            // cam1→stream END-TO-END latency (cam1 capture → stream render), one frame.
+            if !cam1_ids.is_empty() && !stream_ids_seq.is_empty() {
+                let lat = hop_latency(
+                    "cam1→stream",
+                    &chain_hop_samples_from_stream(
+                        stream_frames,
+                        args.burn_cam1_run_id,
+                        args.burn_stream_run_id,
+                    ),
+                );
+                report_hop_latency(
+                    &lat,
+                    "cam1→stream (end-to-end, burn-id)",
+                    "cam1 capture gen_ts_ns",
+                );
+                report["full_chain"]["latency"]["cam1_stream"] = hop_lat_json(&lat);
+            }
+        } else {
+            println!(
+                "=== #174 FULL-CHAIN burn-id verdict: SKIPPED — no cam1/strih/stream burn QR in the \
+                 stream recording. Set CAMERA_BOX_BURN_RUN_ID on cam1 + OBS_BURN_QR on strih/stream \
+                 (+ --burn-*-run-id) and re-run for the clean per-hop loss + latency."
+            );
+        }
     }
 
     // Record the headline verdict and write the machine-readable report (BEFORE any
