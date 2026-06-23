@@ -228,11 +228,6 @@ impl VideoCapture {
         let caps = device.query_caps()?;
         tracing::info!("Device: {} ({})", caps.card, caps.driver);
 
-        // Apply certified picture controls (saturation/contrast) BEFORE streaming so
-        // every grabbed frame is sharp + bimodal for QR decode (#156). Read back the
-        // applied value for an honest log; a failure warns but never aborts capture.
-        Self::apply_controls(&device, controls);
-
         // Get current format as starting point
         let mut format = Capture::format(&device)?;
 
@@ -284,6 +279,18 @@ impl VideoCapture {
             frame_rate.numerator,
             frame_rate.denominator
         );
+
+        // Apply certified picture controls (saturation/contrast) AFTER set_format and
+        // set_params, just before streaming (#156 regression fix). MANY UVC capture
+        // devices — the rig's ShadowCast 2 included — RESET their picture controls to
+        // factory defaults (contrast=50, saturation=50) on VIDIOC_S_FMT / VIDIOC_S_PARM.
+        // Applying the controls BEFORE set_format (as the code previously did) let the
+        // format-set clobber them right back to the soft defaults, so the grab decoded a
+        // mushy QR and ~40% of frames went undecodable (run-163163) even though the
+        // controls were "applied". Setting them here, after the format/rate negotiation
+        // and verified by read-back, guarantees the device actually streams with the
+        // certified sharp/bimodal controls. A failure warns but never aborts capture.
+        Self::apply_controls(&device, controls);
 
         // Create memory-mapped stream with enough buffers to avoid frame drops
         // 4 buffers to handle processing time variance
