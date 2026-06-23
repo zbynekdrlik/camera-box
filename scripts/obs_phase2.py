@@ -622,6 +622,219 @@ def _resolve_own_output(ws, host, ndi_name, terminal):
     return suffix_form
 
 
+# #163: a recorded-black program is the failure this whole action exists to prevent
+# (a probe ingest that received no NDI, or a scene wired to a dead source, renders pure
+# black -> every recorded frame undecodable -> a wasted multi-minute run). The pure
+# decision below is the fail-fast self-check: a frame whose PEAK luma is 0 is genuinely
+# black (no signal at all); any non-zero peak means the source is rendering real content.
+# We key on the PEAK (max), NOT the mean: a legitimately dark-but-live camera frame can
+# have a very low mean (the live 'Cam 5' read mean ~30, but a darker scene could be ~1)
+# while still carrying a decodable QR — only an all-zero frame (max==0) is truly black.
+def _luma_is_black(luma_max):
+    """#163 fail-fast self-check (pure): True iff the rendered program frame is black
+    (no signal). Black == peak luma 0; any non-zero peak is real content. The decision
+    is on the PEAK only — the caller logs the mean separately for diagnostics, but the
+    mean never gates this (a dark-but-live frame has a low mean and a non-zero peak)."""
+    return int(luma_max) == 0
+
+
+def _program_luma(ws, scene_name):
+    """Read the RENDERED program frame of *scene_name* via GetSourceScreenshot and
+    return (max_luma, mean_luma) over a small downscaled PNG. Best-effort: returns
+    (None, None) if the screenshot request fails or PIL is unavailable, so the caller
+    can decide whether to proceed (we never BLOCK a run on the self-check being unable
+    to run — only on it positively finding black)."""
+    import base64
+    import io
+
+    res = _rpc(ws, "GetSourceScreenshot", {
+        "sourceName": scene_name,
+        "imageFormat": "png",
+        "imageWidth": 320,
+        "imageHeight": 180,
+    }, ignore_err=True)
+    data = res.get("imageData")
+    if not data:
+        return None, None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, None
+    try:
+        b64 = data.split(",", 1)[1] if data.startswith("data:") else data
+        im = Image.open(io.BytesIO(base64.b64decode(b64))).convert("L")
+        px = list(im.getdata())
+        if not px:
+            return None, None
+        return max(px), sum(px) / len(px)
+    except Exception:
+        return None, None
+
+
+def _restore_target(prev, target, ephemeral, scenes, saved_prev=None):
+    """#163 (pure, testable): decide the scene teardown should restore PROGRAM to, given
+    the program scene seen at prod-scene time (*prev*), the record *target*, whether the
+    target is *ephemeral* (a scene we built — must never be restored to), the box's
+    *scenes* list, and the last good run's *saved_prev* (for crash recovery).
+
+    - ephemeral target: never restore to it; if prev was the target, recover saved_prev,
+      else fall back to any other existing scene (the stream temp scene case).
+    - real prod target: faithful restore — keep whatever was program, INCLUDING the target
+      itself if it was already live program (don't bump the box off a legit prod scene)."""
+    if ephemeral:
+        if prev == target:
+            prev = saved_prev or prev
+        if not prev or prev == target:
+            prev = next((s for s in scenes if s != target), None)
+        return prev
+    # Real prod scene: keep what was shown (target included). Only fill a missing prev.
+    return prev or next((s for s in scenes), None)
+
+
+def prod_scene(a):
+    """#163: route this box's OBS PROGRAM to a CERTIFIED PRODUCTION scene and verify it
+    is rendering NON-BLACK, so the recording-based E2E records the REAL production scene
+    program (the same pixels a viewer sees) instead of a probe ndi_source that collides
+    with the always-on prod input on the same NDI source-name (which records pure black).
+
+    On strih the prod scene (e.g. 'Cam 5') already shows cam1 via the genlock-certified
+    'NDI cam5' input; on stream a full-screen scene (e.g. 'REC-STRIH-TMP') already shows
+    strih's feed via 'NDI 2ME PGM'. Either way: NO second receiver, NO source-name
+    collision — the bug #163 closes.
+
+    Steps (mirrors setup()'s safety order):
+      1. Record prev program + (studio) prev preview to STATE so teardown restores them
+         (reuses the SAME state keys setup uses, so teardown is unchanged).
+      2. If --ensure-source is given, ensure a full-screen scene over that source exists
+         (the stream temp scene). Touches ONLY that scene, never any prod scene.
+      3. Read this box's DistroAV Main Output ndi_name (printed on stdout for chaining).
+      4. Switch program to the named prod scene.
+      5. FAIL FAST if the program renders black (GetSourceScreenshot luma peak 0) — a
+         black program means the source isn't delivering; abort before StartRecord
+         wastes a full run (the #163 'never waste a run on a black ingest' guard).
+    """
+    ws = _conn(a.host, a.password)
+    try:
+        prev = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+        studio = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
+        prev_preview = (
+            _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get("currentPreviewSceneName")
+            if studio else None
+        )
+
+        scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
+        target = a.program_scene
+        # A scene we BUILD (--ensure-source, the stream temp scene) is EPHEMERAL: it must
+        # never be a restore target (restoring program to the throwaway record scene would
+        # strand it as live program). A plain --program-scene is a real existing prod scene
+        # (strih 'Cam 5'): if it WAS the live program, restoring it to ITSELF is the most
+        # faithful restore — don't bump the box off a legit prod scene onto an arbitrary one.
+        ephemeral = bool(a.ensure_source)
+        # ONE state read: reused both for the crash-recovery fallbacks and the write-back.
+        state = _load_state()
+        saved = state.get(a.host, {})
+        prev = _restore_target(prev, target, ephemeral, scenes, saved.get("prev_scene"))
+        # Preview restore mirrors the program decision (never strand the ephemeral scene
+        # in preview either; for a real prod scene keep what was shown, falling back to the
+        # restored program scene).
+        prev_preview = _restore_target(
+            prev_preview, target, ephemeral, scenes, saved.get("prev_preview")
+        ) or prev
+        if ephemeral and prev is None:
+            sys.stderr.write(
+                f"[obs] {a.host}: WARN prior program unknown/was the ephemeral record "
+                f"scene; will restore to '{prev_preview}'\n"
+            )
+        state[a.host] = {"prev_scene": prev, "prev_preview": prev_preview}
+        _save_state(state)
+
+        # #163: optionally ensure a dedicated full-screen scene over a source (the stream
+        # temp scene). It references an EXISTING prod input (e.g. 'NDI 2ME PGM') — never a
+        # new receiver — so there is no source-name collision; we just stretch it to fill
+        # the canvas so the recorded program is full-frame. On strih --ensure-source is
+        # unused (the prod 'Cam 5' scene already exists and is full-screen).
+        if a.ensure_source:
+            if target not in scenes:
+                _rpc(ws, "CreateScene", {"sceneName": target}, ignore_err=True)
+            items = _rpc(ws, "GetSceneItemList", {"sceneName": target},
+                         ignore_err=True).get("sceneItems", [])
+            if not any(it.get("sourceName") == a.ensure_source for it in items):
+                _rpc(ws, "CreateSceneItem",
+                     {"sceneName": target, "sourceName": a.ensure_source}, ignore_err=True)
+            vs = _rpc(ws, "GetVideoSettings", ignore_err=True)
+            base_w = int(vs.get("baseWidth") or 1920)
+            base_h = int(vs.get("baseHeight") or 1080)
+            item_id = _rpc(ws, "GetSceneItemId",
+                           {"sceneName": target, "sourceName": a.ensure_source},
+                           ignore_err=True).get("sceneItemId")
+            if item_id is not None:
+                _rpc(ws, "SetSceneItemTransform", {
+                    "sceneName": target, "sceneItemId": item_id,
+                    "sceneItemTransform": {
+                        "boundsType": "OBS_BOUNDS_STRETCH", "boundsAlignment": 0,
+                        "boundsWidth": base_w, "boundsHeight": base_h,
+                        "positionX": 0, "positionY": 0, "alignment": 5,
+                    },
+                }, ignore_err=True)
+        elif target not in scenes:
+            raise SystemExit(
+                f"[obs] {a.host}: program scene '{target}' does not exist (and no "
+                f"--ensure-source given to build it). Pass an existing certified prod "
+                f"scene, or --ensure-source <prod input> to build a full-screen scene."
+            )
+
+        # This box's DistroAV Main Output NDI name — printed for the next consumer to
+        # chain/tap (same stdout contract as setup()). The output must be enabled.
+        out = _rpc(ws, "GetOutputSettings", {"outputName": MAIN_OUTPUT}, ignore_err=True)
+        ndi_name = (out.get("outputSettings") or {}).get("ndi_name")
+        if not ndi_name:
+            raise SystemExit(
+                f"[obs] {a.host}: DistroAV '{MAIN_OUTPUT}' is not enabled — enable it in "
+                f"OBS and set its NDI name, then re-run."
+            )
+
+        # Switch program to the prod recording scene.
+        _rpc(ws, "SetCurrentProgramScene", {"sceneName": target})
+        # In Studio Mode also set it to preview so the rendered program is the prod scene
+        # (a stale preview scene keeps render-ticking and can confuse a viewer, but does
+        # not affect the recorded PROGRAM output).
+        if studio:
+            _rpc(ws, "SetCurrentPreviewScene", {"sceneName": target}, ignore_err=True)
+
+        # #163 FAIL-FAST non-black self-check: wait a moment for the scene to render, then
+        # read the program luma. If it is black, ABORT before StartRecord — a black
+        # program records all-undecodable and wastes the whole run (the exact #163 waste).
+        time.sleep(2.0)
+        luma_max, luma_mean = _program_luma(ws, target)
+        if luma_max is None:
+            sys.stderr.write(
+                f"[obs] {a.host}: WARN could not read program luma for the non-black "
+                f"self-check (GetSourceScreenshot/PIL unavailable) — proceeding without "
+                f"it; recording-verdict will still catch an all-black recording.\n"
+            )
+        elif _luma_is_black(luma_max):
+            raise SystemExit(
+                f"[obs] {a.host}: #163 self-check FAIL — program scene '{target}' renders "
+                f"BLACK (luma peak={luma_max}, mean={luma_mean:.1f}). The source is not "
+                f"delivering frames; aborting BEFORE StartRecord so a black recording never "
+                f"wastes a full run. Check the certified prod input feeding '{target}' is "
+                f"receiving NDI."
+            )
+        else:
+            sys.stderr.write(
+                f"[obs] {a.host}: #163 self-check OK — program '{target}' NON-BLACK "
+                f"(luma peak={luma_max}, mean={luma_mean:.1f})\n"
+            )
+
+        sys.stderr.write(
+            f"[obs] {a.host}: program -> {target} (prod scene); Main Output NDI "
+            f"'{ndi_name}'\n"
+        )
+        print(ndi_name)  # stdout = the FULL/own NDI name to chain/tap for this program
+    finally:
+        ws.close()
+
+
 def teardown(a):
     state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
@@ -709,7 +922,7 @@ def record(a):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("setup", "teardown", "record"):
+    for name in ("setup", "teardown", "record", "prod-scene"):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
@@ -717,6 +930,13 @@ def main():
             p.add_argument(
                 "--action", required=True, choices=("start", "stop", "status")
             )
+        if name == "prod-scene":
+            # #163: route program to a CERTIFIED PROD scene and record IT (no colliding
+            # probe ndi_source). --program-scene is the existing prod scene to record;
+            # --ensure-source (optional) builds a full-screen scene over that EXISTING
+            # prod input when --program-scene is a dedicated temp scene (the stream box).
+            p.add_argument("--program-scene", required=True)
+            p.add_argument("--ensure-source", default="")
         if name == "setup":
             p.add_argument("--upstream", required=True)
             # #91: mark a TERMINAL box — one whose Main Output feeds NO downstream OBS
@@ -728,7 +948,8 @@ def main():
             # protective abort. Defaults False — strih and teardown are non-terminal.
             p.add_argument("--terminal", action="store_true")
     a = ap.parse_args()
-    {"setup": setup, "teardown": teardown, "record": record}[a.cmd](a)
+    {"setup": setup, "teardown": teardown, "record": record,
+     "prod-scene": prod_scene}[a.cmd](a)
 
 
 if __name__ == "__main__":
