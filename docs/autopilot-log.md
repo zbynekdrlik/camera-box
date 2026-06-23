@@ -339,3 +339,8 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   5. **Duplicated walk** — `burn_contiguity_in_window` returns `InWindowContiguity{contiguity, missing_slots}` (single source of truth); node_verdict pairs pixel proof onto it. NodeSpec groups node/run_id/rate.
 - 19 burn_contiguity lib tests + 24 recording-verdict binary tests + 435 total lib tests; clippy --all-features clean. RED→GREEN order preserved (RED d6795e61e is the only test-FIRST commit; subsequent commits harden GREEN).
 - Verification review (3rd agent) on the final diff: ALL 5 fixes confirmed correct, NO new bugs (traced leading-None/all-None/single-frame/cam1-gap/backward-jump). One cosmetic note (all-unreadable window printed "0 missing") fixed in d128e98f5. PR #199 ready: dev CI all-green, mergeable+clean.
+
+### #198 — MERGED (PR #199, merge b173f289d7c05291b912ad65c466f6ec703f2c61)
+- PR #199 (dev→main) Closes #198 — CLOSED on merge. dev + main CI all-green every job (Test/Lint/Build/Drift-Guard/Security/Coverage/Python-harness; Mutation skipped diff-scoped, Notify skipped). No manual-merge marker → default auto-merge. Three independent deep reviews (2 finder + 1 verification) all clean.
+- Probe/verdict TOOLING (dev-host) — NO CAM1-4 production deploy, NO web dashboard/version label (embedded NDI appliance; release.yml fires only on v* tags). The merged-main CI green + the re-validation on the existing recording (fixed probe-tools-linux-amd64 from main run 28061985274, stream-only on run 136141133, NO rig) IS the verification.
+- Version 1.7.0-dev.85 on main.
