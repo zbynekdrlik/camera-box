@@ -838,7 +838,11 @@ mod tests {
         // A complete final row (ends in '\n') is NOT a partial fragment — it must still parse,
         // and a genuinely malformed COMPLETE final row still errors (it's not a kill artifact).
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        write!(f, "frame_index,grab_ts_ns\n0,1782000000000\n2,1782000066000\n").unwrap();
+        write!(
+            f,
+            "frame_index,grab_ts_ns\n0,1782000000000\n2,1782000066000\n"
+        )
+        .unwrap();
         let m = parse_grab_ts(f.path()).unwrap();
         assert_eq!(m.get(&2), Some(&1782000066000), "complete final row parses");
         assert_eq!(m.len(), 2);
