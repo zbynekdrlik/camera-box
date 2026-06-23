@@ -166,6 +166,12 @@ cleanup() {
   # Kill the dev1 ffmpeg grab listener if still up.
   [ -n "$FFMPEG_PID" ] && kill "$FFMPEG_PID" 2>/dev/null
   pkill -f "listen=1.*${GRAB_PORT}" 2>/dev/null
+  # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
+  # running (e.g. the run is aborting for another reason), stop the whole group so a
+  # multi-GB decode is never orphaned. The monitor already group-kills on STALL; this
+  # covers the other exit paths.
+  [ -n "${VERDICT_PID:-}" ] && { kill -- -"$VERDICT_PID" 2>/dev/null; kill "$VERDICT_PID" 2>/dev/null; }
+  pkill -x recording-verdict 2>/dev/null
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -289,10 +295,19 @@ rm -f "$VERDICT_EXIT_MARKER"
 # single recording's decode loop, well under this bound even for a 30-min 4K clip.
 VERDICT_STALL_TIMEOUT="${VERDICT_STALL_TIMEOUT:-600}"
 echo "    verdict output: $VERDICT_OUT (stall-timeout ${VERDICT_STALL_TIMEOUT}s, parallel decode #166)"
-(
-  RUST_LOG="${RUST_LOG:-info}" ./target/release/recording-verdict "${VERDICT_ARGS[@]}"
-  echo "$?" > "$VERDICT_EXIT_MARKER"
-) >"$VERDICT_OUT" 2>&1 &
+# Run the verdict in its OWN process group via setsid: $! is then the group leader
+# (pid == pgid), so the monitor's STALL kill can signal the WHOLE group (the wrapper
+# AND the heavy recording-verdict child) and never orphan the runaway decode (#166
+# review BUG 1). The wrapper writes the verdict's exit code to the marker on exit; a
+# verdict CRASH still writes a non-zero code (so the monitor fails loud), and a total
+# death (no marker) is caught by the monitor's DEAD path.
+export RUST_LOG="${RUST_LOG:-info}"
+# bash -c body: $0=cwd, $1=marker path, $2.. = verdict args. The single-quoted body is
+# expanded by the INNER bash (SC2016 is expected here), and every path is passed as an
+# argument (no string interpolation), so a path with spaces/quotes is safe.
+# shellcheck disable=SC2016
+setsid bash -c 'cd "$0" || exit 97; m="$1"; shift; ./target/release/recording-verdict "$@"; echo "$?" > "$m"' \
+  "$(pwd)" "$VERDICT_EXIT_MARKER" "${VERDICT_ARGS[@]}" >"$VERDICT_OUT" 2>&1 &
 VERDICT_PID=$!
 # Monitor to a terminal state: returns the verdict's own exit code on clean completion,
 # 124 on STALL, 126 on a silent death. Either failure mode aborts the run with a clear

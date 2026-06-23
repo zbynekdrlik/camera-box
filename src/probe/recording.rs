@@ -133,6 +133,13 @@ fn probe_dimensions(path: &Path) -> Result<(u32, u32)> {
 /// invoking `on_frame(frame_index, luma)` for each. Frames are read by exact
 /// byte count (`width * height`), so a truncated trailing frame is ignored.
 ///
+/// `on_frame` returns `true` to keep reading and `false` to ABORT the read loop
+/// early (the consumer can no longer accept frames — e.g. the parallel decode's
+/// worker pool has died). On an early abort `read_frames` returns the count
+/// emitted so far; the caller distinguishes "all frames read" (count == decoded)
+/// from "aborted" via its own bookkeeping. ffmpeg is killed on abort so it does
+/// not linger writing to a closed pipe.
+///
 /// ffmpeg's stderr is INHERITED (not piped): on a 30-min / 54k-frame clip a piped
 /// stderr we only drain after the stdout loop could fill its ~64 KB OS pipe buffer
 /// while we block reading stdout — ffmpeg then blocks writing stderr and we block
@@ -144,7 +151,7 @@ fn read_frames(
     path: &Path,
     width: u32,
     height: u32,
-    mut on_frame: impl FnMut(u64, GrayImage),
+    mut on_frame: impl FnMut(u64, GrayImage) -> bool,
 ) -> Result<u64> {
     let frame_bytes = (width as usize) * (height as usize);
     let mut child = Command::new("ffmpeg")
@@ -163,6 +170,7 @@ fn read_frames(
 
     let mut buf = vec![0u8; frame_bytes];
     let mut frame_index: u64 = 0;
+    let mut aborted = false;
     loop {
         match stdout.read_exact(&mut buf) {
             Ok(()) => {
@@ -172,12 +180,26 @@ fn read_frames(
                 let owned = std::mem::replace(&mut buf, vec![0u8; frame_bytes]);
                 let luma = GrayImage::from_raw(width, height, owned)
                     .context("luma buffer sized width*height")?;
-                on_frame(frame_index, luma);
                 frame_index += 1;
+                if !on_frame(frame_index - 1, luma) {
+                    // Consumer can no longer accept frames — stop reading and kill
+                    // ffmpeg so it doesn't block writing to the (soon-closed) pipe.
+                    aborted = true;
+                    let _ = child.kill();
+                    break;
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e).context("read ffmpeg rawvideo stdout"),
         }
+    }
+
+    // On an early abort we killed ffmpeg, so its exit status is a signal, not a
+    // clean 0 — do not treat that as a decode failure (the abort is the real
+    // cause, surfaced by the caller). Reap the child and return the partial count.
+    if aborted {
+        let _ = child.wait();
+        return Ok(frame_index);
     }
 
     let status = child.wait().context("wait for ffmpeg")?;
@@ -232,7 +254,7 @@ fn decode_workers() -> usize {
 /// frame in RAM at once.
 fn decode_stream_parallel(
     workers: usize,
-    produce: impl FnOnce(&mut dyn FnMut(u64, GrayImage)) -> Result<u64>,
+    produce: impl FnOnce(&mut dyn FnMut(u64, GrayImage) -> bool) -> Result<u64>,
 ) -> Result<Vec<RecordingFrame>> {
     let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u64, GrayImage)>(workers * 2);
     let job_rx = Arc::new(Mutex::new(job_rx));
@@ -262,6 +284,16 @@ fn decode_stream_parallel(
         }));
     }
     drop(res_tx); // only the workers' clones remain; res_rx ends when all exit
+                  // CRITICAL (#166 review): drop THIS scope's Receiver Arc so the
+                  // only remaining holders are the worker threads. Otherwise the
+                  // producer's `job_tx.send()` could never observe `Err` when all
+                  // workers die (the Arc strong-count would stay ≥1 here forever),
+                  // and the bounded channel would fill and BLOCK the producer
+                  // permanently — a hang instead of a loud error, the exact #166
+                  // failure class. With this drop, all-workers-dead ⇒ Receiver
+                  // dropped ⇒ `send` returns Err ⇒ the producer aborts the read
+                  // loop ⇒ `handles.join()` surfaces the worker panic.
+    drop(job_rx);
 
     // Collector: drain decoded frames as they complete (out of order) so workers
     // never block on a full result queue. Runs on its own thread concurrently
@@ -274,25 +306,30 @@ fn decode_stream_parallel(
         out
     });
 
-    // Producer: sequential ffmpeg I/O on THIS thread, feeding the worker pool.
-    // A producer error still drops job_tx (closing the workers) before we
-    // propagate it, so no thread leaks.
-    let produce_result = produce(&mut |idx, luma| {
-        // If all workers have exited (e.g. collector dropped), send fails — we
-        // surface that as the producer ending early on the next read.
-        let _ = job_tx.send((idx, luma));
-    });
+    // Producer: sequential ffmpeg I/O on THIS thread, feeding the worker pool. The
+    // emit closure returns `false` when the job channel is closed (all workers have
+    // died — see the drop above), which ABORTS the read loop so the producer can
+    // reach `handles.join()` and surface the worker panic instead of blocking on a
+    // full channel forever. A producer error still drops job_tx (closing the
+    // workers) before we propagate it, so no thread leaks.
+    let produce_result = produce(&mut |idx, luma| job_tx.send((idx, luma)).is_ok());
     drop(job_tx); // signal end-of-jobs → workers exit → collector finishes
 
+    let mut worker_panicked = false;
     for h in handles {
         // A worker panic (e.g. a bug in decode) must fail the analysis loudly,
-        // not silently drop frames.
-        h.join()
-            .map_err(|_| anyhow::anyhow!("recording decode worker panicked"))?;
+        // not silently drop frames. Join ALL handles first (so none leak) before
+        // returning the error.
+        if h.join().is_err() {
+            worker_panicked = true;
+        }
     }
     let mut frames = collector
         .join()
         .map_err(|_| anyhow::anyhow!("recording decode collector panicked"))?;
+    if worker_panicked {
+        anyhow::bail!("recording decode worker panicked");
+    }
 
     // Surface a producer (ffmpeg/ffprobe) error after the threads are cleaned up.
     let total = produce_result?;
@@ -303,7 +340,7 @@ fn decode_stream_parallel(
     anyhow::ensure!(
         frames.len() as u64 == total,
         "parallel decode produced {} frames but the producer emitted {} \
-         (a worker dropped frames)",
+         (a worker dropped frames / died mid-decode)",
         frames.len(),
         total
     );
@@ -330,7 +367,22 @@ pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
         file = %path.display(), width, height, workers,
         "recording analysis start (parallel decode)"
     );
-    let frames = decode_stream_parallel(workers, |emit| read_frames(path, width, height, emit))?;
+    // Emit a periodic frame-count HEARTBEAT at info level (every PROGRESS_EVERY
+    // frames the producer reads). This is the liveness signal the harness stall
+    // detector watches (scripts/verdict-monitor.sh): without it, a single large
+    // recording decodes SILENTLY between its start/complete logs, so a long clip
+    // could exceed the stall timeout and be falsely killed. The heartbeat keeps the
+    // output growing during the decode so the detector sees real progress — the
+    // deep fix, not a band-aid timeout bump (no-timeout-band-aids.md).
+    const PROGRESS_EVERY: u64 = 1000;
+    let frames = decode_stream_parallel(workers, |emit| {
+        read_frames(path, width, height, |idx, luma| {
+            if idx > 0 && idx % PROGRESS_EVERY == 0 {
+                tracing::info!(file = %path.display(), frames_read = idx, "recording decode progress");
+            }
+            emit(idx, luma)
+        })
+    })?;
     let decoded: usize = frames.iter().filter(|f| !f.payloads.is_empty()).count();
     tracing::info!(
         file = %path.display(), total = frames.len(), with_qr = decoded, workers,
@@ -425,37 +477,46 @@ pub fn extract_frames_png(
     let (width, height) = probe_dimensions(path)?;
     let mut extracted: Vec<ExtractedFrame> = Vec::new();
     let mut io_err: Option<anyhow::Error> = None;
+    // The highest wanted index — once we pass it there is nothing left to extract,
+    // so we abort the read loop early (returning false) rather than streaming the
+    // whole recording. With the cap (#166) `want` is small and usually clustered
+    // near the start, so this avoids re-decoding the entire file for the PNGs.
+    let last_wanted = want.iter().copied().max().unwrap_or(0);
     read_frames(path, width, height, |idx, luma| {
-        if io_err.is_some() || !want.contains(&idx) {
-            return;
+        if io_err.is_some() {
+            return false; // a prior save failed — stop reading, surface it below
         }
-        let png_path = out_dir.join(format!("frame-{idx}.png"));
-        // Re-decode BEFORE moving the luma into the PNG save, only for frames the
-        // verdict called undecodable: a CRC-valid payload here = sharp-but-flagged
-        // = decoder bug.
-        let sharp_qr_but_flagged_undecodable = if undecodable.contains(&idx) {
-            !decode_qr_luma_all(luma.clone()).is_empty()
-        } else {
-            false
-        };
-        if let Err(e) = luma.save_with_format(&png_path, image::ImageFormat::Png) {
-            io_err = Some(anyhow::Error::new(e).context(format!(
-                "save pixel-proof PNG {} for flagged frame {idx}",
-                png_path.display()
-            )));
-            return;
+        if want.contains(&idx) {
+            let png_path = out_dir.join(format!("frame-{idx}.png"));
+            // Re-decode BEFORE moving the luma into the PNG save, only for frames the
+            // verdict called undecodable: a CRC-valid payload here = sharp-but-flagged
+            // = decoder bug.
+            let sharp_qr_but_flagged_undecodable = if undecodable.contains(&idx) {
+                !decode_qr_luma_all(luma.clone()).is_empty()
+            } else {
+                false
+            };
+            if let Err(e) = luma.save_with_format(&png_path, image::ImageFormat::Png) {
+                io_err = Some(anyhow::Error::new(e).context(format!(
+                    "save pixel-proof PNG {} for flagged frame {idx}",
+                    png_path.display()
+                )));
+                return false;
+            }
+            tracing::warn!(
+                frame = idx,
+                png = %png_path.display(),
+                sharp_qr_but_flagged_undecodable,
+                "extracted pixel proof for flagged frame"
+            );
+            extracted.push(ExtractedFrame {
+                frame_index: idx,
+                png_path,
+                sharp_qr_but_flagged_undecodable,
+            });
         }
-        tracing::warn!(
-            frame = idx,
-            png = %png_path.display(),
-            sharp_qr_but_flagged_undecodable,
-            "extracted pixel proof for flagged frame"
-        );
-        extracted.push(ExtractedFrame {
-            frame_index: idx,
-            png_path,
-            sharp_qr_but_flagged_undecodable,
-        });
+        // Keep reading until we have passed the last frame we care about.
+        idx < last_wanted
     })?;
     if let Some(e) = io_err {
         return Err(e);

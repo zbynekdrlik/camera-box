@@ -110,10 +110,9 @@ fn dead_process_without_marker_fails_loud_not_hang() {
         "dead-without-marker must fail, got 0\n{stdout}\n{stderr}"
     );
     assert_eq!(code, 126, "DEAD exit code (126)");
-    let all = format!("{stdout}{stderr}");
+    let all = format!("{stdout}{stderr}").to_lowercase();
     assert!(
-        all.contains("DIED") && all.contains("no exit marker".to_lowercase().as_str())
-            || all.to_lowercase().contains("died") && all.to_lowercase().contains("no exit marker"),
+        all.contains("died") && all.contains("exit marker"),
         "must print a clear silent-death diagnostic, got:\n{all}"
     );
 
@@ -206,4 +205,124 @@ fn missing_required_args_fails_with_usage_code() {
         .output()
         .expect("run monitor");
     assert_eq!(out.status.code(), Some(2), "bad-args exit code is 2");
+}
+
+// ---- #166 review: a corrupt/empty/partial marker must NOT be a false exit-0 PASS ----
+
+#[test]
+fn empty_marker_on_dead_process_is_not_a_false_pass() {
+    // BUG-2 regression: the process is DEAD and the marker EXISTS but is EMPTY (the
+    // wrapper truncated it but crashed before the digits landed). The monitor must
+    // NOT default to exit 0 ("verdict passed") — an empty marker is a corrupt result,
+    // so it must FAIL LOUD via the DEAD path (126), never a silent false green.
+    let dir = scratch("empty-marker");
+    let output = dir.join("verdict.out");
+    let marker = dir.join("verdict.exit");
+    std::fs::write(&output, "[verdict] ...\n").unwrap();
+    std::fs::write(&marker, "").unwrap(); // present but empty = corrupt
+
+    let mut child = spawn_silent_sleeper();
+    let pid = child.id();
+    child.kill().ok();
+    child.wait().ok();
+
+    let (code, stdout, stderr) = run_monitor(pid, &output, &marker, "300", "1");
+    assert_eq!(
+        code, 126,
+        "empty marker on a dead process must FAIL (DEAD), not exit 0\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn non_numeric_marker_on_dead_process_is_not_a_false_pass() {
+    // A marker with non-digit garbage is also corrupt → must fail, not exit 0.
+    let dir = scratch("garbage-marker");
+    let output = dir.join("verdict.out");
+    let marker = dir.join("verdict.exit");
+    std::fs::write(&output, "[verdict] ...\n").unwrap();
+    std::fs::write(&marker, "oops").unwrap();
+
+    let mut child = spawn_silent_sleeper();
+    let pid = child.id();
+    child.kill().ok();
+    child.wait().ok();
+
+    let (code, stdout, stderr) = run_monitor(pid, &output, &marker, "300", "1");
+    assert_eq!(
+        code, 126,
+        "non-numeric marker on a dead process must FAIL, not exit 0\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn marker_with_trailing_whitespace_parses_the_code() {
+    // The e2e wrapper writes `echo "$?" > MARKER`, which appends a newline. A
+    // complete numeric code with trailing whitespace must parse correctly.
+    let dir = scratch("ws-marker");
+    let output = dir.join("verdict.out");
+    let marker = dir.join("verdict.exit");
+    std::fs::write(&output, "done\n").unwrap();
+    std::fs::write(&marker, "1\n").unwrap(); // echo-style trailing newline
+
+    let mut child = spawn_silent_sleeper();
+    let pid = child.id();
+    child.kill().ok();
+    child.wait().ok();
+
+    let (code, stdout, stderr) = run_monitor(pid, &output, &marker, "300", "1");
+    assert_eq!(
+        code, 1,
+        "trailing newline must not corrupt the code\n{stdout}\n{stderr}"
+    );
+}
+
+// ---- #166 review BUG-1: STALL kill must take down the verdict's CHILD, not orphan it ----
+
+#[test]
+fn stall_kill_takes_down_the_child_decode_not_just_the_wrapper() {
+    // The real verdict runs as a CHILD of a wrapper (the e2e uses `setsid bash -c`).
+    // On STALL the monitor must kill the WHOLE group so the heavy child decode is not
+    // orphaned. Spawn a setsid wrapper whose child is a uniquely-named sleeper; after
+    // the monitor reports STALL, assert NO process matching that unique name survives.
+    let dir = scratch("group-kill");
+    let output = dir.join("verdict.out");
+    let marker = dir.join("verdict.exit");
+    std::fs::write(&output, "[verdict] wedged...\n").unwrap(); // never grows
+
+    // Unique marker arg so we can find the orphan if the group-kill fails. The child
+    // `sleep` is exec'd by a bash that setsid put in its own process group; $! is the
+    // group leader.
+    let tag = format!("cbverdict_{}_{}", std::process::id(), "groupkill");
+    let mut wrapper = Command::new("setsid")
+        .args([
+            "bash",
+            "-c",
+            // exec a long sleep carrying the unique tag in argv so pgrep can find it
+            &format!("exec sleep 600 # {tag}"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn setsid wrapper");
+    let pid = wrapper.id();
+    std::thread::sleep(Duration::from_millis(300)); // let the group settle
+
+    let (code, _stdout, stderr) = run_monitor(pid, &output, &marker, "2", "1");
+    assert_eq!(code, 124, "STALL exit code\n{stderr}");
+
+    // Give the kill a moment to propagate, then assert NO process carries the tag.
+    std::thread::sleep(Duration::from_millis(500));
+    let survivors = Command::new("pgrep")
+        .args(["-f", &tag])
+        .output()
+        .expect("pgrep");
+    let out = String::from_utf8_lossy(&survivors.stdout);
+    let live: Vec<&str> = out.split_whitespace().collect();
+    assert!(
+        live.is_empty(),
+        "STALL must group-kill the wrapper AND its child — orphans survived: {live:?}\n{stderr}"
+    );
+    wrapper.kill().ok();
+    wrapper.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
 }

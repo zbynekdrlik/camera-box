@@ -71,8 +71,43 @@ alive() { kill -0 "$PID" 2>/dev/null; }
 # Dump a diagnostic tail of the output so the failure is debuggable from the log.
 diag_tail() {
   echo "    --- last 25 lines of $LABEL output ($OUTPUT) ---" >&2
-  [ -f "$OUTPUT" ] && tail -n 25 "$OUTPUT" >&2 || echo "    (no output file)" >&2
+  if [ -f "$OUTPUT" ]; then
+    tail -n 25 "$OUTPUT" >&2
+  else
+    echo "    (no output file)" >&2
+  fi
   echo "    ------------------------------------------------" >&2
+}
+
+# Read the verdict's exit code from the marker. The wrapper writes `echo "$?" > MARKER`.
+# Echoes the code on stdout and returns 0 ONLY when the marker is present AND holds a
+# COMPLETE, purely-numeric code. A marker that is empty or non-numeric — a truncated /
+# half-written / corrupt file — returns NON-zero so the caller does NOT mistake it for a
+# clean exit-0 PASS (a gate must never default-pass on a corrupt marker, #166 review).
+read_marker_code() {
+  [ -f "$EXIT_MARKER" ] || return 1
+  local raw
+  raw="$(cat "$EXIT_MARKER" 2>/dev/null)"
+  raw="${raw//[[:space:]]/}" # strip surrounding whitespace/newline only
+  # Must be a non-empty run of digits and nothing else (rejects "", "12\n3", "abc").
+  case "$raw" in
+    "" | *[!0-9]*) return 1 ;;
+    *) printf '%s' "$raw"; return 0 ;;
+  esac
+}
+
+# Kill the monitored process AND its descendants. `$PID` is the background SUBSHELL
+# that runs the verdict; the heavy `recording-verdict` is its CHILD, so signalling only
+# the subshell would ORPHAN the runaway decode (it keeps burning CPU/RAM). Kill the
+# whole process group when possible (the subshell leads its own group under job
+# control), then fall back to killing direct children + the pid (#166 review BUG 1).
+kill_tree() {
+  local sig="${1:-TERM}"
+  # Process-group kill: the negative-pid form signals every member of PID's group.
+  kill -s "$sig" "-$PID" 2>/dev/null || true
+  # Belt-and-braces: any direct children of the subshell, then the pid itself.
+  pkill --signal "$sig" -P "$PID" 2>/dev/null || true
+  kill -s "$sig" "$PID" 2>/dev/null || true
 }
 
 echo "[$LABEL-monitor] watching pid=$PID output=$OUTPUT stall-timeout=${STALL_TIMEOUT}s poll=${POLL}s"
@@ -80,30 +115,30 @@ last_size="$(out_size)"
 last_progress_ts="$(date +%s)"
 
 while true; do
-  # 1. Clean completion: the wrapper wrote the exit marker. Trust it over the PID
-  #    check (the PID may already be reaped). Read and return the verdict's code.
-  if [ -f "$EXIT_MARKER" ]; then
-    code="$(tr -dc '0-9' < "$EXIT_MARKER" 2>/dev/null)"
-    code="${code:-0}"
+  # 1. Clean completion: the wrapper wrote a COMPLETE numeric exit marker. Trust it
+  #    over the PID check (the PID may already be reaped). A present-but-corrupt
+  #    marker (empty / non-numeric / half-written) is NOT a clean exit — read_marker_code
+  #    returns non-zero, so we fall through rather than default to a false exit-0 PASS.
+  if code="$(read_marker_code)"; then
     echo "[$LABEL-monitor] $LABEL finished cleanly (exit marker code=$code)"
     exit "$code"
   fi
 
-  # 2. DEAD: the process is gone but left NO exit marker → it crashed silently.
+  # 2. DEAD: the process is gone but left NO complete exit marker → it crashed silently.
   #    This is the exact #166 failure that must FAIL FAST, never hang.
   if ! alive; then
     # Grace: the wrapper writes the marker just after the process exits; give it a
-    # couple of poll cycles to appear before declaring a silent death.
+    # couple of poll cycles to appear/finish writing before declaring a silent death.
     for _ in 1 2 3; do
       sleep 1
-      if [ -f "$EXIT_MARKER" ]; then
-        code="$(tr -dc '0-9' < "$EXIT_MARKER" 2>/dev/null)"; code="${code:-0}"
+      if code="$(read_marker_code)"; then
         echo "[$LABEL-monitor] $LABEL finished (exit marker code=$code, post-death)"
         exit "$code"
       fi
     done
-    echo "ERROR: $LABEL process (pid=$PID) DIED with NO exit marker — it crashed/was killed" \
-         "before recording its result. FAILING the run instead of waiting forever (#166)." >&2
+    echo "ERROR: $LABEL process (pid=$PID) DIED with NO complete exit marker — it" \
+         "crashed/was killed (or wrote a corrupt marker) before recording its result." \
+         "FAILING the run instead of waiting forever (#166)." >&2
     diag_tail
     exit "$CODE_DEAD"
   fi
@@ -120,7 +155,11 @@ while true; do
       echo "ERROR: $LABEL process (pid=$PID) STALLED — no output progress for ${idle}s" \
            "(>= ${STALL_TIMEOUT}s). It is wedged, not working. FAILING the run (#166)." >&2
       diag_tail
-      kill "$PID" 2>/dev/null || true
+      # Kill the subshell AND the heavy verdict child it spawned, so the runaway
+      # decode is actually stopped and not orphaned (#166 review BUG 1).
+      kill_tree TERM
+      sleep 1
+      kill_tree KILL
       exit "$CODE_STALL"
     fi
   fi
