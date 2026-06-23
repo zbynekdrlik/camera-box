@@ -347,6 +347,15 @@ fn print_node_verdict(v: &NodeVerdict) {
         );
         return;
     }
+    // No burn decoded at all (empty / all-unreadable window) ⇒ NOT a pass, but there is no
+    // missing-id list to print — say so plainly instead of "0 missing id(s)".
+    if c.first_id.is_none() {
+        println!(
+            "  [{}] NOT zero — NO burn id decoded in the signal window (nothing proven; {} delivered frame(s) carried no readable {} burn).",
+            c.node, c.expected_count, c.node
+        );
+        return;
+    }
     println!(
         "  [{}] NOT zero — {} missing id(s) ({span}): {} REAL DROP, {} BURN-UNREADABLE (fix burn).",
         c.node,
