@@ -771,4 +771,37 @@ mod tests {
         write!(f, "frame_index,grab_ts_ns\n0\n").unwrap(); // <2 columns
         assert!(parse_grab_ts(f.path()).is_err());
     }
+
+    #[test]
+    fn grab_ts_sidecar_tolerates_trailing_partial_row() {
+        // REGRESSION (#111 deploy): the cam1 --record-grab is killed at teardown mid-write,
+        // so the sidecar's LAST row can be a partial `frame_index,` with no timestamp yet
+        // flushed (e.g. "8874,"). That is a normal kill-time artifact, NOT corruption — it
+        // must be tolerated (skip the partial final row), never crash the whole verdict +
+        // block the report. A complete row with an empty ts MID-file is still a hard error.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // Two good rows, then a partial trailing row with an empty timestamp + no newline.
+        write!(
+            f,
+            "frame_index,grab_ts_ns\n0,1782000000000\n1,1782000033000\n2,"
+        )
+        .unwrap();
+        let m = parse_grab_ts(f.path()).unwrap();
+        assert_eq!(m.get(&0), Some(&1782000000000));
+        assert_eq!(m.get(&1), Some(&1782000033000));
+        assert_eq!(m.len(), 2, "the partial trailing row 2, is skipped, not parsed");
+    }
+
+    #[test]
+    fn grab_ts_sidecar_empty_ts_midfile_still_errors() {
+        // A row with an empty timestamp that is NOT the last line is genuine corruption
+        // (a silently-shrunk grab-ts map would drop real latency samples) — still errors.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "frame_index,grab_ts_ns\n0,1782000000000\n1,\n2,1782000066000\n"
+        )
+        .unwrap();
+        assert!(parse_grab_ts(f.path()).is_err());
+    }
 }
