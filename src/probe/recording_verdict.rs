@@ -375,6 +375,58 @@ impl StrihStreamVerdict {
     }
 }
 
+/// A per-hop loss verdict paired on the **digital burn id** — the clean 1:1 common key
+/// (#174). Unlike [`strih_stream_verdict`], which compares the OPTICAL cam2 Vernier tick
+/// SETS (the un-genlocked 60→30 beat is NOT 1:1 across two independent samplings, so it
+/// manufactured the 259-vs-1 "dropped" artifact in run 1530670109), this compares the
+/// render-tick burn `frame_id` SETS. Each node stamps a monotonic per-render burn id; a
+/// hop is lossless iff every upstream burn id within the overlap span reaches downstream.
+/// The burn id is the SAME number end-to-end (the upstream burn rides through unchanged),
+/// so the compare is an exact set equality with no beat ambiguity.
+#[derive(Debug, Clone, Serialize)]
+pub struct BurnHopVerdict {
+    /// Hop label, e.g. `"cam1→strih"` or `"strih→stream"`.
+    pub hop: String,
+    /// Distinct upstream burn ids compared — the overlap span present in BOTH sides.
+    pub compared_ids: usize,
+    /// Upstream burn ids in the overlap span ABSENT downstream — frames the hop DROPPED.
+    pub dropped_ids: Vec<u32>,
+    /// Downstream burn ids in the overlap span ABSENT upstream — phantom / reorder ids
+    /// downstream carries that upstream never rendered.
+    pub phantom_ids: Vec<u32>,
+}
+
+impl BurnHopVerdict {
+    /// PASS = the two sides carry the SAME burn-id set across their overlap, and the
+    /// overlap is non-vacuous (≥2 ids — a 0/1-id overlap cannot demonstrate a clean hop).
+    pub fn is_pass(&self) -> bool {
+        self.dropped_ids.is_empty() && self.phantom_ids.is_empty() && self.compared_ids >= 2
+    }
+}
+
+/// Per-hop loss verdict by the clean digital burn id (#174). `upstream_ids` /
+/// `downstream_ids` are the burn `frame_id`s decoded for the upstream and downstream node
+/// (e.g. from the SINGLE stream recording: upstream = strih-burn ids, downstream =
+/// stream-burn ids — both ride through into stream's program). The compare is restricted
+/// to the OVERLAP span `[max(first), min(last)]` so independent record start/stop skew is
+/// not counted as loss (the same active-span handling [`strih_stream_verdict`] uses), then:
+/// an upstream id absent downstream is a DROP; a downstream id absent upstream is a phantom.
+/// Offset-immune and beat-free because the burn id is the SAME integer on both sides.
+pub fn burn_hop_verdict(
+    hop: &str,
+    _upstream_ids: &[u32],
+    _downstream_ids: &[u32],
+) -> BurnHopVerdict {
+    // [red] not yet implemented — returns an empty verdict so the tests prove they catch
+    // both a real drop and the absence of beat-inflation before the GREEN compare lands.
+    BurnHopVerdict {
+        hop: hop.to_string(),
+        compared_ids: 0,
+        dropped_ids: Vec::new(),
+        phantom_ids: Vec::new(),
+    }
+}
+
 /// Compare the strih and stream per-frame tick SEQUENCES directly (acceptance #4).
 ///
 /// The camera beat is common to BOTH digital outputs (it is upstream of both), so a
@@ -973,5 +1025,76 @@ mod tests {
             !a.claims_zero_loss,
             "absence of phantom ticks is necessary but NOT sufficient for zero-loss"
         );
+    }
+
+    // ---- #174 clean burn-id hop pairing (fixes the 60→30-beat loss artifacts) ----
+
+    #[test]
+    fn burn_hop_equal_id_sets_pass_offset_immune() {
+        // Two nodes carrying the SAME render-tick burn ids (downstream started one id
+        // later — record-start skew). The overlap id set is identical ⇒ clean hop, no
+        // beat ambiguity because the burn id is the SAME integer on both sides.
+        let up = vec![100, 101, 102, 103, 104];
+        let down = vec![101, 102, 103, 104]; // started one render later
+        let v = burn_hop_verdict("strih→stream", &up, &down);
+        assert!(v.is_pass(), "identical overlap burn-id set ⇒ clean hop");
+        assert!(v.dropped_ids.is_empty());
+        assert!(v.phantom_ids.is_empty());
+        assert!(v.compared_ids >= 2);
+    }
+
+    #[test]
+    fn burn_hop_a_real_drop_is_named_not_a_beat_artifact() {
+        // Downstream is MISSING burn id 102 that upstream rendered (within the overlap).
+        // A REAL hop drop — named exactly, with NO inflation from the 60→30 oversample
+        // (the artifact strih_stream_verdict produced: 259 dropped while real_gap=1).
+        let up = vec![100, 101, 102, 103, 104];
+        let down = vec![100, 101, 103, 104]; // 102 dropped
+        let v = burn_hop_verdict("strih→stream", &up, &down);
+        assert!(!v.is_pass(), "a real burn-id drop must FAIL");
+        assert_eq!(v.dropped_ids, vec![102], "exactly the one dropped id");
+        assert!(v.phantom_ids.is_empty());
+    }
+
+    #[test]
+    fn burn_hop_oversampled_repeats_do_not_inflate_loss() {
+        // THE artifact reproduction: the 60→30 beat places one render id on SEVERAL
+        // recorded frames, and the two sides catch DIFFERENT members of each cluster.
+        // With the optical tick set this manufactured hundreds of false "dropped".
+        // With the burn id — the SAME integer regardless of how many frames carry it —
+        // the set compare collapses the duplicates and reports ZERO loss.
+        let up = vec![10, 10, 11, 11, 11, 12, 13, 13];
+        let down = vec![10, 11, 12, 12, 13, 13, 13]; // different per-cluster sampling
+        let v = burn_hop_verdict("strih→stream", &up, &down);
+        assert!(
+            v.is_pass(),
+            "oversampled repeats of the SAME burn id are not loss: {v:?}"
+        );
+        assert!(v.dropped_ids.is_empty(), "no false drops from the beat");
+        assert!(v.phantom_ids.is_empty());
+    }
+
+    #[test]
+    fn burn_hop_phantom_downstream_id_fails() {
+        // Downstream shows burn id 105 upstream never rendered, WITHIN the overlap span
+        // (both sides span 100..=110, so 105 is inside) — a phantom / reorder. The strict
+        // hop must FAIL and name it.
+        let up = vec![100, 101, 102, 103, 110];
+        let down = vec![100, 101, 105, 102, 103, 110]; // 105 phantom, inside [100,110]
+        let v = burn_hop_verdict("cam1→strih", &up, &down);
+        assert!(!v.is_pass(), "a phantom downstream id must FAIL");
+        assert_eq!(v.phantom_ids, vec![105]);
+    }
+
+    #[test]
+    fn burn_hop_disjoint_ranges_are_no_overlap_not_a_pass() {
+        // cam1→strih in run 1530670109 collapsed to compared_ticks=1 because the optical
+        // tick ranges barely overlapped. With burn ids, a genuinely disjoint range yields
+        // compared_ids=0 (honest "no overlap"), never a misleading 1-id "compare".
+        let up = vec![1, 2, 3];
+        let down = vec![100, 101, 102];
+        let v = burn_hop_verdict("cam1→strih", &up, &down);
+        assert_eq!(v.compared_ids, 0, "disjoint ⇒ no overlap");
+        assert!(!v.is_pass(), "no overlap cannot be a pass");
     }
 }
