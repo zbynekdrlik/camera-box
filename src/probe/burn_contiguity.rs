@@ -111,6 +111,23 @@ pub fn burn_contiguity(node: &str, ids: &[u32]) -> NodeContiguity {
     }
 }
 
+/// One IN-WINDOW recorded delivered frame's burn status for a node (#198).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedBurnFrame {
+    /// 0-based recorded frame_index (for slot location / pixel proof).
+    pub frame_index: u64,
+    /// This node's burn id decoded on the frame, or `None` if the burn was not readable.
+    pub burn_id: Option<u32>,
+}
+
+/// THE in-window contiguity check (#198). RED STUB: still delegates to the buggy
+/// integer-range `burn_contiguity` over the present ids, so it over-counts the
+/// per-render-tick forward skips as "missing". The GREEN fix replaces this body.
+pub fn burn_contiguity_in_window(node: &str, frames: &[RecordedBurnFrame]) -> NodeContiguity {
+    let ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
+    burn_contiguity(node, &ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +215,146 @@ mod tests {
         assert_eq!(c.missing_ids, vec![8]); // only 8 is interior; not 4, not 11
         assert_eq!(c.first_id, Some(5));
         assert_eq!(c.last_id, Some(10));
+    }
+
+    // ============================================================================
+    // #198 — the IN-WINDOW contiguity check (correct for the strih/stream per-RENDER
+    // burn counter, which advances faster than the emitted-frame rate).
+    // ============================================================================
+
+    fn rbf(frame_index: u64, burn_id: Option<u32>) -> RecordedBurnFrame {
+        RecordedBurnFrame {
+            frame_index,
+            burn_id,
+        }
+    }
+
+    #[test]
+    fn in_window_render_tick_forward_skips_are_not_loss() {
+        // THE #198 BUG: strih/stream burn id is a per-RENDER-tick counter — it advances
+        // ~3x per EMITTED frame. Consecutive recorded (emitted) frames carry burn ids
+        // that jump by >1 (the un-emitted render ticks). Those forward skips are NOT
+        // dropped frames; every emitted frame is present, so this is ZERO loss — even
+        // though the integer range (1670..28676) is 3x the frame count.
+        let frames = [
+            rbf(0, Some(1670)),
+            rbf(1, Some(1673)),
+            rbf(2, Some(1676)),
+            rbf(3, Some(1679)),
+            rbf(4, Some(1682)),
+        ];
+        let c = burn_contiguity_in_window("strih", &frames);
+        assert!(
+            c.is_contiguous(),
+            "forward render-tick skips (counter > emit rate) are NOT loss: {c:?}"
+        );
+        assert!(c.missing_ids.is_empty());
+        assert_eq!(c.present_count, 5);
+        // expected = the count of in-window EMITTED frames, NOT the 13-wide integer span.
+        assert_eq!(c.expected_count, 5);
+        assert_eq!(c.first_id, Some(1670));
+        assert_eq!(c.last_id, Some(1682));
+    }
+
+    #[test]
+    fn out_of_window_ids_are_not_counted_only_in_window_gaps_count() {
+        // The #198 TDD ask, verbatim: synthetic burn ids where some are out-of-window
+        // (before the first / after the last decoded in-window frame) must NOT be counted
+        // as missing; ONLY a genuine in-window gap (a delivered frame missing its burn)
+        // counts. Here the caller has ALREADY trimmed the pre-/post-signal frames — the
+        // out-of-window ids are simply absent from `frames`, so the range can never
+        // include them. One delivered frame (index 12) carries NO burn = the one real
+        // in-window drop.
+        let frames = [
+            rbf(10, Some(5003)), // first in-window emitted frame
+            rbf(11, Some(5006)),
+            rbf(12, None), // delivered frame, burn unreadable / lost = ONE real drop
+            rbf(13, Some(5012)),
+            rbf(14, Some(5015)), // last in-window emitted frame
+        ];
+        let c = burn_contiguity_in_window("stream", &frames);
+        assert!(
+            !c.is_contiguous(),
+            "one delivered frame missing its burn is loss"
+        );
+        assert_eq!(c.missing_ids.len(), 1, "exactly ONE in-window drop: {c:?}");
+        assert_eq!(c.present_count, 4);
+        assert_eq!(c.expected_count, 5); // 5 in-window emitted frames
+        assert_eq!(c.first_id, Some(5003));
+        assert_eq!(c.last_id, Some(5015));
+    }
+
+    #[test]
+    fn in_window_backward_jump_is_a_reorder_fault() {
+        // A monotonic render counter can only ADVANCE; a burn id going backward across
+        // recorded frames is reorder/corruption and MUST be counted (it can never be a
+        // legitimate render-tick skip).
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump (< 103) = reorder fault
+            rbf(3, Some(106)),
+        ];
+        let c = burn_contiguity_in_window("strih", &frames);
+        assert!(!c.is_contiguous(), "backward jump is a fault: {c:?}");
+        assert_eq!(c.missing_ids, vec![101]);
+    }
+
+    #[test]
+    fn in_window_all_frames_carry_burn_is_zero_loss() {
+        // Every in-window emitted frame carries the node burn (even with big forward
+        // gaps) ⇒ ZERO loss.
+        let frames = [
+            rbf(0, Some(2)),
+            rbf(1, Some(9)),
+            rbf(2, Some(15)),
+            rbf(3, Some(40)),
+        ];
+        let c = burn_contiguity_in_window("stream", &frames);
+        assert!(
+            c.is_contiguous(),
+            "all frames carry the burn ⇒ zero loss: {c:?}"
+        );
+        assert!(c.missing_ids.is_empty());
+        assert_eq!(c.present_count, 4);
+        assert_eq!(c.expected_count, 4);
+    }
+
+    #[test]
+    fn in_window_empty_or_all_none_is_not_a_pass() {
+        // No in-window delivered frame, or none carrying a burn, proves nothing ⇒ NOT zero.
+        let c0 = burn_contiguity_in_window("strih", &[]);
+        assert!(!c0.is_contiguous(), "empty window is not a pass: {c0:?}");
+        assert_eq!(c0.first_id, None);
+
+        let all_none = [rbf(0, None), rbf(1, None)];
+        let c1 = burn_contiguity_in_window("strih", &all_none);
+        assert!(!c1.is_contiguous(), "no burn ever ⇒ not a pass: {c1:?}");
+        assert_eq!(c1.first_id, None);
+        assert_eq!(c1.expected_count, 2);
+    }
+
+    #[test]
+    fn in_window_multiple_missing_each_distinct_for_pixel_slot() {
+        // Two delivered frames missing their burn ⇒ two distinct candidate drops, each
+        // mapping to its own recorded slot for pixel classification.
+        let frames = [
+            rbf(0, Some(1000)),
+            rbf(1, None), // drop 1
+            rbf(2, Some(1006)),
+            rbf(3, None), // drop 2
+            rbf(4, Some(1012)),
+        ];
+        let c = burn_contiguity_in_window("strih", &frames);
+        assert_eq!(
+            c.missing_ids.len(),
+            2,
+            "two distinct in-window drops: {c:?}"
+        );
+        assert_eq!(c.present_count, 3);
+        assert_eq!(c.expected_count, 5);
+        // The synthetic candidate ids are distinct (1001 and 1007) so the verdict's
+        // pixel classifier can locate each slot independently.
+        assert_eq!(c.missing_ids, vec![1001, 1007]);
     }
 }
