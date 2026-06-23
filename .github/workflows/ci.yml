@@ -132,14 +132,6 @@ jobs:
         # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|multitap-probe|recording-probe|recording-verdict)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          # Upload is informational only; the real gate is --fail-under-lines above.
-          # Codecov flakiness (token/rate-limit) must not fail an already-passing build.
-          fail_ci_if_error: false
-
   mutants:
     name: Mutation Testing
     runs-on: ubuntu-latest
