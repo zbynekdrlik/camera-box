@@ -600,14 +600,83 @@ pub fn chain_hop_loss_from_stream(
     up_run_id: u32,
     down_run_id: u32,
 ) -> BurnHopVerdict {
-    // RED stub (#181): not yet implemented — returns the broken empty verdict so the
-    // cam2-tick-pairing tests fail until the real body lands in the GREEN commit.
-    let _ = (stream, cam2_id, up_run_id, down_run_id);
+    let is_cam2 = |run_id: u32| match cam2_id {
+        Some(c) => run_id == c,
+        None => run_id != up_run_id && run_id != down_run_id,
+    };
+    // Per canonical cam2 tick, did THIS recording carry the upstream / downstream burn?
+    // A burn counts only when stamped (gen_ts_ns > 0) — an unstamped QR is not a render.
+    let mut up_ticks: BTreeSet<u32> = BTreeSet::new();
+    let mut down_ticks: BTreeSet<u32> = BTreeSet::new();
+    for f in stream {
+        let mut cam2_tick: Option<u32> = None;
+        let mut has_up = false;
+        let mut has_down = false;
+        for p in &f.payloads {
+            if p.run_id == up_run_id {
+                if p.gen_ts_ns > 0 {
+                    has_up = true;
+                }
+            } else if p.run_id == down_run_id {
+                if p.gen_ts_ns > 0 {
+                    has_down = true;
+                }
+            } else if is_cam2(p.run_id) {
+                // Canonical cam2 tick = the highest-frame_id cam2 half in this frame.
+                cam2_tick = Some(match cam2_tick {
+                    Some(t) if t >= p.frame_id => t,
+                    _ => p.frame_id,
+                });
+            }
+        }
+        let Some(tick) = cam2_tick else { continue };
+        if has_up {
+            up_ticks.insert(tick);
+        }
+        if has_down {
+            down_ticks.insert(tick);
+        }
+    }
+
+    // Overlap span over cam2 ticks: only ticks BOTH endpoints had a chance to carry.
+    let (lo, hi) = match (
+        up_ticks.iter().next().max(down_ticks.iter().next()),
+        up_ticks
+            .iter()
+            .next_back()
+            .min(down_ticks.iter().next_back()),
+    ) {
+        (Some(&a), Some(&b)) if a <= b => (a, b),
+        // Disjoint or one side empty: no overlap to compare.
+        _ => {
+            return BurnHopVerdict {
+                hop: hop.to_string(),
+                compared_ids: 0,
+                dropped_ids: Vec::new(),
+                phantom_ids: Vec::new(),
+            };
+        }
+    };
+    let in_span = |t: u32| t >= lo && t <= hi;
+    let dropped_ids: Vec<u32> = up_ticks
+        .iter()
+        .copied()
+        .filter(|&t| in_span(t) && !down_ticks.contains(&t))
+        .collect();
+    let phantom_ids: Vec<u32> = down_ticks
+        .iter()
+        .copied()
+        .filter(|&t| in_span(t) && !up_ticks.contains(&t))
+        .collect();
+    let compared_ids = up_ticks
+        .iter()
+        .filter(|&&t| in_span(t) && down_ticks.contains(&t))
+        .count();
     BurnHopVerdict {
         hop: hop.to_string(),
-        compared_ids: 0,
-        dropped_ids: Vec::new(),
-        phantom_ids: Vec::new(),
+        compared_ids,
+        dropped_ids,
+        phantom_ids,
     }
 }
 
@@ -1435,11 +1504,8 @@ mod tests {
         // cam1 burns 40,41,42 ; strih burns 80,81,82 — disjoint ranges.
         let cam1_ids = vec![40u32, 41, 42];
         let strih_ids = vec![80u32, 81, 82];
-        let v = crate::probe::recording_verdict::burn_hop_verdict(
-            "cam1→strih",
-            &cam1_ids,
-            &strih_ids,
-        );
+        let v =
+            crate::probe::recording_verdict::burn_hop_verdict("cam1→strih", &cam1_ids, &strih_ids);
         assert_eq!(
             v.compared_ids, 0,
             "independent per-node counters never overlap — the #181 symptom"
@@ -1454,9 +1520,21 @@ mod tests {
         // 3 cam2 ticks; each frame has BOTH cam1 (independent ids 40..) and strih
         // (independent ids 80..) burns, both stamped. No loss.
         let frames = vec![
-            loss_frame(0, 500, &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)]),
-            loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 22)]),
-            loss_frame(2, 504, &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)]),
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
+            ),
+            loss_frame(
+                1,
+                502,
+                &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 22)],
+            ),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)],
+            ),
         ];
         let v = chain_hop_loss_from_stream(
             "cam1→strih",
@@ -1465,7 +1543,10 @@ mod tests {
             BURN_RUN_ID_CAM1,
             BURN_RUN_ID_STRIH,
         );
-        assert_eq!(v.compared_ids, 3, "all 3 cam2 ticks have both burns ⇒ overlap is real, not 0");
+        assert_eq!(
+            v.compared_ids, 3,
+            "all 3 cam2 ticks have both burns ⇒ overlap is real, not 0"
+        );
         assert!(v.dropped_ids.is_empty(), "no dropped");
         assert!(v.phantom_ids.is_empty(), "no phantom");
         assert!(v.is_pass(), "a clean hop with real overlap PASSES");
@@ -1477,10 +1558,18 @@ mod tests {
     #[test]
     fn loss_counts_a_dropped_cam2_tick_as_dropped() {
         let frames = vec![
-            loss_frame(0, 500, &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)]),
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
+            ),
             // tick 502: cam1 present, strih ABSENT → cam1→strih dropped this source frame.
             loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21)]),
-            loss_frame(2, 504, &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)]),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)],
+            ),
         ];
         let v = chain_hop_loss_from_stream(
             "cam1→strih",
@@ -1490,7 +1579,11 @@ mod tests {
             BURN_RUN_ID_STRIH,
         );
         assert_eq!(v.compared_ids, 2, "ticks 500 and 504 survived");
-        assert_eq!(v.dropped_ids, vec![502], "tick 502 had cam1 but no strih ⇒ dropped");
+        assert_eq!(
+            v.dropped_ids,
+            vec![502],
+            "tick 502 had cam1 but no strih ⇒ dropped"
+        );
         assert!(v.phantom_ids.is_empty());
         assert!(!v.is_pass(), "a dropped frame FAILS the hop");
     }
@@ -1500,10 +1593,18 @@ mod tests {
     #[test]
     fn loss_counts_a_phantom_cam2_tick_as_phantom() {
         let frames = vec![
-            loss_frame(0, 500, &[(BURN_RUN_ID_STRIH, 80, 11), (BURN_RUN_ID_STREAM, 120, 12)]),
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_STRIH, 80, 11), (BURN_RUN_ID_STREAM, 120, 12)],
+            ),
             // tick 502: stream present, strih ABSENT → phantom at stream.
             loss_frame(1, 502, &[(BURN_RUN_ID_STREAM, 121, 21)]),
-            loss_frame(2, 504, &[(BURN_RUN_ID_STRIH, 82, 31), (BURN_RUN_ID_STREAM, 122, 32)]),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_STRIH, 82, 31), (BURN_RUN_ID_STREAM, 122, 32)],
+            ),
         ];
         let v = chain_hop_loss_from_stream(
             "strih→stream",
@@ -1514,7 +1615,11 @@ mod tests {
         );
         assert_eq!(v.compared_ids, 2, "ticks 500 and 504 survived");
         assert!(v.dropped_ids.is_empty());
-        assert_eq!(v.phantom_ids, vec![502], "tick 502 had stream but no strih ⇒ phantom");
+        assert_eq!(
+            v.phantom_ids,
+            vec![502],
+            "tick 502 had stream but no strih ⇒ phantom"
+        );
         assert!(!v.is_pass(), "a phantom FAILS the hop");
     }
 
@@ -1526,8 +1631,16 @@ mod tests {
         let frames = vec![
             // tick 100: only cam1 (strih recording started later) → start skew, NOT a drop.
             loss_frame(0, 100, &[(BURN_RUN_ID_CAM1, 40, 11)]),
-            loss_frame(1, 500, &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 80, 22)]),
-            loss_frame(2, 504, &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 81, 32)]),
+            loss_frame(
+                1,
+                500,
+                &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 80, 22)],
+            ),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 81, 32)],
+            ),
             // tick 900: only cam1 (strih stopped earlier) → stop skew, NOT a drop.
             loss_frame(3, 900, &[(BURN_RUN_ID_CAM1, 43, 41)]),
         ];
@@ -1540,7 +1653,10 @@ mod tests {
         );
         // Overlap span = [500, 504]; 100 and 900 are outside it and excluded.
         assert_eq!(v.compared_ids, 2, "only the two in-span ticks compared");
-        assert!(v.dropped_ids.is_empty(), "out-of-span cam1-only ticks are skew, not loss");
+        assert!(
+            v.dropped_ids.is_empty(),
+            "out-of-span cam1-only ticks are skew, not loss"
+        );
         assert!(v.phantom_ids.is_empty());
     }
 
@@ -1549,10 +1665,22 @@ mod tests {
     #[test]
     fn loss_ignores_unstamped_burns() {
         let frames = vec![
-            loss_frame(0, 500, &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)]),
+            loss_frame(
+                0,
+                500,
+                &[(BURN_RUN_ID_CAM1, 40, 11), (BURN_RUN_ID_STRIH, 80, 12)],
+            ),
             // strih burn present but unstamped (0) → strih did not render this tick ⇒ drop.
-            loss_frame(1, 502, &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 0)]),
-            loss_frame(2, 504, &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)]),
+            loss_frame(
+                1,
+                502,
+                &[(BURN_RUN_ID_CAM1, 41, 21), (BURN_RUN_ID_STRIH, 81, 0)],
+            ),
+            loss_frame(
+                2,
+                504,
+                &[(BURN_RUN_ID_CAM1, 42, 31), (BURN_RUN_ID_STRIH, 82, 32)],
+            ),
         ];
         let v = chain_hop_loss_from_stream(
             "cam1→strih",
@@ -1562,6 +1690,10 @@ mod tests {
             BURN_RUN_ID_STRIH,
         );
         assert_eq!(v.compared_ids, 2);
-        assert_eq!(v.dropped_ids, vec![502], "an unstamped downstream burn ⇒ dropped");
+        assert_eq!(
+            v.dropped_ids,
+            vec![502],
+            "an unstamped downstream burn ⇒ dropped"
+        );
     }
 }
