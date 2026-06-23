@@ -149,6 +149,17 @@ pub struct RecordingVerdict {
     /// a backward jump, most-deviant first) — real loss / reorder, FAIL. Same
     /// net-accounting + pixel-proof contract as `real_copy_frames`.
     pub real_gap_frames: Vec<u64>,
+    /// Leading PRE-SIGNAL frames discarded before analysis: the run of `None`
+    /// (no-QR) frames at the very FRONT of the recording, before the first decodable
+    /// frame. These are the console lead-in (the painter has not yet taken cam2's
+    /// monitor / strih's program does not yet carry the QR) — NOT pipeline loss. They
+    /// are trimmed from the undecodable set and the analyzed span (the leading-discard
+    /// window). Reported for honesty so a run can show how much lead-in was excluded.
+    pub lead_in_trimmed: usize,
+    /// Trailing POST-SIGNAL frames discarded before analysis: the run of `None` frames
+    /// at the very END (teardown — the painter/source already removed while the
+    /// recorder is still rolling). Symmetric to `lead_in_trimmed`.
+    pub lead_out_trimmed: usize,
 }
 
 impl RecordingVerdict {
@@ -289,6 +300,8 @@ pub fn verdict(frames: &[FrameTick], cfg: &VerdictConfig) -> RecordingVerdict {
         undecodable_frames,
         real_copy_frames,
         real_gap_frames,
+        lead_in_trimmed: 0,
+        lead_out_trimmed: 0,
     }
 }
 
@@ -691,6 +704,123 @@ mod tests {
         assert!(!v.is_pass());
         assert!(!v.beat_balanced);
         assert_eq!(v.total_frames, 0);
+    }
+
+    #[test]
+    fn leading_console_lead_in_is_discarded_not_counted_undecodable() {
+        // A recording always opens with a few PRE-SIGNAL frames: the painter has not
+        // yet taken cam2's monitor (the console is still showing), or strih's program
+        // does not yet carry the QR. Those frames are `None` (no QR), but they are NOT
+        // pipeline loss — they are the lead-in BEFORE the signal exists. They must be
+        // discarded (leading-discard window), never counted as undecodable faults.
+        // Regression: run-163163 showed console lead-in frames as undecodable pixel
+        // proof + FAIL, defeating the zero-loss verdict on a clean run.
+        let frames = vec![
+            ft(0, None), // console lead-in (painter not up)
+            ft(1, None), // console lead-in
+            ft(2, None), // console lead-in
+            ft(3, Some(0)),
+            ft(4, Some(2)),
+            ft(5, Some(4)),
+            ft(6, Some(6)),
+        ];
+        let cfg = VerdictConfig {
+            min_secs: 0.0,
+            ..VerdictConfig::default()
+        };
+        let v = verdict(&frames, &cfg);
+        assert!(
+            v.undecodable_frames.is_empty(),
+            "leading console lead-in must not be counted as undecodable: {:?}",
+            v.undecodable_frames
+        );
+        assert_eq!(
+            v.lead_in_trimmed, 3,
+            "3 console frames trimmed from the front"
+        );
+        assert!((v.avg_step - 2.0).abs() < 1e-9);
+        assert!(v.beat_balanced);
+        assert!(
+            v.is_pass(),
+            "a clean body after a console lead-in must PASS"
+        );
+    }
+
+    #[test]
+    fn trailing_teardown_lead_out_is_discarded_too() {
+        // Symmetric to the lead-in: the recording can capture a few `None` frames at
+        // the END (teardown — the painter/source already removed but the recorder is
+        // still rolling). Those are post-signal, not loss; trim them too.
+        let frames = vec![
+            ft(0, Some(0)),
+            ft(1, Some(2)),
+            ft(2, Some(4)),
+            ft(3, None), // teardown lead-out
+            ft(4, None), // teardown lead-out
+        ];
+        let cfg = VerdictConfig {
+            min_secs: 0.0,
+            ..VerdictConfig::default()
+        };
+        let v = verdict(&frames, &cfg);
+        assert!(
+            v.undecodable_frames.is_empty(),
+            "trailing teardown lead-out must not be counted undecodable: {:?}",
+            v.undecodable_frames
+        );
+        assert_eq!(v.lead_out_trimmed, 2);
+        assert!(v.is_pass());
+    }
+
+    #[test]
+    fn interior_undecodable_still_fails_after_lead_in_trim() {
+        // The trim is ONLY the leading/trailing PRE/POST-signal run. An undecodable
+        // hole INSIDE the signal body is still a hard fault — the trim must not mask a
+        // mid-run decode collapse.
+        let frames = vec![
+            ft(0, None), // lead-in (trimmed)
+            ft(1, Some(0)),
+            ft(2, None), // INTERIOR undecodable — a real fault
+            ft(3, Some(4)),
+            ft(4, Some(6)),
+        ];
+        let cfg = VerdictConfig {
+            min_secs: 0.0,
+            ..VerdictConfig::default()
+        };
+        let v = verdict(&frames, &cfg);
+        assert_eq!(v.lead_in_trimmed, 1);
+        assert_eq!(
+            v.undecodable_frames,
+            vec![2],
+            "interior undecodable is still a fault"
+        );
+        assert!(!v.is_pass(), "an interior undecodable still fails");
+    }
+
+    #[test]
+    fn analyzed_secs_excludes_trimmed_lead_frames() {
+        // The analyzed span (duration gate) is measured over the SIGNAL body, not the
+        // lead-in/lead-out — otherwise the console frames inflate the analyzed seconds.
+        let mut frames = vec![ft(0, None), ft(1, None)];
+        for i in 0..300u64 {
+            frames.push(ft(2 + i, Some((i as u32) * 2)));
+        }
+        frames.push(ft(302, None)); // lead-out
+        let cfg = VerdictConfig {
+            capture_fps: 30.0,
+            min_secs: 0.0,
+            refresh_hz: 60.0,
+        };
+        let v = verdict(&frames, &cfg);
+        // 300 signal frames @ 30 fps = 10.0 s (NOT 303/30 = 10.1).
+        assert!(
+            (v.analyzed_secs - 10.0).abs() < 1e-9,
+            "analyzed_secs must be over the signal body only, got {}",
+            v.analyzed_secs
+        );
+        assert_eq!(v.lead_in_trimmed, 2);
+        assert_eq!(v.lead_out_trimmed, 1);
     }
 
     #[test]
