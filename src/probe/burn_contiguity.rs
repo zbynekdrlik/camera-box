@@ -126,102 +126,217 @@ pub struct RecordedBurnFrame {
     pub burn_id: Option<u32>,
 }
 
+/// How a node's burn `frame_id` advances — the #198 distinction that decides whether a
+/// forward integer skip between two consecutive recorded (emitted) frames is loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BurnRate {
+    /// cam1: the burn id increments ONCE PER EMITTED frame (src/main.rs — after the genlock
+    /// decimation gate, right before the NDI send). So consecutive recorded frames MUST carry
+    /// consecutive integers; a forward gap (id jumps by >1) means cam1 emitted a frame that
+    /// never reached the recording ⇒ a REAL drop. The in-window id sequence must be a
+    /// contiguous integer run.
+    PerEmittedFrame,
+    /// strih/stream: the burn id is the DistroAV burn filter's `f->frame_id++`, bumped in the
+    /// OBS `video_render` callback — once per RENDER/COMPOSITE TICK, which fires FASTER than
+    /// the emitted/recorded output rate (vendor/distroav/src/ndi-burn-filter.cpp:261). So a
+    /// forward gap between consecutive recorded frames is the EXPECTED un-emitted render ticks
+    /// and is NOT loss; only a delivered frame carrying NO burn (or a backward jump) is.
+    PerRenderTick,
+}
+
+/// Why a missing burn id is missing (#198) — determined from the in-window walk itself, so
+/// the REAL-DROP vs BURN-UNREADABLE distinction is decided by the rate/structure, not lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InWindowMissingKind {
+    /// A frame the node EMITTED that never reached the recording: a per-emit (cam1) forward
+    /// integer gap (an emitted-frame id absent from the recorded sequence), or a backward
+    /// jump (reorder). The node's own frame is genuinely gone ⇒ a REAL drop.
+    RealDrop,
+    /// A DELIVERED frame (cam2's optical QR present at this slot) that carried NO readable node
+    /// burn — the frame reached the recording but the burn QR did not decode ⇒ a
+    /// BURN-READABILITY defect to FIX, not an absent frame.
+    BurnUnreadable,
+}
+
+/// One missing-frame slot the in-window check found: the (synthetic-or-real) burn `id` that
+/// was absent, the recorded `frame_index` whose pixels prove the cause, and the `kind` decided
+/// by the walk (#198). The verdict binary pairs onto THIS authoritative list (single source of
+/// truth) and extracts the pixel proof at `frame_index` — it no longer recomputes the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingSlot {
+    pub id: u32,
+    pub frame_index: u64,
+    pub kind: InWindowMissingKind,
+}
+
+/// The in-window contiguity verdict + the recorded slot for each missing id (#198).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InWindowContiguity {
+    pub contiguity: NodeContiguity,
+    /// One per `contiguity.missing_ids` entry, SAME order, SAME length — the recorded frame to
+    /// view for that missing id. The verdict binary zips these together; the lengths are
+    /// guaranteed equal by construction (both produced in this one walk).
+    pub missing_slots: Vec<MissingSlot>,
+}
+
 /// THE in-window contiguity check (#198), correct for BOTH burn-counter rates.
 ///
 /// ## Why the old integer-range check over-counted strih/stream by ~3x
 ///
 /// [`burn_contiguity`] (above) treats the burn `frame_id` as a per-EMITTED-frame counter:
-/// it builds the span `min(ids)..=max(ids)` and calls every absent integer "missing".
-/// That is only valid for **cam1**, whose burn id increments once per EMITTED frame
-/// (src/main.rs — after the genlock decimation gate, right before the NDI send). For
-/// **strih/stream** the burn id is the DistroAV burn filter's `f->frame_id++`, bumped in
-/// the OBS `video_render` callback — once per RENDER/COMPOSITE TICK, which fires FASTER
-/// than the emitted/recorded output rate (vendor/distroav/src/ndi-burn-filter.cpp:261).
-/// So strih's counter ran to ~28676 while only ~9000 frames were emitted into the ~300 s
-/// recording: every render tick that produced no distinct emitted frame is an integer the
-/// recording never carries, and the old check flagged ALL of them as "missing" (the 18056
-/// false report in #198). Restricting to a window does NOT fix that alone — the render-tick
-/// skips are INTERIOR to the window; the rate is the dominant cause (#198 point 2).
+/// it builds the span `min(ids)..=max(ids)` and calls every absent integer "missing". That is
+/// only valid for **cam1** ([`BurnRate::PerEmittedFrame`]), whose burn id increments once per
+/// EMITTED frame. For **strih/stream** ([`BurnRate::PerRenderTick`]) the burn id is bumped per
+/// OBS render tick, which fires FASTER than the emitted/recorded rate. So strih's counter ran
+/// to ~28676 while only ~9000 frames were emitted into the ~300 s recording: every render tick
+/// that produced no distinct emitted frame is an integer the recording never carries, and the
+/// old check flagged ALL of them as "missing" (the 18056 false report in #198). Restricting to
+/// a window does NOT fix that alone — the render-tick skips are INTERIOR to the window; the
+/// rate is the dominant cause (#198 point 2).
 ///
-/// ## The correct measure
+/// ## The correct measure (rate-aware)
 ///
-/// A recording frame is one EMITTED output frame. For a per-render counter the only real
-/// loss signal is: an in-window DELIVERED frame (carries cam2's optical QR ⇒ a frame DID
-/// reach the recording at that instant) that carries NO readable node burn — the node's
-/// emitted frame for that optical instant was lost OR its burn QR was unreadable. FORWARD
-/// integer skips between consecutive recorded frames are EXPECTED for a free-running render
-/// counter (the un-emitted ticks) and are NOT loss. A BACKWARD jump in the id sequence is a
-/// reorder/corruption fault and IS counted (it can never happen for a monotonic counter
-/// that only advances). Out-of-window frames are excluded entirely (the caller passes only
-/// in-window delivered frames), so the pre-/post-signal ids that inflated the range can no
-/// longer be counted as missing — the #198 point-1 ask. This makes strih/stream behave like
-/// cam1 already does (cam1 is per-emit, so its window == its emitted frames == zero spurious
-/// missing).
+/// A recording frame is one EMITTED output frame. The check walks the in-window DELIVERED
+/// frames (each carries cam2's optical QR ⇒ a frame DID reach the recording at that instant):
+///
+/// - a delivered frame carrying NO readable node burn (`burn_id == None`) is ALWAYS a candidate
+///   drop (the node's frame for that instant was lost OR its burn was unreadable) — for BOTH
+///   rates;
+/// - a BACKWARD jump (id < the previous present id) is ALWAYS a reorder/corruption fault — for
+///   BOTH rates (a monotonic counter only advances);
+/// - a FORWARD gap between two consecutive PRESENT ids is loss ONLY for
+///   [`BurnRate::PerEmittedFrame`] (cam1): each skipped integer is a cam1-emitted frame that
+///   never reached the recording. For [`BurnRate::PerRenderTick`] (strih/stream) a forward gap
+///   is the EXPECTED un-emitted render ticks and is NOT loss.
+///
+/// Out-of-window frames are excluded entirely (the caller passes only in-window delivered
+/// frames via [`RecordedBurnFrame`]), so the pre-/post-signal ids that inflated the range can
+/// no longer be counted as missing — the #198 point-1 ask.
 ///
 /// `frames` MUST be the in-window DELIVERED recorded frames in recorded order. The returned
 /// [`NodeContiguity`] uses `first_id`/`last_id` = the first/last burn id actually present in
-/// the window; `present_count` = frames carrying a burn; `expected_count` = the number of
-/// in-window delivered frames (each MUST carry a burn); `missing_ids` = the burn id that
-/// SHOULD have ridden each `None`/backward-jump frame, derived from the bounding present id
-/// so each missing entry still maps to a real recorded slot for pixel classification. An
-/// empty / all-`None` window ⇒ `first_id == None` ⇒ NOT a pass (nothing proven).
-pub fn burn_contiguity_in_window(node: &str, frames: &[RecordedBurnFrame]) -> NodeContiguity {
+/// the window; `expected_count` = the number of in-window delivered frames (each MUST carry a
+/// burn); `present_count` = `expected_count - missing_ids.len()` so the two counts are ALWAYS
+/// consistent (a backward-jump frame carries a burn but is still counted missing, so it is
+/// NOT double-counted as present). `missing_ids` lists each candidate-drop id, paired 1:1 with
+/// [`InWindowContiguity::missing_slots`] (same order/length) so the pixel classifier views the
+/// exact recorded frame. Consecutive `None` frames get DISTINCT synthetic ids (a monotone
+/// per-slot cursor) so a deduping consumer cannot undercount. An empty / all-`None` window ⇒
+/// `first_id == None` ⇒ NOT a pass (nothing proven).
+pub fn burn_contiguity_in_window(
+    node: &str,
+    frames: &[RecordedBurnFrame],
+    rate: BurnRate,
+) -> InWindowContiguity {
     let present_ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
     let first_id = present_ids.first().copied();
     let last_id = present_ids.last().copied();
-    let present_count = present_ids.len() as u32;
     // Expected = the number of in-window DELIVERED frames: each one is an emitted output
     // frame that MUST carry this node's burn. (Not the integer span — that span is the
-    // free-running render-tick range, not the emitted-frame count.)
+    // free-running render-tick range for strih/stream, not the emitted-frame count.)
     let expected_count = frames.len() as u32;
 
     if first_id.is_none() {
-        return NodeContiguity {
-            node: node.to_string(),
-            first_id: None,
-            last_id: None,
-            present_count: 0,
-            expected_count,
-            missing_ids: Vec::new(),
+        return InWindowContiguity {
+            contiguity: NodeContiguity {
+                node: node.to_string(),
+                first_id: None,
+                last_id: None,
+                present_count: 0,
+                expected_count,
+                missing_ids: Vec::new(),
+            },
+            missing_slots: Vec::new(),
         };
     }
 
-    // Walk the in-window delivered frames in order. A frame whose burn did not decode
-    // (`None`) is a candidate drop — record the id it SHOULD have carried (one past the
-    // last seen present id, so the entry is distinct and maps to this slot). A backward
-    // jump (id < the previous present id) is a reorder fault — record the offending id.
-    let mut missing_ids: Vec<u32> = Vec::new();
+    // Walk the in-window delivered frames in order, recording every missing slot with the id
+    // it should have carried, the recorded frame to view, and WHY it is missing. `next_synth`
+    // is a strictly-monotone cursor for the synthetic ids of `None` slots so consecutive drops
+    // ALWAYS get DISTINCT ids — a deduping consumer can never collapse two real drops into one
+    // (#198 review #1). It is seeded above the integer range so it can never collide with a
+    // real present/gap id (#198 review #3).
+    let max_present = present_ids.iter().copied().max().unwrap_or(0);
+    let mut next_synth = max_present.saturating_add(1);
+    let mut alloc_synth = || {
+        let v = next_synth;
+        next_synth = next_synth.saturating_add(1);
+        v
+    };
+
+    let mut missing_slots: Vec<MissingSlot> = Vec::new();
     let mut prev_present: Option<u32> = None;
+    // Count delivered (in-window) frames that are NOT a clean "present": a `None` frame (no
+    // burn) and a backward-jump frame (carries a burn but out of order). Each is ONE delivered
+    // frame, so it subtracts from present_count → present + these == expected (#198 review #2).
+    // A per-emit forward-gap miss is NOT a delivered frame (a synthetic id between two delivered
+    // frames), so it does NOT subtract — it is an EXTRA real drop surfaced in missing_ids only.
+    let mut non_present_delivered: u32 = 0;
     for f in frames {
         match f.burn_id {
             Some(id) => {
-                if let Some(prev) = prev_present {
-                    if id < prev {
+                match prev_present {
+                    Some(prev) if id < prev => {
                         // Backward jump: a reorder/corruption — the monotonic counter must
-                        // only ever advance. Count this id as a fault.
-                        missing_ids.push(id);
+                        // only ever advance. ALWAYS a fault (both rates); the node's frame for
+                        // this id is out of order ⇒ treated as a real drop of correct ordering.
+                        // This frame is delivered but NOT a clean present.
+                        non_present_delivered = non_present_delivered.saturating_add(1);
+                        missing_slots.push(MissingSlot {
+                            id,
+                            frame_index: f.frame_index,
+                            kind: InWindowMissingKind::RealDrop,
+                        });
                     }
+                    Some(prev) if matches!(rate, BurnRate::PerEmittedFrame) && id > prev + 1 => {
+                        // cam1 (per-emit): a forward gap = cam1-emitted frames that never
+                        // reached the recording. Each skipped integer prev+1..id is one REAL
+                        // drop; record them, viewing THIS frame's pixels (the first present
+                        // frame after the gap) for the proof. THIS frame itself IS present
+                        // (it carries a valid forward id), so it does NOT subtract from present.
+                        for missing in (prev + 1)..id {
+                            missing_slots.push(MissingSlot {
+                                id: missing,
+                                frame_index: f.frame_index,
+                                kind: InWindowMissingKind::RealDrop,
+                            });
+                        }
+                    }
+                    _ => {} // forward gap on a per-render counter ⇒ expected, not loss.
                 }
                 prev_present = Some(id);
             }
             None => {
-                // A delivered frame with no readable burn. The id it should have carried is
-                // one past the last present id (synthetic but distinct + monotone, so it
-                // bounds the recorded slot for the pixel classifier). Saturating so the
-                // degenerate u32::MAX boundary cannot panic.
-                let candidate = prev_present.map(|p| p.saturating_add(1)).unwrap_or(0);
-                missing_ids.push(candidate);
+                // A delivered frame with no readable burn ⇒ the frame reached the recording but
+                // the burn QR did not decode ⇒ BURN-UNREADABLE (both rates). A fresh synthetic
+                // id keeps consecutive Nones distinct and cannot collide with a real id. This
+                // delivered frame is NOT a clean present.
+                non_present_delivered = non_present_delivered.saturating_add(1);
+                missing_slots.push(MissingSlot {
+                    id: alloc_synth(),
+                    frame_index: f.frame_index,
+                    kind: InWindowMissingKind::BurnUnreadable,
+                });
             }
         }
     }
 
-    NodeContiguity {
-        node: node.to_string(),
-        first_id,
-        last_id,
-        present_count,
-        expected_count,
-        missing_ids,
+    let missing_ids: Vec<u32> = missing_slots.iter().map(|s| s.id).collect();
+    // present_count = delivered frames that ARE a clean present (carry a burn, in order). So
+    // present + non_present_delivered == expected_count exactly (#198 review #2). Forward-gap
+    // synthetic misses are NOT delivered frames and are excluded from this reconciliation.
+    let present_count = expected_count.saturating_sub(non_present_delivered);
+
+    InWindowContiguity {
+        contiguity: NodeContiguity {
+            node: node.to_string(),
+            first_id,
+            last_id,
+            present_count,
+            expected_count,
+            missing_ids,
+        },
+        missing_slots,
     }
 }
 
@@ -315,8 +430,8 @@ mod tests {
     }
 
     // ============================================================================
-    // #198 — the IN-WINDOW contiguity check (correct for the strih/stream per-RENDER
-    // burn counter, which advances faster than the emitted-frame rate).
+    // #198 — the IN-WINDOW contiguity check, rate-aware: strih/stream burn per RENDER
+    // tick (forward gaps expected), cam1 burns per EMITTED frame (forward gap = drop).
     // ============================================================================
 
     fn rbf(frame_index: u64, burn_id: Option<u32>) -> RecordedBurnFrame {
@@ -340,12 +455,14 @@ mod tests {
             rbf(3, Some(1679)),
             rbf(4, Some(1682)),
         ];
-        let c = burn_contiguity_in_window("strih", &frames);
+        let w = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        let c = &w.contiguity;
         assert!(
             c.is_contiguous(),
             "forward render-tick skips (counter > emit rate) are NOT loss: {c:?}"
         );
         assert!(c.missing_ids.is_empty());
+        assert!(w.missing_slots.is_empty());
         assert_eq!(c.present_count, 5);
         // expected = the count of in-window EMITTED frames, NOT the 13-wide integer span.
         assert_eq!(c.expected_count, 5);
@@ -354,27 +471,68 @@ mod tests {
     }
 
     #[test]
+    fn in_window_cam1_per_emit_forward_gap_is_a_real_drop() {
+        // cam1's burn is per-EMITTED-frame, so its in-window id run MUST be contiguous
+        // integers. A forward gap (52 absent between 51 and 53) = a cam1-emitted frame that
+        // never reached the recording = a REAL drop — even though every recorded frame here
+        // is delivered. This is the regression the review caught: cam1 must NOT get the
+        // render-tick "forward gaps are fine" treatment.
+        let frames = [
+            rbf(0, Some(50)),
+            rbf(1, Some(51)),
+            rbf(2, Some(53)), // 52 missing — a real cam1 drop
+            rbf(3, Some(54)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        assert!(
+            !c.is_contiguous(),
+            "cam1 per-emit forward gap IS loss: {c:?}"
+        );
+        assert_eq!(c.missing_ids, vec![52], "the missing emitted-frame id");
+        assert_eq!(w.missing_slots.len(), 1);
+        assert_eq!(w.missing_slots[0].id, 52);
+        assert_eq!(
+            w.missing_slots[0].frame_index, 2,
+            "viewed at the frame after the gap"
+        );
+        assert_eq!(w.missing_slots[0].kind, InWindowMissingKind::RealDrop);
+    }
+
+    #[test]
+    fn in_window_cam1_contiguous_run_is_zero_loss() {
+        // cam1 per-emit, every consecutive integer present ⇒ ZERO loss.
+        let frames = [rbf(0, Some(50)), rbf(1, Some(51)), rbf(2, Some(52))];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        assert!(w.contiguity.is_contiguous(), "{:?}", w.contiguity);
+        assert!(w.missing_slots.is_empty());
+    }
+
+    #[test]
     fn out_of_window_ids_are_not_counted_only_in_window_gaps_count() {
         // The #198 TDD ask, verbatim: synthetic burn ids where some are out-of-window
         // (before the first / after the last decoded in-window frame) must NOT be counted
         // as missing; ONLY a genuine in-window gap (a delivered frame missing its burn)
-        // counts. Here the caller has ALREADY trimmed the pre-/post-signal frames — the
-        // out-of-window ids are simply absent from `frames`, so the range can never
-        // include them. One delivered frame (index 12) carries NO burn = the one real
-        // in-window drop.
+        // counts. The caller has ALREADY trimmed the pre-/post-signal frames — the
+        // out-of-window ids are simply absent from `frames`. One delivered frame (index 12)
+        // carries NO burn = the one real in-window drop (BURN-UNREADABLE, frame delivered).
         let frames = [
             rbf(10, Some(5003)), // first in-window emitted frame
             rbf(11, Some(5006)),
-            rbf(12, None), // delivered frame, burn unreadable / lost = ONE real drop
+            rbf(12, None), // delivered frame, burn unreadable = ONE in-window drop
             rbf(13, Some(5012)),
             rbf(14, Some(5015)), // last in-window emitted frame
         ];
-        let c = burn_contiguity_in_window("stream", &frames);
+        let w = burn_contiguity_in_window("stream", &frames, BurnRate::PerRenderTick);
+        let c = &w.contiguity;
         assert!(
             !c.is_contiguous(),
             "one delivered frame missing its burn is loss"
         );
         assert_eq!(c.missing_ids.len(), 1, "exactly ONE in-window drop: {c:?}");
+        assert_eq!(w.missing_slots.len(), 1);
+        assert_eq!(w.missing_slots[0].frame_index, 12);
+        assert_eq!(w.missing_slots[0].kind, InWindowMissingKind::BurnUnreadable);
         assert_eq!(c.present_count, 4);
         assert_eq!(c.expected_count, 5); // 5 in-window emitted frames
         assert_eq!(c.first_id, Some(5003));
@@ -383,31 +541,38 @@ mod tests {
 
     #[test]
     fn in_window_backward_jump_is_a_reorder_fault() {
-        // A monotonic render counter can only ADVANCE; a burn id going backward across
-        // recorded frames is reorder/corruption and MUST be counted (it can never be a
-        // legitimate render-tick skip).
+        // A monotonic counter can only ADVANCE; a burn id going backward across recorded
+        // frames is reorder/corruption and MUST be counted (it can never be a legitimate
+        // render-tick skip) — for BOTH rates. Classified RealDrop (ordering lost).
         let frames = [
             rbf(0, Some(100)),
             rbf(1, Some(103)),
             rbf(2, Some(101)), // backward jump (< 103) = reorder fault
             rbf(3, Some(106)),
         ];
-        let c = burn_contiguity_in_window("strih", &frames);
-        assert!(!c.is_contiguous(), "backward jump is a fault: {c:?}");
-        assert_eq!(c.missing_ids, vec![101]);
+        let w = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "backward jump is a fault: {:?}",
+            w.contiguity
+        );
+        assert_eq!(w.contiguity.missing_ids, vec![101]);
+        assert_eq!(w.missing_slots[0].kind, InWindowMissingKind::RealDrop);
+        assert_eq!(w.missing_slots[0].frame_index, 2);
     }
 
     #[test]
     fn in_window_all_frames_carry_burn_is_zero_loss() {
         // Every in-window emitted frame carries the node burn (even with big forward
-        // gaps) ⇒ ZERO loss.
+        // gaps on a per-render counter) ⇒ ZERO loss.
         let frames = [
             rbf(0, Some(2)),
             rbf(1, Some(9)),
             rbf(2, Some(15)),
             rbf(3, Some(40)),
         ];
-        let c = burn_contiguity_in_window("stream", &frames);
+        let w = burn_contiguity_in_window("stream", &frames, BurnRate::PerRenderTick);
+        let c = &w.contiguity;
         assert!(
             c.is_contiguous(),
             "all frames carry the burn ⇒ zero loss: {c:?}"
@@ -420,38 +585,101 @@ mod tests {
     #[test]
     fn in_window_empty_or_all_none_is_not_a_pass() {
         // No in-window delivered frame, or none carrying a burn, proves nothing ⇒ NOT zero.
-        let c0 = burn_contiguity_in_window("strih", &[]);
-        assert!(!c0.is_contiguous(), "empty window is not a pass: {c0:?}");
-        assert_eq!(c0.first_id, None);
+        let w0 = burn_contiguity_in_window("strih", &[], BurnRate::PerRenderTick);
+        assert!(!w0.contiguity.is_contiguous(), "empty window is not a pass");
+        assert_eq!(w0.contiguity.first_id, None);
 
         let all_none = [rbf(0, None), rbf(1, None)];
-        let c1 = burn_contiguity_in_window("strih", &all_none);
+        let w1 = burn_contiguity_in_window("strih", &all_none, BurnRate::PerRenderTick);
+        let c1 = &w1.contiguity;
         assert!(!c1.is_contiguous(), "no burn ever ⇒ not a pass: {c1:?}");
         assert_eq!(c1.first_id, None);
         assert_eq!(c1.expected_count, 2);
     }
 
     #[test]
-    fn in_window_multiple_missing_each_distinct_for_pixel_slot() {
-        // Two delivered frames missing their burn ⇒ two distinct candidate drops, each
-        // mapping to its own recorded slot for pixel classification.
+    fn in_window_consecutive_none_frames_get_distinct_ids() {
+        // #198 review #1: two CONSECUTIVE delivered frames missing their burn must yield TWO
+        // DISTINCT missing ids — a deduping consumer must never collapse two real drops into
+        // one. (The old code gave both `prev+1`.)
         let frames = [
             rbf(0, Some(1000)),
             rbf(1, None), // drop 1
+            rbf(2, None), // drop 2 — adjacent, MUST get a different id
+            rbf(3, Some(1006)),
+        ];
+        let w = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        let c = &w.contiguity;
+        assert_eq!(c.missing_ids.len(), 2, "two distinct adjacent drops: {c:?}");
+        assert_ne!(
+            c.missing_ids[0], c.missing_ids[1],
+            "adjacent None drops must have DISTINCT ids: {:?}",
+            c.missing_ids
+        );
+        // distinct recorded slots so each can be pixel-proofed independently.
+        assert_eq!(w.missing_slots[0].frame_index, 1);
+        assert_eq!(w.missing_slots[1].frame_index, 2);
+        // present + missing == expected, exactly.
+        assert_eq!(
+            c.present_count + c.missing_ids.len() as u32,
+            c.expected_count
+        );
+    }
+
+    #[test]
+    fn in_window_present_plus_missing_equals_expected_with_backward_jump() {
+        // #198 review #2: a backward-jump frame carries a burn yet is counted missing, so it
+        // must NOT also be counted present — present + missing == expected, always.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward — counted missing, NOT present
+        ];
+        let w = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        let c = &w.contiguity;
+        assert_eq!(c.expected_count, 3);
+        assert_eq!(c.missing_ids.len(), 1);
+        assert_eq!(
+            c.present_count + c.missing_ids.len() as u32,
+            c.expected_count,
+            "present + missing must reconcile to expected: {c:?}"
+        );
+    }
+
+    #[test]
+    fn in_window_synthetic_none_id_cannot_collide_with_real_ids() {
+        // #198 review #3: the synthetic id for a None slot is seeded ABOVE the max present id,
+        // so it can never equal a real present id or a real backward-jump id.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, None), // synthetic id must be > 102 (the max present)
+            rbf(2, Some(102)),
+        ];
+        let w = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        let synth = w.missing_slots[0].id;
+        assert!(
+            synth > 102,
+            "synthetic id {synth} must exceed max present id 102"
+        );
+    }
+
+    #[test]
+    fn in_window_slots_pair_one_to_one_with_missing_ids() {
+        // The binary zips missing_slots onto missing_ids — they MUST be the same length and
+        // order so the pixel classifier views the right frame.
+        let frames = [
+            rbf(0, Some(1000)),
+            rbf(1, None),
             rbf(2, Some(1006)),
-            rbf(3, None), // drop 2
+            rbf(3, None),
             rbf(4, Some(1012)),
         ];
-        let c = burn_contiguity_in_window("strih", &frames);
-        assert_eq!(
-            c.missing_ids.len(),
-            2,
-            "two distinct in-window drops: {c:?}"
-        );
-        assert_eq!(c.present_count, 3);
-        assert_eq!(c.expected_count, 5);
-        // The synthetic candidate ids are distinct (1001 and 1007) so the verdict's
-        // pixel classifier can locate each slot independently.
-        assert_eq!(c.missing_ids, vec![1001, 1007]);
+        let w = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        assert_eq!(w.contiguity.missing_ids.len(), w.missing_slots.len());
+        for (id, slot) in w.contiguity.missing_ids.iter().zip(&w.missing_slots) {
+            assert_eq!(*id, slot.id);
+        }
+        assert_eq!(w.missing_slots[0].frame_index, 1);
+        assert_eq!(w.missing_slots[1].frame_index, 3);
     }
 }
