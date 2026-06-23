@@ -314,6 +314,28 @@ async fn run_capture_loop(
         None => frame_rate,
     };
 
+    // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
+    // CAMERA_BOX_BURN_RUN_ID (mirrors the strih/stream DistroAV burn run_id env): when
+    // UNSET the burn is OFF and the live NDI feed stays completely CLEAN (zero-copy send
+    // untouched, no QR on the broadcast). When set, BEFORE NDIlib_send_send_video_v2 a
+    // small QR carrying (run_id, per-emit frame_id, cam1-capture wall-clock gen_ts_ns) is
+    // drawn into the EMITTED frame's bottom-center luma so the full chain cam1→strih→
+    // stream pairs on a clean digital burn-id from the single stream recording. The burn
+    // module is `probe`-feature-gated (kept out of the production binary); the e2e harness
+    // deploys a probe-featured camera-box to cam1 for the test run.
+    #[cfg(feature = "probe")]
+    let burn_run_id: Option<u32> = std::env::var("CAMERA_BOX_BURN_RUN_ID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&id| id > 0);
+    #[cfg(feature = "probe")]
+    if let Some(id) = burn_run_id {
+        tracing::info!(
+            "#174 CAM1-CAPTURE BURN ACTIVE (TEST MODE): run_id={} — bottom-center QR burned into the emitted frame (production feed is OFF unless CAMERA_BOX_BURN_RUN_ID is set)",
+            id
+        );
+    }
+
     // Create NDI sender with configured name and the (genlock or capture) rate
     let mut sender = NdiSender::new(ndi_name, send_rate)?;
     if genlock_fps.is_some() {
@@ -355,6 +377,11 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0; // frames captured this report window
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
+        // #174 cam1 burn: a monotonic per-EMITTED-frame counter — the cam1 render-tick id
+        // burned into each frame. A clean 1:1 digital key the downstream verdict pairs on
+        // (unlike the optical 60→30 beat). Only advanced when the burn is active.
+        #[cfg(feature = "probe")]
+        let mut burn_frame_id: u32 = 0;
 
         // Genlock decimation state: emit the first capture at/after each target
         // wall-clock boundary, skip the rest. interval_ns 0 => decimation off.
@@ -379,7 +406,38 @@ async fn run_capture_loop(
                         return; // between boundaries — decimate (don't send)
                     }
                 }
-                if let Err(e) = sender.send_frame_zero_copy(data, info) {
+                // #174 TEST-MODE burn: when CAMERA_BOX_BURN_RUN_ID is set, copy the frame,
+                // draw the cam1 render-time QR into its luma, and send the COPY. When unset
+                // (production), the zero-copy send is taken verbatim — no allocation, no QR,
+                // feed stays clean. `burned` keeps the copy alive across the send call.
+                #[cfg(feature = "probe")]
+                let mut burned: Vec<u8>;
+                #[cfg(feature = "probe")]
+                let send_data: &[u8] = match burn_run_id {
+                    Some(run_id) if info.fourcc.str().unwrap_or("") == "YUYV" => {
+                        burned = data.to_vec();
+                        let payload = camera_box::probe::payload::Payload {
+                            run_id,
+                            frame_id: burn_frame_id,
+                            gen_ts_ns: wall_clock_ns() as i64,
+                        };
+                        camera_box::probe::qr::burn_qr_yuyv(
+                            &mut burned,
+                            info.width,
+                            info.height,
+                            info.stride,
+                            &payload,
+                            camera_box::probe::qr::CAM1_BURN_QR_PX,
+                        );
+                        burn_frame_id = burn_frame_id.wrapping_add(1);
+                        &burned
+                    }
+                    _ => data,
+                };
+                #[cfg(not(feature = "probe"))]
+                let send_data: &[u8] = data;
+
+                if let Err(e) = sender.send_frame_zero_copy(send_data, info) {
                     tracing::error!("Failed to send frame: {}", e);
                 }
                 emit_count += 1; // reached only when the frame passed the gate

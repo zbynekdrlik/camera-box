@@ -37,6 +37,89 @@ pub fn qr_origin_y(canvas_h: u32, qh: u32, anchor: VAnchor) -> u32 {
     }
 }
 
+/// Default on-screen size (px) of the cam1-capture burn QR (#174). Small — the cam1
+/// burn lives in the BOTTOM-CENTER gap between the strih (bottom-left) and stream
+/// (bottom-right) ~300px DistroAV burns, and below the top optical dual-QR, so all
+/// four marks stay non-overlapping in the composited stream recording. 200px keeps a
+/// low-EC-H module count well clear of the ~300px corner burns on a 1920×1080 frame.
+pub const CAM1_BURN_QR_PX: u32 = 200;
+
+/// Bottom-edge clearance (px) for the cam1 burn — its bottom row sits this far above the
+/// frame bottom so it never bleeds off the visible raster after the downstream
+/// scale/crop. Matches the modest margins used for the top dual-QR / corner burns.
+pub const CAM1_BURN_BOTTOM_MARGIN_PX: u32 = 24;
+
+/// Top-left `(x, y)` origin of a `qw×qh` cam1 burn QR on a `canvas_w×canvas_h` frame:
+/// horizontally CENTERED, anchored to the BOTTOM with [`CAM1_BURN_BOTTOM_MARGIN_PX`]
+/// clearance. Pure geometry so the no-overlap test can assert the cam1 burn rectangle
+/// against the top dual-QR band and the bottom-corner burn rectangles without rendering.
+/// Clamps so a too-large QR never starts off-frame.
+pub fn cam1_burn_origin(canvas_w: u32, canvas_h: u32, qw: u32, qh: u32) -> (u32, u32) {
+    let ox = (canvas_w.saturating_sub(qw)) / 2;
+    let oy = canvas_h
+        .saturating_sub(qh)
+        .saturating_sub(CAM1_BURN_BOTTOM_MARGIN_PX);
+    (ox, oy)
+}
+
+/// Render `payload` as a fixed-size EC-H QR with a quiet zone — the one place the QR
+/// build idiom lives (used by both the BGRA blit and the YUYV burn). `qr_px` is the exact
+/// square size in px (min == max). The payload is small, so encoding always succeeds.
+fn render_payload_qr(payload: &Payload, qr_px: u32) -> GrayImage {
+    let s = payload.encode();
+    let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
+        .expect("payload is small, encodes within QR capacity");
+    code.render::<Luma<u8>>()
+        .min_dimensions(qr_px, qr_px)
+        .max_dimensions(qr_px, qr_px)
+        .quiet_zone(true)
+        .build()
+}
+
+/// Burn `payload`'s QR (EC-H, `qr_px` square) into a packed **YUYV** capture buffer's
+/// LUMA plane, horizontally centered and bottom-anchored (#174 cam1-capture burn).
+///
+/// YUYV packs `Y0 U0 Y1 V0` per 4 bytes = 2 pixels (luma at the EVEN byte of each pair,
+/// chroma at the odd bytes). The burn writes the QR module luma (0 = black module,
+/// 255 = white quiet zone) into both Y bytes it touches and neutralizes the chroma
+/// bytes to 128 within the burn rectangle, so the burned region is pure grayscale and
+/// decodes cleanly after the YUYV→UYVY→NDI re-emit. `stride` is honored (bytes per row;
+/// tight YUYV stride = `2*width`, a device may pad). Pixels outside the buffer are
+/// skipped (defensive against a short final buffer) — never panics.
+///
+/// TEST-MODE ONLY: the caller gates this on `CAMERA_BOX_BURN_RUN_ID` being set, so an
+/// unset env leaves the production NDI feed completely clean (this fn is never called).
+pub fn burn_qr_yuyv(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    payload: &Payload,
+    qr_px: u32,
+) {
+    let qr = render_payload_qr(payload, qr_px);
+    let (qw, qh) = (qr.width().min(width), qr.height().min(height));
+    let (ox, oy) = cam1_burn_origin(width, height, qw, qh);
+    let stride = stride as usize;
+    for y in 0..qh {
+        let row = (oy + y) as usize * stride;
+        for x in 0..qw {
+            let lum = qr.get_pixel(x, y)[0];
+            let px = (ox + x) as usize;
+            // YUYV: luma byte for pixel px is at row + 2*px (even byte of the pair),
+            // its chroma byte is the adjacent odd byte (U on an even px, V on an odd px).
+            let yi = row + 2 * px;
+            if yi < buf.len() {
+                buf[yi] = lum; // luma
+            }
+            let ci = yi + 1;
+            if ci < buf.len() {
+                buf[ci] = 128; // neutral chroma (gray) so the QR is pure black/white
+            }
+        }
+    }
+}
+
 /// Blit `payload`'s QR (EC-H), centered within the horizontal band
 /// `[band_x, band_x + band_w)` and vertically placed per `anchor`, onto an existing white
 /// BGRA `canvas`.
@@ -54,15 +137,7 @@ fn blit_qr_bgra(
     qr_size: u32,
     anchor: VAnchor,
 ) {
-    let s = payload.encode();
-    let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
-        .expect("payload is small, encodes within QR capacity");
-    let qr: GrayImage = code
-        .render::<Luma<u8>>()
-        .min_dimensions(qr_size, qr_size)
-        .max_dimensions(qr_size, qr_size)
-        .quiet_zone(true)
-        .build();
+    let qr = render_payload_qr(payload, qr_size);
     let (qw, qh) = (qr.width().min(band_w), qr.height().min(canvas_h));
     let ox = band_x + (band_w - qw) / 2;
     let oy = qr_origin_y(canvas_h, qh, anchor);
@@ -543,6 +618,135 @@ mod tests {
         assert_eq!(
             decode_capture_dual(fourcc, &blanked, cw, ch, cw * 4, 620),
             Some(l)
+        );
+    }
+
+    // ---- #174 cam1-capture YUYV burn ----
+
+    /// Build a tight YUYV frame (luma=mid-gray, chroma neutral) of `w×h`.
+    fn yuyv_gray_frame(w: u32, h: u32) -> Vec<u8> {
+        // YUYV = 2 bytes/pixel. Fill luma=128 (even bytes), chroma=128 (odd bytes).
+        vec![128u8; (w * h * 2) as usize]
+    }
+
+    #[test]
+    fn cam1_burn_renders_a_decodable_qr_into_a_yuyv_frame() {
+        use crate::probe::luma::uyvy_to_luma;
+        let p = Payload {
+            run_id: 911_001,
+            frame_id: 4242,
+            gen_ts_ns: 1_700_000_000_123_456,
+        };
+        let (w, h) = (1920u32, 1080u32);
+        let mut frame = yuyv_gray_frame(w, h);
+        burn_qr_yuyv(&mut frame, w, h, w * 2, &p, CAM1_BURN_QR_PX);
+        // Extract the luma plane from the YUYV frame (every even byte) and decode.
+        let luma_bytes = crate::capture::yuyv_to_gray8(&frame, w, h, w * 2);
+        let luma = image::GrayImage::from_raw(w, h, luma_bytes).unwrap();
+        assert_eq!(
+            decode_qr_luma(luma),
+            Some(p),
+            "the cam1 burn must render a decodable QR carrying the exact id+ts"
+        );
+        // Guard against accidentally reading a UYVY-laid path: confirm uyvy_to_luma does
+        // NOT decode it (the burn is YUYV, luma at even bytes) — keeps the YUYV contract.
+        let _ = uyvy_to_luma; // referenced for intent; not asserted (format-specific)
+    }
+
+    #[test]
+    fn cam1_burn_lands_bottom_center_clear_of_top_dualqr_and_bottom_corner_burns() {
+        // The four-mark non-overlap contract on a 1920×1080 stream frame:
+        //   top dual-QR band : y ∈ [TOP_MARGIN_PX, TOP_MARGIN_PX + 700)
+        //   strih burn       : bottom-LEFT  ~300×300 corner
+        //   stream burn      : bottom-RIGHT ~300×300 corner
+        //   cam1 burn        : bottom-CENTER, must miss all three.
+        let (w, h) = (1920u32, 1080u32);
+        let qpx = CAM1_BURN_QR_PX;
+        // Use the real rendered QR size (quiet zone may round up past qpx).
+        let s = Payload {
+            run_id: 911_001,
+            frame_id: 1,
+            gen_ts_ns: 1,
+        }
+        .encode();
+        let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H).unwrap();
+        let qr: GrayImage = code
+            .render::<Luma<u8>>()
+            .min_dimensions(qpx, qpx)
+            .max_dimensions(qpx, qpx)
+            .quiet_zone(true)
+            .build();
+        let (qw, qh) = (qr.width(), qr.height());
+        let (ox, oy) = cam1_burn_origin(w, h, qw, qh);
+        let (cam1_l, cam1_r, cam1_t, cam1_b) = (ox, ox + qw, oy, oy + qh);
+
+        // Vs the top dual-QR band (700px tall under TOP_MARGIN_PX).
+        let dual_band_bottom = TOP_MARGIN_PX + 700;
+        assert!(
+            cam1_t >= dual_band_bottom,
+            "cam1 burn top {cam1_t} must be below the top dual-QR band bottom {dual_band_bottom}"
+        );
+
+        // Vs the bottom-corner burns (~300px squares anchored bottom-left / bottom-right).
+        let corner = 320u32; // generous DistroAV burn box (300 + slack)
+        let strih_right = corner; // bottom-left burn occupies x ∈ [0, corner)
+        let stream_left = w - corner; // bottom-right burn occupies x ∈ [w-corner, w)
+        assert!(
+            cam1_l >= strih_right,
+            "cam1 burn left {cam1_l} must clear the bottom-left strih burn (x<{strih_right})"
+        );
+        assert!(
+            cam1_r <= stream_left,
+            "cam1 burn right {cam1_r} must clear the bottom-right stream burn (x≥{stream_left})"
+        );
+        // And it stays on-frame at the bottom.
+        assert!(cam1_b <= h, "cam1 burn bottom {cam1_b} on-frame (h={h})");
+    }
+
+    #[test]
+    fn cam1_burn_only_touches_its_own_rectangle_leaving_the_rest_clean() {
+        // The burn must NOT disturb pixels outside its bottom-center rectangle — the top
+        // optical dual-QR (and everywhere else) stays exactly as captured.
+        let p = Payload {
+            run_id: 911_001,
+            frame_id: 7,
+            gen_ts_ns: 9,
+        };
+        let (w, h) = (1280u32, 720u32);
+        let original = yuyv_gray_frame(w, h);
+        let mut frame = original.clone();
+        burn_qr_yuyv(&mut frame, w, h, w * 2, &p, CAM1_BURN_QR_PX);
+
+        let qr: GrayImage = QrCode::with_error_correction_level(p.encode().as_bytes(), EcLevel::H)
+            .unwrap()
+            .render::<Luma<u8>>()
+            .min_dimensions(CAM1_BURN_QR_PX, CAM1_BURN_QR_PX)
+            .max_dimensions(CAM1_BURN_QR_PX, CAM1_BURN_QR_PX)
+            .quiet_zone(true)
+            .build();
+        let (qw, qh) = (qr.width(), qr.height());
+        let (ox, oy) = cam1_burn_origin(w, h, qw, qh);
+
+        // A pixel WELL OUTSIDE the burn rect (top-left corner = optical dual-QR area)
+        // is byte-identical to the original.
+        let top_left_idx = 0usize;
+        assert_eq!(
+            frame[top_left_idx], original[top_left_idx],
+            "top-left (optical dual-QR area) must be untouched"
+        );
+        // A row above the burn rect is fully untouched.
+        let above_row = (oy.saturating_sub(2)) as usize * (w * 2) as usize;
+        assert_eq!(
+            frame[above_row..above_row + (w * 2) as usize],
+            original[above_row..above_row + (w * 2) as usize],
+            "a row above the cam1 burn rectangle must be unchanged"
+        );
+        // Inside the burn rect, at least one luma byte differs (the QR was drawn).
+        let inside_row = (oy + qh / 2) as usize * (w * 2) as usize;
+        let inside = (inside_row + 2 * (ox + qw / 2) as usize).min(frame.len() - 1);
+        assert_ne!(
+            frame[inside], original[inside],
+            "the burn rectangle must carry QR pixels"
         );
     }
 }
