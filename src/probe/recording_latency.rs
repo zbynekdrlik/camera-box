@@ -1724,22 +1724,30 @@ mod tests {
 
     #[test]
     fn cam2_cam1_from_burn_uses_highest_frame_id_cam2_vernier_half() {
-        // The cam2 dual-QR has TWO halves with the SAME paint gen_ts but different
-        // frame_ids; the canonical half is the highest frame_id (matches split_payloads).
-        // Both halves carry the paint instant, so the chosen half's gen_ts is the paint ts.
+        // The cam2 dual-QR has TWO halves with DIFFERENT frame_ids; the canonical half is
+        // the highest frame_id (matches split_payloads). In production both halves share one
+        // paint gen_ts, but here the two halves are given DIFFERENT gen_ts ON PURPOSE so the
+        // test can FAIL if the selection ever picked the wrong half (min instead of max, or
+        // the wrong half's gen_ts): only selecting the highest-frame_id half (101 → 1.010s)
+        // gives 45 ms; selecting the older half (100 → 1.000s) would give 55 ms.
         let stream = vec![multi(
             0,
             &[
-                (CAM2, 100, 1_000_000_000), // older Vernier half
-                (CAM2, 101, 1_000_000_000), // fresher half (highest frame_id) — both same paint ts
+                (CAM2, 100, 1_000_000_000), // older half — gen_ts 1.000s (must NOT be chosen)
+                (CAM2, 101, 1_010_000_000), // fresher half (highest frame_id) — paint 1.010s
                 (BURN_RUN_ID_CAM1, 40, 1_055_000_000),
             ],
         )];
         let s = cam2_cam1_samples_from_burn(&stream, Some(CAM2), BURN_RUN_ID_CAM1, &[]);
         assert_eq!(s.len(), 1);
         assert!(
-            (s[0].latency_ms - 55.0).abs() < 1e-6,
-            "cam1 capture (1.055s) − cam2 paint (1.000s) = 55ms"
+            (s[0].latency_ms - 45.0).abs() < 1e-6,
+            "cam1 capture (1.055s) − the HIGHEST-frame_id cam2 half's paint (1.010s) = 45ms \
+             (picking the older half would wrongly give 55ms)"
+        );
+        assert_eq!(
+            s[0].at_ns, 1_010_000_000,
+            "anchored at the chosen (highest-frame_id) half's paint instant, not the older half"
         );
     }
 
