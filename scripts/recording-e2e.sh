@@ -222,12 +222,24 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# #183: the upstream NDI source-name of each box's recorded prod GENLOCK input — used to
+# FORCE genlock_preload=1 on it for the test window (then restore prod on teardown), so the
+# run measures the TRUE genlock hop (~33ms) not the prod audio-sync delay (preload≈31 ≈ 1s).
+#   strih records 'NDI cam5' whose source-name is cam1's NDI name ("CAM1 (usb)").
+#   stream records 'NDI 2ME PGM' whose source-name is strih's program NDI name ($STRIH_OUT).
+STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-CAM1 (usb)}"  # cam1's NDI name (NDI cam5 input src)
+TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 for the test
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
+echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
 STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
-  --program-scene "$STRIH_PROG_SCENE")
+  --program-scene "$STRIH_PROG_SCENE" \
+  --upstream "$STRIH_UPSTREAM_NDI" --test-preload "$TEST_PRELOAD")
+# stream's upstream is strih's program NDI name (just printed above) — force preload=1 on the
+# stream box's 'NDI 2ME PGM' input (the prod copy of 31 the issue calls out).
 STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
-  --program-scene "$STREAM_PROG_SCENE" --ensure-source "$STREAM_PROG_SOURCE")
+  --program-scene "$STREAM_PROG_SCENE" --ensure-source "$STREAM_PROG_SOURCE" \
+  --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
