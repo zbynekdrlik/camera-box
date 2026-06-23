@@ -115,6 +115,34 @@ def test_is_black_luma_helper_flags_black_and_passes_nonblack():
     assert obs_phase2._luma_is_black(luma_max=1) is False
 
 
+def test_blackcheck_verdict_polls_until_deadline_before_failing():
+    # REGRESSION (#111 deploy): the non-black self-check used a SINGLE read 2 s after the
+    # scene switch. A cold DistroAV NDI receiver (high genlock_preload, re-establishing
+    # from idle) needs longer than 2 s to fill its FIFO and render the first non-black
+    # frame — so the single-shot read saw BLACK and aborted a fully-healthy run. The fix
+    # makes the check POLL: a black read BEFORE the deadline means WAIT (keep polling),
+    # not FAIL; only black AT/AFTER the deadline is a real FAIL.
+    #
+    # The pure verdict over (luma_max, elapsed_s, timeout_s):
+    #   - non-black peak           -> "OK"   (proceed immediately, however early)
+    #   - black, elapsed < timeout -> "WAIT" (receiver may still be filling; keep polling)
+    #   - black, elapsed >= timeout-> "BLACK"(genuinely dead source; abort)
+    #   - luma unreadable (None)   -> "WAIT" while in budget, else "UNKNOWN" (never silent OK)
+    assert obs_phase2._blackcheck_verdict(luma_max=255, elapsed_s=0.0, timeout_s=15.0) == "OK"
+    assert obs_phase2._blackcheck_verdict(luma_max=1, elapsed_s=14.9, timeout_s=15.0) == "OK"
+    # Black early in the budget = WAIT (this is the exact case the single-shot 2 s read
+    # mis-classified as FAIL and aborted the #111 run).
+    assert obs_phase2._blackcheck_verdict(luma_max=0, elapsed_s=2.0, timeout_s=15.0) == "WAIT"
+    assert obs_phase2._blackcheck_verdict(luma_max=0, elapsed_s=14.0, timeout_s=15.0) == "WAIT"
+    # Black at/after the deadline = genuine BLACK -> abort.
+    assert obs_phase2._blackcheck_verdict(luma_max=0, elapsed_s=15.0, timeout_s=15.0) == "BLACK"
+    assert obs_phase2._blackcheck_verdict(luma_max=0, elapsed_s=20.0, timeout_s=15.0) == "BLACK"
+    # Unreadable luma: WAIT while in budget (retry the screenshot), UNKNOWN past it (never
+    # a silent OK — the caller warns + proceeds, recording-verdict still catches all-black).
+    assert obs_phase2._blackcheck_verdict(luma_max=None, elapsed_s=3.0, timeout_s=15.0) == "WAIT"
+    assert obs_phase2._blackcheck_verdict(luma_max=None, elapsed_s=15.0, timeout_s=15.0) == "UNKNOWN"
+
+
 SCENES = ["Cam 5", "Cam 1", "test 2", "REC-STRIH-TMP", "POST"]
 
 

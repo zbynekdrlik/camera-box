@@ -191,10 +191,40 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read cam1 grab-ts sidecar {}", path.display()))?;
     let mut m = std::collections::HashMap::new();
+    // Kill-time partial-row tolerance (cam1 --record-grab is a BufWriter killed at teardown
+    // with NO flush, so the file is cut at an arbitrary byte boundary). A COMPLETE row always
+    // ends with '\n' (the writeln! emits the newline LAST, after the full `idx,ts` payload),
+    // so a file that does NOT end in '\n' has exactly one partial final line — of ANY shape
+    // ("8874,", "8874", "8874,17820"-truncated). That final fragment is skipped, whatever it
+    // is; every earlier (newline-terminated) row is parsed STRICTLY. A newline-terminated
+    // malformed row is genuine corruption (not a kill cut) and still errors loudly — a
+    // silently-shrunk grab-ts map would drop / corrupt real cam2→cam1 latency samples.
+    let has_trailing_newline = text.ends_with('\n');
+    // The byte-offset line index of the LAST non-blank, non-header data line (only meaningful
+    // when there is NO trailing newline — then THIS line is the partial fragment to skip).
+    let last_data_line = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let l = l.trim();
+            !l.is_empty() && !l.starts_with("frame_index")
+        })
+        .map(|(i, _)| i)
+        .last();
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("frame_index") {
             continue; // header / blank
+        }
+        // A no-trailing-newline file's final data line is a partial kill-time fragment — skip
+        // it whatever its shape (empty ts, no comma, truncated digits). Everything else parses.
+        if !has_trailing_newline && Some(lineno) == last_data_line {
+            tracing::warn!(
+                line = lineno + 1,
+                fragment = %line,
+                "grab-ts final row has no trailing newline (partial kill-time write) — skipped"
+            );
+            continue;
         }
         let mut it = line.split(',');
         let idx_s = it
@@ -769,6 +799,72 @@ mod tests {
     fn grab_ts_sidecar_malformed_row_errors() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "frame_index,grab_ts_ns\n0\n").unwrap(); // <2 columns
+        assert!(parse_grab_ts(f.path()).is_err());
+    }
+
+    #[test]
+    fn grab_ts_sidecar_tolerates_any_trailing_partial_row() {
+        // REGRESSION (#111 deploy + deep review): the cam1 --record-grab BufWriter is killed
+        // at teardown mid-write with NO flush, so the file is cut at an arbitrary byte
+        // boundary — the surviving trailing fragment (no terminating '\n') can be ANY shape:
+        //   "2,"        empty timestamp           -> must skip
+        //   "2"         no comma at all           -> must skip (was: <2 columns ABORT)
+        //   "2,17820"   timestamp truncated mid-digits, parses as a valid i64
+        //               -> must skip (was: silently inserts a WRONG latency sample)
+        // A complete row ALWAYS ends in '\n' (writeln! writes the '\n' last). So: a file that
+        // does NOT end in '\n' has a partial final line -> skip it, whatever its shape. The
+        // earlier good rows still parse. This must never crash the verdict / block the report.
+        for partial in ["2,", "2", "2,17820", "garbage"] {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            write!(
+                f,
+                "frame_index,grab_ts_ns\n0,1782000000000\n1,1782000033000\n{partial}"
+            )
+            .unwrap();
+            let m = parse_grab_ts(f.path())
+                .unwrap_or_else(|e| panic!("partial {partial:?} should be tolerated, got {e:?}"));
+            assert_eq!(m.get(&0), Some(&1782000000000));
+            assert_eq!(m.get(&1), Some(&1782000033000));
+            assert_eq!(
+                m.len(),
+                2,
+                "the partial trailing row {partial:?} (no trailing newline) is skipped, not parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn grab_ts_sidecar_complete_final_row_with_newline_still_parsed() {
+        // A complete final row (ends in '\n') is NOT a partial fragment — it must still parse,
+        // and a genuinely malformed COMPLETE final row still errors (it's not a kill artifact).
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "frame_index,grab_ts_ns\n0,1782000000000\n2,1782000066000\n"
+        )
+        .unwrap();
+        let m = parse_grab_ts(f.path()).unwrap();
+        assert_eq!(m.get(&2), Some(&1782000066000), "complete final row parses");
+        assert_eq!(m.len(), 2);
+        // A complete (newline-terminated) malformed final row is corruption, not a kill cut.
+        let mut f2 = tempfile::NamedTempFile::new().unwrap();
+        write!(f2, "frame_index,grab_ts_ns\n0,1782000000000\n2,\n").unwrap();
+        assert!(
+            parse_grab_ts(f2.path()).is_err(),
+            "an empty-ts row terminated by a newline is complete-and-corrupt -> error"
+        );
+    }
+
+    #[test]
+    fn grab_ts_sidecar_empty_ts_midfile_still_errors() {
+        // A row with an empty timestamp that is NOT the last line is genuine corruption
+        // (a silently-shrunk grab-ts map would drop real latency samples) — still errors.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "frame_index,grab_ts_ns\n0,1782000000000\n1,\n2,1782000066000\n"
+        )
+        .unwrap();
         assert!(parse_grab_ts(f.path()).is_err());
     }
 }

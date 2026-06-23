@@ -638,6 +638,30 @@ def _luma_is_black(luma_max):
     return int(luma_max) == 0
 
 
+def _blackcheck_verdict(luma_max, elapsed_s, timeout_s):
+    """#111 (pure, testable): poll-aware verdict for the #163 non-black self-check.
+
+    The original check read the program luma ONCE, 2 s after switching to the record
+    scene, and aborted on black. But a cold DistroAV NDI receiver (high genlock_preload,
+    re-establishing the source from idle) needs longer than 2 s to fill its FIFO and
+    render the first non-black frame — so the single read saw BLACK and aborted a fully
+    healthy run (the #111 deploy incident: strih's feed reached stream fine, but the
+    receiver was 2 s into a ~1 s-preload cold start). The fix is to POLL up to a timeout:
+
+      - non-black peak              -> "OK"      proceed immediately (however early)
+      - black, elapsed < timeout    -> "WAIT"    receiver may still be filling; keep polling
+      - black, elapsed >= timeout   -> "BLACK"   genuinely dead source; abort the run
+      - luma unreadable (None):
+          elapsed < timeout         -> "WAIT"    retry the screenshot
+          elapsed >= timeout        -> "UNKNOWN" never a silent OK; caller warns + proceeds
+    """
+    if luma_max is None:
+        return "WAIT" if elapsed_s < timeout_s else "UNKNOWN"
+    if not _luma_is_black(luma_max):
+        return "OK"
+    return "WAIT" if elapsed_s < timeout_s else "BLACK"
+
+
 def _program_luma(ws, scene_name):
     """Read the RENDERED program frame of *scene_name* via GetSourceScreenshot and
     return (max_luma, mean_luma) over a small downscaled PNG. Best-effort: returns
@@ -801,30 +825,44 @@ def prod_scene(a):
         if studio:
             _rpc(ws, "SetCurrentPreviewScene", {"sceneName": target}, ignore_err=True)
 
-        # #163 FAIL-FAST non-black self-check: wait a moment for the scene to render, then
-        # read the program luma. If it is black, ABORT before StartRecord — a black
-        # program records all-undecodable and wastes the whole run (the exact #163 waste).
-        time.sleep(2.0)
-        luma_max, luma_mean = _program_luma(ws, target)
-        if luma_max is None:
-            sys.stderr.write(
-                f"[obs] {a.host}: WARN could not read program luma for the non-black "
-                f"self-check (GetSourceScreenshot/PIL unavailable) — proceeding without "
-                f"it; recording-verdict will still catch an all-black recording.\n"
-            )
-        elif _luma_is_black(luma_max):
-            raise SystemExit(
-                f"[obs] {a.host}: #163 self-check FAIL — program scene '{target}' renders "
-                f"BLACK (luma peak={luma_max}, mean={luma_mean:.1f}). The source is not "
-                f"delivering frames; aborting BEFORE StartRecord so a black recording never "
-                f"wastes a full run. Check the certified prod input feeding '{target}' is "
-                f"receiving NDI."
-            )
-        else:
-            sys.stderr.write(
-                f"[obs] {a.host}: #163 self-check OK — program '{target}' NON-BLACK "
-                f"(luma peak={luma_max}, mean={luma_mean:.1f})\n"
-            )
+        # #163/#111 FAIL-FAST non-black self-check, POLLED: a black program records all-
+        # undecodable and wastes the whole run (#163). But a cold DistroAV receiver (high
+        # genlock_preload, re-establishing from idle) needs longer than the old single 2 s
+        # read to render its first non-black frame — that race aborted a healthy run on
+        # the #111 deploy. So we POLL the program luma until it is NON-BLACK or a timeout
+        # elapses; only black AT the deadline is a genuine dead-source abort.
+        blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
+        poll_interval = 1.0
+        t0 = time.monotonic()
+        luma_max = luma_mean = None
+        while True:
+            luma_max, luma_mean = _program_luma(ws, target)
+            elapsed = time.monotonic() - t0
+            verdict = _blackcheck_verdict(luma_max, elapsed, blackcheck_timeout)
+            if verdict == "OK":
+                sys.stderr.write(
+                    f"[obs] {a.host}: #163 self-check OK — program '{target}' NON-BLACK "
+                    f"(luma peak={luma_max}, mean={luma_mean:.1f}) after {elapsed:.1f}s\n"
+                )
+                break
+            if verdict == "UNKNOWN":
+                sys.stderr.write(
+                    f"[obs] {a.host}: WARN could not read program luma for the non-black "
+                    f"self-check after {elapsed:.1f}s (GetSourceScreenshot/PIL unavailable) "
+                    f"— proceeding without it; recording-verdict still catches all-black.\n"
+                )
+                break
+            if verdict == "BLACK":
+                raise SystemExit(
+                    f"[obs] {a.host}: #163 self-check FAIL — program scene '{target}' "
+                    f"still renders BLACK (luma peak={luma_max}, mean="
+                    f"{(luma_mean or 0):.1f}) after {elapsed:.1f}s. The source is not "
+                    f"delivering frames; aborting BEFORE StartRecord so a black recording "
+                    f"never wastes a full run. Check the certified prod input feeding "
+                    f"'{target}' is receiving NDI."
+                )
+            # verdict == "WAIT": receiver may still be filling — keep polling.
+            time.sleep(poll_interval)
 
         sys.stderr.write(
             f"[obs] {a.host}: program -> {target} (prod scene); Main Output NDI "
