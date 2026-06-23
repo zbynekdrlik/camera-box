@@ -77,16 +77,35 @@ impl NodeContiguity {
 ///
 /// An empty input ⇒ `first_id == None` ⇒ NOT contiguous (nothing proven). A
 /// single-id input is trivially contiguous (span of one, nothing can be missing).
-pub fn burn_contiguity(node: &str, _ids: &[u32]) -> NodeContiguity {
-    // RED stub — to be implemented. Always claims contiguous so the
-    // missing-id tests fail until the real check exists.
+pub fn burn_contiguity(node: &str, ids: &[u32]) -> NodeContiguity {
+    use std::collections::BTreeSet;
+    let present: BTreeSet<u32> = ids.iter().copied().collect();
+    let first_id = present.iter().next().copied();
+    let last_id = present.iter().next_back().copied();
+    let (first, last) = match (first_id, last_id) {
+        (Some(f), Some(l)) => (f, l),
+        _ => {
+            return NodeContiguity {
+                node: node.to_string(),
+                first_id: None,
+                last_id: None,
+                present_count: 0,
+                expected_count: 0,
+                missing_ids: Vec::new(),
+            };
+        }
+    };
+    // expected = last - first + 1 (the size of the contiguous integer span).
+    let expected_count = last - first + 1;
+    let present_count = present.len() as u32;
+    let missing_ids: Vec<u32> = (first..=last).filter(|id| !present.contains(id)).collect();
     NodeContiguity {
         node: node.to_string(),
-        first_id: None,
-        last_id: None,
-        present_count: 0,
-        expected_count: 0,
-        missing_ids: Vec::new(),
+        first_id: Some(first),
+        last_id: Some(last),
+        present_count,
+        expected_count,
+        missing_ids,
     }
 }
 
