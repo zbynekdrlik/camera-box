@@ -796,26 +796,51 @@ mod tests {
     }
 
     #[test]
-    fn grab_ts_sidecar_tolerates_trailing_partial_row() {
-        // REGRESSION (#111 deploy): the cam1 --record-grab is killed at teardown mid-write,
-        // so the sidecar's LAST row can be a partial `frame_index,` with no timestamp yet
-        // flushed (e.g. "8874,"). That is a normal kill-time artifact, NOT corruption — it
-        // must be tolerated (skip the partial final row), never crash the whole verdict +
-        // block the report. A complete row with an empty ts MID-file is still a hard error.
+    fn grab_ts_sidecar_tolerates_any_trailing_partial_row() {
+        // REGRESSION (#111 deploy + deep review): the cam1 --record-grab BufWriter is killed
+        // at teardown mid-write with NO flush, so the file is cut at an arbitrary byte
+        // boundary — the surviving trailing fragment (no terminating '\n') can be ANY shape:
+        //   "2,"        empty timestamp           -> must skip
+        //   "2"         no comma at all           -> must skip (was: <2 columns ABORT)
+        //   "2,17820"   timestamp truncated mid-digits, parses as a valid i64
+        //               -> must skip (was: silently inserts a WRONG latency sample)
+        // A complete row ALWAYS ends in '\n' (writeln! writes the '\n' last). So: a file that
+        // does NOT end in '\n' has a partial final line -> skip it, whatever its shape. The
+        // earlier good rows still parse. This must never crash the verdict / block the report.
+        for partial in ["2,", "2", "2,17820", "garbage"] {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            write!(
+                f,
+                "frame_index,grab_ts_ns\n0,1782000000000\n1,1782000033000\n{partial}"
+            )
+            .unwrap();
+            let m = parse_grab_ts(f.path())
+                .unwrap_or_else(|e| panic!("partial {partial:?} should be tolerated, got {e:?}"));
+            assert_eq!(m.get(&0), Some(&1782000000000));
+            assert_eq!(m.get(&1), Some(&1782000033000));
+            assert_eq!(
+                m.len(),
+                2,
+                "the partial trailing row {partial:?} (no trailing newline) is skipped, not parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn grab_ts_sidecar_complete_final_row_with_newline_still_parsed() {
+        // A complete final row (ends in '\n') is NOT a partial fragment — it must still parse,
+        // and a genuinely malformed COMPLETE final row still errors (it's not a kill artifact).
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        // Two good rows, then a partial trailing row with an empty timestamp + no newline.
-        write!(
-            f,
-            "frame_index,grab_ts_ns\n0,1782000000000\n1,1782000033000\n2,"
-        )
-        .unwrap();
+        write!(f, "frame_index,grab_ts_ns\n0,1782000000000\n2,1782000066000\n").unwrap();
         let m = parse_grab_ts(f.path()).unwrap();
-        assert_eq!(m.get(&0), Some(&1782000000000));
-        assert_eq!(m.get(&1), Some(&1782000033000));
-        assert_eq!(
-            m.len(),
-            2,
-            "the partial trailing row 2, is skipped, not parsed"
+        assert_eq!(m.get(&2), Some(&1782000066000), "complete final row parses");
+        assert_eq!(m.len(), 2);
+        // A complete (newline-terminated) malformed final row is corruption, not a kill cut.
+        let mut f2 = tempfile::NamedTempFile::new().unwrap();
+        write!(f2, "frame_index,grab_ts_ns\n0,1782000000000\n2,\n").unwrap();
+        assert!(
+            parse_grab_ts(f2.path()).is_err(),
+            "an empty-ts row terminated by a newline is complete-and-corrupt -> error"
         );
     }
 
