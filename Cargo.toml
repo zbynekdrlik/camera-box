@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.80"
+version = "1.7.0-dev.81"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -93,6 +93,11 @@ required-features = ["probe"]
 [[bin]]
 name = "recording-verdict"
 path = "src/bin/recording-verdict.rs"
+required-features = ["probe"]
+
+[[bin]]
+name = "forensic-dump"
+path = "src/bin/forensic-dump.rs"
 required-features = ["probe"]
 
 [[bench]]
