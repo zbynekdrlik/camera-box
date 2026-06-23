@@ -126,29 +126,17 @@ static uint32_t resolve_qr_px()
 	return 300u;
 }
 
-// This node's bottom corner. OBS_BURN_CORNER ("left"/"bl"/"bottom-left" → bottom-left;
-// "right"/"br"/"bottom-right" → bottom-right) overrides; otherwise it defaults FROM the
-// run_id (strih default run_id → bottom-left, stream default run_id → bottom-right) so the
-// existing per-node env (OBS_BURN_RUN_ID) keeps the corners distinct with no new env on the
-// boxes. A custom run_id with no OBS_BURN_CORNER falls back to bottom-left.
+// This node's bottom corner. OBS_BURN_CORNER overrides (parsed by burn_geom::corner_from_string,
+// which matches every documented form by substring); otherwise it defaults FROM the run_id
+// (stream default run_id → bottom-right, strih default + any custom run_id → bottom-left) so
+// the existing per-node env (OBS_BURN_RUN_ID) keeps the corners distinct with no new env on
+// the boxes.
 static burn_geom::Corner resolve_corner(uint32_t run_id)
 {
-	const char *env = getenv("OBS_BURN_CORNER");
-	if (env && *env) {
-		if (env[0] == 'r' || env[0] == 'R')
-			return burn_geom::Corner::BottomRight;
-		if (env[0] == 'l' || env[0] == 'L')
-			return burn_geom::Corner::BottomLeft;
-		// "bl"/"br"/"bottom-left"/"bottom-right": disambiguate on the 2nd char.
-		if (env[0] == 'b' && (env[1] == 'r' || env[1] == 'R'))
-			return burn_geom::Corner::BottomRight;
-		if (env[0] == 'b' && (env[1] == 'l' || env[1] == 'L'))
-			return burn_geom::Corner::BottomLeft;
-	}
-	// No explicit corner: derive from the reserved per-node run_id.
-	if (run_id == BURN_RUN_ID_DEFAULT_STREAM)
-		return burn_geom::Corner::BottomRight;
-	return burn_geom::Corner::BottomLeft; // strih default + any custom run_id
+	const burn_geom::Corner dflt = (run_id == BURN_RUN_ID_DEFAULT_STREAM)
+					       ? burn_geom::Corner::BottomRight
+					       : burn_geom::Corner::BottomLeft;
+	return burn_geom::corner_from_string(getenv("OBS_BURN_CORNER"), dflt);
 }
 
 static const char *burn_filter_getname(void *)

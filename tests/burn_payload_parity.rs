@@ -661,6 +661,92 @@ int main(int argc, char **argv) {{
     );
 }
 
+#[test]
+fn burn_geom_corner_from_string_and_tiny_frame_clamp() {
+    // Compile + run a tiny C++ harness over burn-geom.hpp asserting:
+    //   1. corner_from_string parses EVERY documented OBS_BURN_CORNER form correctly —
+    //      especially the long forms "bottom-right"/"bottom-left" (the old per-2nd-char
+    //      parse mapped "bottom-right" to BottomLeft → stream would burn into strih's
+    //      corner and re-collide; the #111 review caught this).
+    //   2. corner_placement does NOT underflow uint32 on a degenerate tiny frame
+    //      (frame < margin + side): band_x/band_cy must clamp to in-frame, not wrap to a
+    //      huge off-frame coordinate.
+    let dir = std::env::temp_dir().join(format!("burn_geom_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_cpp = dir.join("geom_main.cpp");
+    let bin = dir.join("geom_main");
+    let geom_hpp = manifest().join("vendor/distroav/src/burn-geom.hpp");
+
+    let src = format!(
+        r#"
+#include "{geom}"
+#include <cstdint>
+#include <cstdio>
+using burn_geom::Corner;
+using burn_geom::corner_from_string;
+using burn_geom::corner_placement;
+static int fails = 0;
+static void want(const char* s, Corner dflt, Corner exp, const char* label) {{
+    Corner got = corner_from_string(s, dflt);
+    if (got != exp) {{ printf("FAIL %s: corner_from_string(%s) wrong\n", label, s?s:"<null>"); ++fails; }}
+}}
+int main() {{
+    // Long forms (the regression) — independent of the default.
+    want("bottom-right", Corner::BottomLeft, Corner::BottomRight, "bottom-right");
+    want("bottom-left", Corner::BottomRight, Corner::BottomLeft, "bottom-left");
+    want("bottom_right", Corner::BottomLeft, Corner::BottomRight, "bottom_right");
+    want("Bottom-Right", Corner::BottomLeft, Corner::BottomRight, "Bottom-Right(case)");
+    // Short + word forms.
+    want("br", Corner::BottomLeft, Corner::BottomRight, "br");
+    want("bl", Corner::BottomRight, Corner::BottomLeft, "bl");
+    want("right", Corner::BottomLeft, Corner::BottomRight, "right");
+    want("left", Corner::BottomRight, Corner::BottomLeft, "left");
+    want("r", Corner::BottomLeft, Corner::BottomRight, "r");
+    want("l", Corner::BottomRight, Corner::BottomLeft, "l");
+    // Null/empty/garbage → default.
+    want(nullptr, Corner::BottomRight, Corner::BottomRight, "null->dflt");
+    want("", Corner::BottomLeft, Corner::BottomLeft, "empty->dflt");
+    want("xyz", Corner::BottomRight, Corner::BottomRight, "garbage->dflt");
+
+    // Tiny-frame clamp: frame smaller than margin+side must not underflow.
+    auto p = corner_placement(40, 30, Corner::BottomRight, 300, 40);
+    if (p.band_x > 40) {{ printf("FAIL tiny: band_x=%u underflowed\n", p.band_x); ++fails; }}
+    if (p.band_cy > 30) {{ printf("FAIL tiny: band_cy=%u underflowed\n", p.band_cy); ++fails; }}
+    // Production size sanity: BR burn lands flush against the right/bottom margins.
+    auto q = corner_placement(1920, 1080, Corner::BottomRight, 300, 40);
+    if (q.band_x != 1920 - 40 - q.square_px) {{ printf("FAIL prod BR band_x=%u\n", q.band_x); ++fails; }}
+    auto z = corner_placement(1920, 1080, Corner::BottomLeft, 300, 40);
+    if (z.band_x != 40) {{ printf("FAIL prod BL band_x=%u\n", z.band_x); ++fails; }}
+
+    printf("DONE fails=%d\n", fails);
+    return fails == 0 ? 0 : 1;
+}}
+"#,
+        geom = geom_hpp.display(),
+    );
+    std::fs::write(&main_cpp, src).unwrap();
+
+    let compile = Command::new("g++")
+        .args(["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(&main_cpp)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("g++ must be installed");
+    assert!(
+        compile.status.success(),
+        "burn-geom.hpp corner/clamp harness did not compile:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr),
+    );
+    let run = Command::new(&bin).output().expect("run geom harness");
+    assert!(
+        run.status.success(),
+        "#111 corner-parse / tiny-frame-clamp regression:\n{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
 // ---- 2. Vendored-source / build-wiring guards --------------------------------
 
 #[test]

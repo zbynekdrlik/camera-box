@@ -33,6 +33,46 @@ namespace burn_geom {
 // decided per-node assignment); the env OBS_BURN_CORNER selects it (see resolve_corner).
 enum class Corner { BottomLeft, BottomRight };
 
+// Case-insensitive substring search (ASCII only, no <cctype> locale dependence).
+inline bool ci_contains(const char *hay, const char *needle)
+{
+	if (!hay || !needle)
+		return false;
+	auto lc = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? char(c + 32) : c; };
+	for (const char *h = hay; *h; ++h) {
+		const char *a = h;
+		const char *b = needle;
+		while (*a && *b && lc(*a) == lc(*b)) {
+			++a;
+			++b;
+		}
+		if (!*b)
+			return true;
+	}
+	return false;
+}
+
+// Parse an OBS_BURN_CORNER value to a Corner, falling back to `dflt` when the string is
+// null/empty/unrecognized. Matched by SUBSTRING so EVERY documented form works:
+//   "right"/"br"/"bottom-right"/"bottom_right"/"r"  → BottomRight
+//   "left"/"bl"/"bottom-left"/"l"                   → BottomLeft
+// Split out (pure, no getenv) so it is unit-testable — the long-form parse was a real
+// bug (the old code disambiguated on the 2nd char, which is 'o' for "bottom-…").
+inline Corner corner_from_string(const char *s, Corner dflt)
+{
+	if (!s || !*s)
+		return dflt;
+	if (ci_contains(s, "right") || ci_contains(s, "br"))
+		return Corner::BottomRight;
+	if (ci_contains(s, "left") || ci_contains(s, "bl"))
+		return Corner::BottomLeft;
+	if (s[0] == 'r' || s[0] == 'R')
+		return Corner::BottomRight;
+	if (s[0] == 'l' || s[0] == 'L')
+		return Corner::BottomLeft;
+	return dflt;
+}
+
 // A QR placement: the band burn_qr::render draws into. The QR square (side `square_px`,
 // == the actual rendered size) is centered in [band_x, band_x+band_w) and vertically
 // centered on band_cy, so its bounding box is:
@@ -69,9 +109,18 @@ inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner cor
 	Placement p{};
 	p.square_px = side;
 	p.band_w = side; // band exactly one QR wide → render centers it == flush in the band
-	p.band_x = (corner == Corner::BottomLeft) ? margin : (frame_w - margin - side);
+	// band_x / band_cy with uint32 subtraction guarded against underflow on a degenerate
+	// tiny frame (frame_w/frame_h < margin + side) — clamp to 0 rather than wrap to a huge
+	// off-frame coordinate. Production is 1920×1080 so this never bites live; the clamp just
+	// makes the "in-frame for any frame size" contract genuinely true.
+	if (corner == Corner::BottomLeft) {
+		p.band_x = margin;
+	} else {
+		p.band_x = (frame_w > margin + side) ? (frame_w - margin - side) : 0;
+	}
 	// Vertical center so the bottom edge sits at frame_h - margin.
-	p.band_cy = frame_h - margin - side / 2;
+	const uint32_t half = side / 2;
+	p.band_cy = (frame_h > margin + half) ? (frame_h - margin - half) : half;
 	return p;
 }
 
