@@ -456,40 +456,65 @@ fn four_qr_rects(w: i64, h: i64, cam_px: i64, burn_px: i64, burn_margin: i64) ->
     [cam_left, cam_right, strih, stream]
 }
 
+/// Burn QR px for a canvas of height `h`, mirroring the C++ `burn_qr_px_for_canvas`
+/// auto path (#186 / #172): `BURN_QR_HEIGHT_FRACTION` (0.28) × height, floored at 64.
+/// Keep this constant in sync with `vendor/distroav/src/burn-geom.hpp`.
+fn burn_px_for_canvas(h: i64) -> i64 {
+    const BURN_QR_HEIGHT_FRACTION: f64 = 0.28;
+    let px = (BURN_QR_HEIGHT_FRACTION * h as f64) as i64;
+    px.max(64)
+}
+
+/// Burn edge margin for a canvas of height `h`, mirroring `burn_margin_for_canvas`
+/// (#172, canvas-relative ≈ 40px-on-1080, floored at 8). Keep in sync with burn-geom.hpp.
+fn burn_margin_for_canvas(h: i64) -> i64 {
+    let m = ((40.0 / 1080.0) * h as f64) as i64;
+    m.max(8)
+}
+
+/// The camera dual-QR px for a canvas of height `h`: production paints 700px on the 1080
+/// cam2 monitor and it RIDES through the upscale, so on a taller canvas the same content
+/// arrives scaled by h/1080 (the 4K stream is a 2× upscale of the 1080 program).
+fn cam_px_for_canvas(h: i64) -> i64 {
+    (700 * h) / 1080
+}
+
 #[test]
 fn four_qr_rectangles_do_not_overlap_and_are_in_frame() {
-    // #111 REGRESSION GUARD: the four QRs (camera L/R top + strih burn bottom-left + stream
-    // burn bottom-right) MUST NOT overlap and MUST be in-frame. The old geometry (camera
-    // QR vertically centered + a SINGLE center-bottom burn at ~700px, shared by BOTH nodes)
-    // overlapped the camera QR (covered ~220px of each half) AND drew both nodes' burns in
-    // the same pixels — so a stream recording carried 0 readable paired frames. This pure
-    // geometry check fails on that layout and passes only when all four are disjoint.
-    const W: i64 = 1920;
-    const H: i64 = 1080;
-    const CAM_PX: i64 = 700; // recording-e2e.sh QR_SIZE default
-    const BURN_PX: i64 = 300; // resolve_qr_px() default
-    const BURN_MARGIN: i64 = 40; // burn_draw_qr margin
-    let rects = four_qr_rects(W, H, CAM_PX, BURN_PX, BURN_MARGIN);
+    // #111 REGRESSION GUARD + #172 canvas-independence + #186 canvas-relative burns: the four
+    // QRs (camera L/R top + strih burn bottom-left + stream burn bottom-right) MUST NOT overlap
+    // and MUST be in-frame — on EVERY canvas, not just the production 1080 (the #172 gap: the
+    // old test hardcoded 1920×1080 + a fixed 300px burn, so a 4K canvas with the same fixed
+    // 300px silently went soft, and a smaller canvas could re-overlap, with no test catching it).
+    // Now the burn px is canvas-relative (0.29×h, #186) and the camera QR rides the upscale, so
+    // the clearance is asserted as a function of canvas height across several resolutions.
     let names = ["cam-left", "cam-right", "strih-burn", "stream-burn"];
-
-    for (i, r) in rects.iter().enumerate() {
-        assert!(
-            r.x >= 0 && r.y >= 0 && r.x + r.w <= W && r.y + r.h <= H,
-            "{} rect {r:?} is out of the {W}×{H} frame",
-            names[i]
-        );
-    }
-    for i in 0..rects.len() {
-        for j in (i + 1)..rects.len() {
+    // 720p, 1080p (production), 1440p, 4K — the burn must stay non-overlapping + in-frame on all.
+    for (w, h) in [(1280i64, 720i64), (1920, 1080), (2560, 1440), (3840, 2160)] {
+        let cam_px = cam_px_for_canvas(h);
+        let burn_px = burn_px_for_canvas(h);
+        let burn_margin = burn_margin_for_canvas(h); // #172: canvas-relative
+        let rects = four_qr_rects(w, h, cam_px, burn_px, burn_margin);
+        for (i, r) in rects.iter().enumerate() {
             assert!(
-                !rects[i].overlaps(&rects[j]),
-                "#111 layout regression: {} {:?} overlaps {} {:?} — a frame cannot carry two \
-                 readable QRs in the same pixels (this is the readability/0-paired-frames bug)",
-                names[i],
-                rects[i],
-                names[j],
-                rects[j]
+                r.x >= 0 && r.y >= 0 && r.x + r.w <= w && r.y + r.h <= h,
+                "{} rect {r:?} is out of the {w}×{h} frame (burn_px={burn_px})",
+                names[i]
             );
+        }
+        for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                assert!(
+                    !rects[i].overlaps(&rects[j]),
+                    "#172/#186 layout regression at {w}×{h} (cam_px={cam_px} burn_px={burn_px}): \
+                     {} {:?} overlaps {} {:?} — a frame cannot carry two readable QRs in the same \
+                     pixels (the readability/0-paired-frames bug)",
+                    names[i],
+                    rects[i],
+                    names[j],
+                    rects[j]
+                );
+            }
         }
     }
 }
@@ -514,7 +539,11 @@ fn four_corner_layout_all_four_qrs_decode_in_one_frame() {
     const W: u32 = 1920;
     const H: u32 = 1080;
     const CAM_PX: u32 = 700;
-    const BURN_PX: u32 = 300;
+    // #186: the burn is now canvas-relative (0.28×height); on the 1080 production canvas
+    // that is 302px (bigger modules than the old fixed 300 — survives the 4K stream upscale,
+    // still clear of the dual-QR). This test renders + decodes the 1080 composite at that size.
+    // (margin = burn_margin_for_canvas(1080) = 40, the production value.)
+    const BURN_PX: u32 = 302;
     const MARGIN: u32 = 40;
 
     // 1) Camera dual-QR via the REAL Rust painter renderer (top-anchored).
@@ -682,6 +711,7 @@ fn burn_geom_corner_from_string_and_tiny_frame_clamp() {
 #include "{geom}"
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 using burn_geom::Corner;
 using burn_geom::corner_from_string;
 using burn_geom::corner_placement;
@@ -717,6 +747,36 @@ int main() {{
     if (q.band_x != 1920 - 40 - q.square_px) {{ printf("FAIL prod BR band_x=%u\n", q.band_x); ++fails; }}
     auto z = corner_placement(1920, 1080, Corner::BottomLeft, 300, 40);
     if (z.band_x != 40) {{ printf("FAIL prod BL band_x=%u\n", z.band_x); ++fails; }}
+
+    // #186 / #172: canvas-relative burn px + margin (burn_qr_px_for_canvas / burn_margin_for_canvas).
+    using burn_geom::burn_qr_px_for_canvas;
+    using burn_geom::burn_margin_for_canvas;
+    // An absolute OBS_BURN_QR_PX override (non-zero `configured`) is returned verbatim.
+    if (burn_qr_px_for_canvas(444, 1080) != 444) {{ printf("FAIL override\n"); ++fails; }}
+    // Auto (configured=0): 0.28*h. 1080 -> 302 (≈ old 300, clears dual-QR);
+    // 4K (2160) -> 604 (the soft 4K stream burn is now ~2x, crisp through the upscale).
+    uint32_t px1080 = burn_qr_px_for_canvas(0, 1080);
+    uint32_t px2160 = burn_qr_px_for_canvas(0, 2160);
+    if (px1080 != 302) {{ printf("FAIL auto1080=%u (want 302)\n", px1080); ++fails; }}
+    if (px2160 != 604) {{ printf("FAIL auto2160=%u (want 604)\n", px2160); ++fails; }}
+    if (px2160 <= 300) {{ printf("FAIL 4K burn not enlarged: %u\n", px2160); ++fails; }}
+    // Tiny canvas floors at 64 (still a readable burn).
+    if (burn_qr_px_for_canvas(0, 100) != 64) {{ printf("FAIL tiny floor\n"); ++fails; }}
+    // CLEARANCE (#172): the auto burn (bottom-anchored, canvas-relative margin) must clear a
+    // top-anchored camera dual-QR (700px on 1080, scaled by h/1080) on EVERY canvas — its top
+    // row must sit at or below the dual-QR bottom (24*scale + 700*scale). 720 is the case the
+    // old fixed-40 margin failed.
+    for (uint32_t h : {{(uint32_t)720, (uint32_t)1080, (uint32_t)1440, (uint32_t)2160}}) {{
+        uint32_t cam_bottom = (24u * h) / 1080u + (700u * h) / 1080u;
+        uint32_t bpx = burn_qr_px_for_canvas(0, h);
+        uint32_t bmargin = burn_margin_for_canvas(h);
+        auto pl = corner_placement(1920u * h / 1080u, h, Corner::BottomLeft, bpx, bmargin);
+        uint32_t burn_top = pl.band_cy - pl.square_px / 2;
+        if (burn_top < cam_bottom) {{
+            printf("FAIL clearance h=%u: burn_top=%u < cam_bottom=%u\n", h, burn_top, cam_bottom);
+            ++fails;
+        }}
+    }}
 
     printf("DONE fails=%d\n", fails);
     return fails == 0 ? 0 : 1;

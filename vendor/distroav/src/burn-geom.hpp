@@ -29,6 +29,43 @@
 
 namespace burn_geom {
 
+// #186 / #172: fraction of the canvas HEIGHT for the auto (canvas-relative) burn QR size.
+// Both the QR size AND the edge margin are canvas-relative so the clearance vs the
+// top-anchored camera dual-QR holds on EVERY canvas (the #172 gap: a fixed 40px margin ate
+// the clearance on a SHORT canvas — 720p overlapped). The dual-QR is ~0.67*h top-anchored
+// (700+24 on 1080, scaled by h/1080). With margin = BURN_MARGIN_FRACTION*h and burn =
+// BURN_QR_HEIGHT_FRACTION*h, the bottom-anchored burn top sits at
+//   h - 0.037*h - 0.28*h = 0.683*h  >=  the dual-QR bottom 0.6704*h  (a ~0.013*h gap, all h).
+//   1080: 296px burn (≈ old 300), 4K: 605px (2× the old fixed 300 — crisp through the upscale).
+inline constexpr double BURN_QR_HEIGHT_FRACTION = 0.28;
+
+// #172: edge margin as a fraction of the canvas height (≈ the 40px-on-1080 production margin,
+// scaled so the clearance is canvas-independent — a fixed 40px was too big a slice of a 720p
+// frame and pushed the burn up into the dual-QR).
+inline constexpr double BURN_MARGIN_FRACTION = 40.0 / 1080.0;
+
+// Effective burn QR square px for a canvas of height `frame_h`: the absolute `configured`
+// value when non-zero (the OBS_BURN_QR_PX override), else BURN_QR_HEIGHT_FRACTION * frame_h
+// floored at 64 (a tiny canvas still gets a readable burn). Pure so the filter and the
+// parity test share ONE tested size; corner_placement clamps further if a misconfig exceeds
+// the frame. Canvas-relative so the burn is the same RELATIVE size on 1080 and 4K and never
+// goes soft on the 4K stream upscale (#186 — the old fixed 300px was half-size on 4K).
+inline uint32_t burn_qr_px_for_canvas(uint32_t configured, uint32_t frame_h)
+{
+	if (configured != 0)
+		return configured;
+	uint32_t px = (uint32_t)(BURN_QR_HEIGHT_FRACTION * (double)frame_h);
+	return px < 64u ? 64u : px;
+}
+
+// #172: canvas-relative edge margin in px (floored at 8 so a tiny canvas still has a quiet
+// border). Used for BOTH the burn placement and the no-overlap budget.
+inline uint32_t burn_margin_for_canvas(uint32_t frame_h)
+{
+	uint32_t m = (uint32_t)(BURN_MARGIN_FRACTION * (double)frame_h);
+	return m < 8u ? 8u : m;
+}
+
 // Which corner this node burns into. strih = bottom-left, stream = bottom-right (the
 // decided per-node assignment); the env OBS_BURN_CORNER selects it (see resolve_corner).
 enum class Corner { BottomLeft, BottomRight };

@@ -110,10 +110,12 @@ static bool resolve_enabled()
 	return env && *env;
 }
 
-// Desired burn QR pixel size; OBS_BURN_QR_PX overrides (default 300 — SMALLER than the
-// camera dual-QR's ~700px so the two bottom-corner burns sit fully clear of the camera QRs
-// (top band) and of each other, the #111 4-corner no-overlap layout). Clamped to a sane
-// range so a bad env can't blow up the buffer math.
+// Desired burn QR pixel size. OBS_BURN_QR_PX is an ABSOLUTE override (clamped 64..4096);
+// 0 (the auto default, returned when the env is unset) means "compute canvas-relative at
+// draw time" via burn_geom::burn_qr_px_for_canvas — bigger on a 4K canvas so the burn stays
+// crisp (#186). The burn stays SMALLER than the camera dual-QR's ~0.65*h so the two
+// bottom-corner burns sit fully clear of the camera QRs (top band) and of each other
+// (#111 4-corner layout); the 0.29*h auto fraction is sized for exactly that clearance.
 static uint32_t resolve_qr_px()
 {
 	const char *env = getenv("OBS_BURN_QR_PX");
@@ -123,7 +125,7 @@ static uint32_t resolve_qr_px()
 		if (end && *end == '\0' && v >= 64 && v <= 4096)
 			return (uint32_t)v;
 	}
-	return 300u;
+	return 0u; // auto → canvas-relative at draw time (burn_geom::burn_qr_px_for_canvas)
 }
 
 // This node's bottom corner. OBS_BURN_CORNER overrides (parsed by burn_geom::corner_from_string,
@@ -260,10 +262,14 @@ static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t w, uint32_t h)
 	const int64_t gen_ts_ns = burn_clock::gen_ts_ns(fps);
 	const std::string payload = burn_payload::encode(f->run_id, fid, gen_ts_ns);
 
-	// Place the burn in this node's bottom corner with 40px edge clearance.
-	const uint32_t margin = 40;
+	// Place the burn in this node's bottom corner. BOTH the QR px and the edge margin are
+	// canvas-relative (#186/#172) unless OBS_BURN_QR_PX pinned an absolute QR size: bigger on a
+	// 4K stream so the burn stays crisp through the upscale (the old fixed 300px went soft), and
+	// the margin scales so the clearance vs the top dual-QR holds on every canvas.
+	const uint32_t margin = burn_geom::burn_margin_for_canvas(h);
+	const uint32_t qr_px = burn_geom::burn_qr_px_for_canvas(f->qr_px, h);
 	const burn_geom::Placement pl =
-		burn_geom::corner_placement(w, h, f->corner, f->qr_px, margin);
+		burn_geom::corner_placement(w, h, f->corner, qr_px, margin);
 	burn_qr::render(buf, w * 4, w, h, payload, pl.band_x, pl.band_w, pl.band_cy, pl.square_px);
 
 	if ((fid % 300u) == 0u) // throttled: one log line / ~10s @ 30fps
