@@ -24,7 +24,9 @@
 //! Exit code: 0 on PASS for every verdict, non-zero on ANY fail.
 
 use anyhow::{Context, Result};
-use camera_box::probe::burn_contiguity::{burn_contiguity, NodeContiguity};
+use camera_box::probe::burn_contiguity::{
+    burn_contiguity_in_window, BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
+};
 use camera_box::probe::recording::{
     analyze_recording, extract_frames_png, select_frames_to_extract, RecordingFrame,
     DEFAULT_MAX_PIXEL_PROOF,
@@ -175,76 +177,11 @@ struct ClassifiedMissing {
     png: Option<String>,
 }
 
-/// Whether the node's burn QR for `id` was decoded on `f`'s pixels.
-fn frame_has_burn(f: &RecordingFrame, burn_run_id: u32, id: u32) -> bool {
-    f.payloads
-        .iter()
-        .any(|p| p.run_id == burn_run_id && p.frame_id == id)
-}
-
 /// Whether `f` is a DELIVERED optical frame — it carries cam2's optical dual-QR (any
 /// CRC-valid payload whose run_id is NOT one of the forwarded node burns). A delivered
 /// frame proves a frame reached the recording at that optical instant.
 fn frame_is_delivered_optical(f: &RecordingFrame, burn_run_ids: &[u32]) -> bool {
     f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id))
-}
-
-/// Locate the recorded-frame slot for a missing burn `id` of `burn_run_id` and classify
-/// it from the pixels. The slot is the recorded frame between the bounding decoded ids
-/// (the highest frame carrying `id-k` and the lowest carrying `id+k`). If a DELIVERED
-/// optical frame sits in that slot → BURN-UNREADABLE (frame delivered, burn missed); else
-/// → REAL DROP (the optical frame is genuinely absent).
-fn classify_missing(
-    stream: &[RecordingFrame],
-    burn_run_id: u32,
-    all_burn_run_ids: &[u32],
-    id: u32,
-    id_to_indices: &BTreeMap<u32, Vec<u64>>,
-) -> (MissingKind, Option<u64>) {
-    // Lower bound: the LAST recorded frame carrying any id < `id` (the closest decoded
-    // predecessor). Upper bound: the FIRST recorded frame carrying any id > `id`.
-    let lower_idx = id_to_indices
-        .range(..id)
-        .next_back()
-        .and_then(|(_, v)| v.iter().copied().max());
-    // `id + 1` via checked_add so a degenerate id == u32::MAX (unreachable: a missing id is
-    // always < last <= u32::MAX) cannot panic on a debug-build overflow; None ⇒ no successor.
-    let upper_idx = id
-        .checked_add(1)
-        .and_then(|nxt| id_to_indices.range(nxt..).next())
-        .and_then(|(_, v)| v.iter().copied().min());
-    // Candidate slot = recorded frames strictly between the bounds (exclusive) — where
-    // this id's frame WOULD sit. With no intermediate recorded frame, the slot collapses
-    // to the gap between two adjacent recorded frames; we then look at the upper-bound
-    // frame itself (the optical frame nearest the missing slot) for a delivery signal.
-    let (lo, hi) = (lower_idx.unwrap_or(0), upper_idx.unwrap_or(u64::MAX));
-    // A delivered optical frame inside the OPEN slot (lo, hi) means the frame for this
-    // optical instant reached the recording but the burn QR was not decoded on it.
-    let slot_delivered = stream.iter().find(|f| {
-        f.frame_index > lo
-            && f.frame_index < hi
-            && frame_is_delivered_optical(f, all_burn_run_ids)
-            && !frame_has_burn(f, burn_run_id, id)
-    });
-    if let Some(f) = slot_delivered {
-        return (MissingKind::BurnUnreadable, Some(f.frame_index));
-    }
-    // No intermediate recorded frame at all (lo+1 == hi): the two bounding decoded frames
-    // are adjacent, so there is NO separate slot — the upstream node's render id collapsed
-    // onto a neighbour or never reached a distinct recorded frame. Inspect the upper-bound
-    // frame: if it is a delivered optical frame (it carries cam2's QR) the optical instant
-    // WAS delivered, the burn for `id` simply did not land on its own frame ⇒ a burn
-    // readability/coalescing defect, not an absent frame. Otherwise the slot is genuinely
-    // absent ⇒ a real drop.
-    if let Some(hi_idx) = upper_idx {
-        if let Some(f) = stream.iter().find(|f| f.frame_index == hi_idx) {
-            if frame_is_delivered_optical(f, all_burn_run_ids) {
-                return (MissingKind::BurnUnreadable, Some(hi_idx));
-            }
-        }
-        return (MissingKind::RealDrop, Some(hi_idx));
-    }
-    (MissingKind::RealDrop, None)
 }
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
@@ -275,45 +212,98 @@ impl NodeVerdict {
     }
 }
 
-/// Build the trustworthy verdict for one node from the decoded stream frames: run the
-/// pure contiguity check on the node's burn-id sequence, then classify each missing id by
-/// pixel and extract a pixel-proof PNG for it.
-fn node_verdict(
-    node: &str,
+/// The node's burn id decoded on a recorded frame (the first payload matching `burn_run_id`),
+/// or `None` if the frame carried no readable burn for this node.
+fn node_burn_id_on(f: &RecordingFrame, burn_run_id: u32) -> Option<u32> {
+    f.payloads
+        .iter()
+        .find(|p| p.run_id == burn_run_id)
+        .map(|p| p.frame_id)
+}
+
+/// Build the IN-WINDOW per-recorded-frame burn-presence sequence for a node (#198).
+///
+/// The window is the leading-discard-trimmed signal body: from the FIRST to the LAST
+/// recorded frame that carries cam2's optical QR (a DELIVERED frame). Within that span,
+/// every delivered frame is one emitted output frame that MUST carry the node's burn —
+/// so each becomes a [`RecordedBurnFrame`] with the node burn id (or `None` if unreadable).
+/// Frames OUTSIDE the window (pre-/post-signal lead-in/out, where cam2's QR is absent and
+/// only a free-running render-tick burn may sit) are EXCLUDED — so their burn ids can never
+/// inflate the range or be counted as missing (#198 point 1). Frames inside the window that
+/// are NOT delivered (no cam2 QR — an interior optical hole) are excluded from the burn
+/// sequence; that optical loss is the separate per-recording continuity check, not a burn
+/// fault for this node.
+fn in_window_burn_frames(
     stream: &[RecordingFrame],
     burn_run_id: u32,
+    all_burn_run_ids: &[u32],
+) -> Vec<RecordedBurnFrame> {
+    let is_delivered = |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids);
+    let first = stream.iter().position(is_delivered);
+    let last = stream.iter().rposition(is_delivered);
+    let (first, last) = match (first, last) {
+        (Some(f), Some(l)) => (f, l),
+        // No delivered frame at all ⇒ no signal window ⇒ nothing to prove (empty).
+        _ => return Vec::new(),
+    };
+    stream[first..=last]
+        .iter()
+        .filter(|f| is_delivered(f))
+        .map(|f| RecordedBurnFrame {
+            frame_index: f.frame_index,
+            burn_id: node_burn_id_on(f, burn_run_id),
+        })
+        .collect()
+}
+
+/// One node's identity for the contiguity verdict: its label, its burn run_id, and how its
+/// burn counter advances (#198 — cam1 per-emit, strih/stream per-render).
+struct NodeSpec<'a> {
+    node: &'a str,
+    burn_run_id: u32,
+    rate: BurnRate,
+}
+
+/// Build the trustworthy verdict for one node from the decoded stream frames: run the
+/// IN-WINDOW per-recorded-frame contiguity check (#198 — rate-aware: cam1's burn is per-EMIT
+/// so a forward integer gap is a REAL drop, strih/stream's is per-RENDER so a forward gap is
+/// not loss), then extract a pixel-proof PNG for each missing slot the check identified.
+///
+/// The pure [`burn_contiguity_in_window`] is the SINGLE source of truth for both the
+/// contiguity result AND each missing slot's (id, recorded frame_index, kind) — this function
+/// no longer recomputes the walk or re-classifies; it just attaches the pixel proof.
+fn node_verdict(
+    spec: &NodeSpec,
+    stream: &[RecordingFrame],
     all_burn_run_ids: &[u32],
     out_dir: &Path,
     stream_path: &Path,
     max_pixel_proof: usize,
 ) -> Result<NodeVerdict> {
-    let ids = burn_ids_in(stream, burn_run_id);
-    let contiguity = burn_contiguity(node, &ids);
+    let node = spec.node;
+    // #198: walk only the in-window DELIVERED frames; rate decides whether a forward integer
+    // gap is loss; a delivered frame missing its burn IS; out-of-window ids are excluded.
+    let window = in_window_burn_frames(stream, spec.burn_run_id, all_burn_run_ids);
+    let in_window = burn_contiguity_in_window(node, &window, spec.rate);
+    let contiguity = in_window.contiguity;
 
-    // id → recorded frame_indices that carry that id (for slot location).
-    let mut id_to_indices: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
-    for f in stream {
-        for p in &f.payloads {
-            if p.run_id == burn_run_id {
-                id_to_indices
-                    .entry(p.frame_id)
-                    .or_default()
-                    .push(f.frame_index);
-            }
-        }
-    }
-
-    let mut classified = Vec::new();
-    for &id in &contiguity.missing_ids {
-        let (kind, frame_index) =
-            classify_missing(stream, burn_run_id, all_burn_run_ids, id, &id_to_indices);
-        classified.push(ClassifiedMissing {
-            id,
-            kind,
-            frame_index,
+    // The pure check already paired each missing id with the recorded frame to view and WHY
+    // it is missing (RealDrop for a per-emit gap / backward jump, BurnUnreadable for a
+    // delivered frame with no burn). Carry that classification verbatim — single source of
+    // truth — and attach the pixel proof below.
+    let mut classified: Vec<ClassifiedMissing> = in_window
+        .missing_slots
+        .iter()
+        .map(|s| ClassifiedMissing {
+            id: s.id,
+            kind: match s.kind {
+                InWindowMissingKind::RealDrop => MissingKind::RealDrop,
+                InWindowMissingKind::BurnUnreadable => MissingKind::BurnUnreadable,
+            },
+            frame_index: Some(s.frame_index),
             png: None,
-        });
-    }
+        })
+        .collect();
 
     // Extract pixel-proof PNGs for every classified slot frame so the user can SEE it.
     let slots: Vec<u64> = classified.iter().filter_map(|c| c.frame_index).collect();
@@ -354,6 +344,15 @@ fn print_node_verdict(v: &NodeVerdict) {
         println!(
             "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}).",
             c.node
+        );
+        return;
+    }
+    // No burn decoded at all (empty / all-unreadable window) ⇒ NOT a pass, but there is no
+    // missing-id list to print — say so plainly instead of "0 missing id(s)".
+    if c.first_id.is_none() {
+        println!(
+            "  [{}] NOT zero — NO burn id decoded in the signal window (nothing proven; {} delivered frame(s) carried no readable {} burn).",
+            c.node, c.expected_count, c.node
         );
         return;
     }
@@ -1128,12 +1127,32 @@ fn main() -> Result<()> {
                 "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
             );
             let mut node_verdicts: Vec<NodeVerdict> = Vec::new();
-            for (node, run_id, present) in [
-                ("cam1", args.burn_cam1_run_id, !cam1_ids.is_empty()),
-                ("strih", args.burn_strih_run_id, !strih_ids_seq.is_empty()),
+            // #198: cam1's burn increments per EMITTED frame (src/main.rs), so its in-window id
+            // run must be contiguous integers (a forward gap = a real cam1 drop). strih/stream
+            // burn per RENDER tick (DistroAV filter), so a forward gap is expected, not loss.
+            for (spec, present) in [
                 (
-                    "stream",
-                    args.burn_stream_run_id,
+                    NodeSpec {
+                        node: "cam1",
+                        burn_run_id: args.burn_cam1_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                    },
+                    !cam1_ids.is_empty(),
+                ),
+                (
+                    NodeSpec {
+                        node: "strih",
+                        burn_run_id: args.burn_strih_run_id,
+                        rate: BurnRate::PerRenderTick,
+                    },
+                    !strih_ids_seq.is_empty(),
+                ),
+                (
+                    NodeSpec {
+                        node: "stream",
+                        burn_run_id: args.burn_stream_run_id,
+                        rate: BurnRate::PerRenderTick,
+                    },
                     !stream_ids_seq.is_empty(),
                 ),
             ] {
@@ -1145,9 +1164,8 @@ fn main() -> Result<()> {
                     .as_ref()
                     .expect("stream_frames_opt is Some ⇒ --stream was provided");
                 let nv = node_verdict(
-                    node,
+                    &spec,
                     stream_frames,
-                    run_id,
                     &all_burns,
                     &args.out_dir,
                     stream_path.as_path(),
@@ -1155,7 +1173,7 @@ fn main() -> Result<()> {
                 )?;
                 print_node_verdict(&nv);
                 all_pass &= nv.is_zero();
-                report["full_chain"]["loss"][node] = node_verdict_json(&nv);
+                report["full_chain"]["loss"][spec.node] = node_verdict_json(&nv);
                 node_verdicts.push(nv);
             }
             // The single binary headline, in plain words.
@@ -1407,10 +1425,202 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_cam1_capture_stats_str, parse_grab_ts, parse_painter_flip_str,
-        parse_painter_ticks_str,
+        in_window_burn_frames, node_burn_id_on, node_verdict, parse_cam1_capture_stats_str,
+        parse_grab_ts, parse_painter_flip_str, parse_painter_ticks_str,
     };
+    use camera_box::probe::burn_contiguity::{BurnRate, InWindowMissingKind};
+    use camera_box::probe::payload::Payload;
+    use camera_box::probe::recording::RecordingFrame;
     use std::io::Write;
+
+    // ---- #198 in-window burn-contiguity wiring (the bug-level regression) ----
+
+    const CAM2: u32 = 7; // optical cam2 run_id (not a burn)
+    const CAM1B: u32 = 911001; // cam1 per-EMIT capture burn run_id
+    const STRIH: u32 = 911002; // strih per-render burn run_id
+    const STREAM: u32 = 911004; // stream per-render burn run_id
+
+    /// Build a recorded frame from (run_id, frame_id) payloads.
+    fn frame(frame_index: u64, payloads: &[(u32, u32)]) -> RecordingFrame {
+        let payloads: Vec<Payload> = payloads
+            .iter()
+            .map(|&(run_id, frame_id)| Payload {
+                run_id,
+                frame_id,
+                gen_ts_ns: 1,
+            })
+            .collect();
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index,
+            payloads,
+            tick,
+        }
+    }
+
+    #[test]
+    fn node_burn_id_on_reads_the_nodes_burn() {
+        let f = frame(0, &[(CAM2, 500), (STRIH, 1670), (STREAM, 9000)]);
+        assert_eq!(node_burn_id_on(&f, STRIH), Some(1670));
+        assert_eq!(node_burn_id_on(&f, STREAM), Some(9000));
+        // A frame with cam2 but no strih burn ⇒ None for strih.
+        let g = frame(1, &[(CAM2, 501)]);
+        assert_eq!(node_burn_id_on(&g, STRIH), None);
+    }
+
+    #[test]
+    fn in_window_excludes_pre_and_post_signal_render_tick_ids() {
+        // #198: the recording opens with PRE-SIGNAL frames carrying ONLY a free-running
+        // strih render-tick burn (no cam2 optical QR — the painter isn't up yet), and closes
+        // with POST-SIGNAL teardown frames the same way. Those frames are NOT delivered
+        // (no cam2 QR), so the window trims them — their burn ids (1, 2 and 30000) can never
+        // inflate the range. Only the delivered signal frames count.
+        let stream = vec![
+            frame(0, &[(STRIH, 1)]), // pre-signal render tick (no cam2) — trimmed
+            frame(1, &[(STRIH, 2)]), // pre-signal — trimmed
+            frame(2, &[(CAM2, 100), (STRIH, 1670)]), // first delivered (in-window)
+            frame(3, &[(CAM2, 101), (STRIH, 1673)]),
+            frame(4, &[(CAM2, 102), (STRIH, 1676)]), // last delivered (in-window)
+            frame(5, &[(STRIH, 30000)]),             // post-signal teardown (no cam2) — trimmed
+        ];
+        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM]);
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(1670), Some(1673), Some(1676)],
+            "only in-window delivered frames; pre/post render ticks excluded"
+        );
+        let idxs: Vec<u64> = w.iter().map(|f| f.frame_index).collect();
+        assert_eq!(idxs, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn node_verdict_render_tick_skips_are_zero_loss_not_thousands_missing() {
+        // THE #198 REGRESSION at the binary level: strih burn id jumps by 3 per emitted
+        // frame (per-render counter). The OLD integer-range check reported ~2x these as
+        // "missing"; the in-window check reports ZERO (every delivered frame carries the
+        // burn). Range 1670..1685 (16 wide) over 6 emitted frames must NOT yield ~10 missing.
+        let stream: Vec<RecordingFrame> = (0..6)
+            .map(|i| frame(i, &[(CAM2, 100 + i as u32), (STRIH, 1670 + (i as u32) * 3)]))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+            },
+            &stream,
+            &[STRIH, STREAM],
+            tmp.path(),
+            // stream_path only touched when there ARE missing slots to extract pixels for;
+            // a zero-loss verdict never reads it.
+            std::path::Path::new("/nonexistent.mp4"),
+            5,
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "per-render-tick forward skips are NOT loss: {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.contiguity.present_count, 6);
+        assert_eq!(
+            v.contiguity.expected_count, 6,
+            "6 emitted frames, not the 16-wide span"
+        );
+        assert_eq!(v.real_drops(), 0);
+        assert_eq!(v.burn_unreadable(), 0);
+    }
+
+    #[test]
+    fn node_verdict_cam1_per_emit_gap_is_a_real_drop() {
+        // cam1 routed with BurnRate::PerEmittedFrame: a forward integer gap (52 absent) on
+        // delivered frames IS a real cam1 drop — the regression the review caught. The verdict
+        // must FAIL and classify the gap as REAL DROP, not silently pass.
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 51)]),
+            frame(2, &[(CAM2, 102), (CAM1B, 53)]), // 52 missing = real cam1 drop
+            frame(3, &[(CAM2, 103), (CAM1B, 54)]),
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+            },
+            &stream,
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            std::path::Path::new("/nonexistent.mp4"),
+            0, // cap 0 = no cap, but stream_path IS read since there's a missing slot...
+        );
+        // ...so extraction will error on the bogus path. We only assert the contiguity by
+        // calling the pure check directly here (the node_verdict pixel extraction needs a real
+        // file, exercised by the real-data validation run). Confirm the verdict errored on the
+        // bad path ONLY because a real drop was found (not a silent zero-loss pass).
+        let w = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM]);
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "cam1 gap is loss: {:?}",
+            iw.contiguity
+        );
+        assert_eq!(iw.contiguity.missing_ids, vec![52]);
+        assert_eq!(iw.missing_slots[0].kind, InWindowMissingKind::RealDrop);
+        // node_verdict itself tries to extract the pixel proof for the real drop → errors on
+        // the nonexistent path (proving it did NOT short-circuit to a zero-loss pass).
+        assert!(
+            v.is_err(),
+            "a found real drop drives pixel extraction (errors on bad path)"
+        );
+    }
+
+    #[test]
+    fn in_window_delivered_frame_missing_burn_is_one_gap_not_a_range() {
+        // A genuine in-window fault: ONE delivered frame (carries cam2 QR) has no strih burn
+        // among per-render-tick neighbours. The in-window sequence yields exactly ONE missing
+        // entry (a `None` slot), NOT a whole integer-range of phantom missing ids — proving
+        // the rate inflation is gone while a real per-frame drop is still caught.
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (STRIH, 1670)]),
+            frame(1, &[(CAM2, 101), (STRIH, 1673)]),
+            frame(2, &[(CAM2, 102)]), // delivered, NO strih burn ⇒ one real fault
+            frame(3, &[(CAM2, 103), (STRIH, 1679)]),
+        ];
+        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM]);
+        let burns: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            burns,
+            vec![Some(1670), Some(1673), None, Some(1679)],
+            "the one delivered frame with no burn is a single None slot, not a range"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "strih",
+            &w,
+            BurnRate::PerRenderTick,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "a delivered frame missing its burn is loss"
+        );
+        assert_eq!(
+            iw.contiguity.missing_ids.len(),
+            1,
+            "exactly ONE in-window drop"
+        );
+        assert_eq!(iw.contiguity.expected_count, 4); // 4 delivered frames, not the 9-wide span
+        assert_eq!(
+            iw.missing_slots[0].kind,
+            InWindowMissingKind::BurnUnreadable
+        );
+    }
 
     #[test]
     fn cam1_capture_stats_parses_dropped_and_captured() {
