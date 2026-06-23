@@ -191,11 +191,26 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read cam1 grab-ts sidecar {}", path.display()))?;
     let mut m = std::collections::HashMap::new();
+    // The LAST non-blank line index: a partial trailing row (the cam1 --record-grab is
+    // killed at teardown mid-write, leaving "frame_index," with no flushed timestamp) is a
+    // tolerated kill-time artifact, skipped — but ONLY when it is the final line. The same
+    // shape mid-file is genuine corruption and still errors (a silently-shrunk grab-ts map
+    // would drop real cam2→cam1 latency samples without any signal).
+    let last_data_line = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let l = l.trim();
+            !l.is_empty() && !l.starts_with("frame_index")
+        })
+        .map(|(i, _)| i)
+        .last();
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("frame_index") {
             continue; // header / blank
         }
+        let is_last = Some(lineno) == last_data_line;
         let mut it = line.split(',');
         let idx_s = it
             .next()
@@ -206,6 +221,14 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
                 lineno + 1
             )
         })?;
+        // Tolerate an empty timestamp ONLY on the final line (partial kill-time write).
+        if ts_s.trim().is_empty() && is_last {
+            tracing::warn!(
+                line = lineno + 1,
+                "grab-ts trailing row has no timestamp (partial kill-time write) — skipped"
+            );
+            continue;
+        }
         let idx: u64 = idx_s.trim().parse().with_context(|| {
             format!(
                 "grab-ts frame_index not a u64 at line {}: {idx_s:?}",
@@ -789,7 +812,11 @@ mod tests {
         let m = parse_grab_ts(f.path()).unwrap();
         assert_eq!(m.get(&0), Some(&1782000000000));
         assert_eq!(m.get(&1), Some(&1782000033000));
-        assert_eq!(m.len(), 2, "the partial trailing row 2, is skipped, not parsed");
+        assert_eq!(
+            m.len(),
+            2,
+            "the partial trailing row 2, is skipped, not parsed"
+        );
     }
 
     #[test]
