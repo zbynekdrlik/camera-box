@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
-# Recording-based 4-node full-path E2E (#105 / #7), dev1-orchestrated.
+# Recording-based full-path E2E (#105 / #7 / #179), dev1-orchestrated — TRUE STREAM-ONLY.
 #
-# The loss verdict + per-hop latency come ONLY from RECORDED output (cam1 grab file,
-# strih/stream OBS program recordings) and the cam2 painter ground truth — NEVER an
-# NDI tap (the tap harness, scripts/multitap-e2e.sh, produced false sampling
-# artifacts; this is its recording-based replacement, per the e2e-zero-loss memory).
+# The loss verdict + per-hop latency come ONLY from the strih/stream OBS PROGRAM
+# recordings and the cam2 painter ground truth — NEVER an NDI tap (the tap harness,
+# scripts/multitap-e2e.sh, produced false sampling artifacts) AND, since #179, NEVER the
+# 7.3GB cam1 grab. The cam1-capture render-time burn (#174) puts cam1's id + CAPTURE
+# wall-clock ts INTO the emitted NDI frame, which rides through strih → stream, so the
+# SINGLE stream recording already carries cam1's mark — decoding a separate multi-GB cam1
+# grab is REDUNDANT and was the repeated ~15-40 min decode sink that stalled every proof
+# run. The grab is GONE; the verdict runs stream-only in minutes (per the e2e-zero-loss
+# memory + the #179 user directive).
 #
-# THE FOUR EVIDENCE NODES (per-frame id + timestamp at each, dual-QR tick=max):
+# THE EVIDENCE NODES (per-frame id + timestamp, dual-QR tick=max), all in ONE stream rec:
 #   1. cam2  — QR GENERATED on its monitor: painter `tick,gen_ts_ns` CSV
 #              (frame-probe --paint-only --dual-qr --paint-log).
-#   2. cam1  — camera GRAB: camera-box --record-grab streams the gray8 luma of each
-#              EMITTED frame to a dev1 ffmpeg listener (cam1 has no ffmpeg/disk) which
-#              encodes ffv1 cam1.mkv; a grab-ts sidecar carries cam1's grab instant.
+#   2. cam1  — render-time CAPTURE BURN (#174): camera-box (CAMERA_BOX_BURN_RUN_ID set)
+#              burns cam1's run_id + per-emit frame_id + CAPTURE wall-clock ts into the
+#              emitted YUYV frame; it rides through NDI into strih's then stream's program.
+#              NO grab is recorded or downloaded any more (#179).
 #   3. strih — OBS PROGRAM recording (obs-ws StartRecord/StopRecord) .mkv.
-#   4. stream— OBS PROGRAM recording .mp4.
+#   4. stream— OBS PROGRAM recording .mp4 — carries cam2 optical QR + cam1 + strih + stream
+#              burns, so the WHOLE per-hop analysis comes from it alone.
 #
-# recording-verdict consumes ALL FOUR and reports, per hop, per-frame loss + latency:
-#   cam2→cam1 (optical+grab): readability + honest assessment + REAL latency.
-#   cam1→strih: STRICT zero-loss + latency (cam1→strih absolute needs #111, marked
-#               RELATIVE/UNAVAILABLE rather than faked).
-#   strih→stream: STRICT zero-loss + latency.
+# recording-verdict consumes strih + stream (+ painter) and reports, per hop, loss+latency
+# from the stream recording ALONE via the clean digital burn-id pairing (#174/#181):
+#   cam2→cam1 (optical-injection): REAL latency from the cam1 burn's capture-ts vs the
+#               painter paint-ts, matched by cam2 tick (#179 — no grab decode).
+#   cam1→strih: per-hop loss + latency (clean burn-id, no 60→30 beat ambiguity).
+#   strih→stream: per-hop loss + latency.
 #   PASS = 0 undecodable AND 0 net loss on the strict hops AND span ≥ 300 s.
 #
 # TEST RIG: this routes the strih + stream OBS program to the CERTIFIED PRODUCTION scenes
@@ -27,10 +35,10 @@
 # the prod 'NDI 2ME PGM' = strih's feed) and RECORDS that program for the run — NEVER a
 # probe ndi_source (which collides with the always-on prod input on the same NDI
 # source-name and records black, #163). The teardown trap restores both program scenes +
-# the cam1/cam2 camera-box services + kills the dev1 ffmpeg listener on exit (incl.
-# cancel). The operator is the guard (project decision: no automated streaming guard).
+# the cam1/cam2 camera-box services on exit (incl. cancel). The operator is the guard
+# (project decision: no automated streaming guard).
 #
-# Prereqs (dev1): NDI_RUNTIME_DIR_V6=/usr/lib/ndi, cargo, sshpass, ffmpeg, python3 +
+# Prereqs (dev1): NDI_RUNTIME_DIR_V6=/usr/lib/ndi, cargo, sshpass, python3 +
 # websocket-client, matplotlib (for the report). OBS WebSocket :4455 on strih+stream,
 # DistroAV "NDI Main Output" enabled on both. cam1/cam2 SSH (root, pw newlevel).
 set -euo pipefail
@@ -40,14 +48,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/camera-set.sh"
 camera_resolve "${CAM:-cam1}"
 
-CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, records its grab)
+CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 CAM_PW=newlevel
-# dev1 LAN IP cam1 connects to for the grab stream (resolved toward cam1, never localhost).
-DEV1_IP="${DEV1_IP:-$(ip route get "$CAM1_IP" 2>/dev/null | grep -oP 'src \K\S+')}"
-GRAB_PORT="${GRAB_PORT:-9099}"
 RUN_ID="${RUN_ID:-$(( (RANDOM << 16) | RANDOM ))}"
 DURATION="${DURATION:-1800}"
 if [ "$DURATION" -lt 300 ]; then
@@ -59,21 +64,11 @@ PAINT_FPS="${PAINT_FPS:-30}"
 GENLOCK_FPS="${GENLOCK_FPS:-30}"
 # #174 cam1-capture render-time burn run_id (the value CAMERA_BOX_BURN_RUN_ID is set to on
 # cam1). Mirrors the verdict's BURN_RUN_ID_CAM1 default (911001). Distinct from the strih
-# (911002) / stream (911004) burn ids so all four marks are told apart by run_id.
+# (911002) / stream (911004) burn ids so all four marks are told apart by run_id. This burn
+# IS the cam1 mark in the stream recording — the reason #179 can drop the cam1 grab.
 BURN_CAM1_RUN_ID="${BURN_CAM1_RUN_ID:-911001}"
-# The cam1 grab is the genlock-EMITTED 30 fps grid (the frames that reach NDI), at the
-# capture resolution. ffmpeg on dev1 decodes the gray8 raw stream with these.
-GRAB_W="${GRAB_W:-1920}"
-GRAB_H="${GRAB_H:-1080}"
-GRAB_FPS="${GRAB_FPS:-$GENLOCK_FPS}"
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
-CAM1_MKV="$OUTDIR/cam1-${RUN_ID}.mkv"
-# The grab-ts sidecar is WRITTEN by camera-box on cam1, so its --record-grab-ts path
-# must exist ON CAM1 (a dev1 $OUTDIR path fails with ENOENT and kills the grab). Use a
-# cam1-LOCAL path for the write, and a separate dev1 path for the scp-back destination.
-CAM1_GRAB_TS_REMOTE="/tmp/cam1-grab-ts-${RUN_ID}.csv"
-CAM1_GRAB_TS="$OUTDIR/cam1-grab-ts-${RUN_ID}.csv"
 PAINTER_CSV="$OUTDIR/painter-${RUN_ID}.csv"
 STRIH_REC="$OUTDIR/strih-${RUN_ID}.mkv"
 STREAM_REC="$OUTDIR/stream-${RUN_ID}.mp4"
@@ -87,16 +82,14 @@ for hp in "cam1=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$ST
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
 done
-[ -n "$DEV1_IP" ] || { echo "ERROR: could not resolve dev1 LAN IP toward cam1." >&2; exit 1; }
-echo "    dev1 grab-stream endpoint: tcp://${DEV1_IP}:${GRAB_PORT}"
 
-# Disk preflight: cam1's ffv1 grab is ~20 MB/s on dev1 (measured on the rig). FAIL EARLY
-# if $OUTDIR's filesystem cannot hold the estimated cam1.mkv + the two OBS recordings
-# (~3x cam1 to be safe), so a multi-minute run never dies mid-flight on ENOSPC.
-EST_MB=$(( DURATION * 20 ))            # cam1.mkv estimate (MB)
-NEED_MB=$(( EST_MB * 3 ))              # + headroom for the downloaded strih/stream files
+# Disk preflight (#179): the 7.3GB cam1 grab is GONE — only the two downloaded OBS program
+# recordings land on dev1 (~3 MB/s each, strih .mkv + stream .mp4). FAIL EARLY if $OUTDIR's
+# filesystem cannot hold both (with headroom), so a long run never dies mid-flight on ENOSPC.
+EST_MB=$(( DURATION * 3 ))             # one OBS recording estimate (MB)
+NEED_MB=$(( EST_MB * 3 ))              # strih + stream + headroom
 AVAIL_MB=$(df -Pm "$(dirname "$OUTDIR")" | awk 'NR==2{print $4}')
-echo "    disk: need ~${NEED_MB} MB (cam1 grab ~${EST_MB} MB + recordings), have ${AVAIL_MB} MB"
+echo "    disk: need ~${NEED_MB} MB (strih + stream recordings, no grab), have ${AVAIL_MB} MB"
 if [ "${AVAIL_MB:-0}" -lt "$NEED_MB" ]; then
   echo "ERROR: insufficient disk for a ${DURATION}s run (~${NEED_MB} MB needed, ${AVAIL_MB} MB free)." >&2
   echo "       Free space on $(dirname "$OUTDIR") or lower DURATION, then re-run." >&2
@@ -152,11 +145,10 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
    v4l2-ctl -d /dev/video0 --get-ctrl=saturation,contrast 2>/dev/null" \
   || echo "WARNING: could not pre-apply cam1 v4l2 controls (camera-box self-applies on --record-grab)" >&2
 
-FFMPEG_PID=""
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
-  echo "[cleanup] restore OBS program scenes + cam1/cam2 services + kill grab listener"
+  echo "[cleanup] restore OBS program scenes + cam1/cam2 services"
   python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop >/dev/null 2>&1
   python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
   python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
@@ -169,9 +161,6 @@ cleanup() {
   # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it.
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
     "pkill -x frame-probe 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
-  # Kill the dev1 ffmpeg grab listener if still up.
-  [ -n "$FFMPEG_PID" ] && kill "$FFMPEG_PID" 2>/dev/null
-  pkill -f "listen=1.*${GRAB_PORT}" 2>/dev/null
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
   # running (e.g. the run is aborting for another reason), stop the whole group so a
   # multi-GB decode is never orphaned. The monitor already group-kills on STALL; this
@@ -187,41 +176,28 @@ echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured f
 # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
 cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
 
-echo "[2/8] start dev1 ffmpeg grab listener → ${CAM1_MKV} (gray8 ${GRAB_W}x${GRAB_H}@${GRAB_FPS} → ffv1)"
-# ffmpeg LISTENS; cam1's --record-grab connects and streams raw gray8. ffv1 is lossless
-# so analyze_recording (rqrr) decodes the filmed QR exactly. -y overwrites a stale file.
-ffmpeg -hide_banner -loglevel warning -y \
-  -f rawvideo -pix_fmt gray -s "${GRAB_W}x${GRAB_H}" -r "$GRAB_FPS" \
-  -i "tcp://0.0.0.0:${GRAB_PORT}?listen=1" \
-  -c:v ffv1 -level 3 "$CAM1_MKV" >/tmp/ffmpeg-grab-${RUN_ID}.log 2>&1 &
-FFMPEG_PID=$!
-sleep 1  # let the listener bind before cam1 connects
-
-echo "[3/8] cam1 (${CAM1_IP}) — probe-featured camera-box with --record-grab + #174 burn (grabs cam2, records, emits NDI w/ cam1 burn)"
-# #174: deploy the freshly-built PROBE-featured camera-box (carries the cam1-capture burn)
-# to a cam1-LOCAL /tmp path and launch THAT — NOT the prod /usr/local/bin/camera-box (which
-# is the clean production binary with no burn). The burn is runtime-gated by
-# CAMERA_BOX_BURN_RUN_ID, so it draws the cam1 render-time QR into the emitted frame ONLY
-# for this test. The prod service + binary on disk are untouched.
+echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
+# #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the cam1-capture
+# burn) to a cam1-LOCAL /tmp path and launch THAT — NOT the prod /usr/local/bin/camera-box
+# (the clean production binary with no burn). The burn is runtime-gated by
+# CAMERA_BOX_BURN_RUN_ID, so it draws the cam1 run_id + per-emit frame_id + CAPTURE
+# wall-clock ts into the EMITTED frame, which rides through NDI → strih → stream. #179: we
+# NO LONGER --record-grab — the cam1 mark in the stream recording fully replaces the 7.3GB
+# grab, so cam1 just emits NDI with the burn. Re-apply the #156 certified v4l2 controls
+# (saturation=0/contrast=75) directly here (the grab path that used to self-apply is gone).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   target/release/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
-# Stop the deployed service (single-open /dev/video0), launch the manual probe binary that
-# grabs + emits NDI (genlock 30) WITH the #174 cam1 burn AND tees the gray8 grab to dev1 +
-# writes the sidecar. Re-apply the #156 certified v4l2 controls (saturation=0/contrast=75)
-# — camera-box self-applies them when --record-grab is set (CAMERA_BOX_CAPTURE_CONTROLS).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
   "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
    chmod +x $CAM1_BURN_BIN; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+   v4l2-ctl -d /dev/video0 --set-ctrl=saturation=0,contrast=75 2>/dev/null; \
    (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
-     nohup $CAM1_BURN_BIN \
-       --record-grab tcp://${DEV1_IP}:${GRAB_PORT} \
-       --record-grab-ts ${CAM1_GRAB_TS_REMOTE} \
-       >/tmp/cbox-grab.log 2>&1 &)"
-sleep 4  # let cam1's NDI sender become discoverable + the grab stream connect
+     nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"
+sleep 4  # let cam1's NDI sender (with the burn) become discoverable
 
-echo "[4/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
+echo "[3/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   target/release/frame-probe root@"$PAINTER_IP":/tmp/frame-probe
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
@@ -245,7 +221,7 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
-echo "[5/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
+echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
   --program-scene "$STRIH_PROG_SCENE")
@@ -254,33 +230,27 @@ STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
-echo "[6/8] StartRecord on strih + stream (program = certified prod scene)"
+echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
 
-echo "[7/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
+echo "[6/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
 sleep "$DURATION"
 
-echo "[7/8] StopRecord + download the four artifacts to dev1"
+echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"
 STRIH_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop)
 STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop)
 echo "    strih host file:  $STRIH_HOST_PATH"
 echo "    stream host file: $STREAM_HOST_PATH"
-# Stop the painter + cam1 grab so the files finalise.
+# Stop the painter + the cam1 burn binary so the files finalise (no grab stream to flush).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null; true"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" "pkill -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; true"
-sleep 2  # let cam1 flush the grab stream + ffmpeg finalise the mkv
-[ -n "$FFMPEG_PID" ] && { wait "$FFMPEG_PID" 2>/dev/null || true; FFMPEG_PID=""; }
 
-# Download cam1's grab-ts sidecar (cam1 is Linux — scp works). It was written to the
-# cam1-LOCAL path; pull it to the dev1 $OUTDIR path the verdict reads.
-sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
-  root@"$CAM1_IP":"$CAM1_GRAB_TS_REMOTE" "$CAM1_GRAB_TS" 2>/dev/null || \
-  echo "WARNING: could not fetch cam1 grab-ts sidecar (cam2→cam1 latency will be omitted)" >&2
-# Download the cam2 painter ground-truth CSV.
+# Download the cam2 painter ground-truth CSV (tick,gen_ts_ns) — its per-tick PAINT
+# timestamp is what the #179 cam2→cam1 latency pairs the cam1 burn's capture-ts against.
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$PAINTER_IP":/tmp/painter.csv "$PAINTER_CSV" 2>/dev/null || \
-  echo "WARNING: could not fetch painter CSV (cam→strih/cam2→cam1 assessment omitted)" >&2
+  echo "WARNING: could not fetch painter CSV (cam→strih / cam2→cam1 assessment omitted)" >&2
 # Download the OBS recordings from the Windows boxes via the win-* MCP / http.server.
 # scp to Windows is DENIED on this rig; the harness expects the caller (the autopilot
 # worker or operator) to pull STRIH_HOST_PATH / STREAM_HOST_PATH via the win-* MCP and
@@ -290,14 +260,14 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$STREAM" "$STREAM_HOST_PATH" "$STREAM_REC" || \
   echo "NOTE: recording-fetch-windows.sh not run/failed — place strih/stream recordings at $STRIH_REC / $STREAM_REC manually" >&2
 
-echo "[8/8] recording-verdict over all four nodes + report"
-# #111 per-hop ABSOLUTE latency: pass the node burn run_ids so that WHEN the #111 burn
-# is live on the boxes (OBS_BURN_QR=1 + the "DistroAV QR Burn" filter on the program
-# source, OBS_BURN_RUN_ID=911002 strih / 911004 stream) the verdict decodes the burned
-# render-time stamps and computes cam→strih + strih→stream ABSOLUTE latency. They match
-# the burn filter's defaults, so when the burn is OFF these simply find no burn QR and
-# the latency hops report NO SAMPLES (never a wrong number). Override to a custom
-# OBS_BURN_RUN_ID via BURN_STRIH_RUN_ID / BURN_STREAM_RUN_ID.
+echo "[8/8] recording-verdict — TRUE STREAM-ONLY (strih + stream + painter, NO 7.3GB grab) + report"
+# #111/#174 per-hop ABSOLUTE latency + loss: pass the node burn run_ids so the verdict
+# decodes the burned render-time stamps (cam1 capture burn rides into stream; strih/stream
+# burns from their DistroAV filters) and computes the full chain cam1→strih→stream loss +
+# latency from the STREAM recording ALONE, plus cam2→cam1 from the cam1 burn vs the painter
+# paint-ts (#179 — no grab). They match the burn filters' defaults; when a burn is OFF the
+# affected hop reports NO SAMPLES (never a wrong number). Override via BURN_*_RUN_ID.
+# #179: --cam1 / --cam1-grab-ts are NO LONGER passed — the 7.3GB grab is never decoded.
 BURN_STRIH_RUN_ID="${BURN_STRIH_RUN_ID:-911002}"
 BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
 VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
@@ -305,8 +275,6 @@ VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
   --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
 [ -f "$STREAM_REC" ]    && VERDICT_ARGS+=(--stream "$STREAM_REC")
-[ -f "$CAM1_MKV" ]      && VERDICT_ARGS+=(--cam1 "$CAM1_MKV")
-[ -f "$CAM1_GRAB_TS" ]  && VERDICT_ARGS+=(--cam1-grab-ts "$CAM1_GRAB_TS")
 [ -f "$PAINTER_CSV" ]   && VERDICT_ARGS+=(--painter "$PAINTER_CSV")
 
 # #166 LIVENESS-GUARDED verdict run. The verdict decodes multi-GB recordings for
