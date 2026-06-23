@@ -61,6 +61,28 @@ pub fn crop_center(img: &GrayImage, cw: u32, ch: u32) -> GrayImage {
     GrayImage::from_raw(cw, ch, out).expect("buffer sized cw*ch")
 }
 
+/// Crop a `cw`-wide × `ch`-tall band anchored to the TOP of a grayscale image
+/// (horizontally centered, top edge at y=0; saturated to bounds). The #111 dual-QR is
+/// painted in the TOP band (so the strih/stream bottom-corner burns never overlap it), so
+/// the live-capture dual decoder crops from the top — a vertically-centered crop would
+/// miss the now-top-anchored QRs.
+pub fn crop_top(img: &GrayImage, cw: u32, ch: u32) -> GrayImage {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return GrayImage::from_raw(1, 1, vec![0]).expect("1x1");
+    }
+    let cw = cw.min(w).max(1);
+    let ch = ch.min(h).max(1);
+    let ox = (w - cw) / 2;
+    let mut out = vec![0u8; (cw as usize) * (ch as usize)];
+    for y in 0..ch {
+        for x in 0..cw {
+            out[(y * cw + x) as usize] = img.get_pixel(ox + x, y)[0];
+        }
+    }
+    GrayImage::from_raw(cw, ch, out).expect("buffer sized cw*ch")
+}
+
 /// Convert ONLY the centered `cw`×`ch` region of a raw frame to luma, directly from
 /// the source bytes — skipping the full-frame luma conversion. The QR is centered, so
 /// the live tap only needs this ROI; converting just it (≈0.7 MP) instead of the whole
@@ -270,5 +292,35 @@ mod tests {
         let c = crop_center(&img, 1, 2);
         assert_eq!(c.get_pixel(0, 0)[0], 3);
         assert_eq!(c.get_pixel(0, 1)[0], 4);
+    }
+
+    #[test]
+    fn crop_top_anchors_at_y_zero_not_centered() {
+        // #111: crop_top must take the TOP rows (oy=0), NOT the centered rows crop_center
+        // would. 8-tall gradient cropped to 2 tall -> rows 0,1 (not 3,4).
+        let img = GrayImage::from_raw(1, 8, vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let c = crop_top(&img, 1, 2);
+        assert_eq!(
+            c.get_pixel(0, 0)[0],
+            0,
+            "crop_top must start at the top row"
+        );
+        assert_eq!(c.get_pixel(0, 1)[0], 1);
+        // And it must differ from a centered crop (proves it's top-anchored, not centered).
+        let center = crop_center(&img, 1, 2);
+        assert_ne!(
+            c.get_pixel(0, 0)[0],
+            center.get_pixel(0, 0)[0],
+            "crop_top must NOT equal crop_center (the #111 top-anchor)"
+        );
+    }
+
+    #[test]
+    fn crop_top_is_horizontally_centered() {
+        // 8-wide single row -> crop to 2 wide is horizontally centered: ox=(8-2)/2=3.
+        let img = GrayImage::from_raw(8, 1, vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let c = crop_top(&img, 2, 1);
+        assert_eq!(c.get_pixel(0, 0)[0], 3);
+        assert_eq!(c.get_pixel(1, 0)[0], 4);
     }
 }

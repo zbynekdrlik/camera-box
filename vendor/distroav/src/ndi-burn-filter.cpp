@@ -13,8 +13,12 @@
 	  1. gs_texrender the filter target (the source this filter is attached to).
 	  2. gs_stage_texture + gs_stagesurface_map -> a CPU BGRA copy of the rendered frame.
 	  3. CPU-draw the QR (burn_qr::render, qrcodegen EC-High, white quiet zone) into the
-	     copy at THIS node's QR position (a bottom strip, distinct from cam2's centered QR
-	     so both survive in one recorded frame on the dedicated PROBE scene).
+	     copy at THIS node's BOTTOM CORNER (strih=bottom-left, stream=bottom-right) at
+	     ~300px (burn_geom::corner_placement) — fully clear of the camera dual-QR (top
+	     band) and of the other node's burn, so one stream recording carries all four
+	     readable QRs (camera L/R + strih burn + stream burn), none overlapping (#111
+	     4-corner layout — replaces the old center-bottom ~700px burn that overlapped both
+	     the camera QR and the other node's burn → strih→stream 0 paired frames).
 	  4. Re-upload the composited buffer to a dynamic texture and gs_draw_sprite it as the
 	     filter's output, so the burn flows downstream into the recording.
 	NO libobs core change — this is purely a DistroAV plugin filter.
@@ -104,8 +108,10 @@ static bool resolve_enabled()
 	return env && *env;
 }
 
-// Desired QR pixel size; OBS_BURN_QR_PX overrides (default 700, the rig's NDI-survivable
-// size). Clamped to a sane range so a bad env can't blow up the buffer math.
+// Desired burn QR pixel size; OBS_BURN_QR_PX overrides (default 300 — SMALLER than the
+// camera dual-QR's ~700px so the two bottom-corner burns sit fully clear of the camera QRs
+// (top band) and of each other, the #111 4-corner no-overlap layout). Clamped to a sane
+// range so a bad env can't blow up the buffer math.
 static uint32_t resolve_qr_px()
 {
 	const char *env = getenv("OBS_BURN_QR_PX");
@@ -117,6 +123,7 @@ static uint32_t resolve_qr_px()
 	}
 	return 700u;
 }
+
 
 static const char *burn_filter_getname(void *)
 {
@@ -220,8 +227,10 @@ static bool burn_ensure_size(burn_filter *f, uint32_t width, uint32_t height)
 	return true;
 }
 
-// Burn THIS node's QR into the CPU buffer `buf` (BGRA, w x h, stride w*4) at a bottom
-// strip — distinct from cam2's centered QR so both survive in one recorded frame.
+// Burn THIS node's QR into the CPU buffer `buf` (BGRA, w x h, stride w*4) at THIS node's
+// bottom corner (strih=bottom-left, stream=bottom-right) at ~300px — fully clear of the
+// camera dual-QR (top band) and of the other node's burn (the other bottom corner), the
+// #111 4-corner no-overlap layout, so one stream recording carries all four readable QRs.
 static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t w, uint32_t h)
 {
 	const double fps = []() {

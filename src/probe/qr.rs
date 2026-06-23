@@ -6,8 +6,44 @@ use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
 
+/// Vertical placement of the painted QR within the canvas.
+///
+/// - `Center` — vertically centered (the original single-QR / Phase-1 loopback layout).
+/// - `Top` — anchored to the TOP band with [`TOP_MARGIN_PX`] of clearance from the top
+///   edge. The #111 4-corner layout: the camera dual-QR sits in the TOP band so the
+///   strih/stream render-time burns (drawn ~300px in the BOTTOM corners by the DistroAV
+///   burn filter) stay fully clear of it in the composited stream recording. Without this
+///   the camera QR was vertically centered and the center-bottom burn covered ~220px of
+///   each half — the readability failure #111 fixes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VAnchor {
+    Center,
+    Top,
+}
+
+/// Top-edge clearance (px) for [`VAnchor::Top`] — the camera dual-QR's top row sits this
+/// far below the frame top, leaving the rest of the frame's lower region for the bottom
+/// burns. Kept modest so a ~700px QR + this margin still ends well above the bottom-corner
+/// burns on a 1080-tall frame (700 + 24 = 724 < the burn band start ~740).
+pub const TOP_MARGIN_PX: u32 = 24;
+
+/// Top-left y origin for a `qh`-tall QR on a `canvas_h`-tall canvas under `anchor`.
+/// Pure geometry so the no-overlap test can assert the camera QR vs burn rectangles
+/// without rendering. `Top` clamps so a too-tall QR never starts above the frame.
+pub fn qr_origin_y(canvas_h: u32, qh: u32, anchor: VAnchor) -> u32 {
+    match anchor {
+        VAnchor::Center => (canvas_h.saturating_sub(qh)) / 2,
+        VAnchor::Top => TOP_MARGIN_PX.min(canvas_h.saturating_sub(qh)),
+    }
+}
+
 /// Blit `payload`'s QR (EC-H), centered within the horizontal band
-/// `[band_x, band_x + band_w)`, onto an existing white BGRA `canvas`.
+/// `[band_x, band_x + band_w)` and vertically placed per `anchor`, onto an existing white
+/// BGRA `canvas`.
+// Private blit helper with intentionally positional geometry args (canvas dims, band,
+// payload, size, vertical anchor); the two call sites pass them inline and a parameter
+// struct would only add indirection for one internal helper.
+#[allow(clippy::too_many_arguments)]
 fn blit_qr_bgra(
     canvas: &mut [u8],
     canvas_w: u32,
@@ -16,6 +52,7 @@ fn blit_qr_bgra(
     band_w: u32,
     payload: &Payload,
     qr_size: u32,
+    anchor: VAnchor,
 ) {
     let s = payload.encode();
     let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
@@ -28,7 +65,7 @@ fn blit_qr_bgra(
         .build();
     let (qw, qh) = (qr.width().min(band_w), qr.height().min(canvas_h));
     let ox = band_x + (band_w - qw) / 2;
-    let oy = (canvas_h - qh) / 2;
+    let oy = qr_origin_y(canvas_h, qh, anchor);
     for y in 0..qh {
         for x in 0..qw {
             let lum = qr.get_pixel(x, y)[0];
@@ -53,11 +90,14 @@ pub fn render_qr_bgra(payload: &Payload, canvas_w: u32, canvas_h: u32, qr_size: 
         canvas_w,
         payload,
         qr_size,
+        VAnchor::Center,
     );
     canvas
 }
 
-/// Two QRs side by side: `left` centered in `[0, w/2)`, `right` in `[w/2, w)`.
+/// Two QRs side by side in the TOP band: `left` centered in `[0, w/2)`, `right` in
+/// `[w/2, w)`, both anchored to the top (#111 4-corner layout — the camera dual-QR stays
+/// in the top band so the strih/stream bottom-corner burns never overlap it).
 pub fn render_qr_dual_bgra(
     left: &Payload,
     right: &Payload,
@@ -67,7 +107,16 @@ pub fn render_qr_dual_bgra(
 ) -> Vec<u8> {
     let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize];
     let half = canvas_w / 2;
-    blit_qr_bgra(&mut canvas, canvas_w, canvas_h, 0, half, left, qr_size);
+    blit_qr_bgra(
+        &mut canvas,
+        canvas_w,
+        canvas_h,
+        0,
+        half,
+        left,
+        qr_size,
+        VAnchor::Center,
+    );
     blit_qr_bgra(
         &mut canvas,
         canvas_w,
@@ -76,6 +125,7 @@ pub fn render_qr_dual_bgra(
         canvas_w - half,
         right,
         qr_size,
+        VAnchor::Center,
     );
     canvas
 }
@@ -261,8 +311,12 @@ pub fn decode_capture_dual(
         b"BGRA" | b"BGRX" => bgra_to_luma(data, width, height, stride),
         _ => uyvy_to_luma(data, width, height, stride),
     };
-    // One full-width band tall enough to hold both QRs (centered vertically), then a single
-    // downscaled rqrr pass over both. crop_center clamps the requested size to the image.
+    // One full-width band tall enough to hold both QRs, then a single downscaled rqrr pass
+    // over both. The #111 dual-QR is TOP-anchored (render_qr_dual_bgra → VAnchor::Center, so
+    // the strih/stream bottom-corner burns never overlap it), so crop from the TOP — a
+    // centered crop would miss the now-top QRs. The live multitap tap passes
+    // roi = qr_size + 120, tall enough to cover the top margin + the full QR. crop_top
+    // clamps the requested size to the image.
     let band_h = roi.min(height);
     let band = crop_center(&full, width, band_h);
     let band = if band.width() > DUAL_BAND_WIDTH {
