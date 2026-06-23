@@ -166,6 +166,12 @@ cleanup() {
   # Kill the dev1 ffmpeg grab listener if still up.
   [ -n "$FFMPEG_PID" ] && kill "$FFMPEG_PID" 2>/dev/null
   pkill -f "listen=1.*${GRAB_PORT}" 2>/dev/null
+  # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
+  # running (e.g. the run is aborting for another reason), stop the whole group so a
+  # multi-GB decode is never orphaned. The monitor already group-kills on STALL; this
+  # covers the other exit paths.
+  [ -n "${VERDICT_PID:-}" ] && { kill -- -"$VERDICT_PID" 2>/dev/null; kill "$VERDICT_PID" 2>/dev/null; }
+  pkill -x recording-verdict 2>/dev/null
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -273,7 +279,50 @@ VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
 [ -f "$CAM1_GRAB_TS" ]  && VERDICT_ARGS+=(--cam1-grab-ts "$CAM1_GRAB_TS")
 [ -f "$PAINTER_CSV" ]   && VERDICT_ARGS+=(--painter "$PAINTER_CSV")
 
-if ./target/release/recording-verdict "${VERDICT_ARGS[@]}"; then GATE=0; else GATE=$?; fi
+# #166 LIVENESS-GUARDED verdict run. The verdict decodes multi-GB recordings for
+# minutes; if it CRASHES (the #166 night: it died silently after >1 h) or HANGS, a
+# naive "wait for it to finish" would block FOREVER (a crashed process writes no
+# completion marker). So we run it in the BACKGROUND, tee its output to a file, write
+# its exit code to a marker on completion, and let verdict-monitor.sh fail LOUDLY on a
+# dead-or-stalled process instead of hanging the whole run. RUST_LOG=info makes the
+# per-recording progress (probe/decode/complete lines) visible as output growth so the
+# stall detector has a real liveness signal.
+VERDICT_OUT="$OUTDIR/verdict-${RUN_ID}.out"
+VERDICT_EXIT_MARKER="$OUTDIR/verdict-${RUN_ID}.exit"
+rm -f "$VERDICT_EXIT_MARKER"
+# No progress for this many seconds ⇒ the verdict is wedged → fail fast. The parallel
+# decode (#166) emits an INFO line per recording phase; the longest silent stretch is a
+# single recording's decode loop, well under this bound even for a 30-min 4K clip.
+VERDICT_STALL_TIMEOUT="${VERDICT_STALL_TIMEOUT:-600}"
+echo "    verdict output: $VERDICT_OUT (stall-timeout ${VERDICT_STALL_TIMEOUT}s, parallel decode #166)"
+# Run the verdict in its OWN process group via setsid: $! is then the group leader
+# (pid == pgid), so the monitor's STALL kill can signal the WHOLE group (the wrapper
+# AND the heavy recording-verdict child) and never orphan the runaway decode (#166
+# review BUG 1). The wrapper writes the verdict's exit code to the marker on exit; a
+# verdict CRASH still writes a non-zero code (so the monitor fails loud), and a total
+# death (no marker) is caught by the monitor's DEAD path.
+export RUST_LOG="${RUST_LOG:-info}"
+# bash -c body: $0=cwd, $1=marker path, $2.. = verdict args. The single-quoted body is
+# expanded by the INNER bash (SC2016 is expected here), and every path is passed as an
+# argument (no string interpolation), so a path with spaces/quotes is safe.
+# shellcheck disable=SC2016
+setsid bash -c 'cd "$0" || exit 97; m="$1"; shift; ./target/release/recording-verdict "$@"; echo "$?" > "$m"' \
+  "$(pwd)" "$VERDICT_EXIT_MARKER" "${VERDICT_ARGS[@]}" >"$VERDICT_OUT" 2>&1 &
+VERDICT_PID=$!
+# Monitor to a terminal state: returns the verdict's own exit code on clean completion,
+# 124 on STALL, 126 on a silent death. Either failure mode aborts the run with a clear
+# diagnostic — never an all-night hang (#166).
+if "$HERE/verdict-monitor.sh" \
+     --pid "$VERDICT_PID" --output "$VERDICT_OUT" --exit-marker "$VERDICT_EXIT_MARKER" \
+     --stall-timeout "$VERDICT_STALL_TIMEOUT" --poll 5 --label verdict; then
+  GATE=0
+else
+  GATE=$?
+fi
+# Surface the verdict's own output (the human-readable per-hop verdict) in the run log.
+echo "    ----- recording-verdict output -----"
+cat "$VERDICT_OUT" 2>/dev/null || true
+echo "    ------------------------------------"
 
 echo "[8/8] render the 2-graph report PNG"
 if [ -f "$REPORT_JSON" ]; then

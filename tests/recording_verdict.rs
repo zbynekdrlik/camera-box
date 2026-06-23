@@ -333,8 +333,9 @@ fn extract_png_writes_pixel_proof_and_flags_sharp_decoder_bug() {
 
     let flagged = vec![0u64];
     let undecodable: HashSet<u64> = [0u64].into_iter().collect();
-    let extracted =
-        extract_frames_png(&path, &flagged, &undecodable, &out_dir).expect("extract pixel proof");
+    // max_extract = 0 → no cap (this test extracts the single flagged frame).
+    let extracted = extract_frames_png(&path, &flagged, &undecodable, &out_dir, 0)
+        .expect("extract pixel proof");
 
     assert_eq!(extracted.len(), 1, "one flagged frame extracted");
     let e = &extracted[0];
@@ -362,6 +363,6 @@ fn extract_png_no_flagged_frames_is_a_noop() {
     let path = fixture("strih-6519-dual-qr.mkv");
     let out_dir = std::env::temp_dir().join(format!("cb-107-png-empty-{}", std::process::id()));
     let extracted =
-        extract_frames_png(&path, &[], &HashSet::new(), &out_dir).expect("noop extraction");
+        extract_frames_png(&path, &[], &HashSet::new(), &out_dir, 0).expect("noop extraction");
     assert!(extracted.is_empty(), "no flagged frames -> no PNGs");
 }

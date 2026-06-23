@@ -263,3 +263,50 @@ fn fetch_windows_builds_url_from_encoded_name_not_raw() {
          spaces break the request)."
     );
 }
+
+// ---------------------------------------------------------------------------
+// #166: the verdict step must be LIVENESS-GUARDED, never a bare blocking call.
+//
+// The #166 night: recording-verdict decoded a 7.3 GB cam1 grab single-threaded for
+// >1 h, then DIED SILENTLY, and a monitor waited on a completion marker the crashed
+// process never wrote — the whole run hung all night with no result. The fix runs the
+// verdict in the background behind verdict-monitor.sh, which fails LOUDLY on a dead or
+// stalled process. These static guards stop a future refactor from silently reverting
+// to the synchronous-hang pattern.
+// ---------------------------------------------------------------------------
+
+/// recording-e2e.sh must drive the verdict through verdict-monitor.sh (the liveness guard).
+#[test]
+fn verdict_step_uses_the_liveness_monitor() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("verdict-monitor.sh"),
+        "#166: the verdict step must run behind scripts/verdict-monitor.sh so a dead/stalled \
+         verdict fails the run instead of hanging forever."
+    );
+    // The verdict must be backgrounded with an exit marker the monitor reads.
+    assert!(
+        s.contains("VERDICT_EXIT_MARKER") && s.contains("--exit-marker"),
+        "#166: the verdict must write an exit marker that the monitor watches for completion."
+    );
+    assert!(
+        s.contains("--stall-timeout"),
+        "#166: the monitor must be given a stall timeout (no-progress → fail fast)."
+    );
+}
+
+/// The liveness monitor script must exist and be executable.
+#[test]
+fn verdict_monitor_script_exists() {
+    let path = format!("{}/scripts/verdict-monitor.sh", env!("CARGO_MANIFEST_DIR"));
+    let meta = fs::metadata(&path).unwrap_or_else(|e| panic!("verdict-monitor.sh missing: {e}"));
+    assert!(meta.is_file(), "verdict-monitor.sh must be a file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            meta.permissions().mode() & 0o111 != 0,
+            "verdict-monitor.sh must be executable"
+        );
+    }
+}
