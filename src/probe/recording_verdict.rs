@@ -412,18 +412,45 @@ impl BurnHopVerdict {
 /// not counted as loss (the same active-span handling [`strih_stream_verdict`] uses), then:
 /// an upstream id absent downstream is a DROP; a downstream id absent upstream is a phantom.
 /// Offset-immune and beat-free because the burn id is the SAME integer on both sides.
-pub fn burn_hop_verdict(
-    hop: &str,
-    _upstream_ids: &[u32],
-    _downstream_ids: &[u32],
-) -> BurnHopVerdict {
-    // [red] not yet implemented — returns an empty verdict so the tests prove they catch
-    // both a real drop and the absence of beat-inflation before the GREEN compare lands.
+pub fn burn_hop_verdict(hop: &str, upstream_ids: &[u32], downstream_ids: &[u32]) -> BurnHopVerdict {
+    use std::collections::BTreeSet;
+    let up: BTreeSet<u32> = upstream_ids.iter().copied().collect();
+    let down: BTreeSet<u32> = downstream_ids.iter().copied().collect();
+
+    let (lo, hi) = match (
+        up.iter().next().max(down.iter().next()),
+        up.iter().next_back().min(down.iter().next_back()),
+    ) {
+        (Some(&a), Some(&b)) if a <= b => (a, b),
+        _ => {
+            return BurnHopVerdict {
+                hop: hop.to_string(),
+                compared_ids: 0,
+                dropped_ids: Vec::new(),
+                phantom_ids: Vec::new(),
+            };
+        }
+    };
+    let in_span = |t: u32| t >= lo && t <= hi;
+    let dropped_ids: Vec<u32> = up
+        .iter()
+        .copied()
+        .filter(|&t| in_span(t) && !down.contains(&t))
+        .collect();
+    let phantom_ids: Vec<u32> = down
+        .iter()
+        .copied()
+        .filter(|&t| in_span(t) && !up.contains(&t))
+        .collect();
+    let compared_ids = up
+        .iter()
+        .filter(|&&t| in_span(t) && down.contains(&t))
+        .count();
     BurnHopVerdict {
         hop: hop.to_string(),
-        compared_ids: 0,
-        dropped_ids: Vec::new(),
-        phantom_ids: Vec::new(),
+        compared_ids,
+        dropped_ids,
+        phantom_ids,
     }
 }
 
