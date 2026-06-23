@@ -2,6 +2,17 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-06-23 — CI-hygiene batch (#164 + #157, PR #167 MERGED)
+
+- **Batch:** #164 (remove codecov upload + codecov.yml) + #157 (stop push+pull_request double-fire + add concurrency group). Both `.github/workflows`-only, bundle-safe; one PR #167 dev→main, merge_sha `4a1e6f695`. Both issues auto-closed.
+- **Version:** 1.7.0-dev.73 → **1.7.0-dev.74** (Cargo.toml; Cargo.lock is gitignored here so not committed). Commit `8e595879c`.
+- **#164** (commit `978a373e8`): removed the `Upload coverage to Codecov` step from ci.yml + deleted `codecov.yml`. KEPT the blocking `cargo llvm-cov --fail-under-lines ${COVERAGE_THRESHOLD:-47}` gate — proven still green on both PR and main CI. Verified 0 codecov refs remain anywhere. codecov was a STEP inside the `coverage` job (not a job), so `notify-on-failure.needs` unaffected.
+- **#157** (commits `034984950` then refined by `3e1c38d8e`): first tried `push:[main]`+`pull_request:[main]`, but the deep code-review flagged that direct dev pushes with no open PR would then run NO CI. Switched to the sibling-repo pattern (devbridge/restreamer/network-monitor): **`push:[dev,main]` + DROP `pull_request` entirely** + concurrency group `ci-${{ github.workflow }}-${{ github.ref }}` cancel-in-progress:true. Gives exactly ONE run/commit AND keeps dev-push coverage (main isn't branch-protected, so no required check needs the pull_request event). `workflow_dispatch` (mutation window #70) preserved. Hardware/windows workflows' own intentional concurrency groups (some cancel-in-progress:false) + tag-only release.yml/build-image.yml left untouched.
+- **Single-fire PROOF:** historical commits each had a `push` AND a `pull_request` run for the same SHA (the waste); the final commit `3e1c38d` produced exactly ONE `push` run, zero `pull_request`; the main merge `4a1e6f6` likewise only one `push:CI` run. Double-fire eliminated.
+- **No test commit:** CI-config-only (no Rust/logic) → `[no-test]` markers with reasons. No binary deploy to cameras — zero runtime behavior changed; the "live target" for a GitHub Actions change is Actions itself, verified directly (single-fire + green coverage on PR + main). No dashboard → no DOM version read.
+- **Reviews:** `/review` 0/0/0; deep `requesting-code-review` 0 Critical, 1 Important (dev-push gap) FIXED by the `push:[dev,main]` refinement, 2 Minor no-change-needed.
+- Per-ticket Discord cards fired (#164, #157), version 1.7.0-dev.74, no `--url` (CI-internal, no user-viewable web surface).
+
 ## 2026-06-17 — verification run (#102 CLOSED — consume-logic fix PROVEN ~0 loss)
 
 - **#102 strih→stream frame loss — deploy the consume-when-queued fix + PROVE ~0 loss.** No code change (fix already merged `f0152d6c5` = main HEAD, PR #103); this run = redeploy the genlock OBS build to BOTH prod boxes + A/B measure. Verification-only, no version bump.
