@@ -207,9 +207,11 @@ fn classify_missing(
         .range(..id)
         .next_back()
         .and_then(|(_, v)| v.iter().copied().max());
-    let upper_idx = id_to_indices
-        .range((id + 1)..)
-        .next()
+    // `id + 1` via checked_add so a degenerate id == u32::MAX (unreachable: a missing id is
+    // always < last <= u32::MAX) cannot panic on a debug-build overflow; None ⇒ no successor.
+    let upper_idx = id
+        .checked_add(1)
+        .and_then(|nxt| id_to_indices.range(nxt..).next())
         .and_then(|(_, v)| v.iter().copied().min());
     // Candidate slot = recorded frames strictly between the bounds (exclusive) — where
     // this id's frame WOULD sit. With no intermediate recorded frame, the slot collapses
@@ -1350,10 +1352,13 @@ fn main() -> Result<()> {
                 stats.frames_captured
             );
         } else {
+            // Denominator is the TOTAL the device should have produced = delivered + dropped
+            // (frames_captured counts only delivered buffers, not the lost ones).
+            let total = stats.frames_captured.saturating_add(stats.v4l2_dropped);
             println!(
                 "  [cam2→cam1] NOT zero — cam1 V4L2 capture dropped {} of {} frames \
-                 (REAL capture-card drops on the camera leg).",
-                stats.v4l2_dropped, stats.frames_captured
+                 ({} delivered; REAL capture-card drops on the camera leg).",
+                stats.v4l2_dropped, total, stats.frames_captured
             );
         }
         all_pass &= cam1_zero;

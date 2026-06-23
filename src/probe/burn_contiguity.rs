@@ -95,8 +95,10 @@ pub fn burn_contiguity(node: &str, ids: &[u32]) -> NodeContiguity {
             };
         }
     };
-    // expected = last - first + 1 (the size of the contiguous integer span).
-    let expected_count = last - first + 1;
+    // expected = last - first + 1 (the size of the contiguous integer span). Saturating math
+    // so a degenerate full-u32-range span (unreachable for run-bounded CRC-validated burn ids,
+    // but defensive) can never panic on a debug-build overflow.
+    let expected_count = (last - first).saturating_add(1);
     let present_count = present.len() as u32;
     let missing_ids: Vec<u32> = (first..=last).filter(|id| !present.contains(id)).collect();
     NodeContiguity {

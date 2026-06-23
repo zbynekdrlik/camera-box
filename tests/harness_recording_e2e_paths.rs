@@ -80,6 +80,29 @@ fn recording_e2e_keeps_the_cam1_capture_burn_enabled() {
     );
 }
 
+/// #194 / cam2→cam1 LOSS: cam1 must emit its V4L2 capture-drop sidecar
+/// (CAMERA_BOX_CAPTURE_STATS) and the verdict must receive it as --cam1-capture-stats, so the
+/// cam2→cam1 loss is the camera-leg capture-drop count (NOT a painter-tick optical compare).
+/// cam1 must be stopped GRACEFULLY (SIGINT) so the shutdown handler writes the sidecar.
+#[test]
+fn recording_e2e_wires_the_cam2_cam1_capture_drop_loss() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt"),
+        "cam1 must launch with CAMERA_BOX_CAPTURE_STATS so it writes the V4L2 capture-drop \
+         sidecar (the cam2→cam1 loss signal)."
+    );
+    assert!(
+        s.contains("pkill -INT"),
+        "cam1 must be stopped with SIGINT (graceful) so the shutdown handler writes the \
+         capture-stats sidecar before exit."
+    );
+    assert!(
+        s.contains("VERDICT_ARGS+=(--cam1-capture-stats"),
+        "the verdict must be passed --cam1-capture-stats so cam2→cam1 loss = V4L2 capture-drop."
+    );
+}
+
 /// #179: the verdict must be invoked TRUE STREAM-ONLY — never with --cam1 / --cam1-grab-ts
 /// (which would decode the 7.3GB grab). The full chain + cam2→cam1 come from the stream
 /// recording's burns alone.
