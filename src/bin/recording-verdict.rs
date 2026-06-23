@@ -30,8 +30,8 @@ use camera_box::probe::recording::{
 };
 use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
-    cam2_cam1_samples, cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, RunIds,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    cam2_cam1_samples, cam_strih_samples, hop_latency, strih_stream_samples,
+    strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, strih_stream_verdict, verdict, FrameTick, RecordingVerdict, VerdictConfig,
@@ -44,8 +44,11 @@ use std::path::{Path, PathBuf};
 #[command(about = "Hard-fail zero-loss verdict from recorded OBS program files (#107)")]
 struct Args {
     /// strih OBS-program recording (.mkv / .mp4) — the strict hop-1 endpoint.
+    /// Optional: omit it for a cam1-ONLY optical-readability check (the fast PART-B
+    /// loop — `--cam1 grab.mkv --painter painter.csv --cam2-run-id N`), which decodes
+    /// just the cam1 grab and reports the cam2→cam1 decode rate without a 4-node run.
     #[arg(long)]
-    strih: PathBuf,
+    strih: Option<PathBuf>,
     /// stream OBS-program recording — the headline endpoint. Enables strih→stream.
     #[arg(long)]
     stream: Option<PathBuf>,
@@ -243,6 +246,13 @@ fn report_recording(
         "  frames={} analyzed={:.1}s duration_ok={} avg_step={:.4} beat_balanced={}",
         v.total_frames, v.analyzed_secs, v.duration_ok, v.avg_step, v.beat_balanced
     );
+    if v.lead_in_trimmed > 0 || v.lead_out_trimmed > 0 {
+        println!(
+            "  leading-discard: {} pre-signal (console lead-in) + {} post-signal (teardown) \
+             frames trimmed — NOT counted as undecodable",
+            v.lead_in_trimmed, v.lead_out_trimmed
+        );
+    }
     println!(
         "  undecodable={} real_copy={} real_gap={}",
         v.undecodable_frames.len(),
@@ -343,7 +353,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     tracing::info!(
-        strih = %args.strih.display(),
+        strih = ?args.strih.as_ref().map(|p| p.display().to_string()),
         stream = ?args.stream.as_ref().map(|p| p.display().to_string()),
         painter = ?args.painter.as_ref().map(|p| p.display().to_string()),
         out_dir = %args.out_dir.display(),
@@ -364,20 +374,35 @@ fn main() -> Result<()> {
 
     // strih recording verdict (strict hop-1 endpoint). Keep the decoded frames so the
     // #108 per-hop latency engine can read each frame's cam2 + node-burn gen_ts_ns.
-    let (strih_frames, strih_ticks) = ticks_of(&args.strih)?;
-    let strih_v = verdict(&strih_ticks, &cfg);
-    all_pass &= report_recording(
-        "strih",
-        &args.strih,
-        &strih_v,
-        &args.out_dir,
-        args.max_pixel_proof,
-    )?;
-    report["nodes"]["strih"] = serde_json::json!({
-        "pass": strih_v.is_pass(), "frames": strih_v.total_frames,
-        "analyzed_secs": strih_v.analyzed_secs, "undecodable": strih_v.undecodable_frames.len(),
-        "avg_step": strih_v.avg_step, "beat_balanced": strih_v.beat_balanced,
-    });
+    // `--strih` is OPTIONAL: when omitted (the cam1-only optical-readability loop) the
+    // strih-dependent hops (cam→strih, strih→stream) are skipped and only the cam1
+    // grab is decoded/assessed.
+    let strih_data: Option<(Vec<RecordingFrame>, Vec<FrameTick>)> = match &args.strih {
+        Some(strih_path) => {
+            let (strih_frames, strih_ticks) = ticks_of(strih_path)?;
+            let strih_v = verdict(&strih_ticks, &cfg);
+            all_pass &= report_recording(
+                "strih",
+                strih_path,
+                &strih_v,
+                &args.out_dir,
+                args.max_pixel_proof,
+            )?;
+            report["nodes"]["strih"] = serde_json::json!({
+                "pass": strih_v.is_pass(), "frames": strih_v.total_frames,
+                "analyzed_secs": strih_v.analyzed_secs, "undecodable": strih_v.undecodable_frames.len(),
+                "avg_step": strih_v.avg_step, "beat_balanced": strih_v.beat_balanced,
+            });
+            Some((strih_frames, strih_ticks))
+        }
+        None => {
+            println!(
+                "=== strih: SKIPPED (no --strih) — cam1-only optical-readability mode; \
+                 cam→strih and strih→stream hops are unavailable ==="
+            );
+            None
+        }
+    };
 
     // stream recording verdict (headline endpoint) + strih→stream direct compare.
     let mut stream_frames_opt: Option<Vec<RecordingFrame>> = None;
@@ -392,33 +417,38 @@ fn main() -> Result<()> {
             args.max_pixel_proof,
         )?;
 
-        let ss = strih_stream_verdict(&strih_ticks, &stream_ticks, &cfg);
-        println!("=== strih→stream hop verdict (direct tick-SEQUENCE compare, offset-immune) ===");
-        println!(
-            "  compared_ticks={} strih_only(stream dropped)={} stream_only(reorder/phantom)={}",
-            ss.compared_ticks,
-            ss.strih_only_ticks.len(),
-            ss.stream_only_ticks.len()
-        );
-        if !ss.strih_only_ticks.is_empty() {
-            let shown: Vec<u32> = ss.strih_only_ticks.iter().copied().take(20).collect();
-            println!("  strih-only ticks (first 20, = stream dropped these): {shown:?}");
-        }
-        if !ss.stream_only_ticks.is_empty() {
-            let shown: Vec<u32> = ss.stream_only_ticks.iter().copied().take(20).collect();
-            println!("  stream-only ticks (first 20): {shown:?}");
-        }
-        println!("  RESULT: {}", if ss.is_pass() { "PASS" } else { "FAIL" });
-        all_pass &= ss.is_pass();
         report["nodes"]["stream"] = serde_json::json!({
             "pass": stream_v.is_pass(), "frames": stream_v.total_frames,
             "analyzed_secs": stream_v.analyzed_secs,
             "undecodable": stream_v.undecodable_frames.len(),
         });
-        report["hops"]["strih_stream"] = serde_json::json!({
-            "strict": true, "pass": ss.is_pass(), "compared_ticks": ss.compared_ticks,
-            "dropped": ss.strih_only_ticks.len(), "phantom": ss.stream_only_ticks.len(),
-        });
+        // strih→stream direct compare needs the strih recording; skip it in cam1-only mode.
+        if let Some((_, strih_ticks)) = &strih_data {
+            let ss = strih_stream_verdict(strih_ticks, &stream_ticks, &cfg);
+            println!(
+                "=== strih→stream hop verdict (direct tick-SEQUENCE compare, offset-immune) ==="
+            );
+            println!(
+                "  compared_ticks={} strih_only(stream dropped)={} stream_only(reorder/phantom)={}",
+                ss.compared_ticks,
+                ss.strih_only_ticks.len(),
+                ss.stream_only_ticks.len()
+            );
+            if !ss.strih_only_ticks.is_empty() {
+                let shown: Vec<u32> = ss.strih_only_ticks.iter().copied().take(20).collect();
+                println!("  strih-only ticks (first 20, = stream dropped these): {shown:?}");
+            }
+            if !ss.stream_only_ticks.is_empty() {
+                let shown: Vec<u32> = ss.stream_only_ticks.iter().copied().take(20).collect();
+                println!("  stream-only ticks (first 20): {shown:?}");
+            }
+            println!("  RESULT: {}", if ss.is_pass() { "PASS" } else { "FAIL" });
+            all_pass &= ss.is_pass();
+            report["hops"]["strih_stream"] = serde_json::json!({
+                "strict": true, "pass": ss.is_pass(), "compared_ticks": ss.compared_ticks,
+                "dropped": ss.strih_only_ticks.len(), "phantom": ss.stream_only_ticks.len(),
+            });
+        }
         stream_frames_opt = Some(stream_frames);
     }
 
@@ -449,32 +479,35 @@ fn main() -> Result<()> {
         // STRICT cam1→strih hop. The returned verdict's `strih_only_ticks` are the
         // CAM1-only ticks (strih dropped them) and `stream_only_ticks` are the
         // STRIH-only ticks (phantom/reorder) — relabelled here for the cam1→strih hop.
-        let cs = cam1_strih_verdict(&cam1_ticks, &strih_ticks, &cfg);
-        println!(
-            "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
-        );
-        println!(
-            "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
-            cs.compared_ticks,
-            cs.strih_only_ticks.len(),
-            cs.stream_only_ticks.len()
-        );
-        if !cs.strih_only_ticks.is_empty() {
-            let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
+        // Needs the strih recording; skipped in cam1-only optical-readability mode.
+        if let Some((_, strih_ticks)) = &strih_data {
+            let cs = cam1_strih_verdict(&cam1_ticks, strih_ticks, &cfg);
             println!(
-                "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+                "=== cam1→strih hop verdict (STRICT, direct tick-SEQUENCE compare, offset-immune) ==="
             );
+            println!(
+                "  compared_ticks={} cam1_only(strih dropped)={} strih_only(phantom/reorder)={}",
+                cs.compared_ticks,
+                cs.strih_only_ticks.len(),
+                cs.stream_only_ticks.len()
+            );
+            if !cs.strih_only_ticks.is_empty() {
+                let shown: Vec<u32> = cs.strih_only_ticks.iter().copied().take(20).collect();
+                println!(
+                    "  cam1-only ticks (first 20, = strih DROPPED these on cam1→strih): {shown:?}"
+                );
+            }
+            if !cs.stream_only_ticks.is_empty() {
+                let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
+                println!("  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}");
+            }
+            println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
+            all_pass &= cs.is_pass();
+            report["hops"]["cam1_strih"] = serde_json::json!({
+                "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
+                "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
+            });
         }
-        if !cs.stream_only_ticks.is_empty() {
-            let shown: Vec<u32> = cs.stream_only_ticks.iter().copied().take(20).collect();
-            println!("  strih-only ticks (first 20, = phantom/reorder at strih): {shown:?}");
-        }
-        println!("  RESULT: {}", if cs.is_pass() { "PASS" } else { "FAIL" });
-        all_pass &= cs.is_pass();
-        report["hops"]["cam1_strih"] = serde_json::json!({
-            "strict": true, "pass": cs.is_pass(), "compared_ticks": cs.compared_ticks,
-            "dropped": cs.strih_only_ticks.len(), "phantom": cs.stream_only_ticks.len(),
-        });
 
         // HONEST cam2→cam1 optical assessment (vs painter ground truth, never a zero claim).
         if let Some(painter_path) = &args.painter {
@@ -503,11 +536,12 @@ fn main() -> Result<()> {
         cam1_frames_opt = Some(cam1_frames);
     }
 
-    // cam→strih honest assessment (no false zero claim).
+    // cam→strih honest assessment (no false zero claim). Needs both strih + painter;
+    // skipped in cam1-only optical-readability mode.
     let mut cam_strih_clean: Option<bool> = None;
-    if let Some(painter_path) = &args.painter {
+    if let (Some((_, strih_ticks)), Some(painter_path)) = (&strih_data, &args.painter) {
         let painter_ticks = parse_painter_ticks(painter_path)?;
-        let a = cam_strih_assessment(&strih_ticks, &painter_ticks, &cfg);
+        let a = cam_strih_assessment(strih_ticks, &painter_ticks, &cfg);
         println!("=== cam→strih assessment (honest, NOT a zero-loss claim) ===");
         println!("  claims_zero_loss={}", a.claims_zero_loss);
         println!(
@@ -549,9 +583,13 @@ fn main() -> Result<()> {
         cam2: cam2_pin,
         other_burns: vec![],
     };
-    let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(&strih_frames, &strih_ids));
-    report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
-    report["latency"]["cam_strih"] = hop_lat_json(&cam_strih_lat);
+    // cam→strih ABSOLUTE latency needs the strih recording (its in-frame strih-burn +
+    // cam2 stamps). Skipped in cam1-only optical-readability mode.
+    if let Some((strih_frames, _)) = &strih_data {
+        let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(strih_frames, &strih_ids));
+        report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
+        report["latency"]["cam_strih"] = hop_lat_json(&cam_strih_lat);
+    }
 
     // cam2→cam1 OPTICAL+GRAB latency (#105 node 2) — REAL, no #111 burn needed.
     // grab_ts (cam1 grab instant, sidecar) − cam2 paint gen_ts, both wall clock.
@@ -595,12 +633,36 @@ fn main() -> Result<()> {
             cam2: cam2_pin,
             other_burns: vec![args.burn_strih_run_id],
         };
-        let ss_lat = hop_latency(
-            "strih→stream",
-            &strih_stream_samples(&strih_frames, stream_frames, &strih_ids, &stream_ids),
+        // #111 PART A: prefer the WHOLE strih→stream hop from the STREAM recording
+        // ALONE — the stream frames carry the FORWARDED strih burn + stream's own burn,
+        // paired per cam2 tick, so the hop needs no separate strih recording (the
+        // dispatch's "whole per-hop analysis from the single stream recording"). Fall
+        // back to the two-recording method only when the strih burn is NOT forwarded
+        // into the stream program (the from-stream pairing then yields no samples).
+        let from_stream = strih_stream_samples_from_stream(
+            stream_frames,
+            cam2_pin,
+            args.burn_strih_run_id,
+            args.burn_stream_run_id,
         );
+        let (ss_samples, source) = if !from_stream.is_empty() {
+            (from_stream, "stream recording alone (forwarded strih burn)")
+        } else if let Some((strih_frames, _)) = &strih_data {
+            (
+                strih_stream_samples(strih_frames, stream_frames, &strih_ids, &stream_ids),
+                "two recordings (strih burn not forwarded into stream)",
+            )
+        } else {
+            (
+                Vec::new(),
+                "unavailable (no forwarded strih burn, no --strih)",
+            )
+        };
+        println!("  strih→stream latency source: {source}");
+        let ss_lat = hop_latency("strih→stream", &ss_samples);
         report_hop_latency(&ss_lat, "strih→stream", "strih render gen_ts_ns");
         report["latency"]["strih_stream"] = hop_lat_json(&ss_lat);
+        report["latency"]["strih_stream_source"] = serde_json::json!(source);
     }
 
     // Record the headline verdict and write the machine-readable report (BEFORE any

@@ -396,65 +396,202 @@ int main(int argc, char **argv) {{
     assert!(decoded_strs.contains(&r), "right tick {r:?} not decoded");
 }
 
-#[test]
-fn cpp_production_geometry_bottom_strip_qr_decodes() {
-    // The PRODUCTION filter (ndi-burn-filter.cpp burn_draw_qr) burns a SINGLE full-width
-    // bottom-strip QR — render(buf, w*4, w, h, payload, /*band_x*/0, /*band_w*/w,
-    // /*band_cy*/ h - qr_px/2 - margin, qr_px) — distinct from cam2's centered QR so both
-    // survive in one recorded frame. The dual-QR test above proves the encoder/decoder
-    // identity; THIS test proves the EXACT production placement (the clamp/origin path with
-    // band_cy near the bottom edge) is in-bounds and rqrr-decodable, so the burned node QR
-    // is actually readable in a recording.
-    let dir = std::env::temp_dir().join(format!("burn_prodgeo_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let main_cpp = dir.join("prodgeo_main.cpp");
-    let bin = dir.join("prodgeo_main");
-    let out_bgra = dir.join("frame.bgra");
+/// Axis-aligned rectangle [x, x+w) × [y, y+h) for the overlap test.
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
 
-    let payload_hpp = manifest().join(BURN_PAYLOAD_HPP);
-    let qr_hpp = manifest().join(BURN_QR_HPP);
-    let qrcg_cpp = manifest().join(QRCODEGEN_CPP);
-    let qrcg_inc = manifest().join("vendor/distroav/src");
+impl Rect {
+    fn overlaps(&self, o: &Rect) -> bool {
+        self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
+    }
+}
+
+/// The four QR bounding rectangles in the composited 1920×1080 stream frame, computed from
+/// the REAL geometry functions (the painter top-anchor + the C++ burn corner placement,
+/// mirrored), the #111 4-corner layout. The camera dual-QR halves render at ~`cam_px`
+/// (forced square by min/max_dimensions); the burns at `burn_px` in the two bottom corners.
+fn four_qr_rects(w: i64, h: i64, cam_px: i64, burn_px: i64, burn_margin: i64) -> [Rect; 4] {
+    let half = w / 2;
+    // Camera dual-QR: each half centered horizontally in its half, TOP-anchored.
+    let cam_oy = camera_box::probe::qr::qr_origin_y(
+        h as u32,
+        cam_px as u32,
+        camera_box::probe::qr::VAnchor::Top,
+    ) as i64;
+    let cam_left_ox = (half - cam_px) / 2;
+    let cam_right_ox = half + (half - cam_px) / 2;
+    let cam_left = Rect {
+        x: cam_left_ox,
+        y: cam_oy,
+        w: cam_px,
+        h: cam_px,
+    };
+    let cam_right = Rect {
+        x: cam_right_ox,
+        y: cam_oy,
+        w: cam_px,
+        h: cam_px,
+    };
+    // Burns: bottom-left + bottom-right corners (mirror burn_geom::corner_placement: band is
+    // exactly burn_px wide, flush to the corner with burn_margin clearance; bottom edge at
+    // h - burn_margin).
+    let burn_y = h - burn_margin - burn_px;
+    let strih = Rect {
+        x: burn_margin,
+        y: burn_y,
+        w: burn_px,
+        h: burn_px,
+    }; // bottom-left
+    let stream = Rect {
+        x: w - burn_margin - burn_px,
+        y: burn_y,
+        w: burn_px,
+        h: burn_px,
+    }; // bottom-right
+    [cam_left, cam_right, strih, stream]
+}
+
+#[test]
+fn four_qr_rectangles_do_not_overlap_and_are_in_frame() {
+    // #111 REGRESSION GUARD: the four QRs (camera L/R top + strih burn bottom-left + stream
+    // burn bottom-right) MUST NOT overlap and MUST be in-frame. The old geometry (camera
+    // QR vertically centered + a SINGLE center-bottom burn at ~700px, shared by BOTH nodes)
+    // overlapped the camera QR (covered ~220px of each half) AND drew both nodes' burns in
+    // the same pixels — so a stream recording carried 0 readable paired frames. This pure
+    // geometry check fails on that layout and passes only when all four are disjoint.
+    const W: i64 = 1920;
+    const H: i64 = 1080;
+    const CAM_PX: i64 = 700; // recording-e2e.sh QR_SIZE default
+    const BURN_PX: i64 = 300; // resolve_qr_px() default
+    const BURN_MARGIN: i64 = 40; // burn_draw_qr margin
+    let rects = four_qr_rects(W, H, CAM_PX, BURN_PX, BURN_MARGIN);
+    let names = ["cam-left", "cam-right", "strih-burn", "stream-burn"];
+
+    for (i, r) in rects.iter().enumerate() {
+        assert!(
+            r.x >= 0 && r.y >= 0 && r.x + r.w <= W && r.y + r.h <= H,
+            "{} rect {r:?} is out of the {W}×{H} frame",
+            names[i]
+        );
+    }
+    for i in 0..rects.len() {
+        for j in (i + 1)..rects.len() {
+            assert!(
+                !rects[i].overlaps(&rects[j]),
+                "#111 layout regression: {} {:?} overlaps {} {:?} — a frame cannot carry two \
+                 readable QRs in the same pixels (this is the readability/0-paired-frames bug)",
+                names[i],
+                rects[i],
+                names[j],
+                rects[j]
+            );
+        }
+    }
+}
+
+#[test]
+fn four_corner_layout_all_four_qrs_decode_in_one_frame() {
+    // THE end-to-end no-overlap proof: render the FULL composited stream frame —
+    //   - camera dual-QR (top band) via the production Rust painter renderer
+    //     (render_qr_dual_bgra, VAnchor::Top), and
+    //   - strih burn (bottom-LEFT) + stream burn (bottom-RIGHT) via the production C++ burn
+    //     renderer (burn_qr::render + burn_geom::corner_placement),
+    // then assert the PRODUCTION recorded-file decoder (decode_qr_luma_all) reads back ALL
+    // FOUR distinct payloads. On the old center-bottom-700 geometry the burns overwrote the
+    // camera QRs and each other, so fewer than four decoded — this test is the regression
+    // lock for the 4-corner placement.
+    let dir = std::env::temp_dir().join(format!("burn_4corner_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_cpp = dir.join("fourc_main.cpp");
+    let bin = dir.join("fourc_main");
+    let out_bgra = dir.join("frame.bgra");
 
     const W: u32 = 1920;
     const H: u32 = 1080;
-    const QR_PX: u32 = 700;
-    const MARGIN: u32 = 40; // == burn_draw_qr's margin
-    let node = (911004u32, 12345u32, 1_718_600_000_000_000_000i64); // stream node stamp
+    const CAM_PX: u32 = 700;
+    const BURN_PX: u32 = 300;
+    const MARGIN: u32 = 40;
+
+    // 1) Camera dual-QR via the REAL Rust painter renderer (top-anchored).
+    let cam_left = Payload {
+        run_id: 720163,
+        frame_id: 6518,
+        gen_ts_ns: 1_718_600_000_000_000_000,
+    };
+    let cam_right = Payload {
+        run_id: 720163,
+        frame_id: 6519,
+        gen_ts_ns: 1_718_600_000_016_666_666,
+    };
+    let mut frame = camera_box::probe::qr::render_qr_dual_bgra(&cam_left, &cam_right, W, H, CAM_PX);
+
+    // 2) Overlay the two node burns via the REAL C++ burn renderer + corner geometry. The
+    //    C++ harness reads the existing BGRA frame (the camera dual-QR), burns the strih QR
+    //    bottom-left and the stream QR bottom-right, and writes it back — exactly what the
+    //    DistroAV filter does to the composited program video on each box.
+    std::fs::write(&out_bgra, &frame).unwrap();
+
+    let payload_hpp = manifest().join(BURN_PAYLOAD_HPP);
+    let qr_hpp = manifest().join(BURN_QR_HPP);
+    let geom_hpp = manifest().join("vendor/distroav/src/burn-geom.hpp");
+    let qrcg_cpp = manifest().join(QRCODEGEN_CPP);
+    let qrcg_inc = manifest().join("vendor/distroav/src");
+
+    let strih = (911002u32, 100u32, 1_718_600_000_033_333_333i64); // bottom-left
+    let stream = (911004u32, 200u32, 1_718_600_000_050_000_000i64); // bottom-right
 
     let src = format!(
         r#"
 #include "{payload}"
 #include "{qr}"
+#include "{geom}"
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 int main(int argc, char **argv) {{
     if (argc < 2) return 2;
-    const uint32_t W = {w}, H = {h}, QR_PX = {qr_px}, MARGIN = {margin};
-    std::vector<uint8_t> buf((size_t)W * H * 4, 255);
+    const uint32_t W = {w}, H = {h}, BURN_PX = {burn_px}, MARGIN = {margin};
+    const size_t n = (size_t)W * H * 4;
+    std::vector<uint8_t> buf(n);
+    FILE *in = fopen(argv[1], "rb");
+    if (!in) return 3;
+    if (fread(buf.data(), 1, n, in) != n) {{ fclose(in); return 4; }}
+    fclose(in);
     const uint32_t stride = W * 4;
-    std::string p = burn_payload::encode({nr}, {nf}, {ng});
-    // EXACT production call (burn_draw_qr): full-width band, bottom strip.
-    uint32_t band_cy = (H > QR_PX/2 + MARGIN) ? (H - QR_PX/2 - MARGIN) : (H/2);
-    burn_qr::render(buf.data(), stride, W, H, p, 0, W, band_cy, QR_PX);
-    FILE *f = fopen(argv[1], "wb");
-    if (!f) return 3;
-    fwrite(buf.data(), 1, buf.size(), f);
-    fclose(f);
-    printf("%s\n", p.c_str());
+    // strih = bottom-left, stream = bottom-right (exactly burn_draw_qr's path).
+    std::string s = burn_payload::encode({sr}, {sf}, {sg});
+    std::string t = burn_payload::encode({tr}, {tf}, {tg});
+    auto bl = burn_geom::corner_placement(W, H, burn_geom::Corner::BottomLeft, BURN_PX, MARGIN);
+    auto br = burn_geom::corner_placement(W, H, burn_geom::Corner::BottomRight, BURN_PX, MARGIN);
+    burn_qr::render(buf.data(), stride, W, H, s, bl.band_x, bl.band_w, bl.band_cy, bl.square_px);
+    burn_qr::render(buf.data(), stride, W, H, t, br.band_x, br.band_w, br.band_cy, br.square_px);
+    FILE *out = fopen(argv[1], "wb");
+    if (!out) return 5;
+    fwrite(buf.data(), 1, n, out);
+    fclose(out);
+    printf("%s\n%s\n", s.c_str(), t.c_str());
     return 0;
 }}
 "#,
         payload = payload_hpp.display(),
         qr = qr_hpp.display(),
+        geom = geom_hpp.display(),
         w = W,
         h = H,
-        qr_px = QR_PX,
+        burn_px = BURN_PX,
         margin = MARGIN,
-        nr = node.0,
-        nf = node.1,
-        ng = node.2,
+        sr = strih.0,
+        sf = strih.1,
+        sg = strih.2,
+        tr = stream.0,
+        tf = stream.1,
+        tg = stream.2,
     );
     std::fs::write(&main_cpp, src).unwrap();
 
@@ -470,27 +607,143 @@ int main(int argc, char **argv) {{
         .expect("g++ must be installed");
     assert!(
         compile.status.success(),
-        "production-geometry render did not compile:\n{}",
-        String::from_utf8_lossy(&compile.stderr)
+        "4-corner render did not compile:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr),
     );
 
     let run = Command::new(&bin)
         .arg(&out_bgra)
         .output()
-        .expect("run prodgeo main");
-    assert!(run.status.success(), "prodgeo renderer exited nonzero");
-    let burned = String::from_utf8(run.stdout).unwrap().trim().to_string();
+        .expect("run 4corner main");
+    assert!(
+        run.status.success(),
+        "4corner renderer exited nonzero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let burned: Vec<String> = String::from_utf8(run.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        burned.len(),
+        2,
+        "expected 2 burned (strih+stream) payload strings"
+    );
 
-    let data = std::fs::read(&out_bgra).unwrap();
-    let luma = bgra_to_luma(&data, W, H, W * 4);
+    // Decode the FULL composited frame and assert all FOUR distinct QRs read back.
+    frame = std::fs::read(&out_bgra).unwrap();
+    let luma = bgra_to_luma(&frame, W, H, W * 4);
     let decoded: Vec<String> = decode_qr_luma_all(luma)
         .iter()
         .map(|p| p.encode())
         .collect();
+
+    let expected = [
+        cam_left.encode(),
+        cam_right.encode(),
+        burned[0].clone(),
+        burned[1].clone(),
+    ];
+    for e in &expected {
+        assert!(
+            decoded.contains(e),
+            "#111: QR {e:?} did NOT decode from the 4-corner composite. Decoded {} of 4: \
+             {decoded:?}. Some QRs overlap — the 4-corner layout is not readable.",
+            decoded.len()
+        );
+    }
     assert!(
-        decoded.contains(&burned),
-        "rqrr did NOT decode the PRODUCTION bottom-strip QR {burned:?}. Decoded: {decoded:?}. \
-         The real filter placement is not readable in a recording."
+        decoded.len() >= 4,
+        "#111: expected >=4 readable QRs in the composite, got {}: {decoded:?}",
+        decoded.len()
+    );
+}
+
+#[test]
+fn burn_geom_corner_from_string_and_tiny_frame_clamp() {
+    // Compile + run a tiny C++ harness over burn-geom.hpp asserting:
+    //   1. corner_from_string parses EVERY documented OBS_BURN_CORNER form correctly —
+    //      especially the long forms "bottom-right"/"bottom-left" (the old per-2nd-char
+    //      parse mapped "bottom-right" to BottomLeft → stream would burn into strih's
+    //      corner and re-collide; the #111 review caught this).
+    //   2. corner_placement does NOT underflow uint32 on a degenerate tiny frame
+    //      (frame < margin + side): band_x/band_cy must clamp to in-frame, not wrap to a
+    //      huge off-frame coordinate.
+    let dir = std::env::temp_dir().join(format!("burn_geom_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_cpp = dir.join("geom_main.cpp");
+    let bin = dir.join("geom_main");
+    let geom_hpp = manifest().join("vendor/distroav/src/burn-geom.hpp");
+
+    let src = format!(
+        r#"
+#include "{geom}"
+#include <cstdint>
+#include <cstdio>
+using burn_geom::Corner;
+using burn_geom::corner_from_string;
+using burn_geom::corner_placement;
+static int fails = 0;
+static void want(const char* s, Corner dflt, Corner exp, const char* label) {{
+    Corner got = corner_from_string(s, dflt);
+    if (got != exp) {{ printf("FAIL %s: corner_from_string(%s) wrong\n", label, s?s:"<null>"); ++fails; }}
+}}
+int main() {{
+    // Long forms (the regression) — independent of the default.
+    want("bottom-right", Corner::BottomLeft, Corner::BottomRight, "bottom-right");
+    want("bottom-left", Corner::BottomRight, Corner::BottomLeft, "bottom-left");
+    want("bottom_right", Corner::BottomLeft, Corner::BottomRight, "bottom_right");
+    want("Bottom-Right", Corner::BottomLeft, Corner::BottomRight, "Bottom-Right(case)");
+    // Short + word forms.
+    want("br", Corner::BottomLeft, Corner::BottomRight, "br");
+    want("bl", Corner::BottomRight, Corner::BottomLeft, "bl");
+    want("right", Corner::BottomLeft, Corner::BottomRight, "right");
+    want("left", Corner::BottomRight, Corner::BottomLeft, "left");
+    want("r", Corner::BottomLeft, Corner::BottomRight, "r");
+    want("l", Corner::BottomRight, Corner::BottomLeft, "l");
+    // Null/empty/garbage → default.
+    want(nullptr, Corner::BottomRight, Corner::BottomRight, "null->dflt");
+    want("", Corner::BottomLeft, Corner::BottomLeft, "empty->dflt");
+    want("xyz", Corner::BottomRight, Corner::BottomRight, "garbage->dflt");
+
+    // Tiny-frame clamp: frame smaller than margin+side must not underflow.
+    auto p = corner_placement(40, 30, Corner::BottomRight, 300, 40);
+    if (p.band_x > 40) {{ printf("FAIL tiny: band_x=%u underflowed\n", p.band_x); ++fails; }}
+    if (p.band_cy > 30) {{ printf("FAIL tiny: band_cy=%u underflowed\n", p.band_cy); ++fails; }}
+    // Production size sanity: BR burn lands flush against the right/bottom margins.
+    auto q = corner_placement(1920, 1080, Corner::BottomRight, 300, 40);
+    if (q.band_x != 1920 - 40 - q.square_px) {{ printf("FAIL prod BR band_x=%u\n", q.band_x); ++fails; }}
+    auto z = corner_placement(1920, 1080, Corner::BottomLeft, 300, 40);
+    if (z.band_x != 40) {{ printf("FAIL prod BL band_x=%u\n", z.band_x); ++fails; }}
+
+    printf("DONE fails=%d\n", fails);
+    return fails == 0 ? 0 : 1;
+}}
+"#,
+        geom = geom_hpp.display(),
+    );
+    std::fs::write(&main_cpp, src).unwrap();
+
+    let compile = Command::new("g++")
+        .args(["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(&main_cpp)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("g++ must be installed");
+    assert!(
+        compile.status.success(),
+        "burn-geom.hpp corner/clamp harness did not compile:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr),
+    );
+    let run = Command::new(&bin).output().expect("run geom harness");
+    assert!(
+        run.status.success(),
+        "#111 corner-parse / tiny-frame-clamp regression:\n{}",
+        String::from_utf8_lossy(&run.stdout)
     );
 }
 
@@ -559,6 +812,21 @@ fn burn_filter_source_is_vendored_and_wired() {
         "{BURN_FILTER}: the OBS_BURN_QR_PX size override is gone — the rig can no longer \
          tune the NDI-survivable QR size. #111 reverted."
     );
+    // (#111 4-corner layout) The burn MUST be placed in this node's bottom CORNER via the
+    // shared corner geometry, NOT the old full-width center-bottom strip — otherwise the
+    // strih + stream burns overlap each other (strih→stream 0 paired frames) and the camera
+    // dual-QR. Guard the corner-placement call + per-node corner resolution.
+    assert!(
+        flt.contains("burn_geom::corner_placement"),
+        "{BURN_FILTER}: the burn no longer uses burn_geom::corner_placement — it would draw \
+         a center-bottom strip that overlaps the other node's burn and the camera QR (the \
+         #111 readability/0-paired-frames bug). #111 4-corner layout reverted."
+    );
+    assert!(
+        flt.contains("OBS_BURN_CORNER") || flt.contains("Corner::BottomRight"),
+        "{BURN_FILTER}: the per-node bottom corner (strih=left, stream=right) is gone — both \
+         nodes would burn into the same corner and overlap. #111 reverted."
+    );
     // It renders the target then draws the QR (the texrender/stage pattern, or a
     // texture overlay) — assert it actually renders the source through, not replaces it.
     assert!(
@@ -575,6 +843,23 @@ fn burn_filter_source_is_vendored_and_wired() {
         "{BURN_FILTER}: the output draw is not sRGB-correct (gs_get_linear_srgb + \
          gs_effect_set_texture_srgb missing) — the burned program video would be \
          color-shifted in the recording (review C1)."
+    );
+}
+
+#[test]
+fn burn_geom_header_is_vendored() {
+    // The #111 4-corner placement geometry must stay vendored + freestanding so the burn
+    // filter and the parity test share ONE tested corner-placement implementation. A
+    // subtree pull (#44) that drops it would revert the no-overlap layout.
+    let geom = squish(&vendor_file("vendor/distroav/src/burn-geom.hpp"));
+    assert!(
+        geom.contains("namespace burn_geom") && geom.contains("corner_placement"),
+        "vendor/distroav/src/burn-geom.hpp: the #111 corner-placement geometry is missing — \
+         the burn would fall back to a center strip that overlaps the other QRs."
+    );
+    assert!(
+        geom.contains("BottomLeft") && geom.contains("BottomRight"),
+        "vendor/distroav/src/burn-geom.hpp: the per-node bottom corners are gone."
     );
 }
 

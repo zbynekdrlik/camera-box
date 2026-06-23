@@ -272,7 +272,17 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   echo "NOTE: recording-fetch-windows.sh not run/failed — place strih/stream recordings at $STRIH_REC / $STREAM_REC manually" >&2
 
 echo "[8/8] recording-verdict over all four nodes + report"
+# #111 per-hop ABSOLUTE latency: pass the node burn run_ids so that WHEN the #111 burn
+# is live on the boxes (OBS_BURN_QR=1 + the "DistroAV QR Burn" filter on the program
+# source, OBS_BURN_RUN_ID=911002 strih / 911004 stream) the verdict decodes the burned
+# render-time stamps and computes cam→strih + strih→stream ABSOLUTE latency. They match
+# the burn filter's defaults, so when the burn is OFF these simply find no burn QR and
+# the latency hops report NO SAMPLES (never a wrong number). Override to a custom
+# OBS_BURN_RUN_ID via BURN_STRIH_RUN_ID / BURN_STREAM_RUN_ID.
+BURN_STRIH_RUN_ID="${BURN_STRIH_RUN_ID:-911002}"
+BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
 VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
+  --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
 [ -f "$STREAM_REC" ]    && VERDICT_ARGS+=(--stream "$STREAM_REC")
 [ -f "$CAM1_MKV" ]      && VERDICT_ARGS+=(--cam1 "$CAM1_MKV")

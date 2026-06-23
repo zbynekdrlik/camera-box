@@ -13,8 +13,12 @@
 	  1. gs_texrender the filter target (the source this filter is attached to).
 	  2. gs_stage_texture + gs_stagesurface_map -> a CPU BGRA copy of the rendered frame.
 	  3. CPU-draw the QR (burn_qr::render, qrcodegen EC-High, white quiet zone) into the
-	     copy at THIS node's QR position (a bottom strip, distinct from cam2's centered QR
-	     so both survive in one recorded frame on the dedicated PROBE scene).
+	     copy at THIS node's BOTTOM CORNER (strih=bottom-left, stream=bottom-right) at
+	     ~300px (burn_geom::corner_placement) — fully clear of the camera dual-QR (top
+	     band) and of the other node's burn, so one stream recording carries all four
+	     readable QRs (camera L/R + strih burn + stream burn), none overlapping (#111
+	     4-corner layout — replaces the old center-bottom ~700px burn that overlapped both
+	     the camera QR and the other node's burn → strih→stream 0 paired frames).
 	  4. Re-upload the composited buffer to a dynamic texture and gs_draw_sprite it as the
 	     filter's output, so the burn flows downstream into the recording.
 	NO libobs core change — this is purely a DistroAV plugin filter.
@@ -42,6 +46,7 @@
 #include "burn-payload.hpp"
 #include "burn-clock.hpp"
 #include "burn-qr.hpp"
+#include "burn-geom.hpp"
 
 #include <graphics/graphics.h>
 #include <util/platform.h>
@@ -77,6 +82,7 @@ struct burn_filter {
 	uint32_t run_id;
 	bool enabled; // OBS_BURN_QR present -> burn; else transparent pass-through
 	uint32_t qr_px;
+	burn_geom::Corner corner; // this node's bottom corner (strih=left, stream=right)
 
 	// Per-render monotonic frame counter.
 	uint32_t frame_id;
@@ -104,8 +110,10 @@ static bool resolve_enabled()
 	return env && *env;
 }
 
-// Desired QR pixel size; OBS_BURN_QR_PX overrides (default 700, the rig's NDI-survivable
-// size). Clamped to a sane range so a bad env can't blow up the buffer math.
+// Desired burn QR pixel size; OBS_BURN_QR_PX overrides (default 300 — SMALLER than the
+// camera dual-QR's ~700px so the two bottom-corner burns sit fully clear of the camera QRs
+// (top band) and of each other, the #111 4-corner no-overlap layout). Clamped to a sane
+// range so a bad env can't blow up the buffer math.
 static uint32_t resolve_qr_px()
 {
 	const char *env = getenv("OBS_BURN_QR_PX");
@@ -115,7 +123,20 @@ static uint32_t resolve_qr_px()
 		if (end && *end == '\0' && v >= 64 && v <= 4096)
 			return (uint32_t)v;
 	}
-	return 700u;
+	return 300u;
+}
+
+// This node's bottom corner. OBS_BURN_CORNER overrides (parsed by burn_geom::corner_from_string,
+// which matches every documented form by substring); otherwise it defaults FROM the run_id
+// (stream default run_id → bottom-right, strih default + any custom run_id → bottom-left) so
+// the existing per-node env (OBS_BURN_RUN_ID) keeps the corners distinct with no new env on
+// the boxes.
+static burn_geom::Corner resolve_corner(uint32_t run_id)
+{
+	const burn_geom::Corner dflt = (run_id == BURN_RUN_ID_DEFAULT_STREAM)
+					       ? burn_geom::Corner::BottomRight
+					       : burn_geom::Corner::BottomLeft;
+	return burn_geom::corner_from_string(getenv("OBS_BURN_CORNER"), dflt);
 }
 
 static const char *burn_filter_getname(void *)
@@ -137,12 +158,14 @@ static void *burn_filter_create(obs_data_t *, obs_source_t *source)
 	f->run_id = resolve_run_id();
 	f->enabled = resolve_enabled();
 	f->qr_px = resolve_qr_px();
+	f->corner = resolve_corner(f->run_id);
 	f->frame_id = 0;
 
 	obs_log(LOG_INFO,
-		"[burn] filter created: enabled=%s run_id=%u qr_px=%u (env OBS_BURN_QR=%s, "
-		"OBS_BURN_RUN_ID default %u/%u strih/stream)",
+		"[burn] filter created: enabled=%s run_id=%u qr_px=%u corner=%s (env OBS_BURN_QR=%s, "
+		"OBS_BURN_RUN_ID default %u/%u strih/stream → bottom-left/bottom-right)",
 		f->enabled ? "yes" : "no(pass-through)", f->run_id, f->qr_px,
+		f->corner == burn_geom::Corner::BottomRight ? "bottom-right" : "bottom-left",
 		f->enabled ? "set" : "unset", BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM);
 	return f;
 }
@@ -220,8 +243,10 @@ static bool burn_ensure_size(burn_filter *f, uint32_t width, uint32_t height)
 	return true;
 }
 
-// Burn THIS node's QR into the CPU buffer `buf` (BGRA, w x h, stride w*4) at a bottom
-// strip — distinct from cam2's centered QR so both survive in one recorded frame.
+// Burn THIS node's QR into the CPU buffer `buf` (BGRA, w x h, stride w*4) at THIS node's
+// bottom corner (strih=bottom-left, stream=bottom-right) at ~300px — fully clear of the
+// camera dual-QR (top band) and of the other node's burn (the other bottom corner), the
+// #111 4-corner no-overlap layout, so one stream recording carries all four readable QRs.
 static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t w, uint32_t h)
 {
 	const double fps = []() {
@@ -235,14 +260,19 @@ static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t w, uint32_t h)
 	const int64_t gen_ts_ns = burn_clock::gen_ts_ns(fps);
 	const std::string payload = burn_payload::encode(f->run_id, fid, gen_ts_ns);
 
-	// Bottom strip: vertically centered at h - qr_px/2 - margin, horizontally centered.
+	// Place the burn in this node's bottom corner with 40px edge clearance.
 	const uint32_t margin = 40;
-	uint32_t band_cy = (h > f->qr_px / 2 + margin) ? (h - f->qr_px / 2 - margin) : (h / 2);
-	burn_qr::render(buf, w * 4, w, h, payload, 0, w, band_cy, f->qr_px);
+	const burn_geom::Placement pl =
+		burn_geom::corner_placement(w, h, f->corner, f->qr_px, margin);
+	burn_qr::render(buf, w * 4, w, h, payload, pl.band_x, pl.band_w, pl.band_cy, pl.square_px);
 
 	if ((fid % 300u) == 0u) // throttled: one log line / ~10s @ 30fps
-		obs_log(LOG_INFO, "[burn] burned QR run_id=%u frame_id=%u gen_ts_ns=%lld (%.3f fps)",
-			f->run_id, fid, (long long)gen_ts_ns, fps);
+		obs_log(LOG_INFO,
+			"[burn] burned QR run_id=%u frame_id=%u gen_ts_ns=%lld corner=%s "
+			"band_x=%u band_cy=%u px=%u (%.3f fps)",
+			f->run_id, fid, (long long)gen_ts_ns,
+			f->corner == burn_geom::Corner::BottomRight ? "BR" : "BL", pl.band_x,
+			pl.band_cy, pl.square_px, fps);
 }
 
 static void burn_filter_videorender(void *data, gs_effect_t *)

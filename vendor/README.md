@@ -175,11 +175,18 @@ off the live-event window (the user controls when). Steps:
    `drift-guard --check-pins` must show NO DRIFT.
 3. **PROBE scene + enable:** on a DEDICATED probe scene (NOT a production scene), add the
    "DistroAV QR Burn (latency probe)" filter to the node's program source. Launch that
-   OBS with `OBS_BURN_QR=1` and `OBS_BURN_RUN_ID=911002` (strih) / `911004` (stream)
-   (optionally `OBS_BURN_QR_PX=700`). The node QR renders in a BOTTOM strip; cam2's QR
-   rides through CENTERED, so both survive in one recorded frame. RECORD the probe scene's
-   program output; #108 decodes the burned + ridden-through stamps and computes per-hop
-   latency.
+   OBS with `OBS_BURN_QR=1` and `OBS_BURN_RUN_ID=911002` (strih) / `911004` (stream).
+   The #111 4-corner layout (do NOT override the size up to 700 — that re-overlaps the
+   camera QR): each node's burn renders ~300px (`OBS_BURN_QR_PX` default 300) in its BOTTOM
+   CORNER — **strih → bottom-LEFT, stream → bottom-RIGHT** — while cam2's dual-QR rides
+   through in the **TOP** band. All four QRs (cam2 left/right + strih burn + stream burn)
+   then sit in the recorded frame WITHOUT overlapping, so one stream recording carries every
+   stamp. The corner derives from the standard run_ids above (911004 → bottom-right, else →
+   bottom-left); if you use a CUSTOM `OBS_BURN_RUN_ID`, you MUST also set `OBS_BURN_CORNER`
+   (`bottom-left` / `bottom-right`) per node, or both burns default to bottom-left and
+   re-collide. RECORD the probe scene's program output; #108 decodes the burned +
+   ridden-through stamps and computes per-hop latency. (Layout assumes the production
+   1920×1080 strih/stream OBS program canvas.)
 4. **Disable after the probe run:** unset `OBS_BURN_QR` (or remove the filter) and relaunch
    so the production install is unaffected. The filter is inert by default regardless.
 

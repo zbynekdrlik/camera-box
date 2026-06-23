@@ -333,6 +333,16 @@ jobs:
           if ($flt -notmatch [regex]::Escape('OBS_BURN_QR_PX')) {
             Write-Error "ndi-burn-filter.cpp: the OBS_BURN_QR_PX size override is gone — the rig can no longer tune the NDI-survivable QR size (#111 reverted)"; exit 1
           }
+          # #111 4-corner layout: the burn MUST be placed in this node's bottom CORNER via the
+          # shared corner geometry (strih=bottom-left, stream=bottom-right), NOT a center-bottom
+          # strip — otherwise the strih + stream burns overlap each other (strih->stream 0 paired
+          # frames) and the camera dual-QR. Lock-step with tests/burn_payload_parity.rs.
+          if ($flt -notmatch [regex]::Escape('burn_geom::corner_placement')) {
+            Write-Error "ndi-burn-filter.cpp: the burn no longer uses burn_geom::corner_placement — it would draw a center-bottom strip that overlaps the other node's burn and the camera QR (the #111 readability/0-paired-frames bug)"; exit 1
+          }
+          if (!(Test-Path "vendor/distroav/src/burn-geom.hpp")) {
+            Write-Error "vendor/distroav/src/burn-geom.hpp missing — the #111 4-corner placement geometry was dropped; the burn would fall back to a center strip that overlaps the other QRs"; exit 1
+          }
           $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
           if ($pm -notmatch [regex]::Escape('create_ndi_burn_filter_info')) {
             Write-Error "plugin-main.cpp: the burn filter is not registered (create_ndi_burn_filter_info) — OBS would not expose it (#111 reverted)"; exit 1
@@ -347,7 +357,7 @@ jobs:
           if (!(Test-Path "vendor/distroav/src/qrcodegen/qrcodegen.hpp")) {
             Write-Error "vendor/distroav/src/qrcodegen/qrcodegen.hpp missing — the vendored QR encoder (Nayuki, MIT) was dropped (#111 reverted)"; exit 1
           }
-          Write-Output "QR render-time burn filter present (burn_payload::encode + gen_ts_ns + OBS_BURN_RUN_ID + OBS_BURN_QR gate + registered + CMake-wired + vendored qrcodegen) — OK"
+          Write-Output "QR render-time burn filter present (burn_payload::encode + gen_ts_ns + OBS_BURN_RUN_ID + OBS_BURN_QR gate + 4-corner burn_geom::corner_placement + registered + CMake-wired + vendored qrcodegen) — OK"
 
       # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)
