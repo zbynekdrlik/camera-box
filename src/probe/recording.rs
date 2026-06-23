@@ -34,6 +34,19 @@ use image::GrayImage;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+/// Upper bound on decode worker threads. The rqrr per-frame decode is the
+/// CPU-bound bottleneck; beyond ~8 threads the ffmpeg I/O producer (one
+/// sequential gray8 pipe) becomes the limit and more workers just contend.
+const MAX_DECODE_WORKERS: usize = 8;
+
+/// Default cap on how many flagged frames get a pixel-proof PNG written. The
+/// verdict only needs a handful of visual examples per category; extracting a
+/// PNG for thousands of flagged frames was a large slice of the #166 runtime
+/// (re-stream + per-frame PNG encode) and is never needed to read the verdict.
+/// The count of frames *dropped* by the cap is logged so nothing is hidden.
+pub const DEFAULT_MAX_PIXEL_PROOF: usize = 30;
 
 /// One analyzed frame of a recording, in file (capture) order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,27 +195,145 @@ fn read_frames(
     Ok(frame_index)
 }
 
+/// Number of decode worker threads to use (= available CPUs, clamped to
+/// `1..=MAX_DECODE_WORKERS`). Mirrors the #160 spool-decode pool sizing.
+///
+/// `CAMERA_BOX_DECODE_WORKERS` overrides the auto value (still clamped to the
+/// `1..=MAX_DECODE_WORKERS` range) — useful to pin a count on a shared runner or
+/// to A/B the speedup (`=1` reproduces the prior single-threaded loop). A
+/// non-numeric or zero value is ignored (falls back to auto).
+fn decode_workers() -> usize {
+    if let Ok(v) = std::env::var("CAMERA_BOX_DECODE_WORKERS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            if n >= 1 {
+                return n.clamp(1, MAX_DECODE_WORKERS);
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, MAX_DECODE_WORKERS)
+}
+
+/// Decode an ffmpeg-produced gray8 frame stream into `RecordingFrame`s **across a
+/// pool of CPU threads**, returning them in capture (`frame_index`) order.
+///
+/// `produce` is the I/O producer (e.g. [`read_frames`]): it calls the supplied
+/// `emit(frame_index, luma)` once per native-resolution gray8 frame, in order,
+/// and returns the total frame count. This function fans each raw luma frame out
+/// to `workers` decode threads (the rqrr decode — `width*height` luma + detect —
+/// is the ~60 ms/frame bottleneck and embarrassingly parallel: #160 proved this
+/// for the spool path), then re-sorts the results by `frame_index` so the output
+/// is byte-for-byte identical to the prior single-threaded loop.
+///
+/// A bounded job channel (`workers * 2`) caps the number of in-flight
+/// undecoded frames so a 9000-frame / 7+ GB recording never materialises every
+/// frame in RAM at once.
+fn decode_stream_parallel(
+    workers: usize,
+    produce: impl FnOnce(&mut dyn FnMut(u64, GrayImage)) -> Result<u64>,
+) -> Result<Vec<RecordingFrame>> {
+    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u64, GrayImage)>(workers * 2);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<RecordingFrame>();
+
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let job_rx = job_rx.clone();
+        let res_tx = res_tx.clone();
+        handles.push(std::thread::spawn(move || loop {
+            // Lock only to pull the next job; release before the heavy decode so
+            // workers don't serialise on the mutex (the #160 pattern).
+            let job = {
+                let rx = job_rx.lock().unwrap();
+                rx.recv()
+            };
+            let Ok((idx, luma)) = job else { break };
+            let f = decode_recording_frame(idx, luma);
+            tracing::debug!(
+                frame = f.frame_index, decoded = f.payloads.len(), tick = ?f.tick,
+                "recording frame analyzed"
+            );
+            // A closed result channel means the collector is gone — stop.
+            if res_tx.send(f).is_err() {
+                break;
+            }
+        }));
+    }
+    drop(res_tx); // only the workers' clones remain; res_rx ends when all exit
+
+    // Collector: drain decoded frames as they complete (out of order) so workers
+    // never block on a full result queue. Runs on its own thread concurrently
+    // with the producer below.
+    let collector = std::thread::spawn(move || {
+        let mut out: Vec<RecordingFrame> = Vec::new();
+        while let Ok(f) = res_rx.recv() {
+            out.push(f);
+        }
+        out
+    });
+
+    // Producer: sequential ffmpeg I/O on THIS thread, feeding the worker pool.
+    // A producer error still drops job_tx (closing the workers) before we
+    // propagate it, so no thread leaks.
+    let produce_result = produce(&mut |idx, luma| {
+        // If all workers have exited (e.g. collector dropped), send fails — we
+        // surface that as the producer ending early on the next read.
+        let _ = job_tx.send((idx, luma));
+    });
+    drop(job_tx); // signal end-of-jobs → workers exit → collector finishes
+
+    for h in handles {
+        // A worker panic (e.g. a bug in decode) must fail the analysis loudly,
+        // not silently drop frames.
+        h.join()
+            .map_err(|_| anyhow::anyhow!("recording decode worker panicked"))?;
+    }
+    let mut frames = collector
+        .join()
+        .map_err(|_| anyhow::anyhow!("recording decode collector panicked"))?;
+
+    // Surface a producer (ffmpeg/ffprobe) error after the threads are cleaned up.
+    let total = produce_result?;
+
+    // Re-establish capture order: results arrive in completion order across N
+    // workers, so sort by frame_index to match the single-threaded output exactly.
+    frames.sort_unstable_by_key(|f| f.frame_index);
+    anyhow::ensure!(
+        frames.len() as u64 == total,
+        "parallel decode produced {} frames but the producer emitted {} \
+         (a worker dropped frames)",
+        frames.len(),
+        total
+    );
+    Ok(frames)
+}
+
 /// Analyze a recorded OBS program-output file end-to-end: probe its native
 /// resolution, stream every frame as gray8 luma via ffmpeg, decode each with the
-/// rqrr decoder, and return one [`RecordingFrame`] per frame in capture order.
+/// rqrr decoder **across all CPU cores**, and return one [`RecordingFrame`] per
+/// frame in capture order.
 ///
 /// This is the recorded-file analysis entrypoint (#106). It NEVER uses an NDI tap
 /// or the lz4 spool — the loss/delivery verdict (#105 acceptance #1, computed
 /// downstream in #107) must be derived only from the recorded file.
+///
+/// #166: the per-frame rqrr decode is parallelized over a worker pool (mirroring
+/// the #160 spool-decode parallelization). A 7+ GB lossless gray8 cam1 grab that
+/// previously took >1 h single-threaded now decodes in minutes; the output order
+/// is identical to the prior serial loop (results are re-sorted by frame_index).
 pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
-    let mut frames = Vec::new();
-    read_frames(path, width, height, |idx, luma| {
-        let f = decode_recording_frame(idx, luma);
-        tracing::debug!(
-            frame = f.frame_index, decoded = f.payloads.len(), tick = ?f.tick,
-            "recording frame analyzed"
-        );
-        frames.push(f);
-    })?;
+    let workers = decode_workers();
+    tracing::info!(
+        file = %path.display(), width, height, workers,
+        "recording analysis start (parallel decode)"
+    );
+    let frames = decode_stream_parallel(workers, |emit| read_frames(path, width, height, emit))?;
     let decoded: usize = frames.iter().filter(|f| !f.payloads.is_empty()).count();
     tracing::info!(
-        file = %path.display(), total = frames.len(), with_qr = decoded,
+        file = %path.display(), total = frames.len(), with_qr = decoded, workers,
         "recording analysis complete"
     );
     Ok(frames)
@@ -224,27 +355,69 @@ pub struct ExtractedFrame {
     pub sharp_qr_but_flagged_undecodable: bool,
 }
 
-/// Extract pixel proof for the frames the #107 verdict flagged. Re-streams the
-/// recording (the per-frame decode is not retained in memory at scale) and, for
-/// each `frame_index` in `flagged`, writes its native-resolution luma as a PNG into
-/// `out_dir` (`frame-<index>.png`). For frames in `undecodable` it also re-decodes
-/// the extracted pixels: a CRC-valid QR there means a SHARP code was wrongly counted
-/// undecodable — a decoder regression, flagged on the returned [`ExtractedFrame`].
+/// Decide which flagged frames get a pixel-proof PNG, capped at `max_extract`.
+///
+/// PURE (no I/O) so the cap policy is unit-testable: returns the **sorted** subset
+/// of `flagged` (deduped) to extract — the first `max_extract` by frame index —
+/// and how many were `dropped` by the cap. `max_extract == 0` means "no cap"
+/// (extract all). Capping keeps the verdict fast (#166): thousands of PNGs were a
+/// large slice of the runtime and the verdict needs only a handful of examples.
+pub fn select_frames_to_extract(flagged: &[u64], max_extract: usize) -> (Vec<u64>, usize) {
+    let mut want: Vec<u64> = flagged.to_vec();
+    want.sort_unstable();
+    want.dedup();
+    if max_extract == 0 || want.len() <= max_extract {
+        return (want, 0);
+    }
+    let dropped = want.len() - max_extract;
+    want.truncate(max_extract);
+    (want, dropped)
+}
+
+/// Extract pixel proof for the frames the #107 verdict flagged, capped at
+/// `max_extract` PNGs (the first `max_extract` flagged frames by index; `0` =
+/// no cap). Re-streams the recording (the per-frame decode is not retained in
+/// memory at scale) and, for each selected `frame_index`, writes its
+/// native-resolution luma as a PNG into `out_dir` (`frame-<index>.png`). For
+/// frames in `undecodable` it also re-decodes the extracted pixels: a CRC-valid
+/// QR there means a SHARP code was wrongly counted undecodable — a decoder
+/// regression, flagged on the returned [`ExtractedFrame`].
+///
+/// #166: the cap stops the extraction from writing thousands of PNGs (a big slice
+/// of the runtime); the number of flagged frames *dropped* by the cap is logged so
+/// nothing is silently hidden. The verdict's own counts (undecodable / copy / gap)
+/// remain complete — only the *visual proof* is sampled.
 ///
 /// This is the I/O glue (ffmpeg/image), excluded from coverage like the rest of the
 /// recording process boundary; the verdict ENGINE that decides which frames are
-/// flagged is the pure, unit-tested `recording_verdict` module.
+/// flagged is the pure, unit-tested `recording_verdict` module, and the cap policy
+/// is the pure, unit-tested [`select_frames_to_extract`].
 pub fn extract_frames_png(
     path: &Path,
     flagged: &[u64],
     undecodable: &std::collections::HashSet<u64>,
     out_dir: &Path,
+    max_extract: usize,
 ) -> Result<Vec<ExtractedFrame>> {
     use std::collections::HashSet;
-    let want: HashSet<u64> = flagged.iter().copied().collect();
+    let (selected, dropped) = select_frames_to_extract(flagged, max_extract);
+    let want: HashSet<u64> = selected.iter().copied().collect();
     if want.is_empty() {
         tracing::info!("extract_frames_png: no flagged frames — nothing to extract");
         return Ok(Vec::new());
+    }
+    if dropped > 0 {
+        tracing::warn!(
+            extracting = want.len(),
+            cap = max_extract,
+            dropped,
+            flagged_total = flagged.len(),
+            "pixel-proof PNG extraction CAPPED — extracting the first {} of {} flagged frames \
+             ({} not extracted; the verdict counts remain complete, only the visual proof is sampled)",
+            want.len(),
+            flagged.len(),
+            dropped
+        );
     }
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("create PNG output dir {}", out_dir.display()))?;
@@ -290,6 +463,8 @@ pub fn extract_frames_png(
     tracing::info!(
         extracted = extracted.len(),
         requested = want.len(),
+        flagged_total = flagged.len(),
+        capped_dropped = dropped,
         out_dir = %out_dir.display(),
         "pixel-proof extraction complete"
     );
@@ -351,5 +526,106 @@ mod tests {
         let a = decode_recording_frame(0, dual_qr_luma(10, 11));
         let b = decode_recording_frame(0, dual_qr_luma(10, 11));
         assert_eq!(a, b);
+    }
+
+    // ---- #166: parallel decode (order-preserving across the worker pool) ----
+
+    #[test]
+    fn parallel_decode_preserves_capture_order_and_decodes_every_frame() {
+        // The parallel decoder fans frames across N workers that complete OUT of
+        // order, then re-sorts by frame_index. With >1 worker, a sequence of real
+        // dual-QR frames must come back in EXACT capture order with EVERY frame
+        // decoded — proving the reorder logic, not just that it ran. (The single
+        // -threaded loop trivially preserved order; this is the regression guard
+        // that the parallelization did not corrupt it.)
+        let n: u64 = 60;
+        let frames = decode_stream_parallel(4, |emit| {
+            for i in 0..n {
+                // left = even tick 2i, right = odd tick 2i+1 → tick = 2i+1, unique
+                // per frame so an order bug is detectable.
+                emit(i, dual_qr_luma(2 * i as u32, 2 * i as u32 + 1));
+            }
+            Ok(n)
+        })
+        .expect("parallel decode");
+
+        assert_eq!(frames.len() as u64, n, "every frame returned");
+        for (i, f) in frames.iter().enumerate() {
+            assert_eq!(f.frame_index, i as u64, "frames in capture order at {i}");
+            assert_eq!(
+                f.tick,
+                Some(2 * i as u32 + 1),
+                "frame {i} decoded its own ticks"
+            );
+            assert_eq!(f.payloads.len(), 2, "both QRs decoded for frame {i}");
+        }
+    }
+
+    #[test]
+    fn parallel_decode_matches_single_threaded_result_exactly() {
+        // Byte-for-byte equivalence with the serial reference for the SAME input —
+        // the parallelization must not change the decode result, only its speed.
+        let n: u64 = 24;
+        let make = |i: u64| dual_qr_luma(7 * i as u32, 7 * i as u32 + 1);
+
+        let serial: Vec<RecordingFrame> =
+            (0..n).map(|i| decode_recording_frame(i, make(i))).collect();
+
+        // workers=1 and workers=4 must both equal the serial reference.
+        for w in [1usize, 4] {
+            let par = decode_stream_parallel(w, |emit| {
+                for i in 0..n {
+                    emit(i, make(i));
+                }
+                Ok(n)
+            })
+            .unwrap();
+            assert_eq!(par, serial, "parallel (workers={w}) == single-threaded");
+        }
+    }
+
+    #[test]
+    fn parallel_decode_propagates_producer_error() {
+        // A producer (ffmpeg/ffprobe) error must surface as an Err, not a silent
+        // short read — otherwise a truncated decode could be read as "0 loss".
+        let r = decode_stream_parallel(4, |emit| {
+            emit(0, dual_qr_luma(0, 1));
+            anyhow::bail!("simulated ffmpeg failure");
+        });
+        assert!(r.is_err(), "producer error propagates");
+    }
+
+    // ---- #166: pixel-proof PNG cap (pure policy) ----
+
+    #[test]
+    fn select_frames_caps_to_first_n_and_reports_dropped() {
+        let flagged: Vec<u64> = (0..100).collect();
+        let (sel, dropped) = select_frames_to_extract(&flagged, 30);
+        assert_eq!(sel.len(), 30, "capped to N");
+        assert_eq!(sel, (0..30).collect::<Vec<u64>>(), "first N by index");
+        assert_eq!(dropped, 70, "dropped count = total - N");
+    }
+
+    #[test]
+    fn select_frames_no_cap_when_under_limit_or_zero() {
+        let flagged = vec![5u64, 1, 9, 3];
+        // Under the limit: all kept (sorted, deduped), 0 dropped.
+        let (sel, dropped) = select_frames_to_extract(&flagged, 30);
+        assert_eq!(sel, vec![1, 3, 5, 9]);
+        assert_eq!(dropped, 0);
+        // max=0 means "no cap": all kept even when large.
+        let big: Vec<u64> = (0..500).collect();
+        let (sel0, dropped0) = select_frames_to_extract(&big, 0);
+        assert_eq!(sel0.len(), 500);
+        assert_eq!(dropped0, 0);
+    }
+
+    #[test]
+    fn select_frames_dedups_before_capping() {
+        // Duplicate flagged indices must not consume cap slots twice.
+        let flagged = vec![1u64, 1, 2, 2, 3, 3, 4, 4];
+        let (sel, dropped) = select_frames_to_extract(&flagged, 3);
+        assert_eq!(sel, vec![1, 2, 3]);
+        assert_eq!(dropped, 1, "4 unique - 3 cap = 1 dropped");
     }
 }

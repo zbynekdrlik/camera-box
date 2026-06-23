@@ -24,7 +24,10 @@
 //! Exit code: 0 on PASS for every verdict, non-zero on ANY fail.
 
 use anyhow::{Context, Result};
-use camera_box::probe::recording::{analyze_recording, extract_frames_png, RecordingFrame};
+use camera_box::probe::recording::{
+    analyze_recording, extract_frames_png, select_frames_to_extract, RecordingFrame,
+    DEFAULT_MAX_PIXEL_PROOF,
+};
 use camera_box::probe::recording_4node::{cam1_optical_assessment, cam1_strih_verdict};
 use camera_box::probe::recording_latency::{
     cam2_cam1_samples, cam_strih_samples, hop_latency, strih_stream_samples, HopLatency, RunIds,
@@ -65,6 +68,11 @@ struct Args {
     /// Minimum analyzed span (s) before a zero-loss PASS may be declared.
     #[arg(long, default_value_t = 300.0)]
     min_secs: f64,
+    /// Cap on pixel-proof PNGs written per recording (the first N flagged frames by
+    /// index). The verdict needs only a handful of visual examples; extracting
+    /// thousands of PNGs was a large slice of the runtime (#166). `0` = no cap.
+    #[arg(long, default_value_t = DEFAULT_MAX_PIXEL_PROOF)]
+    max_pixel_proof: usize,
     /// Camera capture fps (for the duration gate).
     #[arg(long, default_value_t = 30.0)]
     capture_fps: f64,
@@ -228,6 +236,7 @@ fn report_recording(
     path: &Path,
     v: &RecordingVerdict,
     out_dir: &Path,
+    max_pixel_proof: usize,
 ) -> Result<bool> {
     println!("=== {label} verdict ({}) ===", path.display());
     println!(
@@ -261,7 +270,19 @@ fn report_recording(
 
     if !flagged.is_empty() {
         let png_dir = out_dir.join(label);
-        let extracted = extract_frames_png(path, &flagged, &undecodable, &png_dir)?;
+        let (_selected, dropped) = select_frames_to_extract(&flagged, max_pixel_proof);
+        if dropped > 0 {
+            println!(
+                "  PIXEL-PROOF CAP: {} flagged frames, extracting only the first {} PNGs ({} not \
+                 extracted — verdict counts above are COMPLETE; raise --max-pixel-proof or pass 0 \
+                 for all)",
+                flagged.len(),
+                flagged.len() - dropped,
+                dropped
+            );
+        }
+        let extracted =
+            extract_frames_png(path, &flagged, &undecodable, &png_dir, max_pixel_proof)?;
         for e in &extracted {
             if e.sharp_qr_but_flagged_undecodable {
                 println!(
@@ -345,7 +366,13 @@ fn main() -> Result<()> {
     // #108 per-hop latency engine can read each frame's cam2 + node-burn gen_ts_ns.
     let (strih_frames, strih_ticks) = ticks_of(&args.strih)?;
     let strih_v = verdict(&strih_ticks, &cfg);
-    all_pass &= report_recording("strih", &args.strih, &strih_v, &args.out_dir)?;
+    all_pass &= report_recording(
+        "strih",
+        &args.strih,
+        &strih_v,
+        &args.out_dir,
+        args.max_pixel_proof,
+    )?;
     report["nodes"]["strih"] = serde_json::json!({
         "pass": strih_v.is_pass(), "frames": strih_v.total_frames,
         "analyzed_secs": strih_v.analyzed_secs, "undecodable": strih_v.undecodable_frames.len(),
@@ -357,7 +384,13 @@ fn main() -> Result<()> {
     if let Some(stream_path) = &args.stream {
         let (stream_frames, stream_ticks) = ticks_of(stream_path)?;
         let stream_v = verdict(&stream_ticks, &cfg);
-        all_pass &= report_recording("stream", stream_path, &stream_v, &args.out_dir)?;
+        all_pass &= report_recording(
+            "stream",
+            stream_path,
+            &stream_v,
+            &args.out_dir,
+            args.max_pixel_proof,
+        )?;
 
         let ss = strih_stream_verdict(&strih_ticks, &stream_ticks, &cfg);
         println!("=== strih→stream hop verdict (direct tick-SEQUENCE compare, offset-immune) ===");
@@ -400,7 +433,13 @@ fn main() -> Result<()> {
 
         // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
         let cam1_v = verdict(&cam1_ticks, &cfg);
-        all_pass &= report_recording("cam1", cam1_path, &cam1_v, &args.out_dir)?;
+        all_pass &= report_recording(
+            "cam1",
+            cam1_path,
+            &cam1_v,
+            &args.out_dir,
+            args.max_pixel_proof,
+        )?;
         report["nodes"]["cam1"] = serde_json::json!({
             "pass": cam1_v.is_pass(), "frames": cam1_v.total_frames,
             "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
