@@ -197,6 +197,8 @@ fn read_frames(
     // On an early abort we killed ffmpeg, so its exit status is a signal, not a
     // clean 0 — do not treat that as a decode failure (the abort is the real
     // cause, surfaced by the caller). Reap the child and return the partial count.
+    // (ffmpeg may print a harmless "Error writing trailer"/SIGPIPE line to the
+    // inherited stderr on kill — expected noise on this rare abort path, not a fault.)
     if aborted {
         let _ = child.wait();
         return Ok(frame_index);

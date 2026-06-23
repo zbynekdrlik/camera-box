@@ -333,14 +333,23 @@ fn stall_kill_takes_down_the_child_decode_not_just_the_wrapper() {
     let (code, _stdout, stderr) = run_monitor(pid, &output, &marker, "2", "1");
     assert_eq!(code, 124, "STALL exit code\n{stderr}");
 
-    // Give the kill a moment to propagate, then assert NO process carries the tag.
-    std::thread::sleep(Duration::from_millis(500));
-    let survivors = Command::new("pgrep")
-        .args(["-f", &tag])
-        .output()
-        .expect("pgrep");
-    let out = String::from_utf8_lossy(&survivors.stdout);
-    let live: Vec<&str> = out.split_whitespace().collect();
+    // POLL (up to ~2s) for the tagged process to disappear rather than a single fixed
+    // sleep — on a loaded CI runner the KILL+reap can take longer than a flat 500ms,
+    // which would make this assertion flaky (deep-review I2). The group-kill is
+    // correct; we just give it bounded time to take effect.
+    let mut live: Vec<String> = Vec::new();
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        let survivors = Command::new("pgrep")
+            .args(["-f", &tag])
+            .output()
+            .expect("pgrep");
+        let out = String::from_utf8_lossy(&survivors.stdout);
+        live = out.split_whitespace().map(String::from).collect();
+        if live.is_empty() {
+            break;
+        }
+    }
     assert!(
         live.is_empty(),
         "STALL must group-kill the wrapper AND its child — orphans survived: {live:?}\n{stderr}"
