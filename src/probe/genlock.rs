@@ -462,12 +462,18 @@ pub fn is_wallclock_ts(ts_ns: u64) -> bool {
 /// queue to a momentary high depth BETWEEN two render ticks and have it drained back down
 /// before the next tick observes it — so the consumer-side-only peak UNDER-reports the true
 /// high-water mark. The fix (#99) is to also fold the depth the producer reaches into the
-/// peak, at the push site, under the same `async_mutex`. Both sites call THIS pure function so
-/// the "peak = max so far" rule lives in one tested place and the C side mirrors it exactly.
+/// peak, at the push site, under the same `async_mutex`.
 ///
-/// Pure `max`; saturating is unnecessary (a `u32` max of two `u32`s cannot overflow), but the
-/// monotone-non-decreasing invariant (the return is never below `current_peak`) is what the
-/// callers rely on.
+/// This is the camera-box-side REFERENCE for that "peak = max so far" rule — the same mirror
+/// pattern as [`genlock_decide`] / [`steady_state_depth`]: the C does the update INLINE at both
+/// sites (`if (depth > genlock_peak_depth) genlock_peak_depth = depth;` — the render path can't
+/// call into Rust), and the `tests/genlock_preload.rs` vendored-source guard asserts that inline
+/// update exists on BOTH the producer and consumer paths so an upstream subtree merge can't drop
+/// it. This pure fn pins the rule itself (a monotone non-decreasing max) under unit test, so the
+/// reference the C is checked against is itself provably correct.
+///
+/// Pure `max`; saturating is unnecessary (a `u32` max of two `u32`s cannot overflow). The
+/// invariant: the return is never below `current_peak`.
 pub fn genlock_peak_update(current_peak: u32, observed_depth: u32) -> u32 {
     current_peak.max(observed_depth)
 }

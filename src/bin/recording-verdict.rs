@@ -1105,24 +1105,34 @@ fn main() -> Result<()> {
         // when there is no --strih (the cam1-only / stream-only mode) — then it is the best
         // available source, with the softening caveat. strih/stream nodes always read from the
         // stream recording (the only recording carrying their own burn co-located with cam2).
-        let cam1_source: &[RecordingFrame] = match &strih_data {
-            Some((strih_frames, _)) => strih_frames,
-            None => stream_frames,
-        };
-        let cam1_rec_path: &Path = match (&args.strih, &strih_data) {
-            (Some(p), Some(_)) => p.as_path(),
-            // no --strih ⇒ cam1 falls back to the stream recording for both frames and pixels
-            _ => args
-                .stream
-                .as_ref()
-                .expect("stream_frames_opt is Some ⇒ --stream was provided")
-                .as_path(),
-        };
-        let cam1_source_label = if strih_data.is_some() {
-            "strih 1080p recording (clean, #133)"
-        } else {
-            "stream recording (no --strih; softened, may over-count — #133)"
-        };
+        // The stream recording path is the same for every site in this block (the enclosing
+        // `if let Some(stream_frames)` is only entered when --stream was provided). Unwrap the
+        // invariant ONCE.
+        let stream_path: &Path = args
+            .stream
+            .as_ref()
+            .expect("stream_frames_opt is Some ⇒ --stream was provided")
+            .as_path();
+        // cam1's source frames, its pixel-proof recording path, AND its label are decided by
+        // ONE match on strih_data, so they can never desync (a future change to how strih_data
+        // is built can't leave cam1 reading strih frames while extracting pixels from the stream
+        // file). When --strih is present strih_data is Some AND args.strih is Some, so the strih
+        // path is always available on that arm.
+        let (cam1_source, cam1_rec_path, cam1_source_label): (&[RecordingFrame], &Path, &str) =
+            match (&strih_data, &args.strih) {
+                (Some((strih_frames, _)), Some(strih_path)) => (
+                    strih_frames,
+                    strih_path.as_path(),
+                    "strih 1080p recording (clean, #133)",
+                ),
+                // no --strih (or strih decode unavailable) ⇒ cam1 falls back to the stream
+                // recording for BOTH frames and pixel proof, labelled as the softened source.
+                _ => (
+                    stream_frames,
+                    stream_path,
+                    "stream recording (no --strih; softened, may over-count — #133)",
+                ),
+            };
         let cam1_ids = burn_ids_in(cam1_source, args.burn_cam1_run_id);
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
@@ -1164,11 +1174,8 @@ fn main() -> Result<()> {
                 "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
             );
             let mut node_verdicts: Vec<NodeVerdict> = Vec::new();
-            let stream_path = args
-                .stream
-                .as_ref()
-                .expect("stream_frames_opt is Some ⇒ --stream was provided")
-                .as_path();
+            // `stream_path` (the strih/stream nodes' pixel-proof recording) is computed once
+            // above, alongside the cam1 source selection.
             // #198: cam1's burn increments per EMITTED frame (src/main.rs), so its in-window id
             // run must be contiguous integers (a forward gap = a real cam1 drop). strih/stream
             // burn per RENDER tick (DistroAV filter), so a forward gap is expected, not loss.

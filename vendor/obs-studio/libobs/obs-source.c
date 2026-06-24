@@ -3666,8 +3666,10 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 				 * (the audit log's whole purpose: tuning preload). num here is the
 				 * depth right AFTER this push = the producer's high-water mark.
 				 * Written under async_mutex (held here), same lock as the consumer
-				 * update. genlock_peak_update() is the pure mirror in
-				 * src/probe/genlock.rs (peak = max(peak, observed)). */
+				 * update. The "peak = max(peak, observed)" rule is the pure reference
+				 * genlock_peak_update() in src/probe/genlock.rs; this inline C update
+				 * (and the consumer-side one) are pinned to exist by the
+				 * tests/genlock_preload.rs vendored-source guard. */
 				const uint32_t depth = (uint32_t)source->async_frames.num;
 				if (depth > source->genlock_peak_depth)
 					source->genlock_peak_depth = depth;
