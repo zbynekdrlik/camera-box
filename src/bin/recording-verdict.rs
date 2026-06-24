@@ -123,12 +123,14 @@ struct Args {
     /// scripts/recording-e2e-report.py to render the 2-graph report PNG.
     #[arg(long)]
     json: Option<PathBuf>,
-    /// #209: write a PER-FRAME latency time-series CSV to this path — one row per
+    /// #209/#216: write a PER-FRAME latency time-series CSV to this path — one row per
     /// delivered stream frame: `frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,
-    /// strih_stream_ms,cam1_stream_ms`. This is the LITERAL continuous-line proof input:
-    /// `scripts/latency-line-report.py --csv <path>` draws one line per hop (time on x,
-    /// latency on y), so a gap in the line = a lost frame and a flat line = stable
-    /// latency. Defaults to `latency-per-frame.csv` BESIDE the `--json` summary (the JSON's
+    /// strih_stream_ms,cam1_stream_ms,cam2_cam1_ms`. This is the LITERAL continuous-line proof
+    /// input: `scripts/latency-line-report.py --csv <path>` draws one line per hop (time on x,
+    /// latency on y) — the three burn hops draw continuously, while the cam2→cam1 OPTICAL line
+    /// (`cam2_cam1_ms`) GAPS honestly where the cam1 camera could not read the cam2 QR (#216).
+    /// A gap in a burn line = a lost frame; a gap in cam2→cam1 = an optical-read dropout (not a
+    /// chain loss). Defaults to `latency-per-frame.csv` BESIDE the `--json` summary (the JSON's
     /// own directory, NOT `--out-dir`) when `--json` is given but `--latency-csv` is not,
     /// so the time-series sits next to the summary. Requires the cam1/strih/stream burns
     /// in the stream recording (#174).
