@@ -5,6 +5,10 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 <!-- Global rules inherited from ~/.claude/CLAUDE.md (managed by airuleset) -->
 <!-- PR merge policy, CI monitoring, TDD, two-branch git workflow, test strictness, security, comprehensive logging apply automatically. This file holds ONLY camera-box-specific context — do not duplicate global rules here. -->
 
+## Playbook router
+
+- recording-verdict QR decode path (fast/robust gate, per-recording burn sets, #186 fixtures) → load `.claude/skills/recording-decode`
+
 ## Branch model
 
 Two branches: `main` (production) + `dev`. Work on `dev`, PR to `main`. Standard global two-branch workflow.

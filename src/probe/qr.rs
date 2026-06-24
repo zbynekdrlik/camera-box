@@ -7,30 +7,37 @@ use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// #207 — process-wide counters proving WHICH decode path each recording frame took.
-/// The robust tiled passes are ~10× the cost of the plain full-frame pass, so the
-/// per-frame decode ([`decode_qr_luma_all_fast_then_robust`]) runs them ONLY when the
-/// fast plain pass missed an expected node burn. These counters let the verdict log /
-/// the tests confirm the fast path is taken on the ~99 %+ of clean frames and the robust
-/// fallback only on the rare hard ones. Pure observability — never gates correctness.
+/// #207 — which decode path a single recording frame took.
+///
+/// The robust tiled passes are ~10× the cost of the plain full-frame pass, so the per-frame
+/// decode ([`decode_qr_luma_all_fast_then_robust`]) runs them ONLY when the fast plain pass
+/// missed an expected node burn. This enum reports that choice per-call so it is observable
+/// WITHOUT shared global state — the path-reachability tests assert on it directly (a
+/// process-wide counter would race against the recording unit tests running concurrently).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodePath {
+    /// The plain full-frame pass already carried every expected node burn — the tiles were
+    /// skipped (the ~99 %+ common case on a clean recording).
+    Fast,
+    /// An expected node burn was missing from the plain pass — the tiled+upscaled recovery ran.
+    Robust,
+}
+
+/// #207 — process-wide counters of the decode-path split, for the verdict LOG only (so it
+/// shows fast ≫ robust = the speedup is real). They accumulate across all recordings in one
+/// run. NOT used by tests (those assert the per-call [`DecodePath`] instead — globals race
+/// against concurrent tests). `fast` = plain pass already had every expected burn; `robust` =
+/// a burn was missing so the tiles ran.
 static FAST_PATH_FRAMES: AtomicU64 = AtomicU64::new(0);
 static ROBUST_FALLBACK_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 /// (fast_path_frames, robust_fallback_frames) since process start — the #207 decode-path
-/// split. `fast` = the plain full-frame pass already carried every expected node burn (the
-/// cheap path); `robust` = a burn was missing so the tiled+upscaled recovery ran.
+/// split, for the verdict log.
 pub fn decode_path_counts() -> (u64, u64) {
     (
         FAST_PATH_FRAMES.load(Ordering::Relaxed),
         ROBUST_FALLBACK_FRAMES.load(Ordering::Relaxed),
     )
-}
-
-/// Reset the #207 decode-path counters (test isolation only).
-#[cfg(test)]
-pub fn reset_decode_path_counts() {
-    FAST_PATH_FRAMES.store(0, Ordering::Relaxed);
-    ROBUST_FALLBACK_FRAMES.store(0, Ordering::Relaxed);
 }
 
 /// Vertical placement of the painted QR within the canvas.
@@ -610,6 +617,23 @@ pub fn decode_qr_luma_all_fast_then_robust(
     img: GrayImage,
     expected_burn_run_ids: &[u32],
 ) -> Vec<Payload> {
+    let (out, path) = decode_qr_luma_all_fast_then_robust_pathed(img, expected_burn_run_ids);
+    // Record the split for the verdict log (observability only — never gates correctness).
+    match path {
+        DecodePath::Fast => FAST_PATH_FRAMES.fetch_add(1, Ordering::Relaxed),
+        DecodePath::Robust => ROBUST_FALLBACK_FRAMES.fetch_add(1, Ordering::Relaxed),
+    };
+    out
+}
+
+/// [`decode_qr_luma_all_fast_then_robust`] that ALSO returns which [`DecodePath`] it took.
+/// This is the core; the counting public wrapper above just records the path. Returning the
+/// path makes the choice observable per-call (no global state), so the path-reachability tests
+/// are deterministic even when other tests decode concurrently.
+pub fn decode_qr_luma_all_fast_then_robust_pathed(
+    img: GrayImage,
+    expected_burn_run_ids: &[u32],
+) -> (Vec<Payload>, DecodePath) {
     let mut out = decode_qr_luma_all(img.clone());
 
     // Fast path: the plain pass already carries every expected node burn — the tiled recovery
@@ -619,15 +643,13 @@ pub fn decode_qr_luma_all_fast_then_robust(
         .iter()
         .all(|id| out.iter().any(|p| p.run_id == *id));
     if all_burns_present {
-        FAST_PATH_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return out;
+        return (out, DecodePath::Fast);
     }
 
     // Robust fallback: a burn is missing — give rqrr the tiled+upscaled look (#202) that
     // recovers the small burns the full-frame pass intermittently misses.
-    ROBUST_FALLBACK_FRAMES.fetch_add(1, Ordering::Relaxed);
     robust_tile_passes(&img, &mut out);
-    out
+    (out, DecodePath::Robust)
 }
 
 /// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
@@ -1221,13 +1243,12 @@ mod tests {
 
     // ========================================================================
     // #207 — decode_qr_luma_all_fast_then_robust: plain pass first (FAST), robust
-    // tiled recovery only on a missing burn (ROBUST FALLBACK). The decode-path
-    // counters are process-global, so these counter-asserting tests serialize on a
-    // shared lock to read a deterministic delta.
+    // tiled recovery only on a missing burn (ROBUST FALLBACK). The path is asserted via
+    // the per-call DecodePath return (decode_qr_luma_all_fast_then_robust_pathed) — NO
+    // global counter, so these run correctly even alongside the concurrent recording
+    // unit tests that also decode (a process-global counter raced; that was the first
+    // CI red).
     // ========================================================================
-
-    use std::sync::Mutex;
-    static DECODE_PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Composite a node burn (rendered at `qr_px`) into the BOTTOM-LEFT corner of a clean
     /// dual-QR frame, returning the luma. Models the #111 layout: big optical dual-QR top,
@@ -1257,11 +1278,10 @@ mod tests {
         // The required id is one the plain full-frame pass ALWAYS reads — the big optical
         // dual-QR (run_id 7), which decodes full-frame on every well-formed frame (every other
         // decode test relies on this). With the required id already present, the fast gate must
-        // SKIP the ~10×-cost tiled recovery: the FAST counter increments, ROBUST does not, and
-        // the result equals the plain pass (the tiles would add nothing). Using the optical id
-        // keeps this DETERMINISTIC — no dependence on whether rqrr's full-frame finder happens
-        // to lock a small synthetic burn (the very intermittency #186/#202 is about).
-        let _g = DECODE_PATH_TEST_LOCK.lock().unwrap();
+        // SKIP the ~10×-cost tiled recovery: the call reports DecodePath::Fast and the result
+        // equals the plain pass (the tiles would add nothing). Using the optical id keeps this
+        // DETERMINISTIC — no dependence on whether rqrr's full-frame finder happens to lock a
+        // small synthetic burn (the very intermittency #186/#202 is about).
         let left = Payload {
             run_id: 7,
             frame_id: 100,
@@ -1282,14 +1302,12 @@ mod tests {
             "precondition: the plain pass must read the optical dual-QR (run_id 7): {plain:?}"
         );
 
-        reset_decode_path_counts();
-        let got = decode_qr_luma_all_fast_then_robust(luma, &[7]);
-        let (fast, robust) = decode_path_counts();
+        let (got, path) = decode_qr_luma_all_fast_then_robust_pathed(luma, &[7]);
         assert_eq!(
-            (fast, robust),
-            (1, 0),
+            path,
+            DecodePath::Fast,
             "a frame whose expected id the plain pass already read must take the FAST path \
-             (no tiled recovery): fast={fast}, robust={robust}"
+             (no tiled recovery)"
         );
         assert!(
             got.iter().any(|p| p.run_id == 7),
@@ -1301,11 +1319,9 @@ mod tests {
     fn robust_fallback_taken_when_plain_misses_an_expected_burn() {
         // A SOFTENED frame: the 260px bottom burn is present but blurred so the plain
         // full-frame pass MISSES it (the #186/#202 condition). The fast gate must detect the
-        // missing expected burn and fall back to the robust tiled recovery — the ROBUST
-        // counter increments, the FAST one does not, and the burn is RECOVERED. Same blur
-        // that the synthetic #202 test (`robust_recovers_a_softened_burn…`) proved triggers
-        // plain=miss / robust=recover.
-        let _g = DECODE_PATH_TEST_LOCK.lock().unwrap();
+        // missing expected burn and fall back to the robust tiled recovery — the call reports
+        // DecodePath::Robust and the burn is RECOVERED. Same blur that the synthetic #202 test
+        // (`robust_recovers_a_softened_burn…`) proved triggers plain=miss / robust=recover.
         let left = Payload {
             run_id: 136_141_133,
             frame_id: 4000,
@@ -1331,14 +1347,11 @@ mod tests {
              {plain:?}"
         );
 
-        reset_decode_path_counts();
-        let got = decode_qr_luma_all_fast_then_robust(luma, &[burn.run_id]);
-        let (fast, robust) = decode_path_counts();
+        let (got, path) = decode_qr_luma_all_fast_then_robust_pathed(luma, &[burn.run_id]);
         assert_eq!(
-            (fast, robust),
-            (0, 1),
-            "a frame missing an expected burn from the plain pass must take the ROBUST \
-             fallback: fast={fast}, robust={robust}"
+            path,
+            DecodePath::Robust,
+            "a frame missing an expected burn from the plain pass must take the ROBUST fallback"
         );
         assert!(
             got.contains(&burn),
@@ -1351,7 +1364,6 @@ mod tests {
         // The optimization changes WHEN the tiles run, never WHAT is read. On both a clean
         // frame (fast path) and a softened frame (robust fallback) the fast-then-robust
         // result must equal robust-always exactly (order-independent payload set).
-        let _g = DECODE_PATH_TEST_LOCK.lock().unwrap();
         let left = Payload {
             run_id: 7,
             frame_id: 200,
@@ -1390,9 +1402,8 @@ mod tests {
     #[test]
     fn empty_expected_burns_always_takes_fast_path() {
         // With no expected node burns required, the fast gate is vacuously satisfied — the
-        // decode never runs the tiles. (A caller with nothing to require — e.g. an
-        // optical-only frame — pays only the plain pass.)
-        let _g = DECODE_PATH_TEST_LOCK.lock().unwrap();
+        // decode never runs the tiles (a caller with nothing to require — e.g. an optical-only
+        // frame — pays only the plain pass).
         let p = Payload {
             run_id: 7,
             frame_id: 1,
@@ -1400,13 +1411,11 @@ mod tests {
         };
         let bgra = render_qr_dual_bgra(&p, &p, 1920, 1080, 700);
         let luma = bgra_to_luma(&bgra, 1920, 1080, 1920 * 4);
-        reset_decode_path_counts();
-        let _ = decode_qr_luma_all_fast_then_robust(luma, &[]);
-        let (fast, robust) = decode_path_counts();
+        let (_got, path) = decode_qr_luma_all_fast_then_robust_pathed(luma, &[]);
         assert_eq!(
-            (fast, robust),
-            (1, 0),
-            "empty expected-burns set ⇒ always FAST: fast={fast}, robust={robust}"
+            path,
+            DecodePath::Fast,
+            "empty expected-burns set ⇒ always FAST"
         );
     }
 }
