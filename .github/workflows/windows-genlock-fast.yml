@@ -158,14 +158,18 @@ jobs:
           -DENABLE_VLC=OFF
           -DENABLE_TEST_INPUT=OFF
 
-      # Build only the two OBS targets DistroAV links against — libobs (OBS::libobs) and
-      # obs-frontend-api (OBS::obs-frontend-api) — not the Qt frontend app, plugins, or
-      # installer. These are what `cmake --install` needs to export a usable SDK prefix
-      # for DistroAV's `find_package(libobs)` / `find_package(obs-frontend-api)`.
-      - name: Build OBS SDK targets (libobs + obs-frontend-api)
+      # Build OBS (all default targets) so `cmake --install` finds every artifact its
+      # global install rules reference (libobs, the d3d11/opengl graphics backends, the
+      # frontend, obs-frontend-api). A target-narrowed build (libobs + obs-frontend-api
+      # only) makes the install step fail looking for libobs-d3d11.dll etc. — the bulk
+      # cost we cut is CEF/browser (ENABLE_BROWSER=OFF in the configure above), NOT the
+      # graphics backends, which are small and required for the SDK install DistroAV
+      # links against. This mirrors windows-genlock.yml's `cmake --build build_x64`
+      # minus CEF, so it stays minutes-not-hours yet produces a complete, installable SDK.
+      - name: Build OBS (browser OFF — graphics backends + libobs + frontend-api)
         working-directory: vendor/obs-studio
         shell: bash
-        run: cmake --build build_x64 --config RelWithDebInfo --target libobs --target obs-frontend-api --parallel
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
       - name: Install OBS SDK prefix
         working-directory: vendor/obs-studio
