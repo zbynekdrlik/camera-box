@@ -664,6 +664,76 @@ mod tests {
     }
 
     #[test]
+    fn in_window_cam1_unreadable_burn_does_not_also_manufacture_a_real_drop() {
+        // #133 (validation): cam1 burns PER EMITTED frame, so a delivered frame whose burn QR is
+        // UNREADABLE still CONSUMED one emitted id — the id it would have carried is simply not
+        // decodable, NOT a frame that never reached the recording. The NEXT present frame's id is
+        // therefore prev+2 (the gap = the unreadable frame's own id), which must NOT be counted
+        // AGAIN as a forward-gap REAL DROP. The unreadable frame is exactly ONE fault
+        // (BURN-UNREADABLE); the next present frame is clean.
+        //
+        // The real-rig proof of the bug: cam1 from the 1080p strih recording reported 10
+        // BURN-UNREADABLE frames EACH immediately followed by a "REAL DROP" on the next delivered
+        // frame (225→226, 349→350, …) — and the pixels showed frame 226 IS a delivered frame with
+        // a present cam1 burn. The 11 "real drops" were the per-emit double-count, not loss.
+        let frames = [
+            rbf(0, Some(50)),
+            rbf(1, None), // delivered, cam1 burn unreadable (its id 51 is undecodable)
+            rbf(2, Some(52)), // next present: 52 == 50+2 (the None consumed id 51) — NOT a drop
+            rbf(3, Some(53)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            burn_unreadable, 1,
+            "the unreadable frame is exactly ONE burn-unreadable: {c:?}"
+        );
+        assert_eq!(
+            real_drops, 0,
+            "an unreadable burn must NOT ALSO be counted as a forward-gap real drop \
+             (the #133 per-emit double-count): {c:?}"
+        );
+        assert_eq!(c.missing_ids.len(), 1, "exactly one fault total: {c:?}");
+        // present + non-present-delivered still reconciles to expected.
+        assert_eq!(c.present_count, 3); // ids 50, 52, 53
+        assert_eq!(c.expected_count, 4); // 4 delivered frames
+    }
+
+    #[test]
+    fn in_window_cam1_real_drop_still_caught_when_no_unreadable_frame_precedes() {
+        // The fix must NOT mask a GENUINE cam1 drop. A forward gap with NO intervening None frame
+        // (id jumps prev+2 but every delivered frame carried a readable burn) is a real emitted
+        // frame that never reached the recording — still a REAL DROP.
+        let frames = [
+            rbf(0, Some(50)),
+            rbf(1, Some(51)),
+            rbf(2, Some(53)), // 52 missing AND no None frame between ⇒ a genuine cam1 drop
+            rbf(3, Some(54)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        assert_eq!(
+            real_drops, 1,
+            "a real forward gap with no None is still a drop"
+        );
+        assert_eq!(w.contiguity.missing_ids, vec![52]);
+    }
+
+    #[test]
     fn in_window_slots_pair_one_to_one_with_missing_ids() {
         // The binary zips missing_slots onto missing_ids — they MUST be the same length and
         // order so the pixel classifier views the right frame.
