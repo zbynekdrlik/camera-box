@@ -4404,6 +4404,56 @@ static bool genlock_ts_align_enabled(void)
 	return enabled == 1;
 }
 
+/* camera-box #184: sub-frame MS-GRANULAR jitter reserve — the lowest-latency lever.
+ * 0 = DISABLED (whole-frame preload path, byte-identical to #136). > 0 switches the
+ * ts-align deadline to wall_now - reserve_ms, so the held latency is ≈ reserve_ms
+ * (single-digit ms = just the measured arrival jitter) instead of a full 33ms frame. */
+#define GENLOCK_RESERVE_MS_DEFAULT 0
+#define GENLOCK_RESERVE_MS_MAX 100
+
+/* Clamp of a strtol `long` to [0, GENLOCK_RESERVE_MS_MAX]. Mirrors the Rust
+ * parse_reserve_ms clamp. */
+static uint32_t genlock_clamp_reserve_ms(long v)
+{
+	if (v < 0)
+		return 0;
+	if (v > GENLOCK_RESERVE_MS_MAX)
+		return GENLOCK_RESERVE_MS_MAX;
+	return (uint32_t)v;
+}
+
+/* Parse OBS_GENLOCK_RESERVE_MS into a sub-frame jitter reserve (ms). NULL/empty/
+ * invalid/negative -> default(0=disabled); valid non-negative -> clamped to
+ * [0, GENLOCK_RESERVE_MS_MAX]. Same strtol contract as genlock_parse_preload.
+ * Mirror of camera-box src/probe/genlock.rs parse_reserve_ms. */
+static uint32_t genlock_parse_reserve_ms(const char *env)
+{
+	if (!env || !*env)
+		return GENLOCK_RESERVE_MS_DEFAULT;
+	char *end = NULL;
+	long v = strtol(env, &end, 10);
+	if (end == env || *end != '\0' || v < 0)
+		return GENLOCK_RESERVE_MS_DEFAULT;
+	return genlock_clamp_reserve_ms(v);
+}
+
+/* The cached OBS_GENLOCK_RESERVE_MS reserve (read once at launch, like the other
+ * genlock env gates). 0 => the whole-frame preload path runs unchanged. */
+static uint32_t genlock_reserve_ms(void)
+{
+	static int reserve = -1;
+	if (reserve == -1) {
+		reserve = (int)genlock_parse_reserve_ms(getenv("OBS_GENLOCK_RESERVE_MS"));
+		if (reserve > 0)
+			blog(LOG_INFO,
+			     "genlock: sub-frame jitter reserve = %d ms "
+			     "(OBS_GENLOCK_RESERVE_MS) — ms-granular latency, replaces the "
+			     "whole-frame preload on the ts-align path (#184)",
+			     reserve);
+	}
+	return (uint32_t)reserve;
+}
+
 /* Real DanteSync wall clock NOW in ns since the Unix epoch — the SAME basis the
  * wall-clock-slaved render tick (obs-video.c genlock_wall_ns) and the cam-box NDI
  * timecode (src/ndi.rs) use, so frame->timestamp and present_ts share one timeline. */
@@ -4447,6 +4497,22 @@ static inline uint64_t genlock_present_ts(uint64_t wall_now_ns, uint32_t delay_f
 	const uint64_t base = wall_now_ns > delay ? wall_now_ns - delay : 0;
 	return base + interval_ns / 2;
 }
+
+/* camera-box #184: the presentation deadline under a MS-GRANULAR jitter reserve.
+ * present_ts = wall_now - reserve_ms*1e6 (saturating). A frame is due once it has aged
+ * reserve_ms, so the held latency is EXACTLY reserve_ms — a pure sub-frame time delay,
+ * NOT quantized to a whole frame, and with NO +interval/2 churn bias (the deadline is
+ * an absolute wall-clock instant, not a frame multiple, so frames never cluster on it;
+ * reserve_ms is itself the slew tolerance). Every source shares wall_now - reserve, so
+ * the #136 multi-source in-sync invariant is preserved. The buffer need only cover the
+ * measured arrival jitter (1.6ms strih->stream, 8.1ms cam1->strih), so a ~3ms reserve
+ * replaces the 33ms whole-frame preload while staying zero-loss. Mirror of camera-box
+ * src/probe/genlock.rs genlock_present_ts_reserve. */
+static inline uint64_t genlock_present_ts_reserve(uint64_t wall_now_ns, uint32_t reserve_ms)
+{
+	const uint64_t delay = (uint64_t)reserve_ms * 1000000ULL;
+	return wall_now_ns > delay ? wall_now_ns - delay : 0;
+}
 /* ---- end #136 ------------------------------------------------------------- */
 
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
@@ -4465,17 +4531,22 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	struct obs_video_info ovi;
 	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0;
 	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
+	/* camera-box #184: also print the active sub-frame ms reserve (0 = whole-frame
+	 * preload path). When >0 the held latency is ≈ reserve_ms, NOT preload frames,
+	 * so the operator + post-deploy verification can read the actual lowest-latency
+	 * config live from the OBS log. */
+	const uint32_t reserve_ms = genlock_reserve_ms();
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "overruns=%llu depth=%zu peak=%u preload=%u (=%llu ms @ %.3ffps) cap=%zu "
-	     "empty_run=%u (re-arm@%u) (#70/#97/#126)",
+	     "overruns=%llu depth=%zu peak=%u preload=%u (=%llu ms @ %.3ffps) reserve_ms=%u cap=%zu "
+	     "empty_run=%u (re-arm@%u) (#70/#97/#126/#184)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
 	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
 	     source->genlock_peak_depth, source->genlock_preload,
-	     (unsigned long long)genlock_preload_ms(source->genlock_preload), fps,
+	     (unsigned long long)genlock_preload_ms(source->genlock_preload), fps, reserve_ms,
 	     genlock_source_drop_cap(source), source->genlock_empty_run,
 	     (unsigned)GENLOCK_REARM_EMPTY_TICKS);
 }
@@ -4525,8 +4596,14 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 		if (genlock_ts_align_enabled() && genlock_is_wallclock_ts(next_frame->timestamp)) {
 			const uint64_t interval = genlock_frame_interval_ns();
 			if (interval != 0) {
+				/* camera-box #184: a configured sub-frame ms reserve replaces the
+				 * whole-frame preload deadline (held latency ≈ reserve_ms, not a full
+				 * 33ms frame); reserve_ms=0 keeps the #136 frame-based path verbatim. */
+				const uint32_t reserve_ms = genlock_reserve_ms();
 				const uint64_t present_ts =
-					genlock_present_ts(genlock_wall_now_ns(), preload, interval);
+					reserve_ms > 0
+						? genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)
+						: genlock_present_ts(genlock_wall_now_ns(), preload, interval);
 				/* due = prefix of queued frames at/before the deadline (a single
 				 * NDI source delivers in monotonic capture order). */
 				size_t due = 0;
