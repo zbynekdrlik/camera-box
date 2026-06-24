@@ -128,9 +128,10 @@ struct Args {
     /// strih_stream_ms,cam1_stream_ms`. This is the LITERAL continuous-line proof input:
     /// `scripts/latency-line-report.py --csv <path>` draws one line per hop (time on x,
     /// latency on y), so a gap in the line = a lost frame and a flat line = stable
-    /// latency. Defaults to `<out-dir>/latency-per-frame.csv` when `--json` is given but
-    /// `--latency-csv` is not, so the time-series is produced by default alongside the
-    /// summary. Requires the cam1/strih/stream burns in the stream recording (#174).
+    /// latency. Defaults to `latency-per-frame.csv` BESIDE the `--json` summary (the JSON's
+    /// own directory, NOT `--out-dir`) when `--json` is given but `--latency-csv` is not,
+    /// so the time-series sits next to the summary. Requires the cam1/strih/stream burns
+    /// in the stream recording (#174).
     #[arg(long)]
     latency_csv: Option<PathBuf>,
 }
@@ -1372,12 +1373,21 @@ fn main() -> Result<()> {
             // One row per delivered stream frame (cam2 tick + co-located burns), carrying
             // the three per-hop latencies on the shared DanteSync clock. Written when the
             // operator passes --latency-csv, OR by default next to --json (so the
-            // time-series is produced automatically alongside the summary). The plotter
+            // time-series is produced ALONGSIDE the summary). The plotter
             // scripts/latency-line-report.py turns it into the per-hop line PNG.
+            //
+            // Default location = the JSON file's OWN directory (`latency-per-frame.csv`
+            // beside verdict.json), NOT --out-dir: the CLAUDE.md on-stream pattern passes
+            // --json and --out-dir in DIFFERENT directories, and the doc + the consumer
+            // expect the CSV next to the JSON summary. Fall back to out-dir only when the
+            // JSON path has no parent (e.g. a bare filename in the cwd).
             let csv_path: Option<PathBuf> = args.latency_csv.clone().or_else(|| {
-                args.json
-                    .as_ref()
-                    .map(|_| args.out_dir.join("latency-per-frame.csv"))
+                args.json.as_ref().map(|j| {
+                    j.parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(&args.out_dir)
+                        .join("latency-per-frame.csv")
+                })
             });
             if let Some(path) = &csv_path {
                 let rows = per_frame_latency_csv_rows(
@@ -1385,6 +1395,7 @@ fn main() -> Result<()> {
                     args.burn_cam1_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
+                    cam2_pin,
                     &painter_flip_by_tick,
                 );
                 match write_latency_csv(path, &rows) {

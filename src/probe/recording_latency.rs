@@ -825,7 +825,15 @@ impl LatencyCsvRow {
 /// which the plotter renders as a break in that hop's line. Rows are emitted in capture
 /// order and only for frames carrying a cam2 tick (a frame with no optical QR is not a
 /// delivered optical instant and has no x-axis identity). `gen_ts_ns ≤ 0` burn stamps are
-/// treated as absent (never a wrong number / negative latency).
+/// treated as absent (never a wrong number / negative latency). A frame whose only optical
+/// stamp is non-positive AND that carries no positive burn would have no valid x anchor
+/// (`gen_ts_ns ≤ 0`) and is SKIPPED — a 0-anchor row would plot far left of t0 and distort
+/// the continuous line (it could not be paired on a hop anyway).
+///
+/// `cam2_pin` (the `--cam2-run-id` the painter used): when `Some`, cam2 is matched EXACTLY
+/// by this run_id — IDENTICAL to [`RunIds::is_cam2`] / [`split_payloads`], so a forwarded
+/// foreign QR can never be mistaken for cam2 (the cam2-pinned summary stats the CSV mirrors
+/// use the same rule). When `None`, cam2 = any payload that is not one of the three burns.
 ///
 /// `flip_ts_by_tick` (optional, from the painter `--paint-log`): when non-empty, each
 /// row's `flip_ts_ns` is the cam2 DISPLAY instant for its tick; absent ⇒ `None`.
@@ -834,13 +842,19 @@ pub fn per_frame_latency_csv_rows(
     cam1_run_id: u32,
     strih_run_id: u32,
     stream_run_id: u32,
+    cam2_pin: Option<u32>,
     flip_ts_by_tick: &HashMap<u32, i64>,
 ) -> Vec<LatencyCsvRow> {
     let is_burn =
         |run_id: u32| run_id == cam1_run_id || run_id == strih_run_id || run_id == stream_run_id;
+    // cam2 selection mirrors RunIds::is_cam2: EXACT when pinned, else any non-burn QR.
+    let is_cam2 = |run_id: u32| match cam2_pin {
+        Some(c) => run_id == c,
+        None => !is_burn(run_id),
+    };
     let mut out = Vec::new();
     for f in stream {
-        // Canonical cam2 Vernier tick = the highest-frame_id cam2 (non-burn) half.
+        // Canonical cam2 Vernier tick = the highest-frame_id cam2 half.
         let mut cam2_tick: Option<u32> = None;
         let mut cam2_gen: Option<i64> = None;
         let mut cam1_ts: Option<i64> = None;
@@ -859,7 +873,7 @@ pub fn per_frame_latency_csv_rows(
                 if p.gen_ts_ns > 0 && stream_ts.is_none() {
                     stream_ts = Some(p.gen_ts_ns);
                 }
-            } else if !is_burn(p.run_id) {
+            } else if is_cam2(p.run_id) {
                 // cam2 optical half — keep the freshest (max frame_id) per the canonical
                 // Vernier rule, and remember its paint stamp as the last-resort x anchor.
                 match cam2_tick {
@@ -885,10 +899,13 @@ pub fn per_frame_latency_csv_rows(
                 _ => None,
             }
         };
-        // x-axis anchor = the earliest chain stamp this frame carries: cam1 capture,
-        // else strih render, else cam2 paint. (Every emitted row has at least cam2_gen
-        // when no burn is present.)
-        let gen_ts_ns = cam1_ts.or(strih_ts).or(cam2_gen).unwrap_or(0);
+        // x-axis anchor = the earliest POSITIVE chain stamp this frame carries: cam1
+        // capture, else strih render, else cam2 paint. A frame with no positive stamp at
+        // all has no valid x anchor — SKIP it (a 0 anchor would plot far left of t0 and
+        // distort the line; with no stamp it can't be paired on any hop either).
+        let Some(gen_ts_ns) = cam1_ts.or(strih_ts).or(cam2_gen) else {
+            continue;
+        };
         out.push(LatencyCsvRow {
             frame_id,
             gen_ts_ns,
@@ -2626,6 +2643,7 @@ mod tests {
             BURN_RUN_ID_CAM1,
             BURN_RUN_ID_STRIH,
             BURN_RUN_ID_STREAM,
+            None,
             &HashMap::new(),
         );
         assert_eq!(rows.len(), 1, "one delivered optical frame ⇒ one row");
@@ -2677,6 +2695,7 @@ mod tests {
             BURN_RUN_ID_CAM1,
             BURN_RUN_ID_STRIH,
             BURN_RUN_ID_STREAM,
+            None,
             &HashMap::new(),
         );
         assert_eq!(rows.len(), 1);
@@ -2724,6 +2743,7 @@ mod tests {
             BURN_RUN_ID_CAM1,
             BURN_RUN_ID_STRIH,
             BURN_RUN_ID_STREAM,
+            None,
             &HashMap::new(),
         );
         let ticks: Vec<u32> = rows.iter().map(|r| r.frame_id).collect();
@@ -2749,6 +2769,7 @@ mod tests {
             BURN_RUN_ID_CAM1,
             BURN_RUN_ID_STRIH,
             BURN_RUN_ID_STREAM,
+            None,
             &flip,
         );
         assert_eq!(
@@ -2758,6 +2779,117 @@ mod tests {
         );
         assert_eq!(rows[1].flip_ts_ns, None, "tick 301 not in flip map ⇒ empty");
         assert_eq!(rows[0].to_csv_line(), "300,1000000000,999000000,,,");
+    }
+
+    #[test]
+    fn per_frame_csv_pinned_cam2_is_not_hijacked_by_a_foreign_qr() {
+        // A frame carries the pinned cam2 QR (tick 500) AND a STRAY non-burn QR with a
+        // HIGHER frame_id (9999). With cam2 PINNED, only the cam2 run_id counts, so the
+        // tick stays 500 — the stray QR must NOT hijack the canonical tick. (Unpinned,
+        // the max-frame_id rule would wrongly pick 9999.)
+        let stray_run_id = 4242; // not cam2, not a burn
+        let frame = RecordingFrame {
+            frame_index: 0,
+            payloads: vec![
+                Payload {
+                    run_id: CAM2,
+                    frame_id: 500,
+                    gen_ts_ns: 1_000_000_000,
+                },
+                Payload {
+                    run_id: stray_run_id,
+                    frame_id: 9999,
+                    gen_ts_ns: 1_000_000_000,
+                },
+                Payload {
+                    run_id: BURN_RUN_ID_CAM1,
+                    frame_id: 0,
+                    gen_ts_ns: 1_000_000_000,
+                },
+                Payload {
+                    run_id: BURN_RUN_ID_STRIH,
+                    frame_id: 0,
+                    gen_ts_ns: 1_010_000_000,
+                },
+                Payload {
+                    run_id: BURN_RUN_ID_STREAM,
+                    frame_id: 0,
+                    gen_ts_ns: 1_025_000_000,
+                },
+            ],
+            tick: Some(9999),
+        };
+        // PINNED to CAM2 → tick is 500, the stray QR is ignored.
+        let pinned = per_frame_latency_csv_rows(
+            std::slice::from_ref(&frame),
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            Some(CAM2),
+            &HashMap::new(),
+        );
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(
+            pinned[0].frame_id, 500,
+            "pinned cam2 → tick stays 500, the higher-frame_id stray QR does NOT hijack it"
+        );
+        // UNPINNED → the stray QR (highest frame_id) wins, demonstrating WHY the pin matters.
+        let unpinned = per_frame_latency_csv_rows(
+            &[frame],
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            unpinned[0].frame_id, 9999,
+            "unpinned: any non-burn QR counts, so the stray 9999 wins (the bug the pin fixes)"
+        );
+    }
+
+    #[test]
+    fn per_frame_csv_frame_with_cam2_tick_but_no_positive_stamp_is_skipped() {
+        // A frame with a cam2 tick whose paint stamp is non-positive (0 sentinel) AND no
+        // positive burn ⇒ NO valid x anchor ⇒ the row is SKIPPED (a 0-anchor row would
+        // plot far left of t0 and distort the continuous line; it can't pair a hop either).
+        let frames = vec![
+            RecordingFrame {
+                frame_index: 0,
+                payloads: vec![Payload {
+                    run_id: CAM2,
+                    frame_id: 100,
+                    gen_ts_ns: 0,
+                }],
+                tick: Some(100),
+            },
+            // A valid neighbour to prove the skip is selective, not a blanket empty result.
+            csv_frame(
+                1,
+                Some((CAM2, 102)),
+                Some(1_000_000_000),
+                Some(1_010_000_000),
+                Some(1_020_000_000),
+            ),
+        ];
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            Some(CAM2),
+            &HashMap::new(),
+        );
+        let ticks: Vec<u32> = rows.iter().map(|r| r.frame_id).collect();
+        assert_eq!(
+            ticks,
+            vec![102],
+            "the 0-stamp cam2 frame is skipped; the valid one stays"
+        );
+        assert!(
+            rows[0].gen_ts_ns > 0,
+            "every emitted row has a positive x anchor"
+        );
     }
 
     #[test]

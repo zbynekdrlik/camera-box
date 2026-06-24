@@ -15,6 +15,7 @@ import csv
 import importlib.util
 import os
 import pathlib
+import re
 import sys
 
 import pytest
@@ -55,6 +56,34 @@ def test_plotter_expected_header_matches_the_rust_contract():
     # And the hop columns it draws are the three per-hop latency columns, in flow order.
     cols = [c for c, _label, _color in llr.HOP_COLUMNS]
     assert cols == ["cam1_strih_ms", "strih_stream_ms", "cam1_stream_ms"]
+
+
+def test_plotter_header_equals_the_rust_LatencyCsvRow_HEADER_const():
+    # CROSS-BOUNDARY contract: the plotter's EXPECTED_HEADER MUST equal the Rust
+    # LatencyCsvRow::HEADER const (the verdict's CSV column order). Without this, a Rust
+    # column reorder/rename stays green in CI (the Rust test pins the const against itself)
+    # and only breaks at runtime ON THE RIG when the plotter rejects the real CSV. This
+    # test reads the const STRAIGHT FROM THE RUST SOURCE so CI catches the drift.
+    rust_src = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "src"
+        / "probe"
+        / "recording_latency.rs"
+    )
+    text = rust_src.read_text()
+    # Match: pub const HEADER: &'static str = "<...>";  (the value may wrap to the next
+    # line after `=`, as rustfmt does — capture the first quoted string after HEADER =).
+    m = re.search(
+        r"pub const HEADER:\s*&'static str\s*=\s*\"([^\"]*)\"\s*;",
+        text,
+        re.DOTALL,
+    )
+    assert m, "could not find LatencyCsvRow::HEADER const in recording_latency.rs"
+    rust_header_cols = m.group(1).split(",")
+    assert rust_header_cols == llr.EXPECTED_HEADER, (
+        "Rust LatencyCsvRow::HEADER diverged from the plotter's EXPECTED_HEADER — "
+        f"Rust={rust_header_cols!r} plotter={llr.EXPECTED_HEADER!r}. Keep them in lockstep."
+    )
 
 
 def test_build_series_makes_one_point_list_per_hop_on_a_seconds_axis():
