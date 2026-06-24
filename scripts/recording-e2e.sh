@@ -385,6 +385,12 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
        --out-dir "$OUT_DIR_WIN\\pixel-proof" --json "$OUT_DIR_WIN\\verdict-${RUN_ID}.json"
   echo "    The win-* MCP holder runs the plan above; dev1 receives only the small verdict JSON+PNGs (#193)."
+  echo "    ============================================================================"
+  echo "    NOTE: this exit code is NOT the zero-loss verdict. In on-stream mode the harness"
+  echo "          only EMITS the plan (scp/ssh to Windows is denied, so bash cannot run the"
+  echo "          verdict itself). The PASS/FAIL is the recording-verdict EXIT CODE on the"
+  echo "          stream box + the pulled-back JSON — read THOSE, not this script's exit 0."
+  echo "    ============================================================================"
   exit 0
 fi
 
