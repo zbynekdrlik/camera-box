@@ -39,6 +39,7 @@ EXPECTED_HEADER = [
     "cam1_strih_ms",
     "strih_stream_ms",
     "cam1_stream_ms",
+    "cam2_cam1_ms",  # #216 — the cam2→cam1 OPTICAL-injection leg (gaps honestly on read failure)
 ]
 
 
@@ -53,9 +54,18 @@ def _write_csv(path, rows):
 def test_plotter_expected_header_matches_the_rust_contract():
     # The plotter's hardcoded EXPECTED_HEADER is the contract with the Rust writer.
     assert llr.EXPECTED_HEADER == EXPECTED_HEADER
-    # And the hop columns it draws are the three per-hop latency columns, in flow order.
-    cols = [c for c, _label, _color in llr.HOP_COLUMNS]
-    assert cols == ["cam1_strih_ms", "strih_stream_ms", "cam1_stream_ms"]
+    # The hop columns it draws are the three burn hops PLUS the cam2→cam1 optical leg (#216),
+    # in flow order. HOP_COLUMNS is now (col, label, color, is_optical).
+    cols = [c for c, _label, _color, _opt in llr.HOP_COLUMNS]
+    assert cols == [
+        "cam1_strih_ms",
+        "strih_stream_ms",
+        "cam1_stream_ms",
+        "cam2_cam1_ms",
+    ]
+    # Exactly ONE hop is the optical leg (it gaps on read failure); the other three are burns.
+    optical = [c for c, _l, _color, opt in llr.HOP_COLUMNS if opt]
+    assert optical == ["cam2_cam1_ms"], "only cam2→cam1 is the optical-injection leg"
 
 
 def test_plotter_header_equals_the_rust_LatencyCsvRow_HEADER_const():
@@ -97,6 +107,7 @@ def test_build_series_makes_one_point_list_per_hop_on_a_seconds_axis():
             "cam1_strih_ms": "10.0",
             "strih_stream_ms": "15.0",
             "cam1_stream_ms": "25.0",
+            "cam2_cam1_ms": "120.0",
         },
         {
             "frame_id": "102",
@@ -105,6 +116,7 @@ def test_build_series_makes_one_point_list_per_hop_on_a_seconds_axis():
             "cam1_strih_ms": "10.5",
             "strih_stream_ms": "15.2",
             "cam1_stream_ms": "25.7",
+            "cam2_cam1_ms": "121.0",
         },
         {
             "frame_id": "104",
@@ -113,6 +125,7 @@ def test_build_series_makes_one_point_list_per_hop_on_a_seconds_axis():
             "cam1_strih_ms": "10.1",
             "strih_stream_ms": "15.0",
             "cam1_stream_ms": "25.1",
+            "cam2_cam1_ms": "120.5",
         },
     ]
     series, t0 = llr.build_series(rows)
@@ -126,9 +139,16 @@ def test_build_series_makes_one_point_list_per_hop_on_a_seconds_axis():
     assert series["cam1_stream_ms"][1] == [25.0, 25.7, 25.1]
 
 
+def _real(ys):
+    """The non-NaN data points (NaN entries are pen-lift markers that BREAK the line)."""
+    return [y for y in ys if y == y]  # NaN != NaN
+
+
 def test_build_series_empty_hop_cell_is_a_gap_no_point_for_that_hop():
-    # The middle frame is missing strih→stream + cam1→stream (only cam1→strih present) —
-    # those hops must skip that frame entirely (a gap in the line), NOT plot a 0.
+    # The middle frame is missing strih→stream + cam1→stream + cam2→cam1 (only cam1→strih
+    # present) — those hops must NOT plot a real point there (a gap in the line, NOT a 0). The
+    # gap is realized as a NaN pen-lift marker (#216) so the line truly BREAKS, never a faint
+    # connector drawn across the failure.
     base = 2_000_000_000
     rows = [
         {
@@ -138,6 +158,7 @@ def test_build_series_empty_hop_cell_is_a_gap_no_point_for_that_hop():
             "cam1_strih_ms": "10.0",
             "strih_stream_ms": "15.0",
             "cam1_stream_ms": "25.0",
+            "cam2_cam1_ms": "120.0",
         },
         {
             "frame_id": "2",
@@ -146,6 +167,7 @@ def test_build_series_empty_hop_cell_is_a_gap_no_point_for_that_hop():
             "cam1_strih_ms": "11.0",
             "strih_stream_ms": "",  # gap
             "cam1_stream_ms": "",  # gap
+            "cam2_cam1_ms": "",  # optical read failed ⇒ gap on the cam2→cam1 line
         },
         {
             "frame_id": "3",
@@ -154,15 +176,49 @@ def test_build_series_empty_hop_cell_is_a_gap_no_point_for_that_hop():
             "cam1_strih_ms": "10.0",
             "strih_stream_ms": "15.0",
             "cam1_stream_ms": "25.0",
+            "cam2_cam1_ms": "120.0",
         },
     ]
     series, _t0 = llr.build_series(rows)
-    # cam1→strih present on all three frames.
-    assert series["cam1_strih_ms"][1] == [10.0, 11.0, 10.0]
-    # strih→stream + cam1→stream only on frames 1 and 3 (the empty cell is dropped).
-    assert series["strih_stream_ms"][1] == [15.0, 15.0]
-    assert series["cam1_stream_ms"][1] == [25.0, 25.0]
-    assert len(series["strih_stream_ms"][0]) == 2, "two x points = a gap at the middle frame"
+    # cam1→strih present on all three frames (no break).
+    assert _real(series["cam1_strih_ms"][1]) == [10.0, 11.0, 10.0]
+    # The gapped hops keep only the two REAL points (frames 1 and 3); the empty middle cell is
+    # a NaN break, not a real point.
+    assert _real(series["strih_stream_ms"][1]) == [15.0, 15.0]
+    assert _real(series["cam1_stream_ms"][1]) == [25.0, 25.0]
+    # cam2→cam1 OPTICAL leg gaps at the dropout frame too — the honest break (#216).
+    assert _real(series["cam2_cam1_ms"][1]) == [120.0, 120.0]
+    # A NaN pen-lift marker is present in each gapped hop so the line BREAKS (not connected).
+    assert any(y != y for y in series["strih_stream_ms"][1]), "a NaN break exists"
+    assert any(y != y for y in series["cam2_cam1_ms"][1]), "cam2→cam1 breaks at the dropout"
+
+
+def test_optical_gaps_detects_the_cam2_cam1_read_dropout_window():
+    # #216 — optical_gaps finds the WINDOW where the cam2→cam1 read failed (consecutive empty
+    # cam2_cam1 cells longer than MIN_OPTICAL_GAP_S). The burn hops are present throughout.
+    base = 5_000_000_000_000  # ns
+    rows = []
+    for i in range(40):
+        g = base + i * 1_000_000_000  # 1 s apart
+        # cam2_cam1 empty for a 5 s stretch (frames 10..14) — an optical-read dropout.
+        cam2 = "" if 10 <= i <= 14 else "120.0"
+        rows.append(
+            {
+                "frame_id": "" if cam2 == "" else str(i),
+                "gen_ts_ns": str(g),
+                "flip_ts_ns": "",
+                "cam1_strih_ms": "10.0",  # burns present throughout
+                "strih_stream_ms": "15.0",
+                "cam1_stream_ms": "25.0",
+                "cam2_cam1_ms": cam2,
+            }
+        )
+    _series, t0 = llr.build_series(rows)
+    gaps = llr.optical_gaps(rows, t0)
+    assert len(gaps) == 1, f"one optical-read dropout window: {gaps}"
+    gs, ge, dur = gaps[0]
+    assert dur >= 4.0, f"the dropout lasted several seconds: {gaps}"
+    assert gs < ge, "window has a positive span"
 
 
 def test_plotter_produces_a_png_from_a_synthetic_csv(tmp_path):
@@ -173,15 +229,19 @@ def test_plotter_produces_a_png_from_a_synthetic_csv(tmp_path):
     rows = []
     for i in range(50):
         g = base + i * 33_000_000
-        # A near-flat line with tiny jitter — the "stable latency" the user wants to SEE.
+        # A near-flat line with tiny jitter — the "stable latency" the user wants to SEE. The
+        # cam2→cam1 optical leg is present except for a short mid-run read dropout (frames
+        # 20..29) — the plotter must GAP + annotate it honestly (#216) while the burns continue.
+        cam2 = "" if 20 <= i <= 29 else f"{120.0 + (i % 4) * 0.1:.6f}"
         rows.append(
             [
-                100 + 2 * i,  # frame_id (Vernier tick, +2 per frame)
+                "" if cam2 == "" else 100 + 2 * i,  # frame_id (empty on optical dropout)
                 g,
                 "",  # flip_ts empty
                 f"{10.0 + (i % 3) * 0.1:.6f}",
                 f"{15.0 + (i % 2) * 0.1:.6f}",
                 f"{25.0 + (i % 5) * 0.1:.6f}",
+                cam2,
             ]
         )
     _write_csv(csv_path, rows)

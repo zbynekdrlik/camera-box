@@ -303,12 +303,16 @@ fn in_window_burn_frames(
 ///
 /// #133: the SOURCE recording is per-node, not a single shared `stream` slice. The cam1
 /// burn rides through NDI into BOTH the strih and stream program recordings, so its
-/// contiguity can be read from EITHER — but the 4K stream recording softens the small 320px
-/// cam1 burn (the #196 upscale), so a single QR mis-read there manufactures a PHANTOM drop.
-/// The CLEAN source of truth for cam1→strih is the 1080p STRIH recording (the cam1 burn is
-/// crisp on strih's native canvas). So cam1's `source` is the strih recording; strih and
-/// stream remain on the stream recording (they are the downstream endpoints whose own burns
-/// only the stream recording carries co-located with cam2's optical QR).
+/// contiguity can be read from EITHER — but the stream recording SOFTENS the small cam1 burn
+/// QR (it has traversed 2 NDI hops + 2 HEVC encodes by then; NOT a 4K upscale — both strih and
+/// stream record at 1080p, verified live 2026-06-24, so the old "#196 4K upscale" premise is
+/// invalid). The extra hops/re-encodes blur the small QR so it occasionally mis-decodes or
+/// arrives slightly out of order in recorded-frame order. (#216 hardened the contiguity walk
+/// so a reordered-but-present cam1 id no longer manufactures a phantom drop; the CLEAN source
+/// of truth for cam1→strih is still the 1080p STRIH recording — the cam1 burn is crispest one
+/// hop in.) So cam1's `source` is the strih recording; strih and stream remain on the stream
+/// recording (the downstream endpoints whose own burns only the stream recording carries
+/// co-located with cam2's optical QR).
 struct NodeSpec<'a> {
     node: &'a str,
     burn_run_id: u32,
@@ -1184,9 +1188,12 @@ fn main() -> Result<()> {
     // ===================================================================================
     if let Some(stream_frames) = &stream_frames_opt {
         // #133: cam1's contiguity source-of-truth is the CLEAN 1080p STRIH recording, not the
-        // 4K STREAM recording (the #196 upscale softens the small cam1 burn, manufacturing
-        // phantom drops on a single QR mis-read). The cam1 burn rides through NDI into BOTH
-        // recordings, so it is present in strih too. Fall back to the stream recording ONLY
+        // downstream STREAM recording (the small cam1 burn is softened by the extra NDI hop +
+        // HEVC re-encode by the time it reaches the stream — NOT a 4K upscale; both boxes record
+        // 1080p, #196 premise invalid). #216 hardened the walk so a softened reorder no longer
+        // manufactures a phantom drop, but the strih recording is still the crispest source.
+        // The cam1 burn rides through NDI into BOTH recordings, so it is present in strih too.
+        // Fall back to the stream recording ONLY
         // when there is no --strih (the cam1-only / stream-only mode) — then it is the best
         // available source, with the softening caveat. strih/stream nodes always read from the
         // stream recording (the only recording carrying their own burn co-located with cam2).
@@ -1409,16 +1416,19 @@ fn main() -> Result<()> {
                         .join("latency-per-frame.csv")
                 })
             });
+            // Build the per-frame rows ONCE (the #209 CSV + the #216 optical-dropout finding both
+            // read them). The CSV now carries the cam2→cam1 OPTICAL column (#216): present where
+            // the cam1 camera read the cam2 QR, empty where it did NOT (the honest gap).
+            let csv_rows = per_frame_latency_csv_rows(
+                stream_frames,
+                args.burn_cam1_run_id,
+                args.burn_strih_run_id,
+                args.burn_stream_run_id,
+                cam2_pin,
+                &painter_flip_by_tick,
+            );
             if let Some(path) = &csv_path {
-                let rows = per_frame_latency_csv_rows(
-                    stream_frames,
-                    args.burn_cam1_run_id,
-                    args.burn_strih_run_id,
-                    args.burn_stream_run_id,
-                    cam2_pin,
-                    &painter_flip_by_tick,
-                );
-                match write_latency_csv(path, &rows) {
+                match write_latency_csv(path, &csv_rows) {
                     Ok(n) => {
                         println!(
                             "  PER-FRAME latency CSV ({n} rows) → {} \
@@ -1441,6 +1451,45 @@ fn main() -> Result<()> {
                             path.display()
                         );
                     }
+                }
+            }
+
+            // #216 HONEST FINDING — report the cam2→cam1 OPTICAL-READ dropout windows (stretches
+            // where the cam1 camera could not optically read the cam2 monitor QR while the burns
+            // kept flowing). This is a REAL readability failure on the cam2→cam1 OPTICAL-injection
+            // leg — NOT a chain frame loss — surfaced openly (never hidden behind a drawn-across
+            // line). It does NOT affect the zero-loss gate; it is a labeled diagnostic alongside it.
+            let optical_dropouts =
+                camera_box::probe::recording_latency::optical_read_dropouts(&csv_rows, 2.0);
+            let total_dropout_s: f64 = optical_dropouts.iter().map(|d| d.dur_s).sum();
+            report["full_chain"]["cam2_cam1_optical_read_dropouts"] = serde_json::json!({
+                "count": optical_dropouts.len(),
+                "total_seconds": total_dropout_s,
+                "windows": optical_dropouts,
+                "note": "cam2→cam1 OPTICAL-injection READ DROPOUT — the cam1 camera could not \
+                         optically read the cam2 monitor QR for these windows. A test-rig \
+                         optical-read failure (NOT a chain frame loss): the digital burn hops \
+                         stayed continuous through it. The plotter draws the cam2→cam1 line with \
+                         a visible labeled gap here — never drawn across.",
+            });
+            if optical_dropouts.is_empty() {
+                println!(
+                    "  [cam2→cam1 optical] no read dropout — the cam1 camera read the cam2 QR \
+                     throughout (no optical-injection blackout)."
+                );
+            } else {
+                println!(
+                    "  [cam2→cam1 optical] {} READ DROPOUT window(s), {:.0}s total — the cam1 \
+                     camera could not optically read the cam2 QR (optical-injection read failure, \
+                     NOT a chain frame loss; burn hops stayed continuous):",
+                    optical_dropouts.len(),
+                    total_dropout_s
+                );
+                for d in &optical_dropouts {
+                    println!(
+                        "    · {:.0}s–{:.0}s ({:.0}s, {} frames) — shown as a labeled GAP on the graph",
+                        d.start_s, d.end_s, d.dur_s, d.frames
+                    );
                 }
             }
 
@@ -1792,19 +1841,21 @@ mod tests {
 
     // ========================================================================
     // #133 — cam1→strih contiguity is read from the CLEAN 1080p STRIH recording,
-    // NOT the 4K STREAM recording where the small cam1 burn is softened by the
-    // #196 upscale (one QR mis-read there manufactures a PHANTOM drop).
+    // NOT the downstream STREAM recording where the small cam1 burn is softened by
+    // the extra NDI hop + HEVC re-encode (both boxes record 1080p; #196's "4K
+    // upscale" premise is invalid). One QR mis-read there → a `None` burn-unreadable.
     // ========================================================================
 
     #[test]
     fn cam1_contiguity_reads_from_strih_recording_not_softened_stream() {
         // The cam1 burn (per-EMITTED-frame) rides through NDI into BOTH recordings.
         // In the CLEAN 1080p strih recording every cam1 burn decodes (contiguous run
-        // 50,51,52,53) ⇒ ZERO cam1 loss. In the 4K STREAM recording the same cam1 burn
-        // is softened by the upscale, so one frame's cam1 QR fails to decode (a `None`
-        // slot) — a PHANTOM drop. The cam1 verdict MUST come from the strih slice and
-        // report ZERO, never the stream slice's phantom drop. This is the #133 fix:
-        // the source of truth for cam1→strih is the crisp 1080p strih recording.
+        // 50,51,52,53) ⇒ ZERO cam1 loss. In the downstream STREAM recording the same cam1
+        // burn is softened (an extra NDI hop + HEVC re-encode, NOT a 4K upscale), so one
+        // frame's cam1 QR fails to decode entirely (a `None` slot = BURN-UNREADABLE). The
+        // cam1 verdict MUST come from the strih slice and report ZERO. This is the #133 fix:
+        // the source of truth for cam1→strih is the crisp 1080p strih recording. (Distinct
+        // from the #216 over-count, which was a reordered-but-PRESENT id — fixed in the walk.)
         let strih = vec![
             frame(0, &[(CAM2, 100), (CAM1B, 50)]),
             frame(1, &[(CAM2, 101), (CAM1B, 51)]),
@@ -1814,11 +1865,13 @@ mod tests {
         let stream = vec![
             frame(0, &[(CAM2, 100), (CAM1B, 50)]),
             frame(1, &[(CAM2, 101), (CAM1B, 51)]),
-            frame(2, &[(CAM2, 102)]), // 4K-softened: cam1 QR missed = a PHANTOM drop
+            frame(2, &[(CAM2, 102)]), // softened downstream: cam1 QR entirely missed (None)
             frame(3, &[(CAM2, 103), (CAM1B, 53)]),
         ];
-        // Sanity: the STREAM slice on its own DOES manufacture a phantom cam1 drop —
-        // this is exactly what reading cam1 from the 4K stream did (the #133 artifact).
+        // Sanity: the STREAM slice on its own DOES flag frame 2 as a defect — frame 2 is an
+        // optical-delivered frame whose cam1 burn did not decode at all (BURN-UNREADABLE, id 52
+        // genuinely absent from {50,51,53}), so it is non-contiguous. (This is the softened
+        // source the #133 strih-source fix avoids — NOT the #216 reordered-but-present case.)
         let sw = in_window_burn_frames(
             &stream,
             CAM1B,
@@ -1832,7 +1885,7 @@ mod tests {
         );
         assert!(
             !siw.contiguity.is_contiguous(),
-            "the 4K stream slice manufactures a phantom cam1 drop (the #133 bug source): {:?}",
+            "the softened stream slice flags frame 2 (cam1 burn unreadable — the #133 source): {:?}",
             siw.contiguity
         );
 
@@ -1861,7 +1914,7 @@ mod tests {
         assert_eq!(
             nv.real_drops(),
             0,
-            "no phantom real drop from the 4K stream"
+            "no phantom real drop — cam1 read from the clean 1080p strih recording"
         );
         assert_eq!(nv.burn_unreadable(), 0);
         assert_eq!(nv.contiguity.present_count, 4);
