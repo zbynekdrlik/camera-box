@@ -272,6 +272,14 @@ pub fn burn_contiguity_in_window(
     // A per-emit forward-gap miss is NOT a delivered frame (a synthetic id between two delivered
     // frames), so it does NOT subtract — it is an EXTRA real drop surfaced in missing_ids only.
     let mut non_present_delivered: u32 = 0;
+    // #133: cam1 burns PER EMITTED frame, so a delivered frame whose burn is UNREADABLE still
+    // CONSUMED one emitted id (the id it would have carried is undecodable, NOT a frame that
+    // never reached the recording). Track how many unreadable (`None`) frames occurred since the
+    // last present frame so the per-emit forward-gap check below does NOT re-count those consumed
+    // ids as real drops (the double-count the 1080p-strih validation exposed: each
+    // BURN-UNREADABLE frame manufactured a phantom REAL DROP on the very next present frame). Only
+    // the gap BEYOND the unreadable frames is genuine loss. Reset on each present frame.
+    let mut unreadable_since_prev: u32 = 0;
     for f in frames {
         match f.burn_id {
             Some(id) => {
@@ -289,12 +297,16 @@ pub fn burn_contiguity_in_window(
                         });
                     }
                     Some(prev) if matches!(rate, BurnRate::PerEmittedFrame) && id > prev + 1 => {
-                        // cam1 (per-emit): a forward gap = cam1-emitted frames that never
-                        // reached the recording. Each skipped integer prev+1..id is one REAL
-                        // drop; record them, viewing THIS frame's pixels (the first present
-                        // frame after the gap) for the proof. THIS frame itself IS present
-                        // (it carries a valid forward id), so it does NOT subtract from present.
-                        for missing in (prev + 1)..id {
+                        // cam1 (per-emit): a forward gap = cam1-emitted frames between prev and id
+                        // that never reached the recording. BUT the `unreadable_since_prev`
+                        // intervening BURN-UNREADABLE frames each ALREADY consumed one of those
+                        // ids (counted as burn-unreadable above) — so they are NOT real drops.
+                        // Genuine real drops are only the ids ABOVE what the unreadable frames
+                        // account for: skip the first `unreadable_since_prev` ids of the gap.
+                        // (#133 — kills the per-emit double-count.) THIS frame itself IS present
+                        // (a valid forward id), so it does NOT subtract from present.
+                        let first_real = (prev + 1).saturating_add(unreadable_since_prev);
+                        for missing in first_real..id {
                             missing_slots.push(MissingSlot {
                                 id: missing,
                                 frame_index: f.frame_index,
@@ -305,13 +317,16 @@ pub fn burn_contiguity_in_window(
                     _ => {} // forward gap on a per-render counter ⇒ expected, not loss.
                 }
                 prev_present = Some(id);
+                unreadable_since_prev = 0;
             }
             None => {
                 // A delivered frame with no readable burn ⇒ the frame reached the recording but
                 // the burn QR did not decode ⇒ BURN-UNREADABLE (both rates). A fresh synthetic
                 // id keeps consecutive Nones distinct and cannot collide with a real id. This
-                // delivered frame is NOT a clean present.
+                // delivered frame is NOT a clean present. For per-emit (cam1) it consumed one
+                // emitted id — tracked so the next present frame's gap doesn't re-count it.
                 non_present_delivered = non_present_delivered.saturating_add(1);
+                unreadable_since_prev = unreadable_since_prev.saturating_add(1);
                 missing_slots.push(MissingSlot {
                     id: alloc_synth(),
                     frame_index: f.frame_index,
