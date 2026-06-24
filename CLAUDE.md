@@ -76,6 +76,46 @@ gh run download --repo zbynekdrlik/camera-box -n probe-tools-linux-amd64 --dir .
 chmod +x ./probe-bins/*
 ```
 
+**Recording analysis runs ON stream.lan, NOT on dev1 (#193).** OBS records the 0.7–6 GB
+program file on the powerful Windows **stream box (10.77.9.204** — strong CPU, lots of RAM,
+fast disks). The OLD flow DOWNLOADED that multi-GB file over the LAN to slow dev1 (a PC meant
+only to run Claude) and decoded + rqrr'd it there — the root of the slow transfers, the dev1
+OOM (#187), the 14 GB+ disk fill, and the repeated stalls. **Decode WHERE THE VIDEO IS:** run
+`recording-verdict` on the stream box against the LOCAL recording and bring back ONLY the small
+verdict JSON (+ a few pixel-proof PNGs). dev1 holds NOTHING big.
+
+CI's `windows-probe` job builds `recording-verdict.exe` (probe-featured) on a `windows-2022`
+runner and uploads it as the **`probe-tools-windows-amd64`** artifact. (The Linux-only
+appliance/hardware crates — v4l/alsa/cpal/evdev/drm/libc-ioctl — are confined to
+`cfg(target_os="linux")` so the pure-Rust verdict cross-builds clean.) ffmpeg/ffprobe are
+already installed on stream.lan (winget; ffmpeg 8.0.1 on PATH) — no bundling needed.
+
+The win-stream-snv MCP drives the on-box run (scp/ssh to Windows is DENIED on this rig):
+
+```bash
+# 1. Download the CI-built Windows verdict for the commit under test (NEVER build on dev1).
+gh run download --repo zbynekdrlik/camera-box -n probe-tools-windows-amd64 --dir ./probe-win
+# 2. Upload it to the stream box ONCE via the win-stream-snv MCP FileUpload:
+#      path='C:\camera-box\recording-verdict.exe'  <- ./probe-win/recording-verdict.exe
+# 3. Run it THERE against the LOCAL recording (NO download to dev1) via win-stream-snv Shell.
+#    scripts/recording-verdict-on-stream.sh PRINTS the exact PowerShell command + the
+#    upload/pull-back plan (paths are the box-local Windows paths):
+scripts/recording-verdict-on-stream.sh \
+  --verdict-exe 'C:\camera-box\recording-verdict.exe' --out-dir 'C:\camera-box\verdict-out' \
+  --stream-rec 'C:\path\on\box\stream-REC.mp4' \
+  -- --strih 'C:\path\on\box\strih-REC.mkv' --stream 'C:\path\on\box\stream-REC.mp4' \
+     --min-secs 300 --json 'C:\camera-box\verdict-out\verdict.json' \
+     --out-dir 'C:\camera-box\verdict-out\pixel-proof'
+# 4. Pull back ONLY the small results via win-stream-snv FileDownload: the verdict JSON +
+#    the handful of pixel-proof PNGs under C:\camera-box\verdict-out. The recording stays on
+#    the box and is NEVER copied to dev1.
+```
+
+The recording E2E harness (`scripts/recording-e2e.sh`) DEFAULTS to this on-stream flow
+(`VERDICT_ON_STREAM=1`): it does NOT download the recordings to dev1 and emits the on-stream
+plan at step [8/8]. `VERDICT_ON_STREAM=0` selects the legacy decode-on-dev1 path (still present
+for a box with no uploaded verdict.exe). **Never decode a multi-GB recording on dev1.**
+
 **IMPORTANT:** Use IP addresses, not hostnames (`.lan` DNS may not resolve):
 
 ```bash

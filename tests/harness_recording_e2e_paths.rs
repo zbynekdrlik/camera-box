@@ -429,3 +429,144 @@ fn verdict_monitor_script_exists() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #193 — DECODE WHERE THE VIDEO IS: the verdict runs ON stream.lan, NOT on dev1.
+//
+// The OLD harness DOWNLOADED the 0.7-6 GB OBS recordings over the LAN to dev1 (a slow PC
+// meant only to run Claude) and decoded + rqrr'd them there — the root of the slow transfers,
+// the dev1 OOM (#187), the 14GB+ disk fill, and the repeated stalls. The fix runs the decode
+// IN PLACE on the powerful stream box (10.77.9.204) where the recording already lives, and
+// brings back ONLY the small verdict JSON + a few pixel-proof PNGs. These guards stop a
+// refactor from silently re-introducing the multi-GB download-to-dev1 decode.
+// ---------------------------------------------------------------------------
+
+/// The harness must DEFAULT to running the verdict ON stream.lan (VERDICT_ON_STREAM=1), and
+/// in that default mode must NOT download the recordings to dev1 (the fetch is gated to the
+/// legacy VERDICT_ON_STREAM=0 path).
+#[test]
+fn recording_e2e_defaults_to_decode_on_stream_not_dev1() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("VERDICT_ON_STREAM=\"${VERDICT_ON_STREAM:-1}\""),
+        "#193: the harness must DEFAULT VERDICT_ON_STREAM to 1 (decode ON stream.lan, not dev1)."
+    );
+    // The dev1 fetch (recording-fetch-windows.sh — the multi-GB download) must be GATED so it
+    // does NOT run in the default on-stream mode. It must sit inside the VERDICT_ON_STREAM=0
+    // (else) branch, not unconditionally.
+    let fetch = s
+        .find("recording-fetch-windows.sh\" \\")
+        .or_else(|| s.find("recording-fetch-windows.sh"))
+        .expect("#193: the legacy dev1 fetch must still exist for the VERDICT_ON_STREAM=0 path");
+    // Walk backward from the fetch to the nearest VERDICT_ON_STREAM branch keyword; it must be
+    // the `else` of the on-stream guard (i.e. the fetch is NOT in the on-stream default path).
+    let before = &s[..fetch];
+    let last_if = before
+        .rfind("if [ \"$VERDICT_ON_STREAM\" = \"1\" ]")
+        .unwrap_or(0);
+    let last_else = before.rfind("else").unwrap_or(0);
+    assert!(
+        last_else > last_if && last_if > 0,
+        "#193: the multi-GB recording-fetch-windows.sh download must be inside the \
+         VERDICT_ON_STREAM=0 (else) branch — never run in the default decode-on-stream mode."
+    );
+}
+
+/// In the on-stream path the harness must invoke recording-verdict-on-stream.sh (the planner
+/// that emits the win-stream-snv upload→run-on-box→pull-back-JSON plan) — proving the verdict
+/// is run on the box, not decoded on dev1.
+#[test]
+fn recording_e2e_runs_the_verdict_on_stream_via_the_planner() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("recording-verdict-on-stream.sh"),
+        "#193: the on-stream path must invoke scripts/recording-verdict-on-stream.sh (run the \
+         verdict ON the box, pull back only the small JSON+PNGs)."
+    );
+    // The on-stream branch must NOT decode a multi-GB recording on dev1: the dev1
+    // verdict-monitor.sh / setsid recording-verdict run must be in the LEGACY (else) path only.
+    let on_stream = s
+        .find("if [ \"$VERDICT_ON_STREAM\" = \"1\" ]; then\n  set -e")
+        .expect("#193: the on-stream guard must exist in the [8/8] section");
+    // After the on-stream guard opens, it must reach `exit 0` BEFORE the dev1 setsid verdict run
+    // (so the on-stream path never falls through to a dev1 decode).
+    let region = &s[on_stream..];
+    let exit0 = region
+        .find("\n  exit 0\nfi")
+        .expect("#193: on-stream branch must exit 0");
+    let dev1_run = region
+        .find("setsid bash -c")
+        .expect("#193: the legacy dev1 verdict run must still exist");
+    assert!(
+        exit0 < dev1_run,
+        "#193: the on-stream branch must exit BEFORE the dev1 setsid recording-verdict run, so \
+         the default path never decodes a multi-GB recording on dev1."
+    );
+}
+
+/// The on-stream planner script must exist and be executable.
+#[test]
+fn recording_verdict_on_stream_script_exists() {
+    let path = format!(
+        "{}/scripts/recording-verdict-on-stream.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let meta = fs::metadata(&path)
+        .unwrap_or_else(|e| panic!("#193: recording-verdict-on-stream.sh missing: {e}"));
+    assert!(
+        meta.is_file(),
+        "recording-verdict-on-stream.sh must be a file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            meta.permissions().mode() & 0o111 != 0,
+            "recording-verdict-on-stream.sh must be executable"
+        );
+    }
+}
+
+/// The planner must build a PowerShell command that runs the verdict EXE on the box against
+/// the recording's box-local Windows path — preserving single backslashes (a Windows path),
+/// not bash-doubling them, and never referencing a dev1 path. Behavioral: source the script
+/// and call build_onbox_command.
+#[test]
+fn on_stream_planner_builds_a_valid_windows_command() {
+    let script = format!(
+        "{}/scripts/recording-verdict-on-stream.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; build_onbox_command \"$2\" --stream \"$3\" --min-secs 300")
+        .arg("bash") // $0
+        .arg(&script) // $1 — the script to source
+        .arg("C:\\camera-box\\recording-verdict.exe") // $2 — exe
+        .arg("C:\\OBS\\stream-7.mp4") // $3 — the box-local recording
+        .output()
+        .expect("run build_onbox_command");
+    assert!(
+        out.status.success(),
+        "build_onbox_command failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cmd = String::from_utf8_lossy(&out.stdout);
+    // Single backslashes preserved (a valid Windows path), NOT doubled.
+    assert!(
+        cmd.contains("C:\\OBS\\stream-7.mp4") && !cmd.contains("C:\\\\OBS"),
+        "#193: the on-box command must keep single backslashes in the Windows recording path \
+         (not bash-double them): {cmd:?}"
+    );
+    // It runs the verdict EXE on the box and decodes the box-local recording — no dev1 path.
+    assert!(
+        cmd.contains("recording-verdict.exe") && cmd.contains("--stream"),
+        "#193: the on-box command must run recording-verdict.exe against the local --stream \
+         recording: {cmd:?}"
+    );
+    assert!(
+        !cmd.contains("/tmp/") && !cmd.contains("/home/"),
+        "#193: the on-box command must NOT reference a dev1 (Linux) path — the decode is ON \
+         the box: {cmd:?}"
+    );
+}
