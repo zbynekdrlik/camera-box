@@ -297,6 +297,41 @@ fn rqrr_decode_all(img: GrayImage) -> Vec<Payload> {
     out
 }
 
+/// Install (ONCE per process) a panic hook that SILENCES rqrr's internal
+/// `assert!(scan >= 1)` (rqrr-0.9.3 identify/grid.rs) and chains every OTHER panic to the
+/// previously-installed hook. The tile retry catches that assert (it is expected on a
+/// degenerate tile — lead-in/teardown black frames, near-uniform crops), but the DEFAULT
+/// panic hook still PRINTS the message + backtrace note to stderr for each one — on a
+/// ~9000-frame recording with several tiles per frame that is thousands of dumps drowning
+/// real errors. Suppressing only the rqrr-grid assert keeps every genuine panic loud. The
+/// chain (not a replace) preserves whatever hook was set before (e.g. a test harness's).
+fn install_rqrr_assert_silencer() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // rqrr's grid identifier panics with the literal "scan >= 1" assert; its file
+            // path contains "rqrr". Match either so a version bump that rewords the message
+            // still suppresses the SAME caught assert, never an unrelated panic.
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("");
+            let from_rqrr = info
+                .location()
+                .map(|l| l.file().contains("rqrr"))
+                .unwrap_or(false);
+            if from_rqrr && msg.contains("scan >= 1") {
+                return; // expected, caught by rqrr_decode_all_catch — stay silent
+            }
+            prev(info); // every other panic: report exactly as before
+        }));
+    });
+}
+
 /// Panic-safe [`rqrr_decode_all`] for the #202 tiled retry: rqrr's grid identifier has an
 /// internal `assert!(scan >= 1)` (rqrr-0.9.3 identify/grid.rs:206) that PANICS on certain
 /// degenerate finder geometries (a near-empty or pathologically small tile). On the FULL
@@ -304,9 +339,12 @@ fn rqrr_decode_all(img: GrayImage) -> Vec<Payload> {
 /// feeds rqrr many sub-tiles, any of which could be degenerate — a panic there would abort
 /// the whole frame's decode (and, via the worker pool, the verdict). Catch it and treat a
 /// panicking tile as "found nothing" (the full-frame pass + the other tiles still cover the
-/// frame). Used ONLY for the extra tile passes; the primary full-frame pass keeps the plain
-/// `rqrr_decode_all` so existing behavior is byte-for-byte unchanged.
+/// frame). The [`install_rqrr_assert_silencer`] hook keeps that caught assert from spamming
+/// stderr while leaving every other panic loud. Used ONLY for the extra tile passes; the
+/// primary full-frame pass keeps the plain `rqrr_decode_all` so existing behavior is
+/// byte-for-byte unchanged.
 fn rqrr_decode_all_catch(img: GrayImage) -> Vec<Payload> {
+    install_rqrr_assert_silencer();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rqrr_decode_all(img)))
         .unwrap_or_default()
 }

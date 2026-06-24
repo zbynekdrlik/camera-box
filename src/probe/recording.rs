@@ -12,8 +12,9 @@
 //!   ffmpeg -i <file> -f rawvideo -pix_fmt gray pipe:1   (gray8/luma, native res)
 //!        │  one width*height luma buffer per frame
 //!        ▼
-//!   decode_qr_luma_all  (the EXISTING rqrr decoder in src/probe/qr.rs)
-//!        │  every CRC-valid Payload in the frame (both dual-QR halves in ONE pass)
+//!   decode_qr_luma_all_robust  (the #202 rqrr decoder in src/probe/qr.rs — full-frame
+//!        │                       pass + bottom-band tile recovery for the small node burns)
+//!        │  every CRC-valid Payload in the frame (dual-QR halves + recovered node burns)
 //!        ▼
 //!   RecordingFrame { frame_index, payloads, tick }   → CSV / stdout for #107
 //! ```
@@ -28,7 +29,7 @@
 //! the other hardware/process glue (`multi_reader`, `reader`, `run`).
 
 use crate::probe::payload::Payload;
-use crate::probe::qr::{decode_qr_luma_all, decode_qr_luma_all_robust};
+use crate::probe::qr::decode_qr_luma_all_robust;
 use anyhow::{Context, Result};
 use image::GrayImage;
 use std::io::Read;
@@ -120,12 +121,28 @@ pub struct RecordingFrame {
     /// Every CRC-valid QR payload found in the frame (both dual-QR halves, decoded
     /// in one rqrr pass). Empty when no readable QR is present in the frame.
     pub payloads: Vec<Payload>,
-    /// Effective Vernier tick = the highest `frame_id` among the decoded payloads
-    /// (left QR carries the latest even tick, right the latest odd; the freshest
-    /// sharp region wins — matches `decode_capture_dual`'s `max_by_key(frame_id)`).
-    /// `None` when nothing decoded.
+    /// Effective Vernier tick = the highest `frame_id` among the decoded OPTICAL (cam2
+    /// dual-QR) payloads — left QR carries the latest even tick, right the latest odd, the
+    /// freshest sharp region wins (matches `decode_capture_dual`'s `max_by_key(frame_id)` and
+    /// `recording_latency::split_payloads`). The node BURNS (cam1/strih/stream, run_ids
+    /// [`NODE_BURN_RUN_IDS`]) are EXCLUDED: their per-node counters are independent of the
+    /// optical tick and can exceed it, so a recovered burn must not hijack the Vernier tick
+    /// (the #202 robust decode now recovers burns on most frames — without this exclusion the
+    /// max would routinely be a burn's id, corrupting the tick-based diagnostics). `None` when
+    /// no optical QR decoded.
     pub tick: Option<u32>,
 }
+
+/// The node-burn run_ids (cam1 capture / strih / stream) — the digitally-generated marks our
+/// own code burns into the feed (`recording_latency::BURN_RUN_ID_*`). They are NOT the cam2
+/// optical Vernier tick and are excluded from [`RecordingFrame::tick`]. Mirrored here as a
+/// small const so `tick` selection doesn't pull the whole `RunIds` machinery into the
+/// per-frame hot path.
+pub const NODE_BURN_RUN_IDS: [u32; 3] = [
+    crate::probe::recording_latency::BURN_RUN_ID_CAM1,
+    crate::probe::recording_latency::BURN_RUN_ID_STRIH,
+    crate::probe::recording_latency::BURN_RUN_ID_STREAM,
+];
 
 /// Decode one native-resolution luma frame into a `RecordingFrame`.
 ///
@@ -138,7 +155,13 @@ pub struct RecordingFrame {
 /// `frame_index` is the caller-supplied position in the recording.
 pub fn decode_recording_frame(frame_index: u64, luma: GrayImage) -> RecordingFrame {
     let payloads = decode_qr_luma_all_robust(luma);
-    let tick = payloads.iter().map(|p| p.frame_id).max();
+    // The Vernier tick is the freshest OPTICAL (cam2) half — node burns are excluded so a
+    // recovered burn (now common, #202) never hijacks the max (see RecordingFrame::tick).
+    let tick = payloads
+        .iter()
+        .filter(|p| !NODE_BURN_RUN_IDS.contains(&p.run_id))
+        .map(|p| p.frame_id)
+        .max();
     RecordingFrame {
         frame_index,
         payloads,
@@ -578,9 +601,10 @@ pub fn extract_frames_png(
             let png_path = out_dir.join(format!("frame-{idx}.png"));
             // Re-decode BEFORE moving the luma into the PNG save, only for frames the
             // verdict called undecodable: a CRC-valid payload here = sharp-but-flagged
-            // = decoder bug.
+            // = decoder bug. Use the SAME robust decode the verdict used (#202) so the
+            // self-check matches the decoder actually in effect — not the weaker plain pass.
             let sharp_qr_but_flagged_undecodable = if undecodable.contains(&idx) {
-                !decode_qr_luma_all(luma.clone()).is_empty()
+                !decode_qr_luma_all_robust(luma.clone()).is_empty()
             } else {
                 false
             };
@@ -659,6 +683,59 @@ mod tests {
         let f = decode_recording_frame(7, dual_qr_luma(200, 201));
         assert_eq!(f.frame_index, 7);
         assert_eq!(f.tick, Some(201));
+    }
+
+    #[test]
+    fn tick_excludes_node_burns_even_when_a_burn_id_exceeds_the_optical_tick() {
+        // #202 regression: with the robust decode recovering node burns on most frames, a
+        // burn's frame_id (independent counter, can be LARGER than the optical Vernier tick)
+        // must NOT hijack `tick`. Compose a frame whose optical dual-QR maxes at 201 and add
+        // a cam1 burn with frame_id 9999 (> 201). `tick` MUST be the optical 201, never 9999.
+        use super::NODE_BURN_RUN_IDS as N;
+        use crate::probe::qr::render_qr_bgra;
+        let (cw, ch) = (960u32, 540u32);
+        let l = Payload {
+            run_id: 6519,
+            frame_id: 200,
+            gen_ts_ns: 1,
+        };
+        let r = Payload {
+            run_id: 6519,
+            frame_id: 201,
+            gen_ts_ns: 2,
+        };
+        let burn = Payload {
+            run_id: N[0], // a cam1 node burn
+            frame_id: 9999,
+            gen_ts_ns: 3,
+        };
+        let bgra = render_qr_dual_bgra(&l, &r, cw, ch, 260);
+        let mut luma = bgra_to_luma(&bgra, cw, ch, cw * 4);
+        // Composite the burn in the bottom-left corner (inside the recovery band).
+        let burn_bgra = render_qr_bgra(&burn, 200, 200, 160);
+        let burn_luma = bgra_to_luma(&burn_bgra, 200, 200, 200 * 4);
+        let (ox, oy) = (20u32, ch - 200 - 20);
+        for y in 0..200 {
+            for x in 0..200 {
+                luma.put_pixel(ox + x, oy + y, *burn_luma.get_pixel(x, y));
+            }
+        }
+        let f = decode_recording_frame(0, luma);
+        // The burn IS recovered into payloads (the #202 fix) …
+        assert!(
+            f.payloads
+                .iter()
+                .any(|p| p.run_id == N[0] && p.frame_id == 9999),
+            "the node burn must be recovered into payloads: {:?}",
+            f.payloads
+        );
+        // … but the Vernier tick stays the OPTICAL max, never the burn's larger id.
+        assert_eq!(
+            f.tick,
+            Some(201),
+            "tick must be the optical Vernier tick (201), NOT the burn id 9999: {:?}",
+            f.payloads
+        );
     }
 
     #[test]
