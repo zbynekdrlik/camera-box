@@ -117,11 +117,15 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
    launching shell (see obs-ops skill: ExitOBS → force-kill → clear `.sentinel\*` → relaunch
    `cwd=bin\64bit` with `$env:OBS_BURN_QR=1; $env:OBS_BURN_RUN_ID=911004; $env:OBS_GENLOCK_WALL_CLOCK=1; $env:OBS_GENLOCK_PRELOAD_FRAMES=1; $env:OBS_GENLOCK_RESERVE_MS=3`).
    Verify the OBS log: `[burn] filter created: enabled=yes run_id=911004`.
-2. **stream RECORDING must be native 1080p, NOT 4K** (#225). The OBS canvas is 1080p but the
-   recording reuses the streaming encoder which has NVENC `Rescale=3840x2160` → records 4K →
-   upscale softens the small (~300px) burns → cam1 over-counts (#226). `ffprobe` the recording
-   dims before trusting it. (Profile-param changes don't hot-apply to a running output — set
-   before OBS launch.)
+2. **stream RECORDING is native 1080p, NOT 4K** (#225, FIXED 2026-06-24). The OBS canvas is 1080p.
+   The recording USED to reuse the 4K-rescaled streaming encoder (`RecEncoder=none` + stream
+   `Rescale=3840x2160`) → recorded 4K → upscale softened the small (~300px) burns → cam1 over-counted
+   (#226). **Fixed persistently in the `Stream_Obs` profile:** `[AdvOut] RecEncoder=obs_nvenc_h264_tex`
+   (dedicated rec encoder) + `RecRescale=false` → records native 1920×1080; the stream encoder stays
+   `Rescale=true RescaleRes=3840x2160` (prod → restreamer unchanged). See obs-ops skill "Recording
+   Output = native 1080p" for the full config + apply path. **Still `ffprobe` the recording dims
+   before trusting a run** (must be `1920x1080`) — a regression here silently softens the burns.
+   (Profile-param changes don't hot-apply to a running output — they take effect at OBS launch.)
 
 **DanteSync gate prerequisite (the harness can't HTTP-fetch :8898):** read `\\.\pipe\dantesync`
 on strih+stream via the win-* MCP (PipeDirection.In; strip the 4-byte header to the leading `{`),
