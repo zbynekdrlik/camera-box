@@ -51,3 +51,39 @@ the decode path must keep these green.
 `qr::decode_path_counts() -> (fast, robust)` (process-wide AtomicU64) is logged at
 recording-analysis-complete so the verdict log shows `fast ≫ robust` (the speedup is real).
 Counters are global/cumulative across all recordings in one run.
+
+## Per-frame latency CSV pairing (#209/#216) — optical-decode dropout ≠ chain loss
+
+`recording_latency::per_frame_latency_csv_rows` builds the #209 continuous-line CSV
+(`frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms`). Two distinct QR
+classes drive a row:
+
+- the **node BURNS** (cam1/strih/stream) give the THREE hop columns — these need ONLY the burns,
+  paired WITHIN one frame. They survive any optical dropout (the burns are digitally generated).
+- the **cam2 OPTICAL tick** (`frame_id`, `Option<u32>` since #216) is the per-frame optical
+  identity AND the only key for `flip_ts_ns`. It can go undecodable for a stretch (cam1 filming
+  cam2's monitor briefly fails to read the QR) — an **optical-DECODE dropout**, which is a
+  MEASUREMENT gap, NOT a chain loss.
+
+**#216 fix / rule:** a row is emitted whenever the frame has a valid x-anchor (a positive
+cam1/strih burn or cam2 paint stamp), EVEN WHEN the cam2 tick is absent — so the three burn-hop
+lines stay UNBROKEN across an optical dropout (`frame_id` empty, `flip_ts` empty, three hops
+filled). Only a frame with NEITHER a cam2 tick NOR any positive stamp is skipped. The earlier
+"skip the whole row when no cam2 tick" blanked all three lines for a ~150s stretch (#216 band).
+
+**Diagnosing a latency-CSV gap (do this FIRST, no rig needed):** read the artifacts on disk —
+`proof-*/latency-per-frame.csv` + `verdict-clean.json`. `stream_frames − csv_rows == nodes.stream
+.undecodable` ⇒ the gap is undecodable (no cam2 tick) frames, not lost frames. Check the cam2
+`frame_id` jump vs the `gen_ts_ns` jump: if `tick_jump / 60 ≈ gen_ts_gap_seconds`, the cam2
+painter kept running (optical-decode dropout), not a chain stall. cam1 burn `present_count ==
+expected_count` with no clustered missing run confirms the burns were present the whole time.
+
+## GOTCHA — pre-push Gate-1 false-positives on inline Rust tests
+
+The airuleset `pre-push-test-check.sh` Gate-1 ("feature .rs changed but no test file") keys on the
+PATH (`(test|spec|e2e|playwright)`), so a PR that adds only INLINE `#[cfg(test)]` tests inside a
+`src/*.rs` is wrongly flagged. Gate-2 (the real RED-before-GREEN ordering) DOES detect inline-test
+diffs and passes. Fix: add a genuine integration test under `tests/` (real coverage, not a
+workaround) — e.g. `tests/recording_latency_decode.rs` renders QR pixels + decodes through the
+real rqrr path. That satisfies Gate-1 by path AND adds end-to-end value. Never `[no-test:]` a real
+fix to dodge it.

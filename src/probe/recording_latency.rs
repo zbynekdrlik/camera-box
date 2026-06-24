@@ -759,10 +759,13 @@ pub fn chain_hop_samples_from_stream(
 /// cannot appear.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct LatencyCsvRow {
-    /// The cam2 optical Vernier tick (the canonical `frame_id` carried by every recorded
-    /// frame end-to-end) — the per-frame identity. A monotonic gap in this column across
-    /// rows is a DROPPED optical frame; the plotter draws the gap so loss is self-evident.
-    pub frame_id: u32,
+    /// The cam2 optical Vernier tick (the canonical tick carried by a recorded frame whose
+    /// cam2 QR decoded) — the per-frame optical identity. `None` (empty CSV cell) when the
+    /// cam2 optical QR was UNDECODABLE for this frame (an optical-decode dropout, #216): the
+    /// row is still emitted because the cam1/strih/stream burns are present, so the three
+    /// burn-only hop lines stay UNBROKEN across the dropout — only this optical-identity
+    /// column is empty. A monotonic gap across the `Some` ticks is a dropped OPTICAL frame.
+    pub frame_id: Option<u32>,
     /// The chain ORIGIN wall-clock instant for this frame (ns since epoch) — cam1's
     /// CAPTURE burn `gen_ts_ns` when present, else strih's render `gen_ts_ns`, else the
     /// cam2 paint instant. This is the row's x-axis time anchor (the earliest stamp the
@@ -798,9 +801,12 @@ impl LatencyCsvRow {
         fn ns(v: Option<i64>) -> String {
             v.map(|x| x.to_string()).unwrap_or_default()
         }
+        fn tick(v: Option<u32>) -> String {
+            v.map(|x| x.to_string()).unwrap_or_default()
+        }
         format!(
             "{},{},{},{},{},{}",
-            self.frame_id,
+            tick(self.frame_id),
             self.gen_ts_ns,
             ns(self.flip_ts_ns),
             ms(self.cam1_strih_ms),
@@ -812,23 +818,30 @@ impl LatencyCsvRow {
 
 /// Build the per-frame latency time-series rows (#209) from the SINGLE stream recording.
 ///
-/// For each recorded stream frame that carries the cam2 optical Vernier tick, emit one
-/// [`LatencyCsvRow`]: the cam2 tick (`frame_id`), the chain-origin wall-clock anchor
-/// (`gen_ts_ns`), and the three co-located per-hop latencies (cam1→strih, strih→stream,
-/// cam1→stream). The burns are paired WITHIN the one frame (no cam2-tick cross-recording
-/// pairing), exactly as [`chain_hop_samples_from_stream`] does, so the per-frame points
-/// match the summary-stat hops the verdict already reports — the CSV is the per-frame
-/// expansion of the same numbers, not a parallel measurement.
+/// For each recorded stream frame carrying a valid x-axis time anchor, emit one
+/// [`LatencyCsvRow`]: the cam2 tick (`frame_id`, `None` when the cam2 QR was undecodable —
+/// #216), the chain-origin wall-clock anchor (`gen_ts_ns`), and the three co-located
+/// per-hop latencies (cam1→strih, strih→stream, cam1→stream). The burns are paired WITHIN
+/// the one frame (no cam2-tick cross-recording pairing), exactly as
+/// [`chain_hop_samples_from_stream`] does, so the per-frame points match the summary-stat
+/// hops the verdict already reports — the CSV is the per-frame expansion of the same
+/// numbers, not a parallel measurement.
 ///
 /// A hop's latency is `None` for a frame that did not carry BOTH of that hop's burns
 /// (e.g. a frame with only cam2 + cam1 burn has cam1→strih = None) — an empty CSV cell,
-/// which the plotter renders as a break in that hop's line. Rows are emitted in capture
-/// order and only for frames carrying a cam2 tick (a frame with no optical QR is not a
-/// delivered optical instant and has no x-axis identity). `gen_ts_ns ≤ 0` burn stamps are
-/// treated as absent (never a wrong number / negative latency). A frame whose only optical
-/// stamp is non-positive AND that carries no positive burn would have no valid x anchor
-/// (`gen_ts_ns ≤ 0`) and is SKIPPED — a 0-anchor row would plot far left of t0 and distort
-/// the continuous line (it could not be paired on a hop anyway).
+/// which the plotter renders as a break in that hop's line. `gen_ts_ns ≤ 0` burn stamps are
+/// treated as absent (never a wrong number / negative latency).
+///
+/// #216 — a row is emitted whenever the frame has a valid x anchor (a positive cam1/strih
+/// burn or cam2 paint stamp), EVEN WHEN the cam2 optical tick is absent. The cam2 OPTICAL QR
+/// (cam1 filming cam2's monitor) can go undecodable for a stretch (an optical-decode
+/// dropout) while the cam1/strih/stream BURNS stay present; the three burn-only hops are
+/// still computable, so emitting the row keeps those three lines UNBROKEN across the dropout
+/// (without #216 the whole row was skipped, blanking ~150s of all three lines). Such a row
+/// has `frame_id = None` (empty cell) and no `flip_ts_ns` (it is keyed on the cam2 tick).
+/// Rows are emitted in capture order. The ONLY frame still skipped is one with NEITHER a
+/// cam2 tick NOR any positive stamp — no x identity at all (a 0-anchor row would plot far
+/// left of t0 and distort the continuous line; it could not be paired on a hop anyway).
 ///
 /// `cam2_pin` (the `--cam2-run-id` the painter used): when `Some`, cam2 is matched EXACTLY
 /// by this run_id — IDENTICAL to [`RunIds::is_cam2`] / [`split_payloads`], so a forwarded
@@ -889,10 +902,6 @@ pub fn per_frame_latency_csv_rows(
                 }
             }
         }
-        // Only a frame carrying a cam2 optical tick is a delivered instant with an
-        // x-axis identity — a frame with no optical QR is skipped (not a wrong number).
-        let Some(frame_id) = cam2_tick else { continue };
-
         let ms = |down: Option<i64>, up: Option<i64>| -> Option<f64> {
             match (up, down) {
                 (Some(u), Some(d)) => Some((d - u) as f64 / 1_000_000.0),
@@ -903,13 +912,24 @@ pub fn per_frame_latency_csv_rows(
         // capture, else strih render, else cam2 paint. A frame with no positive stamp at
         // all has no valid x anchor — SKIP it (a 0 anchor would plot far left of t0 and
         // distort the line; with no stamp it can't be paired on any hop either).
+        //
+        // #216: the row is emitted whenever it has a valid x anchor, EVEN WHEN the cam2
+        // optical tick is absent (an optical-decode dropout). The three burn-only hops
+        // (cam1→strih, strih→stream, cam1→stream) need only the burns — which are present
+        // across an optical dropout — so emitting the row keeps those three lines UNBROKEN
+        // over the dropout (the ~150s blank band that #216 reports). Only the cam2-derived
+        // fields are absent for such a row: `frame_id` is None (empty cell) and `flip_ts_ns`
+        // can't be looked up (no tick). A frame with neither a cam2 tick NOR a positive
+        // burn/paint stamp has no x identity at all and is the only one still skipped.
         let Some(gen_ts_ns) = cam1_ts.or(strih_ts).or(cam2_gen) else {
             continue;
         };
         out.push(LatencyCsvRow {
-            frame_id,
+            frame_id: cam2_tick,
             gen_ts_ns,
-            flip_ts_ns: flip_ts_by_tick.get(&frame_id).copied(),
+            // flip_ts is a cam2 DISPLAY instant keyed on the cam2 tick — only resolvable
+            // when this frame actually carried a cam2 tick (an optical-dropout row has none).
+            flip_ts_ns: cam2_tick.and_then(|t| flip_ts_by_tick.get(&t).copied()),
             cam1_strih_ms: ms(strih_ts, cam1_ts),
             strih_stream_ms: ms(stream_ts, strih_ts),
             cam1_stream_ms: ms(stream_ts, cam1_ts),
@@ -2648,7 +2668,11 @@ mod tests {
         );
         assert_eq!(rows.len(), 1, "one delivered optical frame ⇒ one row");
         let r = rows[0];
-        assert_eq!(r.frame_id, 500, "frame_id = cam2 optical Vernier tick");
+        assert_eq!(
+            r.frame_id,
+            Some(500),
+            "frame_id = cam2 optical Vernier tick"
+        );
         assert_eq!(
             r.gen_ts_ns, cam1,
             "x anchor = chain-origin (cam1 capture) stamp"
@@ -2700,7 +2724,7 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         let r = rows[0];
-        assert_eq!(r.frame_id, 700);
+        assert_eq!(r.frame_id, Some(700));
         assert_eq!(r.cam1_strih_ms, None);
         assert_eq!(r.strih_stream_ms, None);
         assert_eq!(r.cam1_stream_ms, None);
@@ -2712,9 +2736,14 @@ mod tests {
     }
 
     #[test]
-    fn per_frame_csv_frame_with_no_cam2_optical_is_skipped() {
-        // A frame with no cam2 optical QR has no per-frame x-axis identity (not a
-        // delivered optical instant) — it must NOT produce a row (never a wrong number).
+    fn per_frame_csv_frame_with_no_cam2_but_burns_still_emits_a_row_216() {
+        // #216 REVISION of the former `..._no_cam2_optical_is_skipped`: that test enshrined
+        // the bug — it skipped a frame that had NO cam2 QR but DID carry all three burns,
+        // blanking the burn-only hop lines across an optical-decode dropout. The correct
+        // behavior is to EMIT a row (frame_id = None / empty cell) so the cam1→strih /
+        // strih→stream / cam1→stream lines stay unbroken; only the cam2-optical identity is
+        // absent. A frame with no cam2 AND no positive stamp is the only one still skipped
+        // (covered by `per_frame_csv_frame_with_no_cam2_and_no_stamp_is_skipped`).
         let frames = vec![
             csv_frame(
                 0,
@@ -2725,11 +2754,11 @@ mod tests {
             ),
             csv_frame(
                 1,
-                None,
+                None, // no cam2 optical QR — but all three burns present (optical dropout)
                 Some(1_100_000_000),
                 Some(1_110_000_000),
                 Some(1_120_000_000),
-            ), // no cam2 → skip
+            ),
             csv_frame(
                 2,
                 Some((CAM2, 102)),
@@ -2746,11 +2775,160 @@ mod tests {
             None,
             &HashMap::new(),
         );
-        let ticks: Vec<u32> = rows.iter().map(|r| r.frame_id).collect();
+        let ticks: Vec<Option<u32>> = rows.iter().map(|r| r.frame_id).collect();
         assert_eq!(
             ticks,
-            vec![100, 102],
-            "only the two cam2-bearing frames produce rows"
+            vec![Some(100), None, Some(102)],
+            "#216: all three frames emit a row; the no-cam2 frame's tick is None (empty cell)"
+        );
+        // The no-cam2 row still carries its three burn-only hops (the chain was alive).
+        assert!((rows[1].cam1_strih_ms.unwrap() - 10.0).abs() < 1e-6);
+        assert!((rows[1].strih_stream_ms.unwrap() - 10.0).abs() < 1e-6);
+        assert!((rows[1].cam1_stream_ms.unwrap() - 20.0).abs() < 1e-6);
+        assert_eq!(
+            rows[1].gen_ts_ns, 1_100_000_000,
+            "x anchor = cam1 capture burn, even with no cam2 tick"
+        );
+    }
+
+    #[test]
+    fn per_frame_csv_frame_with_no_cam2_and_no_stamp_is_skipped() {
+        // The ONLY frame still skipped after #216: no cam2 tick AND no positive burn/paint
+        // stamp ⇒ no x-axis identity at all (it could not be paired on any hop either).
+        let frames = vec![
+            // A bare frame with zero payloads — nothing to anchor on.
+            RecordingFrame {
+                frame_index: 0,
+                payloads: vec![],
+                tick: None,
+            },
+            csv_frame(
+                1,
+                Some((CAM2, 102)),
+                Some(1_000_000_000),
+                Some(1_010_000_000),
+                Some(1_020_000_000),
+            ),
+        ];
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "the empty frame is skipped; the valid one stays"
+        );
+        assert_eq!(rows[0].frame_id, Some(102));
+    }
+
+    #[test]
+    fn per_frame_csv_optical_decode_dropout_keeps_burn_hops_unbroken_216() {
+        // #216 — the ~150s blank band: a stretch of frames whose cam2 OPTICAL QR is
+        // undecodable (an optical-decode dropout, NOT a chain loss) while the cam1/strih/
+        // stream BURNS are present the whole time. Before #216 such a frame was skipped
+        // entirely (no cam2 tick ⇒ `continue`), so the cam1→strih / strih→stream /
+        // cam1→stream lines — which need ONLY the burns, not cam2 — went blank across the
+        // dropout. The fix: emit a row for every burn-carrying frame so those three lines
+        // stay UNBROKEN; only the cam2-dependent `frame_id` column is empty for the gap.
+        //
+        // Layout: a healthy cam2 frame, then 3 burns-only frames (optical dropout), then a
+        // healthy cam2 frame again. Every frame carries all three burns (chain alive).
+        let frames = vec![
+            csv_frame(
+                0,
+                Some((CAM2, 100)),
+                Some(1_000_000_000),
+                Some(1_010_000_000),
+                Some(1_025_000_000),
+            ),
+            // --- optical-decode dropout: burns present, cam2 QR undecodable (no cam2) ---
+            csv_frame(
+                1,
+                None,
+                Some(1_033_000_000),
+                Some(1_043_000_000),
+                Some(1_058_000_000),
+            ),
+            csv_frame(
+                2,
+                None,
+                Some(1_066_000_000),
+                Some(1_076_000_000),
+                Some(1_091_000_000),
+            ),
+            csv_frame(
+                3,
+                None,
+                Some(1_099_000_000),
+                Some(1_109_000_000),
+                Some(1_124_000_000),
+            ),
+            // --- optical decode recovers ---
+            csv_frame(
+                4,
+                Some((CAM2, 104)),
+                Some(1_132_000_000),
+                Some(1_142_000_000),
+                Some(1_157_000_000),
+            ),
+        ];
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            None,
+            &HashMap::new(),
+        );
+        // ALL five frames must emit a row — the three dropout frames are NOT skipped, so
+        // the burn-hop lines have a point at every frame across the whole window (#216).
+        assert_eq!(
+            rows.len(),
+            5,
+            "#216: every burn-carrying frame emits a row, incl. the optical-dropout stretch — \
+             no blank band"
+        );
+        // Every row carries the three burn-only hops (computable from burns alone): +10ms,
+        // +15ms, +25ms. NOT just the two cam2-bearing frames — the dropout frames too.
+        for (i, r) in rows.iter().enumerate() {
+            assert!(
+                (r.cam1_strih_ms.unwrap() - 10.0).abs() < 1e-6,
+                "row {i}: cam1→strih = +10 ms (burn-only, present across the dropout)"
+            );
+            assert!(
+                (r.strih_stream_ms.unwrap() - 15.0).abs() < 1e-6,
+                "row {i}: strih→stream = +15 ms"
+            );
+            assert!(
+                (r.cam1_stream_ms.unwrap() - 25.0).abs() < 1e-6,
+                "row {i}: cam1→stream = +25 ms end-to-end"
+            );
+            assert!(
+                r.gen_ts_ns > 0,
+                "row {i}: every row has a positive x anchor"
+            );
+        }
+        // The three dropout rows (index 1..=3) have NO cam2 tick (empty frame_id cell) but
+        // STILL carry their three burn hops — the cam1 capture burn is the x anchor. The
+        // healthy frames keep their cam2 tick. (`frame_id` is `Option<u32>` after #216.)
+        assert_eq!(
+            rows[1].frame_id, None,
+            "#216: optical-dropout frame has no cam2 tick (empty frame_id) but still a row"
+        );
+        assert_eq!(rows[2].frame_id, None);
+        assert_eq!(rows[3].frame_id, None);
+        assert_eq!(rows[0].frame_id, Some(100));
+        assert_eq!(rows[4].frame_id, Some(104));
+        // CSV line for a dropout row: empty frame_id cell, x anchor = cam1 burn, three hops.
+        assert_eq!(
+            rows[1].to_csv_line(),
+            ",1033000000,,10.000000,15.000000,25.000000",
+            "#216: empty frame_id cell, but the three burn-hop cells are filled"
         );
     }
 
@@ -2830,7 +3008,8 @@ mod tests {
         );
         assert_eq!(pinned.len(), 1);
         assert_eq!(
-            pinned[0].frame_id, 500,
+            pinned[0].frame_id,
+            Some(500),
             "pinned cam2 → tick stays 500, the higher-frame_id stray QR does NOT hijack it"
         );
         // UNPINNED → the stray QR (highest frame_id) wins, demonstrating WHY the pin matters.
@@ -2843,7 +3022,8 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(
-            unpinned[0].frame_id, 9999,
+            unpinned[0].frame_id,
+            Some(9999),
             "unpinned: any non-burn QR counts, so the stray 9999 wins (the bug the pin fixes)"
         );
     }
@@ -2880,10 +3060,10 @@ mod tests {
             Some(CAM2),
             &HashMap::new(),
         );
-        let ticks: Vec<u32> = rows.iter().map(|r| r.frame_id).collect();
+        let ticks: Vec<Option<u32>> = rows.iter().map(|r| r.frame_id).collect();
         assert_eq!(
             ticks,
-            vec![102],
+            vec![Some(102)],
             "the 0-stamp cam2 frame is skipped; the valid one stays"
         );
         assert!(
@@ -2896,20 +3076,22 @@ mod tests {
     fn write_latency_csv_writes_header_plus_one_line_per_row() {
         let rows = vec![
             LatencyCsvRow {
-                frame_id: 1,
+                frame_id: Some(1),
                 gen_ts_ns: 1_000_000_000,
                 flip_ts_ns: None,
                 cam1_strih_ms: Some(10.0),
                 strih_stream_ms: Some(15.0),
                 cam1_stream_ms: Some(25.0),
             },
+            // #216: a row with NO cam2 tick (optical-decode dropout) — empty frame_id cell,
+            // yet the burn-only hops are written so the line stays unbroken.
             LatencyCsvRow {
-                frame_id: 2,
+                frame_id: None,
                 gen_ts_ns: 1_033_000_000,
-                flip_ts_ns: Some(2_000_000_000),
+                flip_ts_ns: None,
                 cam1_strih_ms: Some(11.0),
-                strih_stream_ms: None,
-                cam1_stream_ms: None,
+                strih_stream_ms: Some(16.0),
+                cam1_stream_ms: Some(27.0),
             },
         ];
         let dir = std::env::temp_dir();
@@ -2924,7 +3106,10 @@ mod tests {
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines[0], LatencyCsvRow::HEADER, "first line is the header");
         assert_eq!(lines[1], "1,1000000000,,10.000000,15.000000,25.000000");
-        assert_eq!(lines[2], "2,1033000000,2000000000,11.000000,,");
+        assert_eq!(
+            lines[2], ",1033000000,,11.000000,16.000000,27.000000",
+            "#216: empty frame_id cell, the three burn-hop cells still filled"
+        );
         assert_eq!(lines.len(), 3, "header + 2 rows");
     }
 }
