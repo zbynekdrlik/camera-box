@@ -29,7 +29,7 @@
 //! the other hardware/process glue (`multi_reader`, `reader`, `run`).
 
 use crate::probe::payload::Payload;
-use crate::probe::qr::decode_qr_luma_all_robust;
+use crate::probe::qr::{decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_robust};
 use anyhow::{Context, Result};
 use image::GrayImage;
 use std::io::Read;
@@ -144,17 +144,44 @@ pub const NODE_BURN_RUN_IDS: [u32; 3] = [
     crate::probe::recording_latency::BURN_RUN_ID_STREAM,
 ];
 
-/// Decode one native-resolution luma frame into a `RecordingFrame`.
+/// Decode one native-resolution luma frame into a `RecordingFrame`, requiring the FULL set of
+/// node burns ([`NODE_BURN_RUN_IDS`]) before the fast path may skip the robust tiles.
 ///
-/// PURE (no I/O, no ffmpeg): feeds the luma image into the rqrr decoder. The OFFLINE
-/// recording path uses the #202 ROBUST decode ([`decode_qr_luma_all_robust`]) — the plain
-/// full-frame pass PLUS a tiled+upscaled retry that recovers the small node burns rqrr's
-/// single `detect_grids` pass intermittently misses (the residual burn-unreadable misses on
-/// PRESENT, sharp frames). This decode runs in the parallel #166/#187 worker pool, never on
-/// the latency-sensitive live tap, so the extra passes are affordable.
-/// `frame_index` is the caller-supplied position in the recording.
+/// This is the MAXIMALLY-ROBUST default: requiring all three node burns means the #207 fast
+/// gate only fires on a frame that already carries cam1 + strih + stream, so any recording
+/// missing a burn (e.g. a strih recording, which never carries the stream burn) always runs
+/// the full robust recovery — exactly what the diagnostic tools (forensic-dump,
+/// recording-probe) want. The verdict (the perf-critical 30-min 4K path) instead calls
+/// [`decode_recording_frame_with_burns`] with the burns that recording is KNOWN to carry, so
+/// the fast path fires on its ~99 %+ clean frames. See [`decode_recording_frame_with_burns`].
 pub fn decode_recording_frame(frame_index: u64, luma: GrayImage) -> RecordingFrame {
-    let payloads = decode_qr_luma_all_robust(luma);
+    decode_recording_frame_with_burns(frame_index, luma, &NODE_BURN_RUN_IDS)
+}
+
+/// Decode one native-resolution luma frame into a `RecordingFrame`, with the #207 fast gate
+/// keyed on `expected_node_burns` — the node burns THIS recording is known to carry.
+///
+/// PURE (no I/O, no ffmpeg): feeds the luma image into the rqrr decoder via the #207
+/// FAST-then-ROBUST decode ([`decode_qr_luma_all_fast_then_robust`]): the cheap plain
+/// full-frame pass FIRST, and the #202 tiled+upscaled retry that recovers the small node
+/// burns rqrr's single `detect_grids` pass intermittently misses ONLY when one of
+/// `expected_node_burns` is absent from the plain pass.
+///
+/// Passing the burns the recording ACTUALLY carries is what unlocks the speedup on every
+/// recording: a strih recording (cam1 + strih, never stream) passes `[cam1, strih]`, so a
+/// clean frame carrying both takes the fast path instead of forever running tiles to chase a
+/// stream burn that was never recorded. On a clean recording the plain pass already reads
+/// every expected burn on ~99 %+ of frames, so the ~10×-cost tiles almost never run — a 30-min
+/// verdict drops from ~50 min to ~5 — while the rare hard frame still gets the full robust
+/// recovery, preserving the #186 0-miss guarantee exactly. This decode runs in the parallel
+/// #166/#187 worker pool, never on the latency-sensitive live tap.
+/// `frame_index` is the caller-supplied position in the recording.
+pub fn decode_recording_frame_with_burns(
+    frame_index: u64,
+    luma: GrayImage,
+    expected_node_burns: &[u32],
+) -> RecordingFrame {
+    let payloads = decode_qr_luma_all_fast_then_robust(luma, expected_node_burns);
     // The Vernier tick is the freshest OPTICAL (cam2) half — node burns are excluded so a
     // recovered burn (now common, #202) never hijacks the max (see RecordingFrame::tick).
     let tick = payloads
@@ -364,16 +391,21 @@ fn auto_cpu_workers() -> usize {
 /// frame in RAM at once.
 fn decode_stream_parallel(
     workers: usize,
+    expected_node_burns: &[u32],
     produce: impl FnOnce(&mut dyn FnMut(u64, GrayImage) -> bool) -> Result<u64>,
 ) -> Result<Vec<RecordingFrame>> {
     let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u64, GrayImage)>(workers * 2);
     let job_rx = Arc::new(Mutex::new(job_rx));
     let (res_tx, res_rx) = std::sync::mpsc::channel::<RecordingFrame>();
+    // Owned + shared so each worker thread can read the #207 fast-gate burn set without
+    // borrowing the caller's slice across the `'static` thread boundary.
+    let expected_node_burns: Arc<[u32]> = Arc::from(expected_node_burns);
 
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
         let job_rx = job_rx.clone();
         let res_tx = res_tx.clone();
+        let expected_node_burns = expected_node_burns.clone();
         handles.push(std::thread::spawn(move || loop {
             // Lock only to pull the next job; release before the heavy decode so
             // workers don't serialise on the mutex (the #160 pattern).
@@ -382,7 +414,7 @@ fn decode_stream_parallel(
                 rx.recv()
             };
             let Ok((idx, luma)) = job else { break };
-            let f = decode_recording_frame(idx, luma);
+            let f = decode_recording_frame_with_burns(idx, luma, &expected_node_burns);
             tracing::debug!(
                 frame = f.frame_index, decoded = f.payloads.len(), tick = ?f.tick,
                 "recording frame analyzed"
@@ -470,13 +502,31 @@ fn decode_stream_parallel(
 /// the #160 spool-decode parallelization). A 7+ GB lossless gray8 cam1 grab that
 /// previously took >1 h single-threaded now decodes in minutes; the output order
 /// is identical to the prior serial loop (results are re-sorted by frame_index).
+///
+/// Uses the MAXIMALLY-ROBUST gate (requires the full [`NODE_BURN_RUN_IDS`] before the #207
+/// fast path may skip the tiles) — the right default for the diagnostic dump tools. The
+/// verdict's perf-critical path calls [`analyze_recording_with_burns`] with the burns the
+/// recording actually carries to unlock the #207 speedup.
 pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
+    analyze_recording_with_burns(path, &NODE_BURN_RUN_IDS)
+}
+
+/// [`analyze_recording`] with the #207 fast gate keyed on `expected_node_burns` — the node
+/// burns THIS recording is known to carry. Passing the right set (e.g. `[cam1, strih]` for a
+/// strih recording) lets the fast path fire on the ~99 %+ of clean frames, dropping a 30-min
+/// verdict from ~50 min to ~5 while still running the full robust recovery on any frame that
+/// misses an expected burn (the #186 0-miss guarantee). See [`decode_recording_frame_with_burns`].
+pub fn analyze_recording_with_burns(
+    path: &Path,
+    expected_node_burns: &[u32],
+) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
     let workers = decode_workers(width, height);
     tracing::info!(
         file = %path.display(), width, height, workers,
+        expected_node_burns = ?expected_node_burns,
         avail_mb = available_mem_bytes().map(|b| b / 1_048_576),
-        "recording analysis start (parallel decode, #187 memory-bounded worker pool)"
+        "recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust)"
     );
     // Emit a periodic frame-count HEARTBEAT at info level (every PROGRESS_EVERY
     // frames the producer reads). This is the liveness signal the harness stall
@@ -486,7 +536,7 @@ pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
     // output growing during the decode so the detector sees real progress — the
     // deep fix, not a band-aid timeout bump (no-timeout-band-aids.md).
     const PROGRESS_EVERY: u64 = 1000;
-    let frames = decode_stream_parallel(workers, |emit| {
+    let frames = decode_stream_parallel(workers, expected_node_burns, |emit| {
         read_frames(path, width, height, |idx, luma| {
             if idx > 0 && idx % PROGRESS_EVERY == 0 {
                 tracing::info!(file = %path.display(), frames_read = idx, "recording decode progress");
@@ -495,9 +545,16 @@ pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
         })
     })?;
     let decoded: usize = frames.iter().filter(|f| !f.payloads.is_empty()).count();
+    // #207 — the fast/robust decode-path split, so the verdict log shows the speedup is real:
+    // on a clean recording almost every frame should take the cheap plain-only fast path, with
+    // the ~10×-cost tiled recovery firing only on the rare burn-missed frame. (Counters are
+    // process-global, so the absolute numbers accumulate across all recordings analyzed in one
+    // run — what matters is fast ≫ robust.)
+    let (fast, robust) = crate::probe::qr::decode_path_counts();
     tracing::info!(
         file = %path.display(), total = frames.len(), with_qr = decoded, workers,
-        "recording analysis complete"
+        fast_path_frames = fast, robust_fallback_frames = robust,
+        "recording analysis complete (#207 decode-path split, cumulative this run)"
     );
     Ok(frames)
 }
@@ -765,7 +822,7 @@ mod tests {
         // -threaded loop trivially preserved order; this is the regression guard
         // that the parallelization did not corrupt it.)
         let n: u64 = 60;
-        let frames = decode_stream_parallel(4, |emit| {
+        let frames = decode_stream_parallel(4, &NODE_BURN_RUN_IDS, |emit| {
             for i in 0..n {
                 // left = even tick 2i, right = odd tick 2i+1 → tick = 2i+1, unique
                 // per frame so an order bug is detectable.
@@ -797,9 +854,12 @@ mod tests {
         let serial: Vec<RecordingFrame> =
             (0..n).map(|i| decode_recording_frame(i, make(i))).collect();
 
-        // workers=1 and workers=4 must both equal the serial reference.
+        // workers=1 and workers=4 must both equal the serial reference. Both sides use the
+        // SAME burn set (`decode_recording_frame` defaults to the full `NODE_BURN_RUN_IDS`),
+        // so the #207 fast/robust gate is identical on each path — the comparison is purely
+        // about ordering/parallelism, not the decode path.
         for w in [1usize, 4] {
-            let par = decode_stream_parallel(w, |emit| {
+            let par = decode_stream_parallel(w, &NODE_BURN_RUN_IDS, |emit| {
                 for i in 0..n {
                     emit(i, make(i));
                 }
@@ -814,7 +874,7 @@ mod tests {
     fn parallel_decode_propagates_producer_error() {
         // A producer (ffmpeg/ffprobe) error must surface as an Err, not a silent
         // short read — otherwise a truncated decode could be read as "0 loss".
-        let r = decode_stream_parallel(4, |emit| {
+        let r = decode_stream_parallel(4, &NODE_BURN_RUN_IDS, |emit| {
             emit(0, dual_qr_luma(0, 1));
             anyhow::bail!("simulated ffmpeg failure");
         });

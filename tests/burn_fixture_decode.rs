@@ -33,7 +33,9 @@
 #![cfg(feature = "probe")]
 
 use camera_box::probe::payload::Payload;
-use camera_box::probe::qr::{decode_qr_luma_all, decode_qr_luma_all_robust};
+use camera_box::probe::qr::{
+    decode_qr_luma_all, decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_robust,
+};
 use camera_box::probe::recording_latency::{
     BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
@@ -150,4 +152,67 @@ fn robust_recovers_burns_the_plain_full_frame_pass_does_not() {
         CASES.len(),
         CASES.len()
     );
+}
+
+// ============================================================================
+// #207 — the per-frame recording decode runs the cheap plain pass FIRST and the
+// ~10×-cost robust tiles ONLY when a node burn is actually missing. These real
+// "burn-unreadable" fixtures are exactly the rare frames where the plain pass
+// MISSES the burn, so they must trigger the robust FALLBACK and still recover the
+// exact burn — i.e. the #186 0-miss guarantee is preserved through the fast gate.
+// ============================================================================
+
+/// The #207 fast-then-robust decode still recovers EVERY real burn-unreadable frame.
+/// On each fixture the plain pass misses the node burn, so the fast gate (which requires
+/// the expected burn id) detects the miss and runs the full robust tiled recovery — which
+/// reads the exact burn the verdict needs. This is the proof the speed optimization did
+/// NOT weaken the #186 strict-zero guarantee: a present-but-hard burn still decodes.
+#[test]
+fn fast_then_robust_recovers_every_real_burn_unreadable_frame() {
+    let mut failures = Vec::new();
+    for &(name, run_id, frame_id) in CASES {
+        let luma = fixture_luma(name);
+        // The expected burns are this node's id — the plain pass misses it on these
+        // fixtures, so the fast gate must fall back to the robust tiled recovery.
+        let got = decode_qr_luma_all_fast_then_robust(luma, &[run_id]);
+        if !burn(&got, run_id, frame_id) {
+            failures.push(format!(
+                "{name}: fast-then-robust FAILED to recover the present burn \
+                 ({run_id}.{frame_id}); got {:?}",
+                got.iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the #207 fast-then-robust decode must still read EVERY present burn (the robust \
+         fallback fires when the plain pass misses one — #186 0-miss preserved):\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The #207 fast-then-robust decode is byte-for-byte IDENTICAL to robust-always on every
+/// real fixture: same payload SET (order-independent). The optimization only changes WHEN
+/// the tiles run, never WHAT is read — so no decode regression vs the proven #202 robust
+/// path. On a burn-unreadable fixture the fallback fires and runs the same tiles; on a
+/// frame whose burns the plain pass already had, the fast path returns the same plain
+/// superset (the tiles add nothing there anyway).
+#[test]
+fn fast_then_robust_matches_robust_always_on_every_fixture() {
+    for &(name, run_id, _frame_id) in CASES {
+        let luma = fixture_luma(name);
+        let mut robust = decode_qr_luma_all_robust(luma.clone());
+        let mut fast = decode_qr_luma_all_fast_then_robust(luma, &[run_id]);
+        // Order-independent set equality on (run_id, frame_id, gen_ts_ns).
+        let key = |p: &camera_box::probe::payload::Payload| (p.run_id, p.frame_id, p.gen_ts_ns);
+        robust.sort_by_key(key);
+        fast.sort_by_key(key);
+        assert_eq!(
+            robust, fast,
+            "{name}: #207 fast-then-robust must read the IDENTICAL payload set as \
+             robust-always (only WHEN the tiles run differs, never WHAT is read)"
+        );
+    }
 }
