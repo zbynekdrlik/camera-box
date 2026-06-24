@@ -21,12 +21,25 @@ pub mod recording_4node;
 pub mod recording_latency;
 pub mod recording_verdict;
 
+// #193: the probe HARDWARE GLUE is Linux-only — fb (/dev/fb0 + libc ioctl), kms/presenter
+// (drm page-flip), painter (fb+evdev), reader/multi_reader (v4l), run (drives all of them).
+// None are needed by recording-verdict (its transitive set is recording/recording_verdict/
+// recording_latency/burn_contiguity/recording_4node/payload/qr/luma/analyzer — all pure +
+// cross-platform). Gating them on cfg(target_os="linux") lets the verdict cross-build for
+// Windows (so the #193 decode runs ON stream.lan), while the Linux probe build is unchanged.
+#[cfg(target_os = "linux")]
 pub mod fb;
+#[cfg(target_os = "linux")]
 pub mod kms;
+#[cfg(target_os = "linux")]
 pub mod multi_reader;
+#[cfg(target_os = "linux")]
 pub mod painter;
+#[cfg(target_os = "linux")]
 pub mod presenter;
+#[cfg(target_os = "linux")]
 pub mod reader;
+#[cfg(target_os = "linux")]
 pub mod run;
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
