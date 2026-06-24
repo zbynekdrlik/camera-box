@@ -33,9 +33,10 @@ Past claims of "everything works, zero loss, low latency" were untrustworthy/fal
 **Per-frame latency CONTINUOUS-LINE proof (#209) — the literal line, not just p50/p99:**
 - `recording-verdict --latency-csv <path>` writes one row per delivered stream frame:
   `frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms`
-  (defaults to `<out-dir>/latency-per-frame.csv` whenever `--json` is given, so it is produced
-  automatically alongside the summary). Column contract = `LatencyCsvRow::HEADER` in
-  `src/probe/recording_latency.rs` (single source of truth; the plotter asserts it).
+  (defaults to `latency-per-frame.csv` BESIDE the `--json` summary — the JSON's own directory,
+  NOT `--out-dir` — whenever `--json` is given, so it sits next to the summary). Column contract
+  = `LatencyCsvRow::HEADER` in `src/probe/recording_latency.rs` (single source of truth; the
+  Python plotter asserts it equals its `EXPECTED_HEADER` via a cross-boundary test).
 - Each hop is paired WITHIN one stream frame (co-located burns, same as `chain_hop_samples_from_stream`),
   so the per-frame points MATCH the summary-stat hops — the CSV is the per-frame expansion, not a
   second measurement. An absent hop burn → empty cell → a GAP in that hop's line (= a lost frame).
