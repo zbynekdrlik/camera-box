@@ -414,9 +414,17 @@ pub fn burn_contiguity_in_window(
             let mut hi_water: Option<u32> = None;
             // gap_lo (exclusive) -> interstitial-frame count that fell inside that gap.
             let mut gap_unreadable: BTreeMap<u32, u32> = BTreeMap::new();
+            // Ids decoded SO FAR in the walk. Only a frame whose id was ALREADY seen (a genuine
+            // DUPLICATE — the misdecode/oversample fingerprint) counts as an interstitial
+            // delivered frame. A present-set member arriving LATE / out of order (the #216 reorder
+            // — a single occurrence, just not in ascending recorded position) is accounted for by
+            // its own presence in the set, so it must NOT credit a gap's budget (deep-review #2:
+            // otherwise a genuine drop in a LATER gap is mislabeled BurnUnreadable).
+            let mut seen: BTreeSet<u32> = BTreeSet::new();
             for f in frames {
                 // `None` frames are handled by unreadable_consumed, not here.
                 let Some(id) = f.burn_id else { continue };
+                let is_duplicate = !seen.insert(id);
                 match hi_water {
                     None => {
                         hi_water = Some(id);
@@ -424,9 +432,9 @@ pub fn burn_contiguity_in_window(
                     }
                     Some(prev_hi) => {
                         if id > prev_hi.saturating_add(1) {
-                            // A forward gap opened (prev_hi+1 ..= id-1 absent). The frames seen
-                            // since prev_hi that did NOT advance the high-water mark (duplicates /
-                            // lower ids) are delivered frames that fell in this gap.
+                            // A forward gap opened (prev_hi+1 ..= id-1 absent). The DUPLICATE frames
+                            // seen since prev_hi (a misdecode re-stamping a neighbor id) are
+                            // delivered frames that fell in this gap.
                             if interstitial_since_step > 0 {
                                 gap_unreadable.insert(prev_hi, interstitial_since_step);
                             }
@@ -436,10 +444,12 @@ pub fn burn_contiguity_in_window(
                             // Contiguous forward step (id == prev_hi+1): no gap; reset.
                             hi_water = Some(id);
                             interstitial_since_step = 0;
-                        } else {
-                            // id <= prev_hi: a duplicate or a lower id — an interstitial frame that
-                            // did not advance the sequence. It MAY be a misdecode covering a gap
-                            // that opens later; accumulate it.
+                        } else if is_duplicate {
+                            // id <= prev_hi AND already seen: a genuine DUPLICATE (misdecode /
+                            // oversample) — an interstitial delivered frame. It MAY be a misdecode
+                            // covering a gap that opens later; accumulate it. A late-arriving FIRST
+                            // occurrence of a present id (a reorder) is NOT a duplicate, so it does
+                            // not inflate the budget (deep-review #2).
                             interstitial_since_step = interstitial_since_step.saturating_add(1);
                         }
                     }
@@ -1361,6 +1371,48 @@ mod tests {
         assert_eq!(
             burn_unreadable, 0,
             "no interstitial frame in the 101→105 gap ⇒ no burn-unreadable credited: {:?}",
+            w.missing_slots
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_late_present_id_reorder_does_not_credit_a_later_gap() {
+        // Deep-review #2 guard: a present-set member that arrives LATE / out of order (the #216
+        // 60→30 reorder — a SINGLE occurrence, just not in ascending recorded position) is NOT a
+        // duplicate and must NOT be counted as an interstitial delivered frame. [100,103,101,105]:
+        // present-set {100,101,103,105}, span 100..=105. 102 and 104 are BOTH genuinely absent
+        // (NO frame anywhere carries them; there are NO duplicates — 101 appears exactly once,
+        // just late). The interstitial counter must stay 0, so BOTH 102 (gap 100→103) and 104
+        // (gap 103→105) are genuine REAL DROPs — neither mislabeled BurnUnreadable. (Before the
+        // is_duplicate guard, fr2=101 was wrongly counted as interstitial and credited 104.)
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // late-arriving PRESENT id (reorder) — single occurrence, not a dup
+            rbf(3, Some(105)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops: Vec<u32> = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .map(|s| s.id)
+            .collect();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops,
+            vec![102, 104],
+            "a late-arriving present id (reorder, not a duplicate) must NOT credit a gap — both \
+             genuinely-absent ids stay REAL DROP: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 0,
+            "no genuine duplicate (interstitial) frame anywhere ⇒ no burn-unreadable: {:?}",
             w.missing_slots
         );
     }
