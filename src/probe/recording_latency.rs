@@ -784,13 +784,27 @@ pub struct LatencyCsvRow {
     /// cam1→stream END-TO-END latency (ms) = `stream_burn − cam1_burn`. `None` if either
     /// burn is absent on this frame.
     pub cam1_stream_ms: Option<f64>,
+    /// cam2→cam1 OPTICAL-INJECTION latency (ms) for this frame = `cam1_capture_burn −
+    /// cam2_display`, where `cam2_display` is the cam2 page-flip (`flip_ts`) instant when a
+    /// painter flip map is supplied (#194), else the cam2 paint (`gen_ts`) instant (#179,
+    /// inflated). This is the cam2 monitor → cam1 camera lens → v4l2-capture leg.
+    ///
+    /// #216 — HONEST GAP: `None` (empty CSV cell) when this frame had NO readable cam2 optical
+    /// QR (the cam1 camera failed to OPTICALLY READ the cam2 monitor — an optical-injection
+    /// READ DROPOUT, NOT a chain frame loss), or no cam1 capture burn, or (flip mode) the tick
+    /// has no flip stamp. The plotter renders that empty cell as a VISIBLE GAP in the
+    /// cam2→cam1 line — the optical read-failure shown honestly, NEVER drawn across. The three
+    /// burn-only hops above stay UNBROKEN across the same dropout (they need only the digital
+    /// burns, which ride through even when the optical read fails) — so the graph distinguishes
+    /// the REAL chain (continuous) from the optical-injection read dropout (gapped).
+    pub cam2_cam1_ms: Option<f64>,
 }
 
 impl LatencyCsvRow {
     /// The CSV header line (column order = struct field order). Single source of truth so
     /// the writer and any reader/plotter agree on the columns.
     pub const HEADER: &'static str =
-        "frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms";
+        "frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms,cam2_cam1_ms";
 
     /// This row as one CSV line. `Option` fields render as an empty cell when `None` (a
     /// gap the plotter draws as a break in that hop's line); ms are fixed to 6 decimals.
@@ -805,13 +819,14 @@ impl LatencyCsvRow {
             v.map(|x| x.to_string()).unwrap_or_default()
         }
         format!(
-            "{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{}",
             tick(self.frame_id),
             self.gen_ts_ns,
             ns(self.flip_ts_ns),
             ms(self.cam1_strih_ms),
             ms(self.strih_stream_ms),
             ms(self.cam1_stream_ms),
+            ms(self.cam2_cam1_ms),
         )
     }
 }
@@ -924,6 +939,19 @@ pub fn per_frame_latency_csv_rows(
         let Some(gen_ts_ns) = cam1_ts.or(strih_ts).or(cam2_gen) else {
             continue;
         };
+        // #216 — cam2→cam1 OPTICAL latency = cam1_capture − cam2_display, anchored CO-LOCATED
+        // in THIS frame (no cross-recording pairing). cam2_display = the cam2 page-flip stamp
+        // (flip map, #194) when this frame's tick is mapped, else the cam2 PAINT gen_ts (#179).
+        // It is `None` — an empty CSV cell, the HONEST GAP the plotter shows — whenever the
+        // cam1 camera did NOT optically read a cam2 QR this frame (no cam2 tick / no cam2 paint
+        // stamp), or there is no cam1 capture burn, or (flip mode for this tick) no flip stamp.
+        // NEVER drawn across: an optical READ DROPOUT gaps here while the three burn hops above
+        // stay unbroken (the burns ride through even when the optical read fails).
+        let cam2_display: Option<i64> =
+            match cam2_tick.and_then(|t| flip_ts_by_tick.get(&t).copied()) {
+                Some(flip) if flip > 0 => Some(flip), // #194 display (page-flip) reference
+                _ => cam2_gen.filter(|&g| g > 0),     // #179 paint (gen) reference fallback
+            };
         out.push(LatencyCsvRow {
             frame_id: cam2_tick,
             gen_ts_ns,
@@ -933,6 +961,8 @@ pub fn per_frame_latency_csv_rows(
             cam1_strih_ms: ms(strih_ts, cam1_ts),
             strih_stream_ms: ms(stream_ts, strih_ts),
             cam1_stream_ms: ms(stream_ts, cam1_ts),
+            // cam1_capture − cam2_display, both wall-clock; None on any optical-read dropout.
+            cam2_cam1_ms: ms(cam1_ts, cam2_display),
         });
     }
     out
@@ -953,6 +983,92 @@ pub fn write_latency_csv(path: &std::path::Path, rows: &[LatencyCsvRow]) -> std:
     let mut f = std::fs::File::create(path)?;
     f.write_all(buf.as_bytes())?;
     Ok(rows.len())
+}
+
+/// One cam2→cam1 OPTICAL-READ DROPOUT window (#216): a stretch where the cam1 camera could
+/// not OPTICALLY read the cam2 monitor QR (`cam2_cam1_ms` absent on consecutive frames) while
+/// the burn hops kept flowing. This is a REAL readability failure on the cam2→cam1 optical-
+/// injection leg — NOT a chain frame loss — reported HONESTLY (never hidden) so the verdict
+/// and the graph both surface it as a labeled finding.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OpticalReadDropout {
+    /// Seconds since the run's first frame where the dropout BEGAN.
+    pub start_s: f64,
+    /// Seconds since the run's first frame where the dropout ENDED (the read recovered).
+    pub end_s: f64,
+    /// Duration of the dropout (seconds) = `end_s - start_s`.
+    pub dur_s: f64,
+    /// Number of consecutive frames with no readable cam2 optical QR in the window.
+    pub frames: usize,
+}
+
+/// Detect the cam2→cam1 OPTICAL-READ DROPOUT windows (#216) from the per-frame CSV rows.
+///
+/// A dropout = a run of consecutive rows whose `cam2_cam1_ms` is `None` (the cam1 camera did
+/// not read a cam2 QR that frame) LONGER than `min_dur_s`. Below that floor it is normal
+/// per-frame QR-decode jitter, not a dropout worth reporting (the real 30-min run's dropout
+/// was ~175 s; a few-frame blink is noise). The window's start/end are taken from each row's
+/// `gen_ts_ns` x-anchor (the burn/paint wall-clock the same axis the plotter uses), so the
+/// reported seconds match the graph exactly.
+///
+/// HONEST SCOPE: this is the cam2→cam1 OPTICAL leg ONLY — a labeled readability finding, NOT a
+/// chain loss. The digital burn-hop contiguity (the gate) is unaffected; a dropout here never
+/// fails the zero-loss verdict, it is reported alongside it.
+pub fn optical_read_dropouts(rows: &[LatencyCsvRow], min_dur_s: f64) -> Vec<OpticalReadDropout> {
+    let t0 = rows
+        .iter()
+        .map(|r| r.gen_ts_ns)
+        .filter(|&g| g > 0)
+        .min()
+        .unwrap_or(0);
+    let to_s = |g: i64| (g - t0) as f64 / 1e9;
+    let mut out = Vec::new();
+    let mut run_start: Option<f64> = None;
+    let mut run_frames: usize = 0;
+    let mut last_t: Option<f64> = None;
+    for r in rows {
+        if r.gen_ts_ns <= 0 {
+            continue;
+        }
+        let t = to_s(r.gen_ts_ns);
+        if r.cam2_cam1_ms.is_none() {
+            if run_start.is_none() {
+                // Anchor the start at the last GOOD frame's time (the read was fine up to there),
+                // falling back to this frame when the run leads the recording.
+                run_start = Some(last_t.unwrap_or(t));
+                run_frames = 0;
+            }
+            run_frames += 1;
+        } else {
+            if let (Some(start), Some(end)) = (run_start, last_t) {
+                let dur = end - start;
+                if dur >= min_dur_s {
+                    out.push(OpticalReadDropout {
+                        start_s: start,
+                        end_s: end,
+                        dur_s: dur,
+                        frames: run_frames,
+                    });
+                }
+            }
+            run_start = None;
+            run_frames = 0;
+        }
+        last_t = Some(t);
+    }
+    // A trailing dropout (recording ended mid-failure).
+    if let (Some(start), Some(end)) = (run_start, last_t) {
+        let dur = end - start;
+        if dur >= min_dur_s {
+            out.push(OpticalReadDropout {
+                start_s: start,
+                end_s: end,
+                dur_s: dur,
+                frames: run_frames,
+            });
+        }
+    }
+    out
 }
 
 /// Per-hop LOSS verdict from the SINGLE stream recording, paired on the SHARED cam2
@@ -2608,10 +2724,18 @@ mod tests {
     ) -> RecordingFrame {
         let mut payloads = Vec::new();
         if let Some((r, t)) = cam2 {
+            // #216: cam2's paint stamp = cam1 capture − 100 ms (a deterministic 100 ms
+            // optical-injection latency) when a cam1 burn is present, so the cam2→cam1 CSV
+            // column reads a clean 100.0 ms for a healthy optical read; falls back to 1 ns
+            // when there is no cam1 burn (the cam2_cam1 value is then unused / guarded).
+            let cam2_paint = match cam1_burn {
+                Some(g) if g > 100_000_000 => g - 100_000_000,
+                _ => 1,
+            };
             payloads.push(Payload {
                 run_id: r,
                 frame_id: t,
-                gen_ts_ns: 1,
+                gen_ts_ns: cam2_paint,
             });
         }
         if let Some(g) = cam1_burn {
@@ -2694,12 +2818,17 @@ mod tests {
         // The CSV header is the contract the plotter reads — exact column order.
         assert_eq!(
             LatencyCsvRow::HEADER,
-            "frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms"
+            "frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms,cam2_cam1_ms"
+        );
+        // cam2 paint = cam1 capture − 100 ms (csv_frame default) ⇒ cam2_cam1 = 100 ms.
+        assert!(
+            (r.cam2_cam1_ms.unwrap() - 100.0).abs() < 1e-6,
+            "cam2→cam1 optical = +100 ms (a readable cam2 QR this frame)"
         );
         assert_eq!(
             r.to_csv_line(),
-            "500,1000000000,,10.000000,15.000000,25.000000",
-            "CSV line: tick, x-anchor, empty flip, three hop latencies"
+            "500,1000000000,,10.000000,15.000000,25.000000,100.000000",
+            "CSV line: tick, x-anchor, empty flip, three burn hops, cam2→cam1 optical"
         );
     }
 
@@ -2728,10 +2857,12 @@ mod tests {
         assert_eq!(r.cam1_strih_ms, None);
         assert_eq!(r.strih_stream_ms, None);
         assert_eq!(r.cam1_stream_ms, None);
+        // cam2 + cam1 burn ARE present ⇒ cam2→cam1 optical = +100 ms (the only filled hop).
+        assert!((r.cam2_cam1_ms.unwrap() - 100.0).abs() < 1e-6);
         assert_eq!(
             r.to_csv_line(),
-            "700,2000000000,,,,",
-            "empty cells for every absent hop = gaps in the line"
+            "700,2000000000,,,,,100.000000",
+            "empty cells for every absent burn hop = gaps; cam2→cam1 filled (read OK)"
         );
     }
 
@@ -2924,12 +3055,112 @@ mod tests {
         assert_eq!(rows[3].frame_id, None);
         assert_eq!(rows[0].frame_id, Some(100));
         assert_eq!(rows[4].frame_id, Some(104));
-        // CSV line for a dropout row: empty frame_id cell, x anchor = cam1 burn, three hops.
+
+        // #216 HONEST GAP — the cam2→cam1 OPTICAL line MUST gap across the dropout (the cam1
+        // camera could not read the cam2 QR), NEVER drawn across. The dropout rows (1..=3) have
+        // NO cam2 optical stamp ⇒ cam2_cam1_ms is None (empty cell ⇒ visible gap). The healthy
+        // rows (0, 4) DID read the cam2 QR ⇒ cam2_cam1_ms is filled (+100 ms). This is the
+        // distinction: burn hops continuous (real chain), cam2→cam1 optical gapped (read failure).
+        assert_eq!(
+            rows[1].cam2_cam1_ms, None,
+            "#216: optical-dropout frame gaps the cam2→cam1 line (no read), NOT drawn across"
+        );
+        assert_eq!(rows[2].cam2_cam1_ms, None);
+        assert_eq!(rows[3].cam2_cam1_ms, None);
+        assert!(
+            (rows[0].cam2_cam1_ms.unwrap() - 100.0).abs() < 1e-6,
+            "healthy optical read ⇒ cam2→cam1 filled (+100 ms)"
+        );
+        assert!((rows[4].cam2_cam1_ms.unwrap() - 100.0).abs() < 1e-6);
+        // CSV line for a dropout row: empty frame_id cell, x anchor = cam1 burn, three burn
+        // hops filled, AND an empty trailing cam2_cam1 cell (the honest optical-read gap).
         assert_eq!(
             rows[1].to_csv_line(),
-            ",1033000000,,10.000000,15.000000,25.000000",
-            "#216: empty frame_id cell, but the three burn-hop cells are filled"
+            ",1033000000,,10.000000,15.000000,25.000000,",
+            "#216: empty frame_id cell, three burn-hop cells filled, empty cam2_cam1 cell (gap)"
         );
+        // The healthy frame fills cam2_cam1 (read OK) — proving the column gaps ONLY on dropout.
+        assert_eq!(
+            rows[4].to_csv_line(),
+            "104,1132000000,,10.000000,15.000000,25.000000,100.000000",
+            "#216: healthy frame fills cam2_cam1 — the gap is honest, not blanket-empty"
+        );
+    }
+
+    // Build a CSV row carrying ONLY what optical_read_dropouts reads: the x-anchor gen_ts and
+    // whether cam2_cam1 was readable this frame.
+    fn drow(gen_ms: i64, cam2_cam1: Option<f64>) -> LatencyCsvRow {
+        LatencyCsvRow {
+            frame_id: None,
+            gen_ts_ns: gen_ms * 1_000_000,
+            flip_ts_ns: None,
+            cam1_strih_ms: Some(10.0),
+            strih_stream_ms: Some(15.0),
+            cam1_stream_ms: Some(25.0),
+            cam2_cam1_ms: cam2_cam1,
+        }
+    }
+
+    #[test]
+    fn optical_read_dropout_is_reported_as_a_labeled_window_216() {
+        // #216 — a stretch where cam2_cam1 is None (the cam1 camera could not read the cam2 QR)
+        // LONGER than the floor is reported as ONE optical-read dropout window with its
+        // start/end/duration — a labeled finding, NOT hidden, NOT a chain loss.
+        // 10 good frames (0..9 s), 6 s of dropout (10..16 s — None), then recovery.
+        let mut rows = Vec::new();
+        for s in 0..=9 {
+            rows.push(drow(s * 1000, Some(120.0))); // readable
+        }
+        for s in 10..=16 {
+            rows.push(drow(s * 1000, None)); // optical read FAILED
+        }
+        for s in 17..=20 {
+            rows.push(drow(s * 1000, Some(121.0))); // recovered
+        }
+        let d = optical_read_dropouts(&rows, 2.0);
+        assert_eq!(d.len(), 1, "exactly one dropout window: {d:?}");
+        let g = d[0];
+        // The window covers the unreadable stretch (~10..16 s) — well above the 2 s floor. The
+        // exact boundary frame is an implementation detail; the finding's intent is: ONE window,
+        // located in the gap, several seconds long, counting the unreadable frames.
+        assert!(
+            (8.0..=11.0).contains(&g.start_s),
+            "starts at the onset of the gap (last good frame ~9 s): {g:?}"
+        );
+        assert!(
+            (14.0..=17.0).contains(&g.end_s),
+            "ends at the recovery (~16 s): {g:?}"
+        );
+        assert!(g.dur_s >= 6.0, "dropout lasted several seconds: {g:?}");
+        assert!(g.frames >= 6, "counts the unreadable frames: {g:?}");
+        assert!(
+            (g.dur_s - (g.end_s - g.start_s)).abs() < 1e-6,
+            "dur = end - start: {g:?}"
+        );
+    }
+
+    #[test]
+    fn optical_read_short_blink_below_floor_is_not_a_dropout_216() {
+        // A 1-frame (sub-floor) cam2-read blink is normal QR-decode jitter, NOT an optical
+        // dropout — it must NOT be reported (no false findings).
+        let rows = vec![
+            drow(0, Some(120.0)),
+            drow(33, None), // one-frame blink (~33 ms)
+            drow(66, Some(120.0)),
+            drow(99, Some(120.0)),
+        ];
+        let d = optical_read_dropouts(&rows, 2.0);
+        assert!(
+            d.is_empty(),
+            "a sub-floor blink is jitter, not a reported dropout: {d:?}"
+        );
+    }
+
+    #[test]
+    fn optical_read_all_readable_reports_no_dropout_216() {
+        // A clean run (every frame read the cam2 QR) has ZERO optical dropouts.
+        let rows: Vec<_> = (0..=20).map(|s| drow(s * 1000, Some(120.0))).collect();
+        assert!(optical_read_dropouts(&rows, 2.0).is_empty());
     }
 
     #[test]
@@ -2956,7 +3187,14 @@ mod tests {
             "tick 300 flip filled"
         );
         assert_eq!(rows[1].flip_ts_ns, None, "tick 301 not in flip map ⇒ empty");
-        assert_eq!(rows[0].to_csv_line(), "300,1000000000,999000000,,,");
+        // #216/#194: with a flip stamp, cam2→cam1 uses the DISPLAY (flip) reference:
+        // cam1 capture 1.000s − flip 0.999s = 1.0 ms. Row 1's tick 301 has no flip stamp, so
+        // cam2→cam1 falls back to the cam2 PAINT gen (csv_frame default = cam1 − 100 ms = 100 ms).
+        assert!((rows[0].cam2_cam1_ms.unwrap() - 1.0).abs() < 1e-6);
+        assert_eq!(
+            rows[0].to_csv_line(),
+            "300,1000000000,999000000,,,,1.000000"
+        );
     }
 
     #[test]
@@ -3082,9 +3320,11 @@ mod tests {
                 cam1_strih_ms: Some(10.0),
                 strih_stream_ms: Some(15.0),
                 cam1_stream_ms: Some(25.0),
+                cam2_cam1_ms: Some(120.0), // healthy optical read
             },
-            // #216: a row with NO cam2 tick (optical-decode dropout) — empty frame_id cell,
-            // yet the burn-only hops are written so the line stays unbroken.
+            // #216: a row with NO cam2 tick (optical-decode dropout) — empty frame_id cell AND
+            // empty cam2_cam1_ms cell (the honest optical-read GAP), yet the burn-only hops are
+            // written so those three lines stay unbroken.
             LatencyCsvRow {
                 frame_id: None,
                 gen_ts_ns: 1_033_000_000,
@@ -3092,6 +3332,7 @@ mod tests {
                 cam1_strih_ms: Some(11.0),
                 strih_stream_ms: Some(16.0),
                 cam1_stream_ms: Some(27.0),
+                cam2_cam1_ms: None, // optical read failed ⇒ empty cell ⇒ visible gap
             },
         ];
         let dir = std::env::temp_dir();
@@ -3105,10 +3346,14 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines[0], LatencyCsvRow::HEADER, "first line is the header");
-        assert_eq!(lines[1], "1,1000000000,,10.000000,15.000000,25.000000");
         assert_eq!(
-            lines[2], ",1033000000,,11.000000,16.000000,27.000000",
-            "#216: empty frame_id cell, the three burn-hop cells still filled"
+            lines[1],
+            "1,1000000000,,10.000000,15.000000,25.000000,120.000000"
+        );
+        assert_eq!(
+            lines[2], ",1033000000,,11.000000,16.000000,27.000000,",
+            "#216: empty frame_id cell AND empty cam2_cam1 cell (optical-read gap), \
+             the three burn-hop cells still filled"
         );
         assert_eq!(lines.len(), 3, "header + 2 rows");
     }
