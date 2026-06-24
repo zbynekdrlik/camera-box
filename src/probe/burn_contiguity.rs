@@ -202,12 +202,18 @@ pub struct InWindowContiguity {
 /// - a delivered frame carrying NO readable node burn (`burn_id == None`) is ALWAYS a candidate
 ///   drop (the node's frame for that instant was lost OR its burn was unreadable) — for BOTH
 ///   rates;
-/// - a BACKWARD jump (id < the previous present id) is ALWAYS a reorder/corruption fault — for
-///   BOTH rates (a monotonic counter only advances);
-/// - a FORWARD gap between two consecutive PRESENT ids is loss ONLY for
-///   [`BurnRate::PerEmittedFrame`] (cam1): each skipped integer is a cam1-emitted frame that
-///   never reached the recording. For [`BurnRate::PerRenderTick`] (strih/stream) a forward gap
-///   is the EXPECTED un-emitted render ticks and is NOT loss.
+/// - for [`BurnRate::PerRenderTick`] (strih/stream): a BACKWARD jump (id < the previous present
+///   id) is a reorder/corruption fault (a free-running render counter only advances); a FORWARD
+///   gap is the EXPECTED un-emitted render ticks and is NOT loss.
+/// - for [`BurnRate::PerEmittedFrame`] (cam1): real drops are computed SET-WISE, not by the
+///   recorded-frame walk (#216). A cam1 emitted-frame integer is GENUINELY LOST iff it is absent
+///   from the whole present-set within `min(present)..=max(present)`. This is ORDER-INDEPENDENT,
+///   so an id the softened recording delivers out of order (a one-frame-late 60→30 straddle) can
+///   NEITHER manufacture a phantom drop (it is present elsewhere) NOR be counted twice, and a
+///   backward jump to a present id is correctly benign — while a genuinely-absent integer is
+///   still caught (it loudly widens the missing set). Each BURN-UNREADABLE (`None`) frame already
+///   consumed one emitted id (the #133 distinction), so the absent count is reduced by the
+///   unreadable-frame count before any are charged as drops. Each truly-absent id is listed ONCE.
 ///
 /// Out-of-window frames are excluded entirely (the caller passes only in-window delivered
 /// frames via [`RecordedBurnFrame`]), so the pre-/post-signal ids that inflated the range can
@@ -279,38 +285,30 @@ pub fn burn_contiguity_in_window(
     let mut missing_slots: Vec<MissingSlot> = Vec::new();
     let mut prev_present: Option<u32> = None;
     // Count delivered (in-window) frames that are NOT a clean "present": a `None` frame (no
-    // burn) and a backward-jump frame (carries a burn but out of order). Each is ONE delivered
-    // frame, so it subtracts from present_count → present + these == expected (#198 review #2).
-    // A per-emit forward-gap miss is NOT a delivered frame (a synthetic id between two delivered
-    // frames), so it does NOT subtract — it is an EXTRA real drop surfaced in missing_ids only.
+    // burn) and a per-render backward-jump frame (carries a burn but out of order). Each is ONE
+    // delivered frame, so it subtracts from present_count → present + these == expected
+    // (#198 review #2). A per-emit GENUINELY-absent id (computed set-wise after the walk) is NOT
+    // a delivered frame, so it does NOT subtract — it is an EXTRA real drop in missing_ids only.
     let mut non_present_delivered: u32 = 0;
-    // #133: cam1 burns PER EMITTED frame, so a delivered frame whose burn is UNREADABLE still
-    // CONSUMED one emitted id (the id it would have carried is undecodable, NOT a frame that
-    // never reached the recording). Track how many unreadable (`None`) frames occurred since the
-    // last present frame so the per-emit forward-gap check below does NOT re-count those consumed
-    // ids as real drops (the double-count the 1080p-strih validation exposed: each
-    // BURN-UNREADABLE frame manufactured a phantom REAL DROP on the very next present frame). Only
-    // the gap BEYOND the unreadable frames is genuine loss. Reset on each present frame.
-    let mut unreadable_since_prev: u32 = 0;
+    // For per-emit (cam1) the real-drop detection is SET-based (below the walk), not order-based,
+    // so reorder + unreadable interactions can no longer manufacture or double-count drops. Map
+    // each present id → the FIRST recorded frame_index it appeared on, so a set-absent id can be
+    // paired to the recorded slot of the next present id ABOVE it (the frame after the gap — the
+    // most useful pixel-proof slot). For per-render (strih/stream) the walk below still does the
+    // order-based backward-jump check (their free-running counter has no per-emit ordering
+    // guarantee to lean on, so an out-of-order id IS a fault).
+    use std::collections::BTreeMap;
+    let mut id_to_frame: BTreeMap<u32, u64> = BTreeMap::new();
     for f in frames {
         match f.burn_id {
             Some(id) => {
-                match prev_present {
-                    // #216: a per-emit (cam1) backward jump whose id IS present elsewhere in the
-                    // window is a MEASUREMENT reorder (the monotone counter never runs backward;
-                    // the softened recording just delivered this id one frame late), NOT a lost
-                    // frame — the id reached the recording. Do NOT count it: it is a clean present
-                    // of an in-sequence id. Per-render (strih/stream) keeps the strict behaviour
-                    // (its free-running counter has no per-emit ordering guarantee to lean on).
-                    Some(prev)
-                        if id < prev
-                            && matches!(rate, BurnRate::PerEmittedFrame)
-                            && present_set.contains(&id) => {}
-                    Some(prev) if id < prev => {
-                        // Backward jump: a reorder/corruption — the monotonic counter must
-                        // only ever advance. ALWAYS a fault (both rates); the node's frame for
-                        // this id is out of order ⇒ treated as a real drop of correct ordering.
-                        // This frame is delivered but NOT a clean present.
+                id_to_frame.entry(id).or_insert(f.frame_index);
+                if let Some(prev) = prev_present {
+                    // Per-render (strih/stream): a monotone free-running counter can ONLY advance,
+                    // so a backward jump is a reorder/corruption fault — ALWAYS counted. (cam1
+                    // uses the set-based check below instead; a cam1 backward jump to a present id
+                    // is just the softened recording delivering it late, never a fault.)
+                    if id < prev && matches!(rate, BurnRate::PerRenderTick) {
                         non_present_delivered = non_present_delivered.saturating_add(1);
                         missing_slots.push(MissingSlot {
                             id,
@@ -318,50 +316,67 @@ pub fn burn_contiguity_in_window(
                             kind: InWindowMissingKind::RealDrop,
                         });
                     }
-                    Some(prev) if matches!(rate, BurnRate::PerEmittedFrame) && id > prev + 1 => {
-                        // cam1 (per-emit): a forward gap = cam1-emitted frames between prev and id
-                        // that never reached the recording. BUT the `unreadable_since_prev`
-                        // intervening BURN-UNREADABLE frames each ALREADY consumed one of those
-                        // ids (counted as burn-unreadable above) — so they are NOT real drops.
-                        // Genuine real drops are only the ids ABOVE what the unreadable frames
-                        // account for: skip the first `unreadable_since_prev` ids of the gap.
-                        // (#133 — kills the per-emit double-count.) THIS frame itself IS present
-                        // (a valid forward id), so it does NOT subtract from present.
-                        //
-                        // #216: only an id GENUINELY ABSENT from the whole window is a real drop.
-                        // An id inside the gap that appears LATER in recorded order (a one-frame-
-                        // late 60→30 straddle through the softened recording) is in `present_set`
-                        // — a measurement reorder, NOT a lost frame — and is skipped so it is not
-                        // manufactured into a phantom drop (the 235-overcount the proof exposed).
-                        let first_real = (prev + 1).saturating_add(unreadable_since_prev);
-                        for missing in first_real..id {
-                            if present_set.contains(&missing) {
-                                continue; // present elsewhere ⇒ reorder artifact, not a drop
-                            }
-                            missing_slots.push(MissingSlot {
-                                id: missing,
-                                frame_index: f.frame_index,
-                                kind: InWindowMissingKind::RealDrop,
-                            });
-                        }
-                    }
-                    _ => {} // forward gap on a per-render counter ⇒ expected, not loss.
+                    // A per-render FORWARD gap is the expected un-emitted render ticks (not loss);
+                    // a per-emit forward gap is handled set-wise below — neither acts here.
                 }
                 prev_present = Some(id);
-                unreadable_since_prev = 0;
             }
             None => {
                 // A delivered frame with no readable burn ⇒ the frame reached the recording but
                 // the burn QR did not decode ⇒ BURN-UNREADABLE (both rates). A fresh synthetic
                 // id keeps consecutive Nones distinct and cannot collide with a real id. This
-                // delivered frame is NOT a clean present. For per-emit (cam1) it consumed one
-                // emitted id — tracked so the next present frame's gap doesn't re-count it.
+                // delivered frame is NOT a clean present.
                 non_present_delivered = non_present_delivered.saturating_add(1);
-                unreadable_since_prev = unreadable_since_prev.saturating_add(1);
                 missing_slots.push(MissingSlot {
                     id: alloc_synth(),
                     frame_index: f.frame_index,
                     kind: InWindowMissingKind::BurnUnreadable,
+                });
+            }
+        }
+    }
+
+    // #216 — cam1 (PerEmittedFrame) REAL DROPS, computed SET-WISE (order-independent), so a
+    // reorder (an id delivered out of order by the softened recording) can NEITHER manufacture a
+    // phantom drop NOR double-count, and a backward-jump-to-a-present-id is correctly benign. A
+    // cam1 emitted-frame integer is GENUINELY LOST iff it is absent from the whole present-set
+    // within the observed span `[first..=last]`. BUT each BURN-UNREADABLE (`None`) delivered
+    // frame already CONSUMED one emitted id (its id is simply undecodable, not a frame that never
+    // arrived — the #133 distinction), so the absent-integer count is reduced by the number of
+    // unreadable frames before any are charged as real drops. Genuine drops = (absent integers) −
+    // (unreadable frames), most relevant ids first. Each truly-absent integer is listed ONCE.
+    if matches!(rate, BurnRate::PerEmittedFrame) {
+        // The span is the MIN..=MAX of the present ids (NOT the recorded first/last, which can be
+        // out of order through the softened recording — e.g. a corrupt low id makes first > last).
+        // A monotone per-emit counter's true span is its smallest..largest decoded id; any integer
+        // inside that span absent from the set is a genuinely-lost emitted frame.
+        let span = present_set
+            .iter()
+            .next()
+            .copied()
+            .zip(present_set.iter().next_back().copied());
+        if let Some((lo, hi)) = span {
+            let absent: Vec<u32> = (lo..=hi).filter(|id| !present_set.contains(id)).collect();
+            let unreadable_frames = missing_slots
+                .iter()
+                .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+                .count();
+            // Pair each genuinely-absent id to the recorded frame of the next PRESENT id above it
+            // (the frame right after the gap — where the pixel proof shows the gap), falling back
+            // to the last recorded frame when the absent id is past every present one.
+            let last_frame = frames.last().map(|f| f.frame_index).unwrap_or(0);
+            // The unreadable frames already account for `unreadable_frames` of the absent ids;
+            // only the absent ids BEYOND that are genuine drops (#133 per-emit no-double-count).
+            for missing in absent.into_iter().skip(unreadable_frames) {
+                let frame_index = id_to_frame
+                    .range((missing + 1)..)
+                    .next()
+                    .map(|(_, &fi)| fi)
+                    .unwrap_or(last_frame);
+                missing_slots.push(MissingSlot {
+                    id: missing,
+                    frame_index,
+                    kind: InWindowMissingKind::RealDrop,
                 });
             }
         }
@@ -874,5 +889,59 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(real_drops, vec![52], "the one genuinely-lost emitted id");
+    }
+
+    #[test]
+    fn in_window_cam1_genuine_loss_with_a_low_corrupt_id_is_not_masked() {
+        // #216 review #1 — the set-based check must NOT MASK a genuine loss even when a corrupt
+        // LOW id appears. A naive "backward jump to an in-set id ⇒ benign" guard was tautological
+        // (the frame's own id is always in the set) and made the backward arm dead code, which
+        // could silence a real loss + corruption. Set-based: a corrupt low id 50 in [100,101,50]
+        // pulls `first` to 50, so 51..=99 are absent from the present-set ⇒ MANY real drops ⇒ the
+        // gate LOUDLY FAILS (never a false zero). A genuine loss can never read as contiguous.
+        let frames = [rbf(0, Some(100)), rbf(1, Some(101)), rbf(2, Some(50))];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        assert!(
+            !c.is_contiguous(),
+            "a corrupt low id + the absent span is NOT a false zero: {c:?}"
+        );
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        assert!(
+            real_drops >= 1,
+            "the absent ids in [50..=101] are real drops, not silently masked: {c:?}"
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_genuine_drop_straddled_by_a_reorder_is_counted_once() {
+        // #216 review #2 — a genuinely-absent id straddled by a LATE-arriving reordered id must be
+        // counted EXACTLY ONCE, never twice. ids 100,103,101,104 with 102 GENUINELY dropped and
+        // 101 arriving late: present-set {100,101,103,104}, span [100..=104], absent {102} → one
+        // real drop. The old order-walk reported 102 twice (two forward-gaps); set-based lists it
+        // once.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // reorder: 101 arrives late (present, benign)
+            rbf(3, Some(104)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops: Vec<u32> = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            real_drops,
+            vec![102],
+            "the one genuinely-lost id, counted ONCE (not twice): {:?}",
+            w.missing_slots
+        );
     }
 }
