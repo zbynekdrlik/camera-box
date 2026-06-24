@@ -220,15 +220,26 @@ pub struct InWindowContiguity {
 /// no longer be counted as missing — the #198 point-1 ask.
 ///
 /// `frames` MUST be the in-window DELIVERED recorded frames in recorded order. The returned
-/// [`NodeContiguity`] uses `first_id`/`last_id` = the first/last burn id actually present in
-/// the window; `expected_count` = the number of in-window delivered frames (each MUST carry a
-/// burn); `present_count` = `expected_count - missing_ids.len()` so the two counts are ALWAYS
-/// consistent (a backward-jump frame carries a burn but is still counted missing, so it is
-/// NOT double-counted as present). `missing_ids` lists each candidate-drop id, paired 1:1 with
-/// [`InWindowContiguity::missing_slots`] (same order/length) so the pixel classifier views the
-/// exact recorded frame. Consecutive `None` frames get DISTINCT synthetic ids (a monotone
-/// per-slot cursor) so a deduping consumer cannot undercount. An empty / all-`None` window ⇒
-/// `first_id == None` ⇒ NOT a pass (nothing proven).
+/// [`NodeContiguity`] uses `first_id`/`last_id` = the first/last burn id in RECORDED order;
+/// `expected_count` = the number of in-window delivered frames; `present_count` =
+/// `expected_count − (DELIVERED non-present frames)` = delivered frames that carried a readable
+/// burn (a `None` frame and a per-render backward-jump frame are the delivered non-present ones).
+///
+/// RECONCILIATION (read carefully — it differs by rate):
+/// - `present_count + (None frames + per-render backward jumps) == expected_count`, ALWAYS. These
+///   are the delivered frames.
+/// - cam1 (per-emit) GENUINELY-absent ids are EXTRA missing_slots that are NOT delivered frames
+///   (no recorded frame carried them — they were lost), so they are appended to `missing_ids`
+///   ON TOP of the delivered reconciliation. Therefore `present_count + missing_ids.len()` is
+///   NOT an invariant for cam1 (a pure reorder/duplicate window has `present + 0 missing == expected`,
+///   and a lost id adds to missing_ids without subtracting from present). For per-render, every
+///   missing_id IS a delivered non-present frame, so there `present + missing == expected` holds.
+///
+/// `missing_ids` is paired 1:1 with [`InWindowContiguity::missing_slots`] (same order/length) so
+/// the pixel classifier views the exact recorded frame; the order is the BurnUnreadable/per-render
+/// faults in walk order, then the cam1 genuinely-absent ids ascending (no consumer assumes a sort).
+/// Consecutive `None` frames get DISTINCT synthetic ids so a deduping consumer cannot undercount.
+/// An empty / all-`None` window ⇒ `first_id == None` ⇒ NOT a pass (nothing proven).
 pub fn burn_contiguity_in_window(
     node: &str,
     frames: &[RecordedBurnFrame],
@@ -297,8 +308,17 @@ pub fn burn_contiguity_in_window(
     // most useful pixel-proof slot). For per-render (strih/stream) the walk below still does the
     // order-based backward-jump check (their free-running counter has no per-emit ordering
     // guarantee to lean on, so an out-of-order id IS a fault).
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     let mut id_to_frame: BTreeMap<u32, u64> = BTreeMap::new();
+    // #216 review — track the SPECIFIC emitted id each BURN-UNREADABLE (`None`) frame consumed,
+    // by its POSITION in the monotone walk (NOT a blind "skip N lowest"). For cam1 a None frame
+    // sits right after the last present id `prev`, so the id it would have carried is the next
+    // contiguous integer: `prev + (count of Nones since prev)`. Recording those exact ids and
+    // EXCLUDING them from the genuine-drop set means: a trailing/out-of-span None can no longer
+    // cancel an in-span real drop (review finding #1), and the wrong absent id can no longer be
+    // dropped from the front (review finding #2). Each None accounts for ITS own id, nothing else.
+    let mut unreadable_consumed: BTreeSet<u32> = BTreeSet::new();
+    let mut nones_since_prev: u32 = 0;
     for f in frames {
         match f.burn_id {
             Some(id) => {
@@ -320,6 +340,7 @@ pub fn burn_contiguity_in_window(
                     // a per-emit forward gap is handled set-wise below — neither acts here.
                 }
                 prev_present = Some(id);
+                nones_since_prev = 0;
             }
             None => {
                 // A delivered frame with no readable burn ⇒ the frame reached the recording but
@@ -327,6 +348,16 @@ pub fn burn_contiguity_in_window(
                 // id keeps consecutive Nones distinct and cannot collide with a real id. This
                 // delivered frame is NOT a clean present.
                 non_present_delivered = non_present_delivered.saturating_add(1);
+                nones_since_prev = nones_since_prev.saturating_add(1);
+                // The specific emitted id this None consumed: the next contiguous id after the last
+                // present (prev + 1, + 1 per consecutive None). When there is no prev present yet
+                // (a leading None), it has no in-sequence id to charge — it consumes nothing from
+                // the absent set (it cannot mask an in-span drop). #133 per-emit accounting.
+                if matches!(rate, BurnRate::PerEmittedFrame) {
+                    if let Some(prev) = prev_present {
+                        unreadable_consumed.insert(prev.saturating_add(nones_since_prev));
+                    }
+                }
                 missing_slots.push(MissingSlot {
                     id: alloc_synth(),
                     frame_index: f.frame_index,
@@ -340,36 +371,26 @@ pub fn burn_contiguity_in_window(
     // reorder (an id delivered out of order by the softened recording) can NEITHER manufacture a
     // phantom drop NOR double-count, and a backward-jump-to-a-present-id is correctly benign. A
     // cam1 emitted-frame integer is GENUINELY LOST iff it is absent from the whole present-set
-    // within the observed span `[first..=last]`. BUT each BURN-UNREADABLE (`None`) delivered
-    // frame already CONSUMED one emitted id (its id is simply undecodable, not a frame that never
-    // arrived — the #133 distinction), so the absent-integer count is reduced by the number of
-    // unreadable frames before any are charged as real drops. Genuine drops = (absent integers) −
-    // (unreadable frames), most relevant ids first. Each truly-absent integer is listed ONCE.
+    // within the observed span `min(present)..=max(present)` AND it was NOT the id a BURN-UNREADABLE
+    // frame consumed (those ids are undecodable, not frames that never arrived — the #133
+    // distinction). Each genuinely-lost id is listed ONCE, paired to the recorded slot of the next
+    // present id above it for the pixel proof.
     if matches!(rate, BurnRate::PerEmittedFrame) {
-        // The span is the MIN..=MAX of the present ids (NOT the recorded first/last, which can be
-        // out of order through the softened recording — e.g. a corrupt low id makes first > last).
-        // A monotone per-emit counter's true span is its smallest..largest decoded id; any integer
-        // inside that span absent from the set is a genuinely-lost emitted frame.
+        // The span is MIN..=MAX of the present ids (NOT the recorded first/last, which can be out
+        // of order through the softened recording — e.g. a corrupt low id makes first > last).
         let span = present_set
             .iter()
             .next()
             .copied()
             .zip(present_set.iter().next_back().copied());
         if let Some((lo, hi)) = span {
-            let absent: Vec<u32> = (lo..=hi).filter(|id| !present_set.contains(id)).collect();
-            let unreadable_frames = missing_slots
-                .iter()
-                .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
-                .count();
-            // Pair each genuinely-absent id to the recorded frame of the next PRESENT id above it
-            // (the frame right after the gap — where the pixel proof shows the gap), falling back
-            // to the last recorded frame when the absent id is past every present one.
             let last_frame = frames.last().map(|f| f.frame_index).unwrap_or(0);
-            // The unreadable frames already account for `unreadable_frames` of the absent ids;
-            // only the absent ids BEYOND that are genuine drops (#133 per-emit no-double-count).
-            for missing in absent.into_iter().skip(unreadable_frames) {
+            for missing in (lo..=hi)
+                .filter(|id| !present_set.contains(id))
+                .filter(|id| !unreadable_consumed.contains(id))
+            {
                 let frame_index = id_to_frame
-                    .range((missing + 1)..)
+                    .range((missing.saturating_add(1))..)
                     .next()
                     .map(|(_, &fi)| fi)
                     .unwrap_or(last_frame);
@@ -942,6 +963,75 @@ mod tests {
             vec![102],
             "the one genuinely-lost id, counted ONCE (not twice): {:?}",
             w.missing_slots
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_out_of_span_unreadable_does_not_mask_an_in_span_drop() {
+        // #216 deep-review #1 — a BURN-UNREADABLE (None) frame whose consumed id falls OUTSIDE the
+        // present span must NOT cancel a GENUINE in-span drop. [100,102,None]: 101 is genuinely
+        // dropped (in-span), the trailing None consumed id 103 (just past the span 100..=102). The
+        // old "skip N lowest absent" would have cancelled 101 → masked the loss. Now the None
+        // accounts for ITS own id (103, out of span), so 101 is still reported as a REAL DROP.
+        let frames = [rbf(0, Some(100)), rbf(1, Some(102)), rbf(2, None)];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        let real_drops: Vec<u32> = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .map(|s| s.id)
+            .collect();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops,
+            vec![101],
+            "the in-span drop 101 is NOT masked by an out-of-span unreadable: {c:?}"
+        );
+        assert_eq!(
+            burn_unreadable, 1,
+            "the trailing None is one burn-unreadable"
+        );
+        assert!(!c.is_contiguous(), "a genuine loss is not contiguous");
+    }
+
+    #[test]
+    fn in_window_cam1_unreadable_consumes_its_own_id_not_the_lowest_absent() {
+        // #216 deep-review #2 — a None must account for the id at ITS position, not blindly the
+        // lowest absent id. [100,102,103,None,105]: 101 genuinely dropped (gap 100→102); the None
+        // sits between 103 and 105, consuming 104. The genuine drop is 101 (paired to 102's frame),
+        // and 104 is the unreadable-consumed id — NOT the other way around. The old "skip lowest"
+        // would have wrongly reported the drop as 104 near a clean frame.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(102)), // 101 genuinely dropped (gap)
+            rbf(2, Some(103)),
+            rbf(3, None), // unreadable, consumes 104
+            rbf(4, Some(105)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real: Vec<_> = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .collect();
+        assert_eq!(
+            real.len(),
+            1,
+            "exactly one real drop: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            real[0].id, 101,
+            "the real drop is 101, NOT 104 (the consumed id)"
+        );
+        assert_eq!(
+            real[0].frame_index, 1,
+            "101 paired to the recorded frame of the next present id (102, frame_index 1)"
         );
     }
 }
