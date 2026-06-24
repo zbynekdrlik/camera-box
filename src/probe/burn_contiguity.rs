@@ -264,6 +264,18 @@ pub fn burn_contiguity_in_window(
         v
     };
 
+    // #216 — the GLOBAL present-set: every burn id decoded ANYWHERE in this window. cam1's
+    // burn is a strictly-monotone per-EMITTED-frame counter, so an emitted id can only be
+    // absent from this set if its frame genuinely never reached the recording (a real drop).
+    // An id that IS in the set but arrives slightly OUT OF ORDER in recorded-frame order — a
+    // one-frame-late 60→30 straddle / duplicate through the softened stream recording (#133,
+    // #196) — is a MEASUREMENT reorder, NOT a lost frame, and must not be counted. The
+    // per-emit forward-gap and backward-jump branches below cross-check against this set so a
+    // reordered-but-present id is never manufactured into a phantom REAL DROP. (This is what
+    // the 30-min proof exposed: 235 cam1 "real_drops" while present_ids covered the FULL
+    // integer span — every emitted integer WAS present, nothing lost.)
+    let present_set: std::collections::BTreeSet<u32> = present_ids.iter().copied().collect();
+
     let mut missing_slots: Vec<MissingSlot> = Vec::new();
     let mut prev_present: Option<u32> = None;
     // Count delivered (in-window) frames that are NOT a clean "present": a `None` frame (no
@@ -284,6 +296,16 @@ pub fn burn_contiguity_in_window(
         match f.burn_id {
             Some(id) => {
                 match prev_present {
+                    // #216: a per-emit (cam1) backward jump whose id IS present elsewhere in the
+                    // window is a MEASUREMENT reorder (the monotone counter never runs backward;
+                    // the softened recording just delivered this id one frame late), NOT a lost
+                    // frame — the id reached the recording. Do NOT count it: it is a clean present
+                    // of an in-sequence id. Per-render (strih/stream) keeps the strict behaviour
+                    // (its free-running counter has no per-emit ordering guarantee to lean on).
+                    Some(prev)
+                        if id < prev
+                            && matches!(rate, BurnRate::PerEmittedFrame)
+                            && present_set.contains(&id) => {}
                     Some(prev) if id < prev => {
                         // Backward jump: a reorder/corruption — the monotonic counter must
                         // only ever advance. ALWAYS a fault (both rates); the node's frame for
@@ -305,8 +327,17 @@ pub fn burn_contiguity_in_window(
                         // account for: skip the first `unreadable_since_prev` ids of the gap.
                         // (#133 — kills the per-emit double-count.) THIS frame itself IS present
                         // (a valid forward id), so it does NOT subtract from present.
+                        //
+                        // #216: only an id GENUINELY ABSENT from the whole window is a real drop.
+                        // An id inside the gap that appears LATER in recorded order (a one-frame-
+                        // late 60→30 straddle through the softened recording) is in `present_set`
+                        // — a measurement reorder, NOT a lost frame — and is skipped so it is not
+                        // manufactured into a phantom drop (the 235-overcount the proof exposed).
                         let first_real = (prev + 1).saturating_add(unreadable_since_prev);
                         for missing in first_real..id {
+                            if present_set.contains(&missing) {
+                                continue; // present elsewhere ⇒ reorder artifact, not a drop
+                            }
                             missing_slots.push(MissingSlot {
                                 id: missing,
                                 frame_index: f.frame_index,
