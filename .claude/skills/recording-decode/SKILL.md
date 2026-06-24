@@ -94,6 +94,31 @@ reorder, not a lost frame); only a genuinely-absent integer counts. Per-render s
 Diagnostic tell: `present_count == span == burn_ids_present` with `real_drops > 0` ⇒ over-count,
 not loss.
 
+## #226 GOTCHA — blurred-but-PRESENT cam1 burn is BURN-UNREADABLE, not REAL DROP (the DUPLICATE case)
+
+The #216 fix above handles a reordered id that appears ELSEWHERE in the present-set. #226 is the
+DISTINCT case its diagnostic tell flags: `present_count == expected_count` (NO `None` frame),
+`burn_unreadable == 0`, yet `real_drops > 0` on a periodic decode beat (run 1924001: 107 phantom).
+The blurred cam1 burn on a DELIVERED frame can't become a wrong-but-valid id (CRC), so it re-decodes
+to a CRC-valid **DUPLICATE of a neighbor id** — its own id is then absent from the set with NO
+`None` charging it, so #216's set-based loop leaked it as a phantom REAL DROP.
+
+**DISCRIMINATOR (the deep-review catch — do NOT count all duplicates):** the per-emit chain ALSO
+legitimately re-samples a PRESENT id onto several recorded frames via the 60→30 beat (a BENIGN
+oversample — the DOMINANT duplicate source). A global "duplicate budget"
+(`present_ids.len() − present_set.len()`) MASKS genuine drops that merely coexist with oversamples
+(false-negative on real loss — the exact distinction the user trusts). The honest signal is
+**PER GAP**: a recorded frame that sits STRICTLY BETWEEN two DIFFERENT present ids (in recorded
+order) is a misdecode that fell in that gap; a benign oversample sits AT its own id's position
+(before/adjacent, not inside a gap) and credits nothing. **Fix (burn_contiguity.rs):** walk recorded
+order tracking interstitial frames since the last forward step; when a forward gap opens, that count
+is the gap's BURN-UNREADABLE budget. Spend it on the gap's absent ids (lowest first) → BURN-UNREADABLE;
+the rest of the gap → genuine REAL DROP. **Label-only:** `missing_ids` is unchanged, so the verdict
+still FAILS (`is_zero` = no missing id) on any absent id — the fix can never create a false ZERO, it
+only moves an honest not-zero id from REAL-DROP to BURN-UNREADABLE. Diagnostic tell:
+`present_count == expected_count` AND distinct-set < span AND `real_drops > 0` ⇒ duplicate-misdecode
+over-count (blurred-but-present burns), a burn-readability defect, not loss.
+
 **Diagnosing a latency-CSV gap (do this FIRST, no rig needed):** read the artifacts on disk —
 `proof-*/latency-per-frame.csv` + `verdict-clean.json`. `stream_frames − csv_rows == nodes.stream
 .undecodable` ⇒ the gap is undecodable (no cam2 tick) frames, not lost frames. Check the cam2
