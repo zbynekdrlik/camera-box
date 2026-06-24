@@ -19,9 +19,10 @@ use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{render_qr_bgra, render_qr_dual_bgra};
 use camera_box::probe::recording::decode_recording_frame;
 use camera_box::probe::recording_latency::{
-    cam_strih_samples, hop_latency, split_payloads, strih_stream_samples, RunIds,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    cam_strih_samples, hop_latency, per_frame_latency_csv_rows, split_payloads,
+    strih_stream_samples, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
+use std::collections::HashMap;
 
 const CAM2_RUN_ID: u32 = 6519; // representative cam2 run_id (outside the burn range)
 
@@ -247,4 +248,150 @@ fn dual_vernier_cam2_real_pixels_canonical_tick_and_both_hops() {
         ss_h.stats.p50_ms
     );
     assert!(ss_h.jitter_ms.abs() < 1e-6, "constant offset = zero jitter");
+}
+
+/// Composite a recorded stream frame carrying the three co-located node burns (cam1, strih,
+/// stream) and OPTIONALLY the cam2 optical QR — all decoded through the REAL rqrr path. When
+/// `cam2` is `None`, NO cam2 QR is rendered: that is an OPTICAL-DECODE DROPOUT (cam1 filming
+/// cam2's monitor momentarily fails to read the QR) while the DIGITAL burns are still present.
+fn stream_frame_with_burns_and_optional_cam2(
+    cam2: Option<&Payload>,
+    cam1: &Payload,
+    strih: &Payload,
+    stream: &Payload,
+    w: u32,
+    quarter_h: u32,
+    qr: u32,
+) -> image::GrayImage {
+    // Four stacked quarter-canvases: [cam2-or-blank | cam1 | strih | stream], each centering
+    // one QR (the optical dropout quarter is left blank = no decodable QR there).
+    let blank = vec![255u8; (w * quarter_h * 4) as usize];
+    let q_cam2 = match cam2 {
+        Some(p) => render_qr_bgra(p, w, quarter_h, qr),
+        None => blank.clone(),
+    };
+    let q_cam1 = render_qr_bgra(cam1, w, quarter_h, qr);
+    let q_strih = render_qr_bgra(strih, w, quarter_h, qr);
+    let q_stream = render_qr_bgra(stream, w, quarter_h, qr);
+    let h = quarter_h * 4;
+    let mut full = vec![255u8; (w * h * 4) as usize];
+    let qb = (w * quarter_h * 4) as usize;
+    full[..qb].copy_from_slice(&q_cam2);
+    full[qb..qb * 2].copy_from_slice(&q_cam1);
+    full[qb * 2..qb * 3].copy_from_slice(&q_strih);
+    full[qb * 3..qb * 4].copy_from_slice(&q_stream);
+    bgra_to_luma(&full, w, h, w * 4)
+}
+
+#[test]
+fn per_frame_csv_keeps_burn_hops_unbroken_across_real_optical_dropout_216() {
+    // #216 end-to-end on REAL pixels: a stretch of recorded frames whose cam2 OPTICAL QR is
+    // undecodable (an optical-decode dropout — NOT a chain loss) while the cam1/strih/stream
+    // burns are present the whole time. The per-frame latency CSV must emit a row for EVERY
+    // such frame so the cam1→strih / strih→stream / cam1→stream lines stay UNBROKEN (the
+    // ~150s blank band #216 reports was caused by skipping these rows). Only the cam2-optical
+    // identity column is empty on a dropout row.
+    let base = 1_700_000_000_000_000_000i64;
+    let cam1_strih_off = 60_000_000i64; // +60 ms
+    let strih_stream_off = 59_000_000i64; // +59 ms (so cam1→stream end-to-end = 119 ms)
+    let (w, quarter_h, qr) = (900u32, 360u32, 300u32);
+
+    // 6 frames: cam2 present on 0 and 5; frames 1..=4 are the optical dropout (no cam2 QR),
+    // all six carrying the three burns (the chain stayed alive across the dropout).
+    let cam2_present = [true, false, false, false, false, true];
+    let mut frames = Vec::new();
+    for i in 0..6u64 {
+        let cam_g = base + i as i64 * 33_333_333;
+        let cam2 = Payload {
+            run_id: CAM2_RUN_ID,
+            frame_id: 700 + i as u32,
+            gen_ts_ns: cam_g,
+        };
+        let cam1 = Payload {
+            run_id: BURN_RUN_ID_CAM1,
+            frame_id: 2000 + i as u32,
+            gen_ts_ns: cam_g,
+        };
+        let strih = Payload {
+            run_id: BURN_RUN_ID_STRIH,
+            frame_id: 5000 + i as u32,
+            gen_ts_ns: cam_g + cam1_strih_off,
+        };
+        let stream = Payload {
+            run_id: BURN_RUN_ID_STREAM,
+            frame_id: 9000 + i as u32,
+            gen_ts_ns: cam_g + cam1_strih_off + strih_stream_off,
+        };
+        let cam2_opt = if cam2_present[i as usize] {
+            Some(&cam2)
+        } else {
+            None
+        };
+        let luma = stream_frame_with_burns_and_optional_cam2(
+            cam2_opt, &cam1, &strih, &stream, w, quarter_h, qr,
+        );
+        let rf = decode_recording_frame(i, luma);
+        // All three burns must decode out of the real pixels on every frame.
+        let n_burns = rf
+            .payloads
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.run_id,
+                    BURN_RUN_ID_CAM1 | BURN_RUN_ID_STRIH | BURN_RUN_ID_STREAM
+                )
+            })
+            .count();
+        assert_eq!(
+            n_burns, 3,
+            "frame {i}: all three burns must decode (the chain is alive across the dropout)"
+        );
+        // The dropout frames (1..=4) must have NO decodable cam2 QR.
+        let has_cam2 = rf.payloads.iter().any(|p| p.run_id == CAM2_RUN_ID);
+        assert_eq!(
+            has_cam2, cam2_present[i as usize],
+            "frame {i}: cam2 QR decodability must match the rendered layout"
+        );
+        frames.push(rf);
+    }
+
+    let rows = per_frame_latency_csv_rows(
+        &frames,
+        BURN_RUN_ID_CAM1,
+        BURN_RUN_ID_STRIH,
+        BURN_RUN_ID_STREAM,
+        Some(CAM2_RUN_ID),
+        &HashMap::new(),
+    );
+    // #216: ALL six frames emit a row — the four dropout frames are NOT skipped.
+    assert_eq!(
+        rows.len(),
+        6,
+        "#216: every burn-carrying frame emits a row incl. the optical-dropout stretch"
+    );
+    for (i, r) in rows.iter().enumerate() {
+        assert!(
+            (r.cam1_strih_ms.unwrap() - 60.0).abs() < 1e-6,
+            "row {i}: cam1→strih = +60 ms (burn-only hop, present across the real dropout)"
+        );
+        assert!(
+            (r.strih_stream_ms.unwrap() - 59.0).abs() < 1e-6,
+            "row {i}: strih→stream = +59 ms"
+        );
+        assert!(
+            (r.cam1_stream_ms.unwrap() - 119.0).abs() < 1e-6,
+            "row {i}: cam1→stream = +119 ms end-to-end"
+        );
+        assert!(r.gen_ts_ns > 0, "row {i}: positive x anchor");
+    }
+    // The four dropout rows carry NO cam2 tick (empty frame_id), the two healthy rows do.
+    assert_eq!(rows[0].frame_id, Some(700));
+    assert_eq!(
+        rows[1].frame_id, None,
+        "#216: dropout row has empty frame_id but still a row"
+    );
+    assert_eq!(rows[2].frame_id, None);
+    assert_eq!(rows[3].frame_id, None);
+    assert_eq!(rows[4].frame_id, None);
+    assert_eq!(rows[5].frame_id, Some(705));
 }
