@@ -20,7 +20,7 @@
 use camera_box::capture::yuyv_to_gray8;
 use camera_box::probe::luma::bgra_to_luma;
 use camera_box::probe::payload::Payload;
-use camera_box::probe::qr::render_qr_dual_bgra;
+use camera_box::probe::qr::{render_qr_bgra, render_qr_dual_bgra};
 use camera_box::probe::recording::analyze_recording;
 use std::path::PathBuf;
 use std::process::Command;
@@ -150,4 +150,93 @@ fn strih_6519_dual_qr_frame_decodes_both_qrs() {
     ids.sort_unstable();
     assert_eq!(ids, vec![6518, 6519], "both painted QR ticks present");
     assert_eq!(frame.tick, Some(6519), "Vernier tick = max(left, right)");
+}
+
+/// #202 END-TO-END: the offline recording decode (`analyze_recording`, which the 4-node
+/// verdict consumes) must recover a SOFTENED bottom burn that rqrr's single full-frame
+/// `detect_grids` pass misses — the residual burn-unreadable defect (#202/#186). This drives
+/// the FULL path (compose a frame with the top dual-QR + a 260px node burn in the bottom-left
+/// corner, soften the whole frame as the NDI/encode chain does, encode to a lossless ffv1
+/// gray8 mkv, decode through `analyze_recording`) and asserts ALL THREE marks decode: both
+/// optical QRs AND the node burn (run_id 911_001). Before the bottom-band tiled robust decode
+/// this frame yielded only the two optical QRs. Requires ffmpeg (a camera-box runtime dep,
+/// installed in CI).
+#[test]
+fn analyze_recording_recovers_a_softened_bottom_burn() {
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        panic!("ffmpeg not found — the #202 recovery round-trip cannot run; install ffmpeg");
+    }
+    let (w, h) = (1920u32, 1080u32);
+    let left = Payload {
+        run_id: 136_141_133,
+        frame_id: 4000,
+        gen_ts_ns: 1,
+    };
+    let right = Payload {
+        run_id: 136_141_133,
+        frame_id: 4001,
+        gen_ts_ns: 2,
+    };
+    let burn = Payload {
+        run_id: 911_001, // a cam1-capture node burn
+        frame_id: 1234,
+        gen_ts_ns: 3,
+    };
+
+    // Compose: big top dual-QR + a 260px burn in the bottom-left corner, then soften the
+    // WHOLE frame (the real recording chain anti-aliases the small burn). At this blur the
+    // full-frame pass misses the burn; the bottom-band tiled robust decode recovers it.
+    let bgra = render_qr_dual_bgra(&left, &right, w, h, 700);
+    let mut luma = bgra_to_luma(&bgra, w, h, w * 4);
+    // Render the burn as a centered ~260px QR on a small white BGRA canvas, take its luma,
+    // and composite the QR's non-white (module) pixels into the bottom-left corner.
+    let canvas = 320u32;
+    let burn_bgra = render_qr_bgra(&burn, canvas, canvas, 260);
+    let burn_luma = bgra_to_luma(&burn_bgra, canvas, canvas, canvas * 4);
+    let (ox, oy) = (40u32, h - canvas - 40);
+    for y in 0..canvas {
+        for x in 0..canvas {
+            luma.put_pixel(ox + x, oy + y, *burn_luma.get_pixel(x, y));
+        }
+    }
+    let luma = image::imageops::blur(&luma, 2.8);
+
+    // Encode the gray8 plane to a lossless ffv1 mkv exactly as the dev1 recording listener
+    // does, then decode through the SAME analyze_recording the verdict uses.
+    let dir = std::env::temp_dir().join(format!("burn-recover-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let raw = dir.join("frame.gray8");
+    let mkv = dir.join("burn.mkv");
+    std::fs::write(&raw, luma.as_raw()).unwrap();
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "rawvideo", "-pix_fmt", "gray", "-s"])
+        .arg(format!("{w}x{h}"))
+        .args(["-r", "30", "-i"])
+        .arg(&raw)
+        .args(["-c:v", "ffv1", "-level", "3"])
+        .arg(&mkv)
+        .status()
+        .expect("spawn ffmpeg ffv1 encode");
+    assert!(status.success(), "ffmpeg ffv1 encode failed");
+
+    let frames = analyze_recording(&mkv).expect("analyze the softened-burn recording");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!frames.is_empty(), "decoded at least one frame");
+    let got: Vec<u32> = {
+        let mut r: Vec<u32> = frames[0].payloads.iter().map(|p| p.run_id).collect();
+        r.sort_unstable();
+        r.dedup();
+        r
+    };
+    // The big optical QR decodes (sanity) AND the softened node burn is RECOVERED (#202).
+    assert!(
+        got.contains(&136_141_133),
+        "the optical dual-QR must decode: {got:?}"
+    );
+    assert!(
+        got.contains(&911_001),
+        "the softened bottom node burn must be RECOVERED by the robust offline decode \
+         (#202): run_ids={got:?}"
+    );
 }

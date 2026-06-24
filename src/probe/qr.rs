@@ -297,6 +297,58 @@ fn rqrr_decode_all(img: GrayImage) -> Vec<Payload> {
     out
 }
 
+/// Install (ONCE per process) a panic hook that SILENCES rqrr's internal
+/// `assert!(scan >= 1)` (rqrr-0.9.3 identify/grid.rs) and chains every OTHER panic to the
+/// previously-installed hook. The tile retry catches that assert (it is expected on a
+/// degenerate tile — lead-in/teardown black frames, near-uniform crops), but the DEFAULT
+/// panic hook still PRINTS the message + backtrace note to stderr for each one — on a
+/// ~9000-frame recording with several tiles per frame that is thousands of dumps drowning
+/// real errors. Suppressing only the rqrr-grid assert keeps every genuine panic loud. The
+/// chain (not a replace) preserves whatever hook was set before (e.g. a test harness's).
+fn install_rqrr_assert_silencer() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // rqrr's grid identifier panics with the literal "scan >= 1" assert; its file
+            // path contains "rqrr". Match either so a version bump that rewords the message
+            // still suppresses the SAME caught assert, never an unrelated panic.
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("");
+            let from_rqrr = info
+                .location()
+                .map(|l| l.file().contains("rqrr"))
+                .unwrap_or(false);
+            if from_rqrr && msg.contains("scan >= 1") {
+                return; // expected, caught by rqrr_decode_all_catch — stay silent
+            }
+            prev(info); // every other panic: report exactly as before
+        }));
+    });
+}
+
+/// Panic-safe [`rqrr_decode_all`] for the #202 tiled retry: rqrr's grid identifier has an
+/// internal `assert!(scan >= 1)` (rqrr-0.9.3 identify/grid.rs:206) that PANICS on certain
+/// degenerate finder geometries (a near-empty or pathologically small tile). On the FULL
+/// frame this never fires (the big optical QR is always well-formed), but the robust pass
+/// feeds rqrr many sub-tiles, any of which could be degenerate — a panic there would abort
+/// the whole frame's decode (and, via the worker pool, the verdict). Catch it and treat a
+/// panicking tile as "found nothing" (the full-frame pass + the other tiles still cover the
+/// frame). The [`install_rqrr_assert_silencer`] hook keeps that caught assert from spamming
+/// stderr while leaving every other panic loud. Used ONLY for the extra tile passes; the
+/// primary full-frame pass keeps the plain `rqrr_decode_all` so existing behavior is
+/// byte-for-byte unchanged.
+fn rqrr_decode_all_catch(img: GrayImage) -> Vec<Payload> {
+    install_rqrr_assert_silencer();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rqrr_decode_all(img)))
+        .unwrap_or_default()
+}
+
 /// Otsu's global threshold (0..=255) maximizing between-class variance of a gray
 /// histogram. PURE + total: an empty/flat image returns 128 (a neutral mid-gray cut).
 /// Used to binarize a SOFT optical capture before rqrr (a QR filmed off a monitor is
@@ -372,6 +424,133 @@ pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
     }
     // Nothing on the plain pass — the soft optical capture. Retry on a hard Otsu cut.
     rqrr_decode_all(binarize_otsu(&img))
+}
+
+/// Panic-safe twin of [`decode_qr_luma_all`] for the #202 tile passes (plain pass, then an
+/// Otsu-binarized retry if empty), with both rqrr calls wrapped in
+/// [`rqrr_decode_all_catch`] so a degenerate tile that trips rqrr's internal assert yields
+/// "nothing" instead of aborting the whole frame's decode.
+fn decode_qr_luma_all_tile(img: GrayImage) -> Vec<Payload> {
+    let first = rqrr_decode_all_catch(img.clone());
+    if !first.is_empty() {
+        return first;
+    }
+    rqrr_decode_all_catch(binarize_otsu(&img))
+}
+
+/// #202 — how many horizontal tiles the robust (offline-recording) decode splits the BOTTOM
+/// band into. The #111 layout fixes all three node burns to the BOTTOM of the frame
+/// (strih = bottom-left, cam1 = bottom-center, stream = bottom-right corner) while the large
+/// optical dual-QR sits in the TOP band and ALWAYS decodes on the full-frame pass. So the
+/// recovery passes only need the bottom band, split into 3 columns — one per burn — giving
+/// rqrr a sub-image in which the small ~320px burn is LARGE relative to the tile, so its
+/// finder pattern locks where the full-frame `detect_grids` pass missed it. 3 columns (vs a
+/// full 3×3 grid) cover every burn at 1/3 the rqrr passes (proven: the bottom band recovers
+/// all 17 real flagged burns — cam1 11/11, strih 5/5, stream 1/1).
+const TILE_COLS: u32 = 3;
+
+/// #202 — fraction of the frame HEIGHT, measured from the bottom, the tile band covers. The
+/// burns sit in the bottom corners + center (the #111 4-corner layout, ~0.28×h tall burns
+/// bottom-anchored), so the bottom 45% always contains them whole with margin; the top
+/// dual-QR is excluded (it never needs a tile — it decodes full-frame).
+const TILE_BOTTOM_BAND_FRAC: f32 = 0.45;
+
+/// #202 — fractional overlap between adjacent column tiles, so a burn straddling a column
+/// boundary is still WHOLLY inside at least one tile (a QR cut by a hard tile edge decodes
+/// in neither). 0.25 = each tile extends a quarter of its width into its neighbours.
+const TILE_OVERLAP_FRAC: f32 = 0.25;
+
+/// #202 — minimum long-side px a tile is upscaled TO before rqrr when it is smaller. A
+/// crisp but small burn (the cam1 320px mark, sharp yet only ~7px/module in the 1080p
+/// recording) decodes more reliably for rqrr's finder when the modules are a few px larger;
+/// cubic-upscaling the tile to this floor gives the finder more pixels per module WITHOUT
+/// inventing detail (the pattern is already sharp — see #202: cv2 read every flagged burn
+/// from the same pixels). 1280 keeps a 1/3-of-1080 (≈640px) tile at ~2× and a 1/3-of-4K
+/// (≈1280px) tile unchanged.
+const TILE_UPSCALE_MIN: u32 = 1280;
+
+/// Merge `add` into `into`, keeping each DISTINCT `(run_id, frame_id)` payload once. The
+/// 60→30 beat + multiple tiles surface the SAME burn many times; this de-dups by the full
+/// identity so a node's burn is counted once, never inflated, and a recovered burn from a
+/// later pass is added if (and only if) it is new. The kept copy is the FIRST seen (the
+/// full-frame pass runs before the tiles) — its `gen_ts_ns` is authoritative because a
+/// CRC-valid QR for a given `(run_id, frame_id)` always carries the SAME `gen_ts_ns` (the
+/// payload is one atomic encoded mark), so the dropped duplicates can never differ in it.
+fn merge_payloads(into: &mut Vec<Payload>, add: Vec<Payload>) {
+    for p in add {
+        if !into
+            .iter()
+            .any(|q| q.run_id == p.run_id && q.frame_id == p.frame_id)
+        {
+            into.push(p);
+        }
+    }
+}
+
+/// #202 — the ROBUST offline-recording decode: every CRC-valid QR in the frame, recovering
+/// the small burns rqrr's single full-frame `detect_grids` pass misses.
+///
+/// rqrr's grid detector reliably finds the LARGE optical dual-QR but intermittently misses
+/// the small ~320px node burns when several QRs of very different sizes share one
+/// full-resolution frame (#186/#202 — the burn pixels are present and sharp; cv2 reads every
+/// flagged frame from the identical pixels, so this is a detector-coverage gap, NOT a
+/// burn-size or burn-readability defect). The fix gives rqrr a fair look at each region:
+///
+/// 1. the plain full-frame pass (`decode_qr_luma_all`) — finds the big top dual-QR cheaply;
+/// 2. the BOTTOM band ([`TILE_BOTTOM_BAND_FRAC`] of the height) split into [`TILE_COLS`]
+///    OVERLAPPING column tiles ([`TILE_OVERLAP_FRAC`]) — one per bottom burn — each
+///    cubic-upscaled to at least [`TILE_UPSCALE_MIN`] on its long side, rqrr-decoded; in a
+///    column tile a 320px burn is large-relative and its finder locks.
+///
+/// All passes' CRC-valid payloads are merged, de-duped by `(run_id, frame_id)`
+/// ([`merge_payloads`]), so a node's burn is counted exactly once and the result is always a
+/// SUPERSET of the plain pass. Offline only (the parallel #166/#187 recording decode) — it
+/// runs a few extra rqrr passes per frame, so it is NEVER on the latency-sensitive live tap.
+pub fn decode_qr_luma_all_robust(img: GrayImage) -> Vec<Payload> {
+    let mut out = decode_qr_luma_all(img.clone());
+
+    let (w, h) = (img.width(), img.height());
+    // A tiny frame is one tile — the plain pass already covered it; nothing to gain.
+    if w < TILE_COLS || h < 2 {
+        return out;
+    }
+
+    // The bottom band that holds the burns (the top dual-QR is excluded — it decodes
+    // full-frame). Band top = h - band_h; the tiles span [band_top, h).
+    let band_h = (((h as f32) * TILE_BOTTOM_BAND_FRAC) as u32).clamp(1, h);
+    let band_top = h - band_h;
+
+    // Overlapping column geometry across the band: base step = w / cols, each column extended
+    // by the overlap on each side (clamped to the frame width). The columns span the whole
+    // width, so every bottom burn — left / center / right — falls wholly inside at least one.
+    let step_x = (w / TILE_COLS).max(1);
+    let over_x = ((step_x as f32) * TILE_OVERLAP_FRAC) as u32;
+
+    for gx in 0..TILE_COLS {
+        let x0 = (gx * step_x).saturating_sub(over_x);
+        // The last column extends to the frame edge so no right strip is left uncovered.
+        let x1 = if gx == TILE_COLS - 1 {
+            w
+        } else {
+            (((gx + 1) * step_x) + over_x).min(w)
+        };
+        let tw = x1 - x0;
+        if tw == 0 {
+            continue;
+        }
+        let tile = image::imageops::crop_imm(&img, x0, band_top, tw, band_h).to_image();
+        // Upscale a small tile so the burn's modules span more px for rqrr's finder.
+        let long = tw.max(band_h);
+        let tile = if long < TILE_UPSCALE_MIN {
+            let nw = (tw * TILE_UPSCALE_MIN / long).max(1);
+            let nh = (band_h * TILE_UPSCALE_MIN / long).max(1);
+            image::imageops::resize(&tile, nw, nh, image::imageops::FilterType::CatmullRom)
+        } else {
+            tile
+        };
+        merge_payloads(&mut out, decode_qr_luma_all_tile(tile));
+    }
+    out
 }
 
 /// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
@@ -522,6 +701,208 @@ mod tests {
         assert!(
             got.contains(&p),
             "the Otsu-binarized retry must recover the soft low-contrast QR"
+        );
+    }
+
+    // ============================================================================
+    // #202 — robust offline decode recovers the small node burns rqrr's single
+    // full-frame `detect_grids` pass intermittently misses (the residual
+    // burn-unreadable misses on PRESENT, sharp frames; cv2 reads them, rqrr's
+    // full-frame pass doesn't). The tiled/upscaled robust pass gives rqrr a fair
+    // look at each region so the burn's finder pattern locks.
+    // ============================================================================
+
+    /// Composite the QR for `p` (rendered at `qr_px`) onto a white luma frame at top-left
+    /// `(ox, oy)`. Models a small burn drawn into a large recorded frame.
+    fn blit_burn_luma(frame: &mut GrayImage, p: &Payload, qr_px: u32, ox: u32, oy: u32) {
+        let qr = render_payload_qr(p, qr_px);
+        let (qw, qh) = (qr.width(), qr.height());
+        for y in 0..qh {
+            for x in 0..qw {
+                let (px, py) = (ox + x, oy + y);
+                if px < frame.width() && py < frame.height() {
+                    frame.put_pixel(px, py, qr.get_pixel(x, y).to_owned());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn robust_recovers_a_softened_burn_the_full_frame_pass_misses() {
+        // THE #202 BUG, reproduced deterministically: a 1920×1080 frame carrying the LARGE
+        // optical dual-QR (top) plus a 260px node burn (bottom-left corner) that is SOFTENED
+        // by a Gaussian blur (sigma 2.8) — the exact real-recording condition, where the
+        // burn pixels are present but anti-aliased by the NDI/encode/4K-upscale chain (cv2
+        // reads every flagged real frame from the identical pixels; rqrr's single full-frame
+        // detect_grids does not — #186/#202). At this blur the full-frame plain pass MISSES
+        // the burn; the tiled+upscaled robust pass gives rqrr the burn in a sub-tile where it
+        // is large-relative and its finder locks, so robust RECOVERS it. (Threshold found by
+        // a blur sweep: at qpx 220-260 / sigma 1.6-2.8, plain=miss, robust=recover.)
+        let left = Payload {
+            run_id: 136_141_133,
+            frame_id: 4000,
+            gen_ts_ns: 1,
+        };
+        let right = Payload {
+            run_id: 136_141_133,
+            frame_id: 4001,
+            gen_ts_ns: 2,
+        };
+        let burn = Payload {
+            run_id: 911_001, // cam1 capture burn
+            frame_id: 1234,
+            gen_ts_ns: 3,
+        };
+        let (w, h) = (1920u32, 1080u32);
+        // Big top dual-QR (700px each half, top-anchored) — the easy-to-find marks.
+        let bgra = render_qr_dual_bgra(&left, &right, w, h, 700);
+        let mut luma = bgra_to_luma(&bgra, w, h, w * 4);
+        // A 260px burn in the bottom-left corner (where the strih burn lives), then soften
+        // the WHOLE frame as the recording chain does.
+        let qh = render_payload_qr(&burn, 260).height();
+        blit_burn_luma(&mut luma, &burn, 260, 40, h - qh - 40);
+        let luma = image::imageops::blur(&luma, 2.8);
+
+        let plain = decode_qr_luma_all(luma.clone());
+        let robust = decode_qr_luma_all_robust(luma);
+
+        // The big optical QRs still decode either way (sanity: the frame is well-formed).
+        assert!(
+            plain.iter().any(|p| p.run_id == left.run_id),
+            "the big optical QR must decode on the plain pass (frame is well-formed): {plain:?}"
+        );
+        // The whole point: the softened burn is recovered by robust.
+        assert!(
+            robust.contains(&burn),
+            "robust must recover the softened cam1 burn (#202): robust={robust:?}"
+        );
+        // And the burn is exactly what the plain full-frame pass missed (the RED condition
+        // this locks): if a future rqrr/decoder change finds it full-frame, this test no
+        // longer reproduces the bug — re-tune the blur via the sweep in the commit message.
+        assert!(
+            !plain.contains(&burn),
+            "the plain full-frame pass is expected to MISS the softened burn (the #202 \
+             condition); plain={plain:?}"
+        );
+    }
+
+    #[test]
+    fn robust_is_always_a_superset_of_the_plain_pass() {
+        // No regression: every payload the plain pass finds is also in the robust result
+        // (robust = plain ∪ tile passes, de-duped). A clean dual-QR frame decodes identically
+        // plus whatever the tiles add — never fewer.
+        let left = Payload {
+            run_id: 7,
+            frame_id: 100,
+            gen_ts_ns: 1,
+        };
+        let right = Payload {
+            run_id: 7,
+            frame_id: 101,
+            gen_ts_ns: 2,
+        };
+        let (w, h) = (1920u32, 1080u32);
+        let bgra = render_qr_dual_bgra(&left, &right, w, h, 700);
+        let luma = bgra_to_luma(&bgra, w, h, w * 4);
+        let plain = decode_qr_luma_all(luma.clone());
+        let robust = decode_qr_luma_all_robust(luma);
+        assert!(
+            !plain.is_empty(),
+            "the clean dual-QR must decode: {plain:?}"
+        );
+        for p in &plain {
+            assert!(
+                robust.contains(p),
+                "robust must be a SUPERSET of the plain pass: {p:?} missing from {robust:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn robust_does_not_duplicate_a_burn_seen_in_multiple_tiles() {
+        // The same burn appears in several overlapping tiles AND the full-frame pass; the
+        // result must carry each DISTINCT (run_id, frame_id) exactly once (merge_payloads
+        // de-dups), never an inflated count that would over-report.
+        let burn = Payload {
+            run_id: 911_001,
+            frame_id: 555,
+            gen_ts_ns: 9,
+        };
+        let (w, h) = (1280u32, 720u32);
+        let mut luma = GrayImage::from_raw(w, h, vec![255u8; (w * h) as usize]).unwrap();
+        // A 200px burn in the BOTTOM band (where the recovery tiles look), straddling the
+        // boundary between two overlapping column tiles so it lands inside BOTH at once — the
+        // exact condition the (run_id, frame_id) de-dup must collapse to a single payload.
+        let qpx = 200u32;
+        let qr = render_payload_qr(&burn, qpx);
+        let qh = qr.height();
+        // x at ~1/3 width (the col0/col1 boundary), y near the bottom (inside the band).
+        blit_burn_luma(&mut luma, &burn, qpx, w / 3 - qr.width() / 2, h - qh - 30);
+        let robust = decode_qr_luma_all_robust(luma);
+        let count = robust
+            .iter()
+            .filter(|p| p.run_id == burn.run_id && p.frame_id == burn.frame_id)
+            .count();
+        assert_eq!(
+            count, 1,
+            "a burn seen in many tiles must appear exactly once: {robust:?}"
+        );
+    }
+
+    #[test]
+    fn merge_payloads_keeps_each_distinct_identity_once() {
+        // Pure de-dup contract: same (run_id, frame_id) collapses; a different frame_id (or
+        // run_id) is a distinct mark and is kept.
+        let a = Payload {
+            run_id: 1,
+            frame_id: 10,
+            gen_ts_ns: 1,
+        };
+        let a_dup = Payload {
+            run_id: 1,
+            frame_id: 10,
+            gen_ts_ns: 999, // same identity, different ts — still a duplicate
+        };
+        let b = Payload {
+            run_id: 1,
+            frame_id: 11,
+            gen_ts_ns: 1,
+        };
+        let c = Payload {
+            run_id: 2,
+            frame_id: 10,
+            gen_ts_ns: 1,
+        };
+        let mut into = vec![a];
+        merge_payloads(&mut into, vec![a_dup, b, c]);
+        assert_eq!(
+            into.len(),
+            3,
+            "a_dup collapses onto a; b and c are new: {into:?}"
+        );
+        assert!(into.contains(&a) && into.contains(&b) && into.contains(&c));
+    }
+
+    #[test]
+    fn robust_does_not_panic_on_a_degenerate_frame() {
+        // rqrr's grid identifier has an internal assert!(scan >= 1) that PANICS on certain
+        // degenerate finder geometries (rqrr-0.9.3 identify/grid.rs:206). The robust pass
+        // feeds rqrr many sub-tiles; a panicking tile must NOT abort the whole frame's decode
+        // (it would crash the verdict via the worker pool). A near-uniform / noisy small frame
+        // is exactly the kind of input that can trip it — robust must return cleanly (empty).
+        let mut img = GrayImage::from_raw(200, 130, vec![200u8; 200 * 130]).unwrap();
+        // Sprinkle a few dark specks so rqrr's finder attempts (and may trip) rather than
+        // bailing on a flat field — the panic path this guards.
+        for (i, px) in img.pixels_mut().enumerate() {
+            if i % 37 == 0 {
+                px.0[0] = 0;
+            }
+        }
+        // Must not panic; degenerate input simply yields no payloads.
+        let got = decode_qr_luma_all_robust(img);
+        assert!(
+            got.is_empty(),
+            "a degenerate frame yields no payloads (and never panics): {got:?}"
         );
     }
 

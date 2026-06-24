@@ -56,3 +56,8 @@ deploy-150/
 winartifact/
 deploy-111/
 dist-111/
+
+# Session-local verdict re-run + probe-tools artifact scratch (#202)
+/verdict-rerun-out/
+/dist-probe/
+/recording-verdict-run/
