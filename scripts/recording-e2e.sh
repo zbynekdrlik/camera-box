@@ -280,10 +280,22 @@ echo "[6/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
 sleep "$DURATION"
 
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"
-STRIH_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop)
-STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop)
-echo "    strih host file:  $STRIH_HOST_PATH"
-echo "    stream host file: $STREAM_HOST_PATH"
+# #178: the StopRecord→verdict region is RESILIENT. run 172046073 completed the recording
+# + StopRecord, then a set -e abort (a non-zero $(StopRecord) capture / a transient ssh /
+# an absent optional recording hitting a `[ -f ] && ...` guard) jumped straight to the
+# cleanup EXIT trap and the verdict — the WHOLE POINT of the run — never ran. Disable
+# abort-on-error for the orchestration here; each step is guarded explicitly, and set -e is
+# re-enabled at the verdict run (which manages its own exit via verdict-monitor.sh → GATE).
+set +e
+# StopRecord can return non-zero (OBS-WS already stopped, a transient WS hiccup). Capture the
+# host path best-effort; an empty path just means recording-fetch-windows.sh has nothing to
+# pull and the local recording (if already placed) is used. NEVER abort the run here.
+STRIH_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop) \
+  || echo "WARNING: strih StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
+STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) \
+  || echo "WARNING: stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
+echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
+echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 # Stop the painter + the cam1 burn binary so the files finalise (no grab stream to flush).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null; true"
 # cam1: send SIGINT (graceful) so camera-box's shutdown handler runs and writes the
@@ -330,9 +342,18 @@ VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --cam2-run-id "$RUN_ID" \
   --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
   --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
-[ -f "$STREAM_REC" ]          && VERDICT_ARGS+=(--stream "$STREAM_REC")
-[ -f "$PAINTER_CSV" ]         && VERDICT_ARGS+=(--painter "$PAINTER_CSV")
-[ -f "$CAM1_CAPTURE_STATS" ]  && VERDICT_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS")
+# #178: use `if` blocks for the optional verdict inputs (NOT a `test && append` one-liner) —
+# a FALSE file-test returns non-zero and would `set -e`-abort the script before the verdict;
+# an `if` condition is exempt, so an absent optional recording degrades gracefully (the
+# verdict simply omits that input).
+if [ -f "$STREAM_REC" ]; then VERDICT_ARGS+=(--stream "$STREAM_REC"); fi
+if [ -f "$PAINTER_CSV" ]; then VERDICT_ARGS+=(--painter "$PAINTER_CSV"); fi
+if [ -f "$CAM1_CAPTURE_STATS" ]; then VERDICT_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
+
+# #178: re-enable abort-on-error for the verdict run below — it manages its own exit via
+# verdict-monitor.sh (GATE), so set -e here does not abort the run; it just restores strict
+# mode for the remainder. (The orchestration that could fail transiently is above, guarded.)
+set -e
 
 # #166 LIVENESS-GUARDED verdict run. The verdict decodes multi-GB recordings for
 # minutes; if it CRASHES (the #166 night: it died silently after >1 h) or HANGS, a
