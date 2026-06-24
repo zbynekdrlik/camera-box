@@ -145,8 +145,8 @@ def main():
         ax_loss.set_ylabel("frames", fontsize=11)
         ax_loss.legend(loc="upper right", fontsize=9)
     ax_loss.set_title(
-        "Per-hop LOSS — cam1→strih & strih→stream paired on the CLEAN digital burn id "
-        "(#174, from the stream recording alone); cam2→cam1 = honest optical assessment",
+        "Per-hop LOSS — burn-id contiguity (#186/#198): cam1 from the CLEAN 1080p strih "
+        "recording (#133), strih/stream from the stream recording; cam2→cam1 = honest optical",
         fontsize=11)
     ax_loss.grid(axis="y", alpha=0.3)
 

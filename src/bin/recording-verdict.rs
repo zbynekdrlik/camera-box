@@ -256,12 +256,26 @@ fn in_window_burn_frames(
         .collect()
 }
 
-/// One node's identity for the contiguity verdict: its label, its burn run_id, and how its
-/// burn counter advances (#198 — cam1 per-emit, strih/stream per-render).
+/// One node's identity AND source for the contiguity verdict: its label, its burn run_id,
+/// how its burn counter advances (#198 — cam1 per-emit, strih/stream per-render), and the
+/// recording its burn is decoded FROM (#133).
+///
+/// #133: the SOURCE recording is per-node, not a single shared `stream` slice. The cam1
+/// burn rides through NDI into BOTH the strih and stream program recordings, so its
+/// contiguity can be read from EITHER — but the 4K stream recording softens the small 320px
+/// cam1 burn (the #196 upscale), so a single QR mis-read there manufactures a PHANTOM drop.
+/// The CLEAN source of truth for cam1→strih is the 1080p STRIH recording (the cam1 burn is
+/// crisp on strih's native canvas). So cam1's `source` is the strih recording; strih and
+/// stream remain on the stream recording (they are the downstream endpoints whose own burns
+/// only the stream recording carries co-located with cam2's optical QR).
 struct NodeSpec<'a> {
     node: &'a str,
     burn_run_id: u32,
     rate: BurnRate,
+    /// The decoded frames this node's burn-id contiguity is read FROM (#133).
+    source: &'a [RecordingFrame],
+    /// The recording file backing `source`, for pixel-proof extraction of a missing slot.
+    rec_path: &'a Path,
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -274,16 +288,18 @@ struct NodeSpec<'a> {
 /// no longer recomputes the walk or re-classifies; it just attaches the pixel proof.
 fn node_verdict(
     spec: &NodeSpec,
-    stream: &[RecordingFrame],
     all_burn_run_ids: &[u32],
     out_dir: &Path,
-    stream_path: &Path,
     max_pixel_proof: usize,
 ) -> Result<NodeVerdict> {
     let node = spec.node;
+    // #133: read this node's burn from its OWN source recording (cam1 = the clean 1080p strih
+    // recording; strih/stream = the stream recording) — NOT a single shared slice.
+    let source = spec.source;
+    let rec_path = spec.rec_path;
     // #198: walk only the in-window DELIVERED frames; rate decides whether a forward integer
     // gap is loss; a delivered frame missing its burn IS; out-of-window ids are excluded.
-    let window = in_window_burn_frames(stream, spec.burn_run_id, all_burn_run_ids);
+    let window = in_window_burn_frames(source, spec.burn_run_id, all_burn_run_ids);
     let in_window = burn_contiguity_in_window(node, &window, spec.rate);
     let contiguity = in_window.contiguity;
 
@@ -309,13 +325,8 @@ fn node_verdict(
     let slots: Vec<u64> = classified.iter().filter_map(|c| c.frame_index).collect();
     if !slots.is_empty() {
         let png_dir = out_dir.join(format!("{node}-missing"));
-        let extracted = extract_frames_png(
-            stream_path,
-            &slots,
-            &HashSet::new(),
-            &png_dir,
-            max_pixel_proof,
-        )?;
+        let extracted =
+            extract_frames_png(rec_path, &slots, &HashSet::new(), &png_dir, max_pixel_proof)?;
         let idx_to_png: BTreeMap<u64, String> = extracted
             .iter()
             .map(|e| (e.frame_index, e.png_path.display().to_string()))
@@ -1087,7 +1098,42 @@ fn main() -> Result<()> {
     // stream recording actually carries the burns (else each hop reports no samples).
     // ===================================================================================
     if let Some(stream_frames) = &stream_frames_opt {
-        let cam1_ids = burn_ids_in(stream_frames, args.burn_cam1_run_id);
+        // #133: cam1's contiguity source-of-truth is the CLEAN 1080p STRIH recording, not the
+        // 4K STREAM recording (the #196 upscale softens the small cam1 burn, manufacturing
+        // phantom drops on a single QR mis-read). The cam1 burn rides through NDI into BOTH
+        // recordings, so it is present in strih too. Fall back to the stream recording ONLY
+        // when there is no --strih (the cam1-only / stream-only mode) — then it is the best
+        // available source, with the softening caveat. strih/stream nodes always read from the
+        // stream recording (the only recording carrying their own burn co-located with cam2).
+        // The stream recording path is the same for every site in this block (the enclosing
+        // `if let Some(stream_frames)` is only entered when --stream was provided). Unwrap the
+        // invariant ONCE.
+        let stream_path: &Path = args
+            .stream
+            .as_ref()
+            .expect("stream_frames_opt is Some ⇒ --stream was provided")
+            .as_path();
+        // cam1's source frames, its pixel-proof recording path, AND its label are decided by
+        // ONE match on strih_data, so they can never desync (a future change to how strih_data
+        // is built can't leave cam1 reading strih frames while extracting pixels from the stream
+        // file). When --strih is present strih_data is Some AND args.strih is Some, so the strih
+        // path is always available on that arm.
+        let (cam1_source, cam1_rec_path, cam1_source_label): (&[RecordingFrame], &Path, &str) =
+            match (&strih_data, &args.strih) {
+                (Some((strih_frames, _)), Some(strih_path)) => (
+                    strih_frames,
+                    strih_path.as_path(),
+                    "strih 1080p recording (clean, #133)",
+                ),
+                // no --strih (or strih decode unavailable) ⇒ cam1 falls back to the stream
+                // recording for BOTH frames and pixel proof, labelled as the softened source.
+                _ => (
+                    stream_frames,
+                    stream_path,
+                    "stream recording (no --strih; softened, may over-count — #133)",
+                ),
+            };
+        let cam1_ids = burn_ids_in(cam1_source, args.burn_cam1_run_id);
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
         let any_burn =
@@ -1095,10 +1141,10 @@ fn main() -> Result<()> {
         if any_burn {
             println!();
             println!(
-                "=== #174 FULL-CHAIN per-hop verdict from the STREAM recording ALONE (clean burn-id pairing) ==="
+                "=== #174 FULL-CHAIN per-hop verdict (cam1 from the {cam1_source_label}; strih/stream from the stream recording) ==="
             );
             println!(
-                "  burn ids in stream recording: cam1={} strih={} stream={}",
+                "  burn ids: cam1={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
                 cam1_ids.len(),
                 strih_ids_seq.len(),
                 stream_ids_seq.len()
@@ -1106,6 +1152,23 @@ fn main() -> Result<()> {
             report["full_chain"]["burn_ids_present"] = serde_json::json!({
                 "cam1": cam1_ids.len(), "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
+            report["full_chain"]["cam1_source"] = serde_json::json!(cam1_source_label);
+            // #133 (review): if --strih was supplied (so cam1's source IS the strih recording)
+            // but cam1 carried NO burn there, cam1 is silently SKIPPED below and an all-zero
+            // headline could stand WITHOUT cam1 having been measured. The cam1-capture burn
+            // (CAMERA_BOX_BURN_RUN_ID on cam1) rides into strih's program, so its absence in a
+            // --strih run means the burn was OFF or never reached strih — loudly WARN so a
+            // "ZERO loss" headline is never read as a cam1→strih proof when cam1 was unmeasured.
+            // (No hard fail: a deliberate burn-off / cam1-only diagnostic run is still valid.)
+            if strih_data.is_some() && cam1_ids.is_empty() {
+                eprintln!(
+                    "WARNING: --strih supplied but NO cam1 burn (run_id {}) found in the strih \
+                     recording — cam1→strih is UNMEASURED this run (cam1 burn OFF or not reaching \
+                     strih). A ZERO-loss headline below covers strih/stream ONLY, not cam1→strih.",
+                    args.burn_cam1_run_id
+                );
+                report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
+            }
 
             // ===========================================================================
             // #186 — the ONE trustworthy, binary LOSS verdict (REPLACES the muddled
@@ -1127,15 +1190,22 @@ fn main() -> Result<()> {
                 "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
             );
             let mut node_verdicts: Vec<NodeVerdict> = Vec::new();
+            // `stream_path` (the strih/stream nodes' pixel-proof recording) is computed once
+            // above, alongside the cam1 source selection.
             // #198: cam1's burn increments per EMITTED frame (src/main.rs), so its in-window id
             // run must be contiguous integers (a forward gap = a real cam1 drop). strih/stream
             // burn per RENDER tick (DistroAV filter), so a forward gap is expected, not loss.
+            // #133: cam1 reads its burn from the CLEAN 1080p strih recording (cam1_source /
+            // cam1_rec_path); strih + stream read from the stream recording (their own burns are
+            // co-located with cam2 only there).
             for (spec, present) in [
                 (
                     NodeSpec {
                         node: "cam1",
                         burn_run_id: args.burn_cam1_run_id,
                         rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
                     },
                     !cam1_ids.is_empty(),
                 ),
@@ -1144,6 +1214,8 @@ fn main() -> Result<()> {
                         node: "strih",
                         burn_run_id: args.burn_strih_run_id,
                         rate: BurnRate::PerRenderTick,
+                        source: stream_frames,
+                        rec_path: stream_path,
                     },
                     !strih_ids_seq.is_empty(),
                 ),
@@ -1152,6 +1224,8 @@ fn main() -> Result<()> {
                         node: "stream",
                         burn_run_id: args.burn_stream_run_id,
                         rate: BurnRate::PerRenderTick,
+                        source: stream_frames,
+                        rec_path: stream_path,
                     },
                     !stream_ids_seq.is_empty(),
                 ),
@@ -1159,18 +1233,7 @@ fn main() -> Result<()> {
                 if !present {
                     continue;
                 }
-                let stream_path = args
-                    .stream
-                    .as_ref()
-                    .expect("stream_frames_opt is Some ⇒ --stream was provided");
-                let nv = node_verdict(
-                    &spec,
-                    stream_frames,
-                    &all_burns,
-                    &args.out_dir,
-                    stream_path.as_path(),
-                    args.max_pixel_proof,
-                )?;
+                let nv = node_verdict(&spec, &all_burns, &args.out_dir, args.max_pixel_proof)?;
                 print_node_verdict(&nv);
                 all_pass &= nv.is_zero();
                 report["full_chain"]["loss"][spec.node] = node_verdict_json(&nv);
@@ -1509,13 +1572,13 @@ mod tests {
                 node: "strih",
                 burn_run_id: STRIH,
                 rate: BurnRate::PerRenderTick,
+                source: &stream,
+                // rec_path only touched when there ARE missing slots to extract pixels for;
+                // a zero-loss verdict never reads it.
+                rec_path: std::path::Path::new("/nonexistent.mp4"),
             },
-            &stream,
             &[STRIH, STREAM],
             tmp.path(),
-            // stream_path only touched when there ARE missing slots to extract pixels for;
-            // a zero-loss verdict never reads it.
-            std::path::Path::new("/nonexistent.mp4"),
             5,
         )
         .unwrap();
@@ -1550,12 +1613,12 @@ mod tests {
                 node: "cam1",
                 burn_run_id: CAM1B,
                 rate: BurnRate::PerEmittedFrame,
+                source: &stream,
+                rec_path: std::path::Path::new("/nonexistent.mp4"),
             },
-            &stream,
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
-            std::path::Path::new("/nonexistent.mp4"),
-            0, // cap 0 = no cap, but stream_path IS read since there's a missing slot...
+            0, // cap 0 = no cap, but rec_path IS read since there's a missing slot...
         );
         // ...so extraction will error on the bogus path. We only assert the contiguity by
         // calling the pure check directly here (the node_verdict pixel extraction needs a real
@@ -1580,6 +1643,79 @@ mod tests {
             v.is_err(),
             "a found real drop drives pixel extraction (errors on bad path)"
         );
+    }
+
+    // ========================================================================
+    // #133 — cam1→strih contiguity is read from the CLEAN 1080p STRIH recording,
+    // NOT the 4K STREAM recording where the small cam1 burn is softened by the
+    // #196 upscale (one QR mis-read there manufactures a PHANTOM drop).
+    // ========================================================================
+
+    #[test]
+    fn cam1_contiguity_reads_from_strih_recording_not_softened_stream() {
+        // The cam1 burn (per-EMITTED-frame) rides through NDI into BOTH recordings.
+        // In the CLEAN 1080p strih recording every cam1 burn decodes (contiguous run
+        // 50,51,52,53) ⇒ ZERO cam1 loss. In the 4K STREAM recording the same cam1 burn
+        // is softened by the upscale, so one frame's cam1 QR fails to decode (a `None`
+        // slot) — a PHANTOM drop. The cam1 verdict MUST come from the strih slice and
+        // report ZERO, never the stream slice's phantom drop. This is the #133 fix:
+        // the source of truth for cam1→strih is the crisp 1080p strih recording.
+        let strih = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 51)]),
+            frame(2, &[(CAM2, 102), (CAM1B, 52)]), // crisp at 1080p — burn decodes
+            frame(3, &[(CAM2, 103), (CAM1B, 53)]),
+        ];
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 51)]),
+            frame(2, &[(CAM2, 102)]), // 4K-softened: cam1 QR missed = a PHANTOM drop
+            frame(3, &[(CAM2, 103), (CAM1B, 53)]),
+        ];
+        // Sanity: the STREAM slice on its own DOES manufacture a phantom cam1 drop —
+        // this is exactly what reading cam1 from the 4K stream did (the #133 artifact).
+        let sw = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM]);
+        let siw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &sw,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !siw.contiguity.is_contiguous(),
+            "the 4K stream slice manufactures a phantom cam1 drop (the #133 bug source): {:?}",
+            siw.contiguity
+        );
+
+        // The FIX: cam1's node_verdict reads its burn from the STRIH slice (its own
+        // `source`), so it is contiguous ⇒ ZERO loss, no phantom. A zero-loss verdict
+        // never touches the pixel-proof path, so the recording path is unused here.
+        let tmp = tempfile::tempdir().unwrap();
+        let nv = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &strih, // <-- #133: cam1 source-of-truth = the strih 1080p recording
+                rec_path: std::path::Path::new("/nonexistent-strih.mkv"),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            5,
+        )
+        .unwrap();
+        assert!(
+            nv.is_zero(),
+            "cam1 from the CLEAN strih recording is contiguous ⇒ ZERO loss (no phantom): {:?}",
+            nv.contiguity
+        );
+        assert_eq!(
+            nv.real_drops(),
+            0,
+            "no phantom real drop from the 4K stream"
+        );
+        assert_eq!(nv.burn_unreadable(), 0);
+        assert_eq!(nv.contiguity.present_count, 4);
+        assert_eq!(nv.contiguity.expected_count, 4);
     }
 
     #[test]

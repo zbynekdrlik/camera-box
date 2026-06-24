@@ -449,6 +449,35 @@ pub fn is_wallclock_ts(ts_ns: u64) -> bool {
     (WALLCLOCK_TS_MIN_NS..WALLCLOCK_TS_MAX_NS).contains(&ts_ns)
 }
 
+/// The new high-water mark of the genlock FIFO depth, given the previous peak and a depth
+/// OBSERVED right now (#99 point 2).
+///
+/// ## Why this exists
+///
+/// `genlock_peak_depth` is the audit log's high-water mark of the jitter buffer — its whole
+/// purpose is to tell the operator how close the queue got to the drop-cap so the preload
+/// depth can be tuned. The original #70 instrumentation updated it ONLY on the CONSUMER side
+/// (inside `ready_async_frame`, at the render-tick consume decision). But the PRODUCER (NDI
+/// arrival → `obs_source_output_video_internal` → `da_push_back(async_frames)`) can push the
+/// queue to a momentary high depth BETWEEN two render ticks and have it drained back down
+/// before the next tick observes it — so the consumer-side-only peak UNDER-reports the true
+/// high-water mark. The fix (#99) is to also fold the depth the producer reaches into the
+/// peak, at the push site, under the same `async_mutex`.
+///
+/// This is the camera-box-side REFERENCE for that "peak = max so far" rule — the same mirror
+/// pattern as [`genlock_decide`] / [`steady_state_depth`]: the C does the update INLINE at both
+/// sites (`if (depth > genlock_peak_depth) genlock_peak_depth = depth;` — the render path can't
+/// call into Rust), and the `tests/genlock_preload.rs` vendored-source guard asserts that inline
+/// update exists on BOTH the producer and consumer paths so an upstream subtree merge can't drop
+/// it. This pure fn pins the rule itself (a monotone non-decreasing max) under unit test, so the
+/// reference the C is checked against is itself provably correct.
+///
+/// Pure `max`; saturating is unnecessary (a `u32` max of two `u32`s cannot overflow). The
+/// invariant: the return is never below `current_peak`.
+pub fn genlock_peak_update(current_peak: u32, observed_depth: u32) -> u32 {
+    current_peak.max(observed_depth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,5 +755,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- #99 point 2: peak depth must include the PRODUCER-side high-water mark ----
+
+    #[test]
+    fn peak_update_takes_the_higher_of_prev_and_observed() {
+        // The audit high-water mark only ever GROWS toward the true maximum: a freshly
+        // observed depth above the running peak raises it; a lower one leaves it.
+        assert_eq!(
+            genlock_peak_update(0, 5),
+            5,
+            "first observation sets the peak"
+        );
+        assert_eq!(
+            genlock_peak_update(5, 8),
+            8,
+            "a higher depth raises the peak"
+        );
+        assert_eq!(
+            genlock_peak_update(8, 3),
+            8,
+            "a lower depth leaves the peak"
+        );
+        assert_eq!(
+            genlock_peak_update(8, 8),
+            8,
+            "an equal depth leaves the peak"
+        );
+    }
+
+    #[test]
+    fn peak_captures_a_producer_burst_that_drains_before_the_next_tick() {
+        // THE #99 point-2 BUG: a CONSUMER-side-only peak under-reports. Model the timeline:
+        // the producer pushes the FIFO up to depth 6 between render ticks (its high-water
+        // mark), then the consumer drains it back to 1 before the next render tick observes
+        // the queue. If peak is folded ONLY at the consumer-observed depth (1), it records 1
+        // and the operator never sees how close the queue got to the cap. Folding the
+        // PRODUCER-observed depth (6) at the push site captures the true 6.
+        let mut peak = 0u32;
+
+        // --- producer pushes 6 frames between ticks (each push observes the new depth) ---
+        for depth_after_push in 1..=6u32 {
+            peak = genlock_peak_update(peak, depth_after_push);
+        }
+        // --- consumer drains to 1 by the next render tick; only THAT depth is consumer-seen ---
+        let consumer_observed_depth = 1u32;
+        peak = genlock_peak_update(peak, consumer_observed_depth);
+
+        assert_eq!(
+            peak, 6,
+            "peak must reflect the producer-side high-water mark (6), not just the \
+             consumer-observed depth (1) — the #99 point-2 under-report"
+        );
     }
 }

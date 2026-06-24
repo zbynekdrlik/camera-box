@@ -1006,6 +1006,39 @@ mod vendored_source {
         }
     }
 
+    #[test]
+    fn peak_depth_updated_on_the_producer_push_path() {
+        // #99 point 2: genlock_peak_depth must be folded in on the PRODUCER side too (the
+        // obs_source_output_video_internal push path), not only on the consumer side
+        // (ready_async_frame). Otherwise a producer burst that drains before the next render
+        // tick under-reports the high-water mark. The producer update sits right after the
+        // `genlock_frames_received++` at the da_push_back site, gated by `source->genlock_fifo`.
+        let raw = vendor_file(OBS_SOURCE);
+        // The producer push site is uniquely identified by genlock_frames_received++ (it is
+        // ONLY incremented there). Require a peak update within the same genlock_fifo block.
+        let recv_pos = raw
+            .find("source->genlock_frames_received++")
+            .expect("genlock_frames_received++ producer site missing — #70/#99 reverted");
+        // Window from the receive increment through the rest of that genlock_fifo block (the
+        // peak update sits inside the same `if (source->genlock_fifo) { ... }` block, after a
+        // documenting comment — allow ample room so the comment can't push it out of range).
+        let window_end = (recv_pos + 1400).min(raw.len());
+        let window = &raw[recv_pos..window_end];
+        assert!(
+            window.contains("source->genlock_peak_depth = depth")
+                || window.contains("genlock_peak_depth = (uint32_t)source->async_frames.num"),
+            "{OBS_SOURCE}: #99 point 2 — genlock_peak_depth is NOT updated on the producer push \
+             path (near genlock_frames_received++). The peak under-reports a producer burst that \
+             drains before the next render tick; re-apply the producer-side peak update."
+        );
+        // The consumer-side update must ALSO still exist (both sites contribute the max).
+        assert!(
+            raw.contains("source->genlock_peak_depth = (uint32_t)source->async_frames.num"),
+            "{OBS_SOURCE}: #70 — the consumer-side genlock_peak_depth update (ready_async_frame) \
+             went missing; re-apply."
+        );
+    }
+
     // ---- #97: per-source preload field + runtime set/get API + raised cap -------
 
     #[test]
