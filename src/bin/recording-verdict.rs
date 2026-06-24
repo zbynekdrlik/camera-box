@@ -34,8 +34,8 @@ use camera_box::probe::recording::{
 use camera_box::probe::recording_latency::{
     burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip,
     cam_strih_samples, chain_hop_samples_from_stream, hop_latency, painter_internal_gen_to_flip,
-    strih_stream_samples, strih_stream_samples_from_stream, HopLatency, RunIds, BURN_RUN_ID_CAM1,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    per_frame_latency_csv_rows, strih_stream_samples, strih_stream_samples_from_stream,
+    write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
@@ -123,6 +123,17 @@ struct Args {
     /// scripts/recording-e2e-report.py to render the 2-graph report PNG.
     #[arg(long)]
     json: Option<PathBuf>,
+    /// #209: write a PER-FRAME latency time-series CSV to this path — one row per
+    /// delivered stream frame: `frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,
+    /// strih_stream_ms,cam1_stream_ms`. This is the LITERAL continuous-line proof input:
+    /// `scripts/latency-line-report.py --csv <path>` draws one line per hop (time on x,
+    /// latency on y), so a gap in the line = a lost frame and a flat line = stable
+    /// latency. Defaults to `latency-per-frame.csv` BESIDE the `--json` summary (the JSON's
+    /// own directory, NOT `--out-dir`) when `--json` is given but `--latency-csv` is not,
+    /// so the time-series sits next to the summary. Requires the cam1/strih/stream burns
+    /// in the stream recording (#174).
+    #[arg(long)]
+    latency_csv: Option<PathBuf>,
 }
 
 /// Reduce a HopLatency option to a compact JSON object (or null) for the report.
@@ -1356,6 +1367,61 @@ fn main() -> Result<()> {
                     "cam1 capture gen_ts_ns",
                 );
                 report["full_chain"]["latency"]["cam1_stream"] = hop_lat_json(&lat);
+            }
+
+            // #209: PER-FRAME latency time-series CSV — the LITERAL continuous-line proof.
+            // One row per delivered stream frame (cam2 tick + co-located burns), carrying
+            // the three per-hop latencies on the shared DanteSync clock. Written when the
+            // operator passes --latency-csv, OR by default next to --json (so the
+            // time-series is produced ALONGSIDE the summary). The plotter
+            // scripts/latency-line-report.py turns it into the per-hop line PNG.
+            //
+            // Default location = the JSON file's OWN directory (`latency-per-frame.csv`
+            // beside verdict.json), NOT --out-dir: the CLAUDE.md on-stream pattern passes
+            // --json and --out-dir in DIFFERENT directories, and the doc + the consumer
+            // expect the CSV next to the JSON summary. Fall back to out-dir only when the
+            // JSON path has no parent (e.g. a bare filename in the cwd).
+            let csv_path: Option<PathBuf> = args.latency_csv.clone().or_else(|| {
+                args.json.as_ref().map(|j| {
+                    j.parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(&args.out_dir)
+                        .join("latency-per-frame.csv")
+                })
+            });
+            if let Some(path) = &csv_path {
+                let rows = per_frame_latency_csv_rows(
+                    stream_frames,
+                    args.burn_cam1_run_id,
+                    args.burn_strih_run_id,
+                    args.burn_stream_run_id,
+                    cam2_pin,
+                    &painter_flip_by_tick,
+                );
+                match write_latency_csv(path, &rows) {
+                    Ok(n) => {
+                        println!(
+                            "  PER-FRAME latency CSV ({n} rows) → {} \
+                             (plot: scripts/latency-line-report.py --csv {})",
+                            path.display(),
+                            path.display()
+                        );
+                        report["full_chain"]["latency_csv"] = serde_json::json!({
+                            "path": path.display().to_string(),
+                            "rows": n,
+                            "columns": camera_box::probe::recording_latency::LatencyCsvRow::HEADER,
+                        });
+                        tracing::info!(path = %path.display(), rows = n, "#209 per-frame latency CSV written");
+                    }
+                    Err(e) => {
+                        // Never fail the verdict on a CSV-write hiccup — the JSON summary +
+                        // the headline are the gate; the CSV is the visual aid.
+                        eprintln!(
+                            "WARNING: could not write per-frame latency CSV {}: {e}",
+                            path.display()
+                        );
+                    }
+                }
             }
 
             // cam2→cam1 OPTICAL-INJECTION latency from the STREAM recording ALONE (no 7.3GB

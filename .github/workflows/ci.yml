@@ -251,7 +251,9 @@ jobs:
       - name: Install test deps
         # websocket-client: obs_phase2.py imports it at module load (sys.exit if
         # missing), so it must be present for the test module to import.
-        run: pip install pytest websocket-client
+        # matplotlib: scripts/latency-line-report.py (#209 continuous-line latency
+        # proof) imports it at module load; the plotter test renders a real PNG.
+        run: pip install pytest websocket-client matplotlib
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party

@@ -65,10 +65,11 @@ Camera devices (CAM1-4) run x86_64 Ubuntu. Build in CI (never locally); download
 gh run download --repo zbynekdrlik/camera-box -n camera-box-linux-amd64 --dir ./dist
 chmod +x ./dist/camera-box
 
-# 2. Deploy to device (password: newlevel)
-sshpass -p 'newlevel' ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
-sshpass -p 'newlevel' scp ./dist/camera-box root@10.77.9.6X:/usr/local/bin/
-sshpass -p 'newlevel' ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
+# DEVICE_ROOT_PW: the box root password (NOT committed — export it from your password store before deploying)
+# 2. Deploy to device (device root pw — NOT committed)
+sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
+sshpass -p "$DEVICE_ROOT_PW" scp ./dist/camera-box root@10.77.9.6X:/usr/local/bin/
+sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
 ```
 
 Use IP addresses — `.lan` DNS may not resolve.
