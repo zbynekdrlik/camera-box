@@ -1582,6 +1582,75 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // #133 — cam1→strih contiguity is read from the CLEAN 1080p STRIH recording,
+    // NOT the 4K STREAM recording where the small cam1 burn is softened by the
+    // #196 upscale (one QR mis-read there manufactures a PHANTOM drop).
+    // ========================================================================
+
+    #[test]
+    fn cam1_contiguity_reads_from_strih_recording_not_softened_stream() {
+        // The cam1 burn (per-EMITTED-frame) rides through NDI into BOTH recordings.
+        // In the CLEAN 1080p strih recording every cam1 burn decodes (contiguous run
+        // 50,51,52,53) ⇒ ZERO cam1 loss. In the 4K STREAM recording the same cam1 burn
+        // is softened by the upscale, so one frame's cam1 QR fails to decode (a `None`
+        // slot) — a PHANTOM drop. The cam1 verdict MUST come from the strih slice and
+        // report ZERO, never the stream slice's phantom drop. This is the #133 fix:
+        // the source of truth for cam1→strih is the crisp 1080p strih recording.
+        let strih = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 51)]),
+            frame(2, &[(CAM2, 102), (CAM1B, 52)]), // crisp at 1080p — burn decodes
+            frame(3, &[(CAM2, 103), (CAM1B, 53)]),
+        ];
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 51)]),
+            frame(2, &[(CAM2, 102)]), // 4K-softened: cam1 QR missed = a PHANTOM drop
+            frame(3, &[(CAM2, 103), (CAM1B, 53)]),
+        ];
+        // Sanity: the STREAM slice on its own DOES manufacture a phantom cam1 drop —
+        // this is exactly what reading cam1 from the 4K stream did (the #133 artifact).
+        let sw = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM]);
+        let siw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &sw,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !siw.contiguity.is_contiguous(),
+            "the 4K stream slice manufactures a phantom cam1 drop (the #133 bug source): {:?}",
+            siw.contiguity
+        );
+
+        // The FIX: cam1's node_verdict reads its burn from the STRIH slice (its own
+        // `source`), so it is contiguous ⇒ ZERO loss, no phantom. A zero-loss verdict
+        // never touches the pixel-proof path, so the recording path is unused here.
+        let tmp = tempfile::tempdir().unwrap();
+        let nv = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &strih, // <-- #133: cam1 source-of-truth = the strih 1080p recording
+                rec_path: std::path::Path::new("/nonexistent-strih.mkv"),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            5,
+        )
+        .unwrap();
+        assert!(
+            nv.is_zero(),
+            "cam1 from the CLEAN strih recording is contiguous ⇒ ZERO loss (no phantom): {:?}",
+            nv.contiguity
+        );
+        assert_eq!(nv.real_drops(), 0, "no phantom real drop from the 4K stream");
+        assert_eq!(nv.burn_unreadable(), 0);
+        assert_eq!(nv.contiguity.present_count, 4);
+        assert_eq!(nv.contiguity.expected_count, 4);
+    }
+
     #[test]
     fn in_window_delivered_frame_missing_burn_is_one_gap_not_a_range() {
         // A genuine in-window fault: ONE delivered frame (carries cam2 QR) has no strih burn
