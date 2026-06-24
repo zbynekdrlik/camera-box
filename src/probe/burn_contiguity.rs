@@ -385,6 +385,25 @@ pub fn burn_contiguity_in_window(
             .zip(present_set.iter().next_back().copied());
         if let Some((lo, hi)) = span {
             let last_frame = frames.last().map(|f| f.frame_index).unwrap_or(0);
+            // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP.
+            // The proof signature (run 1924001): present_count == expected_count (NO `None`
+            // frame) yet ids are absent from the present-set. CRC32 (Payload::decode) makes a
+            // wrong-but-valid id impossible, so the blurred burn on a DELIVERED frame re-decoded
+            // to an already-seen (CRC-valid) DUPLICATE of a neighbor id instead of its own. Each
+            // such duplicate delivered frame physically reached the recording but carries the
+            // WRONG id, so the id it SHOULD have carried (an absent integer) had a delivered frame
+            // after all ⇒ a decode MISS on a delivered frame (BURN-UNREADABLE), NOT a frame that
+            // never arrived (REAL DROP).
+            //
+            // `unreadable_budget` = the count of those delivered-but-misdecoded frames = the
+            // SURPLUS of delivered burns over distinct present ids (`present_ids.len() −
+            // present_set.len()`). We spend it on the absent ids: that many are covered by a
+            // delivered (duplicate) frame ⇒ BURN-UNREADABLE; once the budget is gone, the
+            // remaining absent ids had NO delivered frame (the span is wider than the
+            // delivered-frame count) ⇒ genuine REAL DROP. This keeps the COUNTS exact (what the
+            // verdict reports) even though the chain cannot pin WHICH absent id a given duplicate
+            // carried — each missing id still gets a pixel-proof slot below.
+            let mut unreadable_budget = present_ids.len().saturating_sub(present_set.len());
             for missing in (lo..=hi)
                 .filter(|id| !present_set.contains(id))
                 .filter(|id| !unreadable_consumed.contains(id))
@@ -394,10 +413,16 @@ pub fn burn_contiguity_in_window(
                     .next()
                     .map(|(_, &fi)| fi)
                     .unwrap_or(last_frame);
+                let kind = if unreadable_budget > 0 {
+                    unreadable_budget -= 1;
+                    InWindowMissingKind::BurnUnreadable
+                } else {
+                    InWindowMissingKind::RealDrop
+                };
                 missing_slots.push(MissingSlot {
                     id: missing,
                     frame_index,
-                    kind: InWindowMissingKind::RealDrop,
+                    kind,
                 });
             }
         }
