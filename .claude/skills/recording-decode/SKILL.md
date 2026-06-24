@@ -80,10 +80,28 @@ expected_count` with no clustered missing run confirms the burns were present th
 
 ## GOTCHA — pre-push Gate-1 false-positives on inline Rust tests
 
-The airuleset `pre-push-test-check.sh` Gate-1 ("feature .rs changed but no test file") keys on the
-PATH (`(test|spec|e2e|playwright)`), so a PR that adds only INLINE `#[cfg(test)]` tests inside a
-`src/*.rs` is wrongly flagged. Gate-2 (the real RED-before-GREEN ordering) DOES detect inline-test
-diffs and passes. Fix: add a genuine integration test under `tests/` (real coverage, not a
-workaround) — e.g. `tests/recording_latency_decode.rs` renders QR pixels + decodes through the
-real rqrr path. That satisfies Gate-1 by path AND adds end-to-end value. Never `[no-test:]` a real
-fix to dodge it.
+FIXED in airuleset (#170 session): Gate-1 ("feature .rs changed but no test file") used to key
+ONLY on the PATH (`(test|spec|e2e|playwright)`), so a PR adding only INLINE `#[cfg(test)]` tests
+inside a `src/*.rs` was wrongly flagged. Gate-1 now ALSO scans the branch-diff ADDED lines for
+`#[test]`/`assert!`/`fn test_` (mirroring Gate-2's existing inline detection), so a normal Rust
+inline-test PR passes. If a fresh airuleset checkout ever re-blocks: an integration test under
+`tests/` also satisfies it by path — but NEVER `[no-test:]` a real fix to dodge the gate.
+
+## GOTCHA — grab-ts sidecar CSV parse policy (`parse_grab_ts`, recording-verdict.rs)
+
+`parse_grab_ts` (`frame_index,grab_ts_ns`) has THREE distinct row outcomes — don't collapse them:
+
+- **Kill-time partial trailing fragment** (file does NOT end in `\n`; the cam1 `--record-grab`
+  BufWriter is killed with no flush) → the single final line is skipped whatever its shape.
+- **Empty `grab_ts_ns` cell** (`<idx>,` newline-terminated, mid-file or final, #170) → WARN +
+  skip that row. An empty cell = that frame has no recorded grab instant = no cam2→cam1 pairing;
+  `cam2_cam1_samples` already yields no sample for a frame absent from the map, so skipping is the
+  correct, lossless outcome. Do NOT error — run-163163's verdict computed every loss hop then
+  crashed at the very end (`cannot parse integer from empty string`, VERDICT_EXIT=1), losing the
+  whole latency computation over ONE empty cell.
+- **Wrong column count OR a NON-empty unparseable cell** (e.g. `1,abc`) on a complete row → ERROR
+  loudly. That is genuine corruption; a silently-shrunk map would drop real samples with no signal.
+
+The discriminator is empty-vs-nonempty AFTER trim, not mid-file-vs-final. Tests:
+`grab_ts_sidecar_empty_ts_row_is_skipped_not_crashed` (#170 regression) +
+`grab_ts_sidecar_nonempty_garbage_ts_row_still_errors`.
