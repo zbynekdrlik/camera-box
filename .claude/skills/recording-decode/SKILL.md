@@ -111,9 +111,13 @@ oversample — the DOMINANT duplicate source). A global "duplicate budget"
 **PER GAP**: a recorded frame that sits STRICTLY BETWEEN two DIFFERENT present ids (in recorded
 order) is a misdecode that fell in that gap; a benign oversample sits AT its own id's position
 (before/adjacent, not inside a gap) and credits nothing. **Fix (burn_contiguity.rs):** walk recorded
-order tracking interstitial frames since the last forward step; when a forward gap opens, that count
-is the gap's BURN-UNREADABLE budget. Spend it on the gap's absent ids (lowest first) → BURN-UNREADABLE;
-the rest of the gap → genuine REAL DROP. **Label-only:** `missing_ids` is unchanged, so the verdict
+order tracking interstitial frames since the last forward step; a frame counts as interstitial ONLY
+if its id was ALREADY seen (a genuine DUPLICATE — the misdecode fingerprint), NOT if it is a
+present-set member arriving late/out of order (the #216 reorder — a single occurrence accounted for
+by its own presence; counting it would mislabel a genuine drop in a LATER gap). When a forward gap
+opens, the accumulated count is the gap's BURN-UNREADABLE budget. Spend it on the gap's absent ids
+(lowest first) → BURN-UNREADABLE; the rest of the gap → genuine REAL DROP. **Label-only:**
+`missing_ids` is unchanged, so the verdict
 still FAILS (`is_zero` = no missing id) on any absent id — the fix can never create a false ZERO, it
 only moves an honest not-zero id from REAL-DROP to BURN-UNREADABLE. Diagnostic tell:
 `present_count == expected_count` AND distinct-set < span AND `real_drops > 0` ⇒ duplicate-misdecode
