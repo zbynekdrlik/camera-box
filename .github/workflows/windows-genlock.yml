@@ -423,6 +423,29 @@ jobs:
           Copy-Item -Recurse "vendor/distroav/data/*" "stage/data/obs-plugins/distroav/" -ErrorAction SilentlyContinue
           git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
 
+      # #120: emit the per-component SHA manifest INTO the bundle (stage/BUNDLE_MANIFEST.json).
+      # EPIC #125 / #119: a single git-HEAD txt (above) cannot catch a stale-BYTES build of the
+      # right version (the #119 inert preload). The manifest records each rebuilt component's pinned
+      # SOURCE (OBS/DistroAV version + vendored subtree commit, read from vendor/README.md +
+      # vendor/distroav/buildspec.json — the same source-of-truth drift-guard.sh uses) AND the
+      # per-file sha256 of EVERY shipped file, walked from stage/ so it is self-consistent with the
+      # bundle by construction. #121 (post-deploy verify) byte/SHA-checks the deployed stack against
+      # it. The generator's logic is unit-proven on the Linux CI (`test` job, tests/genlock_manifest.rs)
+      # — this is the production EMISSION. git-bash on windows-2022 ships bash + sha256sum + git.
+      - name: Generate per-component SHA manifest (#120)
+        shell: bash
+        run: |
+          scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
+
+      # #120: self-consistency GATE — fail the build if the produced manifest does NOT match the
+      # bundle (every shipped file listed with the correct sha256, no un-manifested bytes, no stale
+      # entries). The generator already self-checks; this is the explicit, independent build gate so
+      # the windows-genlock CI run itself proves the manifest is produced + correct (no rig needed).
+      - name: Assert bundle manifest self-consistent (#120)
+        shell: bash
+        run: |
+          scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
