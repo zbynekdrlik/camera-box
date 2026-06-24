@@ -767,4 +767,81 @@ mod tests {
         assert_eq!(w.missing_slots[0].frame_index, 1);
         assert_eq!(w.missing_slots[1].frame_index, 3);
     }
+
+    // ============================================================================
+    // #216 / cam1 over-count — a REORDERED-BUT-PRESENT id is NOT a real drop.
+    //
+    // The 2026-06-24 30-min proof read cam1's burn from the SOFTENED stream recording
+    // (#133/#196 — 2 NDI hops + 2 HEVC encodes of the small cam1 burn QR). It reported
+    // 235 cam1 "real_drops" while: burn_ids_present.cam1 == the FULL integer span
+    // (53993 distinct ids over 453..=54445 == 53993 wide) AND burn_unreadable == 0.
+    // i.e. EVERY cam1 emitted-frame integer WAS present somewhere in the window — nothing
+    // was actually lost. The per-emit forward-gap walk manufactured the 235 because the
+    // softened recording delivered a handful of ids slightly OUT OF ORDER (a one-frame-late
+    // 60→30 straddle): id n+1 arrives AFTER n+2, so the walk flags n+1 "missing" at the
+    // n+2 step even though n+1 shows up one frame later. A reordered-but-present id is a
+    // MEASUREMENT artifact of decoding through the softened chain, NOT a frame that never
+    // reached the recording. It must NOT be counted as a real drop.
+    // ============================================================================
+
+    #[test]
+    fn in_window_cam1_reordered_but_complete_set_is_zero_loss() {
+        // The proof signature in miniature: present-set {100..=106} is COMPLETE (no integer
+        // truly absent) but ids 101 and 104 each land one frame LATE (after 102 / 105). The
+        // old walk reported 6 phantom faults; the honest answer is ZERO loss — every emitted
+        // cam1 integer reached the recording.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)), // 60→30 duplicate (same emitted id on two recorded frames)
+            rbf(2, Some(102)), // 101 not yet seen — a soft straddle, NOT a drop
+            rbf(3, Some(101)), // 101 arrives one frame late (reorder)
+            rbf(4, Some(103)),
+            rbf(5, Some(103)),
+            rbf(6, Some(105)), // 104 not yet seen
+            rbf(7, Some(104)), // 104 arrives late
+            rbf(8, Some(106)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        let present: std::collections::BTreeSet<u32> =
+            frames.iter().filter_map(|f| f.burn_id).collect();
+        assert_eq!(
+            present,
+            (100..=106).collect(),
+            "guard: the present-set IS the complete integer span"
+        );
+        assert!(
+            c.is_contiguous(),
+            "a reordered-but-complete cam1 set is ZERO loss (no integer truly absent): {c:?}"
+        );
+        assert!(
+            w.missing_slots.is_empty(),
+            "no real drop and no phantom forward-gap drop: {:?}",
+            w.missing_slots
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_genuine_drop_absent_from_whole_set_still_caught() {
+        // The fix must NOT mask a TRUE drop: 52 is absent from the ENTIRE window (it appears
+        // nowhere, late or otherwise) ⇒ a cam1-emitted frame that never reached the recording
+        // ⇒ a REAL DROP that must still be reported.
+        let frames = [
+            rbf(0, Some(50)),
+            rbf(1, Some(51)),
+            rbf(2, Some(53)), // 52 genuinely missing (never appears anywhere)
+            rbf(3, Some(54)),
+            rbf(4, Some(55)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        assert!(!c.is_contiguous(), "a genuinely absent id IS a drop: {c:?}");
+        let real_drops: Vec<u32> = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(real_drops, vec![52], "the one genuinely-lost emitted id");
+    }
 }
