@@ -746,6 +746,178 @@ pub fn chain_hop_samples_from_stream(
     out
 }
 
+/// One per-frame row of the latency time-series CSV (#209) — the LITERAL points the
+/// continuous-line proof graph plots.
+///
+/// The user's original ask is to SEE the latency as a continuous line over the whole
+/// run (points forming a line, latency not fluctuating), not just summary p50/p99 stats.
+/// Each row is one delivered stream frame that carries cam2's optical Vernier tick plus
+/// the co-located node burns, so the plotter can draw, per hop, `latency_ms` (y) against
+/// the chain-origin wall-clock instant (x). A GAP in the x-axis = a lost frame; a FLAT
+/// line = stable latency. Built from the SINGLE stream recording (no cam2-tick
+/// cross-recording pairing), so the per-frame outliers the cam2-tick method produced
+/// cannot appear.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct LatencyCsvRow {
+    /// The cam2 optical Vernier tick (the canonical `frame_id` carried by every recorded
+    /// frame end-to-end) — the per-frame identity. A monotonic gap in this column across
+    /// rows is a DROPPED optical frame; the plotter draws the gap so loss is self-evident.
+    pub frame_id: u32,
+    /// The chain ORIGIN wall-clock instant for this frame (ns since epoch) — cam1's
+    /// CAPTURE burn `gen_ts_ns` when present, else strih's render `gen_ts_ns`, else the
+    /// cam2 paint instant. This is the row's x-axis time anchor (the earliest stamp the
+    /// frame carries), so every hop's line shares one consistent time axis.
+    pub gen_ts_ns: i64,
+    /// The cam2 DISPLAY (page-flip) instant for this tick (ns), when a painter flip map is
+    /// supplied (`--painter` flip log). `None` (empty CSV cell) when no flip map is given.
+    /// Kept so the test-rig painter display time stays visible per frame.
+    pub flip_ts_ns: Option<i64>,
+    /// cam1→strih per-hop latency (ms) for this frame = `strih_burn − cam1_burn`. `None`
+    /// when this frame did not carry BOTH burns (empty CSV cell → a gap in that hop's line).
+    pub cam1_strih_ms: Option<f64>,
+    /// strih→stream per-hop latency (ms) = `stream_burn − strih_burn`. `None` if either
+    /// burn is absent on this frame.
+    pub strih_stream_ms: Option<f64>,
+    /// cam1→stream END-TO-END latency (ms) = `stream_burn − cam1_burn`. `None` if either
+    /// burn is absent on this frame.
+    pub cam1_stream_ms: Option<f64>,
+}
+
+impl LatencyCsvRow {
+    /// The CSV header line (column order = struct field order). Single source of truth so
+    /// the writer and any reader/plotter agree on the columns.
+    pub const HEADER: &'static str =
+        "frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms";
+
+    /// This row as one CSV line. `Option` fields render as an empty cell when `None` (a
+    /// gap the plotter draws as a break in that hop's line); ms are fixed to 6 decimals.
+    pub fn to_csv_line(&self) -> String {
+        fn ms(v: Option<f64>) -> String {
+            v.map(|x| format!("{x:.6}")).unwrap_or_default()
+        }
+        fn ns(v: Option<i64>) -> String {
+            v.map(|x| x.to_string()).unwrap_or_default()
+        }
+        format!(
+            "{},{},{},{},{},{}",
+            self.frame_id,
+            self.gen_ts_ns,
+            ns(self.flip_ts_ns),
+            ms(self.cam1_strih_ms),
+            ms(self.strih_stream_ms),
+            ms(self.cam1_stream_ms),
+        )
+    }
+}
+
+/// Build the per-frame latency time-series rows (#209) from the SINGLE stream recording.
+///
+/// For each recorded stream frame that carries the cam2 optical Vernier tick, emit one
+/// [`LatencyCsvRow`]: the cam2 tick (`frame_id`), the chain-origin wall-clock anchor
+/// (`gen_ts_ns`), and the three co-located per-hop latencies (cam1→strih, strih→stream,
+/// cam1→stream). The burns are paired WITHIN the one frame (no cam2-tick cross-recording
+/// pairing), exactly as [`chain_hop_samples_from_stream`] does, so the per-frame points
+/// match the summary-stat hops the verdict already reports — the CSV is the per-frame
+/// expansion of the same numbers, not a parallel measurement.
+///
+/// A hop's latency is `None` for a frame that did not carry BOTH of that hop's burns
+/// (e.g. a frame with only cam2 + cam1 burn has cam1→strih = None) — an empty CSV cell,
+/// which the plotter renders as a break in that hop's line. Rows are emitted in capture
+/// order and only for frames carrying a cam2 tick (a frame with no optical QR is not a
+/// delivered optical instant and has no x-axis identity). `gen_ts_ns ≤ 0` burn stamps are
+/// treated as absent (never a wrong number / negative latency).
+///
+/// `flip_ts_by_tick` (optional, from the painter `--paint-log`): when non-empty, each
+/// row's `flip_ts_ns` is the cam2 DISPLAY instant for its tick; absent ⇒ `None`.
+pub fn per_frame_latency_csv_rows(
+    stream: &[RecordingFrame],
+    cam1_run_id: u32,
+    strih_run_id: u32,
+    stream_run_id: u32,
+    flip_ts_by_tick: &HashMap<u32, i64>,
+) -> Vec<LatencyCsvRow> {
+    let is_burn =
+        |run_id: u32| run_id == cam1_run_id || run_id == strih_run_id || run_id == stream_run_id;
+    let mut out = Vec::new();
+    for f in stream {
+        // Canonical cam2 Vernier tick = the highest-frame_id cam2 (non-burn) half.
+        let mut cam2_tick: Option<u32> = None;
+        let mut cam2_gen: Option<i64> = None;
+        let mut cam1_ts: Option<i64> = None;
+        let mut strih_ts: Option<i64> = None;
+        let mut stream_ts: Option<i64> = None;
+        for p in &f.payloads {
+            if p.run_id == cam1_run_id {
+                if p.gen_ts_ns > 0 && cam1_ts.is_none() {
+                    cam1_ts = Some(p.gen_ts_ns);
+                }
+            } else if p.run_id == strih_run_id {
+                if p.gen_ts_ns > 0 && strih_ts.is_none() {
+                    strih_ts = Some(p.gen_ts_ns);
+                }
+            } else if p.run_id == stream_run_id {
+                if p.gen_ts_ns > 0 && stream_ts.is_none() {
+                    stream_ts = Some(p.gen_ts_ns);
+                }
+            } else if !is_burn(p.run_id) {
+                // cam2 optical half — keep the freshest (max frame_id) per the canonical
+                // Vernier rule, and remember its paint stamp as the last-resort x anchor.
+                match cam2_tick {
+                    Some(t) if t >= p.frame_id => {}
+                    _ => {
+                        cam2_tick = Some(p.frame_id);
+                        cam2_gen = if p.gen_ts_ns > 0 {
+                            Some(p.gen_ts_ns)
+                        } else {
+                            None
+                        };
+                    }
+                }
+            }
+        }
+        // Only a frame carrying a cam2 optical tick is a delivered instant with an
+        // x-axis identity — a frame with no optical QR is skipped (not a wrong number).
+        let Some(frame_id) = cam2_tick else { continue };
+
+        let ms = |down: Option<i64>, up: Option<i64>| -> Option<f64> {
+            match (up, down) {
+                (Some(u), Some(d)) => Some((d - u) as f64 / 1_000_000.0),
+                _ => None,
+            }
+        };
+        // x-axis anchor = the earliest chain stamp this frame carries: cam1 capture,
+        // else strih render, else cam2 paint. (Every emitted row has at least cam2_gen
+        // when no burn is present.)
+        let gen_ts_ns = cam1_ts.or(strih_ts).or(cam2_gen).unwrap_or(0);
+        out.push(LatencyCsvRow {
+            frame_id,
+            gen_ts_ns,
+            flip_ts_ns: flip_ts_by_tick.get(&frame_id).copied(),
+            cam1_strih_ms: ms(strih_ts, cam1_ts),
+            strih_stream_ms: ms(stream_ts, strih_ts),
+            cam1_stream_ms: ms(stream_ts, cam1_ts),
+        });
+    }
+    out
+}
+
+/// Write the per-frame latency rows (#209) as a CSV file at `path` (header + one line per
+/// row). Returns the number of data rows written. The file is the literal-continuous-line
+/// proof input for `scripts/latency-line-report.py`.
+pub fn write_latency_csv(path: &std::path::Path, rows: &[LatencyCsvRow]) -> std::io::Result<usize> {
+    use std::io::Write;
+    let mut buf = String::with_capacity(rows.len() * 48 + LatencyCsvRow::HEADER.len() + 1);
+    buf.push_str(LatencyCsvRow::HEADER);
+    buf.push('\n');
+    for r in rows {
+        buf.push_str(&r.to_csv_line());
+        buf.push('\n');
+    }
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(buf.as_bytes())?;
+    Ok(rows.len())
+}
+
 /// Per-hop LOSS verdict from the SINGLE stream recording, paired on the SHARED cam2
 /// source tick every frame carries (#181) — NOT each node's independent burn counter.
 ///
@@ -2383,5 +2555,244 @@ mod tests {
             "only ticks 500 and 504 carried both burns"
         );
         assert!(!v.is_pass(), "one non-decoding burn FAILS the hop");
+    }
+
+    // ===== #209: per-frame latency CSV time-series rows ==============================
+
+    /// Build a stream-recorded frame from a cam2 optical (run_id,tick) plus any of the
+    /// three co-located node burns as `(run_id, gen_ts_ns)` — the exact shape the stream
+    /// recording carries (cam2 forwarded + cam1/strih/stream render burns).
+    fn csv_frame(
+        idx: u64,
+        cam2: Option<(u32, u32)>, // (run_id, tick)
+        cam1_burn: Option<i64>,   // cam1 capture gen_ts_ns
+        strih_burn: Option<i64>,  // strih render gen_ts_ns
+        stream_burn: Option<i64>, // stream render gen_ts_ns
+    ) -> RecordingFrame {
+        let mut payloads = Vec::new();
+        if let Some((r, t)) = cam2 {
+            payloads.push(Payload {
+                run_id: r,
+                frame_id: t,
+                gen_ts_ns: 1,
+            });
+        }
+        if let Some(g) = cam1_burn {
+            payloads.push(Payload {
+                run_id: BURN_RUN_ID_CAM1,
+                frame_id: idx as u32,
+                gen_ts_ns: g,
+            });
+        }
+        if let Some(g) = strih_burn {
+            payloads.push(Payload {
+                run_id: BURN_RUN_ID_STRIH,
+                frame_id: idx as u32,
+                gen_ts_ns: g,
+            });
+        }
+        if let Some(g) = stream_burn {
+            payloads.push(Payload {
+                run_id: BURN_RUN_ID_STREAM,
+                frame_id: idx as u32,
+                gen_ts_ns: g,
+            });
+        }
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index: idx,
+            payloads,
+            tick,
+        }
+    }
+
+    #[test]
+    fn per_frame_csv_row_has_the_right_columns_and_all_three_hop_latencies() {
+        // One stream frame carrying cam2 + all three burns: cam1=+0, strih=+10ms,
+        // stream=+25ms. The row must carry the cam2 tick as frame_id, the cam1 capture
+        // stamp as the x anchor, and all three per-hop latencies on the shared clock.
+        let cam1 = 1_000_000_000; // chain origin
+        let strih = 1_010_000_000; // +10 ms
+        let stream = 1_025_000_000; // +25 ms from cam1
+        let frames = vec![csv_frame(
+            0,
+            Some((CAM2, 500)),
+            Some(cam1),
+            Some(strih),
+            Some(stream),
+        )];
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &HashMap::new(),
+        );
+        assert_eq!(rows.len(), 1, "one delivered optical frame ⇒ one row");
+        let r = rows[0];
+        assert_eq!(r.frame_id, 500, "frame_id = cam2 optical Vernier tick");
+        assert_eq!(
+            r.gen_ts_ns, cam1,
+            "x anchor = chain-origin (cam1 capture) stamp"
+        );
+        assert_eq!(r.flip_ts_ns, None, "no painter flip map ⇒ flip empty");
+        assert!(
+            (r.cam1_strih_ms.unwrap() - 10.0).abs() < 1e-6,
+            "cam1→strih = +10 ms"
+        );
+        assert!(
+            (r.strih_stream_ms.unwrap() - 15.0).abs() < 1e-6,
+            "strih→stream = +15 ms"
+        );
+        assert!(
+            (r.cam1_stream_ms.unwrap() - 25.0).abs() < 1e-6,
+            "cam1→stream = +25 ms end-to-end"
+        );
+
+        // The CSV header is the contract the plotter reads — exact column order.
+        assert_eq!(
+            LatencyCsvRow::HEADER,
+            "frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms"
+        );
+        assert_eq!(
+            r.to_csv_line(),
+            "500,1000000000,,10.000000,15.000000,25.000000",
+            "CSV line: tick, x-anchor, empty flip, three hop latencies"
+        );
+    }
+
+    #[test]
+    fn per_frame_csv_missing_hop_burn_is_an_empty_cell_a_gap_in_that_line() {
+        // A frame carrying cam2 + cam1 burn only ⇒ cam1→strih / strih→stream /
+        // cam1→stream are all None (empty cells) — the plotter draws a break, not a 0.
+        let frames = vec![csv_frame(
+            0,
+            Some((CAM2, 700)),
+            Some(2_000_000_000),
+            None,
+            None,
+        )];
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &HashMap::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        let r = rows[0];
+        assert_eq!(r.frame_id, 700);
+        assert_eq!(r.cam1_strih_ms, None);
+        assert_eq!(r.strih_stream_ms, None);
+        assert_eq!(r.cam1_stream_ms, None);
+        assert_eq!(
+            r.to_csv_line(),
+            "700,2000000000,,,,",
+            "empty cells for every absent hop = gaps in the line"
+        );
+    }
+
+    #[test]
+    fn per_frame_csv_frame_with_no_cam2_optical_is_skipped() {
+        // A frame with no cam2 optical QR has no per-frame x-axis identity (not a
+        // delivered optical instant) — it must NOT produce a row (never a wrong number).
+        let frames = vec![
+            csv_frame(
+                0,
+                Some((CAM2, 100)),
+                Some(1_000_000_000),
+                Some(1_010_000_000),
+                Some(1_020_000_000),
+            ),
+            csv_frame(
+                1,
+                None,
+                Some(1_100_000_000),
+                Some(1_110_000_000),
+                Some(1_120_000_000),
+            ), // no cam2 → skip
+            csv_frame(
+                2,
+                Some((CAM2, 102)),
+                Some(1_200_000_000),
+                Some(1_210_000_000),
+                Some(1_220_000_000),
+            ),
+        ];
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &HashMap::new(),
+        );
+        let ticks: Vec<u32> = rows.iter().map(|r| r.frame_id).collect();
+        assert_eq!(
+            ticks,
+            vec![100, 102],
+            "only the two cam2-bearing frames produce rows"
+        );
+    }
+
+    #[test]
+    fn per_frame_csv_flip_ts_filled_from_painter_map_when_supplied() {
+        // With a painter flip map, each row's flip_ts is the cam2 DISPLAY instant for
+        // its tick; a tick absent from the map stays empty (None).
+        let frames = vec![
+            csv_frame(0, Some((CAM2, 300)), Some(1_000_000_000), None, None),
+            csv_frame(1, Some((CAM2, 301)), Some(1_033_000_000), None, None),
+        ];
+        let mut flip: HashMap<u32, i64> = HashMap::new();
+        flip.insert(300, 999_000_000); // tick 300 has a flip stamp
+        let rows = per_frame_latency_csv_rows(
+            &frames,
+            BURN_RUN_ID_CAM1,
+            BURN_RUN_ID_STRIH,
+            BURN_RUN_ID_STREAM,
+            &flip,
+        );
+        assert_eq!(
+            rows[0].flip_ts_ns,
+            Some(999_000_000),
+            "tick 300 flip filled"
+        );
+        assert_eq!(rows[1].flip_ts_ns, None, "tick 301 not in flip map ⇒ empty");
+        assert_eq!(rows[0].to_csv_line(), "300,1000000000,999000000,,,");
+    }
+
+    #[test]
+    fn write_latency_csv_writes_header_plus_one_line_per_row() {
+        let rows = vec![
+            LatencyCsvRow {
+                frame_id: 1,
+                gen_ts_ns: 1_000_000_000,
+                flip_ts_ns: None,
+                cam1_strih_ms: Some(10.0),
+                strih_stream_ms: Some(15.0),
+                cam1_stream_ms: Some(25.0),
+            },
+            LatencyCsvRow {
+                frame_id: 2,
+                gen_ts_ns: 1_033_000_000,
+                flip_ts_ns: Some(2_000_000_000),
+                cam1_strih_ms: Some(11.0),
+                strih_stream_ms: None,
+                cam1_stream_ms: None,
+            },
+        ];
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "camera-box-latency-csv-test-{}.csv",
+            std::process::id()
+        ));
+        let n = write_latency_csv(&path, &rows).expect("write csv");
+        assert_eq!(n, 2, "two data rows written");
+        let body = std::fs::read_to_string(&path).expect("read back");
+        let _ = std::fs::remove_file(&path);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines[0], LatencyCsvRow::HEADER, "first line is the header");
+        assert_eq!(lines[1], "1,1000000000,,10.000000,15.000000,25.000000");
+        assert_eq!(lines[2], "2,1033000000,2000000000,11.000000,,");
+        assert_eq!(lines.len(), 3, "header + 2 rows");
     }
 }
