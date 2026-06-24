@@ -43,7 +43,7 @@ which disables DistroAV + genlock.
 The user has repeated this 2-3× and gets angry when re-asked which recovery method to use.
 
 1. **Normal case:** graceful shutdown via OBS WebSocket `ExitOBS`
-   (ws://<box>:4455; strih pwd: pe6Sha9h1X17lb76 if required; stream: no auth).
+   (ws://<box>:4455; strih pwd: <OBS-strih-WS-pwd — NOT committed; in the box's OBS config / password store> if required; stream: no auth).
 
 2. **Wedged OBS** (dead WebSocket, ignores ExitOBS, ~33 MB or pegged CPU, crash-recovery
    dialog, renders black) → **force-kill obs64 + relaunch**.
@@ -63,7 +63,7 @@ Do NOT use AskUserQuestion for OBS recovery — just recover it.
 
 | Box | Address | Port | Auth |
 |---|---|---|---|
-| strih | 10.77.9.202 | 4455 | pwd `pe6Sha9h1X17lb76` (or no auth) |
+| strih | 10.77.9.202 | 4455 | pwd `<OBS-strih-WS-pwd — NOT committed; in the box's OBS config / password store>` (or no auth) |
 | stream | 10.77.9.204 | 4455 | no auth |
 
 ## AHK on strih
