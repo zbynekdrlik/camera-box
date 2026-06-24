@@ -101,6 +101,57 @@ cam1 (10.77.9.61) has NO /dev/fb0 (only fbcon), ALL HDMI connectors disconnected
 /dev/video0 held by prod camera-box → QR test is inherently a **cam2 proxy for cam→strih**.
 cam1/3/4 each need an HDMI-out→capture loopback to be QR-verified directly (#24).
 
+## Recording-Proof Run Recipe (recording-e2e.sh, the 4-node 0-loss proof)
+
+The DEFINITIVE proof = `scripts/recording-e2e.sh` (records strih+stream OBS programs,
+emits the on-stream verdict plan). Run:
+`RUN_ID=N DURATION=300 USE_PREBUILT_PROBE_DIR=<CI probe-tools-linux dir> VERDICT_ON_STREAM=1 NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup bash scripts/recording-e2e.sh`.
+Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) at HEAD —
+`gh run download <run> -n probe-tools-{linux,windows}-amd64`; symlink `camera-box-probe`→`camera-box`.
+
+**TWO missed-envs silently waste a run (verify BEFORE recording):**
+1. **stream's OBS_BURN_QR must be ON** (#195). The stream burn (911004) only fires if stream's
+   OBS was LAUNCHED with `OBS_BURN_QR=1` — the running OBS does NOT pick up HKLM mid-session.
+   Without it the stream recording has NO stream burn → strih→stream can't pair (latency=null,
+   `strih_stream_source: two recordings ...`). Fix: relaunch stream OBS with the env set in the
+   launching shell (see obs-ops skill: ExitOBS → force-kill → clear `.sentinel\*` → relaunch
+   `cwd=bin\64bit` with `$env:OBS_BURN_QR=1; $env:OBS_BURN_RUN_ID=911004; $env:OBS_GENLOCK_WALL_CLOCK=1; $env:OBS_GENLOCK_PRELOAD_FRAMES=1; $env:OBS_GENLOCK_RESERVE_MS=3`).
+   Verify the OBS log: `[burn] filter created: enabled=yes run_id=911004`.
+2. **stream RECORDING is native 1080p, NOT 4K** (#225, FIXED 2026-06-24). The OBS canvas is 1080p.
+   The recording USED to reuse the 4K-rescaled streaming encoder (`RecEncoder=none` + stream
+   `Rescale=3840x2160`) → recorded 4K → upscale softened the small (~300px) burns → cam1 over-counted
+   (#226). **Fixed persistently in the `Stream_Obs` profile:** `[AdvOut] RecEncoder=obs_nvenc_h264_tex`
+   (dedicated rec encoder) + `RecRescale=false` → records native 1920×1080; the stream encoder stays
+   `Rescale=true RescaleRes=3840x2160` (prod → restreamer unchanged). See obs-ops skill "Recording
+   Output = native 1080p" for the full config + apply path. **Still `ffprobe` the recording dims
+   before trusting a run** (must be `1920x1080`) — a regression here silently softens the burns.
+   (Profile-param changes don't hot-apply to a running output — they take effect at OBS launch.)
+
+**DanteSync gate prerequisite (the harness can't HTTP-fetch :8898):** read `\\.\pipe\dantesync`
+on strih+stream via the win-* MCP (PipeDirection.In; strip the 4-byte header to the leading `{`),
+write `{ntp_offset_us,is_locked,mode,...}` to `/tmp/recording-e2e-<RUN_ID>/dante-{strih,stream}.json`
+BEFORE launching the harness. Then the gate passes all 4 nodes.
+
+**Decode on stream.lan (#193), NOT dev1:** the strih recording lives on the strih box; copy it
+DIRECTLY strih→stream box (`New-PSDrive \\10.77.9.204\C$` + Copy-Item, ~751MB in ~7s, NEVER via
+dev1). Run the verdict as a DETACHED `Start-Process -PassThru -RedirectStandardOutput` and POLL
+the json (the MCP Shell idle-timeout (~30-300s) kills an inline 4K decode — a 300s 4K stream
+decode takes ~7min). QUOTE space-bearing paths in `-ArgumentList` (`"\`"$path\`""`) or the
+`_NLMEDIA stream` path word-splits. Verdict args: `--strih <1080p strih rec> --stream <stream rec>
+--cam2-run-id <RUN_ID> --burn-strih-run-id 911002 --burn-stream-run-id 911004 --burn-cam1-run-id
+911001 --latency-csv <path>`. cam1 is read from the CLEAN 1080p strih recording (#133), strih/stream
+from the stream recording.
+
+**Continuous-line graph (#209):** `python3 scripts/latency-line-report.py --csv <lat.csv> --out X.png`
+auto-shares a LAN URL. The CSV's burn hops (cam1_strih/strih_stream/cam1_stream) must be UNBROKEN
+(0 empty cells); cam2_cam1 gaps honestly where the optical read failed.
+
+**Diagnosing cam1 "REAL DROP":** if the missing ids are PERIODIC (a ~N-emit beat: deltas cluster on
+N, 2N, 3N…) AND present==expected AND the strih genlock FIFO shows `overruns=0` AND the pixels show
+the cam1 burn PRESENT-but-blurred → it's a burn-readability DECODE-MISS, NOT chain loss (#226).
+A genuine drop is randomly spaced + FIFO overruns>0. ALWAYS view the flagged frames' pixels
+(download the `pp/cam1-missing/*.png`, decode the base64, Read it) before claiming loss.
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).

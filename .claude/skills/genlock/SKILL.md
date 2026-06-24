@@ -8,6 +8,38 @@ description: >
 
 # Genlock
 
+## Sub-frame ms reserve (#184, validated 2026-06-24 — prod is on reserve=3ms)
+
+`OBS_GENLOCK_RESERVE_MS=N` (>0) switches the genlock ts-align RELEASE deadline from the
+whole-frame `preload·interval` (=33ms@30fps) to `wall_now − N·1e6` (ms-granular). reserve_ms=0
+= the #136 frame path verbatim (back-compat). Validated zero-loss at reserve=3ms on BOTH hops
+(strict recording-verdict overall_pass, FIFO audits show `reserve_ms=3`, 0 new underruns during
+active feed). **Prod (strih + stream) is LEFT ON reserve=3ms.** obs.dll sha `24e22357…` (build
+19472506e). Rollback DLL: `C:\obs-backup\pre-184\obs.dll` (cdce8c3a… = the old whole-frame build).
+
+**STALE-ENV TRAP launching OBS via win-* MCP (cost the prior #184 worker its stream deploy):**
+the win-* MCP Shell child inherits the long-lived MCP process's env SNAPSHOT — if a genlock var
+(e.g. `OBS_GENLOCK_RESERVE_MS`) was set AFTER the MCP started, the MCP shell reads it EMPTY, and
+an OBS launched from that shell inherits it UNSET (→ silently runs the whole-frame path, no
+reserve line in the log). FIX: in the SAME Shell call that launches OBS, set the genlock env
+EXPLICITLY from the Machine values first:
+```powershell
+$env:OBS_GENLOCK_RESERVE_MS = [System.Environment]::GetEnvironmentVariable('OBS_GENLOCK_RESERVE_MS','Machine')
+# (also WALL_CLOCK / PRELOAD_FRAMES / TS_ALIGN), THEN Start-Process obs64 -WorkingDirectory bin\64bit
+```
+Verify it took: the OBS log must show `genlock: sub-frame jitter reserve = N ms` (prints lazily
+when a genlock_fifo input first activates) AND the FIFO audit line must carry `reserve_ms=N`.
+NB the audit's `underruns=` is CUMULATIVE per OBS process — a huge value can be IDLE accumulation
+between runs; what matters is the DELTA during active feed (0 = clean).
+
+**dev1 ⇄ rig transfers:** dev1 file-drop (`:8788`) is NOT reachable from the rig. dev1→stream
+binary push works via SMB admin share `smbclient //10.77.9.204/C$ -U "newlevel%newlevel"` (newlevel
+is admin). strih→stream SMB works (net use \\10.77.9.204\C$); strih's own C$ DENIES dev1.
+
+**recording-verdict cam1 contiguity:** the STREAM-ONLY single-recording cam1 read is SOFTENED and
+may OVER-COUNT real_drops (#133/#216) — supply BOTH `--strih` + `--stream` for the STRICT cam1
+verdict (the both-hops #184 run: softened stream-only = 37 cam1 drops, strict = 0).
+
 ## Deployed State (strih + stream, since 2026-06-13)
 
 Both production broadcast OBS boxes upgraded in-place to the camera-box genlock build.

@@ -61,3 +61,12 @@ dist-111/
 /verdict-rerun-out/
 /dist-probe/
 /recording-verdict-run/
+
+# Session-local proof-run scratch + CI probe-binary downloads (proof runs; #110/#184)
+/probe-bins/
+/probe-bins-ci/
+/probe-win/
+/probe-win-ci/
+/probe-win-fresh/
+/proof-*/
+/obs184-dll/
