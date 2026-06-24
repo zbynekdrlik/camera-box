@@ -312,3 +312,44 @@ fn distroav_version_comes_from_the_vendored_buildspec_not_just_the_readme() {
         "the README pin (6.2.1) must still be recorded for drift visibility:\n{m}"
     );
 }
+
+#[test]
+fn empty_stage_generates_and_self_checks_clean_under_set_e() {
+    // Robustness (review #1): a degenerate stage with NO files must not abort the script under
+    // `set -euo pipefail` (the empty grep/find no-match). It produces a manifest with an empty
+    // files[] and self-checks clean — never a spurious exit-1 that would fail the build.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path().join("stage");
+    fs::create_dir_all(&stage).unwrap();
+    let out = stage.join("BUNDLE_MANIFEST.json");
+
+    let (gen_code, gout, gerr) = run_script(&[
+        "--stage",
+        stage.to_str().unwrap(),
+        "--build-sha",
+        "abc",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        gen_code, 0,
+        "empty-stage generate must exit 0.\nstdout={gout}\nstderr={gerr}"
+    );
+
+    let m = fs::read_to_string(&out).unwrap();
+    assert!(
+        m.contains("\"files\": ["),
+        "empty manifest still has a files[] array:\n{m}"
+    );
+
+    let (chk_code, cout, cerr) = run_script(&[
+        "--check",
+        out.to_str().unwrap(),
+        "--stage",
+        stage.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        chk_code, 0,
+        "empty-stage manifest must self-check clean.\nstdout={cout}\nstderr={cerr}"
+    );
+}

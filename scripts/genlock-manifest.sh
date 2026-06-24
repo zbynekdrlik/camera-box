@@ -113,6 +113,10 @@ buildspec_version() {
 # json_escape STR -> STR with the JSON-significant characters (\ and ") escaped, for safe
 # interpolation into the hand-built JSON below (paths can contain neither newline nor control char
 # in this bundle, so backslash + quote cover the realistic cases; backslash MUST be escaped first).
+# NOTE: this escapes on WRITE. The text read-back parser `manifest_listed_files` uses a simple
+# `"path": "[^"]*"` regex that stops at the first quote, so a path containing a LITERAL `"` would
+# read back wrong and `--check` would (fail-closed) report INCONSISTENT — never mask a tamper. A
+# Windows filename cannot contain `"`, so this is unreachable for the windows-genlock bundle.
 json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -123,14 +127,16 @@ json_escape() {
 # stage_files DIR -> every regular file under DIR (relative paths, forward slashes, sorted),
 # EXCLUDING the manifest file itself (BUNDLE_MANIFEST.json) — the manifest never lists itself, so a
 # re-run is idempotent and the self-consistency check below has a stable expected set. Deterministic
-# order (LC_ALL=C sort) so the manifest is reproducible.
+# order (LC_ALL=C sort) so the manifest is reproducible. The trailing `|| true` keeps an EMPTY result
+# (a stage with only the manifest, or no files) from the final `grep -vx` exiting 1 and tripping the
+# caller's set -e — an empty stage is a legitimate (if degenerate) input, not an error.
 stage_files() {
   local dir="$1"
   [ -d "$dir" ] || { echo "stage_files: no such dir: $dir" >&2; return 1; }
   ( cd "$dir" && find . -type f \
       | sed 's#^\./##' \
       | grep -vx 'BUNDLE_MANIFEST.json' \
-      | LC_ALL=C sort )
+      | LC_ALL=C sort ) || true
 }
 
 # generate_manifest STAGE README BUILDSPEC BUILD_SHA -> the manifest JSON on stdout.
@@ -192,7 +198,9 @@ generate_manifest() {
 manifest_listed_files() {
   local f="$1"
   [ -f "$f" ] || { echo "manifest_listed_files: no such file: $f" >&2; return 1; }
-  grep -oE '"path": "[^"]*"' "$f" | sed -n 's/"path": "\(.*\)"/\1/p'
+  # `|| true` on the grep: an empty files[] (a degenerate stage with no listed files) is a no-match,
+  # which would otherwise exit 1 and trip the caller's `set -e` / pipefail. An empty list is valid.
+  { grep -oE '"path": "[^"]*"' "$f" || true; } | sed -n 's/"path": "\(.*\)"/\1/p'
 }
 
 # manifest_sha_for FILE PATH -> the recorded sha256 for files[] entry PATH ("" if absent).
