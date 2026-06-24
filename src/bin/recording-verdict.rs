@@ -28,7 +28,7 @@ use camera_box::probe::burn_contiguity::{
     burn_contiguity_in_window, BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
-    analyze_recording, extract_frames_png, select_frames_to_extract, RecordingFrame,
+    analyze_recording_with_burns, extract_frames_png, select_frames_to_extract, RecordingFrame,
     DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
@@ -704,9 +704,19 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
 }
 
 /// Analyze a recording into the per-frame tick stream (the #106 decode → #107 input).
-fn ticks_of(path: &Path) -> Result<(Vec<RecordingFrame>, Vec<FrameTick>)> {
-    let frames =
-        analyze_recording(path).with_context(|| format!("analyze recording {}", path.display()))?;
+///
+/// `expected_node_burns` are the node burns THIS recording is known to carry (a strih
+/// recording carries cam1 + strih, a stream recording carries all three, a cam1 recording
+/// just cam1). Passing the right set drives the #207 fast-then-robust gate: a clean frame
+/// carrying every expected burn skips the ~10×-cost tiled recovery, so the verdict runs in
+/// ~5 min instead of ~50 — while a frame missing an expected burn still gets the full robust
+/// pass (the #186 0-miss guarantee).
+fn ticks_of(
+    path: &Path,
+    expected_node_burns: &[u32],
+) -> Result<(Vec<RecordingFrame>, Vec<FrameTick>)> {
+    let frames = analyze_recording_with_burns(path, expected_node_burns)
+        .with_context(|| format!("analyze recording {}", path.display()))?;
     let ticks = FrameTick::from_recording_frames(&frames);
     Ok((frames, ticks))
 }
@@ -851,7 +861,10 @@ fn main() -> Result<()> {
     // grab is decoded/assessed.
     let strih_data: Option<(Vec<RecordingFrame>, Vec<FrameTick>)> = match &args.strih {
         Some(strih_path) => {
-            let (strih_frames, strih_ticks) = ticks_of(strih_path)?;
+            // The strih recording carries the cam1 (forwarded) + strih burns — never the
+            // stream burn (stream is downstream). The #207 fast gate requires only those two.
+            let (strih_frames, strih_ticks) =
+                ticks_of(strih_path, &[args.burn_cam1_run_id, args.burn_strih_run_id])?;
             let strih_v = verdict(&strih_ticks, &cfg);
             // Diagnostic only (#186): the per-recording beat metrics do not gate the
             // headline — the burn-id contiguity below is authoritative.
@@ -886,7 +899,16 @@ fn main() -> Result<()> {
     // It is printed for context but never makes a contiguous-zero run FAIL.
     let mut stream_frames_opt: Option<Vec<RecordingFrame>> = None;
     if let Some(stream_path) = &args.stream {
-        let (stream_frames, stream_ticks) = ticks_of(stream_path)?;
+        // The stream recording is the chain endpoint — it carries all three node burns
+        // (cam1 → strih → stream forwarded). The #207 fast gate requires all three.
+        let (stream_frames, stream_ticks) = ticks_of(
+            stream_path,
+            &[
+                args.burn_cam1_run_id,
+                args.burn_strih_run_id,
+                args.burn_stream_run_id,
+            ],
+        )?;
         let stream_v = verdict(&stream_ticks, &cfg);
         // Diagnostic (not a gate): surface undecodable + span. The #186 burn-contiguity
         // verdict is authoritative for loss.
@@ -921,7 +943,9 @@ fn main() -> Result<()> {
         // not a dead run. (The #187 memory bound makes this rare; this is the belt-and-
         // braces so a manual `--cam1` on a small box can never silently lose the rest of
         // the verdict.) `ticks_of` returns Err on a grab failure; we catch it here.
-        let cam1_decoded = match ticks_of(cam1_path) {
+        // The cam1 grab carries only the cam1-capture burn (+ the optical dual-QR). The #207
+        // fast gate requires just the cam1 burn.
+        let cam1_decoded = match ticks_of(cam1_path, &[args.burn_cam1_run_id]) {
             Ok(d) => Some(d),
             Err(e) => {
                 eprintln!(
