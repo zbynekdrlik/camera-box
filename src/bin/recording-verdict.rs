@@ -644,9 +644,17 @@ fn parse_cam1_capture_stats(path: &Path) -> Result<Cam1CaptureStats> {
 
 /// Parse the cam1 grab-timestamp sidecar CSV (`frame_index,grab_ts_ns`, header
 /// `frame_index,grab_ts_ns`) the `--record-grab` mode writes into a
-/// `frame_index → grab_ts_ns` map. A malformed row (wrong column count, non-integer)
-/// errors loudly rather than silently dropping — a silently-shrunk grab-ts map would
-/// drop legitimate cam2→cam1 latency samples without any signal.
+/// `frame_index → grab_ts_ns` map.
+///
+/// Row-error policy:
+/// - An EMPTY `grab_ts_ns` cell (`"<idx>,"`) means that frame simply has no recorded grab
+///   instant = NO cam2→cam1 pairing for it (`cam2_cam1_samples` already yields no sample when
+///   the map has no entry for a frame). It is benign missing data, so it is warn + SKIPPED
+///   (#170) — one such row must never abort the whole verdict (run-163163 crashed at the very
+///   end on a single empty cell, losing every loss/latency number it had already computed).
+/// - A NON-empty but unparseable cell, or a wrong column count, is genuine corruption and still
+///   errors loudly — a silently-shrunk map from real corruption would drop valid samples
+///   without any signal.
 fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read cam1 grab-ts sidecar {}", path.display()))?;
@@ -702,7 +710,19 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
                 lineno + 1
             )
         })?;
-        let ts: i64 = ts_s.trim().parse().with_context(|| {
+        let ts_s = ts_s.trim();
+        if ts_s.is_empty() {
+            // #170: an empty grab_ts_ns cell = this frame has no recorded grab instant = no
+            // cam2→cam1 pairing for it (benign missing data). Warn + skip the row; never crash
+            // the verdict over a single empty cell.
+            tracing::warn!(
+                line = lineno + 1,
+                frame_index = %idx_s.trim(),
+                "grab-ts row has an empty grab_ts_ns (no recorded grab instant) — skipped"
+            );
+            continue;
+        }
+        let ts: i64 = ts_s.parse().with_context(|| {
             format!(
                 "grab-ts grab_ts_ns not an i64 at line {}: {ts_s:?}",
                 lineno + 1
@@ -2213,7 +2233,11 @@ mod tests {
             assert_eq!(m.get(&0), Some(&1782000000000), "good rows still parse");
             assert_eq!(m.get(&2), Some(&1782000066000), "good rows still parse");
             assert_eq!(m.get(&1), None, "the empty-ts frame has no grab instant");
-            assert_eq!(m.len(), 2, "exactly the two good rows, the empty-ts row skipped");
+            assert_eq!(
+                m.len(),
+                2,
+                "exactly the two good rows, the empty-ts row skipped"
+            );
         }
     }
 
