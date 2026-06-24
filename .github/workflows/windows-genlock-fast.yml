@@ -95,6 +95,17 @@ jobs:
           git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
           Write-Output "staged obs.dll from: $($dll.FullName)"
 
+      # #120: the hot-swap obs.dll also ships with a per-component SHA manifest, so even an
+      # event-time DLL swap is auditable against #121's post-deploy verify (the same generator the
+      # full windows-genlock.yml bundle uses — logic unit-proven on the Linux `test` job).
+      - name: Generate per-component SHA manifest (#120)
+        shell: bash
+        run: scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
+
+      - name: Assert bundle manifest self-consistent (#120)
+        shell: bash
+        run: scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
       - name: Upload obs.dll
         uses: actions/upload-artifact@v4
         with:

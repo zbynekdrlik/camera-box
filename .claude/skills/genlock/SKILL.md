@@ -32,6 +32,33 @@ Camera→strih hops: genlock tick active but camera ingests are NOT genlock_fifo
 Rollback = stop OBS, robocopy backups back over `C:\Program Files\obs-studio` + the
 ProgramData distroav, clear `%APPDATA%\obs-studio\.sentinel\*`, relaunch.
 
+## Bundle version integrity (EPIC #125)
+
+Two LAYERS guard "the deployed stack is the build we think it is":
+
+- **drift-guard (#45)** — MARKETING versions only (OBS 32.1.2 / DistroAV 6.2.1).
+  `scripts/drift-guard.sh --check-pins` (CI) + `--compare` (live box). Pins live in
+  the `vendor/README.md` version table. CANNOT catch stale-BYTES-of-the-right-version
+  (that was #119: a pre-#97 DistroAV of version 6.2.1 → preload inert).
+- **per-component SHA manifest (#120)** — the windows-genlock build emits
+  `stage/BUNDLE_MANIFEST.json` via `scripts/genlock-manifest.sh` (unit-tested
+  `tests/genlock_manifest.rs`): `components[]` = each rebuilt component's pinned
+  version + vendored subtree commit (DistroAV version cross-checked vs
+  `vendor/distroav/buildspec.json`, same source-of-truth as drift-guard) + NDI
+  `min_version`; `files[]` = every shipped file's sha256+size (walked from `stage/`,
+  self-consistent by construction). `--check FILE --stage DIR` is the consistency gate
+  (exit 21 on sha-drift / extra / missing file). Both windows-genlock.yml and
+  windows-genlock-fast.yml generate + assert it. **The build genuinely rebuilds OBS +
+  DistroAV from `vendor/` source — zero checked-in/cached DLLs** (`git ls-files vendor |
+  grep .dll` = EMPTY), so #119's stale-prebuilt root cause is structurally gone.
+- **#121** (post-deploy byte/SHA verify vs the manifest — needs the rig) and **#122**
+  (drift-guard per-component BUILD SHA) both CONSUME `BUNDLE_MANIFEST.json`.
+
+GOTCHA: the 150-min `windows-genlock.yml` is `workflow_dispatch`-only (can't run
+per-PR), so manifest LOGIC is proven on the Linux `test` job; editing
+`windows-genlock-fast.yml` itself triggers the fast Windows build (its `paths:` lists
+the workflow file), which then runs the manifest gate on a real built obs.dll.
+
 **win-* MCP env reads are STALE:** The MCP Shell spawns a child that inherits the
 long-lived MCP process's env snapshot — `$env:OBS_GENLOCK_WALL_CLOCK` reads EMPTY while
 the var is really set (HKLM). For persistent value read:
