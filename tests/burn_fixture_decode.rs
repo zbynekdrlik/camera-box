@@ -34,13 +34,18 @@
 
 use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{decode_qr_luma_all, decode_qr_luma_all_robust};
+use camera_box::probe::recording_latency::{
+    BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+};
 use image::GrayImage;
 use std::path::PathBuf;
 
-/// The node-burn run_ids (mirror of `recording_latency::BURN_RUN_ID_*`).
-const CAM1: u32 = 911_001;
-const STRIH: u32 = 911_002;
-const STREAM: u32 = 911_004;
+// The node-burn run_ids come straight from the single source of truth
+// (`recording_latency::BURN_RUN_ID_*`) — never mirrored here, so a future change to the
+// burn defaults can never let this test assert against a stale id.
+const CAM1: u32 = BURN_RUN_ID_CAM1;
+const STRIH: u32 = BURN_RUN_ID_STRIH;
+const STREAM: u32 = BURN_RUN_ID_STREAM;
 
 fn fixture_luma(name: &str) -> GrayImage {
     let path: PathBuf = [
@@ -103,28 +108,46 @@ fn robust_decode_recovers_every_real_burn_unreadable_frame() {
     );
 }
 
-/// RED-condition lock: the PLAIN full-frame pass MISSES the same burns the robust pass
-/// recovers — this is exactly the #186 bug, reproduced from real recording pixels. If a
-/// future change ever makes the plain pass find these full-frame (great — rqrr improved),
-/// this assertion fails and the test must be re-anchored; until then it proves the robust
-/// pass is doing real recovery work, not finding burns the plain pass already had.
+/// The robust pass does REAL recovery work — it is NOT just re-finding burns the plain
+/// full-frame pass already had. Proven two ways that DON'T go red merely because the
+/// upstream rqrr decoder happens to improve on one frame (the #186 bug is "plain misses the
+/// small burns", but pinning "plain misses EVERY frame" would turn an rqrr improvement into
+/// a false CI failure — a maintenance tax we avoid):
+///
+/// 1. per-fixture: robust is always a strict SUPERSET of plain (robust = plain ∪ tile
+///    passes), so robust never decodes FEWER burns than plain — a hard invariant;
+/// 2. in aggregate: across all fixtures the plain pass decodes strictly FEWER node burns
+///    than robust, i.e. the tiled recovery genuinely adds burns the full-frame pass missed
+///    (the #186 condition, from real recording pixels). Today plain recovers 0 of the
+///    `CASES`; this stays green as long as the tiled pass keeps finding burns the
+///    full-frame pass doesn't — even if a future rqrr finds one or two of them full-frame.
 #[test]
-fn plain_full_frame_pass_misses_the_real_burns_robust_recovers() {
-    let mut plain_found = Vec::new();
+fn robust_recovers_burns_the_plain_full_frame_pass_does_not() {
+    let (mut plain_hits, mut robust_hits) = (0usize, 0usize);
     for &(name, run_id, frame_id) in CASES {
         let luma = fixture_luma(name);
-        let plain = decode_qr_luma_all(luma);
+        let plain = decode_qr_luma_all(luma.clone());
+        let robust = decode_qr_luma_all_robust(luma);
+
+        // (1) per-fixture superset invariant: every burn plain found, robust also found.
         if burn(&plain, run_id, frame_id) {
-            plain_found.push(format!(
-                "{name}: plain unexpectedly decoded {run_id}.{frame_id}"
-            ));
+            plain_hits += 1;
+            assert!(
+                burn(&robust, run_id, frame_id),
+                "{name}: robust must be a SUPERSET of the plain pass — plain decoded \
+                 {run_id}.{frame_id} but robust did not"
+            );
+        }
+        if burn(&robust, run_id, frame_id) {
+            robust_hits += 1;
         }
     }
+    // (2) aggregate: the tiled recovery adds burns the full-frame pass misses (#186).
     assert!(
-        plain_found.is_empty(),
-        "the plain full-frame pass is EXPECTED to miss these small burns (the #186 condition \
-         the robust pass exists to fix); if rqrr now finds them full-frame, re-anchor this \
-         test with harder fixtures:\n{}",
-        plain_found.join("\n")
+        robust_hits > plain_hits,
+        "the robust tiled pass must recover burns the plain full-frame pass misses (the #186 \
+         decoder-coverage gap): plain hit {plain_hits}/{}, robust hit {robust_hits}/{}",
+        CASES.len(),
+        CASES.len()
     );
 }
