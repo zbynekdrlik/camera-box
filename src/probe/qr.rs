@@ -374,6 +374,16 @@ pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
     rqrr_decode_all(binarize_otsu(&img))
 }
 
+/// #202 — the ROBUST offline-recording decode: every CRC-valid QR in the frame,
+/// recovering the small burns rqrr's single full-frame `detect_grids` pass misses.
+/// (RED stub: plain pass only; GREEN adds the bottom-band tile recovery.)
+pub fn decode_qr_luma_all_robust(img: GrayImage) -> Vec<Payload> {
+    // [red] #202: plain full-frame pass only — the rqrr small-burn miss is NOT yet
+    // recovered, so robust_recovers_a_softened_burn_the_full_frame_pass_misses FAILS
+    // here (proving it catches the #202 bug). GREEN adds the bottom-band tile recovery.
+    decode_qr_luma_all(img)
+}
+
 /// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
 /// full width (left QR in the left half, right in the right half), so we crop that single
 /// band, downscale it to `DUAL_BAND_WIDTH`, and decode it in ONE `rqrr` pass that finds
@@ -522,6 +532,88 @@ mod tests {
         assert!(
             got.contains(&p),
             "the Otsu-binarized retry must recover the soft low-contrast QR"
+        );
+    }
+
+    // ============================================================================
+    // #202 — robust offline decode recovers the small node burns rqrr's single
+    // full-frame `detect_grids` pass intermittently misses (the residual
+    // burn-unreadable misses on PRESENT, sharp frames; cv2 reads them, rqrr's
+    // full-frame pass doesn't). The tiled/upscaled robust pass gives rqrr a fair
+    // look at each region so the burn's finder pattern locks.
+    // ============================================================================
+
+    /// Composite the QR for `p` (rendered at `qr_px`) onto a white luma frame at top-left
+    /// `(ox, oy)`. Models a small burn drawn into a large recorded frame.
+    fn blit_burn_luma(frame: &mut GrayImage, p: &Payload, qr_px: u32, ox: u32, oy: u32) {
+        let qr = render_payload_qr(p, qr_px);
+        let (qw, qh) = (qr.width(), qr.height());
+        for y in 0..qh {
+            for x in 0..qw {
+                let (px, py) = (ox + x, oy + y);
+                if px < frame.width() && py < frame.height() {
+                    frame.put_pixel(px, py, qr.get_pixel(x, y).to_owned());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn robust_recovers_a_softened_burn_the_full_frame_pass_misses() {
+        // THE #202 BUG, reproduced deterministically: a 1920×1080 frame carrying the LARGE
+        // optical dual-QR (top) plus a 260px node burn (bottom-left corner) that is SOFTENED
+        // by a Gaussian blur (sigma 2.8) — the exact real-recording condition, where the
+        // burn pixels are present but anti-aliased by the NDI/encode/4K-upscale chain (cv2
+        // reads every flagged real frame from the identical pixels; rqrr's single full-frame
+        // detect_grids does not — #186/#202). At this blur the full-frame plain pass MISSES
+        // the burn; the tiled+upscaled robust pass gives rqrr the burn in a sub-tile where it
+        // is large-relative and its finder locks, so robust RECOVERS it. (Threshold found by
+        // a blur sweep: at qpx 220-260 / sigma 1.6-2.8, plain=miss, robust=recover.)
+        let left = Payload {
+            run_id: 136_141_133,
+            frame_id: 4000,
+            gen_ts_ns: 1,
+        };
+        let right = Payload {
+            run_id: 136_141_133,
+            frame_id: 4001,
+            gen_ts_ns: 2,
+        };
+        let burn = Payload {
+            run_id: 911_001, // cam1 capture burn
+            frame_id: 1234,
+            gen_ts_ns: 3,
+        };
+        let (w, h) = (1920u32, 1080u32);
+        // Big top dual-QR (700px each half, top-anchored) — the easy-to-find marks.
+        let bgra = render_qr_dual_bgra(&left, &right, w, h, 700);
+        let mut luma = bgra_to_luma(&bgra, w, h, w * 4);
+        // A 260px burn in the bottom-left corner (where the strih burn lives), then soften
+        // the WHOLE frame as the recording chain does.
+        let qh = render_payload_qr(&burn, 260).height();
+        blit_burn_luma(&mut luma, &burn, 260, 40, h - qh - 40);
+        let luma = image::imageops::blur(&luma, 2.8);
+
+        let plain = decode_qr_luma_all(luma.clone());
+        let robust = decode_qr_luma_all_robust(luma);
+
+        // The big optical QRs still decode either way (sanity: the frame is well-formed).
+        assert!(
+            plain.iter().any(|p| p.run_id == left.run_id),
+            "the big optical QR must decode on the plain pass (frame is well-formed): {plain:?}"
+        );
+        // The whole point: the softened burn is recovered by robust.
+        assert!(
+            robust.contains(&burn),
+            "robust must recover the softened cam1 burn (#202): robust={robust:?}"
+        );
+        // And the burn is exactly what the plain full-frame pass missed (the RED condition
+        // this locks): if a future rqrr/decoder change finds it full-frame, this test no
+        // longer reproduces the bug — re-tune the blur via the sweep in the commit message.
+        assert!(
+            !plain.contains(&burn),
+            "the plain full-frame pass is expected to MISS the softened burn (the #202 \
+             condition); plain={plain:?}"
         );
     }
 

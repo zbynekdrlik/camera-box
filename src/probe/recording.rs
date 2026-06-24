@@ -28,7 +28,7 @@
 //! the other hardware/process glue (`multi_reader`, `reader`, `run`).
 
 use crate::probe::payload::Payload;
-use crate::probe::qr::decode_qr_luma_all;
+use crate::probe::qr::{decode_qr_luma_all, decode_qr_luma_all_robust};
 use anyhow::{Context, Result};
 use image::GrayImage;
 use std::io::Read;
@@ -129,11 +129,15 @@ pub struct RecordingFrame {
 
 /// Decode one native-resolution luma frame into a `RecordingFrame`.
 ///
-/// PURE (no I/O, no ffmpeg): feeds the luma image straight into the existing rqrr
-/// decoder, which finds BOTH side-by-side dual-QR codes in one prepare+detect pass.
+/// PURE (no I/O, no ffmpeg): feeds the luma image into the rqrr decoder. The OFFLINE
+/// recording path uses the #202 ROBUST decode ([`decode_qr_luma_all_robust`]) — the plain
+/// full-frame pass PLUS a tiled+upscaled retry that recovers the small node burns rqrr's
+/// single `detect_grids` pass intermittently misses (the residual burn-unreadable misses on
+/// PRESENT, sharp frames). This decode runs in the parallel #166/#187 worker pool, never on
+/// the latency-sensitive live tap, so the extra passes are affordable.
 /// `frame_index` is the caller-supplied position in the recording.
 pub fn decode_recording_frame(frame_index: u64, luma: GrayImage) -> RecordingFrame {
-    let payloads = decode_qr_luma_all(luma);
+    let payloads = decode_qr_luma_all_robust(luma);
     let tick = payloads.iter().map(|p| p.frame_id).max();
     RecordingFrame {
         frame_index,
