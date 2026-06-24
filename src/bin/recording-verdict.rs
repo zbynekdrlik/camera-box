@@ -2177,8 +2177,7 @@ mod tests {
 
     #[test]
     fn grab_ts_sidecar_complete_final_row_with_newline_still_parsed() {
-        // A complete final row (ends in '\n') is NOT a partial fragment — it must still parse,
-        // and a genuinely malformed COMPLETE final row still errors (it's not a kill artifact).
+        // A complete final row (ends in '\n') is NOT a partial fragment — it must still parse.
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(
             f,
@@ -2188,25 +2187,51 @@ mod tests {
         let m = parse_grab_ts(f.path()).unwrap();
         assert_eq!(m.get(&2), Some(&1782000066000), "complete final row parses");
         assert_eq!(m.len(), 2);
-        // A complete (newline-terminated) malformed final row is corruption, not a kill cut.
-        let mut f2 = tempfile::NamedTempFile::new().unwrap();
-        write!(f2, "frame_index,grab_ts_ns\n0,1782000000000\n2,\n").unwrap();
-        assert!(
-            parse_grab_ts(f2.path()).is_err(),
-            "an empty-ts row terminated by a newline is complete-and-corrupt -> error"
-        );
     }
 
     #[test]
-    fn grab_ts_sidecar_empty_ts_midfile_still_errors() {
-        // A row with an empty timestamp that is NOT the last line is genuine corruption
-        // (a silently-shrunk grab-ts map would drop real latency samples) — still errors.
+    fn grab_ts_sidecar_empty_ts_row_is_skipped_not_crashed() {
+        // REGRESSION (#170): run-163163's verdict computed all loss hops then CRASHED at the
+        // very end on `grab-ts grab_ts_ns not an i64 at line 9857: "" — cannot parse integer
+        // from empty string` (VERDICT_EXIT=1), losing the WHOLE latency computation because a
+        // SINGLE cam1 grab-ts sidecar row had an empty grab_ts_ns cell. An empty timestamp cell
+        // = that frame simply has no recorded grab instant = NO cam2→cam1 pairing for that frame
+        // (cam2_cam1_samples already returns no sample when grab_ts_by_index has no entry) — it
+        // is benign missing data, NOT fatal corruption. So an empty grab_ts_ns cell MUST warn +
+        // skip that one row and parse the rest, never abort the verdict. Covers BOTH an empty-ts
+        // row mid-file (1,) and an empty-ts row as the newline-terminated final line.
+        for csv in [
+            // empty-ts mid-file, good rows on both sides
+            "frame_index,grab_ts_ns\n0,1782000000000\n1,\n2,1782000066000\n",
+            // empty-ts as the (newline-terminated) final data row
+            "frame_index,grab_ts_ns\n0,1782000000000\n2,1782000066000\n1,\n",
+        ] {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            write!(f, "{csv}").unwrap();
+            let m = parse_grab_ts(f.path())
+                .unwrap_or_else(|e| panic!("empty-ts row must be skipped, not crash: {e:?}"));
+            assert_eq!(m.get(&0), Some(&1782000000000), "good rows still parse");
+            assert_eq!(m.get(&2), Some(&1782000066000), "good rows still parse");
+            assert_eq!(m.get(&1), None, "the empty-ts frame has no grab instant");
+            assert_eq!(m.len(), 2, "exactly the two good rows, the empty-ts row skipped");
+        }
+    }
+
+    #[test]
+    fn grab_ts_sidecar_nonempty_garbage_ts_row_still_errors() {
+        // A NON-empty but unparseable grab_ts_ns cell (e.g. "abc") on a complete (newline-
+        // terminated) row is genuine corruption, not benign missing data — it still errors
+        // loudly so corrupt sidecars are surfaced rather than silently dropping samples. (Only
+        // the EMPTY cell is treated as "no sample for this frame" per #170; junk is not.)
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(
             f,
-            "frame_index,grab_ts_ns\n0,1782000000000\n1,\n2,1782000066000\n"
+            "frame_index,grab_ts_ns\n0,1782000000000\n1,abc\n2,1782000066000\n"
         )
         .unwrap();
-        assert!(parse_grab_ts(f.path()).is_err());
+        assert!(
+            parse_grab_ts(f.path()).is_err(),
+            "a non-empty non-integer ts cell is corruption -> error"
+        );
     }
 }
