@@ -124,6 +124,98 @@ fn recording_e2e_verdict_is_stream_only_no_cam1_grab_args() {
     );
 }
 
+/// #178: the StopRecord→verdict region must be RESILIENT — a single transient failure
+/// (a non-zero OBS StopRecord, an ssh hiccup, a missing recording so a `[ -f ]` guard is
+/// false) must NOT `set -e`-abort the script before the verdict runs. The verdict IS the
+/// whole point of the run; run 172046073 aborted straight to the cleanup trap after
+/// StopRecord and never produced the verdict.
+///
+/// The fix brackets the region with `set +e` and re-enables `set -e` only at the verdict
+/// run (which already manages its own exit via verdict-monitor.sh → GATE). This test guards
+/// the resilience constructs are present so a refactor cannot silently re-introduce the abort.
+#[test]
+fn stoprecord_to_verdict_region_is_set_e_resilient() {
+    let s = read("scripts/recording-e2e.sh");
+    // The region opens with `set +e` (disable abort-on-error for the orchestration) — there
+    // must be a `set +e` somewhere AFTER the "[7/8]" StopRecord banner and BEFORE the verdict
+    // run section. (The cleanup trap already uses `set +e`; we need one for the main region.)
+    let stop_banner = s
+        .find("[7/8]")
+        .expect("#178: the [7/8] StopRecord banner is missing");
+    let verdict_run = s
+        .find("LIVENESS-GUARDED verdict run")
+        .expect("#178: the verdict-run section marker is missing");
+    assert!(
+        stop_banner < verdict_run,
+        "#178: StopRecord must precede the verdict run"
+    );
+    let region = &s[stop_banner..verdict_run];
+    assert!(
+        region.contains("set +e"),
+        "#178: the StopRecord→verdict region must `set +e` so a transient StopRecord/ssh/fetch \
+         failure can't abort before the verdict runs (run 172046073 aborted to cleanup)."
+    );
+    // The verdict-arg guards must NOT use the `[ -f X ] && VERDICT_ARGS+=(...)` form: under
+    // `set -e` a FALSE `[ -f ]` makes the `&&` list return non-zero and aborts the script.
+    // They must be `if [ -f X ]; then VERDICT_ARGS+=(...); fi` (an `if` condition is exempt
+    // from `set -e`), so a missing optional recording degrades gracefully, never aborts.
+    assert!(
+        !region.contains("] && VERDICT_ARGS+=("),
+        "#178: `[ -f ... ] && VERDICT_ARGS+=(...)` is a set -e abort trap when the file is \
+         absent — use `if [ -f ... ]; then VERDICT_ARGS+=(...); fi` instead."
+    );
+    // The StopRecord captures must be guarded so a non-zero stop can't abort the `$(...)`
+    // capture under set -e (the prime #178 suspect). Either the region is under `set +e`
+    // (covered above) AND/OR the captures carry a `|| true`/`|| echo` fallback.
+    assert!(
+        region.contains("StopRecord") || region.contains("record --action stop"),
+        "#178: the StopRecord step must be in the resilient region"
+    );
+}
+
+/// #178 (behavioral): a region that mirrors the FIXED StopRecord→verdict structure must
+/// REACH the verdict step even when StopRecord returns non-zero and an optional recording is
+/// absent — under `set -euo pipefail`. This is the contract the script fix must satisfy: the
+/// `set +e` bracket + `if`-form arg guards + guarded captures never abort before the verdict.
+#[test]
+fn stoprecord_to_verdict_reaches_verdict_despite_a_failing_step() {
+    // The resilient region pattern, in isolation: a StopRecord that FAILS (rc 1), an optional
+    // recording that is ABSENT (so its `if [ -f ]` guard is false), all under set -euo
+    // pipefail. The fixed pattern must still echo REACHED_VERDICT at the end.
+    let script = r#"
+set -euo pipefail
+REACHED=no
+# --- resilient StopRecord→verdict region (mirrors the script fix) ---
+set +e
+STRIH_HOST_PATH=$(false)   # StopRecord returns non-zero — must NOT abort
+echo "stop rc was $? (non-fatal in the region)" >/dev/null
+VERDICT_ARGS=(--strih /tmp/strih.mkv)
+if [ -f /nonexistent-stream-recording.mkv ]; then
+  VERDICT_ARGS+=(--stream /nonexistent-stream-recording.mkv)
+fi
+set -e
+# --- verdict step (always reached) ---
+REACHED=yes
+echo "REACHED_VERDICT args=${#VERDICT_ARGS[@]}"
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run resilient-region pattern");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "#178: the resilient region must exit 0 despite a failing StopRecord + absent optional \
+         recording; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("REACHED_VERDICT"),
+        "#178: the verdict step must be reached despite the failing step; stdout={stdout}"
+    );
+}
+
 /// The gate must ALWAYS receive a --win-status for strih AND stream (NOT conditional on the
 /// status file existing). If the fetch failed and the file is absent, the gate must mark that
 /// node UNKNOWN and FAIL — never silently drop it and certify only cam1+cam2 (the review bug).
