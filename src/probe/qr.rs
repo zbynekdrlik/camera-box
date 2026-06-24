@@ -472,7 +472,10 @@ const TILE_UPSCALE_MIN: u32 = 1280;
 /// Merge `add` into `into`, keeping each DISTINCT `(run_id, frame_id)` payload once. The
 /// 60→30 beat + multiple tiles surface the SAME burn many times; this de-dups by the full
 /// identity so a node's burn is counted once, never inflated, and a recovered burn from a
-/// later pass is added if (and only if) it is new.
+/// later pass is added if (and only if) it is new. The kept copy is the FIRST seen (the
+/// full-frame pass runs before the tiles) — its `gen_ts_ns` is authoritative because a
+/// CRC-valid QR for a given `(run_id, frame_id)` always carries the SAME `gen_ts_ns` (the
+/// payload is one atomic encoded mark), so the dropped duplicates can never differ in it.
 fn merge_payloads(into: &mut Vec<Payload>, add: Vec<Payload>) {
     for p in add {
         if !into
