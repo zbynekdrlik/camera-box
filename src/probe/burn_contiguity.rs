@@ -385,25 +385,70 @@ pub fn burn_contiguity_in_window(
             .zip(present_set.iter().next_back().copied());
         if let Some((lo, hi)) = span {
             let last_frame = frames.last().map(|f| f.frame_index).unwrap_or(0);
-            // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP.
-            // The proof signature (run 1924001): present_count == expected_count (NO `None`
-            // frame) yet ids are absent from the present-set. CRC32 (Payload::decode) makes a
+            // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP,
+            // but ONLY when a delivered frame demonstrably fell in the gap. The proof signature
+            // (run 1924001): present_count == expected_count (NO `None` frame) yet ids are absent
+            // from the present-set on a periodic beat. CRC32 (Payload::decode) makes a
             // wrong-but-valid id impossible, so the blurred burn on a DELIVERED frame re-decoded
-            // to an already-seen (CRC-valid) DUPLICATE of a neighbor id instead of its own. Each
-            // such duplicate delivered frame physically reached the recording but carries the
-            // WRONG id, so the id it SHOULD have carried (an absent integer) had a delivered frame
-            // after all ⇒ a decode MISS on a delivered frame (BURN-UNREADABLE), NOT a frame that
-            // never arrived (REAL DROP).
+            // to an already-seen (CRC-valid) DUPLICATE of a neighbor id — leaving the id it SHOULD
+            // have carried absent from the set, yet a delivered frame DID sit at that slot.
             //
-            // `unreadable_budget` = the count of those delivered-but-misdecoded frames = the
-            // SURPLUS of delivered burns over distinct present ids (`present_ids.len() −
-            // present_set.len()`). We spend it on the absent ids: that many are covered by a
-            // delivered (duplicate) frame ⇒ BURN-UNREADABLE; once the budget is gone, the
-            // remaining absent ids had NO delivered frame (the span is wider than the
-            // delivered-frame count) ⇒ genuine REAL DROP. This keeps the COUNTS exact (what the
-            // verdict reports) even though the chain cannot pin WHICH absent id a given duplicate
-            // carried — each missing id still gets a pixel-proof slot below.
-            let mut unreadable_budget = present_ids.len().saturating_sub(present_set.len());
+            // CRUCIAL discriminator (the deep-review catch): the per-emit chain ALSO legitimately
+            // puts the SAME id on several recorded frames via the 60→30 sampling beat (a benign
+            // oversample, the DOMINANT duplicate source — see the docstring above). A benign
+            // oversample sits AT an already-present id's recorded position (adjacent to its own
+            // id); a #226 misdecode sits STRICTLY INSIDE a gap between two DIFFERENT present ids.
+            // So we must NOT count total duplicates (that masks genuine drops that merely coexist
+            // with oversamples) — we count, PER GAP, only the recorded frames that physically lie
+            // BETWEEN the gap's bounding present ids in RECORDED order. Each such interstitial
+            // frame is a delivered frame that fell in the gap ⇒ one absent id in that gap is
+            // BURN-UNREADABLE; the rest of the gap had no delivered frame ⇒ genuine REAL DROP.
+            //
+            // Walk the recorded frames in order, tracking the count of interstitial (duplicate /
+            // out-of-gap) frames seen since the last STRICTLY-INCREASING present id. When the next
+            // present id jumps forward by >1 (opening a gap), that accumulated interstitial count
+            // is the number of delivered-but-misdecoded frames that fell in THIS gap. (Frames are
+            // already in recorded order; present_set membership + a monotone high-water cursor
+            // identify a forward step vs an in-gap duplicate.)
+            let mut interstitial_since_step: u32 = 0;
+            let mut hi_water: Option<u32> = None;
+            // gap_lo (exclusive) -> interstitial-frame count that fell inside that gap.
+            let mut gap_unreadable: BTreeMap<u32, u32> = BTreeMap::new();
+            for f in frames {
+                // `None` frames are handled by unreadable_consumed, not here.
+                let Some(id) = f.burn_id else { continue };
+                match hi_water {
+                    None => {
+                        hi_water = Some(id);
+                        interstitial_since_step = 0;
+                    }
+                    Some(prev_hi) => {
+                        if id > prev_hi.saturating_add(1) {
+                            // A forward gap opened (prev_hi+1 ..= id-1 absent). The frames seen
+                            // since prev_hi that did NOT advance the high-water mark (duplicates /
+                            // lower ids) are delivered frames that fell in this gap.
+                            if interstitial_since_step > 0 {
+                                gap_unreadable.insert(prev_hi, interstitial_since_step);
+                            }
+                            hi_water = Some(id);
+                            interstitial_since_step = 0;
+                        } else if id > prev_hi {
+                            // Contiguous forward step (id == prev_hi+1): no gap; reset.
+                            hi_water = Some(id);
+                            interstitial_since_step = 0;
+                        } else {
+                            // id <= prev_hi: a duplicate or a lower id — an interstitial frame that
+                            // did not advance the sequence. It MAY be a misdecode covering a gap
+                            // that opens later; accumulate it.
+                            interstitial_since_step = interstitial_since_step.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            // For each absent id, the gap it belongs to is keyed by the largest present id strictly
+            // below it. Spend that gap's interstitial budget (lowest absent id first) as
+            // BURN-UNREADABLE; the remaining absent ids in the gap are genuine REAL DROPs.
+            let mut gap_budget_used: BTreeMap<u32, u32> = BTreeMap::new();
             for missing in (lo..=hi)
                 .filter(|id| !present_set.contains(id))
                 .filter(|id| !unreadable_consumed.contains(id))
@@ -413,8 +458,18 @@ pub fn burn_contiguity_in_window(
                     .next()
                     .map(|(_, &fi)| fi)
                     .unwrap_or(last_frame);
-                let kind = if unreadable_budget > 0 {
-                    unreadable_budget -= 1;
+                // The gap key = the present id immediately below this absent id. This absent id is
+                // BURN-UNREADABLE iff its gap still has an unspent interstitial-frame budget (a
+                // delivered frame fell in the gap); otherwise it is a genuine REAL DROP.
+                let gap_lo = present_set.range(..missing).next_back().copied();
+                let has_delivered_frame_in_gap = gap_lo.is_some_and(|g| {
+                    let budget = gap_unreadable.get(&g).copied().unwrap_or(0);
+                    let used = gap_budget_used.get(&g).copied().unwrap_or(0);
+                    used < budget
+                });
+                let kind = if has_delivered_frame_in_gap {
+                    let g = gap_lo.expect("gap_lo is Some when budget check passed");
+                    *gap_budget_used.entry(g).or_insert(0) += 1;
                     InWindowMissingKind::BurnUnreadable
                 } else {
                     InWindowMissingKind::RealDrop
@@ -1061,7 +1116,8 @@ mod tests {
     }
 
     // ============================================================================
-    // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP.
+    // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP, but ONLY
+    // when a delivered frame demonstrably fell IN the gap (the per-gap interstitial-frame check).
     //
     // The 2026-06-24 proof run 1924001 read cam1 from the strih 1080p recording and reported
     // 107 "REAL DROP" while present_count == expected_count == 7538 AND burn_unreadable == 0,
@@ -1069,23 +1125,23 @@ mod tests {
     // normally-delivered white frame whose bottom-left cam1 burn QR is PHYSICALLY PRESENT,
     // just soft/blurred — a decode MISS on a delivered frame, not a frame that never arrived.
     //
-    // The signature that distinguishes this from genuine loss: there were ENOUGH delivered
-    // frames to carry every id in the span. present_count == expected_count (no None frame)
-    // yet the DISTINCT present-set is smaller than the span — the surplus delivered frames each
-    // mis-decoded a blurred burn to an already-seen (duplicate) neighbor id. Each such surplus
-    // delivered frame IS the delivered frame for one absent id: that absent id's frame reached
-    // the recording (proven by the duplicate), so it is BURN-UNREADABLE, not a REAL DROP. A
-    // REAL DROP is reserved for an absent id with NO delivered frame to account for it (the
-    // span is wider than the delivered-frame count).
+    // DISCRIMINATOR (the deep-review catch): the per-emit chain ALSO legitimately re-samples the
+    // SAME id onto several recorded frames via the 60→30 beat (a BENIGN oversample, the DOMINANT
+    // duplicate source). A naive "count all duplicates" budget masks genuine drops that merely
+    // coexist with oversamples. The honest signal is PER GAP: a delivered frame that sits
+    // STRICTLY BETWEEN two DIFFERENT present ids (in recorded order) is a misdecode that fell in
+    // that gap ⇒ one absent id there is BURN-UNREADABLE; a benign oversample sits AT its own id's
+    // position (not inside a gap) and credits nothing. The remaining absent ids in a gap had no
+    // delivered frame ⇒ genuine REAL DROP. Either way every absent id stays in missing_ids, so
+    // the verdict still FAILS (never a false ZERO) — the fix only relabels.
     // ============================================================================
 
     #[test]
     fn in_window_cam1_blurred_present_burn_is_unreadable_not_real_drop() {
-        // The proof signature in miniature: 5 delivered frames (no None), but the blurred burn
-        // on the 2nd delivered frame mis-decoded to 100 (a duplicate of frame 0's id) instead of
-        // 101. The DISTINCT present-set {100,102,103,104} has a hole at 101, yet a delivered
-        // frame DID exist for 101 (the duplicate-100 frame) — so 101 is BURN-UNREADABLE, not a
-        // REAL DROP. expected_count(5) >= span_width(5): every span id had a delivered frame.
+        // The proof signature in miniature: 5 delivered frames (no None). The 2nd frame's blurred
+        // burn mis-decoded to 100 (a duplicate of frame 0's id) — and it sits STRICTLY INSIDE the
+        // 100→102 gap, so it is an interstitial delivered frame covering absent id 101. 101 is
+        // therefore BURN-UNREADABLE (a delivered frame fell in the gap), not a REAL DROP.
         let frames = [
             rbf(0, Some(100)),
             rbf(1, Some(100)), // blurred burn mis-decoded to 100 — its TRUE id was 101 (delivered!)
@@ -1124,16 +1180,16 @@ mod tests {
 
     #[test]
     fn in_window_cam1_more_blurred_present_burns_each_unreadable_not_real_drop() {
-        // Two blurred-but-present cam1 burns (the periodic-beat case): ids 101 and 104 each
-        // mis-decoded to a duplicate of the previous id. 7 delivered frames, distinct present
-        // {100,102,103,105,106} = 5, span 100..=106 width 7, absent {101,104}. expected(7) >=
-        // span_width(7) → BOTH absent ids had a delivered frame → BOTH burn-unreadable, 0 real.
+        // Two blurred-but-present cam1 burns (the periodic-beat case): a duplicate sits INSIDE
+        // each of two gaps. fr1=100 is interstitial to the 100→102 gap (covers absent 101);
+        // fr4=103 is interstitial to the 103→105 gap (covers absent 104). Each gap has exactly
+        // one interstitial delivered frame → both absent ids are BURN-UNREADABLE, 0 real.
         let frames = [
             rbf(0, Some(100)),
-            rbf(1, Some(100)), // true 101, blurred → duplicate
+            rbf(1, Some(100)), // true 101, blurred → duplicate IN the 100→102 gap
             rbf(2, Some(102)),
             rbf(3, Some(103)),
-            rbf(4, Some(103)), // true 104, blurred → duplicate
+            rbf(4, Some(103)), // true 104, blurred → duplicate IN the 103→105 gap
             rbf(5, Some(105)),
             rbf(6, Some(106)),
         ];
@@ -1160,17 +1216,16 @@ mod tests {
 
     #[test]
     fn in_window_cam1_mixed_one_blurred_present_and_one_genuine_drop() {
-        // The fix must NOT over-correct: when there are MORE absent ids than surplus delivered
-        // frames, the surplus accounts for the blurred-present ids and the REMAINDER are genuine
-        // drops. [100,100,102,104]: distinct {100,102,104}=3, span 100..=104 width 5, absent
-        // {101,103}. Delivered frames = 4. surplus (delivered − distinct) = 4 − 3 = 1 → exactly
-        // ONE absent id had a delivered frame (burn-unreadable); the other (no delivered frame:
-        // expected 4 < span_width 5) is a genuine REAL DROP. 1 unreadable + 1 real.
+        // The fix must NOT over-correct: a gap WITHOUT an interstitial delivered frame stays a
+        // genuine drop. [100,100,102,104]: the duplicate fr1=100 is interstitial to the 100→102
+        // gap (covers absent 101 → BURN-UNREADABLE). The 102→104 gap has NO interstitial frame
+        // (fr3=104 is the forward step itself), so absent 103 had no delivered frame → genuine
+        // REAL DROP. 1 unreadable + 1 real.
         let frames = [
             rbf(0, Some(100)),
-            rbf(1, Some(100)), // true 101 delivered-but-blurred (duplicate)
+            rbf(1, Some(100)), // true 101 delivered-but-blurred (duplicate IN the 100→102 gap)
             rbf(2, Some(102)),
-            rbf(3, Some(104)), // 103 genuinely absent — no delivered frame for it
+            rbf(3, Some(104)), // 103 genuinely absent — NO interstitial frame in the 102→104 gap
         ];
         let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
         let real_drops = w
@@ -1191,6 +1246,121 @@ mod tests {
         assert_eq!(
             burn_unreadable, 1,
             "one absent id whose frame WAS delivered (the duplicate) is burn-unreadable: {:?}",
+            w.missing_slots
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_benign_oversample_does_not_mask_coexisting_genuine_drops() {
+        // The deep-review masking guard: the 60→30 beat re-samples PRESENT ids (a benign
+        // oversample, NOT a misdecode). A naive "count all duplicates" budget would credit those
+        // duplicates to absent ids and MASK genuine loss. Here ids 100 and 101 are each sampled
+        // twice (benign oversamples AT their own positions), and 102,103,104 are GENUINELY lost
+        // (no frame ever fell in the 101→105 gap except the benign re-sample of 101, which sits
+        // AT 101, not strictly inside the gap as a forward-covering frame for 102). The per-gap
+        // check must count only the ONE interstitial frame in the 101→105 gap (fr3=101) ⇒ at
+        // most 1 burn-unreadable; the other absent ids stay genuine REAL DROPs — the bulk of the
+        // loss is NOT masked. (Old global-budget gave real=1; per-gap must give real>=2.)
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)), // benign oversample of 100 (at 100's position, before any gap)
+            rbf(2, Some(101)),
+            rbf(3, Some(101)), // re-sample of 101, interstitial to the 101→105 gap (credits 1)
+            rbf(4, Some(105)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 2,
+            "the bulk of coexisting genuine drops (103,104) must NOT be masked by a benign \
+             oversample — only the ONE interstitial frame credits a burn-unreadable: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 1,
+            "exactly one interstitial frame in the 101→105 gap ⇒ one burn-unreadable: {:?}",
+            w.missing_slots
+        );
+        // The whole gap is still reported (never a false zero).
+        assert_eq!(
+            w.contiguity.missing_ids.len(),
+            3,
+            "all of 102,103,104 reported"
+        );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "coexisting loss is never a pass"
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_oversample_only_no_gap_is_zero_loss() {
+        // A pure benign oversample with NO gap at all (100,100,101,101,102) is ZERO loss — the
+        // duplicates must NEVER manufacture a phantom burn-unreadable when there is no absent id.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)),
+            rbf(2, Some(101)),
+            rbf(3, Some(101)),
+            rbf(4, Some(102)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        assert!(
+            w.contiguity.is_contiguous(),
+            "a pure oversample (no absent id) is zero loss: {:?}",
+            w.missing_slots
+        );
+        assert!(
+            w.missing_slots.is_empty(),
+            "no missing slot of any kind: {:?}",
+            w.missing_slots
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_genuine_loss_with_benign_oversample_before_the_gap_not_masked() {
+        // The reviewer's primary masking case in its UNAMBIGUOUS form: a benign oversample of
+        // present id 100 (fr1, sitting AT 100 — BEFORE the gap opens, NOT inside it), then a
+        // 3-wide genuine gap 102,103,104 with NO frame falling between 101 and 105. The old
+        // global budget (present_ids.len()=5 − present_set.len()=4 = 1) would have masked one of
+        // the three genuine drops. The per-gap check sees ZERO interstitial frames in the 101→105
+        // gap (the only duplicate, fr1, sat at 100 before the gap) ⇒ all three are genuine REAL
+        // DROPs — nothing masked.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)), // benign oversample AT 100 (before the gap — credits nothing)
+            rbf(2, Some(101)),
+            rbf(3, Some(105)), // forward step opens 101→105 gap with NO interstitial frame
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 3,
+            "ALL THREE genuine drops (102,103,104) reported — none masked by an oversample that \
+             sits BEFORE the gap (no interstitial frame in the gap): {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 0,
+            "no interstitial frame in the 101→105 gap ⇒ no burn-unreadable credited: {:?}",
             w.missing_slots
         );
     }
