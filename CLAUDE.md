@@ -61,6 +61,19 @@ Every push to `dev`/`main` runs `ci.yml`, whose `build` job uploads the
 `camera-box-linux-amd64` artifact (`target/release/camera-box`). Tagged releases
 (`v*`) also publish a tarball via `release.yml`.
 
+**Probe/verdict tooling (#192) is ALSO built by CI** — never locally (the local
+`--features probe` build was the root of the 14GB `target/`, the OOM-on-build, and
+the disk drain). A separate CI step builds the probe binaries with `--features probe`
+and uploads them as the `probe-tools-linux-amd64` artifact (`recording-verdict`,
+`frame-probe`, and the probe-featured `camera-box`). The E2E / proof flow DOWNLOADS
+that artifact for the commit under test and runs it on dev1 — it never compiles
+locally:
+
+```bash
+gh run download --repo zbynekdrlik/camera-box -n probe-tools-linux-amd64 --dir ./probe-bins
+chmod +x ./probe-bins/recording-verdict
+```
+
 **IMPORTANT:** Use IP addresses, not hostnames (`.lan` DNS may not resolve):
 
 ```bash
