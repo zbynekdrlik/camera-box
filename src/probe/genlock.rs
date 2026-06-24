@@ -469,10 +469,7 @@ pub fn is_wallclock_ts(ts_ns: u64) -> bool {
 /// monotone-non-decreasing invariant (the return is never below `current_peak`) is what the
 /// callers rely on.
 pub fn genlock_peak_update(current_peak: u32, observed_depth: u32) -> u32 {
-    // STUB (#99 RED): ignores the freshly observed producer-side depth, so a producer burst
-    // that drains before the next render tick is NEVER captured — the exact under-report.
-    let _ = observed_depth;
-    current_peak
+    current_peak.max(observed_depth)
 }
 
 #[cfg(test)]

@@ -3655,8 +3655,23 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		} else {
 			da_push_back(source->async_frames, &output);
 			source->async_active = true;
-			if (source->genlock_fifo)
+			if (source->genlock_fifo) {
 				source->genlock_frames_received++; /* #70 audit */
+				/* camera-box #99: fold the PRODUCER-side queue depth into the
+				 * peak high-water mark. The #70 peak was updated ONLY on the
+				 * consumer side (ready_async_frame, at the render-tick consume),
+				 * so a producer burst that pushed the FIFO high BETWEEN two render
+				 * ticks and drained before the next tick was never observed — the
+				 * peak under-reported how close the queue got to the drop-cap
+				 * (the audit log's whole purpose: tuning preload). num here is the
+				 * depth right AFTER this push = the producer's high-water mark.
+				 * Written under async_mutex (held here), same lock as the consumer
+				 * update. genlock_peak_update() is the pure mirror in
+				 * src/probe/genlock.rs (peak = max(peak, observed)). */
+				const uint32_t depth = (uint32_t)source->async_frames.num;
+				if (depth > source->genlock_peak_depth)
+					source->genlock_peak_depth = depth;
+			}
 		}
 	}
 	pthread_mutex_unlock(&source->async_mutex);
