@@ -314,6 +314,44 @@ jobs:
             target/release/frame-probe
             target/release/camera-box-probe
 
+  windows-probe:
+    name: Windows probe build (recording-verdict.exe)
+    # #193: build recording-verdict for WINDOWS so the recording decode runs ON stream.lan
+    # (10.77.9.204) where the multi-GB OBS recording already lives — never downloaded to slow
+    # dev1 (the root of the slow transfers + the #187 OOM + the disk drain). recording-verdict
+    # is pure Rust (ffmpeg/ffprobe spawn + rqrr + image, all cross-platform); the Linux-only
+    # appliance/hardware-glue crates (v4l/alsa/cpal/evdev/drm/libc-ioctl) are confined to
+    # cfg(target_os="linux") in Cargo.toml + src so the verdict cross-builds clean here.
+    # ffmpeg/ffprobe are NOT bundled — they are already installed on stream.lan (winget;
+    # ffmpeg 8.0.1 on PATH at C:\Users\newlevel\AppData\Local\Microsoft\WinGet\Links).
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-probe
+
+      # Only the verdict bin is built — the other probe bins (frame-probe / multitap-probe /
+      # camera-box) drive Linux hardware (/dev/fb0, v4l, NDI on Linux) and are NOT needed on
+      # the stream box, so they are deliberately excluded from this Windows build.
+      - name: Build recording-verdict.exe (probe-featured)
+        run: cargo build --release --features probe --bin recording-verdict
+
+      - name: Smoke-check the binary runs (--help)
+        run: |
+          ./target/release/recording-verdict.exe --help
+
+      - name: Upload Windows probe tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-tools-windows-amd64
+          path: target/release/recording-verdict.exe
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -351,7 +389,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, build, security, drift-guard]
+    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

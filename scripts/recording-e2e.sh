@@ -318,14 +318,25 @@ CAM1_CAPTURE_STATS="$OUTDIR/cam1-capture-stats.txt"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$CAM1_IP":/tmp/cam1-capture-stats.txt "$CAM1_CAPTURE_STATS" 2>/dev/null || \
   echo "WARNING: could not fetch cam1 capture-stats sidecar (cam2→cam1 loss omitted)" >&2
-# Download the OBS recordings from the Windows boxes via the win-* MCP / http.server.
-# scp to Windows is DENIED on this rig; the harness expects the caller (the autopilot
-# worker or operator) to pull STRIH_HOST_PATH / STREAM_HOST_PATH via the win-* MCP and
-# place them at $STRIH_REC / $STREAM_REC. If they are already present, proceed.
-"$HERE/recording-fetch-windows.sh" \
-  "$STRIH"  "$STRIH_HOST_PATH"  "$STRIH_REC" \
-  "$STREAM" "$STREAM_HOST_PATH" "$STREAM_REC" || \
-  echo "NOTE: recording-fetch-windows.sh not run/failed — place strih/stream recordings at $STRIH_REC / $STREAM_REC manually" >&2
+# #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
+# recordings to slow dev1 (the root of the download + #187 OOM + disk drain). When
+# VERDICT_ON_STREAM=1 (the default), the harness SKIPS the dev1 fetch entirely and the verdict
+# runs on the box (see [8/8]). Set VERDICT_ON_STREAM=0 ONLY for the legacy decode-on-dev1 path
+# (e.g. a box with no uploaded verdict.exe), which DOES download the recordings here.
+VERDICT_ON_STREAM="${VERDICT_ON_STREAM:-1}"
+if [ "$VERDICT_ON_STREAM" = "1" ]; then
+  echo "    #193: VERDICT_ON_STREAM=1 — NOT downloading the multi-GB recordings to dev1; the"
+  echo "          verdict runs ON stream.lan against the LOCAL recording (dev1 gets only JSON+PNGs)."
+else
+  # LEGACY decode-on-dev1: download the OBS recordings from the Windows boxes via the win-* MCP
+  # / http.server. scp to Windows is DENIED on this rig; the harness expects the caller (the
+  # autopilot worker or operator) to pull STRIH_HOST_PATH / STREAM_HOST_PATH via the win-* MCP
+  # and place them at $STRIH_REC / $STREAM_REC. If they are already present, proceed.
+  "$HERE/recording-fetch-windows.sh" \
+    "$STRIH"  "$STRIH_HOST_PATH"  "$STRIH_REC" \
+    "$STREAM" "$STREAM_HOST_PATH" "$STREAM_REC" || \
+    echo "NOTE: recording-fetch-windows.sh not run/failed — place strih/stream recordings at $STRIH_REC / $STREAM_REC manually" >&2
+fi
 
 echo "[8/8] recording-verdict — TRUE STREAM-ONLY (strih + stream + painter, NO 7.3GB grab) + report"
 # #111/#174 per-hop ABSOLUTE latency + loss: pass the node burn run_ids so the verdict
@@ -350,9 +361,43 @@ if [ -f "$STREAM_REC" ]; then VERDICT_ARGS+=(--stream "$STREAM_REC"); fi
 if [ -f "$PAINTER_CSV" ]; then VERDICT_ARGS+=(--painter "$PAINTER_CSV"); fi
 if [ -f "$CAM1_CAPTURE_STATS" ]; then VERDICT_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
 
+# #193 RUN-ON-STREAM: by default the verdict runs ON stream.lan against the LOCAL recording —
+# the multi-GB file is NEVER decoded on dev1 (the root of the slow transfers + #187 OOM + disk
+# drain). The harness emits the exact win-stream-snv plan (upload recording-verdict.exe → run
+# it on the box against the box-local recording → pull back ONLY the small JSON+PNGs); the
+# agent/operator holding the win-* MCP executes those steps (scp/ssh to Windows is DENIED, so
+# bash cannot run them itself). Set VERDICT_ON_STREAM=0 for the LEGACY decode-on-dev1 path.
+if [ "$VERDICT_ON_STREAM" = "1" ]; then
+  set -e
+  echo "    #193: emitting the run-ON-stream.lan plan (decode where the video is — NOTHING big on dev1)."
+  # The verdict's --strih/--stream paths point at the recordings AS THEY LIVE ON THE STREAM BOX
+  # (the win-* MCP holder substitutes the box-local Windows paths). --json/--out-dir are inside
+  # a box-local OUT_DIR that is pulled back. We forward the burn/run-id/min-secs args verbatim.
+  VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
+  OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
+  STREAM_REC_WIN="${STREAM_REC_WIN:-<the stream recording AS IT LIVES ON THE BOX>}"
+  STRIH_REC_WIN="${STRIH_REC_WIN:-<the strih recording AS IT LIVES ON THE BOX>}"
+  "$HERE/recording-verdict-on-stream.sh" \
+    --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
+    -- --strih "$STRIH_REC_WIN" --stream "$STREAM_REC_WIN" --min-secs 300 \
+       --cam2-run-id "$RUN_ID" \
+       --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+       --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
+       --out-dir "$OUT_DIR_WIN\\pixel-proof" --json "$OUT_DIR_WIN\\verdict-${RUN_ID}.json"
+  echo "    The win-* MCP holder runs the plan above; dev1 receives only the small verdict JSON+PNGs (#193)."
+  echo "    ============================================================================"
+  echo "    NOTE: this exit code is NOT the zero-loss verdict. In on-stream mode the harness"
+  echo "          only EMITS the plan (scp/ssh to Windows is denied, so bash cannot run the"
+  echo "          verdict itself). The PASS/FAIL is the recording-verdict EXIT CODE on the"
+  echo "          stream box + the pulled-back JSON — read THOSE, not this script's exit 0."
+  echo "    ============================================================================"
+  exit 0
+fi
+
 # #178: re-enable abort-on-error for the verdict run below — it manages its own exit via
 # verdict-monitor.sh (GATE), so set -e here does not abort the run; it just restores strict
 # mode for the remainder. (The orchestration that could fail transiently is above, guarded.)
+# (LEGACY decode-on-dev1 path — reached only when VERDICT_ON_STREAM=0.)
 set -e
 
 # #166 LIVENESS-GUARDED verdict run. The verdict decodes multi-GB recordings for

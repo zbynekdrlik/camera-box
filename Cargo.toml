@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.88"
+version = "1.7.0-dev.89"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -16,9 +16,6 @@ name = "camera-box"
 path = "src/main.rs"
 
 [dependencies]
-# V4L2 capture
-v4l = "0.14"
-
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
 
@@ -39,17 +36,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 
-# Low-level system calls (real-time scheduling, memory locking)
-libc = "0.2"
-
-# Audio I/O for VBAN intercom
-cpal = "0.15"
-alsa = "0.9"
-
-# Input device events (for power button mute)
-evdev = "0.12"
-
-# Frame-loss/latency probe (feature = "probe") — kept out of the production binary
+# Frame-loss/latency probe (feature = "probe") — kept out of the production binary.
+# These are ALL pure-Rust, cross-platform crates, so the #193 probe tooling
+# (recording-verdict) builds on Windows too — letting the recording decode run ON
+# stream.lan where the video lives, never downloaded to slow dev1.
 serde_json = { version = "1", optional = true }
 crc = { version = "3", optional = true }
 qrcode = { version = "0.14", optional = true, features = ["image"] }
@@ -57,10 +47,28 @@ rqrr = { version = "0.9", optional = true }
 # `png` enables PNG encoding for the #107 pixel-proof extraction of flagged
 # (undecodable / real-loss) frames; the QR render/decode path needs no codec.
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
-# DRM/KMS page-flip presenter for the tear-free 1:1 painter (#79, Linux-only).
-drm = { version = "0.15", optional = true }
 # Offline spool mode: lz4 compression for captured frame spool files (probe only).
 lz4_flex = { version = "0.11", optional = true }
+
+# Linux-ONLY dependencies (#193). The camera APPLIANCE (v4l capture, ALSA/cpal
+# intercom audio, evdev power button) and the probe HARDWARE GLUE (drm/KMS page-flip
+# presenter, /dev/fb0 ioctl via libc) only build on Linux — the cameras are x86_64
+# Ubuntu. Confining them to cfg(target_os="linux") lets the probe TOOLING
+# (recording-verdict) cross-build for Windows without pulling these in, so the #193
+# recording decode runs ON stream.lan. The lib modules that USE them are
+# cfg(target_os="linux")-gated in src/lib.rs + src/probe/mod.rs in lock-step.
+[target.'cfg(target_os = "linux")'.dependencies]
+# V4L2 capture
+v4l = "0.14"
+# Low-level system calls (real-time scheduling, memory locking, /dev/fb0 ioctl)
+libc = "0.2"
+# Audio I/O for VBAN intercom
+cpal = "0.15"
+alsa = "0.9"
+# Input device events (for power button mute)
+evdev = "0.12"
+# DRM/KMS page-flip presenter for the tear-free 1:1 painter (#79, Linux-only, probe).
+drm = { version = "0.15", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions
@@ -73,6 +81,12 @@ tempfile = "3.9"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
+# `dep:drm` is a target-specific optional dependency (declared only under
+# cfg(target_os="linux") above). On Linux the probe feature enables it (the KMS
+# page-flip presenter); on a non-Linux target (the #193 Windows recording-verdict
+# build) `dep:drm` resolves to nothing because the dependency does not exist there,
+# so the probe feature still activates the cross-platform crates (image/rqrr/…) while
+# the KMS/fb modules that need drm are cfg(target_os="linux")-gated out.
 probe = ["dep:serde_json", "dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
 
 [[bin]]
