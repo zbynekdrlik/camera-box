@@ -366,3 +366,73 @@ fn extract_png_no_flagged_frames_is_a_noop() {
         extract_frames_png(&path, &[], &HashSet::new(), &out_dir, 0).expect("noop extraction");
     assert!(extracted.is_empty(), "no flagged frames -> no PNGs");
 }
+
+/// #204 — once the optical-blurred-but-cam1-burn-present frame is KEPT in cam1's per-emit
+/// window (the bin's `in_window_burn_frames` rate-aware fix), the resulting window is a
+/// contiguous cam1 id run and the contiguity verdict is ZERO loss — no phantom drop. This
+/// locks the downstream contract the fix targets, through the public lib surface
+/// `burn_contiguity_in_window`: the window the bin now produces for run-136141133-shaped
+/// frames (50,51,52,53 — with 51 from the optical-blurred frame) MUST verdict contiguous.
+/// (The bin's `in_window_burn_frames` membership change itself is unit-tested inline in
+/// src/bin/recording-verdict.rs; this is the integration-level lock on the verdict it feeds.)
+#[test]
+fn cam1_window_including_an_optical_blurred_burn_frame_is_zero_loss() {
+    use camera_box::probe::burn_contiguity::{
+        burn_contiguity_in_window, BurnRate, RecordedBurnFrame,
+    };
+    // The post-#204 window: frame 1's cam1 burn (51) is present even though its optical QR
+    // blurred. A contiguous 50,51,52,53 ⇒ zero loss.
+    let window = [
+        RecordedBurnFrame {
+            frame_index: 0,
+            burn_id: Some(50),
+        },
+        RecordedBurnFrame {
+            frame_index: 1, // optical QR blurred on this frame, but the cam1 burn decoded
+            burn_id: Some(51),
+        },
+        RecordedBurnFrame {
+            frame_index: 2,
+            burn_id: Some(52),
+        },
+        RecordedBurnFrame {
+            frame_index: 3,
+            burn_id: Some(53),
+        },
+    ];
+    let iw = burn_contiguity_in_window("cam1", &window, BurnRate::PerEmittedFrame);
+    assert!(
+        iw.contiguity.is_contiguous(),
+        "keeping the blurred-optical frame's cam1 burn yields a contiguous run ⇒ zero loss \
+         (no phantom drop, #204): {:?}",
+        iw.contiguity
+    );
+    assert!(iw.contiguity.missing_ids.is_empty());
+    assert_eq!(iw.contiguity.present_count, 4);
+    assert_eq!(iw.contiguity.expected_count, 4);
+
+    // Contrast: the BUGGY window (51 ORPHANED — the old optical-only filter dropped frame 1)
+    // is what manufactured the phantom drop; assert it WOULD have been flagged, so the test
+    // documents exactly what the fix prevents.
+    let buggy = [
+        RecordedBurnFrame {
+            frame_index: 0,
+            burn_id: Some(50),
+        },
+        RecordedBurnFrame {
+            frame_index: 2,
+            burn_id: Some(52), // 51 missing because frame 1 was excluded
+        },
+        RecordedBurnFrame {
+            frame_index: 3,
+            burn_id: Some(53),
+        },
+    ];
+    let buggy_iw = burn_contiguity_in_window("cam1", &buggy, BurnRate::PerEmittedFrame);
+    assert!(
+        !buggy_iw.contiguity.is_contiguous(),
+        "the orphaned-burn window IS what produced the phantom drop the #204 fix removes: {:?}",
+        buggy_iw.contiguity
+    );
+    assert_eq!(buggy_iw.contiguity.missing_ids, vec![51]);
+}
