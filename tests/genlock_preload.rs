@@ -827,6 +827,62 @@ mod vendored_source {
     }
 
     #[test]
+    fn ms_reserve_release_path_present_in_vendored_source() {
+        // #184: the ts-align release must offer a sub-frame MS-GRANULAR reserve — the
+        // lowest-latency lever (held latency ≈ reserve_ms, not a whole 33ms preload
+        // frame). Env-gated (OBS_GENLOCK_RESERVE_MS, default 0 = disabled = the #136
+        // frame path unchanged). A subtree pull (#44) dropping it silently reverts the
+        // lowest-latency capability. Mirror of src/probe/genlock.rs
+        // genlock_present_ts_reserve / parse_reserve_ms.
+        use camera_box::probe::genlock::{GENLOCK_RESERVE_MS_DEFAULT, GENLOCK_RESERVE_MS_MAX};
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // The env gate + parse must exist.
+        assert!(
+            src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
+            "{OBS_SOURCE}: #184 — the ms-reserve env gate (OBS_GENLOCK_RESERVE_MS) is gone; re-apply."
+        );
+        assert!(
+            src.contains("genlock_parse_reserve_ms"),
+            "{OBS_SOURCE}: #184 — genlock_parse_reserve_ms (the ms-reserve parser) is gone; re-apply."
+        );
+        // The C defaults/cap MUST equal the Rust mirror constants (lock-step).
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_RESERVE_MS_DEFAULT {GENLOCK_RESERVE_MS_DEFAULT}"
+            )),
+            "{OBS_SOURCE}: #184 — GENLOCK_RESERVE_MS_DEFAULT drifted from the Rust mirror \
+             ({GENLOCK_RESERVE_MS_DEFAULT}); keep them in lock-step."
+        );
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_RESERVE_MS_MAX {GENLOCK_RESERVE_MS_MAX}"
+            )),
+            "{OBS_SOURCE}: #184 — GENLOCK_RESERVE_MS_MAX drifted from the Rust mirror \
+             ({GENLOCK_RESERVE_MS_MAX}); keep them in lock-step."
+        );
+        // The reserve present_ts helper must exist AND its body must be the pure ms delay
+        // (wall - reserve_ms*1e6, NO +interval/2 bias). Without the body assert, a subtree
+        // pull could neuter it to `return wall_now_ns;` while every other guard stays green.
+        assert!(
+            src.contains("static inline uint64_t genlock_present_ts_reserve("),
+            "{OBS_SOURCE}: #184 — genlock_present_ts_reserve (the ms-granular deadline) is gone; re-apply."
+        );
+        assert!(
+            src.contains("(uint64_t)reserve_ms * 1000000ULL"),
+            "{OBS_SOURCE}: #184 — genlock_present_ts_reserve lost its ms->ns delay \
+             ((uint64_t)reserve_ms * 1000000ULL); the deployed DLL would no longer apply the \
+             configured reserve. Re-apply the pure ms delay."
+        );
+        // The render path must actually USE the reserve deadline when reserve_ms > 0
+        // (otherwise the knob is inert — exactly the #119 stale-bytes class of bug).
+        assert!(
+            src.contains("genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)"),
+            "{OBS_SOURCE}: #184 — the ts-align render path no longer selects \
+             genlock_present_ts_reserve when a reserve is configured; the ms-reserve knob is inert. Re-apply."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every

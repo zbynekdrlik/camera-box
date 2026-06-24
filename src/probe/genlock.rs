@@ -61,6 +61,24 @@ pub const GENLOCK_DROP_CAP_RESERVE: u32 = 4;
 /// (`tests/genlock_preload.rs`) keeps this in lock-step with the C `#define`.
 pub const MAX_ASYNC_FRAMES: u32 = 30;
 
+/// (#184) Default sub-frame jitter reserve in milliseconds: `0` = DISABLED, so the
+/// timestamp-aligned release falls back to the whole-frame `preload` delay exactly
+/// as before (full back-compat). Any value > 0 switches the release deadline to a
+/// MS-GRANULAR reserve (see [`genlock_present_ts_reserve`]) — the held latency
+/// becomes ≈ `reserve_ms` (single-digit ms = just the measured arrival jitter)
+/// instead of a whole 33 ms frame. Mirrored & guarded in the C side
+/// (`#define GENLOCK_RESERVE_MS_DEFAULT 0`).
+pub const GENLOCK_RESERVE_MS_DEFAULT: u32 = 0;
+
+/// (#184) Hard cap on the sub-frame jitter reserve (ms). A reserve is a *sub-frame*
+/// jitter budget — it only ever needs to cover the few-ms inter-arrival spread
+/// (measured 1.6 ms strih→stream, 8.1 ms cam1→strih on the live rig). 100 ms (= 3
+/// whole frames @ 30 fps) is a generous ceiling that still keeps the knob in its
+/// sub-frame / low-single-frame regime; anything larger means the operator wants a
+/// whole-frame *video delay*, which is the `preload` knob's job, not this one.
+/// Mirrored & guarded in the C side (`#define GENLOCK_RESERVE_MS_MAX 100`).
+pub const GENLOCK_RESERVE_MS_MAX: u32 = 100;
+
 /// Parse the `OBS_GENLOCK_PRELOAD_FRAMES` env value into a reserve depth.
 ///
 /// This is a FAITHFUL mirror of the C `genlock_parse_preload()`, which uses
@@ -101,6 +119,32 @@ pub fn parse_preload(env: Option<&str>) -> u32 {
         // can occur, so there is no separate default-on-error arm (a guarded arm
         // here would leave an equivalent, untestable mutant).
         Err(_) => GENLOCK_PRELOAD_MAX,
+    }
+}
+
+/// (#184) Parse the `OBS_GENLOCK_RESERVE_MS` env value into a sub-frame jitter
+/// reserve in milliseconds.
+///
+/// A FAITHFUL mirror of the C `genlock_parse_reserve_ms()` (same `strtol` quirks as
+/// [`parse_preload`]): `None`/empty/leading-junk/trailing-junk/negative ⇒
+/// [`GENLOCK_RESERVE_MS_DEFAULT`] (`0` = disabled, whole-frame `preload` path);
+/// any in-range or overflowing non-negative integer ⇒ clamped to
+/// [`GENLOCK_RESERVE_MS_MAX`]. `0` is a valid explicit value (disabled), distinct
+/// only in intent from the unset default — both yield `0`.
+pub fn parse_reserve_ms(env: Option<&str>) -> u32 {
+    let Some(raw) = env else {
+        return GENLOCK_RESERVE_MS_DEFAULT;
+    };
+    let body = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let digits = body.strip_prefix('+').unwrap_or(body);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return GENLOCK_RESERVE_MS_DEFAULT;
+    }
+    match digits.parse::<i64>() {
+        Ok(v) => v.min(GENLOCK_RESERVE_MS_MAX as i64) as u32,
+        // Only positive overflow is reachable here (non-empty all-digit body, no
+        // sign) — strtol saturates to LONG_MAX ⇒ the `> MAX` clamp ⇒ MAX.
+        Err(_) => GENLOCK_RESERVE_MS_MAX,
     }
 }
 
@@ -401,6 +445,41 @@ pub fn genlock_present_ts(tick_wall_ns: u64, delay_frames: u32, interval_ns: u64
         .saturating_add(interval_ns / 2)
 }
 
+/// (#184) The presentation deadline for a render tick under a MS-GRANULAR jitter
+/// reserve — the sub-frame lowest-latency lever for zero-latency IMAG on LED walls.
+///
+/// `present_ts = tick_wall_ns - reserve_ms*1_000_000` (saturating, so an early-boot
+/// wall clock can never wrap below 0). A frame is presented once its capture
+/// timestamp is at/before this deadline — i.e. once it has aged at least
+/// `reserve_ms` — so the held latency is EXACTLY `reserve_ms`, a pure time delay
+/// that is NOT quantized to a whole frame.
+///
+/// ## Why this replaces the whole-frame preload (the #184 thesis)
+///
+/// The frame-based [`genlock_present_ts`] subtracts `preload * interval` — at
+/// `preload = 1`, that is a fixed **33.3 ms** floor @ 30 fps. But the buffer only
+/// has to absorb the per-input ARRIVAL JITTER, which the live rig measures at
+/// **1.6 ms** (strih→stream) and **8.1 ms** (cam1→strih) — a few ms, NOT a whole
+/// frame. Setting `reserve_ms ≈ measured_jitter + a small margin` keeps overruns/
+/// underruns at 0 while cutting the held delay from 33 ms to single-digit ms.
+///
+/// ## No +interval/2 churn bias (deliberate)
+///
+/// The frame-based path adds `+interval/2` (the #136 boundary-churn guard) because a
+/// frame can land EXACTLY on a frame-quantized deadline and jitter in/out under
+/// render-tick slew. The reserve deadline is an ABSOLUTE wall-clock instant, not a
+/// frame multiple, so frames do not cluster on it — there is no boundary to churn
+/// across, and `reserve_ms` is itself the slew tolerance (chosen ≥ jitter + margin).
+/// Adding `+interval/2` here would silently re-inflate the latency by ~16 ms,
+/// defeating the whole point. Every source shares the SAME `tick_wall_ns - reserve`,
+/// so multi-source in-sync (the #136 invariant) is preserved by construction.
+///
+/// Mirror of the C `genlock_present_ts_reserve()` (guarded in
+/// `tests/genlock_preload.rs`).
+pub fn genlock_present_ts_reserve(tick_wall_ns: u64, reserve_ms: u32) -> u64 {
+    tick_wall_ns.saturating_sub((reserve_ms as u64) * 1_000_000)
+}
+
 /// Decide the timestamp-aligned release for one source at one render tick (#136).
 ///
 /// `present_ts_ns` — the shared presentation deadline ([`genlock_present_ts`]).
@@ -596,6 +675,127 @@ mod tests {
             genlock_present_ts(NS30, 6, NS30),
             NS30 / 2,
             "saturates, never wraps below 0"
+        );
+    }
+
+    // ---- #184: sub-frame MS-granular jitter reserve --------------------------
+
+    #[test]
+    fn parse_reserve_ms_default_when_unset_or_invalid() {
+        // Unset / empty / whitespace / junk / negative ⇒ DEFAULT (0 = disabled).
+        assert_eq!(parse_reserve_ms(None), GENLOCK_RESERVE_MS_DEFAULT);
+        assert_eq!(parse_reserve_ms(Some("")), GENLOCK_RESERVE_MS_DEFAULT);
+        assert_eq!(parse_reserve_ms(Some("   ")), GENLOCK_RESERVE_MS_DEFAULT);
+        assert_eq!(parse_reserve_ms(Some("abc")), GENLOCK_RESERVE_MS_DEFAULT);
+        assert_eq!(parse_reserve_ms(Some("3x")), GENLOCK_RESERVE_MS_DEFAULT);
+        assert_eq!(parse_reserve_ms(Some("-1")), GENLOCK_RESERVE_MS_DEFAULT);
+        // strtol quirk parity with parse_preload: trailing space ⇒ default; leading ok; +ok.
+        assert_eq!(parse_reserve_ms(Some("5 ")), GENLOCK_RESERVE_MS_DEFAULT);
+        assert_eq!(parse_reserve_ms(Some("  2")), 2);
+        assert_eq!(parse_reserve_ms(Some("+3")), 3);
+        assert_eq!(
+            GENLOCK_RESERVE_MS_DEFAULT, 0,
+            "0 = disabled, whole-frame path"
+        );
+    }
+
+    #[test]
+    fn parse_reserve_ms_valid_and_clamped() {
+        assert_eq!(parse_reserve_ms(Some("0")), 0); // explicit disabled
+        assert_eq!(parse_reserve_ms(Some("2")), 2); // strih→stream jitter ~1.6ms + margin
+        assert_eq!(parse_reserve_ms(Some("10")), 10); // cam1→strih jitter ~8.1ms + margin
+        assert_eq!(GENLOCK_RESERVE_MS_MAX, 100);
+        assert_eq!(parse_reserve_ms(Some("100")), 100);
+        assert_eq!(parse_reserve_ms(Some("101")), GENLOCK_RESERVE_MS_MAX); // clamped
+        assert_eq!(parse_reserve_ms(Some("99999")), GENLOCK_RESERVE_MS_MAX); // overflow path
+    }
+
+    #[test]
+    fn present_ts_reserve_is_a_pure_ms_delay_no_frame_quantization() {
+        // The deadline = wall - reserve_ms (in ns). NO frame quantization, NO
+        // +interval/2 bias — the held latency is EXACTLY reserve_ms.
+        let wall = WBASE + 100 * NS30;
+        assert_eq!(genlock_present_ts_reserve(wall, 3), wall - 3_000_000);
+        assert_eq!(
+            genlock_present_ts_reserve(wall, 0),
+            wall,
+            "0 reserve = no delay"
+        );
+        // saturates, never wraps below 0.
+        assert_eq!(genlock_present_ts_reserve(1_000_000, 5), 0);
+    }
+
+    #[test]
+    fn present_ts_reserve_beats_a_whole_frame_preload() {
+        // THE #184 win: at 30fps one preload frame is 33.3ms; the frame-based deadline
+        // holds (33.3 − 16.7) = 16.6ms effective. A 3ms reserve holds only 3ms — far
+        // less held latency, while still covering the measured ~1.6ms strih→stream jitter.
+        let wall = WBASE + 100 * NS30;
+        let held_frame = wall - genlock_present_ts(wall, 1, NS30); // effective frame-path delay
+        let held_reserve = wall - genlock_present_ts_reserve(wall, 3); // reserve-path delay
+        assert_eq!(held_reserve, 3_000_000, "reserve holds exactly 3ms");
+        assert!(
+            held_reserve < held_frame,
+            "a 3ms reserve ({held_reserve}ns) must hold LESS than one preload frame ({held_frame}ns)"
+        );
+    }
+
+    #[test]
+    fn release_under_reserve_holds_each_frame_for_exactly_the_reserve() {
+        // A frame is due only once it has aged >= reserve_ms. With a 3ms reserve and
+        // frames captured at the steady cadence, the head is due exactly when
+        // wall >= head_ts + 3ms.
+        let reserve_ms = 3u32;
+        let q = caps(6); // head q[0] = WBASE
+                         // wall just BEFORE the head has aged 3ms → not yet due → hold.
+        let wall_early = WBASE + 3_000_000 - 1;
+        assert!(
+            !genlock_release(genlock_present_ts_reserve(wall_early, reserve_ms), &q).present,
+            "head not yet aged the reserve → hold (no premature present)"
+        );
+        // wall once the head has aged exactly 3ms → due → present it, drop nothing.
+        let wall_due = WBASE + 3_000_000;
+        let d = genlock_release(genlock_present_ts_reserve(wall_due, reserve_ms), &q);
+        assert!(
+            d.present && d.drop_oldest == 0,
+            "head aged the reserve → present it"
+        );
+        assert_eq!(
+            q[d.drop_oldest], WBASE,
+            "the presented frame is the reserve-aged head"
+        );
+    }
+
+    #[test]
+    fn release_under_reserve_keeps_two_sources_in_sync() {
+        // The #136 in-sync invariant must survive the reserve path: both sources share
+        // present_ts = wall - reserve, so when both have captured up to the deadline they
+        // present the SAME capture instant regardless of buffered depth. Both queues must
+        // CONTAIN the due frame (in-sync is about the shared deadline, not about a source
+        // that is simply behind) — so choose a wall where the newest due frame is one both
+        // caps(5) and caps(20) hold.
+        let reserve_ms = 5u32;
+        let a = caps(5); // newest = WBASE + 4*NS30
+        let b = caps(20);
+        // Land the deadline a hair after WBASE + 3*NS30 so the newest due frame is index 3
+        // (present in BOTH queues); reserve_ms is the offset from `wall` to that deadline.
+        let deadline = WBASE + 3 * NS30;
+        let wall = deadline + (reserve_ms as u64) * 1_000_000;
+        let present_ts = genlock_present_ts_reserve(wall, reserve_ms);
+        assert_eq!(
+            present_ts, deadline,
+            "reserve path lands the shared deadline at wall-reserve"
+        );
+        let da = genlock_release(present_ts, &a);
+        let db = genlock_release(present_ts, &b);
+        assert!(da.present && db.present, "both have a due frame");
+        assert_eq!(
+            a[da.drop_oldest], b[db.drop_oldest],
+            "different depths must present the SAME capture instant under the reserve path"
+        );
+        assert_eq!(
+            a[da.drop_oldest], deadline,
+            "presented frame is the one captured at the deadline"
         );
     }
 
