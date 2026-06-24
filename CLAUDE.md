@@ -71,7 +71,9 @@ locally:
 
 ```bash
 gh run download --repo zbynekdrlik/camera-box -n probe-tools-linux-amd64 --dir ./probe-bins
-chmod +x ./probe-bins/recording-verdict
+# gh run download strips the +x bit — re-add it to every probe binary you use
+# (recording-verdict, frame-probe, camera-box-probe).
+chmod +x ./probe-bins/*
 ```
 
 **IMPORTANT:** Use IP addresses, not hostnames (`.lan` DNS may not resolve):

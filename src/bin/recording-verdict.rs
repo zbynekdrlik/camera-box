@@ -1153,6 +1153,22 @@ fn main() -> Result<()> {
                 "cam1": cam1_ids.len(), "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
             report["full_chain"]["cam1_source"] = serde_json::json!(cam1_source_label);
+            // #133 (review): if --strih was supplied (so cam1's source IS the strih recording)
+            // but cam1 carried NO burn there, cam1 is silently SKIPPED below and an all-zero
+            // headline could stand WITHOUT cam1 having been measured. The cam1-capture burn
+            // (CAMERA_BOX_BURN_RUN_ID on cam1) rides into strih's program, so its absence in a
+            // --strih run means the burn was OFF or never reached strih — loudly WARN so a
+            // "ZERO loss" headline is never read as a cam1→strih proof when cam1 was unmeasured.
+            // (No hard fail: a deliberate burn-off / cam1-only diagnostic run is still valid.)
+            if strih_data.is_some() && cam1_ids.is_empty() {
+                eprintln!(
+                    "WARNING: --strih supplied but NO cam1 burn (run_id {}) found in the strih \
+                     recording — cam1→strih is UNMEASURED this run (cam1 burn OFF or not reaching \
+                     strih). A ZERO-loss headline below covers strih/stream ONLY, not cam1→strih.",
+                    args.burn_cam1_run_id
+                );
+                report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
+            }
 
             // ===========================================================================
             // #186 — the ONE trustworthy, binary LOSS verdict (REPLACES the muddled
