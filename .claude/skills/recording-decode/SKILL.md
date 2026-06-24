@@ -52,24 +52,47 @@ the decode path must keep these green.
 recording-analysis-complete so the verdict log shows `fast ≫ robust` (the speedup is real).
 Counters are global/cumulative across all recordings in one run.
 
-## Per-frame latency CSV pairing (#209/#216) — optical-decode dropout ≠ chain loss
+## Per-frame latency CSV pairing (#209/#216) — optical-read dropout ≠ chain loss
 
-`recording_latency::per_frame_latency_csv_rows` builds the #209 continuous-line CSV
-(`frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms`). Two distinct QR
-classes drive a row:
+`recording_latency::per_frame_latency_csv_rows` builds the #209 continuous-line CSV. The header
+(SINGLE source of truth = `LatencyCsvRow::HEADER`; the Python plotter cross-checks it) is now
+**7 columns** (#216 added the last):
+`frame_id,gen_ts_ns,flip_ts_ns,cam1_strih_ms,strih_stream_ms,cam1_stream_ms,cam2_cam1_ms`.
+Two distinct QR classes drive a row:
 
-- the **node BURNS** (cam1/strih/stream) give the THREE hop columns — these need ONLY the burns,
-  paired WITHIN one frame. They survive any optical dropout (the burns are digitally generated).
-- the **cam2 OPTICAL tick** (`frame_id`, `Option<u32>` since #216) is the per-frame optical
-  identity AND the only key for `flip_ts_ns`. It can go undecodable for a stretch (cam1 filming
-  cam2's monitor briefly fails to read the QR) — an **optical-DECODE dropout**, which is a
-  MEASUREMENT gap, NOT a chain loss.
+- the **node BURNS** (cam1/strih/stream) give the THREE burn-hop columns — these need ONLY the
+  burns, paired WITHIN one frame. They survive any optical dropout (burns are digitally generated)
+  → these three lines draw CONTINUOUSLY (a gap there = a real chain loss).
+- the **cam2 OPTICAL tick** (`frame_id`, `Option<u32>`) is the per-frame optical identity, the
+  `flip_ts_ns` key, AND the cam2 reference for `cam2_cam1_ms`. It can go undecodable for a stretch
+  (cam1's camera briefly fails to OPTICALLY READ cam2's monitor QR) — an **optical-READ dropout**,
+  a real readability failure on the cam2→cam1 OPTICAL-injection leg, NOT a chain frame loss.
 
-**#216 fix / rule:** a row is emitted whenever the frame has a valid x-anchor (a positive
-cam1/strih burn or cam2 paint stamp), EVEN WHEN the cam2 tick is absent — so the three burn-hop
-lines stay UNBROKEN across an optical dropout (`frame_id` empty, `flip_ts` empty, three hops
-filled). Only a frame with NEITHER a cam2 tick NOR any positive stamp is skipped. The earlier
-"skip the whole row when no cam2 tick" blanked all three lines for a ~150s stretch (#216 band).
+**#216 rule (honest, NOT a cover-up):** a row is emitted whenever the frame has a valid x-anchor
+(positive cam1/strih burn or cam2 paint stamp), even when the cam2 tick is absent — so the three
+BURN lines stay UNBROKEN across a dropout. BUT the **`cam2_cam1_ms` column (= cam1_capture −
+cam2_display, flip #194 else paint #179) is EMPTY on those frames — the HONEST GAP**. The plotter
+(`latency-line-report.py`) draws cam2→cam1 dashed with a TRUE NaN break + a shaded annotated
+window; the verdict JSON reports `cam2_cam1_optical_read_dropouts` (windows/duration via
+`recording_latency::optical_read_dropouts`, ≥2 s floor). NEVER draw the optical line across the
+gap — that was the reverted #216 cover-up. Burn hops continuous + optical line gapped = the honest
+picture.
+
+## #216 GOTCHA — cam1 burn "over-count" is a contiguity-WALK reorder artifact, NOT a CRC gap
+
+The 30-min proof reported 235 cam1 `real_drops`. **CRC is a red herring:** `Payload::decode`
+(src/probe/payload.rs:46) ALREADY validates CRC32 — a HEVC-corrupted read fails CRC → `None`
+(BURN-UNREADABLE), never a wrong VALID id. The real cause: read the proof JSON —
+`cam1.present_count == expected_count == (last_id − first_id + 1)` AND `burn_unreadable == 0` ⇒
+EVERY emitted integer WAS present, nothing lost. Yet `real_drops > 0`. The per-emit forward-gap
+walk (`burn_contiguity_in_window`) flags ids by recorded-frame ORDER, so when the softened stream
+recording (2 NDI hops + 2 HEVC re-encodes of the small QR — **NOT a 4K upscale; both boxes record
+1080p, #196 premise invalid**) delivers an id one frame LATE (a 60→30 straddle reorder), the walk
+manufactures a phantom drop. **Fix (burn_contiguity.rs):** build the global present-set; for cam1
+(PerEmittedFrame) skip any forward-gap / backward-jump id that appears ELSEWHERE in the set (a
+reorder, not a lost frame); only a genuinely-absent integer counts. Per-render stays strict.
+Diagnostic tell: `present_count == span == burn_ids_present` with `real_drops > 0` ⇒ over-count,
+not loss.
 
 **Diagnosing a latency-CSV gap (do this FIRST, no rig needed):** read the artifacts on disk —
 `proof-*/latency-per-frame.csv` + `verdict-clean.json`. `stream_frames − csv_rows == nodes.stream
