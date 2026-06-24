@@ -1034,4 +1034,139 @@ mod tests {
             "101 paired to the recorded frame of the next present id (102, frame_index 1)"
         );
     }
+
+    // ============================================================================
+    // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP.
+    //
+    // The 2026-06-24 proof run 1924001 read cam1 from the strih 1080p recording and reported
+    // 107 "REAL DROP" while present_count == expected_count == 7538 AND burn_unreadable == 0,
+    // the missing ids on a periodic ~23-emit beat. Pixel proof: every flagged frame is a
+    // normally-delivered white frame whose bottom-left cam1 burn QR is PHYSICALLY PRESENT,
+    // just soft/blurred — a decode MISS on a delivered frame, not a frame that never arrived.
+    //
+    // The signature that distinguishes this from genuine loss: there were ENOUGH delivered
+    // frames to carry every id in the span. present_count == expected_count (no None frame)
+    // yet the DISTINCT present-set is smaller than the span — the surplus delivered frames each
+    // mis-decoded a blurred burn to an already-seen (duplicate) neighbor id. Each such surplus
+    // delivered frame IS the delivered frame for one absent id: that absent id's frame reached
+    // the recording (proven by the duplicate), so it is BURN-UNREADABLE, not a REAL DROP. A
+    // REAL DROP is reserved for an absent id with NO delivered frame to account for it (the
+    // span is wider than the delivered-frame count).
+    // ============================================================================
+
+    #[test]
+    fn in_window_cam1_blurred_present_burn_is_unreadable_not_real_drop() {
+        // The proof signature in miniature: 5 delivered frames (no None), but the blurred burn
+        // on the 2nd delivered frame mis-decoded to 100 (a duplicate of frame 0's id) instead of
+        // 101. The DISTINCT present-set {100,102,103,104} has a hole at 101, yet a delivered
+        // frame DID exist for 101 (the duplicate-100 frame) — so 101 is BURN-UNREADABLE, not a
+        // REAL DROP. expected_count(5) >= span_width(5): every span id had a delivered frame.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)), // blurred burn mis-decoded to 100 — its TRUE id was 101 (delivered!)
+            rbf(2, Some(102)),
+            rbf(3, Some(103)),
+            rbf(4, Some(104)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let c = &w.contiguity;
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 0,
+            "a blurred-but-present cam1 burn (delivered frame exists, duplicate proves it) is \
+             NOT a real drop: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 1,
+            "the absent id 101 whose frame WAS delivered is exactly ONE burn-unreadable: {c:?}"
+        );
+        assert_eq!(
+            c.present_count, 5,
+            "all 5 frames delivered a (CRC-valid) burn"
+        );
+        assert_eq!(c.expected_count, 5);
+    }
+
+    #[test]
+    fn in_window_cam1_more_blurred_present_burns_each_unreadable_not_real_drop() {
+        // Two blurred-but-present cam1 burns (the periodic-beat case): ids 101 and 104 each
+        // mis-decoded to a duplicate of the previous id. 7 delivered frames, distinct present
+        // {100,102,103,105,106} = 5, span 100..=106 width 7, absent {101,104}. expected(7) >=
+        // span_width(7) → BOTH absent ids had a delivered frame → BOTH burn-unreadable, 0 real.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)), // true 101, blurred → duplicate
+            rbf(2, Some(102)),
+            rbf(3, Some(103)),
+            rbf(4, Some(103)), // true 104, blurred → duplicate
+            rbf(5, Some(105)),
+            rbf(6, Some(106)),
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 0,
+            "both blurred-present burns are NOT real drops: {real_drops}"
+        );
+        assert_eq!(
+            burn_unreadable, 2,
+            "two delivered-but-undecodable burns: {burn_unreadable}"
+        );
+    }
+
+    #[test]
+    fn in_window_cam1_mixed_one_blurred_present_and_one_genuine_drop() {
+        // The fix must NOT over-correct: when there are MORE absent ids than surplus delivered
+        // frames, the surplus accounts for the blurred-present ids and the REMAINDER are genuine
+        // drops. [100,100,102,104]: distinct {100,102,104}=3, span 100..=104 width 5, absent
+        // {101,103}. Delivered frames = 4. surplus (delivered − distinct) = 4 − 3 = 1 → exactly
+        // ONE absent id had a delivered frame (burn-unreadable); the other (no delivered frame:
+        // expected 4 < span_width 5) is a genuine REAL DROP. 1 unreadable + 1 real.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(100)), // true 101 delivered-but-blurred (duplicate)
+            rbf(2, Some(102)),
+            rbf(3, Some(104)), // 103 genuinely absent — no delivered frame for it
+        ];
+        let w = burn_contiguity_in_window("cam1", &frames, BurnRate::PerEmittedFrame);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 1,
+            "one absent id with no delivered frame is still a genuine drop: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 1,
+            "one absent id whose frame WAS delivered (the duplicate) is burn-unreadable: {:?}",
+            w.missing_slots
+        );
+    }
 }
