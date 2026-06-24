@@ -237,18 +237,49 @@ fn in_window_burn_frames(
     stream: &[RecordingFrame],
     burn_run_id: u32,
     all_burn_run_ids: &[u32],
+    rate: BurnRate,
 ) -> Vec<RecordedBurnFrame> {
-    let is_delivered = |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids);
-    let first = stream.iter().position(is_delivered);
-    let last = stream.iter().rposition(is_delivered);
+    // #204: what counts as a recorded frame for THIS node's contiguity.
+    //
+    // The WINDOW BOUNDARIES (lead-in/out trim) always use cam2's optical QR — the optical
+    // signal defines where the painted run begins/ends. But WITHIN the window, the
+    // per-EMITTED-frame node (cam1) needs a different membership rule than the per-render
+    // nodes (strih/stream):
+    //
+    // - cam1 (PerEmittedFrame): its burn increments once per EMITTED frame, so a frame
+    //   carrying the cam1 burn PROVES cam1's emitted frame reached the recording — regardless
+    //   of whether THAT frame's cam2 OPTICAL QR (a separate mark, independently blur-prone on
+    //   a 60→30 refresh straddle) decoded. The old "optical-delivered only" filter EXCLUDED a
+    //   frame whose optical QR was blurred while its cam1 burn was crisp, orphaning that cam1
+    //   id and manufacturing a PHANTOM forward-gap "REAL DROP" on the next frame (#204: run
+    //   136141133 frame 5905 carried cam1 burn 6485 with a blurred top dual-QR → 6485 dropped
+    //   from the window → phantom drop). So for cam1 a frame is in-window if it carries the
+    //   cam2 optical QR OR the cam1 burn.
+    // - strih/stream (PerRenderTick): their burn is a free-running render counter, so a
+    //   render-tick burn on a NON-optical frame is pre/post-signal noise, NOT an emitted
+    //   frame — they keep the strict optical-delivered membership (the #198 behaviour).
+    let is_optical = |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids);
+    let has_node_burn = |f: &RecordingFrame| node_burn_id_on(f, burn_run_id).is_some();
+    // [red] #204: OLD optical-delivered-only membership — the cam1 burn on an
+    // optical-blurred frame is NOT yet kept, so cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop
+    // FAILS here (it orphans the burn → phantom drop). GREEN keeps the burn for PerEmittedFrame.
+    let _ = (has_node_burn, rate);
+    let in_window = |f: &RecordingFrame| is_optical(f);
+
+    // Boundaries: the optical signal span (the painted run). For cam1 this still anchors the
+    // window to the optical signal; an in-window non-optical frame carrying the cam1 burn is
+    // then included by `in_window` above, but the lead-in/out trim is optical-defined so a
+    // pre-signal free-running cam1 burn can never extend the window.
+    let first = stream.iter().position(is_optical);
+    let last = stream.iter().rposition(is_optical);
     let (first, last) = match (first, last) {
         (Some(f), Some(l)) => (f, l),
-        // No delivered frame at all ⇒ no signal window ⇒ nothing to prove (empty).
+        // No optical frame at all ⇒ no signal window ⇒ nothing to prove (empty).
         _ => return Vec::new(),
     };
     stream[first..=last]
         .iter()
-        .filter(|f| is_delivered(f))
+        .filter(|f| in_window(f))
         .map(|f| RecordedBurnFrame {
             frame_index: f.frame_index,
             burn_id: node_burn_id_on(f, burn_run_id),
@@ -299,7 +330,7 @@ fn node_verdict(
     let rec_path = spec.rec_path;
     // #198: walk only the in-window DELIVERED frames; rate decides whether a forward integer
     // gap is loss; a delivered frame missing its burn IS; out-of-window ids are excluded.
-    let window = in_window_burn_frames(source, spec.burn_run_id, all_burn_run_ids);
+    let window = in_window_burn_frames(source, spec.burn_run_id, all_burn_run_ids, spec.rate);
     let in_window = burn_contiguity_in_window(node, &window, spec.rate);
     let contiguity = in_window.contiguity;
 
@@ -1546,7 +1577,7 @@ mod tests {
             frame(4, &[(CAM2, 102), (STRIH, 1676)]), // last delivered (in-window)
             frame(5, &[(STRIH, 30000)]),             // post-signal teardown (no cam2) — trimmed
         ];
-        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM]);
+        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
@@ -1624,7 +1655,12 @@ mod tests {
         // calling the pure check directly here (the node_verdict pixel extraction needs a real
         // file, exercised by the real-data validation run). Confirm the verdict errored on the
         // bad path ONLY because a real drop was found (not a silent zero-loss pass).
-        let w = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM]);
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
         let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
             "cam1",
             &w,
@@ -1674,7 +1710,12 @@ mod tests {
         ];
         // Sanity: the STREAM slice on its own DOES manufacture a phantom cam1 drop —
         // this is exactly what reading cam1 from the 4K stream did (the #133 artifact).
-        let sw = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM]);
+        let sw = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
         let siw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
             "cam1",
             &sw,
@@ -1718,6 +1759,100 @@ mod tests {
         assert_eq!(nv.contiguity.expected_count, 4);
     }
 
+    // ========================================================================
+    // #204 — a frame whose cam2 OPTICAL QR blurred (undecodable) but whose cam1
+    // BURN decoded must NOT be excluded from cam1's per-emit window (its burn
+    // proves cam1's emitted frame arrived). The old optical-delivered-only filter
+    // orphaned that cam1 id and manufactured a PHANTOM forward-gap REAL DROP.
+    // ========================================================================
+
+    #[test]
+    fn cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop() {
+        // The real run-136141133 shape: frame 1 carries the cam1 burn (id 51) but its cam2
+        // optical dual-QR was motion-blurred on that 60→30 straddle → undecodable, so the
+        // frame has ONLY the cam1 burn. The cam1 sequence across the recording is
+        // contiguous 50,51,52,53 — NOTHING is lost. The old filter dropped frame 1 (no cam2
+        // QR) from the window, leaving 50→52 as "consecutive delivered" → a phantom drop of
+        // 51. With the #204 fix (cam1 in-window membership = optical QR OR cam1 burn) the
+        // burn-carrying frame is kept, the run is contiguous, and the verdict is ZERO loss.
+        let strih = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM1B, 51)]), // cam2 optical QR blurred → only the cam1 burn decoded
+            frame(2, &[(CAM2, 102), (CAM1B, 52)]),
+            frame(3, &[(CAM2, 103), (CAM1B, 53)]),
+        ];
+        let w = in_window_burn_frames(
+            &strih,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
+        // The blurred-optical frame's cam1 burn (51) MUST be in the window.
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(50), Some(51), Some(52), Some(53)],
+            "the cam1 burn on the optical-blurred frame must be kept in-window (#204): {ids:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            iw.contiguity.is_contiguous(),
+            "cam1 50,51,52,53 is contiguous ⇒ ZERO loss, NOT a phantom drop (#204): {:?}",
+            iw.contiguity
+        );
+        assert!(
+            iw.contiguity.missing_ids.is_empty(),
+            "no phantom missing id: {:?}",
+            iw.contiguity.missing_ids
+        );
+
+        // And the full node_verdict from this strih slice is ZERO loss (no pixel path touched).
+        let tmp = tempfile::tempdir().unwrap();
+        let nv = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &strih,
+                rec_path: std::path::Path::new("/nonexistent.mkv"),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            5,
+        )
+        .unwrap();
+        assert!(
+            nv.is_zero(),
+            "ZERO loss, no phantom drop: {:?}",
+            nv.contiguity
+        );
+        assert_eq!(nv.real_drops(), 0);
+    }
+
+    #[test]
+    fn strih_render_burn_on_a_non_optical_frame_stays_excluded() {
+        // The #204 fix is cam1-ONLY: strih/stream burn per RENDER tick, so a render-tick burn
+        // on a NON-optical frame is pre/post-signal noise, NOT an emitted frame — it must
+        // still be excluded (the #198 behaviour). Frame 1 here has only a strih render burn
+        // (no cam2) INSIDE the optical span; for PerRenderTick it is NOT counted.
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (STRIH, 1670)]),
+            frame(1, &[(STRIH, 1673)]), // render tick on a non-optical frame — excluded for strih
+            frame(2, &[(CAM2, 102), (STRIH, 1676)]),
+        ];
+        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(1670), Some(1676)],
+            "a non-optical render-tick burn stays excluded for strih (#198/#204): {ids:?}"
+        );
+    }
+
     #[test]
     fn in_window_delivered_frame_missing_burn_is_one_gap_not_a_range() {
         // A genuine in-window fault: ONE delivered frame (carries cam2 QR) has no strih burn
@@ -1730,7 +1865,7 @@ mod tests {
             frame(2, &[(CAM2, 102)]), // delivered, NO strih burn ⇒ one real fault
             frame(3, &[(CAM2, 103), (STRIH, 1679)]),
         ];
-        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM]);
+        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
         let burns: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             burns,
