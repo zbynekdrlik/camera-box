@@ -260,11 +260,10 @@ fn in_window_burn_frames(
     //   frame — they keep the strict optical-delivered membership (the #198 behaviour).
     let is_optical = |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids);
     let has_node_burn = |f: &RecordingFrame| node_burn_id_on(f, burn_run_id).is_some();
-    // [red] #204: OLD optical-delivered-only membership — the cam1 burn on an
-    // optical-blurred frame is NOT yet kept, so cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop
-    // FAILS here (it orphans the burn → phantom drop). GREEN keeps the burn for PerEmittedFrame.
-    let _ = (has_node_burn, rate);
-    let in_window = |f: &RecordingFrame| is_optical(f);
+    let in_window = |f: &RecordingFrame| match rate {
+        BurnRate::PerEmittedFrame => is_optical(f) || has_node_burn(f),
+        BurnRate::PerRenderTick => is_optical(f),
+    };
 
     // Boundaries: the optical signal span (the painted run). For cam1 this still anchors the
     // window to the optical signal; an in-window non-optical frame carrying the cam1 burn is
