@@ -818,23 +818,30 @@ impl LatencyCsvRow {
 
 /// Build the per-frame latency time-series rows (#209) from the SINGLE stream recording.
 ///
-/// For each recorded stream frame that carries the cam2 optical Vernier tick, emit one
-/// [`LatencyCsvRow`]: the cam2 tick (`frame_id`), the chain-origin wall-clock anchor
-/// (`gen_ts_ns`), and the three co-located per-hop latencies (cam1→strih, strih→stream,
-/// cam1→stream). The burns are paired WITHIN the one frame (no cam2-tick cross-recording
-/// pairing), exactly as [`chain_hop_samples_from_stream`] does, so the per-frame points
-/// match the summary-stat hops the verdict already reports — the CSV is the per-frame
-/// expansion of the same numbers, not a parallel measurement.
+/// For each recorded stream frame carrying a valid x-axis time anchor, emit one
+/// [`LatencyCsvRow`]: the cam2 tick (`frame_id`, `None` when the cam2 QR was undecodable —
+/// #216), the chain-origin wall-clock anchor (`gen_ts_ns`), and the three co-located
+/// per-hop latencies (cam1→strih, strih→stream, cam1→stream). The burns are paired WITHIN
+/// the one frame (no cam2-tick cross-recording pairing), exactly as
+/// [`chain_hop_samples_from_stream`] does, so the per-frame points match the summary-stat
+/// hops the verdict already reports — the CSV is the per-frame expansion of the same
+/// numbers, not a parallel measurement.
 ///
 /// A hop's latency is `None` for a frame that did not carry BOTH of that hop's burns
 /// (e.g. a frame with only cam2 + cam1 burn has cam1→strih = None) — an empty CSV cell,
-/// which the plotter renders as a break in that hop's line. Rows are emitted in capture
-/// order and only for frames carrying a cam2 tick (a frame with no optical QR is not a
-/// delivered optical instant and has no x-axis identity). `gen_ts_ns ≤ 0` burn stamps are
-/// treated as absent (never a wrong number / negative latency). A frame whose only optical
-/// stamp is non-positive AND that carries no positive burn would have no valid x anchor
-/// (`gen_ts_ns ≤ 0`) and is SKIPPED — a 0-anchor row would plot far left of t0 and distort
-/// the continuous line (it could not be paired on a hop anyway).
+/// which the plotter renders as a break in that hop's line. `gen_ts_ns ≤ 0` burn stamps are
+/// treated as absent (never a wrong number / negative latency).
+///
+/// #216 — a row is emitted whenever the frame has a valid x anchor (a positive cam1/strih
+/// burn or cam2 paint stamp), EVEN WHEN the cam2 optical tick is absent. The cam2 OPTICAL QR
+/// (cam1 filming cam2's monitor) can go undecodable for a stretch (an optical-decode
+/// dropout) while the cam1/strih/stream BURNS stay present; the three burn-only hops are
+/// still computable, so emitting the row keeps those three lines UNBROKEN across the dropout
+/// (without #216 the whole row was skipped, blanking ~150s of all three lines). Such a row
+/// has `frame_id = None` (empty cell) and no `flip_ts_ns` (it is keyed on the cam2 tick).
+/// Rows are emitted in capture order. The ONLY frame still skipped is one with NEITHER a
+/// cam2 tick NOR any positive stamp — no x identity at all (a 0-anchor row would plot far
+/// left of t0 and distort the continuous line; it could not be paired on a hop anyway).
 ///
 /// `cam2_pin` (the `--cam2-run-id` the painter used): when `Some`, cam2 is matched EXACTLY
 /// by this run_id — IDENTICAL to [`RunIds::is_cam2`] / [`split_payloads`], so a forwarded
@@ -894,11 +901,6 @@ pub fn per_frame_latency_csv_rows(
                     }
                 }
             }
-        }
-        // [#216 RED placeholder] this commit reproduces the bug: a frame with no cam2
-        // tick is skipped, dropping its burn hops too — the GREEN commit removes this guard.
-        if cam2_tick.is_none() {
-            continue;
         }
         let ms = |down: Option<i64>, up: Option<i64>| -> Option<f64> {
             match (up, down) {
