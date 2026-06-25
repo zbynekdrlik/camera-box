@@ -290,6 +290,7 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | `output_fps` | `30` | log |
 | `genlock_wall_clock` | `0` | env |
 | `ndi_input_latency` | `0` | obs-websocket |
+| `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
 ",
     )
     .unwrap();

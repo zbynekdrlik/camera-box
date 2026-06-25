@@ -210,3 +210,23 @@ re-add a non-genlock one).
 
 strih has OTHER OBS installs in `D:\_APPS` (1ME/2ME/vestibul/input/light) — do NOT touch;
 broadcast = the Program Files 2ME one only.
+
+## Canonical OBS plugin-load path (#124 — no ProgramData-vs-Program Files shadow)
+
+OBS scans MULTIPLE module locations, so the SAME `distroav.dll` in more than one of them
+lets a stale copy silently shadow the intended genlock build (the mixed-version incident
+#119). The genlock DistroAV plugin lives in EXACTLY ONE place:
+
+**`C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll`** (canonical, both boxes).
+
+- First-party OBS plugins ship under `C:\Program Files\obs-studio\obs-plugins\64bit`; DistroAV
+  is the ONLY one deployed to ProgramData. A deploy MUST NOT also drop `distroav.dll` into
+  `Program Files\obs-studio\obs-plugins\64bit` — that re-creates the shadow.
+- The `C:\Program Files\obs-studio\data\obs-plugins\distroav` folder is resources/locale, NOT
+  the binary — leave it.
+- Verified live 2026-06-25: one `distroav.dll` per box (663040 B), loaded by the Program Files
+  genlock `obs64.exe`, render tick ENABLED; none under `Program Files\obs-plugins\64bit`.
+- `/drift-guard` step 1c reads every `distroav.dll` location across the scan paths
+  (`distroav_dll_paths`) and FAILS if there is more than one, or the lone one is off canonical.
+  Pinned in `vendor/README.md` as `canonical_plugin_path`. Do NOT remove the canonical copy —
+  only ever clean a duplicate in a SHADOW path (and only after confirming which is canonical).
