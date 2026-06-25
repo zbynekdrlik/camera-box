@@ -18,6 +18,13 @@
 # the cam1-4 map). Defaults to cam2 (the off-air dev rig) so existing behaviour is
 # unchanged. Explicit CAM_IP / SOURCE still override the resolved values (back-compat).
 # To drive the whole set in one go, use scripts/loopback-e2e-all.sh.
+#
+# NO version-integrity gate here (#123) — INTENTIONALLY. The #123 gate (scripts/version-integrity-
+# gate.sh) refuses a rig test unless the live strih+stream genlocked OBS stack matches the pinned
+# build. Loopback is a SINGLE-BOX cam->NDI->tap test on the camera-box device itself; it never
+# touches the strih/stream OBS stack (see the #66 NOTE below — there is NO downstream genlocked OBS
+# in this path). So the strih/stream pinned-build gate does not apply; recording-e2e.sh and
+# multitap-e2e.sh (which DO route through that stack) carry it. Do NOT add it here "to match" them.
 set -euo pipefail
 
 # Resolve the selected camera's IP + NDI source from the shared set.

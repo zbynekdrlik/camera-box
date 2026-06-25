@@ -149,6 +149,67 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
 3. **Report** per box: the observed set, the verdict (NO DRIFT / DRIFT `<settings>` / INCOMPLETE),
    and — on drift — exactly what to restore. Never claim a clean box you did not fully read.
 
+## Post-deploy WHOLE-BUNDLE byte/SHA verify (#121) — run RIGHT AFTER a genlock deploy
+
+The steps above check the two genlock DLLs (#122). After **deploying** a new genlock bundle to a box,
+verify the deploy is byte-for-byte complete: EVERY file the bundle shipped must match the
+`BUNDLE_MANIFEST.json` on the live box, and the deploy FAILS on ANY mismatch (a partial/corrupted
+deploy where even one non-DLL file is stale must never pass — deploy-from-clean-tree's contract).
+
+1. **Hash every deployed bundle file off the box** (read-only, win-* MCP `Shell`). Walk the install
+   roots the bundle deployed to and emit one `relpath=sha256` line per file, where `relpath` matches
+   the manifest's `files[]` path (forward slashes). The deployed roots map to the manifest layout —
+   `bin/64bit/*` under `C:\Program Files\obs-studio\bin\64bit`, `obs-plugins/64bit/distroav.dll` at
+   the canonical `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll`, top-level
+   files (`GENLOCK_BUILD_SHA.txt`) at the install root:
+
+   ```powershell
+   # Adjust the roots to the deployed bundle's layout; emit manifest-relative path = sha256 per file.
+   $obsRoot = "C:\Program Files\obs-studio"
+   $da      = "C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"
+   $pairs = @()
+   Get-ChildItem "$obsRoot\bin\64bit" -File -Recurse | ForEach-Object {
+     $rel = "bin/64bit/" + $_.FullName.Substring("$obsRoot\bin\64bit\".Length).Replace('\','/')
+     $pairs += "$rel=" + (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+   }
+   if (Test-Path $da) { $pairs += "obs-plugins/64bit/distroav.dll=" + (Get-FileHash $da -Algorithm SHA256).Hash.ToLower() }
+   # …add any top-level bundle files (e.g. GENLOCK_BUILD_SHA.txt) at their manifest path.
+   $pairs -join ','
+   ```
+
+   (Only hash the files the manifest LISTS — first-party OBS plugins / locale already on the box that
+   the bundle did not ship are not in `files[]` and are not part of the verify.)
+
+2. **Verify against the manifest** — feed every observed file hash as `bundle_hashes=`:
+
+   ```bash
+   ./scripts/drift-guard.sh --compare host=strih \
+     obs_version=… distroav_version=… ndi_runtime=… output_fps=… genlock_wall_clock=… \
+     ndi_input_latency="…" distroav_dll_paths="…" genlock_capability="…" \
+     manifest=./gbundle/BUNDLE_MANIFEST.json \
+     bundle_hashes="GENLOCK_BUILD_SHA.txt=<sha>,bin/64bit/obs64.exe=<sha>,bin/64bit/obs.dll=<sha>,obs-plugins/64bit/distroav.dll=<sha>"
+   ```
+
+   - Exit `0` → **NO DRIFT**, the `bundle_files N/N verified` line shows every shipped file matches —
+     the deploy is byte-for-byte complete. (`bundle_hashes=` SUPERSEDES the #122 two-DLL SHA keys; it
+     already covers obs.dll + distroav.dll by exact path, so you need not also pass
+     `obs_dll_sha256=`/`distroav_dll_sha256=`.)
+   - Exit `20` → a deployed file's bytes differ from the manifest (named in a `file … DRIFT` line) —
+     the deploy is corrupt/partial. Re-deploy that file. Do NOT certify the box.
+   - Exit `11` → a manifest file was not hashed (named `file … UNKNOWN`) — re-hash it before trusting.
+
+3. **Record `DEPLOYED_MANIFEST.json` on the box** (the audit artifact #121 requires — the live bytes
+   that actually shipped, so the deployed state is auditable on the box after the fact). Write the
+   per-file `Get-FileHash` set + the deployed build SHA next to the install via win-* MCP:
+
+   ```powershell
+   $manifest = @{ schema = "camera-box/deployed-manifest@1"; deployed_at = (Get-Date -Format o)
+     build_sha = (Get-Content "C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt" -EA SilentlyContinue)
+     files = @() }
+   # …populate $manifest.files from the same Get-FileHash walk as step 1 (path + sha256 + size)…
+   $manifest | ConvertTo-Json -Depth 4 | Set-Content "C:\ProgramData\obs-studio\DEPLOYED_MANIFEST.json"
+   ```
+
 ## Notes
 
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a

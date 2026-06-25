@@ -168,6 +168,103 @@ manifest_sha_for_component() {
     | sed -n 's/.*"sha256": "\([0-9a-f]*\)".*/\1/p' | head -1 || true
 }
 
+# manifest_all_paths MANIFEST -> the "path" of EVERY files[] entry (one per line, manifest order).
+# This is the #121 whole-bundle lister: the #122 per-component lookup above resolves only obs.dll +
+# distroav.dll, but #121's post-deploy verify must check that EVERY shipped file matches byte-for-byte
+# (a partial/corrupted deploy where a non-DLL file is stale would otherwise pass #122). drift-guard
+# owns its own parser here — it must NOT depend on genlock-manifest.sh at --compare time (that script
+# is the PRODUCER; this one is a stand-alone CONSUMER on the operator's dev1, where only the manifest
+# JSON has been downloaded). Same one-line `{ "path": "…", "sha256": … }` shape genlock-manifest.sh
+# emits (+ tests/genlock_manifest.rs asserts). `|| true` so an empty files[] is a no-match, not a
+# pipefail abort.
+manifest_all_paths() {
+  local manifest="$1"
+  [ -f "$manifest" ] || { echo "manifest_all_paths: no such file: $manifest" >&2; return 1; }
+  { grep -oE '"path": "[^"]*"' "$manifest" || true; } | sed -n 's/"path": "\(.*\)"/\1/p'
+}
+
+# manifest_sha_for_path MANIFEST PATH -> the recorded sha256 for the files[] entry whose "path" is
+# exactly PATH ("" if absent). The #121 per-file lookup (distinct from the #122 by-BASENAME
+# manifest_sha_for_component): the whole-bundle compare needs the sha for an EXACT path, since two
+# files can share a basename across dirs. `sed … ;q` quits sed after the first match (a clean exit,
+# NOT a downstream `head -1` that would SIGPIPE the upstream grep under pipefail — the #239 class).
+# `|| true` so a no-match (path absent) is not a pipefail abort.
+manifest_sha_for_path() {
+  local manifest="$1" path="$2"
+  [ -f "$manifest" ] || { echo "manifest_sha_for_path: no such file: $manifest" >&2; return 1; }
+  { grep -F "\"path\": \"$path\"" "$manifest" || true; } \
+    | sed -n '/"sha256"/{s/.*"sha256": "\([0-9a-f]*\)".*/\1/p;q}'
+}
+
+# observed_sha_for PATH OBSERVED_CSV -> the live sha256 observed for bundle file PATH from the
+# comma-separated `relpath=sha256` list gathered off the box (Get-FileHash per deployed file), "" if
+# PATH is not in the set (-> the caller reports it UNKNOWN, never a silent clean). Bundle relpaths use
+# forward slashes and never contain commas or '=' (manifest paths are sha-stamped relative paths), so
+# splitting on ',' then on the FIRST '=' is unambiguous. A whitespace-only entry is skipped.
+observed_sha_for() {
+  local want="$1" csv="$2" entry path sha
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+    [ -z "$entry" ] && continue
+    path="${entry%%=*}"; sha="${entry#*=}"
+    path="${path#"${path%%[![:space:]]*}"}"; path="${path%"${path##*[![:space:]]}"}"
+    if [ "$path" = "$want" ]; then printf '%s' "$sha"; return 0; fi
+  done
+}
+
+# drift_check_all_files MANIFEST OBSERVED_CSV -> the #121 WHOLE-BUNDLE byte/SHA verify. Walks EVERY
+# files[] entry in MANIFEST and compares its recorded sha256 against the live sha for that exact path
+# in OBSERVED_CSV (`relpath=sha256,…`). Prints one status line per file + a roll-up "bundle_files
+# N/total verified" line, and returns 0 OK (every file matches) / 2 DRIFT (any file's bytes differ) /
+# 3 UNKNOWN (a manifest file was not observed, OR the observed set was empty — a file we could not hash
+# is NEVER a silent clean). This is the deploy-from-clean-tree contract: a deploy is "done" only when
+# every manifest-LISTED file on the live box matches byte-for-byte, so ANY mismatch fails the deploy.
+# Scope note (asymmetric by design): this verifies the bytes of the files the manifest lists; it does
+# NOT flag an EXTRA un-manifested file present on the box. The producer-side genlock-manifest.sh
+# check_consistency catches extras at build time, and the dangerous subclass — a shadowing duplicate
+# plugin DLL — is caught independently by drift_check_plugin_paths.
+drift_check_all_files() {
+  local manifest="$1" csv="$2" path exp obs drift=0 unknown=0 ok=0 total=0
+  if [ ! -f "$manifest" ]; then
+    echo "drift_check_all_files: no such manifest: $manifest" >&2; return 1
+  fi
+  if [ -z "$csv" ]; then
+    printf '  %-20s UNKNOWN  (whole-bundle hash scan not run — no bundle_hashes observed)\n' "bundle_files"
+    return 3
+  fi
+  # Iterate the manifest's files via a here-string (NOT `done < <(proc-sub)` — the genlock-manifest.sh
+  # git-bash FIFO lesson) so the loop body's counters survive in this shell.
+  local paths; paths="$(manifest_all_paths "$manifest")"
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    total=$((total + 1))
+    exp="$(manifest_sha_for_path "$manifest" "$path")"
+    obs="$(observed_sha_for "$path" "$csv")"
+    if [ -z "$obs" ]; then
+      printf '  file %-32s UNKNOWN  (deployed file not hashed: %s)\n' "${path##*/}" "$path"
+      unknown=$((unknown + 1))
+    elif [ "$obs" = "$exp" ]; then
+      printf '  file %-32s OK       (%s)\n' "${path##*/}" "$path"
+      ok=$((ok + 1))
+    else
+      printf '  file %-32s DRIFT    (%s — expected %s, observed %s)\n' "${path##*/}" "$path" "$exp" "$obs"
+      drift=$((drift + 1))
+    fi
+  done <<< "$paths"
+  if [ "$total" -eq 0 ]; then
+    printf '  %-20s UNKNOWN  (manifest lists no files[])\n' "bundle_files"
+    return 3
+  fi
+  printf '  %-20s %d/%d verified (%d drift, %d unread)\n' "bundle_files" "$ok" "$total" "$drift" "$unknown"
+  [ "$drift" -gt 0 ] && return 2
+  [ "$unknown" -gt 0 ] && return 3
+  return 0
+}
+
 # genlock_capability_from_log TEXT -> "1" if the running OBS log carries a genlock CAPABILITY marker
 # that ONLY our genlock build emits (the wall-clock render-tick line, the #136 timestamp-aligned
 # release line, the #184 sub-frame jitter reserve line, or the #235 single-knob `genlock: latency = N
@@ -412,6 +509,14 @@ Usage:
   With a manifest supplied, an unread live SHA or capability marker is UNKNOWN (exit 11), never a
   silent clean — a wrong build we failed to hash is exactly the false-negative this facet prevents.
 
+--compare WHOLE-BUNDLE byte/SHA key (#121, post-deploy verify — supply `bundle_hashes` with `manifest`):
+  bundle_hashes (a comma-separated `relpath=sha256` list of EVERY deployed bundle file's live
+    Get-FileHash, read off the box — relpaths forward-slashed, matching the manifest's files[] paths).
+    The deploy is "done" only when the live box matches the manifest byte-for-byte: drift-guard walks
+    the manifest's files[] and FAILS on ANY mismatch (DRIFT) or any unread file (UNKNOWN) — so a
+    partial/corrupted deploy where even one non-DLL file is stale can never pass. Dormant unless
+    supplied (the #122 two-DLL contract is unchanged for the hot-swap obs.dll-only verify path).
+
 Exit codes: 0 = clean, 20 = DRIFT, 11 = some observed value UNKNOWN (incomplete, NOT clean),
 1 = usage/IO error.
 EOF
@@ -468,6 +573,8 @@ compare_observed() {
   local o_obs="$9" o_distroav="${10}" o_ndi="${11}" o_fps="${12}" o_genlock="${13}" o_latency="${14}" o_plugin="${15}"
   # #122 build-SHA + capability facet (opt-in when a bundle manifest is supplied):
   local manifest="${16}" o_obs_sha="${17}" o_distroav_sha="${18}" o_capability="${19}"
+  # #121 whole-bundle byte/SHA facet (opt-in when bundle_hashes= is also supplied alongside manifest):
+  local o_bundle_hashes="${20}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -519,33 +626,41 @@ compare_observed() {
       echo "!! --compare manifest not found: $manifest" >&2
       exit 1
     fi
-    local m_obs_sha m_distroav_sha
-    m_obs_sha="$(manifest_sha_for_component "$manifest" obs)"
-    m_distroav_sha="$(manifest_sha_for_component "$manifest" distroav)"
+    # The #122 per-component obs.dll/distroav.dll SHA checks run ONLY when the #121 whole-bundle facet
+    # is NOT active. When `bundle_hashes=` is supplied, drift_check_all_files (below) verifies EVERY
+    # bundle file — including obs.dll + distroav.dll by their exact path — so the two-DLL checks here
+    # would be redundant AND would falsely demand the separate obs_dll_sha256/distroav_dll_sha256 keys
+    # (UNKNOWN) that the whole-bundle scan already covers. So #121 supersedes them; #122's hot-swap
+    # obs.dll-only verify (no full file set) is preserved when bundle_hashes is absent.
+    if [ -z "$o_bundle_hashes" ]; then
+      local m_obs_sha m_distroav_sha
+      m_obs_sha="$(manifest_sha_for_component "$manifest" obs)"
+      m_distroav_sha="$(manifest_sha_for_component "$manifest" distroav)"
 
-    # obs.dll build SHA — the libobs core our genlock patches live in. The manifest must list it;
-    # if it does not, the manifest is unusable for this check (UNKNOWN, never a false clean).
-    if [ -z "$m_obs_sha" ]; then
-      printf '  %-20s UNKNOWN  (manifest %s lists no obs.dll sha256)\n' "obs_dll_sha256" "$manifest"
-      unknown=$((unknown + 1))
-    else
-      rc=0
-      drift_check "obs_dll_sha256" exact "$m_obs_sha" "$o_obs_sha" || rc=$?
-      [ "$rc" -eq 2 ] && drift=$((drift + 1))
-      [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
-    fi
+      # obs.dll build SHA — the libobs core our genlock patches live in. The manifest must list it;
+      # if it does not, the manifest is unusable for this check (UNKNOWN, never a false clean).
+      if [ -z "$m_obs_sha" ]; then
+        printf '  %-20s UNKNOWN  (manifest %s lists no obs.dll sha256)\n' "obs_dll_sha256" "$manifest"
+        unknown=$((unknown + 1))
+      else
+        rc=0
+        drift_check "obs_dll_sha256" exact "$m_obs_sha" "$o_obs_sha" || rc=$?
+        [ "$rc" -eq 2 ] && drift=$((drift + 1))
+        [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+      fi
 
-    # distroav.dll build SHA — only checked when the manifest carries it (the hot-swap fast-dll
-    # bundle ships obs.dll only). A manifest that lists distroav.dll demands the live SHA; the live
-    # SHA observed without a manifest entry is reported, not silently dropped.
-    if [ -n "$m_distroav_sha" ]; then
-      rc=0
-      drift_check "distroav_dll_sha256" exact "$m_distroav_sha" "$o_distroav_sha" || rc=$?
-      [ "$rc" -eq 2 ] && drift=$((drift + 1))
-      [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
-    elif [ -n "$o_distroav_sha" ]; then
-      printf '  %-20s OK       (observed %s; not in manifest — obs.dll-only bundle)\n' \
-        "distroav_dll_sha256" "$o_distroav_sha"
+      # distroav.dll build SHA — only checked when the manifest carries it (the hot-swap fast-dll
+      # bundle ships obs.dll only). A manifest that lists distroav.dll demands the live SHA; the live
+      # SHA observed without a manifest entry is reported, not silently dropped.
+      if [ -n "$m_distroav_sha" ]; then
+        rc=0
+        drift_check "distroav_dll_sha256" exact "$m_distroav_sha" "$o_distroav_sha" || rc=$?
+        [ "$rc" -eq 2 ] && drift=$((drift + 1))
+        [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+      elif [ -n "$o_distroav_sha" ]; then
+        printf '  %-20s OK       (observed %s; not in manifest — obs.dll-only bundle)\n' \
+          "distroav_dll_sha256" "$o_distroav_sha"
+      fi
     fi
 
     # genlock capability marker — the build-unique tell that distinguishes our build from a stock
@@ -554,6 +669,22 @@ compare_observed() {
     drift_check_capability "$o_capability" || rc=$?
     [ "$rc" -eq 2 ] && drift=$((drift + 1))
     [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+
+    # #121 WHOLE-BUNDLE byte/SHA verify (opt-in: runs when bundle_hashes= is supplied alongside the
+    # manifest). The #122 facet above checks only the two genlock-bearing DLLs; #121 raises the bar to
+    # deploy-from-clean-tree's contract — EVERY file the bundle shipped must match the manifest
+    # byte-for-byte on the live box, so a partial/corrupted deploy (one non-DLL file silently stale)
+    # can never pass. The post-deploy step gathers every deployed file's Get-FileHash off the box into
+    # a `relpath=sha256,…` list and passes it here; drift_check_all_files walks the manifest's files[]
+    # and FAILS on any mismatch (DRIFT) or any unread file (UNKNOWN, never a silent clean). Without
+    # bundle_hashes= this facet is dormant and the #122 two-DLL contract is unchanged (the hot-swap
+    # obs.dll-only verify path).
+    if [ -n "$o_bundle_hashes" ]; then
+      rc=0
+      drift_check_all_files "$manifest" "$o_bundle_hashes" || rc=$?
+      [ "$rc" -eq 2 ] && drift=$((drift + 1))
+      [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+    fi
   fi
 
   echo
@@ -605,7 +736,7 @@ main() {
 
   # --compare: collect observed key=val pairs.
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
-  local manifest="" o_obs_sha="" o_distroav_sha="" o_capability=""
+  local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes=""
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -621,13 +752,14 @@ main() {
       obs_dll_sha256)     o_obs_sha="$v" ;;      # #122: live Get-FileHash of the deployed obs.dll
       distroav_dll_sha256) o_distroav_sha="$v" ;; # #122: live Get-FileHash of the deployed distroav.dll
       genlock_capability) o_capability="$v" ;;   # #122: the live OBS-log genlock marker text
+      bundle_hashes)      o_bundle_hashes="$v" ;; # #121: live `relpath=sha256,…` of every deployed bundle file
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
 
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
-    "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability"
+    "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes"
 }
 
 main "$@"

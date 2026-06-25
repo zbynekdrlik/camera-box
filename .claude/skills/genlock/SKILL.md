@@ -158,9 +158,22 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   returns 1 and trips the test harness's `set -e`. LIVE-PROVEN both boxes 2026-06-25:
   obs.dll `24e22357…` (= #184 fast manifest), distroav.dll `66cea70…` (= full bundle),
   marker present → NO DRIFT; a wrong SHA + no-marker log → exit 20.
-- **#121** (post-deploy byte/SHA verify vs the manifest — needs the rig) still OPEN —
-  it ships the manifest TO the rig + byte-checks the deploy; #122 (above) is the runtime
-  drift-guard facet that consumes it. Both consume `BUNDLE_MANIFEST.json`.
+- **whole-bundle post-deploy byte/SHA verify (#121, DONE)** — #122 above checks only the
+  two genlock DLLs; #121 raises it to deploy-from-clean-tree's contract: drift-guard
+  `--compare` now also takes `bundle_hashes=<relpath=sha256,…>` (every deployed bundle
+  file's live `Get-FileHash`, gathered off the box) and walks the manifest's WHOLE
+  `files[]`, FAILING on ANY mismatch (DRIFT exit 20) or any unread file (UNKNOWN exit 11)
+  — so a partial/corrupted deploy where even one NON-DLL file (`obs64.exe`, a first-party
+  plugin, a locale) is stale can never pass. New pure fns `manifest_all_paths` +
+  `manifest_sha_for_path` + `observed_sha_for` + `drift_check_all_files` (tested in
+  `tests/drift_guard.rs`). The facet is OPT-IN and SUPERSEDES the #122 two-DLL SHA checks
+  when `bundle_hashes=` is supplied (it already covers obs.dll + distroav.dll by exact
+  path); without it the #122 hot-swap obs.dll-only verify is unchanged. The deploy step
+  ALSO records a `DEPLOYED_MANIFEST.json` next to the install on each box (the live
+  per-file `Get-FileHash` set, same shape as `BUNDLE_MANIFEST.json`) so the deployed bytes
+  are auditable on the box after the fact. Driven by `/drift-guard` post-deploy verify
+  (gather every file's `Get-FileHash` → `bundle_hashes=`). Both consume
+  `BUNDLE_MANIFEST.json`.
 - **single canonical OBS plugin-load path (#124)** — OBS scans MULTIPLE module
   locations (`C:\Program Files\obs-studio\obs-plugins\64bit` first-party,
   `C:\ProgramData\obs-studio\plugins\<plugin>\bin\64bit` global,

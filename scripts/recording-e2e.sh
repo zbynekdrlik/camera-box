@@ -136,6 +136,41 @@ CLOCK_GUARD_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}" "$HERE/dantesync-gate.sh" \
   --win-status "strih=$DANTE_STRIH_STATUS" \
   --win-status "stream=$DANTE_STREAM_STATUS"
 
+# Version-integrity precondition gate (#123) — THE OTHER hard step, alongside DanteSync. The whole
+# test is worthless unless the LIVE strih+stream OBS stack is the PINNED build (a randomly-deployed /
+# drifted / stock-OBS build silently produces a false result — that is #119). So before bringing up
+# the rig, gather each Windows box's observed stack state and run drift-guard --compare against the
+# pinned set (vendor/README.md); REFUSE (non-zero) on DRIFT (20) or UNKNOWN (11). Same Windows-box
+# access pattern as the DanteSync gate above: ssh is denied, so each box's state JSON is fetched over
+# its standing http.server (a helper exposes the read-only /drift-guard observed values as
+# /bundle-state.json), falling back to a caller-pre-fetched file (the win-* MCP holder writes it).
+# Optionally pass VERSION_GATE_MANIFEST=<BUNDLE_MANIFEST.json> to also assert the build SHAs.
+echo "[0/8] version-integrity gate — live strih+stream stack MUST match the pinned set (#123/#119)"
+WIN_BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
+VERSION_STRIH_STATE="${VERSION_STRIH_STATE:-$OUTDIR/version-strih.json}"
+VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-$OUTDIR/version-stream.json}"
+# Try to fetch each Windows box's stack-state JSON over its http.server; a failure leaves the file
+# absent -> the gate reports that box UNKNOWN and refuses, unless the caller already placed a state
+# file there via the win-* MCP. Mirrors fetch_dante_status() exactly.
+fetch_box_state() {
+  local host="$1" dest="$2"
+  [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
+  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
+    echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"
+  else
+    echo "    NOTE: could not fetch version-integrity state from ${host} (http :$WIN_BUNDLE_STATE_PORT) — the" >&2
+    echo "          win-* MCP holder must write the drift-guard observed values to $dest, else the gate refuses." >&2
+  fi
+}
+fetch_box_state "$STRIH"  "$VERSION_STRIH_STATE"  || true
+fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
+# ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
+# is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
+"$HERE/version-integrity-gate.sh" \
+  ${VERSION_GATE_MANIFEST:+--manifest "$VERSION_GATE_MANIFEST"} \
+  --win-state "strih=$VERSION_STRIH_STATE" \
+  --win-state "stream=$VERSION_STREAM_STATE"
+
 # cam1 v4l2 capture controls (#156 durable): apply the certified sharp controls
 # (saturation=0, contrast=75) BEFORE the run so a soft-default device can never silently
 # degrade the camera's optical dual-QR decode. The cam1 launch step ([2/8]) re-applies them
