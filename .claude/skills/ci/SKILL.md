@@ -109,3 +109,20 @@ FAILS if any probe-using test is ungated or if the CLAUDE.md local gate command 
 `scripts/purge-target.sh` (cargo clean when `target/` > `${THRESHOLD_MB:-4096}`; SKIPS while a live
 E2E has probe binaries running — matched by truncated `/proc` comm, e.g. `recording-verdi`,
 `camera-box-prob`, NOT a `pgrep -f` cmdline substring which false-positives on the script's own args).
+
+## airuleset `pre-push-test-check` — two recurring traps on `git push origin dev`
+
+The global PreToolUse hook scans the WHOLE `origin/main..HEAD` delta on every push (not just your
+commits), so two things bite here repeatedly:
+
+1. **Inherited bug-fix commit re-flagged.** A `fix(...)`-prefixed commit already on `dev` but not yet
+   on `main` (e.g. a prior `[no-test:]`-bypassed `scripts/` fix from another cycle) is the FIRST
+   commit in the delta → Gate-2 ("bug-fix commit before any test commit") re-fires on YOUR PR even
+   though your own work is correctly RED→GREEN ordered. Resolve with a one-line `[no-test: <reason>]`
+   on your LATEST commit (a docs/log commit is the natural carrier), naming the inherited commit as
+   the only test-less one in range.
+2. **`[no-test: <reason>]` must be on ONE LINE.** The hook greps `\[no-test:\s*[^]]+\]` per-line, so a
+   reason that wraps across newlines never matches and the push stays blocked (looks like the bypass
+   is ignored). Keep the `[no-test: …]` opening `[` and closing `]` on the SAME commit-message line.
+   Bare `[no-test]` (no reason) is rejected outright. Every bypass is logged to
+   `~/devel/airuleset/audits/no-test-skips.log`.
