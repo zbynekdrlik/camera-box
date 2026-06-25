@@ -159,7 +159,8 @@ impl FramebufferDisplay {
 
         // Write the rendered frame into the fb. When the render exactly fills the fb
         // width and the fb has no row padding, write it in one shot; otherwise write
-        // row by row (left-aligned), padding each fb row out to its full line_length.
+        // row by row (left-aligned), padding each fb row out to its full line_length
+        // and blacking out the rows BELOW the render (vertical letterbox).
         let render_stride = render_w as usize * 4;
         let fb_stride = self.line_length as usize;
         if render_w == self.width && fb_stride == render_stride && render_h == self.height {
@@ -167,18 +168,27 @@ impl FramebufferDisplay {
             self.file.write_all_at(&render_data, 0)?;
         } else {
             // Row-by-row: copy each rendered row left-aligned, pad the rest of the fb
-            // row with zeros (letterbox). Only the rendered rows are written; rows
-            // beyond render_h are left untouched (already black / prior content).
+            // row with zeros (right margin). Then black out the rows below the render
+            // (bottom margin) so a smaller-than-fb render never leaves stale framebuffer
+            // content (boot console / a previous taller frame) visible in the letterbox.
             self.file.seek(SeekFrom::Start(0))?;
+            let right_pad = fb_stride.saturating_sub(render_stride);
             for y in 0..render_h as usize {
                 let src_offset = y * render_stride;
                 let src_end = src_offset + render_stride;
                 if src_end <= render_data.len() {
                     self.file.write_all(&render_data[src_offset..src_end])?;
-                    let padding = fb_stride.saturating_sub(render_stride);
-                    if padding > 0 {
-                        self.file.write_all(&vec![0u8; padding])?;
+                    if right_pad > 0 {
+                        self.file.write_all(&vec![0u8; right_pad])?;
                     }
+                }
+            }
+            // Black out the bottom letterbox (rows render_h..fb_height), one fb-stride
+            // zero buffer reused per row.
+            if render_h < self.height {
+                let blank_row = vec![0u8; fb_stride];
+                for _ in render_h..self.height {
+                    self.file.write_all(&blank_row)?;
                 }
             }
         }

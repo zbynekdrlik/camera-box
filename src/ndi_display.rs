@@ -146,7 +146,11 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         // (never silently go dark). Polled BEFORE the first frame so a phantom fb never
         // gets even one heavy write.
         let mut connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
-        let mut last_connector_log = !connector_present; // log the initial state once
+        // Last connector presence we LOGGED (`None` = nothing logged yet). The initial
+        // state — connected OR disconnected — is logged once on the first frame, then
+        // only on a change. This guarantees a boot-with-monitor-unplugged run still
+        // emits the "no monitor — skipping render" diagnostic.
+        let mut logged_connector_state: Option<bool> = None;
 
         // Inner display loop - runs until source disappears
         while running.load(Ordering::Relaxed) {
@@ -181,11 +185,19 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                     // get a heavy software upscale to no real screen (the pre-event
                     // incident: 1080→4K → 99.9% CPU). When disconnected, skip the
                     // render+upscale entirely; capture/emit are unaffected.
-                    if connector_present {
-                        if last_connector_log {
+                    // Log the connector state once initially, then on every change.
+                    if logged_connector_state != Some(connector_present) {
+                        if connector_present {
                             tracing::info!("NDI display: monitor connected — rendering");
-                            last_connector_log = false;
+                        } else {
+                            tracing::info!(
+                                "NDI display: no monitor connected (DRM status=disconnected) — skipping render to avoid upscaling to a phantom framebuffer"
+                            );
                         }
+                        logged_connector_state = Some(connector_present);
+                    }
+
+                    if connector_present {
                         // Display the frame (ignore errors - display may be disconnected)
                         if let Err(e) = display.display_frame(
                             &frame.data,
@@ -201,11 +213,6 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                                 );
                             }
                         }
-                    } else if !last_connector_log {
-                        tracing::info!(
-                            "NDI display: no monitor connected (DRM status=disconnected) — skipping render to avoid upscaling to a phantom framebuffer"
-                        );
-                        last_connector_log = true;
                     }
 
                     frame_count += 1;

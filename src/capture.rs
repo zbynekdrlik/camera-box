@@ -83,17 +83,20 @@ pub fn requested_capture_denominator(override_fps: Option<u32>) -> u32 {
 /// The forward wrapping distance discriminates the two cases:
 /// - a genuine FORWARD advance (incl. the legitimate `u32` wrap, e.g. `MAX → 0`)
 ///   has a SMALL wrapping distance → count it.
-/// - a BACKWARD step has a HUGE wrapping distance (> half the `u32` range, the
-///   "long way round") → it is not a real forward advance → 0 drops.
+/// - a BACKWARD step wraps the "long way round" — its forward distance lands in the
+///   upper half of the range → it is not a real forward advance → 0 drops.
 pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
     let forward = cur.wrapping_sub(prev);
-    // A forward distance in the upper half of the range is really a small backward
-    // step (reset/reorder/decimation), not an enormous forward jump → 0 drops.
-    // This still admits the legitimate forward u32 wrap, whose distance is small.
-    if forward > u32::MAX / 2 {
+    // Reinterpret the wrapping forward distance as a signed delta: a real forward
+    // advance is a small POSITIVE delta; a backward step (reset/reorder/decimation)
+    // is a NEGATIVE delta (forward distance in the upper half → high bit set). The
+    // i32 cast splits at the exact symmetric u32 midpoint (2^31). Non-positive delta
+    // (backward or duplicate) ⇒ 0 drops; otherwise the gap is delta - 1. The
+    // legitimate forward u32 wrap (e.g. MAX→0, delta=+1) stays positive and counts.
+    if (forward as i32) <= 0 {
         0
     } else {
-        forward.saturating_sub(1)
+        forward - 1
     }
 }
 
@@ -739,6 +742,29 @@ mod tests {
             sequence_gap(u32::MAX, 3),
             3,
             "forward wrap with 3 intervening (0,1,2 dropped) => 3"
+        );
+    }
+
+    #[test]
+    fn sequence_gap_splits_at_symmetric_midpoint() {
+        // The forward/backward split is the exact symmetric u32 midpoint (2^31):
+        // a forward distance of 2^31-1 (delta=+2147483647) is still "forward" and
+        // counts; 2^31 and above is "backward" (the long way round) => 0. No bogus
+        // ~2-billion drop count at the boundary.
+        assert_eq!(
+            sequence_gap(0, (1u32 << 31) - 1),
+            (1u32 << 31) - 2,
+            "delta = +2^31-1 (max positive i32) is forward => counts"
+        );
+        assert_eq!(
+            sequence_gap(0, 1u32 << 31),
+            0,
+            "delta = 2^31 (i32::MIN, the midpoint) is backward => 0"
+        );
+        assert_eq!(
+            sequence_gap(0, u32::MAX),
+            0,
+            "delta = -1 (one step backward) => 0, never ~u32::MAX"
         );
     }
 
