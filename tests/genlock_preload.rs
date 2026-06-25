@@ -757,10 +757,19 @@ mod single_latency_knob {
     fn latency_is_clamped_to_max() {
         assert_eq!(GENLOCK_LATENCY_MS_MAX, 100);
         assert_eq!(resolve_latency_ms(Some("100"), None), 100);
-        assert_eq!(resolve_latency_ms(Some("101"), None), GENLOCK_LATENCY_MS_MAX); // clamp
-        assert_eq!(resolve_latency_ms(Some("99999"), None), GENLOCK_LATENCY_MS_MAX); // overflow
-        // The alias is clamped on the same scale.
-        assert_eq!(resolve_latency_ms(None, Some("250")), GENLOCK_LATENCY_MS_MAX);
+        assert_eq!(
+            resolve_latency_ms(Some("101"), None),
+            GENLOCK_LATENCY_MS_MAX
+        ); // clamp
+        assert_eq!(
+            resolve_latency_ms(Some("99999"), None),
+            GENLOCK_LATENCY_MS_MAX
+        ); // overflow
+           // The alias is clamped on the same scale.
+        assert_eq!(
+            resolve_latency_ms(None, Some("250")),
+            GENLOCK_LATENCY_MS_MAX
+        );
     }
 
     #[test]
@@ -771,11 +780,11 @@ mod single_latency_knob {
         assert_eq!(ms_to_frames(33, 30000, 1001), 1); // ~one frame, rounds to 1
         assert_eq!(ms_to_frames(34, 30000, 1001), 1);
         assert_eq!(ms_to_frames(100, 30000, 1001), 3); // ~3 frames
-        // 30/1 exact: one frame = 33.33ms, so 3ms ≈ 0 frames (sub-frame, the whole point).
+                                                       // 30/1 exact: one frame = 33.33ms, so 3ms ≈ 0 frames (sub-frame, the whole point).
         assert_eq!(ms_to_frames(3, 30, 1), 0);
         assert_eq!(ms_to_frames(33, 30, 1), 1);
         assert_eq!(ms_to_frames(50, 30, 1), 2); // 1.5 frames rounds to 2
-        // 60fps: one frame = 16.67ms.
+                                                // 60fps: one frame = 16.67ms.
         assert_eq!(ms_to_frames(17, 60, 1), 1);
         assert_eq!(ms_to_frames(50, 60, 1), 3);
         // fps unknown ⇒ 0 (caller shows "fps unknown", never divides by zero).
@@ -804,7 +813,10 @@ mod single_latency_knob {
         // small jitter/dropout buffer. Auto-derive a depth of at least the min (>=1 frame
         // so the #110 0-loss floor holds) regardless of latency_ms — the depth does NOT
         // add latency (the ms reserve governs the held delay, not the FIFO depth).
-        assert!(GENLOCK_AUTO_PRELOAD_MIN >= 1, "min depth must hold >=1 frame for 0-loss");
+        assert!(
+            GENLOCK_AUTO_PRELOAD_MIN >= 1,
+            "min depth must hold >=1 frame for 0-loss"
+        );
         assert_eq!(genlock_auto_preload(0), GENLOCK_AUTO_PRELOAD_MIN);
         assert_eq!(genlock_auto_preload(3), GENLOCK_AUTO_PRELOAD_MIN); // prod latency_ms=3
         assert_eq!(genlock_auto_preload(10), GENLOCK_AUTO_PRELOAD_MIN);
@@ -832,7 +844,10 @@ mod single_latency_knob {
         // The ms value precedes the '(' (ms primary, frames secondary).
         let paren = l.find('(').expect("has a paren");
         let ms_pos = l.find("3 ms").expect("has the ms value");
-        assert!(ms_pos < paren, "ms value must come BEFORE the parenthesized frames: {l}");
+        assert!(
+            ms_pos < paren,
+            "ms value must come BEFORE the parenthesized frames: {l}"
+        );
     }
 
     #[test]
