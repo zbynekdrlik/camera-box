@@ -30,10 +30,15 @@ sysfs:
 - **Real monitor:**  `status=connected   enabled=enabled  modes=[1920x1080,...]`
 - **Phantom fb:**    `status=disconnected enabled=disabled modes=[]`
 
-`status` is authoritative — a `disconnected` connector means no monitor regardless of a
-lingering `enabled`. `connector_is_connected()` keys on `status.trim() == "connected"`;
-`any_connector_connected("/sys/class/drm")` scans all `cardN-*` connector dirs. On unknown
-sysfs layout (`None`) → render anyway (never silently go dark).
+The connector SCANNING OUT to fb0 is the one with `enabled=enabled`; a real monitor on it
+is `status=connected enabled=enabled`. So presence = BOTH `enabled=enabled` AND
+`status=connected` (`connector_is_connected()`). Requiring `enabled` is what scopes the
+check to the fb-driving connector — on a MULTI-connector box (cam2 has 3 HDMI connectors) a
+second monitor on a non-enabled connector must NOT mask the fb connector's phantom state.
+`any_connector_connected("/sys/class/drm")` scans all `cardN-*` dirs (non-connector dirs like
+`renderD128`/`version`/`card1` have no `status` file → skipped) and returns `Some(true)` if
+any enabled+connected, `Some(false)` if connectors readable but none qualifies (phantom),
+`None` on unknown layout → render anyway (never silently go dark).
 
 **Read sysfs as a PLAIN FILE — do NOT pull the `drm` crate.** `--display` is a
 DEFAULT-FEATURE runtime mode; the `drm` crate is `probe`-feature-only and pulling it into

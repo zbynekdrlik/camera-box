@@ -173,13 +173,16 @@ impl FramebufferDisplay {
             // content (boot console / a previous taller frame) visible in the letterbox.
             self.file.seek(SeekFrom::Start(0))?;
             let right_pad = fb_stride.saturating_sub(render_stride);
+            // One reusable zero buffer for the per-row right margin (no per-row alloc in
+            // this CPU-sensitive display path).
+            let pad_buf = vec![0u8; right_pad];
             for y in 0..render_h as usize {
                 let src_offset = y * render_stride;
                 let src_end = src_offset + render_stride;
                 if src_end <= render_data.len() {
                     self.file.write_all(&render_data[src_offset..src_end])?;
                     if right_pad > 0 {
-                        self.file.write_all(&vec![0u8; right_pad])?;
+                        self.file.write_all(&pad_buf)?;
                     }
                 }
             }
@@ -408,24 +411,38 @@ pub fn clamp_render_dims(src_w: u32, src_h: u32, fb_w: u32, fb_h: u32) -> (u32, 
     (src_w.min(fb_w), src_h.min(fb_h))
 }
 
-/// Decide whether a DRM connector has a real monitor attached, from its sysfs
-/// `status` / `enabled` / `modes` files (#135). `status` is the authoritative
-/// presence signal: a hot-unplugged connector reports `status=disconnected`
-/// (`enabled=disabled`, `modes=[]`) even though i915 leaves fb0 LATCHED at the old
-/// mode — a "phantom" fb that opens and writes fine, so neither the fb-open retry
-/// nor the write-failure path catches it. Only `status == "connected"` (trimmed)
-/// means a monitor is actually present and the display should render.
-pub fn connector_is_connected(status: &str, _enabled: &str, _modes: &str) -> bool {
-    status.trim() == "connected"
+/// Decide whether a DRM connector is ACTIVELY DRIVING A REAL MONITOR — i.e. it is
+/// the connector scanning out to the framebuffer AND a monitor is attached — from its
+/// sysfs `status` / `enabled` / `modes` files (#135).
+///
+/// The framebuffer is scanned out by the connector whose `enabled == "enabled"`.
+/// A real monitor on that connector reports `status=connected enabled=enabled
+/// modes=[...]`. After hot-unplug, i915 leaves fb0 LATCHED at the old mode but the
+/// connector flips to `status=disconnected enabled=disabled modes=[]` — a "phantom"
+/// fb that opens and writes fine, so only this sysfs signal catches it.
+///
+/// We require BOTH `enabled=enabled` AND `status=connected`: a connector that is not
+/// `enabled` is not driving the fb (so its presence is irrelevant to whether the fb is
+/// real), and a `disconnected` connector has no monitor. This is the correct
+/// granularity on a MULTI-connector box — a second connector with its own monitor does
+/// NOT make the fb-driving connector's phantom state "connected".
+pub fn connector_is_connected(status: &str, enabled: &str, _modes: &str) -> bool {
+    status.trim() == "connected" && enabled.trim() == "enabled"
 }
 
-/// Whether ANY DRM connector under `drm_class_dir` (normally `/sys/class/drm`)
-/// currently reports a connected monitor (#135). Reads each `card*-<connector>/status`
+/// Whether the framebuffer is driven by a connector with a REAL monitor — i.e. at
+/// least one DRM connector under `drm_class_dir` (normally `/sys/class/drm`) is both
+/// `enabled` and `connected` (#135). Reads each `card*-<connector>/status` (+`enabled`)
 /// sysfs file (a plain file read — NO `drm` crate, which is probe-feature-only; the
-/// `--display` runtime mode is default-feature). Returns `Some(true/false)` when at
-/// least one connector status was readable, or `None` when no connector status could
-/// be read at all (sysfs absent / unexpected layout) — in which case the caller should
-/// fall back to rendering (never silently go dark on an unknown layout).
+/// `--display` runtime mode is default-feature).
+///
+/// Returns `Some(true)` when an enabled+connected connector exists (render),
+/// `Some(false)` when connectors are readable but NONE is enabled+connected (the
+/// fb-driving connector is a phantom — skip render), or `None` when no connector status
+/// could be read at all (sysfs absent / unexpected layout) — the caller falls back to
+/// rendering (never silently go dark on an unknown layout). Requiring `enabled`
+/// scopes the check to the connector actually scanning out to the fb, so a second
+/// connector's monitor on a multi-connector box cannot defeat the phantom-fb gate.
 pub fn any_connector_connected(drm_class_dir: &str) -> Option<bool> {
     let entries = std::fs::read_dir(drm_class_dir).ok()?;
     let mut saw_any_status = false;
@@ -535,6 +552,70 @@ mod tests {
             "enabled",
             "1920x1080\n"
         ));
+    }
+
+    #[test]
+    fn connector_connected_but_not_enabled_is_not_driving_fb() {
+        // A connector with a monitor but NOT enabled is not scanning out to the fb — so
+        // it must NOT count as "the fb is real". This is the multi-connector key case:
+        // a second monitor on an unused connector must not mask the fb-driving
+        // connector's phantom state.
+        assert!(!connector_is_connected(
+            "connected",
+            "disabled",
+            "1920x1080\n"
+        ));
+    }
+
+    fn write_connector(dir: &std::path::Path, name: &str, status: &str, enabled: &str) {
+        let c = dir.join(name);
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("status"), status).unwrap();
+        std::fs::write(c.join("enabled"), enabled).unwrap();
+        std::fs::write(c.join("modes"), "1920x1080\n").unwrap();
+    }
+
+    #[test]
+    fn any_connector_none_when_no_status_files() {
+        // Unknown / non-DRM layout (no connector has a status file) => None, so the
+        // caller renders rather than silently going dark.
+        let tmp = std::env::temp_dir().join(format!("cb-drm-none-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("renderD128")).unwrap();
+        std::fs::create_dir_all(tmp.join("version")).unwrap();
+        assert_eq!(any_connector_connected(tmp.to_str().unwrap()), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn any_connector_none_when_dir_missing() {
+        assert_eq!(any_connector_connected("/no/such/drm/dir/xyz"), None);
+    }
+
+    #[test]
+    fn any_connector_true_when_an_enabled_connected_connector_exists() {
+        // Live cam2 layout: HDMI-A-1 disconnected, A-2 connected+enabled, A-3
+        // disconnected. Non-connector dirs (no status) are skipped. => Some(true).
+        let tmp = std::env::temp_dir().join(format!("cb-drm-true-{}", std::process::id()));
+        write_connector(&tmp, "card1-HDMI-A-1", "disconnected\n", "disabled\n");
+        write_connector(&tmp, "card1-HDMI-A-2", "connected\n", "enabled\n");
+        write_connector(&tmp, "card1-HDMI-A-3", "disconnected\n", "disabled\n");
+        std::fs::create_dir_all(tmp.join("renderD128")).unwrap(); // no status file
+        assert_eq!(any_connector_connected(tmp.to_str().unwrap()), Some(true));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn any_connector_false_when_fb_connector_phantom_despite_other_monitor() {
+        // The multi-connector phantom case: the fb-driving connector (A-1) hot-unplugged
+        // (disconnected+disabled = phantom latched fb), while a SECOND monitor sits on a
+        // non-enabled connector (A-2 connected but NOT enabled — not scanning out to the
+        // fb). Requiring enabled+connected => Some(false) => skip render (the gate is NOT
+        // defeated by the second monitor).
+        let tmp = std::env::temp_dir().join(format!("cb-drm-phantom-{}", std::process::id()));
+        write_connector(&tmp, "card1-HDMI-A-1", "disconnected\n", "disabled\n");
+        write_connector(&tmp, "card1-HDMI-A-2", "connected\n", "disabled\n");
+        assert_eq!(any_connector_connected(tmp.to_str().unwrap()), Some(false));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
