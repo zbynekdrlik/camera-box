@@ -17,14 +17,13 @@ pub mod obs_log_audit;
 pub mod payload;
 pub mod qr;
 pub mod recording;
-pub mod recording_4node;
 pub mod recording_latency;
 pub mod recording_verdict;
 
 // #193: the probe HARDWARE GLUE is Linux-only — fb (/dev/fb0 + libc ioctl), kms/presenter
 // (drm page-flip), painter (fb+evdev), reader/multi_reader (v4l), run (drives all of them).
 // None are needed by recording-verdict (its transitive set is recording/recording_verdict/
-// recording_latency/burn_contiguity/recording_4node/payload/qr/luma/analyzer — all pure +
+// recording_latency/burn_contiguity/payload/qr/luma/analyzer — all pure +
 // cross-platform). Gating them on cfg(target_os="linux") lets the verdict cross-build for
 // Windows (so the #193 decode runs ON stream.lan), while the Linux probe build is unchanged.
 #[cfg(target_os = "linux")]

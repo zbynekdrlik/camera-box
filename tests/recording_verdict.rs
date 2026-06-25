@@ -15,7 +15,7 @@
 
 use camera_box::probe::recording::extract_frames_png;
 use camera_box::probe::recording_verdict::{
-    cam_strih_assessment, strih_stream_verdict, verdict, FrameTick, VerdictConfig,
+    cam_strih_assessment, verdict, FrameTick, VerdictConfig,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -185,54 +185,6 @@ fn span_exactly_at_floor_passes_duration_gate() {
     let v = verdict(&frames, &cfg());
     assert!(v.duration_ok, "exactly 300 s must meet the duration gate");
     assert!((v.analyzed_secs - 300.0).abs() < 0.5);
-}
-
-// ---- strih→stream: direct tick-SEQUENCE compare (beat cancels, offset-immune) ----
-
-#[test]
-fn strih_stream_identical_ticks_pass() {
-    // The camera beat is COMMON to both digital outputs, so identical strih and
-    // stream tick sequences = zero strih→stream hop loss.
-    let strih = beat_for_secs(300.0);
-    let stream = beat_for_secs(300.0);
-    let v = strih_stream_verdict(&strih, &stream, &cfg());
-    assert!(v.is_pass(), "identical strih/stream ticks must PASS: {v:?}");
-    assert!(v.divergent_ticks().is_empty());
-}
-
-#[test]
-fn strih_stream_offset_does_not_cause_false_divergence() {
-    // The two recordings start on DIFFERENT camera frames (capture offset): the
-    // SAME tick sequence at a positional offset must still PASS — the compare is on
-    // tick sequences, not per-file frame_index positions.
-    let strih = beat_for_secs(300.0);
-    let mut stream = beat_for_secs(300.0);
-    for (i, f) in stream.iter_mut().enumerate() {
-        f.frame_index = i as u64 + 137; // later start, same tick sequence
-    }
-    let v = strih_stream_verdict(&strih, &stream, &cfg());
-    assert!(
-        v.is_pass(),
-        "a capture-offset with identical ticks must PASS (offset-immune): {v:?}"
-    );
-}
-
-#[test]
-fn strih_stream_dropped_frame_fails_and_names_tick() {
-    // stream DROPPED a frame the strih output had (a real strih→stream hop loss):
-    // the dropped tick is flagged strih-only.
-    let strih = beat_for_secs(300.0);
-    let mut stream = beat_for_secs(300.0);
-    let bad = 6000usize;
-    let dropped_tick = stream[bad].tick.unwrap();
-    stream.remove(bad); // stream is missing that camera frame entirely
-    let v = strih_stream_verdict(&strih, &stream, &cfg());
-    assert!(!v.is_pass(), "a stream-dropped frame must FAIL");
-    assert!(
-        v.strih_only_ticks.contains(&dropped_tick),
-        "dropped tick {dropped_tick} must be flagged strih-only, got {:?}",
-        v.strih_only_ticks
-    );
 }
 
 // ---- cam→strih: honest assessment against the cam2 painter ground truth ----
