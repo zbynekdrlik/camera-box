@@ -130,6 +130,34 @@ if [ "$WALL_CLOCK" = "1" ]; then
   CLOCK_GUARD_TARGETS="${CAM:-cam1}=$CAM_IP" "$HERE/clock-offset-guard.sh" --bound-us "${CLOCK_GUARD_BOUND_US:-2000}"
 fi
 
+# Version-integrity precondition gate (#123) — alongside the clock gate. multitap routes the camera's
+# QR NDI through the strih→stream genlocked OBS stack (the obs_phase2.py setup below), so its per-hop
+# numbers are only trustworthy when that live stack is the PINNED build — a drifted / stock OBS gives
+# a false result (#119). Gather each Windows box's observed stack state and run drift-guard --compare
+# vs the pinned set (vendor/README.md); REFUSE on DRIFT (20) or UNKNOWN (11). ssh-denied, so the
+# state JSON is fetched over the box's standing http.server (fallback: caller pre-fetched via win-*
+# MCP) — the same pattern recording-e2e.sh uses.
+echo "[0/5] version-integrity gate — live strih+stream stack MUST match the pinned set (#123/#119)"
+WIN_BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
+VERSION_STRIH_STATE="${VERSION_STRIH_STATE:-/tmp/version-strih-${RUN_ID}.json}"
+VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-/tmp/version-stream-${RUN_ID}.json}"
+fetch_box_state() {
+  local host="$1" dest="$2"
+  [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
+  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
+    echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"
+  else
+    echo "    NOTE: could not fetch version-integrity state from ${host} (http :$WIN_BUNDLE_STATE_PORT) — the" >&2
+    echo "          win-* MCP holder must write the drift-guard observed values to $dest, else the gate refuses." >&2
+  fi
+}
+fetch_box_state "$STRIH"  "$VERSION_STRIH_STATE"  || true
+fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
+"$HERE/version-integrity-gate.sh" \
+  ${VERSION_GATE_MANIFEST:+--manifest "$VERSION_GATE_MANIFEST"} \
+  --win-state "strih=$VERSION_STRIH_STATE" \
+  --win-state "stream=$VERSION_STREAM_STATE"
+
 # shellcheck disable=SC2317  # cleanup() is invoked indirectly via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e

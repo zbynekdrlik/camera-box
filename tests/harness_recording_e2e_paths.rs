@@ -570,3 +570,82 @@ fn on_stream_planner_builds_a_valid_windows_command() {
          the box: {cmd:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #123 — pre-rig-test VERSION-INTEGRITY gate wiring.
+//
+// Every rig-test entry script that brings up the strih+stream genlocked OBS stack must, BEFORE
+// recording, run scripts/version-integrity-gate.sh against BOTH Windows boxes — so a drifted /
+// randomly-deployed / stock OBS build (the #119 wrong-bytes-right-version) is caught and the run
+// is REFUSED before any worthless measurement. These guards lock the wiring so a refactor cannot
+// silently drop the gate. (loopback-e2e.sh is single-box and never touches that stack, so it is
+// intentionally NOT gated — asserted separately.)
+// ---------------------------------------------------------------------------
+
+/// recording-e2e.sh must invoke the version-integrity gate with --win-state for BOTH boxes (so a
+/// missing state file -> UNKNOWN -> the gate refuses, never a silent pass on an unverified build).
+#[test]
+fn recording_e2e_runs_the_version_integrity_gate_for_both_boxes() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("version-integrity-gate.sh"),
+        "#123: recording-e2e.sh must invoke version-integrity-gate.sh"
+    );
+    assert!(
+        s.contains("--win-state \"strih=$VERSION_STRIH_STATE\""),
+        "#123: the gate must ALWAYS be given strih=--win-state (missing -> UNKNOWN -> refuse)"
+    );
+    assert!(
+        s.contains("--win-state \"stream=$VERSION_STREAM_STATE\""),
+        "#123: the gate must ALWAYS be given stream=--win-state (missing -> UNKNOWN -> refuse)"
+    );
+}
+
+/// The version-integrity gate must run BEFORE StartRecord (#123) — fail fast on a drifted stack
+/// before any measurement, exactly like the DanteSync gate.
+#[test]
+fn version_integrity_gate_runs_before_any_recording() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate = s
+        .find("version-integrity-gate.sh")
+        .expect("recording-e2e.sh must invoke version-integrity-gate.sh");
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        gate < start_record,
+        "#123: the version-integrity gate must run BEFORE StartRecord (fail fast on a drifted stack)"
+    );
+}
+
+/// multitap-e2e.sh routes the camera QR through the strih->stream stack, so it too must run the
+/// version-integrity gate for both boxes before measuring.
+#[test]
+fn multitap_e2e_runs_the_version_integrity_gate_for_both_boxes() {
+    let s = read("scripts/multitap-e2e.sh");
+    assert!(
+        s.contains("version-integrity-gate.sh"),
+        "#123: multitap-e2e.sh must invoke version-integrity-gate.sh"
+    );
+    assert!(
+        s.contains("--win-state \"strih=$VERSION_STRIH_STATE\"")
+            && s.contains("--win-state \"stream=$VERSION_STREAM_STATE\""),
+        "#123: multitap-e2e.sh must gate BOTH boxes via --win-state"
+    );
+}
+
+/// loopback-e2e.sh is a SINGLE-BOX cam->NDI->tap test that never touches the strih/stream genlock
+/// stack, so the strih/stream version-integrity gate does NOT apply — it must NOT be wired in (and
+/// the header must say so, so a future reader does not add it "to match" the other scripts).
+#[test]
+fn loopback_e2e_is_intentionally_not_version_gated() {
+    let s = read("scripts/loopback-e2e.sh");
+    assert!(
+        !s.contains("version-integrity-gate.sh"),
+        "#123: loopback is single-box and must NOT run the strih/stream version-integrity gate"
+    );
+    assert!(
+        s.contains("NO version-integrity gate here (#123)"),
+        "#123: loopback must document WHY it is intentionally not gated (so it is not added later)"
+    );
+}
