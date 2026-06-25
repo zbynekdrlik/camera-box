@@ -32,6 +32,14 @@ Resolution + display mirrored & unit-tested in `src/probe/genlock.rs` (resolve_l
 ms_to_frames / genlock_auto_preload / format_latency_label) with vendored-source guards keeping the
 C (`vendor/obs-studio/libobs/obs-source.c` genlock_latency_ms) + DistroAV in lock-step.
 
+**GOTCHA — a `genlock:` log line has THREE consumers; change all of them together.** When you edit a
+`genlock:` line in `obs-source.c` (e.g. the #235 rename from `sub-frame jitter reserve = N ms` to
+`latency = N ms (≈ M frames)`), you MUST update in the SAME PR: (1) the `tests/genlock_preload.rs`
+vendored-source guard string, (2) `scripts/launch-obs-genlock.sh` (#128 wrapper) log-verify regex,
+(3) `scripts/drift-guard.sh` `genlock_capability_from_log` regex (which keys on the build-unique
+`genlock:` lines to catch a stock-OBS #119 wrong-build). Missing any one silently breaks the launch
+verify or capability detection while every other test stays green.
+
 ## Sub-frame ms reserve (#184 — the mechanism #235's single knob drives; prod = 3ms)
 
 `OBS_GENLOCK_RESERVE_MS=N` (>0), now the **back-compat ALIAS** of the #235 `OBS_GENLOCK_LATENCY_MS`,
