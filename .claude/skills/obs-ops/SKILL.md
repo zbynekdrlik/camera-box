@@ -38,6 +38,22 @@ which disables DistroAV + genlock.
   - NO `Failed to find locale`
   - NO `Failed to initialize video`
 
+**Genlock reserve/audit lines need a LIVE consuming source — don't read their absence as broken.**
+The `genlock: timestamp-aligned release ENABLED (OBS_GENLOCK_TS_ALIGN)` + `sub-frame jitter reserve = N ms (#184)`
+lines, and the every-5s `genlock-fifo audit '<src>': ... reserve_ms=N` lines, arm ONLY when the program
+scene is rendering an NDI source that is ACTUALLY DELIVERING frames. If program is parked on a dead/black
+camera (source not feeding — common off-air or after a probe leaves it on a stale scene), these lines NEVER
+appear even though OBS is healthy (30fps render, NDI Main Output active, 0 skips). To get the reserve proof:
+find a camera that's actually feeding (`Get-NetTCPConnection -OwningProcess <obs pid>` to a `10.77.9.6x:5961`),
+switch program to its scene over WS (`SetCurrentProgramScene`), then the ts-align line + `reserve_ms=N`
+audits appear within ~10s. **Verify the relaunched OBS's actual env, not just the log:** read the live child
+process env (PEB `OBS_GENLOCK_*`) to PROVE `RESERVE_MS`/`TS_ALIGN` were inherited — the win-* MCP Shell env
+snapshot is STALE, so always set the genlock vars EXPLICIT in the launch shell AND confirm on the child.
+A genlock config change (e.g. `OBS_GENLOCK_RESERVE_MS`) is NOT hot-applied — it takes effect only at OBS
+launch, so a reserve change = full relaunch (force-kill → clear `.sentinel\*` → relaunch cwd=bin\64bit with
+the vars set). Machine-level env is the persisted default; a sweep that overrode reserve in its launch shell
+leaves the running OBS on the override while Machine env still reads the correct value.
+
 ## Recovery — Do It Autonomously (Never Ask)
 
 The user has repeated this 2-3× and gets angry when re-asked which recovery method to use.
