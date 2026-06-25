@@ -2,6 +2,43 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-06-25 — #122 drift-guard per-component BUILD SHA + capability (worker, v1.7.0-dev.106)
+
+- VALIDATED still real (live, read-only): both strih (10.77.9.202) + stream (10.77.9.204) report OBS
+  32.1.2 / DistroAV 6.2.1 — which the PRE-#122 drift-guard `--compare` PASSES — yet there was no
+  per-component SHA / capability check, so a stock 32.1.2 was indistinguishable (the skill Notes even
+  said so). The #119 gap was open. Gap proven, issue valid.
+- LIVE PROOF DATA (Get-FileHash, read-only via win-* MCP): obs.dll SHA256
+  `24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33` (BOTH boxes — matches the #184
+  fast-dll BUNDLE_MANIFEST, build_sha 19472506e). distroav.dll SHA256
+  `66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880` (BOTH boxes — byte-matches the
+  full windows-genlock bundle's distroav.dll, build 0a41c7e6). Genlock capability marker
+  `render tick ENABLED` present on both (+ `sub-frame jitter reserve = 3 ms` + `timestamp-aligned
+  release` on stream, which has a live consuming source). The rig = full bundle (0a41c7e6) + #184
+  obs.dll hot-swap (19472506e) → obs.dll matches the FAST manifest, distroav.dll the FULL bundle.
+- DESIGN: extended drift-guard `--compare` with an OPT-IN per-component BUILD-SHA + capability facet,
+  active only when `manifest=<BUNDLE_MANIFEST.json>` is supplied (so the pre-existing version-only
+  --compare tests stay green; the SHA facet is the stronger superset when the operator downloads the
+  build's #120 manifest). New keys: manifest, obs_dll_sha256, distroav_dll_sha256, genlock_capability.
+  Pure functions (unit-tested): manifest_sha_for_component (matches the dll by BASENAME → both flat
+  fast-dll and nested full-bundle layouts resolve), genlock_capability_from_log (presence of a
+  build-unique marker), drift_check_capability. With a manifest, an unread live SHA/capability is
+  UNKNOWN (exit 11), never a silent clean.
+- RED→GREEN: tests/drift_guard.rs 6 new tests — RED on 8610d42cf (functions absent), GREEN on
+  8745dca5d. 25/25 drift_guard tests pass; genlock_manifest producer tests (8) still pass (consumer
+  reads the producer's exact format). MISMATCH DEMO: a stock obs.dll SHA + a no-marker log → exit 20
+  DRIFT on the live strih params where every version/setting line still reads OK = the #122 catch.
+- GOTCHA: genlock_capability_from_log must `return 0` on the absent case (empty output IS the signal);
+  the bare `[ -n "$line" ] && echo 1` returned 1 → tripped the test harness's set -e (1 test red).
+- RESUME NOTE: a concurrent process `git reset --hard origin/dev` mid-work (reflog HEAD@{1,2}),
+  wiping the bump + RED commits + the uncommitted GREEN engine. Recovered: cherry-picked the bump
+  (91daf2ecd) + RED (8610d42cf) onto the advanced origin/dev (now carries #124 + a main merge), then
+  re-applied the GREEN engine. Lesson: commit GREEN promptly; the working tree is not safe storage.
+- Commits: version 91daf2ecd; RED 8610d42cf; GREEN 8745dca5d; skill+fmt c86fd4f15. PR Closes #122.
+- SIBLINGS (EPIC #125, out of scope here): #121 (post-deploy byte/SHA verify, OPEN) ships the
+  manifest TO the rig + byte-checks the deploy; #122 is the runtime drift-guard facet that consumes
+  the manifest. #120 (manifest in bundle) CLOSED.
+
 ## 2026-06-25 — #124 single canonical OBS plugin-load path (worker, v1.7.0-dev.105)
 - **VALIDATED PARTIAL (ticket-validator + own live read, win-strih/win-stream-snv MCP):** the DLL ambiguity the issue describes does NOT exist on the live rig TODAY. Both boxes carry EXACTLY ONE `distroav.dll`, in `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\` (663040 B; strih 06-23 19:43, stream 06-23 19:45), loaded by the Program Files genlock `obs64.exe` (strih PID 6244, stream PID 10844), render tick ENABLED, DistroAV 6.2.1 / NDI 6.3.2.0. **NONE** under `Program Files\obs-studio\obs-plugins\64bit` (only first-party plugins there; the `data\obs-plugins\distroav` folder is resources/locale, no .dll). `%APPDATA%\obs-studio\plugins` does not exist; not portable. So the issue's premise was INVERTED — canonical = ProgramData, not Program Files\obs-plugins. **Nothing to clean on the boxes.**
 - **The real gap (still open):** drift-guard checked versions/fps/genlock/latency but had ZERO plugin-path check — a future deploy could still drop a 2nd `distroav.dll` into Program Files\obs-plugins and recreate the shadow (the #119 mixed-version class). So #124 = add the ENFORCEMENT + doc the invariant, NOT clean the boxes.

@@ -82,20 +82,69 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    include them.) If the scan returns nothing, OBS may not be installed at the expected path — omit the
    key so the engine reports UNKNOWN rather than a false clean.
 
-2. **Compare against the pinned set** — feed every observed value to the engine:
+1d. **Gather each component's live BUILD SHA + the genlock CAPABILITY marker (#122).** A stock OBS
+   32.1.2 is byte-for-byte a DIFFERENT build from our genlock 32.1.2 but reports the IDENTICAL
+   marketing version — the marketing-version facet above cannot tell them apart (the #119/#120
+   wrong-build-right-version that silently shipped). #122 closes that: read the deployed `obs.dll` +
+   `distroav.dll` **Get-FileHash SHA256** (the actual bytes on the box) and the **genlock capability
+   markers** the running OBS emitted (lines only our build produces), then compare them to the #120
+   per-component SHA manifest of the build under test.
+
+   ```powershell
+   # The deployed component DLLs (Get-FileHash = the actual bytes; the #122 BUILD-SHA proof):
+   $obsdll = "C:\Program Files\obs-studio\bin\64bit\obs.dll"
+   $dadll  = "C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"
+   if (Test-Path $obsdll) { "obs_dll_sha256=" + (Get-FileHash $obsdll -Algorithm SHA256).Hash.ToLower() }
+   if (Test-Path $dadll)  { "distroav_dll_sha256=" + (Get-FileHash $dadll -Algorithm SHA256).Hash.ToLower() }
+   # The genlock CAPABILITY marker text from the running OBS log (only OUR build emits these — a STOCK
+   # OBS emits NONE). Pass the whole marker block as genlock_capability; the engine asserts presence.
+   $d="$env:APPDATA\obs-studio\logs"
+   $f=Get-ChildItem $d -Filter *.txt | Sort-Object LastWriteTime -Desc | Select-Object -First 1
+   ((Get-Content $f.FullName) | Where-Object { $_ -match 'genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)' }) -join "`n"
+   ```
+
+   **Get the build-under-test's manifest** (the #120 `BUNDLE_MANIFEST.json` shipped inside the genlock
+   bundle) so the engine has the EXPECTED per-component SHA to compare against. It is in the
+   windows-genlock / windows-genlock-fast artifact for the deployed build's commit (CI runs can't reach
+   prod, so the agent downloads it on dev1):
+
+   ```bash
+   # Full bundle (obs.dll + distroav.dll) — the deployed full stack:
+   gh run download <full-genlock-run-id> --repo zbynekdrlik/camera-box -n obs-genlock-windows-x64 --dir ./gbundle
+   # …or the hot-swap obs.dll bundle (obs.dll only) for an event-time DLL swap:
+   gh run download <fast-run-id> --repo zbynekdrlik/camera-box -n obs-genlock-fast-dll --dir ./gbundle
+   # The manifest the engine reads: ./gbundle/BUNDLE_MANIFEST.json
+   ```
+
+   If the box's deployed obs.dll came from a fast-dll hot-swap on top of an older full bundle, the
+   obs.dll SHA matches the FAST manifest and the distroav.dll SHA the FULL bundle's manifest — match
+   each component to the manifest that built it (the engine matches the dll by BASENAME, so either
+   layout — flat `obs.dll` or nested `bin/64bit/obs.dll` — resolves). If OBS is not running or a DLL is
+   missing, omit that key so the engine reports UNKNOWN rather than a false clean.
+
+2. **Compare against the pinned set** — feed every observed value to the engine, INCLUDING the #122
+   per-component BUILD SHA + capability keys (supply `manifest=` to activate that facet):
 
    ```bash
    ./scripts/drift-guard.sh --compare host=strih \
      obs_version=<v> distroav_version=<v> ndi_runtime=<v> output_fps=<n> genlock_wall_clock=<0|1> \
      ndi_input_latency="NDI cam5=<n>,NDI cam1=<n>,NDI cam3=<n>" \
-     distroav_dll_paths="<every distroav.dll location, comma-separated>"   # stream: ndi_input_latency="NDI 2ME PGM=<n>"
+     distroav_dll_paths="<every distroav.dll location, comma-separated>" \
+     manifest=./gbundle/BUNDLE_MANIFEST.json \
+     obs_dll_sha256=<live Get-FileHash of obs.dll> \
+     distroav_dll_sha256=<live Get-FileHash of distroav.dll> \
+     genlock_capability="<the live genlock marker text>"   # stream: ndi_input_latency="NDI 2ME PGM=<n>"
    ```
 
-   - Exit `0` → **NO DRIFT**, the box matches the pinned zero-loss set. Report it.
-   - Exit `20` → **DRIFT**: the output names each setting that differs (expected vs observed).
-     Report loudly. Do NOT fix it silently — restoring prod is off-air + user-approved.
+   - Exit `0` → **NO DRIFT**, the box matches the pinned zero-loss set AND the per-component BUILD SHAs
+     + genlock capability match the manifest. Report it.
+   - Exit `20` → **DRIFT**: the output names each setting/SHA that differs (expected vs observed). A
+     `obs_dll_sha256 DRIFT` or `genlock_capability DRIFT` line means the live OBS is a STOCK/wrong build
+     even though its version matches (the #122 catch). Report loudly. Do NOT fix it silently — restoring
+     prod is off-air + user-approved.
    - Exit `11` → at least one value was **UNKNOWN** (not read). Drift status is incomplete, not
-     clean — re-read the missing value (e.g. OBS not running, DLL path moved) before trusting it.
+     clean — re-read the missing value (e.g. OBS not running, DLL path moved, manifest not downloaded)
+     before trusting it.
 
 3. **Report** per box: the observed set, the verdict (NO DRIFT / DRIFT `<settings>` / INCOMPLETE),
    and — on drift — exactly what to restore. Never claim a clean box you did not fully read.
@@ -104,7 +153,10 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
 
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a
   running box, so it is guarded against the vendored source by `tests/obs_updater_disabled.rs`, not
-  here. A box running stock OBS 32.1.2 instead of our genlock build is otherwise indistinguishable
-  by version alone — the protection against that is deploying only our build (off-air, approved).
+  here. A box running stock OBS 32.1.2 instead of our genlock build USED to be indistinguishable by
+  version alone — **#122 closes that**: step 1d reads each component's live BUILD SHA (obs.dll /
+  distroav.dll Get-FileHash) + the genlock capability markers and step 2 fails on any mismatch vs the
+  #120 manifest, so a stock/wrong build is now caught even when the marketing version matches. (The
+  deploy-only-our-build discipline remains the primary protection; this is the runtime backstop.)
 - Re-pin (edit the table in `vendor/README.md`) only as part of a *deliberate* rollout — e.g. the
   30→60 fps step (#11) or activating genlock — never to silence a drift you did not intend.
