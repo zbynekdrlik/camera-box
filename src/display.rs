@@ -378,6 +378,89 @@ pub fn scale_nearest_neighbor(
 mod tests {
     use super::*;
 
+    // ----- #135: upscale cap (never software-upscale beyond source) -----
+
+    #[test]
+    fn clamp_render_dims_never_upscales_beyond_source() {
+        // The incident: a 1080p source upscaled 1080->4K to a latched phantom fb ->
+        // 99.9% CPU. Render dims must be capped to the source so an oversized fb never
+        // triggers a heavy software upscale; render 1:1 and let the fb show it letterboxed.
+        assert_eq!(
+            clamp_render_dims(1920, 1080, 3840, 2160),
+            (1920, 1080),
+            "1080p source on a 4K fb => render 1:1 (1920x1080), NOT upscaled to 4K"
+        );
+    }
+
+    #[test]
+    fn clamp_render_dims_downscales_to_fb_when_source_larger() {
+        // A source LARGER than the fb is still capped to the fb (downscale is cheap and
+        // necessary so the frame fits) — only UPSCALING beyond source is forbidden.
+        assert_eq!(
+            clamp_render_dims(3840, 2160, 1920, 1080),
+            (1920, 1080),
+            "4K source on a 1080p fb => downscale to fb (1920x1080)"
+        );
+    }
+
+    #[test]
+    fn clamp_render_dims_matches_when_equal() {
+        // The light, correct case (cam4: 1080p source, 1080p monitor) renders 1:1.
+        assert_eq!(clamp_render_dims(1920, 1080, 1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn clamp_render_dims_caps_each_axis_independently() {
+        // src 1920x1080, fb 1280x2160: width capped to 1280 (fb<src), height capped to
+        // 1080 (src<fb) — never exceed source on any axis.
+        assert_eq!(clamp_render_dims(1920, 1080, 1280, 2160), (1280, 1080));
+    }
+
+    // ----- #135: connector-presence detection (skip render to a phantom fb) -----
+
+    #[test]
+    fn connector_connected_when_status_connected() {
+        // cam2/cam4 real monitor: status=connected enabled=enabled modes=[1920x1080,...]
+        assert!(connector_is_connected(
+            "connected",
+            "enabled",
+            "1920x1080\n1280x720\n"
+        ));
+    }
+
+    #[test]
+    fn connector_disconnected_phantom_fb() {
+        // The phantom/latched fb after hot-unplug: status=disconnected enabled=disabled
+        // modes=[]. fb0 stays latched but NO monitor is present -> must NOT render.
+        assert!(!connector_is_connected("disconnected", "disabled", ""));
+    }
+
+    #[test]
+    fn connector_status_trims_whitespace() {
+        // sysfs files carry a trailing newline.
+        assert!(connector_is_connected(
+            "connected\n",
+            "enabled\n",
+            "1920x1080\n"
+        ));
+        assert!(!connector_is_connected(
+            "disconnected\n",
+            "disabled\n",
+            "\n"
+        ));
+    }
+
+    #[test]
+    fn connector_disconnected_even_if_enabled_lingers() {
+        // status is the authoritative monitor-presence signal; a disconnected connector
+        // is "no monitor" regardless of a lingering enabled flag.
+        assert!(!connector_is_connected(
+            "disconnected",
+            "enabled",
+            "1920x1080\n"
+        ));
+    }
+
     #[test]
     fn test_uyvy_to_bgra_black() {
         // Black in UYVY: Y=16 (video black), U=128, V=128
