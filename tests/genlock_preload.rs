@@ -725,6 +725,37 @@ mod single_latency_knob {
         assert_eq!(effective_latency_ms(0, 0), 0);
     }
 
+    // #245: a DEEP per-source latency is a deliberate video delay — the FIFO drop-cap must
+    // hold its full frame-equivalent before the ms deadline releases the oldest frame, or
+    // the overrun force-drain would cap the delay short and make the override INERT. The C
+    // genlock_source_drop_cap feeds max(preload, latency_frames) into genlock_drop_cap; this
+    // pins that a 1000 ms / 2000 ms override still fits under the abs-max, at 30 fps.
+    #[test]
+    fn drop_cap_accommodates_deep_per_source_latency() {
+        use camera_box::probe::genlock::{
+            genlock_drop_cap, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_MAX,
+            GENLOCK_SOURCE_LATENCY_MS_MAX, MAX_ASYNC_FRAMES,
+        };
+        // 1000 ms @ 30 fps = 30 frames -> budget 30, cap = 30 + RESERVE = 34 (above the floor).
+        let f1000 = ms_to_frames(1000, 30, 1);
+        assert_eq!(f1000, 30);
+        assert_eq!(genlock_drop_cap(true, f1000), 30 + GENLOCK_DROP_CAP_RESERVE);
+        // 2000 ms (the per-source cap) @ 30 fps = 60 frames -> cap = 64, comfortably under
+        // the abs-max (GENLOCK_PRELOAD_MAX + RESERVE = 132): a source at the cap buffers its
+        // FULL delay without an overrun force-drain (the GENLOCK_SOURCE_LATENCY_MS_MAX doc).
+        let fmax = ms_to_frames(GENLOCK_SOURCE_LATENCY_MS_MAX, 30, 1);
+        assert_eq!(fmax, 60);
+        let abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
+        assert_eq!(genlock_drop_cap(true, fmax), 60 + GENLOCK_DROP_CAP_RESERVE);
+        assert!(
+            60 + GENLOCK_DROP_CAP_RESERVE < abs_max,
+            "2000 ms must fit under the abs-max"
+        );
+        // A shallow/zero override keeps the historic 30-frame burst-tolerance floor.
+        assert_eq!(genlock_drop_cap(true, 0), MAX_ASYNC_FRAMES);
+        assert_eq!(genlock_drop_cap(true, 3), MAX_ASYNC_FRAMES); // 3 frames (100 ms global) < floor
+    }
+
     #[test]
     fn latency_default_is_zero_disabled() {
         // Neither knob set ⇒ 0 = no ms latency ⇒ the whole-frame preload fallback path
@@ -1161,6 +1192,75 @@ mod vendored_source {
             src.contains("latency_ms=%u (≈%llu frames @ %.3ffps)"),
             "{OBS_SOURCE}: #235 — the audit log no longer shows 'latency_ms=N (≈M frames)' \
              (ms primary, frames in parens); re-apply the single-knob display."
+        );
+    }
+
+    #[test]
+    fn per_source_latency_override_present_in_vendored_source() {
+        // #245: the C side must restore PER-SOURCE latency (the #235 regression collapsed
+        // latency to ONE global env knob). The release-deadline gate must pick the source's
+        // OWN genlock_latency_ms when >0 else the global default, the setter/getter must
+        // exist (and be EXPORTed from obs.h so DistroAV can resolve it), the per-source cap
+        // must equal the Rust mirror, a per-source override must imply ts-align ON for that
+        // source, the drop-cap must scale with the override, and the audit log must surface
+        // the per-source value. A `git subtree pull` (#44) dropping any of these silently
+        // reverts the per-source UX. Mirror of src/probe/genlock.rs effective_latency_ms +
+        // GENLOCK_SOURCE_LATENCY_MS_MAX.
+        use camera_box::probe::genlock::GENLOCK_SOURCE_LATENCY_MS_MAX;
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // The render-path release deadline is PER-SOURCE (override wins, else global).
+        assert!(
+            src.contains(
+                "source->genlock_latency_ms > 0 ? source->genlock_latency_ms : genlock_reserve_ms()"
+            ),
+            "{OBS_SOURCE}: #245 — the ts-align release deadline no longer picks the per-source \
+             genlock_latency_ms override (else the global default); the per-source latency is \
+             inert in the render path. Re-apply."
+        );
+        // A per-source override must imply ts-align ON for THAT source (else an override on
+        // a box with global latency 0 would never reach the ms-reserve path).
+        assert!(
+            src.contains("genlock_ts_align_enabled() || source->genlock_latency_ms > 0"),
+            "{OBS_SOURCE}: #245 — a per-source latency override no longer implies ts-align ON \
+             for that source; an override is inert when the global gate is off. Re-apply."
+        );
+        // The runtime setter/getter must exist (mirror of obs_source_set/get_genlock_preload).
+        assert!(
+            src.contains("void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t")
+                && src.contains("uint32_t obs_source_get_genlock_latency_ms("),
+            "{OBS_SOURCE}: #245 — the per-source latency setter/getter \
+             (obs_source_set/get_genlock_latency_ms) is gone; re-apply."
+        );
+        // The C per-source cap MUST equal the Rust mirror constant (lock-step).
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_SOURCE_LATENCY_MS_MAX {GENLOCK_SOURCE_LATENCY_MS_MAX}"
+            )),
+            "{OBS_SOURCE}: #245 — GENLOCK_SOURCE_LATENCY_MS_MAX drifted from the Rust mirror \
+             ({GENLOCK_SOURCE_LATENCY_MS_MAX}); keep them in lock-step."
+        );
+        // The drop-cap must scale with the per-source latency frame-equivalent (else a deep
+        // override force-drains short and the delay can't build).
+        assert!(
+            src.contains("source->genlock_latency_ms * ovi.fps_num"),
+            "{OBS_SOURCE}: #245 — genlock_source_drop_cap no longer scales with the per-source \
+             latency frame-equivalent; a deep override (e.g. 2000 ms ≈ 60 frames) would \
+             overrun force-drain before its delay builds. Re-apply."
+        );
+        // The audit log must surface the per-source override value (the rig-validation proof).
+        assert!(
+            src.contains("src_latency_ms=%u"),
+            "{OBS_SOURCE}: #245 — the genlock audit log no longer prints the per-source \
+             src_latency_ms field; the rig validation can't read per-source latency. Re-apply."
+        );
+        // The setter must be EXPORTed from obs.h (DistroAV resolves it by name at runtime).
+        let api = squish(&vendor_file(OBS_API));
+        assert!(
+            api.contains(
+                "EXPORT void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t"
+            ),
+            "{OBS_API}: #245 — obs_source_set_genlock_latency_ms is not EXPORTed; DistroAV \
+             cannot resolve the per-source latency setter. Re-apply the export."
         );
     }
 
@@ -1626,6 +1726,53 @@ mod distroav_source {
     }
 
     #[test]
+    fn per_source_latency_int_editable_present() {
+        // #245: the DistroAV source props must offer an EDITABLE per-source latency (ms) int
+        // field (the #235 regression made latency a single GLOBAL env knob with no per-source
+        // control). The field must exist with the 0..2000 range, be applied in
+        // ndi_source_update via the runtime-resolved obs_source_set_genlock_latency_ms setter,
+        // default to 0 (= follow global), and floor a negative scene value before the cast. A
+        // subtree pull (#44) dropping any of these reverts the per-source UI. Mirror of the
+        // libobs side guarded in per_source_latency_override_present_in_vendored_source.
+        let src = squish(&vendor_file(NDI_SOURCE));
+        // The editable per-source int field (NOT the read-only #235 label).
+        assert!(
+            src.contains("#define PROP_GENLOCK_LATENCY_MS_SRC \"genlock_latency_ms_src\""),
+            "{NDI_SOURCE}: #245 — PROP_GENLOCK_LATENCY_MS_SRC define missing; re-apply the \
+             editable per-source latency field."
+        );
+        assert!(
+            src.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC")
+                && src.contains("0, PROP_GENLOCK_SOURCE_LATENCY_MS_MAX, 1"),
+            "{NDI_SOURCE}: #245 — the editable per-source latency int (range 0..2000) is gone \
+             from the NDI source properties; re-apply."
+        );
+        // The symbolic cap must equal the libobs cap (2000).
+        assert!(
+            src.contains("#define PROP_GENLOCK_SOURCE_LATENCY_MS_MAX 2000"),
+            "{NDI_SOURCE}: #245 — PROP_GENLOCK_SOURCE_LATENCY_MS_MAX must be 2000 to match libobs."
+        );
+        // The runtime setter resolver + the apply in ndi_source_update.
+        assert!(
+            src.contains("resolve_set_genlock_latency_ms")
+                && src.contains("obs_source_set_genlock_latency_ms"),
+            "{NDI_SOURCE}: #245 — ndi_source_update no longer resolves/applies \
+             obs_source_set_genlock_latency_ms; the per-source latency field is inert. Re-apply."
+        );
+        assert!(
+            src.contains("obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC)"),
+            "{NDI_SOURCE}: #245 — ndi_source_update no longer reads the \
+             PROP_GENLOCK_LATENCY_MS_SRC setting; re-apply."
+        );
+        // Default 0 (= follow global) so an untouched source behaves as before the field.
+        assert!(
+            src.contains("obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, 0)"),
+            "{NDI_SOURCE}: #245 — the per-source latency default is not wired to 0 (= use \
+             global); re-apply."
+        );
+    }
+
+    #[test]
     fn ms_label_set_on_first_open_and_negative_floored() {
         let src = squish(&vendor_file(NDI_SOURCE));
         // (review) The ms label must be set from the current settings at property-build
@@ -1688,6 +1835,25 @@ mod distroav_source {
             wf.contains("obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD"),
             "{WINDOWS_GENLOCK_WF}: #97 — the production build no longer asserts the \
              preload slider property; re-add the pwsh #97 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_workflow_gates_on_the_per_source_latency() {
+        // #245: the Windows production build must re-assert the per-source latency tokens in
+        // pwsh BEFORE the 150-min build (this Linux Rust guard can't compile on the runner),
+        // so a subtree bump can't ship a build without the per-source latency control while
+        // the version pin still passes.
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+        assert!(
+            wf.contains("obs_source_set_genlock_latency_ms"),
+            "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the per-source \
+             latency API (obs_source_set_genlock_latency_ms); re-add the pwsh #245 gate."
+        );
+        assert!(
+            wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
+            "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the editable \
+             per-source latency int field; re-add the pwsh #245 gate."
         );
     }
 }
