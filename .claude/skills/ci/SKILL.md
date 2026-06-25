@@ -87,3 +87,25 @@ uploaded verdict.exe).
 
 scp/ssh to Windows (stream.lan) is **DENIED** on this rig — use the win-stream-snv MCP.
 ffmpeg/ffprobe are already installed on stream.lan (winget; ffmpeg 8.0.1 on PATH).
+
+## Probe is CI-only locally — never compile `--features probe` on dev1 (#185)
+
+The shared dev1 `target/` has no GC (rust-lang/cargo#5026). Compiling the heavy `probe` feature
+locally (qrcode/rqrr/image/drm/lz4_flex + 5 `required-features=["probe"]` bins) across the day's
+workers ballooned it to 18GB and filled the disk. The fix: **local Tier-0 cheap-checks run DEFAULT
+features only** — `cargo clippy --all-targets -- -D warnings` (NO `--all-features`), `cargo test
+--no-run`. Probe is compile-checked + built ON CI (`ci.yml` runs `--all-features`; #101 C++ gate +
+#192 probe-tools artifact). See CLAUDE.md "Local Build Policy".
+
+**Convention when adding an integration test that imports `camera_box::probe::…`:** gate the whole
+file with `#![cfg(feature = "probe")]` (after the `//!` doc block, before the first `use`) — exactly
+like `tests/recording_decode.rs`. An UNGATED probe test forces the local default-feature
+clippy/test --no-run to compile the probe feature and re-balloons `target/`. CI (`--all-features`)
+still runs gated tests. `tests/local_build_policy_bounds_target.rs` enforces both invariants (it
+FAILS if any probe-using test is ungated or if the CLAUDE.md local gate command block uses
+`--all-features`/`--features probe`).
+
+**Backstop:** `scripts/install-git-hooks.sh` installs a non-blocking pre-push hook running
+`scripts/purge-target.sh` (cargo clean when `target/` > `${THRESHOLD_MB:-4096}`; SKIPS while a live
+E2E has probe binaries running — matched by truncated `/proc` comm, e.g. `recording-verdi`,
+`camera-box-prob`, NOT a `pgrep -f` cmdline substring which false-positives on the script's own args).
