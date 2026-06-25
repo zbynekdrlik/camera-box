@@ -14,6 +14,8 @@
 //! healthy throughout (received kept climbing) — the fault is purely a dead GPU
 //! downstream of the genlock ingest.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::obs_log_audit::audit_obs_log;
 
 /// A real fixture block from the wedged stream OBS log (verbatim, abbreviated). The

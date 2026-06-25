@@ -15,6 +15,8 @@
 //!      `git subtree pull` (#44) or a build-wiring regression can't silently drop the
 //!      burn filter / encoder.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::luma::bgra_to_luma;
 use camera_box::probe::painter::next_wall_boundary_ns;
 use camera_box::probe::payload::Payload;

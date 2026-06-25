@@ -10,6 +10,8 @@
 //! `KmsPresenter::present` uses to fill each back buffer, so verifying it here
 //! proves the on-rig copy without needing a real card.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::kms::{copy_bgra_into, copy_plan, CopyPlan};
 use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{decode_qr_luma, render_qr_bgra};

@@ -16,6 +16,8 @@
 //!
 //! Hardware-free: every Observed is constructed in the test, no NDI/QR/clock.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::analyzer::{LatencyStats, Observed};
 use camera_box::probe::differ::{
     absolute_latency_gate_pass, absolute_latency_stats, diff_hop, full_span_diff, overall_verdict,

@@ -9,6 +9,8 @@
 //! discipline with the decimator means every painted id lands on a tick the
 //! decimator also consumes, preserving contiguity through the 60→30 decimation.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::painter::next_wall_boundary_ns;
 
 #[test]

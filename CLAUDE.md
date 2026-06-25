@@ -26,13 +26,35 @@ CI builds the `camera-box` release binary AND the probe/verdict binaries (`--fea
 via two artifact uploads (`camera-box-linux-amd64`, `probe-tools-linux-amd64`). Download and run
 the CI artifact — never build locally.
 
-Run locally before every push:
+Run locally before every push (**DEFAULT FEATURES ONLY — never `--features probe` / `--all-features`**):
 ```bash
 cargo fmt --all --check
 cargo check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings   # NO --all-features
 cargo test --no-run
 ```
 
+**Do NOT compile `--features probe` (or `--all-features`) locally — that is what balloons `target/`.**
+The `probe` feature pulls heavy deps (`qrcode`, `rqrr`, `image`, `drm`, `lz4_flex`) and 5 extra
+`required-features = ["probe"]` `[[bin]]` targets; with `--all-targets --all-features` every worker's
+cheap check recompiled all of them into the single shared dev1 `target/`, which has no GC
+(rust-lang/cargo#5026) — so it grew to 18 GB and filled the disk (#185). The probe code is
+**compile-checked + built ON CI ONLY**: the C++/vendored gate runs on CI (#101) and the probe
+binaries are built + uploaded as `probe-tools-linux-amd64` on CI (#192) — local probe compilation
+is redundant. Default-feature checks compile only the small appliance crate (`target/` stays in the
+**low hundreds of MB**, not GB); `cargo check`/`cargo tree` on default features pulls NONE of the
+probe crates.
+
 Heavy builds in CI only: `cargo build --release`, running `cargo test`, `cargo bench`, `--features probe`.
-Purge `target/` when stale — CI rebuilds it. Never purge while an E2E is live (binaries executing).
+
+**Bound the shared dev1 `target/` (backstop).** Even default-feature checks + rust-analyzer
+accumulate over a day (incremental cache, never purged). Keep it under ~4 GB:
+```bash
+# Check size, then purge when stale / over budget (CI rebuilds it):
+du -sh target 2>/dev/null
+[ "$(du -sm target 2>/dev/null | cut -f1)" -gt 4096 ] && cargo clean   # >4 GB → reset
+```
+The repo's `scripts/purge-target.sh` (run by the `pre-push` git hook, installed by
+`scripts/install-git-hooks.sh`) does this automatically before each push. **Never purge while an
+E2E is live** (probe binaries executing) — the hook skips when `recording-verdict`/`frame-probe`
+are running.
