@@ -110,11 +110,24 @@ pub const GENLOCK_RESERVE_MS_MAX: u32 = 100;
 /// [`GENLOCK_RESERVE_MS_DEFAULT`].
 pub const GENLOCK_LATENCY_MS_DEFAULT: u32 = GENLOCK_RESERVE_MS_DEFAULT;
 
-/// (#235) Hard cap on the canonical genlock latency (ms) — the SAME ceiling as the
-/// aliased reserve ([`GENLOCK_RESERVE_MS_MAX`] = 100 ms ≈ 3 frames @ 30 fps). Beyond
-/// this the operator wants a whole-frame video delay, which is not what the genlock
-/// latency knob is for.
+/// (#235) Hard cap on the canonical GLOBAL genlock latency (ms) — the SAME ceiling as
+/// the aliased reserve ([`GENLOCK_RESERVE_MS_MAX`] = 100 ms ≈ 3 frames @ 30 fps). This
+/// is the jitter-reserve scale (the global env default each source falls back to). The
+/// PER-SOURCE override ([`GENLOCK_SOURCE_LATENCY_MS_MAX`]) has a much higher ceiling —
+/// it is a deliberate per-source VIDEO DELAY, not a sub-frame reserve.
 pub const GENLOCK_LATENCY_MS_MAX: u32 = GENLOCK_RESERVE_MS_MAX;
+
+/// (#245) Hard cap on the PER-SOURCE genlock latency override (ms), set in the OBS
+/// source UI. Unlike the global env knob ([`GENLOCK_LATENCY_MS_MAX`] = 100 ms — a
+/// sub-frame jitter reserve), a per-source override is a deliberate VIDEO DELAY: the
+/// operator delays ONE source by up to ~2 s to align it against another (the #245
+/// live-event need was 1000 ms on a single stream source while the others stayed low).
+/// 2000 ms ≈ 60 frames @ 30 fps, comfortably inside the FIFO drop-cap's absolute
+/// maximum ([`GENLOCK_PRELOAD_MAX`] + [`GENLOCK_DROP_CAP_RESERVE`] = 132 frames) at the
+/// pinned 30 fps output, so a source at the cap can still buffer its full delay without
+/// an overrun force-drain. Mirrored in the C side (`#define
+/// GENLOCK_SOURCE_LATENCY_MS_MAX 2000`) and the DistroAV UI int range.
+pub const GENLOCK_SOURCE_LATENCY_MS_MAX: u32 = 2000;
 
 /// (#235) The minimum auto-derived internal FIFO depth a genlock source holds for
 /// jitter/dropout resilience, now that `preload` is internal (no longer a user latency
