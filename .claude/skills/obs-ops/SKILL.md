@@ -94,6 +94,39 @@ the wrapper with all four vars PEB-verified (`WALL_CLOCK=1 RESERVE_MS=3 TS_ALIGN
 + `render tick ENABLED`; stream further showed `timestamp-aligned release ENABLED` + `sub-frame
 jitter reserve = 3 ms` + live `reserve_ms=3` audits (it had a live 2ME PGM source).
 
+### Read a running process's CHILD PEB env (ad-hoc, without relaunching)
+
+To verify what env a RUNNING obs64 actually inherited WITHOUT relaunching it (the wrapper does this
+automatically at launch; this is the standalone check) — the win-* MCP `$env:` read is a STALE
+snapshot, so the only truth is the process's own PEB. Paste into the box's MCP `Shell`:
+
+```powershell
+$pid_obs = (Get-Process obs64 | Select-Object -First 1).Id
+$cs = @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class PebEnv {
+  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h,int c,ref PBI p,int l,out int r);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(int a,bool i,int pid);
+  [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h,IntPtr a,byte[] b,int s,out int r);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr R1; public IntPtr Peb; public IntPtr A; public IntPtr B; public IntPtr Pid; public IntPtr R3; }
+  static IntPtr RP(IntPtr h,IntPtr a){ byte[] b=new byte[8]; int r; ReadProcessMemory(h,a,b,8,out r); return (IntPtr)BitConverter.ToInt64(b,0); }
+  static int RI(IntPtr h,IntPtr a){ byte[] b=new byte[4]; int r; ReadProcessMemory(h,a,b,4,out r); return BitConverter.ToInt32(b,0); }
+  public static string Get(int pid){
+    IntPtr h=OpenProcess(0x0410,false,pid); if(h==IntPtr.Zero) return "ERR:open";
+    var p=new PBI(); int rl; if(NtQueryInformationProcess(h,0,ref p,Marshal.SizeOf(p),out rl)!=0){CloseHandle(h);return "ERR:ntq";}
+    IntPtr pp=RP(h,(IntPtr)((long)p.Peb+0x20)); IntPtr ea=RP(h,(IntPtr)((long)pp+0x80)); int es=RI(h,(IntPtr)((long)pp+0x3F0));
+    if(es<=0||es>1048576) es=65536; byte[] buf=new byte[es]; int rd; ReadProcessMemory(h,ea,buf,es,out rd); CloseHandle(h);
+    return Encoding.Unicode.GetString(buf,0,rd).Replace("\0","\n"); }
+}
+'@
+Add-Type -TypeDefinition $cs
+([PebEnv]::Get($pid_obs) -split "`n") | Where-Object { $_ -match '^OBS_GENLOCK_' } | Sort-Object
+```
+
+PEB offsets are the x64 layout: PEB+0x20 = ProcessParameters, RTL_USER_PROCESS_PARAMETERS+0x80 =
+Environment, +0x3F0 = EnvironmentSize. `OpenProcess(0x0410,...)` = QUERY_INFORMATION | VM_READ.
+
 ## Recovery — Do It Autonomously (Never Ask)
 
 The user has repeated this 2-3× and gets angry when re-asked which recovery method to use.
