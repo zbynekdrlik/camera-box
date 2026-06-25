@@ -68,10 +68,13 @@ ProgramData distroav, clear `%APPDATA%\obs-studio\.sentinel\*`, relaunch.
 
 Two LAYERS guard "the deployed stack is the build we think it is":
 
-- **drift-guard (#45)** — MARKETING versions only (OBS 32.1.2 / DistroAV 6.2.1).
+- **drift-guard (#45)** — marketing versions + critical settings (OBS 32.1.2 / DistroAV
+  6.2.1 / fps / genlock gate / input latency / canonical plugin path).
   `scripts/drift-guard.sh --check-pins` (CI) + `--compare` (live box). Pins live in
-  the `vendor/README.md` version table. CANNOT catch stale-BYTES-of-the-right-version
-  (that was #119: a pre-#97 DistroAV of version 6.2.1 → preload inert).
+  the `vendor/README.md` version + settings tables. The version+settings facet alone
+  cannot catch stale-BYTES-of-the-right-version (that was #119: a pre-#97 DistroAV of
+  version 6.2.1 → preload inert) — **#122 (below) closes that** with a per-component
+  BUILD-SHA + capability check.
 - **per-component SHA manifest (#120)** — the windows-genlock build emits
   `stage/BUNDLE_MANIFEST.json` via `scripts/genlock-manifest.sh` (unit-tested
   `tests/genlock_manifest.rs`): `components[]` = each rebuilt component's pinned
@@ -83,8 +86,28 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   windows-genlock-fast.yml generate + assert it. **The build genuinely rebuilds OBS +
   DistroAV from `vendor/` source — zero checked-in/cached DLLs** (`git ls-files vendor |
   grep .dll` = EMPTY), so #119's stale-prebuilt root cause is structurally gone.
-- **#121** (post-deploy byte/SHA verify vs the manifest — needs the rig) and **#122**
-  (drift-guard per-component BUILD SHA) both CONSUME `BUNDLE_MANIFEST.json`.
+- **per-component BUILD SHA + capability (#122, DONE)** — drift-guard `--compare` now
+  CONSUMES `BUNDLE_MANIFEST.json`: supply `manifest=<path>` and it ALSO checks the live
+  rig's `obs.dll`/`distroav.dll` Get-FileHash SHA256 vs the manifest's `files[]` entry
+  (matched by BASENAME → both the flat fast-dll `obs.dll` and the nested full-bundle
+  `bin/64bit/obs.dll` + `obs-plugins/64bit/distroav.dll` resolve) AND the genlock
+  CAPABILITY marker text (`genlock_capability=` — the build-unique `render tick ENABLED`
+  / `sub-frame jitter reserve` / `timestamp-aligned release` log lines). A STOCK OBS
+  32.1.2 (same version, different bytes, emits NO genlock marker) → DRIFT (exit 20) even
+  though every version/setting line reads OK — closes the #119 gap the marketing-version
+  facet alone could not. Facet is OPT-IN: no `manifest=` → historic version-only contract;
+  with it, an unread live SHA/capability is UNKNOWN (exit 11), never a silent clean. New
+  pure fns `manifest_sha_for_component` + `genlock_capability_from_log` +
+  `drift_check_capability` (tested in `tests/drift_guard.rs`). Driven by `/drift-guard`
+  step 1d (Get-FileHash the DLLs read-only + grep the genlock markers + `gh run download`
+  the build's manifest). GOTCHA: `genlock_capability_from_log` MUST `return 0` on the
+  absent case (empty output IS the "stock" signal) — a bare `[ -n "$line" ] && echo 1`
+  returns 1 and trips the test harness's `set -e`. LIVE-PROVEN both boxes 2026-06-25:
+  obs.dll `24e22357…` (= #184 fast manifest), distroav.dll `66cea70…` (= full bundle),
+  marker present → NO DRIFT; a wrong SHA + no-marker log → exit 20.
+- **#121** (post-deploy byte/SHA verify vs the manifest — needs the rig) still OPEN —
+  it ships the manifest TO the rig + byte-checks the deploy; #122 (above) is the runtime
+  drift-guard facet that consumes it. Both consume `BUNDLE_MANIFEST.json`.
 - **single canonical OBS plugin-load path (#124)** — OBS scans MULTIPLE module
   locations (`C:\Program Files\obs-studio\obs-plugins\64bit` first-party,
   `C:\ProgramData\obs-studio\plugins\<plugin>\bin\64bit` global,
