@@ -528,3 +528,35 @@ fn completeness_guard_fails_loud_on_a_count_mismatch() {
     let (ok_code, _o, _e) = run_sourced("assert_manifest_complete 1501 1501");
     assert_eq!(ok_code, 0, "a matching completeness count must pass");
 }
+
+#[test]
+fn generate_fails_loud_when_a_per_file_sha_or_size_is_empty() {
+    // BUG (#239 review, cmdsub set -e suppression): main() calls generate as
+    // `manifest="$(generate_manifest …)"`. A command substitution on the RHS of an assignment
+    // SUPPRESSES `set -e` inside the substituted command, so a mid-loop `sha256_of`/`wc -c` failure
+    // (a staged file briefly unreadable — concurrent process, Windows AV lock, transient I/O) does
+    // NOT abort: the loop emits `{ "path": "x", "sha256": "", "size":  }` (empty sha AND a value-less
+    // size = INVALID JSON), `written` still increments, the count guard sees expected==written and
+    // says OK, and the corrupt manifest is written with exit 0. The completeness count is blind to it
+    // (every PATH is present; only the sha/size are empty). Each emitted entry must therefore be
+    // validated explicitly — a non-empty 64-hex sha + a numeric size — and a bad one must FAIL LOUD,
+    // independent of the suppressed `set -e`.
+    let (bad_sha, sout, serr) = run_sourced("assert_entry_valid 'b.txt' '' '3'");
+    assert_ne!(
+        bad_sha, 0,
+        "an empty sha256 for a staged file must FAIL the generate.\nstdout={sout}\nstderr={serr}"
+    );
+    assert!(
+        format!("{sout}{serr}").contains("b.txt"),
+        "the failure must name the offending file.\nstdout={sout}\nstderr={serr}"
+    );
+    let (bad_size, _o2, _e2) = run_sourced("assert_entry_valid 'b.txt' '5695d82a086b677962a0b0428ed1a213208285b7b40d7d3604876d36a710302a' ''");
+    assert_ne!(bad_size, 0, "an empty size for a staged file must FAIL the generate");
+    let (bad_size2, _o3, _e3) = run_sourced("assert_entry_valid 'b.txt' '5695d82a086b677962a0b0428ed1a213208285b7b40d7d3604876d36a710302a' 'notanumber'");
+    assert_ne!(bad_size2, 0, "a non-numeric size must FAIL the generate");
+    // A valid 64-hex sha + numeric size passes (the helper is not a constant failure).
+    let (ok, _o4, _e4) = run_sourced(
+        "assert_entry_valid 'b.txt' '5695d82a086b677962a0b0428ed1a213208285b7b40d7d3604876d36a710302a' '4'",
+    );
+    assert_eq!(ok, 0, "a valid sha+size must pass");
+}
