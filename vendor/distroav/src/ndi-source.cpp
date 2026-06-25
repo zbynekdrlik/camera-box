@@ -1470,14 +1470,17 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	/* camera-box #245: apply the per-source genlock LATENCY override (ms). Runtime-
 	 * resolved like the preload setter. libobs clamps to [0, 2000] and writes under
 	 * async_mutex (crash-safe, the #93 UAF lesson). 0 = follow the global default.
-	 * Persists in the scene via PROP_GENLOCK_LATENCY_MS_SRC. Floor a negative value
-	 * (only reachable via a corrupt/hand-edited scene, never the 0-2000 field) at 0
-	 * BEFORE the uint32_t cast — otherwise -1 would wrap to UINT32_MAX and libobs would
-	 * clamp it to the MAXIMUM delay instead of zero. */
+	 * Persists in the scene via PROP_GENLOCK_LATENCY_MS_SRC. Clamp to [0, 2000]
+	 * (GENLOCK_SOURCE_LATENCY_MS_MAX) at the input boundary — only reachable outside
+	 * 0-2000 via a corrupt/hand-edited scene. Floor BEFORE the uint32_t cast so -1
+	 * cannot wrap to UINT32_MAX (which libobs would then clamp to the MAXIMUM delay
+	 * instead of zero); the explicit upper clamp matches libobs's authoritative cap. */
 	if (auto set_latency = resolve_set_genlock_latency_ms()) {
 		long long ms = obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC);
 		if (ms < 0)
 			ms = 0;
+		else if (ms > 2000)
+			ms = 2000;
 		set_latency(obs_source, (uint32_t)ms);
 	}
 

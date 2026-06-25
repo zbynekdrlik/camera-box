@@ -4316,9 +4316,14 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 	if (source->genlock_latency_ms > 0) {
 		struct obs_video_info ovi;
 		if (obs_get_video_info(&ovi) && ovi.fps_den != 0) {
+			/* round-to-nearest (+den/2) to faithfully mirror the Rust
+			 * ms_to_frames() — floor would under-budget the cap by ≤1 frame
+			 * on sub-frame ms values. */
+			const uint64_t lat_den = 1000ULL * ovi.fps_den;
 			const uint32_t latency_frames =
-				(uint32_t)((uint64_t)source->genlock_latency_ms * ovi.fps_num /
-					   (1000ULL * ovi.fps_den));
+				(uint32_t)(((uint64_t)source->genlock_latency_ms * ovi.fps_num +
+					    lat_den / 2) /
+					   lat_den);
 			if (latency_frames > depth)
 				depth = latency_frames;
 		}
@@ -4666,7 +4671,9 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	const uint32_t global_latency_ms = genlock_latency_ms();
 	const uint32_t latency_ms = source->genlock_latency_ms > 0 ? source->genlock_latency_ms : global_latency_ms;
 	const unsigned long long latency_frames =
-		have_vi ? (unsigned long long)latency_ms * ovi.fps_num / (1000ULL * ovi.fps_den) : 0ULL;
+		have_vi ? ((unsigned long long)latency_ms * ovi.fps_num + (1000ULL * ovi.fps_den) / 2) /
+				  (1000ULL * ovi.fps_den)
+			: 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
 	     "overruns=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
