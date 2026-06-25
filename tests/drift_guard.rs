@@ -73,6 +73,7 @@ const MANIFEST_FIXTURE: &str = "\
 | `output_fps` | `30` | OBS log |
 | `genlock_wall_clock` | `1` | OBS log |
 | `ndi_input_latency` | `0` | obs-websocket GetInputSettings |
+| `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | Get-ChildItem the OBS scan paths |
 ";
 
 /// The ACTUAL OBS log lines captured from strih/stream 2026-06-14. Note the graphics-adapter
@@ -127,6 +128,11 @@ fn parses_pinned_versions_and_settings_from_manifest() {
         setting("ndi_input_latency"),
         "0",
         "must read the pinned NDI input latency mode (0=Normal, certified low-latency, #84)"
+    );
+    assert_eq!(
+        setting("canonical_plugin_path"),
+        r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit",
+        "must read the pinned single canonical OBS plugin-load path (#124)"
     );
 
     let _ = std::fs::remove_file(&readme);
@@ -364,6 +370,8 @@ fn compare_clean_when_observed_matches_the_pinned_set() {
         "output_fps=30",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        // #124: distroav.dll lives in exactly ONE OBS scan path, the canonical ProgramData one.
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
     ]);
     assert_eq!(
         code, 0,
@@ -518,5 +526,126 @@ fn compare_input_latency_unknown_when_not_read() {
     assert!(
         stdout.contains("ndi_input_latency") && stdout.contains("UNKNOWN"),
         "must report the unread input-latency set. stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+// --- #124: single canonical OBS plugin-load path (no ProgramData-vs-Program Files shadow) ----
+
+#[test]
+fn drift_check_plugin_paths_pure_flags_shadow_and_wrong_path() {
+    // The pure helper: distroav.dll must exist in EXACTLY ONE OBS scan path, and that path must be
+    // the pinned canonical one. The exact #124 failure is a SECOND copy in another scan path
+    // (ProgramData AND Program Files\obs-plugins) that can silently shadow the intended build.
+    // Observed = comma-separated list of every distroav.dll location found across the box's OBS
+    // scan paths. The pinned canonical value is the directory; an observed entry may be the dir or
+    // the full .dll path — both count as "at the canonical path".
+    let canon = r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit";
+    let case = |observed: &str| {
+        let body = "rc=0; drift_check_plugin_paths \"$EXP\" \"$OBS\" || rc=$?; echo \"RC=$rc\"";
+        run_sourced(body, &[("EXP", canon), ("OBS", observed)])
+    };
+
+    // Exactly one copy, at the canonical path -> OK.
+    let ok = case(r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll");
+    assert!(
+        ok.contains("RC=0"),
+        "a single distroav.dll at the canonical path must be OK: {ok:?}"
+    );
+
+    // The #124 shadow: distroav.dll in TWO scan paths -> DRIFT. A stale copy in the other path
+    // can shadow the intended build (the mixed-version incident #119 that burned the user).
+    let shadow = case(concat!(
+        r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        ",",
+        r"C:\Program Files\obs-studio\obs-plugins\64bit\distroav.dll"
+    ));
+    assert!(
+        shadow.contains("RC=2"),
+        "distroav.dll in TWO scan paths is a shadow -> DRIFT: {shadow:?}"
+    );
+    assert!(
+        shadow.contains("DRIFT") && shadow.contains("Program Files"),
+        "must name the shadow path: {shadow:?}"
+    );
+
+    // Exactly one copy but in the WRONG (non-canonical) path -> DRIFT too. The pinned path is the
+    // single source of truth; a lone copy anywhere else is still off the canonical path.
+    let wrong = case(r"C:\Program Files\obs-studio\obs-plugins\64bit\distroav.dll");
+    assert!(
+        wrong.contains("RC=2"),
+        "a lone copy off the canonical path must be DRIFT: {wrong:?}"
+    );
+    assert!(
+        wrong.contains("DRIFT") && wrong.contains("canonical"),
+        "must say it is not on the canonical path: {wrong:?}"
+    );
+
+    // No copy read -> UNKNOWN (never silently OK — a scan we could not run must not look clean).
+    let unknown = case("");
+    assert!(
+        unknown.contains("RC=3") && unknown.contains("UNKNOWN"),
+        "an empty observed set must be UNKNOWN, never OK: {unknown:?}"
+    );
+}
+
+#[test]
+fn compare_fails_loudly_on_plugin_shadow() {
+    // End-to-end: the box has distroav.dll in BOTH ProgramData (canonical) AND Program Files\
+    // obs-plugins (a stale shadow left by a deploy). The guard must exit 20 and name the shadow.
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        concat!(
+            r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+            ",",
+            r"C:\Program Files\obs-studio\obs-plugins\64bit\distroav.dll"
+        ),
+    ]);
+    assert_eq!(
+        code, 20,
+        "a shadowing duplicate plugin must exit 20. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("DRIFT") && stdout.contains("Program Files"),
+        "must name the shadow path. stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly. stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn compare_plugin_paths_unknown_when_not_read() {
+    // Omit distroav_dll_paths: the duplicate-plugin shadow is a real version-integrity drift vector
+    // (#124), so an unread plugin-path scan must be UNKNOWN (exit 11), never a silent clean.
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        // distroav_dll_paths intentionally missing
+    ]);
+    assert_eq!(
+        code, 11,
+        "omitting distroav_dll_paths must exit 11 (UNKNOWN), not 0. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("NO DRIFT"),
+        "must NOT claim clean when the plugin-path scan is unread. stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("distroav_dll_paths") && stdout.contains("UNKNOWN"),
+        "must report the unread plugin-path scan. stdout={stdout:?} stderr={stderr:?}"
     );
 }
