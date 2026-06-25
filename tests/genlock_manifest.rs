@@ -42,6 +42,26 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// Source the REAL script (its `BASH_SOURCE != $0` guard skips the executed flow) and run `body`
+/// against its pure functions. Returns (exit_code, stdout, stderr) — used to drive the
+/// completeness-guard helper directly with controlled counts (a generate bug can't be injected from
+/// the outside, so the guard is exercised as the unit it is). Same convention as
+/// tests/launch_obs_genlock.rs::run_sourced.
+fn run_sourced(body: &str) -> (i32, String, String) {
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 /// Build a synthetic staged bundle mirroring the windows-genlock.yml stage/ layout: the OBS rundir
 /// (bin/64bit/obs64.exe + obs.dll), the DistroAV plugin (obs-plugins/64bit/distroav.dll), its data,
 /// and the existing GENLOCK_BUILD_SHA.txt. Returns the stage dir path (inside a tempdir kept alive
@@ -352,4 +372,159 @@ fn empty_stage_generates_and_self_checks_clean_under_set_e() {
         chk_code, 0,
         "empty-stage manifest must self-check clean.\nstdout={cout}\nstderr={cerr}"
     );
+}
+
+/// Build a synthetic stage with `n` files spread across the real bundle's nested layout
+/// (bin/64bit/*.dll + data/libobs/*.effect), mirroring the ~2000-file windows-genlock bundle.
+fn make_large_stage(n: usize) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path().join("stage");
+    fs::create_dir_all(stage.join("bin/64bit")).unwrap();
+    fs::create_dir_all(stage.join("data/libobs")).unwrap();
+    fs::write(stage.join("GENLOCK_BUILD_SHA.txt"), "deadbeef\n").unwrap();
+    let half = n / 2;
+    for i in 0..half {
+        fs::write(
+            stage.join(format!("bin/64bit/lib{i}.dll")),
+            format!("dll-{i}"),
+        )
+        .unwrap();
+    }
+    for i in half..n {
+        fs::write(
+            stage.join(format!("data/libobs/eff{i}.effect")),
+            format!("eff-{i}"),
+        )
+        .unwrap();
+    }
+    (tmp, stage)
+}
+
+#[test]
+fn check_is_consistent_on_a_large_real_sized_bundle() {
+    // REGRESSION (#239): the real windows-genlock bundle is ~2000 files. The original
+    // check_consistency ran `printf '%s\n' "$listed" | grep -qxF "$rel"` ONCE PER staged file;
+    // `grep -q` exits early on a match, sending SIGPIPE to the upstream `printf`, and under
+    // `set -euo pipefail` that SIGPIPE nondeterministically poisoned the pipeline's exit status —
+    // so ~half the files were falsely reported "staged file not in manifest" and the build failed
+    // with exit 21 on a PERFECTLY VALID, complete manifest. The tiny 5-file synthetic stages above
+    // never hit the race; a real-sized stage does. This locks the fix: a freshly-generated manifest
+    // over a ~1500-file bundle MUST self-check clean, repeatably (the race was nondeterministic, so
+    // check several times to catch a regression that only fails some of the time).
+    let (_tmp, stage) = make_large_stage(1500);
+    let out = stage.join("BUNDLE_MANIFEST.json");
+    let (gen_code, gout, gerr) = run_script(&[
+        "--stage",
+        stage.to_str().unwrap(),
+        "--build-sha",
+        "abc",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        gen_code, 0,
+        "large-stage generate must exit 0.\nstdout={gout}\nstderr={gerr}"
+    );
+
+    for attempt in 0..5 {
+        let (code, cout, cerr) = run_script(&[
+            "--check",
+            out.to_str().unwrap(),
+            "--stage",
+            stage.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            code, 0,
+            "large-bundle self-check must be clean (attempt {attempt}); the SIGPIPE/pipefail \
+             race (#239) made this fail nondeterministically.\nstdout={cout}\nstderr={cerr}"
+        );
+    }
+}
+
+#[test]
+fn check_still_catches_an_extra_file_in_a_large_bundle() {
+    // The fix must not weaken the gate: even on a large bundle, an un-manifested extra file is still
+    // flagged INCONSISTENT (exit 21) — the anti-#119 "no un-audited bytes ship" property holds at scale.
+    let (_tmp, stage) = make_large_stage(1500);
+    let out = stage.join("BUNDLE_MANIFEST.json");
+    let (gen_code, _g, _e) = run_script(&[
+        "--stage",
+        stage.to_str().unwrap(),
+        "--build-sha",
+        "abc",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(gen_code, 0, "large-stage generate must exit 0");
+
+    fs::write(stage.join("bin/64bit/rogue.dll"), "unlisted").unwrap();
+    let (code, _c, cerr) = run_script(&[
+        "--check",
+        out.to_str().unwrap(),
+        "--stage",
+        stage.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        code, 21,
+        "an un-manifested extra file in a large bundle must still fail"
+    );
+    assert!(
+        cerr.contains("not in manifest"),
+        "expected a not-in-manifest report, got:\n{cerr}"
+    );
+}
+
+#[test]
+fn generate_verifies_manifest_completeness_at_generation_loud() {
+    // HARDENING (#239 follow-up): the failed Windows build's reported symptom looked like the
+    // generate loop had stopped partway and the manifest was missing files. It hadn't (the real
+    // cause was the SIGPIPE checker race, fixed above) — but a TRUNCATED generate is a real risk on
+    // git-bash (a process-substitution / find stream cut short) and MUST fail LOUD at generation, so
+    // a partial manifest can never silently reach the later --check. The generator now counts the
+    // staged files it intends to manifest vs the files[] entries it actually wrote, and emits a
+    // completeness line; a healthy generate reports N == N.
+    let (_tmp, stage) = make_large_stage(1500);
+    let out = stage.join("BUNDLE_MANIFEST.json");
+    let (gen_code, gout, gerr) = run_script(&[
+        "--stage",
+        stage.to_str().unwrap(),
+        "--build-sha",
+        "abc",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        gen_code, 0,
+        "complete-bundle generate must exit 0.\nstdout={gout}\nstderr={gerr}"
+    );
+    // The completeness guard prints both counts; on a healthy bundle they are equal and non-zero.
+    // 1500 files + GENLOCK_BUILD_SHA.txt = 1501 staged (the manifest never lists itself).
+    let combined = format!("{gout}{gerr}");
+    assert!(
+        combined.contains("manifest completeness")
+            && combined.contains("1501 staged")
+            && combined.contains("1501 manifested"),
+        "generate must report a verified completeness count (1501 == 1501).\nstdout={gout}\nstderr={gerr}"
+    );
+}
+
+#[test]
+fn completeness_guard_fails_loud_on_a_count_mismatch() {
+    // The guard's TEETH: a generate bug can't be injected from outside, so drive the pure
+    // completeness helper directly with a mismatch (expected 1501, wrote 800 — a truncated stream).
+    // It MUST exit non-zero AND name both counts on stderr, never silently continue. This is the
+    // independent backstop the dispatch asked for: a partial manifest dies AT generation, loud.
+    let (code, sout, serr) = run_sourced("assert_manifest_complete 1501 800");
+    assert_ne!(
+        code, 0,
+        "a 1501-vs-800 completeness mismatch must FAIL the generate.\nstdout={sout}\nstderr={serr}"
+    );
+    let combined = format!("{sout}{serr}");
+    assert!(
+        combined.contains("1501") && combined.contains("800"),
+        "the failure must name both counts so the truncation is debuggable.\nstdout={sout}\nstderr={serr}"
+    );
+    // A matching count passes (the helper is not a constant failure).
+    let (ok_code, _o, _e) = run_sourced("assert_manifest_complete 1501 1501");
+    assert_eq!(ok_code, 0, "a matching completeness count must pass");
 }

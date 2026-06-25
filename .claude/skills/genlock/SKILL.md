@@ -123,6 +123,22 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   windows-genlock-fast.yml generate + assert it. **The build genuinely rebuilds OBS +
   DistroAV from `vendor/` source — zero checked-in/cached DLLs** (`git ls-files vendor |
   grep .dll` = EMPTY), so #119's stale-prebuilt root cause is structurally gone.
+  **GIT-BASH FOOTGUNS (#239) — this script runs under `set -euo pipefail` on the
+  windows-2022 runner's git-bash, where the ~2000-file real bundle hits races the 5-file
+  Linux unit stages NEVER do (a Windows-only break can pass every PR — full build is
+  workflow_dispatch-only, see #240):** (1) **SIGPIPE poisons pipefail** — a per-item
+  `printf … | grep -q…`/`… | head -1` lets the downstream early-exit SIGPIPE the upstream,
+  and pipefail nondeterministically marks the pipeline failed → ~half a VALID bundle
+  falsely "not in manifest" (exit 21 on correct bytes). Fix: single-pass `comm` over
+  `LC_ALL=C`-sorted lists (extra=`comm -23`, missing=`comm -13`, both=`comm -12`), and
+  `sed '…;q'` instead of `| head -1`. **`comm` MUST run `LC_ALL=C` matching the sort** or it
+  sees the lists as unsorted and emits garbage. (2) **proc-sub can truncate** — `done < <(…)`
+  FIFO can be cut short on git-bash; materialise the list into a var + iterate with `<<<`,
+  and `assert_manifest_complete EXPECTED ACTUAL` (exit **22**, distinct from --check's 21)
+  fails LOUD at generation if intended-count ≠ written-count so a partial manifest never
+  reaches --check. RED→GREEN must be proven at the SHELL level (Tier-0 blocks the Rust test
+  runner); the Windows-specific fix is ONLY verifiable by dispatching `windows-genlock.yml`
+  on your HEAD — the broken step never ran green on a real Windows bundle before.
 - **per-component BUILD SHA + capability (#122, DONE)** — drift-guard `--compare` now
   CONSUMES `BUNDLE_MANIFEST.json`: supply `manifest=<path>` and it ALSO checks the live
   rig's `obs.dll`/`distroav.dll` Get-FileHash SHA256 vs the manifest's `files[]` entry
