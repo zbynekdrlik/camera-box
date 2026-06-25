@@ -775,6 +775,29 @@ fn genlock_capability_parser_detects_our_build_vs_stock() {
 }
 
 #[test]
+fn genlock_capability_parser_detects_the_235_single_knob_latency_line() {
+    // #235: the single-knob build's startup log emits 'genlock: latency = N ms (≈ M frames @ Ffps)'
+    // instead of the #184 'sub-frame jitter reserve = N ms' line. The capability parser must
+    // recognize the NEW line as a build-unique marker too — otherwise a #235 build (which no longer
+    // emits the old reserve line) would read as UNKNOWN/stock and false-trip the #119 facet.
+    let lat_only = "07:42:38.746: genlock: latency = 3 ms (≈ 0 frames @ 29.970fps) (OBS_GENLOCK_LATENCY_MS) — single user-facing latency knob, ts-align implied ON (#235)\n";
+    let out = run_sourced("genlock_capability_from_log \"$LOG\"", &[("LOG", lat_only)]);
+    assert_eq!(
+        out.trim(),
+        "1",
+        "the #235 'genlock: latency = N ms' line must read as a build-unique capability marker: {out:?}"
+    );
+    // The alias-sourced wording (RESERVE_MS alias) must also match — it carries the same line shape.
+    let alias = "07:42:38.746: genlock: latency = 3 ms (≈ 0 frames @ 29.970fps) (OBS_GENLOCK_RESERVE_MS alias) — single user-facing latency knob, ts-align implied ON (#235)\n";
+    let out2 = run_sourced("genlock_capability_from_log \"$LOG\"", &[("LOG", alias)]);
+    assert_eq!(
+        out2.trim(),
+        "1",
+        "the alias-sourced #235 latency line must also match: {out2:?}"
+    );
+}
+
+#[test]
 fn compare_clean_when_build_sha_and_capability_match_the_manifest() {
     // Full live facet: the deployed obs.dll/distroav.dll SHAs match the #184 manifest AND the
     // genlock capability marker is present -> NO DRIFT. This is the live-rig PASS #122 proves.

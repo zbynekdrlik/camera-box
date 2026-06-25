@@ -813,9 +813,11 @@ mod single_latency_knob {
         // small jitter/dropout buffer. Auto-derive a depth of at least the min (>=1 frame
         // so the #110 0-loss floor holds) regardless of latency_ms — the depth does NOT
         // add latency (the ms reserve governs the held delay, not the FIFO depth).
-        assert!(
-            GENLOCK_AUTO_PRELOAD_MIN >= 1,
-            "min depth must hold >=1 frame for 0-loss"
+        // Pin the min depth at exactly 1 (>= 1 frame so the #110 0-loss floor holds; equals
+        // the historical default preload, preserving the validated prod behavior).
+        assert_eq!(
+            GENLOCK_AUTO_PRELOAD_MIN, 1,
+            "min depth must be exactly 1 frame (the #110 0-loss floor)"
         );
         assert_eq!(genlock_auto_preload(0), GENLOCK_AUTO_PRELOAD_MIN);
         assert_eq!(genlock_auto_preload(3), GENLOCK_AUTO_PRELOAD_MIN); // prod latency_ms=3
@@ -1062,6 +1064,84 @@ mod vendored_source {
             src.contains("genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)"),
             "{OBS_SOURCE}: #184 — the ts-align render path no longer selects \
              genlock_present_ts_reserve when a reserve is configured; the ms-reserve knob is inert. Re-apply."
+        );
+    }
+
+    #[test]
+    fn single_latency_knob_present_in_vendored_source() {
+        // #235: the C side must read the canonical OBS_GENLOCK_LATENCY_MS knob, KEEP the
+        // OBS_GENLOCK_RESERVE_MS back-compat alias, imply ts-align ON when the ms knob is
+        // set, and auto-derive the internal FIFO depth. A subtree pull (#44) dropping any
+        // of these silently reverts the single-knob UX. Mirror of src/probe/genlock.rs
+        // resolve_latency_ms / genlock_auto_preload.
+        use camera_box::probe::genlock::{
+            GENLOCK_AUTO_PRELOAD_MIN, GENLOCK_LATENCY_MS_DEFAULT, GENLOCK_LATENCY_MS_MAX,
+        };
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // The canonical knob is read.
+        assert!(
+            src.contains("getenv(\"OBS_GENLOCK_LATENCY_MS\")"),
+            "{OBS_SOURCE}: #235 — the canonical latency knob (OBS_GENLOCK_LATENCY_MS) is no \
+             longer read; re-apply the single-knob resolution."
+        );
+        // The back-compat alias parser is STILL present (RESERVE_MS keeps working).
+        assert!(
+            src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
+            "{OBS_SOURCE}: #235 — the OBS_GENLOCK_RESERVE_MS back-compat alias is gone; \
+             existing deploys / the #128 wrapper would break. Re-apply."
+        );
+        // The resolution + the canonical-or-alias resolver must exist.
+        assert!(
+            src.contains("genlock_parse_latency_ms_set")
+                && src.contains("static uint32_t genlock_latency_ms("),
+            "{OBS_SOURCE}: #235 — the single-knob resolver (genlock_parse_latency_ms_set + \
+             genlock_latency_ms, canonical-wins-then-alias) is gone; re-apply."
+        );
+        // The C latency default/cap MUST equal the Rust mirror constants (lock-step).
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_LATENCY_MS_DEFAULT {}",
+                if GENLOCK_LATENCY_MS_DEFAULT == 0 {
+                    "GENLOCK_RESERVE_MS_DEFAULT".to_string()
+                } else {
+                    GENLOCK_LATENCY_MS_DEFAULT.to_string()
+                }
+            )),
+            "{OBS_SOURCE}: #235 — GENLOCK_LATENCY_MS_DEFAULT drifted from the Rust mirror \
+             ({GENLOCK_LATENCY_MS_DEFAULT}); keep them in lock-step."
+        );
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_LATENCY_MS_MAX {}",
+                if GENLOCK_LATENCY_MS_MAX == 100 {
+                    "GENLOCK_RESERVE_MS_MAX".to_string()
+                } else {
+                    GENLOCK_LATENCY_MS_MAX.to_string()
+                }
+            )),
+            "{OBS_SOURCE}: #235 — GENLOCK_LATENCY_MS_MAX drifted from the Rust mirror \
+             ({GENLOCK_LATENCY_MS_MAX}); keep them in lock-step."
+        );
+        // The auto-preload min MUST equal the Rust mirror constant (lock-step).
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_AUTO_PRELOAD_MIN {GENLOCK_AUTO_PRELOAD_MIN}"
+            )),
+            "{OBS_SOURCE}: #235 — GENLOCK_AUTO_PRELOAD_MIN drifted from the Rust mirror \
+             ({GENLOCK_AUTO_PRELOAD_MIN}); keep them in lock-step."
+        );
+        // ts-align must be IMPLIED ON when the ms latency knob is set (no separate user gate).
+        assert!(
+            src.contains("genlock_latency_ms() > 0"),
+            "{OBS_SOURCE}: #235 — genlock_ts_align_enabled no longer implies ts-align ON when \
+             the latency knob is set; the user would still need OBS_GENLOCK_TS_ALIGN. Re-apply."
+        );
+        // preload must be auto-derived (internal) on the ms path — the audit/display log
+        // must surface the ms-primary latency with the frame-equivalent in parens (#235 ask).
+        assert!(
+            src.contains("latency_ms=%u (≈%llu frames @ %.3ffps)"),
+            "{OBS_SOURCE}: #235 — the audit log no longer shows 'latency_ms=N (≈M frames)' \
+             (ms primary, frames in parens); re-apply the single-knob display."
         );
     }
 
@@ -1432,15 +1512,21 @@ mod distroav_source {
             "{NDI_SOURCE}: #97 — the genlock-preload int slider is gone from the NDI \
              source properties; re-apply."
         );
-        // The slider label + min(0) + step(1) are pinned; the max may be the literal
-        // 128 OR the symbolic PROP_GENLOCK_PRELOAD_MAX (== 128, asserted separately).
+        // The slider min(0) + step(1) are pinned; the max may be the literal 128 OR the
+        // symbolic PROP_GENLOCK_PRELOAD_MAX (== 128, asserted separately). #235 relabeled
+        // the slider from "Genlock preload (video delay)" to the internal/legacy
+        // "Genlock preload (internal FIFO depth — legacy frame control)" (preload is no
+        // longer a user latency knob — the ms latency knob holds the delay), so the guard
+        // pins the range/step and that the label marks it INTERNAL/LEGACY, not the exact
+        // old wording.
         assert!(
-            src.contains("PROP_GENLOCK_PRELOAD, \"Genlock preload (video delay)\", 0, 128, 1")
+            src.contains("PROP_GENLOCK_PRELOAD, \"Genlock preload (internal FIFO depth — legacy frame control)\", 0, 128, 1")
                 || src.contains(
-                    "PROP_GENLOCK_PRELOAD, \"Genlock preload (video delay)\", 0, PROP_GENLOCK_PRELOAD_MAX, 1"
+                    "PROP_GENLOCK_PRELOAD, \"Genlock preload (internal FIFO depth — legacy frame control)\", 0, PROP_GENLOCK_PRELOAD_MAX, 1"
                 ),
-            "{NDI_SOURCE}: #97 — the preload slider range/label changed; expected \
-             (\"Genlock preload (video delay)\", 0, 128|PROP_GENLOCK_PRELOAD_MAX, 1)."
+            "{NDI_SOURCE}: #97/#235 — the preload slider range/label changed; expected the \
+             internal/legacy label (\"Genlock preload (internal FIFO depth — legacy frame \
+             control)\", 0, 128|PROP_GENLOCK_PRELOAD_MAX, 1)."
         );
         // The symbolic cap must equal the libobs cap (128).
         assert!(
@@ -1467,6 +1553,38 @@ mod distroav_source {
             src.contains("obs_property_set_modified_callback"),
             "{NDI_SOURCE}: #97 — the preload slider has no modified_callback to \
              recompute the ms label; re-apply."
+        );
+    }
+
+    #[test]
+    fn single_latency_label_present() {
+        // #235: the NDI source properties must show the SINGLE genlock-latency display —
+        // a read-only "genlock latency = N ms (≈ M frames @ Ffps)" (ms primary, frames in
+        // parens), sourced from the resolved env latency (OBS_GENLOCK_LATENCY_MS, alias
+        // OBS_GENLOCK_RESERVE_MS). A subtree pull (#44) dropping it reverts the #235 UX.
+        let src = squish(&vendor_file(NDI_SOURCE));
+        assert!(
+            src.contains("#define PROP_GENLOCK_LATENCY_MS"),
+            "{NDI_SOURCE}: #235 — the PROP_GENLOCK_LATENCY_MS read-only latency label \
+             property define is missing; re-apply."
+        );
+        assert!(
+            src.contains("obs_properties_add_text(props, PROP_GENLOCK_LATENCY_MS"),
+            "{NDI_SOURCE}: #235 — the read-only genlock-latency info-text property is gone; \
+             re-apply the single-knob display."
+        );
+        // The resolver must read the canonical knob AND fall back to the reserve alias.
+        assert!(
+            src.contains("getenv(\"OBS_GENLOCK_LATENCY_MS\")")
+                && src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
+            "{NDI_SOURCE}: #235 — resolve_genlock_latency_ms no longer reads the canonical \
+             OBS_GENLOCK_LATENCY_MS + the OBS_GENLOCK_RESERVE_MS alias; re-apply."
+        );
+        // The label must be ms-primary with the frame-equivalent in parens (the #235 ask).
+        assert!(
+            src.contains("genlock latency = %ld ms (≈ %llu frames @ %.3f fps)"),
+            "{NDI_SOURCE}: #235 — the latency label is no longer 'N ms (≈ M frames @ Ffps)' \
+             (ms primary, frames in parens); re-apply format_genlock_latency_label."
         );
     }
 

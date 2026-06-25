@@ -2,11 +2,15 @@
 # launch-obs-genlock.sh — deterministic, env-safe OBS (re)launch wrapper for the genlock boxes (#128).
 #
 # WHY (#128, the recurring "stale-env trap"): every OBS relaunch (deploy, crash-recovery, reboot,
-# config change) MUST come up carrying the four genlock env vars
+# config change) MUST come up carrying the four REQUIRED genlock env vars
 #   OBS_GENLOCK_WALL_CLOCK   — the wall-clock render-tick master gate (#136)
-#   OBS_GENLOCK_RESERVE_MS   — the sub-frame jitter reserve, #184-validated = 3
-#   OBS_GENLOCK_TS_ALIGN     — timestamp-aligned multi-source release (#136)
-#   OBS_GENLOCK_PRELOAD_FRAMES — per-source FIFO preload default (#70/#97)
+#   OBS_GENLOCK_RESERVE_MS   — the held latency in ms, #184/#235-validated = 3 (now the BACK-COMPAT
+#                              ALIAS of the canonical OBS_GENLOCK_LATENCY_MS, #235)
+#   OBS_GENLOCK_TS_ALIGN     — timestamp-aligned multi-source release (#136; implied ON by the ms knob, #235)
+#   OBS_GENLOCK_PRELOAD_FRAMES — legacy/internal FIFO depth default (#70/#97; auto-derived under the ms knob, #235)
+# plus the OPTIONAL canonical single latency knob (carried only when set in Machine — a re-pinned box):
+#   OBS_GENLOCK_LATENCY_MS   — THE single user-facing genlock latency in ms (#235); wins over the
+#                              RESERVE_MS alias. A legacy box without it still launches on the alias.
 # If the launching process is a LONG-LIVED win-* MCP shell whose environment snapshot PREDATES the
 # Machine-scope env write, the spawned obs64 inherits the STALE snapshot → the var is UNSET → the
 # render tick is silently OFF and the whole genlock guarantee is gone, INVISIBLY (issue #128, the
@@ -41,15 +45,27 @@
 # 0 healthy genlock / non-zero fail-loud — is reported by the MCP Shell when the agent runs it.)
 set -euo pipefail
 
-# The four genlock env vars carried on EVERY launch (the #128 set). The reserve is #184-validated = 3;
-# the wrapper reads the LIVE Machine value (so a future re-pin needs only a setx + relaunch), and the
-# verify asserts the child PEB matches Machine — single source of truth, no hard-coded drift.
+# The four REQUIRED genlock env vars carried on EVERY launch (the #128 set). The held latency is
+# #184/#235-validated = 3 ms; the wrapper reads the LIVE Machine value (so a future re-pin needs only
+# a setx + relaunch), and the verify asserts the child PEB matches Machine — single source of truth,
+# no hard-coded drift. OBS_GENLOCK_RESERVE_MS stays REQUIRED as the #235 back-compat alias (so a box
+# pinned only on reserve keeps working unchanged); the new canonical OBS_GENLOCK_LATENCY_MS is carried
+# OPTIONALLY (only when set in Machine) so a box that has not yet been re-pinned to the new knob name
+# still launches cleanly.
 GENLOCK_VARS=(OBS_GENLOCK_WALL_CLOCK OBS_GENLOCK_RESERVE_MS OBS_GENLOCK_TS_ALIGN OBS_GENLOCK_PRELOAD_FRAMES)
+
+# #235: the canonical single latency knob, carried OPTIONALLY (only if set in Machine — a re-pinned
+# box sets this; a legacy box on the reserve alias does not, and must still launch). When set it WINS
+# over the reserve alias in libobs (genlock_latency_ms resolution).
+GENLOCK_OPTIONAL_VARS=(OBS_GENLOCK_LATENCY_MS)
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
-# genlock_var_list -> space-separated list of the four genlock var names (single source of truth).
+# genlock_var_list -> space-separated list of the four REQUIRED genlock var names (single source of truth).
 genlock_var_list() { printf '%s ' "${GENLOCK_VARS[@]}"; }
+
+# genlock_optional_var_list -> space-separated list of the OPTIONAL canonical genlock var(s) (#235).
+genlock_optional_var_list() { printf '%s ' "${GENLOCK_OPTIONAL_VARS[@]}"; }
 
 # build_launch_program OBS_DIR FORCE -> the full PowerShell program that (re)launches OBS carrying
 # the genlock env FRESH from Machine scope and then verifies+fails-loud. OBS_DIR is the OBS install
@@ -99,15 +115,25 @@ PSNOKILL
 # ===== #128 deterministic genlock OBS (re)launch + verify (paste into the box's win-* MCP Shell) =====
 \$ErrorActionPreference = 'Stop'
 \$genlockVars = @($(printf "'%s'," "${GENLOCK_VARS[@]}" | sed 's/,$//'))
+# #235: the canonical single latency knob, carried only when it is set in Machine (a re-pinned box).
+\$genlockOptionalVars = @($(printf "'%s'," "${GENLOCK_OPTIONAL_VARS[@]}" | sed 's/,$//'))
 
-# (1) Read the genlock vars FRESH from Machine scope (the persistent HKLM source of truth, survives
-#     reboot) and (2) set them EXPLICITLY in THIS shell, so the spawned obs64 inherits the CORRECT
-#     values regardless of any stale env snapshot in the long-lived MCP/launcher process (#128).
+# (1) Read the REQUIRED genlock vars FRESH from Machine scope (the persistent HKLM source of truth,
+#     survives reboot) and (2) set them EXPLICITLY in THIS shell, so the spawned obs64 inherits the
+#     CORRECT values regardless of any stale env snapshot in the long-lived MCP/launcher process (#128).
 foreach (\$n in \$genlockVars) {
   \$v = [System.Environment]::GetEnvironmentVariable(\$n, 'Machine')
   if (\$null -eq \$v -or \$v -eq '') { Write-Error "Machine env \$n is UNSET — set it (setx /M) before launching genlock OBS (#128)."; exit 4 }
   Set-Item -Path "Env:\$n" -Value \$v
   Write-Host "set \$n=\$v (from Machine)"
+}
+# #235: carry the OPTIONAL canonical latency knob only when it is set in Machine (a legacy box on the
+# reserve alias does not have it and must still launch — it is NOT required, just preferred when present).
+\$genlockOptionalSet = @{}
+foreach (\$n in \$genlockOptionalVars) {
+  \$v = [System.Environment]::GetEnvironmentVariable(\$n, 'Machine')
+  if (\$null -ne \$v -and \$v -ne '') { Set-Item -Path "Env:\$n" -Value \$v; \$genlockOptionalSet[\$n] = \$v; Write-Host "set \$n=\$v (from Machine, #235 canonical knob)" }
+  else { Write-Host "(optional \$n not set in Machine — using the OBS_GENLOCK_RESERVE_MS alias, #235 back-compat)" }
 }
 
 ${kill_block}
@@ -178,16 +204,24 @@ foreach (\$n in \$genlockVars) {
   if (\$got -ne \$want) { Write-Error "#128 PEB MISMATCH: obs64 \$n='\$got' but Machine='\$want' — stale-env trap, genlock NOT carried."; \$pebOk = \$false }
   else { Write-Host "PEB OK: \$n=\$got" }
 }
+# #235: verify the OPTIONAL canonical knob in the PEB ONLY when it was set in Machine (a re-pinned box).
+foreach (\$n in \$genlockOptionalSet.Keys) {
+  \$want = \$genlockOptionalSet[\$n]
+  \$got  = \$childEnv[\$n]
+  if (\$got -ne \$want) { Write-Error "#235 PEB MISMATCH: obs64 \$n='\$got' but Machine='\$want' — canonical latency knob NOT carried."; \$pebOk = \$false }
+  else { Write-Host "PEB OK (#235 canonical): \$n=\$got" }
+}
 
-# (6b) VERIFY the fresh OBS log shows the render tick ENABLED and the jitter reserve line. The log is
-#      the AUTHORITATIVE runtime signal — same line drift-guard.sh genlock_from_log() keys on.
+# (6b) VERIFY the fresh OBS log shows the render tick ENABLED and the genlock-latency line. The log is
+#      the AUTHORITATIVE runtime signal — same line drift-guard.sh genlock_from_log() keys on. #235:
+#      the single-knob latency line is 'genlock: latency = N ms (≈ M frames @ Ffps)'.
 \$logDir = "\$env:APPDATA\\obs-studio\\logs"
 \$log = Get-ChildItem \$logDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 \$logText = if (\$log) { Get-Content \$log.FullName -Raw } else { "" }
 \$tickOk    = \$logText -match 'genlock:.*render tick ENABLED'
-\$reserveOk = \$logText -match 'sub-frame jitter reserve = \d+ ms'
+\$latencyOk = \$logText -match 'genlock: latency = \d+ ms'
 if (\$tickOk)    { Write-Host "LOG OK: render tick ENABLED" }          else { Write-Error "#128 LOG: 'render tick ENABLED' NOT found in \$(\$log.Name) — genlock master gate OFF." }
-if (\$reserveOk) { Write-Host ("LOG OK: " + ([regex]::Match(\$logText,'sub-frame jitter reserve = \d+ ms').Value)) } else { Write-Warning "#128 LOG: 'sub-frame jitter reserve = N ms' not yet emitted (needs a live consuming source; PEB OBS_GENLOCK_RESERVE_MS already proven)." }
+if (\$latencyOk) { Write-Host ("LOG OK: " + ([regex]::Match(\$logText,'genlock: latency = \d+ ms[^)]*\)').Value)) } else { Write-Warning "#235 LOG: 'genlock: latency = N ms' not yet emitted (printed lazily when a genlock_fifo input first activates; the PEB OBS_GENLOCK_LATENCY_MS/RESERVE_MS is already proven)." }
 
 # (7) FINAL VERDICT — fail loud unless the child PEB carries every genlock var AND the render tick is ENABLED.
 if (\$pebOk -and \$tickOk) {
