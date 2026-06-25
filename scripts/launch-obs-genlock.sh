@@ -64,6 +64,12 @@ build_launch_program() {
   local obs_dir="$1" force="$2"
   local bin64="${obs_dir}\\bin\\64bit"
   local exe="${bin64}\\obs64.exe"
+  # Escape for the PowerShell SINGLE-quoted strings below: a literal ' is doubled to '' (the
+  # PowerShell single-quote escape), so an OBS dir containing a quote can't break out of the
+  # '...' string. The default 'C:\Program Files\obs-studio' has none; this hardens an override.
+  local obs_dir_ps="${obs_dir//\'/\'\'}"
+  local bin64_ps="${bin64//\'/\'\'}"
+  local exe_ps="${exe//\'/\'\'}"
 
   # The kill branch (only when --force) — documented obs-ops recovery for a wedged OBS.
   local kill_block=""
@@ -110,10 +116,13 @@ ${kill_block}
 Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
 
 # (4) Launch obs64 with cwd = bin\\64bit (wrong cwd => "Failed to find locale/en-US.ini" broken OBS).
-\$obsDir = '${obs_dir}'
-\$exe    = '${exe}'
+#     NB on strih: D:\\_APPS\\NL_STARTUP.ahk auto-respawns obs64 from this same dir, but it won't
+#     double-launch once one is running, so this Start-Process wins; the PEB verify below would in
+#     any case fail loud on a non-genlock AHK respawn (the safe outcome). See obs-ops skill.
+\$obsDir = '${obs_dir_ps}'
+\$exe    = '${exe_ps}'
 if (-not (Test-Path \$exe)) { Write-Error "obs64 not found at \$exe"; exit 5 }
-Start-Process -FilePath \$exe -WorkingDirectory '${bin64}'
+Start-Process -FilePath \$exe -WorkingDirectory '${bin64_ps}'
 
 # (5) Wait for obs64 to come up and write its log (genlock lines are emitted at launch).
 \$proc = \$null
@@ -222,11 +231,14 @@ EOF
 main() {
   local box="" force="0"
   local obs_dir='C:\Program Files\obs-studio'
+  # `need_val FLAG` guards a value-taking flag BEFORE shift 2: a trailing flag with no value must be
+  # a clean usage error (exit 2 + message), not a silent `shift 2` abort (exit 1) under set -e.
+  need_val() { [ "$#" -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; usage >&2; exit 2; }; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --box)     box="${2:-}"; shift 2 ;;
+      --box)     need_val "$@"; box="$2"; shift 2 ;;
       --force)   force="1"; shift ;;
-      --obs-dir) obs_dir="${2:-}"; shift 2 ;;
+      --obs-dir) need_val "$@"; obs_dir="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
     esac

@@ -270,6 +270,39 @@ fn cli_box_selects_correct_mcp_and_emits_program() {
     assert_eq!(code_none, 2, "missing --box must be a usage error (exit 2)");
 }
 
+/// A value-taking flag given with NO value (trailing `--box` / `--obs-dir`) must be a CLEAN usage
+/// error: exit 2 with a message — NOT a silent `shift 2` abort (exit 1, no diagnostic) under set -e.
+#[test]
+fn trailing_flag_without_value_is_usage_error_exit_2() {
+    for flag in ["--box", "--obs-dir"] {
+        let (code, _out, err) = run_script(&[flag]);
+        assert_eq!(
+            code, 2,
+            "#128: a trailing `{flag}` with no value must exit 2 (usage error), not a silent exit 1"
+        );
+        assert!(
+            err.contains("needs a value"),
+            "#128: a trailing `{flag}` must print a clear 'needs a value' error (got stderr: {err:?})"
+        );
+    }
+}
+
+/// An OBS dir containing a single quote must NOT break out of the PowerShell single-quoted strings:
+/// the quote is doubled ('' the PowerShell escape) wherever obs_dir is interpolated into '...'.
+#[test]
+fn obs_dir_single_quote_is_escaped_in_powershell() {
+    let p = run_sourced("build_launch_program \"C:\\\\Te'st\\\\obs-studio\" 0");
+    assert!(
+        p.contains("$obsDir = 'C:\\Te''st\\obs-studio'"),
+        "#128: a single quote in --obs-dir must be doubled ('') so it can't break out of the \
+         PowerShell single-quoted string — got program:\n{p}"
+    );
+    assert!(
+        p.contains("$exe    = 'C:\\Te''st\\obs-studio\\bin\\64bit\\obs64.exe'"),
+        "#128: the exe path must carry the same '' escape"
+    );
+}
+
 /// The script must be SOURCE-SAFE: sourcing it (the unit-test harness) must NOT execute the CLI flow
 /// (the BASH_SOURCE != $0 guard), otherwise every source would try to parse the sourcing shell's args.
 #[test]
