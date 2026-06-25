@@ -54,6 +54,46 @@ launch, so a reserve change = full relaunch (force-kill → clear `.sentinel\*` 
 the vars set). Machine-level env is the persisted default; a sweep that overrode reserve in its launch shell
 leaves the running OBS on the override while Machine env still reads the correct value.
 
+## Reliable genlock (re)launch — USE THE WRAPPER (#128)
+
+**Every OBS (re)launch — deploy, crash-recovery, reboot, a reserve/config change — MUST go through
+`scripts/launch-obs-genlock.sh`. Do NOT hand-roll a `Start-Process` for the broadcast OBS.** The
+recurring "stale-env trap" (#128): when obs64 is spawned from a LONG-LIVED win-* MCP shell whose env
+snapshot predates the Machine-scope env write, the child inherits the STALE snapshot → a genlock var
+is UNSET → the render tick is silently OFF and the whole genlock guarantee is gone, invisibly (the
+#126 deploy near-miss). A `$env:` read in that stale shell agrees with the wrong value, so it cannot
+be trusted — only the launched process's own PEB env proves what obs64 actually inherited.
+
+The wrapper is the PURE planner (scp/ssh to Windows is denied — the agent drives the win-* MCP). It
+PRINTS the exact PowerShell program to paste into the box's `win-strih` / `win-stream-snv` MCP
+`Shell`. The emitted program, in ONE self-contained run: reads the four `OBS_GENLOCK_*` vars FRESH
+from **Machine** scope (the persistent HKLM source of truth, survives reboot — drift-guard #45), sets
+them EXPLICIT in the spawning shell (defeats the stale snapshot), clears `.sentinel\*`, launches
+obs64 cwd=`bin\64bit`, then VERIFIES the launched child's PEB env carries all four vars matching
+Machine AND the OBS log shows `render tick ENABLED`, exiting **non-zero (fail loud)** otherwise — so
+a relaunch can never leave a silent half-genlocked box.
+
+```bash
+# Print the launch+verify program for the box, then paste the program (between the dashed lines)
+# into that box's MCP Shell. Use --force to force-kill a wedged obs64 first (DEV-rig recovery).
+scripts/launch-obs-genlock.sh --box strih  --force   # win-strih  (10.77.9.202)
+scripts/launch-obs-genlock.sh --box stream --force   # win-stream-snv (10.77.9.204)
+```
+
+The program EXITS 0 only when the child PEB carries all four genlock vars matching Machine AND the
+log shows `render tick ENABLED`. A non-zero exit means the genlock env was NOT carried — do NOT trust
+the box; re-run the wrapper. The `sub-frame jitter reserve = N ms` / `reserve_ms=N` audit lines need
+a live consuming source (see the section above), so the wrapper treats their absence as a non-fatal
+WARNING (the PEB read already proves `OBS_GENLOCK_RESERVE_MS=3`) — it does not fail the launch on
+them. The PEB reader (NtQueryInformationProcess + ReadProcessMemory via `Add-Type`, confirmed
+available on both boxes) is the canonical "read the child env to PROVE inheritance" step from the
+section above — the wrapper does it automatically. Behavioral guard: `tests/launch_obs_genlock.rs`.
+
+Proven on both boxes 2026-06-25: strih obs64 PID 6244 and stream obs64 PID 10844 each relaunched via
+the wrapper with all four vars PEB-verified (`WALL_CLOCK=1 RESERVE_MS=3 TS_ALIGN=1 PRELOAD_FRAMES=1`)
++ `render tick ENABLED`; stream further showed `timestamp-aligned release ENABLED` + `sub-frame
+jitter reserve = 3 ms` + live `reserve_ms=3` audits (it had a live 2ME PGM source).
+
 ## Recovery — Do It Autonomously (Never Ask)
 
 The user has repeated this 2-3× and gets angry when re-asked which recovery method to use.
