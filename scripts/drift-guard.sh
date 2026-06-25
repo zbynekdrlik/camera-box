@@ -170,16 +170,17 @@ manifest_sha_for_component() {
 
 # genlock_capability_from_log TEXT -> "1" if the running OBS log carries a genlock CAPABILITY marker
 # that ONLY our genlock build emits (the wall-clock render-tick line, the #136 timestamp-aligned
-# release line, or the #184 sub-frame jitter reserve line), "" (UNKNOWN/absent) if the text carries
-# none — a STOCK OBS log, which is the #119 wrong-build-right-version case this facet exists to catch.
-# Distinct from genlock_from_log (which reads the ENABLED/DISABLED *state* of the wall-clock gate):
-# this reads the PRESENCE of a build-unique capability, so a stock OBS (emits no `genlock:` line at
-# all) is detectable even though its marketing version is identical to ours. Drain-safe (grep|head,
-# never grep -q, matching the sibling *_from_log parsers — see genlock_from_log's note).
+# release line, the #184 sub-frame jitter reserve line, or the #235 single-knob `genlock: latency = N
+# ms` line that superseded it), "" (UNKNOWN/absent) if the text carries none — a STOCK OBS log, which
+# is the #119 wrong-build-right-version case this facet exists to catch. Distinct from genlock_from_log
+# (which reads the ENABLED/DISABLED *state* of the wall-clock gate): this reads the PRESENCE of a
+# build-unique capability, so a stock OBS (emits no `genlock:` line at all) is detectable even though
+# its marketing version is identical to ours. Drain-safe (grep|head, never grep -q, matching the
+# sibling *_from_log parsers — see genlock_from_log's note).
 genlock_capability_from_log() {
   local text="$1" line
   line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve)' \
+    | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' \
     | head -1 || true)"
   # Echo "1" when a build-unique marker is present; otherwise echo NOTHING (the absent signal).
   # `return 0` so the absent case is a clean exit (empty output, not a non-zero status) — the sibling

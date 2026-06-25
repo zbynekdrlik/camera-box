@@ -79,6 +79,154 @@ pub const GENLOCK_RESERVE_MS_DEFAULT: u32 = 0;
 /// Mirrored & guarded in the C side (`#define GENLOCK_RESERVE_MS_MAX 100`).
 pub const GENLOCK_RESERVE_MS_MAX: u32 = 100;
 
+// ---- #235: ONE user-facing genlock latency knob (ms), frames in parens ------
+//
+// History: genlock latency used to be set via TWO confusing env knobs —
+// `OBS_GENLOCK_PRELOAD_FRAMES` (whole frames, #70/#97) AND `OBS_GENLOCK_RESERVE_MS`
+// (ms, #184) — where the reserve OVERRODE the preload delay ONLY when
+// `OBS_GENLOCK_TS_ALIGN` was on. That precedence ("when reserve is set, preload
+// doesn't apply, but only under TS_ALIGN") confused everyone. #235 consolidates them
+// into ONE canonical ms knob: the held latency is a single value in milliseconds.
+//
+// * Canonical knob = `OBS_GENLOCK_LATENCY_MS` — THE latency, in ms.
+// * `OBS_GENLOCK_RESERVE_MS` is kept as a BACK-COMPAT ALIAS (so existing deploys,
+//   scripts, and the #128 relaunch wrapper that set RESERVE_MS keep working; the
+//   validated prod `reserve=3` maps cleanly to `latency_ms=3`). The canonical knob
+//   WINS when both are set.
+// * Setting the ms knob > 0 implies timestamp-aligned release ON (no separate
+//   `OBS_GENLOCK_TS_ALIGN` user gate) and a release deadline of `wall_now - latency_ms`
+//   (the validated #184 path).
+// * `preload` (the FIFO jitter/dropout buffer depth) becomes INTERNAL / auto-derived
+//   ([`genlock_auto_preload`]) — NOT a competing latency knob. It is latency-free
+//   under the ms deadline and holds >= [`GENLOCK_AUTO_PRELOAD_MIN`] frame so the #110
+//   0-loss floor holds.
+// * Display ([`format_latency_label`]) is "N ms (≈ M frames @ Ffps)" — ms primary,
+//   the whole-frame equivalent ([`ms_to_frames`]) in parentheses (the user's ask).
+
+/// (#235) Default canonical genlock latency in ms when neither `OBS_GENLOCK_LATENCY_MS`
+/// nor the back-compat alias `OBS_GENLOCK_RESERVE_MS` is set: `0` = no ms latency, so
+/// the release falls back to the whole-frame preload path exactly as before (full
+/// back-compat with a deploy that sets neither env). Same value/meaning as
+/// [`GENLOCK_RESERVE_MS_DEFAULT`].
+pub const GENLOCK_LATENCY_MS_DEFAULT: u32 = GENLOCK_RESERVE_MS_DEFAULT;
+
+/// (#235) Hard cap on the canonical genlock latency (ms) — the SAME ceiling as the
+/// aliased reserve ([`GENLOCK_RESERVE_MS_MAX`] = 100 ms ≈ 3 frames @ 30 fps). Beyond
+/// this the operator wants a whole-frame video delay, which is not what the genlock
+/// latency knob is for.
+pub const GENLOCK_LATENCY_MS_MAX: u32 = GENLOCK_RESERVE_MS_MAX;
+
+/// (#235) The minimum auto-derived internal FIFO depth a genlock source holds for
+/// jitter/dropout resilience, now that `preload` is internal (no longer a user latency
+/// knob). At least 1 frame is buffered so a single-tick arrival dip never empties the
+/// queue (the #110 sweep showed depth >= 1 is needed to hold 0-loss). This depth is
+/// LATENCY-FREE: under the ms deadline ([`genlock_present_ts_reserve`]) the held delay
+/// is governed by `latency_ms`, not by how many frames sit in the FIFO — the buffer
+/// only smooths arrival jitter, it does not add latency. Equals the historical default
+/// preload ([`GENLOCK_PRELOAD_DEFAULT`] = 1), so the validated prod behavior is preserved.
+pub const GENLOCK_AUTO_PRELOAD_MIN: u32 = GENLOCK_PRELOAD_DEFAULT;
+
+/// (#235) Resolve the canonical genlock latency (ms) from the new knob + the
+/// back-compat alias.
+///
+/// `latency_env` = `OBS_GENLOCK_LATENCY_MS` (the canonical knob); `reserve_env` =
+/// `OBS_GENLOCK_RESERVE_MS` (the deprecated alias). Resolution:
+///
+/// 1. If `OBS_GENLOCK_LATENCY_MS` is SET (a valid `strtol` integer, incl. an explicit
+///    `0`), it is THE latency — it wins over the alias.
+/// 2. Otherwise fall through to `OBS_GENLOCK_RESERVE_MS` (the alias) — so existing
+///    deploys/scripts/the #128 wrapper keep working and prod `reserve=3` ⇒ `3`.
+/// 3. Otherwise [`GENLOCK_LATENCY_MS_DEFAULT`] (`0` = disabled, whole-frame fallback).
+///
+/// "Set" for the canonical knob means it PARSES to a value (the same `strtol` contract
+/// as [`parse_reserve_ms`]): an empty/whitespace/junk/negative `OBS_GENLOCK_LATENCY_MS`
+/// is treated as UNSET and falls through to the alias, NOT silently as `0` — otherwise a
+/// typo in the new knob would surprise-disable a working aliased deploy. A canonical
+/// value out of range is clamped to [`GENLOCK_LATENCY_MS_MAX`]; the alias is clamped on
+/// the same scale by [`parse_reserve_ms`].
+pub fn resolve_latency_ms(latency_env: Option<&str>, reserve_env: Option<&str>) -> u32 {
+    if let Some(ms) = parse_latency_ms_set(latency_env) {
+        // The canonical knob is set (incl. explicit 0) — it owns the value.
+        return ms;
+    }
+    // Fall through to the back-compat alias OBS_GENLOCK_RESERVE_MS.
+    parse_reserve_ms(reserve_env)
+}
+
+/// (#235) Parse `OBS_GENLOCK_LATENCY_MS` into `Some(ms)` only when it is genuinely SET
+/// to a valid value (the `strtol` contract of [`parse_reserve_ms`]), else `None` so
+/// [`resolve_latency_ms`] can fall through to the alias.
+///
+/// Distinct from [`parse_reserve_ms`]'s "invalid ⇒ default 0": here invalid ⇒ `None`
+/// (unset), because the canonical knob must NOT mask a working alias on a typo. A valid
+/// non-negative integer (incl. `0`) ⇒ `Some(clamped)`.
+fn parse_latency_ms_set(env: Option<&str>) -> Option<u32> {
+    let raw = env?;
+    let body = raw.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let digits = body.strip_prefix('+').unwrap_or(body);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None; // unset / junk / negative ⇒ fall through to the alias
+    }
+    Some(match digits.parse::<i64>() {
+        Ok(v) => v.min(GENLOCK_LATENCY_MS_MAX as i64) as u32,
+        // Positive overflow only (non-empty all-digit body, no sign) ⇒ strtol saturates
+        // to LONG_MAX ⇒ the `> MAX` clamp ⇒ MAX.
+        Err(_) => GENLOCK_LATENCY_MS_MAX,
+    })
+}
+
+/// (#235) The auto-derived INTERNAL FIFO depth for a genlock source, given the resolved
+/// latency in ms.
+///
+/// `preload` is no longer a user latency knob — the ms deadline holds the latency, the
+/// FIFO is just a jitter/dropout buffer. So the depth is held at a fixed minimum
+/// ([`GENLOCK_AUTO_PRELOAD_MIN`], >= 1 frame) regardless of `latency_ms`: a deeper FIFO
+/// would NOT add latency under the ms deadline (the deadline picks the frame aged
+/// `latency_ms`, independent of how many frames are queued), but it WOULD waste memory
+/// (stream.lan is RAM-tight, #89). One frame of buffer is enough to absorb a single-tick
+/// arrival dip and hold the #110 0-loss floor. `latency_ms` is accepted (and ignored)
+/// so the signature can grow a latency-dependent depth later without a call-site change.
+pub fn genlock_auto_preload(latency_ms: u32) -> u32 {
+    let _ = latency_ms;
+    GENLOCK_AUTO_PRELOAD_MIN
+}
+
+/// (#235) Convert a latency in milliseconds into the equivalent WHOLE-FRAME count at a
+/// given output frame rate — the inverse of [`preload_to_ms`], for the "N ms (≈ M
+/// frames @ Ffps)" display.
+///
+/// `frames = round(ms * fps_num / (1000 * fps_den))`. Rounds to nearest (so a sub-frame
+/// ms like 3 ms @ 30 fps shows ≈ 0 frames — the headline that the operator no longer has
+/// to count whole frames), and a whole-frame ms round-trips back to the same frame count
+/// via [`preload_to_ms`]. Returns 0 when `fps_num` is 0 (no valid video info yet) — the
+/// caller shows an "fps unknown" label rather than dividing by zero. Uses `u64`
+/// intermediates so `ms * fps_num` cannot overflow at the ms cap.
+pub fn ms_to_frames(ms: u32, fps_num: u32, fps_den: u32) -> u32 {
+    if fps_num == 0 || fps_den == 0 {
+        return 0;
+    }
+    let num = (ms as u64) * (fps_num as u64);
+    let den = 1000u64 * (fps_den as u64);
+    // round-to-nearest: (num + den/2) / den.
+    ((num + den / 2) / den) as u32
+}
+
+/// (#235) Format the single-knob genlock latency label "genlock latency = N ms (≈ M
+/// frames @ Ffps)" — MS PRIMARY, the whole-frame equivalent in PARENTHESES (the #235
+/// display ask). Mirrored by the C audit-log line and the DistroAV slider/label.
+///
+/// `fps_num == 0` (no valid video info yet) ⇒ "N ms (≈ ? frames — fps unknown)" so the
+/// ms is still shown and the caller never divides by zero. The exact wording is unit-
+/// tested; the C/cpp sides produce the same shape (ms first, frames parenthesized).
+pub fn format_latency_label(ms: u32, fps_num: u32, fps_den: u32) -> String {
+    if fps_num == 0 || fps_den == 0 {
+        return format!("genlock latency = {ms} ms (≈ ? frames — fps unknown)");
+    }
+    let frames = ms_to_frames(ms, fps_num, fps_den);
+    let fps = fps_num as f64 / fps_den as f64;
+    format!("genlock latency = {ms} ms (≈ {frames} frames @ {fps:.3}fps)")
+}
+
 /// Parse the `OBS_GENLOCK_PRELOAD_FRAMES` env value into a reserve depth.
 ///
 /// This is a FAITHFUL mirror of the C `genlock_parse_preload()`, which uses

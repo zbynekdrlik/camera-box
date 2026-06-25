@@ -38,6 +38,7 @@
 #define PROP_GENLOCK_PRELOAD "genlock_preload"      /* camera-box #97: video-delay slider */
 #define PROP_GENLOCK_PRELOAD_MS "genlock_preload_ms" /* camera-box #97: read-only ms label */
 #define PROP_GENLOCK_PRELOAD_MAX 128                /* mirrors libobs GENLOCK_PRELOAD_MAX (#97) */
+#define PROP_GENLOCK_LATENCY_MS "genlock_latency_ms" /* camera-box #235: read-only single-knob latency label */
 
 /* camera-box #42: resolve the genlock export at RUNTIME. On Windows the
  * DistroAV build system fetches stock OBS SDK headers (no genlock symbols), so
@@ -102,6 +103,53 @@ static long genlock_preload_env_default()
 	if (v > PROP_GENLOCK_PRELOAD_MAX)
 		return PROP_GENLOCK_PRELOAD_MAX;
 	return v;
+}
+
+/* camera-box #235: resolve the SINGLE genlock latency (ms) from the canonical
+ * OBS_GENLOCK_LATENCY_MS knob, falling back to the OBS_GENLOCK_RESERVE_MS back-compat
+ * alias (canonical wins; same strtol contract + [0,100] clamp as the libobs side). 0 =
+ * disabled (whole-frame preload fallback). Mirror of src/probe/genlock.rs
+ * resolve_latency_ms — used to drive the read-only "genlock latency = N ms (≈ M frames)"
+ * label so the operator reads the ACTUAL deployed latency in the source properties. */
+static long resolve_genlock_latency_ms()
+{
+	const long LATENCY_MS_MAX = 100; /* == GENLOCK_LATENCY_MS_MAX */
+	auto parse = [&](const char *env, bool &set) -> long {
+		set = false;
+		if (!env || !*env)
+			return 0;
+		char *end = nullptr;
+		long v = strtol(env, &end, 10);
+		if (end == env || *end != '\0' || v < 0)
+			return 0; /* unset/junk/negative -> not set */
+		set = true;
+		return v > LATENCY_MS_MAX ? LATENCY_MS_MAX : v;
+	};
+	bool set = false;
+	long ms = parse(getenv("OBS_GENLOCK_LATENCY_MS"), set);
+	if (set)
+		return ms; /* the canonical knob wins */
+	return parse(getenv("OBS_GENLOCK_RESERVE_MS"), set); /* back-compat alias */
+}
+
+/* camera-box #235: format the read-only "genlock latency = N ms (≈ M frames @ Ffps)"
+ * label — MS PRIMARY, the whole-frame equivalent in PARENTHESES (the user's exact ask).
+ * Sourced from the resolved env latency, NOT a per-source value (latency is a launch-time
+ * env). Mirror of src/probe/genlock.rs format_latency_label. */
+static void format_genlock_latency_label(char *buf, size_t buflen)
+{
+	const long ms = resolve_genlock_latency_ms();
+	struct obs_video_info ovi;
+	if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
+		const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
+		/* frames = round(ms * fps_num / (1000 * fps_den)) — inverse of preload_to_ms. */
+		const unsigned long long num = (unsigned long long)ms * ovi.fps_num;
+		const unsigned long long den = 1000ULL * ovi.fps_den;
+		const unsigned long long frames = (num + den / 2) / den;
+		snprintf(buf, buflen, "genlock latency = %ld ms (≈ %llu frames @ %.3f fps)", ms, frames, fps);
+	} else {
+		snprintf(buf, buflen, "genlock latency = %ld ms (≈ ? frames — fps unknown)", ms);
+	}
 }
 
 /* camera-box #97: per-source genlock preload (video-delay) setter, runtime-resolved. */
@@ -375,8 +423,8 @@ static void force_genlock_certified_settings(obs_data_t *settings)
  * shown (non-genlock aux/preview inputs — NDI 2ME PVW / Bible / Camera info, ndi_sync=1
  * — are unaffected, #150 constraint #3). Returns true (properties UI changed → refresh)
  * so it can drive the genlock-checkbox modified-callback directly. PROP_SOURCE,
- * PROP_GENLOCK_FIFO and PROP_GENLOCK_PRELOAD (+ the read-only ms label) are deliberately
- * NEVER hidden. */
+ * PROP_GENLOCK_FIFO and PROP_GENLOCK_PRELOAD (+ the read-only ms label + the #235
+ * read-only genlock-latency label) are deliberately NEVER hidden. */
 static bool apply_genlock_lockdown_visibility(obs_properties_t *props, bool genlock_on)
 {
 	/* The forced (non-essential) properties: shown only when genlock is OFF. */
@@ -474,13 +522,29 @@ obs_properties_t *ndi_source_getproperties(void *data)
 
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock (FIFO frame consumption, camera-box #42)");
 
-	/* camera-box #97: per-source genlock preload as a runtime VIDEO-DELAY control.
-	 * Each preload frame = one frame of genlock-disciplined delay; raise it to push
-	 * the program video back to line up with late audio (~1 s on stream.lan). The
-	 * read-only info text below shows the live ms equivalent at the current output
-	 * fps, recomputed by the slider's modified_callback from obs_get_video_info(). */
+	/* camera-box #235: the SINGLE user-facing genlock latency display — read-only info
+	 * text "genlock latency = N ms (≈ M frames @ Ffps)" (MS PRIMARY, frames in parens).
+	 * Sourced from the resolved env latency (OBS_GENLOCK_LATENCY_MS, alias
+	 * OBS_GENLOCK_RESERVE_MS) so the operator reads the ACTUAL deployed latency. This is
+	 * the consolidated knob; the preload slider below is now an INTERNAL/legacy control
+	 * (auto-derived under the ms knob — not a competing latency knob). */
+	obs_property_t *latency_label =
+		obs_properties_add_text(props, PROP_GENLOCK_LATENCY_MS, "Genlock latency", OBS_TEXT_INFO);
+	{
+		char lat_buf[160];
+		format_genlock_latency_label(lat_buf, sizeof(lat_buf));
+		obs_property_set_description(latency_label, lat_buf);
+	}
+
+	/* camera-box #97/#235: the per-source genlock preload (FIFO depth). #235 demoted this
+	 * from a user latency knob to an INTERNAL/legacy frame control: when the ms latency
+	 * knob is set the depth is auto-derived (the ms deadline holds the latency, not the
+	 * preload), so this slider only governs the legacy whole-frame fallback (latency_ms=0)
+	 * path. Kept for back-compat + the legacy video-delay use; the read-only ms hint below
+	 * shows its frame→ms equivalent. */
 	obs_property_t *preload_slider =
-		obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD, "Genlock preload (video delay)", 0,
+		obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD,
+					      "Genlock preload (internal FIFO depth — legacy frame control)", 0,
 					      PROP_GENLOCK_PRELOAD_MAX, 1);
 	obs_property_t *preload_ms = obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
 	/* camera-box #97: set the ms label immediately from the current settings so it

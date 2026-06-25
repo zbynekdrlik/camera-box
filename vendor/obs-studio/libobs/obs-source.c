@@ -4241,18 +4241,44 @@ static uint32_t genlock_parse_preload(const char *env)
 	return genlock_clamp_preload(v);
 }
 
-/* The launch-time env default a source's per-source preload is initialized from at
- * create (back-compat with #70: a source the operator never touches keeps the env
- * depth). Read once and cached; the GUI overrides it per source at runtime. */
+/* camera-box #235: the minimum auto-derived INTERNAL FIFO depth a genlock source holds
+ * for jitter/dropout resilience now that preload is no longer a user latency knob. >= 1
+ * frame so a single-tick arrival dip never empties the queue (the #110 sweep showed
+ * depth >= 1 holds 0-loss). LATENCY-FREE under the ms deadline: the held delay is
+ * latency_ms, NOT the FIFO depth. Equals the historical default preload (1) so the
+ * validated prod behavior is preserved. Mirror of src/probe/genlock.rs
+ * GENLOCK_AUTO_PRELOAD_MIN. */
+#define GENLOCK_AUTO_PRELOAD_MIN 1
+/* genlock_latency_ms() is declared further down (after the #184 ms-knob block); forward
+ * declare it so genlock_preload_default() can branch on whether the ms knob is set. */
+static uint32_t genlock_latency_ms(void);
+
+/* The launch-time default a source's per-source FIFO depth is initialized from at create.
+ *
+ * #235: when the single ms latency knob is set (latency_ms > 0), preload is INTERNAL —
+ * the ms deadline holds the latency, so the FIFO depth is the auto resilience minimum
+ * (GENLOCK_AUTO_PRELOAD_MIN), NOT a user value, regardless of OBS_GENLOCK_PRELOAD_FRAMES
+ * (which is now deprecated/ignored on the ms path). When latency_ms == 0 (the legacy
+ * frame path) it still reads OBS_GENLOCK_PRELOAD_FRAMES for full back-compat with #70.
+ * Read once and cached. */
 static uint32_t genlock_preload_default(void)
 {
 	static int preload = -1;
 	if (preload == -1) {
-		preload = (int)genlock_parse_preload(getenv("OBS_GENLOCK_PRELOAD_FRAMES"));
-		blog(LOG_INFO,
-		     "genlock: FIFO preload default = %d frame(s) "
-		     "(OBS_GENLOCK_PRELOAD_FRAMES) -- per-source video-delay default (#70/#97)",
-		     preload);
+		if (genlock_latency_ms() > 0) {
+			/* ms latency knob set => preload is internal/auto-derived. */
+			preload = (int)GENLOCK_AUTO_PRELOAD_MIN;
+			blog(LOG_INFO,
+			     "genlock: FIFO depth auto-derived = %d frame(s) (internal resilience "
+			     "buffer; the genlock latency knob holds the delay, not preload) (#235)",
+			     preload);
+		} else {
+			preload = (int)genlock_parse_preload(getenv("OBS_GENLOCK_PRELOAD_FRAMES"));
+			blog(LOG_INFO,
+			     "genlock: FIFO preload default = %d frame(s) "
+			     "(OBS_GENLOCK_PRELOAD_FRAMES) -- per-source video-delay default (#70/#97)",
+			     preload);
+		}
 	}
 	return (uint32_t)preload;
 }
@@ -4388,28 +4414,24 @@ static inline bool genlock_is_wallclock_ts(uint64_t ts_ns)
 	return ts_ns >= GENLOCK_WALLCLOCK_TS_MIN_NS && ts_ns < GENLOCK_WALLCLOCK_TS_MAX_NS;
 }
 
-/* OBS_GENLOCK_TS_ALIGN=1 enables the #136 timestamp-aligned release path. Default
- * OFF => the count gate (genlock_decide) runs exactly as before. Cached like the
- * render-tick env gate (obs-video.c); takes effect on the next OBS launch. */
-static bool genlock_ts_align_enabled(void)
-{
-	static int enabled = -1;
-	if (enabled == -1) {
-		const char *v = getenv("OBS_GENLOCK_TS_ALIGN");
-		enabled = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
-		if (enabled)
-			blog(LOG_INFO, "genlock: timestamp-aligned release ENABLED "
-				       "(OBS_GENLOCK_TS_ALIGN) — multi-source in-sync (#136)");
-	}
-	return enabled == 1;
-}
-
-/* camera-box #184: sub-frame MS-GRANULAR jitter reserve — the lowest-latency lever.
+/* camera-box #184/#235: the SUB-FRAME MS-GRANULAR jitter reserve — the held latency.
  * 0 = DISABLED (whole-frame preload path, byte-identical to #136). > 0 switches the
  * ts-align deadline to wall_now - reserve_ms, so the held latency is ≈ reserve_ms
- * (single-digit ms = just the measured arrival jitter) instead of a full 33ms frame. */
+ * (single-digit ms = just the measured arrival jitter) instead of a full 33ms frame.
+ *
+ * #235 promotes this ms value to THE single user-facing genlock latency knob:
+ * OBS_GENLOCK_LATENCY_MS is the canonical env, with OBS_GENLOCK_RESERVE_MS kept as a
+ * BACK-COMPAT ALIAS (so existing deploys / the #128 wrapper that set RESERVE_MS keep
+ * working; prod reserve=3 maps cleanly to latency_ms=3). The default/cap below are
+ * shared by both (mirror of src/probe/genlock.rs GENLOCK_LATENCY_MS_* /
+ * GENLOCK_RESERVE_MS_*). */
 #define GENLOCK_RESERVE_MS_DEFAULT 0
 #define GENLOCK_RESERVE_MS_MAX 100
+/* #235: the canonical latency-knob default/cap equal the reserve default/cap (the
+ * reserve IS the alias). Kept as distinct #defines so the Rust mirror's
+ * GENLOCK_LATENCY_MS_* lock-step guard has a literal to match. */
+#define GENLOCK_LATENCY_MS_DEFAULT GENLOCK_RESERVE_MS_DEFAULT
+#define GENLOCK_LATENCY_MS_MAX GENLOCK_RESERVE_MS_MAX
 
 /* Clamp of a strtol `long` to [0, GENLOCK_RESERVE_MS_MAX]. Mirrors the Rust
  * parse_reserve_ms clamp. */
@@ -4437,21 +4459,91 @@ static uint32_t genlock_parse_reserve_ms(const char *env)
 	return genlock_clamp_reserve_ms(v);
 }
 
-/* The cached OBS_GENLOCK_RESERVE_MS reserve (read once at launch, like the other
- * genlock env gates). 0 => the whole-frame preload path runs unchanged. */
+/* camera-box #235: parse OBS_GENLOCK_LATENCY_MS (the canonical knob) into *out when it
+ * is genuinely SET to a valid value (same strtol contract as genlock_parse_reserve_ms),
+ * returning true; false (out untouched) when unset/empty/junk/negative so the caller
+ * falls through to the OBS_GENLOCK_RESERVE_MS alias. A typo in the new knob must NOT
+ * surprise-disable a working aliased deploy, so invalid => "unset" (NOT silently 0).
+ * Mirror of src/probe/genlock.rs parse_latency_ms_set. */
+static bool genlock_parse_latency_ms_set(const char *env, uint32_t *out)
+{
+	if (!env || !*env)
+		return false;
+	char *end = NULL;
+	long v = strtol(env, &end, 10);
+	if (end == env || *end != '\0' || v < 0)
+		return false; /* unset / junk / negative -> fall through to the alias */
+	*out = genlock_clamp_reserve_ms(v); /* same [0, MAX] clamp scale as the alias */
+	return true;
+}
+
+/* camera-box #235: the SINGLE resolved genlock latency in ms (read once at launch, like
+ * the other genlock env gates). Resolution: OBS_GENLOCK_LATENCY_MS wins when set (incl.
+ * an explicit 0); otherwise the OBS_GENLOCK_RESERVE_MS back-compat alias; otherwise 0
+ * (disabled => the whole-frame preload path runs unchanged). 0 keeps full back-compat.
+ * Mirror of src/probe/genlock.rs resolve_latency_ms. The legacy genlock_reserve_ms name
+ * is kept as a thin wrapper so the #184 call sites + vendored-source guards are unchanged
+ * — it now returns this single resolved latency. */
+static uint32_t genlock_latency_ms(void)
+{
+	static int latency = -1;
+	if (latency == -1) {
+		uint32_t v = 0;
+		const char *canon = getenv("OBS_GENLOCK_LATENCY_MS");
+		bool from_canon = genlock_parse_latency_ms_set(canon, &v);
+		if (!from_canon)
+			v = genlock_parse_reserve_ms(getenv("OBS_GENLOCK_RESERVE_MS"));
+		latency = (int)v;
+		if (latency > 0) {
+			struct obs_video_info ovi;
+			const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0;
+			const unsigned long long frames =
+				have_vi ? (unsigned long long)latency * ovi.fps_num /
+						  (1000ULL * ovi.fps_den)
+					: 0ULL;
+			const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
+			/* #235: ms-primary, frames-in-parens display (the user's ask). */
+			blog(LOG_INFO,
+			     "genlock: latency = %d ms (≈ %llu frames @ %.3ffps) "
+			     "(%s) — single user-facing latency knob, ts-align implied ON (#235)",
+			     latency, frames, fps,
+			     from_canon ? "OBS_GENLOCK_LATENCY_MS"
+					: "OBS_GENLOCK_RESERVE_MS alias");
+		}
+	}
+	return (uint32_t)latency;
+}
+
+/* #184 back-compat: genlock_reserve_ms() now returns the single resolved #235 latency
+ * (canonical knob OR the reserve alias). Kept under its old name so the #184 release
+ * call sites + the tests/genlock_preload.rs vendored-source guards remain in lock-step. */
 static uint32_t genlock_reserve_ms(void)
 {
-	static int reserve = -1;
-	if (reserve == -1) {
-		reserve = (int)genlock_parse_reserve_ms(getenv("OBS_GENLOCK_RESERVE_MS"));
-		if (reserve > 0)
+	return genlock_latency_ms();
+}
+
+/* OBS_GENLOCK_TS_ALIGN=1 enables the #136 timestamp-aligned release path. Default OFF.
+ * #235: the ts-align release is also IMPLIED ON whenever the single ms latency knob is
+ * set (latency_ms > 0) — the user no longer needs a separate OBS_GENLOCK_TS_ALIGN gate
+ * to get the ms-granular latency. The explicit env still works for the legacy frame
+ * (reserve=0) path. Cached like the render-tick env gate (obs-video.c). */
+static bool genlock_ts_align_enabled(void)
+{
+	static int enabled = -1;
+	if (enabled == -1) {
+		const char *v = getenv("OBS_GENLOCK_TS_ALIGN");
+		const bool env_on = v && *v && strcmp(v, "0") != 0;
+		/* #235: setting the ms latency knob implies ts-align ON. */
+		const bool implied = genlock_latency_ms() > 0;
+		enabled = (env_on || implied) ? 1 : 0;
+		if (enabled)
 			blog(LOG_INFO,
-			     "genlock: sub-frame jitter reserve = %d ms "
-			     "(OBS_GENLOCK_RESERVE_MS) — ms-granular latency, replaces the "
-			     "whole-frame preload on the ts-align path (#184)",
-			     reserve);
+			     "genlock: timestamp-aligned release ENABLED (%s) — multi-source "
+			     "in-sync (#136/#235)",
+			     env_on ? "OBS_GENLOCK_TS_ALIGN"
+				    : "implied by the genlock latency knob");
 	}
-	return (uint32_t)reserve;
+	return enabled == 1;
 }
 
 /* Real DanteSync wall clock NOW in ns since the Unix epoch — the SAME basis the
@@ -4531,22 +4623,28 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	struct obs_video_info ovi;
 	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0;
 	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
-	/* camera-box #184: also print the active sub-frame ms reserve (0 = whole-frame
-	 * preload path). When >0 the held latency is ≈ reserve_ms, NOT preload frames,
-	 * so the operator + post-deploy verification can read the actual lowest-latency
-	 * config live from the OBS log. */
-	const uint32_t reserve_ms = genlock_reserve_ms();
+	/* camera-box #184/#235: print the active genlock latency — the SINGLE user-facing
+	 * ms knob, with the whole-frame equivalent in parens (the #235 display ask). 0 =
+	 * whole-frame preload fallback. The `reserve_ms=N` field is KEPT (the #128 launch
+	 * wrapper's log verify keys on it) and now equals latency_ms (the alias). The
+	 * operator + post-deploy verification read the actual held latency live from this
+	 * line. */
+	const uint32_t latency_ms = genlock_latency_ms();
+	const unsigned long long latency_frames =
+		have_vi ? (unsigned long long)latency_ms * ovi.fps_num / (1000ULL * ovi.fps_den) : 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "overruns=%llu depth=%zu peak=%u preload=%u (=%llu ms @ %.3ffps) reserve_ms=%u cap=%zu "
-	     "empty_run=%u (re-arm@%u) (#70/#97/#126/#184)",
+	     "overruns=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
+	     "preload=%u (=%llu ms) reserve_ms=%u cap=%zu empty_run=%u (re-arm@%u) "
+	     "(#70/#97/#126/#184/#235)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
 	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
-	     source->genlock_peak_depth, source->genlock_preload,
-	     (unsigned long long)genlock_preload_ms(source->genlock_preload), fps, reserve_ms,
+	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
+	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
+	     latency_ms /* reserve_ms == latency_ms (the alias); kept for the #128 log verify */,
 	     genlock_source_drop_cap(source), source->genlock_empty_run,
 	     (unsigned)GENLOCK_REARM_EMPTY_TICKS);
 }

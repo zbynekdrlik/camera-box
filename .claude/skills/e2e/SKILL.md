@@ -115,8 +115,11 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
    Without it the stream recording has NO stream burn → strih→stream can't pair (latency=null,
    `strih_stream_source: two recordings ...`). Fix: relaunch stream OBS with the env set in the
    launching shell (see obs-ops skill: ExitOBS → force-kill → clear `.sentinel\*` → relaunch
-   `cwd=bin\64bit` with `$env:OBS_BURN_QR=1; $env:OBS_BURN_RUN_ID=911004; $env:OBS_GENLOCK_WALL_CLOCK=1; $env:OBS_GENLOCK_PRELOAD_FRAMES=1; $env:OBS_GENLOCK_RESERVE_MS=3`).
-   Verify the OBS log: `[burn] filter created: enabled=yes run_id=911004`.
+   `cwd=bin\64bit` with `$env:OBS_BURN_QR=1; $env:OBS_BURN_RUN_ID=911004; $env:OBS_GENLOCK_WALL_CLOCK=1; $env:OBS_GENLOCK_LATENCY_MS=3`).
+   (#235: `OBS_GENLOCK_LATENCY_MS=3` is THE single genlock latency knob — it implies ts-align on and
+   auto-derives the internal FIFO depth, so `OBS_GENLOCK_RESERVE_MS`/`_TS_ALIGN`/`_PRELOAD_FRAMES` are
+   no longer needed; `OBS_GENLOCK_RESERVE_MS=3` still works as the back-compat alias.)
+   Verify the OBS log: `[burn] filter created: enabled=yes run_id=911004` AND `genlock: latency = 3 ms`.
 2. **stream RECORDING is native 1080p, NOT 4K** (#225, FIXED 2026-06-24). The OBS canvas is 1080p.
    The recording USED to reuse the 4K-rescaled streaming encoder (`RecEncoder=none` + stream
    `Rescale=3840x2160`) → recorded 4K → upscale softened the small (~300px) burns → cam1 over-counted

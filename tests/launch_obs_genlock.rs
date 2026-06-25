@@ -188,17 +188,42 @@ fn program_verifies_child_peb_env_and_fails_on_mismatch() {
 }
 
 /// The verify step also asserts the OBS log shows the render tick ENABLED (the authoritative runtime
-/// signal — same line drift-guard.sh genlock_from_log keys on) AND looks for the jitter-reserve line.
+/// signal — same line drift-guard.sh genlock_from_log keys on) AND looks for the #235 single-knob
+/// genlock-latency line ('genlock: latency = N ms (≈ M frames @ Ffps)' — ms primary, frames in parens).
 #[test]
-fn program_verifies_render_tick_and_reserve_log_lines() {
+fn program_verifies_render_tick_and_latency_log_lines() {
     let p = program_default();
     assert!(
         p.contains("genlock:.*render tick ENABLED") || p.contains("render tick ENABLED"),
         "#128: program must verify the OBS log shows 'render tick ENABLED' (genlock master gate on)"
     );
     assert!(
-        p.contains("sub-frame jitter reserve = "),
-        "#128: program must check the OBS log 'sub-frame jitter reserve = N ms' line (#184)"
+        p.contains("genlock: latency = "),
+        "#235: program must check the OBS log 'genlock: latency = N ms' single-knob line"
+    );
+}
+
+/// #235: the wrapper carries the canonical OBS_GENLOCK_LATENCY_MS knob OPTIONALLY — only when it is
+/// set in Machine (a re-pinned box). A legacy box on the OBS_GENLOCK_RESERVE_MS alias still launches.
+#[test]
+fn program_carries_optional_canonical_latency_knob() {
+    // The pure list helper exposes exactly the canonical var.
+    let out = run_sourced("genlock_optional_var_list");
+    let got: Vec<&str> = out.split_whitespace().collect();
+    assert_eq!(
+        got,
+        ["OBS_GENLOCK_LATENCY_MS"],
+        "#235: genlock_optional_var_list must be exactly [OBS_GENLOCK_LATENCY_MS] — got {got:?}"
+    );
+    let p = program_default();
+    assert!(
+        p.contains("OBS_GENLOCK_LATENCY_MS"),
+        "#235: the program must reference the canonical OBS_GENLOCK_LATENCY_MS knob"
+    );
+    // It is OPTIONAL — carried only when set in Machine (no `exit 4` on unset, unlike the required set).
+    assert!(
+        p.contains("$genlockOptionalVars") && p.contains("$genlockOptionalSet"),
+        "#235: the program must carry the canonical knob via the OPTIONAL (set-if-present) path"
     );
 }
 
