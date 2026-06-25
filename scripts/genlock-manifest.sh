@@ -139,6 +139,25 @@ stage_files() {
       | LC_ALL=C sort ) || true
 }
 
+# assert_manifest_complete EXPECTED ACTUAL -> 0 if EXPECTED == ACTUAL, else FAIL LOUD (exit 22).
+# The generator's own completeness backstop (#239 follow-up): generate walks the staged file list
+# ONCE and emits one files[] entry per file. If those two counts ever diverge — a truncated find /
+# process-substitution stream on git-bash, an aborted loop — the manifest is PARTIAL and must NEVER
+# silently pass to --check. This dies AT generation, naming both counts so the truncation is
+# debuggable. Exit 22 (distinct from --check's 21) so a generation-completeness failure is told apart
+# from a self-consistency failure. (#239's checker race made a COMPLETE manifest look short; this is
+# the inverse guard — a genuinely short manifest can't ship.)
+assert_manifest_complete() {
+  local expected="$1" actual="$2"
+  if [ "$expected" != "$actual" ]; then
+    echo "!! INCOMPLETE MANIFEST: staged $expected files but wrote $actual files[] entries" >&2
+    echo "!! a truncated generate must not ship — failing loud at generation (not at --check)" >&2
+    return 22
+  fi
+  echo "manifest completeness: $expected staged == $actual manifested — OK" >&2
+  return 0
+}
+
 # generate_manifest STAGE README BUILDSPEC BUILD_SHA -> the manifest JSON on stdout.
 #   * components[]: the rebuilt-from-source pins (OBS, DistroAV) + the non-redistributable NDI
 #     runtime minimum. DistroAV's version is taken from the vendored buildspec.json when present
@@ -179,7 +198,18 @@ generate_manifest() {
   printf '  ],\n'
   printf '  "files": [\n'
 
-  local first=1 rel abs sha size
+  # Capture the staged file list ONCE into a variable, then iterate it with a here-string. This
+  # deliberately AVOIDS `done < <(stage_files …)` process substitution: on Windows git-bash a
+  # process-substitution FIFO can be cut short, silently truncating the loop (the exact failure mode
+  # the #239 build LOOKED like). Reading a fully-materialised string can't be truncated mid-stream,
+  # and it lets us count the INTENDED files before the loop and the WRITTEN entries after, then assert
+  # they match (assert_manifest_complete) so a partial manifest dies loud at generation.
+  local file_list expected
+  file_list="$(stage_files "$stage")"
+  # Count non-empty lines = files we intend to manifest (an empty list -> 0, the degenerate stage).
+  expected="$(printf '%s\n' "$file_list" | grep -c . || true)"
+
+  local first=1 rel abs sha size written=0
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     abs="$stage/$rel"
@@ -188,9 +218,17 @@ generate_manifest() {
     if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
     printf '    { "path": "%s", "sha256": "%s", "size": %s }' \
       "$(json_escape "$rel")" "$sha" "$size"
-  done < <(stage_files "$stage")
+    written=$((written + 1))
+  done <<< "$file_list"
   printf '\n  ]\n'
   printf '}\n'
+
+  # Completeness backstop: every staged file MUST have produced exactly one files[] entry. A
+  # divergence means the file list was truncated or the loop aborted -> fail loud, exit 22, never
+  # emit a silently-partial manifest. (The JSON is already printed above; the manifest is only
+  # CONSUMED after generate_manifest returns 0, so failing here aborts the caller before the partial
+  # file is trusted — main() captures stdout, then only writes/uses it when this returns 0.)
+  assert_manifest_complete "$expected" "$written"
 }
 
 # manifest_listed_files FILE -> the "path" of every files[] entry (one per line). Pure text parse
