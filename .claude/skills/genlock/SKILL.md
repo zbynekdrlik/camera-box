@@ -8,27 +8,56 @@ description: >
 
 # Genlock
 
-## Sub-frame ms reserve (#184, validated 2026-06-24 — prod is on reserve=3ms)
+## Genlock latency = ONE knob in MS (#235) — `OBS_GENLOCK_LATENCY_MS`
 
-`OBS_GENLOCK_RESERVE_MS=N` (>0) switches the genlock ts-align RELEASE deadline from the
-whole-frame `preload·interval` (=33ms@30fps) to `wall_now − N·1e6` (ms-granular). reserve_ms=0
-= the #136 frame path verbatim (back-compat). Validated zero-loss at reserve=3ms on BOTH hops
-(strict recording-verdict overall_pass, FIFO audits show `reserve_ms=3`, 0 new underruns during
-active feed). **Prod (strih + stream) is LEFT ON reserve=3ms.** obs.dll sha `24e22357…` (build
-19472506e). Rollback DLL: `C:\obs-backup\pre-184\obs.dll` (cdce8c3a… = the old whole-frame build).
+**There is now a SINGLE user-facing genlock latency knob: the latency in MILLISECONDS.** The old
+confusing dual model (`OBS_GENLOCK_PRELOAD_FRAMES` whole frames + `OBS_GENLOCK_RESERVE_MS` ms, where
+reserve overrode preload ONLY under TS_ALIGN) is consolidated:
+
+- **Canonical knob:** `OBS_GENLOCK_LATENCY_MS=N` — THE held latency, in ms. Setting it = release
+  deadline `wall_now − N·1e6` (the validated #184 path) AND **implies ts-align ON** (no separate
+  `OBS_GENLOCK_TS_ALIGN` user gate needed).
+- **Back-compat ALIAS:** `OBS_GENLOCK_RESERVE_MS` still works (the canonical knob WINS when both are
+  set). So existing deploys / the #128 wrapper / **the live prod config keep working unchanged** —
+  prod's `reserve=3` maps cleanly to `latency_ms=3`.
+- **preload is INTERNAL now** (auto-derived FIFO depth = 1 frame for jitter/dropout resilience,
+  latency-free under the ms deadline so the #110 0-loss floor holds). `OBS_GENLOCK_PRELOAD_FRAMES`
+  is the legacy/internal depth knob, ignored on the ms path. NOT a competing latency knob.
+- **Display (the user's ask):** the OBS startup + audit log show `genlock: latency = N ms
+  (≈ M frames @ Ffps)` — MS PRIMARY, frame-equivalent in PARENS. DistroAV source props show a
+  read-only `Genlock latency = N ms (≈ M frames @ Ffps)` label. The slider is the legacy frame
+  control. A user sets ONE ms value and never has to reason about preload-vs-reserve precedence.
+
+Resolution + display mirrored & unit-tested in `src/probe/genlock.rs` (resolve_latency_ms /
+ms_to_frames / genlock_auto_preload / format_latency_label) with vendored-source guards keeping the
+C (`vendor/obs-studio/libobs/obs-source.c` genlock_latency_ms) + DistroAV in lock-step.
+
+## Sub-frame ms reserve (#184 — the mechanism #235's single knob drives; prod = 3ms)
+
+`OBS_GENLOCK_RESERVE_MS=N` (>0), now the **back-compat ALIAS** of the #235 `OBS_GENLOCK_LATENCY_MS`,
+switches the genlock ts-align RELEASE deadline from the whole-frame `preload·interval` (=33ms@30fps)
+to `wall_now − N·1e6` (ms-granular). latency_ms=0 = the #136 frame path verbatim (back-compat).
+Validated zero-loss at 3ms on BOTH hops (strict recording-verdict overall_pass, FIFO audits show
+`latency_ms=3 reserve_ms=3`, 0 new underruns during active feed). **Prod (strih + stream) is LEFT ON
+3ms** (the reserve alias is still set in prod Machine env; a future re-pin can switch to the canonical
+`OBS_GENLOCK_LATENCY_MS` name). obs.dll sha `24e22357…` (build 19472506e). Rollback DLL:
+`C:\obs-backup\pre-184\obs.dll` (cdce8c3a… = the old whole-frame build).
 
 **STALE-ENV TRAP launching OBS via win-* MCP (cost the prior #184 worker its stream deploy):**
 the win-* MCP Shell child inherits the long-lived MCP process's env SNAPSHOT — if a genlock var
-(e.g. `OBS_GENLOCK_RESERVE_MS`) was set AFTER the MCP started, the MCP shell reads it EMPTY, and
-an OBS launched from that shell inherits it UNSET (→ silently runs the whole-frame path, no
-reserve line in the log). FIX: in the SAME Shell call that launches OBS, set the genlock env
-EXPLICITLY from the Machine values first:
+(e.g. `OBS_GENLOCK_LATENCY_MS` / `OBS_GENLOCK_RESERVE_MS`) was set AFTER the MCP started, the MCP
+shell reads it EMPTY, and an OBS launched from that shell inherits it UNSET (→ silently runs the
+whole-frame path, no latency line in the log). FIX: ALWAYS launch via `scripts/launch-obs-genlock.sh`
+(the #128 wrapper) — it reads the genlock env FRESH from Machine, sets it explicit, and fails loud if
+the child PEB doesn't carry it. If launching by hand, set the env EXPLICITLY from the Machine values
+first:
 ```powershell
 $env:OBS_GENLOCK_RESERVE_MS = [System.Environment]::GetEnvironmentVariable('OBS_GENLOCK_RESERVE_MS','Machine')
-# (also WALL_CLOCK / PRELOAD_FRAMES / TS_ALIGN), THEN Start-Process obs64 -WorkingDirectory bin\64bit
+# (also OBS_GENLOCK_LATENCY_MS if pinned, WALL_CLOCK / PRELOAD_FRAMES / TS_ALIGN),
+# THEN Start-Process obs64 -WorkingDirectory bin\64bit
 ```
-Verify it took: the OBS log must show `genlock: sub-frame jitter reserve = N ms` (prints lazily
-when a genlock_fifo input first activates) AND the FIFO audit line must carry `reserve_ms=N`.
+Verify it took: the OBS log must show `genlock: latency = N ms (≈ M frames @ Ffps)` (prints lazily
+when a genlock_fifo input first activates) AND the FIFO audit line must carry `latency_ms=N`.
 NB the audit's `underruns=` is CUMULATIVE per OBS process — a huge value can be IDLE accumulation
 between runs; what matters is the DELTA during active feed (0 = clean).
 

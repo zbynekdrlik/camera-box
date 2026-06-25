@@ -38,14 +38,15 @@ which disables DistroAV + genlock.
   - NO `Failed to find locale`
   - NO `Failed to initialize video`
 
-**Genlock reserve/audit lines need a LIVE consuming source — don't read their absence as broken.**
-The `genlock: timestamp-aligned release ENABLED (OBS_GENLOCK_TS_ALIGN)` + `sub-frame jitter reserve = N ms (#184)`
-lines, and the every-5s `genlock-fifo audit '<src>': ... reserve_ms=N` lines, arm ONLY when the program
-scene is rendering an NDI source that is ACTUALLY DELIVERING frames. If program is parked on a dead/black
-camera (source not feeding — common off-air or after a probe leaves it on a stale scene), these lines NEVER
-appear even though OBS is healthy (30fps render, NDI Main Output active, 0 skips). To get the reserve proof:
-find a camera that's actually feeding (`Get-NetTCPConnection -OwningProcess <obs pid>` to a `10.77.9.6x:5961`),
-switch program to its scene over WS (`SetCurrentProgramScene`), then the ts-align line + `reserve_ms=N`
+**Genlock latency/audit lines need a LIVE consuming source — don't read their absence as broken.**
+The `genlock: timestamp-aligned release ENABLED` + the #235 single-knob `genlock: latency = N ms
+(≈ M frames @ Ffps)` line, and the every-5s `genlock-fifo audit '<src>': ... latency_ms=N
+(≈M frames) ... reserve_ms=N` lines, arm ONLY when the program scene is rendering an NDI source that
+is ACTUALLY DELIVERING frames. If program is parked on a dead/black camera (source not feeding —
+common off-air or after a probe leaves it on a stale scene), these lines NEVER appear even though OBS
+is healthy (30fps render, NDI Main Output active, 0 skips). To get the latency proof: find a camera
+that's actually feeding (`Get-NetTCPConnection -OwningProcess <obs pid>` to a `10.77.9.6x:5961`),
+switch program to its scene over WS (`SetCurrentProgramScene`), then the ts-align line + `latency_ms=N`
 audits appear within ~10s. **Verify the relaunched OBS's actual env, not just the log:** read the live child
 process env (PEB `OBS_GENLOCK_*`) to PROVE `RESERVE_MS`/`TS_ALIGN` were inherited — the win-* MCP Shell env
 snapshot is STALE, so always set the genlock vars EXPLICIT in the launch shell AND confirm on the child.
@@ -82,17 +83,19 @@ scripts/launch-obs-genlock.sh --box stream --force   # win-stream-snv (10.77.9.2
 
 The program EXITS 0 only when the child PEB carries all four genlock vars matching Machine AND the
 log shows `render tick ENABLED`. A non-zero exit means the genlock env was NOT carried — do NOT trust
-the box; re-run the wrapper. The `sub-frame jitter reserve = N ms` / `reserve_ms=N` audit lines need
+the box; re-run the wrapper. The #235 `genlock: latency = N ms` / `latency_ms=N` audit lines need
 a live consuming source (see the section above), so the wrapper treats their absence as a non-fatal
-WARNING (the PEB read already proves `OBS_GENLOCK_RESERVE_MS=3`) — it does not fail the launch on
-them. The PEB reader (NtQueryInformationProcess + ReadProcessMemory via `Add-Type`, confirmed
+WARNING (the PEB read already proves `OBS_GENLOCK_LATENCY_MS`/`RESERVE_MS=3`) — it does not fail the
+launch on them. The PEB reader (NtQueryInformationProcess + ReadProcessMemory via `Add-Type`, confirmed
 available on both boxes) is the canonical "read the child env to PROVE inheritance" step from the
 section above — the wrapper does it automatically. Behavioral guard: `tests/launch_obs_genlock.rs`.
 
-Proven on both boxes 2026-06-25: strih obs64 PID 6244 and stream obs64 PID 10844 each relaunched via
-the wrapper with all four vars PEB-verified (`WALL_CLOCK=1 RESERVE_MS=3 TS_ALIGN=1 PRELOAD_FRAMES=1`)
-+ `render tick ENABLED`; stream further showed `timestamp-aligned release ENABLED` + `sub-frame
-jitter reserve = 3 ms` + live `reserve_ms=3` audits (it had a live 2ME PGM source).
+Proven on both boxes 2026-06-25 (pre-#235): strih obs64 PID 6244 and stream obs64 PID 10844 each
+relaunched via the wrapper with all four vars PEB-verified (`WALL_CLOCK=1 RESERVE_MS=3 TS_ALIGN=1
+PRELOAD_FRAMES=1`) + `render tick ENABLED`; stream further showed `timestamp-aligned release ENABLED`
++ the latency line + live audits (it had a live 2ME PGM source). Post-#235 the latency line reads
+`genlock: latency = 3 ms (≈ 0 frames @ 29.970fps)` (ms primary, frames in parens) and the audit
+carries `latency_ms=3 reserve_ms=3` (the reserve alias still pinned in prod Machine env).
 
 ### Read a running process's CHILD PEB env (ad-hoc, without relaunching)
 
