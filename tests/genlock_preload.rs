@@ -701,10 +701,29 @@ fn rearm_preserves_102_steady_consume_and_116_drain() {
 // the label format; the vendored-source guard below pins the C/cpp side.
 mod single_latency_knob {
     use camera_box::probe::genlock::{
-        format_latency_label, genlock_auto_preload, ms_to_frames, preload_to_ms,
-        resolve_latency_ms, GENLOCK_AUTO_PRELOAD_MIN, GENLOCK_LATENCY_MS_DEFAULT,
+        effective_latency_ms, format_latency_label, genlock_auto_preload, ms_to_frames,
+        preload_to_ms, resolve_latency_ms, GENLOCK_AUTO_PRELOAD_MIN, GENLOCK_LATENCY_MS_DEFAULT,
         GENLOCK_LATENCY_MS_MAX,
     };
+
+    // #245: per-source latency override — a source's OWN latency_ms (>0) beats the global
+    // default; 0 follows the global. Mirror of the C release-deadline gate in obs-source.c
+    // ready_async_frame: reserve_ms = source->genlock_latency_ms > 0 ?
+    // source->genlock_latency_ms : genlock_reserve_ms(). This restores the per-source
+    // control #235 removed (the live-event regression): one global default, each NDI
+    // source free to hold a DIFFERENT latency.
+    #[test]
+    fn per_source_latency_overrides_global_when_set() {
+        // A source with its OWN latency holds THAT value regardless of the global default.
+        assert_eq!(effective_latency_ms(1000, 3), 1000);
+        assert_eq!(effective_latency_ms(50, 3), 50);
+        // Two sources, one global default -> DIFFERENT resolved latencies (the #245 ask).
+        assert_eq!(effective_latency_ms(1000, 33), 1000);
+        assert_eq!(effective_latency_ms(33, 33), 33);
+        // A source left at 0 follows the global default (incl. global 0 = whole-frame path).
+        assert_eq!(effective_latency_ms(0, 3), 3);
+        assert_eq!(effective_latency_ms(0, 0), 0);
+    }
 
     #[test]
     fn latency_default_is_zero_disabled() {
