@@ -31,6 +31,35 @@ impl Default for NdiDisplayConfig {
     }
 }
 
+/// Severity for a "no frames received" gap on the display NDI receiver.
+///
+/// #130: on a camera with no NDI display feed (e.g. cam2, where the display source
+/// never delivers), the receiver legitimately polls `Ok(None)` for long stretches
+/// while capture/emit run at a steady 30 fps. The old code unconditionally logged
+/// `WARN: NDI display: No frames received for 5 seconds`, flooding the journal during
+/// perfectly normal operation. A no-frame gap is only worth a WARN if the display had
+/// previously been receiving frames and then STALLED (a genuine total-stall signal);
+/// a receiver that has never delivered a frame is simply "source not feeding this
+/// display" — a benign DEBUG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoFrameLevel {
+    /// Benign: never received a frame on this connection — log at DEBUG.
+    Debug,
+    /// Genuine stall: was receiving frames, then stopped — log at WARN.
+    Warn,
+}
+
+/// Decide the log severity for a "no frames" gap. WARN only when the receiver had
+/// actually been delivering frames before the gap (a real stall); otherwise DEBUG
+/// (the source simply isn't feeding this display — normal on a monitor-less cam).
+pub fn no_frame_log_level(frames_received_on_connection: u64) -> NoFrameLevel {
+    if frames_received_on_connection > 0 {
+        NoFrameLevel::Warn
+    } else {
+        NoFrameLevel::Debug
+    }
+}
+
 /// Run the NDI display loop with automatic reconnection
 /// This should be called from a low-priority thread
 pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> Result<()> {
@@ -97,6 +126,12 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         let mut last_report = std::time::Instant::now();
         let mut no_frame_count: u64 = 0;
         let mut first_frame = true;
+        // Frames delivered on THIS connection (does NOT reset with the 10s fps
+        // window). #130: only escalate a no-frame gap to WARN once the receiver has
+        // actually been feeding frames (a real stall); before that it's a benign
+        // DEBUG ("source not delivering to this display" — normal on a cam with no
+        // display feed, e.g. cam2 — which previously flooded the journal).
+        let mut frames_this_connection: u64 = 0;
 
         // Inner display loop - runs until source disappears
         while running.load(Ordering::Relaxed) {
@@ -104,6 +139,7 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
             match receiver.capture_frame(100) {
                 Ok(Some(frame)) => {
                     no_frame_count = 0;
+                    frames_this_connection += 1;
 
                     // Debug: log fourcc on first frame
                     if first_frame {
@@ -152,14 +188,31 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                     // No frame available
                     no_frame_count += 1;
 
-                    // After 10 seconds (100 * 100ms) with no frames, reconnect
+                    // After 10 seconds (100 * 100ms) with no frames, reconnect.
+                    // #130: WARN only if frames had actually been flowing (a real
+                    // stall); otherwise DEBUG — the source simply isn't feeding this
+                    // display, normal on a monitor-less cam, and must not flood logs.
                     if no_frame_count >= 100 {
-                        tracing::warn!("NDI display: No frames for 10 seconds, reconnecting...");
+                        match no_frame_log_level(frames_this_connection) {
+                            NoFrameLevel::Warn => tracing::warn!(
+                                "NDI display: No frames for 10 seconds, reconnecting..."
+                            ),
+                            NoFrameLevel::Debug => tracing::debug!(
+                                "NDI display: no frames for 10s (source not feeding), reconnecting..."
+                            ),
+                        }
                         break; // Exit inner loop to reconnect
                     }
 
                     if no_frame_count == 50 {
-                        tracing::warn!("NDI display: No frames received for 5 seconds");
+                        match no_frame_log_level(frames_this_connection) {
+                            NoFrameLevel::Warn => {
+                                tracing::warn!("NDI display: No frames received for 5 seconds")
+                            }
+                            NoFrameLevel::Debug => tracing::debug!(
+                                "NDI display: no frames for 5s (source not feeding this display)"
+                            ),
+                        }
                     }
                 }
                 Err(e) => {

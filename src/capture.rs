@@ -71,13 +71,30 @@ pub fn requested_capture_denominator(override_fps: Option<u32>) -> u32 {
 /// Number of frames the CAPTURE DEVICE silently dropped between two consecutive
 /// delivered buffers, from their V4L2 `sequence` numbers (the kernel increments
 /// `sequence` once per CAPTURED frame, skipping the value of any frame the driver
-/// could not deliver). Consecutive frames (`cur == prev + 1`) ⇒ 0. A jump ⇒ the
-/// skipped count. `u32` wrapping is handled (`wrapping_sub`), and `cur == prev`
-/// (a duplicate/no-advance, never expected) ⇒ 0. This is capture-card loss —
-/// distinct from genlock-pipeline loss — that the QR instrument was previously
-/// blind to (the `sequence` was discarded at the `stream.next()` call sites).
+/// could not deliver). Consecutive frames (`cur == prev + 1`) ⇒ 0. A real forward
+/// jump ⇒ the skipped count. `cur == prev` (a duplicate/no-advance) ⇒ 0.
+///
+/// #130: a BACKWARD sequence (`cur < prev` — a stream reset, frame reorder, or
+/// 60→30 decimation re-numbering) must report 0, NOT a giant count. The previous
+/// `cur.wrapping_sub(prev).saturating_sub(1)` returned ~`u32::MAX` for `cur < prev`
+/// (e.g. `sequence_gap(12, 10)` = 4294967293), which accumulated into the garbage
+/// `k*2^32 + 1` counter observed live on cam2 (34359738369 = 8*2^32 + 1).
+///
+/// The forward wrapping distance discriminates the two cases:
+/// - a genuine FORWARD advance (incl. the legitimate `u32` wrap, e.g. `MAX → 0`)
+///   has a SMALL wrapping distance → count it.
+/// - a BACKWARD step has a HUGE wrapping distance (> half the `u32` range, the
+///   "long way round") → it is not a real forward advance → 0 drops.
 pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
-    cur.wrapping_sub(prev).saturating_sub(1)
+    let forward = cur.wrapping_sub(prev);
+    // A forward distance in the upper half of the range is really a small backward
+    // step (reset/reorder/decimation), not an enormous forward jump → 0 drops.
+    // This still admits the legitimate forward u32 wrap, whose distance is small.
+    if forward > u32::MAX / 2 {
+        0
+    } else {
+        forward.saturating_sub(1)
+    }
 }
 
 /// Serialize cam1's V4L2 capture-drop statistics into the cam1-capture-stats SIDECAR the
