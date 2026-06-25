@@ -153,6 +153,28 @@ pub fn resolve_latency_ms(latency_env: Option<&str>, reserve_env: Option<&str>) 
     parse_reserve_ms(reserve_env)
 }
 
+/// (#245) The EFFECTIVE genlock latency (ms) for a single source: the source's OWN
+/// per-source override when set (`> 0`), else the global default (from
+/// [`resolve_latency_ms`]).
+///
+/// Mirrors the C release-deadline gate in `obs-source.c` `ready_async_frame`:
+/// ```c
+/// reserve_ms = source->genlock_latency_ms > 0 ? source->genlock_latency_ms
+///                                             : genlock_reserve_ms();
+/// ```
+/// so each NDI source can hold a DIFFERENT latency (the #245 per-source ask) while a
+/// source left at `0` follows the single global default — which may itself be `0` (the
+/// whole-frame preload path). #235 collapsed latency to ONE global env knob and lost
+/// per-source control (the live-event regression); #245 restores it WITHOUT the
+/// confusing dual env knobs: the override lives on the source, set from the OBS UI.
+pub fn effective_latency_ms(source_latency_ms: u32, global_latency_ms: u32) -> u32 {
+    if source_latency_ms > 0 {
+        source_latency_ms
+    } else {
+        global_latency_ms
+    }
+}
+
 /// (#235) Parse `OBS_GENLOCK_LATENCY_MS` into `Some(ms)` only when it is genuinely SET
 /// to a valid value (the `strtol` contract of [`parse_reserve_ms`]), else `None` so
 /// [`resolve_latency_ms`] can fall through to the alias.
