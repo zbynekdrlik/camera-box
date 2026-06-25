@@ -85,6 +85,24 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   grep .dll` = EMPTY), so #119's stale-prebuilt root cause is structurally gone.
 - **#121** (post-deploy byte/SHA verify vs the manifest — needs the rig) and **#122**
   (drift-guard per-component BUILD SHA) both CONSUME `BUNDLE_MANIFEST.json`.
+- **single canonical OBS plugin-load path (#124)** — OBS scans MULTIPLE module
+  locations (`C:\Program Files\obs-studio\obs-plugins\64bit` first-party,
+  `C:\ProgramData\obs-studio\plugins\<plugin>\bin\64bit` global,
+  `%APPDATA%\obs-studio\plugins\<plugin>\bin\64bit` per-user), so the SAME
+  `distroav.dll` in more than one lets a **stale copy silently shadow the intended
+  build** (that's #119 in another guise). **CANONICAL = `C:\ProgramData\obs-studio\
+  plugins\distroav\bin\64bit\distroav.dll` — exactly ONE copy, there.** Verified live
+  on strih + stream 2026-06-25: one `distroav.dll` per box (663040 B), loaded by the
+  Program Files genlock `obs64.exe`, render tick ENABLED; **none** under
+  `Program Files\obs-studio\obs-plugins\64bit` (the `data\obs-plugins\distroav` folder
+  there is resources/locale, not the binary). First-party OBS plugins ship in
+  Program Files\obs-plugins; DistroAV is the one in ProgramData — a deploy MUST NOT
+  also drop `distroav.dll` into Program Files\obs-plugins (re-creates the shadow). The
+  drift-guard now reads `distroav_dll_paths` (every `distroav.dll` location across the
+  scan paths, gathered via win-* MCP — `/drift-guard` step 1c) and FAILS if there is
+  more than one, or the lone one is off the canonical path. Pin row +
+  `drift_check_plugin_paths` (tested in `tests/drift_guard.rs`) live in
+  `vendor/README.md` under `canonical_plugin_path`.
 
 GOTCHA: the 150-min `windows-genlock.yml` is `workflow_dispatch`-only (can't run
 per-PR), so manifest LOGIC is proven on the Linux `test` job; editing

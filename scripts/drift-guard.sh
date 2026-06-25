@@ -27,7 +27,8 @@
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
 #   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
 #       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1 \
-#       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0"
+#       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" \
+#       distroav_dll_paths="C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"
 #   scripts/drift-guard.sh --help
 #
 # Exit codes: 0 = clean (pins valid / no drift), 20 = DRIFT detected, 11 = at least one observed
@@ -216,6 +217,74 @@ drift_check_inputs() {
   return 0
 }
 
+# drift_check_plugin_paths CANONICAL OBSERVED_CSV -> single-canonical OBS plugin-load path guard
+# (#124, EPIC #125). CANONICAL is the pinned single directory the genlock DistroAV plugin must load
+# from (e.g. C:\ProgramData\obs-studio\plugins\distroav\bin\64bit). OBSERVED_CSV is a comma-separated
+# list of EVERY distroav.dll location found across the box's OBS scan paths (gathered live — see
+# .claude/commands/drift-guard.md). The #124 failure class is a SECOND copy in another scan path
+# (ProgramData AND Program Files\obs-plugins\64bit, or a portable dir) that can silently SHADOW the
+# intended build — the mixed-version incident #119 that burned the user. Rules:
+#   * exactly ONE location, AND it is at the canonical path  -> OK (rc 0)
+#   * more than one location (a shadow/duplicate)            -> DRIFT (rc 2) — names the extra path(s)
+#   * exactly one location but NOT at the canonical path     -> DRIFT (rc 2)
+#   * empty observed set (scan not run)                      -> UNKNOWN (rc 3, never silently OK)
+# An observed entry may be the directory OR the full distroav.dll path; both count as "at canonical"
+# when the entry's directory equals CANONICAL (Windows paths compared case-insensitively, since the
+# filesystem is). Windows paths contain backslashes and spaces but never commas, so the CSV split is
+# unambiguous (same convention as drift_check_inputs).
+drift_check_plugin_paths() {
+  local canonical="$1" csv="$2" entry dir lc_dir lc_canon n=0 at_canon=0 off=0
+  if [ -z "$csv" ]; then
+    printf '  %-20s UNKNOWN  (expected one distroav.dll at %s, observed <none>)\n' \
+      "distroav_dll_paths" "$canonical"
+    return 3
+  fi
+  lc_canon="$(printf '%s' "${canonical%\\}" | tr '[:upper:]' '[:lower:]')"
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    # trim surrounding whitespace
+    entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+    [ -z "$entry" ] && continue
+    n=$((n + 1))
+    # Reduce an entry to its directory: if it ends in .dll, strip the trailing \<file>; else it IS
+    # the directory. Then drop a trailing backslash and lower-case for the case-insensitive compare.
+    case "$entry" in
+      *.dll|*.DLL|*.Dll) dir="${entry%\\*}" ;;
+      *)                 dir="$entry" ;;
+    esac
+    dir="${dir%\\}"
+    lc_dir="$(printf '%s' "$dir" | tr '[:upper:]' '[:lower:]')"
+    if [ "$lc_dir" = "$lc_canon" ]; then
+      at_canon=$((at_canon + 1))
+      printf '  plugin %-20s OK       (%s)\n' "distroav.dll" "$entry"
+    else
+      off=$((off + 1))
+      printf '  plugin %-20s DRIFT    (off the canonical path: %s)\n' "distroav.dll" "$entry"
+    fi
+  done
+  if [ "$n" -eq 0 ]; then
+    printf '  %-20s UNKNOWN  (expected one distroav.dll at %s, observed <none>)\n' \
+      "distroav_dll_paths" "$canonical"
+    return 3
+  fi
+  # More than one location anywhere = a shadow (even if one of them is canonical): a stale copy in a
+  # second scan path can mask the intended build. A lone copy off the canonical path is drift too.
+  if [ "$n" -gt 1 ]; then
+    printf '  %-20s DRIFT    (%d distroav.dll copies across scan paths — a stale one can shadow the canonical build)\n' \
+      "distroav_dll_paths" "$n"
+    return 2
+  fi
+  if [ "$off" -gt 0 ]; then
+    printf '  %-20s DRIFT    (the single distroav.dll is not on the canonical path %s)\n' \
+      "distroav_dll_paths" "$canonical"
+    return 2
+  fi
+  return 0
+}
+
 # validate_semver / validate_nonempty -> 0 if the pinned value is present + shaped, else 1 (loud).
 validate_semver() {
   local name="$1" val="$2"
@@ -255,7 +324,11 @@ Usage:
   ndi_input_latency (a comma-separated "input name=latency" list for the genlocked broadcast-path
   NDI inputs, e.g. ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" on strih or
   ndi_input_latency="NDI 2ME PGM=0" on stream — each input's obs-websocket GetInputSettings
-  `latency` field; 0=Normal is the pinned certified low-latency zero-loss mode, #84).
+  `latency` field; 0=Normal is the pinned certified low-latency zero-loss mode, #84),
+  distroav_dll_paths (a comma-separated list of EVERY distroav.dll location found across the box's
+  OBS scan paths — Program Files\obs-studio\obs-plugins\64bit, ProgramData\obs-studio\plugins\*\
+  bin\64bit, %APPDATA%\obs-studio\plugins\*\bin\64bit; must be exactly one, at the pinned canonical
+  path — a second copy is a shadow, #124).
   (gather them read-only off strih/stream via the win-* MCP tools — see
    .claude/commands/drift-guard.md). Any key you omit is reported UNKNOWN.
 
@@ -265,15 +338,16 @@ EOF
 }
 
 check_pins() {
-  local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7"
+  local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7" p_plugin="$8"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
-  validate_semver   "obs_version"        "$p_obs"      || errs=$((errs + 1))
-  validate_semver   "distroav_version"   "$p_distroav" || errs=$((errs + 1))
-  validate_semver   "ndi_runtime_min"    "$p_ndi"      || errs=$((errs + 1))
-  validate_nonempty "output_fps"         "$p_fps"      || errs=$((errs + 1))
-  validate_nonempty "genlock_wall_clock" "$p_genlock"  || errs=$((errs + 1))
-  validate_nonempty "ndi_input_latency"  "$p_latency"  || errs=$((errs + 1))
+  validate_semver   "obs_version"           "$p_obs"      || errs=$((errs + 1))
+  validate_semver   "distroav_version"      "$p_distroav" || errs=$((errs + 1))
+  validate_semver   "ndi_runtime_min"       "$p_ndi"      || errs=$((errs + 1))
+  validate_nonempty "output_fps"            "$p_fps"      || errs=$((errs + 1))
+  validate_nonempty "genlock_wall_clock"    "$p_genlock"  || errs=$((errs + 1))
+  validate_nonempty "ndi_input_latency"     "$p_latency"  || errs=$((errs + 1))
+  validate_nonempty "canonical_plugin_path" "$p_plugin"   || errs=$((errs + 1))
   if [ "$errs" -gt 0 ]; then
     echo >&2
     echo "!! $errs pinned value(s) missing or malformed in $readme." >&2
@@ -283,6 +357,7 @@ check_pins() {
   echo
   echo "All pins present + well-formed:"
   echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps=$p_fps genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
+  echo "  canonical_plugin_path=$p_plugin"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
   # This catches a `git subtree pull` that bumped vendor/distroav without updating the table
@@ -309,8 +384,8 @@ check_pins() {
 }
 
 compare_observed() {
-  local host="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7"
-  local o_obs="$8" o_distroav="$9" o_ndi="${10}" o_fps="${11}" o_genlock="${12}" o_latency="${13}"
+  local host="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7" p_plugin="$8"
+  local o_obs="$9" o_distroav="${10}" o_ndi="${11}" o_fps="${12}" o_genlock="${13}" o_latency="${14}" o_plugin="${15}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -336,6 +411,14 @@ compare_observed() {
   # guard exists to catch) fails the box.
   rc=0
   drift_check_inputs "$p_latency" "$o_latency" || rc=$?
+  [ "$rc" -eq 2 ] && drift=$((drift + 1))
+  [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+
+  # Single canonical OBS plugin-load path (#124): distroav.dll must exist in EXACTLY ONE OBS scan
+  # path, and that path must be the pinned canonical one. A second copy in another scan path can
+  # silently shadow the intended genlock/DistroAV build (the mixed-version incident #119).
+  rc=0
+  drift_check_plugin_paths "$p_plugin" "$o_plugin" || rc=$?
   [ "$rc" -eq 2 ] && drift=$((drift + 1))
   [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
 
@@ -372,21 +455,22 @@ main() {
 
   [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
 
-  local p_obs p_distroav p_ndi p_fps p_genlock p_latency
+  local p_obs p_distroav p_ndi p_fps p_genlock p_latency p_plugin
   p_obs="$(pinned_obs_version "$readme")"
   p_distroav="$(pinned_distroav_version "$readme")"
   p_ndi="$(pinned_ndi_min "$readme")"
   p_fps="$(pinned_setting "$readme" output_fps)"
   p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
   p_latency="$(pinned_setting "$readme" ndi_input_latency)"
+  p_plugin="$(pinned_setting "$readme" canonical_plugin_path)"
 
   if [ "$mode" = "check-pins" ]; then
-    check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency"
+    check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin"
     exit $?
   fi
 
   # --compare: collect observed key=val pairs.
-  local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" pair k v
+  local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -397,12 +481,13 @@ main() {
       output_fps)         o_fps="$v" ;;
       genlock_wall_clock) o_genlock="$v" ;;
       ndi_input_latency)  o_latency="$v" ;;
+      distroav_dll_paths) o_plugin="$v" ;;
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
 
-  compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" \
-    "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency"
+  compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
+    "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin"
 }
 
 main "$@"

@@ -60,12 +60,35 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    (read-only; lists every NDI input + its settings). If OBS is not running there is no live
    obs-websocket — omit the key so the engine reports it UNKNOWN rather than a stale guess.
 
+1c. **Gather every `distroav.dll` location across the OBS scan paths (#124, single canonical plugin
+   path).** OBS scans MULTIPLE module locations; the SAME `distroav.dll` in more than one of them lets
+   a stale copy silently shadow the intended build (the mixed-version incident #119). Read-only enumerate
+   every `distroav.dll` under the three scan paths and build a comma-separated list:
+
+   ```powershell
+   $paths = @(
+     'C:\Program Files\obs-studio\obs-plugins\64bit',
+     'C:\ProgramData\obs-studio\plugins',
+     "$env:APPDATA\obs-studio\plugins"
+   )
+   $found = foreach($p in $paths){ if(Test-Path $p){ Get-ChildItem $p -Recurse -Filter distroav.dll -EA SilentlyContinue | Select-Object -ExpandProperty FullName } }
+   "distroav_dll_paths=$($found -join ',')"
+   ```
+
+   The invariant: exactly ONE `distroav.dll`, at the canonical `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit`.
+   (The `C:\Program Files\obs-studio\data\obs-plugins\distroav` folder is resources/locale — it carries
+   NO `.dll`, so it never matches this scan. D:\_APPS\*, C:\genlock-*, C:\obs-backup\* are SEPARATE
+   portable installs / staging / backups, NOT in the Program Files genlock OBS's scan paths — do not
+   include them.) If the scan returns nothing, OBS may not be installed at the expected path — omit the
+   key so the engine reports UNKNOWN rather than a false clean.
+
 2. **Compare against the pinned set** — feed every observed value to the engine:
 
    ```bash
    ./scripts/drift-guard.sh --compare host=strih \
      obs_version=<v> distroav_version=<v> ndi_runtime=<v> output_fps=<n> genlock_wall_clock=<0|1> \
-     ndi_input_latency="NDI cam5=<n>,NDI cam1=<n>,NDI cam3=<n>"   # stream: "NDI 2ME PGM=<n>"
+     ndi_input_latency="NDI cam5=<n>,NDI cam1=<n>,NDI cam3=<n>" \
+     distroav_dll_paths="<every distroav.dll location, comma-separated>"   # stream: ndi_input_latency="NDI 2ME PGM=<n>"
    ```
 
    - Exit `0` → **NO DRIFT**, the box matches the pinned zero-loss set. Report it.
