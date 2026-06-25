@@ -144,27 +144,38 @@ impl FramebufferDisplay {
         // Convert to BGRA for framebuffer
         let bgra_data = self.convert_to_bgra(data, width, height, fourcc)?;
 
-        // Scale if needed
-        let final_data = if width != self.width || height != self.height {
-            self.scale_nearest(&bgra_data, width, height, self.width, self.height)
+        // #135: NEVER software-upscale beyond the source. Render at min(fb, source)
+        // per axis — a 1080p source on a (possibly latched 4K phantom) fb renders 1:1
+        // (the killer 1080→4K nested-loop upscale is never taken); a larger source is
+        // downscaled to fit. The rendered frame is top-left aligned into the fb and the
+        // remaining fb area is left as letterbox (untouched), so a bigger fb costs only
+        // a 1:1 copy, not a per-fb-pixel upscale.
+        let (render_w, render_h) = clamp_render_dims(width, height, self.width, self.height);
+        let render_data = if render_w != width || render_h != height {
+            self.scale_nearest(&bgra_data, width, height, render_w, render_h)
         } else {
             bgra_data
         };
 
-        // Write to framebuffer using pwrite (atomic position + write)
-        let src_stride = self.width as usize * 4;
-        if self.line_length as usize == src_stride {
-            // No padding needed - write entire frame at once at offset 0
-            self.file.write_all_at(&final_data, 0)?;
+        // Write the rendered frame into the fb. When the render exactly fills the fb
+        // width and the fb has no row padding, write it in one shot; otherwise write
+        // row by row (left-aligned), padding each fb row out to its full line_length.
+        let render_stride = render_w as usize * 4;
+        let fb_stride = self.line_length as usize;
+        if render_w == self.width && fb_stride == render_stride && render_h == self.height {
+            // Exact fit, no padding - write entire frame at once.
+            self.file.write_all_at(&render_data, 0)?;
         } else {
-            // Write line by line with padding
+            // Row-by-row: copy each rendered row left-aligned, pad the rest of the fb
+            // row with zeros (letterbox). Only the rendered rows are written; rows
+            // beyond render_h are left untouched (already black / prior content).
             self.file.seek(SeekFrom::Start(0))?;
-            for y in 0..self.height as usize {
-                let src_offset = y * src_stride;
-                let src_end = src_offset + src_stride;
-                if src_end <= final_data.len() {
-                    self.file.write_all(&final_data[src_offset..src_end])?;
-                    let padding = self.line_length as usize - src_stride;
+            for y in 0..render_h as usize {
+                let src_offset = y * render_stride;
+                let src_end = src_offset + render_stride;
+                if src_end <= render_data.len() {
+                    self.file.write_all(&render_data[src_offset..src_end])?;
+                    let padding = fb_stride.saturating_sub(render_stride);
                     if padding > 0 {
                         self.file.write_all(&vec![0u8; padding])?;
                     }
@@ -374,6 +385,61 @@ pub fn scale_nearest_neighbor(
     dst
 }
 
+/// Cap the render resolution so the display never SOFTWARE-UPSCALES beyond the
+/// source (#135). Render at `min(fb, source)` per axis:
+/// - source ≤ fb (e.g. 1080p source on a latched 4K phantom fb) → render 1:1 at the
+///   source size (let the fb show it letterboxed); the killer `scale_nearest` 1080→4K
+///   upscale (a per-pixel nested loop → 99.9% CPU) is NEVER taken.
+/// - source > fb → downscale to the fb (cheap and necessary so it fits).
+///
+/// Upscaling a 1080p frame to 4K is pointless (no new detail) and heavy — the exact
+/// CPU sink behind the pre-event cam1 incident (load 4.5, ~400ms emit latency).
+pub fn clamp_render_dims(src_w: u32, src_h: u32, fb_w: u32, fb_h: u32) -> (u32, u32) {
+    (src_w.min(fb_w), src_h.min(fb_h))
+}
+
+/// Decide whether a DRM connector has a real monitor attached, from its sysfs
+/// `status` / `enabled` / `modes` files (#135). `status` is the authoritative
+/// presence signal: a hot-unplugged connector reports `status=disconnected`
+/// (`enabled=disabled`, `modes=[]`) even though i915 leaves fb0 LATCHED at the old
+/// mode — a "phantom" fb that opens and writes fine, so neither the fb-open retry
+/// nor the write-failure path catches it. Only `status == "connected"` (trimmed)
+/// means a monitor is actually present and the display should render.
+pub fn connector_is_connected(status: &str, _enabled: &str, _modes: &str) -> bool {
+    status.trim() == "connected"
+}
+
+/// Whether ANY DRM connector under `drm_class_dir` (normally `/sys/class/drm`)
+/// currently reports a connected monitor (#135). Reads each `card*-<connector>/status`
+/// sysfs file (a plain file read — NO `drm` crate, which is probe-feature-only; the
+/// `--display` runtime mode is default-feature). Returns `Some(true/false)` when at
+/// least one connector status was readable, or `None` when no connector status could
+/// be read at all (sysfs absent / unexpected layout) — in which case the caller should
+/// fall back to rendering (never silently go dark on an unknown layout).
+pub fn any_connector_connected(drm_class_dir: &str) -> Option<bool> {
+    let entries = std::fs::read_dir(drm_class_dir).ok()?;
+    let mut saw_any_status = false;
+    let mut connected = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Connector dirs are like `cardN-HDMI-A-1`; they contain a `status` file.
+        let status_path = path.join("status");
+        if let Ok(status) = std::fs::read_to_string(&status_path) {
+            saw_any_status = true;
+            let enabled = std::fs::read_to_string(path.join("enabled")).unwrap_or_default();
+            let modes = std::fs::read_to_string(path.join("modes")).unwrap_or_default();
+            if connector_is_connected(&status, &enabled, &modes) {
+                connected = true;
+            }
+        }
+    }
+    if saw_any_status {
+        Some(connected)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +525,32 @@ mod tests {
             "enabled",
             "1920x1080\n"
         ));
+    }
+
+    #[test]
+    fn incident_scenario_no_heavy_upscale_to_phantom_4k_fb() {
+        // The pre-event cam1 incident (#135, #105 TDD bar): 1080p source, fb latched at
+        // 4K, monitor hot-unplugged so the connector is disconnected. The display path
+        // MUST do NEITHER a heavy 1080->4K software upscale NOR a write to the phantom
+        // fb. Both guards independently neutralize the incident:
+        //   1. connector disconnected => render skipped entirely (no fb write at all)
+        let phantom_disconnected = connector_is_connected("disconnected", "disabled", "");
+        assert!(!phantom_disconnected, "phantom fb => render is skipped");
+        //   2. even if the gate were bypassed, the render is capped to source (1:1),
+        //      so the 99.9%-CPU 1080->4K nested-loop upscale is never executed.
+        assert_eq!(
+            clamp_render_dims(1920, 1080, 3840, 2160),
+            (1920, 1080),
+            "no 1080->4K upscale even if connector check is bypassed"
+        );
+        // No-regression on the healthy case (cam4 / live cam2: connected 1080p monitor,
+        // 1080p fb): render proceeds 1:1 (no upscale, no skip).
+        assert!(connector_is_connected(
+            "connected",
+            "enabled",
+            "1920x1080\n"
+        ));
+        assert_eq!(clamp_render_dims(1920, 1080, 1920, 1080), (1920, 1080));
     }
 
     #[test]

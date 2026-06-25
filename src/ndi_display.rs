@@ -8,8 +8,15 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::display::FramebufferDisplay;
+use crate::display::{any_connector_connected, FramebufferDisplay};
 use crate::ndi::NdiReceiver;
+
+/// DRM sysfs class dir whose connector `status` files report monitor presence (#135).
+const DRM_CLASS_DIR: &str = "/sys/class/drm";
+
+/// Re-poll the connector status every N delivered frames (~1s at 30fps). A plain
+/// sysfs read is cheap, but no need to do it every frame.
+const CONNECTOR_RECHECK_FRAMES: u64 = 30;
 
 /// NDI display configuration
 pub struct NdiDisplayConfig {
@@ -132,6 +139,14 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         // DEBUG ("source not delivering to this display" — normal on a cam with no
         // display feed, e.g. cam2 — which previously flooded the journal).
         let mut frames_this_connection: u64 = 0;
+        // #135: connector-presence gate. When the DRM connector reports no monitor
+        // (a disconnected/latched "phantom" fb after hot-unplug), SKIP rendering — the
+        // fb still opens and writes fine, so this is the only signal that there is no
+        // real monitor. Re-checked every ~1s. `None` (unknown sysfs layout) → render
+        // (never silently go dark). Polled BEFORE the first frame so a phantom fb never
+        // gets even one heavy write.
+        let mut connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
+        let mut last_connector_log = !connector_present; // log the initial state once
 
         // Inner display loop - runs until source disappears
         while running.load(Ordering::Relaxed) {
@@ -140,6 +155,11 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                 Ok(Some(frame)) => {
                     no_frame_count = 0;
                     frames_this_connection += 1;
+
+                    // #135: re-poll connector presence ~once/sec.
+                    if frames_this_connection.is_multiple_of(CONNECTOR_RECHECK_FRAMES) {
+                        connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
+                    }
 
                     // Debug: log fourcc on first frame
                     if first_frame {
@@ -156,14 +176,36 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                         first_frame = false;
                     }
 
-                    // Display the frame (ignore errors - display may be disconnected)
-                    if let Err(e) =
-                        display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
-                    {
-                        // Only log occasionally to avoid spam
-                        if frame_count.is_multiple_of(300) {
-                            tracing::warn!("Display write failed (monitor disconnected?): {}", e);
+                    // #135: only render when a monitor is actually connected. A
+                    // disconnected connector with a latched/phantom fb would otherwise
+                    // get a heavy software upscale to no real screen (the pre-event
+                    // incident: 1080→4K → 99.9% CPU). When disconnected, skip the
+                    // render+upscale entirely; capture/emit are unaffected.
+                    if connector_present {
+                        if last_connector_log {
+                            tracing::info!("NDI display: monitor connected — rendering");
+                            last_connector_log = false;
                         }
+                        // Display the frame (ignore errors - display may be disconnected)
+                        if let Err(e) = display.display_frame(
+                            &frame.data,
+                            frame.width,
+                            frame.height,
+                            frame.fourcc,
+                        ) {
+                            // Only log occasionally to avoid spam
+                            if frame_count.is_multiple_of(300) {
+                                tracing::warn!(
+                                    "Display write failed (monitor disconnected?): {}",
+                                    e
+                                );
+                            }
+                        }
+                    } else if !last_connector_log {
+                        tracing::info!(
+                            "NDI display: no monitor connected (DRM status=disconnected) — skipping render to avoid upscaling to a phantom framebuffer"
+                        );
+                        last_connector_log = true;
                     }
 
                     frame_count += 1;
