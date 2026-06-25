@@ -742,7 +742,11 @@ fn manifest_sha_for_component_matches_by_basename_in_both_layouts() {
         "manifest_sha_for_component \"$M\" distroav",
         &[("M", fast.to_str().unwrap())],
     );
-    assert_eq!(da_fast.trim(), "", "absent distroav must resolve empty: {da_fast:?}");
+    assert_eq!(
+        da_fast.trim(),
+        "",
+        "absent distroav must resolve empty: {da_fast:?}"
+    );
 }
 
 #[test]
@@ -754,12 +758,20 @@ fn genlock_capability_parser_detects_our_build_vs_stock() {
         "genlock_capability_from_log \"$LOG\"",
         &[("LOG", GENLOCK_CAP_OURS)],
     );
-    assert_eq!(ours.trim(), "1", "our build's capability marker must read 1: {ours:?}");
+    assert_eq!(
+        ours.trim(),
+        "1",
+        "our build's capability marker must read 1: {ours:?}"
+    );
 
     // A stock OBS log: real OBS header lines but ZERO genlock markers.
     let stock = "11:40:39.376: OBS 32.1.2 (64-bit, windows)\n11:40:39.714: video settings reset:\n11:40:39.714: \tfps:               30/1\n";
     let out = run_sourced("genlock_capability_from_log \"$LOG\"", &[("LOG", stock)]);
-    assert_eq!(out.trim(), "", "a stock build emits no genlock marker -> UNKNOWN/absent: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "",
+        "a stock build emits no genlock marker -> UNKNOWN/absent: {out:?}"
+    );
 }
 
 #[test]
@@ -837,7 +849,8 @@ fn compare_fails_loudly_on_stock_build_with_no_genlock_capability() {
     // A stock OBS 32.1.2 passes every version check but emits NO genlock marker. With the manifest
     // supplied (live facet active), an ABSENT capability marker is DRIFT — the stock-build tell.
     let manifest = write_temp("dg_184_cap_drift", MANIFEST_184_FAST);
-    let stock_log = "11:40:39.376: OBS 32.1.2 (64-bit, windows)\n11:40:39.714: video settings reset:\n";
+    let stock_log =
+        "11:40:39.376: OBS 32.1.2 (64-bit, windows)\n11:40:39.714: video settings reset:\n";
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=stream",
@@ -860,7 +873,10 @@ fn compare_fails_loudly_on_stock_build_with_no_genlock_capability() {
         stdout.contains("genlock_capability") && stdout.contains("DRIFT"),
         "must flag the absent capability marker. stdout={stdout:?}"
     );
-    assert!(stderr.contains("DRIFT DETECTED"), "must fail loudly. stderr={stderr:?}");
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly. stderr={stderr:?}"
+    );
 }
 
 #[test]
@@ -915,7 +931,10 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
         // no manifest=, no obs_dll_sha256, no genlock_capability
     ]);
-    assert_eq!(code, 0, "no manifest -> marketing facet only -> clean. stdout={stdout:?}");
+    assert_eq!(
+        code, 0,
+        "no manifest -> marketing facet only -> clean. stdout={stdout:?}"
+    );
     assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
     assert!(
         !stdout.contains("obs_dll_sha256"),
