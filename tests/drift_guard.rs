@@ -964,3 +964,264 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
         "the build-SHA facet must stay dormant without a manifest. stdout={stdout:?}"
     );
 }
+
+// --- #121: post-deploy WHOLE-BUNDLE byte/SHA verify (deploy FAILS on ANY file mismatch) -------
+//
+// The #122 facet above checks only obs.dll + distroav.dll against the manifest — the two
+// genlock-bearing components. #121 raises the bar to deploy-from-clean-tree's contract: after a
+// deploy, EVERY file the bundle shipped must match the manifest byte-for-byte on the live box, and
+// the deploy FAILS on ANY mismatch (missing, extra-via-unread, or sha-drifted file) — so a partial
+// or corrupted deploy (one file silently stale) can never pass. The live per-file hashes are
+// gathered off the Windows box (Get-FileHash over each deployed bundle file, ssh denied) and fed as
+// a comma-separated `relpath=sha256` list via the new `bundle_hashes=` observed key; the engine
+// walks the manifest's files[] and compares each. The manifest path uses forward slashes (the
+// genlock-manifest.sh layout), so the observed relpaths must match that convention.
+
+/// A multi-file bundle manifest (the FULL windows-genlock layout) with FOUR files — beyond the two
+/// DLLs the #122 facet covers — so the all-files check is proven to verify the WHOLE bundle, not
+/// just the genlock components.
+const MANIFEST_BUNDLE_4: &str = "\
+{
+  \"schema\": \"camera-box/genlock-bundle-manifest@1\",
+  \"build_sha\": \"19472506ec156696c6fcb097899ba745e17b8953\",
+  \"files\": [
+    { \"path\": \"GENLOCK_BUILD_SHA.txt\", \"sha256\": \"4b1881f9fb31a852f8c6be0010ce296639538be163296885e5e5e23d10763aae\", \"size\": 42 },
+    { \"path\": \"bin/64bit/obs64.exe\", \"sha256\": \"aaaa000000000000000000000000000000000000000000000000000000000000\", \"size\": 100 },
+    { \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33\", \"size\": 1316352 },
+    { \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880\", \"size\": 663040 }
+  ]
+}
+";
+
+/// Every file in MANIFEST_BUNDLE_4 with its CORRECT recorded sha — the live read of a clean deploy.
+const OBSERVED_ALL_MATCH: &str =
+    "GENLOCK_BUILD_SHA.txt=4b1881f9fb31a852f8c6be0010ce296639538be163296885e5e5e23d10763aae,\
+bin/64bit/obs64.exe=aaaa000000000000000000000000000000000000000000000000000000000000,\
+bin/64bit/obs.dll=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33,\
+obs-plugins/64bit/distroav.dll=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880";
+
+#[test]
+fn manifest_all_paths_lists_every_bundle_file() {
+    // The pure lister returns EVERY files[] path (one per line), in manifest order — the input the
+    // all-files compare iterates. (drift-guard owns its own parser; it must not depend on
+    // genlock-manifest.sh at --compare time.)
+    let m = write_temp("dg_bundle4_paths", MANIFEST_BUNDLE_4);
+    let out = run_sourced("manifest_all_paths \"$M\"", &[("M", m.to_str().unwrap())]);
+    let lines: Vec<&str> = out
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            "GENLOCK_BUILD_SHA.txt",
+            "bin/64bit/obs64.exe",
+            "bin/64bit/obs.dll",
+            "obs-plugins/64bit/distroav.dll",
+        ],
+        "must list every bundle file path: {out:?}"
+    );
+    let _ = std::fs::remove_file(&m);
+}
+
+#[test]
+fn drift_check_all_files_pure_ok_drift_unknown() {
+    // The pure whole-bundle helper: every manifest file must have a matching observed sha.
+    //   * all files match            -> OK    (rc 0)
+    //   * any file sha differs       -> DRIFT (rc 2), names the drifted file
+    //   * a manifest file unobserved -> UNKNOWN(rc 3) — a file we failed to hash is never a clean pass
+    //   * empty observed set         -> UNKNOWN(rc 3) — a scan we could not run must not look clean
+    let m = write_temp("dg_bundle4_pure", MANIFEST_BUNDLE_4);
+    let case = |observed: &str| {
+        let body = "rc=0; drift_check_all_files \"$M\" \"$OBS\" || rc=$?; echo \"RC=$rc\"";
+        run_sourced(body, &[("M", m.to_str().unwrap()), ("OBS", observed)])
+    };
+
+    // Clean deploy — every file matches.
+    let ok = case(OBSERVED_ALL_MATCH);
+    assert!(ok.contains("RC=0"), "all-files match must be OK: {ok:?}");
+    assert!(
+        ok.contains("bin/64bit/obs.dll") && ok.contains("OK"),
+        "must report each verified file: {ok:?}"
+    );
+
+    // ONE file's bytes drifted (obs64.exe stale) — the partial-deploy class #121 catches.
+    let drifted = OBSERVED_ALL_MATCH.replace(
+        "bin/64bit/obs64.exe=aaaa000000000000000000000000000000000000000000000000000000000000",
+        "bin/64bit/obs64.exe=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    );
+    let d = case(&drifted);
+    assert!(d.contains("RC=2"), "a drifted file must be DRIFT: {d:?}");
+    assert!(
+        d.contains("bin/64bit/obs64.exe") && d.contains("DRIFT"),
+        "must name the drifted file: {d:?}"
+    );
+
+    // A manifest file the live scan did NOT report (the distroav.dll line dropped) — UNKNOWN, never
+    // a silent OK on a file we could not hash.
+    let missing = OBSERVED_ALL_MATCH.replace(
+        ",obs-plugins/64bit/distroav.dll=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "",
+    );
+    let u = case(&missing);
+    assert!(
+        u.contains("RC=3") && u.contains("UNKNOWN") && u.contains("obs-plugins/64bit/distroav.dll"),
+        "an unobserved bundle file must be UNKNOWN, naming it: {u:?}"
+    );
+
+    // Empty observed set -> UNKNOWN (a scan that did not run).
+    let empty = case("");
+    assert!(
+        empty.contains("RC=3") && empty.contains("UNKNOWN"),
+        "an empty observed set must be UNKNOWN, never OK: {empty:?}"
+    );
+
+    let _ = std::fs::remove_file(&m);
+}
+
+#[test]
+fn compare_clean_when_every_bundle_file_matches_the_manifest() {
+    // End-to-end #121: a clean deploy — every bundle file's live Get-FileHash matches the manifest.
+    // With `bundle_hashes=` supplied (whole-bundle facet active), the engine verifies EVERY file,
+    // not just the two DLLs, and reports NO DRIFT.
+    let m = write_temp("dg_121_clean", MANIFEST_BUNDLE_4);
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED",
+        &format!("manifest={}", m.to_str().unwrap()),
+        &format!("bundle_hashes={OBSERVED_ALL_MATCH}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "every-file match must be clean. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    assert!(
+        stdout.contains("bundle_files") && stdout.contains("4/4"),
+        "must report the whole-bundle verify count. stdout={stdout:?}"
+    );
+    let _ = std::fs::remove_file(&m);
+}
+
+#[test]
+fn compare_fails_loudly_when_any_bundle_file_drifted() {
+    // THE #121 failure this guard exists to catch: the two DLLs are fine, but a NON-DLL bundle file
+    // (obs64.exe — outside the #122 2-DLL facet) is byte-stale on the box (a partial/corrupted
+    // deploy). The whole-bundle facet flags it -> DRIFT (exit 20), even though obs.dll/distroav.dll
+    // both match. This is exactly the file #122 alone would have missed.
+    let m = write_temp("dg_121_drift", MANIFEST_BUNDLE_4);
+    let drifted = OBSERVED_ALL_MATCH.replace(
+        "bin/64bit/obs64.exe=aaaa000000000000000000000000000000000000000000000000000000000000",
+        "bin/64bit/obs64.exe=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    );
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED",
+        &format!("manifest={}", m.to_str().unwrap()),
+        &format!("bundle_hashes={drifted}"),
+    ]);
+    assert_eq!(
+        code, 20,
+        "a drifted bundle file must exit 20 even when the DLLs match. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("bin/64bit/obs64.exe") && stdout.contains("DRIFT"),
+        "must name the drifted bundle file. stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly. stderr={stderr:?}"
+    );
+    let _ = std::fs::remove_file(&m);
+}
+
+#[test]
+fn compare_bundle_files_unknown_when_a_listed_file_was_unread() {
+    // A manifest supplied with `bundle_hashes=` but a listed file NOT in the observed set is UNKNOWN
+    // (exit 11) — a deployed file we failed to hash must never be a silent clean (the same
+    // never-false-clean discipline as every other facet).
+    let m = write_temp("dg_121_unknown", MANIFEST_BUNDLE_4);
+    let missing = OBSERVED_ALL_MATCH.replace(
+        ",obs-plugins/64bit/distroav.dll=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "",
+    );
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED",
+        &format!("manifest={}", m.to_str().unwrap()),
+        &format!("bundle_hashes={missing}"),
+    ]);
+    assert_eq!(
+        code, 11,
+        "an unread bundle file must exit 11 (UNKNOWN). stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("NO DRIFT"),
+        "must NOT claim clean when a bundle file is unread. stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("obs-plugins/64bit/distroav.dll") && stdout.contains("UNKNOWN"),
+        "must report the unread bundle file. stdout={stdout:?}"
+    );
+    let _ = std::fs::remove_file(&m);
+}
+
+#[test]
+fn compare_whole_bundle_facet_dormant_without_bundle_hashes() {
+    // The whole-bundle facet is OPT-IN on `bundle_hashes=`. A manifest supplied WITHOUT bundle_hashes
+    // keeps the #122 two-DLL contract exactly (so the hot-swap obs.dll-only verify path is unchanged):
+    // the engine checks obs.dll/distroav.dll build SHA + capability, and does NOT demand a full file
+    // set. This proves #121 is an additive superset, not a regression of #122.
+    let m = write_temp("dg_121_dormant", MANIFEST_184_FULL);
+    let (code, stdout, _stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", m.to_str().unwrap()),
+        "obs_dll_sha256=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        "distroav_dll_sha256=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED",
+        // no bundle_hashes= -> whole-bundle facet dormant
+    ]);
+    assert_eq!(
+        code, 0,
+        "no bundle_hashes -> two-DLL facet only -> clean. stdout={stdout:?}"
+    );
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    assert!(
+        !stdout.contains("bundle_files"),
+        "the whole-bundle facet must stay dormant without bundle_hashes. stdout={stdout:?}"
+    );
+    let _ = std::fs::remove_file(&m);
+}

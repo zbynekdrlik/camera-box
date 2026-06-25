@@ -551,7 +551,10 @@ fn generate_fails_loud_when_a_per_file_sha_or_size_is_empty() {
         "the failure must name the offending file.\nstdout={sout}\nstderr={serr}"
     );
     let (bad_size, _o2, _e2) = run_sourced("assert_entry_valid 'b.txt' '5695d82a086b677962a0b0428ed1a213208285b7b40d7d3604876d36a710302a' ''");
-    assert_ne!(bad_size, 0, "an empty size for a staged file must FAIL the generate");
+    assert_ne!(
+        bad_size, 0,
+        "an empty size for a staged file must FAIL the generate"
+    );
     let (bad_size2, _o3, _e3) = run_sourced("assert_entry_valid 'b.txt' '5695d82a086b677962a0b0428ed1a213208285b7b40d7d3604876d36a710302a' 'notanumber'");
     assert_ne!(bad_size2, 0, "a non-numeric size must FAIL the generate");
     // A valid 64-hex sha + numeric size passes (the helper is not a constant failure).
