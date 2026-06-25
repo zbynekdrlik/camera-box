@@ -923,6 +923,16 @@ struct obs_source {
 	 * set/get also take the lock — no unlocked mutation of a field the A/V thread
 	 * reads (the #93 UAF lesson). One preload frame = one frame of delay. */
 	uint32_t genlock_preload;          /* per-source jitter reserve / video delay (#97) */
+	/* camera-box #245: per-source genlock latency override, in MS. 0 = follow the global
+	 * default (genlock_reserve_ms() / OBS_GENLOCK_LATENCY_MS); >0 = THIS source holds
+	 * exactly this latency (sub-frame ms ts-align deadline wall_now - latency_ms),
+	 * overriding the global so each NDI source can hold a DIFFERENT latency (the #245
+	 * per-source ask; #235 had collapsed it to one global knob). Set live via
+	 * obs_source_set_genlock_latency_ms() from the DistroAV per-source ms field; read by
+	 * the A/V thread in ready_async_frame() UNDER async_mutex (same lock discipline as
+	 * genlock_preload, the #93 UAF lesson). Mirror of src/probe/genlock.rs
+	 * effective_latency_ms(). */
+	uint32_t genlock_latency_ms;       /* per-source latency override, ms (#245); 0 = global */
 	/* camera-box #102: one-time startup-fill latch. While false the FIFO BUILDS to
 	 * the `genlock_preload` delay depth (holding/repeating only during this initial
 	 * fill); once the queue first exceeds preload it latches true and the FIFO then
