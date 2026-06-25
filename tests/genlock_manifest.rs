@@ -364,7 +364,11 @@ fn make_large_stage(n: usize) -> (tempfile::TempDir, PathBuf) {
     fs::write(stage.join("GENLOCK_BUILD_SHA.txt"), "deadbeef\n").unwrap();
     let half = n / 2;
     for i in 0..half {
-        fs::write(stage.join(format!("bin/64bit/lib{i}.dll")), format!("dll-{i}")).unwrap();
+        fs::write(
+            stage.join(format!("bin/64bit/lib{i}.dll")),
+            format!("dll-{i}"),
+        )
+        .unwrap();
     }
     for i in half..n {
         fs::write(

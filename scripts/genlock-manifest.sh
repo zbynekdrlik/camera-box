@@ -207,15 +207,27 @@ manifest_listed_files() {
 manifest_sha_for() {
   local f="$1" path="$2"
   [ -f "$f" ] || { echo "manifest_sha_for: no such file: $f" >&2; return 1; }
-  # Match the exact one-line entry for PATH and pull its sha256.
-  grep -F "\"path\": \"$path\"" "$f" \
-    | sed -n 's/.*"sha256": "\([0-9a-f]*\)".*/\1/p' | head -1
+  # Match the exact one-line entry for PATH and pull its sha256. `sed … ;q` quits sed itself after
+  # the first match — a clean exit, NOT a downstream `head -1` that would SIGPIPE the upstream
+  # grep/sed (the #236 SIGPIPE-under-pipefail class). `|| true` so a no-match (path absent) is not a
+  # pipefail abort. Pattern anchored to the path entry so we read the right line's sha256.
+  { grep -F "\"path\": \"$path\"" "$f" || true; } \
+    | sed -n '/"sha256"/{s/.*"sha256": "\([0-9a-f]*\)".*/\1/p;q}'
 }
 
 # check_consistency FILE STAGE -> 0 if the manifest is SELF-CONSISTENT with STAGE: every listed
 # file exists in STAGE with the recorded sha256, AND every regular file in STAGE (minus the
 # manifest) is listed. Returns 21 on ANY mismatch (extra, missing, or sha drift). This is the
 # in-CI proof that the produced manifest matches the bundle — the property #121 relies on.
+#
+# The two set-membership directions (staged-not-listed, listed-not-staged) are computed in a SINGLE
+# PASS each with `comm` over LC_ALL=C-sorted lists — NOT a `printf | grep -qxF` re-scan once per
+# file (#236). That per-item pipe was both O(n²) (each of ~2000 staged files re-grepped the whole
+# 2000-line list) and, fatally, RACY: `grep -q` exits early on a match → SIGPIPE to the upstream
+# `printf` → under `set -euo pipefail` the SIGPIPE poisoned the pipeline's exit status
+# nondeterministically, so ~half a perfectly-valid bundle's files were falsely flagged "not in
+# manifest" and the build failed (exit 21) on a correct manifest. `comm` reads each list once, no
+# per-item subshell, no SIGPIPE.
 check_consistency() {
   local f="$1" stage="$2" rc=0
   [ -f "$f" ] || { echo "check_consistency: no such manifest: $f" >&2; return 1; }
@@ -223,30 +235,50 @@ check_consistency() {
 
   local listed actual
   listed="$(manifest_listed_files "$f" | LC_ALL=C sort)"
-  actual="$(stage_files "$stage")"
+  actual="$(stage_files "$stage" | LC_ALL=C sort)"
 
-  # Every staged file must be listed (no un-manifested bytes ship).
-  local rel
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
-    if ! printf '%s\n' "$listed" | grep -qxF "$rel"; then
-      echo "!! INCONSISTENT: staged file not in manifest: $rel" >&2; rc=21
-    fi
-  done <<< "$actual"
+  # Set-diff in one pass each. CRITICAL: `comm` MUST run under the SAME collation the lists were
+  # sorted with (LC_ALL=C above) — comm decides "only in A / only in B / both" by stepping two
+  # streams it assumes are sorted in ITS locale; a locale mismatch makes it see the lists as
+  # "unsorted" and emit garbage (e.g. every file reported as differing). LC_ALL=C on every comm
+  # keeps it byte-collated, matching the sort.
+  #   comm -23 = lines only in actual  -> staged files the manifest does NOT list (un-audited bytes)
+  #   comm -13 = lines only in listed  -> manifest entries with NO matching bundle file
+  # `|| true` so an empty diff (no-match) does not trip `set -e`/pipefail.
+  local extra missing rel
+  extra="$(LC_ALL=C comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed") || true)"
+  missing="$(LC_ALL=C comm -13 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed") || true)"
 
-  # Every listed file must exist with the recorded sha256 (no stale/missing entries).
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
-    if [ ! -f "$stage/$rel" ]; then
-      echo "!! INCONSISTENT: manifest lists a file absent from the bundle: $rel" >&2; rc=21; continue
-    fi
-    local want got
-    want="$(manifest_sha_for "$f" "$rel")"
-    got="$(sha256_of "$stage/$rel")"
-    if [ "$want" != "$got" ]; then
-      echo "!! INCONSISTENT: sha256 drift for $rel: manifest=$want bundle=$got" >&2; rc=21
-    fi
-  done <<< "$listed"
+  if [ -n "$extra" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      echo "!! INCONSISTENT: staged file not in manifest: $rel" >&2
+    done <<< "$extra"
+    rc=21
+  fi
+  if [ -n "$missing" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      echo "!! INCONSISTENT: manifest lists a file absent from the bundle: $rel" >&2
+    done <<< "$missing"
+    rc=21
+  fi
+
+  # For every file present in BOTH sets, the recorded sha256 must match the bundle's actual bytes
+  # (the anti-#119 property: pins the BYTES, not just the version). Only files in both sets can drift;
+  # extras/missing are already reported above. No `grep -q`/`head` early-exit pipe here.
+  local both want got
+  both="$(LC_ALL=C comm -12 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed") || true)"
+  if [ -n "$both" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      want="$(manifest_sha_for "$f" "$rel")"
+      got="$(sha256_of "$stage/$rel")"
+      if [ "$want" != "$got" ]; then
+        echo "!! INCONSISTENT: sha256 drift for $rel: manifest=$want bundle=$got" >&2; rc=21
+      fi
+    done <<< "$both"
+  fi
 
   if [ "$rc" -eq 0 ]; then
     echo "manifest self-consistent with $stage ($(printf '%s\n' "$actual" | grep -c . ) files) — OK"
