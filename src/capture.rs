@@ -682,6 +682,50 @@ mod tests {
     }
 
     #[test]
+    fn sequence_gap_backward_sequence_is_zero() {
+        // #130: a BACKWARD v4l2 sequence (cur < prev: a stream reset, frame reorder,
+        // or 60→30 decimation re-numbering) must NOT be counted as a giant drop. The
+        // old `cur.wrapping_sub(prev).saturating_sub(1)` yielded ~u32::MAX here, which
+        // (cast to u64 and accumulated) produced the garbage `k*2^32 + 1` counter live
+        // on cam2 (e.g. 34359738369 = 8*2^32 + 1). A backward step is 0 drops.
+        assert_eq!(
+            sequence_gap(12, 10),
+            0,
+            "cur<prev by 2 (backward) => 0 drops"
+        );
+        assert_eq!(
+            sequence_gap(10, 9),
+            0,
+            "cur<prev by 1 (backward) => 0 drops"
+        );
+        assert_eq!(
+            sequence_gap(1000, 1),
+            0,
+            "a large backward jump (reset) => 0 drops, NOT ~u32::MAX"
+        );
+    }
+
+    #[test]
+    fn sequence_gap_legit_forward_wrap_still_counts() {
+        // The LEGITIMATE forward u32 wrap (prev near u32::MAX, cur small) must STILL be
+        // counted — it is a genuine forward advance across the wrap boundary, NOT a
+        // backward step. A real forward wrap has a SMALL wrapping distance; a backward
+        // step has a HUGE wrapping distance (> half the u32 range). That is the
+        // discriminator the fix must preserve.
+        assert_eq!(sequence_gap(u32::MAX, 0), 0, "consecutive across wrap => 0");
+        assert_eq!(
+            sequence_gap(u32::MAX - 1, 1),
+            2,
+            "MAX and 0 dropped across the wrap => 2 (forward wrap still counts)"
+        );
+        assert_eq!(
+            sequence_gap(u32::MAX, 3),
+            3,
+            "forward wrap with 3 intervening (0,1,2 dropped) => 3"
+        );
+    }
+
+    #[test]
     fn capture_stats_sidecar_carries_v4l2_dropped_and_frames_captured() {
         // The cam2→cam1 LOSS sidecar: the verdict reads v4l2_dropped as the cam2→cam1 loss
         // (capture-card drops), NOT a painter-tick optical compare. frames_captured is the

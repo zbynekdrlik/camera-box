@@ -233,6 +233,22 @@ mod tests {
     }
 
     #[test]
+    fn no_frame_gap_is_debug_when_never_received() {
+        // #130: a display receiver that has NEVER delivered a frame on this connection
+        // (cam2: the display NDI source isn't feeding it) must NOT escalate a no-frame
+        // gap to WARN — that floods the journal during normal monitor-less operation.
+        assert_eq!(no_frame_log_level(0), NoFrameLevel::Debug);
+    }
+
+    #[test]
+    fn no_frame_gap_is_warn_after_a_real_stall() {
+        // If frames WERE flowing and then stopped, that's a genuine total-stall signal
+        // and stays a WARN — we must not suppress a real stall.
+        assert_eq!(no_frame_log_level(1), NoFrameLevel::Warn);
+        assert_eq!(no_frame_log_level(900), NoFrameLevel::Warn);
+    }
+
+    #[test]
     fn test_ndi_display_config_fields() {
         let config = NdiDisplayConfig {
             source_name: "test".to_string(),
