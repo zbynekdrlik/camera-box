@@ -62,11 +62,16 @@ dist-111/
 /dist-probe/
 /recording-verdict-run/
 
-# Session-local proof-run scratch + CI probe-binary downloads (proof runs; #110/#184)
+# Session-local proof-run scratch + CI probe-binary downloads (proof runs; #110/#184/#213)
+# gh run download --dir target dirs for the probe-tools artifacts (downloaded CI
+# binaries — never committed). probe-linux/ + probe-windows/ are the per-OS download
+# dirs (CLAUDE.md Build & Deploy); the rest are session-local scratch.
 /probe-bins/
 /probe-bins-ci/
+/probe-linux/
 /probe-win/
 /probe-win-ci/
 /probe-win-fresh/
+/probe-windows/
 /proof-*/
 /obs184-dll/
