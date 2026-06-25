@@ -172,8 +172,13 @@ main() {
       compare_args+=("manifest=${manifest}")
     fi
     rc=0
-    # Indent the engine's per-setting lines so a multi-box report stays readable.
-    "$DRIFT_GUARD" "${compare_args[@]}" 2>&1 | sed 's/^/    /' || rc=${PIPESTATUS[0]}
+    # Capture the engine's exit code DIRECTLY (no pipe between drift-guard and the status read), THEN
+    # indent the buffered output for display. The fail-closed property must NOT depend on `set -o
+    # pipefail` staying enabled: a piped `exit 20` to `sed` would otherwise yield pipeline status 0,
+    # the `||` would never fire, rc would stay 0, and a DRIFT would be miscounted as OK — a false pass.
+    local engine_out=""
+    engine_out="$("$DRIFT_GUARD" "${compare_args[@]}" 2>&1)" || rc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
     case "$rc" in
       0)  ok=$((ok + 1)) ;;
       20) bad=$((bad + 1)) ;;

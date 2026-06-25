@@ -222,7 +222,11 @@ observed_sha_for() {
 # N/total verified" line, and returns 0 OK (every file matches) / 2 DRIFT (any file's bytes differ) /
 # 3 UNKNOWN (a manifest file was not observed, OR the observed set was empty — a file we could not hash
 # is NEVER a silent clean). This is the deploy-from-clean-tree contract: a deploy is "done" only when
-# the live box matches the manifest byte-for-byte, so ANY mismatch fails the deploy.
+# every manifest-LISTED file on the live box matches byte-for-byte, so ANY mismatch fails the deploy.
+# Scope note (asymmetric by design): this verifies the bytes of the files the manifest lists; it does
+# NOT flag an EXTRA un-manifested file present on the box. The producer-side genlock-manifest.sh
+# check_consistency catches extras at build time, and the dangerous subclass — a shadowing duplicate
+# plugin DLL — is caught independently by drift_check_plugin_paths.
 drift_check_all_files() {
   local manifest="$1" csv="$2" path exp obs drift=0 unknown=0 ok=0 total=0
   if [ ! -f "$manifest" ]; then
