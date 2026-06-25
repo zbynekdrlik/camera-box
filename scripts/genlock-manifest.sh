@@ -158,6 +158,29 @@ assert_manifest_complete() {
   return 0
 }
 
+# assert_entry_valid PATH SHA SIZE -> 0 if SHA is a non-empty 64-hex-lowercase digest AND SIZE is a
+# non-empty integer byte count, else FAIL LOUD (exit 23, distinct from 21 --check / 22 completeness).
+# The per-entry teeth of the #239 cmdsub-set-e fix: main() runs generate as
+# `manifest="$(generate_manifest …)"`, and a command substitution on an assignment RHS SUPPRESSES
+# `set -e` inside it — so a mid-loop `sha256_of`/`wc -c` failure (a staged file briefly unreadable:
+# concurrent writer, Windows AV lock, transient I/O) does NOT abort. The loop would then emit
+# `{ "sha256": "", "size":  }` (empty sha + value-less size = invalid JSON), `written` would still
+# increment, and the completeness count (every PATH present) would stay blind to it. Validating each
+# emitted entry explicitly catches exactly what the count guard cannot.
+assert_entry_valid() {
+  local path="$1" sha="$2" size="$3"
+  if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{64}$'; then
+    echo "!! INVALID MANIFEST ENTRY: '$path' has a bad sha256 ('$sha') — expected 64 lowercase hex" >&2
+    echo "!! a staged file's sha256 could not be computed (suppressed set -e in the generate cmdsub) — failing loud" >&2
+    return 23
+  fi
+  if ! printf '%s' "$size" | grep -qE '^[0-9]+$'; then
+    echo "!! INVALID MANIFEST ENTRY: '$path' has a bad size ('$size') — expected a non-negative integer byte count" >&2
+    return 23
+  fi
+  return 0
+}
+
 # generate_manifest STAGE README BUILDSPEC BUILD_SHA -> the manifest JSON on stdout.
 #   * components[]: the rebuilt-from-source pins (OBS, DistroAV) + the non-redistributable NDI
 #     runtime minimum. DistroAV's version is taken from the vendored buildspec.json when present
@@ -215,6 +238,10 @@ generate_manifest() {
     abs="$stage/$rel"
     sha="$(sha256_of "$abs")"
     size="$(wc -c < "$abs" | tr -d ' ')"
+    # #239: validate the freshly-computed sha+size BEFORE emitting the entry. The explicit `|| return`
+    # is load-bearing: this loop runs inside `manifest="$(generate_manifest …)"`, where `set -e` is
+    # suppressed, so a silent empty sha/size must be aborted here by hand, not left to set -e.
+    assert_entry_valid "$rel" "$sha" "$size" || return $?
     if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
     printf '    { "path": "%s", "sha256": "%s", "size": %s }' \
       "$(json_escape "$rel")" "$sha" "$size"

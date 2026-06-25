@@ -150,11 +150,12 @@ main() {
 
   local bad=0 unknown=0 ok=0 entry name file rc
   local -a compare_args
+  local -a unknown_boxes=()
   for entry in "${win_state[@]}"; do
     name="${entry%%=*}"; file="${entry#*=}"
     if [ -z "$file" ] || [ ! -s "$file" ]; then
       printf '  %-14s UNKNOWN  (no state file %s — win-* MCP fetch missing)\n' "$name" "${file:-<none>}"
-      unknown=$((unknown + 1)); continue
+      unknown=$((unknown + 1)); unknown_boxes+=("$name"); continue
     fi
     echo "  -- ${name} (${file}) --"
     # Build the drift-guard --compare arg vector from the box's observed state.
@@ -176,7 +177,7 @@ main() {
     case "$rc" in
       0)  ok=$((ok + 1)) ;;
       20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("$name") ;;
       *)  echo "    !! drift-guard exited ${rc} for ${name} (engine/usage error)" >&2; bad=$((bad + 1)) ;;
     esac
   done
@@ -186,11 +187,11 @@ main() {
     echo "!! GATE FAILED: ${bad} box(es) DRIFTED from the pinned zero-loss set — rig test REFUSED." >&2
     echo "!! A result on a randomly-deployed / drifted / stock build is worthless (#119). Restore the" >&2
     echo "!! pinned build (off-air + user-approved redeploy), re-verify with /drift-guard, then re-run." >&2
-    [ "$unknown" -gt 0 ] && echo "!! (${unknown} further box(es) UNKNOWN — status also incomplete.)" >&2
+    [ "$unknown" -gt 0 ] && echo "!! (${unknown} further box(es) UNKNOWN: ${unknown_boxes[*]} — status also incomplete.)" >&2
     exit 20
   fi
   if [ "$unknown" -gt 0 ]; then
-    echo "!! GATE INCOMPLETE: ${unknown} box(es) UNKNOWN (state unread / a value not read) — NOT clean." >&2
+    echo "!! GATE INCOMPLETE: ${unknown} box(es) UNKNOWN: ${unknown_boxes[*]} (state unread / a value not read) — NOT clean." >&2
     echo "!! Every box must report a complete observed stack before the rig test is trusted. (${ok} OK.)" >&2
     exit 11
   fi

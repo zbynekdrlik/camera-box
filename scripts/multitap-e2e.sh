@@ -131,7 +131,7 @@ if [ "$WALL_CLOCK" = "1" ]; then
 fi
 
 # Version-integrity precondition gate (#123) — alongside the clock gate. multitap routes the camera's
-# QR NDI through the strih→stream genlocked OBS stack (the obs_phase2.py setup below), so its per-hop
+# QR NDI through the strih→stream genlocked OBS stack (set up by obs_phase2.py below), so its per-hop
 # numbers are only trustworthy when that live stack is the PINNED build — a drifted / stock OBS gives
 # a false result (#119). Gather each Windows box's observed stack state and run drift-guard --compare
 # vs the pinned set (vendor/README.md); REFUSE on DRIFT (20) or UNKNOWN (11). ssh-denied, so the
