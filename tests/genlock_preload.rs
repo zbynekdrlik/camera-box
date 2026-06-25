@@ -14,6 +14,8 @@
 //!     asserts the C patch is present in vendor/obs-studio so a future
 //!     `git subtree pull` (#44) can't silently revert it.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::genlock::{
     genlock_build_drain, genlock_decide, genlock_drop_cap, genlock_empty_run_next,
     genlock_rearm_on_resume, parse_preload, preload_to_ms, steady_state_depth, GenlockDecision,

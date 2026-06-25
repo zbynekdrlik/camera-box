@@ -4,6 +4,8 @@
 //! than steady state. Trimming the first N seconds (measured from the run's
 //! earliest tap recv) leaves only the steady-state window for the loss check.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::analyzer::Observed;
 use camera_box::probe::differ::{earliest_recv_ns, lead_cutoff_ns, trim_after};
 

@@ -12,6 +12,8 @@
 //!
 //! RED before the `endpoint_sequence_check` impl exists; GREEN after.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::analyzer::Observed;
 use camera_box::probe::differ::{decompose_missing, endpoint_sequence_check};
 

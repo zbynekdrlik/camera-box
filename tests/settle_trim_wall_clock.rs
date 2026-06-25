@@ -13,6 +13,8 @@
 //! These tests pin the clock-domain contract on the pure `settle_cutoff_ns` /
 //! `trim_to_settle` helpers so the bug cannot return without a live rig.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::analyzer::Observed;
 use camera_box::probe::clock_ns;
 use camera_box::probe::differ::{settle_cutoff_ns, trim_to_settle};

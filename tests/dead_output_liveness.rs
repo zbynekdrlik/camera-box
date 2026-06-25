@@ -23,6 +23,8 @@
 //! harness aborts early with a clear cause instead of running the full duration and
 //! reporting a generic under-min-frames Fail.
 
+#![cfg(feature = "probe")]
+
 use camera_box::probe::liveness::{check_tap_liveness, LivenessVerdict, TapLiveness};
 
 /// The #81 scenario: cam + strih taps captured plenty in the first 30s, but the
