@@ -157,3 +157,48 @@ inline-test PR passes. If a fresh airuleset checkout ever re-blocks: an integrat
 The discriminator is empty-vs-nonempty AFTER trim, not mid-file-vs-final. Tests:
 `grab_ts_sidecar_empty_ts_row_is_skipped_not_crashed` (#170 regression) +
 `grab_ts_sidecar_nonempty_garbage_ts_row_still_errors`.
+
+## The LIVE verdict path vs the OLD loss helpers (#197 cleanup — what's actually called)
+
+The headline loss verdict is the **per-node burn-id contiguity** check
+(`burn_contiguity::burn_contiguity_in_window` → `NodeContiguity`, consumed by the
+`recording-verdict` binary's `NodeVerdict`) + the V4L2 capture-drop sidecar. That is the
+ONLY production loss path. The older set-compare / hop-verdict helpers were removed in #197 as
+dead code — do NOT resurrect them or pattern-match off them:
+
+- GONE: `recording_verdict::{strih_stream_verdict, StrihStreamVerdict, burn_hop_verdict,
+  BurnHopVerdict, overlap_set_verdict}`, `recording_latency::chain_hop_loss_from_stream`, and
+  the whole `recording_4node` module. They survived only via their own unit tests.
+- STILL LIVE (don't confuse the look-alikes): `recording_latency::chain_hop_samples_from_stream`
+  (LATENCY, not loss), `burn_ids_in`, `cam2_cam1_samples*`, `write_latency_csv`;
+  `recording_verdict::{verdict, cam_strih_assessment}`. All binary-reachable.
+
+### Safe dead-code removal procedure (cost real time the FIRST time)
+
+A verdict "loss" function rarely stands alone — it forms a **call cluster**: e.g.
+`burn_hop_verdict` and `chain_hop_loss_from_stream` both delegated to `overlap_set_verdict`,
+which returned `BurnHopVerdict`. A symbol is only dead if its WHOLE cluster is dead. Steps:
+1. For EVERY candidate, grep all refs and classify each: definition / `///`+`//!` doc-link /
+   `#[cfg(test)]` body / `use` import / real production call. A fn called only by another fn
+   that is itself test-only is dead; reachable-from-`src/bin/` is LIVE. Dispatch `ticket-validator`
+   for the transitive call-graph — a glance is not enough.
+2. **Cross-reference hazard:** removing fn X breaks any *kept* test that calls X (e.g. the kept
+   `independent_burn_counters_give_zero_overlap_the_181_bug` called the dead `burn_hop_verdict`).
+   Search dead-symbol refs across ALL test fns, not just the obvious ones — remove those tests too.
+3. **Orphan cleanup (clippy `-D warnings` WILL fail CI otherwise):** a removed fn leaves
+   orphaned `use` imports (`use …BurnHopVerdict`, an over-broad `BTreeSet`) and now-unused test
+   helpers (`loss_frame`) — `cargo check --all-features` flags them as `unused`/`dead_code`. Fix.
+4. **rustdoc intra-doc links:** strip/rewrite any surviving `[`removed_item`]` doc-link (module
+   `//!`, and docs on kept items). CI does NOT run `cargo doc -D warnings`, so it won't hard-fail,
+   but it's real bit-rot — fix it.
+5. Verify CI-equivalent locally (Tier-0): `cargo fmt --all --check` + `cargo check --all-features
+   --all-targets` + `cargo clippy --all-targets --all-features -- -D warnings` + `cargo test
+   --no-run --all-features`. The contiguity (#216/#226) + verdict tests must stay green in CI.
+
+### Pre-push hook on a pure-deletion / cleanup commit
+
+A dead-code-removal commit changes `.rs` but ADDS no tests, so pre-push Gate-1 ("feature .rs
+changed, no test added") AND Gate-2 (`Closes #N` ⇒ expects a RED test) both fire. This is NOT a
+bug fix — it's the documented `[no-test: <reason>]` case. Put the marker (e.g.
+`[no-test: dead-code removal, no behavior change — remaining tests cover it]`) on the **LATEST**
+commit of the push (the hook reads `git log -1`). Never `[no-test:]` a real fix.
