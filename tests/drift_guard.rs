@@ -650,3 +650,275 @@ fn compare_plugin_paths_unknown_when_not_read() {
         "must report the unread plugin-path scan. stdout={stdout:?} stderr={stderr:?}"
     );
 }
+
+// --- #122: per-component BUILD SHA + genlock capability drift guard -------------------------
+//
+// The marketing-version + settings facets above pass a STOCK OBS 32.1.2 — it is byte-for-byte a
+// different build from our genlock 32.1.2 but reports the identical version (#119/#120: a wrong
+// build with the right version silently shipped). #122 closes that: drift-guard compares the LIVE
+// rig's per-component BUILD SHA (obs.dll / distroav.dll Get-FileHash) against the #120 bundle
+// manifest, AND asserts the genlock CAPABILITY markers only OUR build emits are present.
+//
+// The fixtures below are the ACTUAL #184 build: the BUNDLE_MANIFEST.json shape genlock-manifest.sh
+// emits (build_sha 19472506e), the obs.dll sha256 24e22357… recorded in it AND read live off both
+// strih+stream rig boxes 2026-06-25, and the real genlock marker lines from the running OBS log.
+
+/// The #120 manifest for the deployed #184 build (the `obs-genlock-fast-dll` layout: obs.dll at the
+/// stage root). The full windows-genlock bundle nests it at `bin/64bit/obs.dll` +
+/// `obs-plugins/64bit/distroav.dll`; the SHA lookup matches by BASENAME so both layouts work.
+const MANIFEST_184_FAST: &str = "\
+{
+  \"schema\": \"camera-box/genlock-bundle-manifest@1\",
+  \"build_sha\": \"19472506ec156696c6fcb097899ba745e17b8953\",
+  \"components\": [
+    { \"name\": \"obs-studio\", \"rebuilt_from_source\": true, \"pinned_version\": \"32.1.2\", \"pinned_commit\": \"fb4d98bf8\", \"source\": \"vendor/obs-studio\" }
+  ],
+  \"files\": [
+    { \"path\": \"GENLOCK_BUILD_SHA.txt\", \"sha256\": \"4b1881f9fb31a852f8c6be0010ce296639538be163296885e5e5e23d10763aae\", \"size\": 42 },
+    { \"path\": \"obs.dll\", \"sha256\": \"24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33\", \"size\": 1316352 }
+  ]
+}
+";
+
+/// The FULL bundle layout (nested paths) — both obs.dll and distroav.dll, the real deployed SHAs.
+const MANIFEST_184_FULL: &str = "\
+{
+  \"schema\": \"camera-box/genlock-bundle-manifest@1\",
+  \"build_sha\": \"19472506ec156696c6fcb097899ba745e17b8953\",
+  \"files\": [
+    { \"path\": \"bin/64bit/obs64.exe\", \"sha256\": \"aaaa000000000000000000000000000000000000000000000000000000000000\", \"size\": 100 },
+    { \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33\", \"size\": 1316352 },
+    { \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880\", \"size\": 663040 }
+  ]
+}
+";
+
+/// The genlock CAPABILITY marker text as it appears in the running OBS log (the build-unique lines
+/// captured live off stream 2026-06-25). A STOCK OBS emits NONE of these.
+const GENLOCK_CAP_OURS: &str = "07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK, slew cap 2000000 ns/tick)
+07:42:38.746: genlock: sub-frame jitter reserve = 3 ms (OBS_GENLOCK_RESERVE_MS) — ms-granular latency, replaces the whole-frame preload on the ts-align path (#184)";
+
+#[test]
+fn manifest_sha_for_component_matches_by_basename_in_both_layouts() {
+    // The pure lookup pulls the recorded sha256 for a logical component (obs / distroav) by matching
+    // the dll BASENAME in files[], so the flat fast-dll layout AND the nested full-bundle layout both
+    // resolve. This is the manifest side of the BUILD-SHA compare.
+    let fast = write_temp("dg_manifest_fast", MANIFEST_184_FAST);
+    let full = write_temp("dg_manifest_full", MANIFEST_184_FULL);
+
+    let obs_fast = run_sourced(
+        "manifest_sha_for_component \"$M\" obs",
+        &[("M", fast.to_str().unwrap())],
+    );
+    assert_eq!(
+        obs_fast.trim(),
+        "24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        "flat obs.dll sha not resolved: {obs_fast:?}"
+    );
+
+    let obs_full = run_sourced(
+        "manifest_sha_for_component \"$M\" obs",
+        &[("M", full.to_str().unwrap())],
+    );
+    assert_eq!(
+        obs_full.trim(),
+        "24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        "nested bin/64bit/obs.dll sha not resolved: {obs_full:?}"
+    );
+
+    let da_full = run_sourced(
+        "manifest_sha_for_component \"$M\" distroav",
+        &[("M", full.to_str().unwrap())],
+    );
+    assert_eq!(
+        da_full.trim(),
+        "66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "nested obs-plugins/64bit/distroav.dll sha not resolved: {da_full:?}"
+    );
+
+    // A component absent from the manifest resolves to empty (the engine then reports UNKNOWN, never
+    // a false clean) — the flat fast manifest carries no distroav.dll.
+    let da_fast = run_sourced(
+        "manifest_sha_for_component \"$M\" distroav",
+        &[("M", fast.to_str().unwrap())],
+    );
+    assert_eq!(da_fast.trim(), "", "absent distroav must resolve empty: {da_fast:?}");
+}
+
+#[test]
+fn genlock_capability_parser_detects_our_build_vs_stock() {
+    // The build-unique marker (the wall-clock render-tick line) is present ONLY in our genlock build.
+    // The parser returns "1" when present (our build), "" (UNKNOWN) when the text carries no genlock
+    // marker at all — a STOCK OBS log, which is the #119 wrong-build case this facet catches.
+    let ours = run_sourced(
+        "genlock_capability_from_log \"$LOG\"",
+        &[("LOG", GENLOCK_CAP_OURS)],
+    );
+    assert_eq!(ours.trim(), "1", "our build's capability marker must read 1: {ours:?}");
+
+    // A stock OBS log: real OBS header lines but ZERO genlock markers.
+    let stock = "11:40:39.376: OBS 32.1.2 (64-bit, windows)\n11:40:39.714: video settings reset:\n11:40:39.714: \tfps:               30/1\n";
+    let out = run_sourced("genlock_capability_from_log \"$LOG\"", &[("LOG", stock)]);
+    assert_eq!(out.trim(), "", "a stock build emits no genlock marker -> UNKNOWN/absent: {out:?}");
+}
+
+#[test]
+fn compare_clean_when_build_sha_and_capability_match_the_manifest() {
+    // Full live facet: the deployed obs.dll/distroav.dll SHAs match the #184 manifest AND the
+    // genlock capability marker is present -> NO DRIFT. This is the live-rig PASS #122 proves.
+    let manifest = write_temp("dg_184_full", MANIFEST_184_FULL);
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", manifest.to_str().unwrap()),
+        "obs_dll_sha256=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        "distroav_dll_sha256=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)",
+    ]);
+    assert_eq!(
+        code, 0,
+        "matching build SHA + capability must be clean. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    assert!(
+        stdout.contains("obs_dll_sha256") && stdout.contains("OK"),
+        "must show the obs.dll build-SHA OK line. stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("genlock_capability") && stdout.contains("OK"),
+        "must show the capability OK line. stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn compare_fails_loudly_when_obs_dll_sha_is_a_stock_or_wrong_build() {
+    // THE #122 failure this guard exists to catch: marketing version 32.1.2 matches, but the live
+    // obs.dll bytes are a DIFFERENT build (a stock OBS, or a stale/wrong genlock build). The SHA
+    // differs from the manifest -> DRIFT (exit 20), even though every version/setting check passes.
+    let manifest = write_temp("dg_184_sha_drift", MANIFEST_184_FAST);
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", manifest.to_str().unwrap()),
+        // a STOCK / wrong-build obs.dll: same version, different bytes
+        "obs_dll_sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED",
+    ]);
+    assert_eq!(
+        code, 20,
+        "a wrong obs.dll build SHA must exit 20 even when the version matches. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("obs_dll_sha256") && stdout.contains("DRIFT"),
+        "must show the obs.dll SHA as DRIFT. stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly. stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn compare_fails_loudly_on_stock_build_with_no_genlock_capability() {
+    // A stock OBS 32.1.2 passes every version check but emits NO genlock marker. With the manifest
+    // supplied (live facet active), an ABSENT capability marker is DRIFT — the stock-build tell.
+    let manifest = write_temp("dg_184_cap_drift", MANIFEST_184_FAST);
+    let stock_log = "11:40:39.376: OBS 32.1.2 (64-bit, windows)\n11:40:39.714: video settings reset:\n";
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", manifest.to_str().unwrap()),
+        "obs_dll_sha256=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        &format!("genlock_capability={stock_log}"),
+    ]);
+    assert_eq!(
+        code, 20,
+        "a stock build with no genlock capability must exit 20. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("genlock_capability") && stdout.contains("DRIFT"),
+        "must flag the absent capability marker. stdout={stdout:?}"
+    );
+    assert!(stderr.contains("DRIFT DETECTED"), "must fail loudly. stderr={stderr:?}");
+}
+
+#[test]
+fn compare_build_sha_unknown_when_manifest_supplied_but_dll_sha_unread() {
+    // When the operator supplies a manifest (activating the build-SHA facet) but a live dll SHA was
+    // NOT read, that component is UNKNOWN (exit 11) — never a silent clean. A wrong build we failed
+    // to hash is exactly the false-negative the UNKNOWN signal exists to prevent.
+    let manifest = write_temp("dg_184_sha_unknown", MANIFEST_184_FULL);
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", manifest.to_str().unwrap()),
+        "obs_dll_sha256=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        // distroav_dll_sha256 + genlock_capability intentionally missing
+    ]);
+    assert_eq!(
+        code, 11,
+        "an unread dll SHA with manifest supplied must exit 11 (UNKNOWN). stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("NO DRIFT"),
+        "must NOT claim clean when a build SHA is unread. stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("distroav_dll_sha256") && stdout.contains("UNKNOWN"),
+        "must report the unread distroav build SHA. stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn compare_build_sha_facet_dormant_without_a_manifest() {
+    // The build-SHA + capability facet is OPT-IN on a supplied manifest. Without `manifest=`, the
+    // engine runs the marketing-version + settings facets exactly as before (the historic contract):
+    // a clean version/settings set is NO DRIFT and the new keys are not demanded. This is what keeps
+    // the pre-#122 live checks valid while the SHA facet is the stronger superset when data is given.
+    let (code, stdout, _stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        // no manifest=, no obs_dll_sha256, no genlock_capability
+    ]);
+    assert_eq!(code, 0, "no manifest -> marketing facet only -> clean. stdout={stdout:?}");
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    assert!(
+        !stdout.contains("obs_dll_sha256"),
+        "the build-SHA facet must stay dormant without a manifest. stdout={stdout:?}"
+    );
+}
