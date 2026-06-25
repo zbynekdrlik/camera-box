@@ -282,6 +282,10 @@ static bool obs_source_init(struct obs_source *source)
 	/* camera-box #126: start with no recorded empty run (bzalloc zeroes it; explicit
 	 * for intent — the reconnect re-arm counts consecutive steady-state true-empties). */
 	source->genlock_empty_run = 0;
+	/* camera-box #245: no per-source latency override at create (bzalloc zeroes it;
+	 * explicit for intent). 0 = follow the global OBS_GENLOCK_LATENCY_MS default; the
+	 * DistroAV per-source ms field sets it at runtime via obs_source_set_genlock_latency_ms(). */
+	source->genlock_latency_ms = 0;
 
 	source->private_settings = obs_data_create();
 	return true;
@@ -4300,9 +4304,28 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 {
 	if (!source->genlock_fifo)
 		return MAX_ASYNC_FRAMES;
-	uint32_t want = source->genlock_preload + GENLOCK_DROP_CAP_RESERVE;
+	/* camera-box #245: a per-source latency override (ms) is a deliberate VIDEO DELAY —
+	 * the FIFO must hold its FULL frame-equivalent before the ms release deadline frees
+	 * the oldest frame, or the overrun force-drain would cap the delay short (a 1000 ms
+	 * override ≈ 30 frames, a 2000 ms one ≈ 60 frames @ 30 fps, both above the 30-frame
+	 * floor). So the depth budget is max(preload, latency-in-frames). The GLOBAL latency
+	 * stays ≤100 ms (≤3 frames, under the floor) so this only GROWS the cap for a deep
+	 * PER-SOURCE override; an un-overridden source keeps the historic preload+RESERVE cap.
+	 * Mirror of src/probe/genlock.rs genlock_drop_cap(fifo, max(preload, latency_frames)). */
+	uint32_t depth = source->genlock_preload;
+	if (source->genlock_latency_ms > 0) {
+		struct obs_video_info ovi;
+		if (obs_get_video_info(&ovi) && ovi.fps_den != 0) {
+			const uint32_t latency_frames =
+				(uint32_t)((uint64_t)source->genlock_latency_ms * ovi.fps_num /
+					   (1000ULL * ovi.fps_den));
+			if (latency_frames > depth)
+				depth = latency_frames;
+		}
+	}
+	uint32_t want = depth + GENLOCK_DROP_CAP_RESERVE;
 	const uint32_t abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
-	if (want > abs_max || want < source->genlock_preload /* overflow guard */)
+	if (want > abs_max || want < depth /* overflow guard */)
 		want = abs_max;
 	if (want < MAX_ASYNC_FRAMES) /* never below the pre-#97 burst-tolerance floor */
 		want = MAX_ASYNC_FRAMES;
@@ -4432,6 +4455,14 @@ static inline bool genlock_is_wallclock_ts(uint64_t ts_ns)
  * GENLOCK_LATENCY_MS_* lock-step guard has a literal to match. */
 #define GENLOCK_LATENCY_MS_DEFAULT GENLOCK_RESERVE_MS_DEFAULT
 #define GENLOCK_LATENCY_MS_MAX GENLOCK_RESERVE_MS_MAX
+/* camera-box #245: the PER-SOURCE latency override cap (ms), set in the OBS source UI.
+ * Far higher than the GLOBAL GENLOCK_LATENCY_MS_MAX (100 ms — a sub-frame jitter
+ * reserve): a per-source override is a deliberate VIDEO DELAY (the live-event need was
+ * 1000 ms on a single source while the others stayed low). 2000 ms ≈ 60 frames @ 30 fps,
+ * inside the FIFO drop-cap abs-max (GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE = 132
+ * frames) so a source at the cap buffers its full delay without an overrun force-drain.
+ * Mirror of src/probe/genlock.rs GENLOCK_SOURCE_LATENCY_MS_MAX + the DistroAV UI int range. */
+#define GENLOCK_SOURCE_LATENCY_MS_MAX 2000
 
 /* Clamp of a strtol `long` to [0, GENLOCK_RESERVE_MS_MAX]. Mirrors the Rust
  * parse_reserve_ms clamp. */
@@ -4623,28 +4654,34 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	struct obs_video_info ovi;
 	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0;
 	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
-	/* camera-box #184/#235: print the active genlock latency — the SINGLE user-facing
-	 * ms knob, with the whole-frame equivalent in parens (the #235 display ask). 0 =
-	 * whole-frame preload fallback. The `reserve_ms=N` field is KEPT (the #128 launch
-	 * wrapper's log verify keys on it) and now equals latency_ms (the alias). The
-	 * operator + post-deploy verification read the actual held latency live from this
-	 * line. */
-	const uint32_t latency_ms = genlock_latency_ms();
+	/* camera-box #184/#235/#245: print the active genlock latency — now PER-SOURCE: the
+	 * source's own override when set (>0) else the GLOBAL default. The headline
+	 * `latency_ms=N (≈M frames)` is the EFFECTIVE held latency for THIS source, so the
+	 * audit log of two sources with different overrides reads e.g. `latency_ms=1000` vs
+	 * `latency_ms=3` — the per-source proof the rig validation reads live. The explicit
+	 * `src_latency_ms=` (the raw per-source override, 0 = follows global) +
+	 * `global_latency_ms=` fields disambiguate override-vs-global. The `reserve_ms=N`
+	 * field is KEPT (the #128 launch wrapper's log verify keys on it) and equals the
+	 * effective latency_ms. Mirror of src/probe/genlock.rs effective_latency_ms. */
+	const uint32_t global_latency_ms = genlock_latency_ms();
+	const uint32_t latency_ms = source->genlock_latency_ms > 0 ? source->genlock_latency_ms : global_latency_ms;
 	const unsigned long long latency_frames =
 		have_vi ? (unsigned long long)latency_ms * ovi.fps_num / (1000ULL * ovi.fps_den) : 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
 	     "overruns=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
+	     "src_latency_ms=%u global_latency_ms=%u "
 	     "preload=%u (=%llu ms) reserve_ms=%u cap=%zu empty_run=%u (re-arm@%u) "
-	     "(#70/#97/#126/#184/#235)",
+	     "(#70/#97/#126/#184/#235/#245)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
 	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
 	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
+	     source->genlock_latency_ms, global_latency_ms,
 	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
-	     latency_ms /* reserve_ms == latency_ms (the alias); kept for the #128 log verify */,
+	     latency_ms /* reserve_ms == effective latency_ms; kept for the #128 log verify */,
 	     genlock_source_drop_cap(source), source->genlock_empty_run,
 	     (unsigned)GENLOCK_REARM_EMPTY_TICKS);
 }
@@ -4691,13 +4728,28 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 		 * Falls through to the count gate below for non-wallclock sources (CG/preview),
 		 * when the interval is unknown, or when OBS_GENLOCK_TS_ALIGN is off. Mirrors
 		 * src/probe/genlock.rs genlock_release(). */
-		if (genlock_ts_align_enabled() && genlock_is_wallclock_ts(next_frame->timestamp)) {
+		/* camera-box #245: a PER-SOURCE latency override implies ts-align ON for THIS
+		 * source even when the global gate is off (mirror of the #235 global
+		 * implication, extended per source) — otherwise an override set on a box whose
+		 * global latency is 0 would be inert (the ms-reserve deadline below only runs on
+		 * this ts-align path). Read under async_mutex (held across the whole render
+		 * path). */
+		const bool ts_align_on = genlock_ts_align_enabled() || source->genlock_latency_ms > 0;
+		if (ts_align_on && genlock_is_wallclock_ts(next_frame->timestamp)) {
 			const uint64_t interval = genlock_frame_interval_ns();
 			if (interval != 0) {
 				/* camera-box #184: a configured sub-frame ms reserve replaces the
 				 * whole-frame preload deadline (held latency ≈ reserve_ms, not a full
 				 * 33ms frame); reserve_ms=0 keeps the #136 frame-based path verbatim. */
-				const uint32_t reserve_ms = genlock_reserve_ms();
+				/* camera-box #245: the held latency is PER-SOURCE — the source's
+				 * own genlock_latency_ms override wins when set (>0), else the global
+				 * default genlock_reserve_ms(). So each NDI source holds a DIFFERENT
+				 * latency from the OBS source UI (the #235 per-source regression fix).
+				 * Mirror of src/probe/genlock.rs effective_latency_ms. Read under
+				 * async_mutex (held), serialised with obs_source_set_genlock_latency_ms. */
+				const uint32_t reserve_ms = source->genlock_latency_ms > 0
+								    ? source->genlock_latency_ms
+								    : genlock_reserve_ms();
 				const uint64_t present_ts =
 					reserve_ms > 0
 						? genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)
@@ -6423,6 +6475,48 @@ uint32_t obs_source_get_genlock_preload(const obs_source_t *source)
 	 * value is not mutated here) to pair with the locked write above. */
 	pthread_mutex_lock(&((obs_source_t *)source)->async_mutex);
 	const uint32_t v = source->genlock_preload;
+	pthread_mutex_unlock(&((obs_source_t *)source)->async_mutex);
+	return v;
+}
+
+void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms)
+{
+	if (!obs_source_valid(source, "obs_source_set_genlock_latency_ms"))
+		return;
+
+	/* camera-box #245: per-source genlock LATENCY override in ms. Clamp to
+	 * [0, GENLOCK_SOURCE_LATENCY_MS_MAX] (0 = follow the global default) and write
+	 * UNDER async_mutex — the A/V thread reads source->genlock_latency_ms in
+	 * ready_async_frame()/cache_video() (both hold async_mutex), so an unlocked write
+	 * would race that read (the #93 UAF lesson, same as obs_source_set_genlock_preload).
+	 * The mutex is recursive, so this is safe even if a caller already holds it. */
+	const uint32_t clamped = ms > GENLOCK_SOURCE_LATENCY_MS_MAX ? GENLOCK_SOURCE_LATENCY_MS_MAX : ms;
+	pthread_mutex_lock(&source->async_mutex);
+	const uint32_t prev = source->genlock_latency_ms;
+	source->genlock_latency_ms = clamped;
+	/* A latency change re-arms the startup-fill latch so the FIFO rebuilds its delay
+	 * line to the new depth (same rationale as the preload setter): on the ms path
+	 * genlock_filled is forced true each tick, but re-arming on a change keeps the drop
+	 * cap / build path consistent if the operator dials a deep delay live. */
+	if (clamped != prev) {
+		source->genlock_filled = false;
+		source->genlock_empty_run = 0;
+	}
+	pthread_mutex_unlock(&source->async_mutex);
+
+	if (clamped != prev)
+		blog(LOG_INFO, "genlock: per-source latency set to %u ms for source '%s' (#245)", clamped,
+		     obs_source_get_name(source));
+}
+
+uint32_t obs_source_get_genlock_latency_ms(const obs_source_t *source)
+{
+	if (!obs_source_valid(source, "obs_source_get_genlock_latency_ms"))
+		return 0;
+	/* Read under async_mutex (cast away const for the lock op only) to pair with the
+	 * locked write above. */
+	pthread_mutex_lock(&((obs_source_t *)source)->async_mutex);
+	const uint32_t v = source->genlock_latency_ms;
 	pthread_mutex_unlock(&((obs_source_t *)source)->async_mutex);
 	return v;
 }

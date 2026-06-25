@@ -110,6 +110,39 @@ jobs:
           }
           Write-Output "per-source genlock preload video-delay patch present (API + per-source field + cap 128 + drop-cap + DistroAV slider + apply) — OK"
 
+      # #245: assert the PER-SOURCE genlock latency (ms) override is present in the
+      # vendored source BEFORE the 150-min build, so a `git subtree pull` (#44) that
+      # reverts it fails HERE rather than shipping a binary where the per-source latency
+      # field is inert (the #235 regression: latency collapsed to one GLOBAL env knob and
+      # an operator could not set 1000 ms on a single source while the others stayed low).
+      # Mirrors the canonical Linux-CI guards in tests/genlock_preload.rs (probe-gated,
+      # can't compile on this windows runner). Keep both in lock-step.
+      - name: Assert per-source genlock latency (ms) override present (#245)
+        shell: pwsh
+        run: |
+          $obs = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($obs -notmatch [regex]::Escape('void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t')) {
+            Write-Error "obs-source.c: obs_source_set_genlock_latency_ms missing — #245 per-source latency API reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('source->genlock_latency_ms > 0 ? source->genlock_latency_ms : genlock_reserve_ms()')) {
+            Write-Error "obs-source.c: the per-source latency release-deadline gate is gone — #245 override inert in the render path"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_SOURCE_LATENCY_MS_MAX 2000')) {
+            Write-Error "obs-source.c: GENLOCK_SOURCE_LATENCY_MS_MAX no longer 2000 — #245 per-source cap reverted"; exit 1
+          }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('EXPORT void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t')) {
+            Write-Error "obs.h: obs_source_set_genlock_latency_ms not EXPORTed — #245 DistroAV cannot resolve the setter"; exit 1
+          }
+          $ndi = (Get-Content "vendor/distroav/src/ndi-source.cpp" -Raw) -replace '\s+', ' '
+          if ($ndi -notmatch [regex]::Escape('obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC')) {
+            Write-Error "ndi-source.cpp: the editable per-source latency int field is gone — #245 reverted"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_latency_ms')) {
+            Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_latency_ms — #245 field inert"; exit 1
+          }
+          Write-Output "per-source genlock latency (ms) override present (libobs API + EXPORT + render-path gate + cap 2000 + DistroAV editable int + apply) — OK"
+
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
       # reverts it fails HERE rather than shipping a binary where cameras freeze at
