@@ -209,7 +209,7 @@ manifest_sha_for() {
   [ -f "$f" ] || { echo "manifest_sha_for: no such file: $f" >&2; return 1; }
   # Match the exact one-line entry for PATH and pull its sha256. `sed … ;q` quits sed itself after
   # the first match — a clean exit, NOT a downstream `head -1` that would SIGPIPE the upstream
-  # grep/sed (the #236 SIGPIPE-under-pipefail class). `|| true` so a no-match (path absent) is not a
+  # grep/sed (the #239 SIGPIPE-under-pipefail class). `|| true` so a no-match (path absent) is not a
   # pipefail abort. Pattern anchored to the path entry so we read the right line's sha256.
   { grep -F "\"path\": \"$path\"" "$f" || true; } \
     | sed -n '/"sha256"/{s/.*"sha256": "\([0-9a-f]*\)".*/\1/p;q}'
@@ -222,7 +222,7 @@ manifest_sha_for() {
 #
 # The two set-membership directions (staged-not-listed, listed-not-staged) are computed in a SINGLE
 # PASS each with `comm` over LC_ALL=C-sorted lists — NOT a `printf | grep -qxF` re-scan once per
-# file (#236). That per-item pipe was both O(n²) (each of ~2000 staged files re-grepped the whole
+# file (#239). That per-item pipe was both O(n²) (each of ~2000 staged files re-grepped the whole
 # 2000-line list) and, fatally, RACY: `grep -q` exits early on a match → SIGPIPE to the upstream
 # `printf` → under `set -euo pipefail` the SIGPIPE poisoned the pipeline's exit status
 # nondeterministically, so ~half a perfectly-valid bundle's files were falsely flagged "not in

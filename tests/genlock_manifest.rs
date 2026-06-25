@@ -382,7 +382,7 @@ fn make_large_stage(n: usize) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn check_is_consistent_on_a_large_real_sized_bundle() {
-    // REGRESSION (#236): the real windows-genlock bundle is ~2000 files. The original
+    // REGRESSION (#239): the real windows-genlock bundle is ~2000 files. The original
     // check_consistency ran `printf '%s\n' "$listed" | grep -qxF "$rel"` ONCE PER staged file;
     // `grep -q` exits early on a match, sending SIGPIPE to the upstream `printf`, and under
     // `set -euo pipefail` that SIGPIPE nondeterministically poisoned the pipeline's exit status —
@@ -416,7 +416,7 @@ fn check_is_consistent_on_a_large_real_sized_bundle() {
         assert_eq!(
             code, 0,
             "large-bundle self-check must be clean (attempt {attempt}); the SIGPIPE/pipefail \
-             race (#236) made this fail nondeterministically.\nstdout={cout}\nstderr={cerr}"
+             race (#239) made this fail nondeterministically.\nstdout={cout}\nstderr={cerr}"
         );
     }
 }
