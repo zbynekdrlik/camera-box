@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# rig-mode.sh — the DETERMINISTIC rig TEST-mode / EVENT-mode switch (#247).
+#
+# WHY (#247, the #246 live-event disaster): switching the rig between TEST mode (QR/E2E measurement)
+# and EVENT mode (clean prod broadcast) used to be AD-HOC — which QR, what size, capture settings,
+# burns on/off, genlock config all depended on the operator's/agent's context. That left burns ON in
+# the prod Machine env during a LIVE event (QR painted on the broadcast) and genlock in a test state.
+# This script is the SINGLE SOURCE OF TRUTH: identical pinned settings every time, no improvisation.
+#
+# WHAT IT DOES — the CAM side is automated here (ssh to the cam boxes is ALLOWED); the Windows OBS
+# side is PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step to run via the win-*
+# MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
+#
+#   TEST  : cam2 — stop camera-box (frees /dev/fb0), launch the PINNED dual-QR vernier painter
+#                  (frame-probe --paint-only --dual-qr --qr-size 700 --duration-secs N), verify it is
+#                  up + writing /dev/fb0. Then PRINT the OBS test step (burns ON via the #128 wrapper,
+#                  run_id strih 911002 / stream 911004 set ONLY in the launch shell — NEVER Machine).
+#   EVENT : cam2 — stop the painter cleanly (via its PID file — NOT a naive `pkill -f frame-probe`,
+#                  which would self-kill a shell whose cmdline contains "frame-probe"), restart
+#                  camera-box, verify the service is active + --display restored. Then PRINT the OBS
+#                  event step (burns OFF: cleared in the launch shell AND asserted ABSENT from Machine
+#                  — the #246 guard; the wrapper refuses to launch otherwise).
+#
+# The painter binary on cam2 comes from the CI probe-tools-linux-amd64 artifact:
+#   gh run download <latest CI run> -n probe-tools-linux-amd64
+#   scp frame-probe root@10.77.9.62:/usr/local/bin/frame-probe
+# If it is absent, TEST mode FAILS LOUD telling the operator to deploy it.
+#
+# cam1 (the SOURCE camera) is NOT reconfigured here: it runs its DEPLOYED camera-box service, which
+# already emits a 30 fps NDI ("CAM1 (usb)") at the certified v4l2 controls (the multitap/recording
+# harness convention — the real camera is already at the test rate). See the e2e playbook skill.
+#
+# Idempotent (re-runnable), self-verifying (prints the achieved state + a clear PASS/FAIL), fail-loud
+# (set -euo pipefail; any verify mismatch exits non-zero).
+#
+# Usage:
+#   scripts/rig-mode.sh test       # switch the rig INTO test mode (paint QR, print OBS burns-ON step)
+#   scripts/rig-mode.sh event      # switch the rig BACK to clean broadcast (stop QR, print OBS burns-OFF step)
+#
+# Env overrides (all pinned by default — override only for a non-default rig):
+#   CAM_PW                 cam-box root password (default: the dev-rig LAN root pw, as in the sibling
+#                          e2e scripts; override from your password store for a different rig)
+#   PAINTER_IP             cam2 device IP (default 10.77.9.62 — the box with the physical monitor)
+#   PAINTER_BIN            painter binary path on cam2 (default /usr/local/bin/frame-probe)
+#   QR_SIZE                dual-QR module size px (default 700 — the validated vernier size)
+#   PAINTER_DURATION_SECS  painter run length (default 7200 = 2 h; event mode stops it sooner via pidfile)
+#   PAINTER_PIDFILE        painter PID file on cam2 (default /run/rig-painter.pid)
+#   PAINTER_EXTRA_FLAGS    extra painter flags for a MEASUREMENT run (default empty), e.g.
+#                          "--wall-clock --run-id 12345" — the pinned switch paints the vernier; a
+#                          full E2E measurement adds these (see scripts/recording-e2e.sh).
+#
+# Exit codes: 0 = mode applied (cam side verified) + OBS step printed; non-zero = cam-side failure or
+#             a usage error (exit 2).
+set -euo pipefail
+
+# --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
+CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
+PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
+CAM1_IP="${CAM1_IP:-10.77.9.61}"             # cam1 — the SOURCE camera (NOT reconfigured here; for the print)
+PAINTER_BIN="${PAINTER_BIN:-/usr/local/bin/frame-probe}"
+QR_SIZE="${QR_SIZE:-700}"
+PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
+PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
+PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
+
+# --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
+
+# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] -> the REMOTE bash run on cam2 (over ssh) to enter
+# TEST mode: stop any prior painter, stop camera-box to free /dev/fb0, fail loud if the painter binary
+# is absent, launch the PINNED dual-QR vernier painter recording its PID, then verify it is up AND
+# writing /dev/fb0. Pure string so a unit test can assert the pinned flags + the safety properties
+# without a live cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY.
+painter_launch_remote() {
+  local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
+  cat <<REMOTE
+set -e
+# (0) idempotency: stop any painter from a previous TEST run so re-running never stacks two painters on
+#     /dev/fb0. pkill -x matches the process NAME only (comm) — it can NEVER self-match the remote
+#     shell's cmdline (the naive 'pkill -f frame-probe' self-kill footgun this whole rig avoids).
+if [ -f "$pidfile" ]; then
+  OLD=\$(cat "$pidfile" 2>/dev/null || true)
+  [ -n "\$OLD" ] && kill "\$OLD" 2>/dev/null || true
+fi
+pkill -x frame-probe 2>/dev/null || true
+# (1) free /dev/fb0: cam2's camera-box runs --display and HOLDS the framebuffer; STOP the service
+#     (NOT kill — the unit is Restart=always, a kill would respawn it and re-grab fb0).
+systemctl stop camera-box
+# (2) wait until /dev/fb0 is actually free (fbdev teardown is async after the process dies).
+i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done
+if fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: /dev/fb0 still held after stopping camera-box" >&2; exit 1; fi
+echo "ok: /dev/fb0 free"
+# (3) the painter binary MUST be present — deploy the CI probe-tools-linux-amd64 artifact to it.
+if [ ! -x "$bin" ]; then
+  echo "FAIL: painter binary $bin missing/not-executable on cam2." >&2
+  echo "      Deploy the CI probe-tools-linux-amd64 artifact:" >&2
+  echo "        gh run download <latest CI run> -n probe-tools-linux-amd64" >&2
+  echo "        scp frame-probe root@$PAINTER_IP:$bin   # then chmod +x" >&2
+  exit 1
+fi
+# (4) launch the PINNED dual-QR vernier painter; record its PID for a clean event-mode stop.
+rm -f "$pidfile" 2>/dev/null || true
+nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur $extra >/tmp/rig-painter.log 2>&1 &
+echo \$! > "$pidfile"
+PAINTER_PID=\$(cat "$pidfile")
+sleep 3
+# (5) verify the painter is UP and actually writing /dev/fb0.
+if ! kill -0 "\$PAINTER_PID" 2>/dev/null; then
+  echo "FAIL: painter PID \$PAINTER_PID not alive (see /tmp/rig-painter.log on cam2):" >&2
+  tail -n 20 /tmp/rig-painter.log >&2 2>/dev/null || true
+  exit 1
+fi
+i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+if ! fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: painter PID \$PAINTER_PID alive but NOT writing /dev/fb0" >&2; exit 1; fi
+echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, ${dur}s)"
+REMOTE
+}
+
+# painter_stop_remote PIDFILE -> the REMOTE bash run on cam2 to enter EVENT mode: stop the painter
+# cleanly via its PID file (NEVER a 'pkill -f frame-probe' — that matches the remote shell's own
+# cmdline and self-kills the cleanup), restart camera-box, then verify the service is active AND
+# --display is restored (camera-box re-grabbed /dev/fb0 to paint the interkom return on the monitor).
+painter_stop_remote() {
+  local pidfile="$1"
+  cat <<REMOTE
+set -e
+# (1) stop the painter cleanly via its PID file (the self-match-safe path).
+if [ -f "$pidfile" ]; then
+  PID=\$(cat "$pidfile" 2>/dev/null || true)
+  if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then kill "\$PID" 2>/dev/null || true; fi
+  rm -f "$pidfile" 2>/dev/null || true
+fi
+# (2) belt-and-suspenders: pkill -x matches the process NAME only (comm), so it can NEVER match the
+#     remote shell's own cmdline — immune to the self-match that strands cleanups (NOT pkill -f).
+pkill -x frame-probe 2>/dev/null || true
+# (3) wait until /dev/fb0 is released by the painter, then restart camera-box (--display interkom).
+i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+systemctl start camera-box
+# (4) verify the service is active.
+i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
+  echo "FAIL: camera-box service not active after start" >&2
+  systemctl status camera-box --no-pager >&2 2>/dev/null || true
+  exit 1
+fi
+# (5) verify --display is restored: the ExecStart carries --display AND camera-box re-grabbed /dev/fb0.
+if ! systemctl cat camera-box 2>/dev/null | grep -q -- '--display'; then
+  echo "FAIL: camera-box ExecStart has no --display — interkom monitor not restored" >&2
+  exit 1
+fi
+i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+if ! fuser -s /dev/fb0 2>/dev/null; then
+  echo "FAIL: camera-box active but /dev/fb0 not held — --display not painting the interkom return" >&2
+  exit 1
+fi
+echo "PASS: painter stopped, camera-box active + --display restored (holding /dev/fb0)"
+REMOTE
+}
+
+# print_obs_step MODE -> the exact Windows-OBS step for this mode. ssh/scp to Windows is DENIED, so the
+# operator/agent runs the #128 wrapper PER BOX and pastes each printed PowerShell program into the
+# box's win-* MCP Shell. The wrapper owns the per-box burn run_id + the #246 Machine-clean guard.
+print_obs_step() {
+  local mode="$1"
+  cat <<EOF
+# ---- Windows OBS ${mode}-mode step (ssh to Windows is DENIED — the wrapper drives the win-* MCP) ----
+# Run the #128 genlock wrapper PER BOX with --mode ${mode}; paste each printed PowerShell program into
+# that box's win-* MCP Shell. --force force-kills a wedged obs64 first (DEV rig).
+#   strih  : scripts/launch-obs-genlock.sh --box strih  --mode ${mode} --force
+#   stream : scripts/launch-obs-genlock.sh --box stream --mode ${mode} --force
+EOF
+  if [ "$mode" = "test" ]; then
+    cat <<'EOF'
+# The wrapper pins burns ON in the LAUNCH SHELL ONLY (never Machine): OBS_BURN_QR=1, OBS_BURN_QR_PX=300,
+# OBS_BURN_RUN_ID=911002 (strih) / 911004 (stream). Genlock env stays from Machine as today.
+# Then confirm (per the e2e / obs-ops playbook skills): PHASE2-PROBE scene selected, recording is
+# NATIVE 1080p (#225 — ffprobe the file = 1920x1080), DanteSync locked. The OBS program EXITS 0 only
+# when the burns + render tick are verified in the launched obs64.
+EOF
+  else
+    cat <<'EOF'
+# The wrapper clears OBS_BURN_* in the launch shell AND refuses to launch if ANY OBS_BURN_* is set in
+# Machine scope (the #246 readiness guard — a Machine-scope burn survives reboot and paints QR on the
+# LIVE broadcast). Then confirm the prod scene + the pinned PROD genlock latency per the obs-ops skill.
+# The OBS program EXITS 0 only when the child obs64 carries NO OBS_BURN_* and the render tick is on.
+EOF
+  fi
+}
+
+# --- source-guard: when sourced (the unit tests), stop here --------------------------------------
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+  return 0
+fi
+
+# --- flow (executed only when run directly) ------------------------------------------------------
+
+usage() {
+  cat <<'EOF'
+rig-mode.sh — the deterministic rig TEST-mode / EVENT-mode switch (#247).
+
+Usage:
+  scripts/rig-mode.sh test     # paint the dual-QR vernier on cam2 + print the OBS burns-ON step
+  scripts/rig-mode.sh event    # stop the QR, restore camera-box --display + print the OBS burns-OFF step
+
+The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The Windows OBS side is PRINTED
+as the exact `launch-obs-genlock.sh --mode {test|event}` step (ssh to Windows is denied — run it via
+the win-* MCP). See the script header for env overrides.
+
+Exit codes: 0 = mode applied (cam side verified) + OBS step printed; 2 = usage error.
+EOF
+}
+
+require_sshpass() {
+  command -v sshpass >/dev/null 2>&1 || {
+    echo "ERROR: sshpass not found — needed to ssh into the cam boxes (apt install sshpass)." >&2
+    exit 1
+  }
+}
+
+cam_ssh() {
+  # cam_ssh REMOTE_SCRIPT — run REMOTE_SCRIPT on cam2 as root, fail-loud on a non-zero remote exit.
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$PAINTER_IP" "$1"
+}
+
+do_test() {
+  require_sshpass
+  echo "===== rig-mode TEST (#247) — paint dual-QR vernier on cam2, burns ON downstream ====="
+  echo "[cam2 ${PAINTER_IP}] stop camera-box -> free /dev/fb0 -> launch PINNED painter (qr=${QR_SIZE}px)"
+  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS")"
+  echo
+  print_obs_step test
+  echo
+  echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
+  echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
+  echo "NEXT: run the two launch-obs-genlock.sh --mode test commands above (win-* MCP), confirm the"
+  echo "      PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> rig in TEST mode."
+  echo "RESULT: TEST mode — cam side PASS."
+}
+
+do_event() {
+  require_sshpass
+  echo "===== rig-mode EVENT (#247) — stop QR, restore clean broadcast, burns OFF + #246 guard ====="
+  echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> restart camera-box -> verify --display restored"
+  cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
+  echo
+  print_obs_step event
+  echo
+  echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + --display interkom restored."
+  echo "NEXT: run the two launch-obs-genlock.sh --mode event commands above (win-* MCP) — they REFUSE to"
+  echo "      launch if any OBS_BURN_* is set in Machine (the #246 guard) -> rig in clean EVENT mode."
+  echo "RESULT: EVENT mode — cam side PASS."
+}
+
+main() {
+  local mode="${1:-}"
+  case "$mode" in
+    test)      do_test ;;
+    event)     do_event ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: mode must be 'test' or 'event' (got '${mode}')" >&2; usage >&2; exit 2 ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi

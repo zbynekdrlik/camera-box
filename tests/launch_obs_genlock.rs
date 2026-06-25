@@ -339,3 +339,217 @@ fn script_is_source_safe() {
         "#128: the script must be source-safe (BASH_SOURCE != $0 guard) — sourcing ran the CLI flow"
     );
 }
+
+// ===== #247 rig TEST/EVENT-mode burn handling (--mode {test|event}) ===============================
+//
+// The deterministic rig switch (#247) drives this wrapper with --mode test|event. TEST mode launches
+// OBS with the #111 burn ON (OBS_BURN_QR=1 + OBS_BURN_QR_PX=300 + the per-box run_id) set ONLY in the
+// launch shell; EVENT mode clears the burns AND asserts the Machine scope carries NONE (the #246
+// guard — a Machine-scope burn survives reboot and paints QR on the LIVE broadcast). The default
+// no-mode launch is byte-identical to the pre-#247 wrapper (all the tests above still pass).
+
+/// Source the script and run `body`; return (exit_code, stdout) WITHOUT asserting success — for the
+/// pure functions that intentionally return non-zero (e.g. burn_run_id_for_box on an unknown box).
+fn run_sourced_status(body: &str) -> (i32, String) {
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// The launch program built for --mode test with the given per-box burn run_id.
+fn program_test(run_id: &str) -> String {
+    run_sourced(&format!(
+        "build_launch_program 'C:\\Program Files\\obs-studio' 0 test {run_id}"
+    ))
+}
+
+/// The launch program built for --mode event.
+fn program_event() -> String {
+    run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 event")
+}
+
+/// `burn_run_id_for_box` is the single source of truth for the per-box #111 burn run_id and mirrors
+/// the Rust consts src/probe/recording_latency.rs::BURN_RUN_ID_{STRIH,STREAM} (strih 911002 / stream
+/// 911004). An unknown box is a HARD error (non-zero) — never a silent wrong/zero run_id in a burn.
+#[test]
+fn burn_run_id_for_box_maps_strih_and_stream() {
+    let strih = run_sourced("burn_run_id_for_box strih");
+    assert_eq!(
+        strih.trim(),
+        "911002",
+        "#247: burn_run_id_for_box strih must be 911002 (mirrors BURN_RUN_ID_STRIH)"
+    );
+    let stream = run_sourced("burn_run_id_for_box stream");
+    assert_eq!(
+        stream.trim(),
+        "911004",
+        "#247: burn_run_id_for_box stream must be 911004 (mirrors BURN_RUN_ID_STREAM)"
+    );
+    let (code, _out) = run_sourced_status("burn_run_id_for_box nope");
+    assert_ne!(
+        code, 0,
+        "#247: burn_run_id_for_box on an unknown box must FAIL (non-zero) — never emit a wrong run_id"
+    );
+}
+
+/// `burn_var_list` lists EXACTLY the three #111 burn env vars — the set EVENT mode clears + asserts
+/// absent. A drift here means the #246 guard checks/clears the wrong set.
+#[test]
+fn burn_var_list_is_exactly_the_three() {
+    let out = run_sourced("burn_var_list");
+    let got: Vec<&str> = out.split_whitespace().collect();
+    assert_eq!(
+        got,
+        ["OBS_BURN_QR", "OBS_BURN_QR_PX", "OBS_BURN_RUN_ID"],
+        "#247: burn_var_list must be exactly the three burn vars — got {got:?}"
+    );
+}
+
+/// TEST mode sets the burns EXPLICITLY in the LAUNCH SHELL (Set-Item Env:) with OBS_BURN_QR=1 +
+/// OBS_BURN_QR_PX=300 + the per-box run_id — and NEVER in Machine scope (a Machine-scope burn
+/// survives reboot and paints QR on the LIVE broadcast: the #246 incident). The set must precede
+/// Start-Process so the child obs64 inherits it.
+#[test]
+fn test_mode_sets_burns_in_launch_shell_not_machine() {
+    let p = program_test("911002");
+    assert!(
+        p.contains("Set-Item -Path Env:OBS_BURN_QR     -Value '1'"),
+        "#247: TEST mode must set OBS_BURN_QR=1 in the launch shell"
+    );
+    assert!(
+        p.contains("Set-Item -Path Env:OBS_BURN_QR_PX  -Value '300'"),
+        "#247: TEST mode must set OBS_BURN_QR_PX=300 in the launch shell"
+    );
+    assert!(
+        p.contains("Set-Item -Path Env:OBS_BURN_RUN_ID -Value '911002'"),
+        "#247: TEST mode must set the per-box OBS_BURN_RUN_ID in the launch shell"
+    );
+    // The burns must NEVER be written to Machine scope (that is the #246 contamination).
+    assert!(
+        !p.contains("SetEnvironmentVariable('OBS_BURN")
+            && !p.contains("setx /M OBS_BURN")
+            && !p.contains("'OBS_BURN_QR', '1', 'Machine'"),
+        "#246/#247: TEST mode must NEVER write a burn var to Machine scope (it survives reboot)"
+    );
+    // Set before launch (so obs64 inherits the burn env).
+    let set_pos = p
+        .find("Set-Item -Path Env:OBS_BURN_QR ")
+        .expect("burn set present");
+    let launch_pos = p.find("Start-Process").expect("Start-Process present");
+    assert!(
+        set_pos < launch_pos,
+        "#247: the burn env-set must happen BEFORE Start-Process so obs64 inherits it"
+    );
+}
+
+/// TEST mode's per-box run_id is wired end-to-end through the CLI: --box strih → 911002,
+/// --box stream → 911004 in the emitted program.
+#[test]
+fn cli_test_mode_run_id_per_box() {
+    let (code_s, out_s, _) = run_script(&["--box", "strih", "--mode", "test"]);
+    assert_eq!(code_s, 0, "strih --mode test plan should print (exit 0)");
+    assert!(
+        out_s.contains("Set-Item -Path Env:OBS_BURN_RUN_ID -Value '911002'"),
+        "#247: --box strih --mode test must wire OBS_BURN_RUN_ID=911002"
+    );
+
+    let (code_st, out_st, _) = run_script(&["--box", "stream", "--mode", "test"]);
+    assert_eq!(code_st, 0, "stream --mode test plan should print (exit 0)");
+    assert!(
+        out_st.contains("Set-Item -Path Env:OBS_BURN_RUN_ID -Value '911004'"),
+        "#247: --box stream --mode test must wire OBS_BURN_RUN_ID=911004"
+    );
+}
+
+/// TEST mode also proves the burns in the launched child's PEB (belt-and-suspenders vs a stale
+/// launch-shell snapshot) and FOLDS $burnOk into the final verdict.
+#[test]
+fn test_mode_verifies_burns_in_child_peb_and_verdict() {
+    let p = program_test("911002");
+    assert!(
+        p.contains("^(OBS_BURN_[^=]+)=(.*)$") && p.contains("$wantBurn"),
+        "#247: TEST mode must verify the child PEB carries the burn vars"
+    );
+    assert!(
+        p.contains("if ($pebOk -and $tickOk -and $burnOk)"),
+        "#247: TEST mode's final verdict must require the burn state too ($burnOk)"
+    );
+}
+
+/// EVENT mode FAILS LOUD if a burn env would leak: it clears OBS_BURN_* in the launch shell AND
+/// asserts the Machine scope carries NONE — refusing to launch (non-zero exit) if any is set. This
+/// is the #246 readiness guard (a Machine-scope burn survives reboot → QR on the LIVE broadcast).
+#[test]
+fn event_mode_clears_burns_and_fails_loud_on_machine_leak() {
+    let p = program_event();
+    // Clear in the launch shell.
+    assert!(
+        p.contains("Remove-Item \"Env:$bn\" -ErrorAction SilentlyContinue"),
+        "#247: EVENT mode must clear OBS_BURN_* in the launch shell"
+    );
+    // Assert Machine carries none, fail loud (the #246 guard).
+    assert!(
+        p.contains("GetEnvironmentVariable($bn, 'Machine')") && p.contains("#246 BURN LEAK"),
+        "#246: EVENT mode must assert the Machine scope carries NO burn var (fail loud on leak)"
+    );
+    assert!(
+        p.contains("exit 8"),
+        "#246: a Machine burn leak must exit non-zero (refuse to launch) — exit 8"
+    );
+    // Post-launch PEB proof the child carries none.
+    assert!(
+        p.contains("carries NO OBS_BURN_*"),
+        "#246: EVENT mode must prove the launched obs64 carries NO OBS_BURN_* (post-launch guard)"
+    );
+    assert!(
+        p.contains("if ($pebOk -and $tickOk -and $burnOk)"),
+        "#247: EVENT mode's final verdict must require the burn-free state too ($burnOk)"
+    );
+}
+
+/// The DEFAULT (no --mode) launch is byte-identical in BEHAVIOR to the pre-#247 wrapper: NO burn
+/// handling at all, and the original `if ($pebOk -and $tickOk)` verdict (no $burnOk). This proves
+/// the #247 feature is purely additive and cannot affect a normal genlock relaunch.
+#[test]
+fn default_mode_has_no_burn_handling() {
+    let p = program_default();
+    assert!(
+        !p.contains("OBS_BURN"),
+        "#247: a default (no --mode) launch must contain NO burn handling — got:\n{p}"
+    );
+    // The verdict line itself must be the plain pre-#247 form — no `-and $burnOk` folded in.
+    // (A doc-comment may mention $burnOk; the gate is the executable verdict, so match the operator.)
+    assert!(
+        p.contains("if ($pebOk -and $tickOk)") && !p.contains("-and $burnOk"),
+        "#247: a default launch must keep the original verdict (no `-and $burnOk`) — pre-#247 behavior"
+    );
+}
+
+/// CLI: an invalid --mode is a usage error (exit 2); a valid --mode reflects in the plan header.
+#[test]
+fn cli_mode_flag_validates_and_reflects_in_header() {
+    let (code_bad, _, err_bad) = run_script(&["--box", "strih", "--mode", "bogus"]);
+    assert_eq!(
+        code_bad, 2,
+        "#247: an invalid --mode must be a usage error (exit 2)"
+    );
+    assert!(
+        err_bad.contains("must be 'test' or 'event'"),
+        "#247: an invalid --mode must error clearly (got stderr: {err_bad:?})"
+    );
+
+    let (code_ok, out_ok, _) = run_script(&["--box", "strih", "--mode", "event"]);
+    assert_eq!(code_ok, 0, "#247: --mode event plan should print (exit 0)");
+    assert!(
+        out_ok.contains("EVENT mode"),
+        "#247: the plan header must reflect the selected mode"
+    );
+}
