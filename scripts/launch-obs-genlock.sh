@@ -67,17 +67,139 @@ genlock_var_list() { printf '%s ' "${GENLOCK_VARS[@]}"; }
 # genlock_optional_var_list -> space-separated list of the OPTIONAL canonical genlock var(s) (#235).
 genlock_optional_var_list() { printf '%s ' "${GENLOCK_OPTIONAL_VARS[@]}"; }
 
-# build_launch_program OBS_DIR FORCE -> the full PowerShell program that (re)launches OBS carrying
-# the genlock env FRESH from Machine scope and then verifies+fails-loud. OBS_DIR is the OBS install
-# root (its bin\64bit is the mandatory cwd). FORCE="1" inserts a documented force-kill of a wedged
-# obs64 first (obs-ops recovery — this is a DEV rig, "kludne ho killni"); FORCE="0" aborts if obs64
-# is already running (a healthy box should be relaunched deliberately, not double-launched).
+# --- #247 TEST/EVENT-mode #111 burn handling -----------------------------------------------------
+# The deterministic rig TEST/EVENT switch (#247) drives this wrapper with --mode {test|event}:
+#   TEST  : launch OBS with the #111 burn ON (OBS_BURN_QR=1 + OBS_BURN_QR_PX + the per-box run_id),
+#           set ONLY in the launch shell — NEVER Machine scope. A Machine-scope OBS_BURN_* survives
+#           reboot and paints QR onto the LIVE broadcast (the #246 incident); a launch-shell var dies
+#           with the OBS process, so it can never contaminate prod.
+#   EVENT : launch OBS with the burn OFF — clear the burn vars in the launch shell AND assert the
+#           Machine scope carries NONE (refuse to launch otherwise). This is the #246 readiness guard.
+# The genlock env is carried from Machine in BOTH modes exactly as before (only the burn changes).
+
+# The reserved per-node #111 burn run_ids — SINGLE SOURCE OF TRUTH mirrors the Rust consts in
+# src/probe/recording_latency.rs (BURN_RUN_ID_STRIH / BURN_RUN_ID_STREAM); the recording-verdict
+# decoder pairs hops on these exact ids, so they must never drift between the painter/launch side
+# and the decode side.
+BURN_RUN_ID_STRIH=911002
+BURN_RUN_ID_STREAM=911004
+# The TEST-mode burn QR module size in px — the validated small node-stamp burn (#226 native-1080p
+# recording keeps the ~300px burn crisp; a 4K-rescaled recording softened it).
+BURN_QR_PX=300
+# The #111 burn env var names cleared + asserted-absent in EVENT mode (the #246 guard set).
+BURN_VARS=(OBS_BURN_QR OBS_BURN_QR_PX OBS_BURN_RUN_ID)
+
+# burn_var_list -> space-separated list of the three #111 burn env var names (single source of truth).
+burn_var_list() { printf '%s ' "${BURN_VARS[@]}"; }
+
+# burn_run_id_for_box BOX -> the reserved #111 burn run_id for strih|stream (mirrors the Rust consts).
+# An unknown box is a HARD error (return 2) — never silently emit a wrong/zero run_id into a live burn.
+burn_run_id_for_box() {
+  case "${1:-}" in
+    strih)  printf '%s' "$BURN_RUN_ID_STRIH" ;;
+    stream) printf '%s' "$BURN_RUN_ID_STREAM" ;;
+    *) echo "burn_run_id_for_box: unknown box '${1:-}' (expected strih|stream)" >&2; return 2 ;;
+  esac
+}
+
+# _burn_env_block MODE RUN_ID -> the PowerShell snippet that sets (TEST) or clears+asserts-Machine-clean
+# (EVENT) the #111 burn env in the LAUNCH SHELL, BEFORE Start-Process. Built with a QUOTED heredoc
+# (literal $ / backticks) + a RUN_ID placeholder, then substituted — the same verbatim-interpolation
+# model as kill_block (bash expands the heredoc once, so the snippet's literal $ land as PowerShell $).
+# Empty MODE -> empty string (a default launch is byte-identical to the pre-#247 wrapper).
+_burn_env_block() {
+  local mode="$1" run_id="${2:-}" blk
+  case "$mode" in
+    test)
+      blk=$(cat <<'PSBURNON'
+# --mode test (#247): TEST-mode burns ON. Set the #111 burn vars EXPLICITLY in THIS launch shell ONLY
+# (Set-Item Env:) — NEVER Machine scope. A Machine-scope OBS_BURN_* survives reboot and paints QR on
+# the LIVE broadcast (the #246 incident); the launch-shell scope dies with the OBS process.
+Set-Item -Path Env:OBS_BURN_QR     -Value '1'
+Set-Item -Path Env:OBS_BURN_QR_PX  -Value '__BURN_QR_PX__'
+Set-Item -Path Env:OBS_BURN_RUN_ID -Value '__BURN_RUN_ID__'
+Write-Host "set OBS_BURN_QR=1 OBS_BURN_QR_PX=__BURN_QR_PX__ OBS_BURN_RUN_ID=__BURN_RUN_ID__ (launch shell ONLY, #247 TEST mode)"
+PSBURNON
+)
+      blk="${blk//__BURN_RUN_ID__/$run_id}"
+      printf '%s' "${blk//__BURN_QR_PX__/$BURN_QR_PX}"
+      ;;
+    event)
+      cat <<'PSBURNOFF'
+# --mode event (#247): EVENT-mode burns OFF. Clear any burn var in THIS launch shell AND assert the
+# Machine scope carries NONE — a Machine-scope OBS_BURN_* survives reboot -> QR on the live broadcast
+# (the #246 incident). Refuse to launch (exit 8) if any burn var is still set in Machine.
+foreach ($bn in @('OBS_BURN_QR','OBS_BURN_QR_PX','OBS_BURN_RUN_ID')) { Remove-Item "Env:$bn" -ErrorAction SilentlyContinue }
+$burnLeak = @()
+foreach ($bn in @('OBS_BURN_QR','OBS_BURN_QR_PX','OBS_BURN_RUN_ID')) {
+  $mv = [System.Environment]::GetEnvironmentVariable($bn, 'Machine')
+  if ($null -ne $mv -and $mv -ne '') { $burnLeak += "$bn=$mv" }
+}
+if ($burnLeak.Count -gt 0) {
+  Write-Error "#246 BURN LEAK: Machine scope carries burn var(s): $($burnLeak -join ', '). A Machine-scope burn survives reboot and paints QR on the LIVE broadcast. Clear it first: foreach (`$n in 'OBS_BURN_QR','OBS_BURN_QR_PX','OBS_BURN_RUN_ID') { [Environment]::SetEnvironmentVariable(`$n, `$null, 'Machine') }"
+  exit 8
+}
+Write-Host "EVENT mode (#247): burns cleared in launch shell + verified ABSENT from Machine (#246 guard passed)"
+PSBURNOFF
+      ;;
+    "") : ;;
+  esac
+}
+
+# _burn_verify_block MODE RUN_ID -> the PowerShell snippet (run AFTER the child PEB env dump) that
+# proves the launched obs64 actually carries the burns (TEST) or carries NONE (EVENT, the #246
+# post-launch guard). Sets $burnOk; folded into the final verdict only when a mode is set.
+_burn_verify_block() {
+  local mode="$1" run_id="${2:-}" blk
+  case "$mode" in
+    test)
+      blk=$(cat <<'PSVBON'
+# (#247 TEST) belt-and-suspenders: prove the launched obs64's CHILD PEB actually carries the burn vars
+# (a stale launch-shell snapshot could otherwise drop them, the same trap as the genlock vars).
+$burnOk = $true
+$wantBurn = [ordered]@{ 'OBS_BURN_QR' = '1'; 'OBS_BURN_QR_PX' = '__BURN_QR_PX__'; 'OBS_BURN_RUN_ID' = '__BURN_RUN_ID__' }
+$childBurn = @{}
+foreach ($line in ($dump -split "`n")) { if ($line -match '^(OBS_BURN_[^=]+)=(.*)$') { $childBurn[$matches[1]] = $matches[2] } }
+foreach ($bn in $wantBurn.Keys) {
+  if ($childBurn[$bn] -ne $wantBurn[$bn]) { Write-Error "#247 TEST burn MISMATCH: obs64 $bn='$($childBurn[$bn])' want '$($wantBurn[$bn])' — burns NOT carried."; $burnOk = $false }
+  else { Write-Host "PEB OK (burn): $bn=$($childBurn[$bn])" }
+}
+PSVBON
+)
+      blk="${blk//__BURN_RUN_ID__/$run_id}"
+      printf '%s' "${blk//__BURN_QR_PX__/$BURN_QR_PX}"
+      ;;
+    event)
+      cat <<'PSVBOFF'
+# (#247 EVENT) prove the launched obs64's CHILD PEB carries NO OBS_BURN_* — the post-launch #246 guard.
+# The Machine assertion + the launch-shell clear above should already guarantee it; this confirms it
+# on the actual running process, immune to any stale snapshot.
+$burnOk = $true
+$childBurn = @()
+foreach ($line in ($dump -split "`n")) { if ($line -match '^(OBS_BURN_[^=]+)=') { $childBurn += $matches[1] } }
+if ($childBurn.Count -gt 0) { Write-Error "#246 EVENT burn LEAK: obs64 still carries $($childBurn -join ', ') — relaunch clean."; $burnOk = $false }
+else { Write-Host "PEB OK (event): obs64 carries NO OBS_BURN_* (#246 clean)" }
+PSVBOFF
+      ;;
+    "") : ;;
+  esac
+}
+
+# build_launch_program OBS_DIR FORCE [MODE] [BURN_RUN_ID] -> the full PowerShell program that
+# (re)launches OBS carrying the genlock env FRESH from Machine scope and then verifies+fails-loud.
+# OBS_DIR is the OBS install root (its bin\64bit is the mandatory cwd). FORCE="1" inserts a documented
+# force-kill of a wedged obs64 first (obs-ops recovery — this is a DEV rig, "kludne ho killni");
+# FORCE="0" aborts if obs64 is already running (relaunch deliberately, never double-launch).
+# MODE (#247, OPTIONAL — default "" preserves the exact pre-#247 behavior) selects the #111 burn
+# handling: "test" sets the burns in the launch shell + verifies them in the child PEB; "event"
+# clears them + asserts Machine carries none + verifies the child PEB is burn-free (the #246 guard).
+# BURN_RUN_ID is the per-box reserved burn run_id (only used when MODE=test).
 #
 # Pure string builder so a unit test can assert the program is well-formed without a Windows host.
-# Heredoc body is a literal PowerShell here-string — note the bash-level interpolation is ONLY
-# $OBS_DIR / the FORCE branch / the var list; everything else (PowerShell $vars) is literal.
+# Heredoc body is a literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the
+# FORCE branch / the var list / the #247 burn blocks; everything else (PowerShell $vars) is literal.
 build_launch_program() {
-  local obs_dir="$1" force="$2"
+  local obs_dir="$1" force="$2" mode="${3:-}" burn_run_id="${4:-}"
   local bin64="${obs_dir}\\bin\\64bit"
   local exe="${bin64}\\obs64.exe"
   # Escape for the PowerShell SINGLE-quoted strings below: a literal ' is doubled to '' (the
@@ -105,6 +227,19 @@ if (Get-Process obs64 -ErrorAction SilentlyContinue) {
 PSNOKILL
 )
   fi
+
+  # #247 per-mode #111 burn blocks (empty for a default no-mode launch -> byte-identical to pre-#247).
+  # burn_env_block sets/clears the burn env in the launch shell; burn_verify_block proves the child
+  # PEB matches; verdict_cond folds $burnOk into the final verdict ONLY when a mode is set.
+  local burn_env_block burn_verify_block verdict_cond
+  burn_env_block="$(_burn_env_block "$mode" "$burn_run_id")"
+  burn_verify_block="$(_burn_verify_block "$mode" "$burn_run_id")"
+  # The PowerShell $pebOk/$tickOk/$burnOk are LITERAL here (assembled into the emitted program, not
+  # expanded by bash) — the single quotes are intentional.
+  # shellcheck disable=SC2016
+  verdict_cond='$pebOk -and $tickOk'
+  # shellcheck disable=SC2016
+  [ -n "$mode" ] && verdict_cond='$pebOk -and $tickOk -and $burnOk'
 
   # The verify block reads the launched child's PEB env via NtQueryInformationProcess +
   # ReadProcessMemory (the win-* MCP `$env:` read is a STALE snapshot — only the child's own PEB
@@ -135,6 +270,10 @@ foreach (\$n in \$genlockOptionalVars) {
   if (\$null -ne \$v -and \$v -ne '') { Set-Item -Path "Env:\$n" -Value \$v; \$genlockOptionalSet[\$n] = \$v; Write-Host "set \$n=\$v (from Machine, #235 canonical knob)" }
   else { Write-Host "(optional \$n not set in Machine — using the OBS_GENLOCK_RESERVE_MS alias, #235 back-compat)" }
 }
+
+# (2b) #247 per-mode #111 burn env — set in THIS launch shell only (test) or cleared + Machine-asserted
+#      clean (event). Empty for a default no-mode launch (byte-identical to the pre-#247 wrapper).
+${burn_env_block}
 
 ${kill_block}
 
@@ -212,6 +351,10 @@ foreach (\$n in \$genlockOptionalSet.Keys) {
   else { Write-Host "PEB OK (#235 canonical): \$n=\$got" }
 }
 
+# (6c) #247 per-mode burn PEB verify — TEST: the child must carry the burns; EVENT: the child must
+#      carry NONE (#246 post-launch guard). Sets \$burnOk; folded into the final verdict only with --mode.
+${burn_verify_block}
+
 # (6b) VERIFY the fresh OBS log shows the render tick ENABLED and the genlock-latency line. The log is
 #      the AUTHORITATIVE runtime signal — same line drift-guard.sh genlock_from_log() keys on. #235:
 #      the single-knob latency line is 'genlock: latency = N ms (≈ M frames @ Ffps)'.
@@ -223,8 +366,9 @@ foreach (\$n in \$genlockOptionalSet.Keys) {
 if (\$tickOk)    { Write-Host "LOG OK: render tick ENABLED" }          else { Write-Error "#128 LOG: 'render tick ENABLED' NOT found in \$(\$log.Name) — genlock master gate OFF." }
 if (\$latencyOk) { Write-Host ("LOG OK: " + ([regex]::Match(\$logText,'genlock: latency = \d+ ms[^)]*\)').Value)) } else { Write-Warning "#235 LOG: 'genlock: latency = N ms' not yet emitted (printed lazily when a genlock_fifo input first activates; the PEB OBS_GENLOCK_LATENCY_MS/RESERVE_MS is already proven)." }
 
-# (7) FINAL VERDICT — fail loud unless the child PEB carries every genlock var AND the render tick is ENABLED.
-if (\$pebOk -and \$tickOk) {
+# (7) FINAL VERDICT — fail loud unless the child PEB carries every genlock var AND the render tick is
+#     ENABLED (and, with --mode, the #247 burn state is correct — \$burnOk).
+if (${verdict_cond}) {
   Write-Host "#128 OK: obs64 PID \$(\$proc.Id) launched with genlock env carried (PEB verified) and render tick ENABLED."
   exit 0
 } else {
@@ -251,10 +395,16 @@ the stale-env trap), clears crash sentinels, launches obs64 cwd=bin\64bit, then 
 PEB env + the OBS log render-tick line and FAILS LOUD otherwise.
 
 Usage:
-  scripts/launch-obs-genlock.sh --box strih|stream [--force] [--obs-dir 'C:\Program Files\obs-studio']
+  scripts/launch-obs-genlock.sh --box strih|stream [--mode test|event] [--force] \
+      [--obs-dir 'C:\Program Files\obs-studio']
   scripts/launch-obs-genlock.sh --help
 
   --box     strih (win-strih, 10.77.9.202) or stream (win-stream-snv, 10.77.9.204) — selects the MCP.
+  --mode    #247 rig mode (default: none — genlock only, no burn change):
+              test  — burns ON: OBS_BURN_QR=1 + OBS_BURN_QR_PX=300 + the per-box run_id (strih 911002,
+                      stream 911004) set ONLY in the launch shell (NEVER Machine), verified in the PEB.
+              event — burns OFF: cleared in the launch shell AND asserted ABSENT from Machine (the #246
+                      guard — refuses to launch if any OBS_BURN_* is set Machine-wide).
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -263,7 +413,7 @@ EOF
 }
 
 main() {
-  local box="" force="0"
+  local box="" force="0" mode=""
   local obs_dir='C:\Program Files\obs-studio'
   # `need_val FLAG` guards a value-taking flag BEFORE shift 2: a trailing flag with no value must be
   # a clean usage error (exit 2 + message), not a silent `shift 2` abort (exit 1) under set -e.
@@ -271,12 +421,19 @@ main() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --box)     need_val "$@"; box="$2"; shift 2 ;;
+      --mode)    need_val "$@"; mode="$2"; shift 2 ;;
       --force)   force="1"; shift ;;
       --obs-dir) need_val "$@"; obs_dir="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
     esac
   done
+
+  # #247: validate the mode up front (empty = the default genlock-only launch).
+  case "$mode" in
+    ""|test|event) : ;;
+    *) echo "ERROR: --mode must be 'test' or 'event' (got '${mode}')" >&2; usage >&2; exit 2 ;;
+  esac
 
   local mcp box_ip
   case "$box" in
@@ -285,22 +442,40 @@ main() {
     *) echo "ERROR: --box must be 'strih' or 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
 
+  # #247: TEST mode needs the per-box reserved burn run_id; event/default do not use it.
+  local burn_run_id=""
+  if [ "$mode" = "test" ]; then
+    burn_run_id="$(burn_run_id_for_box "$box")"
+  fi
+
   local PROGRAM
-  PROGRAM="$(build_launch_program "$obs_dir" "$force")"
+  PROGRAM="$(build_launch_program "$obs_dir" "$force" "$mode" "$burn_run_id")"
+
+  # Per-mode one-line description for the plan header + the burn note.
+  local mode_tag="" burn_note
+  case "$mode" in
+    test)  mode_tag=" — #247 TEST mode (burns ON, run_id=${burn_run_id})"
+           burn_note="#         #247 TEST: also sets OBS_BURN_QR=1 + OBS_BURN_QR_PX=300 + OBS_BURN_RUN_ID=${burn_run_id} in the launch shell ONLY." ;;
+    event) mode_tag=" — #247 EVENT mode (burns OFF, #246 guard)"
+           burn_note="#         #247 EVENT: clears OBS_BURN_* in the launch shell AND refuses to launch if Machine carries any (the #246 guard)." ;;
+    *)     burn_note="#         (no --mode: genlock-only launch, burns unchanged)" ;;
+  esac
 
   cat <<PLAN
-# ===== #128 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) =====
+# ===== #128 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip})${mode_tag} =====
 # scp/ssh to Windows is DENIED on this rig — the agent runs the program below via the ${mcp} MCP Shell.
 #
 # STEP 1: paste the following PowerShell program into:  ${mcp} Shell
 #         (it reads the genlock env from Machine, sets it explicit, launches obs64 cwd=bin\\64bit,
 #          and verifies the child PEB env + the OBS log render-tick line, failing LOUD otherwise)
+${burn_note}
 # ----------------------------------------------------------------------------------------------------
 ${PROGRAM}
 # ----------------------------------------------------------------------------------------------------
 # STEP 2: the program EXITS 0 only when the launched obs64's child PEB carries all four genlock vars
-#         matching Machine AND the OBS log shows 'render tick ENABLED'. A non-zero exit means the
-#         genlock env was NOT carried — do NOT trust the box; re-run this wrapper (--force if wedged).
+#         matching Machine AND the OBS log shows 'render tick ENABLED'${mode:+ AND the #247 ${mode} burn state is correct}.
+#         A non-zero exit means the launch was NOT clean — do NOT trust the box; re-run this wrapper
+#         (--force if wedged).
 PLAN
 }
 

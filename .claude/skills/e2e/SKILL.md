@@ -155,6 +155,49 @@ the cam1 burn PRESENT-but-blurred → it's a burn-readability DECODE-MISS, NOT c
 A genuine drop is randomly spaced + FIFO overruns>0. ALWAYS view the flagged frames' pixels
 (download the `pp/cam1-missing/*.png`, decode the base64, Read it) before claiming loss.
 
+## Rig TEST / EVENT Mode Switch (#247) — `scripts/rig-mode.sh`
+
+THE deterministic, single-source-of-truth switch between TEST mode (QR/E2E measurement) and EVENT
+mode (clean prod broadcast). Replaces the ad-hoc, context-dependent switching that caused #246 — a
+burn left ON in the prod **Machine** env painted QR on the LIVE broadcast, and genlock left in a test
+state. The settings below are PINNED in the script; do NOT improvise them.
+
+Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to the Windows boxes is DENIED, so the OBS side is
+PRINTED as the exact `launch-obs-genlock.sh --mode` step to paste into the box's win-* MCP Shell):
+
+```bash
+scripts/rig-mode.sh test     # rig INTO test mode (paint QR + print OBS burns-ON step)
+scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS burns-OFF step)
+```
+
+**TEST mode (pinned):**
+- **cam2 (10.77.9.62):** `systemctl stop camera-box` (frees /dev/fb0) → launch the painter
+  `frame-probe --paint-only --dual-qr --qr-size 700 --duration-secs N` (700px = the validated
+  vernier), PID → `/run/rig-painter.pid`. Painter binary = `/usr/local/bin/frame-probe` from the CI
+  `probe-tools-linux-amd64` artifact (`gh run download <run> -n probe-tools-linux-amd64` → scp to
+  cam2); TEST mode **FAILS LOUD** if it is absent. For a measurement run add `PAINTER_EXTRA_FLAGS="--wall-clock --run-id <N>"`.
+- **cam1 (10.77.9.61):** NOT reconfigured — runs its DEPLOYED service (already 30 fps / certified v4l2
+  saturation=0 contrast=75), the multitap/recording convention.
+- **strih + stream OBS:** `scripts/launch-obs-genlock.sh --box {strih|stream} --mode test --force` —
+  burns ON in the **LAUNCH SHELL ONLY** (NEVER Machine): `OBS_BURN_QR=1`, `OBS_BURN_QR_PX=300`,
+  `OBS_BURN_RUN_ID` = 911002 (strih) / 911004 (stream). Genlock env stays from Machine. Then confirm
+  the PHASE2-PROBE scene + native-1080p recording (#225).
+
+**EVENT mode (pinned — the #246 guard):**
+- **cam2:** stop the painter via its PID file (NOT `pkill -f frame-probe` — a shell whose cmdline
+  contains "frame-probe" would self-kill; `pkill -x frame-probe` is the safe fallback) →
+  `systemctl start camera-box` → verify active + `--display` restored (re-holds /dev/fb0).
+- **strih + stream OBS:** `scripts/launch-obs-genlock.sh --box {strih|stream} --mode event --force` —
+  burns CLEARED in the launch shell AND asserted ABSENT from Machine; the wrapper **REFUSES to launch
+  (exit 8)** if any `OBS_BURN_*` is set Machine-wide. PROD genlock latency stays from Machine
+  (currently FRAME mode: `OBS_GENLOCK_LATENCY_MS=0`, per-source preload).
+
+**Burn run_ids are the single source of truth** in `src/probe/recording_latency.rs`
+(`BURN_RUN_ID_STRIH=911002`, `BURN_RUN_ID_STREAM=911004`, `BURN_RUN_ID_CAM1=911001`), mirrored by
+`launch-obs-genlock.sh::burn_run_id_for_box`. **NEVER set `OBS_BURN_*` in Machine scope** — it
+survives reboot and is exactly the #246 live-broadcast contamination. The cam-box root pw is `$CAM_PW`
+(dev-rig LAN default, as in the sibling e2e scripts — override from your password store).
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).
