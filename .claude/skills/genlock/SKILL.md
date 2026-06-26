@@ -8,7 +8,43 @@ description: >
 
 # Genlock
 
-## Genlock latency = ONE knob in MS (#235) — `OBS_GENLOCK_LATENCY_MS`
+## #257 — PRODUCTION-SAFE HARD-LOCK (the CURRENT state; supersedes the env model below)
+
+**The genlock build is hard-locked and ENV-FREE. There is NO `OBS_GENLOCK_*` / `OBS_BURN_*` env any
+more** — the old env knobs were removed in #257. The current model:
+
+- **Render tick + ts-align are ALWAYS ON in the build** (`obs-video.c genlock_tick_enabled` /
+  `obs-source.c genlock_ts_align_enabled` just `return true`). No `OBS_GENLOCK_WALL_CLOCK` /
+  `OBS_GENLOCK_TS_ALIGN`. The proof is the OBS-log line `genlock: … render tick ENABLED` (drift-guard
+  capability marker + the launch-wrapper log-verify key on it).
+- **Genlock latency is a BUILD CONST: 3 ms, floor 3** (`GENLOCK_LATENCY_MS_DEFAULT`/`_MIN` = 3 in
+  `obs-source.c`, mirrored in `src/probe/genlock.rs`). No `OBS_GENLOCK_LATENCY_MS` / `_RESERVE_MS`.
+  The PER-SOURCE override is the DistroAV UI int **"Latency (ms)"** (min 3, max 2000, default 3),
+  applied at runtime via `obs_source_set_genlock_latency_ms` (clamps 1→3, 0→3). preload is fully
+  internal/auto (no `OBS_GENLOCK_PRELOAD_FRAMES`).
+- **DistroAV NDI source UI is a HARD WHITELIST** (`ndi_source_getproperties`): exactly four props —
+  `PROP_SOURCE`, `PROP_GENLOCK_FIFO` (Genlock, default ON), `PROP_GENLOCK_LATENCY_MS_SRC`
+  (Latency ms), `PROP_BURN` (Measurement burn, default OFF). Every other DistroAV knob is removed
+  from the UI and FORCED to a certified value (`force_genlock_certified_settings` ← the
+  `GENLOCK_FORCED_SETTINGS` const table, the complement of `GENLOCK_WHITELIST_PROPS`).
+- **Measurement burn is a per-source `genlock_burn` bool, runtime, NO restart** — toggled over OBS
+  WebSocket `SetInputSettings genlock_burn` (`scripts/obs_burn_filter.py add|remove`, driven by
+  `scripts/rig-mode.sh test|event`). libobs stores it (`obs_source_set/get_genlock_burn`); the QR
+  burn filter reads `obs_source_get_genlock_burn(parent)` each render. run_id/corner come from the
+  box's **host role** (strih 911002/bottom-left, stream 911004/bottom-right — no `OBS_BURN_RUN_ID/
+  _CORNER`), qr size canvas-relative auto (no `OBS_BURN_QR_PX`).
+- **`launch-obs-genlock.sh` is env-free** — relaunch = clear sentinels → Start-Process cwd=bin\64bit
+  → log-verify `render tick ENABLED` + DistroAV. No PEB env check (there is no env to carry). The
+  `--mode test|event` is gone (the burn is a WS toggle, not a relaunch).
+- **drift-guard #246 burn facet** now means "no prod source has `genlock_burn=on`" (read over WS),
+  not "no `OBS_BURN_*` in Machine env". `genlock_wall_clock=1` is a build-default sentinel proven by
+  the capability marker.
+
+The `#235` env model and the `STALE-ENV TRAP` notes below are HISTORY (pre-#257) — there is no
+genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `tests/distroav_genlock_lockdown.rs`,
+`tests/launch_obs_genlock.rs`, `tests/rig_mode.rs`, `tests/drift_guard.rs`, `tests/burn_payload_parity.rs`.
+
+## (HISTORY, pre-#257) Genlock latency = ONE knob in MS (#235) — `OBS_GENLOCK_LATENCY_MS`
 
 **There is now a SINGLE user-facing genlock latency knob: the latency in MILLISECONDS.** The old
 confusing dual model (`OBS_GENLOCK_PRELOAD_FRAMES` whole frames + `OBS_GENLOCK_RESERVE_MS` ms, where

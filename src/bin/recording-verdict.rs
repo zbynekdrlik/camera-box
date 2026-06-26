@@ -101,8 +101,8 @@ struct Args {
     /// Monitor refresh Hz of the painted logical counter.
     #[arg(long, default_value_t = 60.0)]
     refresh_hz: f64,
-    /// #108 per-hop ABSOLUTE latency: the strih node's burn-QR run_id (the value
-    /// `OBS_BURN_RUN_ID` was set to on strih; default mirrors the #111 burn filter).
+    /// #108 per-hop ABSOLUTE latency: the strih node's burn-QR run_id (the reserved per-box
+    /// constant the burn filter derives from the host role, #257; default mirrors the #111 filter).
     /// When present in the strih recording, cam→strih latency is computed
     /// (strih_burn.gen_ts_ns − cam2.gen_ts_ns).
     #[arg(long, default_value_t = BURN_RUN_ID_STRIH)]
@@ -908,8 +908,8 @@ fn report_hop_latency(h: &Option<HopLatency>, label: &str, anchor: &str) -> bool
         None => {
             println!(
                 "=== {label} per-hop ABSOLUTE latency (#108) ===\n  NO SAMPLES — no node burn QR \
-                 paired in the recording(s). Enable the #111 burn (OBS_BURN_QR) on the PROBE scene \
-                 and pass the matching --burn-*-run-id."
+                 paired in the recording(s). Enable the #111/#257 burn (set genlock_burn=on, e.g. \
+                 scripts/rig-mode.sh test) on the PROBE scene and pass the matching --burn-*-run-id."
             );
             false
         }
@@ -1732,8 +1732,8 @@ fn build_and_print_verdict(
         } else {
             println!(
                 "=== #174 FULL-CHAIN burn-id verdict: SKIPPED — no cam1/strih/stream burn QR in the \
-                 stream recording. Set CAMERA_BOX_BURN_RUN_ID on cam1 + OBS_BURN_QR on strih/stream \
-                 (+ --burn-*-run-id) and re-run for the clean per-hop loss + latency."
+                 stream recording. Set CAMERA_BOX_BURN_RUN_ID on cam1 + genlock_burn=on on strih/stream \
+                 (scripts/rig-mode.sh test) (+ --burn-*-run-id) and re-run for the clean per-hop loss + latency."
             );
         }
     }

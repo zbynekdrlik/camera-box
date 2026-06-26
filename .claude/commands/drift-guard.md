@@ -101,12 +101,14 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    $d="$env:APPDATA\obs-studio\logs"
    $f=Get-ChildItem $d -Filter *.txt | Sort-Object LastWriteTime -Desc | Select-Object -First 1
    ((Get-Content $f.FullName) | Where-Object { $_ -match 'genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)' }) -join "`n"
-   # #246 prod burn-env: OBS_BURN_* are TEST-mode only and must NEVER be set in Machine scope (RUN
-   # 235001 set them and QR test-burns drew on the LIVE broadcast). Read the three burn vars from
-   # Machine scope; emit `burn_env=none` when none is set, else a NAME=VALUE list of the set ones.
-   $bn=@('OBS_BURN_QR','OBS_BURN_QR_PX','OBS_BURN_RUN_ID')
-   $set=$bn | ForEach-Object { $v=[System.Environment]::GetEnvironmentVariable($_,'Machine'); if ($v) { "$_=$v" } }
-   if ($set) { "burn_env=" + ($set -join ',') } else { "burn_env=none" }
+   ```
+   # #246/#257 prod burn: the measurement burn is a per-source `genlock_burn` bool (no OBS_BURN_* env
+   # any more) and must NEVER be left ON in prod. Read it over OBS WebSocket (NOT Machine env): for
+   # each program-feeding input, check genlock_burn via the harness from dev1 (the boxes are reachable
+   # over WS, not ssh) — emit `burn_env=none` when no source has it on, else a `SOURCE=on` list:
+   #   for src in "NDI cam5" ... ; do scripts/obs_burn_filter.py check --host <ip> --input "$src"; done
+   #   # any line with burn_on=True -> add "$src=on" to the list; none -> burn_env=none
+   # (The `burn_env` key name is kept for the --compare contract; its value is now the genlock_burn state.)
    ```
 
    **Get the build-under-test's manifest** (the #120 `BUNDLE_MANIFEST.json` shipped inside the genlock
