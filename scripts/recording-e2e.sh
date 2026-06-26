@@ -354,7 +354,7 @@ sleep 6  # let both OBS chains stabilise before recording
 # 'OBS launched with OBS_BURN_QR' tell) + `filter_on_input=<bool>` (the burn attached to the
 # RECORDED program input). FAIL FAST on either being off — no more silently-wasted runs.
 # (Same host=ip=source triples cleanup()'s burn-clear loop uses; the recorded inputs carry the burn.)
-echo "[4/8] #195 pre-record burn-ON gate — burns MUST be ON (OBS_BURN_QR) on strih + stream before recording"
+echo "[4b/8] #195 pre-record burn-ON gate — burns MUST be ON (OBS_BURN_QR) on strih + stream before recording"
 for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
   _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
   # `|| true` so a non-zero exit (e.g. OBS unreachable) does NOT set -e-abort the assignment before
@@ -362,9 +362,10 @@ for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURC
   _chk="$(python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
   echo "    [$_bn burn-check] $_chk"
   if ! printf '%s' "$_chk" | grep -q 'kind_registered=True'; then
-    echo "ERROR: $_bn burns OFF — OBS was NOT launched with OBS_BURN_QR (filter kind absent), so the" >&2
+    echo "ERROR: $_bn burn check failed — the burn filter kind is NOT registered: OBS was not" >&2
+    echo "       launched with OBS_BURN_QR, OR $_bn OBS ($_bip) is unreachable. Either way the" >&2
     echo "       recording would carry NO $_bn burn and the run would be wasted (#195)." >&2
-    echo "       Relaunch OBS in test mode via scripts/rig-mode.sh test, then re-run." >&2
+    echo "       Confirm $_bn OBS is up, then relaunch it in test mode via scripts/rig-mode.sh test." >&2
     exit 1
   fi
   if ! printf '%s' "$_chk" | grep -q 'filter_on_input=True'; then
