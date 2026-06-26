@@ -61,8 +61,10 @@ jobs:
         shell: pwsh
         run: |
           $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
-          if ($src -notmatch [regex]::Escape('getenv("OBS_GENLOCK_PRELOAD_FRAMES")')) {
-            Write-Error "obs-source.c: OBS_GENLOCK_PRELOAD_FRAMES no longer read — #70 genlock preload patch reverted"; exit 1
+          # #257: OBS_GENLOCK_PRELOAD_FRAMES env was removed (preload is internal/auto). The env
+          # read must be GONE; the consume-when-queued gate (#102) stays.
+          if ($src -match [regex]::Escape('getenv("OBS_GENLOCK_PRELOAD_FRAMES")')) {
+            Write-Error "obs-source.c: OBS_GENLOCK_PRELOAD_FRAMES env is BACK — #257 removed all genlock env (preload is internal/auto)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('genlock_decide(source->async_frames.num, preload, source->genlock_filled)')) {
             Write-Error "obs-source.c: genlock_fifo no longer uses the #102 consume-when-queued decision (genlock_decide + startup-fill latch) — the loss fix reverted"; exit 1
@@ -76,7 +78,16 @@ jobs:
           if ($src -notmatch [regex]::Escape('source->genlock_underruns++')) {
             Write-Error "obs-source.c: genlock underrun audit counter missing — #70/#102 patch reverted"; exit 1
           }
-          Write-Output "genlock FIFO consume-when-queued patch present (OBS_GENLOCK_PRELOAD_FRAMES + genlock_decide + startup-fill latch + audit) — OK"
+          # #257: render tick + ts-align are build defaults (always on, no env). Assert both gates
+          # return true unconditionally and no OBS_GENLOCK_WALL_CLOCK / _TS_ALIGN env remains.
+          $vid = (Get-Content "vendor/obs-studio/libobs/obs-video.c" -Raw) -replace '\s+', ' '
+          if ($vid -match [regex]::Escape('getenv("OBS_GENLOCK_WALL_CLOCK")')) {
+            Write-Error "obs-video.c: OBS_GENLOCK_WALL_CLOCK env is BACK — #257 made the render tick a build default (always on)"; exit 1
+          }
+          if ($src -match [regex]::Escape('getenv("OBS_GENLOCK_TS_ALIGN")')) {
+            Write-Error "obs-source.c: OBS_GENLOCK_TS_ALIGN env is BACK — #257 made ts-align a build default (always on)"; exit 1
+          }
+          Write-Output "genlock FIFO consume-when-queued patch present (#102 genlock_decide + startup-fill latch + audit) + render tick/ts-align build-default (#257, no env) — OK"
 
       # #97: assert the per-source runtime preload (video-delay) patch is present in
       # BOTH the vendored libobs (the API + per-source field + raised cap) and the
@@ -101,14 +112,14 @@ jobs:
           if ($obs -notmatch [regex]::Escape('genlock_drop_cap') -and $obs -notmatch [regex]::Escape('genlock_source_drop_cap')) {
             Write-Error "obs-source.c: per-source FIFO drop-cap (genlock_source_drop_cap) missing — #97 reverted"; exit 1
           }
+          # #257: preload is fully INTERNAL — the DistroAV UI slider + the set_preload apply were
+          # removed (the whitelist UI). The libobs setter/field/cap stay (internal auto-derive). The
+          # DistroAV slider must be GONE.
           $ndi = (Get-Content "vendor/distroav/src/ndi-source.cpp" -Raw) -replace '\s+', ' '
-          if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_preload')) {
-            Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_preload — #97 slider inert"; exit 1
+          if ($ndi -match [regex]::Escape('obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD')) {
+            Write-Error "ndi-source.cpp: the legacy genlock-preload slider is BACK — #257 removed it from the whitelist UI"; exit 1
           }
-          if ($ndi -notmatch [regex]::Escape('obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD')) {
-            Write-Error "ndi-source.cpp: the genlock-preload int slider is gone — #97 reverted"; exit 1
-          }
-          Write-Output "per-source genlock preload video-delay patch present (API + per-source field + cap 128 + drop-cap + DistroAV slider + apply) — OK"
+          Write-Output "per-source genlock preload video-delay patch present (libobs API + per-source field + cap 128 + drop-cap; #257 DistroAV slider removed) — OK"
 
       # #245: assert the PER-SOURCE genlock latency (ms) override is present in the
       # vendored source BEFORE the 150-min build, so a `git subtree pull` (#44) that
@@ -141,7 +152,23 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_latency_ms')) {
             Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_latency_ms — #245 field inert"; exit 1
           }
-          Write-Output "per-source genlock latency (ms) override present (libobs API + EXPORT + render-path gate + cap 2000 + DistroAV editable int + apply) — OK"
+          # #257: the latency is a build const with a FLOOR of 3 ms, and genlock is DEFAULT ON.
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_LATENCY_MS_MIN 3')) {
+            Write-Error "obs-source.c: GENLOCK_LATENCY_MS_MIN no longer 3 — #257 latency floor reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_LATENCY_MS_DEFAULT 3')) {
+            Write-Error "obs-source.c: GENLOCK_LATENCY_MS_DEFAULT no longer 3 — #257 build-const latency reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('ms < GENLOCK_LATENCY_MS_MIN ? GENLOCK_LATENCY_MS_MIN')) {
+            Write-Error "obs-source.c: obs_source_set_genlock_latency_ms no longer floors at GENLOCK_LATENCY_MS_MIN (3) — #257 floor reverted (1->3, 0->3)"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ms < PROP_GENLOCK_LATENCY_MS_MIN')) {
+            Write-Error "ndi-source.cpp: ndi_source_update no longer floors the per-source latency at PROP_GENLOCK_LATENCY_MS_MIN (3) — #257 floor reverted"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true)')) {
+            Write-Error "ndi-source.cpp: genlock is no longer DEFAULT ON (PROP_GENLOCK_FIFO default true) — #257 reverted"; exit 1
+          }
+          Write-Output "per-source genlock latency (ms) override present + #257 floor 3 (build const, 1->3/0->3) + genlock default-ON — OK"
 
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
@@ -206,8 +233,10 @@ jobs:
         shell: pwsh
         run: |
           $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
-          if ($src -notmatch [regex]::Escape('getenv("OBS_GENLOCK_TS_ALIGN")')) {
-            Write-Error "obs-source.c: OBS_GENLOCK_TS_ALIGN gate gone — #136 timestamp-aligned release reverted"; exit 1
+          # #257: ts-align is a BUILD DEFAULT (genlock_ts_align_enabled returns true, no env). The
+          # per-source ms gate + the wall-clock guard + the present_ts deadline stay.
+          if ($src -notmatch [regex]::Escape('genlock_ts_align_enabled() || source->genlock_latency_ms > 0')) {
+            Write-Error "obs-source.c: the ts-align release gate is gone — #136/#245 timestamp-aligned release reverted"; exit 1
           }
           if ($src -notmatch [regex]::Escape('genlock_is_wallclock_ts(next_frame->timestamp)')) {
             Write-Error "obs-source.c: #136 wall-clock guard (genlock_is_wallclock_ts) on the ts-align path gone — re-apply"; exit 1
@@ -215,7 +244,7 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock_present_ts(genlock_wall_now_ns(), preload, interval)')) {
             Write-Error "obs-source.c: #136 presentation deadline (genlock_present_ts/genlock_wall_now_ns) gone — re-apply"; exit 1
           }
-          Write-Output "genlock timestamp-aligned release patch present (OBS_GENLOCK_TS_ALIGN + wall-clock guard + present_ts) — OK"
+          Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts) — OK"
 
       # #85: assert the #78 "B′" real-wall-clock emit-timecode patch is present in the
       # vendored DistroAV OUTPUT source BEFORE the 150-min build, so a future `git
@@ -316,28 +345,47 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('force_genlock_certified_settings')) {
             Write-Error "ndi-source.cpp: the #150 certified-value forcer (force_genlock_certified_settings) is gone — a genlock source could come up misconfigured. Re-apply the #150 lockdown"; exit 1
           }
-          # The forcer must set every certified key. Spot-check the critical ones that
-          # caused the live 0-decode (hw_accel, audio) plus the timing trio (sync/bw/latency).
+          # #257: the forcer is driven by the GENLOCK_FORCED_SETTINGS const table (the COMPLEMENT of
+          # the whitelist), not individual obs_data_set calls. Assert every certified key is a table
+          # entry — the critical ones that caused the live 0-decode (hw_accel, audio) + the timing
+          # trio (sync/bw/latency) + ptz (now forced too).
           foreach ($needle in @(
-            'obs_data_set_int(settings, PROP_SYNC, PROP_SYNC_NDI_SOURCE_TIMECODE)',
-            'obs_data_set_int(settings, PROP_BEHAVIOR, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME)',
-            'obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_HIGHEST)',
-            'obs_data_set_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL)',
-            'obs_data_set_bool(settings, PROP_HW_ACCEL, true)',
-            'obs_data_set_bool(settings, PROP_AUDIO, false)',
-            'obs_data_set_bool(settings, PROP_FRAMESYNC, false)',
-            'obs_data_set_bool(settings, PROP_FIX_ALPHA, false)')) {
+            '{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}',
+            '{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}',
+            '{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}',
+            '{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}',
+            '{PROP_HW_ACCEL, true, 0, true}',
+            '{PROP_AUDIO, true, 0, false}',
+            '{PROP_FRAMESYNC, true, 0, false}',
+            '{PROP_FIX_ALPHA, true, 0, false}',
+            '{PROP_PTZ, true, 0, false}')) {
             if ($ndi -notmatch [regex]::Escape($needle)) {
-              Write-Error "ndi-source.cpp: the #150 forcer no longer performs '$needle' — that key could be left misconfigured on the genlock path. Re-apply the full #150 lockdown"; exit 1
+              Write-Error "ndi-source.cpp: GENLOCK_FORCED_SETTINGS no longer pins '$needle' — that key could be left misconfigured on the genlock path. Re-apply the full #150/#257 forcer table"; exit 1
             }
           }
           if ($ndi -notmatch [regex]::Escape('force_genlock_certified_settings(settings)')) {
             Write-Error "ndi-source.cpp: ndi_source_update no longer CALLS force_genlock_certified_settings(settings) — the certified values are not enforced at update time. Re-apply the #150 lockdown"; exit 1
           }
-          if ($ndi -notmatch [regex]::Escape('apply_genlock_lockdown_visibility')) {
-            Write-Error "ndi-source.cpp: the #150 property-visibility lockdown (apply_genlock_lockdown_visibility) is gone — the forced keys would still be user-editable in the UI. Re-apply the #150 lockdown"; exit 1
+          # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
+          # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
+          # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.
+          if ($ndi -match [regex]::Escape('apply_genlock_lockdown_visibility')) {
+            Write-Error "ndi-source.cpp: apply_genlock_lockdown_visibility is BACK — #257 replaced hide-on-lockdown with a hard whitelist (the knob is removed from the UI, not hidden)"; exit 1
           }
-          Write-Output "Genlock NDI-source config lockdown present (force_genlock_certified_settings forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha, called from ndi_source_update, non-essential props hidden via apply_genlock_lockdown_visibility) — OK"
+          if ($ndi -notmatch [regex]::Escape('GENLOCK_WHITELIST_PROPS')) {
+            Write-Error "ndi-source.cpp: the GENLOCK_WHITELIST_PROPS whitelist is gone — #257 hard-lock UI reverted"; exit 1
+          }
+          if ($ndi -match [regex]::Escape('obs_properties_add_list(props, PROP_BEHAVIOR')) {
+            Write-Error "ndi-source.cpp: PROP_BEHAVIOR is BACK in the UI — #257 whitelist exposes only source/Genlock/Latency/burn"; exit 1
+          }
+          # #257: the burn is a per-source bool applied at runtime in ndi_source_update.
+          if ($ndi -notmatch [regex]::Escape('obs_properties_add_bool(props, PROP_BURN')) {
+            Write-Error "ndi-source.cpp: the PROP_BURN measurement-burn toggle is gone from the whitelist UI — #257 reverted"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_burn')) {
+            Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_burn — #257 runtime burn toggle inert"; exit 1
+          }
+          Write-Output "Genlock NDI-source HARD-LOCK present (#257: GENLOCK_FORCED_SETTINGS table forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha/ptz; whitelist UI = source/Genlock/Latency/burn; burn applied at runtime) — OK"
 
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
       # #111: assert the QR render-time burn filter (Path B) is present + build-wired in
@@ -357,14 +405,20 @@ jobs:
           if ($flt -notmatch [regex]::Escape('burn_clock::gen_ts_ns')) {
             Write-Error "ndi-burn-filter.cpp: no longer stamps the RAW render-instant wall-clock gen_ts_ns (burn_clock::gen_ts_ns) — node stamp would not share cam2's RAW painter timebase and #108's cam->strih subtraction would be biased (finding #2)"; exit 1
           }
-          if ($flt -notmatch [regex]::Escape('OBS_BURN_RUN_ID')) {
-            Write-Error "ndi-burn-filter.cpp: per-node run_id no longer env-configurable (OBS_BURN_RUN_ID) — #108 cannot distinguish node-stamp from cam2-stamp (#111 reverted)"; exit 1
+          # #257: the burn is gated by the per-source genlock_burn bool (read LIVE from the parent
+          # source each render), NOT env. The OBS_BURN_* env reads MUST be gone; the run_id/corner come
+          # from the host role; the reserved run_ids (911002/911004) stay.
+          if ($flt -match [regex]::Escape('getenv("OBS_BURN')) {
+            Write-Error "ndi-burn-filter.cpp: OBS_BURN_* env read is BACK — #257 made the burn a per-source genlock_burn bool (no env)"; exit 1
           }
-          if ($flt -notmatch [regex]::Escape('OBS_BURN_QR')) {
-            Write-Error "ndi-burn-filter.cpp: the burn is no longer gated behind OBS_BURN_QR (default OFF) — it must not affect the production install until #108 enables it (#111 reverted)"; exit 1
+          if ($flt -notmatch [regex]::Escape('obs_source_get_genlock_burn')) {
+            Write-Error "ndi-burn-filter.cpp: the burn no longer reads the parent source's genlock_burn flag (obs_source_get_genlock_burn) — #257 runtime burn gate reverted"; exit 1
           }
-          if ($flt -notmatch [regex]::Escape('OBS_BURN_QR_PX')) {
-            Write-Error "ndi-burn-filter.cpp: the OBS_BURN_QR_PX size override is gone — the rig can no longer tune the NDI-survivable QR size (#111 reverted)"; exit 1
+          if ($flt -notmatch [regex]::Escape('BURN_RUN_ID_DEFAULT_STRIH 911002') -or $flt -notmatch [regex]::Escape('BURN_RUN_ID_DEFAULT_STREAM 911004')) {
+            Write-Error "ndi-burn-filter.cpp: the reserved per-node run_ids (911002 strih / 911004 stream) drifted — #108 pairing would break"; exit 1
+          }
+          if ($flt -notmatch [regex]::Escape('burn_host_is_stream')) {
+            Write-Error "ndi-burn-filter.cpp: run_id no longer derived from the host role (burn_host_is_stream) — #257 reverted"; exit 1
           }
           # #111 4-corner layout: the burn MUST be placed in this node's bottom CORNER via the
           # shared corner geometry (strih=bottom-left, stream=bottom-right), NOT a center-bottom
@@ -390,7 +444,7 @@ jobs:
           if (!(Test-Path "vendor/distroav/src/qrcodegen/qrcodegen.hpp")) {
             Write-Error "vendor/distroav/src/qrcodegen/qrcodegen.hpp missing — the vendored QR encoder (Nayuki, MIT) was dropped (#111 reverted)"; exit 1
           }
-          Write-Output "QR render-time burn filter present (burn_payload::encode + gen_ts_ns + OBS_BURN_RUN_ID + OBS_BURN_QR gate + 4-corner burn_geom::corner_placement + registered + CMake-wired + vendored qrcodegen) — OK"
+          Write-Output "QR render-time burn filter present (#257: burn_payload::encode + gen_ts_ns + per-source genlock_burn gate + host-role run_ids 911002/911004 + 4-corner burn_geom::corner_placement + registered + CMake-wired + vendored qrcodegen) — OK"
 
       # dots (cmake received a stray '.1.2' preset path) — bash quoting is exact.
       - name: Configure OBS (windows-x64 preset + genlock build flags)

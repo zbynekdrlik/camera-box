@@ -57,10 +57,14 @@ jobs:
         shell: pwsh
         run: |
           $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
-          if ($src -notmatch [regex]::Escape('getenv("OBS_GENLOCK_TS_ALIGN")')) { Write-Error "OBS_GENLOCK_TS_ALIGN gate gone (#136)"; exit 1 }
+          # #257: ts-align + render tick are build defaults (always on, no env).
+          if ($src -match [regex]::Escape('getenv("OBS_GENLOCK_TS_ALIGN")')) { Write-Error "OBS_GENLOCK_TS_ALIGN env is BACK — #257 made ts-align a build default"; exit 1 }
+          $vid = (Get-Content "vendor/obs-studio/libobs/obs-video.c" -Raw) -replace '\s+', ' '
+          if ($vid -match [regex]::Escape('getenv("OBS_GENLOCK_WALL_CLOCK")')) { Write-Error "OBS_GENLOCK_WALL_CLOCK env is BACK — #257 made the render tick a build default"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_ts_align_enabled() || source->genlock_latency_ms > 0')) { Write-Error "ts-align release gate gone (#136/#245)"; exit 1 }
           if ($src -notmatch [regex]::Escape('genlock_is_wallclock_ts(next_frame->timestamp)')) { Write-Error "wall-clock guard gone (#136)"; exit 1 }
           if ($src -notmatch [regex]::Escape('genlock_present_ts(genlock_wall_now_ns(), preload, interval)')) { Write-Error "present_ts gone (#136)"; exit 1 }
-          Write-Output "#136 timestamp-aligned release patch present — OK"
+          Write-Output "#136/#257 ts-align + render tick build-default (no env) present — OK"
 
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`
       # (#44) that reverts #245 to inert-but-still-compiling would hot-swap an INERT obs.dll un-gated
@@ -92,7 +96,20 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_latency_ms')) {
             Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_latency_ms — #245 field inert"; exit 1
           }
-          Write-Output "per-source genlock latency (ms) override present (libobs API + EXPORT + render-path gate + cap 2000 + DistroAV editable int + apply) — OK"
+          # #257: build-const latency floor 3 + genlock default-ON + hard-whitelist UI + runtime burn.
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_LATENCY_MS_MIN 3')) { Write-Error "obs-source.c: GENLOCK_LATENCY_MS_MIN no longer 3 — #257 floor reverted"; exit 1 }
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_LATENCY_MS_DEFAULT 3')) { Write-Error "obs-source.c: GENLOCK_LATENCY_MS_DEFAULT no longer 3 — #257 build-const reverted"; exit 1 }
+          if ($obs -notmatch [regex]::Escape('ms < GENLOCK_LATENCY_MS_MIN ? GENLOCK_LATENCY_MS_MIN')) { Write-Error "obs-source.c: setter no longer floors at 3 (#257)"; exit 1 }
+          if ($obs -notmatch [regex]::Escape('void obs_source_set_genlock_burn(obs_source_t *source, bool')) { Write-Error "obs-source.c: obs_source_set_genlock_burn missing — #257 runtime burn API reverted"; exit 1 }
+          if ($api -notmatch [regex]::Escape('EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool')) { Write-Error "obs.h: obs_source_set_genlock_burn not EXPORTed — #257 DistroAV cannot resolve the burn setter"; exit 1 }
+          if ($ndi -match [regex]::Escape('apply_genlock_lockdown_visibility')) { Write-Error "ndi-source.cpp: apply_genlock_lockdown_visibility is BACK — #257 hard whitelist replaced it"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('GENLOCK_WHITELIST_PROPS')) { Write-Error "ndi-source.cpp: GENLOCK_WHITELIST_PROPS gone — #257 hard-lock UI reverted"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true)')) { Write-Error "ndi-source.cpp: genlock no longer default-ON — #257 reverted"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_burn')) { Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_burn — #257 burn inert"; exit 1 }
+          $flt = (Get-Content "vendor/distroav/src/ndi-burn-filter.cpp" -Raw) -replace '\s+', ' '
+          if ($flt -match [regex]::Escape('getenv("OBS_BURN')) { Write-Error "ndi-burn-filter.cpp: OBS_BURN_* env is BACK — #257 made the burn a per-source bool"; exit 1 }
+          if ($flt -notmatch [regex]::Escape('obs_source_get_genlock_burn')) { Write-Error "ndi-burn-filter.cpp: burn no longer reads the parent genlock_burn flag — #257 reverted"; exit 1 }
+          Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn — OK"
 
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.
