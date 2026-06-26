@@ -454,24 +454,24 @@ drift_check_capability() {
   return 2
 }
 
-# drift_check_burn_env OBSERVED -> the #246 prod burn-env guard. The QR test-burns
-# (OBS_BURN_QR / OBS_BURN_QR_PX / OBS_BURN_RUN_ID) are TEST-mode ONLY and must NEVER be set in the
-# prod Machine environment — RUN 235001 set them into Machine scope on stream + strih and never
-# cleaned up, so QR test-burns drew on the LIVE broadcast (Machine scope survives reboot). OBSERVED
-# is the burn-env state gathered read-only off the box (see .claude/commands/drift-guard.md): the
-# literal "none" when no burn var is set, or a comma-separated `NAME=VALUE` list of every burn var
-# that IS set. Returns 0 OK (none set) / 2 DRIFT (any burn var present) / 3 UNKNOWN (empty — not
-# read; never a silent clean). An entry with an EMPTY value (var exists but blank) is NOT set
-# (skipped) — so a gather that reports `OBS_BURN_QR=` for an unset var is correctly clean. Burn
-# names contain no commas, so the CSV split is unambiguous (same convention as drift_check_inputs).
+# drift_check_burn_env OBSERVED -> the #246/#257 prod burn guard. The QR measurement burn is
+# TEST-mode ONLY and must NEVER be left ON in prod. #257 made it a per-source `genlock_burn` bool
+# (no OBS_BURN_* env any more), toggled over OBS WebSocket — so the check is now "no prod source has
+# genlock_burn=on", read read-only off the box over WebSocket (see .claude/commands/drift-guard.md):
+# OBSERVED is the literal "none" when no source has the burn on, or a comma-separated `SOURCE=on`
+# list of every source whose genlock_burn IS on. Returns 0 OK (none on) / 2 DRIFT (any source on) /
+# 3 UNKNOWN (empty — not read; never a silent clean). An entry with an EMPTY value is NOT set
+# (skipped). Source/var names contain no commas, so the CSV split is unambiguous. (The `burn_env`
+# label + key name are kept for back-compat with the --compare contract; the VALUE it carries is now
+# the per-source genlock_burn state, not Machine env.)
 drift_check_burn_env() {
   local observed="$1" entry name val set_count=0
   if [ -z "$observed" ]; then
-    printf '  %-20s UNKNOWN  (prod burn-env not read — expected no OBS_BURN_* set)\n' "burn_env"
+    printf '  %-20s UNKNOWN  (prod burn state not read — expected no source genlock_burn=on)\n' "burn_env"
     return 3
   fi
   if [ "$observed" = "none" ]; then
-    printf '  %-20s OK       (no OBS_BURN_* set in prod Machine env)\n' "burn_env"
+    printf '  %-20s OK       (no prod source has genlock_burn=on)\n' "burn_env"
     return 0
   fi
   local OLDIFS="$IFS"; IFS=','
@@ -485,18 +485,17 @@ drift_check_burn_env() {
     name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
     val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
     [ -z "$name" ] && continue
-    # A var present but with an empty value is NOT actually set — skip it (never a false DRIFT).
-    # (A real burn var always carries a concrete value — OBS_BURN_QR=1, _PX=300, _RUN_ID=911002;
-    # an all-whitespace value never occurs in any flow, and the gather emits a var only when set to
-    # a non-empty value, so the trimmed-empty skip cannot mask a genuine burn.)
+    # An entry present but with an empty value is NOT actually on — skip it (never a false DRIFT).
+    # (The gather emits a source only when genlock_burn is genuinely on, e.g. `NDI cam5=on`, so the
+    # trimmed-empty skip cannot mask a genuine prod burn.)
     [ -z "$val" ] && continue
-    printf '  burn %-20s DRIFT    (test-burn var set in prod Machine env: %s=%s)\n' "$name" "$name" "$val"
+    printf '  burn %-20s DRIFT    (prod source has the measurement burn ON: %s=%s)\n' "$name" "$name" "$val"
     set_count=$((set_count + 1))
   done
   if [ "$set_count" -gt 0 ]; then
     return 2
   fi
-  printf '  %-20s OK       (no OBS_BURN_* set in prod Machine env)\n' "burn_env"
+  printf '  %-20s OK       (no prod source has genlock_burn=on)\n' "burn_env"
   return 0
 }
 
@@ -567,12 +566,14 @@ Usage:
     partial/corrupted deploy where even one non-DLL file is stale can never pass. Dormant unless
     supplied (the #122 two-DLL contract is unchanged for the hot-swap obs.dll-only verify path).
 
---compare prod burn-env key (#246, opt-in — supply `burn_env` to activate):
-  burn_env (the prod Machine burn-env state read read-only off the box — the literal "none" when
-    NO OBS_BURN_QR / OBS_BURN_QR_PX / OBS_BURN_RUN_ID is set, or a comma-separated NAME=VALUE list
-    of every burn var that IS set). Test-burns are TEST-mode only; ANY set in the prod Machine env
-    draws QR test-burns onto the LIVE broadcast (RUN 235001) -> DRIFT (exit 20). Dormant unless
-    supplied (every historic --compare call is unchanged); the /drift-guard command always feeds it.
+--compare prod burn key (#246/#257, opt-in — supply `burn_env` to activate):
+  burn_env (the prod per-source MEASUREMENT-BURN state, read read-only off the box over OBS
+    WebSocket — #257 made the burn a per-source `genlock_burn` bool, no OBS_BURN_* env any more).
+    The literal "none" when NO source has genlock_burn=on, or a comma-separated `SOURCE=on` list of
+    every source whose burn IS on. The burn is TEST-mode only; ANY source left ON in prod draws QR
+    test-burns onto the LIVE broadcast (RUN 235001) -> DRIFT (exit 20). Dormant unless supplied
+    (every historic --compare call is unchanged); the /drift-guard command always feeds it. (The key
+    name `burn_env` is kept for --compare back-compat; the value is now the genlock_burn state.)
 
 --status keys: host, genlock_wall_clock, genlock_capability, burn_env — a read-only ONE-PLACE dump
   of the genlock gate + build marker + burn state (always exit 0; --compare is the fail-loud gate;
@@ -754,10 +755,11 @@ compare_observed() {
     fi
   fi
 
-  # Prod burn-env guard (#246): OBS_BURN_* are TEST-mode only; ANY set in the prod Machine env draws
-  # QR test-burns onto the LIVE broadcast (RUN 235001). Opt-in: runs only when burn_env= is supplied
-  # (so every historic --compare call is unchanged), exactly like the manifest facet. The
-  # /drift-guard command always feeds burn_env for the prod boxes (none / a NAME=VALUE list).
+  # Prod burn guard (#246/#257): the measurement burn is TEST-mode only; ANY prod source left with
+  # genlock_burn=on draws QR test-burns onto the LIVE broadcast (RUN 235001). #257 made it a
+  # per-source bool over OBS WebSocket (no OBS_BURN_* env). Opt-in: runs only when burn_env= is
+  # supplied (so every historic --compare call is unchanged); the /drift-guard command always feeds
+  # it for the prod boxes (none / a `SOURCE=on` list, gathered over WS).
   if [ -n "$o_burn" ]; then
     rc=0
     drift_check_burn_env "$o_burn" || rc=$?
@@ -791,11 +793,13 @@ status_surface() {
   local host="$1" o_genlock="$2" o_capability="$3" o_burn="$4"
   echo "== drift-guard --status  host=${host:-?}  (read-only genlock + burn state) =="
 
-  # genlock master gate (the wall-clock render tick).
+  # genlock master gate (the wall-clock render tick). #257: this is a BUILD DEFAULT (always on, no
+  # env) proven by the capability marker below; the genlock_wall_clock value is the build-default
+  # sentinel "1" (no longer an OBS_GENLOCK_WALL_CLOCK env read).
   if [ -z "$o_genlock" ]; then
-    printf '  %-20s UNKNOWN  (genlock_wall_clock not read)\n' "genlock_gate"
+    printf '  %-20s UNKNOWN  (genlock gate not read)\n' "genlock_gate"
   elif [ "$o_genlock" = "1" ]; then
-    printf '  %-20s ENABLED  (wall-clock render tick on)\n' "genlock_gate"
+    printf '  %-20s ENABLED  (wall-clock render tick on — build default, #257)\n' "genlock_gate"
   else
     printf '  %-20s DISABLED (observed %s)\n' "genlock_gate" "$o_genlock"
   fi
@@ -809,11 +813,12 @@ status_surface() {
     printf '  %-20s STOCK?   (no genlock capability marker in the supplied log)\n' "genlock_build"
   fi
 
-  # burn state (#246) — the one fact that draws QR onto the live broadcast if wrong.
+  # burn state (#246/#257) — the one fact that draws QR onto the live broadcast if wrong. #257: the
+  # per-source genlock_burn state (read over WS), not OBS_BURN_* Machine env.
   if [ -z "$o_burn" ]; then
-    printf '  %-20s UNKNOWN  (burn_env not read)\n' "burn_env"
+    printf '  %-20s UNKNOWN  (burn state not read)\n' "burn_env"
   elif [ "$o_burn" = "none" ]; then
-    printf '  %-20s CLEAN    (no OBS_BURN_* set)\n' "burn_env"
+    printf '  %-20s CLEAN    (no source genlock_burn=on)\n' "burn_env"
   else
     printf '  %-20s SET!     (%s)\n' "burn_env" "$o_burn"
   fi

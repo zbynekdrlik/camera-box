@@ -103,12 +103,18 @@ pub const GENLOCK_RESERVE_MS_MAX: u32 = 100;
 // * Display ([`format_latency_label`]) is "N ms (≈ M frames @ Ffps)" — ms primary,
 //   the whole-frame equivalent ([`ms_to_frames`]) in parentheses (the user's ask).
 
-/// (#235) Default canonical genlock latency in ms when neither `OBS_GENLOCK_LATENCY_MS`
-/// nor the back-compat alias `OBS_GENLOCK_RESERVE_MS` is set: `0` = no ms latency, so
-/// the release falls back to the whole-frame preload path exactly as before (full
-/// back-compat with a deploy that sets neither env). Same value/meaning as
-/// [`GENLOCK_RESERVE_MS_DEFAULT`].
-pub const GENLOCK_LATENCY_MS_DEFAULT: u32 = GENLOCK_RESERVE_MS_DEFAULT;
+/// (#257) The genlock latency is now a BUILD CONST — no `OBS_GENLOCK_LATENCY_MS` /
+/// `OBS_GENLOCK_RESERVE_MS` env any more. Default AND floor are 3 ms (the validated
+/// zero-loss held latency). Mirrors the C `#define GENLOCK_LATENCY_MS_DEFAULT 3`. The
+/// legacy [`resolve_latency_ms`] / [`parse_reserve_ms`] strtol parsers are kept as pure
+/// helpers (still unit-tested) but the C side no longer feeds them from env.
+pub const GENLOCK_LATENCY_MS_DEFAULT: u32 = 3;
+
+/// (#257) Hard FLOOR for the per-source genlock latency (ms) — the OBS UI min and the
+/// `obs_source_set_genlock_latency_ms` setter clamp both pin it (1 → 3, 0 → 3). Mirrors
+/// the C `#define GENLOCK_LATENCY_MS_MIN 3`. There is no "0 = follow global" any more;
+/// 3 ms is the minimum held latency.
+pub const GENLOCK_LATENCY_MS_MIN: u32 = 3;
 
 /// (#235) Hard cap on the canonical GLOBAL genlock latency (ms) — the SAME ceiling as
 /// the aliased reserve ([`GENLOCK_RESERVE_MS_MAX`] = 100 ms ≈ 3 frames @ 30 fps). This

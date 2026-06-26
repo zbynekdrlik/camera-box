@@ -1570,6 +1570,13 @@ EXPORT uint32_t obs_source_get_genlock_preload(const obs_source_t *source);
 EXPORT void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms);
 EXPORT uint32_t obs_source_get_genlock_latency_ms(const obs_source_t *source);
 
+/* camera-box #257: per-source MEASUREMENT-BURN toggle (runtime, no OBS restart). Set from
+ * the DistroAV PROP_BURN field via ndi_source_update; the QR burn filter reads it each
+ * render (obs_source_get_genlock_burn(parent)) to gate the QR composite. Default OFF; ON
+ * only in TEST mode. A plain bool (same shape as obs_source_set_genlock_fifo). */
+EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool enabled);
+EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */

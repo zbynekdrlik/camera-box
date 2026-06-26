@@ -8,7 +8,8 @@
 # This script is the SINGLE SOURCE OF TRUTH: identical pinned settings every time, no improvisation.
 #
 # WHAT IT DOES — the CAM side is automated here (ssh to the cam boxes is ALLOWED); the Windows OBS
-# side is PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step to run via the win-*
+# burn is toggled DIRECTLY over OBS WebSocket (scripts/obs_burn_filter.py — the harness has WS access);
+# the env-free genlock relaunch (no --mode) is PRINTED to run via the win-*
 # MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
 #
 #   TEST  : cam2 — stop camera-box (frees /dev/fb0), launch the PINNED dual-QR vernier painter
@@ -156,34 +157,68 @@ echo "PASS: painter stopped, camera-box active + --display restored (holding /de
 REMOTE
 }
 
-# print_obs_step MODE -> the exact Windows-OBS step for this mode. ssh/scp to Windows is DENIED, so the
-# operator/agent runs the #128 wrapper PER BOX and pastes each printed PowerShell program into the
-# box's win-* MCP Shell. The wrapper owns the per-box burn run_id + the #246 Machine-clean guard.
-print_obs_step() {
+# --- #257 per-box measurement-burn WebSocket toggle (NO OBS relaunch) ----------------------------
+# #257 replaced the launch-shell OBS_BURN_* env (the old --mode test/event relaunch) with a per-source
+# `genlock_burn` bool flipped over OBS WebSocket — so TEST/EVENT no longer relaunch OBS to change the
+# burn. The harness HAS websocket access to both boxes (ssh does NOT — that's why genlock RELAUNCH is
+# still printed, not run), so rig-mode toggles the burn DIRECTLY via scripts/obs_burn_filter.py.
+#
+# The per-box burn targets (host=ip, input=the program-feeding NDI source the recording captures).
+# Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
+STRIH_IP="${STRIH_IP:-10.77.9.202}"
+STREAM_IP="${STREAM_IP:-10.77.9.204}"
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"      # strih program input (#246 burn target)
+STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (#246 burn target)
+OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
+
+# obs_burn_targets -> the host=ip=source burn triples, one per line "ip|source|box".
+obs_burn_targets() {
+  printf '%s|%s|%s\n' "$STRIH_IP" "$STRIH_PROG_SOURCE" strih
+  printf '%s|%s|%s\n' "$STREAM_IP" "$STREAM_PROG_SOURCE" stream
+}
+
+# burn_action_for_mode MODE -> the obs_burn_filter.py action (test=add/on, event=remove/off).
+burn_action_for_mode() {
+  case "${1:-}" in
+    test)  printf 'add' ;;
+    event) printf 'remove' ;;
+    *) echo "burn_action_for_mode: unknown mode '${1:-}' (expected test|event)" >&2; return 2 ;;
+  esac
+}
+
+# toggle_burn MODE -> flip the per-source genlock_burn on (test) / off (event) on BOTH boxes over
+# OBS WebSocket (no relaunch), fail-loud on any box. The genlock build is hard-locked (#257), so the
+# only mode-specific OBS state is this burn bool; the genlock render tick is the build default.
+toggle_burn() {
+  local mode="$1" action here rc=0
+  action="$(burn_action_for_mode "$mode")"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  while IFS='|' read -r ip src box; do
+    [ -n "$ip" ] || continue
+    echo "[obs ${box} ${ip}] genlock_burn ${action} on '${src}' (WebSocket, no relaunch)"
+    python3 "$here/obs_burn_filter.py" "$action" --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" \
+      2>&1 | sed "s/^/    [${box} burn] /" || rc=$?
+  done < <(obs_burn_targets)
+  return $rc
+}
+
+# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — ssh to Windows is
+# DENIED so OBS launch goes via the win-* MCP). #257: env-free; the wrapper just verifies the genlock
+# render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
+print_genlock_relaunch_note() {
   local mode="$1"
   cat <<EOF
-# ---- Windows OBS ${mode}-mode step (ssh to Windows is DENIED — the wrapper drives the win-* MCP) ----
-# Run the #128 genlock wrapper PER BOX with --mode ${mode}; paste each printed PowerShell program into
-# that box's win-* MCP Shell. --force force-kills a wedged obs64 first (DEV rig).
-#   strih  : scripts/launch-obs-genlock.sh --box strih  --mode ${mode} --force
-#   stream : scripts/launch-obs-genlock.sh --box stream --mode ${mode} --force
+# ---- Windows OBS genlock relaunch (only if OBS is not already running; ssh denied -> win-* MCP) ----
+# The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
+# genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
+# relaunch is only needed to (re)start a stopped/wedged OBS. Per box, paste the printed program into
+# that box's win-* MCP Shell:
+#   strih  : scripts/launch-obs-genlock.sh --box strih  --force
+#   stream : scripts/launch-obs-genlock.sh --box stream --force
+# Then confirm (per the e2e / obs-ops playbook skills): the right scene (PHASE2-PROBE for test, prod
+# for event), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
+# log shows the genlock render tick ENABLED.
 EOF
-  if [ "$mode" = "test" ]; then
-    cat <<'EOF'
-# The wrapper pins burns ON in the LAUNCH SHELL ONLY (never Machine): OBS_BURN_QR=1, OBS_BURN_QR_PX=300,
-# OBS_BURN_RUN_ID=911002 (strih) / 911004 (stream). Genlock env stays from Machine as today.
-# Then confirm (per the e2e / obs-ops playbook skills): PHASE2-PROBE scene selected, recording is
-# NATIVE 1080p (#225 — ffprobe the file = 1920x1080), DanteSync locked. The OBS program EXITS 0 only
-# when the burns + render tick are verified in the launched obs64.
-EOF
-  else
-    cat <<'EOF'
-# The wrapper clears OBS_BURN_* in the launch shell AND refuses to launch if ANY OBS_BURN_* is set in
-# Machine scope (the #246 readiness guard — a Machine-scope burn survives reboot and paints QR on the
-# LIVE broadcast). Then confirm the prod scene + the pinned PROD genlock latency per the obs-ops skill.
-# The OBS program EXITS 0 only when the child obs64 carries NO OBS_BURN_* and the render tick is on.
-EOF
-  fi
 }
 
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------------
@@ -201,11 +236,12 @@ Usage:
   scripts/rig-mode.sh test     # paint the dual-QR vernier on cam2 + print the OBS burns-ON step
   scripts/rig-mode.sh event    # stop the QR, restore camera-box --display + print the OBS burns-OFF step
 
-The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The Windows OBS side is PRINTED
-as the exact `launch-obs-genlock.sh --mode {test|event}` step (ssh to Windows is denied — run it via
-the win-* MCP). See the script header for env overrides.
+The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The OBS burn is toggled DIRECTLY
+over OBS WebSocket (scripts/obs_burn_filter.py — no relaunch); the env-free genlock relaunch (no
+--mode) is PRINTED to run via the win-* MCP (ssh to Windows is denied). See the script header for
+env overrides.
 
-Exit codes: 0 = mode applied (cam side verified) + OBS step printed; 2 = usage error.
+Exit codes: 0 = mode applied (cam side + burn WS toggle) + relaunch note printed; 2 = usage error.
 EOF
 }
 
@@ -223,31 +259,37 @@ cam_ssh() {
 
 do_test() {
   require_sshpass
-  echo "===== rig-mode TEST (#247) — paint dual-QR vernier on cam2, burns ON downstream ====="
+  echo "===== rig-mode TEST (#247/#257) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo "[cam2 ${PAINTER_IP}] stop camera-box -> free /dev/fb0 -> launch PINNED painter (qr=${QR_SIZE}px)"
   cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS")"
   echo
-  print_obs_step test
+  echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
+  toggle_burn test
+  echo
+  print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
-  echo "NEXT: run the two launch-obs-genlock.sh --mode test commands above (win-* MCP), confirm the"
-  echo "      PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> rig in TEST mode."
-  echo "RESULT: TEST mode — cam side PASS."
+  echo "ACHIEVED (obs side): genlock_burn=true on strih + stream program inputs (WebSocket, no relaunch)."
+  echo "NEXT: confirm the PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> TEST mode."
+  echo "RESULT: TEST mode — cam side PASS, burns ON."
 }
 
 do_event() {
   require_sshpass
-  echo "===== rig-mode EVENT (#247) — stop QR, restore clean broadcast, burns OFF + #246 guard ====="
+  echo "===== rig-mode EVENT (#247/#257) — stop QR, restore clean broadcast, genlock_burn OFF ====="
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> restart camera-box -> verify --display restored"
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
   echo
-  print_obs_step event
+  echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
+  toggle_burn event
+  echo
+  print_genlock_relaunch_note event
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + --display interkom restored."
-  echo "NEXT: run the two launch-obs-genlock.sh --mode event commands above (win-* MCP) — they REFUSE to"
-  echo "      launch if any OBS_BURN_* is set in Machine (the #246 guard) -> rig in clean EVENT mode."
-  echo "RESULT: EVENT mode — cam side PASS."
+  echo "ACHIEVED (obs side): genlock_burn=false on strih + stream program inputs (WebSocket, no relaunch)."
+  echo "NEXT: confirm the prod scene per the obs-ops skill -> rig in clean EVENT mode (no burn on broadcast)."
+  echo "RESULT: EVENT mode — cam side PASS, burns OFF."
 }
 
 main() {

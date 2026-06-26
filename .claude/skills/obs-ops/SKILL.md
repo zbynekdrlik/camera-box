@@ -10,6 +10,21 @@ description: >
 
 Canonical extended reference: `/home/newlevel/devel/restreamer/.claude/skills/stream-lan-operations.md`
 
+## #257 — genlock is HARD-LOCKED + ENV-FREE (read this first; supersedes the env model below)
+
+The genlock build no longer uses ANY `OBS_GENLOCK_*` / `OBS_BURN_*` env (removed in #257). So the
+PEB-env-verify sections below are HISTORY — `launch-obs-genlock.sh` no longer carries or checks env.
+Current ops:
+
+- **Relaunch OBS:** `scripts/launch-obs-genlock.sh --box strih|stream [--force]` — env-free; it
+  clears sentinels, launches cwd=bin\64bit, and log-verifies `genlock: … render tick ENABLED` (the
+  build-default proof) + DistroAV. There is no `--mode`, no PEB env check.
+- **Genlock config:** render tick + ts-align are build defaults (always on); latency is a build
+  const (3 ms, floor 3) with the per-source override in the DistroAV source UI ("Latency (ms)").
+- **Measurement burn:** a per-source `genlock_burn` bool toggled over OBS WebSocket with NO relaunch
+  — `scripts/obs_burn_filter.py add|remove --host <ip> --input "<NDI input>"`, or
+  `scripts/rig-mode.sh test|event` for both boxes. (No `OBS_BURN_QR` relaunch.) See the genlock skill.
+
 ## Launch Requirements
 
 **cwd MUST be `C:\Program Files\obs-studio\bin\64bit`** — wrong cwd produces

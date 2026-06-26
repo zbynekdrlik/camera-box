@@ -281,9 +281,10 @@ static void register_plugin_features()
 
 	obs_log(LOG_DEBUG, "Plugin features registered: Alpha filter");
 
-	// #111: register the QR render-time burn filter (the #108 per-hop latency probe
-	// foundation). Inert by default — its render path is a transparent pass-through
-	// until OBS_BURN_QR is set, so registering it on the production install is safe.
+	// #111/#257: register the QR render-time burn filter (the #108 per-hop latency probe
+	// foundation). Inert by default — its render path is a transparent pass-through until the
+	// parent source's per-source genlock_burn flag is set (runtime, no env, no restart), so
+	// registering it on the production install is safe.
 	ndi_burn_filter_info = create_ndi_burn_filter_info();
 	obs_register_source(&ndi_burn_filter_info);
 

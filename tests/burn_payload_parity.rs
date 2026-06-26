@@ -846,12 +846,12 @@ fn burn_filter_source_is_vendored_and_wired() {
          gen_ts_ns (burn_clock::gen_ts_ns); the node stamp would not share cam2's RAW \
          painter timebase and #108's cam→strih subtraction would be biased (finding #2)."
     );
-    // Node identity: the run_id is env-overridable (OBS_BURN_RUN_ID) with the reserved
-    // strih/stream defaults that sit OUTSIDE cam2's range so #108 distinguishes nodes.
+    // #257: node identity (run_id) is derived from the HOST ROLE (no OBS_BURN_RUN_ID env), with the
+    // reserved strih/stream defaults that sit OUTSIDE cam2's range so #108 distinguishes nodes.
     assert!(
-        flt.contains("OBS_BURN_RUN_ID"),
-        "{BURN_FILTER}: the per-node run_id is no longer env-configurable via \
-         OBS_BURN_RUN_ID; #108 cannot distinguish node-stamp from cam2-stamp. #111 reverted."
+        flt.contains("burn_host_is_stream"),
+        "{BURN_FILTER}: #257 — the per-node run_id is no longer derived from the host role \
+         (burn_host_is_stream); re-apply."
     );
     assert!(
         flt.contains("911002"),
@@ -861,18 +861,16 @@ fn burn_filter_source_is_vendored_and_wired() {
         flt.contains("911004"),
         "{BURN_FILTER}: the reserved stream node run_id default (911004) is gone."
     );
-    // Gated behind an env var, default OFF on prod (mirrors OBS_GENLOCK_WALL_CLOCK).
+    // #257: the burn is gated by the per-source genlock_burn bool (read LIVE from the parent each
+    // render), NOT an OBS_BURN_QR env. The env reads MUST be gone; the runtime gate must be present.
     assert!(
-        flt.contains("OBS_BURN_QR"),
-        "{BURN_FILTER}: the burn is no longer gated behind an env var (OBS_BURN_QR); it \
-         must default OFF so the production install is unaffected until #108 enables it."
+        !flt.contains("getenv(\"OBS_BURN"),
+        "{BURN_FILTER}: #257 — an OBS_BURN_* env read is BACK; the burn is a per-source bool (no env)."
     );
-    // The QR pixel size is tunable per-rig (OBS_BURN_QR_PX) so the operator can pick a
-    // size that survives the NDI re-compression at the OBS outputs.
     assert!(
-        flt.contains("OBS_BURN_QR_PX"),
-        "{BURN_FILTER}: the OBS_BURN_QR_PX size override is gone — the rig can no longer \
-         tune the NDI-survivable QR size. #111 reverted."
+        flt.contains("obs_source_get_genlock_burn"),
+        "{BURN_FILTER}: #257 — the burn no longer reads the parent source's genlock_burn flag \
+         (obs_source_get_genlock_burn); the runtime gate is inert. Re-apply."
     );
     // (#111 4-corner layout) The burn MUST be placed in this node's bottom CORNER via the
     // shared corner geometry, NOT the old full-width center-bottom strip — otherwise the

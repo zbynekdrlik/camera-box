@@ -823,17 +823,19 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
 
 static bool genlock_tick_enabled(void)
 {
-	static int enabled = -1;
-	if (enabled == -1) {
-		const char *v = getenv("OBS_GENLOCK_WALL_CLOCK");
-		enabled = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
-		if (enabled)
-			blog(LOG_INFO,
-			     "genlock: wall-clock-slaved render tick ENABLED "
-			     "(OBS_GENLOCK_WALL_CLOCK, slew cap %d ns/tick)",
-			     GENLOCK_MAX_SLEW_NS);
+	/* camera-box #257: the wall-clock-slaved render tick is ALWAYS ON in the fork build
+	 * — no OBS_GENLOCK_WALL_CLOCK env gate. The fork exists to be genlocked in production;
+	 * a stock-OBS free-running tick is never wanted here. Logged once at launch (the
+	 * `render tick ENABLED` line drift-guard.sh + launch-obs-genlock.sh key on). */
+	static int logged = -1;
+	if (logged == -1) {
+		logged = 1;
+		blog(LOG_INFO,
+		     "genlock: wall-clock-slaved render tick ENABLED "
+		     "(build default, slew cap %d ns/tick) (#257)",
+		     GENLOCK_MAX_SLEW_NS);
 	}
-	return enabled == 1;
+	return true;
 }
 
 static uint64_t genlock_wall_ns(void)

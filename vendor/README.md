@@ -29,7 +29,7 @@ part of that change; an *unexpected* difference is drift and the guard fails lou
 | setting | pinned value | live source (read-only) |
 |---|---|---|
 | `output_fps` | `30` | OBS log `video settings reset: … fps: <n>/1` (current zero-loss rate; re-pin to `60` on the #11 rollout) |
-| `genlock_wall_clock` | `1` | OBS log `genlock: wall-clock-slaved render tick ENABLED` (running state) — the genlock master gate, **active** on both boxes since 2026-06-13 (the measured 0-drop strih→stream state). Persistent source is the **Machine** env var `OBS_GENLOCK_WALL_CLOCK=1` (`HKLM\…\Session Manager\Environment`); the gate is read at OBS launch, so the *running* truth is the log line, not a later `$env:` read (which a long-lived launcher/MCP process can hold stale) |
+| `genlock_wall_clock` | `1` | OBS log `genlock: wall-clock-slaved render tick ENABLED` (running state) — the genlock master gate. **#257: this is now a BUILD DEFAULT (always on, no `OBS_GENLOCK_WALL_CLOCK` env).** The pin value `1` is the build-default sentinel; the genlock proof is the capability marker (the `render tick ENABLED` / `timestamp-aligned release` log lines), gathered for `--compare genlock_capability=` / `--status`. The genlock latency is likewise a build const (3 ms, floor 3) with the per-source override in the OBS UI — no `OBS_GENLOCK_LATENCY_MS` / `_RESERVE_MS` / `_TS_ALIGN` / `_PRELOAD_FRAMES` env any more |
 | `ndi_input_latency` | `0` | DistroAV NDI **input** `latency` mode = **Normal** (the obs-websocket `GetInputSettings` `latency` field; `2`=Lowest, `1`=Low, `0`=Normal). This is the **certified LOW-LATENCY zero-loss** ingest mode for the genlocked path (#84). A/B measurement (twice, reversed) found the DistroAV ingest buffer is NOT a real latency lever once genlock is active: the wall-clock render tick dominates emit timing, so **Normal(0) gives a ~33 ms LOWER strih abs_emit p50** (216 ms vs 249 ms at Lowest(2)) while staying zero-loss over a 30-min run — Normal is the more-buffered, lower-latency, loss-free state. It is checked on the **genlocked broadcast-path inputs**: on strih the camera ingests (`NDI cam5`=CAM1, `NDI cam1`=CAM3, `NDI cam3`=CAM4), on stream the strih→stream program feed (`NDI 2ME PGM`). Re-pin only on a deliberate latency rollout (this `0` value IS such a deliberate re-pin, applied + verified live 2026-06-16); an input drifted off `0` is drift the guard flags. Non-broadcast inputs (preview/CG/lyrics) are out of scope of the pin |
 | `canonical_plugin_path` | `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit` | The **single canonical OBS plugin-load path** for the genlock DistroAV plugin (#124, EPIC #125). OBS scans MULTIPLE module locations — `C:\Program Files\obs-studio\obs-plugins\64bit` (first-party install dir), `C:\ProgramData\obs-studio\plugins\<plugin>\bin\64bit` (global third-party), and `%APPDATA%\obs-studio\plugins\<plugin>\bin\64bit` (per-user) — so the SAME `distroav.dll` present in more than one of them lets a **stale copy silently shadow the intended build** (the mixed-version incident #119: a pre-#97 DistroAV loaded while every version check still passed). The invariant: `distroav.dll` exists in **EXACTLY ONE** scan path, and that path is this ProgramData one (verified live on strih + stream 2026-06-25 — exactly one `distroav.dll` per box, 663040 bytes, loaded by the Program Files genlock `obs64.exe`; **none** in `Program Files\obs-studio\obs-plugins\64bit` — the `data\obs-plugins\distroav` folder there is resources/locale, **not** the binary). The first-party OBS plugins ship under `Program Files\obs-studio\obs-plugins\64bit`; DistroAV is the one deployed to ProgramData — a deploy MUST NOT also drop a `distroav.dll` into `Program Files\obs-plugins\64bit` (that recreates the shadow). The drift-guard reads every observed `distroav.dll` location (`distroav_dll_paths`, gathered via win-* MCP) and FAILS if there is more than one, or if the lone one is off this path |
 
@@ -174,11 +174,12 @@ DistroAV:
   per hop on one shared clock. NO libobs core change — render flow is
   texrender → `gs_stage_texture`/map → CPU-draw the QR (qrcodegen EC-High, white quiet
   zone) → re-upload → `gs_draw_sprite` (the same render→stage path as `ndi-filter.cpp`).
-  Node identity: reserved per-node `run_id`, env-overridable via `OBS_BURN_RUN_ID`
-  (defaults 911002 strih / 911004 stream — outside cam2's range). **Gated behind
-  `OBS_BURN_QR` (default OFF)**: with the env unset the filter is a transparent
-  pass-through, so registering it on the production install is inert until #108 enables it
-  on the dedicated PROBE scene. Guarded by `tests/burn_payload_parity.rs` (which
+  Node identity: reserved per-node `run_id` derived from the **host role** (#257 — no env;
+  911002 strih / 911004 stream, outside cam2's range), corner derived from the run_id. **Gated
+  by the parent source's per-source `genlock_burn` bool (#257, default OFF)**: with the bool off
+  the filter is a transparent pass-through, so it is inert on the production install until the burn
+  is toggled ON over OBS WebSocket (no env, no relaunch). Guarded by `tests/burn_payload_parity.rs`
+  (which
   compiles+runs the C++ encoder via g++ and asserts byte-identity with `Payload::encode`,
   round-trip through the decoder, and that the rendered QR decodes back via rqrr) + the
   windows-genlock.yml pwsh #111 gate, so a `git subtree pull` can't silently revert it.
@@ -202,22 +203,19 @@ off the live-event window (the user controls when). Steps:
    Byte-for-byte diff-verify against the artifact. Graceful OBS shutdown (WebSocket
    `ExitOBS` / `CloseMainWindow`, never force-kill), relaunch with `cwd = bin\64bit`.
    `drift-guard --check-pins` must show NO DRIFT.
-3. **PROBE scene + enable:** on a DEDICATED probe scene (NOT a production scene), add the
-   "DistroAV QR Burn (latency probe)" filter to the node's program source. Launch that
-   OBS with `OBS_BURN_QR=1` and `OBS_BURN_RUN_ID=911002` (strih) / `911004` (stream).
-   The #111 4-corner layout (do NOT override the size up to 700 — that re-overlaps the
-   camera QR): each node's burn renders ~300px (`OBS_BURN_QR_PX` default 300) in its BOTTOM
-   CORNER — **strih → bottom-LEFT, stream → bottom-RIGHT** — while cam2's dual-QR rides
-   through in the **TOP** band. All four QRs (cam2 left/right + strih burn + stream burn)
-   then sit in the recorded frame WITHOUT overlapping, so one stream recording carries every
-   stamp. The corner derives from the standard run_ids above (911004 → bottom-right, else →
-   bottom-left); if you use a CUSTOM `OBS_BURN_RUN_ID`, you MUST also set `OBS_BURN_CORNER`
-   (`bottom-left` / `bottom-right`) per node, or both burns default to bottom-left and
-   re-collide. RECORD the probe scene's program output; #108 decodes the burned +
-   ridden-through stamps and computes per-hop latency. (Layout assumes the production
-   1920×1080 strih/stream OBS program canvas.)
-4. **Disable after the probe run:** unset `OBS_BURN_QR` (or remove the filter) and relaunch
-   so the production install is unaffected. The filter is inert by default regardless.
+3. **PROBE scene + enable (#257 — runtime, no env, no relaunch):** on a DEDICATED probe scene
+   (NOT a production scene) toggle the burn ON by setting the program source's per-source
+   `genlock_burn=true` over OBS WebSocket — `scripts/obs_burn_filter.py add --host <ip> --input
+   "<NDI input>"` (or `scripts/rig-mode.sh test`, which does both boxes). The run_id (911002 strih
+   / 911004 stream) and corner (strih → bottom-LEFT, stream → bottom-RIGHT) are derived from the
+   box's host role automatically; the QR size is canvas-relative auto (no `OBS_BURN_QR_PX`). cam2's
+   dual-QR rides through in the **TOP** band, so all four QRs (cam2 left/right + strih burn + stream
+   burn) sit in the recorded frame WITHOUT overlapping — one stream recording carries every stamp.
+   RECORD the probe scene's program output; #108 decodes the burned + ridden-through stamps and
+   computes per-hop latency. (Layout assumes the production 1920×1080 strih/stream OBS canvas.)
+4. **Disable after the probe run:** toggle `genlock_burn=false` (`scripts/obs_burn_filter.py remove`
+   / `scripts/rig-mode.sh event`) — no relaunch. drift-guard's #246 facet asserts no prod source has
+   genlock_burn=on.
 
 ## Build
 

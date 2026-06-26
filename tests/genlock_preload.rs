@@ -757,10 +757,14 @@ mod single_latency_knob {
     }
 
     #[test]
-    fn latency_default_is_zero_disabled() {
-        // Neither knob set ⇒ 0 = no ms latency ⇒ the whole-frame preload fallback path
-        // (full back-compat with a deploy that sets neither env).
-        assert_eq!(GENLOCK_LATENCY_MS_DEFAULT, 0);
+    fn latency_default_and_floor_are_three_ms() {
+        // #257: the genlock latency is a BUILD CONST — default AND floor are 3 ms (no env). The
+        // legacy strtol parser ([`resolve_latency_ms`]) is kept as a pure helper; with neither arg
+        // set it returns the parser's own reserve default (0, the historic "unset" sentinel), which
+        // is decoupled from the new build const below.
+        use camera_box::probe::genlock::GENLOCK_LATENCY_MS_MIN;
+        assert_eq!(GENLOCK_LATENCY_MS_DEFAULT, 3);
+        assert_eq!(GENLOCK_LATENCY_MS_MIN, 3);
         assert_eq!(resolve_latency_ms(None, None), 0);
     }
 
@@ -937,10 +941,11 @@ mod vendored_source {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
+    pub const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
     const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
-    const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
+    pub const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
     pub const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
+    pub const NDI_BURN_FILTER: &str = "vendor/distroav/src/ndi-burn-filter.cpp";
     pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
     pub const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
@@ -965,13 +970,25 @@ mod vendored_source {
     }
 
     #[test]
-    fn preload_env_is_read() {
+    fn no_genlock_env_is_read() {
+        // #257: the genlock build is ENV-FREE — render tick + ts-align are build defaults, the
+        // latency is a build const, preload is internal/auto. NONE of the old OBS_GENLOCK_* env
+        // may be read in obs-source.c (a `git subtree pull` re-introducing one would re-open the
+        // env model #257 removed).
         let src = squish(&vendor_file(OBS_SOURCE));
-        assert!(
-            src.contains("getenv(\"OBS_GENLOCK_PRELOAD_FRAMES\")"),
-            "{OBS_SOURCE}: #70 genlock preload patch missing — OBS_GENLOCK_PRELOAD_FRAMES \
-             is no longer read. A `git subtree pull` (#44) likely reverted it; re-apply."
-        );
+        for env in [
+            "getenv(\"OBS_GENLOCK_PRELOAD_FRAMES\")",
+            "getenv(\"OBS_GENLOCK_RESERVE_MS\")",
+            "getenv(\"OBS_GENLOCK_LATENCY_MS\")",
+            "getenv(\"OBS_GENLOCK_TS_ALIGN\")",
+            "getenv(\"OBS_GENLOCK_WALL_CLOCK\")",
+        ] {
+            assert!(
+                !src.contains(env),
+                "{OBS_SOURCE}: #257 — {env} is BACK; the genlock build must be env-free \
+                 (render tick + ts-align build defaults, latency build const, preload auto)."
+            );
+        }
     }
 
     #[test]
@@ -1015,17 +1032,13 @@ mod vendored_source {
 
     #[test]
     fn timestamp_aligned_release_present() {
-        // #136: the genlock_fifo branch must offer the timestamp-aligned release path
-        // (multi-source IN-SYNC) — env-gated (OBS_GENLOCK_TS_ALIGN, default OFF) + a
-        // per-frame wall-clock guard, presenting the frame captured at
-        // present_ts = wall_now - preload*interval. A subtree pull (#44) dropping it
-        // silently reverts the desync fix. Mirror of src/probe/genlock.rs genlock_release.
+        // #136/#257: the genlock_fifo branch must offer the timestamp-aligned release path
+        // (multi-source IN-SYNC). #257: ts-align is a BUILD DEFAULT (genlock_ts_align_enabled
+        // returns true, no OBS_GENLOCK_TS_ALIGN env) but the per-frame wall-clock guard +
+        // present_ts deadline stay. A subtree pull (#44) dropping them silently reverts the
+        // desync fix. Mirror of src/probe/genlock.rs genlock_release.
         use camera_box::probe::genlock::{WALLCLOCK_TS_MAX_NS, WALLCLOCK_TS_MIN_NS};
         let src = squish(&vendor_file(OBS_SOURCE));
-        assert!(
-            src.contains("getenv(\"OBS_GENLOCK_TS_ALIGN\")"),
-            "{OBS_SOURCE}: #136 — the timestamp-aligned release gate (OBS_GENLOCK_TS_ALIGN) is gone; re-apply."
-        );
         assert!(
             src.contains("genlock_is_wallclock_ts(next_frame->timestamp)"),
             "{OBS_SOURCE}: #136 — the ts-align path no longer guards on \
@@ -1072,14 +1085,12 @@ mod vendored_source {
         // genlock_present_ts_reserve / parse_reserve_ms.
         use camera_box::probe::genlock::{GENLOCK_RESERVE_MS_DEFAULT, GENLOCK_RESERVE_MS_MAX};
         let src = squish(&vendor_file(OBS_SOURCE));
-        // The env gate + parse must exist.
+        // #257: the OBS_GENLOCK_RESERVE_MS env + its parser are GONE (the latency is a build const);
+        // the ms-granular RELEASE mechanism (genlock_present_ts_reserve) stays and is what the
+        // per-source ms latency drives. The reserve default/max #defines are kept for the mirror.
         assert!(
-            src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
-            "{OBS_SOURCE}: #184 — the ms-reserve env gate (OBS_GENLOCK_RESERVE_MS) is gone; re-apply."
-        );
-        assert!(
-            src.contains("genlock_parse_reserve_ms"),
-            "{OBS_SOURCE}: #184 — genlock_parse_reserve_ms (the ms-reserve parser) is gone; re-apply."
+            !src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
+            "{OBS_SOURCE}: #257 — OBS_GENLOCK_RESERVE_MS env is BACK; the latency is a build const (no env)."
         );
         // The C defaults/cap MUST equal the Rust mirror constants (lock-step).
         assert!(
@@ -1127,26 +1138,31 @@ mod vendored_source {
         // resolve_latency_ms / genlock_auto_preload.
         use camera_box::probe::genlock::{
             GENLOCK_AUTO_PRELOAD_MIN, GENLOCK_LATENCY_MS_DEFAULT, GENLOCK_LATENCY_MS_MAX,
+            GENLOCK_LATENCY_MS_MIN,
         };
         let src = squish(&vendor_file(OBS_SOURCE));
-        // The canonical knob is read.
+        // #257: the genlock latency is a BUILD CONST (no env, no canonical/alias resolution). The
+        // env reads + the parser are GONE; genlock_latency_ms() stays as the const accessor.
         assert!(
-            src.contains("getenv(\"OBS_GENLOCK_LATENCY_MS\")"),
-            "{OBS_SOURCE}: #235 — the canonical latency knob (OBS_GENLOCK_LATENCY_MS) is no \
-             longer read; re-apply the single-knob resolution."
+            !src.contains("getenv(\"OBS_GENLOCK_LATENCY_MS\")"),
+            "{OBS_SOURCE}: #257 — OBS_GENLOCK_LATENCY_MS env is BACK; the latency is a build const."
         );
-        // The back-compat alias parser is STILL present (RESERVE_MS keeps working).
         assert!(
-            src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
-            "{OBS_SOURCE}: #235 — the OBS_GENLOCK_RESERVE_MS back-compat alias is gone; \
-             existing deploys / the #128 wrapper would break. Re-apply."
+            !src.contains("genlock_parse_latency_ms_set"),
+            "{OBS_SOURCE}: #257 — the env latency parser (genlock_parse_latency_ms_set) is BACK; \
+             the latency is a build const (no env resolution)."
         );
-        // The resolution + the canonical-or-alias resolver must exist.
         assert!(
-            src.contains("genlock_parse_latency_ms_set")
-                && src.contains("static uint32_t genlock_latency_ms("),
-            "{OBS_SOURCE}: #235 — the single-knob resolver (genlock_parse_latency_ms_set + \
-             genlock_latency_ms, canonical-wins-then-alias) is gone; re-apply."
+            src.contains("static uint32_t genlock_latency_ms("),
+            "{OBS_SOURCE}: #257 — genlock_latency_ms() (the build-const accessor) is gone; re-apply."
+        );
+        // #257: the build-const FLOOR (GENLOCK_LATENCY_MS_MIN = 3) must be defined.
+        assert!(
+            src.contains(&format!(
+                "#define GENLOCK_LATENCY_MS_MIN {GENLOCK_LATENCY_MS_MIN}"
+            )),
+            "{OBS_SOURCE}: #257 — GENLOCK_LATENCY_MS_MIN drifted from the Rust mirror \
+             ({GENLOCK_LATENCY_MS_MIN}); keep them in lock-step."
         );
         // The C latency default/cap MUST equal the Rust mirror constants (lock-step).
         assert!(
@@ -1181,12 +1197,9 @@ mod vendored_source {
             "{OBS_SOURCE}: #235 — GENLOCK_AUTO_PRELOAD_MIN drifted from the Rust mirror \
              ({GENLOCK_AUTO_PRELOAD_MIN}); keep them in lock-step."
         );
-        // ts-align must be IMPLIED ON when the ms latency knob is set (no separate user gate).
-        assert!(
-            src.contains("genlock_latency_ms() > 0"),
-            "{OBS_SOURCE}: #235 — genlock_ts_align_enabled no longer implies ts-align ON when \
-             the latency knob is set; the user would still need OBS_GENLOCK_TS_ALIGN. Re-apply."
-        );
+        // #257: ts-align is ALWAYS ON (build default) — genlock_ts_align_enabled returns true. The
+        // render path still ALSO checks the per-source override (covered by the #245 guard's
+        // `genlock_ts_align_enabled() || source->genlock_latency_ms > 0` assertion).
         // preload must be auto-derived (internal) on the ms path — the audit/display log
         // must surface the ms-primary latency with the frame-equivalent in parens (#235 ask).
         assert!(
@@ -1613,7 +1626,8 @@ mod vendored_source {
 
 mod distroav_source {
     use super::vendored_source::{
-        vendor_file, NDI_SOURCE, WINDOWS_GENLOCK_FAST_WF, WINDOWS_GENLOCK_WF,
+        vendor_file, NDI_BURN_FILTER, NDI_SOURCE, OBS_API, OBS_SOURCE, WINDOWS_GENLOCK_FAST_WF,
+        WINDOWS_GENLOCK_WF,
     };
 
     fn squish(s: &str) -> String {
@@ -1621,110 +1635,147 @@ mod distroav_source {
     }
 
     #[test]
-    fn preload_slider_property_present() {
+    fn distroav_ui_is_exactly_the_whitelist() {
+        // #257: the DistroAV NDI source UI is a HARD WHITELIST — ndi_source_getproperties exposes
+        // EXACTLY source + Genlock + Latency(ms) + Measurement burn, and NOTHING else. The legacy
+        // preload slider + the read-only latency/preload info labels + the ~12 forced knobs are
+        // REMOVED from the UI (forced via GENLOCK_FORCED_SETTINGS instead). A subtree pull (#44) or a
+        // regression re-adding any of them reverts the production-safe hard-lock.
         let src = squish(&vendor_file(NDI_SOURCE));
-        // The int slider (0..128) is the runtime video-delay control, shown next to
-        // the genlock-fifo checkbox.
+        // The whitelist const list + the four whitelist add-calls must be present.
         assert!(
-            src.contains("#define PROP_GENLOCK_PRELOAD"),
-            "{NDI_SOURCE}: #97 PROP_GENLOCK_PRELOAD define missing; re-apply the slider."
+            src.contains("GENLOCK_WHITELIST_PROPS"),
+            "{NDI_SOURCE}: #257 — the GENLOCK_WHITELIST_PROPS whitelist is gone; re-apply the hard-lock UI."
         );
         assert!(
-            src.contains("obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD"),
-            "{NDI_SOURCE}: #97 — the genlock-preload int slider is gone from the NDI \
-             source properties; re-apply."
+            src.contains("obs_properties_add_list(props, PROP_SOURCE")
+                && src.contains("obs_properties_add_bool(props, PROP_GENLOCK_FIFO")
+                && src.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC")
+                && src.contains("obs_properties_add_bool(props, PROP_BURN"),
+            "{NDI_SOURCE}: #257 — the whitelist UI must add EXACTLY source + Genlock + Latency(ms) + burn."
         );
-        // The slider min(0) + step(1) are pinned; the max may be the literal 128 OR the
-        // symbolic PROP_GENLOCK_PRELOAD_MAX (== 128, asserted separately). #235 relabeled
-        // the slider from "Genlock preload (video delay)" to the internal/legacy
-        // "Genlock preload (internal FIFO depth — legacy frame control)" (preload is no
-        // longer a user latency knob — the ms latency knob holds the delay), so the guard
-        // pins the range/step and that the label marks it INTERNAL/LEGACY, not the exact
-        // old wording.
+        // The removed knobs + the old read-only labels + the legacy preload slider must be GONE
+        // from the UI (added nowhere). The forcer still references some PROP_* names, so the guard
+        // targets the UI add-calls, not the bare token.
+        for gone in [
+            "obs_properties_add_list(props, PROP_BEHAVIOR",
+            "obs_properties_add_list(props, PROP_TIMEOUT",
+            "obs_properties_add_list(props, PROP_BANDWIDTH",
+            "obs_properties_add_list(props, PROP_SYNC",
+            "obs_properties_add_list(props, PROP_LATENCY",
+            "obs_properties_add_bool(props, PROP_FRAMESYNC",
+            "obs_properties_add_bool(props, PROP_HW_ACCEL",
+            "obs_properties_add_bool(props, PROP_FIX_ALPHA",
+            "obs_properties_add_bool(props, PROP_AUDIO",
+            "obs_properties_add_list(props, PROP_YUV_RANGE",
+            "obs_properties_add_group(props, PROP_PTZ",
+            "obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD",
+            "obs_properties_add_text(props, PROP_GENLOCK_LATENCY_MS",
+            "obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS",
+            "apply_genlock_lockdown_visibility",
+        ] {
+            assert!(
+                !src.contains(gone),
+                "{NDI_SOURCE}: #257 — '{gone}' is BACK in the UI; the whitelist exposes only \
+                 source/Genlock/Latency/burn (everything else is forced, not shown)."
+            );
+        }
+    }
+
+    #[test]
+    fn forced_certified_const_table_present() {
+        // #257: force_genlock_certified_settings is driven by the GENLOCK_FORCED_SETTINGS const
+        // table — the COMPLEMENT of the whitelist — so a value can't drift and an upstream property
+        // add/remove can't reintroduce a live knob. The table must pin every forced key (incl. PTZ),
+        // and ndi_source_update must still CALL the forcer when genlock is on.
+        let src = squish(&vendor_file(NDI_SOURCE));
         assert!(
-            src.contains("PROP_GENLOCK_PRELOAD, \"Genlock preload (internal FIFO depth — legacy frame control)\", 0, 128, 1")
-                || src.contains(
-                    "PROP_GENLOCK_PRELOAD, \"Genlock preload (internal FIFO depth — legacy frame control)\", 0, PROP_GENLOCK_PRELOAD_MAX, 1"
-                ),
-            "{NDI_SOURCE}: #97/#235 — the preload slider range/label changed; expected the \
-             internal/legacy label (\"Genlock preload (internal FIFO depth — legacy frame \
-             control)\", 0, 128|PROP_GENLOCK_PRELOAD_MAX, 1)."
+            src.contains("GENLOCK_FORCED_SETTINGS"),
+            "{NDI_SOURCE}: #257 — the GENLOCK_FORCED_SETTINGS const table is gone; re-apply the forcer table."
         );
-        // The symbolic cap must equal the libobs cap (128).
+        for entry in [
+            "{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}",
+            "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}",
+            "{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}",
+            "{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}",
+            "{PROP_HW_ACCEL, true, 0, true}",
+            "{PROP_AUDIO, true, 0, false}",
+            "{PROP_FRAMESYNC, true, 0, false}",
+            "{PROP_FIX_ALPHA, true, 0, false}",
+            "{PROP_PTZ, true, 0, false}",
+        ] {
+            assert!(
+                src.contains(entry),
+                "{NDI_SOURCE}: #257 — GENLOCK_FORCED_SETTINGS no longer pins '{entry}'; that key \
+                 could be left misconfigured on the genlock path. Re-apply the full forcer table."
+            );
+        }
         assert!(
-            src.contains("#define PROP_GENLOCK_PRELOAD_MAX 128"),
-            "{NDI_SOURCE}: #97 — PROP_GENLOCK_PRELOAD_MAX must be 128 to match libobs."
+            src.contains("force_genlock_certified_settings(settings)"),
+            "{NDI_SOURCE}: #257 — ndi_source_update no longer CALLS force_genlock_certified_settings."
         );
     }
 
     #[test]
-    fn preload_ms_infotext_present() {
+    fn genlock_is_default_on() {
+        // #257: genlock is DEFAULT ON — a newly-added NDI source is locked down by default.
         let src = squish(&vendor_file(NDI_SOURCE));
-        // A read-only info-text property below the slider shows the live ms, updated
-        // by a modified_callback that reads obs_get_video_info().
         assert!(
-            src.contains("PROP_GENLOCK_PRELOAD_MS"),
-            "{NDI_SOURCE}: #97 — the preload ms info-text property is missing; re-apply."
-        );
-        assert!(
-            src.contains("obs_get_video_info"),
-            "{NDI_SOURCE}: #97 — the ms info-text callback no longer reads \
-             obs_get_video_info() for the fps; re-apply."
-        );
-        assert!(
-            src.contains("obs_property_set_modified_callback"),
-            "{NDI_SOURCE}: #97 — the preload slider has no modified_callback to \
-             recompute the ms label; re-apply."
+            src.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true)"),
+            "{NDI_SOURCE}: #257 — genlock is no longer DEFAULT ON (PROP_GENLOCK_FIFO default true)."
         );
     }
 
     #[test]
-    fn single_latency_label_present() {
-        // #235: the NDI source properties must show the SINGLE genlock-latency display —
-        // a read-only "genlock latency = N ms (≈ M frames @ Ffps)" (ms primary, frames in
-        // parens), sourced from the resolved env latency (OBS_GENLOCK_LATENCY_MS, alias
-        // OBS_GENLOCK_RESERVE_MS). A subtree pull (#44) dropping it reverts the #235 UX.
+    fn burn_runtime_toggle_present() {
+        // #257: the measurement burn is a per-source bool (PROP_BURN) applied LIVE in
+        // ndi_source_update via obs_source_set_genlock_burn (no OBS_BURN_* env, no restart); the
+        // burn filter reads the parent's flag each render.
         let src = squish(&vendor_file(NDI_SOURCE));
         assert!(
-            src.contains("#define PROP_GENLOCK_LATENCY_MS"),
-            "{NDI_SOURCE}: #235 — the PROP_GENLOCK_LATENCY_MS read-only latency label \
-             property define is missing; re-apply."
+            src.contains("#define PROP_BURN \"genlock_burn\""),
+            "{NDI_SOURCE}: #257 — PROP_BURN (\"genlock_burn\") define missing; re-apply the burn toggle."
         );
         assert!(
-            src.contains("obs_properties_add_text(props, PROP_GENLOCK_LATENCY_MS"),
-            "{NDI_SOURCE}: #235 — the read-only genlock-latency info-text property is gone; \
-             re-apply the single-knob display."
-        );
-        // The resolver must read the canonical knob AND fall back to the reserve alias.
-        assert!(
-            src.contains("getenv(\"OBS_GENLOCK_LATENCY_MS\")")
-                && src.contains("getenv(\"OBS_GENLOCK_RESERVE_MS\")"),
-            "{NDI_SOURCE}: #235 — resolve_genlock_latency_ms no longer reads the canonical \
-             OBS_GENLOCK_LATENCY_MS + the OBS_GENLOCK_RESERVE_MS alias; re-apply."
-        );
-        // The label must be ms-primary with the frame-equivalent in parens (the #235 ask).
-        assert!(
-            src.contains("genlock latency = %ld ms (≈ %llu frames @ %.3f fps)"),
-            "{NDI_SOURCE}: #235 — the latency label is no longer 'N ms (≈ M frames @ Ffps)' \
-             (ms primary, frames in parens); re-apply format_genlock_latency_label."
-        );
-    }
-
-    #[test]
-    fn preload_applied_in_update() {
-        let src = squish(&vendor_file(NDI_SOURCE));
-        // ndi_source_update must apply the slider value via the runtime API (resolved
-        // at runtime like set_genlock_fifo, so the plugin still builds against stock
-        // SDK headers and loads on any OBS).
-        assert!(
-            src.contains("obs_source_set_genlock_preload"),
-            "{NDI_SOURCE}: #97 — ndi_source_update no longer applies the per-source \
-             preload via obs_source_set_genlock_preload; the slider is inert. Re-apply."
+            src.contains("obs_properties_add_bool(props, PROP_BURN"),
+            "{NDI_SOURCE}: #257 — the Measurement-burn whitelist UI bool is gone; re-apply."
         );
         assert!(
-            src.contains("PROP_GENLOCK_PRELOAD)"),
-            "{NDI_SOURCE}: #97 — ndi_source_update no longer reads the \
-             PROP_GENLOCK_PRELOAD setting; re-apply."
+            src.contains("resolve_set_genlock_burn") && src.contains("obs_source_set_genlock_burn"),
+            "{NDI_SOURCE}: #257 — ndi_source_update no longer resolves/applies obs_source_set_genlock_burn."
+        );
+        assert!(
+            src.contains("obs_data_get_bool(settings, PROP_BURN)"),
+            "{NDI_SOURCE}: #257 — ndi_source_update no longer reads the PROP_BURN setting."
+        );
+        assert!(
+            src.contains("obs_data_set_default_bool(settings, PROP_BURN, false)"),
+            "{NDI_SOURCE}: #257 — the burn default is not wired to false (OFF)."
+        );
+        // The libobs setter/getter + EXPORT must exist (mirror of genlock_fifo).
+        let obs = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            obs.contains("void obs_source_set_genlock_burn(obs_source_t *source, bool")
+                && obs.contains("bool obs_source_get_genlock_burn("),
+            "{OBS_SOURCE}: #257 — the per-source burn setter/getter is gone; re-apply."
+        );
+        let api = squish(&vendor_file(OBS_API));
+        assert!(
+            api.contains("EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool")
+                && api.contains("EXPORT bool obs_source_get_genlock_burn("),
+            "{OBS_API}: #257 — obs_source_set/get_genlock_burn not EXPORTed; DistroAV + the burn \
+             filter cannot resolve them. Re-apply the exports."
+        );
+        // The burn filter must read the parent's flag (runtime gate) and NOT read OBS_BURN_* env.
+        let flt = squish(&vendor_file(NDI_BURN_FILTER));
+        assert!(
+            flt.contains("obs_source_get_genlock_burn"),
+            "{NDI_BURN_FILTER}: #257 — the burn no longer reads the parent's genlock_burn flag; \
+             the runtime gate is inert. Re-apply."
+        );
+        assert!(
+            !flt.contains("getenv(\"OBS_BURN"),
+            "{NDI_BURN_FILTER}: #257 — an OBS_BURN_* env read is BACK; the burn is a per-source bool (no env)."
         );
     }
 
@@ -1744,11 +1795,14 @@ mod distroav_source {
             "{NDI_SOURCE}: #245 — PROP_GENLOCK_LATENCY_MS_SRC define missing; re-apply the \
              editable per-source latency field."
         );
+        // #257: the field range is [PROP_GENLOCK_LATENCY_MS_MIN, PROP_GENLOCK_SOURCE_LATENCY_MS_MAX]
+        // (floor 3, not 0) and the default is PROP_GENLOCK_LATENCY_MS_DEFAULT (3).
         assert!(
             src.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC")
-                && src.contains("0, PROP_GENLOCK_SOURCE_LATENCY_MS_MAX, 1"),
-            "{NDI_SOURCE}: #245 — the editable per-source latency int (range 0..2000) is gone \
-             from the NDI source properties; re-apply."
+                && src.contains("PROP_GENLOCK_LATENCY_MS_MIN")
+                && src.contains("PROP_GENLOCK_SOURCE_LATENCY_MS_MAX, 1"),
+            "{NDI_SOURCE}: #257 — the editable per-source latency int (range [3, 2000]) is gone \
+             or no longer floors at PROP_GENLOCK_LATENCY_MS_MIN; re-apply."
         );
         // The symbolic cap must equal the libobs cap (2000).
         assert!(
@@ -1767,77 +1821,66 @@ mod distroav_source {
             "{NDI_SOURCE}: #245 — ndi_source_update no longer reads the \
              PROP_GENLOCK_LATENCY_MS_SRC setting; re-apply."
         );
-        // Default 0 (= follow global) so an untouched source behaves as before the field.
+        // #257: default is the floor 3 (PROP_GENLOCK_LATENCY_MS_DEFAULT), not 0 (no follow-global).
         assert!(
-            src.contains("obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, 0)"),
-            "{NDI_SOURCE}: #245 — the per-source latency default is not wired to 0 (= use \
-             global); re-apply."
+            src.contains("obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, PROP_GENLOCK_LATENCY_MS_DEFAULT)"),
+            "{NDI_SOURCE}: #257 — the per-source latency default is not wired to \
+             PROP_GENLOCK_LATENCY_MS_DEFAULT (3); re-apply."
+        );
+        // #257: ndi_source_update floors the per-source latency at PROP_GENLOCK_LATENCY_MS_MIN (3).
+        assert!(
+            src.contains("ms < PROP_GENLOCK_LATENCY_MS_MIN"),
+            "{NDI_SOURCE}: #257 — ndi_source_update no longer floors the latency at \
+             PROP_GENLOCK_LATENCY_MS_MIN (3); re-apply (1 -> 3, 0 -> 3)."
+        );
+        // The C #defines for the floor/default must equal the libobs build consts.
+        assert!(
+            src.contains("#define PROP_GENLOCK_LATENCY_MS_MIN 3")
+                && src.contains("#define PROP_GENLOCK_LATENCY_MS_DEFAULT 3"),
+            "{NDI_SOURCE}: #257 — PROP_GENLOCK_LATENCY_MS_MIN/_DEFAULT must be 3 (the build const floor)."
         );
     }
 
     #[test]
-    fn ms_label_set_on_first_open_and_negative_floored() {
-        let src = squish(&vendor_file(NDI_SOURCE));
-        // (review) The ms label must be set from the current settings at property-build
-        // time (shared formatter), so it shows on first dialog open before any callback
-        // fires — not the bare "↳ delay" placeholder.
+    fn libobs_setter_floors_latency_at_three() {
+        // #257: obs_source_set_genlock_latency_ms clamps to [GENLOCK_LATENCY_MS_MIN, MAX] — the
+        // floor-3 behavior the spec pins (set 1 -> 3, 0 -> 3). The per-source field also inits to
+        // the floor at source create.
+        let obs = squish(&vendor_file(OBS_SOURCE));
         assert!(
-            src.contains("format_preload_ms_label"),
-            "{NDI_SOURCE}: #97 — the shared ms-label formatter is gone; the label no \
-             longer shows on first dialog open. Re-apply."
+            obs.contains("ms < GENLOCK_LATENCY_MS_MIN ? GENLOCK_LATENCY_MS_MIN"),
+            "{OBS_SOURCE}: #257 — obs_source_set_genlock_latency_ms no longer floors at \
+             GENLOCK_LATENCY_MS_MIN (3); the 1->3 / 0->3 clamp is gone. Re-apply."
         );
         assert!(
-            src.contains("obs_source_get_settings(s->obs_source)"),
-            "{NDI_SOURCE}: #97 — the initial ms label is not seeded from the source \
-             settings at build time; it stays the placeholder until interaction. Re-apply."
-        );
-        // (review) A negative scene-JSON preload must be floored at 0 before the
-        // uint32_t cast, or -1 wraps to UINT32_MAX and clamps to MAX delay.
-        assert!(
-            src.contains("if (pl < 0) pl = 0;"),
-            "{NDI_SOURCE}: #97 — ndi_source_update no longer floors a negative preload \
-             at 0 before the uint32_t cast; -1 would wrap to the MAX delay. Re-apply."
+            obs.contains("source->genlock_latency_ms = GENLOCK_LATENCY_MS_MIN_INIT"),
+            "{OBS_SOURCE}: #257 — the per-source latency no longer inits to the floor at create."
         );
     }
 
     #[test]
-    fn preload_default_derives_from_env_for_back_compat() {
-        // #97 (review): ndi_source_getdefaults must derive the PROP_GENLOCK_PRELOAD
-        // default from OBS_GENLOCK_PRELOAD_FRAMES, NOT hardcode 1 — else the #70 env
-        // mechanism is silently reverted to 1 on every scene load for DistroAV sources.
-        let src = squish(&vendor_file(NDI_SOURCE));
-        assert!(
-            src.contains("genlock_preload_env_default")
-                && src.contains("getenv(\"OBS_GENLOCK_PRELOAD_FRAMES\")"),
-            "{NDI_SOURCE}: #97 — the genlock-preload default no longer derives from \
-             OBS_GENLOCK_PRELOAD_FRAMES; a hardcoded default overwrites the libobs env \
-             seed on scene load (#70 back-compat regression). Re-apply."
-        );
-        // The default must NOT be the bare literal 1 (the reverted form).
-        assert!(
-            src.contains("obs_data_set_default_int(settings, PROP_GENLOCK_PRELOAD, genlock_preload_env_default())"),
-            "{NDI_SOURCE}: #97 — PROP_GENLOCK_PRELOAD default is not wired to \
-             genlock_preload_env_default(); re-apply the env back-compat fix."
-        );
-    }
-
-    #[test]
-    fn windows_genlock_workflow_gates_on_the_preload_slider() {
-        // Mirror the lock-step convention (tests/distroav_source_config_lock.rs): the
-        // Windows production build re-asserts the #97 source tokens in pwsh BEFORE the
-        // 150-min build, since this Linux Rust guard can't compile on the runner.
+    fn windows_genlock_workflow_gates_on_the_hard_lock() {
+        // #257: the Windows production build re-asserts the hard-lock tokens in pwsh BEFORE the
+        // 150-min build (this Linux Rust guard can't compile on the runner). The legacy preload
+        // slider must be GONE; the whitelist + floor-3 + genlock-default-on + per-source burn must
+        // be gated.
         let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
         assert!(
-            wf.contains("obs_source_set_genlock_preload"),
-            "{WINDOWS_GENLOCK_WF}: #97 — the production build no longer asserts the \
-             per-source preload API; a subtree bump could ship a build without the \
-             runtime video-delay control while the version pin still passes. Re-add \
-             the pwsh #97 gate."
+            wf.contains("GENLOCK_WHITELIST_PROPS"),
+            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on the GENLOCK_WHITELIST_PROPS \
+             hard-lock UI; re-add the pwsh #257 gate."
         );
         assert!(
-            wf.contains("obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD"),
-            "{WINDOWS_GENLOCK_WF}: #97 — the production build no longer asserts the \
-             preload slider property; re-add the pwsh #97 gate."
+            wf.contains("#define GENLOCK_LATENCY_MS_MIN 3"),
+            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on the latency floor (3); re-add."
+        );
+        assert!(
+            wf.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true)"),
+            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on genlock default-ON; re-add."
+        );
+        assert!(
+            wf.contains("obs_source_get_genlock_burn"),
+            "{WINDOWS_GENLOCK_WF}: #257 — the build no longer gates on the per-source burn; re-add."
         );
     }
 

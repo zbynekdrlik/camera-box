@@ -304,12 +304,12 @@ fn recording_e2e_asserts_burns_on_before_recording() {
          (so a burns-OFF/pass-through OBS is caught before a full run is wasted), not only in \
          cleanup() after the run."
     );
-    // It must key on the OBS_BURN_QR tell (kind_registered) — the 'OBS launched with OBS_BURN_QR'
-    // signal that distinguishes a live burn from a silently-disabled pass-through filter.
+    // #257: it must key on `burn_on` (genlock_burn=true AND the renderer filter present) — the
+    // authoritative tell that the recording will actually carry the burn (no OBS_BURN_QR env now).
     assert!(
-        region.contains("kind_registered"),
-        "#195: the pre-record gate must inspect `kind_registered` (the OBS_BURN_QR tell) — that is \
-         what distinguishes a live burn from a pass-through filter that records NO burns."
+        region.contains("burn_on=True"),
+        "#195/#257: the pre-record gate must inspect `burn_on=True` (genlock_burn on) — the tell \
+         that distinguishes a live burn from a pass-through that records NO burns."
     );
     // It must FAIL FAST (abort) on pass-through, not just warn.
     assert!(
@@ -324,22 +324,20 @@ fn recording_e2e_asserts_burns_on_before_recording() {
     );
 }
 
-/// #195 (behavioral): the pre-record burn-ON gate's parse+abort logic must PROCEED only when
-/// BOTH `kind_registered=True` AND `filter_on_input=True`, and ABORT otherwise — across burns-on,
-/// pass-through (kind off → OBS not launched with OBS_BURN_QR), kind-on-but-filter-unattached, and
-/// OBS-unreachable (the check command's error text). This locks the actual abort BEHAVIOR (the
-/// #195 regression: burns-off must STOP the run, not waste it), not just the gate's presence.
-/// recording-e2e.sh runs top-to-bottom (no source guard), so — like the #178 resilient-region
-/// behavioral test above — this exercises the gate's two greps in an isolated bash snippet.
+/// #195/#257 (behavioral): the pre-record burn-ON gate's parse+abort logic must PROCEED only when
+/// `burn_on=True` (genlock_burn on AND the renderer filter present), and ABORT otherwise — across
+/// burns-on, burns-off (genlock_burn=false), filter-absent (burn_on=False), and OBS-unreachable
+/// (the check command's error text). This locks the actual abort BEHAVIOR (the #195 regression:
+/// burns-off must STOP the run, not waste it), not just the gate's presence. recording-e2e.sh runs
+/// top-to-bottom (no source guard), so this exercises the gate's grep in an isolated bash snippet.
 #[test]
 fn recording_e2e_burn_gate_proceeds_only_when_burns_on() {
-    // The gate's decision in isolation — the SAME two greps recording-e2e.sh runs per box.
+    // The gate's decision in isolation — the SAME grep recording-e2e.sh runs per box (#257).
     let gate = r#"
 set -euo pipefail
 burn_gate_ok() {
   _chk="$1"
-  printf '%s' "$_chk" | grep -q 'kind_registered=True' || return 1
-  printf '%s' "$_chk" | grep -q 'filter_on_input=True' || return 1
+  printf '%s' "$_chk" | grep -q 'burn_on=True' || return 1
   return 0
 }
 if burn_gate_ok "$1"; then echo PROCEED; else echo ABORT; fi
@@ -347,15 +345,15 @@ if burn_gate_ok "$1"; then echo PROCEED; else echo ABORT; fi
     // (check output text, expect PROCEED?)
     let cases = [
         (
-            "[burn] kind_registered=True filter_on_input=True input='NDI cam5'",
+            "[burn] burn_on=True genlock_burn=True filter_on_input=True kind_registered=True input='NDI cam5'",
             true,
         ),
         (
-            "[burn] kind_registered=False filter_on_input=False input='NDI cam5'",
+            "[burn] burn_on=False genlock_burn=False filter_on_input=True kind_registered=True input='NDI cam5'",
             false,
         ),
         (
-            "[burn] kind_registered=True filter_on_input=False input='NDI cam5'",
+            "[burn] burn_on=False genlock_burn=True filter_on_input=False kind_registered=True input='NDI cam5'",
             false,
         ),
         (
