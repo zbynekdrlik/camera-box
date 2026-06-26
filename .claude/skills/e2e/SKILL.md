@@ -18,8 +18,12 @@ Past claims of "everything works, zero loss, low latency" were untrustworthy/fal
    NDI-to-dev1 is an unreliable extra link; frames counted only when OBS shows them in program out.
 2. **Dual-QR Vernier:** cam2 paints 2 QRs (left=even tick, right=odd tick; tick=max resolves
    60→30 beat). QR size 700px (480px gave 76% undecodable; 700px → ~0%).
-3. **HARD-FAIL bar — PASS = 0 undecodable AND 0 copy(stale repeat) AND 0 gap.**
-   No thresholds. No "0.02% negligible". No explaining-away. Anything >0 = FAIL.
+3. **HARD-FAIL bar (#186 headline gate) — PASS = EVERY node's burn-id sequence CONTIGUOUS (no
+   missing id; a BURN-UNREADABLE id also FAILS) AND (when `--cam1-capture-stats` is given)
+   cam2→cam1 V4L2 capture-drop = 0.** No thresholds, no "0.02% negligible", no explaining-away.
+   The per-recording undecodable / 60→30-beat metrics AND the analyzed span (`--min-secs`) are
+   **DIAGNOSTIC only — they do NOT gate the headline** (an old overstatement was "PASS = 0
+   undecodable AND 0 copy AND 0 gap AND span≥300s" — that conflated diagnostics with the gate).
 4. Every undecodable/anomaly frame must be **extracted as real pixels and shown** — black = real
    lost/empty frame = FAIL; blurred QR = decode miss (fix decoder to 0). Prove with pixels.
 5. Duration ≥300s to claim zero-loss; ideal 1800s (30min).

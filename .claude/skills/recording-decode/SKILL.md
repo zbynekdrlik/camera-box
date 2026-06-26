@@ -52,6 +52,34 @@ the decode path must keep these green.
 recording-analysis-complete so the verdict log shows `fast ≫ robust` (the speedup is real).
 Counters are global/cumulative across all recordings in one run.
 
+## #208 per-box decode-in-place — the #186 pixel proof MUST be written ON-box
+
+The verdict needs the strih recording (cam1 contiguity #133 + cam→strih) AND the stream recording
+(full chain). #208 decodes each recording IN PLACE on its own box (`--extract-partial <box>` →
+small partial JSON of ids+timestamps) and merges the partials on dev1 (`--merge-partials
+strih=… stream=…`) — a recording is NEVER copied box-to-box nor to dev1.
+
+**THE GOTCHA (#186 regression that hid here):** the merge runs on dev1 where NO recording exists,
+so it CANNOT extract pixel proofs. If `--extract-partial` only writes the JSON, the #186 "SEE the
+missing/undecodable frame" guarantee silently vanishes (the merge can't re-extract). So
+`--extract-partial` MUST write the pixel proofs ON-box (`extract_partial_flagged_frames` selects
+the same flagged frames the merge flags) into a sibling `<partial>-pixels` dir; the planner scripts
+pull that dir back beside the partial; `run_merge` → `report_pulled_back_pixel_proofs` points at the
+real dev1 path. NEVER print "pixel proofs written on the box" without actually writing them.
+
+**Per-box authoritative ownership for pixel proof** (mirror `build_and_print_verdict`'s node
+sourcing — get it WRONG and the PNGs don't match the merge-flagged slots):
+- **strih box → cam1** (PerEmittedFrame; cam1's burn is crispest in the clean 1080p strih rec, #133).
+- **stream box → strih + stream** (PerRenderTick; their burns are co-located with cam2 only there).
+- Each box ALSO extracts its recording's UNDECODABLE frames (the `report_recording_diag` set).
+- Stream-ONLY merge (no strih partial) has NO cam1 pixel proof → `run_merge` WARNs (cam1's clean
+  source is the strih recording). The production two-box flow always supplies both.
+
+**Merge consistency:** `args_expected_burns_for(box, args)` is the ONE source of truth for a box's
+expected burns (strih=[cam1,strih], stream=[cam1,strih,stream]); `--extract-partial` decodes for it
+and `run_merge` WARNs on a partial whose `expected_burns` disagree with the merge args (a manual
+`--burn-*-run-id` mismatch between extract and merge would misverdict) and on a repeated box key.
+
 ## Per-frame latency CSV pairing (#209/#216) — optical-read dropout ≠ chain loss
 
 `recording_latency::per_frame_latency_csv_rows` builds the #209 continuous-line CSV. The header
@@ -191,9 +219,15 @@ which returned `BurnHopVerdict`. A symbol is only dead if its WHOLE cluster is d
 4. **rustdoc intra-doc links:** strip/rewrite any surviving `[`removed_item`]` doc-link (module
    `//!`, and docs on kept items). CI does NOT run `cargo doc -D warnings`, so it won't hard-fail,
    but it's real bit-rot — fix it.
-5. Verify CI-equivalent locally (Tier-0): `cargo fmt --all --check` + `cargo check --all-features
-   --all-targets` + `cargo clippy --all-targets --all-features -- -D warnings` + `cargo test
-   --no-run --all-features`. The contiguity (#216/#226) + verdict tests must stay green in CI.
+5. Verify locally **DEFAULT FEATURES ONLY** (Tier-0 — NEVER `--features probe`/`--all-features`
+   locally; that pulls qrcode/rqrr/image/drm/lz4 + the 5 probe bins into the shared dev1 `target/`
+   and balloons it, the #185 disk-fill): `cargo fmt --all --check` + `cargo check` + `cargo clippy
+   --all-targets -- -D warnings` + `cargo test --no-run`. The probe code (recording-verdict.rs +
+   its tests, recording_partial, burn_contiguity, the contiguity #216/#226 + verdict tests) does
+   NOT compile under default features — it is compiled + run ON CI (the "Build" / "Windows probe
+   build" / "Test" jobs). CI is the only compiler for the probe path; trust it, don't compile probe
+   locally. shellcheck any touched scripts; the harness structural tests (`harness_recording_e2e_paths`)
+   ARE default-feature and run locally + CI.
 
 ### Pre-push hook on a pure-deletion / cleanup commit
 
