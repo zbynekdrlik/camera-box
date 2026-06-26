@@ -1870,9 +1870,9 @@ fn extract_partial_flagged_frames(
         ],
         _ => &[],
     };
-    for (node, burn_run_id, rate) in owned {
-        let window = in_window_burn_frames(frames, *burn_run_id, &all_burns, *rate);
-        let iw = burn_contiguity_in_window(node, &window, *rate);
+    for &(node, burn_run_id, rate) in owned {
+        let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate);
+        let iw = burn_contiguity_in_window(node, &window, rate);
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
     }
 
@@ -2011,7 +2011,7 @@ fn run_merge(args: &Args) -> Result<()> {
         // silently overwrites the earlier slot) and (2) an `expected_burns` mismatch between the
         // loaded partial and this merge's `--burn-*-run-id` args (a manual burn-id mismatch between
         // extract and merge would otherwise pair on the wrong run_id and misverdict).
-        if box_paths.iter().any(|(b, _)| b == box_name) {
+        if box_paths.iter().any(|(b, _)| b.as_str() == box_name) {
             eprintln!(
                 "WARNING: --merge-partials {box_name}= specified more than once — the later partial \
                  ({path}) OVERWRITES the earlier one for the {box_name} slot."
