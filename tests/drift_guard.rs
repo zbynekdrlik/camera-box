@@ -693,6 +693,22 @@ const MANIFEST_184_FULL: &str = "\
 }
 ";
 
+/// #237: a decoy manifest whose first obs/distroav entries have NO literal dot (`obsXdll` /
+/// `distroavYdll`) sitting BEFORE the real `obs.dll` / `distroav.dll`. With the dot matched as a
+/// regex wildcard the decoy over-matches and `head -1` returns its (wrong) sha; with the dot
+/// escaped the decoy is skipped and the real dll's sha is returned.
+const MANIFEST_DOT_DECOY: &str = "\
+{
+  \"schema\": \"camera-box/genlock-bundle-manifest@1\",
+  \"files\": [
+    { \"path\": \"obsXdll\", \"sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"size\": 1 },
+    { \"path\": \"distroavYdll\", \"sha256\": \"3333333333333333333333333333333333333333333333333333333333333333\", \"size\": 1 },
+    { \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"2222222222222222222222222222222222222222222222222222222222222222\", \"size\": 2 },
+    { \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"4444444444444444444444444444444444444444444444444444444444444444\", \"size\": 2 }
+  ]
+}
+";
+
 /// The genlock CAPABILITY marker text as it appears in the running OBS log (the build-unique lines
 /// captured live off stream 2026-06-25). A STOCK OBS emits NONE of these.
 const GENLOCK_CAP_OURS: &str = "07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK, slew cap 2000000 ns/tick)
@@ -746,6 +762,85 @@ fn manifest_sha_for_component_matches_by_basename_in_both_layouts() {
         da_fast.trim(),
         "",
         "absent distroav must resolve empty: {da_fast:?}"
+    );
+}
+
+#[test]
+fn manifest_sha_for_component_dot_is_literal_not_a_wildcard() {
+    // #237: the dll BASENAME is fed to grep as an EXTENDED REGEX, so the literal dot in obs.dll /
+    // distroav.dll must be ESCAPED — otherwise `.` is an any-char wildcard and a (hypothetical)
+    // path like `obsXdll` (any char where the dot belongs, NO real dot) OVER-MATCHES, returning
+    // the WRONG file's sha. The decoy manifest lists `obsXdll` / `distroavYdll` BEFORE the real
+    // dll, so a wildcard match (pre-fix) returns the decoy's sha via `head -1`; an escaped match
+    // (post-fix) skips the decoy and returns the real dll's sha. No real OBS file is named that —
+    // this is a latent-robustness tightening, not a live bug.
+    let m = write_temp("dg_dot_decoy", MANIFEST_DOT_DECOY);
+
+    let obs = run_sourced(
+        "manifest_sha_for_component \"$M\" obs",
+        &[("M", m.to_str().unwrap())],
+    );
+    assert_eq!(
+        obs.trim(),
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "obs.dll lookup must match the LITERAL dot (the real obs.dll), not over-match the \
+         dot-less `obsXdll` decoy: {obs:?}"
+    );
+
+    let da = run_sourced(
+        "manifest_sha_for_component \"$M\" distroav",
+        &[("M", m.to_str().unwrap())],
+    );
+    assert_eq!(
+        da.trim(),
+        "4444444444444444444444444444444444444444444444444444444444444444",
+        "distroav.dll lookup must match the LITERAL dot (the real distroav.dll), not over-match \
+         the dot-less `distroavYdll` decoy: {da:?}"
+    );
+}
+
+#[test]
+fn compare_labels_unverified_distroav_sha_as_skipped_not_ok() {
+    // #237: when the supplied manifest is an obs.dll-only (fast-dll) bundle, a supplied
+    // distroav_dll_sha256 is NOT compared against anything — labeling that UNCHECKED value "OK" is
+    // misleading (an operator could believe distroav was verified when it wasn't). It must read
+    // SKIPPED. The verdict STAYS NO DRIFT (an obs.dll-only manifest legitimately checks only
+    // obs.dll; SKIPPED != DRIFT/UNKNOWN), so the exit code is unchanged (0).
+    let manifest = write_temp("dg_237_skipped", MANIFEST_184_FAST);
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", manifest.to_str().unwrap()),
+        "obs_dll_sha256=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        "distroav_dll_sha256=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)",
+    ]);
+    assert_eq!(
+        code, 0,
+        "an obs.dll-only manifest legitimately skips distroav — verdict stays NO DRIFT (exit 0). \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("distroav_dll_sha256"))
+        .expect("must print a distroav_dll_sha256 status line");
+    assert!(
+        line.contains("SKIPPED"),
+        "#237: the unverified distroav SHA must be labeled SKIPPED (not compared in an \
+         obs.dll-only manifest): {line:?}"
+    );
+    assert!(
+        !line.contains("OK"),
+        "#237: labeling an UNCHECKED distroav SHA 'OK' is misleading — it must read SKIPPED: \
+         {line:?}"
     );
 }
 
