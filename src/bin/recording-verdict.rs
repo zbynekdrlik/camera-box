@@ -906,33 +906,34 @@ struct DecodedRec {
     rec_path: Option<PathBuf>,
 }
 
-/// Decode one recording IN PLACE into a [`DecodedRec`] (frames + its own path for pixel proof).
-/// `None` path ⇒ the recording wasn't supplied (`Ok(None)`). A decode error aborts when
-/// `fatal`, or (cam1 grab, #187) degrades to `Ok(None)` with a warning so the rest of the
-/// verdict still runs.
-fn decode_for(
-    label: &str,
-    path: Option<&Path>,
-    expected_node_burns: &[u32],
-    fatal: bool,
-) -> Result<Option<DecodedRec>> {
+/// How the OPTIONAL cam1 GRAB recording (#105 node 2) was obtained for the verdict. The cam1
+/// grab is no longer recorded by the harness (#179 — the cam1-capture burn rides into the stream
+/// recording instead), so the per-box / stream-only flow uses [`Cam1Source::Absent`]. A manual
+/// `--cam1` run whose grab decode fails is NON-FATAL (#187): the rest of the verdict still runs,
+/// but the failure is recorded in the report's `nodes.cam1.unavailable` so it is never silent.
+enum Cam1Source {
+    /// cam1 grab decoded OK.
+    Decoded(DecodedRec),
+    /// cam1 grab decode FAILED non-fatally (#187) — reason surfaced in `nodes.cam1.unavailable`.
+    DecodeFailed(String),
+    /// No cam1 grab supplied (the default per-box / stream-only flow).
+    Absent,
+}
+
+/// Decode a (strih/stream) recording IN PLACE into a [`DecodedRec`] (frames + its own path for
+/// pixel proof). `None` path ⇒ the recording wasn't supplied (`Ok(None)`); a decode error aborts
+/// (strih/stream are required for the hops they feed). The cam1 grab decode is NON-FATAL and is
+/// handled separately (see [`Cam1Source`]).
+fn decode_for(path: Option<&Path>, expected_node_burns: &[u32]) -> Result<Option<DecodedRec>> {
     let Some(path) = path else {
         return Ok(None);
     };
-    match analyze_recording_with_burns(path, expected_node_burns) {
-        Ok(frames) => Ok(Some(DecodedRec {
-            frames,
-            rec_path: Some(path.to_path_buf()),
-        })),
-        Err(e) if !fatal => {
-            eprintln!(
-                "WARNING: {label} decode FAILED ({e:#}) — skipping the {label} hops; the rest of \
-                 the verdict still runs (#187 non-fatal)."
-            );
-            Ok(None)
-        }
-        Err(e) => Err(e).with_context(|| format!("analyze recording {}", path.display())),
-    }
+    let frames = analyze_recording_with_burns(path, expected_node_burns)
+        .with_context(|| format!("analyze recording {}", path.display()))?;
+    Ok(Some(DecodedRec {
+        frames,
+        rec_path: Some(path.to_path_buf()),
+    }))
 }
 
 fn main() -> Result<()> {
@@ -971,28 +972,29 @@ fn main() -> Result<()> {
     // then build the verdict. Each recording is decoded for the burns it is KNOWN to carry
     // (strih: cam1+strih; stream: all three; cam1 grab: cam1 only) for the #207 fast gate.
     let strih = decode_for(
-        "strih",
         args.strih.as_deref(),
         &[args.burn_cam1_run_id, args.burn_strih_run_id],
-        true,
     )?;
     let stream = decode_for(
-        "stream",
         args.stream.as_deref(),
         &[
             args.burn_cam1_run_id,
             args.burn_strih_run_id,
             args.burn_stream_run_id,
         ],
-        true,
     )?;
-    // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run.
-    let cam1 = decode_for(
-        "cam1",
-        args.cam1.as_deref(),
-        &[args.burn_cam1_run_id],
-        false,
-    )?;
+    // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run, and the
+    // failure is recorded in nodes.cam1 (never silent). The grab is OPTIONAL (#179).
+    let cam1 = match args.cam1.as_deref() {
+        None => Cam1Source::Absent,
+        Some(p) => match analyze_recording_with_burns(p, &[args.burn_cam1_run_id]) {
+            Ok(frames) => Cam1Source::Decoded(DecodedRec {
+                frames,
+                rec_path: Some(p.to_path_buf()),
+            }),
+            Err(e) => Cam1Source::DecodeFailed(format!("cam1 grab decode failed: {e:#}")),
+        },
+    };
 
     let (_report, all_pass) = build_and_print_verdict(&args, strih, stream, cam1)?;
     if !all_pass {
@@ -1011,7 +1013,7 @@ fn build_and_print_verdict(
     args: &Args,
     strih: Option<DecodedRec>,
     stream: Option<DecodedRec>,
-    cam1: Option<DecodedRec>,
+    cam1: Cam1Source,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -1097,29 +1099,40 @@ fn build_and_print_verdict(
     // cam1→strih hop, and the HONEST cam2→cam1 optical assessment + latency. cam1's
     // grab and strih's program carry the SAME camera frames, so cam1→strih is a strict
     // offset-immune tick-SET compare (the camera beat cancels) — a cam1 tick absent at
-    // strih is a real cam1→strih DROP. (A cam1 grab decode failure was handled non-fatally
-    // by `decode_for` #187, which yields `None` here.)
+    // strih is a real cam1→strih DROP. A NON-FATAL cam1 grab decode failure (#187) is
+    // recorded in nodes.cam1.unavailable so it is never silent; Absent ⇒ no grab (#179).
     let mut cam1_frames_opt: Option<Vec<RecordingFrame>> = None;
-    if let Some(d) = cam1 {
-        let cam1_rec = d.rec_path.clone();
-        let cam1_frames = d.frames;
-        // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
-        // Diagnostic only (#186) — the burn-id contiguity below is authoritative for loss.
-        let cam1_ticks = FrameTick::from_recording_frames(&cam1_frames);
-        let cam1_v = verdict(&cam1_ticks, &cfg);
-        report_recording_diag(
-            "cam1",
-            cam1_rec.as_deref(),
-            &cam1_v,
-            &args.out_dir,
-            args.max_pixel_proof,
-        )?;
-        report["nodes"]["cam1"] = serde_json::json!({
-            "frames": cam1_v.total_frames,
-            "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
-            "diagnostic_only": true,
-        });
-        cam1_frames_opt = Some(cam1_frames);
+    match cam1 {
+        Cam1Source::Decoded(d) => {
+            let cam1_rec = d.rec_path.clone();
+            let cam1_frames = d.frames;
+            // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
+            // Diagnostic only (#186) — the burn-id contiguity below is authoritative for loss.
+            let cam1_ticks = FrameTick::from_recording_frames(&cam1_frames);
+            let cam1_v = verdict(&cam1_ticks, &cfg);
+            report_recording_diag(
+                "cam1",
+                cam1_rec.as_deref(),
+                &cam1_v,
+                &args.out_dir,
+                args.max_pixel_proof,
+            )?;
+            report["nodes"]["cam1"] = serde_json::json!({
+                "frames": cam1_v.total_frames,
+                "analyzed_secs": cam1_v.analyzed_secs, "undecodable": cam1_v.undecodable_frames.len(),
+                "diagnostic_only": true,
+            });
+            cam1_frames_opt = Some(cam1_frames);
+        }
+        Cam1Source::DecodeFailed(reason) => {
+            // #187 non-fatal: the rest of the verdict still runs; record the failure so a
+            // manual --cam1 run that fails is visible in the report, not silently dropped.
+            eprintln!(
+                "WARNING: cam1 grab unavailable — {reason} (the stream-only hops still run; #187)."
+            );
+            report["nodes"]["cam1"] = serde_json::json!({ "unavailable": true, "reason": reason });
+        }
+        Cam1Source::Absent => {}
     }
 
     // cam→strih honest assessment (no false zero claim). Needs both strih + painter;
@@ -1879,8 +1892,8 @@ fn run_merge(args: &Args) -> Result<()> {
         "merge: building the full-chain verdict from per-box partials (#208 — no recording on dev1)"
     );
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
-    // grab in the per-box flow (#179 removed it), so `cam1` is None.
-    let (_report, all_pass) = build_and_print_verdict(args, strih, stream, None)?;
+    // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
+    let (_report, all_pass) = build_and_print_verdict(args, strih, stream, Cam1Source::Absent)?;
     if !all_pass {
         std::process::exit(1);
     }
@@ -1953,7 +1966,7 @@ mod tests {
     /// identical.
     #[test]
     fn merge_of_partials_reproduces_the_fused_verdict() {
-        use super::{build_and_print_verdict, DecodedRec};
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use camera_box::probe::recording_partial::RecordingPartial;
         use clap::Parser;
         use std::path::PathBuf;
@@ -1974,7 +1987,7 @@ mod tests {
                     frames: stream_frames.clone(),
                     rec_path: None,
                 }),
-                None,
+                Cam1Source::Absent,
             )
             .expect("fused verdict");
 
@@ -2003,7 +2016,7 @@ mod tests {
                     frames: stream_back.frames,
                     rec_path: None,
                 }),
-                None,
+                Cam1Source::Absent,
             )
             .expect("merged verdict");
 
@@ -2066,6 +2079,58 @@ mod tests {
             "#208: the missing cam1 id must be classified as a REAL DROP: {}",
             drop["full_chain"]["real_drops"]
         );
+    }
+
+    /// #187/#208: a NON-FATAL cam1 grab decode failure must be RECORDED in the report
+    /// (`nodes.cam1.unavailable`), not silently dropped, while the stream-only hops still run.
+    /// A decoded cam1 grab populates the cam1 diagnostic node.
+    #[test]
+    fn cam1_grab_decode_failure_is_recorded_not_silent() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+
+        // A failed cam1 grab surfaces nodes.cam1.unavailable + the reason (never silent).
+        let (failed, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: window(12, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::DecodeFailed("cam1 grab decode failed: boom".to_string()),
+        )
+        .expect("verdict with a failed cam1 grab");
+        assert_eq!(
+            failed["nodes"]["cam1"]["unavailable"],
+            serde_json::json!(true),
+            "a failed cam1 grab must record nodes.cam1.unavailable: {}",
+            failed["nodes"]["cam1"]
+        );
+        assert!(failed["nodes"]["cam1"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("boom"));
+
+        // A decoded cam1 grab populates the cam1 diagnostic node.
+        let (decoded, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: window(12, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Decoded(DecodedRec {
+                frames: window(12, false, None),
+                rec_path: None,
+            }),
+        )
+        .expect("verdict with a decoded cam1 grab");
+        assert_eq!(
+            decoded["nodes"]["cam1"]["diagnostic_only"],
+            serde_json::json!(true)
+        );
+        assert!(decoded["nodes"]["cam1"]["frames"].as_u64().unwrap() > 0);
     }
 
     #[test]
