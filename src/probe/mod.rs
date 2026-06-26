@@ -18,6 +18,7 @@ pub mod payload;
 pub mod qr;
 pub mod recording;
 pub mod recording_latency;
+pub mod recording_partial;
 pub mod recording_verdict;
 
 // #193: the probe HARDWARE GLUE is Linux-only — fb (/dev/fb0 + libc ioctl), kms/presenter

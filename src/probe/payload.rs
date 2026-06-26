@@ -5,10 +5,11 @@
 //! so it round-trips cleanly through QR text decoding.
 
 use crc::{Crc, CRC_32_ISO_HDLC};
+use serde::{Deserialize, Serialize};
 
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Payload {
     pub run_id: u32,
     pub frame_id: u32,

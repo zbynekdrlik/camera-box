@@ -846,7 +846,10 @@ fn recording_verdict_on_strih_script_exists() {
     );
     let meta = fs::metadata(&path)
         .unwrap_or_else(|e| panic!("#208: recording-verdict-on-strih.sh missing: {e}"));
-    assert!(meta.is_file(), "recording-verdict-on-strih.sh must be a file");
+    assert!(
+        meta.is_file(),
+        "recording-verdict-on-strih.sh must be a file"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
