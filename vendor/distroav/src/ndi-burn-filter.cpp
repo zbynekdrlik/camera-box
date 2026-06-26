@@ -52,15 +52,25 @@
 #include <util/platform.h>
 
 #include <atomic>
-#include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <string>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
 
 #define OBS_NDI_BURN_FILTER_ID "distroav_qr_burn_filter"
 #define BURN_TEXFORMAT GS_BGRA
 
-// Default reserved node run_ids (env-overridable). strih = 911002, stream = 911004 —
-// both far OUTSIDE cam2's normal run_id range so #108 can tell node-stamp from cam2-stamp.
+// camera-box #111/#257: reserved per-node burn run_ids. strih = 911002, stream = 911004 —
+// both far OUTSIDE cam2's normal run_id range so the verdict tells node-stamp from cam2-stamp.
+// #257 removed the OBS_BURN_RUN_ID env: the run_id is now derived from THIS box's hostname
+// (the fixed per-box/role default), so no env is needed and the verdict 911002/911004 pairing
+// keeps working. Mirror of src/probe/recording_latency.rs BURN_RUN_ID_STRIH / _STREAM.
 #define BURN_RUN_ID_DEFAULT_STRIH 911002u
 #define BURN_RUN_ID_DEFAULT_STREAM 911004u
 
@@ -78,9 +88,9 @@ struct burn_filter {
 	uint8_t *work;
 	size_t work_size;
 
-	// Identity / gating (resolved once at create).
+	// Identity (resolved once at create from the host role — no env). The ENABLE gate is
+	// the parent source's per-source genlock_burn flag, read LIVE each render (#257).
 	uint32_t run_id;
-	bool enabled; // OBS_BURN_QR present -> burn; else transparent pass-through
 	uint32_t qr_px;
 	burn_geom::Corner corner; // this node's bottom corner (strih=left, stream=right)
 
@@ -88,57 +98,74 @@ struct burn_filter {
 	uint32_t frame_id;
 };
 
-// Read OBS_BURN_RUN_ID; fall back to the strih default if unset/invalid. The value is a
-// reserved per-node constant — each box sets the env to its own reserved id.
+// camera-box #257: resolve an OBS export by name at RUNTIME (same rationale as ndi-source.cpp:
+// the Windows DistroAV build fetches stock OBS SDK headers without the genlock symbols, so a
+// link-time call cannot build; runtime binding works against any headers AND keeps the plugin
+// loadable on a stock OBS — the burn-enable read is just inert there).
+static void *burn_resolve_obs_export(const char *name)
+{
+#ifdef _WIN32
+	HMODULE m = GetModuleHandleA("obs.dll");
+	if (!m)
+		m = GetModuleHandleA("libobs.dll");
+	return m ? (void *)GetProcAddress(m, name) : nullptr;
+#else
+	return dlsym(RTLD_DEFAULT, name);
+#endif
+}
+
+// camera-box #257: the per-source measurement-burn ENABLE — read LIVE each render from the
+// parent NDI source's genlock_burn flag (set over OBS WebSocket SetInputSettings genlock_burn,
+// applied by ndi_source_update → obs_source_set_genlock_burn). NO env (OBS_BURN_QR is gone):
+// toggling the burn no longer needs an OBS relaunch.
+typedef bool (*get_genlock_burn_fn)(const obs_source_t *);
+static get_genlock_burn_fn resolve_get_genlock_burn()
+{
+	static get_genlock_burn_fn fn = nullptr;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+		fn = (get_genlock_burn_fn)burn_resolve_obs_export("obs_source_get_genlock_burn");
+		if (!fn)
+			obs_log(LOG_WARNING,
+				"[burn] obs_source_get_genlock_burn not exported by this OBS build — "
+				"the measurement-burn toggle is inert (stock OBS?)");
+	}
+	return fn;
+}
+
+// camera-box #257: is THIS box the stream node? Derived from the hostname (no env) — the fixed
+// per-box/role default. stream box → run_id 911004 / bottom-right; strih (and any other) →
+// 911002 / bottom-left. A substring match on "stream" keeps it robust to the exact host name.
+static bool burn_host_is_stream()
+{
+	char name[256] = {0};
+#ifdef _WIN32
+	DWORD n = (DWORD)sizeof(name);
+	if (!GetComputerNameA(name, &n))
+		name[0] = '\0';
+#else
+	if (gethostname(name, sizeof(name) - 1) != 0)
+		name[0] = '\0';
+#endif
+	for (char *p = name; *p; ++p)
+		*p = (char)tolower((unsigned char)*p);
+	return strstr(name, "stream") != nullptr;
+}
+
+// camera-box #257: this box's reserved burn run_id from the host role (no OBS_BURN_RUN_ID env).
 static uint32_t resolve_run_id()
 {
-	const char *env = getenv("OBS_BURN_RUN_ID");
-	if (env && *env) {
-		char *end = nullptr;
-		unsigned long v = strtoul(env, &end, 10);
-		if (end && *end == '\0' && v <= 0xFFFFFFFFul)
-			return (uint32_t)v;
-	}
-	return BURN_RUN_ID_DEFAULT_STRIH;
+	return burn_host_is_stream() ? BURN_RUN_ID_DEFAULT_STREAM : BURN_RUN_ID_DEFAULT_STRIH;
 }
 
-// OBS_BURN_QR present (any non-empty value) -> the burn is enabled. Default OFF so the
-// production install is unaffected until #108 enables it on the PROBE scene.
-static bool resolve_enabled()
-{
-	const char *env = getenv("OBS_BURN_QR");
-	return env && *env;
-}
-
-// Desired burn QR pixel size. OBS_BURN_QR_PX is an ABSOLUTE override (clamped 64..4096);
-// 0 (the auto default, returned when the env is unset) means "compute canvas-relative at
-// draw time" via burn_geom::burn_qr_px_for_canvas — bigger on a 4K canvas so the burn stays
-// crisp (#186). The burn stays SMALLER than the camera dual-QR's ~0.65*h so the two
-// bottom-corner burns sit fully clear of the camera QRs (top band) and of each other
-// (#111 4-corner layout); the 0.29*h auto fraction is sized for exactly that clearance.
-static uint32_t resolve_qr_px()
-{
-	const char *env = getenv("OBS_BURN_QR_PX");
-	if (env && *env) {
-		char *end = nullptr;
-		unsigned long v = strtoul(env, &end, 10);
-		if (end && *end == '\0' && v >= 64 && v <= 4096)
-			return (uint32_t)v;
-	}
-	return 0u; // auto → canvas-relative at draw time (burn_geom::burn_qr_px_for_canvas)
-}
-
-// This node's bottom corner. OBS_BURN_CORNER overrides (parsed by burn_geom::corner_from_string,
-// which matches every documented form by substring); otherwise it defaults FROM the run_id
-// (stream default run_id → bottom-right, strih default + any custom run_id → bottom-left) so
-// the existing per-node env (OBS_BURN_RUN_ID) keeps the corners distinct with no new env on
-// the boxes.
+// This node's bottom corner, derived FROM the run_id (stream → bottom-right, strih → bottom-left)
+// so one stream recording carries all four QRs (camera L/R + strih burn + stream burn) with no
+// overlap (#111 4-corner layout). #257 removed the OBS_BURN_CORNER env.
 static burn_geom::Corner resolve_corner(uint32_t run_id)
 {
-	const burn_geom::Corner dflt = (run_id == BURN_RUN_ID_DEFAULT_STREAM)
-					       ? burn_geom::Corner::BottomRight
-					       : burn_geom::Corner::BottomLeft;
-	return burn_geom::corner_from_string(getenv("OBS_BURN_CORNER"), dflt);
+	return (run_id == BURN_RUN_ID_DEFAULT_STREAM) ? burn_geom::Corner::BottomRight
+						      : burn_geom::Corner::BottomLeft;
 }
 
 static const char *burn_filter_getname(void *)
@@ -157,18 +184,17 @@ static void *burn_filter_create(obs_data_t *, obs_source_t *source)
 {
 	auto *f = (burn_filter *)bzalloc(sizeof(burn_filter));
 	f->context = source;
-	f->run_id = resolve_run_id();
-	f->enabled = resolve_enabled();
-	f->qr_px = resolve_qr_px();
+	f->run_id = resolve_run_id(); // #257: from the host role (no env)
+	f->qr_px = 0u;                 // #257: always canvas-relative auto (no OBS_BURN_QR_PX env)
 	f->corner = resolve_corner(f->run_id);
 	f->frame_id = 0;
 
 	obs_log(LOG_INFO,
-		"[burn] filter created: enabled=%s run_id=%u qr_px=%u corner=%s (env OBS_BURN_QR=%s, "
-		"OBS_BURN_RUN_ID default %u/%u strih/stream → bottom-left/bottom-right)",
-		f->enabled ? "yes" : "no(pass-through)", f->run_id, f->qr_px,
-		f->corner == burn_geom::Corner::BottomRight ? "bottom-right" : "bottom-left",
-		f->enabled ? "set" : "unset", BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM);
+		"[burn] filter created: run_id=%u (host role) corner=%s qr_px=auto — burn is gated LIVE "
+		"by the parent source's per-source genlock_burn flag (#257, no env, no restart). "
+		"run_ids %u/%u strih/stream → bottom-left/bottom-right",
+		f->run_id, f->corner == burn_geom::Corner::BottomRight ? "bottom-right" : "bottom-left",
+		BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM);
 	return f;
 }
 
@@ -292,8 +318,14 @@ static void burn_filter_videorender(void *data, gs_effect_t *)
 		return;
 	}
 
-	// Disabled (default on prod): transparent pass-through, zero overhead beyond a render.
-	if (!f->enabled) {
+	// camera-box #257: the ENABLE gate is the PARENT source's per-source genlock_burn flag,
+	// read LIVE here (toggled over OBS WebSocket SetInputSettings genlock_burn → applied by
+	// ndi_source_update → obs_source_set_genlock_burn, NO OBS restart). OFF (default, prod):
+	// transparent pass-through, zero overhead beyond a render. No env (OBS_BURN_QR is gone).
+	bool burn_on = false;
+	if (auto get_burn = resolve_get_genlock_burn())
+		burn_on = get_burn(parent);
+	if (!burn_on) {
 		obs_source_skip_video_filter(f->context);
 		return;
 	}

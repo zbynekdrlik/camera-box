@@ -25,8 +25,8 @@
 #include <QUrl>
 
 #include <thread>
-#include <cstdio>  /* camera-box #97: snprintf for the preload ms info-text label */
-#include <cstdlib> /* camera-box #97: getenv/strtol for OBS_GENLOCK_PRELOAD_FRAMES default */
+/* camera-box #257: the OBS_GENLOCK_* / OBS_BURN_* env reads + the read-only info-text
+ * labels were removed (hard-lock whitelist UI), so cstdio/cstdlib are no longer needed here. */
 
 #define PROP_SOURCE "ndi_source_name"
 #define PROP_BEHAVIOR "ndi_behavior"
@@ -34,14 +34,12 @@
 #define PROP_BANDWIDTH "ndi_bw_mode"
 #define PROP_SYNC "ndi_sync"
 #define PROP_FRAMESYNC "ndi_framesync"
-#define PROP_GENLOCK_FIFO "genlock_fifo"            /* camera-box #42 */
-#define PROP_GENLOCK_PRELOAD "genlock_preload"      /* camera-box #97: video-delay slider */
-#define PROP_GENLOCK_PRELOAD_MS "genlock_preload_ms" /* camera-box #97: read-only ms label */
-#define PROP_GENLOCK_PRELOAD_MAX 128                /* mirrors libobs GENLOCK_PRELOAD_MAX (#97) */
-#define PROP_GENLOCK_LATENCY_MS "genlock_latency_ms" /* camera-box #235: read-only GLOBAL latency label */
-#define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src" /* camera-box #245: EDITABLE per-source latency (ms) override */
-#define PROP_GENLOCK_LATENCY_MS_SRC_HINT "genlock_latency_ms_src_hint" /* camera-box #245: read-only frame-equiv hint */
-#define PROP_GENLOCK_SOURCE_LATENCY_MS_MAX 2000 /* mirrors libobs GENLOCK_SOURCE_LATENCY_MS_MAX (#245) */
+#define PROP_GENLOCK_FIFO "genlock_fifo"            /* camera-box #42: WHITELIST — bool "Genlock", default ON */
+#define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src" /* camera-box #245: WHITELIST — per-source latency (ms), default 3, min 3 */
+#define PROP_BURN "genlock_burn"                    /* camera-box #257: WHITELIST — bool "Measurement burn (test only)", default OFF, runtime */
+#define PROP_GENLOCK_SOURCE_LATENCY_MS_MAX 2000     /* mirrors libobs GENLOCK_SOURCE_LATENCY_MS_MAX (#245) */
+#define PROP_GENLOCK_LATENCY_MS_MIN 3               /* camera-box #257: latency floor (ms), mirrors libobs GENLOCK_LATENCY_MS_MIN */
+#define PROP_GENLOCK_LATENCY_MS_DEFAULT 3           /* camera-box #257: per-source latency default (ms) = the floor */
 
 /* camera-box #42: resolve the genlock export at RUNTIME. On Windows the
  * DistroAV build system fetches stock OBS SDK headers (no genlock symbols), so
@@ -86,111 +84,24 @@ static set_genlock_fifo_fn resolve_set_genlock_fifo()
 	return fn;
 }
 
-/* camera-box #97: the default genlock-preload depth for a NDI source the operator
- * never touched — derived from OBS_GENLOCK_PRELOAD_FRAMES so the #70 env mechanism
- * ("tune depth without a rebuild") still works on the very DistroAV sources it was
- * built for. Without this, a hardcoded default of 1 in ndi_source_getdefaults would
- * OVERWRITE the libobs env seed on every scene load (defaults are applied before
- * create → update reads the setting → set_preload), silently reverting a non-1 env
- * value to 1 (review finding). Clamped to [0, PROP_GENLOCK_PRELOAD_MAX]; invalid /
- * unset → 1 (GENLOCK_PRELOAD_DEFAULT, mirrors the libobs parse). */
-static long genlock_preload_env_default()
+/* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
+ * rationale as the fifo/latency setters: the Windows DistroAV build fetches stock OBS SDK
+ * headers (no genlock symbols), so a link-time call cannot build; resolve at runtime so
+ * the plugin still loads on any OBS (the control is just inert on a stock build). The
+ * burn QR filter reads obs_source_get_genlock_burn(parent) each render; this setter writes
+ * the per-source flag live from PROP_BURN in ndi_source_update (no OBS restart). */
+typedef void (*set_genlock_burn_fn)(obs_source_t *, bool);
+static set_genlock_burn_fn resolve_set_genlock_burn()
 {
-	const char *env = getenv("OBS_GENLOCK_PRELOAD_FRAMES");
-	if (!env || !*env)
-		return 1;
-	char *end = nullptr;
-	long v = strtol(env, &end, 10);
-	if (end == env || *end != '\0' || v < 0)
-		return 1;
-	if (v > PROP_GENLOCK_PRELOAD_MAX)
-		return PROP_GENLOCK_PRELOAD_MAX;
-	return v;
-}
-
-/* camera-box #235: resolve the SINGLE genlock latency (ms) from the canonical
- * OBS_GENLOCK_LATENCY_MS knob, falling back to the OBS_GENLOCK_RESERVE_MS back-compat
- * alias (canonical wins; same strtol contract + [0,100] clamp as the libobs side). 0 =
- * disabled (whole-frame preload fallback). Mirror of src/probe/genlock.rs
- * resolve_latency_ms — used to drive the read-only "genlock latency = N ms (≈ M frames)"
- * label so the operator reads the ACTUAL deployed latency in the source properties. */
-static long resolve_genlock_latency_ms()
-{
-	const long LATENCY_MS_MAX = 100; /* == GENLOCK_LATENCY_MS_MAX */
-	auto parse = [&](const char *env, bool &set) -> long {
-		set = false;
-		if (!env || !*env)
-			return 0;
-		char *end = nullptr;
-		long v = strtol(env, &end, 10);
-		if (end == env || *end != '\0' || v < 0)
-			return 0; /* unset/junk/negative -> not set */
-		set = true;
-		return v > LATENCY_MS_MAX ? LATENCY_MS_MAX : v;
-	};
-	bool set = false;
-	long ms = parse(getenv("OBS_GENLOCK_LATENCY_MS"), set);
-	if (set)
-		return ms; /* the canonical knob wins */
-	return parse(getenv("OBS_GENLOCK_RESERVE_MS"), set); /* back-compat alias */
-}
-
-/* camera-box #235: format the read-only "genlock latency = N ms (≈ M frames @ Ffps)"
- * label — MS PRIMARY, the whole-frame equivalent in PARENTHESES (the user's exact ask).
- * Sourced from the resolved env latency, NOT a per-source value (latency is a launch-time
- * env). Mirror of src/probe/genlock.rs format_latency_label. */
-static void format_genlock_latency_label(char *buf, size_t buflen)
-{
-	const long ms = resolve_genlock_latency_ms();
-	struct obs_video_info ovi;
-	if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
-		const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
-		/* frames = round(ms * fps_num / (1000 * fps_den)) — inverse of preload_to_ms. */
-		const unsigned long long num = (unsigned long long)ms * ovi.fps_num;
-		const unsigned long long den = 1000ULL * ovi.fps_den;
-		const unsigned long long frames = (num + den / 2) / den;
-		snprintf(buf, buflen, "genlock latency = %ld ms (≈ %llu frames @ %.3f fps)", ms, frames, fps);
-	} else {
-		snprintf(buf, buflen, "genlock latency = %ld ms (≈ ? frames — fps unknown)", ms);
-	}
-}
-
-/* camera-box #245: format the read-only frame-equivalent hint for the EDITABLE per-source
- * genlock latency (ms) field — "≈ M frames @ Ffps" (the user's ask: show the frame
- * equivalent in parens). 0 means the source follows the GLOBAL default, so the hint says
- * so instead of "≈ 0 frames". Description-only; never written back into settings. */
-static void format_src_latency_label(obs_data_t *settings, char *buf, size_t buflen)
-{
-	const long long ms = obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC);
-	if (ms <= 0) {
-		snprintf(buf, buflen, "0 = use global default (see Genlock latency above)");
-		return;
-	}
-	struct obs_video_info ovi;
-	if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
-		const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
-		const unsigned long long num = (unsigned long long)ms * ovi.fps_num;
-		const unsigned long long den = 1000ULL * ovi.fps_den;
-		const unsigned long long frames = (num + den / 2) / den;
-		snprintf(buf, buflen, "≈ %llu frames @ %.3f fps", frames, fps);
-	} else {
-		snprintf(buf, buflen, "≈ ? frames — output fps unknown");
-	}
-}
-
-/* camera-box #97: per-source genlock preload (video-delay) setter, runtime-resolved. */
-typedef void (*set_genlock_preload_fn)(obs_source_t *, uint32_t);
-static set_genlock_preload_fn resolve_set_genlock_preload()
-{
-	static set_genlock_preload_fn fn = nullptr;
+	static set_genlock_burn_fn fn = nullptr;
 	static bool tried = false;
 	if (!tried) {
 		tried = true;
-		fn = (set_genlock_preload_fn)resolve_obs_export("obs_source_set_genlock_preload");
+		fn = (set_genlock_burn_fn)resolve_obs_export("obs_source_set_genlock_burn");
 		if (!fn)
 			obs_log(LOG_WARNING,
-				"genlock: obs_source_set_genlock_preload not exported by this OBS build — "
-				"the Genlock preload (video delay) slider is inert (stock OBS?)");
+				"genlock: obs_source_set_genlock_burn not exported by this OBS build — "
+				"the per-source Measurement burn toggle is inert (stock OBS?)");
 	}
 	return fn;
 }
@@ -403,91 +314,70 @@ const char *ndi_source_getname(void *)
 	return obs_module_text("NDIPlugin.NDISourceName");
 }
 
-/* camera-box #97: format the read-only "≈ N ms (@ F fps)" video-delay label for the
- * current PROP_GENLOCK_PRELOAD value at the current output fps. Shared by the initial
- * property build (so the label shows immediately on first dialog open, before any
- * callback fires — review finding) AND the slider/checkbox modified_callbacks. The
- * label is for the property DESCRIPTION only; it is NEVER written back into settings
- * (no derived string persisted into the saved scene JSON). When genlock_fifo is OFF
- * the preload is inert (ready_async_frame's genlock branch is skipped), so the label
- * says so rather than implying a delay that is not applied. */
-static void format_preload_ms_label(obs_data_t *settings, char *buf, size_t buflen)
-{
-	const long long frames = obs_data_get_int(settings, PROP_GENLOCK_PRELOAD);
-	const bool fifo_on = obs_data_get_bool(settings, PROP_GENLOCK_FIFO);
-	struct obs_video_info ovi;
-	if (obs_get_video_info(&ovi) && ovi.fps_num != 0) {
-		const unsigned long long ms = (unsigned long long)frames * 1000ULL * ovi.fps_den / ovi.fps_num;
-		const double fps = (double)ovi.fps_num / (double)ovi.fps_den;
-		if (fifo_on)
-			snprintf(buf, buflen, "≈ %llu ms (@ %.3f fps)", ms, fps);
-		else
-			snprintf(buf, buflen, "≈ %llu ms (@ %.3f fps) — enable Genlock to apply", ms, fps);
-	} else {
-		snprintf(buf, buflen, "≈ ? ms (output fps unknown)");
-	}
-}
+/* camera-box #257: the HARD-LOCK source-UI WHITELIST. ndi_source_getproperties exposes
+ * EXACTLY these four props and NOTHING else — source selection, the Genlock gate (default
+ * ON), the per-source latency (ms, floor 3), and the measurement-burn toggle (default OFF,
+ * runtime). Every other DistroAV property is removed from the UI and FORCED to a certified
+ * value (GENLOCK_FORCED_SETTINGS below — the exact COMPLEMENT of this list), so an upstream
+ * DistroAV property add/remove can never reintroduce a live drift knob. A vendored-source
+ * test asserts the exposed set == this whitelist. */
+static const char *const GENLOCK_WHITELIST_PROPS[] = {
+	PROP_SOURCE,
+	PROP_GENLOCK_FIFO,
+	PROP_GENLOCK_LATENCY_MS_SRC,
+	PROP_BURN,
+};
 
-/* camera-box #150: FORCE every certified zero-loss genlock value into `settings`,
- * regardless of any saved scene value, UI edit, or harness-set value. Called from
- * ndi_source_update ONLY when genlock_fifo is on (NOT from ndi_source_getdefaults —
- * defaults run before create with no per-source genlock state to gate on; update is
- * the authoritative enforcement point and ndi_source_create calls update at the end,
- * so a newly-added genlock source is forced at creation), so a genlock NDI source —
- * prod, probe, or a newly-added one, in ANY scene — is correct by construction. This
- * closes the misconfig class root-caused live 2026-06-22 (an
- * incompletely-configured probe ingest decoded 0 at the strih output while the
- * fully-configured prod input decoded 100%, same NDI source). The LEGITIMATE operator
- * knobs — PROP_SOURCE, PROP_GENLOCK_PRELOAD and the #245 PROP_GENLOCK_LATENCY_MS_SRC
- * per-source latency override — are NEVER touched here, and
- * PROP_GENLOCK_FIFO itself is the operator's gate (left as the operator set it). The
- * certified values were read live from the working prod input `NDI cam5`:
- *   ndi_sync=2 (SOURCE_TIMECODE / source timing), ndi_behavior=2 (LAST_FRAME),
- *   ndi_bw_mode=0 (highest), latency=0 (NORMAL), ndi_recv_hw_accel=true,
- *   ndi_audio=false, ndi_framesync=false, ndi_fix_alpha_blending=false,
- *   yuv_range=partial, yuv_colorspace=BT.709, timeout=KEEP_CONTENT.
- * Writing into `settings` (not just s->config) means the values persist into the saved
- * scene JSON on the next OBS save, so the source stays correct across restarts. */
+/* camera-box #150/#257: the certified value FORCED into every non-whitelist (hidden) prop
+ * when genlock is on — a single const table that is the COMPLEMENT of GENLOCK_WHITELIST_PROPS.
+ * force_genlock_certified_settings() iterates it, so a value can never silently drift and an
+ * upstream property the operator could otherwise see is pinned to its zero-loss certified
+ * value. The values were read live from the working prod input `NDI cam5`:
+ *   ndi_sync=2 (SOURCE_TIMECODE), ndi_behavior=2 (LAST_FRAME), ndi_bw_mode=0 (highest),
+ *   latency=0 (NORMAL), ndi_recv_hw_accel=true, ndi_audio=false, ndi_framesync=false,
+ *   ndi_fix_alpha_blending=false, yuv_range=partial, yuv_colorspace=BT.709,
+ *   timeout=KEEP_CONTENT, ptz=off. */
+struct genlock_forced_setting {
+	const char *prop;
+	bool is_bool;
+	long long ival; /* used when !is_bool */
+	bool bval;      /* used when is_bool */
+};
+static const struct genlock_forced_setting GENLOCK_FORCED_SETTINGS[] = {
+	{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false},
+	{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false},
+	{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false},
+	{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false},
+	{PROP_TIMEOUT, false, PROP_TIMEOUT_KEEP_CONTENT, false},
+	{PROP_YUV_RANGE, false, PROP_YUV_RANGE_PARTIAL, false},
+	{PROP_YUV_COLORSPACE, false, PROP_YUV_SPACE_BT709, false},
+	{PROP_HW_ACCEL, true, 0, true},
+	{PROP_AUDIO, true, 0, false},
+	{PROP_FRAMESYNC, true, 0, false},
+	{PROP_FIX_ALPHA, true, 0, false},
+	{PROP_PTZ, true, 0, false},
+};
+
+/* camera-box #150/#257: FORCE every certified zero-loss genlock value into `settings`,
+ * regardless of any saved scene value, WS-set value, or harness-set value. Called from
+ * ndi_source_update ONLY when genlock_fifo is on (update is the authoritative enforcement
+ * point; ndi_source_create calls update at the end, so a newly-added genlock source is
+ * forced at creation). Driven by the single GENLOCK_FORCED_SETTINGS const table (the
+ * complement of the whitelist), so a genlock NDI source — prod, probe, or new, in ANY
+ * scene — is correct by construction. This closes the misconfig class root-caused live
+ * 2026-06-22 (an incompletely-configured probe ingest decoded 0 while the certified prod
+ * input decoded 100%, same NDI source). The whitelist knobs (PROP_SOURCE,
+ * PROP_GENLOCK_LATENCY_MS_SRC, PROP_BURN) and PROP_GENLOCK_FIFO (the operator's gate) are
+ * NEVER touched here. Writing into `settings` (not just s->config) persists the values into
+ * the saved scene JSON, so the source stays correct across restarts. */
 static void force_genlock_certified_settings(obs_data_t *settings)
 {
-	obs_data_set_int(settings, PROP_SYNC, PROP_SYNC_NDI_SOURCE_TIMECODE);
-	obs_data_set_int(settings, PROP_BEHAVIOR, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME);
-	obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_HIGHEST);
-	obs_data_set_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL);
-	obs_data_set_int(settings, PROP_TIMEOUT, PROP_TIMEOUT_KEEP_CONTENT);
-	obs_data_set_int(settings, PROP_YUV_RANGE, PROP_YUV_RANGE_PARTIAL);
-	obs_data_set_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709);
-	obs_data_set_bool(settings, PROP_HW_ACCEL, true);
-	obs_data_set_bool(settings, PROP_AUDIO, false);
-	obs_data_set_bool(settings, PROP_FRAMESYNC, false);
-	obs_data_set_bool(settings, PROP_FIX_ALPHA, false);
-}
-
-/* camera-box #150: hide every non-essential property when genlock is enabled, so a
- * human or a tool CANNOT set a forced key wrong from the UI — leaving ONLY the two
- * legitimate knobs (PROP_SOURCE selection + PROP_GENLOCK_PRELOAD video delay) plus the
- * PROP_GENLOCK_FIFO toggle visible. When genlock is OFF the FULL normal property set is
- * shown (non-genlock aux/preview inputs — NDI 2ME PVW / Bible / Camera info, ndi_sync=1
- * — are unaffected, #150 constraint #3). Returns true (properties UI changed → refresh)
- * so it can drive the genlock-checkbox modified-callback directly. PROP_SOURCE,
- * PROP_GENLOCK_FIFO, PROP_GENLOCK_PRELOAD and the #245 editable PROP_GENLOCK_LATENCY_MS_SRC
- * per-source latency field (+ the read-only ms label + the #235 read-only genlock-latency
- * label + the #245 frame-equiv hint) are deliberately NEVER hidden — they are legitimate
- * operator knobs that must stay settable under the genlock lockdown. */
-static bool apply_genlock_lockdown_visibility(obs_properties_t *props, bool genlock_on)
-{
-	/* The forced (non-essential) properties: shown only when genlock is OFF. */
-	static const char *const locked_props[] = {
-		PROP_BEHAVIOR, PROP_BANDWIDTH, PROP_SYNC,           PROP_FRAMESYNC,
-		PROP_HW_ACCEL, PROP_LATENCY,   PROP_AUDIO,          PROP_YUV_RANGE,
-		PROP_YUV_COLORSPACE, PROP_FIX_ALPHA, PROP_TIMEOUT,
-	};
-	for (const char *name : locked_props) {
-		obs_property_t *p = obs_properties_get(props, name);
-		if (p)
-			obs_property_set_visible(p, !genlock_on);
+	for (const struct genlock_forced_setting &f : GENLOCK_FORCED_SETTINGS) {
+		if (f.is_bool)
+			obs_data_set_bool(settings, f.prop, f.bval);
+		else
+			obs_data_set_int(settings, f.prop, f.ival);
 	}
-	return true;
 }
 
 obs_properties_t *ndi_source_getproperties(void *data)
@@ -495,8 +385,17 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	auto s = (ndi_source_t *)data;
 	obs_log(LOG_DEBUG, "+ndi_source_getproperties(…)");
 
+	/* camera-box #257: the HARD-LOCK source UI. Expose EXACTLY the GENLOCK_WHITELIST_PROPS
+	 * — source · Genlock · Latency (ms) · Measurement burn — and NOTHING else. Every other
+	 * DistroAV property (behavior/timeout/bandwidth/sync/framesync/hw_accel/alpha/yuv×2/
+	 * audio/latency-combo/ptz + the old read-only info labels + the legacy preload slider)
+	 * is REMOVED from the UI and FORCED to its certified value (force_genlock_certified_settings
+	 * → GENLOCK_FORCED_SETTINGS, the complement of the whitelist). The operator can no longer
+	 * mis-set a knob that does nothing. A vendored-source test asserts the exposed set ==
+	 * GENLOCK_WHITELIST_PROPS. */
 	obs_properties_t *props = obs_properties_create();
 
+	/* (1) PROP_SOURCE — the NDI source selection (unchanged). */
 	obs_property_t *source_list = obs_properties_add_list(props, PROP_SOURCE,
 							      obs_module_text("NDIPlugin.SourceProps.SourceName"),
 							      OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
@@ -514,230 +413,23 @@ obs_properties_t *ndi_source_getproperties(void *data)
 		obs_property_list_add_string(source_list, source.c_str(), source.c_str());
 	}
 
-	obs_property_t *behavior_list = obs_properties_add_list(props, PROP_BEHAVIOR,
-								obs_module_text("NDIPlugin.SourceProps.Behavior"),
-								OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(behavior_list, obs_module_text("NDIPlugin.SourceProps.Behavior.KeepActive"),
-				  PROP_BEHAVIOR_KEEP_ACTIVE);
-	obs_property_list_add_int(behavior_list, obs_module_text("NDIPlugin.SourceProps.Behavior.StopResumeBlank"),
-				  PROP_BEHAVIOR_STOP_RESUME_BLANK);
-	obs_property_list_add_int(behavior_list, obs_module_text("NDIPlugin.SourceProps.Behavior.StopResumeLastFrame"),
-				  PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME);
-
-	obs_property_t *timeout_list = obs_properties_add_list(props, PROP_TIMEOUT,
-							       obs_module_text("NDIPlugin.SourceProps.Timeout"),
-							       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(timeout_list, obs_module_text("NDIPlugin.SourceProps.Timeout.KeepContent"),
-				  PROP_TIMEOUT_KEEP_CONTENT);
-	obs_property_list_add_int(timeout_list, obs_module_text("NDIPlugin.SourceProps.Timeout.ClearContent"),
-				  PROP_TIMEOUT_CLEAR_CONTENT);
-
-	obs_property_t *bw_modes = obs_properties_add_list(props, PROP_BANDWIDTH,
-							   obs_module_text("NDIPlugin.SourceProps.Bandwidth"),
-							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(bw_modes, obs_module_text("NDIPlugin.BWMode.Highest"), PROP_BW_HIGHEST);
-	obs_property_list_add_int(bw_modes, obs_module_text("NDIPlugin.BWMode.Lowest"), PROP_BW_LOWEST);
-	obs_property_list_add_int(bw_modes, obs_module_text("NDIPlugin.BWMode.AudioOnly"), PROP_BW_AUDIO_ONLY);
-	obs_property_set_modified_callback(bw_modes, [](obs_properties_t *props_, obs_property_t *,
-							obs_data_t *settings_) {
-		bool is_audio_only = (obs_data_get_int(settings_, PROP_BANDWIDTH) == PROP_BW_AUDIO_ONLY);
-		/* camera-box #150: this callback also governs the two YUV controls' visibility,
-		 * so it MUST be genlock-aware — otherwise, under the genlock lockdown (which
-		 * forces bandwidth=HIGHEST, i.e. NOT audio-only), a property refresh that
-		 * re-fires this callback would set the YUV controls visible again and LEAK the
-		 * lockdown for exactly those two props. When genlock is on, keep them hidden
-		 * regardless of audio-only — the lockdown is authoritative. */
-		bool genlock_on = obs_data_get_bool(settings_, PROP_GENLOCK_FIFO);
-		bool yuv_visible = !is_audio_only && !genlock_on;
-
-		obs_property_t *yuv_range = obs_properties_get(props_, PROP_YUV_RANGE);
-		obs_property_t *yuv_colorspace = obs_properties_get(props_, PROP_YUV_COLORSPACE);
-
-		obs_property_set_visible(yuv_range, yuv_visible);
-		obs_property_set_visible(yuv_colorspace, yuv_visible);
-
-		return true;
-	});
-
-	obs_property_t *sync_modes = obs_properties_add_list(props, PROP_SYNC,
-							     obs_module_text("NDIPlugin.SourceProps.Sync"),
-							     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(sync_modes, obs_module_text("NDIPlugin.SyncMode.NDITimestamp"),
-				  PROP_SYNC_NDI_TIMESTAMP);
-	obs_property_list_add_int(sync_modes, obs_module_text("NDIPlugin.SyncMode.NDISourceTimecode"),
-				  PROP_SYNC_NDI_SOURCE_TIMECODE);
-
-	obs_properties_add_bool(props, PROP_FRAMESYNC, obs_module_text("NDIPlugin.NDIFrameSync"));
-
+	/* (2) PROP_GENLOCK_FIFO — the Genlock gate (bool, default ON via ndi_source_getdefaults). */
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock (FIFO frame consumption, camera-box #42)");
 
-	/* camera-box #235: the SINGLE user-facing genlock latency display — read-only info
-	 * text "genlock latency = N ms (≈ M frames @ Ffps)" (MS PRIMARY, frames in parens).
-	 * Sourced from the resolved env latency (OBS_GENLOCK_LATENCY_MS, alias
-	 * OBS_GENLOCK_RESERVE_MS) so the operator reads the ACTUAL deployed latency. This is
-	 * the consolidated knob; the preload slider below is now an INTERNAL/legacy control
-	 * (auto-derived under the ms knob — not a competing latency knob). */
-	obs_property_t *latency_label =
-		obs_properties_add_text(props, PROP_GENLOCK_LATENCY_MS, "Genlock latency (global default)", OBS_TEXT_INFO);
-	{
-		char lat_buf[160];
-		format_genlock_latency_label(lat_buf, sizeof(lat_buf));
-		obs_property_set_description(latency_label, lat_buf);
-	}
-
-	/* camera-box #245: the EDITABLE PER-SOURCE genlock latency override (ms). #235
-	 * collapsed latency to ONE GLOBAL env knob and lost per-source control — the
-	 * live-event regression (operator could not set 1000 ms on a single source while the
-	 * others stayed low). This int field restores it IN THE OBS SOURCE UI (no env): each
-	 * NDI source holds its OWN latency. 0 = follow the global default shown above. Range
-	 * 0..2000 ms (a deliberate per-source VIDEO DELAY, far above the global sub-frame
-	 * reserve). Applied at runtime via obs_source_set_genlock_latency_ms (resolved by
-	 * name so the plugin still builds against stock SDK headers). The read-only hint below
-	 * shows the frame-equivalent (the user's "frame-equivalent in parens" ask). */
+	/* (3) PROP_GENLOCK_LATENCY_MS_SRC — the SINGLE per-source latency knob (ms). #257: floor
+	 * GENLOCK_LATENCY_MS_MIN (3), max PROP_GENLOCK_SOURCE_LATENCY_MS_MAX (2000), default 3.
+	 * Applied at runtime via obs_source_set_genlock_latency_ms (resolved by name so the plugin
+	 * still builds against stock SDK headers; libobs clamps to [3, 2000] too). No env, no global
+	 * label, no read-only hint — the operator sets ONE ms value. */
 	obs_property_t *src_latency =
-		obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC,
-				       "Genlock latency (per source, 0 = use global default)", 0,
+		obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC, "Latency (ms)", PROP_GENLOCK_LATENCY_MS_MIN,
 				       PROP_GENLOCK_SOURCE_LATENCY_MS_MAX, 1);
 	obs_property_int_set_suffix(src_latency, " ms");
-	obs_property_t *src_latency_hint =
-		obs_properties_add_text(props, PROP_GENLOCK_LATENCY_MS_SRC_HINT, "↳ per-source delay", OBS_TEXT_INFO);
-	/* Seed the frame-equiv hint from the current settings so it shows on FIRST dialog
-	 * open (OBS does not fire modified-callbacks at initial population — the #97 lesson).
-	 * The data ptr is the source on a populated dialog; guard the null-data add case. */
-	if (s && s->obs_source) {
-		obs_data_t *cur = obs_source_get_settings(s->obs_source);
-		if (cur) {
-			char init_buf[160];
-			format_src_latency_label(cur, init_buf, sizeof(init_buf));
-			obs_property_set_description(src_latency_hint, init_buf);
-			obs_data_release(cur);
-		}
-	}
-	/* Recompute the frame-equiv hint whenever the per-source ms field changes. Non-
-	 * capturing lambda so it converts to the C obs_property_modified_t pointer. */
-	auto update_src_latency_hint = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
-		char buf[160];
-		format_src_latency_label(settings_, buf, sizeof(buf));
-		obs_property_t *hint = obs_properties_get(props_, PROP_GENLOCK_LATENCY_MS_SRC_HINT);
-		if (hint)
-			obs_property_set_description(hint, buf);
-		return true; /* properties UI changed -> refresh */
-	};
-	obs_property_set_modified_callback(src_latency, update_src_latency_hint);
 
-	/* camera-box #97/#235: the per-source genlock preload (FIFO depth). #235 demoted this
-	 * from a user latency knob to an INTERNAL/legacy frame control: when the ms latency
-	 * knob is set the depth is auto-derived (the ms deadline holds the latency, not the
-	 * preload), so this slider only governs the legacy whole-frame fallback (latency_ms=0)
-	 * path. Kept for back-compat + the legacy video-delay use; the read-only ms hint below
-	 * shows its frame→ms equivalent. */
-	obs_property_t *preload_slider =
-		obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD,
-					      "Genlock preload (internal FIFO depth — legacy frame control)", 0,
-					      PROP_GENLOCK_PRELOAD_MAX, 1);
-	obs_property_t *preload_ms = obs_properties_add_text(props, PROP_GENLOCK_PRELOAD_MS, "↳ delay", OBS_TEXT_INFO);
-	/* camera-box #97: set the ms label immediately from the current settings so it
-	 * shows on FIRST dialog open — OBS does not fire modified_callbacks at initial
-	 * property population, so without this the operator would see the bare "↳ delay"
-	 * placeholder until they move the slider (review finding). The data ptr is the
-	 * source on a populated dialog; guard for the null-data (add-source) case. */
-	if (s && s->obs_source) {
-		obs_data_t *cur = obs_source_get_settings(s->obs_source);
-		if (cur) {
-			char init_buf[160];
-			format_preload_ms_label(cur, init_buf, sizeof(init_buf));
-			obs_property_set_description(preload_ms, init_buf);
-			obs_data_release(cur);
-		}
-	}
-	/* Recompute the read-only ms label whenever EITHER the preload slider OR the
-	 * genlock-fifo checkbox changes, via the shared formatter (description only — never
-	 * written back into settings). Non-capturing lambda so it converts to the C
-	 * obs_property_modified_t function pointer. */
-	auto update_preload_ms = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings_) -> bool {
-		char buf[160];
-		format_preload_ms_label(settings_, buf, sizeof(buf));
-		obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
-		if (ms_prop)
-			obs_property_set_description(ms_prop, buf);
-		return true; /* properties UI changed -> refresh */
-	};
-	obs_property_set_modified_callback(preload_slider, update_preload_ms);
-	/* camera-box #150 + #97: when the genlock-fifo checkbox is toggled, do BOTH —
-	 * update the preload ms-label hint AND re-apply the lockdown visibility so the
-	 * non-essential properties hide (genlock on) / re-appear (genlock off) live. A
-	 * property has a single modified-callback, so the two actions are combined here.
-	 * Non-capturing lambda so it converts to the C obs_property_modified_t pointer. */
-	auto on_genlock_fifo_changed = [](obs_properties_t *props_, obs_property_t *,
-					  obs_data_t *settings_) -> bool {
-		char buf[160];
-		format_preload_ms_label(settings_, buf, sizeof(buf));
-		obs_property_t *ms_prop = obs_properties_get(props_, PROP_GENLOCK_PRELOAD_MS);
-		if (ms_prop)
-			obs_property_set_description(ms_prop, buf);
-		apply_genlock_lockdown_visibility(props_, obs_data_get_bool(settings_, PROP_GENLOCK_FIFO));
-		return true; /* properties UI changed -> refresh */
-	};
-	obs_property_t *genlock_fifo_prop = obs_properties_get(props, PROP_GENLOCK_FIFO);
-	if (genlock_fifo_prop)
-		obs_property_set_modified_callback(genlock_fifo_prop, on_genlock_fifo_changed);
-
-	obs_properties_add_bool(props, PROP_HW_ACCEL, obs_module_text("NDIPlugin.SourceProps.HWAccel"));
-
-	obs_properties_add_bool(props, PROP_FIX_ALPHA, obs_module_text("NDIPlugin.SourceProps.AlphaBlendingFix"));
-
-	obs_property_t *yuv_ranges = obs_properties_add_list(props, PROP_YUV_RANGE,
-							     obs_module_text("NDIPlugin.SourceProps.ColorRange"),
-							     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(yuv_ranges, obs_module_text("NDIPlugin.SourceProps.ColorRange.Partial"),
-				  PROP_YUV_RANGE_PARTIAL);
-	obs_property_list_add_int(yuv_ranges, obs_module_text("NDIPlugin.SourceProps.ColorRange.Full"),
-				  PROP_YUV_RANGE_FULL);
-
-	obs_property_t *yuv_spaces = obs_properties_add_list(props, PROP_YUV_COLORSPACE,
-							     obs_module_text("NDIPlugin.SourceProps.ColorSpace"),
-							     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(yuv_spaces, "BT.709", PROP_YUV_SPACE_BT709);
-	obs_property_list_add_int(yuv_spaces, "BT.601", PROP_YUV_SPACE_BT601);
-	obs_property_list_add_int(yuv_spaces, "BT.2100", PROP_YUV_SPACE_BT2100);
-
-	obs_property_t *latency_modes = obs_properties_add_list(props, PROP_LATENCY,
-								obs_module_text("NDIPlugin.SourceProps.Latency"),
-								OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(latency_modes, obs_module_text("NDIPlugin.SourceProps.Latency.Normal"),
-				  PROP_LATENCY_NORMAL);
-	obs_property_list_add_int(latency_modes, obs_module_text("NDIPlugin.SourceProps.Latency.Low"),
-				  PROP_LATENCY_LOW);
-	obs_property_list_add_int(latency_modes, obs_module_text("NDIPlugin.SourceProps.Latency.Lowest"),
-				  PROP_LATENCY_LOWEST);
-
-	obs_properties_add_bool(props, PROP_AUDIO, obs_module_text("NDIPlugin.SourceProps.Audio"));
-
-	obs_properties_t *group_ptz = obs_properties_create();
-	obs_properties_add_float_slider(group_ptz, PROP_PAN, obs_module_text("NDIPlugin.SourceProps.Pan"), -1.0, 1.0,
-					0.001);
-	obs_properties_add_float_slider(group_ptz, PROP_TILT, obs_module_text("NDIPlugin.SourceProps.Tilt"), -1.0, 1.0,
-					0.001);
-	obs_properties_add_float_slider(group_ptz, PROP_ZOOM, obs_module_text("NDIPlugin.SourceProps.Zoom"), 0.0, 1.0,
-					0.001);
-	obs_properties_add_group(props, PROP_PTZ, obs_module_text("NDIPlugin.SourceProps.PTZ"), OBS_GROUP_CHECKABLE,
-				 group_ptz);
-
-	/* camera-box #150: apply the lockdown visibility ONCE on first dialog open from
-	 * the source's CURRENT genlock_fifo state — OBS does not fire modified-callbacks
-	 * at initial property population, so without this a genlock source would show all
-	 * the (forced, non-editable-in-effect) properties until the operator toggled the
-	 * checkbox. Guard the null-data (add-source) case: a brand-new source has genlock
-	 * off, so the full set shows until the operator enables genlock. */
-	bool genlock_on_now = false;
-	if (s && s->obs_source) {
-		obs_data_t *cur = obs_source_get_settings(s->obs_source);
-		if (cur) {
-			genlock_on_now = obs_data_get_bool(cur, PROP_GENLOCK_FIFO);
-			obs_data_release(cur);
-		}
-	}
-	apply_genlock_lockdown_visibility(props, genlock_on_now);
+	/* (4) PROP_BURN — the measurement-burn toggle (bool, default OFF). #257: applied LIVE via
+	 * obs_source_set_genlock_burn in ndi_source_update (no OBS restart); the QR burn filter reads
+	 * the per-source flag each render. TEST-mode only. */
+	obs_properties_add_bool(props, PROP_BURN, "Measurement burn (test only)");
 
 	obs_log(LOG_DEBUG, "-ndi_source_getproperties(…)");
 
@@ -755,15 +447,14 @@ void ndi_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709);
 	obs_data_set_default_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL);
 	obs_data_set_default_bool(settings, PROP_AUDIO, true);
-	/* camera-box #97: default genlock preload (video delay) = the OBS_GENLOCK_PRELOAD_FRAMES
-	 * env value (or 1 when unset), matching the libobs #70 env default — so a source the
-	 * operator never touches keeps the env-tuned jitter reserve instead of silently
-	 * reverting it to 1 on scene load (review finding). */
-	obs_data_set_default_int(settings, PROP_GENLOCK_PRELOAD, genlock_preload_env_default());
-	/* camera-box #245: the per-source latency override defaults to 0 = follow the global
-	 * OBS_GENLOCK_LATENCY_MS default, so a source the operator never touches behaves
-	 * exactly as before this field existed (no per-source delay). */
-	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, 0);
+	/* camera-box #257: genlock is DEFAULT ON — the fork exists to be genlocked in production,
+	 * so a newly-added NDI source is locked down + forced to the certified config by default. */
+	obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);
+	/* camera-box #245/#257: the per-source latency defaults to the floor (3 ms) — no env, no
+	 * "0 = follow global" any more; 3 ms is the validated zero-loss held latency. */
+	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, PROP_GENLOCK_LATENCY_MS_DEFAULT);
+	/* camera-box #257: measurement burn OFF by default (TEST mode turns it on at runtime). */
+	obs_data_set_default_bool(settings, PROP_BURN, false);
 	obs_log(LOG_DEBUG, "-ndi_source_getdefaults(…)");
 }
 
@@ -1392,16 +1083,16 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	 * incompletely-configured probe ingest decoded 0 while the certified prod input
 	 * decoded 100% off the SAME NDI source). The forcing is GATED on genlock_fifo, so
 	 * non-genlock aux/preview inputs (NDI 2ME PVW / Bible / Camera info, ndi_sync=1)
-	 * are entirely unaffected (#150 constraint #3). The two legitimate operator knobs —
-	 * PROP_SOURCE and PROP_GENLOCK_PRELOAD — are never touched by the forcer. */
+	 * are entirely unaffected (#150 constraint #3). The whitelist knobs —
+	 * PROP_SOURCE, PROP_GENLOCK_LATENCY_MS_SRC, PROP_BURN — are never touched by the forcer. */
 	const bool genlock_lockdown = obs_data_get_bool(settings, PROP_GENLOCK_FIFO);
 	if (genlock_lockdown) {
 		force_genlock_certified_settings(settings);
 		obs_log(LOG_INFO,
-			"'%s' ndi_source_update: #150 genlock lockdown ACTIVE — forced certified "
+			"'%s' ndi_source_update: #150/#257 genlock lockdown ACTIVE — forced certified "
 			"values (ndi_sync=2, ndi_behavior=2, ndi_bw_mode=0, latency=0, "
 			"ndi_recv_hw_accel=true, ndi_audio=false, ndi_framesync=false, "
-			"ndi_fix_alpha_blending=false); only source + genlock preload are operator-set",
+			"ndi_fix_alpha_blending=false, ptz=off); only source + latency + burn are operator-set",
 			obs_source_name);
 	}
 
@@ -1453,36 +1144,28 @@ void ndi_source_update(void *data, obs_data_t *settings)
 	if (auto set_genlock = resolve_set_genlock_fifo())
 		set_genlock(obs_source, obs_data_get_bool(settings, PROP_GENLOCK_FIFO));
 
-	/* camera-box #97: apply the per-source genlock preload (video delay). Runtime-
-	 * resolved like the fifo setter. libobs clamps to [0, 128] and writes under
-	 * async_mutex, so the live change is crash-safe (the #93 UAF lesson). Persists
-	 * in the scene via PROP_GENLOCK_PRELOAD. Floor a negative value (only reachable
-	 * via a corrupt/hand-edited scene, never the 0-128 slider) at 0 BEFORE the
-	 * uint32_t cast — otherwise e.g. -1 would wrap to UINT32_MAX and libobs would
-	 * clamp it to the MAXIMUM delay instead of zero (review finding). */
-	if (auto set_preload = resolve_set_genlock_preload()) {
-		long long pl = obs_data_get_int(settings, PROP_GENLOCK_PRELOAD);
-		if (pl < 0)
-			pl = 0;
-		set_preload(obs_source, (uint32_t)pl);
-	}
-
-	/* camera-box #245: apply the per-source genlock LATENCY override (ms). Runtime-
-	 * resolved like the preload setter. libobs clamps to [0, 2000] and writes under
-	 * async_mutex (crash-safe, the #93 UAF lesson). 0 = follow the global default.
-	 * Persists in the scene via PROP_GENLOCK_LATENCY_MS_SRC. Clamp to [0, 2000]
-	 * (GENLOCK_SOURCE_LATENCY_MS_MAX) at the input boundary — only reachable outside
-	 * 0-2000 via a corrupt/hand-edited scene. Floor BEFORE the uint32_t cast so -1
-	 * cannot wrap to UINT32_MAX (which libobs would then clamp to the MAXIMUM delay
-	 * instead of zero); the explicit upper clamp matches libobs's authoritative cap. */
+	/* camera-box #245/#257: apply the per-source genlock LATENCY (ms). Runtime-resolved like
+	 * the fifo setter. libobs clamps to [GENLOCK_LATENCY_MS_MIN, GENLOCK_SOURCE_LATENCY_MS_MAX]
+	 * and writes under async_mutex (crash-safe, the #93 UAF lesson). #257 FLOOR is 3 ms (no
+	 * "0 = follow global" any more): clamp to [3, 2000] at the input boundary — only reachable
+	 * outside that range via a corrupt/hand-edited scene. Floor BEFORE the uint32_t cast so a
+	 * negative value cannot wrap to UINT32_MAX; the libobs setter re-clamps authoritatively. */
 	if (auto set_latency = resolve_set_genlock_latency_ms()) {
 		long long ms = obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC);
-		if (ms < 0)
-			ms = 0;
-		else if (ms > 2000)
-			ms = 2000;
+		if (ms < PROP_GENLOCK_LATENCY_MS_MIN)
+			ms = PROP_GENLOCK_LATENCY_MS_MIN;
+		else if (ms > PROP_GENLOCK_SOURCE_LATENCY_MS_MAX)
+			ms = PROP_GENLOCK_SOURCE_LATENCY_MS_MAX;
 		set_latency(obs_source, (uint32_t)ms);
 	}
+
+	/* camera-box #257: apply the per-source MEASUREMENT-BURN toggle LIVE (no OBS restart).
+	 * Runtime-resolved like the fifo/latency setters; libobs stores the per-source flag and
+	 * the QR burn filter reads obs_source_get_genlock_burn(parent) each render to gate the
+	 * burn. Persists in the scene via PROP_BURN; toggled at runtime over OBS WebSocket
+	 * SetInputSettings genlock_burn (rig-mode test/event, recording-e2e burn-on/off). */
+	if (auto set_burn = resolve_set_genlock_burn())
+		set_burn(obs_source, obs_data_get_bool(settings, PROP_BURN));
 
 	auto new_hw_accel_enabled = obs_data_get_bool(settings, PROP_HW_ACCEL);
 	reset_ndi_receiver |= (s->config.hw_accel_enabled != new_hw_accel_enabled);
