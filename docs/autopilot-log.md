@@ -704,3 +704,26 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - drift-guard + docs (c21bdb240, 969eb7a6c): #246 burn facet = "no source genlock_burn=on" via WS; genlock_wall_clock build-default sentinel (capability marker is the proof); vendor/README.md + genlock/obs-ops skills + drift-guard cmd #257 banners.
 - CI gates (6aee4b4b9): windows-genlock.yml + fast WF pwsh token gates rewritten — assert env GONE, GENLOCK_FORCED_SETTINGS table + GENLOCK_WHITELIST_PROPS, floor-3, genlock default-ON, per-source burn (host role, no OBS_BURN env). EXPECTED to trigger the ~150min windows-genlock build (vendored C/C++ touched).
 - Tests (818915c1e, d19772bde): genlock_preload.rs / distroav_genlock_lockdown.rs / burn_payload_parity.rs / launch_obs_genlock.rs / rig_mode.rs / harness_recording_e2e_paths.rs guards rewritten to the no-env hard-lock + RED->GREEN behavior guards (whitelist==exactly 4 props, floor-3 clamp, genlock default-on, burn runtime toggle, forced-certified table). All non-probe test binaries GREEN locally; probe-gated guards verified at grep level. fmt/check/clippy/test --no-run clean; shellcheck + py_compile + YAML clean.
+
+## 2026-06-26 — #257 production-safe genlock/NDI hardening DEPLOYED + RIG-VALIDATED
+- PR #258 merged (2c6f527c3); #257 CLOSED; v1.7.0-dev.116. windows-genlock build 28240887974 SUCCESS → obs.dll f0ee255e (1317376) + distroav.dll a05967fd (658944) deployed to strih (PID 18156) + stream (PID 5760) via BITS (signed-URL; strih link slow ~0.2MB/s). Both byte-verified == artifact (identical hashes cross-box), backups kept, sentinels cleared.
+- RIG-VALIDATED live (stream, #257 build), 5 acceptance points with log evidence:
+  (a) WHITELIST — log "[distroav] ... #150/#257 genlock lockdown ACTIVE ... only source + latency + burn are operator-set"; source adds only PROP_SOURCE + genlock_fifo(bool,default ON) + genlock_latency_ms_src(int,min 3) + genlock_burn(bool,default OFF).
+  (b) GENLOCK DEFAULT-ON — log "genlock: wall-clock-slaved render tick ENABLED (build default ...) (#257)" with NO OBS_GENLOCK_* env.
+  (c) LATENCY FLOOR 3 — UI min=3 + DistroAV input clamp [3,2000] + libobs setter re-clamp + CI unit test (set 1→3) on the deployed build (runtime audit latency line emits during steady program delivery).
+  (d) RUNTIME BURN — WS set genlock_burn: log "measurement burn ON for source 'NDI 2ME PGM' (#257)" 15:55 → "OFF" 15:57, SAME running OBS, NO restart; "[burn] filter created ... gated LIVE ... no env, no restart".
+  (e) NO ENV — build genlocks regardless of env; Machine OBS_GENLOCK_*/OBS_BURN_* CLEARED on BOTH boxes (0 remaining).
+- Reset both boxes to prod (latency 3, burn off). FIFO depth auto-derived=1 (preload internal, "latency knob holds the delay" #235/#257).
+- #260 (committed WS password) stripped from drift-guard.md current file earlier (rotation = user's call). #259/#200/#147/#129/#148/#176/#180/#144/#145/#151/#152/#137/#188/#109/#132 remain (mostly OBS-C, RE-VALIDATE vs the #257-reshaped genlock code before working).
+- 📔 Playbook: genlock + obs-ops skills still carry stale killed-env refs → filed for a focused no-env rewrite (see issue above) before the next OBS-C work.
+
+## 2026-06-26 — #261 playbook no-env rewrite (DOC-only, v1.7.0-dev.117)
+- ONE PR, Closes #261. Pure doc: rewrote the playbook to the #257 no-env reality so a future session never sets a killed `OBS_GENLOCK_*`/`OBS_BURN_*` env.
+- genlock/SKILL.md: historicized the #235 latency-env section + the #184 reserve/stale-env-trap section (dropped the `$env:OBS_GENLOCK_RESERVE_MS` launch snippet); deployed-state table "Env var" row → "Genlock env: none — build default (#257)"; #246 burn bullet → `burn_env` is now the `genlock_burn` WS-state (no OBS_BURN_* env); MCP-env note → read genlock state from the OBS log, not env; AHK note → genlock is build-default on relaunch, no env.
+- obs-ops/SKILL.md: env-verify tail → latency/burn are runtime (UI int + WS toggle, hot-apply, no relaunch); WRAPPER section rewritten ENV-FREE (no four-vars-from-Machine, no PEB verify, no `--mode`); removed the PEB-read C# snippet (historicized); recording apply-path dropped the `OBS_BURN_QR` analogy; AHK restart → `launch-obs-genlock.sh --force`, no env.
+- drift-guard.md (command): #246 burn-guard bullet reconciled to #257 — no OBS_BURN_* env; `burn_env` = `genlock_burn` WS state; clear via `rig-mode.sh event`.
+- vendor/README.md + drift-guard.md lines 36-110 were ALREADY #257-clean (negative refs) — no change.
+- Carried two pre-existing dev commits (un-merged real work): 3685a9078 (#260 strip committed WS password from drift-guard.md current file — #260 stays OPEN for rotation/history-rewrite, user's call) + 616993b32 (this #257 deploy/validate log entry). main still had the literal password in the current file, so dropping the #260 strip was not an option.
+- Verified: every remaining `OBS_GENLOCK_`/`OBS_BURN_` in the named files is a negative/historical ref; 0 active env-set instructions. Tier-0 fmt clean; no scripts touched (no shellcheck needed).
+- e2e/SKILL.md still has the SAME killed-env launch trap (outside #261's named scope) → filed #262.
+- 📔 Playbook: genlock + obs-ops + drift-guard playbook now match the #257 no-env model; e2e rewrite tracked in #262.
