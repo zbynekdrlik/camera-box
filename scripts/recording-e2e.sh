@@ -501,6 +501,14 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   STREAM_PARTIAL_WIN="$OUT_DIR_WIN\\stream-partial-${RUN_ID}.json"
   STRIH_PARTIAL="$OUTDIR/strih-partial-${RUN_ID}.json"   # pulled back to dev1
   STREAM_PARTIAL="$OUTDIR/stream-partial-${RUN_ID}.json"  # pulled back to dev1
+  # #186/#208: each box's --extract-partial writes its flagged/undecodable-frame pixel proofs into
+  # the SIBLING `<partial>-pixels` dir; pull each dir back BESIDE its partial on dev1 (the merge
+  # derives the same `<partial>-pixels` path to locate the #186 "SEE the frame" proofs). Small —
+  # only the handful of flagged frames; absent on a clean (zero-loss, fully decodable) run.
+  STRIH_PIXELS_WIN="$OUT_DIR_WIN\\strih-partial-${RUN_ID}-pixels"
+  STREAM_PIXELS_WIN="$OUT_DIR_WIN\\stream-partial-${RUN_ID}-pixels"
+  STRIH_PIXELS="$OUTDIR/strih-partial-${RUN_ID}-pixels"   # #186 pixel proofs pulled back to dev1
+  STREAM_PIXELS="$OUTDIR/stream-partial-${RUN_ID}-pixels"  # #186 pixel proofs pulled back to dev1
 
   echo "    --- [8/8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
   # The strih recording carries cam1 (forwarded) + strih burns; --extract-partial strih decodes
@@ -510,6 +518,9 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     -- --extract-partial strih --strih "$STRIH_REC_WIN" \
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
        --out "$STRIH_PARTIAL_WIN"
+  echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
+  echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
+  echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
 
   echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
@@ -522,9 +533,12 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
        --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
        --out "$STREAM_PARTIAL_WIN"
+  echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
+  echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
+  echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
 
   echo "    --- [8/8c] MERGE the two small partials ON dev1 (no recording on dev1) ---"
-  echo "    After pulling both partials to dev1 ($STRIH_PARTIAL + $STREAM_PARTIAL), run the merge:"
+  echo "    After pulling both partials (+ their <partial>-pixels dirs) to dev1, run the merge:"
   # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
   # and produces the SAME full-chain verdict the fused path would — equivalent fields + PASS.
   MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \
@@ -536,9 +550,10 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
   VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
   printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
-  echo "    The win-* MCP holder runs 8/8a + 8/8b on each box, pulls both small partials to dev1,"
-  echo "    then runs the 8/8c merge above on dev1. A recording is NEVER copied box-to-box nor to"
-  echo "    dev1 — only the small partial JSONs (+ the painter CSV) move (#208)."
+  echo "    The win-* MCP holder runs 8/8a + 8/8b on each box, pulls both small partials (+ their"
+  echo "    <partial>-pixels #186 proof dirs) to dev1, then runs the 8/8c merge above on dev1. A"
+  echo "    recording is NEVER copied box-to-box nor to dev1 — only the small partial JSONs (+ the"
+  echo "    painter CSV + the handful of flagged-frame PNGs) move (#208/#186)."
   echo "    ============================================================================"
   echo "    NOTE: this exit code is NOT the zero-loss verdict. In per-box mode the harness only"
   echo "          EMITS the plan (scp/ssh to Windows is denied, so bash cannot run it itself). The"

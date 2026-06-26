@@ -79,6 +79,20 @@ main() {
   local ONBOX_CMD
   ONBOX_CMD="$(build_onbox_command "$VERDICT_EXE" "${PASS_ARGS[@]}")"
 
+  # #186/#208: the on-box --extract-partial writes the pixel-proof PNGs of every flagged /
+  # undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out partial JSON), so
+  # the merge's #186 "SEE the missing frame" guarantee survives the per-box split. Derive that dir
+  # from the forwarded `--out <partial>` so STEP 3 pulls it back too.
+  local OUT_PARTIAL="" PIXELS_DIR=""
+  local i
+  for ((i = 0; i + 1 < ${#PASS_ARGS[@]}; i++)); do
+    if [ "${PASS_ARGS[$i]}" = "--out" ]; then
+      OUT_PARTIAL="${PASS_ARGS[$((i + 1))]}"
+      break
+    fi
+  done
+  if [ -n "$OUT_PARTIAL" ]; then PIXELS_DIR="${OUT_PARTIAL%.json}-pixels"; fi
+
   cat <<PLAN
 # ===== #208 extract-strih-partial ON the strih box (decode where the video is) =====
 # strih box: ${STRIH_BOX}  (MCP: win-strih)
@@ -90,11 +104,13 @@ main() {
 #   win-strih Shell:
 ${ONBOX_CMD}
 #
-# STEP 3: pull back ONLY the small partial JSON (a handful of MB of ids+timestamps):
-#   win-strih FileDownload  path='<the --out partial JSON inside ${OUT_DIR}>'
+# STEP 3: pull back the small partial JSON (ids+timestamps) AND the #186 pixel-proof PNGs:
+#   win-strih FileDownload  path='${OUT_PARTIAL:-<the --out partial JSON inside ${OUT_DIR}>}'
+#   win-strih FileDownload  path='${PIXELS_DIR:-<the <partial>-pixels dir beside the partial>}'   # #186 pixel proofs (a handful; absent on a clean run)
 #
-# dev1 receives ONLY the tiny partial JSON. The ${STRIH_REC:-<strih recording>} stays on the strih
-# box and is NEVER copied — not to the stream box, not to dev1 (#208).
+# dev1 receives ONLY the tiny partial JSON + the handful of flagged-frame PNGs. The
+# ${STRIH_REC:-<strih recording>} stays on the strih box and is NEVER copied — not to the stream
+# box, not to dev1 (#208). The merge derives the same <partial>-pixels dir to locate the proofs.
 PLAN
 }
 

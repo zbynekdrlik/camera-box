@@ -977,6 +977,70 @@ fn recording_e2e_stream_extract_is_stream_only_never_strih() {
 }
 
 // ---------------------------------------------------------------------------
+// #186/#208 — the per-box extract must PRODUCE + PULL BACK the pixel proofs.
+//
+// BLOCKER (review): the per-box flow decoded each recording into a partial JSON but NEVER wrote the
+// #186 pixel proofs, while merge mode CLAIMED they were "written on the recording's own box during
+// --extract-partial" — pointing the operator at PNGs that never existed. The fix writes them into a
+// `<partial>-pixels` dir on the box and pulls that dir back beside the partial on dev1, so a FAIL's
+// #186 "SEE the missing frame" guarantee resolves to a real dev1 path. These guards lock the
+// pull-back wiring (the Rust side — extract_partial writing + run_merge referencing them — is
+// covered by recording-verdict.rs's probe-feature unit tests).
+// ---------------------------------------------------------------------------
+
+/// The on-strih planner must pull back the `<partial>-pixels` dir (the on-box #186 pixel proofs),
+/// not only the partial JSON — derived from the forwarded `--out <partial>`.
+#[test]
+fn on_strih_planner_pulls_back_the_pixel_proof_dir() {
+    let s = read("scripts/recording-verdict-on-strih.sh");
+    assert!(
+        s.contains("-pixels"),
+        "#186/#208: the on-strih planner must derive + pull back the <partial>-pixels dir."
+    );
+    assert!(
+        s.to_lowercase().contains("pixel proof") || s.to_lowercase().contains("pixel-proof"),
+        "#186/#208: the on-strih planner must name the pixel-proof pull-back in its plan."
+    );
+}
+
+/// The on-stream planner must pull back the `<partial>-pixels` dir in per-box extract mode.
+#[test]
+fn on_stream_planner_pulls_back_the_pixel_proof_dir() {
+    let s = read("scripts/recording-verdict-on-stream.sh");
+    assert!(
+        s.contains("-pixels"),
+        "#186/#208: the on-stream planner must derive + pull back the <partial>-pixels dir."
+    );
+    assert!(
+        s.contains("${PIXELS_DIR}") || s.contains("$PIXELS_DIR"),
+        "#186/#208: the on-stream planner must reference the derived PIXELS_DIR in its STEP 3."
+    );
+}
+
+/// recording-e2e.sh per-box flow must pull EACH box's `<partial>-pixels` dir back to $OUTDIR beside
+/// its partial JSON — so the dev1 merge (which derives `<partial>-pixels`) finds the #186 PNGs.
+#[test]
+fn recording_e2e_pulls_pixel_proof_dirs_to_outdir() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("$OUTDIR/strih-partial-${RUN_ID}-pixels")
+            && s.contains("$OUTDIR/stream-partial-${RUN_ID}-pixels"),
+        "#186/#208: the per-box flow must define each box's pixel-proof dir under $OUTDIR (beside \
+         its partial) so the merge can locate the #186 PNGs on dev1."
+    );
+    assert!(
+        s.contains("STRIH_PIXELS_WIN") && s.contains("STREAM_PIXELS_WIN"),
+        "#186/#208: the per-box flow must define the box-local pixel-proof dirs to pull back."
+    );
+    // The plan must instruct pulling each pixel dir back (FileDownload of the *-pixels dir).
+    assert!(
+        s.contains("FileDownload $STRIH_PIXELS_WIN")
+            && s.contains("FileDownload $STREAM_PIXELS_WIN"),
+        "#186/#208: the plan must FileDownload each box's pixel-proof dir to dev1."
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #123 — pre-rig-test VERSION-INTEGRITY gate wiring.
 //
 // Every rig-test entry script that brings up the strih+stream genlocked OBS stack must, BEFORE
