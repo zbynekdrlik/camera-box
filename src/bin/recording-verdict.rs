@@ -2323,6 +2323,54 @@ mod tests {
         );
     }
 
+    /// #208 box-to-box guard (review): `--merge-partials` must REJECT a partial assigned to the
+    /// wrong slot — a `strih` partial fed as the `stream` input must ERROR (so a recording can
+    /// never be cross-fed at the data level), and a partial whose box is neither strih nor stream
+    /// must BAIL. Both must fail BEFORE the verdict runs (no exit, no misverdict).
+    #[test]
+    fn merge_rejects_box_mismatch_and_unknown_box() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // A `strih` partial assigned to the `stream` slot → error (the partial's recorded box must
+        // match its assignment; a strih recording can never be merged as the stream input).
+        let strih_p = RecordingPartial::from_frames(
+            "strih",
+            &PathBuf::from("strih.mkv"),
+            &[CAM1B, STRIH],
+            vec![],
+        );
+        let strih_path = dir.path().join("strih-partial.json");
+        strih_p.save(&strih_path).unwrap();
+        let spec = format!("stream={}", strih_path.display());
+        let args =
+            super::Args::parse_from(["recording-verdict", "--merge-partials", spec.as_str()]);
+        let err = run_merge(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("box") && msg.contains("strih"),
+            "#208: a strih partial in the stream slot must error (box mismatch): {msg}"
+        );
+
+        // A partial whose box is neither strih nor stream (key matches the recorded box, so the
+        // mismatch guard passes) must BAIL with `unknown box`.
+        let weird_p = RecordingPartial::from_frames("weird", &PathBuf::from("x.mkv"), &[], vec![]);
+        let weird_path = dir.path().join("weird-partial.json");
+        weird_p.save(&weird_path).unwrap();
+        let spec2 = format!("weird={}", weird_path.display());
+        let args2 =
+            super::Args::parse_from(["recording-verdict", "--merge-partials", spec2.as_str()]);
+        let err2 = run_merge(&args2).unwrap_err();
+        assert!(
+            format!("{err2:#}").contains("unknown box"),
+            "#208: an unknown box must bail: {err2:#}"
+        );
+    }
+
     /// #187/#208: a NON-FATAL cam1 grab decode failure must be RECORDED in the report
     /// (`nodes.cam1.unavailable`), not silently dropped, while the stream-only hops still run.
     /// A decoded cam1 grab populates the cam1 diagnostic node.
