@@ -486,6 +486,9 @@ drift_check_burn_env() {
     val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
     [ -z "$name" ] && continue
     # A var present but with an empty value is NOT actually set — skip it (never a false DRIFT).
+    # (A real burn var always carries a concrete value — OBS_BURN_QR=1, _PX=300, _RUN_ID=911002;
+    # an all-whitespace value never occurs in any flow, and the gather emits a var only when set to
+    # a non-empty value, so the trimmed-empty skip cannot mask a genuine burn.)
     [ -z "$val" ] && continue
     printf '  burn %-20s DRIFT    (test-burn var set in prod Machine env: %s=%s)\n' "$name" "$name" "$val"
     set_count=$((set_count + 1))
@@ -836,20 +839,23 @@ main() {
     shift || true
   done
 
-  [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
-
+  # --status is a read-only dump of the live genlock + burn state — it needs NONE of the pinned
+  # set, so skip the manifest requirement + pin load for it (it must work even without
+  # vendor/README.md, e.g. a checkout that only ships the script). #246.
   local p_obs p_distroav p_ndi p_fps p_genlock p_latency p_plugin
-  p_obs="$(pinned_obs_version "$readme")"
-  p_distroav="$(pinned_distroav_version "$readme")"
-  p_ndi="$(pinned_ndi_min "$readme")"
-  p_fps="$(pinned_setting "$readme" output_fps)"
-  p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
-  p_latency="$(pinned_setting "$readme" ndi_input_latency)"
-  p_plugin="$(pinned_setting "$readme" canonical_plugin_path)"
-
-  if [ "$mode" = "check-pins" ]; then
-    check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin"
-    exit $?
+  if [ "$mode" != "status" ]; then
+    [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
+    p_obs="$(pinned_obs_version "$readme")"
+    p_distroav="$(pinned_distroav_version "$readme")"
+    p_ndi="$(pinned_ndi_min "$readme")"
+    p_fps="$(pinned_setting "$readme" output_fps)"
+    p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
+    p_latency="$(pinned_setting "$readme" ndi_input_latency)"
+    p_plugin="$(pinned_setting "$readme" canonical_plugin_path)"
+    if [ "$mode" = "check-pins" ]; then
+      check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin"
+      exit $?
+    fi
   fi
 
   # --compare / --status: collect observed key=val pairs (both facets read the same inputs).

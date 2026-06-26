@@ -219,6 +219,14 @@ cleanup() {
       | sed "s/^/    [$_bn burn-verify] /" || true
   done
 }
+# #246: define the prod scene/source names BEFORE the trap so cleanup()'s burn-clear loop (which
+# references $STRIH_PROG_SOURCE / $STREAM_PROG_SOURCE) never hits a `set -u` unbound-variable on an
+# early abort (failed prebuilt-probe check / cargo build / cam scp-ssh, or Ctrl-C) — the exact
+# failure/abort window the burn-off guard must cover. Detailed rationale at the #183 block below.
+STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
+STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
+STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
 trap cleanup EXIT HUP INT TERM
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
@@ -298,10 +306,9 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 # No second receiver, no source-name collision — proven NON-black on the live rig and by
 # the prior 3-node run (~0.35% real strih→stream loss). prod-scene runs a fail-fast
 # non-black self-check before returning so a black ingest never wastes a full run.
-STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
-STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
-STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
-STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# (STRIH_PROG_SCENE/SOURCE + STREAM_PROG_SCENE/SOURCE are defined earlier, just before the cleanup
+#  trap — #246, so the burn-off teardown survives an early abort. They are `${VAR:-default}` so any
+#  caller override set in the environment still wins.)
 # #183: the upstream NDI source-name of each box's recorded prod GENLOCK input — used to
 # FORCE genlock_preload=1 on it for the test window (then restore prod on teardown), so the
 # run measures the TRUE genlock hop (~33ms) not the prod audio-sync delay (preload≈31 ≈ 1s).
