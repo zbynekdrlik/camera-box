@@ -321,14 +321,33 @@ fn in_window_burn_frames(
         // No optical frame at all ⇒ no signal window ⇒ nothing to prove (empty).
         _ => return Vec::new(),
     };
-    stream[first..=last]
+    let mut frames: Vec<RecordedBurnFrame> = stream[first..=last]
         .iter()
         .filter(|f| in_window(f))
         .map(|f| RecordedBurnFrame {
             frame_index: f.frame_index,
             burn_id: node_burn_id_on(f, burn_run_id),
         })
-        .collect()
+        .collect();
+
+    // #267 — TEARDOWN-TAIL CLAMP. The window's trailing boundary above is anchored to the last
+    // OPTICAL (cam2-QR) frame. At shutdown a node STOPS emitting its burn while cam2's painter
+    // keeps running a few more frames, so the recording captures delivered frames PAST the
+    // node's last emitted burn (run 2606010: cam1 emitted clean through id 9461, then the strih
+    // recording held ~23 more cam2-only frames at teardown). Those trailing burn-less frames
+    // are not lost frames — the node simply ended before the optical signal did — yet the
+    // optical-anchored window charged each as a BURN-UNREADABLE id and blocked a clean
+    // 0-undecodable PASS despite 0 real drops. Clamp the trailing boundary to the last frame
+    // that carries THIS node's burn (its last in-range id) by dropping the trailing run of
+    // burn-absent frames. This NEVER weakens the strict #186 bar for the IN-RANGE span: an
+    // INTERIOR burn-less frame (one with a present burn AFTER it — the stream resumed, so it is
+    // a genuine mid-stream readability miss) is kept and still counts. Only the post-emission
+    // tail (no present burn anywhere after it) is removed. Rate-agnostic — a per-render tail at
+    // teardown is the same artifact.
+    while frames.last().is_some_and(|f| f.burn_id.is_none()) {
+        frames.pop();
+    }
+    frames
 }
 
 /// One node's identity AND source for the contiguity verdict: its label, its burn run_id,
@@ -2562,7 +2581,12 @@ mod tests {
             frame(4, &[(CAM2, 104)]),              // teardown tail
             frame(5, &[(CAM2, 105)]),              // teardown tail
         ];
-        let w = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM], BurnRate::PerEmittedFrame);
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
@@ -2606,11 +2630,16 @@ mod tests {
         // and still FAILS the node. Only the trailing post-emission tail is clamped.
         let stream = vec![
             frame(0, &[(CAM2, 100), (CAM1B, 50)]),
-            frame(1, &[(CAM2, 101)]),              // INTERIOR miss — burn resumes below
+            frame(1, &[(CAM2, 101)]), // INTERIOR miss — burn resumes below
             frame(2, &[(CAM2, 102), (CAM1B, 52)]), // present again ⇒ frame 1 is a real in-range miss
             frame(3, &[(CAM2, 103)]),              // teardown tail (clamped, not counted)
         ];
-        let w = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM], BurnRate::PerEmittedFrame);
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
