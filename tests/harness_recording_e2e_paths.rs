@@ -275,6 +275,55 @@ fn recording_e2e_prints_camera_pre_run_checklist() {
     );
 }
 
+/// #195: the harness must SET+VERIFY burns are ON before recording — assert a pre-record
+/// burn-ON gate that runs `obs_burn_filter.py check` on BOTH boxes and ABORTS the run on
+/// pass-through (OBS not launched with OBS_BURN_QR → kind_registered=false → strih/stream burns
+/// silently absent → the whole proof run wasted, the exact missed-env #195 documents). The gate
+/// must sit in the MAIN flow (after the cleanup trap) and BEFORE StartRecord — NOT only in
+/// cleanup() (which clears burns AFTER the run, #246).
+#[test]
+fn recording_e2e_asserts_burns_on_before_recording() {
+    let s = read("scripts/recording-e2e.sh");
+    // The gate lives in the main flow: after `trap cleanup` (so cleanup()'s own burn check,
+    // defined earlier, is excluded) and before the [5/8] StartRecord step.
+    let trap = s
+        .find("trap cleanup")
+        .expect("recording-e2e.sh must install the cleanup trap");
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        trap < start_record,
+        "the cleanup trap must be installed before StartRecord"
+    );
+    let region = &s[trap..start_record];
+    // A burn-ON CHECK must run in this pre-record region.
+    assert!(
+        region.contains("obs_burn_filter.py") && region.contains("check"),
+        "#195: a pre-record burn-ON gate must run `obs_burn_filter.py check` BEFORE StartRecord \
+         (so a burns-OFF/pass-through OBS is caught before a full run is wasted), not only in \
+         cleanup() after the run."
+    );
+    // It must key on the OBS_BURN_QR tell (kind_registered) — the 'OBS launched with OBS_BURN_QR'
+    // signal that distinguishes a live burn from a silently-disabled pass-through filter.
+    assert!(
+        region.contains("kind_registered"),
+        "#195: the pre-record gate must inspect `kind_registered` (the OBS_BURN_QR tell) — that is \
+         what distinguishes a live burn from a pass-through filter that records NO burns."
+    );
+    // It must FAIL FAST (abort) on pass-through, not just warn.
+    assert!(
+        region.contains("exit 1"),
+        "#195: the pre-record gate must ABORT (exit 1) on burns-OFF — a warn-and-continue would \
+         still waste the whole run (the failure mode #195 exists to kill)."
+    );
+    // It must cover BOTH boxes.
+    assert!(
+        region.contains("$STRIH") && region.contains("$STREAM"),
+        "#195: the pre-record burn-ON gate must check BOTH strih and stream."
+    );
+}
+
 /// The DanteSync NTP+PTP gate must be the FIRST hard step (#7): it must appear in the
 /// script BEFORE the cam1/cam2 launch and the OBS recording start, so a not-locked cluster
 /// fails fast before any measurement.
