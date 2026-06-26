@@ -83,7 +83,7 @@ class Alert:
     """One tripped threshold, ready to render into the Discord body."""
 
     box: str
-    kind: str  # "low_fps" | "underrun_spike" | "dantesync_runaway"
+    kind: str  # "low_fps" | "underrun_spike" | "vanished" | "dantesync_runaway"
     detail: str
 
 
@@ -130,22 +130,42 @@ def last_two_per_source(lines: List[str]) -> Dict[str, Tuple[AuditSample, AuditS
     return {src: (b[0], b[1]) for src, b in per_source.items() if len(b) == 2}
 
 
+# A real day-rollover sends the log timestamp BACKWARDS by nearly a full day; anything less
+# negative is clock jitter or two same-second samples, NOT a midnight wrap.
+_MIDNIGHT_WRAP_THRESHOLD_SECS = 43200.0  # half a day
+
+
+def pair_dt(prev: AuditSample, curr: AuditSample) -> float:
+    """Elapsed seconds between two consecutive samples.
+
+    Uses the parsed OBS log timestamps when BOTH are present, handling a GENUINE midnight wrap (a
+    backwards jump of MORE than half a day → add 86400). A 0 / tiny / small-negative delta is two
+    same-second samples or clock jitter — it carries no usable interval, so we fall back to the
+    genuine ~5 s genlock audit cadence (AUDIT_INTERVAL_SECS, the real
+    GENLOCK_AUDIT_LOG_INTERVAL_NS) rather than (a) fabricating a near-zero rate via a bogus +86400
+    wrap on a 0-delta (#266 finding :145), or (b) trusting a hardcoded dt where the real cadence is
+    the correct, documented fallback (#266 finding :142). The fallback is the genuine cadence, not
+    an arbitrary number.
+    """
+    if prev.ts_secs is not None and curr.ts_secs is not None:
+        diff = curr.ts_secs - prev.ts_secs
+        if diff < -_MIDNIGHT_WRAP_THRESHOLD_SECS:
+            diff += 86400.0  # genuine day rollover
+        if diff > 0:
+            return diff
+        # diff <= 0: same-second samples / clock jitter — no usable interval; use the audit cadence.
+    return AUDIT_INTERVAL_SECS
+
+
 def received_fps(prev: AuditSample, curr: AuditSample) -> Optional[float]:
     """Received-fps between two consecutive samples = delta(received) / delta(time).
 
-    delta-time from the parsed log timestamps when both are present (and positive, handling
-    midnight wrap), else the known ~5 s audit interval. A backwards `received` (counter reset /
-    OBS restart) yields None — no meaningful rate across a reset.
+    The interval comes from [`pair_dt`]. A backwards `received` (counter reset / OBS restart)
+    yields None — no meaningful rate across a reset.
     """
     if curr.received < prev.received:
         return None
-    dt = AUDIT_INTERVAL_SECS
-    if prev.ts_secs is not None and curr.ts_secs is not None:
-        diff = curr.ts_secs - prev.ts_secs
-        if diff <= 0:
-            diff += 86400.0  # crossed midnight
-        if diff > 0:
-            dt = diff
+    dt = pair_dt(prev, curr)
     if dt <= 0:
         return None
     return (curr.received - prev.received) / dt
@@ -164,18 +184,53 @@ def evaluate(
 ) -> List[Alert]:
     """Apply the stuck-state thresholds. Returns one Alert per tripped condition (empty == healthy).
 
-    A source NAMED in `monitored_sources` is a declared broadcast input — any received-fps below
-    `fps_floor` (incl. ~0) alerts. An UNNAMED source below `idle_floor` is treated as idle (probe /
-    not broadcasting) and skipped, so #70 idle-source underrun spam never false-alarms; between
-    idle_floor and fps_floor it is a collapsing broadcast input and alerts.
+    The #265 stuck state is a STARVED genlock receive: the locked output keeps pulling while NDI
+    delivery collapses, so `underruns` climb on a drained FIFO while almost nothing arrives
+    (`overruns` stay flat). That MUST alert whether or not the source was explicitly declared — a
+    broadcast input frozen to ~0 fps in default (scan-all) cron mode is the WORST case and must NOT
+    be silently skipped as "idle" (#266 :177/:178).
+
+    `overruns` is the discriminator that keeps a genuinely idle input quiet (#266 :110/:70): a
+    PARKED source (added but not on program) RECEIVES frames it never consumes, so its FIFO
+    OVERFLOWS — overruns climb (dominating its underrun churn). An overrun-dominated source is
+    alive, not starved → treated as idle and skipped. A source with NO activity at all (nothing
+    arriving, nothing starving) is dormant → skipped too.
+
+    A source NAMED in `monitored_sources` is a declared, required broadcast input: it always alerts
+    below `fps_floor`, and if it produced no usable audit pair at all (vanished — NDI dropped, the
+    fifo stopped logging) it alerts as `vanished` (#266 :130).
+
+    `idle_floor` separates an unambiguously-degraded broadcast (idle_floor..fps_floor, e.g. ~10 fps
+    — always alerts) from the ambiguous ~0 fps floor (frozen broadcast vs idle probe — resolved by
+    the underrun/overrun starvation signature above). All counter deltas are normalized to the ~5 s
+    audit interval so a non-5 s gap between two audit lines cannot distort the spikes (#266 :189).
     """
     alerts: List[Alert] = []
     named = {s for s in (monitored_sources or [])}
     for source, (prev, curr) in sorted(per_source.items()):
         fps = received_fps(prev, curr)
         is_named = source in named
+        scale = AUDIT_INTERVAL_SECS / pair_dt(prev, curr)  # normalize counter deltas to ~5 s
+        d_underruns = max(0, curr.underruns - prev.underruns) * scale
+        d_overruns = max(0, curr.overruns - prev.overruns) * scale
+
+        # PARKED/idle (#70): frames ARE arriving but overflow the FIFO (overruns dominate the
+        # underrun churn) — the source is alive, just not consumed. NOT the starved stuck state.
+        parked_idle = d_overruns > 0 and d_overruns >= d_underruns
+        # STARVED: the genlock output is pulling an empty FIFO — underruns climbing past the spike
+        # threshold while NOT overrun-dominated.
+        starved = d_underruns > underrun_spike and not parked_idle
+
         if fps is not None and fps < fps_floor:
-            if is_named or fps >= idle_floor:
+            if fps >= idle_floor:
+                # Delivering some frames but well below norm (the ~10 fps #265 collapse) —
+                # unambiguously a degraded broadcast input. Always alert.
+                trip = True
+            else:
+                # ~0 fps (frozen). A declared source must be alive → always alert. Otherwise alert
+                # only on the STARVED signature (a frozen real cam), never a parked/dormant one.
+                trip = is_named or starved
+            if trip:
                 alerts.append(
                     Alert(
                         box=box,
@@ -183,18 +238,31 @@ def evaluate(
                         detail=f"NDI príjem '{source}' = {fps:.1f} fps (norma 30)",
                     )
                 )
-        # Underrun SPIKE only counts for a source we are actually treating as a broadcast input
-        # (named, or delivering >= idle_floor) — an idle source's underrun spam is expected (#70).
-        if is_named or (fps is not None and fps >= idle_floor):
-            d_underruns = curr.underruns - prev.underruns
-            if d_underruns > underrun_spike:
-                alerts.append(
-                    Alert(
-                        box=box,
-                        kind="underrun_spike",
-                        detail=f"'{source}' underruns +{d_underruns} za ~5s (genlock hladuje)",
-                    )
+
+        # Underrun SPIKE on its own (receive may still look ~ok but the FIFO is starving). Skip a
+        # parked/idle source — its underrun churn is the expected #70 idle pattern, not starvation.
+        if (is_named or not parked_idle) and d_underruns > underrun_spike:
+            alerts.append(
+                Alert(
+                    box=box,
+                    kind="underrun_spike",
+                    detail=f"'{source}' underruns +{d_underruns:.0f} za ~5s (genlock hladuje)",
                 )
+            )
+
+    # A DECLARED (named/required) source that produced no usable audit pair has VANISHED — NDI
+    # dropped, the fifo stopped logging — so it is absent from `per_source` and must still alert
+    # (a required input we can no longer confirm is alive), never silently disappear (#266 :130).
+    for source in sorted(named):
+        if source not in per_source:
+            alerts.append(
+                Alert(
+                    box=box,
+                    kind="vanished",
+                    detail=f"deklarovaný vstup '{source}' zmizol — žiadne NDI audit dáta",
+                )
+            )
+
     if dantesync_cpu is not None and dantesync_cpu > dantesync_core_pct:
         alerts.append(
             Alert(
@@ -216,16 +284,54 @@ def compose_alert_body(box: str, host: Optional[str], alerts: List[Alert]) -> st
     return "\n".join(lines)
 
 
-def send_alert(body: str, airuleset: str, dry_run: bool) -> None:
-    """Fire the Discord alert via airuleset notify (or just print it on --dry-run)."""
+def send_alert(body: str, airuleset: str, dry_run: bool) -> bool:
+    """Fire the Discord alert via airuleset notify (or just print it on --dry-run).
+
+    Returns True when the alert was delivered (or printed on --dry-run), False when delivery FAILED
+    — airuleset notify exited non-zero (broken Discord webhook / missing env / network outage), or
+    could not be spawned at all. A failed delivery must NEVER be swallowed as "alert fired": main()
+    turns a False here into a distinct, loud exit code so the un-delivered stuck-state is itself
+    surfaced (#266 finding :226, script-failure-policy / fail-loudly).
+    """
     if dry_run:
         print("[dry-run] would alert:\n" + body)
-        return
+        return True
     cmd = ["python3", os.path.expanduser(airuleset), "notify", "--body", body]
     try:
-        subprocess.run(cmd, check=False)
+        result = subprocess.run(cmd, check=False)
     except OSError as e:
-        print(f"WARNING: could not fire watchdog alert: {e}", file=sys.stderr)
+        print(f"ERROR: could not spawn watchdog alert ({airuleset}): {e}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(
+            f"ERROR: watchdog alert delivery FAILED — airuleset notify exited "
+            f"{result.returncode} (Discord webhook / env / network?)",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def read_recent_lines(path: str, max_bytes: int = 2_000_000) -> List[str]:
+    """Read only the TAIL of the (possibly multi-GB) OBS log.
+
+    Only the last two audit lines per active source are needed, and the genlock audit cadence
+    (~5 s per source) means thousands of recent lines fit in a few hundred KB — so reading just the
+    last ~`max_bytes` bounds memory on a huge live OBS log instead of slurping the whole file (#266
+    finding :265). A source whose audit lines fell off the tail is treated as having no recent
+    samples — which is correct: a declared source that stopped logging has VANISHED and alerts via
+    the named-source check (#266 :130).
+    """
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        start = max(0, size - max_bytes)
+        fh.seek(start)
+        data = fh.read()
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]  # drop the partial first line from the mid-file seek
+    return lines
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -261,20 +367,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        with open(args.obs_log, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
+        lines = read_recent_lines(args.obs_log)
     except OSError as e:
         print(f"ERROR: cannot read OBS log {args.obs_log}: {e}", file=sys.stderr)
         return 2
 
     per_source = last_two_per_source(lines)
-    if not per_source and args.dantesync_cpu is None:
+    # Missing NDI audit data is a BAD-INPUT condition (exit 2), NOT a healthy run — supplying
+    # --dantesync-cpu must NOT mask it into a green exit 0 with the NDI check having evaluated
+    # nothing (#266 finding :271). When --source names declared inputs, an absent one is an ALERT
+    # (vanished, handled in evaluate), so only the default scan-all mode with no audit data at all
+    # is treated as un-monitorable bad input.
+    if not per_source and not args.source:
         print(
-            f"ERROR: no genlock-fifo audit data (>=2 lines/source) in {args.obs_log} "
-            "and no --dantesync-cpu given — nothing to evaluate",
+            f"ERROR: no genlock-fifo audit data (>=2 lines/source) in {args.obs_log} — "
+            "nothing to evaluate (NDI receive un-monitorable)",
             file=sys.stderr,
         )
         return 2
+
+    # Echo the resolved thresholds on EVERY outcome so an OK/ALERT line is self-explaining (#266
+    # finding :290, comprehensive-logging).
+    thresholds = (
+        f"fps_floor={args.fps_floor} idle_floor={args.idle_floor} "
+        f"underrun_spike={args.underrun_spike} dantesync_core_pct={args.dantesync_core_pct}"
+    )
 
     alerts = evaluate(
         args.box,
@@ -287,16 +404,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         dantesync_core_pct=args.dantesync_core_pct,
     )
     if not alerts:
-        srcs = ", ".join(
-            f"{s}={received_fps(p, c):.1f}fps" if received_fps(p, c) is not None else f"{s}=?"
-            for s, (p, c) in sorted(per_source.items())
+        # Per-source diagnostic: fps + the counter deltas (consumed/underruns/overruns) so a quiet
+        # OK run still records the full audit picture for later debugging (comprehensive-logging).
+        def _diag(s: str, p: AuditSample, c: AuditSample) -> str:
+            fps = received_fps(p, c)
+            fps_s = f"{fps:.1f}fps" if fps is not None else "?fps"
+            return (
+                f"{s}={fps_s}(consumed+{max(0, c.consumed - p.consumed)} "
+                f"underruns+{max(0, c.underruns - p.underruns)} "
+                f"overruns+{max(0, c.overruns - p.overruns)})"
+            )
+
+        srcs = ", ".join(_diag(s, p, c) for s, (p, c) in sorted(per_source.items()))
+        dante = f", dantesync={args.dantesync_cpu:.0f}%" if args.dantesync_cpu is not None else ""
+        print(
+            f"OK [{args.box}]: no stuck state — {srcs or 'no source samples'}{dante} [{thresholds}]"
         )
-        print(f"OK [{args.box}]: no stuck state — {srcs or 'no source samples'}")
         return 0
 
     body = compose_alert_body(args.box, args.host, alerts)
-    send_alert(body, args.airuleset, args.dry_run)
-    print(f"ALERT [{args.box}]: {len(alerts)} condition(s) tripped", file=sys.stderr)
+    delivered = send_alert(body, args.airuleset, args.dry_run)
+    print(f"ALERT [{args.box}]: {len(alerts)} condition(s) tripped [{thresholds}]", file=sys.stderr)
+    if not delivered:
+        print(
+            f"ERROR [{args.box}]: alert could NOT be delivered — stuck state went UNREPORTED",
+            file=sys.stderr,
+        )
+        return 3
     return 1
 
 
