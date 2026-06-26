@@ -100,7 +100,6 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    $d="$env:APPDATA\obs-studio\logs"
    $f=Get-ChildItem $d -Filter *.txt | Sort-Object LastWriteTime -Desc | Select-Object -First 1
    ((Get-Content $f.FullName) | Where-Object { $_ -match 'genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)' }) -join "`n"
-   ```
    # #246/#257 prod burn: the measurement burn is a per-source `genlock_burn` bool (no OBS_BURN_* env
    # any more) and must NEVER be left ON in prod. Read it over OBS WebSocket (NOT Machine env): for
    # each program-feeding input, check genlock_burn via the harness from dev1 (the boxes are reachable

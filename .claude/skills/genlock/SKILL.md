@@ -67,10 +67,11 @@ ms, reserve overriding preload only under TS_ALIGN):
   + ts-align are now build defaults and the latency is the UI int (floor 3).
 - **preload is internal** (auto-derived FIFO depth = 1 frame for jitter/dropout resilience,
   latency-free under the ms deadline so the #110 0-loss floor holds) — unchanged, still true.
-- **Display (unchanged):** the OBS startup + audit log show `genlock: latency = N ms
-  (≈ M frames @ Ffps)` — MS PRIMARY, frame-equivalent in PARENS. The DistroAV source props show the
-  read-only `Genlock latency = N ms (≈ M frames @ Ffps)` label. A user sets ONE ms value (now the UI
-  int, not an env) and never reasons about preload-vs-reserve precedence.
+- **Display:** the OBS startup + audit log show `genlock: latency = N ms (≈ M frames @ Ffps)` — MS
+  PRIMARY, frame-equivalent in PARENS (this log format is unchanged across #257). Pre-#257 the latency
+  was env-set and the DistroAV source props showed only a READ-ONLY `Genlock latency = N ms` label;
+  post-#257 that prop is the EDITABLE "Latency (ms)" int (min 3) — a user sets ONE ms value in the UI
+  (not an env) and never reasons about preload-vs-reserve precedence.
 
 Resolution + display mirrored & unit-tested in `src/probe/genlock.rs` (resolve_latency_ms /
 ms_to_frames / genlock_auto_preload / format_latency_label) with vendored-source guards keeping the
