@@ -918,18 +918,31 @@ fn recording_e2e_extracts_each_partial_on_its_own_box_and_merges() {
     );
 }
 
-/// The CORE #208 guard: a recording is NEVER copied box-to-box. The stream-box decode must be
-/// passed ONLY its own --stream recording — NEVER the strih recording. The old fused on-stream
-/// flow forwarded `--strih "$STRIH_REC_WIN"` to the verdict running on the STREAM box, which
-/// required the strih .mkv to be copied strih→stream first. That marker must be GONE.
+/// The CORE #208 guard: a recording is NEVER copied box-to-box. The strih recording is decoded on
+/// the STRIH box (the on-strih extract legitimately takes `--strih "$STRIH_REC_WIN"`); the strih
+/// recording must NOT be handed to the STREAM box's extract (the old fused on-stream flow forwarded
+/// it there, which required the strih .mkv to be copied strih→stream first). So `--strih
+/// "$STRIH_REC_WIN"` must appear in the on-STRIH block ONLY, and there must be no PowerShell
+/// recording-copy mechanism between boxes. (The on-stream-never-strih guard is the separate test.)
 #[test]
 fn recording_e2e_never_copies_a_recording_box_to_box() {
     let s = read("scripts/recording-e2e.sh");
-    // The on-stream verdict must never be handed the strih recording on the stream box.
+    let strih_call = s
+        .find("recording-verdict-on-strih.sh")
+        .expect("#208: the on-strih planner invocation must exist");
+    let stream_call = s
+        .find("recording-verdict-on-stream.sh")
+        .expect("#208: the on-stream planner invocation must exist");
+    // The strih recording is decoded ON the strih box: `--strih "$STRIH_REC_WIN"` belongs to the
+    // on-STRIH extract block (between the on-strih call and the on-stream call), proving it is
+    // decoded in place there, not copied to the stream box.
+    let strih_marker = s
+        .find("--strih \"$STRIH_REC_WIN\"")
+        .expect("#208: the strih box must decode its own recording (--strih \"$STRIH_REC_WIN\")");
     assert!(
-        !s.contains("--strih \"$STRIH_REC_WIN\""),
-        "#208: the stream box must NOT be passed the strih recording (`--strih \"$STRIH_REC_WIN\"`) \
-         — that forced a strih→stream box-to-box copy. Decode strih ON the strih box instead."
+        strih_call < strih_marker && strih_marker < stream_call,
+        "#208: `--strih \"$STRIH_REC_WIN\"` must be in the on-STRIH extract block (decoded on the \
+         strih box), NEVER handed to the on-STREAM extract (which would force a box-to-box copy)."
     );
     // No box-to-box recording copy mechanism (PowerShell Copy-Item / New-PSDrive of a .mkv/.mp4).
     let lower = s.to_lowercase();
