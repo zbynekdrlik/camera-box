@@ -1881,6 +1881,24 @@ fn extract_partial_flagged_frames(
     (flagged, undecodable)
 }
 
+/// The node-burn run_ids a per-box partial is expected to carry, derived from the box name + the
+/// `--burn-*-run-id` args: the strih recording carries cam1 (forwarded) + strih; the stream
+/// recording (the chain endpoint) carries all three. `None` for an unknown box. SINGLE source of
+/// truth for BOTH `--extract-partial` (what it decodes for) and the `--merge-partials` consistency
+/// check — so a manual `--burn-*-run-id` mismatch between extract and merge cannot silently
+/// misverdict (run_merge warns when a loaded partial's `expected_burns` disagree with this).
+fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
+    match box_name {
+        "strih" => Some(vec![args.burn_cam1_run_id, args.burn_strih_run_id]),
+        "stream" => Some(vec![
+            args.burn_cam1_run_id,
+            args.burn_strih_run_id,
+            args.burn_stream_run_id,
+        ]),
+        _ => None,
+    }
+}
+
 /// #208 PER-BOX decode-in-place: decode the box's LOCAL recording in place and write a SMALL
 /// partial JSON (ids + timestamps, NO frames/pixels) PLUS the #186 pixel-proof PNGs for this box's
 /// flagged frames (undecodable + the missing-burn slots for the nodes it backs) into the sibling
@@ -1888,28 +1906,24 @@ fn extract_partial_flagged_frames(
 /// stream box decodes its stream recording (all three burns). dev1 then `--merge-partials` the
 /// small JSONs (+ pulls back the pixel dirs) — the recording is NEVER copied box-to-box (nor to dev1).
 fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
-    let (rec_path, expected_burns): (&Path, Vec<u32>) = match box_name {
+    let expected_burns = args_expected_burns_for(box_name, args).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--extract-partial: unknown box {box_name:?} (expected `strih` or `stream`)"
+        )
+    })?;
+    let rec_path: &Path = match box_name {
         // The strih recording carries the cam1 (forwarded) + strih burns — never the stream burn.
-        "strih" => (
-            args.strih
-                .as_deref()
-                .context("--extract-partial strih needs --strih <recording on the strih box>")?,
-            vec![args.burn_cam1_run_id, args.burn_strih_run_id],
-        ),
+        "strih" => args
+            .strih
+            .as_deref()
+            .context("--extract-partial strih needs --strih <recording on the strih box>")?,
         // The stream recording is the chain endpoint — it carries all three forwarded burns.
-        "stream" => (
-            args.stream
-                .as_deref()
-                .context("--extract-partial stream needs --stream <recording on the stream box>")?,
-            vec![
-                args.burn_cam1_run_id,
-                args.burn_strih_run_id,
-                args.burn_stream_run_id,
-            ],
-        ),
-        other => {
-            anyhow::bail!("--extract-partial: unknown box {other:?} (expected `strih` or `stream`)")
-        }
+        "stream" => args
+            .stream
+            .as_deref()
+            .context("--extract-partial stream needs --stream <recording on the stream box>")?,
+        // args_expected_burns_for already returned None (→ bailed) for any other box.
+        _ => unreachable!("unknown box rejected by args_expected_burns_for above"),
     };
     tracing::info!(
         box_name,
@@ -1993,6 +2007,26 @@ fn run_merge(args: &Args) -> Result<()> {
             "--merge-partials {spec}: the partial file's box is {:?} but it was assigned to {box_name:?}",
             partial.box_name
         );
+        // Review (#208): WARN — never silently — on (1) a repeated box key (a later partial
+        // silently overwrites the earlier slot) and (2) an `expected_burns` mismatch between the
+        // loaded partial and this merge's `--burn-*-run-id` args (a manual burn-id mismatch between
+        // extract and merge would otherwise pair on the wrong run_id and misverdict).
+        if box_paths.iter().any(|(b, _)| b == box_name) {
+            eprintln!(
+                "WARNING: --merge-partials {box_name}= specified more than once — the later partial \
+                 ({path}) OVERWRITES the earlier one for the {box_name} slot."
+            );
+        }
+        if let Some(expected) = args_expected_burns_for(box_name, args) {
+            if partial.expected_burns != expected {
+                eprintln!(
+                    "WARNING: --merge-partials {box_name}: the partial was extracted for burns {:?} \
+                     but this merge's --burn-*-run-id imply {expected:?} — a burn-id mismatch \
+                     between extract and merge can MISVERDICT. Re-extract with matching --burn-* ids.",
+                    partial.expected_burns
+                );
+            }
+        }
         box_paths.push((box_name.to_string(), PathBuf::from(path)));
         let rec = DecodedRec {
             frames: partial.frames,
@@ -2371,6 +2405,32 @@ mod tests {
         assert!(
             format!("{err2:#}").contains("unknown box"),
             "#208: an unknown box must bail: {err2:#}"
+        );
+    }
+
+    /// #208 (review): the per-box expected burns are ONE source of truth shared by extract and the
+    /// merge consistency check — strih carries cam1+strih, stream carries all three, unknown → None.
+    /// A mismatch between a partial's recorded expected_burns and this mapping is what run_merge
+    /// warns on (a manual --burn-* mismatch between extract and merge that could misverdict).
+    #[test]
+    fn args_expected_burns_for_maps_box_to_its_burns() {
+        use super::args_expected_burns_for;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        assert_eq!(
+            args_expected_burns_for("strih", &args),
+            Some(vec![CAM1B, STRIH]),
+            "strih partial carries cam1 (forwarded) + strih"
+        );
+        assert_eq!(
+            args_expected_burns_for("stream", &args),
+            Some(vec![CAM1B, STRIH, STREAM]),
+            "stream partial (chain endpoint) carries all three burns"
+        );
+        assert_eq!(
+            args_expected_burns_for("nope", &args),
+            None,
+            "an unknown box has no expected burns"
         );
     }
 
