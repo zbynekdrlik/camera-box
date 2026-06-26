@@ -145,7 +145,12 @@ fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
 # fetch failed and the file is absent, the gate marks that node UNKNOWN and FAILS — never a
 # silent pass with the Windows boxes unverified. Dropping the node here (the previous bug) let
 # the gate certify only cam1+cam2 and exit 0 with strih/stream NTP/PTP never checked.
-CLOCK_GUARD_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}" "$HERE/dantesync-gate.sh" \
+# #253: the explicit --bound-us arg below already carries the bound (and OVERRIDES the gate's own
+# CLOCK_GUARD_BOUND_US default), so the leading CLOCK_GUARD_BOUND_US=... env-prefix was redundant
+# AND shellcheck-flagged (SC2097/SC2098: the prefix is only seen by the forked process, while the
+# same-line $CLOCK_GUARD_BOUND_US expansion is resolved by the CURRENT shell before the prefix
+# takes effect). Pass the value purely as the argument — behavior is identical.
+"$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --linux "cam1=$CAM1_IP cam2=$PAINTER_IP" \
   --win-status "strih=$DANTE_STRIH_STATUS" \
