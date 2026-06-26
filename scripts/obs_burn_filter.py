@@ -102,10 +102,13 @@ def cmd_check(ws, input_name):
     burn = _genlock_burn(ws, input_name)
     present = _has_filter(ws, input_name)
     registered = BURN_FILTER_KIND in _filter_kinds(ws)
-    # `burn_on` is the authoritative tell (a burn renders only when the bool is true AND the
-    # renderer filter is present). kind_registered/filter_on_input kept for diagnostics.
+    # `burn_on` is the authoritative tell: a burn RENDERS only when the per-source bool is true
+    # AND the renderer filter is attached (no filter => nothing renders even with the bool on,
+    # per this script's contract). Both conditions are required. kind_registered/filter_on_input
+    # are kept for diagnostics.
+    burn_on = (burn is True) and present
     print(
-        f"[burn] burn_on={burn is True} genlock_burn={burn} filter_on_input={present} "
+        f"[burn] burn_on={burn_on} genlock_burn={burn} filter_on_input={present} "
         f"kind_registered={registered} input='{input_name}'"
     )
     if not registered:

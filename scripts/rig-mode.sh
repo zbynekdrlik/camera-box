@@ -8,7 +8,8 @@
 # This script is the SINGLE SOURCE OF TRUTH: identical pinned settings every time, no improvisation.
 #
 # WHAT IT DOES — the CAM side is automated here (ssh to the cam boxes is ALLOWED); the Windows OBS
-# side is PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step to run via the win-*
+# burn is toggled DIRECTLY over OBS WebSocket (scripts/obs_burn_filter.py — the harness has WS access);
+# the env-free genlock relaunch (no --mode) is PRINTED to run via the win-*
 # MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
 #
 #   TEST  : cam2 — stop camera-box (frees /dev/fb0), launch the PINNED dual-QR vernier painter
@@ -235,11 +236,12 @@ Usage:
   scripts/rig-mode.sh test     # paint the dual-QR vernier on cam2 + print the OBS burns-ON step
   scripts/rig-mode.sh event    # stop the QR, restore camera-box --display + print the OBS burns-OFF step
 
-The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The Windows OBS side is PRINTED
-as the exact `launch-obs-genlock.sh --mode {test|event}` step (ssh to Windows is denied — run it via
-the win-* MCP). See the script header for env overrides.
+The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The OBS burn is toggled DIRECTLY
+over OBS WebSocket (scripts/obs_burn_filter.py — no relaunch); the env-free genlock relaunch (no
+--mode) is PRINTED to run via the win-* MCP (ssh to Windows is denied). See the script header for
+env overrides.
 
-Exit codes: 0 = mode applied (cam side verified) + OBS step printed; 2 = usage error.
+Exit codes: 0 = mode applied (cam side + burn WS toggle) + relaunch note printed; 2 = usage error.
 EOF
 }
 

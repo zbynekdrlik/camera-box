@@ -234,8 +234,16 @@ cleanup() {
     _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
     python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
       | sed "s/^/    [$_bn burn-clear] /" || true
-    python3 "$HERE/obs_burn_filter.py" check  --host "$_bip" --input "$_bsrc" 2>&1 \
-      | sed "s/^/    [$_bn burn-verify] /" || true
+    _vrf="$(python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
+    printf '%s\n' "$_vrf" | sed "s/^/    [$_bn burn-verify] /"
+    # The block above PROMISES to VERIFY burns OFF; surface a LOUD warning if a burn is still on
+    # (e.g. the remove SetInputSettings was swallowed by a transient WS hiccup) so a lingering
+    # test-burn onto the live broadcast can't pass silently. (cleanup runs in the EXIT trap, so it
+    # WARNS rather than exits non-zero; drift-guard --compare burn_env= is the fail-loud gate.)
+    if printf '%s' "$_vrf" | grep -q 'burn_on=True'; then
+      echo "    [$_bn burn-verify] WARNING #246: genlock_burn still ON after clear — re-clear via" >&2
+      echo "        scripts/rig-mode.sh event (or obs_burn_filter.py remove) before any live broadcast." >&2
+    fi
   done
 }
 # #246: define the prod scene/source names BEFORE the trap so cleanup()'s burn-clear loop (which
