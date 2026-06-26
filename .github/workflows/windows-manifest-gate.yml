@@ -1,0 +1,101 @@
+name: Windows manifest gate (genlock SHA-manifest on git-bash)
+
+# camera-box #240: a CHEAP, per-push Windows gate for the genlock bundle SHA-manifest
+# (scripts/genlock-manifest.sh, #120).
+#
+# Why this exists: #120's manifest self-consistency step shipped a Windows-broken bug (#239:
+# a SIGPIPE/pipefail checker race + a comm-collation hazard) that false-failed the ENTIRE
+# deployable ~2000-file genlock bundle on the real Windows build — yet it PASSED every PR.
+# The coverage gap: the full Windows genlock build (windows-genlock.yml) is workflow_dispatch-
+# only and not a PR gate; the manifest LOGIC is otherwise only Linux-unit-tested
+# (tests/genlock_manifest.rs) against tiny 5-file stages that never hit the race; and
+# windows-genlock-fast.yml fires ONLY on the vendored OBS/DistroAV build paths — so a change to
+# the manifest CHECKER itself (scripts/genlock-manifest.sh / tests/genlock_manifest.rs) shipped
+# UN-GATED. A Windows-only manifest regression could land on main again.
+#
+# The fix (#240 option 1, the cheapest): run the manifest generate+check on a real windows-2022
+# runner (git-bash) over a SYNTHETIC real-sized stage (~1600 dummy files laid out like the
+# bundle) — NO OBS/DistroAV compile (no 150-min build). This exercises exactly the git-bash-
+# specific behaviors the Linux test cannot: process-substitution truncation, large-file sha,
+# locale/collation, and the #239 per-item `grep -q` SIGPIPE-under-pipefail race that only
+# surfaces at bundle scale. ~2 minutes, full teeth, on every relevant push.
+#
+# This repo gates merges via push-to-dev (it deliberately omits pull_request per #157), so the
+# push-to-dev run IS the pre-merge gate. The gate fires for the manifest-checker paths (the files
+# windows-genlock-fast.yml does NOT watch).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - 'scripts/genlock-manifest.sh'
+      - 'tests/genlock_manifest.rs'
+      - '.github/workflows/windows-manifest-gate.yml'
+      - '.github/workflows/windows-genlock.yml'
+      - '.github/workflows/windows-genlock-fast.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-manifest-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest-gate:
+    name: genlock SHA-manifest generate+check (synthetic real-sized stage, git-bash)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build a SYNTHETIC real-sized staged bundle that mirrors the windows-genlock.yml stage/
+      # layout (bin/64bit/*.dll + data/libobs/*.effect + obs-plugins/64bit/distroav.dll +
+      # GENLOCK_BUILD_SHA.txt) — ~1600 files so the git-bash-scale behaviors (process-sub
+      # truncation, large-file sha, locale/collation, the #239 SIGPIPE/comm race) are actually
+      # exercised. NO OBS/DistroAV compile: this is the manifest LOGIC gate, not the vendored build.
+      - name: Build synthetic real-sized stage (~1600 files, NO OBS build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          N=1600
+          STAGE=stage
+          mkdir -p "$STAGE/bin/64bit" "$STAGE/data/libobs" "$STAGE/obs-plugins/64bit"
+          half=$((N / 2))
+          for i in $(seq 1 "$half"); do
+            printf 'libobs-fake-%s' "$i" > "$STAGE/bin/64bit/lib$i.dll"
+          done
+          for i in $(seq $((half + 1)) "$N"); do
+            printf 'effect-fake-%s' "$i" > "$STAGE/data/libobs/eff$i.effect"
+          done
+          printf 'fake-distroav-plugin' > "$STAGE/obs-plugins/64bit/distroav.dll"
+          git rev-parse HEAD > "$STAGE/GENLOCK_BUILD_SHA.txt"
+          echo "synthetic stage: $(find "$STAGE" -type f | wc -l) files (target ${N}+ )"
+
+      # Generate the per-component SHA manifest over the synthetic stage (the same generator the
+      # full windows-genlock.yml bundle uses). This runs the generate loop + completeness +
+      # per-entry-validity guards on git-bash at bundle scale.
+      - name: Generate per-component SHA manifest over the synthetic stage (#240)
+        shell: bash
+        run: bash scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
+
+      # THE gate: run the self-consistency CHECK over the real-sized stage on git-bash. This is the
+      # step the #239 SIGPIPE/pipefail + comm-collation race false-failed on the real Windows
+      # bundle while every Linux PR passed. A freshly-generated manifest MUST self-check clean.
+      - name: Assert manifest self-consistent at bundle scale (git-bash) (#240/#239)
+        shell: bash
+        run: bash scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
+      # Teeth: prove the gate still FAILS on a real inconsistency (an un-manifested extra file =
+      # un-audited bytes, the anti-#119 property) — on the Windows runner, at scale. A check that
+      # PASSED here would mean the gate had lost its teeth.
+      - name: Assert the gate has teeth — an un-manifested extra file FAILS the check (#240)
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo 'rogue-unlisted-bytes' > stage/bin/64bit/rogue-unlisted.dll
+          if bash scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage; then
+            echo "TEETH FAILURE: --check passed despite an un-manifested extra file"; exit 1
+          fi
+          echo "teeth OK: an un-manifested extra file was correctly flagged INCONSISTENT"
