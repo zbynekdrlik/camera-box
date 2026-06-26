@@ -829,6 +829,138 @@ fn on_stream_planner_builds_a_valid_windows_command() {
 }
 
 // ---------------------------------------------------------------------------
+// #208 — PER-BOX decode-in-place (refines #193). The verdict needs the STRIH recording (cam1
+// contiguity #133 + cam→strih) AND the STREAM recording (the full chain). The old on-stream
+// flow ran a SINGLE fused verdict on the stream box, which forced the ~700 MB strih .mkv to be
+// copied strih→stream first. #208: decode the strih recording ON the strih box and the stream
+// recording ON the stream box, each in place, and merge the SMALL partial JSONs on dev1 — a
+// recording is NEVER copied box-to-box (nor to dev1). These guards lock that flow.
+// ---------------------------------------------------------------------------
+
+/// The on-strih planner script must exist and be executable (mirror of on-stream).
+#[test]
+fn recording_verdict_on_strih_script_exists() {
+    let path = format!(
+        "{}/scripts/recording-verdict-on-strih.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let meta = fs::metadata(&path)
+        .unwrap_or_else(|e| panic!("#208: recording-verdict-on-strih.sh missing: {e}"));
+    assert!(meta.is_file(), "recording-verdict-on-strih.sh must be a file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            meta.permissions().mode() & 0o111 != 0,
+            "recording-verdict-on-strih.sh must be executable"
+        );
+    }
+}
+
+/// The on-strih planner must target the STRIH box (win-strih MCP, 10.77.9.202) and run the
+/// verdict against the box-LOCAL strih recording — it must NEVER copy that recording off-box.
+#[test]
+fn on_strih_planner_targets_the_strih_box() {
+    let s = read("scripts/recording-verdict-on-strih.sh");
+    assert!(
+        s.contains("win-strih"),
+        "#208: the on-strih planner must target the win-strih MCP (the strih box)."
+    );
+    assert!(
+        s.contains("10.77.9.202"),
+        "#208: the on-strih planner must reference the strih box IP 10.77.9.202."
+    );
+    // It must NOT reference the stream box — it only decodes the strih recording in place.
+    assert!(
+        !s.contains("win-stream") && !s.contains("10.77.9.204"),
+        "#208: the on-strih planner must NOT touch the stream box (it decodes strih in place only)."
+    );
+    // It must state the strih recording stays on the box (never copied).
+    assert!(
+        s.to_lowercase().contains("never copied") || s.to_lowercase().contains("stays on"),
+        "#208: the on-strih planner must state the strih recording stays on the box (never copied)."
+    );
+}
+
+/// recording-e2e.sh [8/8] default path must EXTRACT the strih partial ON the strih box (via the
+/// on-strih planner) and the stream partial ON the stream box (via the on-stream planner), then
+/// MERGE the two small JSONs on dev1.
+#[test]
+fn recording_e2e_extracts_each_partial_on_its_own_box_and_merges() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("recording-verdict-on-strih.sh"),
+        "#208: the default path must invoke recording-verdict-on-strih.sh (strih partial ON the \
+         strih box)."
+    );
+    assert!(
+        s.contains("recording-verdict-on-stream.sh"),
+        "#208: the default path must invoke recording-verdict-on-stream.sh (stream partial ON the \
+         stream box)."
+    );
+    assert!(
+        s.contains("--extract-partial strih"),
+        "#208: the strih box must run `recording-verdict --extract-partial strih` against its \
+         LOCAL strih recording."
+    );
+    assert!(
+        s.contains("--extract-partial stream"),
+        "#208: the stream box must run `recording-verdict --extract-partial stream` against its \
+         LOCAL stream recording."
+    );
+    assert!(
+        s.contains("--merge-partials"),
+        "#208: dev1 must MERGE the two small partial JSONs (`recording-verdict --merge-partials \
+         strih=… stream=…`) into the final verdict — no recording on dev1."
+    );
+}
+
+/// The CORE #208 guard: a recording is NEVER copied box-to-box. The stream-box decode must be
+/// passed ONLY its own --stream recording — NEVER the strih recording. The old fused on-stream
+/// flow forwarded `--strih "$STRIH_REC_WIN"` to the verdict running on the STREAM box, which
+/// required the strih .mkv to be copied strih→stream first. That marker must be GONE.
+#[test]
+fn recording_e2e_never_copies_a_recording_box_to_box() {
+    let s = read("scripts/recording-e2e.sh");
+    // The on-stream verdict must never be handed the strih recording on the stream box.
+    assert!(
+        !s.contains("--strih \"$STRIH_REC_WIN\""),
+        "#208: the stream box must NOT be passed the strih recording (`--strih \"$STRIH_REC_WIN\"`) \
+         — that forced a strih→stream box-to-box copy. Decode strih ON the strih box instead."
+    );
+    // No box-to-box recording copy mechanism (PowerShell Copy-Item / New-PSDrive of a .mkv/.mp4).
+    let lower = s.to_lowercase();
+    assert!(
+        !lower.contains("copy-item") && !lower.contains("new-psdrive"),
+        "#208: there must be no PowerShell Copy-Item / New-PSDrive recording copy between boxes."
+    );
+}
+
+/// The stream-box partial extract must be passed ONLY --stream (its own recording), never a
+/// strih recording path — proving the strih recording is decoded on the strih box, not the
+/// stream box. Asserted on the on-stream planner invocation block in the default path.
+#[test]
+fn recording_e2e_stream_extract_is_stream_only_never_strih() {
+    let s = read("scripts/recording-e2e.sh");
+    // Find the on-stream planner invocation in the default path and confirm its forwarded args
+    // (after `--`) carry --extract-partial stream + --stream, and NO --strih recording.
+    let call = s
+        .find("recording-verdict-on-stream.sh")
+        .expect("#208: the on-stream planner invocation must exist");
+    // Look at a generous window after the invocation (the forwarded args span several lines).
+    let window = &s[call..(call + 800).min(s.len())];
+    assert!(
+        window.contains("--extract-partial stream"),
+        "#208: the on-stream planner must forward `--extract-partial stream`: {window:?}"
+    );
+    assert!(
+        !window.contains("--strih"),
+        "#208: the stream-box extract must NEVER be passed --strih (the strih recording is decoded \
+         on the strih box): {window:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #123 — pre-rig-test VERSION-INTEGRITY gate wiring.
 //
 // Every rig-test entry script that brings up the strih+stream genlocked OBS stack must, BEFORE
