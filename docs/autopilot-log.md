@@ -682,3 +682,8 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - REVIEW: code-review (5 → 3 fixed 8afb2cef5, 2 filed) + superpowers:requesting-code-review (0🔴0🟡, 2 Minor → #195 gate locked with a 4-state mirror test b12bc373f). 0🔴0🟡0🔵. Cards fired #240/#244/#220/#195.
 - Follow-ups filed: #252 (shared BURN_TARGETS array for #195 gate + #246 cleanup — needs #246-owned code), #253 (pre-existing shellcheck SC2097/SC2098 on dantesync-gate env-prefix).
 - 📔 Playbook: e2e SKILL.md updated (#195 now auto-enforced; harness-script sourceability gotcha). Worker playbook commit 096d9e467 on dev (rides next PR).
+
+## 2026-06-26 — #252 + #253 + #210 (bundle, PR #254, v1.7.0-dev.114) — MERGED + #168 auto-closed
+- PR #254 merged (7ecc384d9); #252 + #253 + #210 CLOSED. No rig deploy (scripts/CI/tests/Cargo only).
+- #252: shared BURN_TARGETS array in recording-e2e.sh (one list for the #195 burn-ON gate + #246 cleanup burn-clear). #253: shellcheck SC2097/SC2098 on the dantesync-gate env-prefix fixed. #210: removed the DEAD multitap-probe chapter (src/bin/multitap-probe.rs + Cargo [[bin]] + scripts/multitap-e2e.sh + e2e-report.py + 2 test cleanups + CI/purge refs); loopback-e2e.sh KEPT (alive, frame-probe, active hardware workflow — the issue's premise was wrong). Reviews 0🔴0🟡0🔵. Cards fired. Follow-up #255 filed (residual doc-comment refs).
+- #168 AUTO-CLOSED (ticket-validator OVERCOME-hard): #179 (e953e4cd9, in main) dropped the 7.3GB cam1 grab entirely — the artifact #168 wanted to shrink no longer exists; tests lock the grab path out.
