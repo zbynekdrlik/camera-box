@@ -33,20 +33,18 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    if(Test-Path $dll){ "ndi_runtime=$((Get-Item $dll).VersionInfo.FileVersion)" }
    # OUTPUT fps = the `fps:` line inside the "video settings reset:" block:
    $vs=($log -split "`n"); for($i=0;$i -lt $vs.Count;$i++){ if($vs[$i] -match 'video settings reset:'){ for($j=$i;$j -lt $vs.Count;$j++){ if($vs[$j] -match 'fps:\s+(\d+)/'){ "output_fps=$($Matches[1])"; break } }; break } }
-   # genlock master gate = the RUNNING OBS state from the log (the gate is read at OBS launch, so
-   # a later $env: read can be stale — esp. via a long-lived launcher/MCP process). ENABLED -> 1,
-   # DISABLED -> 0. Cross-check the PERSISTENT Machine setting in HKLM (survives reboot); if the log
-   # says 1 but HKLM != 1 (or vice versa), report it — a reboot would then launch the other state.
+   # #257: the genlock master gate is a BUILD DEFAULT (always on, no OBS_GENLOCK_WALL_CLOCK env) —
+   # the gate is PROVEN by the running OBS log marker, NOT an env read. ENABLED -> 1, DISABLED -> 0.
+   # The genlock_wall_clock=1 we emit is the build-default sentinel (the capability marker is the
+   # real proof, gathered below as genlock_capability).
    if($log -match 'genlock:.*render tick ENABLED'){ "genlock_wall_clock=1" } elseif($log -match 'genlock:.*render tick DISABLED'){ "genlock_wall_clock=0" }
-   $hklm=(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name OBS_GENLOCK_WALL_CLOCK -EA SilentlyContinue).OBS_GENLOCK_WALL_CLOCK
-   "# persistent HKLM OBS_GENLOCK_WALL_CLOCK=[$hklm] (must agree with the log gate)"
    ```
 
    (`ndi_runtime` from the DLL `FileVersion` is the robust source; the OBS log
    `NDI Library Version detected:` line is an equivalent fallback. If OBS is **not running**, the
-   newest log is stale — note that, do not treat a stale read as live truth. Do **not** read the
-   genlock gate from `$env:OBS_GENLOCK_WALL_CLOCK` via the MCP shell: that shell inherits an env
-   snapshot from a long-lived parent and showed empty on 2026-06-14 while HKLM + the OBS log both
+   newest log is stale — note that, do not treat a stale read as live truth. #257: do **not** read the
+   genlock gate from any `OBS_GENLOCK_WALL_CLOCK` env — there is none; the gate is the OBS-log render-tick
+   marker. (Pre-#257 the MCP shell `$env:` read inherited a stale snapshot and showed empty 2026-06-14 while the OBS log
    correctly read `1`.)
 
 1b. **Gather the per-input NDI ingest latency off the running OBS (#84).** The `latency` mode is a
