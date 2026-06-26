@@ -1092,6 +1092,36 @@ mod vendored_source {
     }
 
     #[test]
+    fn fps_pair_read_is_tear_checked() {
+        // #200: the genlock audit/preload path read the unlocked ovi fps pair directly via
+        // obs_get_video_info(), which a concurrent obs_reset_video() can TEAR. The fix is a
+        // single tear-checked snapshot helper (genlock_video_fps) used at all four fps-read
+        // sites (drop_cap / preload_ms / frame_interval_ns / audit_log) — NO hot-path lock
+        // (deadlock risk vs obs_reset_video), a value-seqlock instead. Guard the helper, its
+        // agreement check, and that the four sites use it, so a subtree pull can't revert it.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("static bool genlock_video_fps("),
+            "{OBS_SOURCE}: #200 — the tear-checked fps snapshot helper genlock_video_fps is \
+             missing; the genlock audit/preload path reads ovi.fps_num/fps_den unlocked \
+             (torn pair). Re-apply."
+        );
+        assert!(
+            src.contains("a.fps_num == b.fps_num && a.fps_den == b.fps_den"),
+            "{OBS_SOURCE}: #200 — genlock_video_fps no longer compares two back-to-back \
+             snapshots for agreement (the value-seqlock that rejects a torn read); re-apply."
+        );
+        // 1 definition + the 4 call sites = >= 5 occurrences of `genlock_video_fps(`.
+        let calls = src.matches("genlock_video_fps(").count();
+        assert!(
+            calls >= 5,
+            "{OBS_SOURCE}: #200 — genlock_video_fps is used at fewer than the four genlock \
+             fps-read sites (drop_cap/preload_ms/frame_interval_ns/audit_log); a site still \
+             reads the ovi pair unlocked. Found {calls} occurrence(s) incl. the definition."
+        );
+    }
+
+    #[test]
     fn timestamp_aligned_release_present() {
         // #136/#257: the genlock_fifo branch must offer the timestamp-aligned release path
         // (multi-source IN-SYNC). #257: ts-align is a BUILD DEFAULT (genlock_ts_align_enabled

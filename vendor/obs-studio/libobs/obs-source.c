@@ -4260,6 +4260,38 @@ static uint32_t genlock_preload_default(void)
 	return (uint32_t)preload;
 }
 
+/* camera-box #200: read the output frame-rate pair (fps_num, fps_den) WITHOUT a torn
+ * read. obs_get_video_info() (obs.c) copies obs->...->mix->ovi UNLOCKED, so a
+ * concurrent obs_reset_video() (a resolution/fps change) can interleave between the
+ * fps_num and fps_den field copies and return a MISMATCHED pair — which would format a
+ * wrong ms in the genlock audit log. We deliberately do NOT take the OBS video
+ * graphics lock on this render/audit path: that risks a lock-ordering deadlock vs
+ * obs_reset_video (which holds the video lock while it can touch source state), for a
+ * log-only accuracy gain. Instead snapshot the pair twice and accept it only when two
+ * back-to-back reads AGREE — a bounded value-seqlock; obs_reset_video is rare, so in
+ * steady state the first two reads already match (one extra struct copy). Returns false
+ * with num=den=0 when there is no valid video info OR a tear persists past the retry
+ * budget — every caller already guards fps_num==0 / fps_den!=0, so it then takes the
+ * fps-unknown branch (latency_frames=0, fps=0.0; preload_ms / interval return 0). Mirror
+ * of the fps-pair acceptance pinned in src/probe/genlock.rs (genlock_fps_pair_consistent). */
+static bool genlock_video_fps(uint32_t *fps_num, uint32_t *fps_den)
+{
+	struct obs_video_info a;
+	struct obs_video_info b;
+	for (int attempt = 0; attempt < 4; attempt++) {
+		if (!obs_get_video_info(&a) || !obs_get_video_info(&b))
+			break;
+		if (a.fps_num == b.fps_num && a.fps_den == b.fps_den) {
+			*fps_num = a.fps_num;
+			*fps_den = a.fps_den;
+			return true;
+		}
+	}
+	*fps_num = 0;
+	*fps_den = 0;
+	return false;
+}
+
 /* Per-source async-FIFO drop-cap (#97). A NON-genlock source keeps libobs' fixed
  * MAX_ASYNC_FRAMES (those sources never deliberately buffer). A genlock source's cap
  * = max(MAX_ASYNC_FRAMES, preload + RESERVE), capped at GENLOCK_PRELOAD_MAX + RESERVE.
@@ -4287,14 +4319,15 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 	 * Mirror of src/probe/genlock.rs genlock_drop_cap(fifo, max(preload, latency_frames)). */
 	uint32_t depth = source->genlock_preload;
 	if (source->genlock_latency_ms > 0) {
-		struct obs_video_info ovi;
-		if (obs_get_video_info(&ovi) && ovi.fps_den != 0) {
+		/* camera-box #200: tear-checked fps snapshot (see genlock_video_fps). */
+		uint32_t fps_num, fps_den;
+		if (genlock_video_fps(&fps_num, &fps_den) && fps_den != 0) {
 			/* round-to-nearest (+den/2) to faithfully mirror the Rust
 			 * ms_to_frames() — floor would under-budget the cap by ≤1 frame
 			 * on sub-frame ms values. */
-			const uint64_t lat_den = 1000ULL * ovi.fps_den;
+			const uint64_t lat_den = 1000ULL * fps_den;
 			const uint32_t latency_frames =
-				(uint32_t)(((uint64_t)source->genlock_latency_ms * ovi.fps_num +
+				(uint32_t)(((uint64_t)source->genlock_latency_ms * fps_num +
 					    lat_den / 2) /
 					   lat_den);
 			if (latency_frames > depth)
@@ -4316,10 +4349,11 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
  * camera-box tests/genlock_preload.rs (preload_to_ms). */
 static uint64_t genlock_preload_ms(uint32_t frames)
 {
-	struct obs_video_info ovi;
-	if (!obs_get_video_info(&ovi) || ovi.fps_num == 0)
+	/* camera-box #200: tear-checked fps snapshot (see genlock_video_fps). */
+	uint32_t fps_num, fps_den;
+	if (!genlock_video_fps(&fps_num, &fps_den) || fps_num == 0)
 		return 0;
-	return (uint64_t)frames * 1000 * ovi.fps_den / ovi.fps_num;
+	return (uint64_t)frames * 1000 * fps_den / fps_num;
 }
 
 /* camera-box #102: the genlock consume decision for one render tick. Mirrored by
@@ -4513,10 +4547,11 @@ static inline uint64_t genlock_wall_now_ns(void)
 /* One output frame interval in ns from the current video info (0 if unknown). */
 static inline uint64_t genlock_frame_interval_ns(void)
 {
-	struct obs_video_info ovi;
-	if (!obs_get_video_info(&ovi) || ovi.fps_num == 0)
+	/* camera-box #200: tear-checked fps snapshot (see genlock_video_fps). */
+	uint32_t fps_num, fps_den;
+	if (!genlock_video_fps(&fps_num, &fps_den) || fps_num == 0)
 		return 0;
-	return (uint64_t)1000000000ULL * ovi.fps_den / ovi.fps_num;
+	return (uint64_t)1000000000ULL * fps_den / fps_num;
 }
 
 /* The presentation deadline for this tick: the wall-clock instant whose frame is due
@@ -4564,14 +4599,16 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	/* camera-box #97: print the per-source preload AND its ms-equivalent video
 	 * delay (preload=N (=M ms @ Ffps)) so the live delay is visible in the OBS log
 	 * for the operator + post-deploy verification. */
-	struct obs_video_info ovi;
-	/* camera-box #259: guard fps_den too (not fps_num alone). The latency_frames
-	 * integer divide below is `/ (1000ULL * ovi.fps_den)` — a SIGFPE on the render
-	 * thread if fps_den==0. Mirror genlock_source_drop_cap, which guards the identical
-	 * divide with `ovi.fps_den != 0`; when false we fall through to the fps-unknown
-	 * branch (fps=0.0, latency_frames=0). */
-	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0 && ovi.fps_den != 0;
-	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
+	/* camera-box #200: tear-checked fps snapshot (see genlock_video_fps) — the audit
+	 * path read the unlocked ovi pair, which obs_reset_video can tear.
+	 * camera-box #259: guard fps_den too (not fps_num alone). The latency_frames integer
+	 * divide below is `/ (1000ULL * fps_den)` — a SIGFPE on the render thread if
+	 * fps_den==0. Mirror genlock_source_drop_cap, which guards the identical divide with
+	 * `fps_den != 0`; when false we fall through to the fps-unknown branch (fps=0.0,
+	 * latency_frames=0). */
+	uint32_t fps_num, fps_den;
+	const bool have_vi = genlock_video_fps(&fps_num, &fps_den) && fps_num != 0 && fps_den != 0;
+	const double fps = have_vi ? (double)fps_num / (double)fps_den : 0.0;
 	/* camera-box #184/#235/#245: print the active genlock latency — now PER-SOURCE: the
 	 * source's own override when set (>0) else the GLOBAL default. The headline
 	 * `latency_ms=N (≈M frames)` is the EFFECTIVE held latency for THIS source, so the
@@ -4584,8 +4621,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	const uint32_t global_latency_ms = genlock_latency_ms();
 	const uint32_t latency_ms = source->genlock_latency_ms > 0 ? source->genlock_latency_ms : global_latency_ms;
 	const unsigned long long latency_frames =
-		have_vi ? ((unsigned long long)latency_ms * ovi.fps_num + (1000ULL * ovi.fps_den) / 2) /
-				  (1000ULL * ovi.fps_den)
+		have_vi ? ((unsigned long long)latency_ms * fps_num + (1000ULL * fps_den) / 2) /
+				  (1000ULL * fps_den)
 			: 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "

@@ -746,6 +746,29 @@ pub fn genlock_peak_update(current_peak: u32, observed_depth: u32) -> u32 {
     current_peak.max(observed_depth)
 }
 
+/// (#200) Accept an output-fps snapshot only when two back-to-back reads AGREE — the
+/// value-seqlock the C `genlock_video_fps()` helper uses to avoid a TORN
+/// `(fps_num, fps_den)` pair on the unlocked genlock audit/preload path.
+///
+/// `obs_get_video_info()` (obs.c) copies the global output `ovi` struct WITHOUT a
+/// lock, so a concurrent `obs_reset_video()` (a resolution/fps change) can interleave
+/// between the num and den field copies and return a mismatched pair, formatting a
+/// wrong ms in the audit log. Taking the OBS video graphics lock on the render/audit
+/// path risks a lock-ordering deadlock vs `obs_reset_video` (which holds the video lock
+/// while it can touch source state), for a log-only gain — so the C side instead reads
+/// the pair twice and accepts it only when both reads match (`obs_reset_video` is rare
+/// ⇒ the steady state matches on the first try). Returns `None` on disagreement (a tear
+/// in flight); the caller then takes the fps-unknown branch (frames 0 / fps 0.0), never
+/// a divide-by-zero. This pure fn pins that acceptance rule so the C helper is checked
+/// against a provably-correct reference.
+pub fn genlock_fps_pair_consistent(a: (u32, u32), b: (u32, u32)) -> Option<(u32, u32)> {
+    if a == b {
+        Some(a)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,5 +1220,36 @@ mod tests {
             "peak must reflect the producer-side high-water mark (6), not just the \
              consumer-observed depth (1) — the #99 point-2 under-report"
         );
+    }
+
+    // ---- #200: tear-checked fps snapshot (value-seqlock acceptance) -----------
+
+    #[test]
+    fn fps_pair_accepted_only_when_two_reads_agree() {
+        // Two back-to-back snapshots that AGREE are the consistent pair → accept it.
+        assert_eq!(
+            genlock_fps_pair_consistent((30000, 1001), (30000, 1001)),
+            Some((30000, 1001))
+        );
+        assert_eq!(genlock_fps_pair_consistent((30, 1), (30, 1)), Some((30, 1)));
+        // A consistent zero pair is still accepted; the CALLER guards fps_num==0.
+        assert_eq!(genlock_fps_pair_consistent((0, 0), (0, 0)), Some((0, 0)));
+    }
+
+    #[test]
+    fn fps_pair_rejected_on_a_torn_read() {
+        // obs_reset_video tore the pair between the two reads → reject (None), so the C
+        // caller takes the fps-unknown branch instead of formatting a mismatched ms.
+        // den changed (num matched):
+        assert_eq!(genlock_fps_pair_consistent((30000, 1001), (30000, 1)), None);
+        // num changed (den matched):
+        assert_eq!(
+            genlock_fps_pair_consistent((30000, 1001), (60000, 1001)),
+            None
+        );
+        // both changed (a full fps switch mid-read):
+        assert_eq!(genlock_fps_pair_consistent((30000, 1001), (60, 1)), None);
+        // the classic tear: old num + new den vs new num + old den.
+        assert_eq!(genlock_fps_pair_consistent((30000, 1), (60000, 1001)), None);
     }
 }
