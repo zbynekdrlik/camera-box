@@ -646,3 +646,12 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   then reset to 0 ms for both. Set via OBS WebSocket SetInputSettings genlock_latency_ms_src (the DistroAV per-source UI field). Proves per-source ms override takes effect at runtime, distinct per source, independent of the global — the #235-regression fix the live event needed.
 - #246 hygiene verified live: prod Machine OBS_BURN_QR/_PX/_RUN_ID all EMPTY (no burns).
 - Discord cards fired for #245 + #247. AHK note: no AutoHotkey watchdog was actually running on strih; the earlier deploy exit -1 was the AHK-detection self-matching the running powershell (CommandLine contained 'AutoHotkey'/'NL_STARTUP') and Stop-Process killing the session — dropped the AHK handling.
+
+## 2026-06-26 — batch #237 + #246 + #249 (drift-guard / CI hardening) → PR #250
+- Version 1.7.0-dev.111 → 1.7.0-dev.112 (commit 63d455dd7). One PR (#250) dev→main, Closes #237 #246 #249.
+- #237 (drift-guard dll-dot regex + distroav-SHA label): RED 159644305 → GREEN eacea1b14.
+  Tests `manifest_sha_for_component_dot_is_literal_not_a_wildcard` + `compare_labels_unverified_distroav_sha_as_skipped_not_ok`. Escaped `obs[.]dll`/`distroav[.]dll`; OK→SKIPPED for an unchecked distroav SHA (verdict stays NO DRIFT).
+- #246 (CRITICAL prod burn-env guard — remaining items; launch-path already #247): RED f088f4b8d → GREEN d11b21530.
+  New `drift_check_burn_env` + opt-in `--compare burn_env=` (DRIFT exit 20 on any prod Machine OBS_BURN_*) + read-only `--status` facet (genlock+burn in one place). recording-e2e cleanup trap now clears+verifies burns off via obs_burn_filter.py remove/check on both boxes. DECISION: opt-in (keyed on burn_env=) preserves back-compat with all historic --compare calls; harness has NO SSH to Windows so cleanup uses obs-websocket only (Machine env is --compare/rig-mode's job). #188 (rich live dock) left open, noted.
+- #249 (fast-WF #245 token gate): RED fa12b0e46 → GREEN bbfba8f3a. Added the #245 pwsh source-token gate to windows-genlock-fast.yml mirroring the slow gate (#248). Test `windows_genlock_fast_workflow_gates_on_the_per_source_latency`.
+- Tier-0 GOTCHA captured in genlock skill: probe-gated tests (genlock_preload.rs) verified at grep level; non-probe tests (drift_guard.rs, harness_recording_e2e_paths.rs) run via the built deps binary directly (no rebuild) — 41/41 + harness GREEN locally.
