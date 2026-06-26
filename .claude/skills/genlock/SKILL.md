@@ -44,25 +44,26 @@ The `#235` env model and the `STALE-ENV TRAP` notes below are HISTORY (pre-#257)
 genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `tests/distroav_genlock_lockdown.rs`,
 `tests/launch_obs_genlock.rs`, `tests/rig_mode.rs`, `tests/drift_guard.rs`, `tests/burn_payload_parity.rs`.
 
-## (HISTORY, pre-#257) Genlock latency = ONE knob in MS (#235) — `OBS_GENLOCK_LATENCY_MS`
+## (HISTORY, pre-#257) Genlock latency env knobs — ALL REMOVED in #257
 
-**There is now a SINGLE user-facing genlock latency knob: the latency in MILLISECONDS.** The old
-confusing dual model (`OBS_GENLOCK_PRELOAD_FRAMES` whole frames + `OBS_GENLOCK_RESERVE_MS` ms, where
-reserve overrode preload ONLY under TS_ALIGN) is consolidated:
+⚠️ **These env vars NO LONGER EXIST.** Latency is now a build const (3 ms, floor 3) with the
+per-source override in the DistroAV source UI — see the #257 section at the top. This section is kept
+only to explain the lineage; **never set any `OBS_GENLOCK_*` env — there are none.**
 
-- **Canonical knob:** `OBS_GENLOCK_LATENCY_MS=N` — THE held latency, in ms. Setting it = release
-  deadline `wall_now − N·1e6` (the validated #184 path) AND **implies ts-align ON** (no separate
-  `OBS_GENLOCK_TS_ALIGN` user gate needed).
-- **Back-compat ALIAS:** `OBS_GENLOCK_RESERVE_MS` still works (the canonical knob WINS when both are
-  set). So existing deploys / the #128 wrapper / **the live prod config keep working unchanged** —
-  prod's `reserve=3` maps cleanly to `latency_ms=3`.
-- **preload is INTERNAL now** (auto-derived FIFO depth = 1 frame for jitter/dropout resilience,
-  latency-free under the ms deadline so the #110 0-loss floor holds). `OBS_GENLOCK_PRELOAD_FRAMES`
-  is the legacy/internal depth knob, ignored on the ms path. NOT a competing latency knob.
-- **Display (the user's ask):** the OBS startup + audit log show `genlock: latency = N ms
-  (≈ M frames @ Ffps)` — MS PRIMARY, frame-equivalent in PARENS. DistroAV source props show a
-  read-only `Genlock latency = N ms (≈ M frames @ Ffps)` label. The slider is the legacy frame
-  control. A user sets ONE ms value and never has to reason about preload-vs-reserve precedence.
+Pre-#257, genlock latency went through ONE env knob in MILLISECONDS (#235), which had superseded an
+earlier confusing dual model (`OBS_GENLOCK_PRELOAD_FRAMES` whole frames + `OBS_GENLOCK_RESERVE_MS`
+ms, reserve overriding preload only under TS_ALIGN):
+
+- `OBS_GENLOCK_LATENCY_MS=N` *was* THE held latency in ms — release deadline `wall_now − N·1e6` (#184),
+  implying ts-align ON. `OBS_GENLOCK_RESERVE_MS` *was* a back-compat alias; `OBS_GENLOCK_TS_ALIGN` and
+  `OBS_GENLOCK_PRELOAD_FRAMES` *were* the older gates. **All four were deleted in #257** — render tick
+  + ts-align are now build defaults and the latency is the UI int (floor 3).
+- **preload is internal** (auto-derived FIFO depth = 1 frame for jitter/dropout resilience,
+  latency-free under the ms deadline so the #110 0-loss floor holds) — unchanged, still true.
+- **Display (unchanged):** the OBS startup + audit log show `genlock: latency = N ms
+  (≈ M frames @ Ffps)` — MS PRIMARY, frame-equivalent in PARENS. The DistroAV source props show the
+  read-only `Genlock latency = N ms (≈ M frames @ Ffps)` label. A user sets ONE ms value (now the UI
+  int, not an env) and never reasons about preload-vs-reserve precedence.
 
 Resolution + display mirrored & unit-tested in `src/probe/genlock.rs` (resolve_latency_ms /
 ms_to_frames / genlock_auto_preload / format_latency_label) with vendored-source guards keeping the
@@ -76,34 +77,26 @@ vendored-source guard string, (2) `scripts/launch-obs-genlock.sh` (#128 wrapper)
 `genlock:` lines to catch a stock-OBS #119 wrong-build). Missing any one silently breaks the launch
 verify or capability detection while every other test stays green.
 
-## Sub-frame ms reserve (#184 — the mechanism #235's single knob drives; prod = 3ms)
+## (HISTORY, pre-#257) Sub-frame ms reserve (#184) + the stale-env launch trap — env removed
 
-`OBS_GENLOCK_RESERVE_MS=N` (>0), now the **back-compat ALIAS** of the #235 `OBS_GENLOCK_LATENCY_MS`,
-switches the genlock ts-align RELEASE deadline from the whole-frame `preload·interval` (=33ms@30fps)
-to `wall_now − N·1e6` (ms-granular). latency_ms=0 = the #136 frame path verbatim (back-compat).
-Validated zero-loss at 3ms on BOTH hops (strict recording-verdict overall_pass, FIFO audits show
-`latency_ms=3 reserve_ms=3`, 0 new underruns during active feed). **Prod (strih + stream) is LEFT ON
-3ms** (the reserve alias is still set in prod Machine env; a future re-pin can switch to the canonical
-`OBS_GENLOCK_LATENCY_MS` name). obs.dll sha `24e22357…` (build 19472506e). Rollback DLL:
-`C:\obs-backup\pre-184\obs.dll` (cdce8c3a… = the old whole-frame build).
+⚠️ **No genlock env any more (removed in #257).** Kept for lineage only; **never set an
+`OBS_GENLOCK_*` env.**
 
-**STALE-ENV TRAP launching OBS via win-* MCP (cost the prior #184 worker its stream deploy):**
-the win-* MCP Shell child inherits the long-lived MCP process's env SNAPSHOT — if a genlock var
-(e.g. `OBS_GENLOCK_LATENCY_MS` / `OBS_GENLOCK_RESERVE_MS`) was set AFTER the MCP started, the MCP
-shell reads it EMPTY, and an OBS launched from that shell inherits it UNSET (→ silently runs the
-whole-frame path, no latency line in the log). FIX: ALWAYS launch via `scripts/launch-obs-genlock.sh`
-(the #128 wrapper) — it reads the genlock env FRESH from Machine, sets it explicit, and fails loud if
-the child PEB doesn't carry it. If launching by hand, set the env EXPLICITLY from the Machine values
-first:
-```powershell
-$env:OBS_GENLOCK_RESERVE_MS = [System.Environment]::GetEnvironmentVariable('OBS_GENLOCK_RESERVE_MS','Machine')
-# (also OBS_GENLOCK_LATENCY_MS if pinned, WALL_CLOCK / PRELOAD_FRAMES / TS_ALIGN),
-# THEN Start-Process obs64 -WorkingDirectory bin\64bit
-```
-Verify it took: the OBS log must show `genlock: latency = N ms (≈ M frames @ Ffps)` (prints lazily
-when a genlock_fifo input first activates) AND the FIFO audit line must carry `latency_ms=N`.
-NB the audit's `underruns=` is CUMULATIVE per OBS process — a huge value can be IDLE accumulation
-between runs; what matters is the DELTA during active feed (0 = clean).
+Pre-#257, `OBS_GENLOCK_RESERVE_MS=N` (the #235 latency alias) switched the genlock ts-align release
+deadline from the whole-frame `preload·interval` (=33ms@30fps) to `wall_now − N·1e6` (ms-granular);
+`latency_ms=0` was the #136 frame path verbatim. Validated zero-loss at 3 ms on BOTH hops (strict
+recording-verdict `overall_pass`, FIFO audits `latency_ms=3 reserve_ms=3`, 0 new underruns during
+active feed). Prod ran at 3 ms via the Machine env; **#257 cleared all genlock env on both boxes and
+made render tick + ts-align build defaults with the 3 ms floor** — so prod still runs at 3 ms, now from
+the build const + per-source UI int, NOT env. Rollback DLL (pre-#184 whole-frame build):
+`C:\obs-backup\pre-184\obs.dll` (`cdce8c3a…`).
+
+The pre-#257 **STALE-ENV TRAP** (a win-* MCP shell inheriting a stale env snapshot, so an OBS launched
+from it silently ran the whole-frame path with no latency line) is **moot now — there is no genlock
+env to inherit.** The lasting lesson survives the env: a running OBS's genlock state is read from the
+OBS log (`genlock: … render tick ENABLED` + `genlock: latency = N ms` once a genlock_fifo input is
+live), NEVER from an env read. NB the FIFO audit's `underruns=` is CUMULATIVE per OBS process — a huge
+value can be IDLE accumulation between runs; what matters is the DELTA during active feed (0 = clean).
 
 **dev1 ⇄ rig transfers:** dev1 file-drop (`:8788`) is NOT reachable from the rig. dev1→stream
 binary push works via SMB admin share `smbclient //10.77.9.204/C$ -U "newlevel%newlevel"` (newlevel
@@ -122,7 +115,11 @@ Both production broadcast OBS boxes upgraded in-place to the camera-box genlock 
 | OBS version | 32.1.2 | 32.1.2 |
 | Build SHA | cf7b0606 | cf7b0606 |
 | Genlock active | YES | YES |
-| Env var | HKLM OBS_GENLOCK_WALL_CLOCK=1 | HKLM OBS_GENLOCK_WALL_CLOCK=1 |
+| Genlock env | none — build default (#257) | none — build default (#257) |
+
+(The version/SHA row above is the 2026-06-13 baseline; the current deployed bytes are the #257 build —
+see `docs/autopilot-log.md` for the live obs.dll / distroav.dll SHAs and the drift-guard `--compare`
+manifest check. Genlock is no longer gated by any env: it is a build default since #257.)
 
 **Genlock is ACTIVE:** both boxes log `genlock: wall-clock-slaved render tick ENABLED` at OBS launch.
 stream's live `NDI 2ME PGM` input has `genlock_fifo=True` → production strih→stream hop is genlocked.
@@ -228,22 +225,24 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   more than one, or the lone one is off the canonical path. Pin row +
   `drift_check_plugin_paths` (tested in `tests/drift_guard.rs`) live in
   `vendor/README.md` under `canonical_plugin_path`.
-- **prod burn-env guard + `--status` (#246, DONE)** — QR test-burns
-  (`OBS_BURN_QR`/`OBS_BURN_QR_PX`/`OBS_BURN_RUN_ID`) are TEST-mode ONLY; RUN 235001 set
-  them in **Machine** scope on stream+strih → QR drew on the LIVE broadcast (survives
-  reboot). drift-guard `--compare` now takes `burn_env=` (the literal `none`, or a
-  `NAME=VALUE` list of set burn vars — `/drift-guard` step 1 gathers it from Machine
-  scope) and FAILS (exit 20) on ANY set burn var. OPT-IN like the manifest facet (omit the
-  key → dormant, no UNKNOWN → every historic `--compare` call unchanged). `drift_check_burn_env`
-  (tested in `tests/drift_guard.rs`). Also a read-only `scripts/drift-guard.sh --status
-  host=… genlock_wall_clock=… genlock_capability=… burn_env=…` that prints genlock gate +
-  build marker + burn state in ONE place (always exit 0; `--compare` is the gate; the rich
-  live OBS dock is the separate #188). The launch-path guard (clear burns in the launch
-  shell + refuse Machine-scope burns) is the #128 wrapper / `rig-mode.sh` (#247). The
-  recording-e2e cleanup trap now also clears+verifies burns off via
-  `obs_burn_filter.py remove`+`check` on both boxes (the harness has NO SSH to Windows — it
-  reaches the boxes only over obs-websocket, so it cannot clear Machine env; that is
-  `--compare burn_env=` + `rig-mode event`'s job).
+- **prod burn guard + `--status` (#246, DONE; burn model updated by #257)** — the measurement burn
+  must NEVER be left on in prod. **Pre-#257** it was a launch-env QR burn
+  (`OBS_BURN_QR`/`OBS_BURN_QR_PX`/`OBS_BURN_RUN_ID`); RUN 235001 set them in **Machine** scope on
+  stream+strih → QR drew on the LIVE broadcast (survives reboot) — the incident this guard exists for.
+  **#257 removed all `OBS_BURN_*` env**: the burn is now a per-source `genlock_burn` bool toggled at
+  runtime over OBS WebSocket (no env, no restart). drift-guard `--compare` keeps the `burn_env=` key
+  for contract stability, but its value is now the **`genlock_burn` WS state** read off each
+  program-feeding source (`none` when all off, else a `SOURCE=on` list) — it FAILS (exit 20) on ANY
+  source left burning. OPT-IN like the manifest facet (omit the key → dormant, no UNKNOWN → every
+  historic `--compare` call unchanged). `drift_check_burn_env` (tested in `tests/drift_guard.rs`).
+  Also a read-only `scripts/drift-guard.sh --status host=… genlock_wall_clock=… genlock_capability=…
+  burn_env=…` that prints genlock gate + build marker + burn state in ONE place (always exit 0;
+  `--compare` is the gate; the rich live OBS dock is the separate #188). Toggling the rig into / out
+  of test mode (the burns) is `scripts/rig-mode.sh test|event`, which drives `obs_burn_filter.py
+  add|remove` over WS (the #128 wrapper itself is env-free now). The recording-e2e cleanup trap also
+  clears+verifies burns off via `obs_burn_filter.py remove`+`check` on both boxes over obs-websocket
+  (the harness has no SSH to Windows; with no burn env any more, the WS `genlock_burn` toggle +
+  `rig-mode event` is the whole story).
 - **#237 (DONE)** — `manifest_sha_for_component` bracket-escapes the dll-basename dot
   (`obs[.]dll`) so it is matched literally not as a regex wildcard; an obs.dll-only
   manifest labels a supplied distroav SHA `SKIPPED` (not `OK`) — an unchecked value must
@@ -271,16 +270,16 @@ token / source token) and let CI (`--all-features`) run them. The NON-probe test
 (Tier-0 OK), then run the built `target/debug/deps/<name>-*` binary DIRECTLY (no rebuild,
 no Tier-0 violation) to prove GREEN locally.
 
-**win-* MCP env reads are STALE:** The MCP Shell spawns a child that inherits the
-long-lived MCP process's env snapshot — `$env:OBS_GENLOCK_WALL_CLOCK` reads EMPTY while
-the var is really set (HKLM). For persistent value read:
-`HKLM SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
-For running OBS genlock state: read the OBS log line
-`genlock: wall-clock-slaved render tick ENABLED|DISABLED` (latched at OBS launch).
+**Reading genlock state — from the OBS LOG, never an env (no genlock env exists post-#257):**
+render tick + ts-align are build defaults, so there is nothing to read in env. The running genlock
+state is the OBS log line `genlock: … render tick ENABLED|DISABLED` (latched at OBS launch) +
+`genlock: latency = N ms` (once a genlock_fifo input is live). (Pre-#257 a win-* MCP `$env:` read was
+additionally a STALE snapshot — the child inherits the long-lived MCP process's env — which is why the
+log, not env, was always the source of truth.)
 
 **AHK on strih:** `D:\_APPS\NL_STARTUP.ahk` auto-relaunches obs64 from
-`C:\Program Files\obs-studio` (which is the genlock build). On reboot AHK inherits
-the Machine env var → launches genlock automatically.
+`C:\Program Files\obs-studio` (which is the genlock build). On reboot AHK relaunches it and genlock
+comes up automatically — it is a build default (#257), no env needed.
 
 Other OBS installs on strih (`D:\_APPS` — 1ME/2ME/vestibul/input/light) — NOT touched;
 only the Program Files 2ME is the broadcast one.

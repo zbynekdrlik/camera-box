@@ -716,3 +716,14 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - Reset both boxes to prod (latency 3, burn off). FIFO depth auto-derived=1 (preload internal, "latency knob holds the delay" #235/#257).
 - #260 (committed WS password) stripped from drift-guard.md current file earlier (rotation = user's call). #259/#200/#147/#129/#148/#176/#180/#144/#145/#151/#152/#137/#188/#109/#132 remain (mostly OBS-C, RE-VALIDATE vs the #257-reshaped genlock code before working).
 - 📔 Playbook: genlock + obs-ops skills still carry stale killed-env refs → filed for a focused no-env rewrite (see issue above) before the next OBS-C work.
+
+## 2026-06-26 — #261 playbook no-env rewrite (DOC-only, v1.7.0-dev.117)
+- ONE PR, Closes #261. Pure doc: rewrote the playbook to the #257 no-env reality so a future session never sets a killed `OBS_GENLOCK_*`/`OBS_BURN_*` env.
+- genlock/SKILL.md: historicized the #235 latency-env section + the #184 reserve/stale-env-trap section (dropped the `$env:OBS_GENLOCK_RESERVE_MS` launch snippet); deployed-state table "Env var" row → "Genlock env: none — build default (#257)"; #246 burn bullet → `burn_env` is now the `genlock_burn` WS-state (no OBS_BURN_* env); MCP-env note → read genlock state from the OBS log, not env; AHK note → genlock is build-default on relaunch, no env.
+- obs-ops/SKILL.md: env-verify tail → latency/burn are runtime (UI int + WS toggle, hot-apply, no relaunch); WRAPPER section rewritten ENV-FREE (no four-vars-from-Machine, no PEB verify, no `--mode`); removed the PEB-read C# snippet (historicized); recording apply-path dropped the `OBS_BURN_QR` analogy; AHK restart → `launch-obs-genlock.sh --force`, no env.
+- drift-guard.md (command): #246 burn-guard bullet reconciled to #257 — no OBS_BURN_* env; `burn_env` = `genlock_burn` WS state; clear via `rig-mode.sh event`.
+- vendor/README.md + drift-guard.md lines 36-110 were ALREADY #257-clean (negative refs) — no change.
+- Carried two pre-existing dev commits (un-merged real work): 3685a9078 (#260 strip committed WS password from drift-guard.md current file — #260 stays OPEN for rotation/history-rewrite, user's call) + 616993b32 (this #257 deploy/validate log entry). main still had the literal password in the current file, so dropping the #260 strip was not an option.
+- Verified: every remaining `OBS_GENLOCK_`/`OBS_BURN_` in the named files is a negative/historical ref; 0 active env-set instructions. Tier-0 fmt clean; no scripts touched (no shellcheck needed).
+- e2e/SKILL.md still has the SAME killed-env launch trap (outside #261's named scope) → filed #262.
+- 📔 Playbook: genlock + obs-ops + drift-guard playbook now match the #257 no-env model; e2e rewrite tracked in #262.

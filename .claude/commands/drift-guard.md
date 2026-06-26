@@ -231,10 +231,13 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
   deploy-only-our-build discipline remains the primary protection; this is the runtime backstop.)
 - Re-pin (edit the table in `vendor/README.md`) only as part of a *deliberate* rollout — e.g. the
   30→60 fps step (#11) or activating genlock — never to silence a drift you did not intend.
-- **#246 prod burn guard:** the `burn_env` observed value (gathered in step 1) is asserted by
-  `--compare` — ANY `OBS_BURN_QR` / `OBS_BURN_QR_PX` / `OBS_BURN_RUN_ID` set in the prod **Machine**
-  env is DRIFT (it draws QR test-burns onto the live broadcast and survives reboot). Burns are
-  TEST-mode only; clear a stray one with `scripts/rig-mode.sh event` and remove it from Machine
-  scope. For a quick read-only view of the genlock + burn state in ONE place (no full drift compare)
-  use `scripts/drift-guard.sh --status host=<h> genlock_wall_clock=<0|1> genlock_capability="…"
-  burn_env="…"` — informational (exit 0); the rich live OBS dock is the separate #188.
+- **#246 prod burn guard (#257 model):** the `burn_env` observed value (gathered in step 1) is
+  asserted by `--compare`. **Post-#257 there are no `OBS_BURN_*` env vars** — the burn is a per-source
+  `genlock_burn` bool toggled at runtime over OBS WebSocket. So `burn_env` now carries the observed
+  `genlock_burn` WS state (`none` when every program-feeding source is off, else a `SOURCE=on` list),
+  and `--compare` is DRIFT on ANY source left burning (it would draw QR onto the live broadcast — the
+  #246 incident, originally a Machine-scope burn env that survived reboot). Clear a stray burn with
+  `scripts/rig-mode.sh event` (drives `obs_burn_filter.py remove` over WS). For a quick read-only view
+  of the genlock + burn state in ONE place (no full drift compare) use `scripts/drift-guard.sh
+  --status host=<h> genlock_wall_clock=<0|1> genlock_capability="…" burn_env="…"` — informational
+  (exit 0); the rich live OBS dock is the separate #188.
