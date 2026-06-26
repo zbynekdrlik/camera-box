@@ -44,6 +44,13 @@ The `#235` env model and the `STALE-ENV TRAP` notes below are HISTORY (pre-#257)
 genlock env to lose any more. Tests: `tests/genlock_preload.rs`, `tests/distroav_genlock_lockdown.rs`,
 `tests/launch_obs_genlock.rs`, `tests/rig_mode.rs`, `tests/drift_guard.rs`, `tests/burn_payload_parity.rs`.
 
+**PLAYBOOK HYGIENE (when you kill an env var / identifier):** grep the WHOLE playbook —
+`grep -rE 'OBS_GENLOCK_|OBS_BURN_' .claude vendor/README.md` (and the same for any newly-killed
+name) — and historicize/remove EVERY operator-facing instance, not just the obvious skill. The #261
+no-env rewrite covered genlock + obs-ops + drift-guard + vendor/README, but `.claude/skills/e2e/SKILL.md`
+still had active `$env:OBS_BURN_QR=1` launch steps (filed #262) — a killed knob hides in the skill you
+didn't think to open.
+
 ## (HISTORY, pre-#257) Genlock latency env knobs — ALL REMOVED in #257
 
 ⚠️ **These env vars NO LONGER EXIST.** Latency is now a build const (3 ms, floor 3) with the
