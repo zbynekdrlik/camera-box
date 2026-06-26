@@ -49,7 +49,8 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
 
 1b. **Gather the per-input NDI ingest latency off the running OBS (#84).** The `latency` mode is a
    per-input DistroAV setting, read from the live obs-websocket (`ws://strih.lan:4455` /
-   `ws://stream.lan:4455`, pw `JhRfqdTmuifYq60y`), NOT the OBS log/registry. For each genlocked
+   `ws://stream.lan:4455`; WS password is NOT committed — see the local memory
+   `rig-obs-ws-credentials`, #260), NOT the OBS log/registry. For each genlocked
    **broadcast-path** input — on strih the camera ingests (`NDI cam5`=CAM1, `NDI cam1`=CAM3,
    `NDI cam3`=CAM4), on stream the strih→stream program feed (`NDI 2ME PGM`) — read
    `GetInputSettings`→`latency` (`0`=Normal is the pin — the certified low-latency zero-loss mode, #84) and build a comma-separated
