@@ -3,14 +3,22 @@
 //! Consumes the #106 recorded-file decode (NOT an NDI tap, NOT the lz4 spool) and
 //! produces a HARD-FAIL zero-loss verdict with NO thresholds:
 //!
-//!   PASS = 0 undecodable AND 0 net copy AND 0 net gap AND analyzed span ≥ 300 s.
+//!   PASS (#186) = EVERY node's burn-id sequence is CONTIGUOUS (no missing id — a
+//!   missing id, incl. a BURN-UNREADABLE one, FAILS) AND (when `--cam1-capture-stats`
+//!   is given) cam2→cam1 V4L2 capture-drop = 0. The per-recording undecodable / 60→30
+//!   beat metrics and the analyzed span (`--min-secs`) are DIAGNOSTIC only — they are
+//!   reported for context but do NOT gate the headline.
 //!
 //! The free-running 60→30 camera-sampling beat (mean step exactly 2.0, symmetric)
-//! is recognized and NOT counted as loss; only the NET imbalance is real loss.
+//! is recognized and NOT counted as loss; the burn-id contiguity is the trustworthy verdict.
 //!
 //! Usage:
 //!   recording-verdict --strih strih.mkv [--stream stream.mkv] \
 //!       [--painter painter.csv] [--out-dir run-dir] [--min-secs 300]
+//!   recording-verdict --extract-partial <strih|stream> --strih|--stream <local rec> \
+//!       --out partial.json        # #208 decode ONE box's recording in place
+//!   recording-verdict --merge-partials strih=a.json --merge-partials stream=b.json \
+//!       [--painter …] [--json …]  # #208 merge the per-box partials on dev1
 //!
 //! - `--strih` the strih OBS-program recording (the strict hop-1 endpoint).
 //! - `--stream` the stream OBS-program recording (the headline endpoint). When
@@ -837,8 +845,8 @@ fn report_recording_diag(
                 println!(
                     "  {} undecodable frame(s) — pixel proofs were extracted ON the recording's box \
                      during --extract-partial and pulled back to dev1 beside the partial JSON (the \
-                     <partial>-pixels dir; see the per-box pixel-proof paths above); not re-extracted \
-                     here — #208/#186",
+                     <partial>-pixels dir; see the '#186/#208 pixel proofs' section at the end of \
+                     this run for the concrete dev1 paths); not re-extracted here — #208/#186",
                     flagged.len()
                 );
             }
@@ -2044,6 +2052,20 @@ fn run_merge(args: &Args) -> Result<()> {
         strih.is_some() || stream.is_some(),
         "--merge-partials needs at least one BOX=JSON partial"
     );
+    // #186 note: cam1's pixel proof comes from the STRIH box (cam1's burn is crispest in the clean
+    // 1080p strih recording, #133 — its slots are flagged there). A degenerate stream-ONLY merge
+    // (no strih partial) therefore has NO cam1 pixel proof: cam1 falls back to the softened stream
+    // source for the verdict, but the stream box's --extract-partial deliberately does NOT write
+    // cam1 proofs (they would be at softened/reordered slots that don't match the merge's). WARN so
+    // a stream-only run never SILENTLY lacks the #186 cam1 proof; the production two-box flow always
+    // supplies both partials.
+    if stream.is_some() && strih.is_none() {
+        eprintln!(
+            "WARNING: --merge-partials is stream-only (no strih partial) — cam1's #186 pixel proof \
+             is UNAVAILABLE (cam1's clean source is the strih recording, #133). Supply \
+             strih=<partial> for full cam1 pixel proof."
+        );
+    }
     tracing::info!(
         strih = strih.is_some(),
         stream = stream.is_some(),
