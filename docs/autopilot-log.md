@@ -727,3 +727,7 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - Verified: every remaining `OBS_GENLOCK_`/`OBS_BURN_` in the named files is a negative/historical ref; 0 active env-set instructions. Tier-0 fmt clean; no scripts touched (no shellcheck needed).
 - e2e/SKILL.md still has the SAME killed-env launch trap (outside #261's named scope) → filed #262.
 - 📔 Playbook: genlock + obs-ops + drift-guard playbook now match the #257 no-env model; e2e rewrite tracked in #262.
+
+## 2026-06-26 — #261 playbook no-env rewrite (PR #263, v1.7.0-dev.117) — MERGED
+- PR #263 merged; #261 CLOSED. genlock + obs-ops skills + drift-guard command rewritten to the #257 no-env reality (genlock build-default, per-source ms latency floor 3, runtime burn via WS, env-free launch); 0 active killed-env instructions remain. e2e SKILL.md residual env = #262 (filed). #260 (WS pw) left for user rotation call.
+- NEXT (GOAL path, user-approved "pokračuj"): fresh #257 E2E baseline running (zero-loss + per-hop latency) → then reliability bugs (#147/#129/#144/#145) → #109 restart-survival → #24 cam1/3/4 coverage → close #105.
