@@ -150,8 +150,11 @@ struct Args {
     #[arg(long)]
     out: Option<PathBuf>,
     /// #208 MERGE the per-box partials into the SAME full-chain verdict the fused path produces
-    /// (cam2→cam1, cam1→strih, strih→stream, cam1 contiguity, all loss + latency; PASS = 0
-    /// undecodable AND 0 net loss AND ≥ `--min-secs`). Repeat per box:
+    /// (cam2→cam1, cam1→strih, strih→stream, cam1 contiguity, all loss + latency). PASS is the
+    /// #186 gate: EVERY node's burn-id sequence is CONTIGUOUS (no missing id — a missing id, incl.
+    /// a BURN-UNREADABLE one, FAILS) AND (when `--cam1-capture-stats` is given) cam2→cam1 V4L2
+    /// capture-drop = 0. The analyzed span (`--min-secs`) and the per-recording undecodable beat
+    /// are DIAGNOSTIC only — they do NOT gate the headline. Repeat per box:
     /// `--merge-partials strih=<json> --merge-partials stream=<json>`. Combined with the small
     /// `--painter` / `--cam1-capture-stats` files (already on dev1) and written to `--json`. NO
     /// recording is read here — only the small partial JSONs.
