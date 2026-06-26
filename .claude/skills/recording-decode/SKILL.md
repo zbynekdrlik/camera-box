@@ -192,6 +192,32 @@ over-count (blurred-but-present burns), a burn-readability defect, not loss.
 painter kept running (optical-decode dropout), not a chain stall. cam1 burn `present_count ==
 expected_count` with no clustered missing run confirms the burns were present the whole time.
 
+## #267 GOTCHA — the teardown/lead-in edge clamp MUST be BOUNDED (an unconditional clamp masks real loss)
+
+`in_window_burn_frames` anchors the window to cam2's OPTICAL (QR) span. At the EDGES a node's burn
+can be legitimately absent while cam2's painter is up: at SHUTDOWN the node stops emitting its burn
+while cam2 keeps painting a few frames (teardown tail, run 2606010 = 23 cam1-absent frames / ~0.77 s
+past id 9461); symmetrically at START cam2 can come up a few frames BEFORE the node's first burn
+(lead-in). Those edge frames are optical-present / node-burn-absent.
+
+**THE TRAP:** an optical-present / burn-absent edge run is **IDENTICAL in the recording** whether the
+node simply ended/began there (legit) OR it EMITTED those ids and they were LOST in transit right at
+shutdown/startup (REAL end/start-of-stream loss — must FAIL). The first #267 fix popped EVERY trailing
+burn-absent frame unconditionally → it **silently clamped real end-of-stream loss into a false PASS**
+(violates the user's HARD zero-loss bar). **No recorded signal distinguishes the two:** the cam1 burn
+id IS the per-EMITTED-frame counter and rides only its own recordings (a cam1→strih loss is absent from
+BOTH strih+stream — stream is downstream); `cam1-capture-stats.frames_captured` is CAPTURE-rate (~2× the
+emit rate — NOT a burn id, can't map to a last-emitted id); the `--painter` sidecar is cam2's timeline =
+the already-over-extended window boundary. So the ONLY sound discriminator is the **SIZE** of the edge
+run.
+
+**FIX (current):** clamp a leading/trailing burn-absent run ONLY when it is within
+`TEARDOWN_EDGE_MAX_FRAMES` (=45, ~1.5 s @ 30 fps emit, ~2× the observed 23-frame overrun). A LONGER edge
+run is real loss → kept → charged BURN-UNREADABLE → FAILS, never clamped. The strict #186 bar is
+untouched for the in-range span: an INTERIOR burn-less frame (present burn on BOTH sides) is neither
+leading nor trailing → always kept → still FAILS. Rate-agnostic. If a future legit teardown exceeds 45
+frames, RAISE the bound with evidence — do NOT remove the bound.
+
 ## GOTCHA — pre-push Gate-1 false-positives on inline Rust tests
 
 FIXED in airuleset (#170 session): Gate-1 ("feature .rs changed but no test file") used to key

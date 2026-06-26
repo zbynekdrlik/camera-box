@@ -2,6 +2,12 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-06-26 — PR #268 deep-review fixes (worker, v1.7.0-dev.118)
+- Fixed the 14 deep-review (xhigh) defects on the open PR #268 (bundles #267 #266 #262); NOT merged (supervisor re-reviews + merges).
+- **#267 (recording-verdict teardown clamp masked real loss):** RED `d94bce3fb` → GREEN `4fac963c5`. The first fix popped EVERY trailing burn-absent frame unconditionally → an optical-present/cam1-burn-absent tail is identical for legit teardown vs real end-of-stream loss, so it could false-PASS. No recorded signal distinguishes them (cam1 burn = per-emit counter on its own recordings; cam1-capture-stats = capture-rate ~2×, not a burn id; painter = cam2's over-extended boundary) → bounded the LEADING+TRAILING edge clamp to `TEARDOWN_EDGE_MAX_FRAMES`=45 (~1.5s, ~2× the 23-frame 2606010 overrun); a longer edge run stays BURN-UNREADABLE → FAILS. Fixed the symmetric lead-in (mirror) too. RED tests: `long_trailing_burn_absent_tail_is_real_loss_not_clamped`, `bounded_leading_lead_in_is_clamped_not_charged`, `long_leading_burn_absent_lead_in_is_real_loss_not_clamped`. 2606010 (23-frame tail ≤45) still clamps → overall_pass true.
+- **#266 (stuck-watchdog) — 10 findings:** RED `b43736d0e` → GREEN `751207281`. Frozen-0fps unnamed broadcast now alerts (starved = underruns climbing + overruns flat); `overruns` is the parked-idle discriminator; named-vanished alert; send_alert fails loudly (exit 3); no-NDI-data stays exit 2 even with --dantesync-cpu; midnight-wrap/same-instant fps fix; per-dt underrun normalization; thresholds logged; tail the OBS log. +9 pytest RED→GREEN (27 pass total).
+- **#262 (doc):** untouched (no finding touched it).
+
 ## 2026-06-25 — #122 drift-guard per-component BUILD SHA + capability (worker, v1.7.0-dev.106)
 
 - VALIDATED still real (live, read-only): both strih (10.77.9.202) + stream (10.77.9.204) report OBS

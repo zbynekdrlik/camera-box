@@ -86,3 +86,27 @@ restartom pc a pokracovat vo vyvoji!!!"
 
 Do NOT gate, classify, or ask before recovering dev rig infra.
 The user interrupts Claude when the rig is needed live.
+
+## #265/#266 — NDI-receive STUCK state + the detect+alert watchdog
+
+THE STUCK STATE (intermittent, after long uptime): the cam→OBS NDI receive on a broadcast box
+(strih/stream) collapses to ~10 fps (genlock STARVED, huge underruns) while `dantesync.exe` pegs
+~1 of 16 cores. Restarting the dantesync service does NOT fix it — only a full PC reboot does
+(2026-06-26: cam1→strih ~10→30.2 fps, underruns 290k→0 after reboot). Recovery = reboot (#265).
+
+`scripts/stuck-watchdog.py` (+ `tests/python/test_stuck_watchdog.py`, run with
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/python`) is the DETECT+ALERT check. It
+parses the genlock-fifo audit line (`received/consumed/underruns/overruns`, ~5 s cadence) + a
+dantesync CPU% and Discord-alerts via `airuleset notify`. Key classification gotchas (#266 review):
+
+- **STARVED (alert, even UNNAMED):** received-fps < floor (incl. frozen ~0) with **underruns
+  climbing on a drained FIFO, overruns flat**. A frozen-0-fps broadcast input in default scan mode
+  is the WORST case — never skip it as "idle".
+- **`overruns` is the idle discriminator:** a PARKED source (added, not on program) RECEIVES frames
+  it never consumes → its FIFO OVERFLOWS → **overruns dominate the underrun churn** → alive, not
+  starved → skip (#70). A source with NO activity (nothing arriving, nothing starving) is dormant →
+  skip.
+- **NAMED (`--source`) inputs:** always alert below floor; a declared input absent / <2 audit lines
+  = VANISHED → alert (don't let `last_two_per_source` silently drop it).
+- Delivery FAILS LOUDLY (exit 3) if `airuleset notify` returns non-zero; missing NDI audit data in
+  default mode stays exit 2 even with `--dantesync-cpu`; counter deltas are normalized per dt.
