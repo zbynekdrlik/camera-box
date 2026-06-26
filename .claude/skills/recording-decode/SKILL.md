@@ -80,6 +80,40 @@ expected burns (strih=[cam1,strih], stream=[cam1,strih,stream]); `--extract-part
 and `run_merge` WARNs on a partial whose `expected_burns` disagree with the merge args (a manual
 `--burn-*-run-id` mismatch between extract and merge would misverdict) and on a repeated box key.
 
+## Per-box decode — rig EXECUTION gotchas (win-* MCP, cost real time 2026-06-26)
+
+The harness only EMITS the per-box plan (`VERDICT_ON_STREAM=1`); you RUN it via the win-* MCP. Hits:
+
+- **`recording-verdict.exe` spawns `ffprobe`/`ffmpeg` by name (PATH).** The **stream box** has them
+  (WinGet `Gyan.FFmpeg`, shimmed in `…\WinGet\Links`). The **strih box does NOT** → the strih
+  `--extract-partial` dies instantly with `spawn ffprobe … program not found` (err log, empty out).
+  Fix: copy the real binaries (the WinGet `…\Packages\Gyan.FFmpeg…\ffmpeg-*-full_build\bin\
+  ff{probe,mpeg}.exe`, ~201 MB each) from the stream box to **`C:\camera-box\` on strih** over SMB
+  (`Copy-Item \\10.77.9.204\C$\…` — box↔box pass-through auth works, same `newlevel` account), then
+  launch the decode with `$env:PATH="C:\camera-box;"+$env:PATH`. (They now live at `C:\camera-box\
+  ff{probe,mpeg}.exe` on strih — leave them for future runs.)
+- **Run the decode DETACHED + poll** (a 300s 1080p decode ≈ 2–3 min; 4K ≈ 7 min): `Start-Process …
+  -PassThru -NoNewWindow -RedirectStandardOutput …`. The MCP `Shell` call itself often **times out
+  at 30s even though the process launched and keeps running** — don't relaunch; verify with
+  `Get-Process recording-verdict` + tail the `.out` (`recording decode progress frames_read=`).
+- **QUOTE space-bearing recording paths inside `-ArgumentList`** — wrap the path element in embedded
+  double-quotes (`'"D:\_REC\2026-06-26 17-03-17.mkv"'`); both rig recording dirs have spaces
+  (`D:\_REC\<date time>.mkv`, `…\_NLMEDIA stream\RECORDINGS\<date time>.mp4`).
+- **Pull results to dev1:** small individual PNGs (~320 KB) FileDownload fine; a **>~3 MB file
+  (the partial JSON, a pixels .zip) overflows the tool context → it's saved to a tool-result file**
+  whose `.result` is `[task:ID] base64:<N>bytes:<b64>` — decode with
+  `jq -r '.result' FILE | sed -E 's/^\[task:[0-9a-f]+\] base64:[0-9]+bytes://' | base64 -d > out`.
+  A FileDownload >~9 MB can **drop the win-strih session** mid-transfer — grab individual small PNGs
+  instead of the whole pixels zip when you only need to eyeball a few frames.
+- **The file-drop (`airuleset.py share`) binds to the TAILSCALE IP only** — the LAN Windows boxes
+  can't reach it. To push a file (e.g. the fresh `recording-verdict.exe`) to a box, run a temp
+  `python3 -m http.server <port> --bind 0.0.0.0` on dev1 and `Invoke-WebRequest` it from the box
+  (dev1 LAN IP, e.g. `10.77.9.165`).
+- **Cleanup leaves cam1 DOWN sometimes:** the harness EXIT trap's `systemctl restart camera-box` on
+  cam1 can RACE `/dev/video0` release by the burn binary and fail silently → cam1 service inactive
+  after the run. ALWAYS re-verify `systemctl is-active camera-box` + `fuser /dev/fb0` on BOTH cams in
+  the rig-reset step and restart cam1 if needed (a retry a minute later succeeds).
+
 ## Per-frame latency CSV pairing (#209/#216) — optical-read dropout ≠ chain loss
 
 `recording_latency::per_frame_latency_csv_rows` builds the #209 continuous-line CSV. The header
