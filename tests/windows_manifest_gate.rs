@@ -47,9 +47,10 @@ fn manifest_gate_runs_on_a_windows_runner() {
 }
 
 /// The gate must FIRE on push to dev (this repo's pre-merge gate — it omits pull_request per
-/// #157) AND its path filter must include the manifest CHECKER logic (`scripts/genlock-manifest.sh`
-/// + `tests/genlock_manifest.rs`) — exactly the files `windows-genlock-fast.yml` does NOT watch,
-/// so a checker-logic change is no longer shipped ungated (#240).
+/// #157) AND its path filter must include the manifest CHECKER logic
+/// (`scripts/genlock-manifest.sh` and `tests/genlock_manifest.rs`) — exactly the files
+/// `windows-genlock-fast.yml` does NOT watch, so a checker-logic change is no longer shipped
+/// ungated (#240).
 #[test]
 fn manifest_gate_triggers_on_push_dev_for_the_checker_paths() {
     let wf = read(GATE);
