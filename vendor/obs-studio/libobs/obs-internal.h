@@ -908,6 +908,7 @@ struct obs_source {
 	bool async_unbuffered;
 	bool async_decoupled;
 	bool genlock_fifo; /* camera-box #42: consume exactly one queued frame per render tick */
+	bool genlock_burn; /* camera-box #257: per-source measurement-burn toggle (runtime, no restart) */
 	/* camera-box #70: genlock FIFO preload reserve + audit counters. The FIFO
 	 * holds `genlock_preload` frames of jitter buffer (set once at startup from
 	 * OBS_GENLOCK_PRELOAD_FRAMES) and consumes one per tick only once the queue
