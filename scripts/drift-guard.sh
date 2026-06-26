@@ -454,6 +454,49 @@ drift_check_capability() {
   return 2
 }
 
+# drift_check_burn_env OBSERVED -> the #246 prod burn-env guard. The QR test-burns
+# (OBS_BURN_QR / OBS_BURN_QR_PX / OBS_BURN_RUN_ID) are TEST-mode ONLY and must NEVER be set in the
+# prod Machine environment — RUN 235001 set them into Machine scope on stream + strih and never
+# cleaned up, so QR test-burns drew on the LIVE broadcast (Machine scope survives reboot). OBSERVED
+# is the burn-env state gathered read-only off the box (see .claude/commands/drift-guard.md): the
+# literal "none" when no burn var is set, or a comma-separated `NAME=VALUE` list of every burn var
+# that IS set. Returns 0 OK (none set) / 2 DRIFT (any burn var present) / 3 UNKNOWN (empty — not
+# read; never a silent clean). An entry with an EMPTY value (var exists but blank) is NOT set
+# (skipped) — so a gather that reports `OBS_BURN_QR=` for an unset var is correctly clean. Burn
+# names contain no commas, so the CSV split is unambiguous (same convention as drift_check_inputs).
+drift_check_burn_env() {
+  local observed="$1" entry name val set_count=0
+  if [ -z "$observed" ]; then
+    printf '  %-20s UNKNOWN  (prod burn-env not read — expected no OBS_BURN_* set)\n' "burn_env"
+    return 3
+  fi
+  if [ "$observed" = "none" ]; then
+    printf '  %-20s OK       (no OBS_BURN_* set in prod Machine env)\n' "burn_env"
+    return 0
+  fi
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($observed)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+    [ -z "$entry" ] && continue
+    name="${entry%%=*}"; val="${entry#*=}"
+    name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+    [ -z "$name" ] && continue
+    # A var present but with an empty value is NOT actually set — skip it (never a false DRIFT).
+    [ -z "$val" ] && continue
+    printf '  burn %-20s DRIFT    (test-burn var set in prod Machine env: %s=%s)\n' "$name" "$name" "$val"
+    set_count=$((set_count + 1))
+  done
+  if [ "$set_count" -gt 0 ]; then
+    return 2
+  fi
+  printf '  %-20s OK       (no OBS_BURN_* set in prod Machine env)\n' "burn_env"
+  return 0
+}
+
 # validate_semver / validate_nonempty -> 0 if the pinned value is present + shaped, else 1 (loud).
 validate_semver() {
   local name="$1" val="$2"
@@ -487,6 +530,7 @@ validates that pinned set (CI) or compares it against values observed on a live 
 Usage:
   scripts/drift-guard.sh [--check-pins] [--readme PATH]   # validate the pin set (CI, default)
   scripts/drift-guard.sh --compare KEY=VAL ...            # compare live-observed values vs pins
+  scripts/drift-guard.sh --status  KEY=VAL ...            # read-only genlock + burn state, one place
   scripts/drift-guard.sh --help
 
 --compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock,
@@ -519,6 +563,17 @@ Usage:
     the manifest's files[] and FAILS on ANY mismatch (DRIFT) or any unread file (UNKNOWN) — so a
     partial/corrupted deploy where even one non-DLL file is stale can never pass. Dormant unless
     supplied (the #122 two-DLL contract is unchanged for the hot-swap obs.dll-only verify path).
+
+--compare prod burn-env key (#246, opt-in — supply `burn_env` to activate):
+  burn_env (the prod Machine burn-env state read read-only off the box — the literal "none" when
+    NO OBS_BURN_QR / OBS_BURN_QR_PX / OBS_BURN_RUN_ID is set, or a comma-separated NAME=VALUE list
+    of every burn var that IS set). Test-burns are TEST-mode only; ANY set in the prod Machine env
+    draws QR test-burns onto the LIVE broadcast (RUN 235001) -> DRIFT (exit 20). Dormant unless
+    supplied (every historic --compare call is unchanged); the /drift-guard command always feeds it.
+
+--status keys: host, genlock_wall_clock, genlock_capability, burn_env — a read-only ONE-PLACE dump
+  of the genlock gate + build marker + burn state (always exit 0; --compare is the fail-loud gate;
+  the rich live OBS dock is the separate #188).
 
 Exit codes: 0 = clean, 20 = DRIFT, 11 = some observed value UNKNOWN (incomplete, NOT clean),
 1 = usage/IO error.
@@ -578,6 +633,8 @@ compare_observed() {
   local manifest="${16}" o_obs_sha="${17}" o_distroav_sha="${18}" o_capability="${19}"
   # #121 whole-bundle byte/SHA facet (opt-in when bundle_hashes= is also supplied alongside manifest):
   local o_bundle_hashes="${20}"
+  # #246 prod burn-env facet (opt-in when burn_env= is supplied):
+  local o_burn="${21:-}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -694,6 +751,17 @@ compare_observed() {
     fi
   fi
 
+  # Prod burn-env guard (#246): OBS_BURN_* are TEST-mode only; ANY set in the prod Machine env draws
+  # QR test-burns onto the LIVE broadcast (RUN 235001). Opt-in: runs only when burn_env= is supplied
+  # (so every historic --compare call is unchanged), exactly like the manifest facet. The
+  # /drift-guard command always feeds burn_env for the prod boxes (none / a NAME=VALUE list).
+  if [ -n "$o_burn" ]; then
+    rc=0
+    drift_check_burn_env "$o_burn" || rc=$?
+    [ "$rc" -eq 2 ] && drift=$((drift + 1))
+    [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+  fi
+
   echo
   if [ "$drift" -gt 0 ]; then
     echo "!! DRIFT DETECTED on ${host:-target}: $drift setting(s) differ from the pinned zero-loss set." >&2
@@ -710,6 +778,48 @@ compare_observed() {
   exit 0
 }
 
+# status_surface HOST O_GENLOCK O_CAPABILITY O_BURN -> the #246 read-only ONE-PLACE state surface.
+# Prints the genlock master-gate state, the genlock build-unique capability marker, and the burn
+# state from the SAME observed key=val inputs --compare reads — so an operator never needs ad-hoc
+# PEB/env reads to answer "is genlock on? is this our build? are burns clean?". This is
+# INFORMATIONAL (always exit 0): --compare is the fail-loud drift gate; the rich LIVE OBS dock is
+# the separate #188. An unread input is shown UNKNOWN (never silently omitted).
+status_surface() {
+  local host="$1" o_genlock="$2" o_capability="$3" o_burn="$4"
+  echo "== drift-guard --status  host=${host:-?}  (read-only genlock + burn state) =="
+
+  # genlock master gate (the wall-clock render tick).
+  if [ -z "$o_genlock" ]; then
+    printf '  %-20s UNKNOWN  (genlock_wall_clock not read)\n' "genlock_gate"
+  elif [ "$o_genlock" = "1" ]; then
+    printf '  %-20s ENABLED  (wall-clock render tick on)\n' "genlock_gate"
+  else
+    printf '  %-20s DISABLED (observed %s)\n' "genlock_gate" "$o_genlock"
+  fi
+
+  # genlock build-unique capability marker (our build vs a stock/wrong build).
+  if [ -z "$o_capability" ]; then
+    printf '  %-20s UNKNOWN  (capability marker not read)\n' "genlock_build"
+  elif [ "$(genlock_capability_from_log "$o_capability")" = "1" ]; then
+    printf '  %-20s OUR-BUILD (genlock capability marker present)\n' "genlock_build"
+  else
+    printf '  %-20s STOCK?   (no genlock capability marker in the supplied log)\n' "genlock_build"
+  fi
+
+  # burn state (#246) — the one fact that draws QR onto the live broadcast if wrong.
+  if [ -z "$o_burn" ]; then
+    printf '  %-20s UNKNOWN  (burn_env not read)\n' "burn_env"
+  elif [ "$o_burn" = "none" ]; then
+    printf '  %-20s CLEAN    (no OBS_BURN_* set)\n' "burn_env"
+  else
+    printf '  %-20s SET!     (%s)\n' "burn_env" "$o_burn"
+  fi
+
+  echo
+  echo "(read-only status; '--compare burn_env=…' is the fail-loud gate; the live OBS dock is #188.)"
+  return 0
+}
+
 main() {
   local mode="check-pins" readme="$DEFAULT_README"
   local -a kv=()
@@ -717,6 +827,7 @@ main() {
     case "$1" in
       --check-pins) mode="check-pins" ;;
       --compare)    mode="compare" ;;
+      --status)     mode="status" ;;
       --readme)     shift; readme="${1:-}" ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -741,9 +852,9 @@ main() {
     exit $?
   fi
 
-  # --compare: collect observed key=val pairs.
+  # --compare / --status: collect observed key=val pairs (both facets read the same inputs).
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
-  local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes=""
+  local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn=""
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -760,13 +871,19 @@ main() {
       distroav_dll_sha256) o_distroav_sha="$v" ;; # #122: live Get-FileHash of the deployed distroav.dll
       genlock_capability) o_capability="$v" ;;   # #122: the live OBS-log genlock marker text
       bundle_hashes)      o_bundle_hashes="$v" ;; # #121: live `relpath=sha256,…` of every deployed bundle file
+      burn_env)           o_burn="$v" ;;         # #246: prod burn-env state ("none" or NAME=VALUE,…)
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
 
+  if [ "$mode" = "status" ]; then
+    status_surface "$host" "$o_genlock" "$o_capability" "$o_burn"
+    exit $?
+  fi
+
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
-    "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes"
+    "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn"
 }
 
 main "$@"

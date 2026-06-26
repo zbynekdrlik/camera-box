@@ -101,6 +101,12 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    $d="$env:APPDATA\obs-studio\logs"
    $f=Get-ChildItem $d -Filter *.txt | Sort-Object LastWriteTime -Desc | Select-Object -First 1
    ((Get-Content $f.FullName) | Where-Object { $_ -match 'genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)' }) -join "`n"
+   # #246 prod burn-env: OBS_BURN_* are TEST-mode only and must NEVER be set in Machine scope (RUN
+   # 235001 set them and QR test-burns drew on the LIVE broadcast). Read the three burn vars from
+   # Machine scope; emit `burn_env=none` when none is set, else a NAME=VALUE list of the set ones.
+   $bn=@('OBS_BURN_QR','OBS_BURN_QR_PX','OBS_BURN_RUN_ID')
+   $set=$bn | ForEach-Object { $v=[System.Environment]::GetEnvironmentVariable($_,'Machine'); if ($v) { "$_=$v" } }
+   if ($set) { "burn_env=" + ($set -join ',') } else { "burn_env=none" }
    ```
 
    **Get the build-under-test's manifest** (the #120 `BUNDLE_MANIFEST.json` shipped inside the genlock
@@ -133,15 +139,18 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
      manifest=./gbundle/BUNDLE_MANIFEST.json \
      obs_dll_sha256=<live Get-FileHash of obs.dll> \
      distroav_dll_sha256=<live Get-FileHash of distroav.dll> \
-     genlock_capability="<the live genlock marker text>"   # stream: ndi_input_latency="NDI 2ME PGM=<n>"
+     genlock_capability="<the live genlock marker text>" \
+     burn_env="<none, or the NAME=VALUE list from the burn-env gather>"   # stream: ndi_input_latency="NDI 2ME PGM=<n>"
    ```
 
    - Exit `0` → **NO DRIFT**, the box matches the pinned zero-loss set AND the per-component BUILD SHAs
-     + genlock capability match the manifest. Report it.
+     + genlock capability match the manifest AND no test-burn is set in the prod Machine env. Report it.
    - Exit `20` → **DRIFT**: the output names each setting/SHA that differs (expected vs observed). A
      `obs_dll_sha256 DRIFT` or `genlock_capability DRIFT` line means the live OBS is a STOCK/wrong build
-     even though its version matches (the #122 catch). Report loudly. Do NOT fix it silently — restoring
-     prod is off-air + user-approved.
+     even though its version matches (the #122 catch); a `burn … DRIFT (test-burn var set in prod Machine
+     env)` line means a #246 test-burn is set on prod — clear it with `scripts/rig-mode.sh event` (and
+     remove it from Machine scope). Report loudly. Do NOT fix it silently — restoring prod is
+     off-air + user-approved.
    - Exit `11` → at least one value was **UNKNOWN** (not read). Drift status is incomplete, not
      clean — re-read the missing value (e.g. OBS not running, DLL path moved, manifest not downloaded)
      before trusting it.
@@ -221,3 +230,10 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
   deploy-only-our-build discipline remains the primary protection; this is the runtime backstop.)
 - Re-pin (edit the table in `vendor/README.md`) only as part of a *deliberate* rollout — e.g. the
   30→60 fps step (#11) or activating genlock — never to silence a drift you did not intend.
+- **#246 prod burn guard:** the `burn_env` observed value (gathered in step 1) is asserted by
+  `--compare` — ANY `OBS_BURN_QR` / `OBS_BURN_QR_PX` / `OBS_BURN_RUN_ID` set in the prod **Machine**
+  env is DRIFT (it draws QR test-burns onto the live broadcast and survives reboot). Burns are
+  TEST-mode only; clear a stray one with `scripts/rig-mode.sh event` and remove it from Machine
+  scope. For a quick read-only view of the genlock + burn state in ONE place (no full drift compare)
+  use `scripts/drift-guard.sh --status host=<h> genlock_wall_clock=<0|1> genlock_capability="…"
+  burn_env="…"` — informational (exit 0); the rich live OBS dock is the separate #188.

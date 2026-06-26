@@ -203,6 +203,21 @@ cleanup() {
   # covers the other exit paths.
   [ -n "${VERDICT_PID:-}" ] && { kill -- -"$VERDICT_PID" 2>/dev/null; kill "$VERDICT_PID" 2>/dev/null; }
   pkill -x recording-verdict 2>/dev/null
+  # #246: clear + VERIFY OBS burns OFF on strih + stream after EVERY run (incl. failure/abort), so a
+  # QR test-burn can never linger onto the live broadcast. The burn is a DistroAV surface reachable
+  # over obs-websocket: REMOVE it from each box's program input (a no-op if absent), then `check` to
+  # VERIFY it is off and surface the kind_registered tell (true => OBS was launched with OBS_BURN_QR
+  # — relaunch clean via scripts/rig-mode.sh event). The harness has NO SSH to the Windows boxes, so
+  # it cannot clear Machine-scope OBS_BURN_* env; that is asserted by `drift-guard --compare
+  # burn_env=` and cleared by rig-mode event. The rich live OBS dock is the separate #188.
+  echo "[cleanup] #246 clear + verify OBS burns OFF on strih + stream"
+  for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+    _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
+    python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
+      | sed "s/^/    [$_bn burn-clear] /" || true
+    python3 "$HERE/obs_burn_filter.py" check  --host "$_bip" --input "$_bsrc" 2>&1 \
+      | sed "s/^/    [$_bn burn-verify] /" || true
+  done
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -284,6 +299,7 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 # the prior 3-node run (~0.35% real strih→stream loss). prod-scene runs a fail-fast
 # non-black self-check before returning so a black ingest never wastes a full run.
 STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
 # #183: the upstream NDI source-name of each box's recorded prod GENLOCK input — used to
