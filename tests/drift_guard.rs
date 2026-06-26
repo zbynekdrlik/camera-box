@@ -693,6 +693,22 @@ const MANIFEST_184_FULL: &str = "\
 }
 ";
 
+/// #237: a decoy manifest whose first obs/distroav entries have NO literal dot (`obsXdll` /
+/// `distroavYdll`) sitting BEFORE the real `obs.dll` / `distroav.dll`. With the dot matched as a
+/// regex wildcard the decoy over-matches and `head -1` returns its (wrong) sha; with the dot
+/// escaped the decoy is skipped and the real dll's sha is returned.
+const MANIFEST_DOT_DECOY: &str = "\
+{
+  \"schema\": \"camera-box/genlock-bundle-manifest@1\",
+  \"files\": [
+    { \"path\": \"obsXdll\", \"sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"size\": 1 },
+    { \"path\": \"distroavYdll\", \"sha256\": \"3333333333333333333333333333333333333333333333333333333333333333\", \"size\": 1 },
+    { \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"2222222222222222222222222222222222222222222222222222222222222222\", \"size\": 2 },
+    { \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"4444444444444444444444444444444444444444444444444444444444444444\", \"size\": 2 }
+  ]
+}
+";
+
 /// The genlock CAPABILITY marker text as it appears in the running OBS log (the build-unique lines
 /// captured live off stream 2026-06-25). A STOCK OBS emits NONE of these.
 const GENLOCK_CAP_OURS: &str = "07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK, slew cap 2000000 ns/tick)
@@ -746,6 +762,85 @@ fn manifest_sha_for_component_matches_by_basename_in_both_layouts() {
         da_fast.trim(),
         "",
         "absent distroav must resolve empty: {da_fast:?}"
+    );
+}
+
+#[test]
+fn manifest_sha_for_component_dot_is_literal_not_a_wildcard() {
+    // #237: the dll BASENAME is fed to grep as an EXTENDED REGEX, so the literal dot in obs.dll /
+    // distroav.dll must be ESCAPED — otherwise `.` is an any-char wildcard and a (hypothetical)
+    // path like `obsXdll` (any char where the dot belongs, NO real dot) OVER-MATCHES, returning
+    // the WRONG file's sha. The decoy manifest lists `obsXdll` / `distroavYdll` BEFORE the real
+    // dll, so a wildcard match (pre-fix) returns the decoy's sha via `head -1`; an escaped match
+    // (post-fix) skips the decoy and returns the real dll's sha. No real OBS file is named that —
+    // this is a latent-robustness tightening, not a live bug.
+    let m = write_temp("dg_dot_decoy", MANIFEST_DOT_DECOY);
+
+    let obs = run_sourced(
+        "manifest_sha_for_component \"$M\" obs",
+        &[("M", m.to_str().unwrap())],
+    );
+    assert_eq!(
+        obs.trim(),
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "obs.dll lookup must match the LITERAL dot (the real obs.dll), not over-match the \
+         dot-less `obsXdll` decoy: {obs:?}"
+    );
+
+    let da = run_sourced(
+        "manifest_sha_for_component \"$M\" distroav",
+        &[("M", m.to_str().unwrap())],
+    );
+    assert_eq!(
+        da.trim(),
+        "4444444444444444444444444444444444444444444444444444444444444444",
+        "distroav.dll lookup must match the LITERAL dot (the real distroav.dll), not over-match \
+         the dot-less `distroavYdll` decoy: {da:?}"
+    );
+}
+
+#[test]
+fn compare_labels_unverified_distroav_sha_as_skipped_not_ok() {
+    // #237: when the supplied manifest is an obs.dll-only (fast-dll) bundle, a supplied
+    // distroav_dll_sha256 is NOT compared against anything — labeling that UNCHECKED value "OK" is
+    // misleading (an operator could believe distroav was verified when it wasn't). It must read
+    // SKIPPED. The verdict STAYS NO DRIFT (an obs.dll-only manifest legitimately checks only
+    // obs.dll; SKIPPED != DRIFT/UNKNOWN), so the exit code is unchanged (0).
+    let manifest = write_temp("dg_237_skipped", MANIFEST_184_FAST);
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        &format!("manifest={}", manifest.to_str().unwrap()),
+        "obs_dll_sha256=24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33",
+        "distroav_dll_sha256=66cea7039aa0547823f60935bfd1fb36f38cfdfc76ba5911609c33cbfd022880",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)",
+    ]);
+    assert_eq!(
+        code, 0,
+        "an obs.dll-only manifest legitimately skips distroav — verdict stays NO DRIFT (exit 0). \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("distroav_dll_sha256"))
+        .expect("must print a distroav_dll_sha256 status line");
+    assert!(
+        line.contains("SKIPPED"),
+        "#237: the unverified distroav SHA must be labeled SKIPPED (not compared in an \
+         obs.dll-only manifest): {line:?}"
+    );
+    assert!(
+        !line.contains("OK"),
+        "#237: labeling an UNCHECKED distroav SHA 'OK' is misleading — it must read SKIPPED: \
+         {line:?}"
     );
 }
 
@@ -1224,4 +1319,201 @@ fn compare_whole_bundle_facet_dormant_without_bundle_hashes() {
         "the whole-bundle facet must stay dormant without bundle_hashes. stdout={stdout:?}"
     );
     let _ = std::fs::remove_file(&m);
+}
+
+// --- #246: prod burn-env guard (OBS_BURN_* must NEVER be set in the prod Machine env) ----------
+//
+// RUN 235001 (#235 re-validate) set OBS_BURN_QR / OBS_BURN_QR_PX / OBS_BURN_RUN_ID into Machine
+// scope on BOTH stream and strih and never cleaned up — so QR test-burns drew on the LIVE
+// broadcast (Machine scope survives reboot). Burns are test-mode ONLY. drift-guard had ZERO burn
+// check; this adds a pure guard + a --compare facet that FAILS LOUDLY if the prod Machine env
+// carries ANY OBS_BURN_*. Opt-in (keyed on burn_env=), mirroring the manifest facet, so the
+// historic --compare calls are unchanged; the /drift-guard command always feeds it.
+
+#[test]
+fn drift_check_burn_env_flags_a_set_burn_var_as_drift() {
+    // The #246 failure: a burn var present in the prod Machine env. Any set burn var -> DRIFT (rc 2).
+    let body = "rc=0; drift_check_burn_env \"$B\" || rc=$?; echo \"RC=$rc\"";
+    let out = run_sourced(
+        body,
+        &[(
+            "B",
+            "OBS_BURN_QR=1,OBS_BURN_QR_PX=300,OBS_BURN_RUN_ID=911004",
+        )],
+    );
+    assert!(
+        out.contains("DRIFT"),
+        "a set burn var must be flagged DRIFT: {out:?}"
+    );
+    assert!(
+        out.contains("RC=2"),
+        "a set burn var must return rc 2: {out:?}"
+    );
+    assert!(
+        out.contains("OBS_BURN_QR"),
+        "the drift line must name the offending burn var: {out:?}"
+    );
+}
+
+#[test]
+fn drift_check_burn_env_clean_when_none() {
+    // The expected prod state: no burn var set. The operator passes the literal "none" -> OK (rc 0).
+    let body = "rc=0; drift_check_burn_env \"$B\" || rc=$?; echo \"RC=$rc\"";
+    let out = run_sourced(body, &[("B", "none")]);
+    assert!(out.contains("OK"), "none -> OK: {out:?}");
+    assert!(out.contains("RC=0"), "none -> rc 0: {out:?}");
+    // A list whose entries all have EMPTY values (var exists but unset/blank) is also clean.
+    let out2 = run_sourced(
+        body,
+        &[("B", "OBS_BURN_QR=,OBS_BURN_QR_PX=,OBS_BURN_RUN_ID=")],
+    );
+    assert!(
+        out2.contains("OK") && out2.contains("RC=0"),
+        "all-empty -> OK: {out2:?}"
+    );
+}
+
+#[test]
+fn drift_check_burn_env_unknown_when_not_read() {
+    // An empty observed value (not read) is UNKNOWN (rc 3), never a silent clean.
+    let body = "rc=0; drift_check_burn_env \"$B\" || rc=$?; echo \"RC=$rc\"";
+    let out = run_sourced(body, &[("B", "")]);
+    assert!(
+        out.contains("UNKNOWN"),
+        "unread burn_env -> UNKNOWN: {out:?}"
+    );
+    assert!(out.contains("RC=3"), "unread burn_env -> rc 3: {out:?}");
+}
+
+#[test]
+fn compare_fails_loudly_when_prod_has_a_burn_env_set() {
+    // End-to-end: every version/setting matches, but the prod Machine env carries OBS_BURN_QR — the
+    // #246 incident. The burn facet (opt-in via burn_env=) must DRIFT the box (exit 20) even though
+    // every other check is clean.
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "burn_env=OBS_BURN_QR=1,OBS_BURN_QR_PX=300,OBS_BURN_RUN_ID=911004",
+    ]);
+    assert_eq!(
+        code, 20,
+        "a prod Machine burn var must exit 20 (DRIFT) even when all else is clean. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("burn") && stdout.contains("DRIFT"),
+        "must show the burn var as DRIFT. stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly. stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn compare_clean_when_prod_burn_env_is_none() {
+    // The certified prod state: burn_env=none. The facet runs (key supplied) and reports OK; the
+    // verdict stays NO DRIFT (exit 0).
+    let (code, stdout, _stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "burn_env=none",
+    ]);
+    assert_eq!(code, 0, "burn_env=none must be clean. stdout={stdout:?}");
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    assert!(
+        stdout.contains("burn_env") && stdout.contains("OK"),
+        "must show the burn_env OK line. stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn compare_burn_env_facet_dormant_without_the_key() {
+    // Back-compat: omitting burn_env keeps the historic --compare contract — the burn facet stays
+    // dormant (no UNKNOWN, no exit-11), exactly like the manifest facet.
+    let (code, stdout, _stderr) = run_script(&[
+        "--compare",
+        "host=strih",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        // no burn_env=
+    ]);
+    assert_eq!(
+        code, 0,
+        "no burn_env -> dormant -> clean. stdout={stdout:?}"
+    );
+    assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
+    assert!(
+        !stdout.contains("burn"),
+        "the burn facet must stay dormant without burn_env=. stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn status_surface_reports_genlock_and_burn_in_one_place() {
+    // #246 item 2: a read-only --status facet that prints genlock + burn state in ONE place from
+    // the same observed inputs (so an operator never needs ad-hoc PEB/env reads). It is
+    // informational (exit 0) — --compare is the fail-loud gate; the rich live OBS dock is #188.
+    let (code, stdout, stderr) = run_script(&[
+        "--status",
+        "host=stream",
+        "genlock_wall_clock=1",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)",
+        "burn_env=OBS_BURN_QR=1",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--status is informational (exit 0). stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("genlock") && stdout.contains("burn"),
+        "--status must print BOTH genlock and burn state in one place. stdout={stdout:?}"
+    );
+    // a set burn must be visibly surfaced (not hidden)
+    assert!(
+        stdout.contains("OBS_BURN_QR"),
+        "--status must surface the set burn var. stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn status_surface_does_not_require_the_pinned_manifest() {
+    // #246: --status is a read-only live-state dump that uses NONE of the pinned set, so it must
+    // work even when vendor/README.md is absent (a checkout shipping only the script). RED before
+    // the fix: the manifest-required check + pin load ran for every mode and exited 1 here.
+    let (code, stdout, stderr) = run_script(&[
+        "--status",
+        "host=stream",
+        "genlock_wall_clock=1",
+        "burn_env=none",
+        "--readme",
+        "/nonexistent/path/vendor/README.md",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--status must not require the pinned manifest (read-only live-state dump). \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains("manifest not found"),
+        "--status must skip the manifest-required check. stderr={stderr:?}"
+    );
 }

@@ -942,6 +942,7 @@ mod vendored_source {
     const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
     pub const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
     pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
+    pub const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
     /// Read the libobs `#define MAX_ASYNC_FRAMES <n>` literal from the vendored
     /// source so the preload-cap invariant tracks upstream instead of being
@@ -1611,7 +1612,9 @@ mod vendored_source {
 // ---- #97 GUI: DistroAV per-source preload slider + ms info-text --------------
 
 mod distroav_source {
-    use super::vendored_source::{vendor_file, NDI_SOURCE, WINDOWS_GENLOCK_WF};
+    use super::vendored_source::{
+        vendor_file, NDI_SOURCE, WINDOWS_GENLOCK_FAST_WF, WINDOWS_GENLOCK_WF,
+    };
 
     fn squish(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -1854,6 +1857,27 @@ mod distroav_source {
             wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
             "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the editable \
              per-source latency int field; re-add the pwsh #245 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_fast_workflow_gates_on_the_per_source_latency() {
+        // #249: the FAST hot-DLL workflow COMPILES the real vendored C/cpp (a broken patch fails the
+        // build), but it had NO source-text token gate for #245 — only #136. A `git subtree pull`
+        // that silently reverts #245 to inert-but-still-compiling would ship an INERT obs.dll un-gated
+        // on the fast path (the slow windows-genlock.yml gained the #245 gate in #248). The fast path
+        // must re-assert the same #245 tokens BEFORE its build, mirroring the slow gate.
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+        assert!(
+            wf.contains("obs_source_set_genlock_latency_ms"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the per-source \
+             latency API (obs_source_set_genlock_latency_ms); a subtree pull could ship an inert \
+             obs.dll on the fast path. Add the pwsh #245 gate, mirroring windows-genlock.yml."
+        );
+        assert!(
+            wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the editable \
+             per-source latency int field; add the pwsh #245 gate."
         );
     }
 }

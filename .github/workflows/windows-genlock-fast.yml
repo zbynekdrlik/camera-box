@@ -62,6 +62,38 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock_present_ts(genlock_wall_now_ns(), preload, interval)')) { Write-Error "present_ts gone (#136)"; exit 1 }
           Write-Output "#136 timestamp-aligned release patch present — OK"
 
+      # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`
+      # (#44) that reverts #245 to inert-but-still-compiling would hot-swap an INERT obs.dll un-gated
+      # (the #235 regression: latency collapsed to one GLOBAL env knob, no per-source override). The
+      # slow windows-genlock.yml gained this #245 gate in #248; mirror it here so the fast path fails
+      # at the same token check rather than shipping an inert DLL. Pure source-text guard (no build) —
+      # mirrors tests/genlock_preload.rs::vendored_source (probe-gated, can't compile on this runner).
+      - name: Assert per-source genlock latency (ms) override present (#245)
+        shell: pwsh
+        run: |
+          $obs = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($obs -notmatch [regex]::Escape('void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t')) {
+            Write-Error "obs-source.c: obs_source_set_genlock_latency_ms missing — #245 per-source latency API reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('source->genlock_latency_ms > 0 ? source->genlock_latency_ms : genlock_reserve_ms()')) {
+            Write-Error "obs-source.c: the per-source latency release-deadline gate is gone — #245 override inert in the render path"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_SOURCE_LATENCY_MS_MAX 2000')) {
+            Write-Error "obs-source.c: GENLOCK_SOURCE_LATENCY_MS_MAX no longer 2000 — #245 per-source cap reverted"; exit 1
+          }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('EXPORT void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t')) {
+            Write-Error "obs.h: obs_source_set_genlock_latency_ms not EXPORTed — #245 DistroAV cannot resolve the setter"; exit 1
+          }
+          $ndi = (Get-Content "vendor/distroav/src/ndi-source.cpp" -Raw) -replace '\s+', ' '
+          if ($ndi -notmatch [regex]::Escape('obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC')) {
+            Write-Error "ndi-source.cpp: the editable per-source latency int field is gone — #245 reverted"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_latency_ms')) {
+            Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_latency_ms — #245 field inert"; exit 1
+          }
+          Write-Output "per-source genlock latency (ms) override present (libobs API + EXPORT + render-path gate + cap 2000 + DistroAV editable int + apply) — OK"
+
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.
       - name: Configure OBS (windows-x64 preset)

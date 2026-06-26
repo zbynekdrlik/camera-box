@@ -192,11 +192,48 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   more than one, or the lone one is off the canonical path. Pin row +
   `drift_check_plugin_paths` (tested in `tests/drift_guard.rs`) live in
   `vendor/README.md` under `canonical_plugin_path`.
+- **prod burn-env guard + `--status` (#246, DONE)** — QR test-burns
+  (`OBS_BURN_QR`/`OBS_BURN_QR_PX`/`OBS_BURN_RUN_ID`) are TEST-mode ONLY; RUN 235001 set
+  them in **Machine** scope on stream+strih → QR drew on the LIVE broadcast (survives
+  reboot). drift-guard `--compare` now takes `burn_env=` (the literal `none`, or a
+  `NAME=VALUE` list of set burn vars — `/drift-guard` step 1 gathers it from Machine
+  scope) and FAILS (exit 20) on ANY set burn var. OPT-IN like the manifest facet (omit the
+  key → dormant, no UNKNOWN → every historic `--compare` call unchanged). `drift_check_burn_env`
+  (tested in `tests/drift_guard.rs`). Also a read-only `scripts/drift-guard.sh --status
+  host=… genlock_wall_clock=… genlock_capability=… burn_env=…` that prints genlock gate +
+  build marker + burn state in ONE place (always exit 0; `--compare` is the gate; the rich
+  live OBS dock is the separate #188). The launch-path guard (clear burns in the launch
+  shell + refuse Machine-scope burns) is the #128 wrapper / `rig-mode.sh` (#247). The
+  recording-e2e cleanup trap now also clears+verifies burns off via
+  `obs_burn_filter.py remove`+`check` on both boxes (the harness has NO SSH to Windows — it
+  reaches the boxes only over obs-websocket, so it cannot clear Machine env; that is
+  `--compare burn_env=` + `rig-mode event`'s job).
+- **#237 (DONE)** — `manifest_sha_for_component` bracket-escapes the dll-basename dot
+  (`obs[.]dll`) so it is matched literally not as a regex wildcard; an obs.dll-only
+  manifest labels a supplied distroav SHA `SKIPPED` (not `OK`) — an unchecked value must
+  never read as verified (verdict stays NO DRIFT; SKIPPED ≠ DRIFT/UNKNOWN).
 
 GOTCHA: the 150-min `windows-genlock.yml` is `workflow_dispatch`-only (can't run
 per-PR), so manifest LOGIC is proven on the Linux `test` job; editing
 `windows-genlock-fast.yml` itself triggers the fast Windows build (its `paths:` lists
 the workflow file), which then runs the manifest gate on a real built obs.dll.
+
+GOTCHA (workflow source-token gates): BOTH Windows workflows re-assert the genlock patch
+tokens in pwsh BEFORE their build (the Linux Rust guards in `tests/genlock_preload.rs` are
+probe-gated, can't compile on the runner) — keep them in LOCK-STEP. The slow
+`windows-genlock.yml` and the FAST `windows-genlock-fast.yml` must each carry the #136 AND
+#245 (`obs_source_set_genlock_latency_ms` / `PROP_GENLOCK_LATENCY_MS_SRC`) gates; the fast
+gate was added in #249 (the slow one in #248). `tests/genlock_preload.rs` has a
+`windows_genlock[_fast]_workflow_gates_on_the_per_source_latency` guard per workflow — add
+the matching guard when you add a new token gate.
+
+GOTCHA (Tier-0 local test verification): the probe-gated test files
+(`#![cfg(feature="probe")]`, e.g. `genlock_preload.rs`) CANNOT be compiled/run on dev1
+(Tier-0 forbids `--features probe`) — verify their assertions at the grep level (the WF
+token / source token) and let CI (`--all-features`) run them. The NON-probe test files
+(`drift_guard.rs`, `harness_recording_e2e_paths.rs`) CAN: `cargo test --no-run` to compile
+(Tier-0 OK), then run the built `target/debug/deps/<name>-*` binary DIRECTLY (no rebuild,
+no Tier-0 violation) to prove GREEN locally.
 
 **win-* MCP env reads are STALE:** The MCP Shell spawns a child that inherits the
 long-lived MCP process's env snapshot — `$env:OBS_GENLOCK_WALL_CLOCK` reads EMPTY while

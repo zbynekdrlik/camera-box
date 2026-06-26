@@ -203,7 +203,30 @@ cleanup() {
   # covers the other exit paths.
   [ -n "${VERDICT_PID:-}" ] && { kill -- -"$VERDICT_PID" 2>/dev/null; kill "$VERDICT_PID" 2>/dev/null; }
   pkill -x recording-verdict 2>/dev/null
+  # #246: clear + VERIFY OBS burns OFF on strih + stream after EVERY run (incl. failure/abort), so a
+  # QR test-burn can never linger onto the live broadcast. The burn is a DistroAV surface reachable
+  # over obs-websocket: REMOVE it from each box's program input (a no-op if absent), then `check` to
+  # VERIFY it is off and surface the kind_registered tell (true => OBS was launched with OBS_BURN_QR
+  # — relaunch clean via scripts/rig-mode.sh event). The harness has NO SSH to the Windows boxes, so
+  # it cannot clear Machine-scope OBS_BURN_* env; that is asserted by `drift-guard --compare
+  # burn_env=` and cleared by rig-mode event. The rich live OBS dock is the separate #188.
+  echo "[cleanup] #246 clear + verify OBS burns OFF on strih + stream"
+  for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+    _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
+    python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
+      | sed "s/^/    [$_bn burn-clear] /" || true
+    python3 "$HERE/obs_burn_filter.py" check  --host "$_bip" --input "$_bsrc" 2>&1 \
+      | sed "s/^/    [$_bn burn-verify] /" || true
+  done
 }
+# #246: define the prod scene/source names BEFORE the trap so cleanup()'s burn-clear loop (which
+# references $STRIH_PROG_SOURCE / $STREAM_PROG_SOURCE) never hits a `set -u` unbound-variable on an
+# early abort (failed prebuilt-probe check / cargo build / cam scp-ssh, or Ctrl-C) — the exact
+# failure/abort window the burn-off guard must cover. Detailed rationale at the #183 block below.
+STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
+STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
+STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
 trap cleanup EXIT HUP INT TERM
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
@@ -283,9 +306,9 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 # No second receiver, no source-name collision — proven NON-black on the live rig and by
 # the prior 3-node run (~0.35% real strih→stream loss). prod-scene runs a fail-fast
 # non-black self-check before returning so a black ingest never wastes a full run.
-STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
-STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
-STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# (STRIH_PROG_SCENE/SOURCE + STREAM_PROG_SCENE/SOURCE are defined earlier, just before the cleanup
+#  trap — #246, so the burn-off teardown survives an early abort. They are `${VAR:-default}` so any
+#  caller override set in the environment still wins.)
 # #183: the upstream NDI source-name of each box's recorded prod GENLOCK input — used to
 # FORCE genlock_preload=1 on it for the test window (then restore prod on teardown), so the
 # run measures the TRUE genlock hop (~33ms) not the prod audio-sync delay (preload≈31 ≈ 1s).
