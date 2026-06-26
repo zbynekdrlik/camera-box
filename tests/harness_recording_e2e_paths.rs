@@ -324,6 +324,68 @@ fn recording_e2e_asserts_burns_on_before_recording() {
     );
 }
 
+/// #195 (behavioral): the pre-record burn-ON gate's parse+abort logic must PROCEED only when
+/// BOTH `kind_registered=True` AND `filter_on_input=True`, and ABORT otherwise — across burns-on,
+/// pass-through (kind off → OBS not launched with OBS_BURN_QR), kind-on-but-filter-unattached, and
+/// OBS-unreachable (the check command's error text). This locks the actual abort BEHAVIOR (the
+/// #195 regression: burns-off must STOP the run, not waste it), not just the gate's presence.
+/// recording-e2e.sh runs top-to-bottom (no source guard), so — like the #178 resilient-region
+/// behavioral test above — this exercises the gate's two greps in an isolated bash snippet.
+#[test]
+fn recording_e2e_burn_gate_proceeds_only_when_burns_on() {
+    // The gate's decision in isolation — the SAME two greps recording-e2e.sh runs per box.
+    let gate = r#"
+set -euo pipefail
+burn_gate_ok() {
+  _chk="$1"
+  printf '%s' "$_chk" | grep -q 'kind_registered=True' || return 1
+  printf '%s' "$_chk" | grep -q 'filter_on_input=True' || return 1
+  return 0
+}
+if burn_gate_ok "$1"; then echo PROCEED; else echo ABORT; fi
+"#;
+    // (check output text, expect PROCEED?)
+    let cases = [
+        (
+            "[burn] kind_registered=True filter_on_input=True input='NDI cam5'",
+            true,
+        ),
+        (
+            "[burn] kind_registered=False filter_on_input=False input='NDI cam5'",
+            false,
+        ),
+        (
+            "[burn] kind_registered=True filter_on_input=False input='NDI cam5'",
+            false,
+        ),
+        (
+            "Traceback (most recent call last): ConnectionRefusedError",
+            false,
+        ),
+    ];
+    for (chk, expect_ok) in cases {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(gate)
+            .arg("bash") // $0
+            .arg(chk) // $1 — the check output, passed as an arg (no quoting hazard)
+            .output()
+            .expect("run burn-gate snippet");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if expect_ok {
+            assert!(
+                stdout.contains("PROCEED") && !stdout.contains("ABORT"),
+                "#195: burns-ON (kind_registered+filter_on_input) must PROCEED; got {stdout:?} for {chk:?}"
+            );
+        } else {
+            assert!(
+                stdout.contains("ABORT"),
+                "#195: burns-off/unattached/unreachable must ABORT the run; got {stdout:?} for {chk:?}"
+            );
+        }
+    }
+}
+
 /// The DanteSync NTP+PTP gate must be the FIRST hard step (#7): it must appear in the
 /// script BEFORE the cam1/cam2 launch and the OBS recording start, so a not-locked cluster
 /// fails fast before any measurement.
