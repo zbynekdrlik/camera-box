@@ -2545,6 +2545,91 @@ mod tests {
     }
 
     #[test]
+    fn in_window_clamps_post_emission_teardown_tail() {
+        // #267: at teardown the node STOPS emitting its burn while cam2's optical painter keeps
+        // running for a few more frames, so the strih recording captures DELIVERED (cam2-QR)
+        // frames PAST the node's last emitted burn. The optical-anchored window used to extend
+        // to the last cam2 frame, so those trailing burn-less frames became BURN-UNREADABLE
+        // synthetic ids and blocked a clean 0-undecodable PASS — even though no frame was lost
+        // (the node simply ended ~0.77s before the optical signal did). The fix CLAMPS the
+        // window's trailing boundary to the last frame that carries THIS node's burn (its last
+        // in-range id). cam1 (per-emit) is the real-world case; the clamp is rate-agnostic.
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 51)]),
+            frame(2, &[(CAM2, 102), (CAM1B, 52)]), // last EMITTED cam1 burn
+            frame(3, &[(CAM2, 103)]),              // teardown tail: cam2 only, cam1 stopped
+            frame(4, &[(CAM2, 104)]),              // teardown tail
+            frame(5, &[(CAM2, 105)]),              // teardown tail
+        ];
+        let w = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM], BurnRate::PerEmittedFrame);
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(50), Some(51), Some(52)],
+            "trailing teardown frames past the last emitted burn must be clamped off"
+        );
+        // The clamped window is fully contiguous ⇒ a clean PASS, no phantom burn_unreadable.
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            iw.contiguity.is_contiguous(),
+            "no missing id after clamping the teardown tail: {:?}",
+            iw.contiguity
+        );
+        assert_eq!(iw.contiguity.missing_ids.len(), 0);
+
+        // Rate-agnostic: a per-render (strih/stream) teardown tail is clamped the same way.
+        let stream_r = vec![
+            frame(0, &[(CAM2, 100), (STRIH, 1670)]),
+            frame(1, &[(CAM2, 101), (STRIH, 1673)]), // last strih render-tick burn
+            frame(2, &[(CAM2, 102)]),                // teardown tail: cam2 only
+            frame(3, &[(CAM2, 103)]),                // teardown tail
+        ];
+        let wr = in_window_burn_frames(&stream_r, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
+        let idsr: Vec<Option<u32>> = wr.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            idsr,
+            vec![Some(1670), Some(1673)],
+            "per-render teardown tail clamped to the last emitted render-tick burn"
+        );
+    }
+
+    #[test]
+    fn clamp_keeps_interior_unreadable_and_strict_bar() {
+        // The #267 clamp must NEVER weaken the strict #186 bar: an INTERIOR burn-less delivered
+        // frame (one with a present burn AFTER it — proof the stream RESUMED, so it is a genuine
+        // mid-stream readability miss, not a teardown end) is still counted as BURN-UNREADABLE
+        // and still FAILS the node. Only the trailing post-emission tail is clamped.
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 50)]),
+            frame(1, &[(CAM2, 101)]),              // INTERIOR miss — burn resumes below
+            frame(2, &[(CAM2, 102), (CAM1B, 52)]), // present again ⇒ frame 1 is a real in-range miss
+            frame(3, &[(CAM2, 103)]),              // teardown tail (clamped, not counted)
+        ];
+        let w = in_window_burn_frames(&stream, CAM1B, &[CAM1B, STRIH, STREAM], BurnRate::PerEmittedFrame);
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(50), None, Some(52)],
+            "interior miss kept, only the trailing tail clamped"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "an interior in-range miss must still FAIL the strict bar: {:?}",
+            iw.contiguity
+        );
+    }
+
+    #[test]
     fn node_verdict_render_tick_skips_are_zero_loss_not_thousands_missing() {
         // THE #198 REGRESSION at the binary level: strih burn id jumps by 3 per emitted
         // frame (per-render counter). The OLD integer-range check reported ~2x these as
