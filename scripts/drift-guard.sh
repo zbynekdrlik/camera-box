@@ -157,9 +157,12 @@ buildspec_version() {
 manifest_sha_for_component() {
   local manifest="$1" component="$2" dll
   [ -f "$manifest" ] || { echo "manifest_sha_for_component: no such file: $manifest" >&2; return 1; }
+  # The basename is interpolated into the extended-regex below, so the literal dot is bracket-escaped
+  # ([.]) — an unescaped `.` is an any-char wildcard that would over-match a (hypothetical) dot-less
+  # basename like `obsXdll` and return the WRONG file's sha (#237).
   case "$component" in
-    obs)      dll="obs.dll" ;;
-    distroav) dll="distroav.dll" ;;
+    obs)      dll="obs[.]dll" ;;
+    distroav) dll="distroav[.]dll" ;;
     *) echo "manifest_sha_for_component: unknown component '$component' (want obs|distroav)" >&2; return 1 ;;
   esac
   # Match a files[] line whose "path" ends in the dll basename (root or any nested dir), pull its
@@ -658,7 +661,11 @@ compare_observed() {
         [ "$rc" -eq 2 ] && drift=$((drift + 1))
         [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
       elif [ -n "$o_distroav_sha" ]; then
-        printf '  %-20s OK       (observed %s; not in manifest — obs.dll-only bundle)\n' \
+        # #237: the supplied distroav SHA is NOT compared here (this is an obs.dll-only manifest), so
+        # it must be labeled SKIPPED — NOT OK. Calling an UNCHECKED value "OK" misleads an operator
+        # into believing distroav was verified. SKIPPED != DRIFT/UNKNOWN, so the verdict stays NO
+        # DRIFT (distroav is verified vs its full bundle in a separate invocation per /drift-guard).
+        printf '  %-20s SKIPPED  (observed %s; not in this obs.dll-only manifest — verify distroav vs its full bundle)\n' \
           "distroav_dll_sha256" "$o_distroav_sha"
       fi
     fi
