@@ -80,6 +80,31 @@ main() {
   local ONBOX_CMD
   ONBOX_CMD="$(build_onbox_command "$VERDICT_EXE" "${PASS_ARGS[@]}")"
 
+  # #186/#208: in PER-BOX extract mode the on-box --extract-partial writes the pixel-proof PNGs of
+  # every flagged / undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out
+  # partial JSON) — so the merge's #186 "SEE the missing frame" guarantee survives the per-box
+  # split. Derive that dir from the forwarded `--out <partial>` so STEP 3 pulls it back too.
+  local OUT_PARTIAL="" PIXELS_DIR=""
+  local i
+  for ((i = 0; i + 1 < ${#PASS_ARGS[@]}; i++)); do
+    if [ "${PASS_ARGS[$i]}" = "--out" ]; then
+      OUT_PARTIAL="${PASS_ARGS[$((i + 1))]}"
+      break
+    fi
+  done
+  if [ -n "$OUT_PARTIAL" ]; then PIXELS_DIR="${OUT_PARTIAL%.json}-pixels"; fi
+
+  # STEP 3 pull-back text: per-box extract (a partial JSON + its <partial>-pixels dir) vs the
+  # legacy fused mode (a --json verdict + the OUT_DIR\pixel-proof PNGs).
+  local STEP3
+  if [ -n "$OUT_PARTIAL" ]; then
+    STEP3="#   win-stream-snv FileDownload  path='${OUT_PARTIAL}'
+#   win-stream-snv FileDownload  path='${PIXELS_DIR}'   # #186 pixel proofs (a handful; absent on a clean run)"
+  else
+    STEP3="#   win-stream-snv FileDownload  path='<the --json path inside ${OUT_DIR}>'
+#   win-stream-snv FileDownload  path='<each PNG under ${OUT_DIR}\\pixel-proof>'"
+  fi
+
   cat <<PLAN
 # ===== #193 run-on-stream.lan plan (decode where the video is — NOTHING big on dev1) =====
 # stream box: ${STREAM_BOX}  (MCP: win-stream-snv)
@@ -91,12 +116,12 @@ main() {
 #   win-stream-snv Shell:
 ${ONBOX_CMD}
 #
-# STEP 3: pull back ONLY the small results (JSON + a few pixel-proof PNGs):
-#   win-stream-snv FileDownload  path='<the --json path inside ${OUT_DIR}>'
-#   win-stream-snv FileDownload  path='<each PNG under ${OUT_DIR}\\pixel-proof>'
+# STEP 3: pull back ONLY the small results (the partial JSON / verdict JSON + a few pixel-proof PNGs):
+${STEP3}
 #
-# dev1 receives ONLY the tiny JSON + PNGs. The ${STREAM_REC:-<stream recording>} stays on the
-# box and is NEVER copied to dev1 (#193).
+# dev1 receives ONLY the tiny JSON + the handful of flagged-frame PNGs. The
+# ${STREAM_REC:-<stream recording>} stays on the box and is NEVER copied to dev1 (#193/#208). The
+# merge derives the same <partial>-pixels dir to locate the #186 proofs.
 PLAN
 }
 

@@ -676,7 +676,7 @@ pub fn decode_capture_dual(
     // One full-width band tall enough to hold both QRs, then a single downscaled rqrr pass
     // over both. The #111 dual-QR is TOP-anchored (render_qr_dual_bgra → VAnchor::Top, so
     // the strih/stream bottom-corner burns never overlap it), so crop from the TOP — a
-    // centered crop would miss the now-top QRs. The live multitap tap passes
+    // centered crop would miss the now-top QRs. The recorded-file decode passes
     // roi = qr_size + 120, tall enough to cover the top margin + the full QR. crop_top
     // clamps the requested size to the image.
     let band_h = roi.min(height);

@@ -32,6 +32,7 @@ use crate::probe::payload::Payload;
 use crate::probe::qr::{decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_robust};
 use anyhow::{Context, Result};
 use image::GrayImage;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -114,7 +115,7 @@ fn available_mem_bytes() -> Option<u64> {
 pub const DEFAULT_MAX_PIXEL_PROOF: usize = 30;
 
 /// One analyzed frame of a recording, in file (capture) order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingFrame {
     /// 0-based index of this frame within the recording.
     pub frame_index: u64,

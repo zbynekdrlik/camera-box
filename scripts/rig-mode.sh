@@ -27,7 +27,7 @@
 # If it is absent, TEST mode FAILS LOUD telling the operator to deploy it.
 #
 # cam1 (the SOURCE camera) is NOT reconfigured here: it runs its DEPLOYED camera-box service, which
-# already emits a 30 fps NDI ("CAM1 (usb)") at the certified v4l2 controls (the multitap/recording
+# already emits a 30 fps NDI ("CAM1 (usb)") at the certified v4l2 controls (the recording-e2e
 # harness convention — the real camera is already at the test rate). See the e2e playbook skill.
 #
 # Idempotent (re-runnable), self-verifying (prints the achieved state + a clear PASS/FAIL), fail-loud

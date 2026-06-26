@@ -23,8 +23,8 @@
 # gate.sh) refuses a rig test unless the live strih+stream genlocked OBS stack matches the pinned
 # build. Loopback is a SINGLE-BOX cam->NDI->tap test on the camera-box device itself; it never
 # touches the strih/stream OBS stack (see the #66 NOTE below — there is NO downstream genlocked OBS
-# in this path). So the strih/stream pinned-build gate does not apply; recording-e2e.sh and
-# multitap-e2e.sh (which DO route through that stack) carry it. Do NOT add it here "to match" them.
+# in this path). So the strih/stream pinned-build gate does not apply; recording-e2e.sh (which DOES
+# route through that stack) carries it. Do NOT add it here "to match" it.
 set -euo pipefail
 
 # Resolve the selected camera's IP + NDI source from the shared set.
@@ -121,12 +121,13 @@ if fuser -s /dev/video0 2>/dev/null; then
 fi
 
 echo ">> start camera-box WITHOUT --display (capture->NDI only)"
-# #66 NOTE: loopback INTENTIONALLY does NOT set CAMERA_BOX_GENLOCK_FPS here (unlike
-# multitap-e2e.sh, which must — see that script). Loopback measures cam->NDI->tap on the SAME
-# box with frame-probe reading the NDI source directly; there is NO downstream genlocked OBS
-# FIFO in this path, so the #66 genlock-decimation requirement does not apply. Loopback
-# deliberately exercises the raw ~60fps capture path (CAPTURE_FPS=60). Do NOT add the genlock
-# env here "to match multitap" — it would change what loopback measures.
+# #66 NOTE: loopback INTENTIONALLY does NOT set CAMERA_BOX_GENLOCK_FPS here (unlike the
+# genlocked full-path run, recording-e2e.sh, which routes through the strih/stream OBS FIFO).
+# Loopback measures cam->NDI->tap on the SAME box with frame-probe reading the NDI source
+# directly; there is NO downstream genlocked OBS FIFO in this path, so the #66 genlock-decimation
+# requirement does not apply. Loopback deliberately exercises the raw ~60fps capture path
+# (CAPTURE_FPS=60). Do NOT add the genlock env here "to match the full-path run" — it would change
+# what loopback measures.
 nohup /usr/local/bin/camera-box >/tmp/cam-manual.log 2>&1 &
 MANUAL_PID=$!
 sleep 7

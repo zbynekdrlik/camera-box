@@ -3,14 +3,22 @@
 //! Consumes the #106 recorded-file decode (NOT an NDI tap, NOT the lz4 spool) and
 //! produces a HARD-FAIL zero-loss verdict with NO thresholds:
 //!
-//!   PASS = 0 undecodable AND 0 net copy AND 0 net gap AND analyzed span ≥ 300 s.
+//!   PASS (#186) = EVERY node's burn-id sequence is CONTIGUOUS (no missing id — a
+//!   missing id, incl. a BURN-UNREADABLE one, FAILS) AND (when `--cam1-capture-stats`
+//!   is given) cam2→cam1 V4L2 capture-drop = 0. The per-recording undecodable / 60→30
+//!   beat metrics and the analyzed span (`--min-secs`) are DIAGNOSTIC only — they are
+//!   reported for context but do NOT gate the headline.
 //!
 //! The free-running 60→30 camera-sampling beat (mean step exactly 2.0, symmetric)
-//! is recognized and NOT counted as loss; only the NET imbalance is real loss.
+//! is recognized and NOT counted as loss; the burn-id contiguity is the trustworthy verdict.
 //!
 //! Usage:
 //!   recording-verdict --strih strih.mkv [--stream stream.mkv] \
 //!       [--painter painter.csv] [--out-dir run-dir] [--min-secs 300]
+//!   recording-verdict --extract-partial <strih|stream> --strih|--stream <local rec> \
+//!       --out partial.json        # #208 decode ONE box's recording in place
+//!   recording-verdict --merge-partials strih=a.json --merge-partials stream=b.json \
+//!       [--painter …] [--json …]  # #208 merge the per-box partials on dev1
 //!
 //! - `--strih` the strih OBS-program recording (the strict hop-1 endpoint).
 //! - `--stream` the stream OBS-program recording (the headline endpoint). When
@@ -37,6 +45,7 @@ use camera_box::probe::recording_latency::{
     per_frame_latency_csv_rows, strih_stream_samples, strih_stream_samples_from_stream,
     write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
+use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
@@ -136,6 +145,29 @@ struct Args {
     /// in the stream recording (#174).
     #[arg(long)]
     latency_csv: Option<PathBuf>,
+    /// #208 PER-BOX decode-in-place. Decode the ONE LOCAL recording on THIS box (passed via
+    /// `--strih` for `strih`, `--stream` for `stream`) and write a small PARTIAL JSON (`--out`)
+    /// of what the cross-box merge needs — the box's burn-id sequence(s) with per-frame ids +
+    /// timestamps + the cam2 ticks it can see (ids + timestamps, NEVER frames/pixels). The strih
+    /// recording is decoded ON the strih box, the stream recording ON the stream box; a recording
+    /// is NEVER copied box-to-box (nor to dev1) — only this small JSON moves. dev1 then runs
+    /// `--merge-partials` to combine them. `<box>` is `strih` or `stream`.
+    #[arg(long, value_name = "BOX")]
+    extract_partial: Option<String>,
+    /// #208: where `--extract-partial` writes the partial JSON. Default: `partial-<box>.json`.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// #208 MERGE the per-box partials into the SAME full-chain verdict the fused path produces
+    /// (cam2→cam1, cam1→strih, strih→stream, cam1 contiguity, all loss + latency). PASS is the
+    /// #186 gate: EVERY node's burn-id sequence is CONTIGUOUS (no missing id — a missing id, incl.
+    /// a BURN-UNREADABLE one, FAILS) AND (when `--cam1-capture-stats` is given) cam2→cam1 V4L2
+    /// capture-drop = 0. The analyzed span (`--min-secs`) and the per-recording undecodable beat
+    /// are DIAGNOSTIC only — they do NOT gate the headline. Repeat per box:
+    /// `--merge-partials strih=<json> --merge-partials stream=<json>`. Combined with the small
+    /// `--painter` / `--cam1-capture-stats` files (already on dev1) and written to `--json`. NO
+    /// recording is read here — only the small partial JSONs.
+    #[arg(long, value_name = "BOX=JSON")]
+    merge_partials: Vec<String>,
 }
 
 /// Reduce a HopLatency option to a compact JSON object (or null) for the report.
@@ -322,7 +354,12 @@ struct NodeSpec<'a> {
     /// The decoded frames this node's burn-id contiguity is read FROM (#133).
     source: &'a [RecordingFrame],
     /// The recording file backing `source`, for pixel-proof extraction of a missing slot.
-    rec_path: &'a Path,
+    /// #208: `None` when `source` came from a merged per-box PARTIAL — the contiguity verdict
+    /// (the PASS gate) is unaffected; the pixel-proof PNG is not re-extracted HERE because the
+    /// recording is not on dev1. It was already written ON the box during `--extract-partial`
+    /// (see `extract_partial_flagged_frames`) and pulled back to dev1 beside the partial JSON in
+    /// the `<partial>-pixels` dir, so the #186 "SEE the frame" proof is preserved either way.
+    rec_path: Option<&'a Path>,
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -369,8 +406,13 @@ fn node_verdict(
         .collect();
 
     // Extract pixel-proof PNGs for every classified slot frame so the user can SEE it.
+    // #208: only when the recording is on this host (fused / `--extract-partial`). In merge mode
+    // (`rec_path` None) the recording is not on dev1, so these slots are NOT re-extracted here —
+    // their pixel proofs were ALREADY written ON the box during `--extract-partial`
+    // (`extract_partial_flagged_frames` flags the same missing slots) and pulled back beside the
+    // partial JSON. The classification (the PASS gate) is complete regardless.
     let slots: Vec<u64> = classified.iter().filter_map(|c| c.frame_index).collect();
-    if !slots.is_empty() {
+    if let (false, Some(rec_path)) = (slots.is_empty(), rec_path) {
         let png_dir = out_dir.join(format!("{node}-missing"));
         let extracted =
             extract_frames_png(rec_path, &slots, &HashSet::new(), &png_dir, max_pixel_proof)?;
@@ -740,24 +782,6 @@ fn parse_grab_ts(path: &Path) -> Result<std::collections::HashMap<u64, i64>> {
     Ok(m)
 }
 
-/// Analyze a recording into the per-frame tick stream (the #106 decode → #107 input).
-///
-/// `expected_node_burns` are the node burns THIS recording is known to carry (a strih
-/// recording carries cam1 + strih, a stream recording carries all three, a cam1 recording
-/// just cam1). Passing the right set drives the #207 fast-then-robust gate: a clean frame
-/// carrying every expected burn skips the ~10×-cost tiled recovery, so the verdict runs in
-/// ~5 min instead of ~50 — while a frame missing an expected burn still gets the full robust
-/// pass (the #186 0-miss guarantee).
-fn ticks_of(
-    path: &Path,
-    expected_node_burns: &[u32],
-) -> Result<(Vec<RecordingFrame>, Vec<FrameTick>)> {
-    let frames = analyze_recording_with_burns(path, expected_node_burns)
-        .with_context(|| format!("analyze recording {}", path.display()))?;
-    let ticks = FrameTick::from_recording_frames(&frames);
-    Ok((frames, ticks))
-}
-
 /// Print a per-recording DIAGNOSTIC (#186): the per-frame continuity numbers
 /// (undecodable / span) for context only — it does NOT gate the headline verdict
 /// and does NOT print a PASS/FAIL "RESULT" (which read as a verdict). The single
@@ -768,12 +792,20 @@ fn ticks_of(
 /// its pixel proof extracted.
 fn report_recording_diag(
     label: &str,
-    path: &Path,
+    // #208: `None` when the frames came from a merged per-box PARTIAL (the recording lives on
+    // its own box and is NEVER copied here) — the continuity numbers are unchanged; only the
+    // pixel-proof PNG extraction (which needs the recording file) is skipped.
+    path: Option<&Path>,
     v: &RecordingVerdict,
     out_dir: &Path,
     max_pixel_proof: usize,
 ) -> Result<()> {
-    println!("=== {label} recording DIAGNOSTIC ({}) ===", path.display());
+    match path {
+        Some(p) => println!("=== {label} recording DIAGNOSTIC ({}) ===", p.display()),
+        None => println!(
+            "=== {label} recording DIAGNOSTIC (merged partial — recording not on this host, #208) ==="
+        ),
+    }
     println!(
         "  frames={} analyzed={:.1}s undecodable={} (diagnostic only — loss is decided by the \
          #186 burn-id contiguity below, not these per-frame beat metrics)",
@@ -800,6 +832,27 @@ fn report_recording_diag(
     let mut flagged: Vec<u64> = v.undecodable_frames.to_vec();
     flagged.sort_unstable();
     flagged.dedup();
+
+    // #208: pixel-proof needs the recording file. In merge mode (path None) the recording is not
+    // on dev1; the per-box `--extract-partial` run ALREADY wrote these undecodable frames' pixel
+    // proofs ON the box (`extract_partial_flagged_frames`) and they were pulled back to dev1 beside
+    // the partial JSON in the `<partial>-pixels` dir (run_merge prints the concrete path). So report
+    // the count and do not re-extract here.
+    let path = match path {
+        Some(p) => p,
+        None => {
+            if !flagged.is_empty() {
+                println!(
+                    "  {} undecodable frame(s) — pixel proofs were extracted ON the recording's box \
+                     during --extract-partial and pulled back to dev1 beside the partial JSON (the \
+                     <partial>-pixels dir; see the '#186/#208 pixel proofs' section at the end of \
+                     this run for the concrete dev1 paths); not re-extracted here — #208/#186",
+                    flagged.len()
+                );
+            }
+            return Ok(());
+        }
+    };
 
     if !flagged.is_empty() {
         let png_dir = out_dir.join(label);
@@ -863,6 +916,46 @@ fn report_hop_latency(h: &Option<HopLatency>, label: &str, anchor: &str) -> bool
     }
 }
 
+/// One recording's decoded frames + (optionally) the recording file backing them. The frames
+/// come from EITHER a live decode (fused / `--extract-partial`) OR a merged per-box PARTIAL
+/// (#208); `rec_path` is `Some` only when the recording is on THIS host (so pixel-proof PNGs
+/// can be extracted). `None` ⇒ merged partial: the contiguity/PASS verdict is unaffected, only
+/// pixel-proof extraction is skipped (the per-box `--extract-partial` already wrote it).
+struct DecodedRec {
+    frames: Vec<RecordingFrame>,
+    rec_path: Option<PathBuf>,
+}
+
+/// How the OPTIONAL cam1 GRAB recording (#105 node 2) was obtained for the verdict. The cam1
+/// grab is no longer recorded by the harness (#179 — the cam1-capture burn rides into the stream
+/// recording instead), so the per-box / stream-only flow uses [`Cam1Source::Absent`]. A manual
+/// `--cam1` run whose grab decode fails is NON-FATAL (#187): the rest of the verdict still runs,
+/// but the failure is recorded in the report's `nodes.cam1.unavailable` so it is never silent.
+enum Cam1Source {
+    /// cam1 grab decoded OK.
+    Decoded(DecodedRec),
+    /// cam1 grab decode FAILED non-fatally (#187) — reason surfaced in `nodes.cam1.unavailable`.
+    DecodeFailed(String),
+    /// No cam1 grab supplied (the default per-box / stream-only flow).
+    Absent,
+}
+
+/// Decode a (strih/stream) recording IN PLACE into a [`DecodedRec`] (frames + its own path for
+/// pixel proof). `None` path ⇒ the recording wasn't supplied (`Ok(None)`); a decode error aborts
+/// (strih/stream are required for the hops they feed). The cam1 grab decode is NON-FATAL and is
+/// handled separately (see [`Cam1Source`]).
+fn decode_for(path: Option<&Path>, expected_node_burns: &[u32]) -> Result<Option<DecodedRec>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let frames = analyze_recording_with_burns(path, expected_node_burns)
+        .with_context(|| format!("analyze recording {}", path.display()))?;
+    Ok(Some(DecodedRec {
+        frames,
+        rec_path: Some(path.to_path_buf()),
+    }))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -871,15 +964,77 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // #208 MODE DISPATCH — three exclusive modes (default = the fused single-process verdict):
+    //   --extract-partial <box> : decode the ONE local recording in place → a small partial JSON
+    //                             (ids + timestamps, no frames/pixels copied); a recording is
+    //                             NEVER moved box-to-box, only this small JSON.
+    //   --merge-partials ...     : combine per-box partials (+ the small painter CSV on dev1)
+    //                             into the SAME full-chain verdict the fused path produces.
+    //   (neither)                : fused — decode every supplied recording on THIS host.
+    if let Some(box_name) = args.extract_partial.clone() {
+        return extract_partial(&args, &box_name);
+    }
+    if !args.merge_partials.is_empty() {
+        return run_merge(&args);
+    }
+
     tracing::info!(
         strih = ?args.strih.as_ref().map(|p| p.display().to_string()),
         stream = ?args.stream.as_ref().map(|p| p.display().to_string()),
         painter = ?args.painter.as_ref().map(|p| p.display().to_string()),
         out_dir = %args.out_dir.display(),
         min_secs = args.min_secs,
-        "recording-verdict start"
+        "recording-verdict start (fused)"
     );
 
+    // FUSED: decode every supplied recording on THIS host (the legacy single-process path),
+    // then build the verdict. Each recording is decoded for the burns it is KNOWN to carry
+    // (strih: cam1+strih; stream: all three; cam1 grab: cam1 only) for the #207 fast gate.
+    let strih = decode_for(
+        args.strih.as_deref(),
+        &[args.burn_cam1_run_id, args.burn_strih_run_id],
+    )?;
+    let stream = decode_for(
+        args.stream.as_deref(),
+        &[
+            args.burn_cam1_run_id,
+            args.burn_strih_run_id,
+            args.burn_stream_run_id,
+        ],
+    )?;
+    // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run, and the
+    // failure is recorded in nodes.cam1 (never silent). The grab is OPTIONAL (#179).
+    let cam1 = match args.cam1.as_deref() {
+        None => Cam1Source::Absent,
+        Some(p) => match analyze_recording_with_burns(p, &[args.burn_cam1_run_id]) {
+            Ok(frames) => Cam1Source::Decoded(DecodedRec {
+                frames,
+                rec_path: Some(p.to_path_buf()),
+            }),
+            Err(e) => Cam1Source::DecodeFailed(format!("cam1 grab decode failed: {e:#}")),
+        },
+    };
+
+    let (_report, all_pass) = build_and_print_verdict(&args, strih, stream, cam1)?;
+    if !all_pass {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Build the full-chain verdict + print it + write the `--json` report, returning the report
+/// JSON and the binary PASS. Operates on ALREADY-DECODED frames so the fused path (live decode)
+/// and #208 merge path (deserialized per-box partials) share IDENTICAL logic — the merged
+/// verdict is therefore equivalent to the fused output (same fields, same PASS semantics). The
+/// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
+/// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
+fn build_and_print_verdict(
+    args: &Args,
+    strih: Option<DecodedRec>,
+    stream: Option<DecodedRec>,
+    cam1: Cam1Source,
+) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
         min_secs: args.min_secs,
@@ -891,23 +1046,26 @@ fn main() -> Result<()> {
     // built incrementally and written to --json for the 2-graph report renderer.
     let mut report = serde_json::json!({ "nodes": {}, "hops": {}, "latency": {} });
 
+    // The recording file backing each node's frames, for pixel proof. `None` ⇒ the frames came
+    // from a merged per-box partial (the recording is on its own box, never copied here #208).
+    let strih_rec: Option<PathBuf> = strih.as_ref().and_then(|d| d.rec_path.clone());
+    let stream_rec: Option<PathBuf> = stream.as_ref().and_then(|d| d.rec_path.clone());
+
     // strih recording verdict (strict hop-1 endpoint). Keep the decoded frames so the
     // #108 per-hop latency engine can read each frame's cam2 + node-burn gen_ts_ns.
-    // `--strih` is OPTIONAL: when omitted (the cam1-only optical-readability loop) the
+    // strih is OPTIONAL: when omitted (the cam1-only optical-readability loop) the
     // strih-dependent hops (cam→strih, strih→stream) are skipped and only the cam1
     // grab is decoded/assessed.
-    let strih_data: Option<(Vec<RecordingFrame>, Vec<FrameTick>)> = match &args.strih {
-        Some(strih_path) => {
-            // The strih recording carries the cam1 (forwarded) + strih burns — never the
-            // stream burn (stream is downstream). The #207 fast gate requires only those two.
-            let (strih_frames, strih_ticks) =
-                ticks_of(strih_path, &[args.burn_cam1_run_id, args.burn_strih_run_id])?;
+    let strih_data: Option<(Vec<RecordingFrame>, Vec<FrameTick>)> = match strih {
+        Some(d) => {
+            let strih_frames = d.frames;
+            let strih_ticks = FrameTick::from_recording_frames(&strih_frames);
             let strih_v = verdict(&strih_ticks, &cfg);
             // Diagnostic only (#186): the per-recording beat metrics do not gate the
             // headline — the burn-id contiguity below is authoritative.
             report_recording_diag(
                 "strih",
-                strih_path,
+                strih_rec.as_deref(),
                 &strih_v,
                 &args.out_dir,
                 args.max_pixel_proof,
@@ -921,7 +1079,7 @@ fn main() -> Result<()> {
         }
         None => {
             println!(
-                "=== strih: SKIPPED (no --strih) — cam1-only optical-readability mode; \
+                "=== strih: SKIPPED (no strih input) — cam1-only optical-readability mode; \
                  cam→strih and strih→stream hops are unavailable ==="
             );
             None
@@ -935,23 +1093,15 @@ fn main() -> Result<()> {
     // the 60→30 sampling beat with loss (the exact false-positive source the user flagged).
     // It is printed for context but never makes a contiguous-zero run FAIL.
     let mut stream_frames_opt: Option<Vec<RecordingFrame>> = None;
-    if let Some(stream_path) = &args.stream {
-        // The stream recording is the chain endpoint — it carries all three node burns
-        // (cam1 → strih → stream forwarded). The #207 fast gate requires all three.
-        let (stream_frames, stream_ticks) = ticks_of(
-            stream_path,
-            &[
-                args.burn_cam1_run_id,
-                args.burn_strih_run_id,
-                args.burn_stream_run_id,
-            ],
-        )?;
+    if let Some(d) = stream {
+        let stream_frames = d.frames;
+        let stream_ticks = FrameTick::from_recording_frames(&stream_frames);
         let stream_v = verdict(&stream_ticks, &cfg);
         // Diagnostic (not a gate): surface undecodable + span. The #186 burn-contiguity
         // verdict is authoritative for loss.
         report_recording_diag(
             "stream",
-            stream_path,
+            stream_rec.as_deref(),
             &stream_v,
             &args.out_dir,
             args.max_pixel_proof,
@@ -969,42 +1119,20 @@ fn main() -> Result<()> {
     // cam1→strih hop, and the HONEST cam2→cam1 optical assessment + latency. cam1's
     // grab and strih's program carry the SAME camera frames, so cam1→strih is a strict
     // offset-immune tick-SET compare (the camera beat cancels) — a cam1 tick absent at
-    // strih is a real cam1→strih DROP.
+    // strih is a real cam1→strih DROP. A NON-FATAL cam1 grab decode failure (#187) is
+    // recorded in nodes.cam1.unavailable so it is never silent; Absent ⇒ no grab (#179).
     let mut cam1_frames_opt: Option<Vec<RecordingFrame>> = None;
-    if let Some(cam1_path) = &args.cam1 {
-        // #187: the cam1 GRAB is the large (multi-GB 4K) decode. Decode it so a failure
-        // (a decode error, or the worker pool aborting under memory pressure on a tight
-        // box) does NOT `?`-abort the WHOLE verdict — the valuable stream-only hops are
-        // computed LATER from the stream recording ALONE and must still be produced + the
-        // JSON still written. A cam1 grab failure degrades to "cam1-grab hops unavailable",
-        // not a dead run. (The #187 memory bound makes this rare; this is the belt-and-
-        // braces so a manual `--cam1` on a small box can never silently lose the rest of
-        // the verdict.) `ticks_of` returns Err on a grab failure; we catch it here.
-        // The cam1 grab carries only the cam1-capture burn (+ the optical dual-QR). The #207
-        // fast gate requires just the cam1 burn.
-        let cam1_decoded = match ticks_of(cam1_path, &[args.burn_cam1_run_id]) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                eprintln!(
-                    "WARNING: cam1 grab decode FAILED ({e:#}) — skipping the cam1-GRAB hops; \
-                     the stream-only per-hop verdict (incl cam2→cam1 from the cam1-capture burn) \
-                     is still computed from the stream recording below. (#187: a cam1 grab \
-                     failure no longer aborts the whole run.)"
-                );
-                report["nodes"]["cam1"] = serde_json::json!({
-                    "unavailable": true,
-                    "reason": format!("cam1 grab decode failed: {e:#}"),
-                });
-                None
-            }
-        };
-        if let Some((cam1_frames, cam1_ticks)) = cam1_decoded {
+    match cam1 {
+        Cam1Source::Decoded(d) => {
+            let cam1_rec = d.rec_path.clone();
+            let cam1_frames = d.frames;
             // cam1's own per-recording continuity (undecodable / net copy/gap WITHIN cam1).
             // Diagnostic only (#186) — the burn-id contiguity below is authoritative for loss.
+            let cam1_ticks = FrameTick::from_recording_frames(&cam1_frames);
             let cam1_v = verdict(&cam1_ticks, &cfg);
             report_recording_diag(
                 "cam1",
-                cam1_path,
+                cam1_rec.as_deref(),
                 &cam1_v,
                 &args.out_dir,
                 args.max_pixel_proof,
@@ -1015,7 +1143,16 @@ fn main() -> Result<()> {
                 "diagnostic_only": true,
             });
             cam1_frames_opt = Some(cam1_frames);
-        } // end: cam1 grab decoded OK (#187 non-fatal guard)
+        }
+        Cam1Source::DecodeFailed(reason) => {
+            // #187 non-fatal: the rest of the verdict still runs; record the failure so a
+            // manual --cam1 run that fails is visible in the report, not silently dropped.
+            eprintln!(
+                "WARNING: cam1 grab unavailable — {reason} (the stream-only hops still run; #187)."
+            );
+            report["nodes"]["cam1"] = serde_json::json!({ "unavailable": true, "reason": reason });
+        }
+        Cam1Source::Absent => {}
     }
 
     // cam→strih honest assessment (no false zero claim). Needs both strih + painter;
@@ -1199,34 +1336,33 @@ fn main() -> Result<()> {
         // when there is no --strih (the cam1-only / stream-only mode) — then it is the best
         // available source, with the softening caveat. strih/stream nodes always read from the
         // stream recording (the only recording carrying their own burn co-located with cam2).
-        // The stream recording path is the same for every site in this block (the enclosing
-        // `if let Some(stream_frames)` is only entered when --stream was provided). Unwrap the
-        // invariant ONCE.
-        let stream_path: &Path = args
-            .stream
-            .as_ref()
-            .expect("stream_frames_opt is Some ⇒ --stream was provided")
-            .as_path();
+        // The stream recording path (for pixel proof) is the same for every site in this block.
+        // #208: it is `None` when the stream frames came from a merged partial — pixel proof is
+        // then skipped (the recording is on the stream box); the contiguity verdict is unaffected.
+        let stream_path: Option<&Path> = stream_rec.as_deref();
         // cam1's source frames, its pixel-proof recording path, AND its label are decided by
         // ONE match on strih_data, so they can never desync (a future change to how strih_data
         // is built can't leave cam1 reading strih frames while extracting pixels from the stream
-        // file). When --strih is present strih_data is Some AND args.strih is Some, so the strih
-        // path is always available on that arm.
-        let (cam1_source, cam1_rec_path, cam1_source_label): (&[RecordingFrame], &Path, &str) =
-            match (&strih_data, &args.strih) {
-                (Some((strih_frames, _)), Some(strih_path)) => (
-                    strih_frames,
-                    strih_path.as_path(),
-                    "strih 1080p recording (clean, #133)",
-                ),
-                // no --strih (or strih decode unavailable) ⇒ cam1 falls back to the stream
-                // recording for BOTH frames and pixel proof, labelled as the softened source.
-                _ => (
-                    stream_frames,
-                    stream_path,
-                    "stream recording (no --strih; softened, may over-count — #133)",
-                ),
-            };
+        // file). When strih frames are present (decode OR partial), cam1 reads its burn from the
+        // clean 1080p strih recording; `strih_rec` is its pixel-proof path (None in merge mode).
+        let (cam1_source, cam1_rec_path, cam1_source_label): (
+            &[RecordingFrame],
+            Option<&Path>,
+            &str,
+        ) = match &strih_data {
+            Some((strih_frames, _)) => (
+                strih_frames,
+                strih_rec.as_deref(),
+                "strih 1080p recording (clean, #133)",
+            ),
+            // no strih input (or strih decode unavailable) ⇒ cam1 falls back to the stream
+            // recording for BOTH frames and pixel proof, labelled as the softened source.
+            None => (
+                stream_frames,
+                stream_path,
+                "stream recording (no strih input; softened, may over-count — #133)",
+            ),
+        };
         let cam1_ids = burn_ids_in(cam1_source, args.burn_cam1_run_id);
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
@@ -1671,9 +1807,321 @@ fn main() -> Result<()> {
             "OVERALL: NOT zero — see the per-node missing-id list above (each id classified REAL \
              DROP or BURN-UNREADABLE with its pixel slot). No percentage, no exclusion."
         );
+    }
+    // Return the report + PASS; the CALLER (main / run_merge) decides the process exit. The
+    // builder must NEVER `process::exit` itself — the unit tests call it in-process (#208).
+    Ok((report, all_pass))
+}
+
+/// #208 + #186: the sibling directory (BESIDE the partial JSON) where `--extract-partial` writes
+/// this box's pixel-proof PNGs and `--merge-partials` looks for the pulled-back copies. For a
+/// partial `…/strih-partial-42.json` it is `…/strih-partial-42-pixels`. Deriving it the SAME way
+/// on both sides means the box writes the PNGs, the harness pulls the dir back beside the partial,
+/// and the merge points the operator at the real dev1 location — no path is threaded around.
+fn partial_pixels_dir(partial_path: &Path) -> PathBuf {
+    let stem = partial_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "partial".to_string());
+    partial_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}-pixels"))
+}
+
+/// #208 + #186: the recorded-frame indices THIS box must extract pixel proofs for during
+/// `--extract-partial`, so the merge's #186 "SEE the missing / undecodable frame" guarantee
+/// survives the per-box split (the merge can NEVER re-extract — the recording is not on dev1).
+///
+/// Returns `(flagged, undecodable)`. `flagged` is the union (sorted, deduped) of
+///   • the recording's UNDECODABLE frames (no readable QR at all — the `report_recording_diag` set), and
+///   • the missing-burn slots for the nodes this box AUTHORITATIVELY backs — the SAME slots the
+///     merge would flag, so the PNGs pulled back are exactly the #186 proofs:
+///       - strih box → cam1 (its burn is read from the clean 1080p strih recording, #133),
+///       - stream box → strih + stream (their burns are read from the stream recording).
+/// `undecodable` is the undecodable subset (so `extract_frames_png` runs its sharp-but-flagged
+/// self-check on those frames). PURE (no I/O) so the selection is unit-testable; the PNG write is
+/// the thin `extract_frames_png` glue in [`extract_partial`].
+fn extract_partial_flagged_frames(
+    box_name: &str,
+    frames: &[RecordingFrame],
+    args: &Args,
+) -> (Vec<u64>, HashSet<u64>) {
+    let all_burns = [
+        args.burn_cam1_run_id,
+        args.burn_strih_run_id,
+        args.burn_stream_run_id,
+    ];
+    // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
+    let ticks = FrameTick::from_recording_frames(frames);
+    let cfg = VerdictConfig {
+        capture_fps: args.capture_fps,
+        min_secs: args.min_secs,
+        refresh_hz: args.refresh_hz,
+    };
+    let v = verdict(&ticks, &cfg);
+    let undecodable: HashSet<u64> = v.undecodable_frames.iter().copied().collect();
+    let mut flagged: Vec<u64> = v.undecodable_frames.clone();
+
+    // The missing-burn slots for the nodes THIS box authoritatively backs (#133): the strih box
+    // backs cam1 (its burn is crispest in the clean 1080p strih recording); the stream box backs
+    // strih + stream (their own burns are co-located with cam2's optical QR only in the stream
+    // recording). These are the SAME (node, source) pairings `build_and_print_verdict` uses, so the
+    // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
+    // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop); strih/stream burn
+    // per-RENDER-tick (a forward gap is not loss, but a delivered frame missing its burn is).
+    let owned: &[(&str, u32, BurnRate)] = match box_name {
+        "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame)],
+        "stream" => &[
+            ("strih", args.burn_strih_run_id, BurnRate::PerRenderTick),
+            ("stream", args.burn_stream_run_id, BurnRate::PerRenderTick),
+        ],
+        _ => &[],
+    };
+    for &(node, burn_run_id, rate) in owned {
+        let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate);
+        let iw = burn_contiguity_in_window(node, &window, rate);
+        flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
+    }
+
+    flagged.sort_unstable();
+    flagged.dedup();
+    (flagged, undecodable)
+}
+
+/// The node-burn run_ids a per-box partial is expected to carry, derived from the box name + the
+/// `--burn-*-run-id` args: the strih recording carries cam1 (forwarded) + strih; the stream
+/// recording (the chain endpoint) carries all three. `None` for an unknown box. SINGLE source of
+/// truth for BOTH `--extract-partial` (what it decodes for) and the `--merge-partials` consistency
+/// check — so a manual `--burn-*-run-id` mismatch between extract and merge cannot silently
+/// misverdict (run_merge warns when a loaded partial's `expected_burns` disagree with this).
+fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
+    match box_name {
+        "strih" => Some(vec![args.burn_cam1_run_id, args.burn_strih_run_id]),
+        "stream" => Some(vec![
+            args.burn_cam1_run_id,
+            args.burn_strih_run_id,
+            args.burn_stream_run_id,
+        ]),
+        _ => None,
+    }
+}
+
+/// #208 PER-BOX decode-in-place: decode the box's LOCAL recording in place and write a SMALL
+/// partial JSON (ids + timestamps, NO frames/pixels) PLUS the #186 pixel-proof PNGs for this box's
+/// flagged frames (undecodable + the missing-burn slots for the nodes it backs) into the sibling
+/// `<partial>-pixels` dir. The strih box decodes its strih recording (cam1 + strih burns); the
+/// stream box decodes its stream recording (all three burns). dev1 then `--merge-partials` the
+/// small JSONs (+ pulls back the pixel dirs) — the recording is NEVER copied box-to-box (nor to dev1).
+fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
+    let expected_burns = args_expected_burns_for(box_name, args).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--extract-partial: unknown box {box_name:?} (expected `strih` or `stream`)"
+        )
+    })?;
+    let rec_path: &Path = match box_name {
+        // The strih recording carries the cam1 (forwarded) + strih burns — never the stream burn.
+        "strih" => args
+            .strih
+            .as_deref()
+            .context("--extract-partial strih needs --strih <recording on the strih box>")?,
+        // The stream recording is the chain endpoint — it carries all three forwarded burns.
+        "stream" => args
+            .stream
+            .as_deref()
+            .context("--extract-partial stream needs --stream <recording on the stream box>")?,
+        // args_expected_burns_for already returned None (→ bailed) for any other box.
+        _ => unreachable!("unknown box rejected by args_expected_burns_for above"),
+    };
+    tracing::info!(
+        box_name,
+        recording = %rec_path.display(),
+        expected_burns = ?expected_burns,
+        "extract-partial: decoding the LOCAL recording in place (#208 — nothing copied off-box)"
+    );
+    let frames = analyze_recording_with_burns(rec_path, &expected_burns)
+        .with_context(|| format!("analyze recording {}", rec_path.display()))?;
+
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("partial-{box_name}.json")));
+
+    // #186/#208: write the pixel proofs for THIS box's flagged frames (undecodable + the
+    // missing-burn slots for the nodes this box backs) into the sibling `<partial>-pixels` dir,
+    // so the per-box flow does NOT drop the "SEE the frame" guarantee. The recording is on this
+    // box during extract, so this is the ONE place the proof can be produced; the merge (dev1) can
+    // never re-extract. Only the flagged-frame PNGs are written (a handful), pulled back beside the
+    // partial JSON. A clean (zero-loss, fully decodable) run writes none.
+    let (flagged, undecodable) = extract_partial_flagged_frames(box_name, &frames, args);
+    if !flagged.is_empty() {
+        let png_dir = partial_pixels_dir(&out);
+        let extracted = extract_frames_png(
+            rec_path,
+            &flagged,
+            &undecodable,
+            &png_dir,
+            args.max_pixel_proof,
+        )?;
+        println!(
+            "#186/#208 pixel-proof [{box_name}]: {} flagged frame(s) → {} PNG(s) in {} \
+             (undecodable + missing-burn slots; pull this dir to dev1 beside the partial).",
+            flagged.len(),
+            extracted.len(),
+            png_dir.display(),
+        );
+    }
+
+    let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames);
+    partial.save(&out)?;
+    let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "#208 partial-extract [{box_name}]: {} frames decoded in place → {} ({bytes} bytes JSON). \
+         Pull this small JSON (+ the {}-pixels dir if present) to dev1; the {} recording stays on \
+         its box (never copied).",
+        partial.frames.len(),
+        out.display(),
+        partial_pixels_dir(&out)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        box_name,
+    );
+    Ok(())
+}
+
+/// #208 MERGE: combine the per-box partials (+ the small `--painter` / `--cam1-capture-stats`
+/// files already on dev1) into the SAME full-chain verdict the fused path produces — with NO
+/// recording read here. A strih partial can ONLY fill the `strih` slot and a stream partial the
+/// `stream` slot (the file's recorded `box` must match its assignment), so a recording can never
+/// be cross-fed; the partials carry only ids + timestamps.
+fn run_merge(args: &Args) -> Result<()> {
+    let mut strih: Option<DecodedRec> = None;
+    let mut stream: Option<DecodedRec> = None;
+    // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
+    // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
+    let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
+    for spec in &args.merge_partials {
+        let (box_name, path) = spec
+            .split_once('=')
+            .with_context(|| format!("--merge-partials expects BOX=JSON, got {spec:?}"))?;
+        let partial = RecordingPartial::load(Path::new(path))
+            .with_context(|| format!("load partial {path}"))?;
+        // The partial's recorded box name MUST match the slot it is assigned to — a strih
+        // partial can NEVER be merged as the stream input (the #208 box-to-box guard, enforced
+        // at the data level, not just the path).
+        anyhow::ensure!(
+            partial.box_name == box_name,
+            "--merge-partials {spec}: the partial file's box is {:?} but it was assigned to {box_name:?}",
+            partial.box_name
+        );
+        // Review (#208): WARN — never silently — on (1) a repeated box key (a later partial
+        // silently overwrites the earlier slot) and (2) an `expected_burns` mismatch between the
+        // loaded partial and this merge's `--burn-*-run-id` args (a manual burn-id mismatch between
+        // extract and merge would otherwise pair on the wrong run_id and misverdict).
+        if box_paths.iter().any(|(b, _)| b.as_str() == box_name) {
+            eprintln!(
+                "WARNING: --merge-partials {box_name}= specified more than once — the later partial \
+                 ({path}) OVERWRITES the earlier one for the {box_name} slot."
+            );
+        }
+        if let Some(expected) = args_expected_burns_for(box_name, args) {
+            if partial.expected_burns != expected {
+                eprintln!(
+                    "WARNING: --merge-partials {box_name}: the partial was extracted for burns {:?} \
+                     but this merge's --burn-*-run-id imply {expected:?} — a burn-id mismatch \
+                     between extract and merge can MISVERDICT. Re-extract with matching --burn-* ids.",
+                    partial.expected_burns
+                );
+            }
+        }
+        box_paths.push((box_name.to_string(), PathBuf::from(path)));
+        let rec = DecodedRec {
+            frames: partial.frames,
+            rec_path: None, // merge: the recording is on its own box, never on dev1
+        };
+        match box_name {
+            "strih" => strih = Some(rec),
+            "stream" => stream = Some(rec),
+            other => anyhow::bail!(
+                "--merge-partials: unknown box {other:?} (expected `strih` or `stream`)"
+            ),
+        }
+    }
+    anyhow::ensure!(
+        strih.is_some() || stream.is_some(),
+        "--merge-partials needs at least one BOX=JSON partial"
+    );
+    // #186 note: cam1's pixel proof comes from the STRIH box (cam1's burn is crispest in the clean
+    // 1080p strih recording, #133 — its slots are flagged there). A degenerate stream-ONLY merge
+    // (no strih partial) therefore has NO cam1 pixel proof: cam1 falls back to the softened stream
+    // source for the verdict, but the stream box's --extract-partial deliberately does NOT write
+    // cam1 proofs (they would be at softened/reordered slots that don't match the merge's). WARN so
+    // a stream-only run never SILENTLY lacks the #186 cam1 proof; the production two-box flow always
+    // supplies both partials.
+    if stream.is_some() && strih.is_none() {
+        eprintln!(
+            "WARNING: --merge-partials is stream-only (no strih partial) — cam1's #186 pixel proof \
+             is UNAVAILABLE (cam1's clean source is the strih recording, #133). Supply \
+             strih=<partial> for full cam1 pixel proof."
+        );
+    }
+    tracing::info!(
+        strih = strih.is_some(),
+        stream = stream.is_some(),
+        painter = ?args.painter.as_ref().map(|p| p.display().to_string()),
+        "merge: building the full-chain verdict from per-box partials (#208 — no recording on dev1)"
+    );
+    // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
+    // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
+    let (_report, all_pass) = build_and_print_verdict(args, strih, stream, Cam1Source::Absent)?;
+    report_pulled_back_pixel_proofs(&box_paths);
+    if !all_pass {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// #186/#208: point the operator at the pixel proofs each box wrote during `--extract-partial`.
+/// The merge cannot re-extract (the recording is not on dev1), but the box ALREADY wrote the
+/// flagged/undecodable frames' PNGs into the `<partial>-pixels` dir, pulled back beside the partial
+/// JSON. Locate that dir per box and report how many PNGs are there — so a FAIL's #186 "SEE the
+/// missing frame" guarantee resolves to a real dev1 path, never a phantom one.
+fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
+    if box_paths.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "=== #186/#208 pixel proofs (extracted ON each box during --extract-partial, pulled back to dev1) ==="
+    );
+    for (box_name, partial_path) in box_paths {
+        let dir = partial_pixels_dir(partial_path);
+        let pngs = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|x| x.eq_ignore_ascii_case("png"))
+                    })
+                    .count()
+            })
+            .ok();
+        match pngs {
+            Some(0) | None => println!(
+                "  [{box_name}] {} — no pixel-proof PNGs on dev1 (a clean run writes none; if this \
+                 run FAILED, pull the {box_name} box's <partial>-pixels dir — it was written there \
+                 during --extract-partial)",
+                dir.display()
+            ),
+            Some(n) => println!(
+                "  [{box_name}] {n} pixel-proof PNG(s) in {} — open these to SEE each flagged / \
+                 undecodable frame (#186)",
+                dir.display()
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1710,6 +2158,354 @@ mod tests {
             payloads,
             tick,
         }
+    }
+
+    // ---- #208 PER-BOX decode-in-place: merge of per-box partials reproduces the fused verdict ----
+
+    /// Build a window of N delivered frames carrying the requested burns, contiguous end-to-end.
+    /// `with_stream` adds the stream burn (only the stream recording carries it).
+    fn window(n: u32, with_stream: bool, cam1_gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i)];
+                // cam1 per-emit id: contiguous, UNLESS a forward gap is injected (skip one id).
+                let cam1_id = match cam1_gap_at {
+                    Some(g) if i >= g => 5000 + i + 1, // from `g` on, ids jump by 1 → id (5000+g) missing
+                    _ => 5000 + i,
+                };
+                ps.push((CAM1B, cam1_id));
+                ps.push((STRIH, 1670 + 3 * i)); // per-render tick
+                if with_stream {
+                    ps.push((STREAM, 9000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #208: merging the per-box partials (strih partial + stream partial) reproduces the SAME
+    /// full-chain verdict the fused single-process path produces — same JSON, same PASS — for a
+    /// clean ZERO-loss run AND a run with a real cam1 drop. This is the equivalence the per-box
+    /// decode-in-place flow rests on: no recording is copied box-to-box, yet the verdict is
+    /// identical.
+    #[test]
+    fn merge_of_partials_reproduces_the_fused_verdict() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        // Default args: burn ids default to 911001/911002/911004; cam2_run_id 0; min-secs 300.
+        let args = super::Args::parse_from(["recording-verdict"]);
+
+        // Helper: build BOTH ways (fused = frames decoded here; merge = frames round-tripped
+        // through the per-box partial JSON) and assert the verdict JSON + PASS are identical.
+        let run_both = |strih_frames: Vec<RecordingFrame>, stream_frames: Vec<RecordingFrame>| {
+            let (fused, fused_pass) = build_and_print_verdict(
+                &args,
+                Some(DecodedRec {
+                    frames: strih_frames.clone(),
+                    rec_path: None,
+                }),
+                Some(DecodedRec {
+                    frames: stream_frames.clone(),
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+            )
+            .expect("fused verdict");
+
+            // Round-trip both recordings through the small per-box partial JSON, then merge.
+            let strih_p = RecordingPartial::from_frames(
+                "strih",
+                &PathBuf::from("strih.mkv"),
+                &[CAM1B, STRIH],
+                strih_frames,
+            );
+            let stream_p = RecordingPartial::from_frames(
+                "stream",
+                &PathBuf::from("stream.mp4"),
+                &[CAM1B, STRIH, STREAM],
+                stream_frames,
+            );
+            let strih_back = RecordingPartial::from_json(&strih_p.to_json().unwrap()).unwrap();
+            let stream_back = RecordingPartial::from_json(&stream_p.to_json().unwrap()).unwrap();
+            let (merged, merged_pass) = build_and_print_verdict(
+                &args,
+                Some(DecodedRec {
+                    frames: strih_back.frames,
+                    rec_path: None,
+                }),
+                Some(DecodedRec {
+                    frames: stream_back.frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+            )
+            .expect("merged verdict");
+
+            assert_eq!(
+                merged, fused,
+                "#208: the merged verdict JSON must reproduce the fused output exactly"
+            );
+            assert_eq!(
+                merged_pass, fused_pass,
+                "#208: merge PASS must equal fused PASS"
+            );
+            (fused, fused_pass)
+        };
+
+        // CLEAN run: contiguous burns end-to-end ⇒ ZERO loss PASS.
+        let (clean, clean_pass) = run_both(window(12, false, None), window(12, true, None));
+        assert!(clean_pass, "#208: contiguous burns ⇒ overall PASS");
+        assert_eq!(clean["overall_pass"], serde_json::json!(true));
+        assert_eq!(clean["full_chain"]["zero_loss"], serde_json::json!(true));
+        assert_eq!(clean["full_chain"]["real_drops"], serde_json::json!(0));
+        assert_eq!(clean["full_chain"]["burn_unreadable"], serde_json::json!(0));
+        // The per-node diagnostics + full-chain burn presence must reflect BOTH recordings'
+        // frames — proving the strih diag came from the strih partial and stream from the stream
+        // partial (the per-box decode), not one fused recording.
+        assert_eq!(clean["nodes"]["strih"]["undecodable"], serde_json::json!(0));
+        assert_eq!(
+            clean["nodes"]["strih"]["diagnostic_only"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            clean["nodes"]["stream"]["undecodable"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            clean["full_chain"]["burn_ids_present"]["cam1"],
+            serde_json::json!(12),
+            "cam1 burn ids come from the STRIH partial (#133): {}",
+            clean["full_chain"]["burn_ids_present"]
+        );
+        assert_eq!(
+            clean["full_chain"]["burn_ids_present"]["stream"],
+            serde_json::json!(12)
+        );
+        assert!(
+            clean["full_chain"]["cam1_source"]
+                .as_str()
+                .unwrap_or("")
+                .contains("strih"),
+            "cam1's contiguity source must be the strih recording (#133): {}",
+            clean["full_chain"]["cam1_source"]
+        );
+
+        // REAL cam1 DROP: cam1's contiguity source is the STRIH recording (#133); a forward gap
+        // (id 5005 missing from frame 5 on) is a real cam1 drop ⇒ NOT zero ⇒ FAIL. Merge agrees.
+        let (drop, drop_pass) = run_both(window(12, false, Some(5)), window(12, true, None));
+        assert!(!drop_pass, "#208: a real cam1 drop ⇒ overall FAIL");
+        assert_eq!(drop["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert!(
+            drop["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
+            "#208: the missing cam1 id must be classified as a REAL DROP: {}",
+            drop["full_chain"]["real_drops"]
+        );
+    }
+
+    /// #186/#208 BLOCKER: `--extract-partial` must IDENTIFY this box's pixel-proof frames so the
+    /// on-box decode can write the PNGs and the merge's "SEE the frame" guarantee survives the
+    /// per-box split. The strih box must flag its recording's UNDECODABLE frames (no readable QR).
+    #[test]
+    fn extract_partial_flags_undecodable_frames_for_pixel_proof() {
+        use super::extract_partial_flagged_frames;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        // strih-box frames: an INTERIOR frame (index 1) with NO readable QR (undecodable);
+        // surrounded by decodable frames so it is body-interior (not lead-in/out trimmed). cam1
+        // ids 5000,5001 are contiguous (no missing-burn slot) — so ONLY the undecodable shows.
+        let frames = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 5000), (STRIH, 1670)]),
+            frame(1, &[]), // no QR at all → undecodable interior frame
+            frame(2, &[(CAM2, 102), (CAM1B, 5001), (STRIH, 1676)]),
+        ];
+        let (flagged, undecodable) = extract_partial_flagged_frames("strih", &frames, &args);
+        assert!(
+            flagged.contains(&1),
+            "#186: the undecodable frame (index 1) must be flagged for pixel-proof extraction \
+             on-box; got flagged={flagged:?}"
+        );
+        assert!(
+            undecodable.contains(&1),
+            "#186: frame 1 must be in the undecodable set (so the sharp-but-flagged self-check \
+             runs on it); got {undecodable:?}"
+        );
+    }
+
+    /// #186/#208 BLOCKER: the stream box must ALSO flag the missing-burn slots for the nodes it
+    /// backs (strih + stream), so a delivered frame whose burn QR is unreadable (a #186 anomaly)
+    /// has its pixels extractable on-box, not silently lost in the per-box flow.
+    #[test]
+    fn extract_partial_flags_missing_burn_slots_for_owned_nodes() {
+        use super::extract_partial_flagged_frames;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        // stream-box frames: frame 1 is DELIVERED (carries cam2) but is MISSING its strih burn —
+        // a BURN-UNREADABLE missing slot for the strih node (read from the stream recording). All
+        // frames are decodable (cam2 present) so there is NO undecodable frame; the ONLY proof is
+        // the strih missing-burn slot at frame index 1.
+        let frames = vec![
+            frame(0, &[(CAM2, 100), (STRIH, 1670), (STREAM, 9000)]),
+            frame(1, &[(CAM2, 101), (STREAM, 9003)]), // delivered, NO strih burn → BurnUnreadable
+            frame(2, &[(CAM2, 102), (STRIH, 1676), (STREAM, 9006)]),
+        ];
+        let (flagged, undecodable) = extract_partial_flagged_frames("stream", &frames, &args);
+        assert!(
+            flagged.contains(&1),
+            "#186: the strih-node missing-burn slot (delivered frame 1 with no strih burn) must be \
+             flagged for pixel-proof on the stream box; got flagged={flagged:?}"
+        );
+        assert!(
+            undecodable.is_empty(),
+            "#186: no frame is undecodable here (all carry cam2) — only the missing-burn slot is \
+             flagged; got undecodable={undecodable:?}"
+        );
+    }
+
+    /// #208: the pixel-proof dir is derived the SAME way on both sides (extract writes it, merge
+    /// reads it) — `…/strih-partial-42.json` → `…/strih-partial-42-pixels` beside the JSON.
+    #[test]
+    fn partial_pixels_dir_is_a_sibling_named_after_the_partial() {
+        use super::partial_pixels_dir;
+        use std::path::Path;
+        assert_eq!(
+            partial_pixels_dir(Path::new("/tmp/run/strih-partial-42.json")),
+            Path::new("/tmp/run/strih-partial-42-pixels"),
+            "the pixel dir must be a sibling of the partial named <stem>-pixels"
+        );
+        // No parent → current dir.
+        assert_eq!(
+            partial_pixels_dir(Path::new("stream-partial.json")),
+            Path::new("stream-partial-pixels")
+        );
+    }
+
+    /// #208 box-to-box guard (review): `--merge-partials` must REJECT a partial assigned to the
+    /// wrong slot — a `strih` partial fed as the `stream` input must ERROR (so a recording can
+    /// never be cross-fed at the data level), and a partial whose box is neither strih nor stream
+    /// must BAIL. Both must fail BEFORE the verdict runs (no exit, no misverdict).
+    #[test]
+    fn merge_rejects_box_mismatch_and_unknown_box() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // A `strih` partial assigned to the `stream` slot → error (the partial's recorded box must
+        // match its assignment; a strih recording can never be merged as the stream input).
+        let strih_p = RecordingPartial::from_frames(
+            "strih",
+            &PathBuf::from("strih.mkv"),
+            &[CAM1B, STRIH],
+            vec![],
+        );
+        let strih_path = dir.path().join("strih-partial.json");
+        strih_p.save(&strih_path).unwrap();
+        let spec = format!("stream={}", strih_path.display());
+        let args =
+            super::Args::parse_from(["recording-verdict", "--merge-partials", spec.as_str()]);
+        let err = run_merge(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("box") && msg.contains("strih"),
+            "#208: a strih partial in the stream slot must error (box mismatch): {msg}"
+        );
+
+        // A partial whose box is neither strih nor stream (key matches the recorded box, so the
+        // mismatch guard passes) must BAIL with `unknown box`.
+        let weird_p = RecordingPartial::from_frames("weird", &PathBuf::from("x.mkv"), &[], vec![]);
+        let weird_path = dir.path().join("weird-partial.json");
+        weird_p.save(&weird_path).unwrap();
+        let spec2 = format!("weird={}", weird_path.display());
+        let args2 =
+            super::Args::parse_from(["recording-verdict", "--merge-partials", spec2.as_str()]);
+        let err2 = run_merge(&args2).unwrap_err();
+        assert!(
+            format!("{err2:#}").contains("unknown box"),
+            "#208: an unknown box must bail: {err2:#}"
+        );
+    }
+
+    /// #208 (review): the per-box expected burns are ONE source of truth shared by extract and the
+    /// merge consistency check — strih carries cam1+strih, stream carries all three, unknown → None.
+    /// A mismatch between a partial's recorded expected_burns and this mapping is what run_merge
+    /// warns on (a manual --burn-* mismatch between extract and merge that could misverdict).
+    #[test]
+    fn args_expected_burns_for_maps_box_to_its_burns() {
+        use super::args_expected_burns_for;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        assert_eq!(
+            args_expected_burns_for("strih", &args),
+            Some(vec![CAM1B, STRIH]),
+            "strih partial carries cam1 (forwarded) + strih"
+        );
+        assert_eq!(
+            args_expected_burns_for("stream", &args),
+            Some(vec![CAM1B, STRIH, STREAM]),
+            "stream partial (chain endpoint) carries all three burns"
+        );
+        assert_eq!(
+            args_expected_burns_for("nope", &args),
+            None,
+            "an unknown box has no expected burns"
+        );
+    }
+
+    /// #187/#208: a NON-FATAL cam1 grab decode failure must be RECORDED in the report
+    /// (`nodes.cam1.unavailable`), not silently dropped, while the stream-only hops still run.
+    /// A decoded cam1 grab populates the cam1 diagnostic node.
+    #[test]
+    fn cam1_grab_decode_failure_is_recorded_not_silent() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+
+        // A failed cam1 grab surfaces nodes.cam1.unavailable + the reason (never silent).
+        let (failed, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: window(12, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::DecodeFailed("cam1 grab decode failed: boom".to_string()),
+        )
+        .expect("verdict with a failed cam1 grab");
+        assert_eq!(
+            failed["nodes"]["cam1"]["unavailable"],
+            serde_json::json!(true),
+            "a failed cam1 grab must record nodes.cam1.unavailable: {}",
+            failed["nodes"]["cam1"]
+        );
+        assert!(failed["nodes"]["cam1"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("boom"));
+
+        // A decoded cam1 grab populates the cam1 diagnostic node.
+        let (decoded, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: window(12, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Decoded(DecodedRec {
+                frames: window(12, false, None),
+                rec_path: None,
+            }),
+        )
+        .expect("verdict with a decoded cam1 grab");
+        assert_eq!(
+            decoded["nodes"]["cam1"]["diagnostic_only"],
+            serde_json::json!(true)
+        );
+        assert!(decoded["nodes"]["cam1"]["frames"].as_u64().unwrap() > 0);
     }
 
     #[test]
@@ -1766,7 +2562,7 @@ mod tests {
                 source: &stream,
                 // rec_path only touched when there ARE missing slots to extract pixels for;
                 // a zero-loss verdict never reads it.
-                rec_path: std::path::Path::new("/nonexistent.mp4"),
+                rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -1805,7 +2601,7 @@ mod tests {
                 burn_run_id: CAM1B,
                 rate: BurnRate::PerEmittedFrame,
                 source: &stream,
-                rec_path: std::path::Path::new("/nonexistent.mp4"),
+                rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -1901,7 +2697,7 @@ mod tests {
                 burn_run_id: CAM1B,
                 rate: BurnRate::PerEmittedFrame,
                 source: &strih, // <-- #133: cam1 source-of-truth = the strih 1080p recording
-                rec_path: std::path::Path::new("/nonexistent-strih.mkv"),
+                rec_path: Some(std::path::Path::new("/nonexistent-strih.mkv")),
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -1982,7 +2778,7 @@ mod tests {
                 burn_run_id: CAM1B,
                 rate: BurnRate::PerEmittedFrame,
                 source: &strih,
-                rec_path: std::path::Path::new("/nonexistent.mkv"),
+                rec_path: Some(std::path::Path::new("/nonexistent.mkv")),
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),

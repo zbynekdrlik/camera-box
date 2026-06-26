@@ -81,8 +81,9 @@ struct Args {
     /// Stamp each frame's `gen_ts_ns` on CLOCK_REALTIME (the DanteSync-disciplined
     /// wall clock) instead of this process's monotonic clock. Set this for the #7
     /// multi-node ABSOLUTE end-to-end latency path (paint-only on the camera; the
-    /// dev1 endpoint tap runs `multitap-probe --wall-clock` so recv − gen is a
-    /// true absolute latency). Leave OFF for the Phase-1 single-box loopback,
+    /// recorded-file verdict (recording-verdict) reads each node's burn gen_ts on
+    /// the same wall clock, so the per-hop latency is a true absolute latency).
+    /// Leave OFF for the Phase-1 single-box loopback,
     /// where painter+reader share one process clock. Requires the cluster to be
     /// clock-synced (verify with scripts/clock-offset-guard.sh).
     #[arg(long, default_value_t = false)]
@@ -90,7 +91,8 @@ struct Args {
     /// Paint two QR codes side-by-side (Vernier dual-QR path) and decode from both
     /// halves on receive. At least one half is always sharp on a mid-transition
     /// capture, eliminating the false-loss artifact from the single-QR path.
-    /// Painter and reader both switch; use together with multitap-probe --dual-qr.
+    /// Painter and reader both switch; the recorded-file verdict decodes both
+    /// halves the same way.
     #[arg(long, default_value_t = false)]
     dual_qr: bool,
     /// Paint QR frames DIRECTLY into an NDI sender with this name (no

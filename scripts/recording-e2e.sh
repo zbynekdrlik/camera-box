@@ -478,35 +478,87 @@ if [ -f "$STREAM_REC" ]; then VERDICT_ARGS+=(--stream "$STREAM_REC"); fi
 if [ -f "$PAINTER_CSV" ]; then VERDICT_ARGS+=(--painter "$PAINTER_CSV"); fi
 if [ -f "$CAM1_CAPTURE_STATS" ]; then VERDICT_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
 
-# #193 RUN-ON-STREAM: by default the verdict runs ON stream.lan against the LOCAL recording —
-# the multi-GB file is NEVER decoded on dev1 (the root of the slow transfers + #187 OOM + disk
-# drain). The harness emits the exact win-stream-snv plan (upload recording-verdict.exe → run
-# it on the box against the box-local recording → pull back ONLY the small JSON+PNGs); the
-# agent/operator holding the win-* MCP executes those steps (scp/ssh to Windows is DENIED, so
-# bash cannot run them itself). Set VERDICT_ON_STREAM=0 for the LEGACY decode-on-dev1 path.
+# #208 PER-BOX DECODE-IN-PLACE (refines #193): by default decode EACH recording ON ITS OWN BOX —
+# the strih recording ON the strih box, the stream recording ON the stream box — and merge the
+# SMALL partial JSONs on dev1. A recording is NEVER copied box-to-box (nor to dev1); only the
+# small partial JSONs (+ the painter CSV) move. The OLD #193 flow ran a SINGLE fused verdict on
+# the stream box, which forced the ~700 MB strih .mkv to be copied strih→stream first — that copy
+# is GONE. The harness EMITS the per-box plans (upload recording-verdict.exe → extract the partial
+# on each box → pull back ONLY the small JSON); the agent/operator holding the win-* MCP executes
+# them (scp/ssh to Windows is DENIED, so bash cannot run them itself), then runs the dev1 merge.
+# Set VERDICT_ON_STREAM=0 for the LEGACY single-box decode-on-dev1 fallback (no box-decode .exe).
 if [ "$VERDICT_ON_STREAM" = "1" ]; then
   set -e
-  echo "    #193: emitting the run-ON-stream.lan plan (decode where the video is — NOTHING big on dev1)."
-  # The verdict's --strih/--stream paths point at the recordings AS THEY LIVE ON THE STREAM BOX
-  # (the win-* MCP holder substitutes the box-local Windows paths). --json/--out-dir are inside
-  # a box-local OUT_DIR that is pulled back. We forward the burn/run-id/min-secs args verbatim.
+  echo "    #208: emitting the PER-BOX decode-in-place plan (strih ON strih, stream ON stream — NOTHING copied)."
+  # The recordings stay AS THEY LIVE ON THEIR OWN BOX (the win-* MCP holder substitutes each box's
+  # local Windows path). Each box writes its small partial JSON into a box-local OUT_DIR that is
+  # pulled back to dev1; the merge runs on dev1 from the two small JSONs (no recording on dev1).
   VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
   OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
-  STREAM_REC_WIN="${STREAM_REC_WIN:-<the stream recording AS IT LIVES ON THE BOX>}"
-  STRIH_REC_WIN="${STRIH_REC_WIN:-<the strih recording AS IT LIVES ON THE BOX>}"
+  STREAM_REC_WIN="${STREAM_REC_WIN:-<the stream recording AS IT LIVES ON THE STREAM BOX>}"
+  STRIH_REC_WIN="${STRIH_REC_WIN:-<the strih recording AS IT LIVES ON THE STRIH BOX>}"
+  STRIH_PARTIAL_WIN="$OUT_DIR_WIN\\strih-partial-${RUN_ID}.json"
+  STREAM_PARTIAL_WIN="$OUT_DIR_WIN\\stream-partial-${RUN_ID}.json"
+  STRIH_PARTIAL="$OUTDIR/strih-partial-${RUN_ID}.json"   # pulled back to dev1
+  STREAM_PARTIAL="$OUTDIR/stream-partial-${RUN_ID}.json"  # pulled back to dev1
+  # #186/#208: each box's --extract-partial writes its flagged/undecodable-frame pixel proofs into
+  # the SIBLING `<partial>-pixels` dir; pull each dir back BESIDE its partial on dev1 (the merge
+  # derives the same `<partial>-pixels` path to locate the #186 "SEE the frame" proofs). Small —
+  # only the handful of flagged frames; absent on a clean (zero-loss, fully decodable) run.
+  STRIH_PIXELS_WIN="$OUT_DIR_WIN\\strih-partial-${RUN_ID}-pixels"
+  STREAM_PIXELS_WIN="$OUT_DIR_WIN\\stream-partial-${RUN_ID}-pixels"
+  STRIH_PIXELS="$OUTDIR/strih-partial-${RUN_ID}-pixels"   # #186 pixel proofs pulled back to dev1
+  STREAM_PIXELS="$OUTDIR/stream-partial-${RUN_ID}-pixels"  # #186 pixel proofs pulled back to dev1
+
+  echo "    --- [8/8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
+  # The strih recording carries cam1 (forwarded) + strih burns; --extract-partial strih decodes
+  # it IN PLACE on the strih box and writes the small partial JSON. It is NEVER copied off-box.
+  "$HERE/recording-verdict-on-strih.sh" \
+    --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
+    -- --extract-partial strih --strih "$STRIH_REC_WIN" \
+       --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+       --out "$STRIH_PARTIAL_WIN"
+  echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
+  echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
+  echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
+
+  echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
+  # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
+  # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
+  # strih recording is decoded on the strih box above), so no box-to-box copy is ever needed.
   "$HERE/recording-verdict-on-stream.sh" \
     --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
-    -- --strih "$STRIH_REC_WIN" --stream "$STREAM_REC_WIN" --min-secs 300 \
+    -- --extract-partial stream --stream "$STREAM_REC_WIN" \
        --cam2-run-id "$RUN_ID" \
-       --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
-       --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
-       --out-dir "$OUT_DIR_WIN\\pixel-proof" --json "$OUT_DIR_WIN\\verdict-${RUN_ID}.json"
-  echo "    The win-* MCP holder runs the plan above; dev1 receives only the small verdict JSON+PNGs (#193)."
+       --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+       --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+       --out "$STREAM_PARTIAL_WIN"
+  echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
+  echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
+  echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
+
+  echo "    --- [8/8c] MERGE the two small partials ON dev1 (no recording on dev1) ---"
+  echo "    After pulling both partials (+ their <partial>-pixels dirs) to dev1, run the merge:"
+  # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
+  # and produces the SAME full-chain verdict the fused path would — equivalent fields + PASS.
+  MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \
+    --min-secs 300 --cam2-run-id "$RUN_ID" \
+    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+    --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+    --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
+  if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
+  if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
+  VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
+  printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
+  echo "    The win-* MCP holder runs 8/8a + 8/8b on each box, pulls both small partials (+ their"
+  echo "    <partial>-pixels #186 proof dirs) to dev1, then runs the 8/8c merge above on dev1. A"
+  echo "    recording is NEVER copied box-to-box nor to dev1 — only the small partial JSONs (+ the"
+  echo "    painter CSV + the handful of flagged-frame PNGs) move (#208/#186)."
   echo "    ============================================================================"
-  echo "    NOTE: this exit code is NOT the zero-loss verdict. In on-stream mode the harness"
-  echo "          only EMITS the plan (scp/ssh to Windows is denied, so bash cannot run the"
-  echo "          verdict itself). The PASS/FAIL is the recording-verdict EXIT CODE on the"
-  echo "          stream box + the pulled-back JSON — read THOSE, not this script's exit 0."
+  echo "    NOTE: this exit code is NOT the zero-loss verdict. In per-box mode the harness only"
+  echo "          EMITS the plan (scp/ssh to Windows is denied, so bash cannot run it itself). The"
+  echo "          PASS/FAIL is the merge recording-verdict EXIT CODE on dev1 + the pulled-back"
+  echo "          JSON — read THOSE, not this script's exit 0."
   echo "    ============================================================================"
   exit 0
 fi

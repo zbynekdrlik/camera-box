@@ -215,6 +215,14 @@ jobs:
         #   decision functions (pick_mode, copy_plan, copy_bgra_into, next_bo_index,
         #   is_phase_lockable) are free functions OUTSIDE these patterns and stay
         #   mutated + are covered by kms unit + kms_pitch_roundtrip integration tests.
+        # #208 excludes (decode_for / extract_partial / run_merge / RecordingPartial::{save,load}
+        # / report_recording_diag): I/O glue — ffmpeg recording decode, partial-JSON file
+        # read/write, and pixel-proof PNG extraction + stdout printing. Uncatchable by a unit test
+        # without a live recording on disk, exactly like the run_capture_loop / clock_ns glue. The
+        # PURE logic they wrap IS mutated + covered: build_and_print_verdict (the merge==fused +
+        # zero-loss/real-drop assertions in merge_of_partials_reproduces_the_fused_verdict), the
+        # burn-id contiguity engine, and RecordingPartial::{from_frames,to_json,from_json} (the
+        # recording_partial roundtrip + schema unit tests).
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe \
@@ -231,6 +239,12 @@ jobs:
               --exclude-re '\bclock_ns\b' \
               --exclude-re 'KmsPresenter' \
               --exclude-re 'fbcon::' \
+              --exclude-re '\bdecode_for\b' \
+              --exclude-re '\bextract_partial\b' \
+              --exclude-re '\brun_merge\b' \
+              --exclude-re 'RecordingPartial::save' \
+              --exclude-re 'RecordingPartial::load' \
+              --exclude-re '\breport_recording_diag\b' \
               --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."
