@@ -142,24 +142,6 @@ camera_resolve "$CAM" >/dev/null 2>&1 || true
 }
 
 #[test]
-fn multitap_e2e_no_longer_hardcodes_cam2_ip() {
-    // The pre-#24 hard-coding: a bare `CAM2=10.77.9.62` assignment. After #24 the cam IP
-    // must come from the shared resolver, not a literal baked into the orchestrator.
-    let s = read("scripts/multitap-e2e.sh");
-    assert!(
-        !s.contains("CAM2=10.77.9.62"),
-        "#24 regression: multitap-e2e.sh still hard-codes `CAM2=10.77.9.62`; the camera \
-         IP must be resolved from scripts/camera-set.sh (env-overridable via CAM), not \
-         baked in."
-    );
-    assert!(
-        s.contains("camera-set.sh"),
-        "#24: multitap-e2e.sh must source scripts/camera-set.sh to resolve the camera \
-         IP + NDI source from a single source of truth."
-    );
-}
-
-#[test]
 fn loopback_e2e_routes_through_camera_set() {
     // loopback-e2e.sh already had CAM_IP/SOURCE overrides; #24 adds NAME-based selection
     // (CAM=cam3) so an operator drives any camera by name, resolved through the shared set.

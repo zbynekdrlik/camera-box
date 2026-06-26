@@ -20,7 +20,7 @@
 #
 # SAFETY: NEVER purges while an E2E is live — deleting target/ out from under a running probe binary
 # would corrupt the run. The guarded names are the probe ANALYSIS binaries that run ON dev1 (where
-# this purge runs): recording-verdict / frame-probe / multitap-probe / recording-probe / forensic-dump.
+# this purge runs): recording-verdict / frame-probe / recording-probe / forensic-dump.
 # (The probe-featured `camera-box` itself runs on the REMOTE camera, renamed to camera-box-burn-*, so
 # it is never a dev1 target/ consumer — it is intentionally not in the dev1 guard list.)
 # Run from the repo root (or anywhere — it cd's to the repo root via git).
@@ -65,7 +65,7 @@ fi
 # CAVEAT: the kernel truncates comm to 15 chars, so 'recording-verdict' (17) -> 'recording-verdi'.
 # We list the truncated form so it still matches. (Only the analysis bins run on dev1; the
 # probe-featured camera-box runs on the remote camera — see the SAFETY note in the header.)
-PROBE_COMM='recording-verdi|frame-probe|multitap-probe|recording-probe|forensic-dump'
+PROBE_COMM='recording-verdi|frame-probe|recording-probe|forensic-dump'
 if pgrep -x "$PROBE_COMM" >/dev/null 2>&1; then
   echo "purge-target.sh: probe binaries are RUNNING (live E2E) — skipping purge (safety)." >&2
   exit 0

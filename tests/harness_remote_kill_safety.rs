@@ -33,7 +33,6 @@ fn read(p: &str) -> String {
 #[test]
 fn rig_scripts_never_use_cmdline_matching_pkill() {
     for file in [
-        "scripts/multitap-e2e.sh",
         "scripts/loopback-e2e.sh",
         ".github/workflows/loopback-e2e.yml",
     ] {

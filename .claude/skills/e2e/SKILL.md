@@ -92,27 +92,17 @@ exposure. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it BEFORE
 (Optional later: a first-N-seconds optical-read-rate gate that aborts early with "check camera
 shutter/focus" if the cam2 QR decode rate is low — fail fast instead of after a 30-min run.)
 
-## QR Harness (post-#68, 2026-06-15)
+## QR-tap harness — REMOVED (#210)
 
-After #68 (merged `68180c20c`) the harness AGREES with the persistence test — no longer false-greens.
+The old live-NDI-tap QR harness (`scripts/multitap-e2e.sh` + the `multitap-probe` bin) is GONE: an
+NDI tap samples a different surface than what is DELIVERED, so it produced false sampling artifacts.
+The proof path is now `scripts/recording-e2e.sh` — decode the RECORDED OBS program output (see the
+Recording-Proof Run Recipe below). The #68 contiguity / leading-discard / wall-clock fixes
+(`endpoint_sequence_check`, `decompose_missing`, `--lead-discard-secs`) live on in the kept probe
+code (`src/probe/`) and are exercised by `recording-verdict`.
 
-**Run:**
-```bash
-DURATION=360 LEAD_DISCARD=60 OUT=/tmp/x.json ./scripts/multitap-e2e.sh
-```
-Needs OBS WS :4455 on strih (10.77.9.202) + stream (10.77.9.204), `NDI_RUNTIME_DIR_V6=/usr/lib/ndi`,
-python `websocket-client`. Takes over strih/stream program scene + restarts cam2 camera-box (restored by trap).
-
-**Four fixes in #68:**
-- fb tearing → cam2 fb0 now `FBIO_WAITFORVSYNC` (vsync-gated direct writes, tear-free).
-- contiguity/order → `endpoint_sequence_check` flags gaps+reorders; `decompose_missing` splits
-  emission-artifact vs pipeline-loss.
-- leading-discard → `--lead-discard-secs N` discards post-reset prime; shows real steady-state loss.
-- painter wall-clock pacing → phase-lock to genlock decimator wall-clock boundaries.
-
-**Live steady-state (cam2→strih→stream, genlock+wall-clock, DURATION=360 LEAD_DISCARD=60):**
-Full-span pipeline loss 34/300s = 1 lost per 8.8s; 0.38% per-frame loss on BOTH hops.
-VERDICT=FAIL (correctly). genlock-on-both-hops pending (#8).
+Historical #68 steady-state (cam2→strih→stream, the old tap harness): 0.38% per-frame loss on BOTH
+hops, VERDICT=FAIL (correctly); genlock-on-both-hops pending (#8).
 
 ## cam1 Cannot Run the QR Harness
 
@@ -200,7 +190,7 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   `probe-tools-linux-amd64` artifact (`gh run download <run> -n probe-tools-linux-amd64` → scp to
   cam2); TEST mode **FAILS LOUD** if it is absent. For a measurement run add `PAINTER_EXTRA_FLAGS="--wall-clock --run-id <N>"`.
 - **cam1 (10.77.9.61):** NOT reconfigured — runs its DEPLOYED service (already 30 fps / certified v4l2
-  saturation=0 contrast=75), the multitap/recording convention.
+  saturation=0 contrast=75), the recording convention.
 - **strih + stream OBS:** `scripts/launch-obs-genlock.sh --box {strih|stream} --mode test --force` —
   burns ON in the **LAUNCH SHELL ONLY** (NEVER Machine): `OBS_BURN_QR=1`, `OBS_BURN_QR_PX=300`,
   `OBS_BURN_RUN_ID` = 911002 (strih) / 911004 (stream). Genlock env stays from Machine. Then confirm

@@ -33,11 +33,6 @@ fn obs_py() -> String {
     fs::read_to_string(path).expect("read scripts/obs_phase2.py")
 }
 
-fn harness_sh() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/multitap-e2e.sh");
-    fs::read_to_string(path).expect("read scripts/multitap-e2e.sh")
-}
-
 /// `setup()` must accept a terminal-box flag so the caller can declare a box whose
 /// output feeds no downstream OBS hop (only dev1's tap). Without the flag there is
 /// no way to distinguish the strih box (next-hop protection legitimate) from the
@@ -147,50 +142,5 @@ fn ingest_source_abort_stays_unconditional() {
             && body.contains("aborting before touching the program scene"),
         "#91: the ingest-source resolution abort must remain (a box that cannot resolve \
          the upstream it ingests is always broken, terminal or not)."
-    );
-}
-
-/// The harness must mark the STREAM box (the terminal box — its output is tapped by
-/// dev1, not ingested by another OBS hop) with the terminal flag, and must NOT mark
-/// the STRIH box (whose output feeds the next OBS hop).
-#[test]
-fn harness_marks_only_the_stream_box_terminal() {
-    let sh = harness_sh();
-
-    // Find the two setup invocations.
-    let strih_call = sh
-        .find("setup --host \"$STRIH\"")
-        .expect("strih OBS setup call not found in multitap-e2e.sh");
-    let stream_call = sh
-        .find("setup --host \"$STREAM\"")
-        .expect("stream OBS setup call not found in multitap-e2e.sh");
-
-    // The strih setup line (whose output feeds the next OBS hop) must NOT pass
-    // --terminal: its own-output abort legitimately protects the stream box.
-    let strih_line_end = sh[strih_call..]
-        .find('\n')
-        .map(|i| strih_call + i)
-        .unwrap_or(sh.len());
-    let strih_line = &sh[strih_call..strih_line_end];
-    assert!(
-        !strih_line.contains("--terminal"),
-        "#91: the STRIH setup call must NOT be marked --terminal — its Main Output feeds \
-         the next OBS hop (stream), so the own-output resolution abort legitimately \
-         protects that hop. strih line: {strih_line}"
-    );
-
-    // The stream setup line (terminal box, tapped directly by dev1) MUST pass
-    // --terminal so the spurious self-discovery abort is skipped.
-    let stream_line_end = sh[stream_call..]
-        .find('\n')
-        .map(|i| stream_call + i)
-        .unwrap_or(sh.len());
-    let stream_line = &sh[stream_call..stream_line_end];
-    assert!(
-        stream_line.contains("--terminal"),
-        "#91: the STREAM setup call must be marked --terminal — its Main Output is tapped \
-         directly by dev1 (no downstream OBS hop), and its own OBS cannot self-discover \
-         its own output, so the own-output abort is spurious and must be skipped. stream \
-         line: {stream_line}"
     );
 }

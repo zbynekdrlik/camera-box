@@ -2,8 +2,8 @@
 # Recording-based full-path E2E (#105 / #7 / #179), dev1-orchestrated — TRUE STREAM-ONLY.
 #
 # The loss verdict + per-hop latency come ONLY from the strih/stream OBS PROGRAM
-# recordings and the cam2 painter ground truth — NEVER an NDI tap (the tap harness,
-# scripts/multitap-e2e.sh, produced false sampling artifacts) AND, since #179, NEVER the
+# recordings and the cam2 painter ground truth — NEVER an NDI tap (the live NDI-tap harness
+# produced false sampling artifacts and was removed, #210) AND, since #179, NEVER the
 # 7.3GB cam1 grab. The cam1-capture render-time burn (#174) puts cam1's id + CAPTURE
 # wall-clock ts INTO the emitted NDI frame, which rides through strih → stream, so the
 # SINGLE stream recording already carries cam1's mark — decoding a separate multi-GB cam1
@@ -251,8 +251,8 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the sce
 # gate and the #246 cleanup() burn-clear loop iterate the SAME set; keeping it in one array means a
 # third box (or a triple-structure change) can never green-light a set the cleanup does not clear
 # (the #246 linger-onto-live-broadcast hazard). Defined HERE — after the *_PROG_SOURCE vars and
-# BEFORE `trap cleanup` — so cleanup()'s `"${BURN_TARGETS[@]}"` is never an unbound `set -u` var on
-# an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap).
+# BEFORE the cleanup trap is armed — so cleanup()'s array expansion is never an unbound `set -u`
+# var on an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap).
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE")
 trap cleanup EXIT HUP INT TERM
 

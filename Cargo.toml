@@ -95,11 +95,6 @@ path = "src/bin/frame-probe.rs"
 required-features = ["probe"]
 
 [[bin]]
-name = "multitap-probe"
-path = "src/bin/multitap-probe.rs"
-required-features = ["probe"]
-
-[[bin]]
 name = "recording-probe"
 path = "src/bin/recording-probe.rs"
 required-features = ["probe"]

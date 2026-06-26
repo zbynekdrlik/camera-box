@@ -578,13 +578,14 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
     );
 
     // BOTH consumers iterate the shared array — the cleanup() burn-clear loop AND the #195
-    // pre-record burn-ON gate. Two iterations of "${BURN_TARGETS[@]}" prove the inline
-    // triple-lists are gone (the dedup #252 asks for).
+    // pre-record burn-ON gate. Two `for _hbs in "${BURN_TARGETS[@]}"` loop headers prove the
+    // inline triple-lists are gone (the dedup #252 asks for); anchoring on the loop header (not
+    // the bare expansion) excludes any prose mention of the array in comments.
     assert_eq!(
-        s.matches("\"${BURN_TARGETS[@]}\"").count(),
+        s.matches("for _hbs in \"${BURN_TARGETS[@]}\"").count(),
         2,
         "#252: both the #195 pre-record gate and the #246 cleanup() loop must iterate \
-         \"${{BURN_TARGETS[@]}}\" — neither may keep an inline triple-list."
+         `for _hbs in \"${{BURN_TARGETS[@]}}\"` — neither may keep an inline triple-list."
     );
 }
 
@@ -868,22 +869,6 @@ fn version_integrity_gate_runs_before_any_recording() {
     assert!(
         gate < start_record,
         "#123: the version-integrity gate must run BEFORE StartRecord (fail fast on a drifted stack)"
-    );
-}
-
-/// multitap-e2e.sh routes the camera QR through the strih->stream stack, so it too must run the
-/// version-integrity gate for both boxes before measuring.
-#[test]
-fn multitap_e2e_runs_the_version_integrity_gate_for_both_boxes() {
-    let s = read("scripts/multitap-e2e.sh");
-    assert!(
-        s.contains("version-integrity-gate.sh"),
-        "#123: multitap-e2e.sh must invoke version-integrity-gate.sh"
-    );
-    assert!(
-        s.contains("--win-state \"strih=$VERSION_STRIH_STATE\"")
-            && s.contains("--win-state \"stream=$VERSION_STREAM_STATE\""),
-        "#123: multitap-e2e.sh must gate BOTH boxes via --win-state"
     );
 }
 
