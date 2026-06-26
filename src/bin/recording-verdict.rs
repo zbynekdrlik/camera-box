@@ -2737,12 +2737,17 @@ mod tests {
     }
 
     #[test]
-    fn bounded_leading_lead_in_is_clamped_not_charged() {
-        // The MIRROR of the teardown clamp at the START: the window is anchored to the FIRST
-        // optical (cam2) frame, but cam1 can begin emitting its burn a few frames AFTER cam2's
-        // painter came up. Those leading optical-only frames carry no cam1 burn and were being
-        // charged as phantom BURN-UNREADABLE (a false FAIL). A SHORT leading lead-in (before the
-        // node's first emitted burn) must be clamped off the same way the trailing teardown tail is.
+    fn leading_lead_in_is_charged_not_clamped() {
+        // #267 DEEP-REVIEW CORRECTION: the TRAILING teardown tail is clamped, but the LEADING
+        // (lead-in) edge is NOT. The window is anchored to the FIRST optical (cam2) frame; if cam1
+        // begins emitting its burn a few frames AFTER cam2's painter came up, those leading
+        // optical-only frames carry no cam1 burn. The first #267 fix ALSO clamped that leading run
+        // — but the lead-in case is UNOBSERVED on the rig, and clamping it MASKS a real ≤bound
+        // START-of-stream loss (cam1 EMITTED those ids and they were lost in transit at startup)
+        // into a false PASS, violating the user's HARD 0-gap bar. So a leading burn-absent run is
+        // now KEPT and CHARGED as BURN-UNREADABLE → the node FAILS. A false-FAIL is SAFE; masking
+        // start-of-stream loss is not. (The OLD test asserted the leading run was clamped/PASS —
+        // exactly the masking this correction removes; it is the RED reproduction of that bug.)
         let mut stream: Vec<RecordingFrame> = Vec::new();
         for i in 0..5u32 {
             stream.push(frame(i as u64, &[(CAM2, 100 + i)])); // lead-in: cam2 up, cam1 not yet emitting
@@ -2759,8 +2764,8 @@ mod tests {
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids.first(),
-            Some(&Some(50)),
-            "leading lead-in (optical-only, before cam1's first burn) must be clamped: {ids:?}"
+            Some(&None),
+            "leading lead-in must be KEPT (never clamped) so a real start-of-stream loss can never be masked: {ids:?}"
         );
         let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
             "cam1",
@@ -2768,16 +2773,17 @@ mod tests {
             BurnRate::PerEmittedFrame,
         );
         assert!(
-            iw.contiguity.is_contiguous(),
-            "after clamping the lead-in the window is fully contiguous: {:?}",
+            !iw.contiguity.is_contiguous(),
+            "a leading burn-absent run must be CHARGED (BURN-UNREADABLE → FAIL), never clamped: {:?}",
             iw.contiguity
         );
     }
 
     #[test]
     fn long_leading_burn_absent_lead_in_is_real_loss_not_clamped() {
-        // Mirror of the trailing bound: a LONG leading burn-absent run (cam1 burns lost at
-        // start-of-stream, far beyond any lead-in window) is REAL loss and must FAIL, not clamp.
+        // The LEADING edge is never clamped at all (no leading bound) — short OR long, a leading
+        // burn-absent run stays CHARGED → FAILS. This pins the long case explicitly: cam1 burns
+        // lost at start-of-stream are REAL loss and must FAIL.
         let mut stream: Vec<RecordingFrame> = Vec::new();
         for i in 0..100u32 {
             stream.push(frame(i as u64, &[(CAM2, 100 + i)])); // 100 optical-only leading frames
