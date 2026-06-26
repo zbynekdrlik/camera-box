@@ -129,8 +129,12 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
 `gh run download <run> -n probe-tools-{linux,windows}-amd64`; symlink `camera-box-probe`→`camera-box`.
 
 **TWO missed-envs silently waste a run (verify BEFORE recording):**
-1. **stream's OBS_BURN_QR must be ON** (#195). The stream burn (911004) only fires if stream's
-   OBS was LAUNCHED with `OBS_BURN_QR=1` — the running OBS does NOT pick up HKLM mid-session.
+1. **stream's OBS_BURN_QR must be ON** (#195). **The harness now AUTO-CHECKS this** before
+   `[5/8] StartRecord` (the `[4b/8]` pre-record burn-ON gate): it runs `obs_burn_filter.py check`
+   on strih+stream and ABORTS (exit 1) unless `kind_registered=True` AND `filter_on_input=True`
+   — so a burns-OFF/pass-through OBS fails fast instead of wasting a full run. If it aborts,
+   relaunch the box's OBS in test mode via `scripts/rig-mode.sh test`. The stream burn (911004)
+   only fires if stream's OBS was LAUNCHED with `OBS_BURN_QR=1` — the running OBS does NOT pick up HKLM mid-session.
    Without it the stream recording has NO stream burn → strih→stream can't pair (latency=null,
    `strih_stream_source: two recordings ...`). Fix: relaunch stream OBS with the env set in the
    launching shell (see obs-ops skill: ExitOBS → force-kill → clear `.sentinel\*` → relaunch
@@ -216,6 +220,19 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
 `launch-obs-genlock.sh::burn_run_id_for_box`. **NEVER set `OBS_BURN_*` in Machine scope** — it
 survives reboot and is exactly the #246 live-broadcast contamination. The cam-box root pw is `$CAM_PW`
 (dev-rig LAN default, as in the sibling e2e scripts — override from your password store).
+
+## Testing the E2E harness scripts (sourceability gotcha)
+
+`scripts/recording-e2e.sh` runs TOP-TO-BOTTOM under `set -euo pipefail` (NO `BASH_SOURCE != $0`
+source guard), so a test CANNOT `. recording-e2e.sh` to unit a single function — sourcing it would
+execute the whole harness (ping preflight, gates, deploys). To behaviorally test a piece of its
+logic, MIRROR the snippet in an inline `bash -c` and run the four states (the #178 set+e-region
+test and the #195 burn-gate test both do this: `tests/harness_recording_e2e_paths.rs`). Pass inputs
+as `bash -c '<body>' bash "$arg1" "$arg2"` ($0,$1,…) to avoid quoting hazards. By contrast,
+`scripts/recording-fetch-windows.sh` and `scripts/genlock-manifest.sh` DO have a `BASH_SOURCE != $0`
+guard, so their pure functions can be sourced directly (see `urlencode_name` / `tests/genlock_manifest.rs`).
+Structural guards (the script CONTAINS the gate/flag) complement — but don't replace — a behavioral
+mirror of the decision logic.
 
 ## Reporting Scope — NEVER Claim Partial as Full
 
