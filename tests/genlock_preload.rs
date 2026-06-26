@@ -18,8 +18,8 @@
 
 use camera_box::probe::genlock::{
     genlock_build_drain, genlock_decide, genlock_drop_cap, genlock_empty_run_next,
-    genlock_rearm_on_resume, parse_preload, preload_to_ms, steady_state_depth, GenlockDecision,
-    GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
+    genlock_rearm_on_resume, ms_to_frames, parse_preload, preload_to_ms, steady_state_depth,
+    GenlockDecision, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
     GENLOCK_REARM_EMPTY_TICKS, MAX_ASYNC_FRAMES,
 };
 
@@ -183,6 +183,40 @@ fn preload_to_ms_conversion() {
 fn default_is_one_frame() {
     // preload=1 → one frame of reserve = one frame of latency per hop.
     assert_eq!(GENLOCK_PRELOAD_DEFAULT, 1);
+}
+
+// ---- #259: fps_den==0 must NOT divide-by-zero (latent SIGFPE) -----------------
+//
+// The C genlock audit-log computes latency_frames =
+//   (latency_ms*fps_num + (1000*fps_den)/2) / (1000*fps_den)
+// guarded only by `have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0` — NOT
+// fps_den. If obs_get_video_info ever returns true with fps_num!=0 && fps_den==0,
+// that integer divide is a SIGFPE on the render thread (the sibling
+// genlock_source_drop_cap already guards `ovi.fps_den != 0`). The C divide cannot be
+// unit-tested directly, so we (a) pin the mirror's value contract — both ms<->frames
+// helpers return 0, never panic, when fps_den==0 — and (b) assert the C have_vi guard
+// checks fps_den (the vendored_source guard below). Found by the #257 (PR #258) review.
+
+#[test]
+fn ms_to_frames_is_zero_and_no_panic_when_fps_den_zero() {
+    // The mirror of the C latency_frames divide. fps_den==0 (with ANY fps_num) must
+    // yield 0 — the "fps unknown" fallback — never a divide-by-zero. (#259)
+    assert_eq!(ms_to_frames(100, 30000, 0), 0);
+    assert_eq!(ms_to_frames(3, 30, 0), 0);
+    assert_eq!(ms_to_frames(0, 0, 0), 0);
+    // fps_num==0 also yields 0 (no valid video info), the existing contract.
+    assert_eq!(ms_to_frames(100, 0, 1), 0);
+    // A valid pair still converts normally (3 ms @ 30 fps rounds to 0 frames).
+    assert_eq!(ms_to_frames(1000, 30, 1), 30);
+}
+
+#[test]
+fn preload_to_ms_is_zero_and_no_panic_when_fps_den_zero() {
+    // The sibling ms helper divides by fps_num (not fps_den), so fps_den==0 makes the
+    // numerator 0 — still 0, still no panic. Pin it so the contract can't regress. (#259)
+    assert_eq!(preload_to_ms(30, 30000, 0), 0);
+    assert_eq!(preload_to_ms(1, 30, 0), 0);
+    assert_eq!(preload_to_ms(30, 0, 1), 0); // fps_num==0 path (existing)
 }
 
 // ---- #102: consume-when-queued + one-time startup fill (the loss fix) --------
@@ -1027,6 +1061,33 @@ mod vendored_source {
         assert!(
             src.contains("source->genlock_underruns++"),
             "{OBS_SOURCE}: #70/#102 — the genlock underrun audit counter is gone; re-apply."
+        );
+    }
+
+    #[test]
+    fn audit_log_have_vi_guards_fps_den() {
+        // #259: the genlock audit-log latency_frames integer divide
+        //   (latency_ms*fps_num + (1000*fps_den)/2) / (1000*fps_den)
+        // SIGFPEs on the render thread if fps_den==0. The `have_vi` guard that gates it
+        // must check BOTH fps_num != 0 AND fps_den != 0 (mirroring genlock_source_drop_cap,
+        // the only other site that does this divide and DOES guard fps_den). Anchor on the
+        // unique `have_vi` declaration so drop_cap's own fps_den guard can't satisfy this
+        // (the test is RED until the audit guard itself adds fps_den).
+        let raw = vendor_file(OBS_SOURCE);
+        let pos = raw
+            .find("have_vi =")
+            .expect("#259: the genlock audit-log `have_vi` guard is gone — re-locate");
+        let tail = &raw[pos..];
+        let semi = tail
+            .find(';')
+            .expect("#259: the have_vi statement has no terminator");
+        let stmt = squish(&tail[..semi]);
+        assert!(
+            stmt.contains("fps_num != 0") && stmt.contains("fps_den != 0"),
+            "{OBS_SOURCE}: #259 — the genlock audit-log `have_vi` guard must check BOTH \
+             fps_num != 0 AND fps_den != 0 before the latency_frames divide (it currently \
+             guards fps_num only → SIGFPE when fps_den==0). Mirror genlock_source_drop_cap. \
+             Got: `{stmt}`"
         );
     }
 
