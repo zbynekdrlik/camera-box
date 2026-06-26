@@ -335,6 +335,33 @@ fn recording_e2e_teardown_restores_program_scenes() {
     );
 }
 
+/// #246: cleanup() must CLEAR + VERIFY-OFF the OBS burn on BOTH boxes after every run (incl.
+/// failure/abort), so a QR test-burn can never linger onto the live broadcast. The harness has no
+/// SSH to the Windows boxes, so it cannot clear Machine-scope OBS_BURN_* env (that is the job of
+/// drift-guard --compare burn_env= + rig-mode event); what it CAN and MUST do is remove the
+/// obs-websocket-reachable burn filter (clear) and `check` it off (verify) on strih + stream.
+#[test]
+fn recording_e2e_cleanup_clears_and_verifies_burns_off() {
+    let s = read("scripts/recording-e2e.sh");
+    let cleanup = s
+        .find("cleanup()")
+        .expect("recording-e2e.sh must define cleanup()");
+    let body = &s[cleanup..];
+    assert!(
+        body.contains("obs_burn_filter.py"),
+        "#246: cleanup() must clear/verify the OBS burn via obs_burn_filter.py (the \
+         websocket-reachable burn surface), so a test burn can't linger after a run/abort."
+    );
+    assert!(
+        body.contains("remove") && body.contains("check"),
+        "#246: cleanup() must both REMOVE the burn (clear) AND `check` it (verify-off)."
+    );
+    assert!(
+        body.contains("$STRIH") && body.contains("$STREAM"),
+        "#246: the burn clear+verify must run on BOTH strih and stream."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #163: recording-fetch-windows.sh must URL-ENCODE the OBS recording filename.
 //
