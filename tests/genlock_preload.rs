@@ -1158,7 +1158,9 @@ mod vendored_source {
         );
         // #257: the build-const FLOOR (GENLOCK_LATENCY_MS_MIN = 3) must be defined.
         assert!(
-            src.contains(&format!("#define GENLOCK_LATENCY_MS_MIN {GENLOCK_LATENCY_MS_MIN}")),
+            src.contains(&format!(
+                "#define GENLOCK_LATENCY_MS_MIN {GENLOCK_LATENCY_MS_MIN}"
+            )),
             "{OBS_SOURCE}: #257 — GENLOCK_LATENCY_MS_MIN drifted from the Rust mirror \
              ({GENLOCK_LATENCY_MS_MIN}); keep them in lock-step."
         );
