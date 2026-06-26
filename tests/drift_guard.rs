@@ -1493,3 +1493,27 @@ fn status_surface_reports_genlock_and_burn_in_one_place() {
         "--status must surface the set burn var. stdout={stdout:?}"
     );
 }
+
+#[test]
+fn status_surface_does_not_require_the_pinned_manifest() {
+    // #246: --status is a read-only live-state dump that uses NONE of the pinned set, so it must
+    // work even when vendor/README.md is absent (a checkout shipping only the script). RED before
+    // the fix: the manifest-required check + pin load ran for every mode and exited 1 here.
+    let (code, stdout, stderr) = run_script(&[
+        "--status",
+        "host=stream",
+        "genlock_wall_clock=1",
+        "burn_env=none",
+        "--readme",
+        "/nonexistent/path/vendor/README.md",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--status must not require the pinned manifest (read-only live-state dump). \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains("manifest not found"),
+        "--status must skip the manifest-required check. stderr={stderr:?}"
+    );
+}

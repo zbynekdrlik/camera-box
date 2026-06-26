@@ -327,7 +327,11 @@ fn recording_e2e_teardown_restores_program_scenes() {
     let cleanup = s
         .find("cleanup()")
         .expect("recording-e2e.sh must define cleanup()");
-    let body = &s[cleanup..];
+    let end = s[cleanup..]
+        .find("\ntrap ")
+        .map(|i| cleanup + i)
+        .unwrap_or(s.len());
+    let body = &s[cleanup..end];
     assert!(
         body.contains("teardown --host \"$STREAM\"") && body.contains("teardown --host \"$STRIH\""),
         "#163: cleanup() must teardown (restore prior program scene) on BOTH strih and \
@@ -346,7 +350,11 @@ fn recording_e2e_cleanup_clears_and_verifies_burns_off() {
     let cleanup = s
         .find("cleanup()")
         .expect("recording-e2e.sh must define cleanup()");
-    let body = &s[cleanup..];
+    let end = s[cleanup..]
+        .find("\ntrap ")
+        .map(|i| cleanup + i)
+        .unwrap_or(s.len());
+    let body = &s[cleanup..end];
     assert!(
         body.contains("obs_burn_filter.py"),
         "#246: cleanup() must clear/verify the OBS burn via obs_burn_filter.py (the \
@@ -360,6 +368,30 @@ fn recording_e2e_cleanup_clears_and_verifies_burns_off() {
         body.contains("$STRIH") && body.contains("$STREAM"),
         "#246: the burn clear+verify must run on BOTH strih and stream."
     );
+}
+
+/// #246 (regression): cleanup()'s burn-clear loop references $STRIH_PROG_SOURCE / $STREAM_PROG_SOURCE.
+/// The script runs `set -euo pipefail`, so those vars MUST be defined BEFORE `trap cleanup` — otherwise
+/// any early abort (failed prebuilt-probe check, cargo build, cam scp/ssh, or Ctrl-C before the later
+/// definition) fires the trap and the loop dies on a `set -u` unbound-variable, SKIPPING the burn
+/// clear+verify in the exact failure/abort window the CRITICAL #246 guard must cover.
+#[test]
+fn recording_e2e_burn_source_vars_defined_before_cleanup_trap() {
+    let s = read("scripts/recording-e2e.sh");
+    let trap = s
+        .find("trap cleanup")
+        .expect("recording-e2e.sh must install the cleanup trap");
+    for var in ["STRIH_PROG_SOURCE=", "STREAM_PROG_SOURCE="] {
+        let def = s
+            .find(var)
+            .unwrap_or_else(|| panic!("recording-e2e.sh must define {var}"));
+        assert!(
+            def < trap,
+            "#246: {var} must be defined BEFORE `trap cleanup` — else cleanup()'s burn-clear loop \
+             hits a `set -u` unbound-variable on an early abort and the burn is NOT cleared in the \
+             failure/abort window the guard must cover."
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
