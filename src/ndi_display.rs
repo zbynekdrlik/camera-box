@@ -67,6 +67,38 @@ pub fn no_frame_log_level(frames_received_on_connection: u64) -> NoFrameLevel {
     }
 }
 
+/// Decide whether the connector-presence diagnostic should be logged NOW, given the
+/// currently-observed presence and the last presence value we logged (`None` = never
+/// logged). A log is due on the very first observation (initial state) and on every
+/// subsequent change; an unchanged state is not re-logged (#130: no log flood).
+///
+/// #244: this is the testable core of the connector-state diagnostic. The caller invokes
+/// `log_connector_state` once BEFORE the inner frame loop so a monitor-less cam whose NDI
+/// source never delivers a frame STILL emits the initial "no monitor — skipping render"
+/// line — the old code logged only inside the `Ok(Some(frame))` arm, so a zero-frame run
+/// never emitted it despite the comment claiming a boot-with-monitor-unplugged run would.
+pub fn connector_log_due(present: bool, last_logged: Option<bool>) -> bool {
+    last_logged != Some(present)
+}
+
+/// Emit the connector-presence diagnostic if it is due (initial state, or a change since
+/// the last logged state), updating `logged` to the current state when it logs. Called
+/// once before the inner frame loop (so the initial state is logged even with zero frames,
+/// #244) and again on every connector re-poll inside the loop.
+fn log_connector_state(present: bool, logged: &mut Option<bool>) {
+    if !connector_log_due(present, *logged) {
+        return;
+    }
+    if present {
+        tracing::info!("NDI display: monitor connected — rendering");
+    } else {
+        tracing::info!(
+            "NDI display: no monitor connected (DRM status=disconnected) — skipping render to avoid upscaling to a phantom framebuffer"
+        );
+    }
+    *logged = Some(present);
+}
+
 /// Run the NDI display loop with automatic reconnection
 /// This should be called from a low-priority thread
 pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> Result<()> {
@@ -103,6 +135,17 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         }
     }
     let (fb_width, fb_height) = display.dimensions();
+
+    // #135/#244: connector presence + the last presence we LOGGED persist ACROSS reconnects.
+    // Read + log the initial state ONCE here — so even a cam that never receives a frame (or whose
+    // connect keeps failing) still emits the "no monitor — skipping render" diagnostic (#244). It
+    // is re-polled on each (re)connect and inside the inner loop, but `log_connector_state` only
+    // emits on an actual CHANGE, so a reconnect with an unchanged connector does NOT re-log — the
+    // diagnostic is never spammed per reconnect (anti-flood, #130).
+    // `None` (unknown sysfs layout) → render (never silently go dark).
+    let mut connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
+    let mut logged_connector_state: Option<bool> = None;
+    log_connector_state(connector_present, &mut logged_connector_state);
 
     // Outer reconnection loop - keeps trying to connect/reconnect
     while running.load(Ordering::Relaxed) {
@@ -142,15 +185,12 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         // #135: connector-presence gate. When the DRM connector reports no monitor
         // (a disconnected/latched "phantom" fb after hot-unplug), SKIP rendering — the
         // fb still opens and writes fine, so this is the only signal that there is no
-        // real monitor. Re-checked every ~1s. `None` (unknown sysfs layout) → render
-        // (never silently go dark). Polled BEFORE the first frame so a phantom fb never
-        // gets even one heavy write.
-        let mut connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
-        // Last connector presence we LOGGED (`None` = nothing logged yet). The initial
-        // state — connected OR disconnected — is logged once on the first frame, then
-        // only on a change. This guarantees a boot-with-monitor-unplugged run still
-        // emits the "no monitor — skipping render" diagnostic.
-        let mut logged_connector_state: Option<bool> = None;
+        // real monitor. Re-checked every ~1s inside the inner loop. Re-polled here on each
+        // (re)connect (a monitor may have been (un)plugged during the gap); the shared
+        // `logged_connector_state` (hoisted above the outer loop) means this only re-logs on
+        // an actual change, never once per reconnect.
+        connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
+        log_connector_state(connector_present, &mut logged_connector_state);
 
         // Inner display loop - runs until source disappears
         while running.load(Ordering::Relaxed) {
@@ -185,17 +225,9 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                     // get a heavy software upscale to no real screen (the pre-event
                     // incident: 1080→4K → 99.9% CPU). When disconnected, skip the
                     // render+upscale entirely; capture/emit are unaffected.
-                    // Log the connector state once initially, then on every change.
-                    if logged_connector_state != Some(connector_present) {
-                        if connector_present {
-                            tracing::info!("NDI display: monitor connected — rendering");
-                        } else {
-                            tracing::info!(
-                                "NDI display: no monitor connected (DRM status=disconnected) — skipping render to avoid upscaling to a phantom framebuffer"
-                            );
-                        }
-                        logged_connector_state = Some(connector_present);
-                    }
+                    // #244: re-log on a change (the initial state was already logged once
+                    // before the inner loop).
+                    log_connector_state(connector_present, &mut logged_connector_state);
 
                     if connector_present {
                         // Display the frame (ignore errors - display may be disconnected)
@@ -348,6 +380,43 @@ mod tests {
         // and stays a WARN — we must not suppress a real stall.
         assert_eq!(no_frame_log_level(1), NoFrameLevel::Warn);
         assert_eq!(no_frame_log_level(900), NoFrameLevel::Warn);
+    }
+
+    #[test]
+    fn connector_log_due_on_initial_state_even_without_a_frame() {
+        // #244: the whole point — the initial connector state (connected OR disconnected)
+        // is "due" the first time it is observed (last_logged == None), so the diagnostic
+        // is emitted before the inner frame loop. A monitor-less cam whose NDI source never
+        // delivers a frame therefore still logs "no monitor — skipping render".
+        assert!(
+            connector_log_due(false, None),
+            "initial disconnected state must log (the zero-frame phantom-fb case #244)"
+        );
+        assert!(
+            connector_log_due(true, None),
+            "initial connected state must also log once"
+        );
+    }
+
+    #[test]
+    fn connector_log_due_only_on_change_thereafter() {
+        // An unchanged state is NOT re-logged (no log flood, #130) — only a transition is.
+        assert!(
+            !connector_log_due(false, Some(false)),
+            "unchanged disconnected state must NOT re-log"
+        );
+        assert!(
+            !connector_log_due(true, Some(true)),
+            "unchanged connected state must NOT re-log"
+        );
+        assert!(
+            connector_log_due(true, Some(false)),
+            "a disconnected→connected transition must log"
+        );
+        assert!(
+            connector_log_due(false, Some(true)),
+            "a connected→disconnected transition must log"
+        );
     }
 
     #[test]

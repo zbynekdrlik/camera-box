@@ -239,6 +239,153 @@ fn gate_always_passes_win_status_for_both_windows_nodes() {
     );
 }
 
+/// #220: the harness must PRINT a camera pre-run checklist (shutter/focus/exposure) before the
+/// run starts — the cam1 optical settings it CANNOT auto-set (camera-box reads the ShadowCast
+/// /dev/video0, which does not expose the BMPCC's shutter/focus/exposure). A 1/60 shutter caused
+/// the #216 ~175s optical-read gap; the banner reminds the operator to set a fast shutter (≥1/500),
+/// manual focus, and fixed exposure BEFORE the run.
+#[test]
+fn recording_e2e_prints_camera_pre_run_checklist() {
+    let s = read("scripts/recording-e2e.sh");
+    let banner = s
+        .find("CAMERA PRE-RUN CHECKLIST")
+        .expect("#220: recording-e2e.sh must print a CAMERA PRE-RUN CHECKLIST banner");
+    // The checklist must name all three operator-set camera controls.
+    assert!(
+        s.contains("SHUTTER") && (s.contains("1/500") || s.contains("1/1000")),
+        "#220: the checklist must call out a FAST shutter ≥1/500 (the #216 conclusion; freezes the \
+         60Hz monitor QR so the dual-QR Vernier does not smear)."
+    );
+    assert!(
+        s.contains("FOCUS") && s.contains("MANUAL"),
+        "#220: the checklist must call out MANUAL focus locked on the cam2 monitor (no autofocus hunt)."
+    );
+    assert!(
+        s.contains("EXPOSURE") && (s.contains("FIXED") || s.contains("manual gain")),
+        "#220: the checklist must call out FIXED exposure / manual gain (no auto-exposure drift)."
+    );
+    // It is a PRE-run reminder: it must be printed BEFORE recording starts.
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        banner < start_record,
+        "#220: the camera pre-run checklist must be printed BEFORE StartRecord (it is a pre-run \
+         reminder — fix the camera, then run)."
+    );
+}
+
+/// #195: the harness must SET+VERIFY burns are ON before recording — assert a pre-record
+/// burn-ON gate that runs `obs_burn_filter.py check` on BOTH boxes and ABORTS the run on
+/// pass-through (OBS not launched with OBS_BURN_QR → kind_registered=false → strih/stream burns
+/// silently absent → the whole proof run wasted, the exact missed-env #195 documents). The gate
+/// must sit in the MAIN flow (after the cleanup trap) and BEFORE StartRecord — NOT only in
+/// cleanup() (which clears burns AFTER the run, #246).
+#[test]
+fn recording_e2e_asserts_burns_on_before_recording() {
+    let s = read("scripts/recording-e2e.sh");
+    // The gate lives in the main flow: after `trap cleanup` (so cleanup()'s own burn check,
+    // defined earlier, is excluded) and before the [5/8] StartRecord step.
+    let trap = s
+        .find("trap cleanup")
+        .expect("recording-e2e.sh must install the cleanup trap");
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        trap < start_record,
+        "the cleanup trap must be installed before StartRecord"
+    );
+    let region = &s[trap..start_record];
+    // A burn-ON CHECK must run in this pre-record region.
+    assert!(
+        region.contains("obs_burn_filter.py") && region.contains("check"),
+        "#195: a pre-record burn-ON gate must run `obs_burn_filter.py check` BEFORE StartRecord \
+         (so a burns-OFF/pass-through OBS is caught before a full run is wasted), not only in \
+         cleanup() after the run."
+    );
+    // It must key on the OBS_BURN_QR tell (kind_registered) — the 'OBS launched with OBS_BURN_QR'
+    // signal that distinguishes a live burn from a silently-disabled pass-through filter.
+    assert!(
+        region.contains("kind_registered"),
+        "#195: the pre-record gate must inspect `kind_registered` (the OBS_BURN_QR tell) — that is \
+         what distinguishes a live burn from a pass-through filter that records NO burns."
+    );
+    // It must FAIL FAST (abort) on pass-through, not just warn.
+    assert!(
+        region.contains("exit 1"),
+        "#195: the pre-record gate must ABORT (exit 1) on burns-OFF — a warn-and-continue would \
+         still waste the whole run (the failure mode #195 exists to kill)."
+    );
+    // It must cover BOTH boxes.
+    assert!(
+        region.contains("$STRIH") && region.contains("$STREAM"),
+        "#195: the pre-record burn-ON gate must check BOTH strih and stream."
+    );
+}
+
+/// #195 (behavioral): the pre-record burn-ON gate's parse+abort logic must PROCEED only when
+/// BOTH `kind_registered=True` AND `filter_on_input=True`, and ABORT otherwise — across burns-on,
+/// pass-through (kind off → OBS not launched with OBS_BURN_QR), kind-on-but-filter-unattached, and
+/// OBS-unreachable (the check command's error text). This locks the actual abort BEHAVIOR (the
+/// #195 regression: burns-off must STOP the run, not waste it), not just the gate's presence.
+/// recording-e2e.sh runs top-to-bottom (no source guard), so — like the #178 resilient-region
+/// behavioral test above — this exercises the gate's two greps in an isolated bash snippet.
+#[test]
+fn recording_e2e_burn_gate_proceeds_only_when_burns_on() {
+    // The gate's decision in isolation — the SAME two greps recording-e2e.sh runs per box.
+    let gate = r#"
+set -euo pipefail
+burn_gate_ok() {
+  _chk="$1"
+  printf '%s' "$_chk" | grep -q 'kind_registered=True' || return 1
+  printf '%s' "$_chk" | grep -q 'filter_on_input=True' || return 1
+  return 0
+}
+if burn_gate_ok "$1"; then echo PROCEED; else echo ABORT; fi
+"#;
+    // (check output text, expect PROCEED?)
+    let cases = [
+        (
+            "[burn] kind_registered=True filter_on_input=True input='NDI cam5'",
+            true,
+        ),
+        (
+            "[burn] kind_registered=False filter_on_input=False input='NDI cam5'",
+            false,
+        ),
+        (
+            "[burn] kind_registered=True filter_on_input=False input='NDI cam5'",
+            false,
+        ),
+        (
+            "Traceback (most recent call last): ConnectionRefusedError",
+            false,
+        ),
+    ];
+    for (chk, expect_ok) in cases {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(gate)
+            .arg("bash") // $0
+            .arg(chk) // $1 — the check output, passed as an arg (no quoting hazard)
+            .output()
+            .expect("run burn-gate snippet");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if expect_ok {
+            assert!(
+                stdout.contains("PROCEED") && !stdout.contains("ABORT"),
+                "#195: burns-ON (kind_registered+filter_on_input) must PROCEED; got {stdout:?} for {chk:?}"
+            );
+        } else {
+            assert!(
+                stdout.contains("ABORT"),
+                "#195: burns-off/unattached/unreachable must ABORT the run; got {stdout:?} for {chk:?}"
+            );
+        }
+    }
+}
+
 /// The DanteSync NTP+PTP gate must be the FIRST hard step (#7): it must appear in the
 /// script BEFORE the cam1/cam2 launch and the OBS recording start, so a not-locked cluster
 /// fails fast before any measurement.
