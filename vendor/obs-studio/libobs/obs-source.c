@@ -4565,7 +4565,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	 * delay (preload=N (=M ms @ Ffps)) so the live delay is visible in the OBS log
 	 * for the operator + post-deploy verification. */
 	struct obs_video_info ovi;
-	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0;
+	/* camera-box #259: guard fps_den too (not fps_num alone). The latency_frames
+	 * integer divide below is `/ (1000ULL * ovi.fps_den)` — a SIGFPE on the render
+	 * thread if fps_den==0. Mirror genlock_source_drop_cap, which guards the identical
+	 * divide with `ovi.fps_den != 0`; when false we fall through to the fps-unknown
+	 * branch (fps=0.0, latency_frames=0). */
+	const bool have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0 && ovi.fps_den != 0;
 	const double fps = have_vi ? (double)ovi.fps_num / (double)ovi.fps_den : 0.0;
 	/* camera-box #184/#235/#245: print the active genlock latency — now PER-SOURCE: the
 	 * source's own override when set (>0) else the GLOBAL default. The headline
