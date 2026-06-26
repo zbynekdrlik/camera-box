@@ -2659,6 +2659,117 @@ mod tests {
     }
 
     #[test]
+    fn long_trailing_burn_absent_tail_is_real_loss_not_clamped() {
+        // #267 HARDENING — the teardown-tail clamp must be BOUNDED. A SHORT trailing burn-absent
+        // run is a legit teardown overrun (cam2's painter outlives cam1 by ~0.77 s ≈ 23 frames at
+        // shutdown); a LONG one is REAL end-of-stream loss — cam1 EMITTED those ids and they were
+        // lost in transit right before shutdown. The recording is IDENTICAL for both (optical
+        // present, cam1 burn absent), so the only sound rule is to bound the clamp: a tail longer
+        // than the physically-plausible teardown window must NOT be silently clamped (that would
+        // mask a real zero-loss failure — the user's HARD bar). It stays BURN-UNREADABLE and FAILS.
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        for i in 0..11u32 {
+            stream.push(frame(i as u64, &[(CAM2, 100 + i), (CAM1B, 50 + i)])); // emitted, contiguous
+        }
+        for i in 0..100u32 {
+            stream.push(frame((11 + i) as u64, &[(CAM2, 111 + i)])); // long cam2-only end-loss tail
+        }
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
+        let absent = w.iter().filter(|f| f.burn_id.is_none()).count();
+        assert!(
+            absent >= 50,
+            "a long end-of-stream burn-absent run must NOT be clamped (real loss); kept {absent}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "a long emitted-but-lost tail must FAIL the strict bar, not silently PASS: {:?}",
+            iw.contiguity
+        );
+    }
+
+    #[test]
+    fn bounded_leading_lead_in_is_clamped_not_charged() {
+        // The MIRROR of the teardown clamp at the START: the window is anchored to the FIRST
+        // optical (cam2) frame, but cam1 can begin emitting its burn a few frames AFTER cam2's
+        // painter came up. Those leading optical-only frames carry no cam1 burn and were being
+        // charged as phantom BURN-UNREADABLE (a false FAIL). A SHORT leading lead-in (before the
+        // node's first emitted burn) must be clamped off the same way the trailing teardown tail is.
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        for i in 0..5u32 {
+            stream.push(frame(i as u64, &[(CAM2, 100 + i)])); // lead-in: cam2 up, cam1 not yet emitting
+        }
+        for i in 0..11u32 {
+            stream.push(frame((5 + i) as u64, &[(CAM2, 105 + i), (CAM1B, 50 + i)]));
+        }
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids.first(),
+            Some(&Some(50)),
+            "leading lead-in (optical-only, before cam1's first burn) must be clamped: {ids:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            iw.contiguity.is_contiguous(),
+            "after clamping the lead-in the window is fully contiguous: {:?}",
+            iw.contiguity
+        );
+    }
+
+    #[test]
+    fn long_leading_burn_absent_lead_in_is_real_loss_not_clamped() {
+        // Mirror of the trailing bound: a LONG leading burn-absent run (cam1 burns lost at
+        // start-of-stream, far beyond any lead-in window) is REAL loss and must FAIL, not clamp.
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        for i in 0..100u32 {
+            stream.push(frame(i as u64, &[(CAM2, 100 + i)])); // 100 optical-only leading frames
+        }
+        for i in 0..11u32 {
+            stream.push(frame((100 + i) as u64, &[(CAM2, 200 + i), (CAM1B, 50 + i)]));
+        }
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+        );
+        let absent = w.iter().filter(|f| f.burn_id.is_none()).count();
+        assert!(
+            absent >= 50,
+            "a long start-of-stream burn-absent run must NOT be clamped (real loss); kept {absent}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "a long leading loss must FAIL: {:?}",
+            iw.contiguity
+        );
+    }
+
+    #[test]
     fn node_verdict_render_tick_skips_are_zero_loss_not_thousands_missing() {
         // THE #198 REGRESSION at the binary level: strih burn id jumps by 3 per emitted
         // frame (per-render counter). The OLD integer-range check reported ~2x these as
