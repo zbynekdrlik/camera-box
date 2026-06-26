@@ -1334,12 +1334,21 @@ fn compare_whole_bundle_facet_dormant_without_bundle_hashes() {
 fn drift_check_burn_env_flags_a_set_burn_var_as_drift() {
     // The #246 failure: a burn var present in the prod Machine env. Any set burn var -> DRIFT (rc 2).
     let body = "rc=0; drift_check_burn_env \"$B\" || rc=$?; echo \"RC=$rc\"";
-    let out = run_sourced(body, &[("B", "OBS_BURN_QR=1,OBS_BURN_QR_PX=300,OBS_BURN_RUN_ID=911004")]);
+    let out = run_sourced(
+        body,
+        &[(
+            "B",
+            "OBS_BURN_QR=1,OBS_BURN_QR_PX=300,OBS_BURN_RUN_ID=911004",
+        )],
+    );
     assert!(
         out.contains("DRIFT"),
         "a set burn var must be flagged DRIFT: {out:?}"
     );
-    assert!(out.contains("RC=2"), "a set burn var must return rc 2: {out:?}");
+    assert!(
+        out.contains("RC=2"),
+        "a set burn var must return rc 2: {out:?}"
+    );
     assert!(
         out.contains("OBS_BURN_QR"),
         "the drift line must name the offending burn var: {out:?}"
@@ -1358,7 +1367,10 @@ fn drift_check_burn_env_clean_when_none() {
         body,
         &[("B", "OBS_BURN_QR=,OBS_BURN_QR_PX=,OBS_BURN_RUN_ID=")],
     );
-    assert!(out2.contains("OK") && out2.contains("RC=0"), "all-empty -> OK: {out2:?}");
+    assert!(
+        out2.contains("OK") && out2.contains("RC=0"),
+        "all-empty -> OK: {out2:?}"
+    );
 }
 
 #[test]
@@ -1366,7 +1378,10 @@ fn drift_check_burn_env_unknown_when_not_read() {
     // An empty observed value (not read) is UNKNOWN (rc 3), never a silent clean.
     let body = "rc=0; drift_check_burn_env \"$B\" || rc=$?; echo \"RC=$rc\"";
     let out = run_sourced(body, &[("B", "")]);
-    assert!(out.contains("UNKNOWN"), "unread burn_env -> UNKNOWN: {out:?}");
+    assert!(
+        out.contains("UNKNOWN"),
+        "unread burn_env -> UNKNOWN: {out:?}"
+    );
     assert!(out.contains("RC=3"), "unread burn_env -> rc 3: {out:?}");
 }
 
@@ -1441,7 +1456,10 @@ fn compare_burn_env_facet_dormant_without_the_key() {
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
         // no burn_env=
     ]);
-    assert_eq!(code, 0, "no burn_env -> dormant -> clean. stdout={stdout:?}");
+    assert_eq!(
+        code, 0,
+        "no burn_env -> dormant -> clean. stdout={stdout:?}"
+    );
     assert!(stdout.contains("NO DRIFT"), "stdout={stdout:?}");
     assert!(
         !stdout.contains("burn"),
@@ -1461,7 +1479,10 @@ fn status_surface_reports_genlock_and_burn_in_one_place() {
         "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)",
         "burn_env=OBS_BURN_QR=1",
     ]);
-    assert_eq!(code, 0, "--status is informational (exit 0). stdout={stdout:?} stderr={stderr:?}");
+    assert_eq!(
+        code, 0,
+        "--status is informational (exit 0). stdout={stdout:?} stderr={stderr:?}"
+    );
     assert!(
         stdout.contains("genlock") && stdout.contains("burn"),
         "--status must print BOTH genlock and burn state in one place. stdout={stdout:?}"
