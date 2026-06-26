@@ -239,6 +239,42 @@ fn gate_always_passes_win_status_for_both_windows_nodes() {
     );
 }
 
+/// #220: the harness must PRINT a camera pre-run checklist (shutter/focus/exposure) before the
+/// run starts — the cam1 optical settings it CANNOT auto-set (camera-box reads the ShadowCast
+/// /dev/video0, which does not expose the BMPCC's shutter/focus/exposure). A 1/60 shutter caused
+/// the #216 ~175s optical-read gap; the banner reminds the operator to set a fast shutter (≥1/500),
+/// manual focus, and fixed exposure BEFORE the run.
+#[test]
+fn recording_e2e_prints_camera_pre_run_checklist() {
+    let s = read("scripts/recording-e2e.sh");
+    let banner = s
+        .find("CAMERA PRE-RUN CHECKLIST")
+        .expect("#220: recording-e2e.sh must print a CAMERA PRE-RUN CHECKLIST banner");
+    // The checklist must name all three operator-set camera controls.
+    assert!(
+        s.contains("SHUTTER") && (s.contains("1/500") || s.contains("1/1000")),
+        "#220: the checklist must call out a FAST shutter ≥1/500 (the #216 conclusion; freezes the \
+         60Hz monitor QR so the dual-QR Vernier does not smear)."
+    );
+    assert!(
+        s.contains("FOCUS") && s.contains("MANUAL"),
+        "#220: the checklist must call out MANUAL focus locked on the cam2 monitor (no autofocus hunt)."
+    );
+    assert!(
+        s.contains("EXPOSURE") && (s.contains("FIXED") || s.contains("manual gain")),
+        "#220: the checklist must call out FIXED exposure / manual gain (no auto-exposure drift)."
+    );
+    // It is a PRE-run reminder: it must be printed BEFORE recording starts.
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        banner < start_record,
+        "#220: the camera pre-run checklist must be printed BEFORE StartRecord (it is a pre-run \
+         reminder — fix the camera, then run)."
+    );
+}
+
 /// The DanteSync NTP+PTP gate must be the FIRST hard step (#7): it must appear in the
 /// script BEFORE the cam1/cam2 launch and the OBS recording start, so a not-locked cluster
 /// fails fast before any measurement.

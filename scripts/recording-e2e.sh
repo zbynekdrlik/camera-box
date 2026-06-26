@@ -77,6 +77,21 @@ REPORT_JSON="$OUTDIR/verdict-${RUN_ID}.json"
 REPORT_PNG="$OUTDIR/report-${RUN_ID}.png"
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
+# #220: CAMERA PRE-RUN CHECKLIST. The cam2->cam1 OPTICAL injection leg (cam1 broadcast camera
+# filming the cam2 monitor QR) depends on the cam1 camera's MANUAL settings, which the harness
+# CANNOT read or set: camera-box reads /dev/video0 (the ShadowCast capture card), which does NOT
+# expose the BMPCC's shutter/focus/exposure. A 1/60 shutter integrates a full 60Hz monitor refresh
+# and SMEARS the dual-QR Vernier mid-change -> the optical read drops (the #216 ~175s gap; the
+# DIGITAL burns were unaffected, so the chain stayed 0 real loss — purely the optical-INJECTION leg).
+# Satisfy this BEFORE the run, then the cam2->cam1 read is reliable with no spurious optical gap.
+echo "=================================================================================="
+echo " CAMERA PRE-RUN CHECKLIST (cam1 broadcast camera — the harness CANNOT auto-set these)"
+echo "   [ ] SHUTTER FAST: >= 1/500 s (ideally 1/1000) — freezes the 60Hz monitor QR, no smear"
+echo "   [ ] FOCUS: MANUAL, locked on the cam2 monitor (no autofocus hunting)"
+echo "   [ ] EXPOSURE: FIXED / manual gain (no auto-exposure drift)"
+echo " A 1/60 shutter caused the #216 ~175s optical-read gap. Fix the camera, THEN run."
+echo "=================================================================================="
+
 echo "[0/8] reachability preflight (cam1 source, cam2 painter, strih, stream)"
 for hp in "cam1=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"

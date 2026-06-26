@@ -73,6 +73,25 @@ not chain loss.
 (2-panel PNG: continuity line slope-2 + deviation band).
 These should land in repo as `scripts/e2e-report.py` (per writing-plans spec).
 
+## Camera Pre-Run Checklist (#220) — cam1 optical settings the harness CANNOT auto-set
+
+The cam2→cam1 OPTICAL injection leg (cam1 broadcast camera filming the cam2 monitor QR) depends on
+the cam1 camera's MANUAL settings. The harness CANNOT read or set them: camera-box reads
+`/dev/video0` (the ShadowCast capture card), which does NOT expose the BMPCC's shutter/focus/
+exposure. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it BEFORE every proof run:
+
+- **Shutter FAST: ≥ 1/500 s (ideally 1/1000)** — a slow shutter integrates a full 60Hz monitor
+  refresh and SMEARS the dual-QR Vernier mid-change (one half changes per refresh), so the optical
+  read of the cam2 monitor QR goes borderline and drops. A **1/60** shutter caused the **#216 ~175s
+  optical-read gap** (the DIGITAL burns were unaffected — drawn post-capture — so the chain stayed
+  0 real loss; the gap was purely the test's optical-INJECTION leg). **≥1/500 is the #216
+  conclusion and SUPERSEDES the old 1/250 spec.**
+- **Manual focus, locked on the cam2 monitor** — no autofocus hunting mid-run.
+- **Fixed exposure / manual gain** — no auto-exposure drift.
+
+(Optional later: a first-N-seconds optical-read-rate gate that aborts early with "check camera
+shutter/focus" if the cam2 QR decode rate is low — fail fast instead of after a 30-min run.)
+
 ## QR Harness (post-#68, 2026-06-15)
 
 After #68 (merged `68180c20c`) the harness AGREES with the persistence test — no longer false-greens.
