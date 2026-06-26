@@ -14,8 +14,8 @@
 //! downstream OBS / GPU device-removed — so #81 can never recur as a silent 30-min
 //! zero-frames mystery.
 //!
-//! Pure / unit-tested: the caller (multitap-probe) feeds the per-tap captured counts;
-//! no NDI rig is needed to test the decision.
+//! Pure / unit-tested: the caller feeds the per-tap captured counts; no NDI rig is
+//! needed to test the decision.
 
 /// One tap's captured-frame count within the early liveness window.
 #[derive(Debug, Clone)]
