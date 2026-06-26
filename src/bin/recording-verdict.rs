@@ -344,8 +344,10 @@ struct NodeSpec<'a> {
     source: &'a [RecordingFrame],
     /// The recording file backing `source`, for pixel-proof extraction of a missing slot.
     /// #208: `None` when `source` came from a merged per-box PARTIAL — the contiguity verdict
-    /// (the PASS gate) is unaffected; only the pixel-proof PNG is skipped (it was written on
-    /// the recording's own box during --extract-partial).
+    /// (the PASS gate) is unaffected; the pixel-proof PNG is not re-extracted HERE because the
+    /// recording is not on dev1. It was already written ON the box during `--extract-partial`
+    /// (see `extract_partial_flagged_frames`) and pulled back to dev1 beside the partial JSON in
+    /// the `<partial>-pixels` dir, so the #186 "SEE the frame" proof is preserved either way.
     rec_path: Option<&'a Path>,
 }
 
@@ -393,8 +395,11 @@ fn node_verdict(
         .collect();
 
     // Extract pixel-proof PNGs for every classified slot frame so the user can SEE it.
-    // #208: only when the recording is on this host (fused / extract). In merge mode the
-    // recording stays on its box; the classification (the PASS gate) is already complete.
+    // #208: only when the recording is on this host (fused / `--extract-partial`). In merge mode
+    // (`rec_path` None) the recording is not on dev1, so these slots are NOT re-extracted here —
+    // their pixel proofs were ALREADY written ON the box during `--extract-partial`
+    // (`extract_partial_flagged_frames` flags the same missing slots) and pulled back beside the
+    // partial JSON. The classification (the PASS gate) is complete regardless.
     let slots: Vec<u64> = classified.iter().filter_map(|c| c.frame_index).collect();
     if let (false, Some(rec_path)) = (slots.is_empty(), rec_path) {
         let png_dir = out_dir.join(format!("{node}-missing"));
@@ -817,16 +822,20 @@ fn report_recording_diag(
     flagged.sort_unstable();
     flagged.dedup();
 
-    // #208: pixel-proof needs the recording file. In merge mode (path None) the recording is
-    // on its own box; the per-box --extract-partial run already wrote its pixel proofs there,
-    // so just report the count and skip extraction here.
+    // #208: pixel-proof needs the recording file. In merge mode (path None) the recording is not
+    // on dev1; the per-box `--extract-partial` run ALREADY wrote these undecodable frames' pixel
+    // proofs ON the box (`extract_partial_flagged_frames`) and they were pulled back to dev1 beside
+    // the partial JSON in the `<partial>-pixels` dir (run_merge prints the concrete path). So report
+    // the count and do not re-extract here.
     let path = match path {
         Some(p) => p,
         None => {
             if !flagged.is_empty() {
                 println!(
-                    "  {} undecodable frame(s) (pixel proofs written on the recording's own box \
-                     during --extract-partial; not re-extracted here — #208)",
+                    "  {} undecodable frame(s) — pixel proofs were extracted ON the recording's box \
+                     during --extract-partial and pulled back to dev1 beside the partial JSON (the \
+                     <partial>-pixels dir; see the per-box pixel-proof paths above); not re-extracted \
+                     here — #208/#186",
                     flagged.len()
                 );
             }
@@ -1827,10 +1836,46 @@ fn extract_partial_flagged_frames(
     frames: &[RecordingFrame],
     args: &Args,
 ) -> (Vec<u64>, HashSet<u64>) {
-    // [red] #208 — the real selection is added in the GREEN commit; this stub flags NOTHING, so
-    // the per-box flow still drops the #186 pixel proof (the regression the test reproduces).
-    let _ = (box_name, frames, args);
-    (Vec::new(), HashSet::new())
+    let all_burns = [
+        args.burn_cam1_run_id,
+        args.burn_strih_run_id,
+        args.burn_stream_run_id,
+    ];
+    // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
+    let ticks = FrameTick::from_recording_frames(frames);
+    let cfg = VerdictConfig {
+        capture_fps: args.capture_fps,
+        min_secs: args.min_secs,
+        refresh_hz: args.refresh_hz,
+    };
+    let v = verdict(&ticks, &cfg);
+    let undecodable: HashSet<u64> = v.undecodable_frames.iter().copied().collect();
+    let mut flagged: Vec<u64> = v.undecodable_frames.clone();
+
+    // The missing-burn slots for the nodes THIS box authoritatively backs (#133): the strih box
+    // backs cam1 (its burn is crispest in the clean 1080p strih recording); the stream box backs
+    // strih + stream (their own burns are co-located with cam2's optical QR only in the stream
+    // recording). These are the SAME (node, source) pairings `build_and_print_verdict` uses, so the
+    // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
+    // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop); strih/stream burn
+    // per-RENDER-tick (a forward gap is not loss, but a delivered frame missing its burn is).
+    let owned: &[(&str, u32, BurnRate)] = match box_name {
+        "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame)],
+        "stream" => &[
+            ("strih", args.burn_strih_run_id, BurnRate::PerRenderTick),
+            ("stream", args.burn_stream_run_id, BurnRate::PerRenderTick),
+        ],
+        _ => &[],
+    };
+    for (node, burn_run_id, rate) in owned {
+        let window = in_window_burn_frames(frames, *burn_run_id, &all_burns, *rate);
+        let iw = burn_contiguity_in_window(node, &window, *rate);
+        flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
+    }
+
+    flagged.sort_unstable();
+    flagged.dedup();
+    (flagged, undecodable)
 }
 
 /// #208 PER-BOX decode-in-place: decode the box's LOCAL recording in place and write a SMALL
@@ -1928,6 +1973,9 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
 fn run_merge(args: &Args) -> Result<()> {
     let mut strih: Option<DecodedRec> = None;
     let mut stream: Option<DecodedRec> = None;
+    // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
+    // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
+    let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
@@ -1942,6 +1990,7 @@ fn run_merge(args: &Args) -> Result<()> {
             "--merge-partials {spec}: the partial file's box is {:?} but it was assigned to {box_name:?}",
             partial.box_name
         );
+        box_paths.push((box_name.to_string(), PathBuf::from(path)));
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
@@ -1967,10 +2016,53 @@ fn run_merge(args: &Args) -> Result<()> {
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
     let (_report, all_pass) = build_and_print_verdict(args, strih, stream, Cam1Source::Absent)?;
+    report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// #186/#208: point the operator at the pixel proofs each box wrote during `--extract-partial`.
+/// The merge cannot re-extract (the recording is not on dev1), but the box ALREADY wrote the
+/// flagged/undecodable frames' PNGs into the `<partial>-pixels` dir, pulled back beside the partial
+/// JSON. Locate that dir per box and report how many PNGs are there — so a FAIL's #186 "SEE the
+/// missing frame" guarantee resolves to a real dev1 path, never a phantom one.
+fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
+    if box_paths.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "=== #186/#208 pixel proofs (extracted ON each box during --extract-partial, pulled back to dev1) ==="
+    );
+    for (box_name, partial_path) in box_paths {
+        let dir = partial_pixels_dir(partial_path);
+        let pngs = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|x| x.eq_ignore_ascii_case("png"))
+                    })
+                    .count()
+            })
+            .ok();
+        match pngs {
+            Some(0) | None => println!(
+                "  [{box_name}] {} — no pixel-proof PNGs on dev1 (a clean run writes none; if this \
+                 run FAILED, pull the {box_name} box's <partial>-pixels dir — it was written there \
+                 during --extract-partial)",
+                dir.display()
+            ),
+            Some(n) => println!(
+                "  [{box_name}] {n} pixel-proof PNG(s) in {} — open these to SEE each flagged / \
+                 undecodable frame (#186)",
+                dir.display()
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
