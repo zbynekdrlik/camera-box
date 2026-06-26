@@ -1793,10 +1793,52 @@ fn build_and_print_verdict(
     Ok((report, all_pass))
 }
 
+/// #208 + #186: the sibling directory (BESIDE the partial JSON) where `--extract-partial` writes
+/// this box's pixel-proof PNGs and `--merge-partials` looks for the pulled-back copies. For a
+/// partial `…/strih-partial-42.json` it is `…/strih-partial-42-pixels`. Deriving it the SAME way
+/// on both sides means the box writes the PNGs, the harness pulls the dir back beside the partial,
+/// and the merge points the operator at the real dev1 location — no path is threaded around.
+fn partial_pixels_dir(partial_path: &Path) -> PathBuf {
+    let stem = partial_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "partial".to_string());
+    partial_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}-pixels"))
+}
+
+/// #208 + #186: the recorded-frame indices THIS box must extract pixel proofs for during
+/// `--extract-partial`, so the merge's #186 "SEE the missing / undecodable frame" guarantee
+/// survives the per-box split (the merge can NEVER re-extract — the recording is not on dev1).
+///
+/// Returns `(flagged, undecodable)`. `flagged` is the union (sorted, deduped) of
+///   • the recording's UNDECODABLE frames (no readable QR at all — the `report_recording_diag` set), and
+///   • the missing-burn slots for the nodes this box AUTHORITATIVELY backs — the SAME slots the
+///     merge would flag, so the PNGs pulled back are exactly the #186 proofs:
+///       - strih box → cam1 (its burn is read from the clean 1080p strih recording, #133),
+///       - stream box → strih + stream (their burns are read from the stream recording).
+/// `undecodable` is the undecodable subset (so `extract_frames_png` runs its sharp-but-flagged
+/// self-check on those frames). PURE (no I/O) so the selection is unit-testable; the PNG write is
+/// the thin `extract_frames_png` glue in [`extract_partial`].
+fn extract_partial_flagged_frames(
+    box_name: &str,
+    frames: &[RecordingFrame],
+    args: &Args,
+) -> (Vec<u64>, HashSet<u64>) {
+    // [red] #208 — the real selection is added in the GREEN commit; this stub flags NOTHING, so
+    // the per-box flow still drops the #186 pixel proof (the regression the test reproduces).
+    let _ = (box_name, frames, args);
+    (Vec::new(), HashSet::new())
+}
+
 /// #208 PER-BOX decode-in-place: decode the box's LOCAL recording in place and write a SMALL
-/// partial JSON (ids + timestamps, NO frames/pixels). The strih box decodes its strih recording
-/// (cam1 + strih burns); the stream box decodes its stream recording (all three burns). dev1 then
-/// `--merge-partials` the small JSONs — the recording is NEVER copied box-to-box (nor to dev1).
+/// partial JSON (ids + timestamps, NO frames/pixels) PLUS the #186 pixel-proof PNGs for this box's
+/// flagged frames (undecodable + the missing-burn slots for the nodes it backs) into the sibling
+/// `<partial>-pixels` dir. The strih box decodes its strih recording (cam1 + strih burns); the
+/// stream box decodes its stream recording (all three burns). dev1 then `--merge-partials` the
+/// small JSONs (+ pulls back the pixel dirs) — the recording is NEVER copied box-to-box (nor to dev1).
 fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     let (rec_path, expected_burns): (&Path, Vec<u32>) = match box_name {
         // The strih recording carries the cam1 (forwarded) + strih burns — never the stream burn.
@@ -1830,18 +1872,49 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     let frames = analyze_recording_with_burns(rec_path, &expected_burns)
         .with_context(|| format!("analyze recording {}", rec_path.display()))?;
 
-    let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames);
     let out = args
         .out
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!("partial-{box_name}.json")));
+
+    // #186/#208: write the pixel proofs for THIS box's flagged frames (undecodable + the
+    // missing-burn slots for the nodes this box backs) into the sibling `<partial>-pixels` dir,
+    // so the per-box flow does NOT drop the "SEE the frame" guarantee. The recording is on this
+    // box during extract, so this is the ONE place the proof can be produced; the merge (dev1) can
+    // never re-extract. Only the flagged-frame PNGs are written (a handful), pulled back beside the
+    // partial JSON. A clean (zero-loss, fully decodable) run writes none.
+    let (flagged, undecodable) = extract_partial_flagged_frames(box_name, &frames, args);
+    if !flagged.is_empty() {
+        let png_dir = partial_pixels_dir(&out);
+        let extracted = extract_frames_png(
+            rec_path,
+            &flagged,
+            &undecodable,
+            &png_dir,
+            args.max_pixel_proof,
+        )?;
+        println!(
+            "#186/#208 pixel-proof [{box_name}]: {} flagged frame(s) → {} PNG(s) in {} \
+             (undecodable + missing-burn slots; pull this dir to dev1 beside the partial).",
+            flagged.len(),
+            extracted.len(),
+            png_dir.display(),
+        );
+    }
+
+    let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames);
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
         "#208 partial-extract [{box_name}]: {} frames decoded in place → {} ({bytes} bytes JSON). \
-         Pull ONLY this small JSON to dev1; the {} recording stays on its box (never copied).",
+         Pull this small JSON (+ the {}-pixels dir if present) to dev1; the {} recording stays on \
+         its box (never copied).",
         partial.frames.len(),
         out.display(),
+        partial_pixels_dir(&out)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         box_name,
     );
     Ok(())
@@ -2078,6 +2151,83 @@ mod tests {
             drop["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
             "#208: the missing cam1 id must be classified as a REAL DROP: {}",
             drop["full_chain"]["real_drops"]
+        );
+    }
+
+    /// #186/#208 BLOCKER: `--extract-partial` must IDENTIFY this box's pixel-proof frames so the
+    /// on-box decode can write the PNGs and the merge's "SEE the frame" guarantee survives the
+    /// per-box split. The strih box must flag its recording's UNDECODABLE frames (no readable QR).
+    #[test]
+    fn extract_partial_flags_undecodable_frames_for_pixel_proof() {
+        use super::extract_partial_flagged_frames;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        // strih-box frames: an INTERIOR frame (index 1) with NO readable QR (undecodable);
+        // surrounded by decodable frames so it is body-interior (not lead-in/out trimmed). cam1
+        // ids 5000,5001 are contiguous (no missing-burn slot) — so ONLY the undecodable shows.
+        let frames = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 5000), (STRIH, 1670)]),
+            frame(1, &[]), // no QR at all → undecodable interior frame
+            frame(2, &[(CAM2, 102), (CAM1B, 5001), (STRIH, 1676)]),
+        ];
+        let (flagged, undecodable) = extract_partial_flagged_frames("strih", &frames, &args);
+        assert!(
+            flagged.contains(&1),
+            "#186: the undecodable frame (index 1) must be flagged for pixel-proof extraction \
+             on-box; got flagged={flagged:?}"
+        );
+        assert!(
+            undecodable.contains(&1),
+            "#186: frame 1 must be in the undecodable set (so the sharp-but-flagged self-check \
+             runs on it); got {undecodable:?}"
+        );
+    }
+
+    /// #186/#208 BLOCKER: the stream box must ALSO flag the missing-burn slots for the nodes it
+    /// backs (strih + stream), so a delivered frame whose burn QR is unreadable (a #186 anomaly)
+    /// has its pixels extractable on-box, not silently lost in the per-box flow.
+    #[test]
+    fn extract_partial_flags_missing_burn_slots_for_owned_nodes() {
+        use super::extract_partial_flagged_frames;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        // stream-box frames: frame 1 is DELIVERED (carries cam2) but is MISSING its strih burn —
+        // a BURN-UNREADABLE missing slot for the strih node (read from the stream recording). All
+        // frames are decodable (cam2 present) so there is NO undecodable frame; the ONLY proof is
+        // the strih missing-burn slot at frame index 1.
+        let frames = vec![
+            frame(0, &[(CAM2, 100), (STRIH, 1670), (STREAM, 9000)]),
+            frame(1, &[(CAM2, 101), (STREAM, 9003)]), // delivered, NO strih burn → BurnUnreadable
+            frame(2, &[(CAM2, 102), (STRIH, 1676), (STREAM, 9006)]),
+        ];
+        let (flagged, undecodable) = extract_partial_flagged_frames("stream", &frames, &args);
+        assert!(
+            flagged.contains(&1),
+            "#186: the strih-node missing-burn slot (delivered frame 1 with no strih burn) must be \
+             flagged for pixel-proof on the stream box; got flagged={flagged:?}"
+        );
+        assert!(
+            undecodable.is_empty(),
+            "#186: no frame is undecodable here (all carry cam2) — only the missing-burn slot is \
+             flagged; got undecodable={undecodable:?}"
+        );
+    }
+
+    /// #208: the pixel-proof dir is derived the SAME way on both sides (extract writes it, merge
+    /// reads it) — `…/strih-partial-42.json` → `…/strih-partial-42-pixels` beside the JSON.
+    #[test]
+    fn partial_pixels_dir_is_a_sibling_named_after_the_partial() {
+        use super::partial_pixels_dir;
+        use std::path::Path;
+        assert_eq!(
+            partial_pixels_dir(Path::new("/tmp/run/strih-partial-42.json")),
+            Path::new("/tmp/run/strih-partial-42-pixels"),
+            "the pixel dir must be a sibling of the partial named <stem>-pixels"
+        );
+        // No parent → current dir.
+        assert_eq!(
+            partial_pixels_dir(Path::new("stream-partial.json")),
+            Path::new("stream-partial-pixels")
         );
     }
 
