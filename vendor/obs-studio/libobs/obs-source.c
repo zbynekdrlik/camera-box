@@ -4440,6 +4440,13 @@ static inline bool genlock_is_wallclock_ts(uint64_t ts_ns)
  * src/probe/genlock.rs GENLOCK_SOURCE_LATENCY_MS_MAX + the DistroAV UI int range. */
 #define GENLOCK_SOURCE_LATENCY_MS_MAX 2000
 
+/* camera-box #257: GENLOCK_LATENCY_MS_MIN_INIT (defined early, near obs_source_init, so the
+ * per-source field can be seeded at create before this block) MUST equal the canonical floor
+ * GENLOCK_LATENCY_MS_MIN — otherwise the create-seed and the setter clamp would disagree. Pin
+ * them equal at compile time so a future floor change can never silently desync the two. */
+_Static_assert(GENLOCK_LATENCY_MS_MIN == GENLOCK_LATENCY_MS_MIN_INIT,
+	       "genlock latency create-seed floor (_INIT) must equal the canonical clamp floor (#257)");
+
 /* camera-box #257: the GLOBAL genlock latency a source without a per-source override falls
  * back to — now a BUILD CONST (GENLOCK_LATENCY_MS_DEFAULT = 3 ms), no env. Per-source is
  * always >= GENLOCK_LATENCY_MS_MIN (3) so this fallback is effectively never reached, but

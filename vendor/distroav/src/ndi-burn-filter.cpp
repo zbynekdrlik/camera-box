@@ -23,16 +23,16 @@
 	     filter's output, so the burn flows downstream into the recording.
 	NO libobs core change — this is purely a DistroAV plugin filter.
 
-	Identity / gating:
-	  - run_id: reserved per-node constant, env-overridable via OBS_BURN_RUN_ID. Defaults
-	    to 911002 (strih); stream sets OBS_BURN_RUN_ID=911004. Both sit OUTSIDE cam2's
-	    normal run_id range so #108 distinguishes node-stamp from cam2-stamp by run_id.
+	Identity / gating (#257 — no env):
+	  - run_id: reserved per-node constant DERIVED FROM THE HOST ROLE (no OBS_BURN_RUN_ID env):
+	    stream box (hostname contains "stream") = 911004, strih (and any other) = 911002. Both
+	    sit OUTSIDE cam2's normal run_id range so #108 distinguishes node-stamp from cam2-stamp.
 	  - frame_id: this filter's own per-render monotonic counter.
 	  - gen_ts_ns: RAW render-instant wall-clock (burn_clock::gen_ts_ns, NOT boundary-
 	    snapped) — shares the camera-box painter's RAW basis so cam→strih is bias-free (#108
 	    finding #2). The genlock EMIT timecode (ndi-output.cpp) stays snapped; separate path.
-	  - Gated behind OBS_BURN_QR (mirrors OBS_GENLOCK_WALL_CLOCK): default OFF, so the
-	    production install is UNAFFECTED until #108 enables it on the dedicated PROBE scene.
+	  - Gated by the PARENT source's per-source genlock_burn bool (#257, default OFF, no env),
+	    read LIVE each render (obs_source_get_genlock_burn) so toggling needs NO OBS restart.
 	    When OFF the filter is a transparent pass-through (renders the target, no burn).
 
 	UNVERIFIED until post-event on-rig deploy: the actual burn into a real recording.
@@ -150,6 +150,15 @@ static bool burn_host_is_stream()
 #endif
 	for (char *p = name; *p; ++p)
 		*p = (char)tolower((unsigned char)*p);
+	/* #257: the verdict's strih(911002)/stream(911004) pairing rests on this host-role match. If
+	 * the box is NEITHER "stream" NOR "strih" (renamed / a new host), we fall back to strih's id —
+	 * which would silently mis-pair the verdict. WARN LOUD so a host rename is never a silent
+	 * mis-stamp (the resolved id is also logged at filter-create). */
+	if (!strstr(name, "stream") && !strstr(name, "strih"))
+		obs_log(LOG_WARNING,
+			"[burn] host '%s' matches neither 'stream' nor 'strih' — defaulting run_id to strih "
+			"(911002). If this box should stamp 911004, rename it to contain 'stream' (#257).",
+			name);
 	return strstr(name, "stream") != nullptr;
 }
 
@@ -288,10 +297,10 @@ static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t w, uint32_t h)
 	const int64_t gen_ts_ns = burn_clock::gen_ts_ns(fps);
 	const std::string payload = burn_payload::encode(f->run_id, fid, gen_ts_ns);
 
-	// Place the burn in this node's bottom corner. BOTH the QR px and the edge margin are
-	// canvas-relative (#186/#172) unless OBS_BURN_QR_PX pinned an absolute QR size: bigger on a
-	// 4K stream so the burn stays crisp through the upscale (the old fixed 300px went soft), and
-	// the margin scales so the clearance vs the top dual-QR holds on every canvas.
+	// Place the burn in this node's bottom corner. BOTH the QR px and the edge margin are always
+	// canvas-relative (#186/#172, #257: f->qr_px is hard-coded 0 = auto, no OBS_BURN_QR_PX env):
+	// bigger on a 4K stream so the burn stays crisp through the upscale (the old fixed 300px went
+	// soft), and the margin scales so the clearance vs the top dual-QR holds on every canvas.
 	const uint32_t margin = burn_geom::burn_margin_for_canvas(h);
 	const uint32_t qr_px = burn_geom::burn_qr_px_for_canvas(f->qr_px, h);
 	const burn_geom::Placement pl =
