@@ -123,21 +123,22 @@ emits the on-stream verdict plan). Run:
 Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) at HEAD —
 `gh run download <run> -n probe-tools-{linux,windows}-amd64`; symlink `camera-box-probe`→`camera-box`.
 
-**TWO missed-envs silently waste a run (verify BEFORE recording):**
-1. **stream's OBS_BURN_QR must be ON** (#195). **The harness now AUTO-CHECKS this** before
+**TWO things silently waste a run (verify BEFORE recording):**
+1. **stream's measurement burn must be ON** (#195/#257). **The harness AUTO-CHECKS this** before
    `[5/8] StartRecord` (the `[4b/8]` pre-record burn-ON gate): it runs `obs_burn_filter.py check`
-   on strih+stream and ABORTS (exit 1) unless `kind_registered=True` AND `filter_on_input=True`
-   — so a burns-OFF/pass-through OBS fails fast instead of wasting a full run. If it aborts,
-   relaunch the box's OBS in test mode via `scripts/rig-mode.sh test`. The stream burn (911004)
-   only fires if stream's OBS was LAUNCHED with `OBS_BURN_QR=1` — the running OBS does NOT pick up HKLM mid-session.
-   Without it the stream recording has NO stream burn → strih→stream can't pair (latency=null,
-   `strih_stream_source: two recordings ...`). Fix: relaunch stream OBS with the env set in the
-   launching shell (see obs-ops skill: ExitOBS → force-kill → clear `.sentinel\*` → relaunch
-   `cwd=bin\64bit` with `$env:OBS_BURN_QR=1; $env:OBS_BURN_RUN_ID=911004; $env:OBS_GENLOCK_WALL_CLOCK=1; $env:OBS_GENLOCK_LATENCY_MS=3`).
-   (#235: `OBS_GENLOCK_LATENCY_MS=3` is THE single genlock latency knob — it implies ts-align on and
-   auto-derives the internal FIFO depth, so `OBS_GENLOCK_RESERVE_MS`/`_TS_ALIGN`/`_PRELOAD_FRAMES` are
-   no longer needed; `OBS_GENLOCK_RESERVE_MS=3` still works as the back-compat alias.)
-   Verify the OBS log: `[burn] filter created: enabled=yes run_id=911004` AND `genlock: latency = 3 ms`.
+   on strih+stream and ABORTS (exit 1) unless the per-source `genlock_burn=true` — so a
+   burns-OFF/pass-through OBS fails fast instead of wasting a full run. (Post-#257 the DistroAV QR
+   burn EFFECT filter is ALWAYS registered; the `genlock_burn` bool gates whether it RENDERS.)
+   Without the burn the stream recording has NO stream burn → strih→stream can't pair (latency=null,
+   `strih_stream_source: two recordings ...`). Fix — turn it ON over OBS WebSocket, **NO relaunch,
+   NO env**: `scripts/rig-mode.sh test` (both boxes) or
+   `scripts/obs_burn_filter.py add --host <ip> --input "<program input>"`. The burn run_id comes
+   from the box's host role (strih=911002 bottom-left / stream=911004 bottom-right), NOT env. Verify
+   the OBS log: `[burn] ON  genlock_burn=true on '<input>'`.
+   (#235/#257: genlock latency is the per-source DistroAV UI int (floor 3, prod=3 ms); the render
+   tick + ts-align are BUILD DEFAULTS. There is NO `OBS_GENLOCK_*` / `OBS_BURN_*` env any more — the
+   old `$env:OBS_BURN_QR=1; OBS_GENLOCK_LATENCY_MS=3` launch model is GONE (#257/#261); OBS launches
+   env-free via `scripts/launch-obs-genlock.sh --box {strih|stream}`.)
 2. **stream RECORDING is native 1080p, NOT 4K** (#225, FIXED 2026-06-24). The OBS canvas is 1080p.
    The recording USED to reuse the 4K-rescaled streaming encoder (`RecEncoder=none` + stream
    `Rescale=3840x2160`) → recorded 4K → upscale softened the small (~300px) burns → cam1 over-counted
@@ -180,8 +181,10 @@ mode (clean prod broadcast). Replaces the ad-hoc, context-dependent switching th
 burn left ON in the prod **Machine** env painted QR on the LIVE broadcast, and genlock left in a test
 state. The settings below are PINNED in the script; do NOT improvise them.
 
-Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to the Windows boxes is DENIED, so the OBS side is
-PRINTED as the exact `launch-obs-genlock.sh --mode` step to paste into the box's win-* MCP Shell):
+Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to the Windows boxes is DENIED, so the OBS side
+is PRINTED as the exact step to paste into the box's win-* MCP Shell — the WS burn toggle
+`obs_burn_filter.py add|remove` and, only if OBS is wedged, the env-free
+`launch-obs-genlock.sh --box {strih|stream} --force` relaunch):
 
 ```bash
 scripts/rig-mode.sh test     # rig INTO test mode (paint QR + print OBS burns-ON step)
@@ -196,25 +199,33 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   cam2); TEST mode **FAILS LOUD** if it is absent. For a measurement run add `PAINTER_EXTRA_FLAGS="--wall-clock --run-id <N>"`.
 - **cam1 (10.77.9.61):** NOT reconfigured — runs its DEPLOYED service (already 30 fps / certified v4l2
   saturation=0 contrast=75), the recording convention.
-- **strih + stream OBS:** `scripts/launch-obs-genlock.sh --box {strih|stream} --mode test --force` —
-  burns ON in the **LAUNCH SHELL ONLY** (NEVER Machine): `OBS_BURN_QR=1`, `OBS_BURN_QR_PX=300`,
-  `OBS_BURN_RUN_ID` = 911002 (strih) / 911004 (stream). Genlock env stays from Machine. Then confirm
-  the PHASE2-PROBE scene + native-1080p recording (#225).
+- **strih + stream OBS:** the measurement burn is toggled ON over OBS WebSocket — **NO relaunch,
+  NO env**: `rig-mode.sh test` runs `scripts/obs_burn_filter.py add` on both boxes (per-source
+  `genlock_burn=true`; the QR EFFECT filter is always registered, the bool gates its render). The
+  burn run_id is fixed by the box role — strih 911002 (bottom-left) / stream 911004 (bottom-right) —
+  NOT env. Relaunch the box's OBS only if it is wedged or pass-through:
+  `scripts/launch-obs-genlock.sh --box {strih|stream} --force` (env-free; genlock latency is the
+  build const, floor 3 ms). Then confirm the PHASE2-PROBE scene + native-1080p recording (#225).
 
 **EVENT mode (pinned — the #246 guard):**
 - **cam2:** stop the painter via its PID file (NOT `pkill -f frame-probe` — a shell whose cmdline
   contains "frame-probe" would self-kill; `pkill -x frame-probe` is the safe fallback) →
   `systemctl start camera-box` → verify active + `--display` restored (re-holds /dev/fb0).
-- **strih + stream OBS:** `scripts/launch-obs-genlock.sh --box {strih|stream} --mode event --force` —
-  burns CLEARED in the launch shell AND asserted ABSENT from Machine; the wrapper **REFUSES to launch
-  (exit 8)** if any `OBS_BURN_*` is set Machine-wide. PROD genlock latency stays from Machine
-  (currently FRAME mode: `OBS_GENLOCK_LATENCY_MS=0`, per-source preload).
+- **strih + stream OBS:** the measurement burn is toggled OFF over OBS WebSocket — the #246 guard,
+  **NO relaunch, NO env**: `rig-mode.sh event` runs `scripts/obs_burn_filter.py remove` on both
+  boxes (per-source `genlock_burn=false`; the EFFECT filter stays registered, pass-through — no QR
+  on the live broadcast). PROD genlock latency is the per-source DistroAV UI int (prod=3 ms),
+  unchanged by the burn toggle.
 
 **Burn run_ids are the single source of truth** in `src/probe/recording_latency.rs`
 (`BURN_RUN_ID_STRIH=911002`, `BURN_RUN_ID_STREAM=911004`, `BURN_RUN_ID_CAM1=911001`), mirrored by
-`launch-obs-genlock.sh::burn_run_id_for_box`. **NEVER set `OBS_BURN_*` in Machine scope** — it
-survives reboot and is exactly the #246 live-broadcast contamination. The cam-box root pw is `$CAM_PW`
-(dev-rig LAN default, as in the sibling e2e scripts — override from your password store).
+the box host role in `scripts/obs_burn_filter.py`. **Post-#257 there is NO `OBS_BURN_*` env at
+all** — the burn is the per-source `genlock_burn` bool flipped over OBS WebSocket, so the old #246
+`OBS_BURN_*`-in-Machine-scope contamination (a stray env surviving a reboot and painting QR on the
+live broadcast) is structurally impossible. The #246 guard is now a WS-STATE read: EVENT mode
+asserts `genlock_burn=false` on the program inputs (`obs_burn_filter.py check`) and the harness
+cleanup verifies it. The cam-box root pw is `$CAM_PW` (dev-rig LAN default, as in the sibling e2e
+scripts — override from your password store).
 
 ## Testing the E2E harness scripts (sourceability gotcha)
 

@@ -86,3 +86,15 @@ restartom pc a pokracovat vo vyvoji!!!"
 
 Do NOT gate, classify, or ask before recovering dev rig infra.
 The user interrupts Claude when the rig is needed live.
+
+## #265 — NDI-receive STUCK state (recovery = reboot)
+
+THE STUCK STATE (intermittent, after long uptime): the cam→OBS NDI receive on a broadcast box
+(strih/stream) collapses to ~10 fps (genlock STARVED, huge underruns) while `dantesync.exe` pegs
+~1 of 16 cores. Restarting the dantesync service does NOT fix it — only a full PC reboot does
+(2026-06-26: cam1→strih ~10→30.2 fps, underruns 290k→0 after reboot). Recovery = reboot (#265).
+
+A detect+alert watchdog for this state is tracked separately in **#266** (split out of PR #268 for a
+solo redesign — the first cut over-/under-discriminated STUCK vs benign IDLE). No watchdog script
+lives in the tree yet; until #266 lands, the stuck state is caught by hand (genlock-fifo audit fps +
+dantesync CPU) and recovered by reboot per above.

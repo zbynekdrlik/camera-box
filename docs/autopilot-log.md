@@ -2,6 +2,12 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-06-27 — PR #268 narrowed to #267 + #262; #266 split out (worker, v1.7.0-dev.118)
+- 2nd deep review found the #267 fix OVER-corrected. PR #268 now ships ONLY the verified-safe #267 (trailing-clamp-only) + #262 (doc). #266 (watchdog) SPLIT OUT for a solo redesign. NOT merged (supervisor re-reviews + merges).
+- **#267 (recording-verdict) — leading clamp removed:** RED `748d27eb3` → GREEN `61a4e2c67`. The earlier fix clamped BOTH a trailing teardown tail (justified — observed run 2606010: cam2 painter outlives cam1 ~0.77s/23 frames at shutdown) AND a NEW leading (lead-in) burn-absent run. The leading clamp masks UNOBSERVED-but-possible real START-of-stream loss (cam1 emitted those ids, lost in transit at startup) → false-PASS vs the user's HARD 0-gap bar. Removed the leading clamp entirely; KEPT the bounded trailing teardown clamp. A leading burn-absent run now stays CHARGED (BURN-UNREADABLE → FAILS) — a false-FAIL is SAFE, masking start-loss is not. Renamed `TEARDOWN_EDGE_MAX_FRAMES`→`TEARDOWN_TAIL_MAX_FRAMES` (=45; trailing-only now). RED test `leading_lead_in_is_charged_not_clamped` (was `bounded_leading_lead_in_is_clamped_not_charged`, inverted to assert charged/FAIL). KEPT trailing tests `in_window_clamps_post_emission_teardown_tail`, `long_trailing_burn_absent_tail_is_real_loss_not_clamped`, `clamp_keeps_interior_unreadable_and_strict_bar`, and `long_leading_burn_absent_lead_in_is_real_loss_not_clamped`. 2606010 (trailing 23-frame tail ≤45, no leading issue) still clamps → overall_pass true; a synthetic leading-loss case FAILS.
+- **#266 (stuck-watchdog) — SPLIT OUT, left OPEN:** removed `scripts/stuck-watchdog.py` + `tests/python/test_stuck_watchdog.py` and the #266 ops-playbook content; dropped `Closes #266` from the PR body. 14+ findings over 2 review rounds (false-negatives green a dead cam; false-positives reboot a healthy box) → a buggy safety tool is worse than none. Redesign brief posted on #266 (dantesync-runaway checked first/independently; STUCK-vs-IDLE discriminator; robust audit-tail; floor pair_dt; document exit 3).
+- **#262 (doc):** untouched, kept as-is.
+
 ## 2026-06-25 — #122 drift-guard per-component BUILD SHA + capability (worker, v1.7.0-dev.106)
 
 - VALIDATED still real (live, read-only): both strih (10.77.9.202) + stream (10.77.9.204) report OBS
@@ -727,3 +733,7 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - Verified: every remaining `OBS_GENLOCK_`/`OBS_BURN_` in the named files is a negative/historical ref; 0 active env-set instructions. Tier-0 fmt clean; no scripts touched (no shellcheck needed).
 - e2e/SKILL.md still has the SAME killed-env launch trap (outside #261's named scope) → filed #262.
 - 📔 Playbook: genlock + obs-ops + drift-guard playbook now match the #257 no-env model; e2e rewrite tracked in #262.
+
+## 2026-06-26 — #261 playbook no-env rewrite (PR #263, v1.7.0-dev.117) — MERGED
+- PR #263 merged; #261 CLOSED. genlock + obs-ops skills + drift-guard command rewritten to the #257 no-env reality (genlock build-default, per-source ms latency floor 3, runtime burn via WS, env-free launch); 0 active killed-env instructions remain. e2e SKILL.md residual env = #262 (filed). #260 (WS pw) left for user rotation call.
+- NEXT (GOAL path, user-approved "pokračuj"): fresh #257 E2E baseline running (zero-loss + per-hop latency) → then reliability bugs (#147/#129/#144/#145) → #109 restart-survival → #24 cam1/3/4 coverage → close #105.
