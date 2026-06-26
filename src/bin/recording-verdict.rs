@@ -266,14 +266,19 @@ fn node_burn_id_on(f: &RecordingFrame, burn_run_id: u32) -> Option<u32> {
         .map(|p| p.frame_id)
 }
 
-/// #267 — the maximum length of a node's LEADING (lead-in) or TRAILING (teardown) burn-absent run
-/// that may be clamped off the optical window as a start/end-of-stream edge artifact rather than
-/// charged as loss. The observed teardown overrun (run 2606010) was 23 frames (~0.77 s @ 30 fps
-/// emit: cam2's painter outlived cam1 by the held latency + shutdown skew). This bound is ~2×
-/// that margin. A burn-absent edge run LONGER than this is treated as REAL start/end-of-stream
-/// loss (cam1 emitted those ids and they were lost in transit) and is NEVER clamped — it stays
-/// charged as BURN-UNREADABLE and FAILS, so the clamp can never mask a real zero-loss failure.
-const TEARDOWN_EDGE_MAX_FRAMES: usize = 45;
+/// #267 — the maximum length of a node's TRAILING (teardown) burn-absent run that may be clamped
+/// off the optical window as an end-of-stream edge artifact rather than charged as loss. The
+/// observed teardown overrun (run 2606010) was 23 frames (~0.77 s @ 30 fps emit: cam2's painter
+/// outlived cam1 by the held latency + shutdown skew). This bound is ~2× that margin. A trailing
+/// burn-absent run LONGER than this is treated as REAL end-of-stream loss (the node emitted those
+/// ids and they were lost in transit) and is NEVER clamped — it stays charged as BURN-UNREADABLE
+/// and FAILS, so the clamp can never mask a real zero-loss failure.
+///
+/// TRAILING-ONLY (deep-review correction): the LEADING (lead-in) edge is NEVER clamped. The
+/// observed-and-justified case is the teardown tail; the lead-in is UNOBSERVED, and a leading
+/// clamp would only open a NEW masking window where a real ≤bound start-of-stream loss false-PASSes
+/// the user's HARD 0-gap bar. So this constant governs the trailing teardown tail only.
+const TEARDOWN_TAIL_MAX_FRAMES: usize = 45;
 
 /// Build the IN-WINDOW per-recorded-frame burn-presence sequence for a node (#198).
 ///
@@ -339,53 +344,47 @@ fn in_window_burn_frames(
         })
         .collect();
 
-    // #267 — BOUNDED TEARDOWN / LEAD-IN EDGE CLAMP. The window above is anchored to cam2's optical
-    // (QR) span. At the EDGES a node's burn can be legitimately absent while cam2's painter is up:
-    //   • TEARDOWN TAIL — at shutdown the node STOPS emitting its burn while cam2's painter keeps
-    //     running a few more frames (run 2606010: cam1 emitted clean through id 9461, then ~23
-    //     cam2-only frames at teardown, ≈0.77 s). Those are not lost frames.
-    //   • LEAD-IN — at start cam2's painter can come up a few frames BEFORE the node's first
-    //     emitted burn; those leading optical-only frames carry no burn either (the mirror case).
-    // The OLD fix popped EVERY trailing burn-absent frame unconditionally — which MASKS real loss:
-    // an optical-present / burn-absent edge run is IDENTICAL in the recording whether the node
-    // simply ended/began there (legit) OR it EMITTED those frames and they were LOST in transit
-    // right at shutdown/startup (REAL end/start-of-stream loss — must FAIL, the user's HARD
-    // zero-loss bar). No recorded signal distinguishes the two (the cam1 burn rides only its own
-    // recordings; cam1-capture-stats is capture-rate ~2×, not a burn id; the painter is cam2's
-    // already-over-extended boundary), so the ONLY sound discriminator is the SIZE of the edge run:
-    // a teardown/lead-in overrun is small and bounded (≈0.77 s observed), real loss is not. So
-    // clamp an edge burn-absent run ONLY when it is within [`TEARDOWN_EDGE_MAX_FRAMES`]; a LONGER
-    // edge run stays charged as BURN-UNREADABLE and FAILS — never silently clamped. This NEVER
-    // weakens the strict #186 bar for the IN-RANGE span: an INTERIOR burn-less frame (a present
-    // burn on BOTH sides — the stream resumed) is neither leading nor trailing, so it is always
-    // kept and still FAILS. Rate-agnostic — a per-render edge run at teardown is the same artifact.
+    // #267 — BOUNDED TEARDOWN-TAIL EDGE CLAMP (TRAILING only). The window above is anchored to
+    // cam2's optical (QR) span. At TEARDOWN a node's burn can be legitimately absent while cam2's
+    // painter is still up: at shutdown the node STOPS emitting its burn while cam2 keeps painting a
+    // few more frames (run 2606010: cam1 emitted clean through id 9461, then ~23 cam2-only frames at
+    // teardown, ≈0.77 s). Those are not lost frames. The OLD fix popped EVERY trailing burn-absent
+    // frame UNCONDITIONALLY — which MASKS real loss: an optical-present / burn-absent tail is
+    // IDENTICAL in the recording whether the node simply ended there (legit) OR it EMITTED those
+    // frames and they were LOST in transit right at shutdown (REAL end-of-stream loss — must FAIL,
+    // the user's HARD zero-loss bar). No recorded signal distinguishes the two (the node burn rides
+    // only its own recording; cam1-capture-stats is capture-rate ~2×, not a burn id; the painter is
+    // cam2's already-over-extended boundary), so the ONLY sound discriminator is the SIZE of the
+    // tail: a teardown overrun is small and bounded (≈0.77 s observed), real loss is not. So clamp a
+    // TRAILING burn-absent run ONLY when it is within [`TEARDOWN_TAIL_MAX_FRAMES`]; a LONGER tail
+    // stays charged as BURN-UNREADABLE and FAILS — never silently clamped.
+    //
+    // ONLY the TRAILING edge is clamped — the LEADING (lead-in) edge is NOT. A start-of-stream
+    // burn-absent run is left CHARGED (BURN-UNREADABLE → FAIL). The lead-in case is UNOBSERVED on
+    // the rig, and a leading clamp would open a NEW masking window where a real ≤bound START-of-
+    // stream loss (the node emitted those ids; they were lost in transit at startup) false-PASSes
+    // the HARD 0-gap bar. A false-FAIL is SAFE; masking start-of-stream loss is not. If a real
+    // lead-in artifact is ever OBSERVED, it earns its own evidence-backed fix then — we do not clamp
+    // an unobserved case.
+    //
+    // This NEVER weakens the strict #186 bar for the IN-RANGE span: an INTERIOR burn-less frame (a
+    // present burn on BOTH sides — the stream resumed) is neither leading nor trailing, so it is
+    // always kept and still FAILS. Rate-agnostic — a per-render tail at teardown is the same artifact.
     let n = frames.len();
-    let leading_absent = frames.iter().take_while(|f| f.burn_id.is_none()).count();
     let trailing_absent = frames
         .iter()
         .rev()
         .take_while(|f| f.burn_id.is_none())
         .count();
-    let drop_lead = if leading_absent <= TEARDOWN_EDGE_MAX_FRAMES {
-        leading_absent
-    } else {
-        0 // a LONG lead-in is real start-of-stream loss — keep it, do NOT clamp
-    };
-    let drop_tail = if trailing_absent <= TEARDOWN_EDGE_MAX_FRAMES {
+    let drop_tail = if trailing_absent <= TEARDOWN_TAIL_MAX_FRAMES {
         trailing_absent
     } else {
         0 // a LONG tail is real end-of-stream loss — keep it, do NOT clamp
     };
-    if drop_lead + drop_tail >= n {
-        // Every frame is burn-absent (leading_absent == trailing_absent == n) AND within the bound
-        // ⇒ the node carried no burn anywhere in a short window ⇒ nothing to prove. (A LONG
-        // all-absent window keeps everything ⇒ FAILS, as it must.) Clearing once also avoids the
-        // overlapping leading/trailing runs double-draining below.
-        frames.clear();
-    } else {
-        frames.truncate(n - drop_tail);
-        frames.drain(0..drop_lead);
-    }
+    // truncate(n - drop_tail) handles the all-burn-absent short window too: trailing_absent == n ≤
+    // bound ⇒ drop_tail == n ⇒ truncate(0) ⇒ empty (nothing to prove). A LONG all-absent window has
+    // trailing_absent > bound ⇒ drop_tail == 0 ⇒ everything kept ⇒ FAILS, as it must.
+    frames.truncate(n - drop_tail);
     frames
 }
 
