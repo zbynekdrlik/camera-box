@@ -541,6 +541,57 @@ fn recording_e2e_burn_source_vars_defined_before_cleanup_trap() {
     }
 }
 
+/// #252: the #195 pre-record burn-ON gate and the #246 cleanup() burn-clear loop MUST iterate one
+/// shared `BURN_TARGETS` array, not two hand-synced inline triple-lists — otherwise a third box (or
+/// a triple-structure change) can green-light a set the cleanup does not clear (the #246
+/// linger-onto-live-broadcast hazard). The array MUST be defined BEFORE `trap cleanup` (so
+/// cleanup()'s `"${BURN_TARGETS[@]}"` is never an unbound `set -u` var on an early abort) and MUST
+/// cover BOTH strih and stream.
+#[test]
+fn recording_e2e_burn_targets_is_one_shared_array() {
+    let s = read("scripts/recording-e2e.sh");
+
+    // The array is declared exactly once, and covers both boxes.
+    let def = s
+        .find("BURN_TARGETS=(")
+        .expect("#252: recording-e2e.sh must define a single BURN_TARGETS array");
+    assert_eq!(
+        s.matches("BURN_TARGETS=(").count(),
+        1,
+        "#252: BURN_TARGETS must be defined exactly once (single source of truth)."
+    );
+    let decl_end = def + s[def..].find(')').expect("BURN_TARGETS=( must close");
+    let decl = &s[def..decl_end];
+    // Match `$STRIH=` / `$STREAM=` (the triple separator), not a bare `$STRIH` — so the
+    // `$STRIH_PROG_SOURCE` / `$STREAM_PROG_SOURCE` substrings can't satisfy "both boxes".
+    assert!(
+        decl.contains("$STRIH=") && decl.contains("$STREAM="),
+        "#252: the shared BURN_TARGETS array must cover BOTH strih and stream \
+         (each as a host=ip=source triple)."
+    );
+
+    // It is defined BEFORE the cleanup trap (set -u safety on an early abort).
+    let trap = s
+        .find("trap cleanup")
+        .expect("recording-e2e.sh must install the cleanup trap");
+    assert!(
+        def < trap,
+        "#252: BURN_TARGETS must be defined BEFORE `trap cleanup` — else cleanup()'s \
+         `\"${{BURN_TARGETS[@]}}\"` is an unbound `set -u` var on an early abort."
+    );
+
+    // BOTH consumers iterate the shared array — the cleanup() burn-clear loop AND the #195
+    // pre-record burn-ON gate. Two `for _hbs in "${BURN_TARGETS[@]}"` loop headers prove the
+    // inline triple-lists are gone (the dedup #252 asks for); anchoring on the loop header (not
+    // the bare expansion) excludes any prose mention of the array in comments.
+    assert_eq!(
+        s.matches("for _hbs in \"${BURN_TARGETS[@]}\"").count(),
+        2,
+        "#252: both the #195 pre-record gate and the #246 cleanup() loop must iterate \
+         `for _hbs in \"${{BURN_TARGETS[@]}}\"` — neither may keep an inline triple-list."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #163: recording-fetch-windows.sh must URL-ENCODE the OBS recording filename.
 //
@@ -821,22 +872,6 @@ fn version_integrity_gate_runs_before_any_recording() {
     assert!(
         gate < start_record,
         "#123: the version-integrity gate must run BEFORE StartRecord (fail fast on a drifted stack)"
-    );
-}
-
-/// multitap-e2e.sh routes the camera QR through the strih->stream stack, so it too must run the
-/// version-integrity gate for both boxes before measuring.
-#[test]
-fn multitap_e2e_runs_the_version_integrity_gate_for_both_boxes() {
-    let s = read("scripts/multitap-e2e.sh");
-    assert!(
-        s.contains("version-integrity-gate.sh"),
-        "#123: multitap-e2e.sh must invoke version-integrity-gate.sh"
-    );
-    assert!(
-        s.contains("--win-state \"strih=$VERSION_STRIH_STATE\"")
-            && s.contains("--win-state \"stream=$VERSION_STREAM_STATE\""),
-        "#123: multitap-e2e.sh must gate BOTH boxes via --win-state"
     );
 }
 

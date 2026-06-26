@@ -4,7 +4,7 @@ name: Full-path E2E (recording-based · hardware · self-hosted dev1)
 # drives the real broadcast chain cam2 → cam1 → strih OBS → stream OBS and decides the
 # verdict ONLY from RECORDED output — the cam2 painter ground truth, cam1's grab
 # recording, and the strih/stream OBS PROGRAM recordings — NEVER an NDI tap (the tap
-# harness scripts/multitap-e2e.sh produced false sampling artifacts and is superseded).
+# live NDI-tap harness produced false sampling artifacts and was removed, #210).
 # scripts/recording-e2e.sh exits non-zero on ANY strict-hop loss / undecodable / a span
 # below 300 s. The cam2 loopback Phase-1 twin is loopback-e2e.yml.
 #

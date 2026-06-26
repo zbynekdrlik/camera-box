@@ -632,9 +632,9 @@ pub fn absolute_latency_stats(source: &[Observed], endpoint: &[Observed]) -> Opt
 /// impossible — it can only mean the cluster wall clocks desynced past the
 /// transit time (the camera clock ahead of dev1), so the whole measurement is
 /// untrustworthy and the gate FAILS rather than passing on a number that may be a
-/// large true latency masquerading as a small/negative one. The `multitap-e2e.sh`
-/// clock-offset pre-flight is the first line of defence; this is the backstop for
-/// a probe invoked directly without it.
+/// large true latency masquerading as a small/negative one. The rig clock-sync
+/// pre-flight (the DanteSync gate the e2e harness runs) is the first line of
+/// defence; this is the backstop for a probe invoked directly without it.
 pub fn absolute_latency_gate_pass(latency: &Option<LatencyStats>, max_p99_ms: Option<f64>) -> bool {
     match (max_p99_ms, latency) {
         (None, _) => true,

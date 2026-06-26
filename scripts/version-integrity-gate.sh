@@ -3,7 +3,7 @@
 # version-integrity-gate.sh — the pre-rig-test VERSION-INTEGRITY precondition gate (#123, EPIC #125).
 #
 # WHY THIS GATE EXISTS (the user's hard requirement, "we can't dev/test on randomly-deployed
-# versions"): every rig test (recording-e2e, multitap, loopback, the obs phase scripts) measures the
+# versions"): every rig test (recording-e2e, loopback, the obs phase scripts) measures the
 # behaviour of the LIVE strih+stream OBS stack. Those results are ONLY trustworthy when the live
 # stack matches the pinned zero-loss SHA set (the versions + critical settings in vendor/README.md
 # AND, when a bundle manifest is supplied, the per-component/whole-bundle BUILD SHAs). A test run on

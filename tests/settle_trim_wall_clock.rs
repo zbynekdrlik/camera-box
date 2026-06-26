@@ -132,27 +132,3 @@ fn wall_clock_stop_must_match_recv_clock_domain() {
         "sanity: a monotonic stop (the bug) trims the wall-clock frame to zero"
     );
 }
-
-/// Call-site source lock (review #1): the only place that broke was multitap-probe's
-/// stop-time derivation. A pure-helper test can't observe a regression there, so pin
-/// the source directly — stop_ns MUST be `clock_ns(start, args.wall_clock)` and MUST
-/// NOT use `start.elapsed()` (the monotonic bug). Mirrors the obs_phase2 static guards.
-#[test]
-fn multitap_probe_derives_stop_in_recv_clock_domain() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bin/multitap-probe.rs"
-    ))
-    .expect("read src/bin/multitap-probe.rs");
-    assert!(
-        src.contains("let stop_ns = clock_ns(start, args.wall_clock)"),
-        "#63: multitap-probe must derive stop_ns via clock_ns(start, args.wall_clock) so it \
-         shares the tap recv_ts_ns clock domain; without it the wall-clock settle cutoff \
-         trims every frame to unique=0."
-    );
-    assert!(
-        !src.contains("let stop_ns = start.elapsed()"),
-        "#63 regression: stop_ns must NOT be derived from start.elapsed() (monotonic) — that \
-         is the exact bug that zeroed all wall-clock frames."
-    );
-}

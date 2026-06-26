@@ -70,8 +70,9 @@ there ARE step-events (9 dup + 58 skip strih). The step-events are rig sampling-
 not chain loss.
 
 **Analysis tools on dev1:** `.qr_dual.py` (split L/R decode), `.e2e_report.py`
-(2-panel PNG: continuity line slope-2 + deviation band).
-These should land in repo as `scripts/e2e-report.py` (per writing-plans spec).
+(2-panel PNG: continuity line slope-2 + deviation band). NOTE: the old multitap-tap report
+(`scripts/e2e-report.py`) was removed with the tap harness (#210); the recording-proof path
+renders its report via `scripts/recording-e2e-report.py` (in repo).
 
 ## Camera Pre-Run Checklist (#220) — cam1 optical settings the harness CANNOT auto-set
 
@@ -92,27 +93,17 @@ exposure. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it BEFORE
 (Optional later: a first-N-seconds optical-read-rate gate that aborts early with "check camera
 shutter/focus" if the cam2 QR decode rate is low — fail fast instead of after a 30-min run.)
 
-## QR Harness (post-#68, 2026-06-15)
+## QR-tap harness — REMOVED (#210)
 
-After #68 (merged `68180c20c`) the harness AGREES with the persistence test — no longer false-greens.
+The old live-NDI-tap QR harness (`scripts/multitap-e2e.sh` + the `multitap-probe` bin) is GONE: an
+NDI tap samples a different surface than what is DELIVERED, so it produced false sampling artifacts.
+The proof path is now `scripts/recording-e2e.sh` — decode the RECORDED OBS program output (see the
+Recording-Proof Run Recipe below). The #68 contiguity / leading-discard / wall-clock fixes
+(`endpoint_sequence_check`, `decompose_missing`, `--lead-discard-secs`) live on in the kept probe
+code (`src/probe/`) and are exercised by `recording-verdict`.
 
-**Run:**
-```bash
-DURATION=360 LEAD_DISCARD=60 OUT=/tmp/x.json ./scripts/multitap-e2e.sh
-```
-Needs OBS WS :4455 on strih (10.77.9.202) + stream (10.77.9.204), `NDI_RUNTIME_DIR_V6=/usr/lib/ndi`,
-python `websocket-client`. Takes over strih/stream program scene + restarts cam2 camera-box (restored by trap).
-
-**Four fixes in #68:**
-- fb tearing → cam2 fb0 now `FBIO_WAITFORVSYNC` (vsync-gated direct writes, tear-free).
-- contiguity/order → `endpoint_sequence_check` flags gaps+reorders; `decompose_missing` splits
-  emission-artifact vs pipeline-loss.
-- leading-discard → `--lead-discard-secs N` discards post-reset prime; shows real steady-state loss.
-- painter wall-clock pacing → phase-lock to genlock decimator wall-clock boundaries.
-
-**Live steady-state (cam2→strih→stream, genlock+wall-clock, DURATION=360 LEAD_DISCARD=60):**
-Full-span pipeline loss 34/300s = 1 lost per 8.8s; 0.38% per-frame loss on BOTH hops.
-VERDICT=FAIL (correctly). genlock-on-both-hops pending (#8).
+Historical #68 steady-state (cam2→strih→stream, the old tap harness): 0.38% per-frame loss on BOTH
+hops, VERDICT=FAIL (correctly); genlock-on-both-hops pending (#8).
 
 ## cam1 Cannot Run the QR Harness
 
@@ -129,8 +120,12 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
 `gh run download <run> -n probe-tools-{linux,windows}-amd64`; symlink `camera-box-probe`→`camera-box`.
 
 **TWO missed-envs silently waste a run (verify BEFORE recording):**
-1. **stream's OBS_BURN_QR must be ON** (#195). The stream burn (911004) only fires if stream's
-   OBS was LAUNCHED with `OBS_BURN_QR=1` — the running OBS does NOT pick up HKLM mid-session.
+1. **stream's OBS_BURN_QR must be ON** (#195). **The harness now AUTO-CHECKS this** before
+   `[5/8] StartRecord` (the `[4b/8]` pre-record burn-ON gate): it runs `obs_burn_filter.py check`
+   on strih+stream and ABORTS (exit 1) unless `kind_registered=True` AND `filter_on_input=True`
+   — so a burns-OFF/pass-through OBS fails fast instead of wasting a full run. If it aborts,
+   relaunch the box's OBS in test mode via `scripts/rig-mode.sh test`. The stream burn (911004)
+   only fires if stream's OBS was LAUNCHED with `OBS_BURN_QR=1` — the running OBS does NOT pick up HKLM mid-session.
    Without it the stream recording has NO stream burn → strih→stream can't pair (latency=null,
    `strih_stream_source: two recordings ...`). Fix: relaunch stream OBS with the env set in the
    launching shell (see obs-ops skill: ExitOBS → force-kill → clear `.sentinel\*` → relaunch
@@ -196,7 +191,7 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   `probe-tools-linux-amd64` artifact (`gh run download <run> -n probe-tools-linux-amd64` → scp to
   cam2); TEST mode **FAILS LOUD** if it is absent. For a measurement run add `PAINTER_EXTRA_FLAGS="--wall-clock --run-id <N>"`.
 - **cam1 (10.77.9.61):** NOT reconfigured — runs its DEPLOYED service (already 30 fps / certified v4l2
-  saturation=0 contrast=75), the multitap/recording convention.
+  saturation=0 contrast=75), the recording convention.
 - **strih + stream OBS:** `scripts/launch-obs-genlock.sh --box {strih|stream} --mode test --force` —
   burns ON in the **LAUNCH SHELL ONLY** (NEVER Machine): `OBS_BURN_QR=1`, `OBS_BURN_QR_PX=300`,
   `OBS_BURN_RUN_ID` = 911002 (strih) / 911004 (stream). Genlock env stays from Machine. Then confirm
@@ -216,6 +211,19 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
 `launch-obs-genlock.sh::burn_run_id_for_box`. **NEVER set `OBS_BURN_*` in Machine scope** — it
 survives reboot and is exactly the #246 live-broadcast contamination. The cam-box root pw is `$CAM_PW`
 (dev-rig LAN default, as in the sibling e2e scripts — override from your password store).
+
+## Testing the E2E harness scripts (sourceability gotcha)
+
+`scripts/recording-e2e.sh` runs TOP-TO-BOTTOM under `set -euo pipefail` (NO `BASH_SOURCE != $0`
+source guard), so a test CANNOT `. recording-e2e.sh` to unit a single function — sourcing it would
+execute the whole harness (ping preflight, gates, deploys). To behaviorally test a piece of its
+logic, MIRROR the snippet in an inline `bash -c` and run the four states (the #178 set+e-region
+test and the #195 burn-gate test both do this: `tests/harness_recording_e2e_paths.rs`). Pass inputs
+as `bash -c '<body>' bash "$arg1" "$arg2"` ($0,$1,…) to avoid quoting hazards. By contrast,
+`scripts/recording-fetch-windows.sh` and `scripts/genlock-manifest.sh` DO have a `BASH_SOURCE != $0`
+guard, so their pure functions can be sourced directly (see `urlencode_name` / `tests/genlock_manifest.rs`).
+Structural guards (the script CONTAINS the gate/flag) complement — but don't replace — a behavioral
+mirror of the decision logic.
 
 ## Reporting Scope — NEVER Claim Partial as Full
 

@@ -1,5 +1,5 @@
 //! Behavioral guard for `scripts/version-integrity-gate.sh` — the pre-rig-test VERSION-INTEGRITY
-//! precondition gate (#123, EPIC #125). No rig test (recording-e2e, multitap, loopback, the obs
+//! precondition gate (#123, EPIC #125). No rig test (recording-e2e, loopback, the obs
 //! phase scripts) may bring up the rig and trust its result unless the LIVE strih+stream stack
 //! matches the pinned SHA set: a test run on a randomly-deployed / drifted / stock OBS build is
 //! worthless (that is exactly #119 — a wrong-bytes-right-version build that silently shipped). So

@@ -2,8 +2,8 @@
 # Recording-based full-path E2E (#105 / #7 / #179), dev1-orchestrated — TRUE STREAM-ONLY.
 #
 # The loss verdict + per-hop latency come ONLY from the strih/stream OBS PROGRAM
-# recordings and the cam2 painter ground truth — NEVER an NDI tap (the tap harness,
-# scripts/multitap-e2e.sh, produced false sampling artifacts) AND, since #179, NEVER the
+# recordings and the cam2 painter ground truth — NEVER an NDI tap (the live NDI-tap harness
+# produced false sampling artifacts and was removed, #210) AND, since #179, NEVER the
 # 7.3GB cam1 grab. The cam1-capture render-time burn (#174) puts cam1's id + CAPTURE
 # wall-clock ts INTO the emitted NDI frame, which rides through strih → stream, so the
 # SINGLE stream recording already carries cam1's mark — decoding a separate multi-GB cam1
@@ -145,7 +145,12 @@ fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
 # fetch failed and the file is absent, the gate marks that node UNKNOWN and FAILS — never a
 # silent pass with the Windows boxes unverified. Dropping the node here (the previous bug) let
 # the gate certify only cam1+cam2 and exit 0 with strih/stream NTP/PTP never checked.
-CLOCK_GUARD_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}" "$HERE/dantesync-gate.sh" \
+# #253: the explicit --bound-us arg below already carries the bound (and OVERRIDES the gate's own
+# CLOCK_GUARD_BOUND_US default), so the leading CLOCK_GUARD_BOUND_US=... env-prefix was redundant
+# AND shellcheck-flagged (SC2097/SC2098: the prefix is only seen by the forked process, while the
+# same-line $CLOCK_GUARD_BOUND_US expansion is resolved by the CURRENT shell before the prefix
+# takes effect). Pass the value purely as the argument — behavior is identical.
+"$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --linux "cam1=$CAM1_IP cam2=$PAINTER_IP" \
   --win-status "strih=$DANTE_STRIH_STATUS" \
@@ -226,7 +231,7 @@ cleanup() {
   # it cannot clear Machine-scope OBS_BURN_* env; that is asserted by `drift-guard --compare
   # burn_env=` and cleared by rig-mode event. The rich live OBS dock is the separate #188.
   echo "[cleanup] #246 clear + verify OBS burns OFF on strih + stream"
-  for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+  for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (defined before the trap)
     _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
     python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
       | sed "s/^/    [$_bn burn-clear] /" || true
@@ -242,6 +247,13 @@ STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# #252: single source of truth for the host=ip=source burn triples. The #195 pre-record burn-ON
+# gate and the #246 cleanup() burn-clear loop iterate the SAME set; keeping it in one array means a
+# third box (or a triple-structure change) can never green-light a set the cleanup does not clear
+# (the #246 linger-onto-live-broadcast hazard). Defined HERE — after the *_PROG_SOURCE vars and
+# BEFORE the cleanup trap is armed — so cleanup()'s array expansion is never an unbound `set -u`
+# var on an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap).
+BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE")
 trap cleanup EXIT HUP INT TERM
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
@@ -355,7 +367,7 @@ sleep 6  # let both OBS chains stabilise before recording
 # RECORDED program input). FAIL FAST on either being off — no more silently-wasted runs.
 # (Same host=ip=source triples cleanup()'s burn-clear loop uses; the recorded inputs carry the burn.)
 echo "[4b/8] #195 pre-record burn-ON gate — burns MUST be ON (OBS_BURN_QR) on strih + stream before recording"
-for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set cleanup() clears)
   _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
   # `|| true` so a non-zero exit (e.g. OBS unreachable) does NOT set -e-abort the assignment before
   # our own clear diagnostic; the captured text then won't match kind_registered=True → we abort below.

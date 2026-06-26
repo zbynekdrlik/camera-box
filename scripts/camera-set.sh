@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single source of truth for the cam1-4 set (#24).
 #
-# Both frame-loss orchestrators (scripts/loopback-e2e.sh, scripts/multitap-e2e.sh) source
+# The frame-loss orchestrators (scripts/loopback-e2e.sh, scripts/recording-e2e.sh) source
 # this and resolve a camera NAME (cam1..cam4) to its device IP and NDI source name, instead
 # of baking cam2 in. The map is authoritative per CLAUDE.md / targets.md:
 #

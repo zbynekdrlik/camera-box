@@ -37,65 +37,9 @@
 
 use std::fs;
 
-fn multitap() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/multitap-e2e.sh");
-    fs::read_to_string(path).expect("read scripts/multitap-e2e.sh")
-}
-
 fn camera_set() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/camera-set.sh");
     fs::read_to_string(path).expect("read scripts/camera-set.sh")
-}
-
-/// The ACTIVE (non-comment) shell line that launches camera-box manually
-/// (`nohup /usr/local/bin/camera-box`). Comment lines (leading `#`, ignoring whitespace) are
-/// excluded so a mention of the env in a `# …` comment can never satisfy the assertions — the
-/// guard must pin the real command, not documentation about it.
-fn active_camera_box_launch_line(script: &str) -> &str {
-    script
-        .lines()
-        .find(|l| l.contains("nohup /usr/local/bin/camera-box") && !l.trim_start().starts_with('#'))
-        .expect("active (non-comment) manual camera-box launch line not found in multitap-e2e.sh")
-}
-
-/// The manual camera-box launch in multitap-e2e.sh MUST export `CAMERA_BOX_GENLOCK_FPS` so the
-/// sender genlock-decimates exactly like the deployed systemd service (#50 drop-in). Without
-/// it the manual sender free-runs at the capture rate (~60 fps) and strih's 30 fps genlock
-/// FIFO drops ~half the frames / renders black (#66).
-#[test]
-fn manual_camera_box_launch_sets_genlock_fps() {
-    let s = multitap();
-    // Assert ON THE ACTIVE LAUNCH LINE ITSELF (not anywhere in the file) so a comment mention
-    // of the env can't spuriously pass — the env must precede the binary on that very command.
-    let line = active_camera_box_launch_line(&s);
-    let env_pos = line.find("CAMERA_BOX_GENLOCK_FPS=").unwrap_or(usize::MAX);
-    let launch = line
-        .find("nohup /usr/local/bin/camera-box")
-        .expect("launch token missing on the located line");
-    assert!(
-        env_pos != usize::MAX && env_pos < launch,
-        "#66 regression: CAMERA_BOX_GENLOCK_FPS must be set on the SAME active command that \
-         launches camera-box (line: `{line}`) — a manual launch without genlock decimation \
-         emits the full ~60fps capture and strih's 30fps genlock FIFO drops ~half the frames."
-    );
-}
-
-/// The genlock rate must be sourced from the single `GENLOCK_FPS` knob (default 30), not a
-/// bare literal — so it stays in lock-step with the deployed drop-in and an operator can
-/// override it (e.g. when the live OBS rate changes for the #11 60fps step). Checked on the
-/// ACTIVE launch line (comments excluded).
-#[test]
-fn multitap_uses_genlock_fps_knob_not_a_bare_literal() {
-    let s = multitap();
-    let line = active_camera_box_launch_line(&s);
-    assert!(
-        line.contains("CAMERA_BOX_GENLOCK_FPS=${GENLOCK_FPS")
-            || line.contains("CAMERA_BOX_GENLOCK_FPS=\"$GENLOCK_FPS\"")
-            || line.contains("CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS"),
-        "#66: the active camera-box launch must drive CAMERA_BOX_GENLOCK_FPS from the \
-         GENLOCK_FPS knob (single source of truth, env-overridable) so it tracks the deployed \
-         genlock rate — got: `{line}`"
-    );
 }
 
 /// `GENLOCK_FPS` is the single source of truth for the harness genlock rate and lives in the
