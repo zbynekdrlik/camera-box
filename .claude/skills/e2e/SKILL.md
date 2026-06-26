@@ -70,8 +70,9 @@ there ARE step-events (9 dup + 58 skip strih). The step-events are rig sampling-
 not chain loss.
 
 **Analysis tools on dev1:** `.qr_dual.py` (split L/R decode), `.e2e_report.py`
-(2-panel PNG: continuity line slope-2 + deviation band).
-These should land in repo as `scripts/e2e-report.py` (per writing-plans spec).
+(2-panel PNG: continuity line slope-2 + deviation band). NOTE: the old multitap-tap report
+(`scripts/e2e-report.py`) was removed with the tap harness (#210); the recording-proof path
+renders its report via `scripts/recording-e2e-report.py` (in repo).
 
 ## Camera Pre-Run Checklist (#220) — cam1 optical settings the harness CANNOT auto-set
 

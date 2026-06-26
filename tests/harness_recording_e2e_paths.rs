@@ -562,9 +562,12 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
     );
     let decl_end = def + s[def..].find(')').expect("BURN_TARGETS=( must close");
     let decl = &s[def..decl_end];
+    // Match `$STRIH=` / `$STREAM=` (the triple separator), not a bare `$STRIH` — so the
+    // `$STRIH_PROG_SOURCE` / `$STREAM_PROG_SOURCE` substrings can't satisfy "both boxes".
     assert!(
-        decl.contains("$STRIH") && decl.contains("$STREAM"),
-        "#252: the shared BURN_TARGETS array must cover BOTH strih and stream."
+        decl.contains("$STRIH=") && decl.contains("$STREAM="),
+        "#252: the shared BURN_TARGETS array must cover BOTH strih and stream \
+         (each as a host=ip=source triple)."
     );
 
     // It is defined BEFORE the cleanup trap (set -u safety on an early abort).
