@@ -50,6 +50,22 @@ fn run_sourced(body: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Source the script + run `body`, returning (exit_code, stdout) WITHOUT asserting success — for
+/// pure functions that intentionally return non-zero (e.g. burn_action_for_mode on an unknown mode).
+fn run_sourced_status(body: &str) -> (i32, String) {
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
 /// Run the script as a subprocess; return (exit_code, stdout, stderr).
 fn run_script(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(script())
@@ -226,28 +242,63 @@ fn no_cmdline_matching_pkill_on_executable_lines() {
     }
 }
 
-/// Each mode PRINTS the exact `launch-obs-genlock.sh --mode <mode>` step for BOTH boxes (strih +
-/// stream) — that wrapper owns the per-box burn run_id (test) and the #246 Machine-clean guard
-/// (event); rig-mode delegates to it rather than re-deriving the OBS state.
+/// #257: the burn is toggled over OBS WebSocket (no --mode relaunch). `obs_burn_targets` lists the
+/// strih + stream program inputs; `burn_action_for_mode` maps test->add (burn ON), event->remove
+/// (burn OFF). The genlock relaunch note (printed, ssh denied) is env-free — no --mode.
 #[test]
-fn prints_obs_wrapper_step_per_mode() {
-    let test_step = run_sourced("print_obs_step test");
+fn burn_targets_cover_both_boxes() {
+    let targets = run_sourced("obs_burn_targets");
     assert!(
-        test_step.contains("--box strih  --mode test")
-            && test_step.contains("--box stream --mode test"),
-        "#247: TEST mode must print the launch-obs-genlock.sh --mode test step for strih AND stream"
+        targets.contains("10.77.9.202") && targets.contains("strih"),
+        "#257: obs_burn_targets must include the strih box. got=\n{targets}"
     );
+    assert!(
+        targets.contains("10.77.9.204") && targets.contains("stream"),
+        "#257: obs_burn_targets must include the stream box. got=\n{targets}"
+    );
+}
 
-    let event_step = run_sourced("print_obs_step event");
-    assert!(
-        event_step.contains("--box strih  --mode event")
-            && event_step.contains("--box stream --mode event"),
-        "#247: EVENT mode must print the launch-obs-genlock.sh --mode event step for strih AND stream"
+#[test]
+fn burn_action_maps_mode_to_add_or_remove() {
+    let (code, out) = run_sourced_status("burn_action_for_mode test");
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.trim(),
+        "add",
+        "#257: test mode -> obs_burn_filter.py add (burn ON)"
     );
-    assert!(
-        event_step.contains("#246"),
-        "#247: the EVENT OBS step must reference the #246 Machine-clean burn guard"
+    let (code, out) = run_sourced_status("burn_action_for_mode event");
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.trim(),
+        "remove",
+        "#257: event mode -> obs_burn_filter.py remove (burn OFF)"
     );
+    let (code, _out) = run_sourced_status("burn_action_for_mode bogus");
+    assert_ne!(
+        code, 0,
+        "#257: an unknown mode must fail (no silent wrong action)"
+    );
+}
+
+#[test]
+fn genlock_relaunch_note_is_env_free_no_mode() {
+    for mode in ["test", "event"] {
+        let note = run_sourced(&format!("print_genlock_relaunch_note {mode}"));
+        assert!(
+            note.contains("--box strih") && note.contains("--box stream"),
+            "#257: the relaunch note must cover strih AND stream. mode={mode} note=\n{note}"
+        );
+        // #257: env-free relaunch — NO --mode and NO OBS_GENLOCK_*/OBS_BURN_* env.
+        assert!(
+            !note.contains("--mode"),
+            "#257: the genlock relaunch is env-free with NO --mode (burn is a WS toggle). note=\n{note}"
+        );
+        assert!(
+            !note.contains("OBS_BURN") && !note.contains("OBS_GENLOCK"),
+            "#257: the relaunch note must not reference any OBS_BURN_*/OBS_GENLOCK_* env. note=\n{note}"
+        );
+    }
 }
 
 /// The script must be SOURCE-SAFE: sourcing it (the unit-test harness) must NOT execute main (the

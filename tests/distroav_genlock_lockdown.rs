@@ -87,38 +87,33 @@ fn genlock_certified_forcer_exists_and_sets_every_certified_key() {
          the #150 lockdown."
     );
 
-    // Every certified (key -> value) write the forcer MUST perform. The squished
-    // source must contain each exact assignment so a dropped or weakened force fails.
+    // #257: the forcer is driven by the GENLOCK_FORCED_SETTINGS const table (the COMPLEMENT of the
+    // whitelist), not individual obs_data_set calls. Every certified key MUST be a table entry so a
+    // dropped/weakened force fails AND an upstream property add can't reintroduce a live knob.
     let must_force: &[&str] = &[
-        // sync = 2 (SOURCE_TIMECODE / source timing)
-        "obs_data_set_int(settings, PROP_SYNC, PROP_SYNC_NDI_SOURCE_TIMECODE)",
-        // behavior = 2 (STOP_RESUME_LAST_FRAME)
-        "obs_data_set_int(settings, PROP_BEHAVIOR, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME)",
-        // bandwidth = 0 (highest)
-        "obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_HIGHEST)",
-        // latency = 0 (NORMAL)
-        "obs_data_set_int(settings, PROP_LATENCY, PROP_LATENCY_NORMAL)",
-        // timeout = KEEP_CONTENT
-        "obs_data_set_int(settings, PROP_TIMEOUT, PROP_TIMEOUT_KEEP_CONTENT)",
-        // yuv range = partial
-        "obs_data_set_int(settings, PROP_YUV_RANGE, PROP_YUV_RANGE_PARTIAL)",
-        // yuv colorspace = BT.709
-        "obs_data_set_int(settings, PROP_YUV_COLORSPACE, PROP_YUV_SPACE_BT709)",
-        // hw accel = true
-        "obs_data_set_bool(settings, PROP_HW_ACCEL, true)",
-        // audio = false
-        "obs_data_set_bool(settings, PROP_AUDIO, false)",
-        // framesync = false
-        "obs_data_set_bool(settings, PROP_FRAMESYNC, false)",
-        // alpha-blending fix = false
-        "obs_data_set_bool(settings, PROP_FIX_ALPHA, false)",
+        "{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}",
+        "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}",
+        "{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}",
+        "{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}",
+        "{PROP_TIMEOUT, false, PROP_TIMEOUT_KEEP_CONTENT, false}",
+        "{PROP_YUV_RANGE, false, PROP_YUV_RANGE_PARTIAL, false}",
+        "{PROP_YUV_COLORSPACE, false, PROP_YUV_SPACE_BT709, false}",
+        "{PROP_HW_ACCEL, true, 0, true}",
+        "{PROP_AUDIO, true, 0, false}",
+        "{PROP_FRAMESYNC, true, 0, false}",
+        "{PROP_FIX_ALPHA, true, 0, false}",
+        "{PROP_PTZ, true, 0, false}",
     ];
+    assert!(
+        src.contains("GENLOCK_FORCED_SETTINGS"),
+        "{NDI_SOURCE}: #257 — the GENLOCK_FORCED_SETTINGS const table is gone; re-apply the forcer table."
+    );
     for needle in must_force {
         assert!(
             src.contains(needle),
-            "{NDI_SOURCE}: #150 — the certified forcer does not perform `{needle}`. \
-             That key could then be left at a saved/UI/default value and misconfigure \
-             the genlock zero-loss path. Re-apply the full #150 lockdown."
+            "{NDI_SOURCE}: #257 — GENLOCK_FORCED_SETTINGS does not pin `{needle}`. That key could be \
+             left at a saved/UI/default value and misconfigure the genlock zero-loss path. Re-apply \
+             the full forcer table."
         );
     }
 }
@@ -148,81 +143,74 @@ fn update_forces_certified_values_only_when_genlock_enabled() {
     );
 }
 
-/// `ndi_source_getproperties` MUST hide the non-essential properties when genlock is
-/// enabled, leaving ONLY the source selection + genlock toggle + preload visible —
-/// so a human or a tool CANNOT set the forced keys wrong. Implemented via a
-/// modified-callback on the genlock checkbox plus an initial visibility pass.
+/// #257: `ndi_source_getproperties` is a HARD WHITELIST — it exposes EXACTLY source + Genlock +
+/// Latency(ms) + Measurement burn and adds NOTHING else. The forced (non-essential) knobs are
+/// REMOVED from the UI entirely (not hidden via the old apply_genlock_lockdown_visibility, which is
+/// gone), so a human or a tool CANNOT set them wrong.
 #[test]
-fn getproperties_hides_nonessential_props_on_genlock() {
+fn getproperties_is_the_hard_whitelist() {
     let src = vendor_file(NDI_SOURCE);
     let body = squish(fn_body(&src, "obs_properties_t *ndi_source_getproperties("));
 
-    // A single visibility helper applies the hide/show decision; assert it is wired
-    // both initially and from the genlock checkbox's modified-callback.
+    // The old hide-on-lockdown helper must be GONE (replaced by the whitelist).
     assert!(
-        body.contains("apply_genlock_lockdown_visibility"),
-        "{NDI_SOURCE}: #150 — getproperties no longer applies \
-         apply_genlock_lockdown_visibility(...) to hide the non-essential props on the \
-         genlock path. The forced keys would still be user-editable in the UI. \
-         Re-apply the #150 visibility lockdown."
+        !squish(&src).contains("apply_genlock_lockdown_visibility"),
+        "{NDI_SOURCE}: #257 — apply_genlock_lockdown_visibility is BACK; the hard whitelist \
+         REMOVES the forced knobs from the UI, it does not hide them."
     );
-
-    // Each non-essential property must be passed to set_visible(..., false)-style
-    // hiding via the helper. Assert the helper touches each PROP by name so a
-    // dropped one fails. (The helper sets visibility per-prop.)
-    let hidden: &[&str] = &[
-        "PROP_BEHAVIOR",
-        "PROP_BANDWIDTH",
-        "PROP_SYNC",
-        "PROP_FRAMESYNC",
-        "PROP_HW_ACCEL",
-        "PROP_LATENCY",
-        "PROP_AUDIO",
-        "PROP_YUV_RANGE",
-        "PROP_YUV_COLORSPACE",
-        "PROP_FIX_ALPHA",
-        "PROP_TIMEOUT",
-    ];
-    let helper = squish(fn_body(
-        &src,
-        "static bool apply_genlock_lockdown_visibility(",
-    ));
-    for prop in hidden {
+    // getproperties adds EXACTLY the four whitelist props.
+    for add in [
+        "obs_properties_add_list(props, PROP_SOURCE",
+        "obs_properties_add_bool(props, PROP_GENLOCK_FIFO",
+        "obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC",
+        "obs_properties_add_bool(props, PROP_BURN",
+    ] {
         assert!(
-            helper.contains(prop),
-            "{NDI_SOURCE}: #150 — apply_genlock_lockdown_visibility does not control \
-             the visibility of {prop}. On the genlock path it must be hidden so it \
-             cannot be set wrong. Re-apply the full #150 visibility lockdown."
+            body.contains(add),
+            "{NDI_SOURCE}: #257 — the whitelist UI must add `{add}` (source/Genlock/Latency/burn)."
         );
     }
-    // The two legitimate user knobs must NEVER be hidden by the lockdown.
-    assert!(
-        !helper.contains("obs_property_set_visible(obs_properties_get(props, PROP_SOURCE), false)")
-            && !helper.contains(
-                "obs_property_set_visible(obs_properties_get(props, PROP_GENLOCK_PRELOAD), false)"
-            ),
-        "{NDI_SOURCE}: #150 — the lockdown is hiding a LEGITIMATE user knob \
-         (PROP_SOURCE or PROP_GENLOCK_PRELOAD). Those two must always stay visible."
-    );
+    // None of the forced knobs may be ADDED to the UI (the forcer pins them; the UI never shows them).
+    let must_not_add: &[&str] = &[
+        "obs_properties_add_list(props, PROP_BEHAVIOR",
+        "obs_properties_add_list(props, PROP_BANDWIDTH",
+        "obs_properties_add_list(props, PROP_SYNC",
+        "obs_properties_add_list(props, PROP_LATENCY",
+        "obs_properties_add_bool(props, PROP_FRAMESYNC",
+        "obs_properties_add_bool(props, PROP_HW_ACCEL",
+        "obs_properties_add_bool(props, PROP_AUDIO",
+        "obs_properties_add_list(props, PROP_YUV_RANGE",
+        "obs_properties_add_list(props, PROP_YUV_COLORSPACE",
+        "obs_properties_add_bool(props, PROP_FIX_ALPHA",
+        "obs_properties_add_list(props, PROP_TIMEOUT",
+        "obs_properties_add_group(props, PROP_PTZ",
+        "obs_properties_add_int_slider(props, PROP_GENLOCK_PRELOAD",
+    ];
+    for add in must_not_add {
+        assert!(
+            !body.contains(add),
+            "{NDI_SOURCE}: #257 — `{add}` is BACK in the UI; the whitelist exposes only \
+             source/Genlock/Latency/burn (everything else is forced, not shown)."
+        );
+    }
 }
 
-/// Lock-step gate: the Windows production-build workflow re-asserts the #150 lockdown
-/// SOURCE tokens in pwsh BEFORE the 150-min build (the Linux Rust guard above can't
-/// compile on the windows-2022 runner). Drop the workflow check and CI fails here.
+/// Lock-step gate: the Windows production-build workflow re-asserts the #150/#257 hard-lock SOURCE
+/// tokens in pwsh BEFORE the 150-min build (the Linux Rust guard above can't compile on the
+/// windows-2022 runner). Drop the workflow check and CI fails here.
 #[test]
 fn windows_genlock_workflow_gates_on_the_lockdown_patch() {
     let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
 
     assert!(
         wf.contains("force_genlock_certified_settings"),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #150 \
-         certified-value forcer SOURCE patch — a future subtree bump could reship a \
-         DistroAV that lets a genlock source come up misconfigured while the version \
-         pin still passes. Re-add the pwsh #150 source-patch gate."
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the certified-value forcer \
+         SOURCE patch — a subtree bump could reship a DistroAV that lets a genlock source come up \
+         misconfigured. Re-add the pwsh forcer gate."
     );
     assert!(
-        wf.contains("apply_genlock_lockdown_visibility"),
-        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #150 \
-         property-visibility lockdown. Re-add the pwsh #150 source-patch gate."
+        wf.contains("GENLOCK_WHITELIST_PROPS"),
+        "{WINDOWS_GENLOCK_WF}: #257 — the production build no longer asserts the GENLOCK_WHITELIST_PROPS \
+         hard-lock UI. Re-add the pwsh #257 gate."
     );
 }

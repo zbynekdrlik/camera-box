@@ -321,7 +321,7 @@ const char *ndi_source_getname(void *)
  * value (GENLOCK_FORCED_SETTINGS below — the exact COMPLEMENT of this list), so an upstream
  * DistroAV property add/remove can never reintroduce a live drift knob. A vendored-source
  * test asserts the exposed set == this whitelist. */
-static const char *const GENLOCK_WHITELIST_PROPS[] = {
+[[maybe_unused]] static const char *const GENLOCK_WHITELIST_PROPS[] = {
 	PROP_SOURCE,
 	PROP_GENLOCK_FIFO,
 	PROP_GENLOCK_LATENCY_MS_SRC,
