@@ -84,6 +84,13 @@ pub struct FramebufferDisplay {
     #[allow(dead_code)]
     bits_per_pixel: u32,
     line_length: u32,
+    /// #244: reusable zero buffer for the per-row right-margin padding in the
+    /// letterboxed/padded-stride branch of `display_frame`, hoisted out of the hot path so
+    /// it allocates once (resized in place) instead of `vec![0u8; right_pad]` every frame.
+    pad_buf: Vec<u8>,
+    /// #244: reusable zero buffer for one full blank fb row (the bottom-letterbox fill),
+    /// same per-frame-alloc hoist as `pad_buf`.
+    blank_row: Vec<u8>,
 }
 
 impl FramebufferDisplay {
@@ -125,6 +132,9 @@ impl FramebufferDisplay {
             height: vinfo.yres,
             bits_per_pixel: vinfo.bits_per_pixel,
             line_length: finfo.line_length,
+            // #244: start empty; grown in place on first use of the padded/letterbox branch.
+            pad_buf: Vec::new(),
+            blank_row: Vec::new(),
         })
     }
 
@@ -173,25 +183,27 @@ impl FramebufferDisplay {
             // content (boot console / a previous taller frame) visible in the letterbox.
             self.file.seek(SeekFrom::Start(0))?;
             let right_pad = fb_stride.saturating_sub(render_stride);
-            // One reusable zero buffer for the per-row right margin (no per-row alloc in
-            // this CPU-sensitive display path).
-            let pad_buf = vec![0u8; right_pad];
+            // #244: reuse the hoisted zero buffer for the per-row right margin instead of a
+            // fresh `vec![0u8; right_pad]` every frame. After the first padded frame at a
+            // given size this allocates nothing — only the render+write work remains in this
+            // CPU-sensitive display path.
+            ensure_zero_scratch(&mut self.pad_buf, right_pad);
             for y in 0..render_h as usize {
                 let src_offset = y * render_stride;
                 let src_end = src_offset + render_stride;
                 if src_end <= render_data.len() {
                     self.file.write_all(&render_data[src_offset..src_end])?;
                     if right_pad > 0 {
-                        self.file.write_all(&pad_buf)?;
+                        self.file.write_all(&self.pad_buf)?;
                     }
                 }
             }
-            // Black out the bottom letterbox (rows render_h..fb_height), one fb-stride
-            // zero buffer reused per row.
+            // Black out the bottom letterbox (rows render_h..fb_height) with the hoisted,
+            // reused full-stride zero buffer (#244: no per-frame alloc).
             if render_h < self.height {
-                let blank_row = vec![0u8; fb_stride];
+                ensure_zero_scratch(&mut self.blank_row, fb_stride);
                 for _ in render_h..self.height {
-                    self.file.write_all(&blank_row)?;
+                    self.file.write_all(&self.blank_row)?;
                 }
             }
         }
@@ -398,6 +410,21 @@ pub fn scale_nearest_neighbor(
     dst
 }
 
+/// Resize a reusable zero-fill scratch buffer to exactly `len` bytes, reusing its existing
+/// allocation (#244: hoisted out of the per-frame `display_frame` path so the
+/// padded/letterbox branch no longer does a `vec![0u8; n]` allocation every frame).
+///
+/// These scratch buffers are only ever WRITE SOURCES of zeros (their bytes are never
+/// mutated after a resize), so resizing only when the length changes keeps every byte 0:
+/// growing fills the new bytes with 0, shrinking drops the (already-zero) tail, and an
+/// unchanged length is a no-op. After the first call at a given size, subsequent frames at
+/// the same size reuse the buffer's heap allocation — zero per-frame allocation.
+pub fn ensure_zero_scratch(buf: &mut Vec<u8>, len: usize) {
+    if buf.len() != len {
+        buf.resize(len, 0);
+    }
+}
+
 /// Cap the render resolution so the display never SOFTWARE-UPSCALES beyond the
 /// source (#135). Render at `min(fb, source)` per axis:
 /// - source ≤ fb (e.g. 1080p source on a latched 4K phantom fb) → render 1:1 at the
@@ -470,6 +497,57 @@ pub fn any_connector_connected(drm_class_dir: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- #244: reusable per-frame zero scratch buffer (no per-frame alloc) -----
+
+    #[test]
+    fn ensure_zero_scratch_grows_with_zeros() {
+        // From empty (the open() initial state) → grown to the needed length, all zero.
+        let mut buf = Vec::new();
+        ensure_zero_scratch(&mut buf, 5);
+        assert_eq!(
+            buf,
+            vec![0u8; 5],
+            "grow from empty must be all-zero of the new len"
+        );
+    }
+
+    #[test]
+    fn ensure_zero_scratch_shrinks_keeping_zeros() {
+        // A bigger buffer reused for a smaller pad shrinks; the retained prefix is zero.
+        let mut buf = vec![0u8; 8];
+        ensure_zero_scratch(&mut buf, 3);
+        assert_eq!(
+            buf,
+            vec![0u8; 3],
+            "shrink must keep all-zero of the new len"
+        );
+    }
+
+    #[test]
+    fn ensure_zero_scratch_same_len_is_noop_and_reuses_alloc() {
+        // The steady-state hot path: same size every frame → no realloc, capacity preserved
+        // (no per-frame allocation — the #244 fix), contents stay all-zero.
+        let mut buf = vec![0u8; 4];
+        let cap_before = buf.capacity();
+        let ptr_before = buf.as_ptr();
+        ensure_zero_scratch(&mut buf, 4);
+        assert_eq!(buf, vec![0u8; 4]);
+        assert_eq!(buf.capacity(), cap_before, "same-len must not reallocate");
+        assert_eq!(
+            buf.as_ptr(),
+            ptr_before,
+            "same-len must reuse the existing allocation"
+        );
+    }
+
+    #[test]
+    fn ensure_zero_scratch_zero_len() {
+        // The no-padding case (right_pad == 0) yields an empty buffer, never a panic.
+        let mut buf = vec![0u8; 6];
+        ensure_zero_scratch(&mut buf, 0);
+        assert!(buf.is_empty(), "len 0 must yield an empty buffer");
+    }
 
     // ----- #135: upscale cap (never software-upscale beyond source) -----
 
