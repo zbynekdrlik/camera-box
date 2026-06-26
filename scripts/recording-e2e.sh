@@ -226,7 +226,7 @@ cleanup() {
   # it cannot clear Machine-scope OBS_BURN_* env; that is asserted by `drift-guard --compare
   # burn_env=` and cleared by rig-mode event. The rich live OBS dock is the separate #188.
   echo "[cleanup] #246 clear + verify OBS burns OFF on strih + stream"
-  for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+  for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (defined before the trap)
     _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
     python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
       | sed "s/^/    [$_bn burn-clear] /" || true
@@ -242,6 +242,13 @@ STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# #252: single source of truth for the host=ip=source burn triples. The #195 pre-record burn-ON
+# gate and the #246 cleanup() burn-clear loop iterate the SAME set; keeping it in one array means a
+# third box (or a triple-structure change) can never green-light a set the cleanup does not clear
+# (the #246 linger-onto-live-broadcast hazard). Defined HERE — after the *_PROG_SOURCE vars and
+# BEFORE `trap cleanup` — so cleanup()'s `"${BURN_TARGETS[@]}"` is never an unbound `set -u` var on
+# an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap).
+BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE")
 trap cleanup EXIT HUP INT TERM
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
@@ -355,7 +362,7 @@ sleep 6  # let both OBS chains stabilise before recording
 # RECORDED program input). FAIL FAST on either being off — no more silently-wasted runs.
 # (Same host=ip=source triples cleanup()'s burn-clear loop uses; the recorded inputs carry the burn.)
 echo "[4b/8] #195 pre-record burn-ON gate — burns MUST be ON (OBS_BURN_QR) on strih + stream before recording"
-for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set cleanup() clears)
   _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
   # `|| true` so a non-zero exit (e.g. OBS unreachable) does NOT set -e-abort the assignment before
   # our own clear diagnostic; the captured text then won't match kind_registered=True → we abort below.

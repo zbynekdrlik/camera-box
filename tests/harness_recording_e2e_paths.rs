@@ -541,6 +541,53 @@ fn recording_e2e_burn_source_vars_defined_before_cleanup_trap() {
     }
 }
 
+/// #252: the #195 pre-record burn-ON gate and the #246 cleanup() burn-clear loop MUST iterate one
+/// shared `BURN_TARGETS` array, not two hand-synced inline triple-lists — otherwise a third box (or
+/// a triple-structure change) can green-light a set the cleanup does not clear (the #246
+/// linger-onto-live-broadcast hazard). The array MUST be defined BEFORE `trap cleanup` (so
+/// cleanup()'s `"${BURN_TARGETS[@]}"` is never an unbound `set -u` var on an early abort) and MUST
+/// cover BOTH strih and stream.
+#[test]
+fn recording_e2e_burn_targets_is_one_shared_array() {
+    let s = read("scripts/recording-e2e.sh");
+
+    // The array is declared exactly once, and covers both boxes.
+    let def = s
+        .find("BURN_TARGETS=(")
+        .expect("#252: recording-e2e.sh must define a single BURN_TARGETS array");
+    assert_eq!(
+        s.matches("BURN_TARGETS=(").count(),
+        1,
+        "#252: BURN_TARGETS must be defined exactly once (single source of truth)."
+    );
+    let decl_end = def + s[def..].find(')').expect("BURN_TARGETS=( must close");
+    let decl = &s[def..decl_end];
+    assert!(
+        decl.contains("$STRIH") && decl.contains("$STREAM"),
+        "#252: the shared BURN_TARGETS array must cover BOTH strih and stream."
+    );
+
+    // It is defined BEFORE the cleanup trap (set -u safety on an early abort).
+    let trap = s
+        .find("trap cleanup")
+        .expect("recording-e2e.sh must install the cleanup trap");
+    assert!(
+        def < trap,
+        "#252: BURN_TARGETS must be defined BEFORE `trap cleanup` — else cleanup()'s \
+         `\"${{BURN_TARGETS[@]}}\"` is an unbound `set -u` var on an early abort."
+    );
+
+    // BOTH consumers iterate the shared array — the cleanup() burn-clear loop AND the #195
+    // pre-record burn-ON gate. Two iterations of "${BURN_TARGETS[@]}" prove the inline
+    // triple-lists are gone (the dedup #252 asks for).
+    assert_eq!(
+        s.matches("\"${BURN_TARGETS[@]}\"").count(),
+        2,
+        "#252: both the #195 pre-record gate and the #246 cleanup() loop must iterate \
+         \"${{BURN_TARGETS[@]}}\" — neither may keep an inline triple-list."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #163: recording-fetch-windows.sh must URL-ENCODE the OBS recording filename.
 //
