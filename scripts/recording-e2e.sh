@@ -345,6 +345,37 @@ STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
+# #195: PRE-RECORD BURN-ON GATE — burns MUST be ON before recording, else the run is wasted.
+# The strih (911002) + stream (911004) burns only fire if each box's OBS was LAUNCHED with
+# OBS_BURN_QR set (the running OBS does NOT pick it up mid-session). A deploy that set
+# OBS_BURN_RUN_ID but not OBS_BURN_QR loads the DistroAV burn filter in PASS-THROUGH → the
+# recordings carry NO strih/stream burn → strih→stream can't pair (a full 300s+decode run
+# produces no measurable hop). obs_burn_filter.py check prints `kind_registered=<bool>` (the
+# 'OBS launched with OBS_BURN_QR' tell) + `filter_on_input=<bool>` (the burn attached to the
+# RECORDED program input). FAIL FAST on either being off — no more silently-wasted runs.
+# (Same host=ip=source triples cleanup()'s burn-clear loop uses; the recorded inputs carry the burn.)
+echo "[4/8] #195 pre-record burn-ON gate — burns MUST be ON (OBS_BURN_QR) on strih + stream before recording"
+for _hbs in "strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE"; do
+  _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
+  # `|| true` so a non-zero exit (e.g. OBS unreachable) does NOT set -e-abort the assignment before
+  # our own clear diagnostic; the captured text then won't match kind_registered=True → we abort below.
+  _chk="$(python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
+  echo "    [$_bn burn-check] $_chk"
+  if ! printf '%s' "$_chk" | grep -q 'kind_registered=True'; then
+    echo "ERROR: $_bn burns OFF — OBS was NOT launched with OBS_BURN_QR (filter kind absent), so the" >&2
+    echo "       recording would carry NO $_bn burn and the run would be wasted (#195)." >&2
+    echo "       Relaunch OBS in test mode via scripts/rig-mode.sh test, then re-run." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$_chk" | grep -q 'filter_on_input=True'; then
+    echo "ERROR: $_bn burn filter is NOT attached to the recorded input '$_bsrc' — the $_bn burn" >&2
+    echo "       would be absent from the recording and the run would be wasted (#195)." >&2
+    echo "       Relaunch OBS in test mode via scripts/rig-mode.sh test, then re-run." >&2
+    exit 1
+  fi
+  echo "    [$_bn burn-check] OK — burns ON (kind_registered + filter_on_input='$_bsrc')"
+done
+
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
