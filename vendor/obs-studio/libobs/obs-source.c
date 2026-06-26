@@ -4626,21 +4626,29 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 			: 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "overruns=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
+	     "holds=%llu overruns=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
 	     "src_latency_ms=%u global_latency_ms=%u "
 	     "preload=%u (=%llu ms) reserve_ms=%u cap=%zu empty_run=%u (re-arm@%u) "
-	     "(#70/#97/#126/#184/#235/#245)",
+	     "ts_present=%llu ts_due=%u ts_head_skew_ms=%lld "
+	     "(#70/#97/#126/#148/#184/#235/#245)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
+	     (unsigned long long)source->genlock_holds,
 	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
 	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
 	     source->genlock_latency_ms, global_latency_ms,
 	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
 	     latency_ms /* reserve_ms == effective latency_ms; kept for the #128 log verify */,
 	     genlock_source_drop_cap(source), source->genlock_empty_run,
-	     (unsigned)GENLOCK_REARM_EMPTY_TICKS);
+	     (unsigned)GENLOCK_REARM_EMPTY_TICKS,
+	     /* camera-box #148: the ts-align decision sample (present_ts / due / head-frame
+	      * skew in ms) — the per-tick present/hold/drop relationship the #136 churn
+	      * diagnosis lacked. Sampled on the ts-align path; 0 on non-ts-align sources. */
+	     (unsigned long long)source->genlock_last_present_ts,
+	     source->genlock_last_due,
+	     (long long)(source->genlock_last_head_skew_ns / 1000000));
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -4717,14 +4725,31 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				while (due < source->async_frames.num &&
 				       source->async_frames.array[due]->timestamp <= present_ts)
 					due++;
+				/* camera-box #148: SAMPLE the ts-align decision inputs for the
+				 * periodic 5s audit line (present_ts / due / head-frame-vs-wall
+				 * skew). Cheap per-tick field writes; the blog() in
+				 * genlock_audit_log stays 5s-gated. The skew reads the wall clock
+				 * once here (a few µs after the deadline's own read — immaterial at
+				 * the ms granularity logged). ready_async_frame is only entered with
+				 * num>=1, so array[0] is valid. */
+				source->genlock_last_present_ts = present_ts;
+				source->genlock_last_due = (uint32_t)due;
+				source->genlock_last_head_skew_ns =
+					(int64_t)(genlock_wall_now_ns() -
+						  source->async_frames.array[0]->timestamp);
 				/* count-gate machinery (empty_run re-arm / fill latch) is unused on
 				 * this path — ts-align self-heals after a transient via the real ts. */
 				source->genlock_empty_run = 0;
 				source->genlock_filled = true;
 				if (due == 0) {
 					/* nothing has reached its deadline yet (source early or
-					 * stalled) — repeat the current frame this tick. */
-					source->genlock_underruns++;
+					 * stalled) — repeat the current frame this tick. camera-box
+					 * #148: a BENIGN source-early HOLD (frames ARE queued, just
+					 * none yet due — ready_async_frame is entered with num>=1),
+					 * NOT a real FIFO starvation. Count it as genlock_holds, not
+					 * genlock_underruns; folding the two hid the #136 boundary
+					 * churn (diagnosed live with no such signal). */
+					source->genlock_holds++;
 					genlock_audit_log(source, now_ns);
 					return false;
 				}

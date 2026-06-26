@@ -1347,10 +1347,11 @@ mod vendored_source {
         // The drop-cap must scale with the per-source latency frame-equivalent (else a deep
         // override force-drains short and the delay can't build).
         assert!(
-            src.contains("source->genlock_latency_ms * ovi.fps_num"),
+            src.contains("source->genlock_latency_ms * fps_num"),
             "{OBS_SOURCE}: #245 — genlock_source_drop_cap no longer scales with the per-source \
              latency frame-equivalent; a deep override (e.g. 2000 ms ≈ 60 frames) would \
-             overrun force-drain before its delay builds. Re-apply."
+             overrun force-drain before its delay builds. Re-apply. (#200 renamed the torn \
+             ovi.fps_num read to the genlock_video_fps snapshot local fps_num.)"
         );
         // The audit log must surface the per-source override value (the rig-validation proof).
         assert!(
@@ -1545,6 +1546,72 @@ mod vendored_source {
                 hdr.contains(field),
                 "{OBS_INTERNAL}: #70 audit field `{field}` missing from obs_source — \
                  an upstream subtree merge dropped the genlock audit state; re-apply."
+            );
+        }
+    }
+
+    #[test]
+    fn ts_align_holds_field_and_sample_in_struct() {
+        // #148: the ts-align source-early HOLD counter + the per-tick decision sample
+        // (present_ts / due / head-skew) must live on obs_source so the 5s audit line can
+        // surface them. A subtree pull dropping them silently reverts the debuggability fix.
+        let hdr = squish(&vendor_file(OBS_INTERNAL));
+        for field in [
+            "genlock_holds",
+            "genlock_last_present_ts",
+            "genlock_last_due",
+            "genlock_last_head_skew_ns",
+        ] {
+            assert!(
+                hdr.contains(field),
+                "{OBS_INTERNAL}: #148 field `{field}` missing from obs_source — the ts-align \
+                 HOLD/underrun split + decision sample reverted; re-apply."
+            );
+        }
+    }
+
+    #[test]
+    fn ts_align_hold_counts_as_hold_not_underrun() {
+        // #148: the ts-align due==0 path (source early/stalled, frames queued) must
+        // increment genlock_holds, NOT genlock_underruns (folding the two hid the #136
+        // boundary churn). Verify the holds increment exists AND sits in the same
+        // ts-align branch as the present_ts deadline (so it isn't some unrelated counter).
+        let raw = vendor_file(OBS_SOURCE);
+        assert!(
+            raw.contains("source->genlock_holds++"),
+            "{OBS_SOURCE}: #148 — the ts-align source-early HOLD counter \
+             (source->genlock_holds++) is gone; the benign hold is mis-counted as an \
+             underrun again. Re-apply."
+        );
+        // Anchor on the unique reserve-deadline call; the holds++ must be within the same
+        // ts-align block (it follows the present_ts/due computation, before the present path).
+        let anchor = raw
+            .find("genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)")
+            .expect("#148: the ts-align reserve deadline is gone — re-locate");
+        let window_end = (anchor + 2500).min(raw.len());
+        assert!(
+            raw[anchor..window_end].contains("source->genlock_holds++"),
+            "{OBS_SOURCE}: #148 — genlock_holds++ is not in the ts-align decision block \
+             (near the present_ts deadline). The source-early HOLD is still counted as an \
+             underrun; re-apply."
+        );
+    }
+
+    #[test]
+    fn audit_log_emits_holds_and_ts_align_sample() {
+        // #148: the periodic audit line must surface the new signals so a future ts-align
+        // regression is debuggable from the log alone (comprehensive-logging).
+        let src = squish(&vendor_file(OBS_SOURCE));
+        for token in [
+            "holds=%llu",
+            "ts_present=%llu",
+            "ts_due=%u",
+            "ts_head_skew_ms=%lld",
+        ] {
+            assert!(
+                src.contains(token),
+                "{OBS_SOURCE}: #148 — the genlock audit line no longer emits `{token}`; the \
+                 ts-align hold/decision signals are missing from the 5s log. Re-apply."
             );
         }
     }

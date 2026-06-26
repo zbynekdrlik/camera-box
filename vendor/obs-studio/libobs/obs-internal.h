@@ -956,10 +956,17 @@ struct obs_source {
 	uint32_t genlock_empty_run;
 	uint64_t genlock_frames_received;  /* video frames queued onto async_frames */
 	uint64_t genlock_frames_consumed;  /* frames handed to the compositor (one per tick) */
-	uint64_t genlock_underruns;        /* holds with no distinct frame to emit (build fill + true empty) */
+	uint64_t genlock_underruns;        /* real FIFO starvation: build fill + true empty (NOT the ts-align source-early hold, see genlock_holds #148) */
+	uint64_t genlock_holds;            /* camera-box #148: ts-align source-early HOLDs (frames queued but none yet due) — a BENIGN repeat, distinct from a real underrun */
 	uint64_t genlock_overruns;         /* per-source drop-cap drains (queue forced empty) */
 	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
 	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */
+	/* camera-box #148: last ts-align decision, SAMPLED per tick for the 5s audit line (the
+	 * blog() stays 5s-gated; only these cheap field writes are per-tick) — so a future
+	 * ts-align regression (clock skew, wrong interval, drift) is debuggable from the log. */
+	uint64_t genlock_last_present_ts;  /* most recent ts-align presentation deadline (ns) */
+	uint32_t genlock_last_due;         /* most recent ts-align due-frame count */
+	int64_t genlock_last_head_skew_ns; /* most recent (wall_now - head frame->timestamp) skew (ns) */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;

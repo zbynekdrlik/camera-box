@@ -769,6 +769,42 @@ pub fn genlock_fps_pair_consistent(a: (u32, u32), b: (u32, u32)) -> Option<(u32,
     }
 }
 
+/// (#148) The audit counter a single timestamp-aligned render tick increments.
+///
+/// On the ts-align release path the FIFO is only entered with at least one queued
+/// frame (`ready_async_frame` dereferences the head before this decision), so a
+/// non-presented tick there is ALWAYS a SOURCE-EARLY HOLD — frames ARE queued, none
+/// has yet reached its presentation deadline ([`genlock_release`] returned
+/// `present == false` with a non-empty queue) — NOT a true-empty FIFO underrun. The
+/// pre-#148 C code folded that hold into `genlock_underruns`, conflating a benign
+/// source-early hold (the #136 boundary churn) with real starvation and making the
+/// live ~3 fps churn undebuggable from the counters alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenlockTick {
+    /// A due frame was presented this tick.
+    Present,
+    /// Frames queued, none due yet — repeat the current frame. Counted as
+    /// `genlock_holds` (#148), NOT `genlock_underruns`.
+    SourceEarlyHold,
+    /// The FIFO is genuinely empty — a real underrun (counted as `genlock_underruns`).
+    /// NOT reachable on the ts-align path (entered with >=1 queued frame); modelled so
+    /// the hold-vs-underrun split is provable.
+    Underrun,
+}
+
+/// Classify one ts-align tick from the queue depth and the due-frame count, so the C
+/// counter choice (`genlock_holds` vs `genlock_underruns`) is unit-tested. `due` is the
+/// [`genlock_release`] prefix count (queued frames at/before the deadline).
+pub fn classify_ts_align_tick(queue_depth: usize, due: usize) -> GenlockTick {
+    if queue_depth == 0 {
+        GenlockTick::Underrun
+    } else if due == 0 {
+        GenlockTick::SourceEarlyHold
+    } else {
+        GenlockTick::Present
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,5 +1287,51 @@ mod tests {
         assert_eq!(genlock_fps_pair_consistent((30000, 1001), (60, 1)), None);
         // the classic tear: old num + new den vs new num + old den.
         assert_eq!(genlock_fps_pair_consistent((30000, 1), (60000, 1001)), None);
+    }
+
+    // ---- #148: ts-align HOLD vs underrun split -------------------------------
+
+    #[test]
+    fn source_early_hold_is_not_an_underrun() {
+        // THE #148 split: frames ARE queued but none is due yet (the ts-align deadline
+        // is ahead of the head frame's capture ts) → a BENIGN source-early HOLD, which
+        // increments genlock_holds — NOT genlock_underruns. This is the case the
+        // pre-#148 C code mis-counted as an underrun, hiding the #136 churn.
+        assert_eq!(classify_ts_align_tick(1, 0), GenlockTick::SourceEarlyHold);
+        assert_eq!(classify_ts_align_tick(5, 0), GenlockTick::SourceEarlyHold);
+        assert_eq!(classify_ts_align_tick(30, 0), GenlockTick::SourceEarlyHold);
+    }
+
+    #[test]
+    fn due_frame_is_a_present() {
+        // Any due frame (due >= 1) presents this tick — neither a hold nor an underrun.
+        assert_eq!(classify_ts_align_tick(1, 1), GenlockTick::Present);
+        assert_eq!(classify_ts_align_tick(6, 4), GenlockTick::Present);
+    }
+
+    #[test]
+    fn empty_queue_is_a_real_underrun_not_a_hold() {
+        // The split's other side: an EMPTY FIFO (depth 0) is a real starvation →
+        // genlock_underruns. (Not reached on the ts-align path, which is entered with
+        // num>=1, but the classifier must keep the two categories distinct.)
+        assert_eq!(classify_ts_align_tick(0, 0), GenlockTick::Underrun);
+    }
+
+    #[test]
+    fn classification_matches_genlock_release_on_a_non_empty_queue() {
+        // Cross-check against the release decision: with frames queued, `present==false`
+        // from genlock_release is EXACTLY the SourceEarlyHold case, and `present==true`
+        // is Present — so the audit counter split tracks the real release outcome.
+        let q = caps(5);
+        let early = genlock_release(WBASE - 1, &q); // nothing due → hold
+        assert!(!early.present);
+        assert_eq!(
+            classify_ts_align_tick(q.len(), 0),
+            GenlockTick::SourceEarlyHold
+        );
+        let present = genlock_release(WBASE + 2 * NS30, &q); // some due → present
+        assert!(present.present);
+        let due = present.drop_oldest + 1; // due count = dropped stale + the presented one
+        assert_eq!(classify_ts_align_tick(q.len(), due), GenlockTick::Present);
     }
 }
