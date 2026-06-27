@@ -1149,15 +1149,41 @@ pub struct BurnRing<T> {
 
 impl<T> BurnRing<T> {
     /// Hand one emitted frame's burn work to the burn thread. MUST preserve the strict 1:1 burn
-    /// id ↔ emitted-frame mapping: when the bounded ring is full it BACK-PRESSURES (blocks the
-    /// capture thread until the burn thread drains a slot) rather than dropping a job.
+    /// id ↔ emitted-frame mapping: when the bounded ring is full it BACK-PRESSURES (waits for the
+    /// burn thread to drain a slot) rather than dropping a job — a dropped job would punch a
+    /// burn-id GAP the recording verdict misreads as a chain loss.
+    ///
+    /// #279 FIX 2 — the wait is INTERRUPTIBLE by shutdown. Instead of an unbounded blocking
+    /// `SyncSender::send` (which parks the capture thread forever when the burn thread is stalled
+    /// in a synchronous `NDIlib_send_send_video_v2` — it would never reach the capture loop's
+    /// `running` re-check, so `drop(ring)`/grab-flush/join never run and the process wedges),
+    /// submit retries `try_send` and re-checks `running` between attempts. On a full ring it keeps
+    /// waiting WHILE running (never drops); once `running` goes false it returns
+    /// [`SubmitError::ShutdownInterrupted`] promptly so the capture thread can drop the ring, flush
+    /// the grab recording, and join the burn thread. At steady state the ring is not full, so the
+    /// first `try_send` succeeds immediately and this never sleeps — the blocking-back-pressure
+    /// design (and its 1:1 guarantee) is unchanged; only the unbounded park is removed.
     pub fn submit(&self, job: T) -> Result<(), SubmitError<T>> {
-        // NOTE (#279 FIX 2 RED): unbounded blocking send — when the ring is full this parks the
-        // capture thread FOREVER if the burn thread is stalled (e.g. a synchronous NDI send to a
-        // disconnected strih OBS). The `running` flag is never consulted, so shutdown cannot
-        // unblock it and drop(ring)/grab-flush/join never run. The GREEN replaces this with an
-        // interruptible poll loop.
-        self.tx.send(job).map_err(|e| SubmitError::Closed(e.0))
+        let mut job = job;
+        loop {
+            match self.tx.try_send(job) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(returned)) => {
+                    // Ring full → back-pressure. NEVER drop the job. Re-check the shutdown flag:
+                    // keep waiting while running, abandon cleanly once shutdown is signalled.
+                    if !self.running.load(Ordering::Relaxed) {
+                        return Err(SubmitError::ShutdownInterrupted(returned));
+                    }
+                    job = returned;
+                    // Brief sleep so a genuinely back-pressured capture thread stays responsive to
+                    // shutdown without busy-spinning. Not reached at steady state (ring not full).
+                    std::thread::sleep(SUBMIT_SHUTDOWN_POLL);
+                }
+                Err(TrySendError::Disconnected(returned)) => {
+                    return Err(SubmitError::Closed(returned));
+                }
+            }
+        }
     }
 }
 

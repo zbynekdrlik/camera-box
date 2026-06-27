@@ -632,22 +632,27 @@ async fn run_capture_loop(
                 }
             }
         }
-        // #275b — close the burn ring and join the burn thread so the last queued frames are
-        // rendered + sent (and the NDI sender it owns is destroyed cleanly) before shutdown
-        // continues. Dropping the ring closes the channel → the burn thread's recv loop ends.
+        // #275b — close the burn ring so the burn thread's recv loop ends and it drains the last
+        // queued frames. Dropping the producer closes the channel.
         #[cfg(feature = "probe")]
-        {
-            drop(burn_ring);
-            if let Some(h) = burn_handle.take() {
-                if let Err(e) = h.join() {
-                    tracing::error!("#275b cam1-burn thread panicked during shutdown: {:?}", e);
-                }
-            }
-        }
-        // Loop exited (shutdown): flush + close the grab recording so the last frames
-        // and sidecar rows reach dev1/disk.
+        drop(burn_ring);
+
+        // #279 FIX 2 — flush + close the grab recording BEFORE joining the burn thread. The grab
+        // sink is independent of the burn thread, and the join can briefly block on the burn
+        // thread's final NDI sends (a momentarily stalled strih OBS). Flushing grab first
+        // guarantees the recording is complete and the sidecar rows reach dev1/disk even if the
+        // burn-thread join lags — the truncated-grab half of the wedge this fix targets.
         if let Some(rec) = grab_recorder.take() {
             rec.finish();
+        }
+
+        // #275b — join the burn thread so the last queued frames are rendered + sent and the NDI
+        // sender it owns is destroyed cleanly before shutdown continues.
+        #[cfg(feature = "probe")]
+        if let Some(h) = burn_handle.take() {
+            if let Err(e) = h.join() {
+                tracing::error!("#275b cam1-burn thread panicked during shutdown: {:?}", e);
+            }
         }
         // cam2→cam1 LOSS sidecar: write cam1's final V4L2 capture-drop count so the verdict
         // reports the camera-leg loss (a non-fatal best effort — a write failure only means
