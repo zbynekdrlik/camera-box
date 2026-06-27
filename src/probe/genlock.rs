@@ -793,6 +793,50 @@ pub fn genlock_release_guarded(
     }
 }
 
+/// The per-EVENT latch decision for the `genlock_backward_steps` audit counter + warning
+/// log (#269 [2]). A single backward clock step recovers over MANY render ticks (the buffer
+/// drains one frame/tick), so the raw [`genlock_release_guarded`] `backward_step` flag is
+/// `true` for the WHOLE recovery. Counting/logging on every such tick reports one step as N
+/// and spams `LOG_WARNING` at frame rate (breaking the 5 s audit-log gating). This latch
+/// fires the count + log ONCE, on the transition INTO the re-anchor state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenlockBackwardStepLatch {
+    /// Increment `genlock_backward_steps` THIS tick (once per event, on the entry edge).
+    pub count_event: bool,
+    /// Emit the backward-step `LOG_WARNING` THIS tick (once per event, on the entry edge).
+    pub log_event: bool,
+    /// The new "currently inside a backward-step recovery" state to carry to the next tick
+    /// (mirror of the C `source->genlock_in_backward_step` field).
+    pub in_step: bool,
+}
+
+/// Latch the backward-step audit counter + warning log to ONCE per EVENT (#269 [2]).
+///
+/// `prev_in_step` — were we already inside a backward-step recovery on the previous tick
+/// (the carried `genlock_in_backward_step` state)? `backward_step_this_tick` — did THIS tick
+/// re-anchor ([`genlock_release_guarded`]`.backward_step`)? The count + log fire only on the
+/// rising edge (`backward_step_this_tick && !prev_in_step`), so one EVENT recovered over N
+/// ticks counts ONCE, not N times, and the `LOG_WARNING` fires once per event instead of at
+/// frame rate. The carried `in_step` simply tracks the current re-anchor state, so the next
+/// distinct event (after a normal/benign tick resets it) counts again.
+///
+/// Mirror of the C `ready_async_frame` ts-align re-anchor counter latch (#147 / #269 [2]) —
+/// guarded in `tests/genlock_preload.rs`.
+pub fn genlock_backward_step_latch(
+    prev_in_step: bool,
+    backward_step_this_tick: bool,
+) -> GenlockBackwardStepLatch {
+    // #269 [2] RED: this mirrors the CURRENT (buggy) C — it counts + logs on EVERY re-anchor
+    // tick, so one event over N ticks reports as N. The GREEN fix latches on the rising edge
+    // (`backward_step_this_tick && !prev_in_step`).
+    let _ = prev_in_step;
+    GenlockBackwardStepLatch {
+        count_event: backward_step_this_tick,
+        log_event: backward_step_this_tick,
+        in_step: backward_step_this_tick,
+    }
+}
+
 /// Lower plausible-wall-clock bound (Unix epoch ns): 2020-01-01T00:00:00Z.
 pub const WALLCLOCK_TS_MIN_NS: u64 = 1_577_836_800_000_000_000;
 /// Upper plausible-wall-clock bound (exclusive, Unix epoch ns): 2100-01-01T00:00:00Z.
@@ -1745,5 +1789,119 @@ mod tests {
         assert_eq!(g.release, genlock_release(present_ts, &queued));
         assert!(g.release.present);
         assert!(!g.backward_step);
+    }
+
+    // ---- #269 deep-review fixes on the #147 re-anchor (RED→GREEN) -----------
+
+    #[test]
+    fn sink_backward_step_preserves_the_latency_buffer_not_drain_to_empty() {
+        // #269 [0]: a backward step BIGGER than the source's buffer makes every queued frame
+        // future vs present_ts (due==0). The re-anchor must NOT drain the queue to a single
+        // frame — for a deep per-source latency override (up to 2000 ms) that collapses the
+        // deliberate buffer, so the post-step frames are not "due" until they age the full
+        // latency_ms and the program feed FREEZES for ~latency_ms while it refills. The fix
+        // presents the OLDEST queued frame and KEEPS the rest as the buffer (it drains one
+        // frame per tick as the caller erases the presented head) — a few-frame blip at ANY
+        // latency, never a drain-to-empty re-freeze.
+        let latency_ms = 500u32;
+        let wall0 = WBASE + 1000 * NS30;
+        // A full ~500 ms buffer of pre-step frames (≈15 @ 30 fps), ascending capture order.
+        let depth = (latency_ms as u64 * 1_000_000).div_ceil(NS30) as usize; // ~15
+        let queued: Vec<u64> = (0..depth as u64)
+            .map(|i| wall0 - (depth as u64 - 1 - i) * NS30)
+            .collect();
+        // Backward step far bigger than the buffer depth → all queued frames future → due==0.
+        let wall_after = wall0 - 5_000_000_000;
+        let present_ts = genlock_present_ts_reserve(wall_after, latency_ms);
+        assert!(
+            !genlock_release(present_ts, &queued).present,
+            "setup: the backward step must produce a due==0 freeze on the unguarded path"
+        );
+
+        let g = genlock_release_guarded(wall_after, NS30, present_ts, &queued);
+        assert!(g.backward_step, "a backward step beyond the buffer must re-anchor");
+        assert!(g.release.present, "the re-anchor must present, never freeze");
+        // Frames REMAINING after this tick's consume (drop_oldest stale + 1 presented head):
+        // the latency buffer must survive, not collapse to ~0.
+        let remaining = queued.len() - g.release.drop_oldest - 1;
+        assert!(
+            remaining >= depth - 2,
+            "re-anchor must PRESERVE the latency buffer (left {remaining} of {depth}); the \
+             drain-to-empty bug left 0 → froze for ~latency_ms while refilling (#269 [0])"
+        );
+    }
+
+    #[test]
+    fn sink_backward_step_re_anchors_uniformly_regardless_of_queue_depth() {
+        // #269 [3]: the re-anchor trigger must be DEPTH-INDEPENDENT so every genlock source
+        // recovers UNIFORMLY (in step) from one backward clock step. The old trigger tested
+        // the OLDEST queued frame (array[0]), whose future-ness depends on the source's
+        // buffer depth — so a deep-buffer source could stay frozen (a benign HOLD) while a
+        // shallow source jumped to live: the exact cross-source DESYNC genlock prevents. The
+        // trigger must test the NEWEST (max-ts) queued frame instead.
+        let wall0 = WBASE + 1000 * NS30;
+        // A 5-frame buffer; backward step = 6 intervals. The step exceeds the buffer (due==0,
+        // would freeze) but the OLDEST frame is NOT itself > one interval in the future — only
+        // the NEWEST is. A depth-independent (max-ts) trigger must still detect the step.
+        let queued: Vec<u64> = (1..=5u64).rev().map(|i| wall0 - i * NS30).collect(); // [-5..-1]
+        let wall_after = wall0 - 6 * NS30;
+        let present_ts = genlock_present_ts_reserve(wall_after, RESERVE_MS);
+        assert!(
+            !genlock_release(present_ts, &queued).present,
+            "setup: must be a due==0 freeze on the unguarded path"
+        );
+        assert!(
+            queued[0] <= wall_after + NS30,
+            "setup: the OLDEST frame must NOT be > one interval ahead — else the old \
+             oldest-frame trigger would already catch it and there'd be nothing to fix"
+        );
+
+        let g = genlock_release_guarded(wall_after, NS30, present_ts, &queued);
+        assert!(
+            g.backward_step,
+            "a deep-buffer source must re-anchor on a backward step too (#269 [3]); the old \
+             oldest-frame trigger left it frozen while shallow sources jumped → desync"
+        );
+        assert!(g.release.present, "the re-anchor must present, never freeze");
+    }
+
+    #[test]
+    fn backward_step_counts_once_per_event_not_per_recovery_tick() {
+        // #269 [2]: one backward-step EVENT recovers over many ticks (the buffer drains one
+        // frame/tick). The audit counter must increment ONCE per event (on the entry edge),
+        // not once per tick — else a single NTP/PTP step over N ticks reports as N steps and
+        // the LOG_WARNING spams at frame rate, breaking the 5 s audit-log gating.
+        let mut in_step = false;
+        let mut count = 0u64;
+        let mut logs = 0u64;
+        for _ in 0..10 {
+            let l = genlock_backward_step_latch(in_step, true);
+            if l.count_event {
+                count += 1;
+            }
+            if l.log_event {
+                logs += 1;
+            }
+            in_step = l.in_step;
+        }
+        assert_eq!(count, 1, "one backward-step event over 10 ticks counts ONCE (#269 [2])");
+        assert_eq!(logs, 1, "LOG_WARNING fires ONCE per event, not per tick (#269 [2])");
+    }
+
+    #[test]
+    fn separate_backward_step_events_each_count_once() {
+        // Two distinct events separated by a normal (non-re-anchor) period each count once —
+        // the latch resets when a tick is not a backward step.
+        let mut in_step = false;
+        let mut count = 0u64;
+        // event(2 ticks), gap(2), event(3), gap(1)
+        for &bw in &[true, true, false, false, true, true, true, false] {
+            let l = genlock_backward_step_latch(in_step, bw);
+            if l.count_event {
+                count += 1;
+            }
+            in_step = l.in_step;
+        }
+        assert_eq!(count, 2, "two separated backward-step events count twice (#269 [2])");
     }
 }
