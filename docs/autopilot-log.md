@@ -753,3 +753,10 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - #148 (ts-align HOLD vs underrun + log): due==0 source-early HOLD was counted as genlock_underruns. Fix = distinct genlock_holds counter (struct + obs-source.c) + SAMPLE present_ts/due/head-skew per tick into the 5s audit blog (holds= ts_present= ts_due= ts_head_skew_ms=). Mirror GenlockTick/classify_ts_align_tick (audit-only) + guards. Commit 4ed648d04.
 - Tests are probe-gated (src/probe + tests/genlock_preload.rs are #[cfg(feature="probe")]) → run only under --features probe; default-feature gate doesn't see them. Verified locally via --features probe: 39 lib genlock + 77 genlock_preload guards green. C (obs.dll) builds on the windows-genlock CI only.
 - 📔 Playbook: see playbook-review note in the completion report.
+
+## 2026-06-27 — autopilot batch 2: #259 + #200 + #148 (PR #269, v1.7.0-dev.119) — MERGED
+- PR #269 merged (fefac84c); #259 + #200 + #148 CLOSED; main CI green.
+- #259 SIGFPE fps_den guard; #200 torn-fps eliminated via a file-scope value-seqlock last-good cache (lock-free read, write only on fps change, no deadlock); #148 distinct genlock_holds counter (split from underruns) + present_ts/due/head-skew audit fields.
+- QUALITY: high genlock-C review found 5 in-diff regressions the fix introduced (drop-cap collapse + ts-align disengage on the #200 false-return path; build-fill mislabeled underrun; stale audit fields; double hot-path wall-clock read) — ALL fixed (RED→GREEN). A CI exact-anchor guard (windows-genlock*.yml #136 present_ts) broke on the #148 wall_now hoist → updated both YAML guards + playbook.
+- DEPLOY DEFERRED: these are diagnostic/safety-only (NO live-behavior change) + drift-guard is version-based (obs 32.1.2 unchanged) → rig deploy batched with the next genlock-BEHAVIOR batch (#147/#129/#144/#145) which needs the 150-min build + rig E2E-verify anyway. Rig runs the prior working genlock build meanwhile (invisible to drift-guard).
+- NEXT: batch 3 = #266 stuck-watchdog redesign (split out of #268; script-only).
