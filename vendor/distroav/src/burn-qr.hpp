@@ -36,21 +36,6 @@ inline int module_px(int modules, int target_px)
 	return px < 1 ? 1 : px;
 }
 
-// Draw one BGRA pixel (B,G,R,A) at (x,y) into `buf` of stride `stride` bytes/row.
-// Bounds-checked: an out-of-frame coordinate is a no-op (defensive — the caller clamps,
-// but a malformed width/height must never write past the buffer).
-inline void put_bgra(uint8_t *buf, uint32_t stride, uint32_t frame_w, uint32_t frame_h, uint32_t x,
-		     uint32_t y, uint8_t b, uint8_t g, uint8_t r, uint8_t a)
-{
-	if (x >= frame_w || y >= frame_h)
-		return;
-	uint8_t *p = buf + (size_t)y * stride + (size_t)x * 4;
-	p[0] = b;
-	p[1] = g;
-	p[2] = r;
-	p[3] = a;
-}
-
 // Render `text` as a QR (EC level HIGH) into the BGRA `buf` (stride bytes/row, frame
 // `frame_w` x `frame_h`), centered within the horizontal band [band_x, band_x+band_w),
 // vertically centered on `band_cy`. The QR (incl. quiet zone) is first painted onto a

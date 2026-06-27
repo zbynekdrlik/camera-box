@@ -600,6 +600,16 @@ async fn run_capture_loop(
                 }
             }
         }
+        // #275b — close the burn ring and join the burn thread so the last queued frames are
+        // rendered + sent (and the NDI sender it owns is destroyed cleanly) before shutdown
+        // continues. Dropping the ring closes the channel → the burn thread's recv loop ends.
+        #[cfg(feature = "probe")]
+        {
+            drop(burn_ring);
+            if let Some(h) = burn_handle.take() {
+                let _ = h.join();
+            }
+        }
         // Loop exited (shutdown): flush + close the grab recording so the last frames
         // and sidecar rows reach dev1/disk.
         if let Some(rec) = grab_recorder.take() {
