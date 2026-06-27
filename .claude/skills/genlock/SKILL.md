@@ -326,8 +326,16 @@ is captured here. Do NOT copy or commit changes to them for new work.
 ## Drift Guard
 
 `scripts/drift-guard.sh` + `/drift-guard` enforces the pinned zero-loss set:
-OBS 32.1.2, DistroAV 6.2.1, NDI runtime 6.3.2.0, output 1080@30, genlock_wall_clock=1.
+OBS 32.1.2, DistroAV 6.2.1, NDI runtime 6.3.2.0, genlock_wall_clock=1, and the per-box output fps.
 `--check-pins` in CI, `--compare` read-only live. Both boxes verified NO DRIFT (2026-06-14).
+
+**#11 mixed 60/30 — output_fps is HOST-KEYED.** The single `output_fps` pin is gone; the manifest
+pins `output_fps_strih=60` AND `output_fps_stream=30` (strih renders the 60fps LED-wall IMAG program;
+stream DECIMATES 60→30 every other frame for the restreamer). So `--compare` now REQUIRES `host=` and
+resolves `output_fps_${host}` — it **FAILS LOUDLY (exit 1)** on an unknown/empty host (so no future box
+silently defaults to the wrong fps). `--check-pins` validates BOTH host pins present. The OBSERVED
+`output_fps=<n>` key (read from the live OBS log) is unchanged — only the PINNED side is host-keyed.
+`version-integrity-gate.sh` already adds `host=<box>` per `--win-state` box, so it works unchanged.
 
 ## strih NDI Input → Camera Mapping (INVERTED)
 

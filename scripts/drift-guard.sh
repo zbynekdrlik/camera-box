@@ -30,7 +30,7 @@
 # Usage:
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
 #   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
-#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1 \
+#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=60 genlock_wall_clock=1 \   # host=strih→60, host=stream→30 (#11)
 #       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" \
 #       distroav_dll_paths="C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"
 #   scripts/drift-guard.sh --help
@@ -585,16 +585,18 @@ EOF
 }
 
 check_pins() {
-  local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps="$5" p_genlock="$6" p_latency="$7" p_plugin="$8"
+  local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps_strih="$5" p_fps_stream="$6" p_genlock="$7" p_latency="$8" p_plugin="$9"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
-  validate_semver   "obs_version"           "$p_obs"      || errs=$((errs + 1))
-  validate_semver   "distroav_version"      "$p_distroav" || errs=$((errs + 1))
-  validate_semver   "ndi_runtime_min"       "$p_ndi"      || errs=$((errs + 1))
-  validate_nonempty "output_fps"            "$p_fps"      || errs=$((errs + 1))
-  validate_nonempty "genlock_wall_clock"    "$p_genlock"  || errs=$((errs + 1))
-  validate_nonempty "ndi_input_latency"     "$p_latency"  || errs=$((errs + 1))
-  validate_nonempty "canonical_plugin_path" "$p_plugin"   || errs=$((errs + 1))
+  validate_semver   "obs_version"           "$p_obs"        || errs=$((errs + 1))
+  validate_semver   "distroav_version"      "$p_distroav"   || errs=$((errs + 1))
+  validate_semver   "ndi_runtime_min"       "$p_ndi"        || errs=$((errs + 1))
+  # #11 mixed 60/30: both host-keyed output_fps pins MUST be present (strih=60, stream=30).
+  validate_nonempty "output_fps_strih"      "$p_fps_strih"  || errs=$((errs + 1))
+  validate_nonempty "output_fps_stream"     "$p_fps_stream" || errs=$((errs + 1))
+  validate_nonempty "genlock_wall_clock"    "$p_genlock"    || errs=$((errs + 1))
+  validate_nonempty "ndi_input_latency"     "$p_latency"    || errs=$((errs + 1))
+  validate_nonempty "canonical_plugin_path" "$p_plugin"     || errs=$((errs + 1))
   if [ "$errs" -gt 0 ]; then
     echo >&2
     echo "!! $errs pinned value(s) missing or malformed in $readme." >&2
@@ -603,7 +605,7 @@ check_pins() {
   fi
   echo
   echo "All pins present + well-formed:"
-  echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps=$p_fps genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
+  echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps_strih=$p_fps_strih output_fps_stream=$p_fps_stream genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
   echo "  canonical_plugin_path=$p_plugin"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
@@ -847,18 +849,22 @@ main() {
   # --status is a read-only dump of the live genlock + burn state — it needs NONE of the pinned
   # set, so skip the manifest requirement + pin load for it (it must work even without
   # vendor/README.md, e.g. a checkout that only ships the script). #246.
-  local p_obs p_distroav p_ndi p_fps p_genlock p_latency p_plugin
+  local p_obs p_distroav p_ndi p_fps p_fps_strih p_fps_stream p_genlock p_latency p_plugin
   if [ "$mode" != "status" ]; then
     [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
     p_obs="$(pinned_obs_version "$readme")"
     p_distroav="$(pinned_distroav_version "$readme")"
     p_ndi="$(pinned_ndi_min "$readme")"
-    p_fps="$(pinned_setting "$readme" output_fps)"
+    # #11 mixed 60/30: output_fps is HOST-KEYED (strih renders 60, stream decimates to 30). The
+    # per-host pin is resolved from the `host` arg in --compare (below); --check-pins validates
+    # BOTH are present so no future box silently defaults to the wrong fps.
+    p_fps_strih="$(pinned_setting "$readme" output_fps_strih)"
+    p_fps_stream="$(pinned_setting "$readme" output_fps_stream)"
     p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
     p_latency="$(pinned_setting "$readme" ndi_input_latency)"
     p_plugin="$(pinned_setting "$readme" canonical_plugin_path)"
     if [ "$mode" = "check-pins" ]; then
-      check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin"
+      check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps_strih" "$p_fps_stream" "$p_genlock" "$p_latency" "$p_plugin"
       exit $?
     fi
   fi
@@ -890,6 +896,18 @@ main() {
   if [ "$mode" = "status" ]; then
     status_surface "$host" "$o_genlock" "$o_capability" "$o_burn"
     exit $?
+  fi
+
+  # #11 mixed 60/30: output_fps is HOST-KEYED — resolve the pin for THIS box. An unknown/empty host
+  # has no pin → FAIL LOUDLY so no future box silently defaults to the wrong fps (strih=60/stream=30).
+  if [ -z "$host" ]; then
+    echo "ERROR: --compare requires host= (output_fps is host-keyed: output_fps_strih / output_fps_stream)." >&2
+    exit 1
+  fi
+  p_fps="$(pinned_setting "$readme" "output_fps_${host}")"
+  if [ -z "$p_fps" ]; then
+    echo "ERROR: no output_fps pin for host '${host}' (expected an 'output_fps_${host}' row in $readme; known hosts: strih, stream)." >&2
+    exit 1
   fi
 
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \

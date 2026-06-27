@@ -84,11 +84,13 @@ const STRIH_PINNED: &str = "{\
 }";
 
 /// A stream state JSON that MATCHES the pinned set (the stream box's broadcast input is NDI 2ME PGM).
+/// #11 mixed 60/30: the stream box DECIMATES the 60fps strih feed to 30fps output, so its observed
+/// output_fps is 30 (matches the host-keyed `output_fps_stream` pin).
 const STREAM_PINNED: &str = "{\
 \"obs_version\":\"32.1.2\",\
 \"distroav_version\":\"6.2.1\",\
 \"ndi_runtime\":\"6.3.2.0\",\
-\"output_fps\":\"60\",\
+\"output_fps\":\"30\",\
 \"genlock_wall_clock\":\"1\",\
 \"ndi_input_latency\":\"NDI 2ME PGM=0\",\
 \"distroav_dll_paths\":\"C:\\\\ProgramData\\\\obs-studio\\\\plugins\\\\distroav\\\\bin\\\\64bit\\\\distroav.dll\"\
@@ -234,7 +236,8 @@ fn gate_uses_a_custom_readme_for_the_pinned_set() {
 | `vendor/obs-studio` | x | **99.9.9** (commit `a`) | git subtree --squash |
 | `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
 | NDI | x | requires **NDI ≥ 6.3.0** | tree |
-| `output_fps` | `60` | log |
+| `output_fps_strih` | `60` | log |
+| `output_fps_stream` | `30` | log |
 | `genlock_wall_clock` | `1` | env |
 | `ndi_input_latency` | `0` | obs-websocket |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan |

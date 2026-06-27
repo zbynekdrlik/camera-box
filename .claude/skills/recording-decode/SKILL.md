@@ -386,3 +386,36 @@ changed, no test added") AND Gate-2 (`Closes #N` ⇒ expects a RED test) both fi
 bug fix — it's the documented `[no-test: <reason>]` case. Put the marker (e.g.
 `[no-test: dead-code removal, no behavior change — remaining tests cover it]`) on the **LATEST**
 commit of the push (the hook reads `git log -1`). Never `[no-test:]` a real fix.
+
+## #11 — DECIMATION-AWARE contiguity (the mixed 60/30 topology)
+
+Final topology: cam(60)→strih(60, LED-wall IMAG)→stream(30, every-other-frame)→restreamer(30). The
+strih burn is the strih OBS render-tick counter at 60fps; read from the 30fps STREAM recording it
+steps by **2** by design (the stream's genlock FIFO keeps every other strih frame). The PerRenderTick
+path used to UNCONDITIONALLY ignore forward gaps — which MASKED real strih→stream loss (a gap of 4,
+where 2 is by-design, was a lost frame read as a false ZERO).
+
+`burn_contiguity_in_window_with_step(node, frames, rate, expected_step)` (`src/probe/burn_contiguity.rs`):
+- `expected_step >= 2` ⇒ a forward gap **== step** is the by-design decimation (not loss); a gap
+  **> step** charges the excess `gap/expected_step − 1` (INTEGER div, so genlock beat jitter of
+  `step ± 1` charges 0) as `RealDrop`. Never a false ZERO — a real drop always opens a gap ≥ 2·step.
+- `expected_step == 1` ⇒ today's unconditional-ignore (unchanged): the strih burn in a 60-in-60
+  recording, the stream burn (recorded by its own OBS), cam render ticks. The 3-arg
+  `burn_contiguity_in_window` wrapper passes 1.
+- cam1 (PerEmittedFrame) is UNAFFECTED — its real-drop detection is set-based and catches every real
+  60fps drop regardless of the recording fps.
+
+**THE GOTCHA — two DIFFERENT "steps", do not conflate:**
+- the **LOSS decimation step** (`recording-verdict.rs` `node_render_step` → `NodeSpec.step`): strih=2,
+  stream=1, cam1=ignored. Derived from rig-pinned `--strih-emit-fps`(60) / `--stream-capture-fps`(30),
+  **DECOUPLED from `--capture-fps`** so it is always correct even when the merge runs `--capture-fps 60`
+  (which it does, for cam1's diagnostic span read from the 60fps strih recording).
+- the **OPTICAL diagnostic expected_step** (`VerdictConfig`, `refresh_hz / capture_fps`): the cam2
+  Vernier beat, DIAGNOSTIC only. THIS one tracks `--capture-fps` (60 for strih rec, 30 for stream rec),
+  which is why `recording-e2e.sh` splits `CAPTURE_FPS` into `STRIH_CAPTURE_FPS`/`STREAM_CAPTURE_FPS`.
+
+`node_render_step("strih", emit, cap)` = `round(emit/cap).max(1)` = 2; `"stream"`/`"cam1"` = 1 (the
+stream burn is emitted AND recorded by the same OBS ⇒ no decimation). RED→GREEN lock:
+`in_window_decimation_step2_extra_missing_id_is_a_real_drop_not_masked` (gap 4 → 1 RealDrop) +
+`..._two_lost_frames_charge_two_real_drops` (gap 6 → 2) + `..._every_other_id_is_zero_loss` (clean) +
+`..._jitter_gap_of_one_or_three_is_not_loss` + `in_window_step1_strih_recording_..._none_still_caught`.

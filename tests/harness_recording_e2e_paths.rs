@@ -967,10 +967,14 @@ fn recording_e2e_stream_extract_is_stream_only_never_strih() {
         window.contains("--extract-partial stream"),
         "#208: the on-stream planner must forward `--extract-partial stream`: {window:?}"
     );
+    // Forbid the strih RECORDING flag (`--strih "<path>"`) — that would force a box-to-box copy.
+    // `--strih-emit-fps "<n>"` (#11, a scalar rate for the decimation step, not a recording) is
+    // legitimately allowed, so match the recording flag's `--strih "` form specifically rather than
+    // the bare `--strih` substring (which `--strih-emit-fps` would false-trip).
     assert!(
-        !window.contains("--strih"),
-        "#208: the stream-box extract must NEVER be passed --strih (the strih recording is decoded \
-         on the strih box): {window:?}"
+        !window.contains("--strih \""),
+        "#208: the stream-box extract must NEVER be passed the --strih <recording> (the strih \
+         recording is decoded on the strih box): {window:?}"
     );
 }
 
@@ -1101,23 +1105,30 @@ fn loopback_e2e_is_intentionally_not_version_gated() {
     );
 }
 
-/// #11 60fps rollout: the chain runs at 60fps end-to-end, so the harness must DEFAULT the cam1
-/// emit rate (GENLOCK_FPS → CAMERA_BOX_GENLOCK_FPS) and the recorded-program rate (CAPTURE_FPS)
-/// to 60, and it must thread `--capture-fps "$CAPTURE_FPS"` into EVERY verdict invocation. The
-/// verdict's duration gate is `analyzed_secs = recorded_frames / capture_fps` and the optical
-/// expected-step is `refresh_hz / capture_fps`; at 60fps the default `--capture-fps 30` would
-/// mis-report a 600 s span (a 300 s run is ~18000 recorded frames) and expected_step=2, so the
-/// pass-through is mandatory on the merge, the legacy fused verdict, AND both on-box extracts.
+/// #11 mixed 60/30 topology: cam1 emits 60fps, strih renders 60fps, stream DECIMATES to 30fps for
+/// the restreamer. So the harness must default the cam1 emit rate (GENLOCK_FPS →
+/// CAMERA_BOX_GENLOCK_FPS) to 60 and SPLIT the recorded-program rate PER BOX (STRIH_CAPTURE_FPS=60,
+/// STREAM_CAPTURE_FPS=30). A single shared 60 mis-reports the 30fps stream recording's diagnostic
+/// span (`analyzed_secs = frames / capture_fps`) + optical expected-step (`refresh_hz / capture_fps`)
+/// — the #1c shadow. The stream on-box extract gets --capture-fps 30; the strih extract / dev1
+/// merge / legacy fused verdict get 60. The decimation LOSS step (the 60fps strih burn read from the
+/// 30fps stream recording steps by round(strih_emit/stream_capture)=2) is a rig-pinned topology
+/// constant threaded as --strih-emit-fps / --stream-capture-fps, DECOUPLED from the diagnostic
+/// --capture-fps so it is always correct regardless of which recording's rate is in effect.
 #[test]
-fn recording_e2e_defaults_to_60fps_and_threads_capture_fps() {
+fn recording_e2e_defaults_to_mixed_60_30_and_threads_per_box_fps() {
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("GENLOCK_FPS=\"${GENLOCK_FPS:-60}\""),
-        "#11: cam1 NDI emit rate (CAMERA_BOX_GENLOCK_FPS) must default to 60 (the 60fps rollout)."
+        "#11: cam1 NDI emit rate (CAMERA_BOX_GENLOCK_FPS) must default to 60 (cam1+strih render 60)."
     );
     assert!(
-        s.contains("CAPTURE_FPS=\"${CAPTURE_FPS:-60}\""),
-        "#11: the recorded-program fps (verdict duration gate + expected-step) must default to 60."
+        s.contains("STRIH_CAPTURE_FPS=\"${STRIH_CAPTURE_FPS:-60}\""),
+        "#11: the strih recording fps (diagnostic span + optical step) must default to 60."
+    );
+    assert!(
+        s.contains("STREAM_CAPTURE_FPS=\"${STREAM_CAPTURE_FPS:-30}\""),
+        "#11: the stream recording fps must default to 30 (the stream box decimates 60→30)."
     );
     assert!(
         s.contains("PAINT_FPS=\"${PAINT_FPS:-60}\""),
@@ -1128,12 +1139,29 @@ fn recording_e2e_defaults_to_60fps_and_threads_capture_fps() {
         s.contains("CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS"),
         "#11: cam1 must launch with CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS."
     );
-    // EVERY verdict invocation that reports the span/step must carry --capture-fps "$CAPTURE_FPS":
-    // the legacy fused verdict (VERDICT_ARGS), the dev1 merge (MERGE_ARGS), and both on-box extracts.
-    let occurrences = s.matches("--capture-fps \"$CAPTURE_FPS\"").count();
+    // The stream on-box extract decodes the 30fps stream recording → --capture-fps STREAM_CAPTURE_FPS.
     assert!(
-        occurrences >= 4,
-        "#11: --capture-fps \"$CAPTURE_FPS\" must be threaded into the fused verdict, the merge, \
-         and BOTH on-box extracts (>=4 sites); found {occurrences}."
+        s.contains("--capture-fps \"$STREAM_CAPTURE_FPS\""),
+        "#11: the stream on-box extract must use --capture-fps \"$STREAM_CAPTURE_FPS\" (30)."
+    );
+    // The strih extract, the dev1 merge, and the legacy fused verdict read the 60fps strih recording
+    // (cam1 burn) → --capture-fps STRIH_CAPTURE_FPS (>=3 sites).
+    let strih_fps = s.matches("--capture-fps \"$STRIH_CAPTURE_FPS\"").count();
+    assert!(
+        strih_fps >= 3,
+        "#11: --capture-fps \"$STRIH_CAPTURE_FPS\" (60) must be threaded into the strih extract, the \
+         merge, and the fused verdict (>=3 sites); found {strih_fps}."
+    );
+    // The decimation LOSS step is rig-pinned + decoupled from the diagnostic --capture-fps: the strih
+    // burn read from the 30fps stream recording steps by round(strih_emit/stream_capture)=2. Threaded
+    // on the stream extract, the merge, AND the fused verdict (the burns the stream recording carries).
+    let emit = s.matches("--strih-emit-fps \"$STRIH_CAPTURE_FPS\"").count();
+    let dec = s
+        .matches("--stream-capture-fps \"$STREAM_CAPTURE_FPS\"")
+        .count();
+    assert!(
+        emit >= 3 && dec >= 3,
+        "#11: the decimation step (--strih-emit-fps + --stream-capture-fps) must be threaded into the \
+         stream extract, the merge, and the fused verdict (>=3 each); found emit={emit} dec={dec}."
     );
 }
