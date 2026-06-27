@@ -746,6 +746,148 @@ pub fn genlock_peak_update(current_peak: u32, observed_depth: u32) -> u32 {
     current_peak.max(observed_depth)
 }
 
+/// (#200) Accept an output-fps snapshot only when two back-to-back reads AGREE — the
+/// value-seqlock the C `genlock_video_fps()` helper uses to avoid a TORN
+/// `(fps_num, fps_den)` pair on the unlocked genlock audit/preload path.
+///
+/// `obs_get_video_info()` (obs.c) copies the global output `ovi` struct WITHOUT a
+/// lock, so a concurrent `obs_reset_video()` (a resolution/fps change) can interleave
+/// between the num and den field copies and return a mismatched pair, formatting a
+/// wrong ms in the audit log. Taking the OBS video graphics lock on the render/audit
+/// path risks a lock-ordering deadlock vs `obs_reset_video` (which holds the video lock
+/// while it can touch source state), for a log-only gain — so the C side instead reads
+/// the pair twice and accepts it only when both reads match (`obs_reset_video` is rare
+/// ⇒ the steady state matches on the first try). Returns `None` on disagreement (a tear
+/// in flight); the caller then takes the fps-unknown branch (frames 0 / fps 0.0), never
+/// a divide-by-zero. This pure fn pins that acceptance rule so the C helper is checked
+/// against a provably-correct reference.
+pub fn genlock_fps_pair_consistent(a: (u32, u32), b: (u32, u32)) -> Option<(u32, u32)> {
+    if a == b {
+        Some(a)
+    } else {
+        None
+    }
+}
+
+/// (#148) The audit counter a single timestamp-aligned render tick increments.
+///
+/// On the ts-align release path the FIFO is only entered with at least one queued
+/// frame (`ready_async_frame` dereferences the head before this decision), so a
+/// non-presented tick there is ALWAYS a SOURCE-EARLY HOLD — frames ARE queued, none
+/// has yet reached its presentation deadline ([`genlock_release`] returned
+/// `present == false` with a non-empty queue) — NOT a true-empty FIFO underrun. The
+/// pre-#148 C code folded that hold into `genlock_underruns`, conflating a benign
+/// source-early hold (the #136 boundary churn) with real starvation and making the
+/// live ~3 fps churn undebuggable from the counters alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenlockTick {
+    /// A due frame was presented this tick.
+    Present,
+    /// Frames queued, none due yet — repeat the current frame. Counted as
+    /// `genlock_holds` (#148), NOT `genlock_underruns`.
+    SourceEarlyHold,
+    /// The FIFO is genuinely empty — a real underrun (counted as `genlock_underruns`).
+    /// NOT reachable on the ts-align path (entered with >=1 queued frame); modelled so
+    /// the hold-vs-underrun split is provable.
+    Underrun,
+}
+
+/// Classify one ts-align tick from the queue depth and the due-frame count, so the C
+/// counter choice (`genlock_holds` vs `genlock_underruns`) is unit-tested. `due` is the
+/// [`genlock_release`] prefix count (queued frames at/before the deadline).
+pub fn classify_ts_align_tick(queue_depth: usize, due: usize) -> GenlockTick {
+    if queue_depth == 0 {
+        GenlockTick::Underrun
+    } else if due == 0 {
+        GenlockTick::SourceEarlyHold
+    } else {
+        GenlockTick::Present
+    }
+}
+
+/// An output frame-rate pair `(fps_num, fps_den)` — the canvas `ovi` fps the genlock
+/// audit/preload path reads.
+pub type FpsPair = (u32, u32);
+
+/// The result of [`genlock_fps_cached`]: `(new_cache, result)` — the cache state after
+/// the call, and the pair the caller uses (`None` ⇒ the fps-unknown fallback).
+pub type FpsCacheUpdate = (Option<FpsPair>, Option<FpsPair>);
+
+/// (#200 follow-up, #269 review) The LAST-GOOD-cached extension of
+/// [`genlock_fps_pair_consistent`]. The C `genlock_video_fps()` keeps a file-scope
+/// last-good `(fps_num, fps_den)` cache (the output fps is the GLOBAL canvas `ovi`, one
+/// value shared by every genlock source, so a single cached pair is correct). On
+/// AGREEMENT it accepts the fresh pair AND refreshes the cache; on a persistent TEAR it
+/// returns the cached last-good pair instead of failing.
+///
+/// This is the #269 fix for two false-return regressions the bare
+/// [`genlock_fps_pair_consistent`] introduced: a tear made
+/// [`genlock_drop_cap`]'s caller skip the latency-frames bump → the per-source FIFO
+/// drop-cap collapsed to the 30-frame floor → a deep-latency override momentarily
+/// force-drained the FIFO (an A/V phase jump); and it made the C
+/// `genlock_frame_interval_ns()` return 0 → the ts-align block was skipped for that tick
+/// → the source briefly presented off the shared wall-clock deadline (a one-tick break of
+/// the #136 multi-source in-sync invariant). Returning the cached pair on a transient
+/// tear eliminates both while still never logging a torn pair (#200's goal).
+///
+/// Only a tear with NO good pair ever cached rejects (`None` ⇒ the first-ever call
+/// mid-tear → the fps-unknown fallback). A degenerate `(0, _)` agreement is accepted but
+/// NOT cached (it is not a good fps), mirroring the C `a.fps_num != 0` publish guard.
+///
+/// Returns `(new_cache, result)`: `new_cache` is the cache state after this call;
+/// `result` is the pair the caller uses (`None` ⇒ fps-unknown fallback).
+pub fn genlock_fps_cached(cache: Option<FpsPair>, a: FpsPair, b: FpsPair) -> FpsCacheUpdate {
+    match genlock_fps_pair_consistent(a, b) {
+        // Agree on a GOOD pair: accept it AND refresh the cache.
+        Some(pair) if pair.0 != 0 => (Some(pair), Some(pair)),
+        // Agree on a degenerate (0, _) pair: return it but do NOT cache it.
+        Some(pair) => (cache, Some(pair)),
+        // Tear: return the cached last-good pair; only a never-initialized cache rejects.
+        None => (cache, cache),
+    }
+}
+
+/// (#148 follow-up, #269 finding [4]) Classify one COUNT-GATE render tick into the audit
+/// counter it increments. The count gate is entered (via `ready_async_frame`) only with
+/// `queue_depth >= 1`, so a NON-consume tick there is ALWAYS a build-fill HOLD (still
+/// establishing the preload delay; the startup-fill latch is unset) — a BENIGN repeat
+/// that RECURS on every #126 reconnect re-arm — NOT a true-empty FIFO starvation. The
+/// true-empty underrun is counted separately at the `queue_depth == 0` guard
+/// (`get_closest_frame`), modelled here as `Underrun` for completeness. The pre-#269 C
+/// folded the build-fill hold into `genlock_underruns`; this pins the corrected split
+/// (build-fill HOLD → `genlock_holds`, true-empty → `genlock_underruns`).
+pub fn classify_count_gate_tick(queue_depth: usize, consume: bool) -> GenlockTick {
+    if queue_depth == 0 {
+        GenlockTick::Underrun // true empty (counted at the num==0 guard, get_closest_frame)
+    } else if !consume {
+        GenlockTick::SourceEarlyHold // build-fill HOLD → genlock_holds (#269 [4])
+    } else {
+        GenlockTick::Present
+    }
+}
+
+/// (#148 follow-up, #269 finding [5]) The ts-align decision sample (present_ts / due /
+/// head-skew) the 5s audit line publishes. It is meaningful ONLY on a tick the ts-align
+/// path actually sampled; a count-gate or true-empty tick has NO sample and MUST publish
+/// the all-zero sentinel, so the audit never prints a STALE sample left over from an
+/// earlier ts-align tick (the pre-#269 C wrote these fields ONLY in the ts-align branch
+/// but `genlock_audit_log` printed them unconditionally — a ts-align source that fell
+/// through to the count gate printed stale skew). Mirrors the C `genlock_clear_ts_sample()`
+/// reset applied on the count-gate fall-through and the true-empty paths. `sampled` is
+/// whether the ts-align branch produced a fresh sample this tick.
+pub fn genlock_ts_audit_sample(
+    sampled: bool,
+    present_ts: u64,
+    due: u32,
+    head_skew_ns: i64,
+) -> (u64, u32, i64) {
+    if sampled {
+        (present_ts, due, head_skew_ns)
+    } else {
+        (0, 0, 0) // sentinel: no ts-align sample this tick
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,5 +1339,178 @@ mod tests {
             "peak must reflect the producer-side high-water mark (6), not just the \
              consumer-observed depth (1) — the #99 point-2 under-report"
         );
+    }
+
+    // ---- #200: tear-checked fps snapshot (value-seqlock acceptance) -----------
+
+    #[test]
+    fn fps_pair_accepted_only_when_two_reads_agree() {
+        // Two back-to-back snapshots that AGREE are the consistent pair → accept it.
+        assert_eq!(
+            genlock_fps_pair_consistent((30000, 1001), (30000, 1001)),
+            Some((30000, 1001))
+        );
+        assert_eq!(genlock_fps_pair_consistent((30, 1), (30, 1)), Some((30, 1)));
+        // A consistent zero pair is still accepted; the CALLER guards fps_num==0.
+        assert_eq!(genlock_fps_pair_consistent((0, 0), (0, 0)), Some((0, 0)));
+    }
+
+    #[test]
+    fn fps_pair_rejected_on_a_torn_read() {
+        // obs_reset_video tore the pair between the two reads → reject (None), so the C
+        // caller takes the fps-unknown branch instead of formatting a mismatched ms.
+        // den changed (num matched):
+        assert_eq!(genlock_fps_pair_consistent((30000, 1001), (30000, 1)), None);
+        // num changed (den matched):
+        assert_eq!(
+            genlock_fps_pair_consistent((30000, 1001), (60000, 1001)),
+            None
+        );
+        // both changed (a full fps switch mid-read):
+        assert_eq!(genlock_fps_pair_consistent((30000, 1001), (60, 1)), None);
+        // the classic tear: old num + new den vs new num + old den.
+        assert_eq!(genlock_fps_pair_consistent((30000, 1), (60000, 1001)), None);
+    }
+
+    // ---- #148: ts-align HOLD vs underrun split -------------------------------
+
+    #[test]
+    fn source_early_hold_is_not_an_underrun() {
+        // THE #148 split: frames ARE queued but none is due yet (the ts-align deadline
+        // is ahead of the head frame's capture ts) → a BENIGN source-early HOLD, which
+        // increments genlock_holds — NOT genlock_underruns. This is the case the
+        // pre-#148 C code mis-counted as an underrun, hiding the #136 churn.
+        assert_eq!(classify_ts_align_tick(1, 0), GenlockTick::SourceEarlyHold);
+        assert_eq!(classify_ts_align_tick(5, 0), GenlockTick::SourceEarlyHold);
+        assert_eq!(classify_ts_align_tick(30, 0), GenlockTick::SourceEarlyHold);
+    }
+
+    #[test]
+    fn due_frame_is_a_present() {
+        // Any due frame (due >= 1) presents this tick — neither a hold nor an underrun.
+        assert_eq!(classify_ts_align_tick(1, 1), GenlockTick::Present);
+        assert_eq!(classify_ts_align_tick(6, 4), GenlockTick::Present);
+    }
+
+    #[test]
+    fn empty_queue_is_a_real_underrun_not_a_hold() {
+        // The split's other side: an EMPTY FIFO (depth 0) is a real starvation →
+        // genlock_underruns. (Not reached on the ts-align path, which is entered with
+        // num>=1, but the classifier must keep the two categories distinct.)
+        assert_eq!(classify_ts_align_tick(0, 0), GenlockTick::Underrun);
+    }
+
+    #[test]
+    fn classification_matches_genlock_release_on_a_non_empty_queue() {
+        // Cross-check against the release decision: with frames queued, `present==false`
+        // from genlock_release is EXACTLY the SourceEarlyHold case, and `present==true`
+        // is Present — so the audit counter split tracks the real release outcome.
+        let q = caps(5);
+        let early = genlock_release(WBASE - 1, &q); // nothing due → hold
+        assert!(!early.present);
+        assert_eq!(
+            classify_ts_align_tick(q.len(), 0),
+            GenlockTick::SourceEarlyHold
+        );
+        let present = genlock_release(WBASE + 2 * NS30, &q); // some due → present
+        assert!(present.present);
+        let due = present.drop_oldest + 1; // due count = dropped stale + the presented one
+        assert_eq!(classify_ts_align_tick(q.len(), due), GenlockTick::Present);
+    }
+
+    // ---- #269 review: cached last-good fps (findings [0]/[1]/[2]) -----------
+
+    #[test]
+    fn fps_cached_agreement_updates_cache_and_returns_pair() {
+        // Two agreeing reads accept the fresh pair AND publish it to the cache.
+        let (c, r) = genlock_fps_cached(None, (30000, 1001), (30000, 1001));
+        assert_eq!(r, Some((30000, 1001)));
+        assert_eq!(c, Some((30000, 1001)));
+        // A later agreement on a NEW pair refreshes the cache.
+        let (c2, r2) = genlock_fps_cached(c, (60, 1), (60, 1));
+        assert_eq!(r2, Some((60, 1)));
+        assert_eq!(c2, Some((60, 1)));
+    }
+
+    #[test]
+    fn fps_cached_tear_after_good_read_returns_cached_pair() {
+        // #269 [0]/[1]/[2]: once a good pair was cached, a torn read must NOT collapse to
+        // the fps-unknown branch — it returns the cached last-good pair (so drop_cap keeps
+        // its deep-latency frames and frame_interval stays nonzero / ts-align stays engaged).
+        let cache = Some((30000, 1001));
+        let (c, r) = genlock_fps_cached(cache, (30000, 1001), (30000, 1)); // torn den
+        assert_eq!(
+            r,
+            Some((30000, 1001)),
+            "a tear must return the cached good pair"
+        );
+        assert_eq!(c, cache, "the cache is unchanged on a tear");
+    }
+
+    #[test]
+    fn fps_cached_tear_with_no_cache_rejects() {
+        // The ONLY reject: a tear before any good pair was ever read (first-ever call
+        // mid-tear) → the fps-unknown fallback.
+        let (c, r) = genlock_fps_cached(None, (30000, 1001), (60000, 1001));
+        assert_eq!(r, None);
+        assert_eq!(c, None);
+    }
+
+    #[test]
+    fn fps_cached_degenerate_agreement_not_cached() {
+        // (0, _) is agreed but is not a GOOD fps → returned to the caller but never cached
+        // (it must not overwrite a good cache), mirroring the C `a.fps_num != 0` guard.
+        let (c, r) = genlock_fps_cached(Some((30, 1)), (0, 0), (0, 0));
+        assert_eq!(r, Some((0, 0)));
+        assert_eq!(
+            c,
+            Some((30, 1)),
+            "a degenerate agreement must not clobber a good cache"
+        );
+    }
+
+    // ---- #269 finding [4]: count-gate build-fill is a HOLD, not an underrun ----
+
+    #[test]
+    fn count_gate_build_fill_is_a_hold_not_an_underrun() {
+        // The count gate is entered only with queue_depth>=1; a non-consume tick there is a
+        // BENIGN build-fill HOLD → genlock_holds, NEVER genlock_underruns.
+        assert_eq!(
+            classify_count_gate_tick(1, false),
+            GenlockTick::SourceEarlyHold
+        );
+        assert_eq!(
+            classify_count_gate_tick(3, false),
+            GenlockTick::SourceEarlyHold
+        );
+    }
+
+    #[test]
+    fn count_gate_consume_is_present() {
+        assert_eq!(classify_count_gate_tick(1, true), GenlockTick::Present);
+        assert_eq!(classify_count_gate_tick(5, true), GenlockTick::Present);
+    }
+
+    #[test]
+    fn count_gate_true_empty_is_underrun() {
+        // The only real underrun on the count-gate model (counted at the num==0 guard).
+        assert_eq!(classify_count_gate_tick(0, false), GenlockTick::Underrun);
+    }
+
+    // ---- #269 finding [5]: stale ts-align audit sample → sentinel --------------
+
+    #[test]
+    fn ts_audit_sample_fresh_on_a_sampled_tick() {
+        assert_eq!(
+            genlock_ts_audit_sample(true, 123_456, 2, -5),
+            (123_456, 2, -5)
+        );
+    }
+
+    #[test]
+    fn ts_audit_sample_sentinel_on_a_non_sampled_tick() {
+        // #269 [5]: a count-gate / true-empty tick must NOT reprint the previous ts-align
+        // sample — it publishes the all-zero sentinel.
+        assert_eq!(genlock_ts_audit_sample(false, 123_456, 2, -5), (0, 0, 0));
     }
 }

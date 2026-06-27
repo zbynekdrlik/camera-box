@@ -18,8 +18,8 @@
 
 use camera_box::probe::genlock::{
     genlock_build_drain, genlock_decide, genlock_drop_cap, genlock_empty_run_next,
-    genlock_rearm_on_resume, parse_preload, preload_to_ms, steady_state_depth, GenlockDecision,
-    GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
+    genlock_rearm_on_resume, ms_to_frames, parse_preload, preload_to_ms, steady_state_depth,
+    GenlockDecision, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_DEFAULT, GENLOCK_PRELOAD_MAX,
     GENLOCK_REARM_EMPTY_TICKS, MAX_ASYNC_FRAMES,
 };
 
@@ -183,6 +183,40 @@ fn preload_to_ms_conversion() {
 fn default_is_one_frame() {
     // preload=1 → one frame of reserve = one frame of latency per hop.
     assert_eq!(GENLOCK_PRELOAD_DEFAULT, 1);
+}
+
+// ---- #259: fps_den==0 must NOT divide-by-zero (latent SIGFPE) -----------------
+//
+// The C genlock audit-log computes latency_frames =
+//   (latency_ms*fps_num + (1000*fps_den)/2) / (1000*fps_den)
+// guarded only by `have_vi = obs_get_video_info(&ovi) && ovi.fps_num != 0` — NOT
+// fps_den. If obs_get_video_info ever returns true with fps_num!=0 && fps_den==0,
+// that integer divide is a SIGFPE on the render thread (the sibling
+// genlock_source_drop_cap already guards `ovi.fps_den != 0`). The C divide cannot be
+// unit-tested directly, so we (a) pin the mirror's value contract — both ms<->frames
+// helpers return 0, never panic, when fps_den==0 — and (b) assert the C have_vi guard
+// checks fps_den (the vendored_source guard below). Found by the #257 (PR #258) review.
+
+#[test]
+fn ms_to_frames_is_zero_and_no_panic_when_fps_den_zero() {
+    // The mirror of the C latency_frames divide. fps_den==0 (with ANY fps_num) must
+    // yield 0 — the "fps unknown" fallback — never a divide-by-zero. (#259)
+    assert_eq!(ms_to_frames(100, 30000, 0), 0);
+    assert_eq!(ms_to_frames(3, 30, 0), 0);
+    assert_eq!(ms_to_frames(0, 0, 0), 0);
+    // fps_num==0 also yields 0 (no valid video info), the existing contract.
+    assert_eq!(ms_to_frames(100, 0, 1), 0);
+    // A valid pair still converts normally (3 ms @ 30 fps rounds to 0 frames).
+    assert_eq!(ms_to_frames(1000, 30, 1), 30);
+}
+
+#[test]
+fn preload_to_ms_is_zero_and_no_panic_when_fps_den_zero() {
+    // The sibling ms helper divides by fps_num (not fps_den), so fps_den==0 makes the
+    // numerator 0 — still 0, still no panic. Pin it so the contract can't regress. (#259)
+    assert_eq!(preload_to_ms(30, 30000, 0), 0);
+    assert_eq!(preload_to_ms(1, 30, 0), 0);
+    assert_eq!(preload_to_ms(30, 0, 1), 0); // fps_num==0 path (existing)
 }
 
 // ---- #102: consume-when-queued + one-time startup fill (the loss fix) --------
@@ -1031,6 +1065,63 @@ mod vendored_source {
     }
 
     #[test]
+    fn audit_log_have_vi_guards_fps_den() {
+        // #259: the genlock audit-log latency_frames integer divide
+        //   (latency_ms*fps_num + (1000*fps_den)/2) / (1000*fps_den)
+        // SIGFPEs on the render thread if fps_den==0. The `have_vi` guard that gates it
+        // must check BOTH fps_num != 0 AND fps_den != 0 (mirroring genlock_source_drop_cap,
+        // the only other site that does this divide and DOES guard fps_den). Anchor on the
+        // unique `have_vi` declaration so drop_cap's own fps_den guard can't satisfy this
+        // (the test is RED until the audit guard itself adds fps_den).
+        let raw = vendor_file(OBS_SOURCE);
+        let pos = raw
+            .find("have_vi =")
+            .expect("#259: the genlock audit-log `have_vi` guard is gone — re-locate");
+        let tail = &raw[pos..];
+        let semi = tail
+            .find(';')
+            .expect("#259: the have_vi statement has no terminator");
+        let stmt = squish(&tail[..semi]);
+        assert!(
+            stmt.contains("fps_num != 0") && stmt.contains("fps_den != 0"),
+            "{OBS_SOURCE}: #259 — the genlock audit-log `have_vi` guard must check BOTH \
+             fps_num != 0 AND fps_den != 0 before the latency_frames divide (it currently \
+             guards fps_num only → SIGFPE when fps_den==0). Mirror genlock_source_drop_cap. \
+             Got: `{stmt}`"
+        );
+    }
+
+    #[test]
+    fn fps_pair_read_is_tear_checked() {
+        // #200: the genlock audit/preload path read the unlocked ovi fps pair directly via
+        // obs_get_video_info(), which a concurrent obs_reset_video() can TEAR. The fix is a
+        // single tear-checked snapshot helper (genlock_video_fps) used at all four fps-read
+        // sites (drop_cap / preload_ms / frame_interval_ns / audit_log) — NO hot-path lock
+        // (deadlock risk vs obs_reset_video), a value-seqlock instead. Guard the helper, its
+        // agreement check, and that the four sites use it, so a subtree pull can't revert it.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("static bool genlock_video_fps("),
+            "{OBS_SOURCE}: #200 — the tear-checked fps snapshot helper genlock_video_fps is \
+             missing; the genlock audit/preload path reads ovi.fps_num/fps_den unlocked \
+             (torn pair). Re-apply."
+        );
+        assert!(
+            src.contains("a.fps_num == b.fps_num && a.fps_den == b.fps_den"),
+            "{OBS_SOURCE}: #200 — genlock_video_fps no longer compares two back-to-back \
+             snapshots for agreement (the value-seqlock that rejects a torn read); re-apply."
+        );
+        // 1 definition + the 4 call sites = >= 5 occurrences of `genlock_video_fps(`.
+        let calls = src.matches("genlock_video_fps(").count();
+        assert!(
+            calls >= 5,
+            "{OBS_SOURCE}: #200 — genlock_video_fps is used at fewer than the four genlock \
+             fps-read sites (drop_cap/preload_ms/frame_interval_ns/audit_log); a site still \
+             reads the ovi pair unlocked. Found {calls} occurrence(s) incl. the definition."
+        );
+    }
+
+    #[test]
     fn timestamp_aligned_release_present() {
         // #136/#257: the genlock_fifo branch must offer the timestamp-aligned release path
         // (multi-source IN-SYNC). #257: ts-align is a BUILD DEFAULT (genlock_ts_align_enabled
@@ -1046,9 +1137,9 @@ mod vendored_source {
              non-camera sources); re-apply."
         );
         assert!(
-            src.contains("genlock_present_ts(genlock_wall_now_ns(), preload, interval)"),
-            "{OBS_SOURCE}: #136 — the presentation deadline (genlock_present_ts from the real \
-             wall clock genlock_wall_now_ns) is gone; re-apply."
+            src.contains("genlock_present_ts(wall_now, preload, interval)"),
+            "{OBS_SOURCE}: #136/#269 [3] — the presentation deadline (genlock_present_ts from the \
+             hoisted single wall-clock read `wall_now`) is gone; re-apply."
         );
         // #136 boundary-churn fix: the C genlock_present_ts BODY must carry the +interval/2
         // half-interval bias (mirror of src/probe/genlock.rs genlock_present_ts'
@@ -1123,9 +1214,10 @@ mod vendored_source {
         // The render path must actually USE the reserve deadline when reserve_ms > 0
         // (otherwise the knob is inert — exactly the #119 stale-bytes class of bug).
         assert!(
-            src.contains("genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)"),
-            "{OBS_SOURCE}: #184 — the ts-align render path no longer selects \
-             genlock_present_ts_reserve when a reserve is configured; the ms-reserve knob is inert. Re-apply."
+            src.contains("genlock_present_ts_reserve(wall_now, reserve_ms)"),
+            "{OBS_SOURCE}: #184/#269 [3] — the ts-align render path no longer selects \
+             genlock_present_ts_reserve (from the hoisted `wall_now`) when a reserve is \
+             configured; the ms-reserve knob is inert. Re-apply."
         );
     }
 
@@ -1256,10 +1348,11 @@ mod vendored_source {
         // The drop-cap must scale with the per-source latency frame-equivalent (else a deep
         // override force-drains short and the delay can't build).
         assert!(
-            src.contains("source->genlock_latency_ms * ovi.fps_num"),
+            src.contains("source->genlock_latency_ms * fps_num"),
             "{OBS_SOURCE}: #245 — genlock_source_drop_cap no longer scales with the per-source \
              latency frame-equivalent; a deep override (e.g. 2000 ms ≈ 60 frames) would \
-             overrun force-drain before its delay builds. Re-apply."
+             overrun force-drain before its delay builds. Re-apply. (#200 renamed the torn \
+             ovi.fps_num read to the genlock_video_fps snapshot local fps_num.)"
         );
         // The audit log must surface the per-source override value (the rig-validation proof).
         assert!(
@@ -1456,6 +1549,170 @@ mod vendored_source {
                  an upstream subtree merge dropped the genlock audit state; re-apply."
             );
         }
+    }
+
+    #[test]
+    fn ts_align_holds_field_and_sample_in_struct() {
+        // #148: the ts-align source-early HOLD counter + the per-tick decision sample
+        // (present_ts / due / head-skew) must live on obs_source so the 5s audit line can
+        // surface them. A subtree pull dropping them silently reverts the debuggability fix.
+        let hdr = squish(&vendor_file(OBS_INTERNAL));
+        for field in [
+            "genlock_holds",
+            "genlock_last_present_ts",
+            "genlock_last_due",
+            "genlock_last_head_skew_ns",
+        ] {
+            assert!(
+                hdr.contains(field),
+                "{OBS_INTERNAL}: #148 field `{field}` missing from obs_source — the ts-align \
+                 HOLD/underrun split + decision sample reverted; re-apply."
+            );
+        }
+    }
+
+    #[test]
+    fn ts_align_hold_counts_as_hold_not_underrun() {
+        // #148: the ts-align due==0 path (source early/stalled, frames queued) must
+        // increment genlock_holds, NOT genlock_underruns (folding the two hid the #136
+        // boundary churn). Verify the holds increment exists AND sits in the same
+        // ts-align branch as the present_ts deadline (so it isn't some unrelated counter).
+        let raw = vendor_file(OBS_SOURCE);
+        assert!(
+            raw.contains("source->genlock_holds++"),
+            "{OBS_SOURCE}: #148 — the ts-align source-early HOLD counter \
+             (source->genlock_holds++) is gone; the benign hold is mis-counted as an \
+             underrun again. Re-apply."
+        );
+        // Anchor on the unique reserve-deadline call; the holds++ must be within the same
+        // ts-align block (it follows the present_ts/due computation, before the present path).
+        let anchor = raw
+            .find("genlock_present_ts_reserve(wall_now, reserve_ms)")
+            .expect("#148/#269 [3]: the ts-align reserve deadline (from hoisted wall_now) is gone — re-locate");
+        let window_end = (anchor + 2500).min(raw.len());
+        assert!(
+            raw[anchor..window_end].contains("source->genlock_holds++"),
+            "{OBS_SOURCE}: #148 — genlock_holds++ is not in the ts-align decision block \
+             (near the present_ts deadline). The source-early HOLD is still counted as an \
+             underrun; re-apply."
+        );
+    }
+
+    #[test]
+    fn audit_log_emits_holds_and_ts_align_sample() {
+        // #148: the periodic audit line must surface the new signals so a future ts-align
+        // regression is debuggable from the log alone (comprehensive-logging).
+        let src = squish(&vendor_file(OBS_SOURCE));
+        for token in [
+            "holds=%llu",
+            "ts_present=%llu",
+            "ts_due=%u",
+            "ts_head_skew_ms=%lld",
+        ] {
+            assert!(
+                src.contains(token),
+                "{OBS_SOURCE}: #148 — the genlock audit line no longer emits `{token}`; the \
+                 ts-align hold/decision signals are missing from the 5s log. Re-apply."
+            );
+        }
+    }
+
+    #[test]
+    fn fps_read_returns_cached_last_good_pair_on_a_tear() {
+        // #269 [0]/[1]/[2]: genlock_video_fps must keep a LAST-GOOD cache and return it on
+        // a persistent tear (not false/0), so genlock_source_drop_cap never collapses to the
+        // 30-frame floor and genlock_frame_interval_ns never returns 0 (disengaging ts-align)
+        // on a transient ovi-fps tear. Mirror of src/probe/genlock.rs genlock_fps_cached.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("static bool genlock_fps_cache_load("),
+            "{OBS_SOURCE}: #269 [0]/[1]/[2] — the lock-free last-good fps cache reader \
+             genlock_fps_cache_load is gone; a tear would again collapse the drop-cap / \
+             zero the frame interval. Re-apply."
+        );
+        assert!(
+            src.contains(
+                "static pthread_mutex_t genlock_fps_cache_lock = PTHREAD_MUTEX_INITIALIZER"
+            ),
+            "{OBS_SOURCE}: #269 — the fps-cache writer mutex (genlock_fps_cache_lock) is gone; \
+             concurrent publishers could corrupt the seqlock. Re-apply."
+        );
+        // The tear fallback must RETURN the cached pair (the whole point of the #269 fix),
+        // not just compute it.
+        assert!(
+            src.contains("if (genlock_fps_cache_load(fps_num, fps_den)) return true;")
+                || src.contains("if (genlock_fps_cache_load(fps_num, fps_den)) { return true; }"),
+            "{OBS_SOURCE}: #269 [0]/[1]/[2] — genlock_video_fps no longer returns the cached \
+             last-good pair on a persistent tear; it reverted to the bare false/0 return that \
+             collapses the drop-cap and zeroes the frame interval. Re-apply."
+        );
+    }
+
+    #[test]
+    fn ts_align_reads_wall_clock_once_per_tick() {
+        // #269 [3]: the ts-align tick must read the precise wall clock ONCE
+        // (`const uint64_t wall_now = genlock_wall_now_ns();`) and reuse it for BOTH the
+        // deadline and the head-skew sample — not call genlock_wall_now_ns() a second time
+        // (GetSystemTimePreciseAsFileTime is non-trivial on Windows).
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("const uint64_t wall_now = genlock_wall_now_ns();"),
+            "{OBS_SOURCE}: #269 [3] — the single hoisted wall-clock read \
+             (`const uint64_t wall_now = genlock_wall_now_ns();`) is gone; re-apply."
+        );
+        assert!(
+            src.contains("(int64_t)(wall_now - source->async_frames.array[0]->timestamp)"),
+            "{OBS_SOURCE}: #269 [3] — the ts-align head-skew sample no longer reuses the hoisted \
+             `wall_now` (it calls genlock_wall_now_ns() a SECOND time per tick); re-apply."
+        );
+    }
+
+    #[test]
+    fn count_gate_build_fill_counts_as_hold_not_underrun() {
+        // #269 [4]: the count-gate build-fill HOLD (`!gd.consume`, reached only with num>=1)
+        // is benign — it must increment genlock_holds, NOT genlock_underruns. underruns are
+        // now TRUE-EMPTY only (the single num==0 guard in get_closest_frame).
+        let raw = vendor_file(OBS_SOURCE);
+        // Anchor on the count-gate hold comment; genlock_holds++ must be in that branch.
+        let anchor = raw
+            .find("hold: still BUILDING the preload delay")
+            .expect("#269 [4]: the count-gate build-fill hold branch is gone — re-locate");
+        let window_end = (anchor + 1500).min(raw.len());
+        assert!(
+            raw[anchor..window_end].contains("source->genlock_holds++"),
+            "{OBS_SOURCE}: #269 [4] — the count-gate build-fill hold no longer increments \
+             genlock_holds (it is mis-counted as an underrun again). Re-apply."
+        );
+        // After the move there is EXACTLY ONE genlock_underruns++ left: the TRUE-EMPTY guard.
+        let underruns = raw.matches("source->genlock_underruns++").count();
+        assert_eq!(
+            underruns, 1,
+            "{OBS_SOURCE}: #269 [4] — expected exactly 1 `source->genlock_underruns++` (the \
+             TRUE-EMPTY num==0 guard); found {underruns}. The build-fill hold was re-folded into \
+             genlock_underruns, or a new spurious underrun site appeared."
+        );
+    }
+
+    #[test]
+    fn stale_ts_align_sample_reset_to_sentinel_off_path() {
+        // #269 [5]: genlock_last_present_ts/_due/_head_skew_ns are written ONLY on a ts-align
+        // tick but genlock_audit_log prints them unconditionally — so a fall-through / true-empty
+        // tick printed a STALE sample. genlock_clear_ts_sample() must reset them to 0 on BOTH the
+        // count-gate fall-through AND the true-empty path. Mirror of genlock_ts_audit_sample.
+        let raw = vendor_file(OBS_SOURCE);
+        let src = squish(&raw);
+        assert!(
+            src.contains("static inline void genlock_clear_ts_sample(obs_source_t *source)"),
+            "{OBS_SOURCE}: #269 [5] — the ts-align sample reset helper genlock_clear_ts_sample \
+             is gone; the 5s audit would reprint a stale present/due/skew. Re-apply."
+        );
+        let calls = raw.matches("genlock_clear_ts_sample(source);").count();
+        assert!(
+            calls >= 2,
+            "{OBS_SOURCE}: #269 [5] — genlock_clear_ts_sample(source) is called {calls} time(s); \
+             expected >=2 (the count-gate fall-through AND the true-empty path). A non-ts-align \
+             tick would print a stale sample. Re-apply."
+        );
     }
 
     #[test]

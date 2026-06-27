@@ -271,12 +271,23 @@ gate was added in #249 (the slow one in #248). `tests/genlock_preload.rs` has a
 the matching guard when you add a new token gate.
 
 GOTCHA (Tier-0 local test verification): the probe-gated test files
-(`#![cfg(feature="probe")]`, e.g. `genlock_preload.rs`) CANNOT be compiled/run on dev1
-(Tier-0 forbids `--features probe`) — verify their assertions at the grep level (the WF
-token / source token) and let CI (`--all-features`) run them. The NON-probe test files
-(`drift_guard.rs`, `harness_recording_e2e_paths.rs`) CAN: `cargo test --no-run` to compile
-(Tier-0 OK), then run the built `target/debug/deps/<name>-*` binary DIRECTLY (no rebuild,
-no Tier-0 violation) to prove GREEN locally.
+(`#![cfg(feature="probe")]`, e.g. `genlock_preload.rs`) AND the whole `src/probe/genlock.rs`
+Rust mirror are NOT seen by the default-feature gate (`cargo check/clippy/test --no-run`
+compile them to nothing) — so the default gate green proves NOTHING about a genlock C/mirror
+change. Grep-level verification of the vendored-source guard strings is the cheap default.
+BUT: when a change is a bug-fix needing RED→GREEN proof (regression-test-first — grep alone
+can't show a guard test actually FAILS then PASSES), OR to avoid burning the ~150-min
+windows-genlock CI on a probe compile/lint/logic error, run the probe-gated genlock tests
+locally ONCE via the documented `# airuleset:build-ok` bypass — TARGETED so it's cheap:
+`cargo test --features probe --test genlock_preload <name>  # airuleset:build-ok`,
+`cargo test --features probe --lib genlock  # airuleset:build-ok`,
+`cargo clippy --features probe --all-targets -- -D warnings  # airuleset:build-ok`.
+This pulls the probe deps (image/qrcode/rqrr/drm/lz4) → `target/` jumps to ~3.5–4 GB; the
+pre-push hook (`scripts/purge-target.sh`) trims it. The C (`obs.dll`) still builds on the
+windows-genlock CI only — local can't compile it; eyeball the C diff for correctness.
+The NON-probe test files (`drift_guard.rs`, `harness_recording_e2e_paths.rs`) CAN run
+fully Tier-0: `cargo test --no-run` to compile, then run the built
+`target/debug/deps/<name>-*` binary DIRECTLY (no rebuild, no violation) to prove GREEN.
 
 **Reading genlock state — from the OBS LOG, never an env (no genlock env exists post-#257):**
 render tick + ts-align are build defaults, so there is nothing to read in env. The running genlock
@@ -360,3 +371,14 @@ Tracked: #76.
 The lag CANCELS OBS↔OBS (strih→stream measured correctly = 187 ms). It BREAKS cam→OBS
 (cam→strih timecode gave nonsense 17.7 ms / negative). Fix B′ unlocks exact cam→strih
 measurement.
+
+## CI exact-anchor guards live in YAML too (not just tests) — #269 gotcha
+A vendored-C refactor that changes a pinned genlock call-site SHAPE breaks the
+`regex::Escape` `-notmatch` source guards in BOTH places — update ALL in the same change:
+- `tests/genlock_preload.rs` (the Rust vendored-source guards), AND
+- `.github/workflows/windows-genlock-fast.yml` + `windows-genlock.yml` (the "Assert genlock
+  timestamp-aligned release patch present (#136)" step — these run on the whitespace-collapsed
+  `$src` BEFORE the ~18-min build, so a stale anchor fails the build at the assert, not at compile).
+Example: #148 hoisted `genlock_present_ts(genlock_wall_now_ns(), …)` → `wall_now = genlock_wall_now_ns();`
++ `genlock_present_ts(wall_now, …)`; the YAML guards pinned the old inline form and failed the FAST
+build until updated to check the `wall_now` source + the new call form.
