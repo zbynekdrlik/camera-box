@@ -757,13 +757,39 @@ pub fn genlock_release_guarded(
     present_ts_ns: u64,
     queued_ts_ascending: &[u64],
 ) -> GenlockReleaseGuarded {
-    // #147 RED: this stub reproduces TODAY's unguarded SINK behaviour — it ignores the
-    // backward step and delegates straight to genlock_release, so a future-stamped head
-    // HOLDs (freezes) forever. The GREEN commit replaces this body with the re-anchor.
-    let _ = (wall_now_ns, interval_ns);
-    GenlockReleaseGuarded {
-        release: genlock_release(present_ts_ns, queued_ts_ascending),
-        backward_step: false,
+    let release = genlock_release(present_ts_ns, queued_ts_ascending);
+    if release.present {
+        // A queued frame is due — normal operation, no freeze, nothing to recover.
+        return GenlockReleaseGuarded {
+            release,
+            backward_step: false,
+        };
+    }
+    // due == 0: the unguarded path would HOLD (repeat the last frame). Distinguish a
+    // BENIGN source-early hold (head frame simply not aged to the deadline yet) from a
+    // backward-clock-step FREEZE: a HEAD frame stamped MORE THAN one interval AHEAD of the
+    // real wall clock is impossible for a live capture — it was captured BEFORE a backward
+    // step, so present_ts = wall_now - reserve can never reach it and the hold is indefinite.
+    let head_future = queued_ts_ascending
+        .first()
+        .is_some_and(|&head| head > wall_now_ns.saturating_add(interval_ns));
+    if head_future {
+        // RE-ANCHOR: present the NEWEST queued frame, dropping the older (now-stale,
+        // pre-step) ones — exactly as a normal "present newest due" tick. Never freeze.
+        GenlockReleaseGuarded {
+            release: GenlockRelease {
+                drop_oldest: queued_ts_ascending.len() - 1,
+                present: true,
+            },
+            backward_step: true,
+        }
+    } else {
+        // Genuine source-early / stalled hold (queue empty, or head recent but not yet
+        // due — including a large deliberate per-source latency buffer fill) — unchanged.
+        GenlockReleaseGuarded {
+            release,
+            backward_step: false,
+        }
     }
 }
 
@@ -1599,7 +1625,7 @@ mod tests {
         // finds nothing due and HOLDs — the indefinite freeze.
         let wall0 = WBASE + 10 * NS30;
         let queued = vec![wall0 - NS30, wall0]; // captured just before "now", ascending
-        // Pre-step: a frame IS due (normal).
+                                                // Pre-step: a frame IS due (normal).
         let pre = genlock_release(genlock_present_ts_reserve(wall0, RESERVE_MS), &queued);
         assert!(pre.present, "pre-step a queued frame must be due");
 

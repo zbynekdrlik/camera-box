@@ -959,6 +959,7 @@ struct obs_source {
 	uint64_t genlock_underruns;        /* #269 [4]: real FIFO starvation = TRUE-EMPTY only (the num==0 guard in get_closest_frame). The count-gate build-fill hold moved to genlock_holds — do NOT fold it back. */
 	uint64_t genlock_holds;            /* camera-box #148/#269 [4]: BENIGN repeats, distinct from a real underrun — the ts-align source-early hold (frames queued, none yet due) AND the count-gate build-fill hold (still building the preload delay; recurs on every #126 reconnect re-arm). */
 	uint64_t genlock_overruns;         /* per-source drop-cap drains (queue forced empty) */
+	uint64_t genlock_backward_steps;   /* camera-box #147: ts-align re-anchors after a BACKWARD wall-clock step (NTP/PTP sawtooth). The head frame was stamped > one interval AHEAD of wall_now (impossible for a live capture = captured before the step); instead of HOLDing (freezing the program feed) indefinitely, present the newest queued frame and drain the stale pre-step frames. Mirror of src/probe/genlock.rs genlock_release_guarded / the cam-EMIT guard #131. */
 	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
 	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */
 	/* camera-box #148: last ts-align decision, SAMPLED per tick for the 5s audit line (the

@@ -4704,17 +4704,18 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 			: 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "holds=%llu overruns=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
+	     "holds=%llu overruns=%llu backward_steps=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
 	     "src_latency_ms=%u global_latency_ms=%u "
 	     "preload=%u (=%llu ms) reserve_ms=%u cap=%zu empty_run=%u (re-arm@%u) "
 	     "ts_present=%llu ts_due=%u ts_head_skew_ms=%lld "
-	     "(#70/#97/#126/#148/#184/#235/#245)",
+	     "(#70/#97/#126/#147/#148/#184/#235/#245)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
 	     (unsigned long long)source->genlock_holds,
-	     (unsigned long long)source->genlock_overruns, source->async_frames.num,
+	     (unsigned long long)source->genlock_overruns,
+	     (unsigned long long)source->genlock_backward_steps, source->async_frames.num,
 	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
 	     source->genlock_latency_ms, global_latency_ms,
 	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
@@ -4829,21 +4830,53 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * this path — ts-align self-heals after a transient via the real ts. */
 				source->genlock_empty_run = 0;
 				source->genlock_filled = true;
+				/* camera-box #147: backward wall-clock step (NTP/PTP sawtooth)
+				 * recovery. present_ts = wall_now - reserve; on a BACKWARD clock
+				 * step wall_now (and present_ts) regress below every already-queued
+				 * (pre-step, higher) frame timestamp, so due==0 every tick and the
+				 * unguarded path HOLDs (repeats the last frame) INDEFINITELY — the
+				 * live program feed FREEZES until the clock climbs back. Mirror of
+				 * src/probe/genlock.rs genlock_release_guarded and the cam-EMIT guard
+				 * #131 (a boundary impossibly far in the future re-anchors). */
+				size_t to_drop;
 				if (due == 0) {
-					/* nothing has reached its deadline yet (source early or
-					 * stalled) — repeat the current frame this tick. camera-box
-					 * #148: a BENIGN source-early HOLD (frames ARE queued, just
-					 * none yet due — ready_async_frame is entered with num>=1),
-					 * NOT a real FIFO starvation. Count it as genlock_holds, not
-					 * genlock_underruns; folding the two hid the #136 boundary
-					 * churn (diagnosed live with no such signal). */
-					source->genlock_holds++;
-					genlock_audit_log(source, now_ns);
-					return false;
+					/* A queued HEAD frame stamped MORE THAN one interval AHEAD of
+					 * the real wall clock is impossible for a live capture — it was
+					 * captured BEFORE a backward clock step. */
+					const bool head_future =
+						source->async_frames.array[0]->timestamp >
+						wall_now + interval;
+					if (!head_future) {
+						/* #148: a BENIGN source-early HOLD (frames queued, none
+						 * yet due) -> genlock_holds, NOT a true-empty
+						 * genlock_underruns. Repeat the current frame this tick. */
+						source->genlock_holds++;
+						genlock_audit_log(source, now_ns);
+						return false;
+					}
+					/* RE-ANCHOR: present the NEWEST queued frame and drop the older
+					 * (now-stale, pre-step) ones instead of freezing. Over the next
+					 * ticks each re-anchor drops the frames behind the newest,
+					 * draining the stale pre-step seam; once the post-step
+					 * (rewound-clock) frames are the newest, the normal ts-align
+					 * prefix resumes — a brief blip, never an indefinite freeze. */
+					source->genlock_backward_steps++;
+					blog(LOG_WARNING,
+					     "genlock-fifo backward clock step '%s': head ts %llu > "
+					     "wall_now+interval (%llu) — re-anchoring (present newest of "
+					     "%zu queued, drop %zu stale) instead of freezing the program "
+					     "feed (#147)",
+					     source->context.name ? source->context.name : "?",
+					     (unsigned long long)source->async_frames.array[0]->timestamp,
+					     (unsigned long long)(wall_now + interval),
+					     source->async_frames.num,
+					     source->async_frames.num - 1);
+					to_drop = source->async_frames.num - 1;
+				} else {
+					/* present the NEWEST due frame: erase the (due-1) stale older
+					 * ones via the same da_erase(.,0)+remove_async_frame() idiom. */
+					to_drop = due - 1;
 				}
-				/* present the NEWEST due frame: erase the (due-1) stale older ones
-				 * via the same da_erase(.,0)+remove_async_frame() free idiom. */
-				size_t to_drop = due - 1;
 				while (to_drop-- && source->async_frames.num > 1) {
 					struct obs_source_frame *dropped = source->async_frames.array[0];
 					da_erase(source->async_frames, 0);
