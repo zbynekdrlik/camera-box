@@ -119,15 +119,28 @@ def test_healthy_30fps_no_alert():
     assert wd.evaluate("strih", win, dantesync_cpu=20.0) == []
 
 
-def test_degraded_10fps_starved_alerts():
-    # The #265 collapse: receive at ~10 fps (50 frames / 5 s), underruns climbing, FIFO drained.
+def test_degraded_collapse_from_healthy_alerts():
+    # The #265 collapse: a clean 30 fps feed (was HEALTHY, the in-window peak baseline) that drops to
+    # ~10 fps with the FIFO starving (underruns climbing, depth drained). The 30 fps peak proves this
+    # is a collapse, not a steadily-low feed.
     win = _win("NDI cam5", [
-        (0, 0, 0, 0), (50, 200, 0, 0), (100, 400, 0, 0), (150, 600, 0, 0),
-        (200, 800, 0, 0), (250, 1000, 0, 0),
+        (0, 0, 0, 2), (150, 0, 0, 2), (300, 0, 0, 2),  # healthy 30 fps (peak baseline)
+        (350, 400, 0, 0), (400, 800, 0, 0), (450, 1200, 0, 0),  # collapsed to ~10 fps + starving
     ])
     alerts = wd.evaluate("strih", win, dantesync_cpu=None)
     assert [a.kind for a in alerts] == ["stuck"]
     assert "NDI cam5" in alerts[0].detail
+
+
+def test_steady_low_fps_never_healthy_no_alert():
+    # A feed that was ALWAYS ~10 fps (never peaked at 30 → no in-window healthy baseline) is NOT a
+    # collapse, even though a sub-30 source on a 30 fps genlock naturally underruns. peak ~10 < floor
+    # → no alert. (The old instantaneous "below floor + starved" logic false-alarmed exactly this.)
+    win = _win("low-by-design", [
+        (0, 0, 0, 0), (50, 400, 0, 0), (100, 800, 0, 0), (150, 1200, 0, 0),
+        (200, 1600, 0, 0), (250, 2000, 0, 0),
+    ])
+    assert wd.evaluate("strih", win, dantesync_cpu=None) == []
 
 
 def test_frozen_0fps_was_delivering_alerts_in_default_mode():
@@ -178,27 +191,15 @@ def test_low_fps_but_not_starved_no_alert():
     assert wd.evaluate("strih", win, dantesync_cpu=None) == []
 
 
-def test_sustained_freeze_beyond_window_alerts():
-    # THE real-rig sustained collapse (requirement 1, "full freeze must alert"): `received` frozen at
-    # a HIGH cumulative value for the WHOLE window (the delivering samples already scrolled out, so the
-    # in-window peak_fps has decayed to ~0) while underruns climb on a drained FIFO. The cumulative
-    # `received` (41421 >> delivered_frames) is what proves this is a real feed, not a never-delivered
-    # idle → ALERT. The old within-window-only logic MISSED exactly this (peak_fps=0 → "never
-    # delivered").
+def test_freeze_with_no_healthy_baseline_in_window_no_alert():
+    # A window where `received` is frozen at a high value for the WHOLE window with NO in-window
+    # healthy lead-in (peak ~0). Without the healthy baseline this is indistinguishable from a
+    # never-delivered idle source, so the SAFE choice is no alert (a false alarm on a healthy box is
+    # worse than none). A real collapse is caught at its ONSET, while the 30 fps lead-in is still in
+    # the ~5 min window. This deliberately favours no-false-positive over re-alerting an old freeze.
     win = _win("NDI cam5", [
         (41421, 614, 0, 0), (41421, 765, 0, 0), (41421, 916, 0, 0), (41421, 1067, 0, 0),
         (41421, 1218, 0, 0), (41421, 1369, 0, 0),
-    ])
-    alerts = wd.evaluate("strih", win, dantesync_cpu=None)
-    assert [a.kind for a in alerts] == ["stuck"]
-
-
-def test_frozen_low_cumulative_received_no_alert():
-    # A source frozen with underruns climbing but whose cumulative `received` never exceeded the
-    # delivered-frames floor (a probe that got a couple frames then never a real feed) → not a real
-    # feed → no alert. Pins the delivered_frames discriminator (boundary of sustained-freeze alert).
-    win = _win("blip-probe", [
-        (5, 100, 0, 0), (5, 300, 0, 0), (5, 500, 0, 0), (5, 700, 0, 0), (5, 900, 0, 0),
     ])
     assert wd.evaluate("strih", win, dantesync_cpu=None) == []
 
@@ -207,16 +208,17 @@ def test_frozen_low_cumulative_received_no_alert():
 # staleness — the live-rig false-alert safeguard
 # ---------------------------------------------------------------------------
 
-def _sustained_frozen_win(source="NDI cam5", base_ts=12 * 3600.0):
-    # received frozen at a high value, underruns climbing, depth drained — a stuck signature.
+def _stuck_win(source="NDI cam5", base_ts=12 * 3600.0):
+    # A real stuck signature: a healthy 30 fps lead-in (peak baseline) then frozen + starving, depth
+    # drained. newest sample at base_ts + 25 s.
     return _win(source, [
-        (41421, 614, 0, 0), (41421, 765, 0, 0), (41421, 916, 0, 0),
-        (41421, 1067, 0, 0), (41421, 1218, 0, 0), (41421, 1369, 0, 0),
+        (0, 0, 0, 2), (150, 0, 0, 2), (300, 0, 0, 2),  # healthy 30 fps
+        (300, 614, 0, 0), (300, 765, 0, 0), (300, 916, 0, 0),  # frozen + starving
     ], base_ts=base_ts)
 
 
 def test_fresh_stuck_source_alerts_with_now():
-    win = _sustained_frozen_win(base_ts=12 * 3600.0)  # newest sample at 12:00:25
+    win = _stuck_win(base_ts=12 * 3600.0)  # newest sample at 12:00:25
     now = 12 * 3600 + 30  # 5 s later → fresh
     alerts = wd.evaluate("strih", win, dantesync_cpu=None, now_secs=now)
     assert [a.kind for a in alerts] == ["stuck"]
@@ -226,13 +228,13 @@ def test_stale_source_skipped_with_now():
     # The SAME stuck signature, but the newest sample is ~1.5 h old (OBS stopped logging it — it left
     # program). Stale → skipped → no alert. This is what stops a stopped-log's frozen tail from
     # false-alarming a healthy box.
-    win = _sustained_frozen_win(base_ts=12 * 3600.0)  # newest at 12:00:25
+    win = _stuck_win(base_ts=12 * 3600.0)  # newest at 12:00:25
     now = 13 * 3600 + 1800  # 13:30:00 → ~1.5 h later → stale
     assert wd.evaluate("strih", win, dantesync_cpu=None, now_secs=now) == []
 
 
 def test_named_stale_source_vanished():
-    win = _sustained_frozen_win(source="NDI cam5", base_ts=12 * 3600.0)
+    win = _stuck_win(source="NDI cam5", base_ts=12 * 3600.0)
     now = 13 * 3600 + 1800  # stale
     alerts = wd.evaluate("strih", win, dantesync_cpu=None, monitored_sources=["NDI cam5"], now_secs=now)
     assert [a.kind for a in alerts] == ["vanished"]
@@ -240,24 +242,34 @@ def test_named_stale_source_vanished():
 
 def test_staleness_off_when_now_none():
     # now_secs None → staleness filtering OFF → the stuck signature is judged on its merits (alert).
-    win = _sustained_frozen_win()
+    win = _stuck_win()
     assert [a.kind for a in wd.evaluate("strih", win, dantesync_cpu=None, now_secs=None)] == ["stuck"]
 
 
+def test_future_dated_sample_is_fresh_not_stale():
+    # The clock-skew bug guard: a sample timestamped AFTER `now` (box clock ahead of the poller) is
+    # the freshest data possible and must NOT be flipped to stale (an abs(age) test would). A
+    # genuinely stuck box with the box clock 120 s ahead must still ALERT, not be skipped.
+    win = _stuck_win(base_ts=12 * 3600.0)  # newest at 12:00:25
+    now = 12 * 3600 - 95  # 11:58:25 → newest sample is 120 s in the "future" vs now
+    alerts = wd.evaluate("strih", win, dantesync_cpu=None, now_secs=now)
+    assert [a.kind for a in alerts] == ["stuck"]
+
+
 def test_sample_age_normal_and_skew_and_midnight():
-    # normal: 30 s old
+    # normal: 30 s old (positive)
     assert wd.sample_age_secs(12 * 3600.0, 12 * 3600 + 30) == pytest.approx(30.0)
-    # small clock skew (sample 2 s "ahead" of now) → small negative, treated fresh by abs() in caller
+    # clock skew (sample 2 s AFTER now) → negative → fresh (not stale) in is_stale
     assert wd.sample_age_secs(12 * 3600 + 2, 12 * 3600.0) == pytest.approx(-2.0)
     # midnight wrap: newest 23:59:55 yesterday, now 00:00:05 today → 10 s, not ~86390
-    age = wd.sample_age_secs(23 * 3600 + 59 * 60 + 55, 5.0)
-    assert age == pytest.approx(10.0)
+    assert wd.sample_age_secs(23 * 3600 + 59 * 60 + 55, 5.0) == pytest.approx(10.0)
 
 
-def test_is_stale_uses_abs_for_large_gap():
-    samples = _sustained_frozen_win()["NDI cam5"]  # newest at 12:00:25
-    assert wd.is_stale(samples, now_secs=12 * 3600 + 30, max_age=60) is False  # 5 s → fresh
-    assert wd.is_stale(samples, now_secs=12 * 3600 + 600, max_age=60) is True  # ~9.5 min → stale
+def test_is_stale_only_old_positive_age_is_stale():
+    samples = _stuck_win()["NDI cam5"]  # newest at 12:00:25
+    assert wd.is_stale(samples, now_secs=12 * 3600 + 30, max_age=60) is False  # 5 s old → fresh
+    assert wd.is_stale(samples, now_secs=12 * 3600 + 600, max_age=60) is True  # ~9.5 min old → stale
+    assert wd.is_stale(samples, now_secs=12 * 3600 - 200, max_age=60) is False  # 225 s future → fresh
     assert wd.is_stale(samples, now_secs=None, max_age=60) is False  # off
 
 
@@ -304,9 +316,20 @@ def test_named_source_vanished_alerts():
     assert "NDI cam5" in alerts[0].detail
 
 
-def test_named_source_single_sample_vanished():
-    win = {"NDI cam5": [_s(100, source="NDI cam5")]}  # only 1 sample → no pair
-    alerts = wd.evaluate("strih", win, dantesync_cpu=None, monitored_sources=["NDI cam5"])
+def test_named_single_fresh_sample_not_vanished():
+    # A named source that JUST appeared has exactly 1 fresh audit line — it has NOT vanished, it is
+    # starting up. It must NOT false-vanish (give it time for a 2nd line); no rate yet → no stuck.
+    win = {"NDI cam5": [_s(100, source="NDI cam5", ts=12 * 3600 + 25)]}
+    now = 12 * 3600 + 30  # fresh
+    alerts = wd.evaluate("strih", win, dantesync_cpu=None, monitored_sources=["NDI cam5"], now_secs=now)
+    assert alerts == []
+
+
+def test_named_single_stale_sample_vanished():
+    # A named source with a single OLD sample (its logging stopped) HAS vanished → alert.
+    win = {"NDI cam5": [_s(100, source="NDI cam5", ts=12 * 3600 + 25)]}
+    now = 13 * 3600  # ~1 h later → stale
+    alerts = wd.evaluate("strih", win, dantesync_cpu=None, monitored_sources=["NDI cam5"], now_secs=now)
     assert [a.kind for a in alerts] == ["vanished"]
 
 

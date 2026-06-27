@@ -16,21 +16,22 @@ first cut false-negatived a 0-fps frozen cam AND false-positived an idle probe i
 NOT a single underruns reading — it is the TRAJECTORY across a WINDOW of recent audit samples per
 source:
 
-  * STUCK (alert) — the source HAS delivered (its cumulative `received` is non-trivial, and/or it was
-    advancing earlier in the window) and is NOW collapsed below the fps floor (down to a full freeze
-    at 0 fps) AND STARVED: underruns climbing, the FIFO depth drained to ~0, and NOT overrun-dominant.
-    This is the #265 collapse. A 0-fps source that HAD been delivering is the WORST case and MUST
-    alert even when it is not named (default scan-all mode) — including a freeze that has lasted
-    LONGER than the observed window (the cumulative `received` is what proves prior delivery once the
-    delivering samples scroll out of the window; verified against real strih log data where `received`
-    sat frozen at 41421 for ~30 audit samples while underruns climbed ~30/s).
-  * benign IDLE (no alert) — a source that NEVER delivered (cumulative `received` ~0 and flat across
-    the window: a probe/monitor input parked off-program, never on the wire), OR a source whose churn
-    is OVERRUNS-dominant (frames arriving faster than consumed → the FIFO overflows → holding, not
-    starved). overruns is the holding-vs-starved discriminator.
+  * STUCK (alert) — the source was HEALTHY (received-fps peaked >= the fps floor somewhere in the
+    window) and is NOW collapsed below the fps floor (down to a full freeze at 0 fps) AND STARVED:
+    underruns climbing, the FIFO depth drained to ~0, and NOT overrun-dominant. This is the #265
+    collapse. A 0-fps source that HAD been delivering is the WORST case and MUST alert even when it is
+    not named (default scan-all mode). The window is sized (~5 min) so the healthy lead-in BEFORE a
+    collapse stays in view while the collapse persists (the real strih collapse ran a clean 30 fps
+    then froze, the whole ~2.5 min episode well inside the window).
+  * benign IDLE (no alert) — a source that NEVER delivered healthily (peak received-fps below the
+    floor across the window: an idle probe, or a steadily-low feed that never WAS 30 fps so never
+    "collapsed"), OR a source whose churn is OVERRUNS-dominant over the window (frames arriving faster
+    than consumed → the FIFO overflows → holding, not starved). overruns is the holding-vs-starved
+    discriminator; the peak-fps baseline is the collapsed-vs-always-low discriminator.
 
-Reading the WINDOW (not just the last two samples) is what lets us tell "was advancing then froze"
-(STUCK) from "never advanced" (IDLE) — both show a flat `received` in the most recent pair.
+Reading the WINDOW (not just the last two samples) is what lets us tell "was healthy then collapsed"
+(STUCK) from "was always low / never delivered" (IDLE) — both show the same flat low `received` in
+the most recent pair; only the in-window peak distinguishes them.
 
 STALENESS (the live-rig safeguard against a false alert) — a genlock-fifo audit line is written
 (every ~5 s) only while the source is on an actively-rendered scene. When a source leaves program OBS
@@ -90,8 +91,11 @@ from typing import Dict, List, Optional
 AUDIT_INTERVAL_SECS = 5.0
 
 # How many recent audit samples per source to retain — the WINDOW. At the ~5 s cadence this is
-# ~60 s of history, enough to see "was delivering then froze" vs "never delivered".
-DEFAULT_WINDOW = 12
+# ~5 min of history. It must be large enough that the HEALTHY (>=fps_floor) lead-in BEFORE a collapse
+# stays in view while the collapse persists — that healthy baseline is how a real-feed-that-collapsed
+# is told from a source that was always low (the #265 stutter+freeze observed on strih ran ~2.5 min
+# of frozen audit before the source left program, well inside this window).
+DEFAULT_WINDOW = 60
 # The most-recent sub-window (in samples) the current fps / starvation rates are measured over.
 # 3 samples == 2 pairs == ~10 s — long enough to be steady, short enough to catch a fresh freeze.
 RECENT_SAMPLES = 3
@@ -105,12 +109,10 @@ MIN_PAIR_DT = 1.0
 MIDNIGHT_WRAP_THRESHOLD_SECS = 43200.0  # half a day
 
 # Default thresholds (overridable via CLI):
-DEFAULT_FPS_FLOOR = 25.0  # a broadcast input below this (norm 30) == collapsing/stuck
-DEFAULT_IDLE_FLOOR = 1.0  # below this the source is "frozen/near-0" (ambiguous → use the trajectory)
+DEFAULT_FPS_FLOOR = 25.0  # a broadcast input below this (norm 30) == collapsing/stuck. Also the
+#                           "was healthy" baseline: a source must have peaked >= this in the window.
 DEFAULT_UNDERRUN_RATE = 10.0  # underruns added PER SECOND above this == the FIFO starving (#265 ~25/s)
 DEFAULT_DEPTH_FLOOR = 2.0  # recent FIFO depth at/below this == drained (starved); #265 ran depth 0-1
-DEFAULT_DELIVERED_FRAMES = 30  # cumulative received above this (~1 s @30fps) proves the source HAS
-#                               delivered — it is a real feed, not a never-delivered idle probe.
 DEFAULT_MAX_SAMPLE_AGE_SECS = 60.0  # a source whose newest audit sample is older than this (vs `now`)
 #                                     stopped logging → left the rendered scene → not currently active.
 DEFAULT_DANTESYNC_CORE_PCT = 85.0  # dantesync burning > this % of ONE core == runaway
@@ -144,13 +146,13 @@ class SourceStat:
     source: str
     n_samples: int
     recent_fps: Optional[float]  # received-fps over the recent sub-window (None = reset/unknown)
-    peak_fps: Optional[float]  # best received-fps across the WHOLE window (the "was delivering" peak)
-    underrun_rate: float  # underruns added / s over the recent sub-window
+    peak_fps: Optional[float]  # best received-fps across the WHOLE window (the "was healthy" baseline)
+    underrun_rate: float  # underruns added / s over the recent sub-window (climbing NOW)
     overrun_rate: float  # overruns added / s over the recent sub-window
     recent_depth: Optional[float]  # median FIFO depth over the recent sub-window
     collapsed: bool  # recent_fps < fps_floor
-    starved: bool  # underruns climbing + FIFO drained + NOT overrun-dominant
-    was_delivering: bool  # currently delivering some, OR delivered healthily earlier in the window
+    starved: bool  # underruns climbing NOW + FIFO drained + NOT overrun-dominant over the window
+    was_delivering: bool  # was HEALTHY (peak received-fps >= fps_floor) somewhere in the window
 
 
 @dataclass
@@ -308,11 +310,13 @@ def _peak_received_fps(samples: List[AuditSample], cadence: float) -> Optional[f
 
 
 def sample_age_secs(newest_ts: Optional[float], now_secs: Optional[float]) -> Optional[float]:
-    """Seconds between a source's newest audit sample and `now` (both seconds-of-day), correcting a
-    single midnight rollover (newest late yesterday vs now early today → a large negative → +86400).
-    None when either timestamp is absent (age unknowable). The caller compares abs(age): a small
-    value (positive OR negative clock-skew) is fresh, a large one is stale — abs handles the
-    >12 h-but-<24 h ambiguity where the seconds-of-day wrap heuristic cannot."""
+    """POSITIVE seconds the source's newest sample is OLDER than `now` (both seconds-of-day),
+    correcting a single midnight rollover (newest late yesterday vs now early today → a large negative
+    → +86400). A NEGATIVE result means the sample is timestamped AFTER `now` — clock skew between the
+    box and the poller's clock — which is the freshest data possible, never stale. None when either
+    timestamp is absent (age unknowable). Limitation: with HH:MM:SS-only log lines a gap in the narrow
+    12–24 h band can't be told from skew; a source still actively logging is always seconds-fresh and
+    a stopped one ages past max_age well within 12 h, so this band is unreachable in operation."""
     if newest_ts is None or now_secs is None:
         return None
     age = now_secs - newest_ts
@@ -321,28 +325,27 @@ def sample_age_secs(newest_ts: Optional[float], now_secs: Optional[float]) -> Op
     return age
 
 
-def is_stale(
-    samples: List[AuditSample], now_secs: Optional[float], max_age: float
-) -> bool:
+def is_stale(samples: List[AuditSample], now_secs: Optional[float], max_age: float) -> bool:
     """True when the source's newest audit sample is older than `max_age` vs `now` — i.e. OBS stopped
-    logging it (it left the rendered scene), so it is not currently active. False when `now` is not
-    supplied (staleness off) or the newest sample has no timestamp (age unknowable → treat as fresh)."""
+    logging it (it left the rendered scene), so it is not currently active. A future-dated sample
+    (box clock ahead of `now`) is the freshest data possible → NOT stale (only a genuinely-OLD
+    positive age is stale; never abs() — that would flip a clock-skewed live source to stale and miss
+    the stuck state). False when `now` is not supplied (staleness off) or the newest sample has no
+    timestamp (age unknowable → treat as fresh)."""
     if now_secs is None or not samples:
         return False
     age = sample_age_secs(samples[-1].ts_secs, now_secs)
     if age is None:
         return False
-    return abs(age) > max_age
+    return age > max_age
 
 
 def analyze_source(
     samples: List[AuditSample],
     *,
     fps_floor: float = DEFAULT_FPS_FLOOR,
-    idle_floor: float = DEFAULT_IDLE_FLOOR,
     underrun_rate: float = DEFAULT_UNDERRUN_RATE,
     depth_floor: float = DEFAULT_DEPTH_FLOOR,
-    delivered_frames: int = DEFAULT_DELIVERED_FRAMES,
 ) -> Optional[SourceStat]:
     """Reduce a source's window of samples to the trajectory + starvation verdicts. None when there
     are < 2 samples (no pair → no rate to judge)."""
@@ -354,29 +357,31 @@ def analyze_source(
         recent = samples[-2:]
 
     recent_fps = _slice_received_fps(recent, cadence)
-    u_rate = _slice_counter_rate(recent, "underruns", cadence)
+    u_rate = _slice_counter_rate(recent, "underruns", cadence)  # underruns climbing NOW
     o_rate = _slice_counter_rate(recent, "overruns", cadence)
+    # The holding-vs-starved character is judged over the WHOLE window, not the recent 2-pair slice,
+    # so a transient overrun blip in the last ~10 s can't suppress a real starving-freeze alert.
+    win_u_rate = _slice_counter_rate(samples, "underruns", cadence)
+    win_o_rate = _slice_counter_rate(samples, "overruns", cadence)
     depths = [float(s.depth) for s in recent if s.depth is not None]
     recent_depth = statistics.median(depths) if depths else None
     peak_fps = _peak_received_fps(samples, cadence)
 
     collapsed = recent_fps is not None and recent_fps < fps_floor
     depth_drained = recent_depth is None or recent_depth <= depth_floor
-    # STARVED: underruns climbing on a drained FIFO, and NOT overrun-dominant (overruns climbing as
-    # fast or faster == the FIFO is overflowing, i.e. holding/parked, NOT starved).
-    starved = u_rate > underrun_rate and o_rate < u_rate and depth_drained
-    # WAS DELIVERING: the source is a real feed that HAS delivered frames — proven by ANY of:
-    #   - currently delivering SOME (recent_fps >= idle_floor: an active but degraded broadcast input),
-    #   - it delivered healthily (>= fps_floor) earlier IN the window (the in-window trajectory), OR
-    #   - its cumulative `received` is non-trivial (it delivered at some point, even before the window
-    #     started — this is what catches a freeze that has lasted LONGER than the window, where the
-    #     delivering samples have already scrolled out and peak_fps has decayed to ~0).
-    # It separates a frozen-but-real-feed (STUCK) from a never-delivered idle probe (received ~0).
-    was_delivering = (
-        (recent_fps is not None and recent_fps >= idle_floor)
-        or (peak_fps is not None and peak_fps >= fps_floor)
-        or samples[-1].received > delivered_frames
-    )
+    # OVERRUN-DOMINANT (holding/parked, NOT starved): over the window, overruns climb as fast or
+    # faster than underruns → the FIFO is overflowing (frames arrive faster than consumed), the
+    # source is alive and holding, not starved.
+    overrun_dominant = win_o_rate >= win_u_rate and win_o_rate > 0
+    # STARVED: underruns climbing NOW on a drained FIFO, and NOT overrun-dominant over the window.
+    starved = u_rate > underrun_rate and not overrun_dominant and depth_drained
+    # WAS HEALTHY: the source delivered at a HEALTHY (>= fps_floor) rate at some point IN the window —
+    # the baseline that tells "a real 30 fps feed that NOW collapsed" (the #265 stuck state, req1)
+    # apart from a source that was ALWAYS low (a legit low-fps feed, never a collapse) or NEVER
+    # delivered (an idle probe, peak ~0). The window is sized so this lead-in stays visible while a
+    # collapse persists; a freeze that outlives the window's healthy lead-in is left to the operator
+    # who was already alerted at its onset (the SAFE direction — never a false alarm on a steady feed).
+    was_healthy = peak_fps is not None and peak_fps >= fps_floor
     return SourceStat(
         source=samples[-1].source,
         n_samples=len(samples),
@@ -387,7 +392,7 @@ def analyze_source(
         recent_depth=recent_depth,
         collapsed=collapsed,
         starved=starved,
-        was_delivering=was_delivering,
+        was_delivering=was_healthy,
     )
 
 
@@ -402,23 +407,21 @@ def evaluate(
     *,
     monitored_sources: Optional[List[str]] = None,
     fps_floor: float = DEFAULT_FPS_FLOOR,
-    idle_floor: float = DEFAULT_IDLE_FLOOR,
     underrun_rate: float = DEFAULT_UNDERRUN_RATE,
     depth_floor: float = DEFAULT_DEPTH_FLOOR,
-    delivered_frames: int = DEFAULT_DELIVERED_FRAMES,
     dantesync_core_pct: float = DEFAULT_DANTESYNC_CORE_PCT,
     now_secs: Optional[float] = None,
     max_sample_age: float = DEFAULT_MAX_SAMPLE_AGE_SECS,
 ) -> List[Alert]:
     """Apply the stuck-state classification. One Alert per tripped condition (empty == healthy).
 
-    - default (scan-all) mode: a source alerts as `stuck` ONLY on the unambiguous starved-collapse
-      signature WITH a delivering history (so a frozen real feed alerts — even past the window — but a
-      never-delivered probe / an overrun-dominant parked source stays quiet).
+    - default (scan-all) mode: a source alerts as `stuck` ONLY on the unambiguous signature — it was
+      HEALTHY (peaked >= fps_floor) in the window, has NOW collapsed below fps_floor, AND is starved
+      (underruns climbing on a drained FIFO, not overrun-dominant). A never-delivered probe (peak ~0),
+      a steadily-low feed (never healthy), and an overrun-dominant parked source all stay quiet.
     - a NAMED/required broadcast input is held to a stricter bar: it alerts whenever its receive
       drops below the fps floor at all (a required cam at ~0 fps is bad whether or not it is the
-      classic starved signature), and if it produced no usable audit pair OR went stale it alerts as
-      `vanished`.
+      classic starved signature), and if it is absent OR went stale it alerts as `vanished`.
     - STALENESS: when `now_secs` is supplied, a source whose newest sample is older than
       `max_sample_age` stopped logging (left program) → it is SKIPPED in scan-all (not stuck, just not
       in use), and counts as `vanished` for a NAMED input. (now_secs None → staleness off.)
@@ -432,10 +435,8 @@ def evaluate(
         stat = analyze_source(
             window[source],
             fps_floor=fps_floor,
-            idle_floor=idle_floor,
             underrun_rate=underrun_rate,
             depth_floor=depth_floor,
-            delivered_frames=delivered_frames,
         )
         if stat is None:
             continue  # < 2 samples; a named one is caught by the vanished pass below
@@ -457,12 +458,13 @@ def evaluate(
                 )
             )
 
-    # A DECLARED (named/required) input that produced no usable audit pair, OR whose logging went
+    # A DECLARED (named/required) input that is ABSENT (no audit lines at all), OR whose logging went
     # stale (NDI dropped / the fifo stopped / it left program), has VANISHED — a required input we can
-    # no longer confirm is alive. It MUST still alert, never silently disappear.
+    # no longer confirm is alive. It MUST still alert, never silently disappear. A source with a SINGLE
+    # FRESH sample just appeared (give it time) → not vanished; only absent-or-stale is vanished.
     for source in sorted(named):
         samples = window.get(source, [])
-        if len(samples) < 2 or is_stale(samples, now_secs, max_sample_age):
+        if not samples or is_stale(samples, now_secs, max_sample_age):
             alerts.append(
                 Alert(
                     box=box,
@@ -561,10 +563,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     ap.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="audit samples per source")
     ap.add_argument("--fps-floor", type=float, default=DEFAULT_FPS_FLOOR)
-    ap.add_argument("--idle-floor", type=float, default=DEFAULT_IDLE_FLOOR)
     ap.add_argument("--underrun-rate", type=float, default=DEFAULT_UNDERRUN_RATE)
     ap.add_argument("--depth-floor", type=float, default=DEFAULT_DEPTH_FLOOR)
-    ap.add_argument("--delivered-frames", type=int, default=DEFAULT_DELIVERED_FRAMES)
     ap.add_argument("--dantesync-core-pct", type=float, default=DEFAULT_DANTESYNC_CORE_PCT)
     ap.add_argument(
         "--now",
@@ -614,10 +614,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Resolved thresholds echoed on EVERY outcome so an OK/ALERT line is self-explaining
     # (comprehensive-logging).
     thresholds = (
-        f"window={args.window} fps_floor={args.fps_floor} idle_floor={args.idle_floor} "
+        f"window={args.window} fps_floor={args.fps_floor} "
         f"underrun_rate={args.underrun_rate}/s depth_floor={args.depth_floor} "
-        f"delivered_frames={args.delivered_frames} dantesync_core_pct={args.dantesync_core_pct} "
-        f"max_sample_age={args.max_sample_age}s now={'auto' if now_secs is not None and not args.now else (args.now or 'off')}"
+        f"dantesync_core_pct={args.dantesync_core_pct} max_sample_age={args.max_sample_age}s "
+        f"now={(args.now or 'auto') if now_secs is not None else 'off'}"
     )
 
     # Exit 2 ONLY when there is NO signal of ANY kind: no usable audit data AND no declared source
@@ -637,10 +637,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.dantesync_cpu,
         monitored_sources=args.source,
         fps_floor=args.fps_floor,
-        idle_floor=args.idle_floor,
         underrun_rate=args.underrun_rate,
         depth_floor=args.depth_floor,
-        delivered_frames=args.delivered_frames,
         dantesync_core_pct=args.dantesync_core_pct,
         now_secs=now_secs,
         max_sample_age=args.max_sample_age,
@@ -659,10 +657,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             stat = analyze_source(
                 window[source],
                 fps_floor=args.fps_floor,
-                idle_floor=args.idle_floor,
                 underrun_rate=args.underrun_rate,
                 depth_floor=args.depth_floor,
-                delivered_frames=args.delivered_frames,
             )
             if stat is None:
                 diags.append(f"{source}=<{len(window[source])} sample>")
