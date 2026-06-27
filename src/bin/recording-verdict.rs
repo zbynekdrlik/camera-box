@@ -33,7 +33,8 @@
 
 use anyhow::{Context, Result};
 use camera_box::probe::burn_contiguity::{
-    burn_contiguity_in_window, BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
+    burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind, NodeContiguity,
+    RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
     analyze_recording_with_burns, extract_frames_png, select_frames_to_extract, RecordingFrame,
@@ -101,6 +102,24 @@ struct Args {
     /// Monitor refresh Hz of the painted logical counter.
     #[arg(long, default_value_t = 60.0)]
     refresh_hz: f64,
+    /// #11 mixed 60/30: the strih OBS render/emit fps (the rate the strih DistroAV burn-id counter
+    /// advances). RIG-PINNED constant, never user-tuned (a wrong value would mask real loss). With
+    /// `--stream-capture-fps` it gives the strih burn's by-design DECIMATION step in the stream
+    /// recording: `round(strih_emit_fps / stream_capture_fps)` = 60/30 = 2. A recorded forward gap
+    /// of exactly that step is the decimation (not loss); a larger gap charges the excess as a real
+    /// drop. Default 60 (the LED-wall IMAG program rate).
+    #[arg(long, default_value_t = 60.0)]
+    strih_emit_fps: f64,
+    /// #11 mixed 60/30: the fps the STREAM recording was captured at — the stream OBS output rate
+    /// after it decimates the 60fps strih feed to 30. The strih burn is read FROM the stream
+    /// recording, so this is the denominator of its decimation step (60/30 = 2). RIG-PINNED, never
+    /// user-tuned. NOTE this is DISTINCT from `--capture-fps` (the diagnostic span / optical-beat
+    /// rate, which the harness sets per recording — 60 for the strih recording's cam1 diagnostic):
+    /// the decimation LOSS step is a topology constant, decoupled from the diagnostic so it is
+    /// always correct regardless of which recording's `--capture-fps` is in effect. The stream burn
+    /// is emitted AND recorded by the same stream OBS, so its own step is always 1. Default 30.
+    #[arg(long, default_value_t = 30.0)]
+    stream_capture_fps: f64,
     /// #108 per-hop ABSOLUTE latency: the strih node's burn-QR run_id (the reserved per-box
     /// constant the burn filter derives from the host role, #257; default mirrors the #111 filter).
     /// When present in the strih recording, cam→strih latency is computed
@@ -475,6 +494,29 @@ struct NodeSpec<'a> {
     /// boundary so a foreign/previous-run paint in the lead-in cannot inflate the leading edge.
     /// `None` ⇒ the pre-#273 "any non-burn payload is cam2" rule.
     cam2_run_id: Option<u32>,
+    /// #11 mixed 60/30: the by-design per-recorded-frame burn-id step for a [`BurnRate::PerRenderTick`]
+    /// node — the DECIMATION factor of this node's render rate over the recording's capture rate.
+    /// `2` for the 60fps strih burn read from the 30fps stream recording (a gap of 2 is decimation,
+    /// a larger gap charges the excess as a real drop); `1` for a non-decimated hop (the stream burn,
+    /// recorded by its own OBS) — today's unconditional-ignore. Ignored for cam1 (PerEmittedFrame,
+    /// set-based). See [`node_render_step`].
+    step: i64,
+}
+
+/// #11 mixed 60/30 — the by-design per-recorded-frame burn-id step for a PerRenderTick node, given
+/// the strih render rate and the stream recording's capture rate (both RIG-PINNED). The strih burn
+/// (rendered at `strih_emit_fps`, read from the stream recording captured at `stream_capture_fps`)
+/// steps by `round(strih_emit_fps / stream_capture_fps)` = 60/30 = 2 — the genlock decimation. The
+/// stream burn is emitted AND recorded by the same stream OBS, so it steps by exactly 1 (no
+/// decimation between its render and its own recording). cam1 is PerEmittedFrame (set-based) so its
+/// step is never consulted; it returns 1 harmlessly.
+fn node_render_step(node: &str, strih_emit_fps: f64, stream_capture_fps: f64) -> i64 {
+    match node {
+        "strih" if stream_capture_fps > 0.0 => {
+            (strih_emit_fps / stream_capture_fps).round().max(1.0) as i64
+        }
+        _ => 1,
+    }
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -505,7 +547,7 @@ fn node_verdict(
         spec.rate,
         spec.cam2_run_id,
     );
-    let in_window = burn_contiguity_in_window(node, &window, spec.rate);
+    let in_window = burn_contiguity_in_window_with_step(node, &window, spec.rate, spec.step);
     let contiguity = in_window.contiguity;
 
     // The pure check already paired each missing id with the recorded frame to view and WHY
@@ -1549,6 +1591,8 @@ fn build_and_print_verdict(
                         source: cam1_source,
                         rec_path: cam1_rec_path,
                         cam2_run_id: cam2_pin,
+                        // cam1 is set-based (PerEmittedFrame) — step is never consulted.
+                        step: node_render_step("cam1", args.strih_emit_fps, args.stream_capture_fps),
                     },
                     !cam1_ids.is_empty(),
                 ),
@@ -1560,6 +1604,13 @@ fn build_and_print_verdict(
                         source: stream_frames,
                         rec_path: stream_path,
                         cam2_run_id: cam2_pin,
+                        // #11: the 60fps strih burn read from the 30fps stream recording ⇒ step 2
+                        // (decimation-aware — a gap > 2 charges the excess as a real drop).
+                        step: node_render_step(
+                            "strih",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                        ),
                     },
                     !strih_ids_seq.is_empty(),
                 ),
@@ -1571,6 +1622,13 @@ fn build_and_print_verdict(
                         source: stream_frames,
                         rec_path: stream_path,
                         cam2_run_id: cam2_pin,
+                        // The stream burn is emitted AND recorded by the same stream OBS ⇒ step 1
+                        // (no decimation between its render and its own recording).
+                        step: node_render_step(
+                            "stream",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                        ),
                     },
                     !stream_ids_seq.is_empty(),
                 ),
@@ -1985,11 +2043,14 @@ fn extract_partial_flagged_frames(
     // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
     // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop); strih/stream burn
     // per-RENDER-tick (a forward gap is not loss, but a delivered frame missing its burn is).
-    let owned: &[(&str, u32, BurnRate)] = match box_name {
-        "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame)],
+    // #11: the same decimation-aware step the merge verdict uses, so the on-box pixel-proof
+    // flagging matches what the merge flags (strih=2 in the 30fps stream recording, stream=1).
+    let strih_step = node_render_step("strih", args.strih_emit_fps, args.stream_capture_fps);
+    let owned: &[(&str, u32, BurnRate, i64)] = match box_name {
+        "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame, 1)],
         "stream" => &[
-            ("strih", args.burn_strih_run_id, BurnRate::PerRenderTick),
-            ("stream", args.burn_stream_run_id, BurnRate::PerRenderTick),
+            ("strih", args.burn_strih_run_id, BurnRate::PerRenderTick, strih_step),
+            ("stream", args.burn_stream_run_id, BurnRate::PerRenderTick, 1),
         ],
         _ => &[],
     };
@@ -1997,9 +2058,9 @@ fn extract_partial_flagged_frames(
     // THIS run's paint exactly as the merge verdict does (a foreign-run lead-in is not flagged as
     // delivered). `None` for an unpinned extract (e.g. the strih box runs without --cam2-run-id).
     let cam2_pin = args.cam2_pin();
-    for &(node, burn_run_id, rate) in owned {
+    for &(node, burn_run_id, rate, step) in owned {
         let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate, cam2_pin);
-        let iw = burn_contiguity_in_window(node, &window, rate);
+        let iw = burn_contiguity_in_window_with_step(node, &window, rate, step);
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
     }
 
@@ -3117,6 +3178,51 @@ mod tests {
     }
 
     #[test]
+    fn node_render_step_maps_mixed_topology_to_strih_2_stream_1() {
+        // #11: the rig-pinned decimation factor. strih (60fps render) read from the 30fps stream
+        // recording ⇒ step 2; stream (recorded by its own OBS) ⇒ step 1; cam1 (set-based) ⇒ 1.
+        assert_eq!(super::node_render_step("strih", 60.0, 30.0), 2);
+        assert_eq!(super::node_render_step("stream", 60.0, 30.0), 1);
+        assert_eq!(super::node_render_step("cam1", 60.0, 30.0), 1);
+        // A 60-in-60 case (strih burn read from a 60fps recording) ⇒ step 1 (no decimation).
+        assert_eq!(super::node_render_step("strih", 60.0, 60.0), 1);
+        // Never below 1, and a zero/garbage denominator degrades safely to 1 (no panic).
+        assert_eq!(super::node_render_step("strih", 30.0, 60.0), 1);
+        assert_eq!(super::node_render_step("strih", 60.0, 0.0), 1);
+    }
+
+    #[test]
+    fn node_verdict_strih_decimation_step2_clean_is_zero_loss() {
+        // #11 binary level: the strih burn in the 30fps stream recording steps by 2 (every-other
+        // render tick). With the strih node's step=2, this clean decimation is ZERO loss — no
+        // false positive. (rec_path is never read: a zero-loss verdict has no missing slot.)
+        let stream: Vec<RecordingFrame> = (0..6)
+            .map(|i| frame(i, &[(CAM2, 100 + i as u32), (STRIH, 2000 + (i as u32) * 2)]))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0), // = 2
+            },
+            &[STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "clean 60→30 decimation (ids step by 2) is ZERO loss: {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
     fn node_verdict_render_tick_skips_are_zero_loss_not_thousands_missing() {
         // THE #198 REGRESSION at the binary level: strih burn id jumps by 3 per emitted
         // frame (per-render counter). The OLD integer-range check reported ~2x these as
@@ -3136,6 +3242,7 @@ mod tests {
                 // a zero-loss verdict never reads it.
                 rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
                 cam2_run_id: None,
+                step: 1,
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -3176,6 +3283,7 @@ mod tests {
                 source: &stream,
                 rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
                 cam2_run_id: None,
+                step: 1,
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -3275,6 +3383,7 @@ mod tests {
                 source: &strih, // <-- #133: cam1 source-of-truth = the strih 1080p recording
                 rec_path: Some(std::path::Path::new("/nonexistent-strih.mkv")),
                 cam2_run_id: None,
+                step: 1,
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -3358,6 +3467,7 @@ mod tests {
                 source: &strih,
                 rec_path: Some(std::path::Path::new("/nonexistent.mkv")),
                 cam2_run_id: None,
+                step: 1,
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),

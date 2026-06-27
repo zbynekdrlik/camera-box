@@ -284,8 +284,6 @@ pub fn burn_contiguity_in_window_with_step(
     rate: BurnRate,
     expected_step: i64,
 ) -> InWindowContiguity {
-    // RED placeholder — the decimation-excess RealDrop handling is added in the GREEN commit.
-    let _ = expected_step;
     let present_ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
     let first_id = present_ids.first().copied();
     let last_id = present_ids.last().copied();
@@ -377,8 +375,34 @@ pub fn burn_contiguity_in_window_with_step(
                             kind: InWindowMissingKind::RealDrop,
                         });
                     }
-                    // A per-render FORWARD gap is the expected un-emitted render ticks (not loss);
-                    // a per-emit forward gap is handled set-wise below — neither acts here.
+                    // A per-render FORWARD gap: for a NON-decimated hop (expected_step == 1) it is
+                    // the expected un-emitted render ticks and is NOT loss (today's behavior,
+                    // unchanged). For a DECIMATED hop (expected_step >= 2 — the 60fps strih burn
+                    // read from the 30fps stream recording, ids step by ~2 by design), a gap of
+                    // EXACTLY expected_step is the decimation; a gap LARGER than that means one or
+                    // more emitted output frames never reached the recording — charge the excess
+                    // `gap/expected_step − 1` (integer division, so genlock beat jitter of
+                    // expected_step ± 1 charges 0) as REAL DROPs. These are absent frames BETWEEN
+                    // two delivered frames (not delivered frames themselves), so — like cam1's
+                    // set-based genuinely-absent ids — they are EXTRA missing_slots that do NOT
+                    // subtract from present_count. The missing ids `prev + k·expected_step` lie
+                    // strictly inside (prev, id) ⇒ below max_present ⇒ never collide with a
+                    // synthetic None id (seeded above max_present) or a present id.
+                    // (cam1's per-emit forward gap is handled set-wise below — neither acts here.)
+                    if matches!(rate, BurnRate::PerRenderTick) && expected_step >= 2 && id > prev {
+                        let gap = id as i64 - prev as i64;
+                        let excess = gap / expected_step - 1;
+                        if excess > 0 {
+                            for k in 1..=excess {
+                                let missing_id = prev as i64 + k * expected_step;
+                                missing_slots.push(MissingSlot {
+                                    id: missing_id as u32,
+                                    frame_index: f.frame_index,
+                                    kind: InWindowMissingKind::RealDrop,
+                                });
+                            }
+                        }
+                    }
                 }
                 prev_present = Some(id);
                 nones_since_prev = 0;
