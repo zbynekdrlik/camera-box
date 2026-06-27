@@ -1023,6 +1023,16 @@ EXPORT bool obs_display_enabled(obs_display_t *display);
 
 EXPORT void obs_display_set_background_color(obs_display_t *display, uint32_t color);
 
+/**
+ * camera-box #276: set a per-display render-rate divisor. divisor <= 1 renders
+ * every frame (default); divisor N renders only every Nth call to
+ * render_display(), skipping the rest BEFORE render_display_begin() (no clear, no
+ * present, no flicker). Used to throttle the heavy built-in Multiview projector
+ * so monitoring never steals the program-output render budget at 60fps. Program
+ * output and preview keep the default (every frame).
+ */
+EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor);
+
 EXPORT void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height);
 
 /* ------------------------------------------------------------------------- */

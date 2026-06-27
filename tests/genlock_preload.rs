@@ -978,6 +978,10 @@ mod vendored_source {
     pub const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
     const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
     pub const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
+    // #276 multiview render-divisor: libobs render path + frontend projector + the burn renderer.
+    pub const OBS_DISPLAY: &str = "vendor/obs-studio/libobs/obs-display.c";
+    pub const OBSPROJECTOR: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.cpp";
+    pub const BURN_QR: &str = "vendor/distroav/src/burn-qr.hpp";
     pub const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
     pub const NDI_BURN_FILTER: &str = "vendor/distroav/src/ndi-burn-filter.cpp";
     pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
@@ -1932,6 +1936,99 @@ mod vendored_source {
              equivalent of the preload; re-apply the ms field."
         );
     }
+
+    // ---- #276 multiview render-divisor decouple --------------------------------
+
+    #[test]
+    fn display_render_divisor_gate_present() {
+        // #276: render_display() must frame-skip a throttled display BEFORE
+        // render_display_begin() (no clear/present → no flicker, ~0 cost), or the heavy
+        // built-in Multiview projector blocks the 60fps program presentation on the shared
+        // graphics thread. A subtree pull dropping this re-opens the #144 program-render lag.
+        let src = squish(&vendor_file(OBS_DISPLAY));
+        assert!(
+            src.contains("display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0"),
+            "{OBS_DISPLAY}: #276 — the per-display render-divisor frame-skip gate in \
+             render_display() is gone; the multiview would steal the 60fps program budget."
+        );
+        assert!(
+            src.contains(
+                "void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)"
+            ),
+            "{OBS_DISPLAY}: #276 — obs_display_set_render_divisor() impl missing; the frontend \
+             cannot throttle the multiview."
+        );
+    }
+
+    #[test]
+    fn display_render_divisor_struct_fields_present() {
+        // #276: the per-instance counter + divisor must live on struct obs_display (NOT
+        // static — a static counter would lockstep every projector). Read+written only on
+        // the graphics thread.
+        let hdr = squish(&vendor_file(OBS_INTERNAL));
+        assert!(
+            hdr.contains("uint32_t frame_counter;"),
+            "{OBS_INTERNAL}: #276 — obs_display.frame_counter field missing; re-apply."
+        );
+        assert!(
+            hdr.contains("uint32_t render_divisor;"),
+            "{OBS_INTERNAL}: #276 — obs_display.render_divisor field missing; re-apply."
+        );
+    }
+
+    #[test]
+    fn display_render_divisor_api_exported() {
+        // #276: obs_display_set_render_divisor must be EXPORTed so the frontend
+        // (OBSProjector.cpp) can link it.
+        let api = squish(&vendor_file(OBS_API));
+        assert!(
+            api.contains("EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)"),
+            "{OBS_API}: #276 — obs_display_set_render_divisor not EXPORTed; the frontend cannot \
+             throttle the multiview."
+        );
+    }
+
+    #[test]
+    fn multiview_projector_sets_render_divisor() {
+        // #276: ONLY the Multiview projector is throttled (divisor 2); program output +
+        // preview keep the default (every frame). The call must be gated on isMultiview.
+        let src = squish(&vendor_file(OBSPROJECTOR));
+        assert!(
+            src.contains("if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)"),
+            "{OBSPROJECTOR}: #276 — the multiview projector no longer sets render_divisor=2; \
+             the heavy multiview render would run every frame and break the 60fps program."
+        );
+    }
+
+    // ---- #275 cheaper measurement burn (bulk-fill render) ----------------------
+
+    #[test]
+    fn burn_qr_render_uses_bulk_fills() {
+        // #275: the per-pixel put_bgra nested loops made the strih genlock_burn render
+        // 18.9ms > the 16.6ms 60fps budget. The render must use BULK fills — one memset per
+        // row for the white backing + a tight 32-bit run-fill for black module runs —
+        // producing IDENTICAL output bytes (white FF FF FF FF, black 00 00 00 FF, proven by
+        // the burn_payload_parity render→decode test). A regression to per-pixel fills
+        // re-breaks the 60fps measurement burn.
+        let src = squish(&vendor_file(BURN_QR));
+        assert!(
+            src.contains("std::memset(row, 0xFF,"),
+            "{BURN_QR}: #275 — the white backing is no longer a per-row memset; the burn \
+             render reverted to the slow per-pixel path."
+        );
+        assert!(
+            src.contains("const uint8_t black_px[4] = {0, 0, 0, 255};")
+                && src.contains("std::memcpy(&black, black_px, 4);"),
+            "{BURN_QR}: #275 — the portable black BGRA run-fill constant is gone; re-apply \
+             the bulk black module-run fill."
+        );
+        // The render must NOT fall back to a per-pixel put_bgra fill loop inside render().
+        assert!(
+            !src.contains("put_bgra(buf, stride, frame_w, frame_h, (uint32_t)(ox + xx)"),
+            "{BURN_QR}: #275 — the per-pixel white put_bgra loop is BACK; that is the slow \
+             path #275 removed."
+        );
+    }
 }
 
 // ---- #97 GUI: DistroAV per-source preload slider + ms info-text --------------
@@ -2273,6 +2370,72 @@ mod distroav_source {
             wf.contains("max_ts > wall_now + interval"),
             "{WINDOWS_GENLOCK_FAST_WF}: #147/#269 [3] — the FAST build does not assert the \
              backward-clock-step detection (max queued ts > wall_now + interval); add the pwsh #147 gate."
+        );
+    }
+
+    // ---- #276 + #275 build gates (the #269 YAML lock-step) ---------------------
+
+    #[test]
+    fn windows_genlock_workflow_gates_on_the_multiview_divisor() {
+        // #276: the slow PRODUCTION build (which builds the frontend, where OBSProjector.cpp
+        // lives) must re-assert the multiview render-divisor tokens in pwsh BEFORE the
+        // 150-min build — this Linux Rust guard can't compile on the runner, and a `git
+        // subtree pull` could revert the decouple to inert-but-still-compiling, shipping an
+        // obs.dll/frontend that lets the multiview steal the 60fps program budget again.
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+        assert!(
+            wf.contains("display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0"),
+            "{WINDOWS_GENLOCK_WF}: #276 — the production build no longer asserts the per-display \
+             render-divisor frame-skip gate; re-add the pwsh #276 gate."
+        );
+        assert!(
+            wf.contains("if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)"),
+            "{WINDOWS_GENLOCK_WF}: #276 — the production build no longer asserts the multiview \
+             projector setting render_divisor=2; re-add the pwsh #276 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_fast_workflow_gates_on_the_multiview_divisor() {
+        // #276: the FAST build compiles only libobs (obs.dll), so it can't COMPILE the
+        // OBSProjector.cpp change — but it must still source-text assert the libobs gate +
+        // the frontend call (a text guard, no build) so a subtree pull reverting #276 fails
+        // here on the fast path too, mirroring the slow gate (the #269 lock-step rule).
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+        assert!(
+            wf.contains("display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #276 — the FAST build does not assert the render-divisor \
+             frame-skip gate; add the pwsh #276 gate, mirroring windows-genlock.yml."
+        );
+        assert!(
+            wf.contains("if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #276 — the FAST build does not assert the multiview \
+             render_divisor=2 call; add the pwsh #276 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_workflow_gates_on_the_burn_bulk_fill() {
+        // #275: the production build must assert the cheaper bulk-fill burn render (the
+        // strih/stream genlock_burn at 60fps), so a subtree pull can't revert it to the slow
+        // per-pixel path that overran the 60fps budget.
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+        assert!(
+            wf.contains("std::memset(row, 0xFF,"),
+            "{WINDOWS_GENLOCK_WF}: #275 — the production build no longer asserts the bulk-fill \
+             burn render (per-row white memset); re-add the pwsh #275 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_fast_workflow_gates_on_the_burn_bulk_fill() {
+        // #275: the FAST build COMPILES burn-qr.hpp (DistroAV) — assert the bulk-fill token
+        // too so a revert to per-pixel fills fails on the fast path, mirroring the slow gate.
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+        assert!(
+            wf.contains("std::memset(row, 0xFF,"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #275 — the FAST build does not assert the bulk-fill burn \
+             render; add the pwsh #275 gate, mirroring windows-genlock.yml."
         );
     }
 }

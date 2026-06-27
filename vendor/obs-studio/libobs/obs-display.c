@@ -242,6 +242,18 @@ void render_display(struct obs_display *display)
 	if (!display || !display->enabled)
 		return;
 
+	/* camera-box #276: per-display frame-skip, BEFORE render_display_begin(). A
+	 * monitoring surface throttled with render_divisor>1 (the built-in Multiview
+	 * projector, set to 2) renders only every Nth frame so its 9-18ms render
+	 * never blocks the 60fps program presentation on the shared graphics thread.
+	 * Skipping HERE (before begin) costs ~nothing — no gs_load_swapchain, no
+	 * gs_clear, no gs_present — and leaves the last presented frame on screen, so
+	 * there is no flicker (the callback-skip alternative still paid the clear +
+	 * present and flickered). render_divisor 0/1 = render every frame, so program
+	 * output + preview (which never set it) are genuinely unaffected. */
+	if (display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0)
+		return;
+
 	/* -------------------------------------------- */
 
 	pthread_mutex_lock(&display->draw_info_mutex);
@@ -293,6 +305,19 @@ void obs_display_set_background_color(obs_display_t *display, uint32_t color)
 {
 	if (display)
 		display->background_color = color;
+}
+
+/* camera-box #276: throttle a display's render rate. divisor <= 1 renders every
+ * frame (default); divisor N renders only every Nth call to render_display(),
+ * skipping the rest BEFORE render_display_begin() (no clear, no present, no
+ * flicker). Used by the frontend to cap the heavy built-in Multiview projector
+ * (set to 2) so monitoring never steals the program-output render budget at
+ * 60fps. Unguarded single write (set once at display create from the Qt thread),
+ * mirroring obs_display_set_background_color; the graphics thread reads it. */
+void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)
+{
+	if (display)
+		display->render_divisor = divisor;
 }
 
 void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height)

@@ -299,6 +299,21 @@ struct obs_display {
 	DARRAY(struct draw_callback) draw_callbacks;
 	bool use_clear_workaround;
 
+	/* camera-box #276: per-display render-rate divisor so a heavy monitoring
+	 * surface (the built-in Multiview projector) cannot steal the 60fps program
+	 * render budget. render_display() runs on the SINGLE graphics thread for ALL
+	 * displays (program output, preview, every projector) sequentially after
+	 * output_frames(); a 9-18ms multiview render there blocks the program
+	 * presentation. With render_divisor=N this display renders only every Nth
+	 * call to render_display() (skipped BEFORE render_display_begin → ~0 cost,
+	 * last frame stays on screen, no flicker). 0/1 = render every frame (the
+	 * default for program output + preview). frame_counter is PER-INSTANCE (never
+	 * static) so multiple projectors do not lockstep. Both are read+written only
+	 * on the graphics thread; render_divisor is set once from the Qt thread at
+	 * display create (same unguarded pattern as background_color). */
+	uint32_t frame_counter;
+	uint32_t render_divisor;
+
 	struct obs_display *next;
 	struct obs_display **prev_next;
 };

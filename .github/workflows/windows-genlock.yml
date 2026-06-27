@@ -262,6 +262,28 @@ jobs:
           }
           Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147 backward-step recovery) — OK"
 
+      # #276/#275: assert the multiview render-divisor decouple (libobs render path + the
+      # frontend Multiview projector) AND the cheaper bulk-fill measurement burn are present
+      # BEFORE the 150-min build. The PRODUCTION build builds the FRONTEND (OBSProjector.cpp),
+      # so this is the build that proves the #276 frontend change compiles; the pwsh gate
+      # fails fast if a `git subtree pull` (#44) reverts either to inert-but-still-compiling.
+      # Mirrors tests/genlock_preload.rs::{vendored_source,distroav_source} (Linux Rust guards,
+      # probe-gated — can't compile on this Windows runner). The #269 lock-step rule: a
+      # vendored-C guard lives in the YAML too, not only the Rust test.
+      - name: Assert #276 multiview render-divisor + #275 bulk-fill burn present
+        shell: pwsh
+        run: |
+          $disp = (Get-Content "vendor/obs-studio/libobs/obs-display.c" -Raw) -replace '\s+', ' '
+          if ($disp -notmatch [regex]::Escape('display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0')) { Write-Error "obs-display.c: #276 render-divisor frame-skip gate gone — the multiview would steal the 60fps program budget"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs-display.c: #276 obs_display_set_render_divisor impl gone"; exit 1 }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs.h: #276 obs_display_set_render_divisor not EXPORTed — frontend cannot link it"; exit 1 }
+          $proj = (Get-Content "vendor/obs-studio/frontend/widgets/OBSProjector.cpp" -Raw) -replace '\s+', ' '
+          if ($proj -notmatch [regex]::Escape('if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)')) { Write-Error "OBSProjector.cpp: #276 multiview no longer sets render_divisor=2 — the heavy multiview render runs every frame"; exit 1 }
+          $bqr = (Get-Content "vendor/distroav/src/burn-qr.hpp" -Raw) -replace '\s+', ' '
+          if ($bqr -notmatch [regex]::Escape('std::memset(row, 0xFF,')) { Write-Error "burn-qr.hpp: #275 bulk-fill (per-row white memset) gone — burn render reverted to the slow per-pixel path that overran the 60fps budget"; exit 1 }
+          Write-Output "#276 multiview render-divisor decouple + #275 bulk-fill burn render present — OK"
+
       # #85: assert the #78 "B′" real-wall-clock emit-timecode patch is present in the
       # vendored DistroAV OUTPUT source BEFORE the 150-min build, so a future `git
       # subtree pull` (#44) that restores `NDIlib_send_timecode_synthesize` fails HERE

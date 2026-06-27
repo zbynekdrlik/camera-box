@@ -1040,9 +1040,99 @@ pub fn genlock_ts_audit_sample(
     }
 }
 
+/// (#276) Pure mirror of the obs-display.c `render_display()` per-display frame-skip
+/// gate that decouples the heavy built-in Multiview projector from the 60fps program
+/// render. The vendored C is
+/// `if (display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0) return;`
+/// — a render is SKIPPED when the divisor is >1 and the current counter is not a
+/// multiple of it; the counter is post-incremented ONLY when the divisor is >1 (the
+/// `&&` short-circuits for divisor 0/1, so those displays — program output, preview —
+/// never touch the counter and render EVERY frame). Returns `(skip, next_counter)`.
+/// This is the only unit-testable part of #276 (the GPU render timing itself needs the
+/// rig); it locks the skip CADENCE (divisor=2 → renders every other frame → halves the
+/// multiview's render-thread cost, freeing the program presentation).
+pub fn display_render_skip(frame_counter: u32, render_divisor: u32) -> (bool, u32) {
+    if render_divisor > 1 {
+        // skip == C's `(frame_counter % render_divisor) != 0` (== not a multiple of the divisor).
+        let skip = !frame_counter.is_multiple_of(render_divisor);
+        (skip, frame_counter.wrapping_add(1))
+    } else {
+        // divisor 0/1: render every frame; counter untouched (matches the C `&&` short-circuit).
+        (false, frame_counter)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #276 multiview render-divisor skip cadence -------------------------
+
+    #[test]
+    fn render_divisor_0_or_1_renders_every_frame_and_never_touches_counter() {
+        // Program output + preview never set a divisor (bzalloc → 0). They MUST render
+        // every frame and the counter must stay 0 (the C `&&` short-circuits the post-
+        // increment), so they are genuinely unaffected by #276.
+        for divisor in [0u32, 1] {
+            let mut counter = 0u32;
+            for _ in 0..10 {
+                let (skip, next) = display_render_skip(counter, divisor);
+                assert!(!skip, "divisor {divisor} must never skip");
+                assert_eq!(
+                    next, 0,
+                    "divisor {divisor} must leave the counter untouched"
+                );
+                counter = next;
+            }
+        }
+    }
+
+    #[test]
+    fn render_divisor_2_renders_every_other_frame() {
+        // The multiview is throttled to 2 → renders frames 0,2,4,… skips 1,3,5,… so its
+        // 9-18ms render lands on the program thread only every other frame (halved cost).
+        let mut counter = 0u32;
+        let mut rendered = 0;
+        let mut skipped = 0;
+        for i in 0..10u32 {
+            let (skip, next) = display_render_skip(counter, 2);
+            if i.is_multiple_of(2) {
+                assert!(!skip, "even frame {i} renders");
+                rendered += 1;
+            } else {
+                assert!(skip, "odd frame {i} skips");
+                skipped += 1;
+            }
+            counter = next;
+        }
+        assert_eq!((rendered, skipped), (5, 5));
+        assert_eq!(counter, 10, "counter advances every call when divisor>1");
+    }
+
+    #[test]
+    fn render_divisor_3_renders_one_in_three() {
+        let mut counter = 0u32;
+        let rendered: usize = (0..9)
+            .filter(|_| {
+                let (skip, next) = display_render_skip(counter, 3);
+                counter = next;
+                !skip
+            })
+            .count();
+        assert_eq!(rendered, 3, "divisor 3 renders 1/3 of frames (0,3,6)");
+    }
+
+    #[test]
+    fn render_divisor_counter_wraps_without_panic() {
+        // The counter is u32 and increments forever on a live multiview; it must wrap, not
+        // overflow-panic, and the cadence must stay correct across the wrap.
+        let (skip, next) = display_render_skip(u32::MAX, 2);
+        // u32::MAX is odd → MAX % 2 == 1 → skip; next wraps to 0.
+        assert!(skip);
+        assert_eq!(next, 0);
+        let (skip0, _) = display_render_skip(0, 2);
+        assert!(!skip0, "after the wrap, counter 0 renders again");
+    }
 
     // ---- #136: timestamp-aligned release (multi-source IN-SYNC) -------------
 
