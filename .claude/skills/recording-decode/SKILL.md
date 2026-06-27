@@ -54,6 +54,43 @@ speedup (`vendor/distroav/src/burn-qr.hpp` bulk row/run fills) deliberately keep
 identical (white `FF FF FF FF`, black `00 00 00 FF`) precisely so this lock stays valid — see the
 genlock skill "#275" section.
 
+## #275b — cam1 capture-burn renders ASYNC (off the emit loop), or cam1 caps at 30fps
+
+The #174 cam1 capture-burn (`src/probe/qr.rs::burn_qr_yuyv` → `render_payload_qr`) used to render
+the per-frame QR SYNCHRONOUSLY on the capture/emit loop (`src/main.rs` `process_frame`), between
+the genlock emit-gate and the NDI send. That per-frame render is too heavy for the 16.6ms 60fps
+budget → cam1's NDI emit capped at **30fps** (`30.0 emitted / 62.5 captured, 0 dropped`; prod = 60),
+so the chain couldn't be MEASURED at 60 (#11). **The burn path is MEASUREMENT-ONLY** (cargo feature
+`probe` + env `CAMERA_BOX_BURN_RUN_ID`) — production is the unchanged zero-copy send, so this never
+touches the live broadcast.
+
+**The fix (the design the #275 first pass DROPPED as "risky" — now resolved):** a dedicated
+`cam1-burn` thread fed by a bounded FIFO ring (`src/probe/genlock.rs`: `BurnFrameIdSource`,
+`BurnRing`, `burn_ring`, `run_burn_ring`, `BURN_RING_DEPTH=3`). The burn thread OWNS the single
+NDI sender. The 3 hazards the first pass feared, and how they're each handled — DON'T re-derive:
+
+- **gen_ts can't be "pre-rendered ahead" (it's per-frame).** Don't try to. The capture thread
+  stamps `frame_id` (monotonic `BurnFrameIdSource`, drawn once per emit IN emit order) + `gen_ts_ns`
+  (emit-instant wall clock) + the emit timecode AT THE GATE, copies the frame, and submits the WHOLE
+  job; the burn thread renders that job's QR (full payload already known). The pipeline overlaps
+  render(N+1) with send(N) — no pre-render-without-ts needed.
+- **genlock pacing jitter from sending on another thread.** The NDI timecode is computed on the
+  CAPTURE thread at the gate instant (`ndi::boundary_timecode_100ns(fps)`) and CARRIED to the send
+  (`NdiSender::send_frame_data_with_timecode`) — NOT re-derived on the burn thread. So the stamped
+  timecode is the emitted frame's genlock boundary, immune to burn-thread queue jitter. (`send_frame_data`
+  is now the timecode-computing wrapper for the normal path.)
+- **1:1 burn-id↔emit under back-pressure.** `BurnRing::submit` uses a BLOCKING `sync_channel` send —
+  it back-pressures the capture thread when the ring is full, NEVER drops. A dropped/reordered job
+  would punch a burn-id GAP the verdict misreads as phantom chain loss. The RED→GREEN lock is
+  `genlock.rs::async_burn_ring_preserves_1to1_mapping_in_order_under_backpressure` (RED = dropping
+  `try_send` loses 497/500 under a slow consumer; GREEN = blocking `send` delivers all in order with
+  the carried timecode). Shutdown: drop the ring (closes the channel) → join the thread → flush the
+  tail + destroy the sender cleanly.
+
+Throughput is then `min(emit-gate rate, burn-thread rate)`; if the rig E2E still shows <60, the next
+lever is the DEFERRED payload-shrink (blocked by the wire-format fixture lock above — needs a rig
+recording run to regen). The async move alone is what unblocks the 60fps cam1 leg.
+
 ## Decode-path observability (#207)
 
 `qr::decode_path_counts() -> (fast, robust)` (process-wide AtomicU64) is logged at
