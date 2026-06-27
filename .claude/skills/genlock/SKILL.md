@@ -437,6 +437,50 @@ built-in projector is the budget thief.
   14% renderSkip, studio-OFF clean) — prod runs studio off, so latent not active; same class as the
   multiview.
 
+## #278 — multiview ADAPTIVE budget-based decouple (SUPERSEDES the #276 fixed divisor)
+The #276 fixed `render_divisor=2` (multiview every-other-frame) is INSUFFICIENT for the 4-LIVE-CAM
+case: rig-measured a SINGLE multiview render is ~18-23ms, which ALONE exceeds the 16.6ms 60fps budget,
+so even every other frame the rendered frames overran the deadline → **~29% program renderSkip → the
+LED-wall IMAG program dropped to ~43fps**. #278 replaces the fixed cadence with an ADAPTIVE,
+budget-based skip so the PROGRAM render is NEVER delayed regardless of multiview weight.
+
+**The new model — `render_divisor>1` is now just a "throttleable monitoring display" MARKER** (the
+value, still 2, set by OBSProjector on the multiview only — NO frontend change for #278); the actual
+skip is driven by the display's measured render cost vs the remaining frame budget:
+- `obs-internal.h`: `struct obs_display` drops `frame_counter`, adds **`uint64_t render_ewma_ns`**
+  (per-instance EWMA of the actual draw, α=1/4; 0 = cold/not-warmed). `struct obs_core_video` gains
+  **`uint64_t graphics_frame_start_ns`** (this tick's `os_gettime_ns()` start).
+- `obs-video.c` `obs_graphics_thread_loop`: publishes `obs->video.graphics_frame_start_ns = frame_start;`
+  at the TOP of the tick (before output_frames + render_displays).
+- `obs-display.c` `render_display()`: for a monitoring display, BEFORE `render_display_begin()` compute
+  `elapsed = now - tick_start` and **skip when `elapsed + ewma > budget` where `budget = interval -
+  interval/10` (90% margin)**. `ewma==0` / no timing → render once to measure (never starved to 0).
+  After a real render, update `render_ewma_ns = prev ? (prev*3 + dur)/4 : dur`. Program + preview
+  (divisor 0/1) are NEVER throttled. Skipping before begin() = ~0 cost, last frame stays → no flicker.
+- **Tradeoff (accepted, documented):** when a single monitoring render genuinely exceeds the whole
+  budget (4-live-cam multiview), it has NO slack ever → it freezes/very-low-fps. That is fine — it is
+  MONITORING; the program staying clean 60fps is the non-negotiable requirement. No periodic
+  over-budget "probe" render is done (it would reintroduce renderSkip). To force a re-measure after
+  load drops, close+reopen the projector (fresh display → ewma=0 → re-warms).
+- **DEPLOY is LIBOBS-ONLY** (unlike #276, which changed OBSProjector.cpp → needed the **obs64.exe**
+  frontend swap). #278 touches only `obs-display.c`/`obs-video.c`/`obs-internal.h` → the **fast
+  obs.dll hot-swap is sufficient** (the `windows-genlock-fast.yml` build validates it). The
+  OBSProjector `divisor=2` marker is already deployed; no obs64.exe/distroav swap for #278.
+- Mirror `display_render_skip_budget(render_divisor, elapsed, ewma, interval)` +
+  `display_render_ewma_update(prev, dur)` in `src/probe/genlock.rs` (replaced the old
+  `display_render_skip` cadence mirror) + behavior tests. The #276 every-Nth tokens are GONE.
+- **NEW pinned source anchors (the #269 lock-step — in `tests/genlock_preload.rs` AND BOTH
+  `windows-genlock{,-fast}.yml` pwsh gates):** `if (elapsed + ewma > budget) return;`,
+  `const uint64_t budget = interval - interval / 10;`,
+  `display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;`,
+  `obs->video.graphics_frame_start_ns = frame_start;`, struct fields `uint64_t render_ewma_ns;` +
+  `uint64_t graphics_frame_start_ns;`. (The OBSProjector `if (isMultiview) …divisor…2)` anchor is
+  UNCHANGED — the marker stays.) The OLD `(display->frame_counter++ % display->render_divisor)` token
+  was removed everywhere.
+- **ACCEPTANCE (the supervisor rig-verifies — the prior #276 fix failed exactly this):** multiview
+  open showing 4 LIVE cams + program single-cam → program MUST be 0 renderSkip / activeFps 60 /
+  avgRenderMs-for-program under budget, while the multiview renders at whatever reduced fps.
+
 ## #275 — cheaper measurement burn (bulk-fill render); wire format is LOCKED by the #186 fixtures
 The per-frame QR burn (strih/stream `genlock_burn` filter `vendor/distroav/src/burn-qr.hpp` render())
 was a per-pixel `put_bgra` loop with per-pixel bounds checks → 18.9ms on a 60fps strih render (>16.6ms
