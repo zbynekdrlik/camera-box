@@ -1040,26 +1040,58 @@ pub fn genlock_ts_audit_sample(
     }
 }
 
-/// (#276) Pure mirror of the obs-display.c `render_display()` per-display frame-skip
-/// gate that decouples the heavy built-in Multiview projector from the 60fps program
-/// render. The vendored C is
-/// `if (display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0) return;`
-/// — a render is SKIPPED when the divisor is >1 and the current counter is not a
-/// multiple of it; the counter is post-incremented ONLY when the divisor is >1 (the
-/// `&&` short-circuits for divisor 0/1, so those displays — program output, preview —
-/// never touch the counter and render EVERY frame). Returns `(skip, next_counter)`.
-/// This is the only unit-testable part of #276 (the GPU render timing itself needs the
-/// rig); it locks the skip CADENCE (divisor=2 → renders every other frame → halves the
-/// multiview's render-thread cost, freeing the program presentation).
-pub fn display_render_skip(frame_counter: u32, render_divisor: u32) -> (bool, u32) {
-    if render_divisor > 1 {
-        // skip == C's `(frame_counter % render_divisor) != 0` (== not a multiple of the divisor).
-        let skip = !frame_counter.is_multiple_of(render_divisor);
-        (skip, frame_counter.wrapping_add(1))
-    } else {
-        // divisor 0/1: render every frame; counter untouched (matches the C `&&` short-circuit).
-        (false, frame_counter)
-    }
+/// (#278) Pure mirror of the obs-display.c `render_display()` ADAPTIVE, budget-based skip
+/// for a heavy monitoring display (the built-in Multiview projector, marked by
+/// `render_divisor > 1`). This SUPERSEDES the #276 fixed every-Nth-frame skip: with 4 live
+/// cams a SINGLE multiview render (~18-23 ms, rig-measured) alone exceeds the 16.6 ms 60 fps
+/// budget, so even every-other-frame the frames it DID render overran the deadline → ~29 %
+/// program renderSkip → the LED-wall IMAG program dropped to ~43 fps. The fix renders a
+/// monitoring display ONLY when its measured cost (EWMA, ns) fits the budget REMAINING after
+/// the program has already rendered this tick.
+///
+/// The vendored C, in `render_display()` BEFORE `render_display_begin()` (skipping there is
+/// ~0 cost — no clear/present — and leaves the last presented frame, so no flicker), is:
+/// ```c
+/// if (display->render_divisor > 1) {
+///     ... read interval, tick_start, ewma ...
+///     if (ewma != 0 && interval != 0 && tick_start != 0) {
+///         uint64_t elapsed = now - tick_start;
+///         uint64_t budget  = interval - interval / 10; /* 90% safety margin */
+///         if (elapsed + ewma > budget) return;          /* no slack → skip this frame */
+///     }
+/// }
+/// ```
+/// Returns `true` iff the display should be SKIPPED this frame. Guarantees:
+/// - `render_divisor <= 1` (program output + preview) → NEVER throttled (always render).
+/// - `ewma_ns == 0` (not warmed up) or `interval_ns == 0` (no timing yet) → render once to
+///   measure — so a monitoring display is NEVER starved to 0 before it is even measured.
+/// - Otherwise skip iff `elapsed + ewma > 90% of the frame interval`, i.e. render only when
+///   there is genuine slack left after the program → the monitoring render can NEVER push
+///   the graphics loop past the deadline → the program never skips. A monitoring display
+///   whose single render genuinely exceeds the budget (4-live-cam multiview) self-throttles
+///   to whatever slack is left (may freeze under sustained over-budget load — fine, it is
+///   monitoring; the program stays clean 60 fps, which is the non-negotiable requirement).
+///
+/// This is the only unit-testable part of #278 (the real GPU render timing needs the rig,
+/// which is why the supervisor rig-verifies the 4-live-cam case).
+pub fn display_render_skip_budget(render_divisor: u32, elapsed_ns: u64, ewma_ns: u64, interval_ns: u64) -> bool {
+    // RED stub: never skip (the un-throttled #276 behavior that lets a heavy monitoring
+    // render overrun the 60fps budget and skip the program). GREEN replaces this.
+    let _ = (render_divisor, elapsed_ns, ewma_ns, interval_ns);
+    false
+}
+
+/// (#278) Pure mirror of the EWMA update applied in `render_display()` AFTER a real render of
+/// a monitoring display, so the budget gate above can predict the next frame's cost. The
+/// vendored C is `display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;` — an
+/// exponentially-weighted moving average with α = 1/4 (3/4 weight on history) that smooths
+/// per-frame jitter while still tracking a load change within a few frames; a cold EWMA
+/// (`prev == 0`) seeds with the first measured duration.
+pub fn display_render_ewma_update(prev_ewma_ns: u64, measured_ns: u64) -> u64 {
+    // RED stub: wrong update (always 0) — never converges to the measured cost, so the budget
+    // gate would never learn a display is heavy. GREEN replaces this.
+    let _ = (prev_ewma_ns, measured_ns);
+    0
 }
 
 // ============================================================================
@@ -1224,72 +1256,108 @@ pub fn burn_should_render_qr(fourcc: &str) -> bool {
 mod tests {
     use super::*;
 
-    // ---- #276 multiview render-divisor skip cadence -------------------------
+    // ---- #278 multiview ADAPTIVE budget-based skip --------------------------
+    //
+    // Supersedes the #276 fixed every-Nth-frame cadence: the skip decision is now driven by
+    // the display's measured render cost (EWMA) vs the budget REMAINING after the program has
+    // already rendered this tick — so the program NEVER skips, no matter how heavy the
+    // monitoring display is. A 60fps frame interval is 16,666,666 ns; the 90% budget is
+    // 16,666,666 − 16,666,666/10 = 15,000,000 ns (15.0 ms).
+
+    const I60: u64 = 16_666_666; // 60fps frame interval (ns)
+    const BUDGET60: u64 = I60 - I60 / 10; // 90% safety margin = 15,000,000 ns
 
     #[test]
-    fn render_divisor_0_or_1_renders_every_frame_and_never_touches_counter() {
-        // Program output + preview never set a divisor (bzalloc → 0). They MUST render
-        // every frame and the counter must stay 0 (the C `&&` short-circuits the post-
-        // increment), so they are genuinely unaffected by #276.
+    fn program_and_preview_displays_are_never_throttled() {
+        // Program output + preview never set a divisor (bzalloc → 0/1). They MUST render
+        // EVERY frame regardless of elapsed/ewma/interval — the program is sacred.
         for divisor in [0u32, 1] {
-            let mut counter = 0u32;
-            for _ in 0..10 {
-                let (skip, next) = display_render_skip(counter, divisor);
-                assert!(!skip, "divisor {divisor} must never skip");
-                assert_eq!(
-                    next, 0,
-                    "divisor {divisor} must leave the counter untouched"
-                );
-                counter = next;
-            }
+            // even with an absurd elapsed + ewma that would skip a monitoring display:
+            assert!(
+                !display_render_skip_budget(divisor, I60, I60 * 10, I60),
+                "divisor {divisor} (program/preview) must NEVER be skipped"
+            );
         }
     }
 
     #[test]
-    fn render_divisor_2_renders_every_other_frame() {
-        // The multiview is throttled to 2 → renders frames 0,2,4,… skips 1,3,5,… so its
-        // 9-18ms render lands on the program thread only every other frame (halved cost).
-        let mut counter = 0u32;
-        let mut rendered = 0;
-        let mut skipped = 0;
-        for i in 0..10u32 {
-            let (skip, next) = display_render_skip(counter, 2);
-            if i.is_multiple_of(2) {
-                assert!(!skip, "even frame {i} renders");
-                rendered += 1;
-            } else {
-                assert!(skip, "odd frame {i} skips");
-                skipped += 1;
-            }
-            counter = next;
+    fn heavy_monitoring_display_with_no_slack_is_skipped() {
+        // The #278 regression: a 4-live-cam multiview render (~18ms EWMA) added to the ~4.3ms
+        // the program already consumed this tick (elapsed) exceeds the 15ms budget → the
+        // monitoring display MUST be skipped so the program does not overrun and renderSkip.
+        let elapsed = 4_340_000; // program already rendered ~4.34ms this tick
+        let ewma = 18_000_000; // multiview's measured ~18ms render
+        assert!(
+            elapsed + ewma > BUDGET60,
+            "test premise: this case has no slack"
+        );
+        assert!(
+            display_render_skip_budget(2, elapsed, ewma, I60),
+            "a heavy monitoring display with no remaining budget MUST be skipped (else the \
+             program renderSkips — the exact #278 bug)"
+        );
+    }
+
+    #[test]
+    fn monitoring_display_renders_when_there_is_slack() {
+        // When the monitoring display's cost DOES fit the remaining budget it MUST render —
+        // it is never starved when there is genuine slack.
+        let elapsed = 4_000_000; // 4.0ms program
+        let ewma = 8_000_000; // 8.0ms light multiview → 12.0ms total < 15ms budget
+        assert!(elapsed + ewma <= BUDGET60, "test premise: this case has slack");
+        assert!(
+            !display_render_skip_budget(2, elapsed, ewma, I60),
+            "a monitoring display whose cost fits the remaining budget MUST render"
+        );
+    }
+
+    #[test]
+    fn cold_monitoring_display_renders_to_measure_never_starved() {
+        // EWMA not warmed up (==0) → render once to measure, never skip-forever before we
+        // even know the cost. Same for a zero interval (no timing yet).
+        assert!(
+            !display_render_skip_budget(2, I60, 0, I60),
+            "ewma==0 (cold) must render to measure — never starved to 0"
+        );
+        assert!(
+            !display_render_skip_budget(2, I60, I60, 0),
+            "interval==0 (no timing) must render — never starved to 0"
+        );
+    }
+
+    #[test]
+    fn budget_boundary_is_inclusive_render_exclusive_skip() {
+        // Exactly AT the 90% budget → render (<=). One ns OVER → skip (>). Matches the C
+        // `elapsed + ewma > budget`.
+        assert!(
+            !display_render_skip_budget(2, 0, BUDGET60, I60),
+            "elapsed+ewma == budget → render (not skip)"
+        );
+        assert!(
+            display_render_skip_budget(2, 0, BUDGET60 + 1, I60),
+            "elapsed+ewma one ns over budget → skip"
+        );
+    }
+
+    #[test]
+    fn ewma_update_seeds_cold_then_converges_toward_load() {
+        // Cold (prev==0) seeds with the first measurement.
+        assert_eq!(
+            display_render_ewma_update(0, 18_000_000),
+            18_000_000,
+            "cold EWMA seeds with the first measured duration"
+        );
+        // α=1/4: from 8ms, a heavy 20ms frame nudges the average UP toward the load, smoothed.
+        let next = display_render_ewma_update(8_000_000, 20_000_000);
+        assert_eq!(next, (8_000_000 * 3 + 20_000_000) / 4, "EWMA = (prev*3 + dur)/4");
+        assert!(next > 8_000_000 && next < 20_000_000, "EWMA moves toward, not to, the new load");
+        // Repeated heavy frames converge the EWMA up across the budget so the gate learns the
+        // display is over-budget and starts skipping (the #278 self-throttle).
+        let mut e = 8_000_000u64;
+        for _ in 0..12 {
+            e = display_render_ewma_update(e, 20_000_000);
         }
-        assert_eq!((rendered, skipped), (5, 5));
-        assert_eq!(counter, 10, "counter advances every call when divisor>1");
-    }
-
-    #[test]
-    fn render_divisor_3_renders_one_in_three() {
-        let mut counter = 0u32;
-        let rendered: usize = (0..9)
-            .filter(|_| {
-                let (skip, next) = display_render_skip(counter, 3);
-                counter = next;
-                !skip
-            })
-            .count();
-        assert_eq!(rendered, 3, "divisor 3 renders 1/3 of frames (0,3,6)");
-    }
-
-    #[test]
-    fn render_divisor_counter_wraps_without_panic() {
-        // The counter is u32 and increments forever on a live multiview; it must wrap, not
-        // overflow-panic, and the cadence must stay correct across the wrap.
-        let (skip, next) = display_render_skip(u32::MAX, 2);
-        // u32::MAX is odd → MAX % 2 == 1 → skip; next wraps to 0.
-        assert!(skip);
-        assert_eq!(next, 0);
-        let (skip0, _) = display_render_skip(0, 2);
-        assert!(!skip0, "after the wrap, counter 0 renders again");
+        assert!(e > BUDGET60, "sustained heavy load drives the EWMA over budget → gate skips");
     }
 
     // ---- #136: timestamp-aligned release (multi-source IN-SYNC) -------------
