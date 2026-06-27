@@ -72,6 +72,16 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 		bool isMultiview = type == ProjectorType::Multiview;
 		obs_display_add_draw_callback(GetDisplay(), isMultiview ? OBSRenderMultiview : OBSRender, this);
 		obs_display_set_background_color(GetDisplay(), 0x000000);
+		// camera-box #276: the built-in Multiview projector renders a thumbnail of
+		// every scene each frame (9-18ms) on the SAME graphics thread that presents
+		// the program output, AFTER output_frames() — at 60fps that 9-18ms overruns
+		// the 16.6ms budget and breaks the program render whenever the multiview is
+		// open (measured: program 4.9ms/0-skip closed → 13.7-14.2ms with it open).
+		// Halve the MULTIVIEW display's render rate (every other frame) so monitoring
+		// never steals the program budget. ONLY the multiview is throttled; program
+		// output + preview keep divisor 1 (render every frame) and are unaffected.
+		if (isMultiview)
+			obs_display_set_render_divisor(GetDisplay(), 2);
 	};
 
 	connect(this, &OBSQTDisplay::DisplayCreated, this, addDrawCallback);

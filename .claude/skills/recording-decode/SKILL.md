@@ -46,6 +46,14 @@ pass MISSES the node burn, robust/fast-then-robust RECOVERS it. A present digita
 MUST decode — a non-decoding present burn is a decoder defect, never a real drop. Any change to
 the decode path must keep these green.
 
+**These fixtures also LOCK the burn WIRE FORMAT, not just the decoder.** They are real recordings
+carrying `P{run_id}.{frame_id}.{gen_ts_ns}.{crc32}` and the test decodes them via `Payload::decode`.
+So you CANNOT change the payload format (e.g. to shrink the QR matrix for a cheaper burn) off-rig —
+it breaks these fixtures, which only a fresh rig recording run can regenerate. The #275 burn-render
+speedup (`vendor/distroav/src/burn-qr.hpp` bulk row/run fills) deliberately keeps the OUTPUT BYTES
+identical (white `FF FF FF FF`, black `00 00 00 FF`) precisely so this lock stays valid — see the
+genlock skill "#275" section.
+
 ## Decode-path observability (#207)
 
 `qr::decode_path_counts() -> (fast, robust)` (process-wide AtomicU64) is logged at
