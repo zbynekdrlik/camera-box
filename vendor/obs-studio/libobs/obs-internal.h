@@ -956,17 +956,20 @@ struct obs_source {
 	uint32_t genlock_empty_run;
 	uint64_t genlock_frames_received;  /* video frames queued onto async_frames */
 	uint64_t genlock_frames_consumed;  /* frames handed to the compositor (one per tick) */
-	uint64_t genlock_underruns;        /* real FIFO starvation: build fill + true empty (NOT the ts-align source-early hold, see genlock_holds #148) */
-	uint64_t genlock_holds;            /* camera-box #148: ts-align source-early HOLDs (frames queued but none yet due) — a BENIGN repeat, distinct from a real underrun */
+	uint64_t genlock_underruns;        /* #269 [4]: real FIFO starvation = TRUE-EMPTY only (the num==0 guard in get_closest_frame). The count-gate build-fill hold moved to genlock_holds — do NOT fold it back. */
+	uint64_t genlock_holds;            /* camera-box #148/#269 [4]: BENIGN repeats, distinct from a real underrun — the ts-align source-early hold (frames queued, none yet due) AND the count-gate build-fill hold (still building the preload delay; recurs on every #126 reconnect re-arm). */
 	uint64_t genlock_overruns;         /* per-source drop-cap drains (queue forced empty) */
 	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
 	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */
 	/* camera-box #148: last ts-align decision, SAMPLED per tick for the 5s audit line (the
 	 * blog() stays 5s-gated; only these cheap field writes are per-tick) — so a future
-	 * ts-align regression (clock skew, wrong interval, drift) is debuggable from the log. */
-	uint64_t genlock_last_present_ts;  /* most recent ts-align presentation deadline (ns) */
-	uint32_t genlock_last_due;         /* most recent ts-align due-frame count */
-	int64_t genlock_last_head_skew_ns; /* most recent (wall_now - head frame->timestamp) skew (ns) */
+	 * ts-align regression (clock skew, wrong interval, drift) is debuggable from the log.
+	 * #269 [5]: written fresh ONLY on a ts-align tick; genlock_clear_ts_sample() resets all
+	 * three to 0 (the sentinel) on every count-gate / true-empty tick, so the audit never
+	 * prints a STALE sample from an earlier ts-align tick. 0 ⇒ "no ts-align sample this tick". */
+	uint64_t genlock_last_present_ts;  /* most recent ts-align presentation deadline (ns); 0 = not sampled this tick */
+	uint32_t genlock_last_due;         /* most recent ts-align due-frame count; 0 = not sampled this tick */
+	int64_t genlock_last_head_skew_ns; /* most recent (wall_now - head frame->timestamp) skew (ns); 0 = not sampled this tick */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;

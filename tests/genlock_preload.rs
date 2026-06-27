@@ -1137,9 +1137,9 @@ mod vendored_source {
              non-camera sources); re-apply."
         );
         assert!(
-            src.contains("genlock_present_ts(genlock_wall_now_ns(), preload, interval)"),
-            "{OBS_SOURCE}: #136 — the presentation deadline (genlock_present_ts from the real \
-             wall clock genlock_wall_now_ns) is gone; re-apply."
+            src.contains("genlock_present_ts(wall_now, preload, interval)"),
+            "{OBS_SOURCE}: #136/#269 [3] — the presentation deadline (genlock_present_ts from the \
+             hoisted single wall-clock read `wall_now`) is gone; re-apply."
         );
         // #136 boundary-churn fix: the C genlock_present_ts BODY must carry the +interval/2
         // half-interval bias (mirror of src/probe/genlock.rs genlock_present_ts'
@@ -1214,9 +1214,10 @@ mod vendored_source {
         // The render path must actually USE the reserve deadline when reserve_ms > 0
         // (otherwise the knob is inert — exactly the #119 stale-bytes class of bug).
         assert!(
-            src.contains("genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)"),
-            "{OBS_SOURCE}: #184 — the ts-align render path no longer selects \
-             genlock_present_ts_reserve when a reserve is configured; the ms-reserve knob is inert. Re-apply."
+            src.contains("genlock_present_ts_reserve(wall_now, reserve_ms)"),
+            "{OBS_SOURCE}: #184/#269 [3] — the ts-align render path no longer selects \
+             genlock_present_ts_reserve (from the hoisted `wall_now`) when a reserve is \
+             configured; the ms-reserve knob is inert. Re-apply."
         );
     }
 
@@ -1586,8 +1587,8 @@ mod vendored_source {
         // Anchor on the unique reserve-deadline call; the holds++ must be within the same
         // ts-align block (it follows the present_ts/due computation, before the present path).
         let anchor = raw
-            .find("genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)")
-            .expect("#148: the ts-align reserve deadline is gone — re-locate");
+            .find("genlock_present_ts_reserve(wall_now, reserve_ms)")
+            .expect("#148/#269 [3]: the ts-align reserve deadline (from hoisted wall_now) is gone — re-locate");
         let window_end = (anchor + 2500).min(raw.len());
         assert!(
             raw[anchor..window_end].contains("source->genlock_holds++"),
@@ -1614,6 +1615,104 @@ mod vendored_source {
                  ts-align hold/decision signals are missing from the 5s log. Re-apply."
             );
         }
+    }
+
+    #[test]
+    fn fps_read_returns_cached_last_good_pair_on_a_tear() {
+        // #269 [0]/[1]/[2]: genlock_video_fps must keep a LAST-GOOD cache and return it on
+        // a persistent tear (not false/0), so genlock_source_drop_cap never collapses to the
+        // 30-frame floor and genlock_frame_interval_ns never returns 0 (disengaging ts-align)
+        // on a transient ovi-fps tear. Mirror of src/probe/genlock.rs genlock_fps_cached.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("static bool genlock_fps_cache_load("),
+            "{OBS_SOURCE}: #269 [0]/[1]/[2] — the lock-free last-good fps cache reader \
+             genlock_fps_cache_load is gone; a tear would again collapse the drop-cap / \
+             zero the frame interval. Re-apply."
+        );
+        assert!(
+            src.contains(
+                "static pthread_mutex_t genlock_fps_cache_lock = PTHREAD_MUTEX_INITIALIZER"
+            ),
+            "{OBS_SOURCE}: #269 — the fps-cache writer mutex (genlock_fps_cache_lock) is gone; \
+             concurrent publishers could corrupt the seqlock. Re-apply."
+        );
+        // The tear fallback must RETURN the cached pair (the whole point of the #269 fix),
+        // not just compute it.
+        assert!(
+            src.contains("if (genlock_fps_cache_load(fps_num, fps_den)) return true;")
+                || src.contains("if (genlock_fps_cache_load(fps_num, fps_den)) { return true; }"),
+            "{OBS_SOURCE}: #269 [0]/[1]/[2] — genlock_video_fps no longer returns the cached \
+             last-good pair on a persistent tear; it reverted to the bare false/0 return that \
+             collapses the drop-cap and zeroes the frame interval. Re-apply."
+        );
+    }
+
+    #[test]
+    fn ts_align_reads_wall_clock_once_per_tick() {
+        // #269 [3]: the ts-align tick must read the precise wall clock ONCE
+        // (`const uint64_t wall_now = genlock_wall_now_ns();`) and reuse it for BOTH the
+        // deadline and the head-skew sample — not call genlock_wall_now_ns() a second time
+        // (GetSystemTimePreciseAsFileTime is non-trivial on Windows).
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("const uint64_t wall_now = genlock_wall_now_ns();"),
+            "{OBS_SOURCE}: #269 [3] — the single hoisted wall-clock read \
+             (`const uint64_t wall_now = genlock_wall_now_ns();`) is gone; re-apply."
+        );
+        assert!(
+            src.contains("(int64_t)(wall_now - source->async_frames.array[0]->timestamp)"),
+            "{OBS_SOURCE}: #269 [3] — the ts-align head-skew sample no longer reuses the hoisted \
+             `wall_now` (it calls genlock_wall_now_ns() a SECOND time per tick); re-apply."
+        );
+    }
+
+    #[test]
+    fn count_gate_build_fill_counts_as_hold_not_underrun() {
+        // #269 [4]: the count-gate build-fill HOLD (`!gd.consume`, reached only with num>=1)
+        // is benign — it must increment genlock_holds, NOT genlock_underruns. underruns are
+        // now TRUE-EMPTY only (the single num==0 guard in get_closest_frame).
+        let raw = vendor_file(OBS_SOURCE);
+        // Anchor on the count-gate hold comment; genlock_holds++ must be in that branch.
+        let anchor = raw
+            .find("hold: still BUILDING the preload delay")
+            .expect("#269 [4]: the count-gate build-fill hold branch is gone — re-locate");
+        let window_end = (anchor + 1500).min(raw.len());
+        assert!(
+            raw[anchor..window_end].contains("source->genlock_holds++"),
+            "{OBS_SOURCE}: #269 [4] — the count-gate build-fill hold no longer increments \
+             genlock_holds (it is mis-counted as an underrun again). Re-apply."
+        );
+        // After the move there is EXACTLY ONE genlock_underruns++ left: the TRUE-EMPTY guard.
+        let underruns = raw.matches("source->genlock_underruns++").count();
+        assert_eq!(
+            underruns, 1,
+            "{OBS_SOURCE}: #269 [4] — expected exactly 1 `source->genlock_underruns++` (the \
+             TRUE-EMPTY num==0 guard); found {underruns}. The build-fill hold was re-folded into \
+             genlock_underruns, or a new spurious underrun site appeared."
+        );
+    }
+
+    #[test]
+    fn stale_ts_align_sample_reset_to_sentinel_off_path() {
+        // #269 [5]: genlock_last_present_ts/_due/_head_skew_ns are written ONLY on a ts-align
+        // tick but genlock_audit_log prints them unconditionally — so a fall-through / true-empty
+        // tick printed a STALE sample. genlock_clear_ts_sample() must reset them to 0 on BOTH the
+        // count-gate fall-through AND the true-empty path. Mirror of genlock_ts_audit_sample.
+        let raw = vendor_file(OBS_SOURCE);
+        let src = squish(&raw);
+        assert!(
+            src.contains("static inline void genlock_clear_ts_sample(obs_source_t *source)"),
+            "{OBS_SOURCE}: #269 [5] — the ts-align sample reset helper genlock_clear_ts_sample \
+             is gone; the 5s audit would reprint a stale present/due/skew. Re-apply."
+        );
+        let calls = raw.matches("genlock_clear_ts_sample(source);").count();
+        assert!(
+            calls >= 2,
+            "{OBS_SOURCE}: #269 [5] — genlock_clear_ts_sample(source) is called {calls} time(s); \
+             expected >=2 (the count-gate fall-through AND the true-empty path). A non-ts-align \
+             tick would print a stale sample. Re-apply."
+        );
     }
 
     #[test]

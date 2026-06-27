@@ -4260,20 +4260,63 @@ static uint32_t genlock_preload_default(void)
 	return (uint32_t)preload;
 }
 
+/* camera-box #200 follow-up (#269 review): the LAST-GOOD output-fps cache for
+ * genlock_video_fps(). The output fps is the GLOBAL canvas ovi — one value shared by
+ * EVERY genlock source — so a single file-scope cached pair is correct. Readers are
+ * lock-free via a value-seqlock (genlock_fps_cache_seq: even=stable, odd=write in flight,
+ * 0=no good pair ever cached); the RARE writer (only when the freshly-agreed pair DIFFERS
+ * from the cache, so steady state never writes) serialises under a private mutex that is
+ * NEVER nested with any other lock — it therefore cannot deadlock vs obs_reset_video
+ * (unlike the OBS video graphics lock the original #200 note rejected). */
+static pthread_mutex_t genlock_fps_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile long genlock_fps_cache_seq = 0; /* even=stable, odd=writing, 0=never set */
+static uint32_t genlock_fps_cache_num = 0;
+static uint32_t genlock_fps_cache_den = 0;
+
+/* Lock-free seqlock read of the last-good fps cache. Returns false (leaving *num/*den
+ * untouched) when no good pair was ever published. */
+static bool genlock_fps_cache_load(uint32_t *num, uint32_t *den)
+{
+	for (int attempt = 0; attempt < 4; attempt++) {
+		const long s1 = os_atomic_load_long(&genlock_fps_cache_seq);
+		if (s1 == 0)
+			return false; /* never initialized */
+		if (s1 & 1)
+			continue; /* writer in flight — retry */
+		const uint32_t n = genlock_fps_cache_num;
+		const uint32_t d = genlock_fps_cache_den;
+		if (os_atomic_load_long(&genlock_fps_cache_seq) == s1) {
+			*num = n;
+			*den = d;
+			return true;
+		}
+	}
+	return false;
+}
+
 /* camera-box #200: read the output frame-rate pair (fps_num, fps_den) WITHOUT a torn
  * read. obs_get_video_info() (obs.c) copies obs->...->mix->ovi UNLOCKED, so a
  * concurrent obs_reset_video() (a resolution/fps change) can interleave between the
- * fps_num and fps_den field copies and return a MISMATCHED pair — which would format a
- * wrong ms in the genlock audit log. We deliberately do NOT take the OBS video
- * graphics lock on this render/audit path: that risks a lock-ordering deadlock vs
- * obs_reset_video (which holds the video lock while it can touch source state), for a
- * log-only accuracy gain. Instead snapshot the pair twice and accept it only when two
- * back-to-back reads AGREE — a bounded value-seqlock; obs_reset_video is rare, so in
- * steady state the first two reads already match (one extra struct copy). Returns false
- * with num=den=0 when there is no valid video info OR a tear persists past the retry
- * budget — every caller already guards fps_num==0 / fps_den!=0, so it then takes the
- * fps-unknown branch (latency_frames=0, fps=0.0; preload_ms / interval return 0). Mirror
- * of the fps-pair acceptance pinned in src/probe/genlock.rs (genlock_fps_pair_consistent). */
+ * fps_num and fps_den field copies and return a MISMATCHED pair. We deliberately do NOT
+ * take the OBS video graphics lock on this render/audit path: that risks a lock-ordering
+ * deadlock vs obs_reset_video (which holds the video lock while it can touch source
+ * state). Instead snapshot the pair twice and accept it only when two back-to-back reads
+ * AGREE — a bounded value-seqlock; obs_reset_video is rare, so in steady state the first
+ * two reads already match (one extra struct copy).
+ *
+ * camera-box #269 review: on AGREEMENT we also PUBLISH the good pair to a file-scope
+ * last-good cache (only when it CHANGED — the steady-state hot path stays lock-free), and
+ * on a PERSISTENT tear we return the CACHED last-good pair instead of false/0. The bare
+ * false return broke two callers the old always-true read never did: (1)
+ * genlock_source_drop_cap skipped its latency_frames bump → the per-source FIFO drop-cap
+ * collapsed to the 30-frame floor → a deep-latency override momentarily force-drained the
+ * FIFO (an A/V phase jump); (2) genlock_frame_interval_ns returned 0 → the ts-align block
+ * was skipped for that tick → the source briefly presented off the shared wall-clock
+ * deadline (a one-tick break of the #136 multi-source in-sync invariant). Returning the
+ * cached pair eliminates both while still never logging a TORN pair (#200's goal). false
+ * is now returned ONLY on a tear before ANY good pair was ever read (first-ever call
+ * mid-tear) — every caller still guards fps_num==0 / fps_den!=0 and takes the fps-unknown
+ * branch then. Mirror of src/probe/genlock.rs genlock_fps_cached. */
 static bool genlock_video_fps(uint32_t *fps_num, uint32_t *fps_den)
 {
 	struct obs_video_info a;
@@ -4284,9 +4327,28 @@ static bool genlock_video_fps(uint32_t *fps_num, uint32_t *fps_den)
 		if (a.fps_num == b.fps_num && a.fps_den == b.fps_den) {
 			*fps_num = a.fps_num;
 			*fps_den = a.fps_den;
+			/* publish a CHANGED good (nonzero) pair; steady state matches the
+			 * cache so it takes no lock. The compare reads the cache via the
+			 * lock-free seqlock (no data race), then the rare write serialises. */
+			if (a.fps_num != 0) {
+				uint32_t cn = 0, cd = 0;
+				const bool cached = genlock_fps_cache_load(&cn, &cd);
+				if (!cached || cn != a.fps_num || cd != a.fps_den) {
+					pthread_mutex_lock(&genlock_fps_cache_lock);
+					os_atomic_inc_long(&genlock_fps_cache_seq); /* -> odd */
+					genlock_fps_cache_num = a.fps_num;
+					genlock_fps_cache_den = a.fps_den;
+					os_atomic_inc_long(&genlock_fps_cache_seq); /* -> even */
+					pthread_mutex_unlock(&genlock_fps_cache_lock);
+				}
+			}
 			return true;
 		}
 	}
+	/* a tear persisted past the retry budget: return the cached last-good pair if one
+	 * was ever recorded; only a never-initialized cache rejects (fps-unknown fallback). */
+	if (genlock_fps_cache_load(fps_num, fps_den))
+		return true;
 	*fps_num = 0;
 	*fps_den = 0;
 	return false;
@@ -4586,6 +4648,22 @@ static inline uint64_t genlock_present_ts_reserve(uint64_t wall_now_ns, uint32_t
 }
 /* ---- end #136 ------------------------------------------------------------- */
 
+/* camera-box #148 follow-up (#269 finding [5]): the ts-align decision sample
+ * (genlock_last_present_ts / _due / _head_skew_ns) is written ONLY on a tick the ts-align
+ * path ran, but genlock_audit_log prints it unconditionally — so a ts-align source that
+ * FALLS THROUGH to the count gate (interval==0, non-wallclock head ts) or a true-empty
+ * tick printed the STALE sample from an earlier tick. Reset the three fields to the
+ * all-zero sentinel on every count-gate / true-empty tick (BEFORE that tick's
+ * genlock_audit_log call) so the 5s audit never prints a stale present/due/skew (the
+ * "0 on non-ts-align" the audit comment promises). Mirror of src/probe/genlock.rs
+ * genlock_ts_audit_sample. */
+static inline void genlock_clear_ts_sample(obs_source_t *source)
+{
+	source->genlock_last_present_ts = 0;
+	source->genlock_last_due = 0;
+	source->genlock_last_head_skew_ns = 0;
+}
+
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
  * visible in the OBS log before AND after the fix (the verification evidence).
  * `now_ns` is the monotonic render-tick stamp (obs->video.video_time). */
@@ -4645,7 +4723,9 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned)GENLOCK_REARM_EMPTY_TICKS,
 	     /* camera-box #148: the ts-align decision sample (present_ts / due / head-frame
 	      * skew in ms) — the per-tick present/hold/drop relationship the #136 churn
-	      * diagnosis lacked. Sampled on the ts-align path; 0 on non-ts-align sources. */
+	      * diagnosis lacked. Sampled on the ts-align path; reset to 0 (the sentinel) on
+	      * every count-gate / true-empty tick by genlock_clear_ts_sample (#269 [5]) so
+	      * this never prints a STALE sample from an earlier ts-align tick. */
 	     (unsigned long long)source->genlock_last_present_ts,
 	     source->genlock_last_due,
 	     (long long)(source->genlock_last_head_skew_ns / 1000000));
@@ -4715,10 +4795,18 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				const uint32_t reserve_ms = source->genlock_latency_ms > 0
 								    ? source->genlock_latency_ms
 								    : genlock_reserve_ms();
+				/* camera-box #269 finding [3]: read the precise wall clock ONCE per
+				 * tick and reuse it for BOTH the deadline and the head-skew sample.
+				 * On Windows genlock_wall_now_ns() is GetSystemTimePreciseAsFileTime
+				 * (non-trivial); the old code called it a SECOND time for the skew,
+				 * doubling the per-frame precise-clock read on this hot path. The
+				 * single read also makes the skew measured at the SAME instant as the
+				 * deadline. */
+				const uint64_t wall_now = genlock_wall_now_ns();
 				const uint64_t present_ts =
 					reserve_ms > 0
-						? genlock_present_ts_reserve(genlock_wall_now_ns(), reserve_ms)
-						: genlock_present_ts(genlock_wall_now_ns(), preload, interval);
+						? genlock_present_ts_reserve(wall_now, reserve_ms)
+						: genlock_present_ts(wall_now, preload, interval);
 				/* due = prefix of queued frames at/before the deadline (a single
 				 * NDI source delivers in monotonic capture order). */
 				size_t due = 0;
@@ -4728,14 +4816,14 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				/* camera-box #148: SAMPLE the ts-align decision inputs for the
 				 * periodic 5s audit line (present_ts / due / head-frame-vs-wall
 				 * skew). Cheap per-tick field writes; the blog() in
-				 * genlock_audit_log stays 5s-gated. The skew reads the wall clock
-				 * once here (a few µs after the deadline's own read — immaterial at
-				 * the ms granularity logged). ready_async_frame is only entered with
+				 * genlock_audit_log stays 5s-gated. #269 [3]: the skew reuses the
+				 * single `wall_now` read above (same instant as the deadline, no
+				 * second precise-clock read). ready_async_frame is only entered with
 				 * num>=1, so array[0] is valid. */
 				source->genlock_last_present_ts = present_ts;
 				source->genlock_last_due = (uint32_t)due;
 				source->genlock_last_head_skew_ns =
-					(int64_t)(genlock_wall_now_ns() -
+					(int64_t)(wall_now -
 						  source->async_frames.array[0]->timestamp);
 				/* count-gate machinery (empty_run re-arm / fill latch) is unused on
 				 * this path — ts-align self-heals after a transient via the real ts. */
@@ -4768,6 +4856,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				return true;
 			}
 		}
+
+		/* camera-box #269 finding [5]: the ts-align path did NOT present/hold this tick
+		 * (interval==0, a non-wallclock head ts, or ts-align off) — reset the ts-align
+		 * decision sample to the sentinel so the 5s audit prints 0, never a STALE sample
+		 * left over from an earlier ts-align tick. */
+		genlock_clear_ts_sample(source);
 
 		/* camera-box #126: frames have RESUMED (this branch is reached only with
 		 * num>=1). If a SUSTAINED true-empty run preceded this resume while the source
@@ -4820,8 +4914,14 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 			 * while the reserve fills. ready_async_frame is only reached with
 			 * num>=1 (get_closest_frame returns earlier on a TRUE empty, counting
 			 * that underrun at its num==0 guard), so once filled this branch is not
-			 * taken: a steady-state queued frame is ALWAYS consumed (the #102 fix). */
-			source->genlock_underruns++;
+			 * taken: a steady-state queued frame is ALWAYS consumed (the #102 fix).
+			 * camera-box #269 finding [4]: this count-gate build-fill is a BENIGN
+			 * hold (its own comment says "still BUILDING"; it also recurs on every
+			 * #126 reconnect re-arm) — count it as genlock_holds, NOT genlock_underruns.
+			 * underruns must mean TRUE-EMPTY starvation only (the num==0 guard in
+			 * get_closest_frame); folding the build-fill in inflated the underrun
+			 * count. Mirror of src/probe/genlock.rs classify_count_gate_tick. */
+			source->genlock_holds++;
 			genlock_audit_log(source, now_ns);
 			return false;
 		}
@@ -4963,6 +5063,10 @@ static inline struct obs_source_frame *get_closest_frame(obs_source_t *source, u
 			 * Saturating so a very long outage can't wrap the counter. */
 			if (source->genlock_empty_run != UINT32_MAX)
 				source->genlock_empty_run++;
+			/* camera-box #269 finding [5]: a true-empty tick has no ts-align
+			 * sample — reset to the sentinel so the audit prints 0, not a stale
+			 * present/due/skew from an earlier ts-align tick. */
+			genlock_clear_ts_sample(source);
 			genlock_audit_log(source, sys_time);
 		}
 		return NULL;

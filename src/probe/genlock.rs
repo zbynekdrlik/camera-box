@@ -805,6 +805,14 @@ pub fn classify_ts_align_tick(queue_depth: usize, due: usize) -> GenlockTick {
     }
 }
 
+/// An output frame-rate pair `(fps_num, fps_den)` — the canvas `ovi` fps the genlock
+/// audit/preload path reads.
+pub type FpsPair = (u32, u32);
+
+/// The result of [`genlock_fps_cached`]: `(new_cache, result)` — the cache state after
+/// the call, and the pair the caller uses (`None` ⇒ the fps-unknown fallback).
+pub type FpsCacheUpdate = (Option<FpsPair>, Option<FpsPair>);
+
 /// (#200 follow-up, #269 review) The LAST-GOOD-cached extension of
 /// [`genlock_fps_pair_consistent`]. The C `genlock_video_fps()` keeps a file-scope
 /// last-good `(fps_num, fps_den)` cache (the output fps is the GLOBAL canvas `ovi`, one
@@ -828,16 +836,15 @@ pub fn classify_ts_align_tick(queue_depth: usize, due: usize) -> GenlockTick {
 ///
 /// Returns `(new_cache, result)`: `new_cache` is the cache state after this call;
 /// `result` is the pair the caller uses (`None` ⇒ fps-unknown fallback).
-pub fn genlock_fps_cached(
-    cache: Option<(u32, u32)>,
-    a: (u32, u32),
-    b: (u32, u32),
-) -> (Option<(u32, u32)>, Option<(u32, u32)>) {
-    // RED stub (#269 [0]/[1]/[2]): OLD behavior — no cache retention; a tear rejects even
-    // when a good pair was previously read (the bare genlock_fps_pair_consistent return).
-    let _ = cache;
-    let r = genlock_fps_pair_consistent(a, b);
-    (cache, r)
+pub fn genlock_fps_cached(cache: Option<FpsPair>, a: FpsPair, b: FpsPair) -> FpsCacheUpdate {
+    match genlock_fps_pair_consistent(a, b) {
+        // Agree on a GOOD pair: accept it AND refresh the cache.
+        Some(pair) if pair.0 != 0 => (Some(pair), Some(pair)),
+        // Agree on a degenerate (0, _) pair: return it but do NOT cache it.
+        Some(pair) => (cache, Some(pair)),
+        // Tear: return the cached last-good pair; only a never-initialized cache rejects.
+        None => (cache, cache),
+    }
 }
 
 /// (#148 follow-up, #269 finding [4]) Classify one COUNT-GATE render tick into the audit
@@ -850,13 +857,12 @@ pub fn genlock_fps_cached(
 /// folded the build-fill hold into `genlock_underruns`; this pins the corrected split
 /// (build-fill HOLD → `genlock_holds`, true-empty → `genlock_underruns`).
 pub fn classify_count_gate_tick(queue_depth: usize, consume: bool) -> GenlockTick {
-    // RED stub (#269 [4]): OLD behavior — a non-consume (build-fill) tick is counted as an
-    // Underrun (the pre-#269 C `source->genlock_underruns++` at the count gate). The
-    // build-fill-is-a-HOLD test below FAILS here.
-    if queue_depth > 0 && consume {
-        GenlockTick::Present
+    if queue_depth == 0 {
+        GenlockTick::Underrun // true empty (counted at the num==0 guard, get_closest_frame)
+    } else if !consume {
+        GenlockTick::SourceEarlyHold // build-fill HOLD → genlock_holds (#269 [4])
     } else {
-        GenlockTick::Underrun
+        GenlockTick::Present
     }
 }
 
@@ -875,10 +881,11 @@ pub fn genlock_ts_audit_sample(
     due: u32,
     head_skew_ns: i64,
 ) -> (u64, u32, i64) {
-    // RED stub (#269 [5]): OLD behavior — prints the sample unconditionally, so a
-    // non-ts-align tick reprints the previous (stale) ts-align sample.
-    let _ = sampled;
-    (present_ts, due, head_skew_ns)
+    if sampled {
+        (present_ts, due, head_skew_ns)
+    } else {
+        (0, 0, 0) // sentinel: no ts-align sample this tick
+    }
 }
 
 #[cfg(test)]
