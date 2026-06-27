@@ -700,6 +700,73 @@ pub fn genlock_release(present_ts_ns: u64, queued_ts_ascending: &[u64]) -> Genlo
     }
 }
 
+/// A timestamp-aligned genlock RELEASE decision WITH backward-wall-clock-step recovery
+/// (#147) — the [`genlock_release`] decision plus a flag for whether THIS tick recovered
+/// from a backward clock step (so the C audit can count `genlock_backward_steps`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenlockReleaseGuarded {
+    /// The release decision to apply (drop the stale oldest, present or hold).
+    pub release: GenlockRelease,
+    /// A backward DanteSync wall-clock step (NTP/PTP sawtooth correction) was DETECTED
+    /// and RECOVERED this tick: the head frame was stamped in the impossible FUTURE
+    /// relative to the real wall clock (captured before the step), so the unguarded path
+    /// would have HELD (frozen) indefinitely; this tick re-anchored and presented a frame
+    /// instead. `false` on every normal tick (a due frame, or a benign source-early hold).
+    pub backward_step: bool,
+}
+
+/// Decide the timestamp-aligned release WITH backward-wall-clock-step recovery (#147).
+///
+/// The SINK ts-align deadline is `present_ts = wall_now - reserve` ([`genlock_present_ts`]
+/// / [`genlock_present_ts_reserve`]). If the shared DanteSync wall clock steps BACKWARD (a
+/// real NTP/PTP sawtooth correction on this rig — see the genlock ops notes), `wall_now`
+/// regresses, so `present_ts` drops BELOW every already-queued frame's (pre-step, higher)
+/// capture timestamp → [`genlock_release`] finds `due == 0` and HOLDs (repeats the last
+/// frame) every tick. Because the post-step frames keep arriving stamped at the rewound
+/// (lower) clock, the queue head stays a stale FUTURE-stamped frame and the hold is
+/// INDEFINITE — the live program feed FREEZES until the wall clock naturally climbs back
+/// (potentially seconds–minutes). This is the SINK analogue of the cam-EMIT freeze the
+/// #131/#134 guard fixed (`src/ndi.rs genlock_emit_gate`: a boundary latched impossibly
+/// far in the future re-latched to the rewound clock).
+///
+/// Recovery (mirror of #131's future-state detection, applied to the queued frames): a
+/// queued frame whose capture timestamp is MORE THAN one `interval` AHEAD of the real
+/// `wall_now` is impossible for a live capture (you cannot capture in the future) — it was
+/// stamped BEFORE a backward clock step. When the unguarded release would HOLD (`due == 0`)
+/// yet such a future-stamped frame sits at the HEAD (blocking the ascending-prefix scan),
+/// RE-ANCHOR: present the NEWEST queued frame and drop the older (now-stale) ones — exactly
+/// as a normal "present newest due" tick. Over the next ticks each re-anchor drops the
+/// frames behind the newest, so the stale pre-step frames drain; once the post-step
+/// (rewound-clock) frames are the newest, the normal ts-align prefix resumes. The result
+/// is a one-/few-tick blip, NEVER an indefinite freeze.
+///
+/// Why a one-tick `wall_now < last_wall_now` step detector is NOT enough (and is not used):
+/// the backward step is a SINGLE event, but the stale FUTURE-stamped head persists across
+/// the following ticks (until it drains), so a one-shot "the clock just stepped" trigger
+/// would re-freeze on the very next tick. Detecting the stale future-stamped head directly
+/// — the condition that actually causes the freeze — self-heals over the seam and needs no
+/// per-source state. A legitimate large per-source latency override (up to 2000 ms) buffers
+/// frames that are PAST-stamped (aging toward the deadline, `ts <= wall_now`), never
+/// FUTURE-stamped, so this guard never touches it.
+///
+/// Mirror of the C `ready_async_frame` ts-align release block (#147) — guarded in
+/// `tests/genlock_preload.rs`.
+pub fn genlock_release_guarded(
+    wall_now_ns: u64,
+    interval_ns: u64,
+    present_ts_ns: u64,
+    queued_ts_ascending: &[u64],
+) -> GenlockReleaseGuarded {
+    // #147 RED: this stub reproduces TODAY's unguarded SINK behaviour — it ignores the
+    // backward step and delegates straight to genlock_release, so a future-stamped head
+    // HOLDs (freezes) forever. The GREEN commit replaces this body with the re-anchor.
+    let _ = (wall_now_ns, interval_ns);
+    GenlockReleaseGuarded {
+        release: genlock_release(present_ts_ns, queued_ts_ascending),
+        backward_step: false,
+    }
+}
+
 /// Lower plausible-wall-clock bound (Unix epoch ns): 2020-01-01T00:00:00Z.
 pub const WALLCLOCK_TS_MIN_NS: u64 = 1_577_836_800_000_000_000;
 /// Upper plausible-wall-clock bound (exclusive, Unix epoch ns): 2100-01-01T00:00:00Z.
@@ -1512,5 +1579,145 @@ mod tests {
         // #269 [5]: a count-gate / true-empty tick must NOT reprint the previous ts-align
         // sample — it publishes the all-zero sentinel.
         assert_eq!(genlock_ts_audit_sample(false, 123_456, 2, -5), (0, 0, 0));
+    }
+
+    // ---- #147: backward wall-clock step (NTP/PTP correction) recovery -------
+    // SINK ts-align analogue of the cam-EMIT guard #131/#134
+    // (ndi.rs::genlock_gate_recovers_after_backward_clock_step). A backward DanteSync
+    // wall-clock step drops present_ts below every pre-step (high) frame timestamp →
+    // `due == 0` every tick → the unguarded path HOLDs (freezes the program feed)
+    // INDEFINITELY. The guard must re-anchor and resume within ~1 interval.
+
+    const RESERVE_MS: u32 = 3; // the prod genlock latency (#257 floor)
+
+    #[test]
+    fn sink_backward_clock_step_freezes_the_unguarded_release() {
+        // Documents the bug the guard fixes. Steady state: frames captured around the
+        // wall clock are due. Then the wall clock steps BACKWARD by ~5 s (a real NTP/PTP
+        // sawtooth correction). present_ts = wall - reserve regresses far below every
+        // already-queued (pre-step, high) frame timestamp, so the RAW genlock_release
+        // finds nothing due and HOLDs — the indefinite freeze.
+        let wall0 = WBASE + 10 * NS30;
+        let queued = vec![wall0 - NS30, wall0]; // captured just before "now", ascending
+        // Pre-step: a frame IS due (normal).
+        let pre = genlock_release(genlock_present_ts_reserve(wall0, RESERVE_MS), &queued);
+        assert!(pre.present, "pre-step a queued frame must be due");
+
+        // Backward step: the clock jumps ~5 s into the past. The queued frames are
+        // unchanged (still stamped at the pre-step, higher wall time).
+        let wall_after = wall0 - 5_000_000_000;
+        let present_ts_after = genlock_present_ts_reserve(wall_after, RESERVE_MS);
+        let frozen = genlock_release(present_ts_after, &queued);
+        assert!(
+            !frozen.present,
+            "the bug: after a backward clock step the unguarded release HOLDs (due==0) — \
+             this is the program-feed freeze #147 fixes"
+        );
+    }
+
+    #[test]
+    fn sink_backward_clock_step_re_anchors_instead_of_freezing() {
+        // The #147 fix: on the SAME backward-step tick the unguarded path would freeze,
+        // the guarded release RE-ANCHORS — it flags the backward step AND presents the
+        // newest queued frame (dropping the stale older pre-step ones) instead of holding.
+        let wall0 = WBASE + 10 * NS30;
+        let queued = vec![wall0 - NS30, wall0];
+        let wall_after = wall0 - 5_000_000_000;
+        let present_ts_after = genlock_present_ts_reserve(wall_after, RESERVE_MS);
+
+        let g = genlock_release_guarded(wall_after, NS30, present_ts_after, &queued);
+        assert!(
+            g.backward_step,
+            "a future-stamped head after a backward clock step must be DETECTED (#147)"
+        );
+        assert!(
+            g.release.present,
+            "the guard must PRESENT a frame, not freeze, after a backward clock step (#147)"
+        );
+        assert_eq!(
+            g.release.drop_oldest,
+            queued.len() - 1,
+            "the re-anchor presents the NEWEST queued frame, dropping the stale older \
+             (pre-step) ones"
+        );
+    }
+
+    #[test]
+    fn sink_backward_step_recovers_within_one_interval_not_frozen_forever() {
+        // Mirror of ndi.rs::genlock_gate_recovers_after_backward_clock_step: drive several
+        // ticks AT the rewound clock (post-step frames arriving stamped at the new low
+        // wall time) and confirm presentation RESUMES within ~1 interval — i.e. the guard
+        // self-heals over the non-monotonic seam (stale high frames then fresh low ones),
+        // never wedging at "frozen forever" like the unguarded path.
+        let wall0 = WBASE + 100 * NS30;
+        // At the step instant the FIFO holds the freshest pre-step (high) frame.
+        let mut queue: Vec<u64> = vec![wall0];
+        let rewound = wall0 - 5_000_000_000; // clock jumps ~5 s back
+
+        let mut presented = 0usize;
+        let mut anchored = 0usize;
+        for k in 0..4u64 {
+            let wall = rewound + k * NS30; // clock advances normally from the rewound point
+            let present_ts = genlock_present_ts_reserve(wall, RESERVE_MS);
+            let g = genlock_release_guarded(wall, NS30, present_ts, &queue);
+            if g.backward_step {
+                anchored += 1;
+            }
+            if g.release.present {
+                presented += 1;
+                // Apply the decision: free the stale oldest, keep the presented frame at
+                // the head (the C keeps array[0] until the next consume drops it).
+                queue.drain(0..g.release.drop_oldest);
+            }
+            // A post-step frame arrives stamped at the rewound clock (the cam re-anchored
+            // its own emit gate, #131), appended in capture order.
+            queue.push(rewound + (k + 1) * NS30);
+        }
+        assert!(
+            presented >= 1,
+            "presentation must RESUME after a backward clock step (got {presented}); \
+             the unguarded path stays frozen at 0 forever (#147)"
+        );
+        assert!(
+            anchored >= 1,
+            "the backward step must be detected + recovered at least once (got {anchored})"
+        );
+    }
+
+    #[test]
+    fn benign_source_early_hold_is_not_treated_as_a_backward_step() {
+        // A normal source-early hold: the head frame simply has not aged to the deadline
+        // yet (ts in (present_ts, wall_now] — recent, NOT future). The guard must leave it
+        // a plain HOLD, never spuriously re-anchor, so the legitimate large per-source
+        // latency feature (up to 2000 ms of deliberate, past-stamped buffering) is intact.
+        let wall = WBASE + 50 * NS30;
+        // A 1000 ms deliberate latency: a frame captured 100 ms ago is queued but not yet
+        // due (aged < 1000 ms). It is PAST-stamped (ts <= wall), never future.
+        let latency_ms = 1000u32;
+        let head_ts = wall - 100_000_000; // 100 ms old — recent, not future
+        let queued = vec![head_ts];
+        let present_ts = genlock_present_ts_reserve(wall, latency_ms);
+        let g = genlock_release_guarded(wall, NS30, present_ts, &queued);
+        assert!(
+            !g.backward_step,
+            "a recent (past-stamped) not-yet-due frame is NOT a backward step (#147)"
+        );
+        assert!(
+            !g.release.present,
+            "a benign source-early hold must stay a HOLD (the large-latency buffer fill)"
+        );
+    }
+
+    #[test]
+    fn normal_due_tick_is_unchanged_by_the_guard() {
+        // When a frame is genuinely due, the guard is a pass-through: same release as the
+        // raw genlock_release, never flagged as a backward step.
+        let wall = WBASE + 20 * NS30;
+        let queued = vec![wall - 2 * NS30, wall - NS30];
+        let present_ts = genlock_present_ts_reserve(wall, RESERVE_MS);
+        let g = genlock_release_guarded(wall, NS30, present_ts, &queued);
+        assert_eq!(g.release, genlock_release(present_ts, &queued));
+        assert!(g.release.present);
+        assert!(!g.backward_step);
     }
 }
