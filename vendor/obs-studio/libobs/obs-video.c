@@ -1172,6 +1172,11 @@ bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 	uint64_t frame_start = os_gettime_ns();
 	uint64_t frame_time_ns;
 
+	/* camera-box #278: publish this tick's start so render_display() can budget a heavy
+	 * monitoring display against the time already consumed by output_frames() + earlier
+	 * displays — rendering it only when slack remains, so the program never overruns. */
+	obs->video.graphics_frame_start_ns = frame_start;
+
 	update_active_states();
 
 	profile_start(context->video_thread_name);

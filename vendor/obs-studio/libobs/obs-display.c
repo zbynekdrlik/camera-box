@@ -242,17 +242,36 @@ void render_display(struct obs_display *display)
 	if (!display || !display->enabled)
 		return;
 
-	/* camera-box #276: per-display frame-skip, BEFORE render_display_begin(). A
-	 * monitoring surface throttled with render_divisor>1 (the built-in Multiview
-	 * projector, set to 2) renders only every Nth frame so its 9-18ms render
-	 * never blocks the 60fps program presentation on the shared graphics thread.
-	 * Skipping HERE (before begin) costs ~nothing — no gs_load_swapchain, no
-	 * gs_clear, no gs_present — and leaves the last presented frame on screen, so
-	 * there is no flicker (the callback-skip alternative still paid the clear +
-	 * present and flickered). render_divisor 0/1 = render every frame, so program
-	 * output + preview (which never set it) are genuinely unaffected. */
-	if (display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0)
-		return;
+	/* camera-box #278: ADAPTIVE budget-based skip for a heavy monitoring display, BEFORE
+	 * render_display_begin(). render_display() runs on the SINGLE graphics thread for ALL
+	 * displays sequentially AFTER output_frames(); a heavy monitoring render there pushes
+	 * the tick past the frame deadline → the NEXT program frame starts late → renderSkip.
+	 * render_divisor>1 marks a throttleable monitoring display (the built-in Multiview
+	 * projector, set to 2; 0/1 = program output + preview = NEVER throttled). #276 skipped
+	 * it every-other-frame, but a SINGLE 4-live-cam multiview render (~18-23ms) alone
+	 * exceeds the 16.6ms 60fps budget, so even every other frame the rendered frames overran
+	 * → ~29% program renderSkip (rig-measured). So instead, render a monitoring display ONLY
+	 * when its measured cost (render_ewma_ns) fits the budget REMAINING after the program has
+	 * already rendered this tick: skip when elapsed-this-tick + this display's EWMA render
+	 * time would exceed 90% of the frame interval. Skipping HERE (before begin) costs
+	 * ~nothing — no gs_load_swapchain, no gs_clear, no gs_present — and leaves the last
+	 * presented frame on screen, so there is no flicker. ewma==0 (not yet warmed) → render
+	 * once to measure (never starved to 0). Result: the program renders 60fps with 0
+	 * renderSkip no matter how heavy the monitoring display is; the monitoring display
+	 * self-throttles to whatever slack is left (may drop to a low fps / freeze under
+	 * sustained over-budget load — fine, it is monitoring; the program is the requirement). */
+	if (display->render_divisor > 1) {
+		const uint64_t interval = obs->video.video_frame_interval_ns;
+		const uint64_t tick_start = obs->video.graphics_frame_start_ns;
+		const uint64_t ewma = display->render_ewma_ns;
+		if (ewma != 0 && interval != 0 && tick_start != 0) {
+			const uint64_t now = os_gettime_ns();
+			const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
+			const uint64_t budget = interval - interval / 10; /* 90% safety margin */
+			if (elapsed + ewma > budget)
+				return;
+		}
+	}
 
 	/* -------------------------------------------- */
 
@@ -267,6 +286,11 @@ void render_display(struct obs_display *display)
 	pthread_mutex_unlock(&display->draw_info_mutex);
 
 	/* -------------------------------------------- */
+
+	/* camera-box #278: time the actual draw of a monitoring display so the budget gate
+	 * above can predict the next frame's cost. 0 for program/preview (divisor 0/1) — that
+	 * path stays untouched. */
+	const uint64_t render_begin_ns = (display->render_divisor > 1) ? os_gettime_ns() : 0;
 
 	if (render_display_begin(display, cx, cy, update_color_space)) {
 		GS_DEBUG_MARKER_BEGIN(GS_DEBUG_COLOR_DISPLAY, "obs_display");
@@ -287,6 +311,15 @@ void render_display(struct obs_display *display)
 		GS_DEBUG_MARKER_END();
 
 		gs_present();
+
+		/* camera-box #278: update this monitoring display's render-cost EWMA (α=1/4) from
+		 * the draw we just did — only after a real render (begin returned true), only for a
+		 * monitoring display (divisor>1). prev==0 (cold) seeds with the first measurement. */
+		if (display->render_divisor > 1) {
+			const uint64_t dur = os_gettime_ns() - render_begin_ns;
+			const uint64_t prev = display->render_ewma_ns;
+			display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;
+		}
 	}
 }
 
@@ -307,13 +340,15 @@ void obs_display_set_background_color(obs_display_t *display, uint32_t color)
 		display->background_color = color;
 }
 
-/* camera-box #276: throttle a display's render rate. divisor <= 1 renders every
- * frame (default); divisor N renders only every Nth call to render_display(),
- * skipping the rest BEFORE render_display_begin() (no clear, no present, no
- * flicker). Used by the frontend to cap the heavy built-in Multiview projector
- * (set to 2) so monitoring never steals the program-output render budget at
- * 60fps. Unguarded single write (set once at display create from the Qt thread),
- * mirroring obs_display_set_background_color; the graphics thread reads it. */
+/* camera-box #278: mark a display as a THROTTLEABLE monitoring surface. divisor <= 1
+ * renders every frame (default — program output + preview); divisor > 1 enables the
+ * adaptive budget-based skip in render_display() (the value itself is just the
+ * >1 marker now — the #278 gate is driven by the display's measured EWMA render cost vs
+ * the remaining frame budget, not a fixed every-Nth cadence). Used by the frontend to cap
+ * the heavy built-in Multiview projector (set to 2) so monitoring never steals the
+ * program-output render budget at 60fps. Unguarded single write (set once at display
+ * create from the Qt thread), mirroring obs_display_set_background_color; the graphics
+ * thread reads it. */
 void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)
 {
 	if (display)

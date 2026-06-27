@@ -119,25 +119,32 @@ jobs:
           if ($flt -notmatch [regex]::Escape('obs_source_get_genlock_burn')) { Write-Error "ndi-burn-filter.cpp: burn no longer reads the parent genlock_burn flag — #257 reverted"; exit 1 }
           Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn — OK"
 
-      # #276/#275 (the #269 YAML lock-step): the FAST path COMPILES libobs (obs.dll) + the
+      # #278/#275 (the #269 YAML lock-step): the FAST path COMPILES libobs (obs.dll) + the
       # DistroAV burn, so a `git subtree pull` reverting either to inert-but-still-compiling
       # would hot-swap a regressed obs.dll/distroav un-gated. Re-assert the tokens in pwsh
       # (mirrors tests/genlock_preload.rs::{vendored_source,distroav_source} — probe-gated,
       # can't compile on this runner). OBSProjector.cpp is frontend-only (the fast path does
       # NOT build it) but the source-text check still catches a revert.
-      - name: Assert #276 multiview render-divisor + #275 bulk-fill burn present
+      - name: Assert #278 multiview adaptive budget-skip + #275 bulk-fill burn present
         shell: pwsh
         run: |
           $disp = (Get-Content "vendor/obs-studio/libobs/obs-display.c" -Raw) -replace '\s+', ' '
-          if ($disp -notmatch [regex]::Escape('display->render_divisor > 1 && (display->frame_counter++ % display->render_divisor) != 0')) { Write-Error "obs-display.c: #276 render-divisor frame-skip gate gone — the multiview would steal the 60fps program budget"; exit 1 }
-          if ($disp -notmatch [regex]::Escape('void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs-display.c: #276 obs_display_set_render_divisor impl gone"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('if (elapsed + ewma > budget) return;')) { Write-Error "obs-display.c: #278 adaptive budget-skip gate gone — the multiview would steal the 60fps program budget"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('const uint64_t budget = interval - interval / 10;')) { Write-Error "obs-display.c: #278 90% frame-budget gone"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;')) { Write-Error "obs-display.c: #278 render-cost EWMA update gone — the budget gate cannot learn a display is heavy"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs-display.c: #278 obs_display_set_render_divisor impl gone"; exit 1 }
+          $vid = (Get-Content "vendor/obs-studio/libobs/obs-video.c" -Raw) -replace '\s+', ' '
+          if ($vid -notmatch [regex]::Escape('obs->video.graphics_frame_start_ns = frame_start;')) { Write-Error "obs-video.c: #278 per-tick start no longer published — the adaptive skip loses its elapsed reference"; exit 1 }
+          $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
+          if ($hdr -notmatch [regex]::Escape('uint64_t render_ewma_ns;')) { Write-Error "obs-internal.h: #278 obs_display.render_ewma_ns field gone"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('uint64_t graphics_frame_start_ns;')) { Write-Error "obs-internal.h: #278 obs_core_video.graphics_frame_start_ns field gone"; exit 1 }
           $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
-          if ($api -notmatch [regex]::Escape('EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs.h: #276 obs_display_set_render_divisor not EXPORTed — frontend cannot link it"; exit 1 }
+          if ($api -notmatch [regex]::Escape('EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs.h: #278 obs_display_set_render_divisor not EXPORTed — frontend cannot link it"; exit 1 }
           $proj = (Get-Content "vendor/obs-studio/frontend/widgets/OBSProjector.cpp" -Raw) -replace '\s+', ' '
-          if ($proj -notmatch [regex]::Escape('if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)')) { Write-Error "OBSProjector.cpp: #276 multiview no longer sets render_divisor=2 — the heavy multiview render runs every frame"; exit 1 }
+          if ($proj -notmatch [regex]::Escape('if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)')) { Write-Error "OBSProjector.cpp: #278 multiview no longer marks render_divisor=2 — it would not be throttled"; exit 1 }
           $bqr = (Get-Content "vendor/distroav/src/burn-qr.hpp" -Raw) -replace '\s+', ' '
           if ($bqr -notmatch [regex]::Escape('std::memset(row, 0xFF,')) { Write-Error "burn-qr.hpp: #275 bulk-fill (per-row white memset) gone — burn render reverted to the slow per-pixel path that overran the 60fps budget"; exit 1 }
-          Write-Output "#276 multiview render-divisor decouple + #275 bulk-fill burn render present — OK"
+          Write-Output "#278 multiview adaptive budget-skip decouple + #275 bulk-fill burn render present — OK"
 
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.
