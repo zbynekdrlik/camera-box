@@ -170,6 +170,15 @@ struct Args {
     merge_partials: Vec<String>,
 }
 
+impl Args {
+    /// cam2's pinned painter run_id as an `Option`, applying the `0 ⇒ unpinned` sentinel.
+    /// SINGLE source of truth for the sentinel so every consumer (#108 latency pairing, the
+    /// #273 optical-window boundary, the per-box extract flagging) agrees on `None` vs `Some`.
+    fn cam2_pin(&self) -> Option<u32> {
+        (self.cam2_run_id != 0).then_some(self.cam2_run_id)
+    }
+}
+
 /// Reduce a HopLatency option to a compact JSON object (or null) for the report.
 fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
     match h {
@@ -245,7 +254,15 @@ fn frame_is_delivered_optical(
     match cam2_run_id {
         // #273: pinned ⇒ a frame is current-run delivered ONLY if it carries THIS run's paint.
         // A foreign (previous-run) cam2 run_id is pre-signal residue, NOT current-run delivery.
-        Some(pin) => f.payloads.iter().any(|p| p.run_id == pin),
+        // The `!burn_run_ids.contains` guard is defense-in-depth: should the pin ever be
+        // misconfigured to a node burn run_id, a burn-only frame must NOT be read as optical
+        // (that would let in_window membership collapse to "has the burn" and MASK a delivered-
+        // but-burn-absent loss). With pin == a burn id no frame is optical ⇒ empty window ⇒
+        // first_id None ⇒ is_contiguous() false ⇒ FAILS closed, never a vacuous pass.
+        Some(pin) => f
+            .payloads
+            .iter()
+            .any(|p| p.run_id == pin && !burn_run_ids.contains(&p.run_id)),
         // Unpinned ⇒ any non-burn payload is cam2 (pre-#273 behaviour; safe for the strih recording).
         None => f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id)),
     }
@@ -356,6 +373,15 @@ fn in_window_burn_frames(
     // window to the optical signal; an in-window non-optical frame carrying the cam1 burn is
     // then included by `in_window` above, but the lead-in/out trim is optical-defined so a
     // pre-signal free-running cam1 burn can never extend the window.
+    //
+    // #273 boundary assumption: when pinned, `is_optical` is CURRENT-run paint only, so the
+    // window starts at the first frame painting THIS run. This relies on cam1 NOT emitting
+    // current-run burns onto FOREIGN-paint lead-in frames (true for the observed flow — cam1's
+    // burn and cam2's paint advance to the new run together). A loss straddling the foreign→pin
+    // boundary is the UNOBSERVED lead-in case #267 declines to special-case; the prior "any
+    // paint is optical" rule that appeared to cover it was itself the #273 bug (it charged the
+    // foreign residue as loss). The guarantee that IS preserved + tested: a current-paint frame
+    // with an absent burn is KEPT and FAILS (pinned_real_leading_current_run_loss_still_fails).
     let first = stream.iter().position(is_optical);
     let last = stream.iter().rposition(is_optical);
     let (first, last) = match (first, last) {
@@ -1287,11 +1313,7 @@ fn build_and_print_verdict(
     // that already share the DanteSync wall clock. Reported, never gated (a latency
     // gate is a separate decision; #108 asks for the stable, defined numbers).
     println!();
-    let cam2_pin = if args.cam2_run_id != 0 {
-        Some(args.cam2_run_id)
-    } else {
-        None
-    };
+    let cam2_pin = args.cam2_pin();
     // #194: load the painter's per-tick gen→flip stamps from the --paint-log CSV (if it has
     // the 3-column flip format). flip_ts is the cam2 DISPLAY (page-flip) instant — the true
     // reference for cam2→cam1 (cam1_capture − flip_ts). Empty when no --painter / a pre-#194
@@ -1321,14 +1343,9 @@ fn build_and_print_verdict(
         match &args.cam1_grab_ts {
             Some(grab_ts_path) => {
                 let grab_ts = parse_grab_ts(grab_ts_path)?;
-                let cam2_pin_c1 = if args.cam2_run_id != 0 {
-                    Some(args.cam2_run_id)
-                } else {
-                    None
-                };
                 let c1_lat = hop_latency(
                     "cam2→cam1",
-                    &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin_c1),
+                    &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin),
                 );
                 report_hop_latency(&c1_lat, "cam2→cam1 (optical+grab)", "cam2 paint gen_ts_ns");
                 let mut c1_json = hop_lat_json(&c1_lat);
@@ -1979,11 +1996,7 @@ fn extract_partial_flagged_frames(
     // #273: thread the cam2 pin so the on-box pixel-proof flagging anchors the optical window to
     // THIS run's paint exactly as the merge verdict does (a foreign-run lead-in is not flagged as
     // delivered). `None` for an unpinned extract (e.g. the strih box runs without --cam2-run-id).
-    let cam2_pin = if args.cam2_run_id != 0 {
-        Some(args.cam2_run_id)
-    } else {
-        None
-    };
+    let cam2_pin = args.cam2_pin();
     for &(node, burn_run_id, rate) in owned {
         let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate, cam2_pin);
         let iw = burn_contiguity_in_window(node, &window, rate);
@@ -2917,6 +2930,45 @@ mod tests {
             "unpinned: any non-burn payload counts as cam2 (pre-#273 behaviour)"
         );
         assert!(frame_is_delivered_optical(&current, &burns, None));
+    }
+
+    #[test]
+    fn frame_is_delivered_optical_pin_equal_to_a_burn_id_fails_closed() {
+        // Defense-in-depth: if --cam2-run-id is misconfigured to a node burn run_id, a burn-only
+        // frame must NOT be read as current-run optical — otherwise the cam1 in-window membership
+        // (is_optical || has_node_burn) collapses to "has the burn" and a delivered-but-burn-absent
+        // loss would be MASKED. With pin == a burn id, no frame is optical ⇒ empty window ⇒
+        // first_id None ⇒ NOT contiguous ⇒ the node FAILS closed (never a vacuous pass).
+        let burns = [CAM1B, STRIH, STREAM];
+        let cam1_burn_only = frame(0, &[(CAM1B, 50)]);
+        assert!(
+            !frame_is_delivered_optical(&cam1_burn_only, &burns, Some(CAM1B)),
+            "a burn-only frame must NOT count as optical even when the pin is (mis)set to that burn id"
+        );
+        let stream: Vec<RecordingFrame> = (0..4u32)
+            .map(|i| frame(i as u64, &[(CAM1B, 50 + i)]))
+            .collect();
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &burns,
+            BurnRate::PerEmittedFrame,
+            Some(CAM1B),
+        );
+        assert!(
+            w.is_empty(),
+            "pin==burn ⇒ no optical frame ⇒ empty window: {w:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "an empty window must FAIL (first_id None), never vacuously pass: {:?}",
+            iw.contiguity
+        );
     }
 
     #[test]
