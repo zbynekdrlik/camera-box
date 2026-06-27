@@ -766,25 +766,39 @@ pub fn genlock_release_guarded(
         };
     }
     // due == 0: the unguarded path would HOLD (repeat the last frame). Distinguish a
-    // BENIGN source-early hold (head frame simply not aged to the deadline yet) from a
-    // backward-clock-step FREEZE: a HEAD frame stamped MORE THAN one interval AHEAD of the
-    // real wall clock is impossible for a live capture — it was captured BEFORE a backward
-    // step, so present_ts = wall_now - reserve can never reach it and the hold is indefinite.
-    let head_future = queued_ts_ascending
-        .first()
-        .is_some_and(|&head| head > wall_now_ns.saturating_add(interval_ns));
-    if head_future {
-        // RE-ANCHOR: present the NEWEST queued frame, dropping the older (now-stale,
-        // pre-step) ones — exactly as a normal "present newest due" tick. Never freeze.
+    // BENIGN source-early hold (frames queued, none aged to the deadline yet) from a
+    // backward-clock-step FREEZE.
+    //
+    // #269 [3]: detect the step on the NEWEST (max-ts) queued frame, NOT the oldest. The
+    // newest captured frame is ~wall_now in normal operation; one stamped MORE THAN an
+    // interval AHEAD of the real wall clock is impossible for a live capture — the shared
+    // DanteSync clock stepped backward. Testing the OLDEST frame instead would make the
+    // trigger depend on each source's queue depth (a backward step smaller than a deep
+    // source's buffer leaves its oldest frame NOT-future, so it stays frozen while a shallow
+    // source jumps to live — the exact cross-source DESYNC genlock prevents). The MAX is
+    // depth-independent, so all genlock sources re-anchor UNIFORMLY once the step exceeds one
+    // interval. A legitimate large per-source latency override (≤2000 ms) buffers PAST-stamped
+    // frames (ts ≤ wall_now, aging toward the deadline), whose max is never > wall_now +
+    // interval, so the guard never touches it.
+    let max_ts = queued_ts_ascending.iter().copied().max();
+    let backward_step = max_ts.is_some_and(|m| m > wall_now_ns.saturating_add(interval_ns));
+    if backward_step {
+        // #269 [0]: RE-ANCHOR by presenting the OLDEST queued frame and dropping NOTHING
+        // extra (drop_oldest = 0). The pre-step frames are real captures; the caller erases
+        // the presented head each tick, so the buffer drains one frame per tick (matching the
+        // consume rate) and the configured latency-depth buffer is PRESERVED — recovery is a
+        // smooth few-frame blip at ANY latency. The old "present newest, drop num-1" drained
+        // the queue to empty, so for a deep latency override the feed then FROZE for
+        // ~latency_ms while the buffer refilled.
         GenlockReleaseGuarded {
             release: GenlockRelease {
-                drop_oldest: queued_ts_ascending.len() - 1,
+                drop_oldest: 0,
                 present: true,
             },
             backward_step: true,
         }
     } else {
-        // Genuine source-early / stalled hold (queue empty, or head recent but not yet
+        // Genuine source-early / stalled hold (queue empty, or frames recent but not yet
         // due — including a large deliberate per-source latency buffer fill) — unchanged.
         GenlockReleaseGuarded {
             release,
@@ -826,13 +840,14 @@ pub fn genlock_backward_step_latch(
     prev_in_step: bool,
     backward_step_this_tick: bool,
 ) -> GenlockBackwardStepLatch {
-    // #269 [2] RED: this mirrors the CURRENT (buggy) C — it counts + logs on EVERY re-anchor
-    // tick, so one event over N ticks reports as N. The GREEN fix latches on the rising edge
-    // (`backward_step_this_tick && !prev_in_step`).
-    let _ = prev_in_step;
+    // #269 [2]: fire the count + log only on the RISING edge of the re-anchor state, so one
+    // event recovered over N ticks counts ONCE (not N) and the LOG_WARNING fires once per
+    // event instead of at frame rate. The carried `in_step` tracks the current state; a
+    // normal/benign tick resets it, so the next distinct event counts again.
+    let transition_in = backward_step_this_tick && !prev_in_step;
     GenlockBackwardStepLatch {
-        count_event: backward_step_this_tick,
-        log_event: backward_step_this_tick,
+        count_event: transition_in,
+        log_event: transition_in,
         in_step: backward_step_this_tick,
     }
 }
@@ -1688,8 +1703,11 @@ mod tests {
     #[test]
     fn sink_backward_clock_step_re_anchors_instead_of_freezing() {
         // The #147 fix: on the SAME backward-step tick the unguarded path would freeze,
-        // the guarded release RE-ANCHORS — it flags the backward step AND presents the
-        // newest queued frame (dropping the stale older pre-step ones) instead of holding.
+        // the guarded release RE-ANCHORS — it flags the backward step AND presents a frame
+        // instead of holding. #269 [0]: it presents the OLDEST queued frame and drops NOTHING
+        // extra (drop_oldest == 0), preserving the buffer (it drains one frame/tick as the
+        // caller erases the presented head) — NOT "present newest, drop num-1" which drained
+        // the queue to empty and re-froze the feed for ~latency_ms while it refilled.
         let wall0 = WBASE + 10 * NS30;
         let queued = vec![wall0 - NS30, wall0];
         let wall_after = wall0 - 5_000_000_000;
@@ -1698,17 +1716,16 @@ mod tests {
         let g = genlock_release_guarded(wall_after, NS30, present_ts_after, &queued);
         assert!(
             g.backward_step,
-            "a future-stamped head after a backward clock step must be DETECTED (#147)"
+            "a future-stamped queue after a backward clock step must be DETECTED (#147)"
         );
         assert!(
             g.release.present,
             "the guard must PRESENT a frame, not freeze, after a backward clock step (#147)"
         );
         assert_eq!(
-            g.release.drop_oldest,
-            queued.len() - 1,
-            "the re-anchor presents the NEWEST queued frame, dropping the stale older \
-             (pre-step) ones"
+            g.release.drop_oldest, 0,
+            "#269 [0]: the re-anchor presents the OLDEST frame and preserves the buffer \
+             (drop nothing extra), not drain-to-empty"
         );
     }
 
@@ -1735,9 +1752,11 @@ mod tests {
             }
             if g.release.present {
                 presented += 1;
-                // Apply the decision: free the stale oldest, keep the presented frame at
-                // the head (the C keeps array[0] until the next consume drops it).
-                queue.drain(0..g.release.drop_oldest);
+                // Apply the real consume (get_closest_frame): drop the `drop_oldest` stale
+                // frames AND erase the presented head (array[0]) — drop_oldest + 1 total. With
+                // the #269 [0] present-oldest re-anchor (drop_oldest == 0) this drains exactly
+                // one frame/tick, the genlock consume rate, preserving the buffer.
+                queue.drain(0..=g.release.drop_oldest);
             }
             // A post-step frame arrives stamped at the rewound clock (the cam re-anchored
             // its own emit gate, #131), appended in capture order.
@@ -1819,8 +1838,14 @@ mod tests {
         );
 
         let g = genlock_release_guarded(wall_after, NS30, present_ts, &queued);
-        assert!(g.backward_step, "a backward step beyond the buffer must re-anchor");
-        assert!(g.release.present, "the re-anchor must present, never freeze");
+        assert!(
+            g.backward_step,
+            "a backward step beyond the buffer must re-anchor"
+        );
+        assert!(
+            g.release.present,
+            "the re-anchor must present, never freeze"
+        );
         // Frames REMAINING after this tick's consume (drop_oldest stale + 1 presented head):
         // the latency buffer must survive, not collapse to ~0.
         let remaining = queued.len() - g.release.drop_oldest - 1;
@@ -1862,7 +1887,10 @@ mod tests {
             "a deep-buffer source must re-anchor on a backward step too (#269 [3]); the old \
              oldest-frame trigger left it frozen while shallow sources jumped → desync"
         );
-        assert!(g.release.present, "the re-anchor must present, never freeze");
+        assert!(
+            g.release.present,
+            "the re-anchor must present, never freeze"
+        );
     }
 
     #[test]
@@ -1884,8 +1912,14 @@ mod tests {
             }
             in_step = l.in_step;
         }
-        assert_eq!(count, 1, "one backward-step event over 10 ticks counts ONCE (#269 [2])");
-        assert_eq!(logs, 1, "LOG_WARNING fires ONCE per event, not per tick (#269 [2])");
+        assert_eq!(
+            count, 1,
+            "one backward-step event over 10 ticks counts ONCE (#269 [2])"
+        );
+        assert_eq!(
+            logs, 1,
+            "LOG_WARNING fires ONCE per event, not per tick (#269 [2])"
+        );
     }
 
     #[test]
@@ -1902,6 +1936,9 @@ mod tests {
             }
             in_step = l.in_step;
         }
-        assert_eq!(count, 2, "two separated backward-step events count twice (#269 [2])");
+        assert_eq!(
+            count, 2,
+            "two separated backward-step events count twice (#269 [2])"
+        );
     }
 }

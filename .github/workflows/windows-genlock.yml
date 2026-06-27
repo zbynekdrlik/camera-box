@@ -249,11 +249,16 @@ jobs:
           }
           # #147: the backward wall-clock step (NTP/PTP sawtooth) re-anchor guard — without it the
           # ts-align release HOLDs (freezes the live program feed) indefinitely on a backward step.
-          if ($src -notmatch [regex]::Escape('source->async_frames.array[0]->timestamp > wall_now + interval')) {
-            Write-Error "obs-source.c: #147 backward-clock-step detection (head ts > wall_now + interval) gone — ts-align would freeze the program feed on an NTP/PTP step — re-apply"; exit 1
+          # #269 [3]: detection is on the MAX queued ts (depth-independent, uniform across sources).
+          if ($src -notmatch [regex]::Escape('max_ts > wall_now + interval')) {
+            Write-Error "obs-source.c: #147/#269 backward-clock-step detection (max queued ts > wall_now + interval) gone — ts-align would freeze the program feed on an NTP/PTP step — re-apply"; exit 1
           }
           if ($src -notmatch [regex]::Escape('source->genlock_backward_steps++')) {
             Write-Error "obs-source.c: #147 backward-step re-anchor counter (genlock_backward_steps) gone — re-apply"; exit 1
+          }
+          # #269 [2]: the per-event latch (counter fires once per step, not per recovery tick).
+          if ($src -notmatch [regex]::Escape('source->genlock_in_backward_step = true')) {
+            Write-Error "obs-source.c: #269 [2] backward-step per-event latch (genlock_in_backward_step) gone — counter would over-report — re-apply"; exit 1
           }
           Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147 backward-step recovery) — OK"
 

@@ -67,8 +67,11 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock_present_ts(wall_now, preload, interval)')) { Write-Error "present_ts gone (#136)"; exit 1 }
           # #147: the backward wall-clock step (NTP/PTP sawtooth) re-anchor guard — without it
           # the ts-align release FREEZES the program feed forever on a backward clock step.
-          if ($src -notmatch [regex]::Escape('source->async_frames.array[0]->timestamp > wall_now + interval')) { Write-Error "backward-clock-step detection gone (#147) — ts-align would freeze the program feed on an NTP/PTP step"; exit 1 }
+          # #269 [3]: detection on the MAX queued ts (depth-independent, uniform across sources).
+          if ($src -notmatch [regex]::Escape('max_ts > wall_now + interval')) { Write-Error "backward-clock-step detection gone (#147/#269) — ts-align would freeze the program feed on an NTP/PTP step"; exit 1 }
           if ($src -notmatch [regex]::Escape('source->genlock_backward_steps++')) { Write-Error "backward-step re-anchor counter gone (#147)"; exit 1 }
+          # #269 [2]: per-event latch — counter fires once per step, not per recovery tick.
+          if ($src -notmatch [regex]::Escape('source->genlock_in_backward_step = true')) { Write-Error "backward-step per-event latch gone (#269 [2]) — counter would over-report"; exit 1 }
           Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147 backward-step recovery present — OK"
 
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`

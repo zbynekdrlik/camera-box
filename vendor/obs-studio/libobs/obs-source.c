@@ -4840,42 +4840,70 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * #131 (a boundary impossibly far in the future re-anchors). */
 				size_t to_drop;
 				if (due == 0) {
-					/* A queued HEAD frame stamped MORE THAN one interval AHEAD of
-					 * the real wall clock is impossible for a live capture — it was
-					 * captured BEFORE a backward clock step. */
-					const bool head_future =
-						source->async_frames.array[0]->timestamp >
-						wall_now + interval;
+					/* camera-box #269 [3]: detect the backward step on the NEWEST
+					 * (max-ts) queued frame, NOT array[0] (the oldest). The newest
+					 * captured frame is ~wall_now in normal operation; one stamped MORE
+					 * THAN one interval AHEAD of the real wall clock is impossible for a
+					 * live capture — the shared DanteSync clock stepped backward. Testing
+					 * the OLDEST frame made the trigger depend on each source's queue
+					 * depth (a step smaller than a deep source's buffer left its oldest
+					 * frame NOT-future, so that source stayed frozen while a shallow one
+					 * jumped to live — the cross-source DESYNC genlock prevents). The MAX
+					 * is depth-independent, so all genlock sources re-anchor UNIFORMLY
+					 * once the step exceeds one interval. async_frames is in ARRIVAL order
+					 * (non-monotonic across the backward-step seam), so scan for the true
+					 * max rather than read a positional head. */
+					uint64_t max_ts = source->async_frames.array[0]->timestamp;
+					for (size_t i = 1; i < source->async_frames.num; i++) {
+						const uint64_t ts = source->async_frames.array[i]->timestamp;
+						if (ts > max_ts)
+							max_ts = ts;
+					}
+					const bool head_future = max_ts > wall_now + interval;
 					if (!head_future) {
 						/* #148: a BENIGN source-early HOLD (frames queued, none
 						 * yet due) -> genlock_holds, NOT a true-empty
-						 * genlock_underruns. Repeat the current frame this tick. */
+						 * genlock_underruns. Repeat the current frame this tick.
+						 * #269 [2]: not re-anchoring — clear the per-event latch so
+						 * the NEXT distinct backward step counts again. */
 						source->genlock_holds++;
+						source->genlock_in_backward_step = false;
 						genlock_audit_log(source, now_ns);
 						return false;
 					}
-					/* RE-ANCHOR: present the NEWEST queued frame and drop the older
-					 * (now-stale, pre-step) ones instead of freezing. Over the next
-					 * ticks each re-anchor drops the frames behind the newest,
-					 * draining the stale pre-step seam; once the post-step
-					 * (rewound-clock) frames are the newest, the normal ts-align
-					 * prefix resumes — a brief blip, never an indefinite freeze. */
-					source->genlock_backward_steps++;
-					blog(LOG_WARNING,
-					     "genlock-fifo backward clock step '%s': head ts %llu > "
-					     "wall_now+interval (%llu) — re-anchoring (present newest of "
-					     "%zu queued, drop %zu stale) instead of freezing the program "
-					     "feed (#147)",
-					     source->context.name ? source->context.name : "?",
-					     (unsigned long long)source->async_frames.array[0]->timestamp,
-					     (unsigned long long)(wall_now + interval),
-					     source->async_frames.num,
-					     source->async_frames.num - 1);
-					to_drop = source->async_frames.num - 1;
+					/* RE-ANCHOR. #269 [0]: present the OLDEST queued frame and drop
+					 * NOTHING extra (to_drop = 0). The pre-step frames are real captures;
+					 * get_closest_frame erases the presented head each tick, so the buffer
+					 * drains one frame per tick (the genlock consume rate) and the
+					 * configured latency-depth buffer is PRESERVED — a smooth few-frame
+					 * blip at ANY latency. The old "present newest, drop num-1" drained the
+					 * queue to empty, so for a deep per-source latency override the feed
+					 * then FROZE for ~latency_ms while the buffer refilled.
+					 * #269 [2]: count + LOG_WARNING ONCE per EVENT (on the transition INTO
+					 * the re-anchor state), not every recovery tick — the old per-tick
+					 * increment counted one step as N and logged at frame rate, breaking
+					 * the 5 s audit-log gating. */
+					if (!source->genlock_in_backward_step) {
+						source->genlock_backward_steps++;
+						blog(LOG_WARNING,
+						     "genlock-fifo backward clock step '%s': max queued ts %llu > "
+						     "wall_now+interval (%llu) — re-anchoring (present oldest of "
+						     "%zu queued, preserve buffer) instead of freezing the program "
+						     "feed (#147)",
+						     source->context.name ? source->context.name : "?",
+						     (unsigned long long)max_ts,
+						     (unsigned long long)(wall_now + interval),
+						     source->async_frames.num);
+					}
+					source->genlock_in_backward_step = true;
+					to_drop = 0;
 				} else {
 					/* present the NEWEST due frame: erase the (due-1) stale older
-					 * ones via the same da_erase(.,0)+remove_async_frame() idiom. */
+					 * ones via the same da_erase(.,0)+remove_async_frame() idiom.
+					 * #269 [2]: a normal due tick ends any backward-step recovery —
+					 * clear the per-event latch so the next step counts again. */
 					to_drop = due - 1;
+					source->genlock_in_backward_step = false;
 				}
 				while (to_drop-- && source->async_frames.num > 1) {
 					struct obs_source_frame *dropped = source->async_frames.array[0];

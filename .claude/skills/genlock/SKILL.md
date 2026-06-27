@@ -391,21 +391,41 @@ every tick → since #257 genlock is always-on this FREEZES the live program fee
 climbs back. This is the SINK twin of the cam-EMIT freeze the #131/#134 `genlock_emit_gate` guard
 fixed (a boundary impossibly far in the future re-latches).
 
-- **Fix mechanism = HEAD-FUTURE detection, NOT a stored `last_wall_now`.** A queued HEAD frame
+- **Fix mechanism = FUTURE-stamped detection, NOT a stored `last_wall_now`.** A queued frame
   stamped `> wall_now + interval` is impossible for a live capture (= captured before the step). On
-  due==0 with such a head, RE-ANCHOR: present the NEWEST queued frame, drop the older stale ones.
-  Why not a one-shot "clock just stepped" detector: the stale future-stamped head PERSISTS across
-  the following ticks (until it drains), so a one-shot trigger re-freezes next tick. Head-future
+  due==0 with such a frame, RE-ANCHOR instead of freezing.
+  Why not a one-shot "clock just stepped" detector: the stale future-stamped frame PERSISTS across
+  the following ticks (until it drains), so a one-shot trigger re-freezes next tick. Future-stamped
   self-heals over the non-monotonic seam (stale-high then fresh-low frames) with NO per-source state.
   Pure mirror: `src/probe/genlock.rs genlock_release_guarded` / `GenlockReleaseGuarded`.
+- **#269 deep-review fixes (the three things the original re-anchor got wrong):**
+  - **[0] DON'T drain to empty.** The old re-anchor presented the NEWEST and dropped `num-1` →
+    collapsed the buffer; for a deep per-source latency (≤2000 ms) the feed then FROZE for
+    ~latency_ms while it refilled. Fix: present the OLDEST queued frame, drop NOTHING extra
+    (`to_drop = 0`); `get_closest_frame` erases the presented head, so the buffer drains
+    one-frame-per-tick (consume rate) and the latency depth is PRESERVED — a few-frame blip at ANY
+    latency.
+  - **[3] trigger on the MAX queued ts, NOT `array[0]` (the oldest).** The oldest-frame trigger is
+    queue-DEPTH-dependent: a step smaller than a deep source's buffer left its oldest frame
+    not-future → it stayed frozen while a shallow source jumped → cross-source DESYNC. The MAX is
+    depth-independent → all sources re-anchor UNIFORMLY once the step exceeds one interval.
+    `async_frames` is ARRIVAL order (non-monotonic across the seam) → scan for the true max.
+  - **[2] count + log ONCE per EVENT, not per tick.** A step recovers over ~depth ticks; the old
+    `genlock_backward_steps++`-every-tick counted one event as N and logged at frame rate (broke the
+    5 s audit gating). Latched via the `bool source->genlock_in_backward_step` field (set true on the
+    rising edge, cleared on a benign/normal tick). Mirror: `genlock_backward_step_latch` /
+    `GenlockBackwardStepLatch`.
 - **A large per-source latency (up to 2000 ms) is SAFE** — it buffers PAST-stamped frames (aging,
-  `ts <= wall_now`), never future-stamped, so the guard never triggers on it.
-- **Audit signal:** the `genlock-fifo audit` line now prints `backward_steps=%llu`
-  (`source->genlock_backward_steps`) — read it on the rig deploy-verify to confirm recoveries.
+  `ts <= wall_now`), whose max is never `> wall_now + interval`, so the guard never triggers on it.
+- **Audit signal:** the `genlock-fifo audit` line prints `backward_steps=%llu`
+  (`source->genlock_backward_steps`) — read it on the rig deploy-verify to confirm recoveries (now
+  one increment per real step event, not per tick).
 - **GOTCHA — the `ts_align_hold_counts_as_hold_not_underrun` guard pins `genlock_holds++` within a
-  HARDCODED 2500-char window** of the `genlock_present_ts_reserve(wall_now, reserve_ms)` anchor
+  HARDCODED window** of the `genlock_present_ts_reserve(wall_now, reserve_ms)` anchor
   (`tests/genlock_preload.rs`). Adding comment/code in the `due==0` block can push `genlock_holds++`
-  out of that window and fail the guard — keep that block's comments TIGHT (the #147 add was trimmed
-  to fit). The pinned source tokens (in `tests/genlock_preload.rs` + BOTH windows-genlock*.yml per
-  the #269 lock-step): `source->async_frames.array[0]->timestamp > wall_now + interval` and
-  `source->genlock_backward_steps++`.
+  out of that window and fail the guard — #269's max-ts scan + comments grew the block, so the window
+  was widened 2500→4000 chars. Keep that block reasonable; bump the window if you add more.
+- **Pinned source tokens** (in `tests/genlock_preload.rs` + BOTH windows-genlock*.yml per the #269
+  lock-step): `max_ts > wall_now + interval`, `source->genlock_backward_steps++`,
+  `source->genlock_in_backward_step = true`/`= false`. (The pre-#269 token was
+  `source->async_frames.array[0]->timestamp > wall_now + interval` — replaced by the max-ts trigger.)
