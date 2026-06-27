@@ -382,3 +382,30 @@ A vendored-C refactor that changes a pinned genlock call-site SHAPE breaks the
 Example: #148 hoisted `genlock_present_ts(genlock_wall_now_ns(), …)` → `wall_now = genlock_wall_now_ns();`
 + `genlock_present_ts(wall_now, …)`; the YAML guards pinned the old inline form and failed the FAST
 build until updated to check the `wall_now` source + the new call form.
+
+## #147 — backward wall-clock step recovery (SINK ts-align)
+The SINK ts-align release (`obs-source.c ready_async_frame`, the `due==0` branch) used to HOLD
+(repeat the last frame) forever on a BACKWARD DanteSync wall-clock step (NTP/PTP sawtooth):
+`present_ts = wall_now - reserve` regresses below every queued (pre-step, high) frame ts → due==0
+every tick → since #257 genlock is always-on this FREEZES the live program feed until the clock
+climbs back. This is the SINK twin of the cam-EMIT freeze the #131/#134 `genlock_emit_gate` guard
+fixed (a boundary impossibly far in the future re-latches).
+
+- **Fix mechanism = HEAD-FUTURE detection, NOT a stored `last_wall_now`.** A queued HEAD frame
+  stamped `> wall_now + interval` is impossible for a live capture (= captured before the step). On
+  due==0 with such a head, RE-ANCHOR: present the NEWEST queued frame, drop the older stale ones.
+  Why not a one-shot "clock just stepped" detector: the stale future-stamped head PERSISTS across
+  the following ticks (until it drains), so a one-shot trigger re-freezes next tick. Head-future
+  self-heals over the non-monotonic seam (stale-high then fresh-low frames) with NO per-source state.
+  Pure mirror: `src/probe/genlock.rs genlock_release_guarded` / `GenlockReleaseGuarded`.
+- **A large per-source latency (up to 2000 ms) is SAFE** — it buffers PAST-stamped frames (aging,
+  `ts <= wall_now`), never future-stamped, so the guard never triggers on it.
+- **Audit signal:** the `genlock-fifo audit` line now prints `backward_steps=%llu`
+  (`source->genlock_backward_steps`) — read it on the rig deploy-verify to confirm recoveries.
+- **GOTCHA — the `ts_align_hold_counts_as_hold_not_underrun` guard pins `genlock_holds++` within a
+  HARDCODED 2500-char window** of the `genlock_present_ts_reserve(wall_now, reserve_ms)` anchor
+  (`tests/genlock_preload.rs`). Adding comment/code in the `due==0` block can push `genlock_holds++`
+  out of that window and fail the guard — keep that block's comments TIGHT (the #147 add was trimmed
+  to fit). The pinned source tokens (in `tests/genlock_preload.rs` + BOTH windows-genlock*.yml per
+  the #269 lock-step): `source->async_frames.array[0]->timestamp > wall_now + interval` and
+  `source->genlock_backward_steps++`.
