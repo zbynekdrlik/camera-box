@@ -242,10 +242,13 @@ fn frame_is_delivered_optical(
     burn_run_ids: &[u32],
     cam2_run_id: Option<u32>,
 ) -> bool {
-    // RED (#273): the pin is threaded but NOT yet honored — the body still treats ANY non-burn
-    // payload (incl. a foreign-run paint) as delivered, reproducing the bug for the new tests.
-    let _ = cam2_run_id;
-    f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id))
+    match cam2_run_id {
+        // #273: pinned ⇒ a frame is current-run delivered ONLY if it carries THIS run's paint.
+        // A foreign (previous-run) cam2 run_id is pre-signal residue, NOT current-run delivery.
+        Some(pin) => f.payloads.iter().any(|p| p.run_id == pin),
+        // Unpinned ⇒ any non-burn payload is cam2 (pre-#273 behaviour; safe for the strih recording).
+        None => f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id)),
+    }
 }
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
@@ -2968,18 +2971,20 @@ mod tests {
 
     #[test]
     fn pinned_real_interior_loss_in_steady_span_still_fails() {
-        // NO-MASKING: the pin trims only foreign residue — a REAL interior loss inside the
-        // current-run steady span (a delivered current-run frame whose cam1 burn is genuinely
-        // absent, with present burns on BOTH sides) is neither leading nor trailing, so it is
-        // KEPT and still FAILS the strict #186 bar. The trim can never hide a real drop.
+        // NO-MASKING: the pin trims only foreign residue — a REAL interior DROP inside the
+        // current-run steady span (an emitted cam1 id GENUINELY absent, ids jumping 51→53 with a
+        // present burn on every recorded frame, so no `None` slot consumes it) is neither leading
+        // nor trailing, so it is KEPT and still FAILS the strict #186 bar as a REAL DROP. The
+        // #273 trim can never hide a real drop.
         let stream = vec![
-            // foreign residue lead-in (trimmed)
+            // foreign residue lead-in (trimmed by the pin)
             frame(0, &[(CAM2_FOREIGN, 9000), (STRIH, 40)]),
-            // current-run steady span with an INTERIOR cam1 gap: 50, 51, _, 53 (id 52 absent)
+            // current-run steady span: cam1 ids 50,51,53,54 — id 52 is GENUINELY absent (a real
+            // interior drop), every frame carries a burn so nothing is charged as burn-unreadable.
             frame(1, &[(CAM2_PIN, 100), (CAM1B, 50)]),
             frame(2, &[(CAM2_PIN, 101), (CAM1B, 51)]),
-            frame(3, &[(CAM2_PIN, 102)]), // delivered current-run frame, cam1 burn absent → real miss
-            frame(4, &[(CAM2_PIN, 103), (CAM1B, 53)]),
+            frame(3, &[(CAM2_PIN, 102), (CAM1B, 53)]),
+            frame(4, &[(CAM2_PIN, 103), (CAM1B, 54)]),
         ];
         let w = in_window_burn_frames(
             &stream,
@@ -2991,8 +2996,8 @@ mod tests {
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
-            vec![Some(50), Some(51), None, Some(53)],
-            "foreign lead-in trimmed, but the interior current-run miss is KEPT: {ids:?}"
+            vec![Some(50), Some(51), Some(53), Some(54)],
+            "foreign lead-in trimmed, but the steady-span ids (with the real interior gap) are KEPT: {ids:?}"
         );
         let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
             "cam1",
@@ -3004,7 +3009,16 @@ mod tests {
             "a real interior loss must still FAIL — the #273 trim never masks real loss: {:?}",
             iw.contiguity
         );
-        assert_eq!(iw.contiguity.missing_ids, vec![52]);
+        assert_eq!(
+            iw.contiguity.missing_ids,
+            vec![52],
+            "the genuinely-absent interior id 52 is reported as the loss"
+        );
+        assert_eq!(
+            iw.missing_slots[0].kind,
+            InWindowMissingKind::RealDrop,
+            "an absent interior id (no None slot consuming it) is a REAL DROP, not burn-unreadable"
+        );
     }
 
     #[test]
