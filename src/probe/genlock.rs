@@ -1074,11 +1074,25 @@ pub fn genlock_ts_audit_sample(
 ///
 /// This is the only unit-testable part of #278 (the real GPU render timing needs the rig,
 /// which is why the supervisor rig-verifies the 4-live-cam case).
-pub fn display_render_skip_budget(render_divisor: u32, elapsed_ns: u64, ewma_ns: u64, interval_ns: u64) -> bool {
-    // RED stub: never skip (the un-throttled #276 behavior that lets a heavy monitoring
-    // render overrun the 60fps budget and skip the program). GREEN replaces this.
-    let _ = (render_divisor, elapsed_ns, ewma_ns, interval_ns);
-    false
+pub fn display_render_skip_budget(
+    render_divisor: u32,
+    elapsed_ns: u64,
+    ewma_ns: u64,
+    interval_ns: u64,
+) -> bool {
+    // Program output + preview (divisor 0/1) are NEVER throttled — the program is sacred.
+    if render_divisor <= 1 {
+        return false;
+    }
+    // Not warmed up (no EWMA) or no frame timing yet → render once to measure, so a
+    // monitoring display is never starved to 0 before its cost is even known.
+    if ewma_ns == 0 || interval_ns == 0 {
+        return false;
+    }
+    // 90% safety margin (matches the C `interval - interval / 10`). saturating_add mirrors
+    // the C `elapsed + ewma` for the realistic ns domain while never panicking in debug.
+    let budget = interval_ns - interval_ns / 10;
+    elapsed_ns.saturating_add(ewma_ns) > budget
 }
 
 /// (#278) Pure mirror of the EWMA update applied in `render_display()` AFTER a real render of
@@ -1088,10 +1102,14 @@ pub fn display_render_skip_budget(render_divisor: u32, elapsed_ns: u64, ewma_ns:
 /// per-frame jitter while still tracking a load change within a few frames; a cold EWMA
 /// (`prev == 0`) seeds with the first measured duration.
 pub fn display_render_ewma_update(prev_ewma_ns: u64, measured_ns: u64) -> u64 {
-    // RED stub: wrong update (always 0) — never converges to the measured cost, so the budget
-    // gate would never learn a display is heavy. GREEN replaces this.
-    let _ = (prev_ewma_ns, measured_ns);
-    0
+    if prev_ewma_ns == 0 {
+        // cold: seed with the first measured duration
+        measured_ns
+    } else {
+        // α = 1/4: (prev*3 + dur)/4. saturating ops mirror the C plain arithmetic for the
+        // realistic ns domain while never panicking in debug.
+        (prev_ewma_ns.saturating_mul(3).saturating_add(measured_ns)) / 4
+    }
 }
 
 // ============================================================================
@@ -1304,7 +1322,10 @@ mod tests {
         // it is never starved when there is genuine slack.
         let elapsed = 4_000_000; // 4.0ms program
         let ewma = 8_000_000; // 8.0ms light multiview → 12.0ms total < 15ms budget
-        assert!(elapsed + ewma <= BUDGET60, "test premise: this case has slack");
+        assert!(
+            elapsed + ewma <= BUDGET60,
+            "test premise: this case has slack"
+        );
         assert!(
             !display_render_skip_budget(2, elapsed, ewma, I60),
             "a monitoring display whose cost fits the remaining budget MUST render"
@@ -1349,15 +1370,25 @@ mod tests {
         );
         // α=1/4: from 8ms, a heavy 20ms frame nudges the average UP toward the load, smoothed.
         let next = display_render_ewma_update(8_000_000, 20_000_000);
-        assert_eq!(next, (8_000_000 * 3 + 20_000_000) / 4, "EWMA = (prev*3 + dur)/4");
-        assert!(next > 8_000_000 && next < 20_000_000, "EWMA moves toward, not to, the new load");
+        assert_eq!(
+            next,
+            (8_000_000 * 3 + 20_000_000) / 4,
+            "EWMA = (prev*3 + dur)/4"
+        );
+        assert!(
+            next > 8_000_000 && next < 20_000_000,
+            "EWMA moves toward, not to, the new load"
+        );
         // Repeated heavy frames converge the EWMA up across the budget so the gate learns the
         // display is over-budget and starts skipping (the #278 self-throttle).
         let mut e = 8_000_000u64;
         for _ in 0..12 {
             e = display_render_ewma_update(e, 20_000_000);
         }
-        assert!(e > BUDGET60, "sustained heavy load drives the EWMA over budget → gate skips");
+        assert!(
+            e > BUDGET60,
+            "sustained heavy load drives the EWMA over budget → gate skips"
+        );
     }
 
     // ---- #136: timestamp-aligned release (multi-source IN-SYNC) -------------

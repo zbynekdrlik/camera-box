@@ -299,19 +299,22 @@ struct obs_display {
 	DARRAY(struct draw_callback) draw_callbacks;
 	bool use_clear_workaround;
 
-	/* camera-box #276: per-display render-rate divisor so a heavy monitoring
-	 * surface (the built-in Multiview projector) cannot steal the 60fps program
-	 * render budget. render_display() runs on the SINGLE graphics thread for ALL
-	 * displays (program output, preview, every projector) sequentially after
-	 * output_frames(); a 9-18ms multiview render there blocks the program
-	 * presentation. With render_divisor=N this display renders only every Nth
-	 * call to render_display() (skipped BEFORE render_display_begin → ~0 cost,
-	 * last frame stays on screen, no flicker). 0/1 = render every frame (the
-	 * default for program output + preview). frame_counter is PER-INSTANCE (never
-	 * static) so multiple projectors do not lockstep. Both are read+written only
-	 * on the graphics thread; render_divisor is set once from the Qt thread at
-	 * display create (same unguarded pattern as background_color). */
-	uint32_t frame_counter;
+	/* camera-box #278: ADAPTIVE budget-based throttle so a heavy monitoring surface
+	 * (the built-in Multiview projector) cannot steal the 60fps program render budget.
+	 * render_display() runs on the SINGLE graphics thread for ALL displays (program
+	 * output, preview, every projector) sequentially AFTER output_frames(); a 9-23ms
+	 * multiview render there pushes the tick past the frame deadline → the NEXT program
+	 * frame starts late → renderSkip. render_divisor>1 marks a THROTTLEABLE monitoring
+	 * display (set to 2 on the multiview only; 0/1 = program output + preview = never
+	 * throttled). #276 skipped such a display every-Nth-frame, but a SINGLE 4-live-cam
+	 * multiview render (~18-23ms) alone exceeds the 16.6ms budget, so even every other
+	 * frame the rendered frames overran → ~29% program renderSkip. So instead we render a
+	 * monitoring display ONLY when its measured cost (render_ewma_ns, an EWMA of the actual
+	 * draw, α=1/4; 0 = not warmed up) fits the budget REMAINING after the program this tick.
+	 * Both fields are PER-INSTANCE (never static — a static counter would lockstep every
+	 * projector) and read+written only on the graphics thread; render_divisor is set once
+	 * from the Qt thread at display create (same unguarded pattern as background_color). */
+	uint64_t render_ewma_ns;
 	uint32_t render_divisor;
 
 	struct obs_display *next;
@@ -418,6 +421,12 @@ struct obs_core_video {
 
 	uint64_t video_time;
 	uint64_t video_frame_interval_ns;
+	/* camera-box #278: os_gettime_ns() captured at the TOP of the current graphics tick
+	 * (obs_graphics_thread_loop). render_display() reads it to compute how much of the
+	 * frame budget the program (output_frames + earlier displays) has already consumed,
+	 * so a monitoring display only renders when slack remains. Written + read only on the
+	 * graphics thread. */
+	uint64_t graphics_frame_start_ns;
 	uint64_t video_half_frame_interval_ns;
 	uint64_t video_avg_frame_time_ns;
 	double video_fps;
