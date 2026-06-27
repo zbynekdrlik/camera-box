@@ -98,6 +98,18 @@ fn fps_from_frame_rate(numerator: u32, denominator: u32) -> i64 {
     (numerator as f64 / denominator as f64).round() as i64
 }
 
+/// #275b — the genlock emit-boundary NDI timecode for the CURRENT wall clock at `fps`, computed
+/// WITHOUT blocking (the non-sleeping twin of [`wait_for_next_boundary_100ns`]). The async
+/// cam1-burn pipeline computes this ON THE CAPTURE THREAD at the genlock emit-gate instant and
+/// carries it to the burn thread's send (via [`NdiSender::send_frame_data_with_timecode`]), so
+/// the stamped timecode is the EMITTED frame's gate boundary — immune to the burn-thread queue
+/// jitter that moving the send off the capture thread would otherwise inject into the genlock
+/// pacing. `fps` is the integer genlock rate; 0 yields the raw wall clock (a genlock no-op,
+/// matching [`next_boundary_100ns`]).
+pub fn boundary_timecode_100ns(fps: u32) -> i64 {
+    next_boundary_100ns(get_wall_clock_100ns(), fps as i64)
+}
+
 // NDI SDK type definitions (minimal subset for video sending and receiving)
 #[repr(C)]
 struct NDIlib_send_create_t {
@@ -748,7 +760,11 @@ impl NdiSender {
     }
 
     /// Send video frame with zero-copy from buffer slice (FAST PATH)
-    /// Uses SYNCHRONOUS send for lowest latency - blocks until NDI accepts frame
+    /// Uses SYNCHRONOUS send for lowest latency - blocks until NDI accepts frame.
+    ///
+    /// Computes the NDI timecode itself (boundary timecode under external pacing, else a blocking
+    /// wait to the boundary) then delegates to [`send_frame_data_with_timecode`]. The async
+    /// cam1-burn thread (#275b) calls that variant directly with a gate-stamped timecode instead.
     #[inline]
     pub fn send_frame_data(
         &mut self,
@@ -757,6 +773,32 @@ impl NdiSender {
         height: u32,
         fourcc: v4l::FourCC,
         stride: u32,
+    ) -> Result<()> {
+        let fps = fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
+        let timecode = if self.external_pacing {
+            // Caller already gated this send to a wall-clock boundary; stamp it without sleeping.
+            next_boundary_100ns(get_wall_clock_100ns(), fps)
+        } else {
+            wait_for_next_boundary_100ns(fps)
+        };
+        self.send_frame_data_with_timecode(data, width, height, fourcc, stride, timecode)
+    }
+
+    /// #275b — send a video frame with a CALLER-SUPPLIED NDI `timecode_100ns` (100ns since
+    /// epoch). The async cam1-burn thread uses this so the stamped timecode is the EMITTED
+    /// frame's genlock boundary computed on the capture thread at the gate instant
+    /// ([`boundary_timecode_100ns`]) — NOT a value re-derived later on the burn thread (which
+    /// would inject queue jitter into the genlock pacing). [`send_frame_data`] is the
+    /// timecode-computing wrapper for the normal capture-thread path.
+    #[inline]
+    pub fn send_frame_data_with_timecode(
+        &mut self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        fourcc: v4l::FourCC,
+        stride: u32,
+        timecode_100ns: i64,
     ) -> Result<()> {
         let fourcc_str = fourcc.str()?;
 
@@ -798,20 +840,10 @@ impl NdiSender {
             frame_rate_d: self.frame_rate.denominator as c_int,
             picture_aspect_ratio: 0.0, // Use default
             frame_format_type: NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE,
-            timecode: {
-                // NDI advertises the exact rational rate; genlock paces on the
-                // nearest whole-frame cadence derived from it (see
-                // fps_from_frame_rate — rounds, so 59.94 -> 60 not 59).
-                let fps =
-                    fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
-                if self.external_pacing {
-                    // Caller already gated this send to a wall-clock boundary;
-                    // stamp the boundary timecode without sleeping.
-                    next_boundary_100ns(get_wall_clock_100ns(), fps)
-                } else {
-                    wait_for_next_boundary_100ns(fps)
-                }
-            },
+            // The boundary/paced timecode resolved by the caller (or by send_frame_data's
+            // wrapper above) — stamped verbatim so the async cam1-burn (#275b) preserves the
+            // EMITTED frame's gate timecode.
+            timecode: timecode_100ns,
             p_data: uyvy_ptr,
             line_stride_in_bytes: uyvy_stride as c_int,
             p_metadata: ptr::null(),

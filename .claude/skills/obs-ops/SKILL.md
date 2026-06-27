@@ -202,6 +202,42 @@ MsgBox) and won't double-launch. (Proven on the 2026-06-27 #147 obs.dll deploy.)
 strih has OTHER OBS installs in `D:\_APPS` (1ME/2ME/vestibul/input/light) — do NOT touch;
 broadcast = the Program Files 2ME one only.
 
+## A force-kill relaunch restores a STALE saved config — clean the baseline before measuring (#276 deploy)
+
+OBS persists its scene-collection / global state on GRACEFUL exit. A **force-kill** (the deploy/recovery
+path) cannot save, so on relaunch OBS restores the LAST-SAVED config — usually OLDER than the running
+session's live state. Observed 2026-06-27 (#276 deploy): the live pre-deploy session was Studio-Mode
+OFF / no burns / program on the prod scene (~4-5ms render), but after force-kill+relaunch both boxes
+came up **Studio Mode ON + a stray `genlock_burn` ON + a stale program scene** (strih on Cam5-with-burn,
+stream on `REC-STRIH-TMP` not `PRE`). Studio Mode renders preview+program (≈2×) and the burn adds cost,
+so a naive post-relaunch "baseline" looked like 18.9ms / ~14% renderSkip — NOT a regression, just the
+restored heavier state.
+
+- **Before any render measurement:** establish a clean baseline — `SetStudioModeEnabled false` over WS +
+  turn off any `genlock_burn` (`scripts/obs_burn_filter.py remove`/`check`), confirm program is on the
+  live prod scene. Then A/B only the thing under test.
+- **Reset to clean prod after a deploy** = restore the operator's pre-deploy LIVE state, not the stale
+  restored one: burns OFF both boxes, program on the prod scene (strih `Cam 5`, stream `PRE`), Studio
+  Mode OFF, no leftover test projector. (The saved config will still restore the stale state on the NEXT
+  restart — a pre-existing quirk, not the deploy's fault.)
+
+## Rig measurement helpers over OBS WebSocket (no Windows GUI needed)
+
+- **Per-window render stats:** snapshot `GetStats` (activeFps, averageFrameRenderTime, render/output
+  Skipped/Total) at T0, wait N s, snapshot again → DELTAS (renderSkipped delta, outputFps) are immune to
+  startup transient and to the huge cumulative counters. `renderSkippedFrames` = GPU compositor missed
+  the 60fps deadline; `outputSkippedFrames` = encoder dropped a broadcast frame (the one that matters).
+- **Open the built-in Multiview projector:** `OpenVideoMixProjector {videoMixType:
+  OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW, monitorIndex:0}` (fullscreen). There is **no WS request to
+  CLOSE a projector** — close it by `PostMessage WM_CLOSE (0x0010)` to the window titled
+  `Projector - Multiview` (enumerate obs64 windows via win-* MCP). Confirm open/closed by window title.
+- **Decode a measurement burn live (no recording):** turn burn ON (`obs_burn_filter.py add`), then
+  `GetSourceScreenshot {sourceName:"<program scene>", imageFormat:"png", imageWidth:1920}` → base64 →
+  decode the QR with opencv `QRCodeDetector` (full frame, fallback to a 2× upscaled bottom-left crop).
+  A clean decode of `P{run_id}.{frame}.{gen_ts_ns}.{crc32}` (strih run_id 911002 bottom-left, stream
+  911004 bottom-right) proves the burn renders + decodes; then burn OFF. (Reuses the `scripts/obs_phase2.py`
+  `_conn`/`_rpc` WS helpers; the WS pw is in local memory, not committed.)
+
 ## Canonical OBS plugin-load path (#124 — no ProgramData-vs-Program Files shadow)
 
 OBS scans MULTIPLE module locations, so the SAME `distroav.dll` in more than one of them

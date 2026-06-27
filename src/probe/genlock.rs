@@ -1062,6 +1062,164 @@ pub fn display_render_skip(frame_counter: u32, render_divisor: u32) -> (bool, u3
     }
 }
 
+// ============================================================================
+// #275b — async cam1 capture-burn ring (move the per-frame QR render OFF the emit loop)
+// ============================================================================
+//
+// The #174 cam1 capture-burn renders + blits the per-frame QR ON the capture/emit thread,
+// between the genlock emit-gate and the NDI send. At a 60 fps emit that per-frame render is
+// too heavy to hold the 16.6 ms budget, so cam1's NDI emit caps at 30 fps and the full chain
+// can't be MEASURED at 60 (the #11 terminal zero-loss verdict needs it).
+//
+// The fix moves the render off the hot loop onto a dedicated burn thread fed by a bounded FIFO
+// ring (`sync_channel`). The capture thread STAMPS each emitted frame's identity — the
+// monotonic burn `frame_id`, the emit-instant `gen_ts_ns`, and the genlock boundary timecode
+// of the EMITTED frame — at the gate (the genlock-authoritative instant), copies the frame, and
+// hands it off; the burn thread renders the QR + NDI-sends it WITH the carried timecode. The
+// ring gives the 2-3 frame look-ahead ("pre-render the next frame's QR while the current
+// sends") and BACK-PRESSURES (blocks) instead of dropping, so the burn id ↔ emitted-frame
+// mapping stays strictly 1:1 — a dropped job would punch a burn-id GAP the recording verdict
+// misreads as a (phantom) chain loss, silently corrupting the zero-loss verdict.
+//
+// This module hosts the GENERIC, unit-testable ring mechanism (no frame layout, no NDI); the
+// concrete `BurnJob` + thread wiring live in `main.rs`. The test below drives the real ring +
+// a slow consumer to prove the 1:1 / in-order / no-drop / timecode-passthrough guarantee
+// without an OBS/NDI build.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// #275b — depth of the async cam1-burn ring: how many emitted frames the capture thread may
+/// queue ahead of the burn thread. 3 absorbs normal render jitter (the "pre-render the next
+/// frame's QR while the current sends" look-ahead) while bounding the added latency to ≤ ~3
+/// emit intervals.
+pub const BURN_RING_DEPTH: usize = 3;
+
+/// #279 FIX 2 — how long a full-ring [`BurnRing::submit`] blocks before re-checking the shutdown
+/// flag. Short enough that shutdown unblocks the capture thread within a frame or two (so a
+/// blocking submit can NEVER wedge the shutdown path when the burn thread is stalled in a
+/// synchronous NDI send), long enough that the poll is negligible against the burn thread draining
+/// a slot during ordinary back-pressure.
+const SUBMIT_SHUTDOWN_POLL: Duration = Duration::from_millis(5);
+
+/// #275b — monotonic per-EMITTED-frame burn id source. [`next_id`](Self::next_id) returns the
+/// current id then advances (wrapping at `u32::MAX`, matching the legacy `burn_frame_id`).
+/// Pulled once per emitted frame, in emit order, on the capture thread — that single in-order
+/// draw is what keeps the burn id ↔ emitted-frame mapping strictly 1:1 once the QR render moves
+/// to the async burn thread.
+#[derive(Debug, Default)]
+pub struct BurnFrameIdSource {
+    next: u32,
+}
+
+impl BurnFrameIdSource {
+    /// Return the current burn id, then advance (wrapping).
+    pub fn next_id(&mut self) -> u32 {
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        id
+    }
+}
+
+/// #279 FIX 2 — why [`BurnRing::submit`] returned without queuing the job. Both variants hand the
+/// un-sent job back so the caller can log it (it is NEVER silently dropped).
+#[derive(Debug)]
+pub enum SubmitError<T> {
+    /// The burn thread (receiver) is gone — the ring channel is closed. A genuine error.
+    Closed(T),
+    /// Shutdown was signalled (the `running` flag went false) while the ring was full, so the
+    /// blocking submit was abandoned rather than parking the capture thread forever. This is the
+    /// CLEAN-shutdown path, not a fault — it lets the capture thread reach `drop(ring)` / grab
+    /// flush / burn-thread join even when the burn thread is stalled in a synchronous NDI send.
+    ShutdownInterrupted(T),
+}
+
+/// #275b — capture-thread producer handle for the async cam1-burn ring (the sending side of a
+/// bounded FIFO [`sync_channel`]).
+pub struct BurnRing<T> {
+    tx: SyncSender<T>,
+    /// #279 FIX 2 — the capture loop's shared `running` flag. When it goes false a full-ring
+    /// [`submit`](Self::submit) stops blocking and returns [`SubmitError::ShutdownInterrupted`]
+    /// instead of parking the capture thread (which would never reach the while-loop's `running`
+    /// re-check while the burn thread is stalled in `NDIlib_send_send_video_v2`).
+    running: Arc<AtomicBool>,
+}
+
+impl<T> BurnRing<T> {
+    /// Hand one emitted frame's burn work to the burn thread. MUST preserve the strict 1:1 burn
+    /// id ↔ emitted-frame mapping: when the bounded ring is full it BACK-PRESSURES (waits for the
+    /// burn thread to drain a slot) rather than dropping a job — a dropped job would punch a
+    /// burn-id GAP the recording verdict misreads as a chain loss.
+    ///
+    /// #279 FIX 2 — the wait is INTERRUPTIBLE by shutdown. Instead of an unbounded blocking
+    /// `SyncSender::send` (which parks the capture thread forever when the burn thread is stalled
+    /// in a synchronous `NDIlib_send_send_video_v2` — it would never reach the capture loop's
+    /// `running` re-check, so `drop(ring)`/grab-flush/join never run and the process wedges),
+    /// submit retries `try_send` and re-checks `running` between attempts. On a full ring it keeps
+    /// waiting WHILE running (never drops); once `running` goes false it returns
+    /// [`SubmitError::ShutdownInterrupted`] promptly so the capture thread can drop the ring, flush
+    /// the grab recording, and join the burn thread. At steady state the ring is not full, so the
+    /// first `try_send` succeeds immediately and this never sleeps — the blocking-back-pressure
+    /// design (and its 1:1 guarantee) is unchanged; only the unbounded park is removed.
+    pub fn submit(&self, job: T) -> Result<(), SubmitError<T>> {
+        let mut job = job;
+        loop {
+            match self.tx.try_send(job) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(returned)) => {
+                    // Ring full → back-pressure. NEVER drop the job. Re-check the shutdown flag:
+                    // keep waiting while running, abandon cleanly once shutdown is signalled.
+                    if !self.running.load(Ordering::Relaxed) {
+                        return Err(SubmitError::ShutdownInterrupted(returned));
+                    }
+                    job = returned;
+                    // Brief sleep so a genuinely back-pressured capture thread stays responsive to
+                    // shutdown without busy-spinning. Not reached at steady state (ring not full).
+                    std::thread::sleep(SUBMIT_SHUTDOWN_POLL);
+                }
+                Err(TrySendError::Disconnected(returned)) => {
+                    return Err(SubmitError::Closed(returned));
+                }
+            }
+        }
+    }
+}
+
+/// #275b — create the async cam1-burn ring: a bounded ([`BURN_RING_DEPTH`]) FIFO channel.
+/// Returns the capture-thread [`BurnRing`] producer + the burn-thread [`Receiver`]. `running` is
+/// the capture loop's shared run flag; it makes a full-ring [`BurnRing::submit`] interruptible on
+/// shutdown (#279 FIX 2).
+pub fn burn_ring<T>(running: Arc<AtomicBool>) -> (BurnRing<T>, Receiver<T>) {
+    let (tx, rx) = sync_channel(BURN_RING_DEPTH);
+    (BurnRing { tx, running }, rx)
+}
+
+/// #275b — run the async cam1-burn thread to completion: pop each job in RECEIVE (= emit) order
+/// and hand it to `burn_and_send` (render the QR into the copied frame, then NDI-send it with the
+/// gate-stamped timecode). Receiving over the FIFO [`Receiver`] preserves emit order exactly; the
+/// loop ends when every [`BurnRing`] producer has dropped (capture loop exit), so the caller
+/// `join`s this to flush the last queued frames before the NDI sender is destroyed. Generic over
+/// the per-job action so the unit test substitutes a recorder for the NDI render+send.
+pub fn run_burn_ring<T>(rx: Receiver<T>, mut burn_and_send: impl FnMut(T)) {
+    while let Ok(job) = rx.recv() {
+        burn_and_send(job);
+    }
+}
+
+/// #279 FIX 3 — should the async cam1-burn render its QR into THIS frame? The QR burner
+/// ([`crate::probe::qr::burn_qr_yuyv`]) assumes the YUYV byte layout, so only a YUYV frame may be
+/// burned. cam1 captures a fixed YUYV format, but a v4l2 driver CAN substitute a different format
+/// on `S_FMT` — and once the NDI sender moved onto the burn thread (#275b) a non-YUYV frame had no
+/// emit path and was SILENTLY DROPPED, killing the entire cam1 feed on a format substitution. The
+/// pre-#275b path always emitted such a frame UNBURNED; this predicate restores that: `false` ⇒
+/// emit the frame as an unburned passthrough (still sent, still grab-written), NEVER dropped.
+/// Pure so the render-vs-passthrough decision is unit-locked.
+pub fn burn_should_render_qr(fourcc: &str) -> bool {
+    fourcc == "YUYV"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2030,5 +2188,143 @@ mod tests {
             count, 2,
             "two separated backward-step events count twice (#269 [2])"
         );
+    }
+
+    // ---- #275b async cam1 capture-burn ring ---------------------------------
+
+    #[test]
+    fn burn_frame_id_source_is_monotonic_and_wraps() {
+        let mut s = BurnFrameIdSource::default();
+        assert_eq!(s.next_id(), 0);
+        assert_eq!(s.next_id(), 1);
+        assert_eq!(s.next_id(), 2);
+        // wraps at u32::MAX (matches the legacy `burn_frame_id`).
+        let mut w = BurnFrameIdSource { next: u32::MAX };
+        assert_eq!(w.next_id(), u32::MAX);
+        assert_eq!(w.next_id(), 0);
+    }
+
+    #[test]
+    fn async_burn_ring_preserves_1to1_mapping_in_order_under_backpressure() {
+        // THE #275b CORRECTNESS CRUX, reproduced deterministically. Moving the cam1 burn render
+        // off the emit loop onto an async burn thread is only sound if the burn id ↔ emitted-frame
+        // mapping stays strictly 1:1 — every emitted frame's burn id reaches the burn thread
+        // EXACTLY ONCE, in emit order, carrying the timecode the gate stamped — even while the
+        // burn thread momentarily lags. A full ring MUST back-pressure the capture thread, NEVER
+        // silently drop a job (a drop punches a burn-id GAP the recording verdict misreads as a
+        // chain loss, corrupting the zero-loss verdict).
+        //
+        // The capture/emit thread is modelled by the producer loop (stamp id+timecode at the gate,
+        // submit); a deliberately SLOW consumer fills the bounded ring so the producer hits
+        // back-pressure. With a DROPPING ring (`try_send`) jobs vanish and the assertions FAIL
+        // (the RED); with a BLOCKING ring (`send`) every job survives in order (the GREEN).
+        use std::thread;
+        use std::time::Duration;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let (ring, rx) = burn_ring::<(u32, i64)>(running);
+        let consumer = thread::spawn(move || {
+            let mut seen: Vec<(u32, i64)> = Vec::new();
+            run_burn_ring(rx, |job| {
+                // a slow burn render → the bounded ring fills → the producer must back-pressure.
+                thread::sleep(Duration::from_micros(50));
+                seen.push(job);
+            });
+            seen
+        });
+
+        const N: u32 = 500;
+        let mut ids = BurnFrameIdSource::default();
+        for k in 0..N {
+            let frame_id = ids.next_id();
+            // a stand-in genlock 60 fps boundary timecode, stamped at the gate instant; the burn
+            // thread must send EXACTLY this value (no re-derivation on the send thread).
+            let emit_timecode = 1_000_000 + (k as i64) * 166_667;
+            ring.submit((frame_id, emit_timecode))
+                .expect("the bounded ring blocks; it must never drop while the consumer is alive");
+        }
+        drop(ring); // close the channel so the consumer's recv loop ends
+        let seen = consumer.join().expect("burn thread joins cleanly");
+
+        assert_eq!(
+            seen.len(),
+            N as usize,
+            "every emitted frame's burn job survives the ring — no drop, no duplicate (got {})",
+            seen.len()
+        );
+        for (k, (frame_id, emit_timecode)) in seen.iter().enumerate() {
+            assert_eq!(
+                *frame_id, k as u32,
+                "burn ids stay strictly monotonic AND in emit order (1:1, no reorder)"
+            );
+            assert_eq!(
+                *emit_timecode,
+                1_000_000 + (k as i64) * 166_667,
+                "the gate-stamped emitted-frame timecode is carried through the ring unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn submit_unblocks_on_shutdown_when_ring_full() {
+        // #279 FIX 2 — the SHUTDOWN-DEADLOCK guard. A full-ring submit MUST stay interruptible:
+        // when the burn thread stalls (e.g. a synchronous NDI send to a disconnected strih OBS)
+        // the ring fills and the capture thread blocks in submit. With an unbounded blocking send
+        // (the RED) the only `running` re-check is at the top of the capture while-loop, which the
+        // blocked submit never reaches — so on shutdown drop(ring) / grab-flush / burn-join never
+        // run and the process wedges (needs SIGKILL; the grab recording is truncated). The GREEN
+        // polls with a timeout and re-checks `running`, returning promptly on shutdown.
+        use std::sync::mpsc;
+        use std::thread;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let (ring, _rx) = burn_ring::<u32>(Arc::clone(&running));
+        // Fill the bounded ring; NOTHING drains it, so the NEXT submit must block (back-pressure).
+        for k in 0..BURN_RING_DEPTH as u32 {
+            ring.submit(k)
+                .expect("a free slot accepts the job without blocking");
+        }
+
+        // The (DEPTH+1)th submit blocks on the full ring. Run it on a worker and signal it back
+        // a `done` token the instant it returns, so the test can assert it unblocked PROMPTLY
+        // after shutdown rather than parking forever.
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let r = ring.submit(999u32);
+            let _ = done_tx.send(());
+            r
+        });
+
+        // Let the worker reach the blocking submit, then signal shutdown.
+        thread::sleep(Duration::from_millis(50));
+        running.store(false, Ordering::Relaxed);
+
+        done_rx.recv_timeout(Duration::from_secs(2)).expect(
+            "submit must unblock within 2s of shutdown — it parked forever (the #279 FIX 2 deadlock)",
+        );
+        let result = worker.join().expect("worker thread joins cleanly");
+        assert!(
+            matches!(result, Err(SubmitError::ShutdownInterrupted(999))),
+            "a shutdown-interrupted submit returns the un-sent job (never a silent drop)"
+        );
+        // `_rx` is kept alive until here so the block was genuine back-pressure (full ring with a
+        // live receiver), NOT a closed channel returning early.
+        drop(_rx);
+    }
+
+    #[test]
+    fn burn_renders_qr_only_for_yuyv_else_unburned_passthrough() {
+        // #279 FIX 3 — only a YUYV frame may be QR-burned (the burner assumes the YUYV layout).
+        // EVERY other format must take the unburned-passthrough branch (still emitted, never
+        // dropped) so a v4l2 format substitution can't kill the cam1 feed.
+        assert!(burn_should_render_qr("YUYV"), "YUYV is burned");
+        for other in [
+            "NV12", "MJPG", "UYVY", "BGRA", "BGR4", "RX24", "", "yuyv", "YUY2",
+        ] {
+            assert!(
+                !burn_should_render_qr(other),
+                "{other} must NOT be QR-burned — emit it UNBURNED (passthrough), never drop"
+            );
+        }
     }
 }
