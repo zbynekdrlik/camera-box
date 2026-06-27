@@ -11,6 +11,8 @@ use camera_box::config::Config;
 use camera_box::intercom;
 use camera_box::ndi::NdiSender;
 use camera_box::ndi_display::{self, NdiDisplayConfig};
+#[cfg(feature = "probe")]
+use camera_box::probe::genlock::SubmitError;
 
 /// #275b — one emitted frame's async cam1-burn work, handed capture thread → burn thread over
 /// the bounded ring ([`camera_box::probe::genlock::BurnRing`]). `buf` is an OWNED copy of the
@@ -439,7 +441,10 @@ async fn run_capture_loop(
         let mut burn_handle: Option<std::thread::JoinHandle<()>> = None;
         #[cfg(feature = "probe")]
         if burn_run_id.is_some() {
-            let (ring, rx) = camera_box::probe::genlock::burn_ring::<BurnJob>();
+            // #279 FIX 2 — hand the burn ring the capture loop's `running` flag so a full-ring
+            // submit is interruptible on shutdown (never wedges the capture thread).
+            let (ring, rx) =
+                camera_box::probe::genlock::burn_ring::<BurnJob>(Arc::clone(&running_capture));
             let mut burn_sender = capture_sender
                 .take()
                 .expect("NDI sender is present before the burn thread takes it");
@@ -532,22 +537,30 @@ async fn run_capture_loop(
                 #[cfg(feature = "probe")]
                 if let (Some(ring), Some(run_id)) = (burn_ring.as_ref(), burn_run_id) {
                     if info.fourcc.str().unwrap_or("") == "YUYV" {
+                        let frame_id = burn_ids.next_id();
                         let job = BurnJob {
                             buf: data.to_vec(),
                             info,
                             run_id,
-                            frame_id: burn_ids.next_id(),
+                            frame_id,
                             gen_ts_ns: emit_wall_ns,
                             emit_timecode_100ns: camera_box::ndi::boundary_timecode_100ns(send_fps),
                         };
                         // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
-                        // emit ONLY on success: an Err means the burn thread is gone (the frame was
-                        // not sent), so it must not inflate the emitted-fps stat.
+                        // emit ONLY on success: any Err means the frame was NOT sent, so it must
+                        // not inflate the emitted-fps stat. #279 FIX 2 — a full-ring submit is
+                        // interruptible on shutdown (ShutdownInterrupted), distinct from the burn
+                        // thread being gone (Closed).
                         match ring.submit(job) {
                             Ok(()) => emit_count += 1,
-                            Err(_) => {
-                                tracing::error!("#275b cam1-burn ring closed — burn thread gone")
-                            }
+                            Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
+                                "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
+                                frame_id
+                            ),
+                            Err(SubmitError::Closed(_)) => tracing::error!(
+                                "#275b cam1-burn ring closed — burn thread gone (frame_id={} run_id={} not sent)",
+                                frame_id, run_id
+                            ),
                         }
                         tee_grab(data);
                         return; // handed to the burn thread; the sender lives there now

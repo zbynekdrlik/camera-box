@@ -1086,13 +1086,23 @@ pub fn display_render_skip(frame_counter: u32, render_divisor: u32) -> (bool, u3
 // a slow consumer to prove the 1:1 / in-order / no-drop / timecode-passthrough guarantee
 // without an OBS/NDI build.
 
-use std::sync::mpsc::{sync_channel, Receiver, SendError, SyncSender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// #275b — depth of the async cam1-burn ring: how many emitted frames the capture thread may
 /// queue ahead of the burn thread. 3 absorbs normal render jitter (the "pre-render the next
 /// frame's QR while the current sends" look-ahead) while bounding the added latency to ≤ ~3
 /// emit intervals.
 pub const BURN_RING_DEPTH: usize = 3;
+
+/// #279 FIX 2 — how long a full-ring [`BurnRing::submit`] blocks before re-checking the shutdown
+/// flag. Short enough that shutdown unblocks the capture thread within a frame or two (so a
+/// blocking submit can NEVER wedge the shutdown path when the burn thread is stalled in a
+/// synchronous NDI send), long enough that the poll is negligible against the burn thread draining
+/// a slot during ordinary back-pressure.
+const SUBMIT_SHUTDOWN_POLL: Duration = Duration::from_millis(5);
 
 /// #275b — monotonic per-EMITTED-frame burn id source. [`next_id`](Self::next_id) returns the
 /// current id then advances (wrapping at `u32::MAX`, matching the legacy `burn_frame_id`).
@@ -1113,32 +1123,51 @@ impl BurnFrameIdSource {
     }
 }
 
+/// #279 FIX 2 — why [`BurnRing::submit`] returned without queuing the job. Both variants hand the
+/// un-sent job back so the caller can log it (it is NEVER silently dropped).
+#[derive(Debug)]
+pub enum SubmitError<T> {
+    /// The burn thread (receiver) is gone — the ring channel is closed. A genuine error.
+    Closed(T),
+    /// Shutdown was signalled (the `running` flag went false) while the ring was full, so the
+    /// blocking submit was abandoned rather than parking the capture thread forever. This is the
+    /// CLEAN-shutdown path, not a fault — it lets the capture thread reach `drop(ring)` / grab
+    /// flush / burn-thread join even when the burn thread is stalled in a synchronous NDI send.
+    ShutdownInterrupted(T),
+}
+
 /// #275b — capture-thread producer handle for the async cam1-burn ring (the sending side of a
 /// bounded FIFO [`sync_channel`]).
 pub struct BurnRing<T> {
     tx: SyncSender<T>,
+    /// #279 FIX 2 — the capture loop's shared `running` flag. When it goes false a full-ring
+    /// [`submit`](Self::submit) stops blocking and returns [`SubmitError::ShutdownInterrupted`]
+    /// instead of parking the capture thread (which would never reach the while-loop's `running`
+    /// re-check while the burn thread is stalled in `NDIlib_send_send_video_v2`).
+    running: Arc<AtomicBool>,
 }
 
 impl<T> BurnRing<T> {
     /// Hand one emitted frame's burn work to the burn thread. MUST preserve the strict 1:1 burn
     /// id ↔ emitted-frame mapping: when the bounded ring is full it BACK-PRESSURES (blocks the
-    /// capture thread until the burn thread drains a slot) rather than dropping a job. Returns
-    /// `Err` only once the burn thread (receiver) has gone (shutdown).
-    pub fn submit(&self, job: T) -> Result<(), SendError<T>> {
-        // BLOCKING send: when the bounded ring is full, the capture thread waits for the burn
-        // thread to drain a slot rather than dropping the job. This is the whole correctness
-        // crux — a dropped job would punch a burn-id GAP the recording verdict misreads as a
-        // chain loss. Throughput is then min(emit-gate rate, burn-thread rate); the ring depth
-        // absorbs jitter so the capture thread rarely actually blocks.
-        self.tx.send(job)
+    /// capture thread until the burn thread drains a slot) rather than dropping a job.
+    pub fn submit(&self, job: T) -> Result<(), SubmitError<T>> {
+        // NOTE (#279 FIX 2 RED): unbounded blocking send — when the ring is full this parks the
+        // capture thread FOREVER if the burn thread is stalled (e.g. a synchronous NDI send to a
+        // disconnected strih OBS). The `running` flag is never consulted, so shutdown cannot
+        // unblock it and drop(ring)/grab-flush/join never run. The GREEN replaces this with an
+        // interruptible poll loop.
+        self.tx.send(job).map_err(|e| SubmitError::Closed(e.0))
     }
 }
 
 /// #275b — create the async cam1-burn ring: a bounded ([`BURN_RING_DEPTH`]) FIFO channel.
-/// Returns the capture-thread [`BurnRing`] producer + the burn-thread [`Receiver`].
-pub fn burn_ring<T>() -> (BurnRing<T>, Receiver<T>) {
+/// Returns the capture-thread [`BurnRing`] producer + the burn-thread [`Receiver`]. `running` is
+/// the capture loop's shared run flag; it makes a full-ring [`BurnRing::submit`] interruptible on
+/// shutdown (#279 FIX 2).
+pub fn burn_ring<T>(running: Arc<AtomicBool>) -> (BurnRing<T>, Receiver<T>) {
     let (tx, rx) = sync_channel(BURN_RING_DEPTH);
-    (BurnRing { tx }, rx)
+    (BurnRing { tx, running }, rx)
 }
 
 /// #275b — run the async cam1-burn thread to completion: pop each job in RECEIVE (= emit) order
@@ -2154,7 +2183,8 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let (ring, rx) = burn_ring::<(u32, i64)>();
+        let running = Arc::new(AtomicBool::new(true));
+        let (ring, rx) = burn_ring::<(u32, i64)>(running);
         let consumer = thread::spawn(move || {
             let mut seen: Vec<(u32, i64)> = Vec::new();
             run_burn_ring(rx, |job| {
@@ -2195,5 +2225,52 @@ mod tests {
                 "the gate-stamped emitted-frame timecode is carried through the ring unchanged"
             );
         }
+    }
+
+    #[test]
+    fn submit_unblocks_on_shutdown_when_ring_full() {
+        // #279 FIX 2 — the SHUTDOWN-DEADLOCK guard. A full-ring submit MUST stay interruptible:
+        // when the burn thread stalls (e.g. a synchronous NDI send to a disconnected strih OBS)
+        // the ring fills and the capture thread blocks in submit. With an unbounded blocking send
+        // (the RED) the only `running` re-check is at the top of the capture while-loop, which the
+        // blocked submit never reaches — so on shutdown drop(ring) / grab-flush / burn-join never
+        // run and the process wedges (needs SIGKILL; the grab recording is truncated). The GREEN
+        // polls with a timeout and re-checks `running`, returning promptly on shutdown.
+        use std::sync::mpsc;
+        use std::thread;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let (ring, _rx) = burn_ring::<u32>(Arc::clone(&running));
+        // Fill the bounded ring; NOTHING drains it, so the NEXT submit must block (back-pressure).
+        for k in 0..BURN_RING_DEPTH as u32 {
+            ring.submit(k)
+                .expect("a free slot accepts the job without blocking");
+        }
+
+        // The (DEPTH+1)th submit blocks on the full ring. Run it on a worker and signal it back
+        // a `done` token the instant it returns, so the test can assert it unblocked PROMPTLY
+        // after shutdown rather than parking forever.
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let r = ring.submit(999u32);
+            let _ = done_tx.send(());
+            r
+        });
+
+        // Let the worker reach the blocking submit, then signal shutdown.
+        thread::sleep(Duration::from_millis(50));
+        running.store(false, Ordering::Relaxed);
+
+        done_rx.recv_timeout(Duration::from_secs(2)).expect(
+            "submit must unblock within 2s of shutdown — it parked forever (the #279 FIX 2 deadlock)",
+        );
+        let result = worker.join().expect("worker thread joins cleanly");
+        assert!(
+            matches!(result, Err(SubmitError::ShutdownInterrupted(999))),
+            "a shutdown-interrupted submit returns the un-sent job (never a silent drop)"
+        );
+        // `_rx` is kept alive until here so the block was genuine back-pressure (full ring with a
+        // live receiver), NOT a closed channel returning early.
+        drop(_rx);
     }
 }
