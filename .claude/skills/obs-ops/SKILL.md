@@ -187,6 +187,18 @@ To restart strih's OBS mid-session: kill obs64 + relaunch via `scripts/launch-ob
 strih --force` (genlock comes up automatically — it is a build default, #257, no env needed). AHK then
 sees OBS running and won't re-add another one.
 
+**GOTCHA — a libobs HOT-SWAP (deploying a new `obs.dll`) needs AHK STOPPED for the swap window, not
+just kill+relaunch.** AHK's `SafeLoop` (`Run obs64` after a ~5 s delay when its window is gone, polled
+every 1 s) is fine for a fast restart, but a DLL swap is multi-step (kill obs64 → `Copy-Item` the new
+`bin\64bit\obs.dll` → relaunch) and AHK can respawn obs64 *mid-copy*, which **locks the DLL** and the
+copy fails (or, worse, AHK launches a SECOND obs64 around the relaunch since it keys on the obs64
+*window*, which appears a few seconds after `Start-Process`). So for a hot-swap: `Stop-Process
+AutoHotkey64` FIRST → kill obs64 → backup + copy the new obs.dll (verify `Get-FileHash`) → clear
+`.sentinel\*` → relaunch via the wrapper → confirm ONE obs64 + render tick ENABLED → then RESTART AHK
+(`Start-Process AutoHotkey64.exe "D:\_APPS\NL_STARTUP.ahk"`) so reboot-recovery is restored. On
+restart AHK sees the OBS window already up → takes the `else Startup()` branch (no "zapnúť všetko?"
+MsgBox) and won't double-launch. (Proven on the 2026-06-27 #147 obs.dll deploy.)
+
 strih has OTHER OBS installs in `D:\_APPS` (1ME/2ME/vestibul/input/light) — do NOT touch;
 broadcast = the Program Files 2ME one only.
 

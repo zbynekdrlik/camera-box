@@ -170,6 +170,15 @@ struct Args {
     merge_partials: Vec<String>,
 }
 
+impl Args {
+    /// cam2's pinned painter run_id as an `Option`, applying the `0 ⇒ unpinned` sentinel.
+    /// SINGLE source of truth for the sentinel so every consumer (#108 latency pairing, the
+    /// #273 optical-window boundary, the per-box extract flagging) agrees on `None` vs `Some`.
+    fn cam2_pin(&self) -> Option<u32> {
+        (self.cam2_run_id != 0).then_some(self.cam2_run_id)
+    }
+}
+
 /// Reduce a HopLatency option to a compact JSON object (or null) for the report.
 fn hop_lat_json(h: &Option<HopLatency>) -> serde_json::Value {
     match h {
@@ -222,11 +231,41 @@ struct ClassifiedMissing {
     png: Option<String>,
 }
 
-/// Whether `f` is a DELIVERED optical frame — it carries cam2's optical dual-QR (any
-/// CRC-valid payload whose run_id is NOT one of the forwarded node burns). A delivered
-/// frame proves a frame reached the recording at that optical instant.
-fn frame_is_delivered_optical(f: &RecordingFrame, burn_run_ids: &[u32]) -> bool {
-    f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id))
+/// Whether `f` is a CURRENT-RUN DELIVERED optical frame — it carries cam2's optical dual-QR
+/// for THIS run. A delivered frame proves an output frame reached the recording at that
+/// optical instant, so it is what anchors the per-node burn-contiguity window.
+///
+/// `cam2_run_id` (#273):
+/// - `Some(pin)` (the harness pins `--cam2-run-id`): a frame is current-run delivered ONLY
+///   if it carries a payload whose run_id == `pin`. A FOREIGN cam2 run_id (a *previous*
+///   run's residual paint still on the monitor when the recording started) is NOT current-run
+///   delivery — it is pre-signal residue and must never extend the optical window. This is the
+///   #273 fix: the strih recording's lead-in carried the prior run's `2606010` paint, which the
+///   old "any non-burn payload" rule counted as delivered, anchoring the window at frame 0 and
+///   charging the cam1-burn-absent lead-in as false BURN-UNREADABLE → a false zero-loss FAIL.
+/// - `None` (unpinned, `--cam2-run-id 0`): any CRC-valid payload whose run_id is NOT one of the
+///   forwarded node burns counts as cam2 — the pre-#273 behaviour, safe for the strih recording
+///   (which carries no foreign burn) and unchanged for every existing call site.
+fn frame_is_delivered_optical(
+    f: &RecordingFrame,
+    burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+) -> bool {
+    match cam2_run_id {
+        // #273: pinned ⇒ a frame is current-run delivered ONLY if it carries THIS run's paint.
+        // A foreign (previous-run) cam2 run_id is pre-signal residue, NOT current-run delivery.
+        // The `!burn_run_ids.contains` guard is defense-in-depth: should the pin ever be
+        // misconfigured to a node burn run_id, a burn-only frame must NOT be read as optical
+        // (that would let in_window membership collapse to "has the burn" and MASK a delivered-
+        // but-burn-absent loss). With pin == a burn id no frame is optical ⇒ empty window ⇒
+        // first_id None ⇒ is_contiguous() false ⇒ FAILS closed, never a vacuous pass.
+        Some(pin) => f
+            .payloads
+            .iter()
+            .any(|p| p.run_id == pin && !burn_run_ids.contains(&p.run_id)),
+        // Unpinned ⇒ any non-burn payload is cam2 (pre-#273 behaviour; safe for the strih recording).
+        None => f.payloads.iter().any(|p| !burn_run_ids.contains(&p.run_id)),
+    }
 }
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
@@ -297,6 +336,11 @@ fn in_window_burn_frames(
     burn_run_id: u32,
     all_burn_run_ids: &[u32],
     rate: BurnRate,
+    // #273: cam2's pinned painter run_id (`--cam2-run-id`). `Some(pin)` ⇒ only THIS run's
+    // optical paint defines the window boundaries — a foreign/previous-run paint in the
+    // lead-in is excluded so it can never inflate the leading edge. `None` ⇒ the pre-#273
+    // "any non-burn payload is cam2" rule (safe for the foreign-burn-free strih recording).
+    cam2_run_id: Option<u32>,
 ) -> Vec<RecordedBurnFrame> {
     // #204: what counts as a recorded frame for THIS node's contiguity.
     //
@@ -317,7 +361,8 @@ fn in_window_burn_frames(
     // - strih/stream (PerRenderTick): their burn is a free-running render counter, so a
     //   render-tick burn on a NON-optical frame is pre/post-signal noise, NOT an emitted
     //   frame — they keep the strict optical-delivered membership (the #198 behaviour).
-    let is_optical = |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids);
+    let is_optical =
+        |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids, cam2_run_id);
     let has_node_burn = |f: &RecordingFrame| node_burn_id_on(f, burn_run_id).is_some();
     let in_window = |f: &RecordingFrame| match rate {
         BurnRate::PerEmittedFrame => is_optical(f) || has_node_burn(f),
@@ -328,6 +373,15 @@ fn in_window_burn_frames(
     // window to the optical signal; an in-window non-optical frame carrying the cam1 burn is
     // then included by `in_window` above, but the lead-in/out trim is optical-defined so a
     // pre-signal free-running cam1 burn can never extend the window.
+    //
+    // #273 boundary assumption: when pinned, `is_optical` is CURRENT-run paint only, so the
+    // window starts at the first frame painting THIS run. This relies on cam1 NOT emitting
+    // current-run burns onto FOREIGN-paint lead-in frames (true for the observed flow — cam1's
+    // burn and cam2's paint advance to the new run together). A loss straddling the foreign→pin
+    // boundary is the UNOBSERVED lead-in case #267 declines to special-case; the prior "any
+    // paint is optical" rule that appeared to cover it was itself the #273 bug (it charged the
+    // foreign residue as loss). The guarantee that IS preserved + tested: a current-paint frame
+    // with an absent burn is KEPT and FAILS (pinned_real_leading_current_run_loss_still_fails).
     let first = stream.iter().position(is_optical);
     let last = stream.iter().rposition(is_optical);
     let (first, last) = match (first, last) {
@@ -417,6 +471,10 @@ struct NodeSpec<'a> {
     /// (see `extract_partial_flagged_frames`) and pulled back to dev1 beside the partial JSON in
     /// the `<partial>-pixels` dir, so the #186 "SEE the frame" proof is preserved either way.
     rec_path: Option<&'a Path>,
+    /// #273: cam2's pinned painter run_id (`--cam2-run-id`), threaded into the optical-window
+    /// boundary so a foreign/previous-run paint in the lead-in cannot inflate the leading edge.
+    /// `None` ⇒ the pre-#273 "any non-burn payload is cam2" rule.
+    cam2_run_id: Option<u32>,
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -440,7 +498,13 @@ fn node_verdict(
     let rec_path = spec.rec_path;
     // #198: walk only the in-window DELIVERED frames; rate decides whether a forward integer
     // gap is loss; a delivered frame missing its burn IS; out-of-window ids are excluded.
-    let window = in_window_burn_frames(source, spec.burn_run_id, all_burn_run_ids, spec.rate);
+    let window = in_window_burn_frames(
+        source,
+        spec.burn_run_id,
+        all_burn_run_ids,
+        spec.rate,
+        spec.cam2_run_id,
+    );
     let in_window = burn_contiguity_in_window(node, &window, spec.rate);
     let contiguity = in_window.contiguity;
 
@@ -1249,11 +1313,7 @@ fn build_and_print_verdict(
     // that already share the DanteSync wall clock. Reported, never gated (a latency
     // gate is a separate decision; #108 asks for the stable, defined numbers).
     println!();
-    let cam2_pin = if args.cam2_run_id != 0 {
-        Some(args.cam2_run_id)
-    } else {
-        None
-    };
+    let cam2_pin = args.cam2_pin();
     // #194: load the painter's per-tick gen→flip stamps from the --paint-log CSV (if it has
     // the 3-column flip format). flip_ts is the cam2 DISPLAY (page-flip) instant — the true
     // reference for cam2→cam1 (cam1_capture − flip_ts). Empty when no --painter / a pre-#194
@@ -1283,14 +1343,9 @@ fn build_and_print_verdict(
         match &args.cam1_grab_ts {
             Some(grab_ts_path) => {
                 let grab_ts = parse_grab_ts(grab_ts_path)?;
-                let cam2_pin_c1 = if args.cam2_run_id != 0 {
-                    Some(args.cam2_run_id)
-                } else {
-                    None
-                };
                 let c1_lat = hop_latency(
                     "cam2→cam1",
-                    &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin_c1),
+                    &cam2_cam1_samples(cam1_frames, &grab_ts, cam2_pin),
                 );
                 report_hop_latency(&c1_lat, "cam2→cam1 (optical+grab)", "cam2 paint gen_ts_ns");
                 let mut c1_json = hop_lat_json(&c1_lat);
@@ -1493,6 +1548,7 @@ fn build_and_print_verdict(
                         rate: BurnRate::PerEmittedFrame,
                         source: cam1_source,
                         rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
                     },
                     !cam1_ids.is_empty(),
                 ),
@@ -1503,6 +1559,7 @@ fn build_and_print_verdict(
                         rate: BurnRate::PerRenderTick,
                         source: stream_frames,
                         rec_path: stream_path,
+                        cam2_run_id: cam2_pin,
                     },
                     !strih_ids_seq.is_empty(),
                 ),
@@ -1513,6 +1570,7 @@ fn build_and_print_verdict(
                         rate: BurnRate::PerRenderTick,
                         source: stream_frames,
                         rec_path: stream_path,
+                        cam2_run_id: cam2_pin,
                     },
                     !stream_ids_seq.is_empty(),
                 ),
@@ -1935,8 +1993,12 @@ fn extract_partial_flagged_frames(
         ],
         _ => &[],
     };
+    // #273: thread the cam2 pin so the on-box pixel-proof flagging anchors the optical window to
+    // THIS run's paint exactly as the merge verdict does (a foreign-run lead-in is not flagged as
+    // delivered). `None` for an unpinned extract (e.g. the strih box runs without --cam2-run-id).
+    let cam2_pin = args.cam2_pin();
     for &(node, burn_run_id, rate) in owned {
-        let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate);
+        let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate, cam2_pin);
         let iw = burn_contiguity_in_window(node, &window, rate);
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
     }
@@ -2184,8 +2246,9 @@ fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        in_window_burn_frames, node_burn_id_on, node_verdict, parse_cam1_capture_stats_str,
-        parse_grab_ts, parse_painter_flip_str, parse_painter_ticks_str,
+        frame_is_delivered_optical, in_window_burn_frames, node_burn_id_on, node_verdict,
+        parse_cam1_capture_stats_str, parse_grab_ts, parse_painter_flip_str,
+        parse_painter_ticks_str,
     };
     use camera_box::probe::burn_contiguity::{BurnRate, InWindowMissingKind};
     use camera_box::probe::payload::Payload;
@@ -2198,6 +2261,11 @@ mod tests {
     const CAM1B: u32 = 911001; // cam1 per-EMIT capture burn run_id
     const STRIH: u32 = 911002; // strih per-render burn run_id
     const STREAM: u32 = 911004; // stream per-render burn run_id
+                                // #273: a CURRENT-run cam2 painter run_id (the `--cam2-run-id` pin) and a FOREIGN one — a
+                                // previous run's residual paint still on the cam2 monitor when the recording started. Mirrors
+                                // the real run 2706001 (current) vs 2606010 (the prior run's lead-in residue).
+    const CAM2_PIN: u32 = 2706001;
+    const CAM2_FOREIGN: u32 = 2606010;
 
     /// Build a recorded frame from (run_id, frame_id) payloads.
     fn frame(frame_index: u64, payloads: &[(u32, u32)]) -> RecordingFrame {
@@ -2590,7 +2658,13 @@ mod tests {
             frame(4, &[(CAM2, 102), (STRIH, 1676)]), // last delivered (in-window)
             frame(5, &[(STRIH, 30000)]),             // post-signal teardown (no cam2) — trimmed
         ];
-        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
+        let w = in_window_burn_frames(
+            &stream,
+            STRIH,
+            &[STRIH, STREAM],
+            BurnRate::PerRenderTick,
+            None,
+        );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
@@ -2624,6 +2698,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
@@ -2651,7 +2726,13 @@ mod tests {
             frame(2, &[(CAM2, 102)]),                // teardown tail: cam2 only
             frame(3, &[(CAM2, 103)]),                // teardown tail
         ];
-        let wr = in_window_burn_frames(&stream_r, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
+        let wr = in_window_burn_frames(
+            &stream_r,
+            STRIH,
+            &[STRIH, STREAM],
+            BurnRate::PerRenderTick,
+            None,
+        );
         let idsr: Vec<Option<u32>> = wr.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             idsr,
@@ -2677,6 +2758,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
@@ -2717,6 +2799,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let absent = w.iter().filter(|f| f.burn_id.is_none()).count();
         assert!(
@@ -2759,6 +2842,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
@@ -2795,6 +2879,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let absent = w.iter().filter(|f| f.burn_id.is_none()).count();
         assert!(
@@ -2809,6 +2894,224 @@ mod tests {
         assert!(
             !iw.contiguity.is_contiguous(),
             "a long leading loss must FAIL: {:?}",
+            iw.contiguity
+        );
+    }
+
+    // ========================================================================
+    // #273 — the optical-delivered check must honor the pinned `--cam2-run-id`.
+    // A FOREIGN (previous-run) cam2 paint in the lead-in must NOT count as
+    // current-run delivery: it is pre-signal residue and must be TRIMMED off the
+    // leading edge, never charged as cam1 BURN-UNREADABLE. The trim removes ONLY
+    // foreign residue — a real current-run start-of-stream loss (current paint,
+    // no burn) and a real interior loss STILL FAIL (no masking).
+    // ========================================================================
+
+    #[test]
+    fn frame_is_delivered_optical_honors_the_cam2_pin() {
+        // A frame carrying ONLY the previous run's paint (CAM2_FOREIGN) + a node burn.
+        let foreign = frame(0, &[(CAM2_FOREIGN, 9000), (STRIH, 43)]);
+        // A frame carrying THIS run's paint (CAM2_PIN) + the cam1 burn.
+        let current = frame(1, &[(CAM2_PIN, 100), (CAM1B, 50)]);
+        let burns = [CAM1B, STRIH, STREAM];
+
+        // PINNED: only the current-run paint counts as delivered; the foreign paint does NOT.
+        assert!(
+            !frame_is_delivered_optical(&foreign, &burns, Some(CAM2_PIN)),
+            "a FOREIGN (previous-run) cam2 paint must NOT count as current-run delivery (#273)"
+        );
+        assert!(
+            frame_is_delivered_optical(&current, &burns, Some(CAM2_PIN)),
+            "THIS run's cam2 paint IS current-run delivery"
+        );
+        // UNPINNED (back-compat): any non-burn payload is cam2 — both frames count as delivered.
+        assert!(
+            frame_is_delivered_optical(&foreign, &burns, None),
+            "unpinned: any non-burn payload counts as cam2 (pre-#273 behaviour)"
+        );
+        assert!(frame_is_delivered_optical(&current, &burns, None));
+    }
+
+    #[test]
+    fn frame_is_delivered_optical_pin_equal_to_a_burn_id_fails_closed() {
+        // Defense-in-depth: if --cam2-run-id is misconfigured to a node burn run_id, a burn-only
+        // frame must NOT be read as current-run optical — otherwise the cam1 in-window membership
+        // (is_optical || has_node_burn) collapses to "has the burn" and a delivered-but-burn-absent
+        // loss would be MASKED. With pin == a burn id, no frame is optical ⇒ empty window ⇒
+        // first_id None ⇒ NOT contiguous ⇒ the node FAILS closed (never a vacuous pass).
+        let burns = [CAM1B, STRIH, STREAM];
+        let cam1_burn_only = frame(0, &[(CAM1B, 50)]);
+        assert!(
+            !frame_is_delivered_optical(&cam1_burn_only, &burns, Some(CAM1B)),
+            "a burn-only frame must NOT count as optical even when the pin is (mis)set to that burn id"
+        );
+        let stream: Vec<RecordingFrame> = (0..4u32)
+            .map(|i| frame(i as u64, &[(CAM1B, 50 + i)]))
+            .collect();
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &burns,
+            BurnRate::PerEmittedFrame,
+            Some(CAM1B),
+        );
+        assert!(
+            w.is_empty(),
+            "pin==burn ⇒ no optical frame ⇒ empty window: {w:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "an empty window must FAIL (first_id None), never vacuously pass: {:?}",
+            iw.contiguity
+        );
+    }
+
+    #[test]
+    fn pinned_foreign_run_lead_in_is_trimmed_to_a_clean_pass() {
+        // THE #273 REPRODUCTION (run 2706001): the strih recording's lead-in carried the PREVIOUS
+        // run's residual cam2 paint (CAM2_FOREIGN) + the strih burn, but NO current-run paint and
+        // NO cam1 burn (cam1 had not started emitting into THIS run yet). The old optical check
+        // counted that foreign paint as "delivered", anchoring the window at frame 0 so the
+        // cam1-absent lead-in was charged as BURN-UNREADABLE → a false zero-loss FAIL. With the pin
+        // honored, only CAM2_PIN frames define the window: the foreign lead-in is trimmed, leaving a
+        // contiguous cam1 run ⇒ a clean PASS.
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        // 3 foreign-residue lead-in frames: previous run's paint + strih burn, NO cam1, NO pin.
+        for i in 0..3u32 {
+            stream.push(frame(
+                i as u64,
+                &[(CAM2_FOREIGN, 9000 + i), (STRIH, 40 + i)],
+            ));
+        }
+        // The steady-state current-run span: this run's paint + a contiguous cam1 burn run.
+        for i in 0..5u32 {
+            stream.push(frame(
+                (3 + i) as u64,
+                &[(CAM2_PIN, 100 + i), (CAM1B, 50 + i)],
+            ));
+        }
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+            Some(CAM2_PIN),
+        );
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(50), Some(51), Some(52), Some(53), Some(54)],
+            "the foreign-run lead-in must be TRIMMED — only the current-run steady span remains: {ids:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            iw.contiguity.is_contiguous(),
+            "after trimming the foreign-run lead-in the cam1 run is contiguous ⇒ ZERO loss (#273): {:?}",
+            iw.contiguity
+        );
+        assert!(iw.contiguity.missing_ids.is_empty());
+    }
+
+    #[test]
+    fn pinned_real_interior_loss_in_steady_span_still_fails() {
+        // NO-MASKING: the pin trims only foreign residue — a REAL interior DROP inside the
+        // current-run steady span (an emitted cam1 id GENUINELY absent, ids jumping 51→53 with a
+        // present burn on every recorded frame, so no `None` slot consumes it) is neither leading
+        // nor trailing, so it is KEPT and still FAILS the strict #186 bar as a REAL DROP. The
+        // #273 trim can never hide a real drop.
+        let stream = vec![
+            // foreign residue lead-in (trimmed by the pin)
+            frame(0, &[(CAM2_FOREIGN, 9000), (STRIH, 40)]),
+            // current-run steady span: cam1 ids 50,51,53,54 — id 52 is GENUINELY absent (a real
+            // interior drop), every frame carries a burn so nothing is charged as burn-unreadable.
+            frame(1, &[(CAM2_PIN, 100), (CAM1B, 50)]),
+            frame(2, &[(CAM2_PIN, 101), (CAM1B, 51)]),
+            frame(3, &[(CAM2_PIN, 102), (CAM1B, 53)]),
+            frame(4, &[(CAM2_PIN, 103), (CAM1B, 54)]),
+        ];
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+            Some(CAM2_PIN),
+        );
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids,
+            vec![Some(50), Some(51), Some(53), Some(54)],
+            "foreign lead-in trimmed, but the steady-span ids (with the real interior gap) are KEPT: {ids:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "a real interior loss must still FAIL — the #273 trim never masks real loss: {:?}",
+            iw.contiguity
+        );
+        assert_eq!(
+            iw.contiguity.missing_ids,
+            vec![52],
+            "the genuinely-absent interior id 52 is reported as the loss"
+        );
+        assert_eq!(
+            iw.missing_slots[0].kind,
+            InWindowMissingKind::RealDrop,
+            "an absent interior id (no None slot consuming it) is a REAL DROP, not burn-unreadable"
+        );
+    }
+
+    #[test]
+    fn pinned_real_leading_current_run_loss_still_fails() {
+        // NO-MASKING at the LEADING edge: a frame carrying THIS run's paint (CAM2_PIN) but no cam1
+        // burn is a CURRENT-run delivered frame — a possible real start-of-stream loss (cam1
+        // emitted those ids and they were lost in transit at startup). The pin trims only FOREIGN
+        // residue; it must NOT trim a current-run-paint lead-in. So this leading run stays CHARGED
+        // (BURN-UNREADABLE) and the node FAILS — exactly the #267 leading-edge guarantee, preserved.
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        // leading CURRENT-run paint with NO cam1 burn — a real start-of-stream loss, NOT foreign.
+        for i in 0..4u32 {
+            stream.push(frame(i as u64, &[(CAM2_PIN, 100 + i)]));
+        }
+        for i in 0..5u32 {
+            stream.push(frame(
+                (4 + i) as u64,
+                &[(CAM2_PIN, 104 + i), (CAM1B, 50 + i)],
+            ));
+        }
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+            Some(CAM2_PIN),
+        );
+        let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
+        assert_eq!(
+            ids.first(),
+            Some(&None),
+            "a leading CURRENT-run-paint frame with no burn must be KEPT (charged), never trimmed as stabilization: {ids:?}"
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "a real current-run start-of-stream loss must FAIL even with the pin (no masking): {:?}",
             iw.contiguity
         );
     }
@@ -2832,6 +3135,7 @@ mod tests {
                 // rec_path only touched when there ARE missing slots to extract pixels for;
                 // a zero-loss verdict never reads it.
                 rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
+                cam2_run_id: None,
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -2871,6 +3175,7 @@ mod tests {
                 rate: BurnRate::PerEmittedFrame,
                 source: &stream,
                 rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
+                cam2_run_id: None,
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -2885,6 +3190,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
             "cam1",
@@ -2944,6 +3250,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         let siw = camera_box::probe::burn_contiguity::burn_contiguity_in_window(
             "cam1",
@@ -2967,6 +3274,7 @@ mod tests {
                 rate: BurnRate::PerEmittedFrame,
                 source: &strih, // <-- #133: cam1 source-of-truth = the strih 1080p recording
                 rec_path: Some(std::path::Path::new("/nonexistent-strih.mkv")),
+                cam2_run_id: None,
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -3015,6 +3323,7 @@ mod tests {
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
+            None,
         );
         // The blurred-optical frame's cam1 burn (51) MUST be in the window.
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
@@ -3048,6 +3357,7 @@ mod tests {
                 rate: BurnRate::PerEmittedFrame,
                 source: &strih,
                 rec_path: Some(std::path::Path::new("/nonexistent.mkv")),
+                cam2_run_id: None,
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -3073,7 +3383,13 @@ mod tests {
             frame(1, &[(STRIH, 1673)]), // render tick on a non-optical frame — excluded for strih
             frame(2, &[(CAM2, 102), (STRIH, 1676)]),
         ];
-        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
+        let w = in_window_burn_frames(
+            &stream,
+            STRIH,
+            &[STRIH, STREAM],
+            BurnRate::PerRenderTick,
+            None,
+        );
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
@@ -3094,7 +3410,13 @@ mod tests {
             frame(2, &[(CAM2, 102)]), // delivered, NO strih burn ⇒ one real fault
             frame(3, &[(CAM2, 103), (STRIH, 1679)]),
         ];
-        let w = in_window_burn_frames(&stream, STRIH, &[STRIH, STREAM], BurnRate::PerRenderTick);
+        let w = in_window_burn_frames(
+            &stream,
+            STRIH,
+            &[STRIH, STREAM],
+            BurnRate::PerRenderTick,
+            None,
+        );
         let burns: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             burns,

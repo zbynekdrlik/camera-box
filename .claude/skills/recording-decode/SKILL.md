@@ -224,6 +224,45 @@ lost in transit at startup) would false-PASS. A leading burn-absent run stays CH
 → FAILS): a false-FAIL is SAFE, masking start-of-stream loss is not. If a real lead-in artifact is ever
 OBSERVED, give it its own evidence-backed fix — do not pre-emptively clamp an unobserved case.
 
+## #273 GOTCHA — the optical window must honor `--cam2-run-id` (foreign-run lead-in residue)
+
+`in_window_burn_frames` anchors the per-node burn window to cam2's OPTICAL span via
+`frame_is_delivered_optical`. That check used to count ANY non-burn payload as cam2 — so when the
+recording's lead-in still carried the **PREVIOUS run's** residual cam2 paint (the strih OBS
+recording started before cam2 switched to this run AND before cam1 began its burn), those
+foreign-paint frames counted as "delivered", anchoring the window at frame 0. The cam1-burn-absent
+lead-in was then charged as false BURN-UNREADABLE → a false zero-loss FAIL (run 2706001: 43 false
+cam1 misses, `overall_pass=false`, chain actually clean).
+
+**FIX:** `frame_is_delivered_optical(f, burns, cam2_run_id: Option<u32>)` — when pinned (`Some(pin)`),
+a frame is current-run delivered ONLY if it carries a payload `run_id == pin && !burns.contains`
+(the `!burns` guard is defense-in-depth: pin misconfigured to a burn id ⇒ no optical frame ⇒ empty
+window ⇒ FAILS closed, never masks). Unpinned (`--cam2-run-id 0` ⇒ `None`) keeps the old "any
+non-burn = cam2" (safe for the strih recording, no foreign burn). Threaded through `NodeSpec.cam2_run_id`
+so BOTH the fused path AND the `--merge-partials` path get it (run_merge → build_and_print_verdict
+re-derives the pin via `Args::cam2_pin()` — the single `0⇒None` source of truth). `extract_partial`
+threads it too (None for the strih box, which extracts without --cam2-run-id).
+
+**This IS "trim the leading + trailing stabilization" (user: "odkroj začiatok a koniec"):**
+- **Leading** trim = run-id-precise — ONLY foreign-run residue is excluded. A CURRENT-run-paint
+  frame with no burn is KEPT and CHARGED (the #267 leading-edge guarantee — a real start-of-stream
+  loss must never be masked). The pin trims warm-up, NOT loss.
+- **Trailing** trim = the existing bounded #267 teardown clamp (`TEARDOWN_TAIL_MAX_FRAMES`).
+- **NO masking:** empty window (all-foreign / mis-pinned) ⇒ `first_id None` ⇒ `is_contiguous()` is
+  `first_id.is_some() && missing_ids.is_empty()` ⇒ **false** ⇒ node FAILS (burn_contiguity.rs:63).
+  A real interior drop still FAILS. Tests: `pinned_foreign_run_lead_in_is_trimmed_to_a_clean_pass`,
+  `pinned_real_interior_loss_in_steady_span_still_fails` (real-drop, missing_ids=[52]),
+  `pinned_real_leading_current_run_loss_still_fails`, `frame_is_delivered_optical_pin_equal_to_a_burn_id_fails_closed`.
+
+**RED→GREEN re-merge recipe (verify a verdict-WINDOW fix against an existing run, no rig):** the
+per-box partials preserve full per-frame `payloads` (incl. the foreign paint), so re-run the merge
+locally with `# airuleset:build-ok` + `AIRULESET_ALLOW_LOCAL_BUILD=1 cargo build --features probe
+--bin recording-verdict`, then `./target/debug/recording-verdict --merge-partials strih=… stream=…
+--cam2-run-id <pin> --burn-*-run-id … --json out.json --cam1-capture-stats …` (exact flags in the
+run's `harness.log`). Compare `overall_pass` + `.full_chain.loss.cam1.{first_id,last_id,missing_ids}`
+vs the on-disk RED `verdict-<run>.json`. The probe path compiles ON CI ONLY — this build is the
+sanctioned RED→GREEN exception, `cargo clean`/purge after.
+
 ## GOTCHA — pre-push Gate-1 false-positives on inline Rust tests
 
 FIXED in airuleset (#170 session): Gate-1 ("feature .rs changed but no test file") used to key
