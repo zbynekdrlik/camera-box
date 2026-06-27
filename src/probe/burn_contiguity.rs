@@ -179,6 +179,19 @@ pub struct InWindowContiguity {
     pub missing_slots: Vec<MissingSlot>,
 }
 
+/// The in-window contiguity check with `expected_step == 1` (no decimation): every render tick /
+/// emitted frame is one recorded frame, so per-render forward gaps are unconditionally ignored —
+/// today's behavior, unchanged. For a DECIMATED hop (the strih burn read from the lower-fps stream
+/// recording, where the 60 fps strih render is captured at 30 → ids step by 2 by design) call
+/// [`burn_contiguity_in_window_with_step`] with the decimation factor.
+pub fn burn_contiguity_in_window(
+    node: &str,
+    frames: &[RecordedBurnFrame],
+    rate: BurnRate,
+) -> InWindowContiguity {
+    burn_contiguity_in_window_with_step(node, frames, rate, 1)
+}
+
 /// THE in-window contiguity check (#198), correct for BOTH burn-counter rates.
 ///
 /// ## Why the old integer-range check over-counted strih/stream by ~3x
@@ -240,11 +253,39 @@ pub struct InWindowContiguity {
 /// faults in walk order, then the cam1 genuinely-absent ids ascending (no consumer assumes a sort).
 /// Consecutive `None` frames get DISTINCT synthetic ids so a deduping consumer cannot undercount.
 /// An empty / all-`None` window ⇒ `first_id == None` ⇒ NOT a pass (nothing proven).
-pub fn burn_contiguity_in_window(
+///
+/// ## Decimation-aware step (`expected_step`) — the mixed 60/30 topology (#11)
+///
+/// For a [`BurnRate::PerRenderTick`] node read from a recording captured at a LOWER fps than the
+/// node's render rate — the strih burn (rendered at 60 on the strih box) read from the 30 fps
+/// STREAM recording — consecutive recorded frames carry render-tick ids that step by the by-design
+/// DECIMATION factor `expected_step` (60/30 = 2: the stream's genlock FIFO keeps every other strih
+/// frame). A forward gap **== `expected_step`** IS that decimation and is NOT loss; a forward gap
+/// **> `expected_step`** means one or more emitted output frames never reached the recording — the
+/// excess `gap / expected_step − 1` (INTEGER division, so genlock beat jitter of
+/// `expected_step ± 1` charges 0) is appended as [`InWindowMissingKind::RealDrop`]. This is the
+/// load-bearing no-masking fix: without it the per-render forward gap is UNCONDITIONALLY ignored,
+/// so a real loss in the decimated hop (a gap of 4 where 2 is by-design) reads as a false ZERO.
+///
+/// The excess check is GATED on `expected_step >= 2` (a configured decimation hop). With
+/// `expected_step == 1` the per-render forward gap stays UNCONDITIONALLY ignored exactly as before
+/// — so the strih burn in a 60-in-60 strih recording, the stream burn recorded by its own 30 fps
+/// OBS (emit rate == capture rate ⇒ step 1), and the cam render-tick semantics are all unchanged
+/// (the [`burn_contiguity_in_window`] back-compat wrapper passes `1`). cam1
+/// ([`BurnRate::PerEmittedFrame`]) is unaffected by `expected_step` — its real-drop detection is
+/// the order-independent set-based check below, which already catches every real 60 fps drop.
+///
+/// The decimation-excess RealDrops are absent frames BETWEEN two delivered frames (like the cam1
+/// genuinely-absent ids), NOT delivered frames, so they are EXTRA entries in `missing_ids` and
+/// `present_count + missing_ids.len()` is NOT an invariant for a decimated per-render node either.
+pub fn burn_contiguity_in_window_with_step(
     node: &str,
     frames: &[RecordedBurnFrame],
     rate: BurnRate,
+    expected_step: i64,
 ) -> InWindowContiguity {
+    // RED placeholder — the decimation-excess RealDrop handling is added in the GREEN commit.
+    let _ = expected_step;
     let present_ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
     let first_id = present_ids.first().copied();
     let last_id = present_ids.last().copied();
@@ -1415,5 +1456,161 @@ mod tests {
             "no genuine duplicate (interstitial) frame anywhere ⇒ no burn-unreadable: {:?}",
             w.missing_slots
         );
+    }
+
+    // ============================================================================
+    // #11 mixed 60/30 topology — DECIMATION-AWARE per-render contiguity.
+    //
+    // The strih burn is the strih OBS render-tick counter at 60 fps. Read from the 30 fps STREAM
+    // recording (the stream's genlock FIFO keeps every other strih frame), consecutive recorded
+    // frames carry strih ids stepping by the by-design DECIMATION factor 2. A gap of EXACTLY 2 is
+    // that decimation (not loss); a gap > 2 means an emitted output frame was genuinely lost — the
+    // excess `gap/step − 1` is a REAL DROP. expected_step==1 = today's unconditional-ignore.
+    //
+    // These three prove decimation-aware ≠ blanket-ignore:
+    //   1. decimation (every-other id, gap==step) PASSES — no false loss.
+    //   2. decimation + an EXTRA missing id (gap > step) still FAILS — no masking.
+    //   3. expected_step==1 (the strih-recording / 60-in-60 case) still catches a real drop.
+    // ============================================================================
+
+    #[test]
+    fn in_window_decimation_step2_every_other_id_is_zero_loss() {
+        // The strih burn in the 30 fps stream recording: 60 fps render captured every-other →
+        // ids step by 2. With expected_step=2 every gap IS the by-design decimation ⇒ ZERO loss,
+        // no false positive (the masking the OLD unconditional-ignore also gave — but see test 2).
+        let frames = [
+            rbf(0, Some(1000)),
+            rbf(1, Some(1002)),
+            rbf(2, Some(1004)),
+            rbf(3, Some(1006)),
+            rbf(4, Some(1008)),
+        ];
+        let w = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 2);
+        let c = &w.contiguity;
+        assert!(
+            c.is_contiguous(),
+            "every-other-id (gap==step) is by-design decimation, NOT loss: {c:?}"
+        );
+        assert!(
+            w.missing_slots.is_empty(),
+            "no missing slot for clean decimation: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(c.present_count, 5);
+        assert_eq!(c.first_id, Some(1000));
+        assert_eq!(c.last_id, Some(1008));
+    }
+
+    #[test]
+    fn in_window_decimation_step2_jitter_gap_of_one_or_three_is_not_loss() {
+        // Genlock 60→30 beat jitter: an occasional gap of 1 (both frames kept) or 3 (a beat
+        // straddle) is NOT loss — integer `gap/step − 1` charges 0 for gap ∈ {1, 2, 3} at step 2.
+        let frames = [
+            rbf(0, Some(2000)),
+            rbf(1, Some(2001)), // gap 1 (oversample — both kept this beat)
+            rbf(2, Some(2003)), // gap 2 (decimation)
+            rbf(3, Some(2006)), // gap 3 (beat straddle)
+            rbf(4, Some(2008)), // gap 2
+        ];
+        let w = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 2);
+        assert!(
+            w.contiguity.is_contiguous(),
+            "decimation beat jitter (gap 1 or 3) is not loss: {:?}",
+            w.missing_slots
+        );
+    }
+
+    #[test]
+    fn in_window_decimation_step2_extra_missing_id_is_a_real_drop_not_masked() {
+        // THE no-masking proof (the scrutiny point). Steady decimation by 2, but ONE output frame
+        // is genuinely lost: the recorded strih ids jump 1004 → 1008 (gap 4 where 2 is by-design).
+        // The excess `4/2 − 1 = 1` is a REAL DROP. WITHOUT decimation-awareness the forward gap is
+        // unconditionally ignored → a false ZERO; WITH it the verdict correctly FAILS.
+        let frames = [
+            rbf(0, Some(1000)),
+            rbf(1, Some(1002)),
+            rbf(2, Some(1004)),
+            rbf(3, Some(1008)), // gap 4 — one decimation step is genuinely missing (a lost frame)
+            rbf(4, Some(1010)),
+        ];
+        let w = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 2);
+        let c = &w.contiguity;
+        assert!(
+            !c.is_contiguous(),
+            "a gap > step (real loss on top of decimation) must NOT be masked: {c:?}"
+        );
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        assert_eq!(
+            real_drops, 1,
+            "exactly ONE excess frame lost (4/2 − 1) charged as a real drop: {:?}",
+            w.missing_slots
+        );
+        assert!(
+            !c.missing_ids.is_empty(),
+            "the lost frame keeps the verdict NOT-zero (never a false pass): {c:?}"
+        );
+    }
+
+    #[test]
+    fn in_window_decimation_step2_two_lost_frames_charge_two_real_drops() {
+        // A wider real loss: gap of 6 at step 2 ⇒ `6/2 − 1 = 2` excess frames lost ⇒ two real drops.
+        let frames = [rbf(0, Some(500)), rbf(1, Some(502)), rbf(2, Some(508))];
+        let w = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 2);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        assert_eq!(
+            real_drops, 2,
+            "gap 6 at step 2 = two genuinely-lost frames: {:?}",
+            w.missing_slots
+        );
+        assert!(!w.contiguity.is_contiguous());
+    }
+
+    #[test]
+    fn in_window_step1_strih_recording_forward_gap_unchanged_and_none_still_caught() {
+        // expected_step==1 (the strih burn read from a 60-in-60 strih recording, the stream burn
+        // recorded by its own OBS, cam render ticks): per-render FORWARD gaps stay UNCONDITIONALLY
+        // ignored (free-running counter > emit rate), so the big forward gaps below are ZERO loss —
+        // identical to today. BUT a delivered frame missing its burn (None) is STILL a real drop:
+        // step=1 does not blanket-ignore, it only leaves the forward-gap render-tick semantics
+        // untouched. Proves the gate (`expected_step >= 2`) never weakens the step-1 path.
+        let clean = [rbf(0, Some(1670)), rbf(1, Some(1673)), rbf(2, Some(1676))];
+        let w_clean =
+            burn_contiguity_in_window_with_step("strih", &clean, BurnRate::PerRenderTick, 1);
+        assert!(
+            w_clean.contiguity.is_contiguous(),
+            "step=1 forward render-tick gaps are unchanged (not loss): {:?}",
+            w_clean.contiguity
+        );
+
+        let dropped = [rbf(0, Some(1670)), rbf(1, None), rbf(2, Some(1676))];
+        let w_drop =
+            burn_contiguity_in_window_with_step("strih", &dropped, BurnRate::PerRenderTick, 1);
+        assert!(
+            !w_drop.contiguity.is_contiguous(),
+            "step=1 still catches a delivered-but-burnless frame: {:?}",
+            w_drop.contiguity
+        );
+        assert_eq!(w_drop.missing_slots.len(), 1);
+        assert_eq!(
+            w_drop.missing_slots[0].kind,
+            InWindowMissingKind::BurnUnreadable
+        );
+    }
+
+    #[test]
+    fn burn_contiguity_in_window_wrapper_equals_step_1() {
+        // The 3-arg back-compat wrapper MUST be exactly expected_step==1.
+        let frames = [rbf(0, Some(100)), rbf(1, Some(110)), rbf(2, None), rbf(3, Some(130))];
+        let a = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
+        let b = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 1);
+        assert_eq!(a, b, "wrapper must delegate to step=1");
     }
 }
