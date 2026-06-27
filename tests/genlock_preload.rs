@@ -1167,6 +1167,60 @@ mod vendored_source {
     }
 
     #[test]
+    fn backward_clock_step_recovery_present_in_vendored_source() {
+        // #147: the SINK ts-align release must RE-ANCHOR on a backward DanteSync wall-clock
+        // step (NTP/PTP sawtooth) instead of HOLDing (freezing the program feed) forever.
+        // A subtree pull (#44) dropping the guard silently reverts the freeze fix while the
+        // Rust mirror unit tests stay green (the probe-gated mirror compiles to nothing in
+        // the default gate). Mirror of src/probe/genlock.rs genlock_release_guarded.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // #269 [3]: the backward-step detection tests the MAX queued ts (a frame more than one
+        // interval AHEAD of the real wall clock = captured before a backward step, impossible
+        // for a live cap). The MAX (not array[0], the oldest) makes the trigger DEPTH-
+        // independent so every genlock source re-anchors uniformly (no shallow-jumps-while-
+        // deep-freezes cross-source desync).
+        assert!(
+            src.contains("max_ts > wall_now + interval"),
+            "{OBS_SOURCE}: #147/#269 [3] — the backward-clock-step detection (max queued ts > \
+             wall_now + interval) is gone; the ts-align release would FREEZE the program feed \
+             on an NTP/PTP backward step (or recover non-uniformly). Re-apply the re-anchor guard."
+        );
+        // The re-anchor must COUNT the event (the genlock_backward_steps audit counter).
+        assert!(
+            src.contains("source->genlock_backward_steps++"),
+            "{OBS_SOURCE}: #147 — the genlock_backward_steps re-anchor counter increment is \
+             gone; the backward-step recovery (or its audit signal) reverted. Re-apply."
+        );
+        // #269 [2]: the counter is LATCHED per event (genlock_in_backward_step) so one step
+        // over N recovery ticks counts ONCE, not N — the increment is gated on the rising edge.
+        assert!(
+            src.contains("source->genlock_in_backward_step = true")
+                && src.contains("source->genlock_in_backward_step = false"),
+            "{OBS_SOURCE}: #269 [2] — the per-event backward-step latch (genlock_in_backward_step \
+             set true on re-anchor, cleared on a benign/normal tick) is gone; the counter would \
+             over-report (one step counted per tick) and the LOG_WARNING would spam at frame rate."
+        );
+        // The audit line must expose the counter so the rig deploy-verify can SEE recoveries.
+        assert!(
+            src.contains("backward_steps=%llu"),
+            "{OBS_SOURCE}: #147 — the genlock-fifo audit line no longer prints \
+             backward_steps=; the re-anchor signal is invisible to post-deploy verify. Re-apply."
+        );
+        // The struct fields must exist (lock-step with the increment, the latch + the audit print).
+        let internal = squish(&vendor_file(OBS_INTERNAL));
+        assert!(
+            internal.contains("uint64_t genlock_backward_steps;"),
+            "{OBS_INTERNAL}: #147 — the genlock_backward_steps source-struct field is gone; \
+             re-apply (the #147 backward-step recovery counter)."
+        );
+        assert!(
+            internal.contains("bool genlock_in_backward_step;"),
+            "{OBS_INTERNAL}: #269 [2] — the genlock_in_backward_step latch field is gone; \
+             re-apply (the per-event backward-step counter latch)."
+        );
+    }
+
+    #[test]
     fn ms_reserve_release_path_present_in_vendored_source() {
         // #184: the ts-align release must offer a sub-frame MS-GRANULAR reserve — the
         // lowest-latency lever (held latency ≈ reserve_ms, not a whole 33ms preload
@@ -1586,10 +1640,11 @@ mod vendored_source {
         );
         // Anchor on the unique reserve-deadline call; the holds++ must be within the same
         // ts-align block (it follows the present_ts/due computation, before the present path).
+        // #269 widened the window: the [3] max-ts scan + the [0]/[2] comments grew the block.
         let anchor = raw
             .find("genlock_present_ts_reserve(wall_now, reserve_ms)")
             .expect("#148/#269 [3]: the ts-align reserve deadline (from hoisted wall_now) is gone — re-locate");
-        let window_end = (anchor + 2500).min(raw.len());
+        let window_end = (anchor + 4000).min(raw.len());
         assert!(
             raw[anchor..window_end].contains("source->genlock_holds++"),
             "{OBS_SOURCE}: #148 — genlock_holds++ is not in the ts-align decision block \
@@ -2178,6 +2233,46 @@ mod distroav_source {
             wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
             "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the editable \
              per-source latency int field; add the pwsh #245 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_workflow_gates_on_the_backward_step_recovery() {
+        // #147: the slow production build must re-assert the backward-clock-step re-anchor
+        // tokens in pwsh BEFORE the 150-min build (this Linux Rust guard can't compile on the
+        // runner), so a subtree bump can't ship an obs.dll that FREEZES the program feed on an
+        // NTP/PTP backward step while the version pin still passes (the #269 lock-step gotcha:
+        // a vendored-C guard lives in the YAML too, not only this test).
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+        assert!(
+            wf.contains("source->genlock_backward_steps++"),
+            "{WINDOWS_GENLOCK_WF}: #147 — the production build no longer asserts the \
+             backward-step re-anchor counter (genlock_backward_steps); re-add the pwsh #147 gate."
+        );
+        assert!(
+            wf.contains("max_ts > wall_now + interval"),
+            "{WINDOWS_GENLOCK_WF}: #147/#269 [3] — the production build no longer asserts the \
+             backward-clock-step detection (max queued ts > wall_now + interval); re-add the pwsh #147 gate."
+        );
+    }
+
+    #[test]
+    fn windows_genlock_fast_workflow_gates_on_the_backward_step_recovery() {
+        // #147: the FAST hot-DLL workflow compiles the real vendored C, but a `git subtree pull`
+        // reverting the #147 guard to inert-but-still-compiling (e.g. dropping the re-anchor
+        // branch) would hot-swap a FREEZING obs.dll un-gated. The fast path must re-assert the
+        // same #147 tokens BEFORE its build, mirroring the slow gate.
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+        assert!(
+            wf.contains("source->genlock_backward_steps++"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #147 — the FAST build does not assert the backward-step \
+             re-anchor counter (genlock_backward_steps); add the pwsh #147 gate, mirroring \
+             windows-genlock.yml."
+        );
+        assert!(
+            wf.contains("max_ts > wall_now + interval"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #147/#269 [3] — the FAST build does not assert the \
+             backward-clock-step detection (max queued ts > wall_now + interval); add the pwsh #147 gate."
         );
     }
 }
