@@ -411,6 +411,23 @@ built-in projector is the budget thief.
   unit-testable part — the GPU render timing needs the rig) + cadence tests. Guards live LOCK-STEP in
   `tests/genlock_preload.rs` AND BOTH `windows-genlock{,-fast}.yml` (the #269 rule above): the
   render_display gate token, the API, the struct fields, the OBSProjector `divisor=2` call.
+- **DEPLOY GOTCHA — OBSProjector.cpp compiles into `obs64.exe`, NOT a frontend DLL.** `frontend/cmake/
+  ui-widgets.cmake` puts OBSProjector in the `obs-studio` target whose `OUTPUT_NAME=obs64`
+  (`frontend/CMakeLists.txt`). So the #276 frontend change ONLY takes effect if you swap **obs64.exe**
+  (`bin\64bit\obs64.exe`) — the usual obs.dll-only hot-swap is INSUFFICIENT. A #276/#275a deploy swaps
+  THREE binaries: `bin\64bit\obs.dll` (libobs) + `bin\64bit\obs64.exe` (frontend) + the canonical
+  `ProgramData\…\distroav\bin\64bit\distroav.dll` (#275a). `obs-frontend-api.dll` does NOT need swapping
+  (it doesn't use the new export). Use the FULL `obs-genlock-windows-x64` artifact + its
+  `BUNDLE_MANIFEST.json` files[] sha256 to byte-verify each swapped binary.
+- **RIG-CONFIRMED 2026-06-27 (build 829ec4bb, strih, program on a live 60fps cam, A/B over 60s GetStats
+  deltas via WS):** multiview projector CLOSED = 4.34ms / 0 renderSkip / 0 outputSkip / 60.000fps;
+  multiview projector OPEN fullscreen (divisor=2) = **11.50ms / 0 renderSkip / 0 outputSkip / 60.000fps**
+  (< 16.6ms budget, < pre-fix 13.7-14.2ms). genlock-fifo underruns UNCHANGED by the multiview (~2/s
+  steady-state both states; holds flat, overruns=0). Multiview renders LIVE at ~30fps (divisor-2) →
+  monitoring works. **#276 PASS — divisor=2 keeps the 60fps program clean with the multiview open.**
+  SEPARATE finding #278: **Studio Mode** preview is a 2nd render-budget consumer at 60fps (studio-ON ≈
+  14% renderSkip, studio-OFF clean) — prod runs studio off, so latent not active; same class as the
+  multiview.
 
 ## #275 — cheaper measurement burn (bulk-fill render); wire format is LOCKED by the #186 fixtures
 The per-frame QR burn (strih/stream `genlock_burn` filter `vendor/distroav/src/burn-qr.hpp` render())
