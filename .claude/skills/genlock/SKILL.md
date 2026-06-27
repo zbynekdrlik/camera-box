@@ -371,3 +371,14 @@ Tracked: #76.
 The lag CANCELS OBS↔OBS (strih→stream measured correctly = 187 ms). It BREAKS cam→OBS
 (cam→strih timecode gave nonsense 17.7 ms / negative). Fix B′ unlocks exact cam→strih
 measurement.
+
+## CI exact-anchor guards live in YAML too (not just tests) — #269 gotcha
+A vendored-C refactor that changes a pinned genlock call-site SHAPE breaks the
+`regex::Escape` `-notmatch` source guards in BOTH places — update ALL in the same change:
+- `tests/genlock_preload.rs` (the Rust vendored-source guards), AND
+- `.github/workflows/windows-genlock-fast.yml` + `windows-genlock.yml` (the "Assert genlock
+  timestamp-aligned release patch present (#136)" step — these run on the whitespace-collapsed
+  `$src` BEFORE the ~18-min build, so a stale anchor fails the build at the assert, not at compile).
+Example: #148 hoisted `genlock_present_ts(genlock_wall_now_ns(), …)` → `wall_now = genlock_wall_now_ns();`
++ `genlock_present_ts(wall_now, …)`; the YAML guards pinned the old inline form and failed the FAST
+build until updated to check the `wall_now` source + the new call form.
