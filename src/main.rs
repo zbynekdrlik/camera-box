@@ -351,6 +351,15 @@ async fn run_capture_loop(
             "#174 CAM1-CAPTURE BURN ACTIVE (TEST MODE): run_id={} — bottom-center QR burned into the emitted frame (production feed is OFF unless CAMERA_BOX_BURN_RUN_ID is set)",
             id
         );
+        // #275b: the async burn stamps each emitted frame's NDI timecode at the genlock
+        // emit-gate boundary. Without genlock there is no boundary to align to (the timecode
+        // falls back to the raw wall clock), so the measurement is only well-defined under
+        // genlock. The E2E harness always sets GENLOCK_FPS; warn loudly if it didn't.
+        if genlock_fps.is_none() {
+            tracing::warn!(
+                "#275b cam1 burn is ACTIVE without genlock (GENLOCK_FPS unset) — emitted-frame timecodes will NOT be boundary-aligned; enable genlock for a well-defined measurement"
+            );
+        }
     }
 
     // Create NDI sender with configured name and the (genlock or capture) rate
@@ -494,6 +503,25 @@ async fn run_capture_loop(
                         return; // between boundaries — decimate (don't send)
                     }
                 }
+                // #275b — ONE cam1 emit-instant wall-clock stamp (CLOCK_REALTIME, the DanteSync
+                // clock), shared by the burned QR's gen_ts AND the grab-recording tee, so both
+                // describe the SAME instant even when the async submit below back-pressures (the
+                // grab ts must not drift later than the emit, which would inflate cam2→cam1 latency).
+                let emit_wall_ns = wall_clock_ns() as i64;
+
+                // #105 node 2 — tee the EMITTED (original, unburned) frame to the cam1 grab
+                // recording at the emit instant. A broken grab stream stops recording but NEVER
+                // the NDI send (the measured pipeline must not be disturbed by a recorder fault).
+                // One closure so the burn path and the production path can't drift.
+                let mut tee_grab = |data: &[u8]| {
+                    if let Some(rec) = grab_recorder.as_mut() {
+                        if let Err(e) = rec.write_frame(data, emit_wall_ns) {
+                            tracing::error!("grab-record write failed, stopping recorder: {}", e);
+                            grab_recorder = None;
+                        }
+                    }
+                };
+
                 // #275b ASYNC BURN PATH (test mode: probe + CAMERA_BOX_BURN_RUN_ID). Stamp the
                 // emitted frame's burn id + emit-instant gen_ts + gate-instant NDI timecode HERE
                 // (the genlock-authoritative moment), copy the frame, and hand it to the burn
@@ -509,53 +537,44 @@ async fn run_capture_loop(
                             info,
                             run_id,
                             frame_id: burn_ids.next_id(),
-                            gen_ts_ns: wall_clock_ns() as i64,
+                            gen_ts_ns: emit_wall_ns,
                             emit_timecode_100ns: camera_box::ndi::boundary_timecode_100ns(send_fps),
                         };
-                        if ring.submit(job).is_err() {
-                            tracing::error!("#275b cam1-burn ring closed — burn thread gone");
-                        }
-                        emit_count += 1; // reached only when the frame passed the gate
-
-                        // #105 node 2 — tee the EMITTED (original, unburned) frame to the cam1
-                        // grab recording on the SAME wall clock the cam2 painter uses.
-                        if let Some(rec) = grab_recorder.as_mut() {
-                            if let Err(e) = rec.write_frame(data, wall_clock_ns() as i64) {
-                                tracing::error!(
-                                    "grab-record write failed, stopping recorder: {}",
-                                    e
-                                );
-                                grab_recorder = None;
+                        // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
+                        // emit ONLY on success: an Err means the burn thread is gone (the frame was
+                        // not sent), so it must not inflate the emitted-fps stat.
+                        match ring.submit(job) {
+                            Ok(()) => emit_count += 1,
+                            Err(_) => {
+                                tracing::error!("#275b cam1-burn ring closed — burn thread gone")
                             }
                         }
+                        tee_grab(data);
                         return; // handed to the burn thread; the sender lives there now
                     }
+                    // Burn active but a non-YUYV frame: the sender lives on the burn thread, so it
+                    // cannot be sent here. cam1 captures a fixed YUYV format, so this is unreachable
+                    // in practice — log LOUDLY (never a silent drop) if the format ever changes.
+                    tracing::error!(
+                        "#275b burn active but frame fourcc is {} (not YUYV) — cannot burn/send, dropping (cam1 should always be YUYV)",
+                        info.fourcc.str().unwrap_or("?")
+                    );
+                    return;
                 }
 
                 // PRODUCTION / non-burn path: zero-copy direct send (unchanged). Under the probe
-                // build the sender lives in `capture_sender` (it moves to the burn thread only when
-                // the burn is active, in which case the YUYV handoff above already returned).
+                // build the sender lives in `capture_sender`; it moves to the burn thread ONLY when
+                // the burn is active, and then the handoff above handles every frame and returns —
+                // so this path is reached only when the burn is inactive (`capture_sender` = Some).
                 #[cfg(feature = "probe")]
-                let sender = match capture_sender.as_mut() {
-                    Some(s) => s,
-                    None => return, // sender moved to the burn thread; nothing to send here
-                };
+                let sender = capture_sender
+                    .as_mut()
+                    .expect("capture_sender is present whenever the burn is inactive");
                 if let Err(e) = sender.send_frame_zero_copy(data, info) {
                     tracing::error!("Failed to send frame: {}", e);
                 }
                 emit_count += 1; // reached only when the frame passed the gate
-
-                // #105 node 2 — tee the EMITTED frame to the cam1 grab recording. Stamp
-                // the grab instant on the SAME wall clock (CLOCK_REALTIME) the cam2
-                // painter uses, so the recording-verdict computes the real cam2→cam1
-                // latency. A broken grab stream stops recording but NEVER the NDI send
-                // (the measured pipeline must not be disturbed by a recorder fault).
-                if let Some(rec) = grab_recorder.as_mut() {
-                    if let Err(e) = rec.write_frame(data, wall_clock_ns() as i64) {
-                        tracing::error!("grab-record write failed, stopping recorder: {}", e);
-                        grab_recorder = None;
-                    }
-                }
+                tee_grab(data);
             });
 
             match result {
@@ -607,7 +626,9 @@ async fn run_capture_loop(
         {
             drop(burn_ring);
             if let Some(h) = burn_handle.take() {
-                let _ = h.join();
+                if let Err(e) = h.join() {
+                    tracing::error!("#275b cam1-burn thread panicked during shutdown: {:?}", e);
+                }
             }
         }
         // Loop exited (shutdown): flush + close the grab recording so the last frames
