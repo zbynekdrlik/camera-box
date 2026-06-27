@@ -266,6 +266,10 @@ pub fn burn_contiguity_in_window(
 /// `expected_step ± 1` charges 0) is appended as [`InWindowMissingKind::RealDrop`]. This is the
 /// load-bearing no-masking fix: without it the per-render forward gap is UNCONDITIONALLY ignored,
 /// so a real loss in the decimated hop (a gap of 4 where 2 is by-design) reads as a false ZERO.
+/// The no-masking guarantee is EXACT at the rig's `expected_step == 2` (the only un-charged gap is
+/// 3 = genuine beat jitter); for a hypothetical `expected_step >= 3` (non-default fps) a single
+/// drop landing in `step+1 ..= 2·step−1` is charged 0 by the integer division — sustained/multi-slot
+/// loss is still always caught. The rig runs step=2, so this blind spot is not reachable in prod.
 ///
 /// The excess check is GATED on `expected_step >= 2` (a configured decimation hop). With
 /// `expected_step == 1` the per-render forward gap stays UNCONDITIONALLY ignored exactly as before
@@ -381,8 +385,15 @@ pub fn burn_contiguity_in_window_with_step(
                     // read from the 30fps stream recording, ids step by ~2 by design), a gap of
                     // EXACTLY expected_step is the decimation; a gap LARGER than that means one or
                     // more emitted output frames never reached the recording — charge the excess
-                    // `gap/expected_step − 1` (integer division, so genlock beat jitter of
-                    // expected_step ± 1 charges 0) as REAL DROPs. These are absent frames BETWEEN
+                    // as REAL DROPs. The gap spans `gap/expected_step` decimation slots; ONE is the
+                    // current present frame, and `nones_since_prev` of them were DELIVERED frames
+                    // whose burn was UNREADABLE (each already charged BURN-UNREADABLE in the None
+                    // arm — those slots reached the recording, they are NOT lost). So the genuinely
+                    // absent slots are `excess = gap/expected_step − 1 − nones_since_prev` (integer
+                    // division, so genlock beat jitter of expected_step ± 1 charges 0; crediting the
+                    // Nones stops a gap that straddles an unreadable burn from manufacturing a
+                    // phantom REAL DROP for the exact slot the None already accounts for — the
+                    // #133/#226 RealDrop-vs-BurnUnreadable honesty). These are absent frames BETWEEN
                     // two delivered frames (not delivered frames themselves), so — like cam1's
                     // set-based genuinely-absent ids — they are EXTRA missing_slots that do NOT
                     // subtract from present_count. The missing ids `prev + k·expected_step` lie
@@ -391,7 +402,7 @@ pub fn burn_contiguity_in_window_with_step(
                     // (cam1's per-emit forward gap is handled set-wise below — neither acts here.)
                     if matches!(rate, BurnRate::PerRenderTick) && expected_step >= 2 && id > prev {
                         let gap = id as i64 - prev as i64;
-                        let excess = gap / expected_step - 1;
+                        let excess = gap / expected_step - 1 - i64::from(nones_since_prev);
                         if excess > 0 {
                             for k in 1..=excess {
                                 let missing_id = prev as i64 + k * expected_step;
