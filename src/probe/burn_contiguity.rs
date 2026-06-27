@@ -1598,6 +1598,73 @@ mod tests {
     }
 
     #[test]
+    fn in_window_decimation_step2_unreadable_burn_is_not_double_counted_as_real_drop() {
+        // Review-found (#11): on a DECIMATED (step>=2) per-render hop, a delivered frame whose strih
+        // burn is UNREADABLE (None) occupies one decimation slot — it is BURN-UNREADABLE, NOT a lost
+        // frame. The forward-gap excess must CREDIT the Nones since the last present id (each consumed
+        // one decimation step), else the gap spanning the None manufactures a PHANTOM real drop for
+        // the exact slot the None already accounts for. [1000, None, 1004] at step 2: gap 1000→1004
+        // = 4 = 2 steps; the None (true ~1002) + 1004 are both delivered ⇒ ZERO real drops, exactly
+        // ONE burn-unreadable. (Never masks: a None already fails is_contiguous; this only stops the
+        // honest RealDrop-vs-BurnUnreadable label from inflating — the #133/#226 distinction.)
+        let frames = [rbf(0, Some(1000)), rbf(1, None), rbf(2, Some(1004))];
+        let w = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 2);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 0,
+            "the unreadable strih burn consumed the gap's slot — NOT a real drop: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 1,
+            "exactly one burn-unreadable (the delivered None frame): {:?}",
+            w.missing_slots
+        );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "a None still fails the verdict (never masked)"
+        );
+    }
+
+    #[test]
+    fn in_window_decimation_step2_unreadable_plus_genuine_drop_counts_only_the_drop() {
+        // The credit must NOT over-correct: [1000, None, 1008] at step 2: gap 8 = 4 steps; the None
+        // (~1002) is one delivered slot, 1008 is delivered → 1004 and 1006 are genuinely absent ⇒
+        // 2 real drops + 1 burn-unreadable (excess = gap/step − 1 − nones = 4 − 1 − 1 = 2).
+        let frames = [rbf(0, Some(1000)), rbf(1, None), rbf(2, Some(1008))];
+        let w = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 2);
+        let real_drops = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let burn_unreadable = w
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(
+            real_drops, 2,
+            "two genuinely-absent decimation slots: {:?}",
+            w.missing_slots
+        );
+        assert_eq!(
+            burn_unreadable, 1,
+            "the one delivered None frame: {:?}",
+            w.missing_slots
+        );
+    }
+
+    #[test]
     fn in_window_step1_strih_recording_forward_gap_unchanged_and_none_still_caught() {
         // expected_step==1 (the strih burn read from a 60-in-60 strih recording, the stream burn
         // recorded by its own OBS, cam render ticks): per-render FORWARD gaps stay UNCONDITIONALLY
