@@ -274,6 +274,24 @@ fn check_pins_passes_on_the_real_repo_manifest() {
 }
 
 #[test]
+fn real_manifest_pins_output_fps_60_after_the_11_rollout() {
+    // #11 60fps rollout: the committed vendor/README.md must pin output_fps = 60 (the chain runs
+    // at 60fps end-to-end — both OBS canvas/output at 60, cam1 emits 60fps NDI, full-chain
+    // zero-loss proven at 60). A silent revert to 30 (or any other value) is the regression this
+    // locks. Reads the REAL manifest via pinned_setting (the same parser drift-guard --compare
+    // uses to flag a live box drifted off 60).
+    let readme = manifest_dir().join("vendor/README.md");
+    let env = [("README", readme.to_str().unwrap())];
+    let fps = run_sourced("pinned_setting \"$README\" output_fps", &env)
+        .trim()
+        .to_string();
+    assert_eq!(
+        fps, "60",
+        "#11: the real vendor/README.md must pin output_fps=60 (the 60fps rollout); a drop to 30 is drift"
+    );
+}
+
+#[test]
 fn check_pins_flags_manifest_vs_vendored_source_drift() {
     // A manifest that pins a DistroAV version the vendored source does not carry is drift the
     // guard must catch in CI (subtree pulled but table left stale, or vice versa).
@@ -368,7 +386,7 @@ fn compare_clean_when_observed_matches_the_pinned_set() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         // #124: distroav.dll lives in exactly ONE OBS scan path, the canonical ProgramData one.
@@ -389,7 +407,7 @@ fn compare_fails_loudly_on_drift() {
         "obs_version=31.0.0", // drifted
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=60", // drifted
+        "output_fps=30", // drifted
         "genlock_wall_clock=1",
     ]);
     assert_eq!(
@@ -415,7 +433,7 @@ fn compare_never_silently_passes_when_a_value_is_unread() {
         "host=strih",
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         // ndi_runtime intentionally missing
     ]);
@@ -484,7 +502,7 @@ fn compare_fails_loudly_when_an_input_latency_drifted() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=2,NDI cam1=0,NDI cam3=0",
     ]);
@@ -512,7 +530,7 @@ fn compare_input_latency_unknown_when_not_read() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         // ndi_input_latency intentionally missing
     ]);
@@ -599,7 +617,7 @@ fn compare_fails_loudly_on_plugin_shadow() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         concat!(
@@ -632,7 +650,7 @@ fn compare_plugin_paths_unknown_when_not_read() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         // distroav_dll_paths intentionally missing
@@ -813,7 +831,7 @@ fn compare_labels_unverified_distroav_sha_as_skipped_not_ok() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -903,7 +921,7 @@ fn compare_clean_when_build_sha_and_capability_match_the_manifest() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -939,7 +957,7 @@ fn compare_fails_loudly_when_obs_dll_sha_is_a_stock_or_wrong_build() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -975,7 +993,7 @@ fn compare_fails_loudly_on_stock_build_with_no_genlock_capability() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1009,7 +1027,7 @@ fn compare_build_sha_unknown_when_manifest_supplied_but_dll_sha_unread() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1043,7 +1061,7 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1187,7 +1205,7 @@ fn compare_clean_when_every_bundle_file_matches_the_manifest() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1224,7 +1242,7 @@ fn compare_fails_loudly_when_any_bundle_file_drifted() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1263,7 +1281,7 @@ fn compare_bundle_files_unknown_when_a_listed_file_was_unread() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1299,7 +1317,7 @@ fn compare_whole_bundle_facet_dormant_without_bundle_hashes() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1396,7 +1414,7 @@ fn compare_fails_loudly_when_prod_has_a_burn_env_set() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1426,7 +1444,7 @@ fn compare_clean_when_prod_burn_env_is_none() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1450,7 +1468,7 @@ fn compare_burn_env_facet_dormant_without_the_key() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30",
+        "output_fps=60",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",

@@ -1100,3 +1100,40 @@ fn loopback_e2e_is_intentionally_not_version_gated() {
         "#123: loopback must document WHY it is intentionally not gated (so it is not added later)"
     );
 }
+
+/// #11 60fps rollout: the chain runs at 60fps end-to-end, so the harness must DEFAULT the cam1
+/// emit rate (GENLOCK_FPS → CAMERA_BOX_GENLOCK_FPS) and the recorded-program rate (CAPTURE_FPS)
+/// to 60, and it must thread `--capture-fps "$CAPTURE_FPS"` into EVERY verdict invocation. The
+/// verdict's duration gate is `analyzed_secs = recorded_frames / capture_fps` and the optical
+/// expected-step is `refresh_hz / capture_fps`; at 60fps the default `--capture-fps 30` would
+/// mis-report a 600 s span (a 300 s run is ~18000 recorded frames) and expected_step=2, so the
+/// pass-through is mandatory on the merge, the legacy fused verdict, AND both on-box extracts.
+#[test]
+fn recording_e2e_defaults_to_60fps_and_threads_capture_fps() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("GENLOCK_FPS=\"${GENLOCK_FPS:-60}\""),
+        "#11: cam1 NDI emit rate (CAMERA_BOX_GENLOCK_FPS) must default to 60 (the 60fps rollout)."
+    );
+    assert!(
+        s.contains("CAPTURE_FPS=\"${CAPTURE_FPS:-60}\""),
+        "#11: the recorded-program fps (verdict duration gate + expected-step) must default to 60."
+    );
+    assert!(
+        s.contains("PAINT_FPS=\"${PAINT_FPS:-60}\""),
+        "#11: the painter rate must default to 60 (moot under KMS vblank, correct on fallback)."
+    );
+    // The cam1 launch must pass the emit rate through to camera-box.
+    assert!(
+        s.contains("CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS"),
+        "#11: cam1 must launch with CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS."
+    );
+    // EVERY verdict invocation that reports the span/step must carry --capture-fps "$CAPTURE_FPS":
+    // the legacy fused verdict (VERDICT_ARGS), the dev1 merge (MERGE_ARGS), and both on-box extracts.
+    let occurrences = s.matches("--capture-fps \"$CAPTURE_FPS\"").count();
+    assert!(
+        occurrences >= 4,
+        "#11: --capture-fps \"$CAPTURE_FPS\" must be threaded into the fused verdict, the merge, \
+         and BOTH on-box extracts (>=4 sites); found {occurrences}."
+    );
+}

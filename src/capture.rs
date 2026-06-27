@@ -61,9 +61,10 @@ pub fn frame_rate_from_interval(interval_numerator: u32, interval_denominator: u
     }
 }
 
-/// The v4l2 capture-interval denominator (frames/sec) to request. The rig runs a
-/// true-30 fps chain (no 60→30 decimation), so `CAMERA_BOX_CAPTURE_FPS=30` lets the
-/// device negotiate native 30; unset / 0 / invalid keeps the 60 fps default (#11).
+/// The v4l2 capture-interval denominator (frames/sec) to request. Post-#11 the rig runs a
+/// true-60 fps chain end-to-end, so the default is the 60 fps native ShadowCast mode (unset /
+/// 0 / invalid keeps it). `CAMERA_BOX_CAPTURE_FPS=30` still lets a box negotiate native 30 for a
+/// legacy 30 fps path (the EMIT rate is the separate `CAMERA_BOX_GENLOCK_FPS` decimation knob).
 pub fn requested_capture_denominator(override_fps: Option<u32>) -> u32 {
     override_fps.filter(|&f| f > 0).unwrap_or(60)
 }
