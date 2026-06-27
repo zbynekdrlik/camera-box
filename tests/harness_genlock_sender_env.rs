@@ -28,8 +28,13 @@
 //!
 //! The harness must start the manual camera-box with the SAME genlock rate the deployed
 //! service uses, so the measured sender faithfully reproduces production. The rate lives in
-//! one place (`scripts/camera-set.sh` → `GENLOCK_FPS`, default 30, env-overridable to match
-//! the live drop-in) and is interpolated into the remote launch in multitap-e2e.sh.
+//! one place (`scripts/camera-set.sh` → `GENLOCK_FPS`, env-overridable to match the live
+//! drop-in) and is interpolated into the remote launch in multitap-e2e.sh.
+//!
+//! #11 mixed 60/30 update: the default is now **60** — cam1 emits 60fps NDI so strih renders the
+//! 60fps LED-wall IMAG program; the 60→30 decimation now happens DOWNSTREAM on the stream box, not
+//! at cam1. The cam1 drop-in is `CAMERA_BOX_GENLOCK_FPS=60`. A default of 30 here would shadow the
+//! emit rate back to 30 on a fleet deploy (deploy-fleet.sh sources this), re-introducing the loss.
 //!
 //! This test reads the scripts statically (it runs neither bash nor camera-box). If anyone
 //! drops the genlock env from the manual launch, the bare harness goes lossy/black again and
@@ -43,16 +48,19 @@ fn camera_set() -> String {
 }
 
 /// `GENLOCK_FPS` is the single source of truth for the harness genlock rate and lives in the
-/// shared `camera-set.sh` (alongside the camera map), defaulting to 30 to match the live
-/// `genlock.conf` drop-in. Asserting it lives there keeps the rate from drifting per-script.
+/// shared `camera-set.sh` (alongside the camera map). #11 mixed 60/30: it defaults to **60** to
+/// match the live cam1 `genlock.conf` drop-in (`CAMERA_BOX_GENLOCK_FPS=60` — cam1 emits 60fps; the
+/// 60→30 decimation is downstream on the stream box). Asserting it lives there keeps the rate from
+/// drifting per-script — and a 30 default would silently shadow cam1's emit back to 30 on a fleet
+/// deploy (deploy-fleet.sh sources this), re-introducing the #66 loss.
 #[test]
-fn camera_set_defines_genlock_fps_default_30() {
+fn camera_set_defines_genlock_fps_default_60() {
     let cs = camera_set();
     assert!(
-        cs.contains("GENLOCK_FPS=\"${GENLOCK_FPS:-30}\"")
-            || cs.contains("GENLOCK_FPS=${GENLOCK_FPS:-30}"),
-        "#66: camera-set.sh must define GENLOCK_FPS defaulting to 30 (matching the deployed \
-         camera-box service drop-in CAMERA_BOX_GENLOCK_FPS=30) as the single source of truth \
-         for the harness genlock emit rate."
+        cs.contains("GENLOCK_FPS=\"${GENLOCK_FPS:-60}\"")
+            || cs.contains("GENLOCK_FPS=${GENLOCK_FPS:-60}"),
+        "#11: camera-set.sh must define GENLOCK_FPS defaulting to 60 (matching the deployed cam1 \
+         drop-in CAMERA_BOX_GENLOCK_FPS=60 — cam1 emits 60fps, stream decimates 60→30 downstream) \
+         as the single source of truth for the harness genlock emit rate."
     );
 }

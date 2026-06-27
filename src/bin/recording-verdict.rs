@@ -1592,7 +1592,11 @@ fn build_and_print_verdict(
                         rec_path: cam1_rec_path,
                         cam2_run_id: cam2_pin,
                         // cam1 is set-based (PerEmittedFrame) — step is never consulted.
-                        step: node_render_step("cam1", args.strih_emit_fps, args.stream_capture_fps),
+                        step: node_render_step(
+                            "cam1",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                        ),
                     },
                     !cam1_ids.is_empty(),
                 ),
@@ -2049,8 +2053,18 @@ fn extract_partial_flagged_frames(
     let owned: &[(&str, u32, BurnRate, i64)] = match box_name {
         "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame, 1)],
         "stream" => &[
-            ("strih", args.burn_strih_run_id, BurnRate::PerRenderTick, strih_step),
-            ("stream", args.burn_stream_run_id, BurnRate::PerRenderTick, 1),
+            (
+                "strih",
+                args.burn_strih_run_id,
+                BurnRate::PerRenderTick,
+                strih_step,
+            ),
+            (
+                "stream",
+                args.burn_stream_run_id,
+                BurnRate::PerRenderTick,
+                1,
+            ),
         ],
         _ => &[],
     };

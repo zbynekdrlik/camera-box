@@ -23,15 +23,16 @@
 CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4}"
 
 # GENLOCK_FPS = the genlock/broadcast emit rate the harness starts the manual camera-box
-# sender at, so it genlock-decimates EXACTLY like the deployed camera-box service (#66). The
-# deployed devices get this from the systemd drop-in
-# `/etc/systemd/system/camera-box.service.d/genlock.conf` = `CAMERA_BOX_GENLOCK_FPS=30` (#50);
-# the harness must mirror it or the manually-launched sender free-runs at the ~60fps capture
-# rate (no decimation, no wall-clock external pacing) and the downstream 30fps genlock FIFO in
-# OBS (one frame per render tick) drops ~half the frames / renders black. Single source of
-# truth, env-overridable (set GENLOCK_FPS to match the live drop-in if the broadcast rate ever
-# changes, e.g. the #11 60fps step). Default 30 = the current live rate.
-GENLOCK_FPS="${GENLOCK_FPS:-30}"
+# sender at, so it wall-paces EXACTLY like the deployed camera-box service (#66). The deployed
+# cam1 gets this from the systemd drop-in
+# `/etc/systemd/system/camera-box.service.d/genlock.conf` = `CAMERA_BOX_GENLOCK_FPS=60` (#11
+# mixed 60/30 rollout — cam1 emits 60fps NDI so strih renders the 60fps program; the stream box
+# does the 60→30 decimation downstream). The harness must mirror it or the manually-launched
+# sender free-runs / paces at the wrong rate and the downstream genlock FIFO in OBS (one frame
+# per render tick) drops frames or renders black. Single source of truth, env-overridable (set
+# GENLOCK_FPS to match the live drop-in if the emit rate ever changes). Default 60 = the #11 rate
+# (this is what deploy-fleet.sh re-pins cam1's emit to — a default of 30 would shadow it back).
+GENLOCK_FPS="${GENLOCK_FPS:-60}"
 
 # camera_resolve <name>
 # On success: sets CAMERA_NAME / CAMERA_IP / CAMERA_SOURCE and returns 0.

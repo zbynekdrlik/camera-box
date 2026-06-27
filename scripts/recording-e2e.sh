@@ -68,11 +68,17 @@ QR_SIZE="${QR_SIZE:-700}"
 # wall-paces the 60 fps capture onto (60 = 1:1 pass-through onto the 60 fps wall boundaries).
 PAINT_FPS="${PAINT_FPS:-60}"
 GENLOCK_FPS="${GENLOCK_FPS:-60}"
-# #11: the recorded OBS program fps (= output/canvas fps = cam1 emit). Feeds the verdict's
-# duration gate (analyzed_secs = recorded_frames / CAPTURE_FPS) and the optical expected-step
-# (refresh_hz / CAPTURE_FPS). At 60fps a 300 s recording is ~18000 frames → the default 30
-# would mis-report a 600 s span and expected_step=2; pass 60 so span + step are honest.
-CAPTURE_FPS="${CAPTURE_FPS:-60}"
+# #11 mixed 60/30 topology: the recorded OBS program fps is now PER BOX — the strih recording is
+# 60fps (strih renders the 60fps LED-wall IMAG program) and the stream recording is 30fps (the
+# stream box decimates 60→30 for the restreamer). Each feeds ITS recording's DIAGNOSTIC span
+# (analyzed_secs = frames / capture_fps) and optical expected-step (refresh_hz / capture_fps), so
+# the strih extract gets 60 and the stream extract gets 30 — a single shared 60 would mis-report
+# the stream recording's span + optical beat (the #1c shadow). The decimation LOSS step (the 60fps
+# strih burn read from the 30fps stream recording steps by 2) is a RIG-PINNED topology constant,
+# threaded as --strih-emit-fps / --stream-capture-fps below and DECOUPLED from these diagnostic
+# rates so it is always correct regardless of which recording's --capture-fps is in effect.
+STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-60}"
+STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
 # #174 cam1-capture render-time burn run_id (the value CAMERA_BOX_BURN_RUN_ID is set to on
 # cam1). Mirrors the verdict's BURN_RUN_ID_CAM1 default (911001). Distinct from the strih
 # (911002) / stream (911004) burn ids so all four marks are told apart by run_id. This burn
@@ -477,7 +483,11 @@ echo "[8/8] recording-verdict — TRUE STREAM-ONLY (strih + stream + painter, NO
 # #179: the cam1-grab verdict inputs are GONE — the 7.3GB grab is never decoded.
 BURN_STRIH_RUN_ID="${BURN_STRIH_RUN_ID:-911002}"
 BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
-VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --capture-fps "$CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
+# #11: --capture-fps = the strih recording's rate (the fused fallback reads the cam1 burn from the
+# strih recording). The decimation step for the strih burn (read from the 30fps stream recording)
+# is pinned via --strih-emit-fps / --stream-capture-fps, decoupled from the diagnostic --capture-fps.
+VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
+  --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
   --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
   --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
@@ -526,7 +536,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # it IN PLACE on the strih box and writes the small partial JSON. It is NEVER copied off-box.
   "$HERE/recording-verdict-on-strih.sh" \
     --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
-    -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$CAPTURE_FPS" \
+    -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$STRIH_CAPTURE_FPS" \
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
        --out "$STRIH_PARTIAL_WIN"
   echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
@@ -539,7 +549,8 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # strih recording is decoded on the strih box above), so no box-to-box copy is ever needed.
   "$HERE/recording-verdict-on-stream.sh" \
     --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
-    -- --extract-partial stream --stream "$STREAM_REC_WIN" --capture-fps "$CAPTURE_FPS" \
+    -- --extract-partial stream --stream "$STREAM_REC_WIN" --capture-fps "$STREAM_CAPTURE_FPS" \
+       --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
        --cam2-run-id "$RUN_ID" \
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
        --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
@@ -553,7 +564,8 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
   # and produces the SAME full-chain verdict the fused path would — equivalent fields + PASS.
   MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \
-    --min-secs 300 --capture-fps "$CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
+    --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
+    --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
     --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
     --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")

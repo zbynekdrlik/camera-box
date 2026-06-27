@@ -1632,7 +1632,12 @@ mod tests {
     #[test]
     fn burn_contiguity_in_window_wrapper_equals_step_1() {
         // The 3-arg back-compat wrapper MUST be exactly expected_step==1.
-        let frames = [rbf(0, Some(100)), rbf(1, Some(110)), rbf(2, None), rbf(3, Some(130))];
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(110)),
+            rbf(2, None),
+            rbf(3, Some(130)),
+        ];
         let a = burn_contiguity_in_window("strih", &frames, BurnRate::PerRenderTick);
         let b = burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 1);
         assert_eq!(a, b, "wrapper must delegate to step=1");

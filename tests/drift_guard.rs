@@ -70,7 +70,8 @@ const MANIFEST_FIXTURE: &str = "\
 
 | setting | pinned value | live source |
 |---|---|---|
-| `output_fps` | `30` | OBS log |
+| `output_fps_strih` | `60` | OBS log |
+| `output_fps_stream` | `30` | OBS log |
 | `genlock_wall_clock` | `1` | OBS log |
 | `ndi_input_latency` | `0` | obs-websocket GetInputSettings |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | Get-ChildItem the OBS scan paths |
@@ -122,7 +123,8 @@ fn parses_pinned_versions_and_settings_from_manifest() {
             .trim()
             .to_string()
     };
-    assert_eq!(setting("output_fps"), "30");
+    assert_eq!(setting("output_fps_strih"), "60");
+    assert_eq!(setting("output_fps_stream"), "30");
     assert_eq!(setting("genlock_wall_clock"), "1");
     assert_eq!(
         setting("ndi_input_latency"),
@@ -274,20 +276,27 @@ fn check_pins_passes_on_the_real_repo_manifest() {
 }
 
 #[test]
-fn real_manifest_pins_output_fps_60_after_the_11_rollout() {
-    // #11 60fps rollout: the committed vendor/README.md must pin output_fps = 60 (the chain runs
-    // at 60fps end-to-end — both OBS canvas/output at 60, cam1 emits 60fps NDI, full-chain
-    // zero-loss proven at 60). A silent revert to 30 (or any other value) is the regression this
-    // locks. Reads the REAL manifest via pinned_setting (the same parser drift-guard --compare
-    // uses to flag a live box drifted off 60).
+fn real_manifest_pins_output_fps_per_box_strih_60_stream_30() {
+    // #11 mixed 60/30 topology: the committed vendor/README.md must pin output_fps PER BOX —
+    // strih renders 60fps (the LED-wall IMAG program; cam1 emits 60fps NDI) and stream DECIMATES
+    // to 30fps (every other frame, via the genlock FIFO) for the restreamer. A silent revert of
+    // strih to 30, or a drift of stream UP to 60, is the regression this locks. Reads the REAL
+    // manifest via pinned_setting (the same parser drift-guard --compare uses per host).
     let readme = manifest_dir().join("vendor/README.md");
     let env = [("README", readme.to_str().unwrap())];
-    let fps = run_sourced("pinned_setting \"$README\" output_fps", &env)
+    let strih = run_sourced("pinned_setting \"$README\" output_fps_strih", &env)
+        .trim()
+        .to_string();
+    let stream = run_sourced("pinned_setting \"$README\" output_fps_stream", &env)
         .trim()
         .to_string();
     assert_eq!(
-        fps, "60",
-        "#11: the real vendor/README.md must pin output_fps=60 (the 60fps rollout); a drop to 30 is drift"
+        strih, "60",
+        "#11: the real vendor/README.md must pin output_fps_strih=60 (strih renders 60); a drop to 30 is drift"
+    );
+    assert_eq!(
+        stream, "30",
+        "#11: the real vendor/README.md must pin output_fps_stream=30 (stream decimates to 30); a drift to 60 is drift"
     );
 }
 
@@ -305,7 +314,8 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | `vendor/obs-studio` | x | **32.1.2** (commit `a`) | git subtree --squash |
 | `vendor/distroav` | x | **9.9.9** (commit `b`) | git subtree --squash |
 | NDI | x | requires **NDI ≥ 6.3.0** | tree |
-| `output_fps` | `30` | log |
+| `output_fps_strih` | `60` | log |
+| `output_fps_stream` | `30` | log |
 | `genlock_wall_clock` | `0` | env |
 | `ndi_input_latency` | `0` | obs-websocket |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
@@ -407,7 +417,7 @@ fn compare_fails_loudly_on_drift() {
         "obs_version=31.0.0", // drifted
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=30", // drifted
+        "output_fps=30", // matches the stream pin (#11 60→30); obs_version is the drift here
         "genlock_wall_clock=1",
     ]);
     assert_eq!(
@@ -530,7 +540,7 @@ fn compare_input_latency_unknown_when_not_read() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=60",
+        "output_fps=30",
         "genlock_wall_clock=1",
         // ndi_input_latency intentionally missing
     ]);
@@ -617,7 +627,7 @@ fn compare_fails_loudly_on_plugin_shadow() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=60",
+        "output_fps=30",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         concat!(
@@ -993,7 +1003,7 @@ fn compare_fails_loudly_on_stock_build_with_no_genlock_capability() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=60",
+        "output_fps=30",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1242,7 +1252,7 @@ fn compare_fails_loudly_when_any_bundle_file_drifted() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=60",
+        "output_fps=30",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
@@ -1414,7 +1424,7 @@ fn compare_fails_loudly_when_prod_has_a_burn_env_set() {
         "obs_version=32.1.2",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
-        "output_fps=60",
+        "output_fps=30",
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
