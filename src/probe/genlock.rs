@@ -1208,6 +1208,18 @@ pub fn run_burn_ring<T>(rx: Receiver<T>, mut burn_and_send: impl FnMut(T)) {
     }
 }
 
+/// #279 FIX 3 — should the async cam1-burn render its QR into THIS frame? The QR burner
+/// ([`crate::probe::qr::burn_qr_yuyv`]) assumes the YUYV byte layout, so only a YUYV frame may be
+/// burned. cam1 captures a fixed YUYV format, but a v4l2 driver CAN substitute a different format
+/// on `S_FMT` — and once the NDI sender moved onto the burn thread (#275b) a non-YUYV frame had no
+/// emit path and was SILENTLY DROPPED, killing the entire cam1 feed on a format substitution. The
+/// pre-#275b path always emitted such a frame UNBURNED; this predicate restores that: `false` ⇒
+/// emit the frame as an unburned passthrough (still sent, still grab-written), NEVER dropped.
+/// Pure so the render-vs-passthrough decision is unit-locked.
+pub fn burn_should_render_qr(fourcc: &str) -> bool {
+    fourcc == "YUYV"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2298,5 +2310,21 @@ mod tests {
         // `_rx` is kept alive until here so the block was genuine back-pressure (full ring with a
         // live receiver), NOT a closed channel returning early.
         drop(_rx);
+    }
+
+    #[test]
+    fn burn_renders_qr_only_for_yuyv_else_unburned_passthrough() {
+        // #279 FIX 3 — only a YUYV frame may be QR-burned (the burner assumes the YUYV layout).
+        // EVERY other format must take the unburned-passthrough branch (still emitted, never
+        // dropped) so a v4l2 format substitution can't kill the cam1 feed.
+        assert!(burn_should_render_qr("YUYV"), "YUYV is burned");
+        for other in [
+            "NV12", "MJPG", "UYVY", "BGRA", "BGR4", "RX24", "", "yuyv", "YUY2",
+        ] {
+            assert!(
+                !burn_should_render_qr(other),
+                "{other} must NOT be QR-burned — emit it UNBURNED (passthrough), never drop"
+            );
+        }
     }
 }
