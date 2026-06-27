@@ -1125,13 +1125,12 @@ impl<T> BurnRing<T> {
     /// capture thread until the burn thread drains a slot) rather than dropping a job. Returns
     /// `Err` only once the burn thread (receiver) has gone (shutdown).
     pub fn submit(&self, job: T) -> Result<(), SendError<T>> {
-        // NOTE(#275b RED): a non-blocking `try_send` DROPS the job when the ring is full — the
-        // tempting "never block the hot capture thread" choice. Under back-pressure that punches
-        // a burn-id GAP (the recording verdict reads it as chain loss). The GREEN fix switches to
-        // a blocking `send`. The test `async_burn_ring_preserves_1to1_mapping_in_order_under_backpressure`
-        // FAILS here (jobs dropped) and PASSES once `submit` blocks.
-        let _ = self.tx.try_send(job);
-        Ok(())
+        // BLOCKING send: when the bounded ring is full, the capture thread waits for the burn
+        // thread to drain a slot rather than dropping the job. This is the whole correctness
+        // crux — a dropped job would punch a burn-id GAP the recording verdict misreads as a
+        // chain loss. Throughput is then min(emit-gate rate, burn-thread rate); the ring depth
+        // absorbs jitter so the capture thread rarely actually blocks.
+        self.tx.send(job)
     }
 }
 
