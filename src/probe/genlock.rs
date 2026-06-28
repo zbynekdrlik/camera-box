@@ -602,9 +602,20 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
 /// ([`GENLOCK_MAX_SOURCE_FPS`]) — and the canvas rate too, should a future canvas ever run
 /// faster — flooring at [`GENLOCK_AUTO_PRELOAD_MIN`]. Mirror of the C
 /// `genlock_source_drop_cap` depth budget in `vendor/obs-studio/libobs/obs-source.c`.
-pub fn genlock_latency_depth_frames(latency_ms: u32, canvas_fps_num: u32, canvas_fps_den: u32) -> u32 {
+pub fn genlock_latency_depth_frames(
+    latency_ms: u32,
+    canvas_fps_num: u32,
+    canvas_fps_den: u32,
+) -> u32 {
+    // The buffer fills at the SOURCE arrival rate (#292): budget at the worst-case
+    // GENLOCK_MAX_SOURCE_FPS so a 60 fps feed into a 30 fps canvas still holds the full
+    // delay. Honour the canvas rate too, should a future canvas ever run faster than the
+    // source. Floor at the resilience minimum so a sub-frame (3 ms) latency keeps >= 1.
+    let arrival_frames = ms_to_frames(latency_ms, GENLOCK_MAX_SOURCE_FPS, 1);
     let canvas_frames = ms_to_frames(latency_ms, canvas_fps_num, canvas_fps_den);
-    canvas_frames.max(GENLOCK_AUTO_PRELOAD_MIN)
+    arrival_frames
+        .max(canvas_frames)
+        .max(GENLOCK_AUTO_PRELOAD_MIN)
 }
 
 // ---- #136: timestamp-aligned release (multi-source IN-SYNC) ----------------
