@@ -287,7 +287,12 @@ pub fn select_capture_controls(env_spec: Option<&str>, record_grab: bool) -> Vec
     match env_spec {
         Some(spec) => parse_capture_controls(spec),
         None if record_grab => certified_cam1_controls(),
-        None => Vec::new(),
+        // #296 ROOT FIX: production now ENFORCES the certified colour set on every
+        // open (previously `Vec::new()` — controls untouched), so a stray
+        // saturation=0 left by a prior grab can never persist and turn the live
+        // cameras grayscale. Self-healing colour, same philosophy as the genlock
+        // lockdown.
+        None => color_production_controls(),
     }
 }
 
