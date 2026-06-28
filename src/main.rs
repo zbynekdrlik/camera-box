@@ -622,6 +622,9 @@ async fn run_capture_loop(
                     // inflate the emitted-fps stat. #279 FIX 2 — a full-ring submit is
                     // interruptible on shutdown (ShutdownInterrupted), distinct from the burn
                     // thread being gone (Closed).
+                    // On either Err the un-sent job (and its #280 pooled buffer) is dropped/freed
+                    // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
+                    // never steady state, so not returning the buffer to the pool cannot leak.
                     match ring.submit(job) {
                         Ok(()) => emit_count += 1,
                         Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(

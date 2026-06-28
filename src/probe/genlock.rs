@@ -1316,11 +1316,16 @@ impl BufferPool {
     /// else allocate a fresh `Vec` (and count it). The caller `clear()`s + fills it; a reused
     /// buffer keeps its ~4 MB capacity so the fill does not reallocate.
     pub fn take(&self) -> Vec<u8> {
-        if let Some(buf) = self.free.lock().unwrap().pop() {
-            buf
-        } else {
-            self.allocated.fetch_add(1, Ordering::Relaxed);
-            Vec::new()
+        // Drop the lock BEFORE allocating on the empty path: pop releases the mutex, then the
+        // fresh `Vec::new` (+ the counter bump) runs unlocked so it never holds the lock against
+        // the burn thread's `put`.
+        let popped = self.free.lock().unwrap().pop();
+        match popped {
+            Some(buf) => buf,
+            None => {
+                self.allocated.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
         }
     }
 
