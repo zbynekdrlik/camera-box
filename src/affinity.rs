@@ -136,6 +136,21 @@ pub fn smp_affinity_mask_hex(cores: &[usize]) -> String {
     format!("{mask:x}")
 }
 
+/// Normalise a `/proc/irq/<n>/smp_affinity` mask string for comparison: drop the
+/// comma CPU-group separators, lowercase, and strip leading zeros — so the
+/// kernel's zero-padded / comma-grouped rendering (`"00000008"` or
+/// `"00000000,00000008"`) compares equal to our compact `"8"`. An all-zero /
+/// empty mask normalises to `"0"`.
+fn normalize_affinity_mask(s: &str) -> String {
+    let compact = s.trim().replace(',', "").to_ascii_lowercase();
+    let trimmed = compact.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IO / syscall glue around the pure logic above (not unit-tested — reads /sys,
 // /proc, calls sched_setaffinity).
@@ -274,7 +289,10 @@ pub fn setup_irq_affinity() {
         let path = format!("/proc/irq/{irq}/smp_affinity");
         let prev = std::fs::read_to_string(&path).unwrap_or_default();
         let prev = prev.trim().to_string();
-        if prev.eq_ignore_ascii_case(&mask) {
+        // The kernel renders smp_affinity zero-padded / comma-grouped (e.g.
+        // "00000008" or "00000000,00000008"), so compare NORMALISED bitmasks —
+        // not the raw strings — to keep the idempotency fast-path + log honest.
+        if normalize_affinity_mask(&prev) == normalize_affinity_mask(&mask) {
             tracing::info!("#289 IRQ {irq}: smp_affinity already {mask} — unchanged");
             continue;
         }
@@ -415,6 +433,13 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     }
 
     #[test]
+    fn capture_irqs_match_is_case_insensitive() {
+        // Mixed-case keyword AND mixed-case description both fold to lowercase.
+        let interrupts = " 50:  1 0 0 0  PCI-MSI 2-edge  xHCI_HCD:usb4\n";
+        assert_eq!(parse_capture_irqs(interrupts, &["XhCi"]), vec![50]);
+    }
+
+    #[test]
     fn capture_irqs_empty_when_no_match() {
         let interrupts = " 0: 15 0 0 0 IO-APIC 2-edge timer\n";
         assert_eq!(
@@ -454,5 +479,40 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     fn smp_mask_ignores_out_of_range_cores() {
         // Cores >= 64 don't fit a u64 mask and are skipped (no shift overflow).
         assert_eq!(smp_affinity_mask_hex(&[0, 64, 65]), "1");
+    }
+
+    #[test]
+    fn normalize_mask_strips_zero_padding() {
+        assert_eq!(normalize_affinity_mask("8"), "8");
+        assert_eq!(normalize_affinity_mask("00000008"), "8");
+    }
+
+    #[test]
+    fn normalize_mask_strips_comma_groups() {
+        // The kernel comma-groups masks for >32 CPUs (high group first).
+        assert_eq!(normalize_affinity_mask("00000000,00000008"), "8");
+    }
+
+    #[test]
+    fn normalize_mask_lowercases() {
+        assert_eq!(normalize_affinity_mask("FF"), "ff");
+    }
+
+    #[test]
+    fn normalize_mask_zero_and_empty() {
+        assert_eq!(normalize_affinity_mask("0"), "0");
+        assert_eq!(normalize_affinity_mask("00000000"), "0");
+        assert_eq!(normalize_affinity_mask(""), "0");
+    }
+
+    #[test]
+    fn normalize_mask_round_trips_smp_hex() {
+        // What we WRITE (smp_affinity_mask_hex) normalises to itself, so the
+        // idempotency fast-path matches on the next ExecStartPre.
+        let mask = smp_affinity_mask_hex(&[3]);
+        assert_eq!(
+            normalize_affinity_mask(&mask),
+            normalize_affinity_mask("00000008")
+        );
     }
 }
