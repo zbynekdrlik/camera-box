@@ -137,6 +137,22 @@ fn test_mode_launches_pinned_painter() {
     );
 }
 
+/// #290: TEST mode must launch the painter at the FULL 60 fps capture rate — the chain moved to
+/// 60fps (#11) but the painter was launched without forcing a rate, so on the fbdev-fallback path it
+/// fell to the 12 fps coverage default and the optical tick advanced far too slowly to resolve
+/// 60fps timing. The invocation must pass an explicit `--paint-fps 60` so the painter paints 60
+/// distinct ticks/s (under KMS it is vblank-locked at the monitor refresh and the flag is a no-op;
+/// on the fbdev fallback it is what makes the rate correct).
+#[test]
+fn test_mode_painter_runs_at_60fps_capture_rate() {
+    let p = painter_launch();
+    assert!(
+        p.contains("--paint-fps 60"),
+        "#290: TEST mode must launch the painter at the 60fps capture rate (--paint-fps 60) so it \
+         paints 60 distinct ticks/s — got:\n{p}"
+    );
+}
+
 /// #291: TEST mode frees /dev/fb0 WITHOUT a full `systemctl stop camera-box` (which killed cam2's
 /// capture+emit too). It installs a TRANSIENT systemd drop-in that overrides ExecStart to run
 /// camera-box WITHOUT `--display`, reloads + restarts, then WAITS until fb0 is actually free

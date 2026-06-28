@@ -155,25 +155,19 @@ fn main() -> Result<()> {
     // false loss. (Full-rate runs at the capture rate to stress the real path;
     // it is report-only for loss.)
     //
-    // #79: the KMS page-flip presenter is vblank-locked — it emits exactly one
-    // new id per HDMI vblank (1:1 with the 60 Hz capture), ignoring --paint-fps.
-    // So when KMS may actually drive the HDMI output (kms / auto presenter AND
-    // the real painter path — NOT --synth-ndi / --paint-only, which never open a
-    // presenter), the painter's true emission rate IS the capture rate; default
-    // paint_fps to capture_fps so the configured rate matches the cadence the
-    // vblank flip will produce (the analyzer classifies oversample from actual
-    // decoded-sample counts, not a configured ratio). fbdev — and the
-    // presenter-less synth-ndi / paint-only paths — keep the sub-capture coverage
-    // default. An explicit --paint-fps always wins.
-    let kms_presenter_path = !matches!(
-        presenter,
-        camera_box::probe::presenter::PresenterKind::Fbdev
-    ) && args.synth_ndi.is_none()
-        && !args.paint_only;
-    let paint_fps = args.paint_fps.unwrap_or(match mode {
-        PaintMode::Coverage if kms_presenter_path => args.capture_fps,
-        PaintMode::Coverage => 12.0,
-        PaintMode::FullRate => args.capture_fps,
+    // The default painter rate (when --paint-fps is omitted) is computed by the
+    // single source of truth `default_paint_fps` (testable; see #290). A path that
+    // drives a real HDMI presenter defaults to the full capture rate; the fbdev
+    // single-box loopback gate keeps the sub-capture coverage default. An explicit
+    // --paint-fps always wins.
+    let paint_fps = args.paint_fps.unwrap_or_else(|| {
+        camera_box::probe::run::default_paint_fps(
+            mode,
+            args.capture_fps,
+            presenter,
+            args.paint_only,
+            args.synth_ndi.is_some(),
+        )
     });
     let run_id = match args.run_id {
         Some(r) => r,
