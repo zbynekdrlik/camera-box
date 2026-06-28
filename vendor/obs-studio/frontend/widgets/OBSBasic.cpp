@@ -21,6 +21,7 @@
 #include "ui-config.h"
 
 #include "ColorSelect.hpp"
+#include "NewlevelBuildDate.hpp"
 #include "OBSBasicControls.hpp"
 #include "OBSBasicStats.hpp"
 #include "plugin-manager/PluginManager.hpp"
@@ -2080,26 +2081,19 @@ void OBSBasic::UpdateEditMenu()
 	ui->actionHorizontalCenter->setEnabled(canTransformMultiple);
 }
 
-/* genlock (#152): the compiler build date, reformatted from `__DATE__` ("Mmm DD YYYY",
- * day space-padded for <10) to ISO "YYYY-MM-DD". The value comes from the compiler at
- * build time — never hardcoded — so the production OBS title always shows the date the
- * running build was compiled (version-integrity epic #125). Uses only std::string +
- * std::ostringstream — the same <string>/<sstream> dependency as the existing
- * `stringstream name;` in UpdateTitleBar (so no new includes, and identical compile
- * footprint on the Windows build target). Guarded by tests/obs_titlebar_newlevel.rs + the
- * windows-genlock{,-fast}.yml source-anchor gates; keep all three in lock-step. */
+/* genlock (#152 / #313): the compiler build date, reformatted from `__DATE__` ("Mmm DD
+ * YYYY", day space-padded for <10) to ISO "YYYY-MM-DD". The value comes from the compiler
+ * at build time — never hardcoded — so the production OBS title always shows the date the
+ * running build was compiled (version-integrity epic #125). The actual parse lives in the
+ * pure, OBS/Qt-free `newlevel_iso_date()` (NewlevelBuildDate.hpp) so its behaviour is
+ * unit-testable off-rig (tests/obs_titlebar_newlevel_parse.rs) — #313: a short/malformed
+ * `__DATE__` must never throw, or it crashes OBS at startup via UpdateTitleBar. Guarded by
+ * tests/obs_titlebar_newlevel.rs + the windows-genlock{,-fast}.yml source-anchor gates
+ * (which pin the `const std::string d = __DATE__;` injection below); keep all in lock-step. */
 static std::string NewlevelBuildDate()
 {
-	static const std::string months = "JanFebMarAprMayJunJulAugSepOctNovDec";
 	const std::string d = __DATE__;
-	const std::string::size_type mpos = months.find(d.substr(0, 3));
-	const int month = mpos == std::string::npos ? 0 : int(mpos / 3) + 1;
-	const char dayTens = d[4]; /* ' ' when the day is a single digit */
-	const char dayOnes = d[5];
-	std::ostringstream iso;
-	iso << d.substr(7, 4) << "-" << (month < 10 ? "0" : "") << month << "-"
-	    << (dayTens == ' ' ? '0' : dayTens) << dayOnes;
-	return iso.str();
+	return newlevel_iso_date(d);
 }
 
 void OBSBasic::UpdateTitleBar()
