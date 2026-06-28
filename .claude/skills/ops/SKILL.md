@@ -140,8 +140,18 @@ without ever advancing the announced signature → infinite WARN loop, box never
 invariants: (1) advance the trigger (`announced`) ONLY on a SUCCESSFUL create — `ReannounceState::record_reannounce_attempt(current, created_ok)`; a failed create leaves state unchanged so the next
 poll retries. (2) the emit path (`send_frame_data_with_timecode`) must GUARD a null `self.sender` (drop
 the frame, don't call `send_send_video_v2(NULL)` = UB) for the brief destroy→create window. Convergence
-+ retry are unit-tested purely in `src/reannounce.rs`; the FFI ordering itself is review-enforced (test
-seam tracked in #317).
++ retry are unit-tested purely in `src/reannounce.rs`.
+
+**FFI ORDERING is now LOCKED by a test seam (#317):** the pure `src/reannounce.rs` tests never call the
+FFI, so a revert to create-first kept them green while reintroducing the loop. `src/ndi.rs` has a private
+`trait NdiSendOps { send_create; send_destroy }` separating the two FFI calls from `NdiLib`'s
+`libloading::Library`; `NdiLib` impls it as a thin `#[inline]` pass-through (live path byte-identical),
+and `fn reannounce_dance<O: NdiSendOps>(ops, &mut sender, settings, &mut trigger, current)` holds the
+destroy-first logic that `reannounce_now` delegates to. `mod ffi_seam_tests` drives the dance with a
+`FakeNdi` that records `[Op::Destroy(ptr)|Op::Create]` order AND models the SDK one-live-sender-per-name
+rule (create while a same-name handle is live → null). To unit-test ANY other NDI FFI ordering, add the
+method to `NdiSendOps` + `FakeNdi`, never construct a real `NdiLib`. Run cheap: `cargo test --lib
+ffi_seam_tests` (append `# airuleset:build-ok` — the Tier-0 hook blocks `cargo test` otherwise).
 
 **SCOPE LIMIT (do NOT overstate):** re-announce fixes the **boot-race / late-DHCP / link-flap**
 cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
