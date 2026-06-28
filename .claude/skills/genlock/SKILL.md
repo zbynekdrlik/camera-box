@@ -22,6 +22,25 @@ more** — the old env knobs were removed in #257. The current model:
   The PER-SOURCE override is the DistroAV UI int **"Latency (ms)"** (min 3, max 2000, default 3),
   applied at runtime via `obs_source_set_genlock_latency_ms` (clamps 1→3, 0→3). preload is fully
   internal/auto (no `OBS_GENLOCK_PRELOAD_FRAMES`).
+  - **#292 — the drop-cap MUST budget the held depth at the SOURCE ARRIVAL fps, NOT the canvas
+    output fps.** The ts-align deadline (`present_ts = wall_now − latency_ms`) holds every queued
+    frame younger than `latency_ms`, so the FIFO fills at the source ARRIVAL rate. The stream box
+    receives a **60 fps** NDI feed from strih into a **30 fps** canvas (the 60→30 strih→stream
+    topology), so 1000 ms parks ≈60 frames, not the 30 the canvas rate implies. The old
+    `genlock_source_drop_cap` budgeted `latency_frames` at `genlock_video_fps()` (= canvas fps),
+    undercounting ~2x → the overrun force-drain capped the delay at **~450 ms** (≈27-29 frames near
+    the `MAX_ASYNC_FRAMES=30` floor at 60 fps) — the operator could not delay the stream the ~1 s
+    needed to A/V-align to the late mastered audio. Fix: budget at `GENLOCK_MAX_SOURCE_FPS = 60`
+    (the rig's max source rate; cameras+strih render 60), honouring the canvas rate too if ever
+    higher. 2000 ms @ 60 fps = 120 frames + RESERVE 4 = cap 124 < abs-max 132 (`GENLOCK_PRELOAD_MAX`
+    128 unchanged — already sufficient; the binding constraint is depth+reserve, not abs-max). Pure
+    helper `genlock_latency_depth_frames(latency_ms, canvas_num, canvas_den)` in `src/probe/genlock.rs`
+    mirrors the C; the C divide `(latency_ms*60+500)/1000` == `ms_to_frames(ms,60,1)`. Guard
+    `drop_cap_budgets_at_source_arrival_fps_in_vendored_source` pins the C `#define
+    GENLOCK_MAX_SOURCE_FPS 60` + the budget term. **DELIVERY (set 1000 ms, measure A/V align on
+    stream) is a SUPERVISOR rig step at the coordinated OBS rollout** — the unit test is the
+    code-level proof. Do NOT reduce the latency — the ~1 s is INTENTIONAL (aligns video to the
+    1 s-late mastered audio); the fix RAISES the achievable max, never lowers latency.
 - **DistroAV NDI source UI is a HARD WHITELIST** (`ndi_source_getproperties`): exactly four props —
   `PROP_SOURCE`, `PROP_GENLOCK_FIFO` (Genlock, default ON), `PROP_GENLOCK_LATENCY_MS_SRC`
   (Latency ms), `PROP_BURN` (Measurement burn, default OFF). Every other DistroAV knob is removed
