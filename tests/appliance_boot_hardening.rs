@@ -56,7 +56,11 @@ fn provisioning_holds_the_appliance_kernel() {
             "{script} must `apt-mark hold` the kernel meta-packages so a surprise kernel can never \
              be installed on the appliance (the auto-installed 6.8.0-124 kernel bricked CAM3/CAM4, #295)"
         );
-        for pkg in ["linux-image-generic", "linux-headers-generic", "linux-generic"] {
+        for pkg in [
+            "linux-image-generic",
+            "linux-headers-generic",
+            "linux-generic",
+        ] {
             assert!(
                 body.contains(pkg),
                 "{script}'s kernel hold must cover {pkg} so the whole kernel meta-package set is \
@@ -106,16 +110,20 @@ fn provisioning_guarantees_initrd_for_every_kernel_before_grub() {
             "{script} must install a /etc/kernel/postinst.d hook so any future kernel install always \
              gets an initrd before grub is regenerated (#295)"
         );
-        // Ordering: the initrd guarantee must come BEFORE the (single) update-grub each script runs,
-        // or grub could still be regenerated while an initrd-less kernel is present.
-        let initrd_pos = body
-            .find("update-initramfs -c -k")
-            .expect("checked above that update-initramfs -c -k is present");
-        let grub_pos = body
-            .find("update-grub")
-            .expect("each setup script runs update-grub for fast boot");
+        // Ordering: the initrd guarantee must run BEFORE update-grub, or grub could still be
+        // regenerated while an initrd-less kernel is present. Compare the first *command* occurrence
+        // of each — ignore comment lines, since a comment may merely *mention* "update-grub".
+        let first_cmd_line = |needle: &str| -> Option<usize> {
+            body.lines().position(|l| {
+                let t = l.trim_start();
+                !t.starts_with('#') && t.contains(needle)
+            })
+        };
+        let initrd_line = first_cmd_line("update-initramfs -c -k")
+            .expect("update-initramfs -c -k command present");
+        let grub_line = first_cmd_line("update-grub").expect("update-grub command present");
         assert!(
-            initrd_pos < grub_pos,
+            initrd_line < grub_line,
             "{script} must guarantee initrds (update-initramfs -c -k) BEFORE it runs update-grub — \
              otherwise update-grub can still default-boot an initrd-less kernel (#295)"
         );
