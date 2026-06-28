@@ -91,6 +91,21 @@ Throughput is then `min(emit-gate rate, burn-thread rate)`; if the rig E2E still
 lever is the DEFERRED payload-shrink (blocked by the wire-format fixture lock above — needs a rig
 recording run to regen). The async move alone is what unblocks the 60fps cam1 leg.
 
+**#280 — the capture→burn frame copy reuses a BOUNDED BUFFER POOL (no per-frame to_vec).** The mmap
+is valid only inside the V4L2 callback, so a copy IS required to cross to the burn thread; #275b did
+it with a per-frame `data.to_vec()` (~4MB at 1080p YUYV → a fresh heap alloc+free EVERY emitted
+frame at 60fps). #280 adds `genlock.rs::BufferPool` (`Mutex<Vec<Vec<u8>>>` free list + `AtomicUsize`
+alloc counter, cap `BURN_POOL_CAP = BURN_RING_DEPTH + 2 = 5`): capture `take()`s (reuse, or alloc
+only when empty), `clear()`+`extend_from_slice` the frame (reuses the ~4MB capacity → no realloc),
+submits; the burn thread `put()`s the buffer back AFTER the NDI send. **The pool carries NO frame
+identity — it is a memory optimization ONLY, so it CANNOT change the frame ORDER, the 1:1
+burn_id↔emit mapping, or the carried gate-stamped timecode (all stamped on the capture thread, in
+the job). Keep it that way — never thread identity through the pool.** RED→GREEN lock (genlock.rs):
+`buffer_pool_recycles_a_returned_buffer_instead_of_reallocating` +
+`pooled_async_burn_recycles_buffers_and_preserves_1to1_ordering_under_backpressure` (the latter is
+the #275b 1:1 harness with pooled buffers — proves recycle AND ordering together). The #275b/#279
+async-burn tests must stay green.
+
 ## Decode-path observability (#207)
 
 `qr::decode_path_counts() -> (fast, robust)` (process-wide AtomicU64) is logged at
