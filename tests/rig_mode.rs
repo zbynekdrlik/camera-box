@@ -146,11 +146,16 @@ fn test_mode_launches_pinned_painter() {
 fn test_mode_frees_fb0_via_no_display_dropin_not_full_stop() {
     let p = painter_launch();
     // The #291 bug: TEST mode must NOT stop the WHOLE service (that kills capture+emit, dropping
-    // cam2 as a measurable camera). The only acceptable "stop" is the display output.
+    // cam2 as a measurable camera). The only acceptable "stop" is the display output. Check
+    // EXECUTABLE lines only (a future explanatory comment may legitimately mention the old command).
+    let stops_service = p.lines().any(|l| {
+        let code = l.trim_start();
+        !code.starts_with('#') && code.contains("systemctl stop camera-box")
+    });
     assert!(
-        !p.contains("systemctl stop camera-box"),
-        "#291: TEST mode must NOT fully stop camera-box — that kills cam2's capture+emit. \
-         Switch it to no-display instead. Got:\n{p}"
+        !stops_service,
+        "#291: TEST mode must NOT fully stop camera-box on an executable line — that kills cam2's \
+         capture+emit. Switch it to no-display instead. Got:\n{p}"
     );
     // It installs a transient drop-in (in /run — tmpfs, so a reboot auto-reverts) overriding
     // ExecStart to camera-box WITHOUT --display, then reloads + restarts to apply it. Assert the
@@ -190,6 +195,13 @@ fn test_mode_keeps_camera_box_capturing_and_emitting() {
     assert!(
         p.contains("is-active camera-box"),
         "#291: TEST mode must verify camera-box is STILL active (capture+emit must keep running). \
+         Got:\n{p}"
+    );
+    // It must FAIL LOUD (not silently pass) if camera-box did not come back up — otherwise a green
+    // result would be reported while cam2's capture+emit is dead.
+    assert!(
+        p.contains("camera-box not active after switching to no-display mode"),
+        "#291: TEST mode must fail loud if camera-box is not active after the no-display switch. \
          Got:\n{p}"
     );
     assert!(
@@ -270,7 +282,7 @@ fn event_mode_stops_via_pidfile_restores_display() {
          with TEST, not a `systemctl cat` that could false-pass on the base unit). Got:\n{p}"
     );
     assert!(
-        p.contains("is-active camera-box") && p.contains("not active after start"),
+        p.contains("is-active camera-box") && p.contains("not active after restart"),
         "#247: EVENT mode must verify the camera-box service is active (fail loud otherwise)"
     );
     assert!(

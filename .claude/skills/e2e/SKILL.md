@@ -274,9 +274,12 @@ blank/operator capture is NOT "the QR is broken/overexposed" — the QR simply i
 - **Turn QR OFF (back to broadcast):** `scripts/rig-mode.sh event` → stops the painter (pidfile),
   removes the no-display drop-in + restarts camera-box on cam2 (--display restored), burns OFF.
   ALWAYS run this before a live event.
-- In TEST mode cam2 (.62) PAINTS the monitor on fb0 AND still captures /dev/video0 + emits NDI
-  (#291) — so cam2 IS measurable as a camera (it films its own painted monitor via the split HDMI),
-  alongside the other boxes (cam1/3/4) filming the QR.
+- In TEST mode cam2 (.62) PAINTS the monitor on fb0 AND its camera-box stays running in no-display
+  mode (still captures /dev/video0 + emits NDI — #291), instead of being fully stopped. So cam2 is
+  no longer auto-dropped as a camera in test mode. Whether cam2's emitted NDI actually carries the
+  vernier QR depends on the rig HW (its /dev/video0 ShadowCast seeing the painted monitor via the
+  split HDMI) — confirm that on the rig (decode cam2's NDI for the QR); the switch alone does NOT
+  prove it. cam1/3/4 also film the QR as before.
 
 **GOTCHA — check the painter with `pgrep -x frame-probe` (EXACT name), NEVER `pgrep -f frame-probe`.**
 `pgrep -f` matches the whole cmdline → it matches YOUR OWN shell/ssh command that contains the string

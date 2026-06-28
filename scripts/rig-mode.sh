@@ -115,9 +115,11 @@ systemctl restart camera-box
 # (2) wait until /dev/fb0 is actually free (the no-display camera-box released it; teardown is async).
 i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done
 if fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: /dev/fb0 still held after switching camera-box to no-display mode" >&2; exit 1; fi
-echo "ok: /dev/fb0 free (camera-box still capturing + emitting; only display output stopped)"
-# (2b) #291: verify camera-box is STILL ACTIVE (capture+emit alive — the whole point) and now runs
-#      WITHOUT --display, so a Restart=always respawn can never re-grab fb0.
+echo "ok: /dev/fb0 free (camera-box NOT stopped — only display output dropped; capture+emit keep running)"
+# (2b) #291: verify camera-box is STILL ACTIVE (so capture+emit keep running — the whole point) and
+#      now runs WITHOUT --display, so a Restart=always respawn can never re-grab fb0. NOTE: this is a
+#      systemd is-active check (Type=simple → 'active' == process forked); it does NOT itself prove the
+#      NDI emit reached strih — that optical/network proof is a rig step (see the e2e skill).
 i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   echo "FAIL: camera-box not active after switching to no-display mode (capture+emit must keep running)" >&2
@@ -128,7 +130,7 @@ if systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--di
   echo "FAIL: camera-box still launches with --display — fb0 would be re-grabbed" >&2
   exit 1
 fi
-echo "ok: camera-box active, capturing + emitting WITHOUT --display (fb0 free for the painter)"
+echo "ok: camera-box ACTIVE in no-display mode (not stopped; capture+emit running) — fb0 free for the painter"
 # (3) the painter binary MUST be present — deploy the CI probe-tools-linux-amd64 artifact to it.
 if [ ! -x "$bin" ]; then
   echo "FAIL: painter binary $bin missing/not-executable on cam2." >&2
@@ -188,12 +190,12 @@ systemctl restart camera-box
 # (4) verify the service is active.
 i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
-  echo "FAIL: camera-box service not active after start" >&2
+  echo "FAIL: camera-box service not active after restart" >&2
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
 # (5) verify --display is restored: the EFFECTIVE ExecStart carries --display (same resolved check
-#     TEST mode uses — `systemctl show`, NOT `systemctl cat`, so a silently-failed drop-in removal
+#     TEST mode uses — 'systemctl show', NOT 'systemctl cat', so a silently-failed drop-in removal
 #     can't false-pass on the base unit's --display line) AND camera-box re-grabbed /dev/fb0.
 if ! systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'; then
   echo "FAIL: camera-box ExecStart has no --display — interkom monitor not restored" >&2
@@ -320,7 +322,8 @@ do_test() {
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
-  echo "                     cam2 camera-box STILL capturing + emitting NDI (no-display drop-in) — #291: measurable."
+  echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
+  echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream program inputs (WebSocket, no relaunch)."
   echo "NEXT: confirm the PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> TEST mode."
