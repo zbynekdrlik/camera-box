@@ -131,6 +131,18 @@ LAN-NIC denylist, `REANNOUNCE_POLL_INTERVAL=2s`); Linux IO (`getifaddrs`) +
 `NdiSender::maybe_reannounce()` in `src/ndi.rs`; called each report tick by the capture loop.
 Steady state never re-creates (would drop connected OBS receivers) — only a real change does.
 
+**GOTCHA — re-announce MUST destroy before create (#297 dev.139 infinite loop):** `NDIlib_send_create`
+refuses to register a SECOND sender whose name is already live in this process → returns null. So a
+same-name re-create while the old handle still exists ALWAYS fails. `reannounce_now` must
+**`send_destroy(old)` FIRST, then `send_create`** (guard the null handle on destroy — on a retry the
+field is already null, same as `Drop`). The shipped dev.139 created-first → null → `bail!` every 2s
+without ever advancing the announced signature → infinite WARN loop, box never rediscovered. Two
+invariants: (1) advance the trigger (`announced`) ONLY on a SUCCESSFUL create — `ReannounceState::record_reannounce_attempt(current, created_ok)`; a failed create leaves state unchanged so the next
+poll retries. (2) the emit path (`send_frame_data_with_timecode`) must GUARD a null `self.sender` (drop
+the frame, don't call `send_send_video_v2(NULL)` = UB) for the brief destroy→create window. Convergence
++ retry are unit-tested purely in `src/reannounce.rs`; the FFI ordering itself is review-enforced (test
+seam tracked in #317).
+
 **SCOPE LIMIT (do NOT overstate):** re-announce fixes the **boot-race / late-DHCP / link-flap**
 cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
 (stable network, no change → no trigger) — and the cam boxes have STATIC IPs, so a clean reboot may
