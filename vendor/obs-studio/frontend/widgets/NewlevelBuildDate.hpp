@@ -19,6 +19,14 @@
 
 static inline std::string newlevel_iso_date(const std::string &compileDate)
 {
+	/* #313: never index/`substr` out of range — a short/empty/malformed date threw
+	 * std::out_of_range (MSVC std::_Xran "invalid string position") out of
+	 * UpdateTitleBar() during OBSBasic construction and ABORTED OBS at startup. A
+	 * well-formed `__DATE__` is exactly the 11-char "Mmm DD YYYY"; anything shorter
+	 * cannot be parsed, so return a safe fallback BEFORE any d[..] / d.substr(7, 4). */
+	if (compileDate.size() < 11)
+		return "unknown";
+
 	static const std::string months = "JanFebMarAprMayJunJulAugSepOctNovDec";
 	const std::string &d = compileDate;
 	const std::string::size_type mpos = months.find(d.substr(0, 3));
