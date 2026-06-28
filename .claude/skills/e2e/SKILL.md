@@ -251,3 +251,29 @@ State exactly which node/hop a result covers and what it does NOT prove.
 #23 per-hop latency gate, #24 cam1/3/4 coverage, #25 notify-on-red, #26 audio scope.
 
 File discovered work as GitHub issues immediately, without asking.
+
+## QR painter on/off for ANY frame-loss verification — USE rig-mode.sh (don't fumble it)
+
+The dual-QR painter on cam2 is REQUIRED for every frame-loss / sync verification (it's the optical
+tick the cameras film). Without it the cameras show only the operator view → NOTHING decodes (a
+blank/operator capture is NOT "the QR is broken/overexposed" — the QR simply isn't painted).
+
+- **Turn QR ON:**  `scripts/rig-mode.sh test`   → stops camera-box on cam2 (.62, frees /dev/fb0) +
+  launches `frame-probe --paint-only --dual-qr --qr-size 700` + toggles the genlock_burn ON.
+- **Turn QR OFF (back to broadcast):** `scripts/rig-mode.sh event` → stops the painter (pidfile),
+  restarts camera-box on cam2 (--display), burns OFF. ALWAYS run this before a live event.
+- In TEST mode cam2 (.62) is the PAINTER, so it does NOT capture — only the OTHER cam boxes
+  (cam1/3/4) film the QR. To measure cam2 AS A CAMERA you need the painter on a different display/box.
+
+**GOTCHA — check the painter with `pgrep -x frame-probe` (EXACT name), NEVER `pgrep -f frame-probe`.**
+`pgrep -f` matches the whole cmdline → it matches YOUR OWN shell/ssh command that contains the string
+"frame-probe" → false "painter still running / respawning" readings (cost real time 2026-06-28; the
+rig-mode script header warns about exactly this self-match). Use `pgrep -x frame-probe` or
+`ps -C frame-probe` to see the REAL painter process.
+
+**4-camera sync measurement (content alignment, not just FIFO phase):** QR painter ON → screenshot
+the strih "Multiview" scene (all cams in ONE frame = simultaneous) at high res → zxing-decode each
+camera's cam2 painter `frame_id` → equal frame_id across cameras = they captured the same painted
+instant = synced. Proven 2026-06-28: cam1/3/4 13/14 rounds spread 0, max spread 2 frames, at uniform
+3ms latency. cv2 QRCodeDetector is too weak for the filmed QR — use zxing-cpp (`pip install
+--break-system-packages zxing-cpp`). head_skew from the genlock FIFO audit is NOT content alignment.
