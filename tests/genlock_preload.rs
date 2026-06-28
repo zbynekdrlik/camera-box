@@ -790,6 +790,64 @@ mod single_latency_knob {
         assert_eq!(genlock_drop_cap(true, 3), MAX_ASYNC_FRAMES); // 3 frames (100 ms global) < floor
     }
 
+    // #292: the genlock ts-align release deadline holds every queued frame younger than
+    // latency_ms, so the FIFO fills at the SOURCE ARRIVAL rate — which can EXCEED the
+    // canvas OUTPUT rate. The stream box receives a 60 fps NDI feed from strih into a
+    // 30 fps canvas (the "60→30 strih→stream" topology), so 1000 ms of delay parks ≈ 60
+    // frames in the buffer, NOT 30. Budgeting the drop-cap at the CANVAS fps (the pre-#292
+    // bug) undercounted the held depth ~2x, so the overrun force-drain capped a deep
+    // latency at ~450 ms — the operator could not delay the stream the ~1 s needed to
+    // A/V-align to the late mastered audio. The drop-cap depth MUST be budgeted at the
+    // worst-case arrival rate. This is the test CI "never verified" (the old tests budgeted
+    // at the canvas fps and so always passed while production capped at ~450 ms).
+    #[test]
+    fn drop_cap_delivers_high_latency_at_max_source_arrival() {
+        use camera_box::probe::genlock::{
+            genlock_drop_cap, genlock_latency_depth_frames, GENLOCK_MAX_SOURCE_FPS,
+        };
+        // The rig's worst case: a 30 fps STREAM canvas receiving a 60 fps NDI feed.
+        const STREAM_CANVAS_FPS: u32 = 30;
+        for &latency_ms in &[1000u32, 1500, 2000] {
+            // Frames the FIFO actually holds at the worst-case arrival rate.
+            let held = ms_to_frames(latency_ms, GENLOCK_MAX_SOURCE_FPS, 1);
+            // The depth the drop-cap budgets, given the (slower) stream canvas fps.
+            let depth = genlock_latency_depth_frames(latency_ms, STREAM_CANVAS_FPS, 1);
+            let cap = genlock_drop_cap(true, depth);
+            assert!(
+                cap > held,
+                "{latency_ms} ms @ {GENLOCK_MAX_SOURCE_FPS} fps arrival: drop-cap {cap} must \
+                 exceed the {held} held frames to DELIVER the configured latency — a canvas-fps \
+                 budget caps it at ~450 ms (#292)"
+            );
+        }
+    }
+
+    // #292: the per-source latency depth helper budgets at the worst-case SOURCE arrival
+    // rate (GENLOCK_MAX_SOURCE_FPS = 60), so the FIFO holds the FULL configured delay even
+    // when the canvas runs slower (30 fps stream). At the canvas rate alone the depth would
+    // be half — the root cause of the ~450 ms production cap.
+    #[test]
+    fn latency_depth_frames_budgets_at_source_arrival_rate() {
+        use camera_box::probe::genlock::{
+            genlock_latency_depth_frames, GENLOCK_AUTO_PRELOAD_MIN, GENLOCK_MAX_SOURCE_FPS,
+            GENLOCK_SOURCE_LATENCY_MS_MAX,
+        };
+        // 1000 ms into a 30 fps canvas must budget for the 60 fps arrival = 60 frames.
+        assert_eq!(genlock_latency_depth_frames(1000, 30, 1), 60);
+        // 1500 ms → 90 frames (the operator's A/V-align headroom above 1 s).
+        assert_eq!(genlock_latency_depth_frames(1500, 30, 1), 90);
+        // The per-source maximum (2000 ms) → 120 frames @ 60 fps.
+        assert_eq!(
+            genlock_latency_depth_frames(GENLOCK_SOURCE_LATENCY_MS_MAX, 30, 1),
+            120
+        );
+        // A faster canvas (60 fps) yields the same depth — the arrival floor already covers it.
+        assert_eq!(genlock_latency_depth_frames(1000, 60, 1), 60);
+        // The shallow 3 ms floor never drops below the resilience minimum.
+        assert_eq!(genlock_latency_depth_frames(3, 30, 1), GENLOCK_AUTO_PRELOAD_MIN);
+        assert_eq!(GENLOCK_MAX_SOURCE_FPS, 60);
+    }
+
     #[test]
     fn latency_default_and_floor_are_three_ms() {
         // #257: the genlock latency is a BUILD CONST — default AND floor are 3 ms (no env). The

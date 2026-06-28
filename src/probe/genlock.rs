@@ -145,6 +145,17 @@ pub const GENLOCK_SOURCE_LATENCY_MS_MAX: u32 = 2000;
 /// preload ([`GENLOCK_PRELOAD_DEFAULT`] = 1), so the validated prod behavior is preserved.
 pub const GENLOCK_AUTO_PRELOAD_MIN: u32 = GENLOCK_PRELOAD_DEFAULT;
 
+/// (#292) The maximum frame rate any genlock SOURCE feeds at on this rig — the cameras
+/// and strih render 60 fps. The genlock ts-align deadline ([`genlock_present_ts_reserve`])
+/// holds every queued frame younger than `latency_ms`, so the FIFO fills at the SOURCE's
+/// ARRIVAL rate, which can EXCEED the canvas OUTPUT rate (the stream box receives a 60 fps
+/// NDI feed from strih into a 30 fps canvas — the "60→30 strih→stream" topology). Budgeting
+/// the FIFO drop-cap at the canvas rate undercounted the held depth ~2x, so a deep
+/// per-source latency force-drained at ~450 ms on the 30 fps stream box (#292). The
+/// drop-cap depth ([`genlock_latency_depth_frames`]) is budgeted at this worst-case arrival
+/// rate so the configured latency is DELIVERED regardless of canvas fps.
+pub const GENLOCK_MAX_SOURCE_FPS: u32 = 60;
+
 /// (#235) Resolve the canonical genlock latency (ms) from the new knob + the
 /// back-compat alias.
 ///
@@ -572,6 +583,28 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
     let want = preload.saturating_add(GENLOCK_DROP_CAP_RESERVE);
     let abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
     want.min(abs_max).max(MAX_ASYNC_FRAMES)
+}
+
+/// (#292) The FIFO depth (frames) a genlock source must be able to hold to DELIVER
+/// `latency_ms` of video delay — the value fed into [`genlock_drop_cap`] as the source's
+/// effective `preload` budget.
+///
+/// The ts-align release deadline ([`genlock_present_ts_reserve`]) holds every queued frame
+/// younger than `latency_ms`, so the FIFO parks `latency_ms`-worth of frames AT THE SOURCE
+/// ARRIVAL RATE. That rate can EXCEED the canvas OUTPUT rate: the stream box receives a
+/// 60 fps NDI feed from strih into a 30 fps canvas (the "60→30 strih→stream" topology), so
+/// 1000 ms of delay parks ≈ 60 frames, NOT the 30 the canvas rate implies. Budgeting the
+/// drop-cap at the canvas fps undercounted the held depth ~2x, so the overrun force-drain
+/// capped a deep latency at ~450 ms — the operator could not delay the stream the ~1 s
+/// needed to align to the late mastered audio (#292).
+///
+/// The depth is therefore budgeted at the WORST-CASE arrival rate
+/// ([`GENLOCK_MAX_SOURCE_FPS`]) — and the canvas rate too, should a future canvas ever run
+/// faster — flooring at [`GENLOCK_AUTO_PRELOAD_MIN`]. Mirror of the C
+/// `genlock_source_drop_cap` depth budget in `vendor/obs-studio/libobs/obs-source.c`.
+pub fn genlock_latency_depth_frames(latency_ms: u32, canvas_fps_num: u32, canvas_fps_den: u32) -> u32 {
+    let canvas_frames = ms_to_frames(latency_ms, canvas_fps_num, canvas_fps_den);
+    canvas_frames.max(GENLOCK_AUTO_PRELOAD_MIN)
 }
 
 // ---- #136: timestamp-aligned release (multi-source IN-SYNC) ----------------
