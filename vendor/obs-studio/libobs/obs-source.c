@@ -4237,6 +4237,17 @@ static uint32_t genlock_clamp_preload_u32(uint32_t v)
  * validated prod behavior is preserved. Mirror of src/probe/genlock.rs
  * GENLOCK_AUTO_PRELOAD_MIN. */
 #define GENLOCK_AUTO_PRELOAD_MIN 1
+/* camera-box #292: the maximum frame rate any genlock SOURCE feeds at on this rig — the
+ * cameras and strih render 60 fps. The genlock ts-align deadline holds every queued frame
+ * younger than latency_ms, so the FIFO fills at the SOURCE ARRIVAL rate, which can EXCEED
+ * the canvas OUTPUT rate (the stream box receives a 60 fps NDI feed from strih into a 30
+ * fps canvas — the 60->30 strih->stream topology). Budgeting the drop-cap at the canvas fps
+ * undercounted the held depth ~2x → a deep per-source latency force-drained at ~450 ms on
+ * the 30 fps stream box, so the operator could not delay the stream the ~1 s needed to
+ * A/V-align to the late mastered audio. genlock_source_drop_cap budgets at this worst-case
+ * arrival rate so the configured latency is DELIVERED regardless of canvas fps. Mirror of
+ * src/probe/genlock.rs GENLOCK_MAX_SOURCE_FPS. */
+#define GENLOCK_MAX_SOURCE_FPS 60
 /* genlock_latency_ms() is declared further down (after the #184 ms-knob block); forward
  * declare it so genlock_preload_default() can branch on whether the ms knob is set. */
 static uint32_t genlock_latency_ms(void);
@@ -4381,20 +4392,32 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 	 * Mirror of src/probe/genlock.rs genlock_drop_cap(fifo, max(preload, latency_frames)). */
 	uint32_t depth = source->genlock_preload;
 	if (source->genlock_latency_ms > 0) {
-		/* camera-box #200: tear-checked fps snapshot (see genlock_video_fps). */
+		/* camera-box #292: the ts-align deadline holds every queued frame younger than
+		 * latency_ms, so the FIFO fills at the SOURCE ARRIVAL rate, which can EXCEED the
+		 * canvas OUTPUT rate (a 60 fps NDI feed into a 30 fps stream canvas). Budgeting at
+		 * the canvas fps undercounted the held depth ~2x → a deep latency force-drained at
+		 * ~450 ms. Budget at the worst-case arrival rate (GENLOCK_MAX_SOURCE_FPS) so the
+		 * configured latency is DELIVERED regardless of canvas fps. round-to-nearest
+		 * (+rate/2) faithfully mirrors the Rust ms_to_frames(). Mirror of
+		 * src/probe/genlock.rs genlock_latency_depth_frames. */
+		uint32_t latency_frames =
+			(uint32_t)(((uint64_t)source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS +
+				    500) /
+				   1000);
+		/* camera-box #200: tear-checked fps snapshot (see genlock_video_fps). Honour the
+		 * canvas rate too, should a future canvas ever run faster than the source. */
 		uint32_t fps_num, fps_den;
 		if (genlock_video_fps(&fps_num, &fps_den) && fps_den != 0) {
-			/* round-to-nearest (+den/2) to faithfully mirror the Rust
-			 * ms_to_frames() — floor would under-budget the cap by ≤1 frame
-			 * on sub-frame ms values. */
 			const uint64_t lat_den = 1000ULL * fps_den;
-			const uint32_t latency_frames =
+			const uint32_t canvas_frames =
 				(uint32_t)(((uint64_t)source->genlock_latency_ms * fps_num +
 					    lat_den / 2) /
 					   lat_den);
-			if (latency_frames > depth)
-				depth = latency_frames;
+			if (canvas_frames > latency_frames)
+				latency_frames = canvas_frames;
 		}
+		if (latency_frames > depth)
+			depth = latency_frames;
 	}
 	uint32_t want = depth + GENLOCK_DROP_CAP_RESERVE;
 	const uint32_t abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;

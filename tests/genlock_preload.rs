@@ -759,35 +759,97 @@ mod single_latency_knob {
         assert_eq!(effective_latency_ms(0, 0), 0);
     }
 
-    // #245: a DEEP per-source latency is a deliberate video delay — the FIFO drop-cap must
-    // hold its full frame-equivalent before the ms deadline releases the oldest frame, or
-    // the overrun force-drain would cap the delay short and make the override INERT. The C
-    // genlock_source_drop_cap feeds max(preload, latency_frames) into genlock_drop_cap; this
-    // pins that a 1000 ms / 2000 ms override still fits under the abs-max, at 30 fps.
+    // #245/#292: a DEEP per-source latency is a deliberate video delay — the FIFO drop-cap
+    // must hold its full frame-equivalent before the ms deadline releases the oldest frame,
+    // or the overrun force-drain would cap the delay short and make the override INERT. This
+    // pins genlock_drop_cap as a pure function of a frame count; the ACTUAL per-source depth
+    // (budgeted at the worst-case source arrival fps, #292) is computed by
+    // genlock_latency_depth_frames and exercised in
+    // drop_cap_delivers_high_latency_at_max_source_arrival. Here we confirm the worst real
+    // case — 2000 ms @ 60 fps source = 120 frames — still fits under the abs-max.
     #[test]
     fn drop_cap_accommodates_deep_per_source_latency() {
         use camera_box::probe::genlock::{
             genlock_drop_cap, GENLOCK_DROP_CAP_RESERVE, GENLOCK_PRELOAD_MAX,
             GENLOCK_SOURCE_LATENCY_MS_MAX, MAX_ASYNC_FRAMES,
         };
-        // 1000 ms @ 30 fps = 30 frames -> budget 30, cap = 30 + RESERVE = 34 (above the floor).
-        let f1000 = ms_to_frames(1000, 30, 1);
-        assert_eq!(f1000, 30);
-        assert_eq!(genlock_drop_cap(true, f1000), 30 + GENLOCK_DROP_CAP_RESERVE);
-        // 2000 ms (the per-source cap) @ 30 fps = 60 frames -> cap = 64, comfortably under
-        // the abs-max (GENLOCK_PRELOAD_MAX + RESERVE = 132): a source at the cap buffers its
-        // FULL delay without an overrun force-drain (the GENLOCK_SOURCE_LATENCY_MS_MAX doc).
-        let fmax = ms_to_frames(GENLOCK_SOURCE_LATENCY_MS_MAX, 30, 1);
-        assert_eq!(fmax, 60);
+        // genlock_drop_cap given a 30-frame depth -> cap = 30 + RESERVE = 34 (above the floor).
+        assert_eq!(genlock_drop_cap(true, 30), 30 + GENLOCK_DROP_CAP_RESERVE);
+        // The per-source maximum (2000 ms) at the worst-case 60 fps source arrival = 120
+        // frames -> cap = 124, comfortably under the abs-max (GENLOCK_PRELOAD_MAX + RESERVE =
+        // 132): a source at the cap buffers its FULL 2 s delay without an overrun force-drain.
+        let fmax = ms_to_frames(GENLOCK_SOURCE_LATENCY_MS_MAX, 60, 1);
+        assert_eq!(fmax, 120);
         let abs_max = GENLOCK_PRELOAD_MAX + GENLOCK_DROP_CAP_RESERVE;
-        assert_eq!(genlock_drop_cap(true, fmax), 60 + GENLOCK_DROP_CAP_RESERVE);
+        assert_eq!(genlock_drop_cap(true, fmax), 120 + GENLOCK_DROP_CAP_RESERVE);
         assert!(
-            60 + GENLOCK_DROP_CAP_RESERVE < abs_max,
-            "2000 ms must fit under the abs-max"
+            120 + GENLOCK_DROP_CAP_RESERVE < abs_max,
+            "2000 ms @ 60 fps (120 frames) must fit under the abs-max"
         );
         // A shallow/zero override keeps the historic 30-frame burst-tolerance floor.
         assert_eq!(genlock_drop_cap(true, 0), MAX_ASYNC_FRAMES);
         assert_eq!(genlock_drop_cap(true, 3), MAX_ASYNC_FRAMES); // 3 frames (100 ms global) < floor
+    }
+
+    // #292: the genlock ts-align release deadline holds every queued frame younger than
+    // latency_ms, so the FIFO fills at the SOURCE ARRIVAL rate — which can EXCEED the
+    // canvas OUTPUT rate. The stream box receives a 60 fps NDI feed from strih into a
+    // 30 fps canvas (the "60→30 strih→stream" topology), so 1000 ms of delay parks ≈ 60
+    // frames in the buffer, NOT 30. Budgeting the drop-cap at the CANVAS fps (the pre-#292
+    // bug) undercounted the held depth ~2x, so the overrun force-drain capped a deep
+    // latency at ~450 ms — the operator could not delay the stream the ~1 s needed to
+    // A/V-align to the late mastered audio. The drop-cap depth MUST be budgeted at the
+    // worst-case arrival rate. This is the test CI "never verified" (the old tests budgeted
+    // at the canvas fps and so always passed while production capped at ~450 ms).
+    #[test]
+    fn drop_cap_delivers_high_latency_at_max_source_arrival() {
+        use camera_box::probe::genlock::{
+            genlock_drop_cap, genlock_latency_depth_frames, GENLOCK_MAX_SOURCE_FPS,
+        };
+        // The rig's worst case: a 30 fps STREAM canvas receiving a 60 fps NDI feed.
+        const STREAM_CANVAS_FPS: u32 = 30;
+        for &latency_ms in &[1000u32, 1500, 2000] {
+            // Frames the FIFO actually holds at the worst-case arrival rate.
+            let held = ms_to_frames(latency_ms, GENLOCK_MAX_SOURCE_FPS, 1);
+            // The depth the drop-cap budgets, given the (slower) stream canvas fps.
+            let depth = genlock_latency_depth_frames(latency_ms, STREAM_CANVAS_FPS, 1);
+            let cap = genlock_drop_cap(true, depth);
+            assert!(
+                cap > held,
+                "{latency_ms} ms @ {GENLOCK_MAX_SOURCE_FPS} fps arrival: drop-cap {cap} must \
+                 exceed the {held} held frames to DELIVER the configured latency — a canvas-fps \
+                 budget caps it at ~450 ms (#292)"
+            );
+        }
+    }
+
+    // #292: the per-source latency depth helper budgets at the worst-case SOURCE arrival
+    // rate (GENLOCK_MAX_SOURCE_FPS = 60), so the FIFO holds the FULL configured delay even
+    // when the canvas runs slower (30 fps stream). At the canvas rate alone the depth would
+    // be half — the root cause of the ~450 ms production cap.
+    #[test]
+    fn latency_depth_frames_budgets_at_source_arrival_rate() {
+        use camera_box::probe::genlock::{
+            genlock_latency_depth_frames, GENLOCK_AUTO_PRELOAD_MIN, GENLOCK_MAX_SOURCE_FPS,
+            GENLOCK_SOURCE_LATENCY_MS_MAX,
+        };
+        // 1000 ms into a 30 fps canvas must budget for the 60 fps arrival = 60 frames.
+        assert_eq!(genlock_latency_depth_frames(1000, 30, 1), 60);
+        // 1500 ms → 90 frames (the operator's A/V-align headroom above 1 s).
+        assert_eq!(genlock_latency_depth_frames(1500, 30, 1), 90);
+        // The per-source maximum (2000 ms) → 120 frames @ 60 fps.
+        assert_eq!(
+            genlock_latency_depth_frames(GENLOCK_SOURCE_LATENCY_MS_MAX, 30, 1),
+            120
+        );
+        // A faster canvas (60 fps) yields the same depth — the arrival floor already covers it.
+        assert_eq!(genlock_latency_depth_frames(1000, 60, 1), 60);
+        // The shallow 3 ms floor never drops below the resilience minimum.
+        assert_eq!(
+            genlock_latency_depth_frames(3, 30, 1),
+            GENLOCK_AUTO_PRELOAD_MIN
+        );
+        assert_eq!(GENLOCK_MAX_SOURCE_FPS, 60);
     }
 
     #[test]
@@ -963,7 +1025,9 @@ mod single_latency_knob {
 // ---- vendored-source guard (the C patch must stay applied) ------------------
 
 mod vendored_source {
-    use camera_box::probe::genlock::{GENLOCK_PRELOAD_MAX, GENLOCK_REARM_EMPTY_TICKS};
+    use camera_box::probe::genlock::{
+        GENLOCK_MAX_SOURCE_FPS, GENLOCK_PRELOAD_MAX, GENLOCK_REARM_EMPTY_TICKS,
+    };
     use std::path::PathBuf;
 
     pub fn vendor_file(rel: &str) -> String {
@@ -1912,6 +1976,33 @@ mod vendored_source {
     }
 
     #[test]
+    fn drop_cap_budgets_at_source_arrival_fps_in_vendored_source() {
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // #292: genlock_source_drop_cap must budget the latency depth at the worst-case
+        // SOURCE arrival rate (GENLOCK_MAX_SOURCE_FPS = 60), NOT the canvas output fps —
+        // the FIFO fills at the arrival rate (a 60 fps feed into a 30 fps canvas), so a
+        // canvas-fps budget undercounts the held depth ~2x and force-drains a deep latency
+        // at ~450 ms. A subtree pull / revert that drops the define or the budget term
+        // silently re-caps the operator's A/V-align delay.
+        assert!(
+            src.contains("#define GENLOCK_MAX_SOURCE_FPS 60"),
+            "{OBS_SOURCE}: #292 GENLOCK_MAX_SOURCE_FPS define missing/changed; the drop-cap \
+             reverted to a canvas-fps budget that caps latency at ~450 ms. The Rust mirror \
+             is {GENLOCK_MAX_SOURCE_FPS}."
+        );
+        assert!(
+            src.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
+            "{OBS_SOURCE}: #292 — genlock_source_drop_cap no longer budgets latency_frames \
+             at the source arrival rate (GENLOCK_MAX_SOURCE_FPS); a deep latency \
+             force-drains at ~450 ms. Re-apply."
+        );
+        assert_eq!(
+            GENLOCK_MAX_SOURCE_FPS, 60,
+            "Rust mirror must equal the C define"
+        );
+    }
+
+    #[test]
     fn setter_clamps_unsigned_not_via_long() {
         // (review) The setter takes a uint32_t and MUST clamp the unsigned value
         // directly — round-tripping through `long` inverts the upper clamp to 0 on
@@ -2384,6 +2475,15 @@ mod distroav_source {
             "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the editable \
              per-source latency int field; re-add the pwsh #245 gate."
         );
+        // #292: the build must also gate on the source-arrival-fps drop-cap budget, so a subtree
+        // revert that re-caps a deep latency at ~450ms fails at the token, not silently in prod.
+        assert!(
+            wf.contains("#define GENLOCK_MAX_SOURCE_FPS 60")
+                && wf.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
+            "{WINDOWS_GENLOCK_WF}: #292 — the production build no longer gates on the \
+             GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a revert re-caps latency at \
+             ~450ms. Re-add the pwsh #292 gate."
+        );
     }
 
     #[test]
@@ -2404,6 +2504,15 @@ mod distroav_source {
             wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
             "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the editable \
              per-source latency int field; add the pwsh #245 gate."
+        );
+        // #292: the FAST build must also gate on the source-arrival-fps drop-cap budget (mirror the
+        // slow gate), so a subtree pull can't hot-swap an obs.dll that re-caps latency at ~450ms.
+        assert!(
+            wf.contains("#define GENLOCK_MAX_SOURCE_FPS 60")
+                && wf.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #292 — the FAST build does not gate on the \
+             GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a subtree pull could hot-swap an \
+             obs.dll that re-caps latency at ~450ms. Add the pwsh #292 gate, mirroring windows-genlock.yml."
         );
     }
 
