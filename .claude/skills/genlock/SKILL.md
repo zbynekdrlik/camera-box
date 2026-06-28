@@ -144,6 +144,19 @@ ProgramData distroav, clear `%APPDATA%\obs-studio\.sentinel\*`, relaunch.
 
 ## Bundle version integrity (EPIC #125)
 
+**On-box build identity in the OBS title (#152):** the window title is composed in
+`OBSBasic::UpdateTitleBar()` (`vendor/obs-studio/frontend/widgets/OBSBasic.cpp`) — after
+the OBS version (`GetVersionString`, which already carries the git-describe sha) it appends
+` - newlevel.media build <YYYY-MM-DD>`. The date is the compiler `__DATE__` reformatted to
+ISO by the file-local `NewlevelBuildDate()` helper just above `UpdateTitleBar()` (uses only
+`<string>`/`<sstream>`, no new includes → near-zero frontend-compile risk; prefer `__DATE__`
+over CMake/config-header date plumbing since the full frontend build is 150-min and not
+locally compilable). Guard = `tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
+Linux test → runs Tier-0; RED→GREEN provable locally by running the built
+`target/debug/deps/obs_titlebar_newlevel-*` against the source) + the lock-step pwsh
+source-anchor gate in BOTH `windows-genlock{,-fast}.yml` (the FAST path doesn't build the
+frontend but still source-text-gates the token, same as the #276/#278 OBSProjector gate).
+
 Two LAYERS guard "the deployed stack is the build we think it is":
 
 - **drift-guard (#45)** — marketing versions + critical settings (OBS 32.1.2 / DistroAV
