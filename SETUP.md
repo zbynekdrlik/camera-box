@@ -342,3 +342,42 @@ sshpass -p 'newlevel' ssh root@10.77.9.6X "systemctl start camera-box && mount -
 - **Master image** = Clean Ubuntu + SSH only (NOT a clone of CAM1)
 - **Setup script** = Does ALL configuration (installs apps, optimizes system)
 - **NDI library** = Must be copied manually (licensing)
+
+---
+
+## Boot Hardening — "it must be impossible to brick a cam box again" (#295)
+
+Two cam boxes (CAM3 + CAM4) were bricked when an `update-grub` defaulted to an auto-installed
+`6.8.0-124` kernel that had **no generated initrd** → the kernel could not mount root. The trigger
+chain: an active `unattended-upgrades` auto-installed a new kernel; a full 100M `/var/cache` tmpfs
+broke apt with `ENOSPC` so the initrd was never generated; a later `update-grub` happily made that
+initrd-less kernel the default boot entry.
+
+The provisioning scripts (`scripts/setup.sh` and `scripts/setup-device.sh`) now make this
+**impossible to recreate on a re-provision** — never a one-off live edit (live grub edits are what
+bricked the boxes). What they do, enforced by `tests/appliance_boot_hardening.rs`:
+
+1. **Pin the kernel** — `apt-mark hold linux-image-generic linux-headers-generic linux-generic`.
+   An appliance must never silently gain a new kernel.
+2. **Disable automatic upgrades** — `/etc/apt/apt.conf.d/20auto-upgrades` sets
+   `APT::Periodic::Unattended-Upgrade "0"` (plus a kernel blacklist and the masked
+   `unattended-upgrades.service`). This is *how* the bad kernel auto-installed.
+3. **Guarantee an initrd for every kernel before grub** — provisioning runs
+   `update-initramfs -c -k <ver>` for any kernel missing one *before* `update-grub`, and installs
+   `/etc/kernel/postinst.d/zz-camera-box-initrd-guarantee` so any future kernel install regenerates a
+   missing initrd before grub's own hook.
+4. **Pin a safe grub default** — `GRUB_DEFAULT=saved` + `grub-set-default` to the running known-good
+   kernel, with a guard that validates the generated default entry references both a kernel image AND
+   an initrd (and aborts loudly otherwise — never ship a brickable default).
+5. **Size `/var/cache` ≥512M uniformly** — so apt can never `ENOSPC` and leave a kernel without its
+   initrd. (Drift was 100M on some boxes, 500M on others.)
+
+### Long-term target — the read-only-root + overlay image (`scripts/build-image.sh`)
+
+The deployed boxes were provisioned manually with a **read-write root**, so they are exposed to
+power-loss corruption and to the brick above. `scripts/build-image.sh` already builds the durable
+appliance image: a **read-only root filesystem** with an **overlay** partition for writes (and
+tmpfs for `/var/log`, `/tmp`, …), with the kernel pinned and `GRUB_DEFAULT=saved`. The long-term
+plan is to re-image the fleet onto that ro-root + overlay image. That live re-image is an
+**operational step (tracked separately, #301)** — it is NOT done by this hardening change; this
+change makes the *provisioning* safe so the brick cannot recur whichever path is used.

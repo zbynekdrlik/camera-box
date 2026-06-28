@@ -162,6 +162,91 @@ update_system() {
     log "System updated"
 }
 
+# #295: GUARANTEE every installed kernel has an initrd. A kernel without an initrd that becomes the
+# grub default cannot mount root — that is exactly what bricked CAM3 + CAM4. Run this BEFORE every
+# update-grub so grub can never produce a default entry that fails to boot.
+camera_box_ensure_all_kernels_have_initrd() {
+    local vmlinuz kver
+    for vmlinuz in /boot/vmlinuz-*; do
+        [[ -e "$vmlinuz" ]] || continue
+        kver="${vmlinuz#/boot/vmlinuz-}"
+        if [[ ! -e "/boot/initrd.img-${kver}" ]]; then
+            warn "#295: kernel ${kver} has no initrd — generating one before grub"
+            update-initramfs -c -k "${kver}"
+        fi
+    done
+}
+
+# #295: refuse to leave a grub default that cannot boot, then pin the saved default to the running
+# (known-good) kernel. Validates the generated /boot/grub/grub.cfg default entry references BOTH a
+# kernel image AND an initrd; aborts loudly if not (never ship a brickable default).
+camera_box_pin_safe_grub_default() {
+    local cfg="/boot/grub/grub.cfg" kver default_block
+    [[ -f "$cfg" ]] || {
+        warn "#295: $cfg not found — cannot validate grub default"
+        return 0
+    }
+    # grub's default is its first top-level menuentry (saved_entry=0).
+    default_block="$(awk '/^[[:space:]]*menuentry /{c++} c==1{print} c==2{exit}' "$cfg")"
+    if ! grep -qE '(vmlinuz|[[:space:]]linux )' <<<"$default_block" \
+        || ! grep -q 'initrd' <<<"$default_block"; then
+        error "#295: grub default entry is missing a kernel image or initrd line — refusing to leave the box brickable"
+    fi
+    kver="$(uname -r)"
+    if [[ -e "/boot/vmlinuz-${kver}" && -e "/boot/initrd.img-${kver}" ]]; then
+        grub-set-default 0
+    fi
+}
+
+# #295: PIN the appliance kernel and disable unattended upgrades. The brick was an auto-installed
+# kernel (via active unattended-upgrades) without an initrd becoming the grub default. An appliance
+# must never silently gain a new kernel.
+harden_appliance_kernel() {
+    header "Hardening Appliance Boot (#295)"
+
+    log "Pinning kernel meta-packages (apt-mark hold)..."
+    apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
+
+    log "Disabling automatic (unattended) upgrades..."
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+// Camera-box appliance: never auto-update. An unattended kernel install without an initrd bricked
+// CAM3/CAM4 (#295). Kernels are pinned with `apt-mark hold`; updates are operator-driven.
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+    # Belt-and-braces: even if unattended-upgrades is ever re-enabled, kernels stay blacklisted.
+    cat > /etc/apt/apt.conf.d/51camera-box-no-kernel-autoupgrade << 'EOF'
+// #295: never let unattended-upgrades touch the kernel on the appliance.
+Unattended-Upgrade::Package-Blacklist {
+    "linux-image";
+    "linux-headers";
+    "linux-generic";
+};
+EOF
+    systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+        apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+    systemctl mask unattended-upgrades.service 2>/dev/null || true
+
+    # #295: any FUTURE kernel install must always get an initrd. This /etc/kernel/postinst.d hook
+    # sorts before grub's own `zz-update-grub` hook ("zz-camera-box" < "zz-update-grub"), so a
+    # missing initrd is regenerated BEFORE grub is updated.
+    log "Installing initrd-guarantee kernel hook..."
+    mkdir -p /etc/kernel/postinst.d
+    cat > /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee << 'EOF'
+#!/bin/sh
+# #295: guarantee every installed kernel has an initrd (a kernel without one bricked CAM3/CAM4).
+set -e
+version="$1"
+[ -n "$version" ] || exit 0
+if [ ! -e "/boot/initrd.img-${version}" ]; then
+    update-initramfs -c -k "${version}"
+fi
+EOF
+    chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee
+
+    log "Kernel pinned; auto-upgrades disabled; initrd guaranteed for every kernel"
+}
+
 # Configure system for appliance mode
 configure_system() {
     header "Configuring System"
@@ -299,14 +384,23 @@ EOF
     # Force fsck on next boot after unclean shutdown
     tune2fs -c 1 "$(findmnt -n -o SOURCE /)" 2>/dev/null || true
 
-    # --- Configure GRUB for fast boot ---
-    log "Configuring GRUB for fast boot..."
+    # --- Configure GRUB for fast + #295 brick-proof boot ---
+    log "Configuring GRUB (fast + safe boot)..."
     if [[ -f /etc/default/grub ]]; then
         sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
         sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
         grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
         grep -q "GRUB_RECORDFAIL_TIMEOUT" /etc/default/grub || echo "GRUB_RECORDFAIL_TIMEOUT=0" >> /etc/default/grub
-        update-grub 2>/dev/null || true
+        # #295: pin the default to the explicitly-saved known-good kernel, never "newest".
+        if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
+            sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
+        else
+            echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
+        fi
+        # #295: guarantee initrds BEFORE regenerating grub, then validate + pin a safe default.
+        camera_box_ensure_all_kernels_have_initrd
+        update-grub
+        camera_box_pin_safe_grub_default
     fi
 
     # --- Configure autologin ---
@@ -374,7 +468,9 @@ UUID=$root_uuid / ext4 ro 0 1
 tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
 tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
 tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
-tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=100M 0 0
+# #295: size /var/cache >=512M (uniformly across the fleet) so apt can never ENOSPC and leave a
+# freshly-installed kernel without its initrd (a 100M /var/cache filled up and did exactly that).
+tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
 tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
 EOF
 
@@ -633,6 +729,7 @@ main() {
     expand_disk      # First! Before anything that needs disk space
     set_hostname
     update_system
+    harden_appliance_kernel   # #295: pin kernel + kill auto-upgrades + initrd hook BEFORE grub work
     configure_system
     install_dantesync
     install_camera_box

@@ -281,16 +281,47 @@ else
 fi
 
 # =============================================================================
-# STEP 10: Disable GRUB timeout (fast boot)
+# STEP 10: GRUB — fast boot + #295 brick-proofing (pin a known-good kernel)
 # =============================================================================
 echo ""
-echo -e "${GREEN}[10/${TOTAL_STEPS}] Disabling GRUB timeout...${NC}"
+echo -e "${GREEN}[10/${TOTAL_STEPS}] Configuring GRUB (fast + safe boot)...${NC}"
 sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
 sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
 grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
 grep -q "GRUB_RECORDFAIL_TIMEOUT" /etc/default/grub || echo "GRUB_RECORDFAIL_TIMEOUT=0" >> /etc/default/grub
-update-grub 2>/dev/null || true
-echo "  GRUB timeout: 0 seconds (including recordfail)"
+# #295: pin the default to the explicitly-saved known-good kernel, never "newest".
+if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
+    sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
+else
+    echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
+fi
+# #295: GUARANTEE every installed kernel has an initrd BEFORE regenerating grub. A kernel without an
+# initrd that becomes the grub default cannot mount root — that bricked CAM3 + CAM4.
+for vmlinuz in /boot/vmlinuz-*; do
+    [ -e "$vmlinuz" ] || continue
+    kver="${vmlinuz#/boot/vmlinuz-}"
+    if [ ! -e "/boot/initrd.img-${kver}" ]; then
+        echo -e "  ${YELLOW}#295: kernel ${kver} has no initrd — generating before grub${NC}"
+        update-initramfs -c -k "${kver}"
+    fi
+done
+update-grub
+# #295: refuse to leave a default boot entry without a kernel image AND an initrd, then pin the
+# saved default to the running (known-good) kernel.
+GRUB_CFG="/boot/grub/grub.cfg"
+if [ -f "$GRUB_CFG" ]; then
+    DEFAULT_ENTRY="$(awk '/^[[:space:]]*menuentry /{c++} c==1{print} c==2{exit}' "$GRUB_CFG")"
+    if ! echo "$DEFAULT_ENTRY" | grep -qE '(vmlinuz|[[:space:]]linux )' \
+        || ! echo "$DEFAULT_ENTRY" | grep -q 'initrd'; then
+        echo -e "${RED}#295: grub default entry lacks a kernel image or initrd — aborting to avoid a brick${NC}"
+        exit 1
+    fi
+    RUNNING_KVER="$(uname -r)"
+    if [ -e "/boot/vmlinuz-${RUNNING_KVER}" ] && [ -e "/boot/initrd.img-${RUNNING_KVER}" ]; then
+        grub-set-default 0
+    fi
+fi
+echo "  GRUB: timeout 0s, default pinned to known-good kernel with initrd [#295]"
 
 # =============================================================================
 # STEP 11: Reduce network wait timeout
@@ -419,8 +450,41 @@ systemctl mask snapd.service 2>/dev/null || true
 # Cloud-init
 systemctl disable --now cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service 2>/dev/null || true
 touch /etc/cloud/cloud-init.disabled 2>/dev/null || true
-# Auto updates
-systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+# Auto updates — #295: an active unattended-upgrades auto-installed a kernel without an initrd that
+# bricked CAM3/CAM4. PIN the kernel and disable unattended upgrades entirely; an appliance must
+# never silently gain a new kernel.
+systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+    apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+systemctl mask unattended-upgrades.service 2>/dev/null || true
+apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+// Camera-box appliance: never auto-update (#295 — kernels are pinned with apt-mark hold).
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+cat > /etc/apt/apt.conf.d/51camera-box-no-kernel-autoupgrade << 'EOF'
+// #295: never let unattended-upgrades touch the kernel on the appliance.
+Unattended-Upgrade::Package-Blacklist {
+    "linux-image";
+    "linux-headers";
+    "linux-generic";
+};
+EOF
+# #295: any FUTURE kernel install must always get an initrd. This /etc/kernel/postinst.d hook sorts
+# before grub's own `zz-update-grub` hook, so a missing initrd is regenerated BEFORE grub is updated.
+mkdir -p /etc/kernel/postinst.d
+cat > /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee << 'EOF'
+#!/bin/sh
+# #295: guarantee every installed kernel has an initrd (a kernel without one bricked CAM3/CAM4).
+set -e
+version="$1"
+[ -n "$version" ] || exit 0
+if [ ! -e "/boot/initrd.img-${version}" ]; then
+    update-initramfs -c -k "${version}"
+fi
+EOF
+chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee
+echo "  #295: kernel pinned (apt-mark hold), unattended-upgrades disabled, initrd hook installed"
 # ModemManager (not needed)
 systemctl disable --now ModemManager.service 2>/dev/null || true
 # Bluetooth (not needed)
@@ -541,7 +605,9 @@ $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
 tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
 tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
-tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=100M 0 0
+# #295: size /var/cache >=512M (uniformly across the fleet) so apt can never ENOSPC and leave a
+# freshly-installed kernel without its initrd (a 100M /var/cache filled up and did exactly that).
+tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
 tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
 FSTABEOF
 
