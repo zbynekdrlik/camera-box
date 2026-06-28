@@ -153,14 +153,18 @@ fn test_mode_frees_fb0_via_no_display_dropin_not_full_stop() {
          Switch it to no-display instead. Got:\n{p}"
     );
     // It installs a transient drop-in (in /run — tmpfs, so a reboot auto-reverts) overriding
-    // ExecStart to camera-box WITHOUT --display, then reloads + restarts to apply it.
+    // ExecStart to camera-box WITHOUT --display, then reloads + restarts to apply it. Assert the
+    // FULL write-redirect + the FULL no-display override line (not loose substrings that a comment
+    // could satisfy).
     assert!(
-        p.contains("camera-box.service.d") && p.contains("zz-rig-test-no-display.conf"),
-        "#291: TEST mode must install a transient no-display systemd drop-in. Got:\n{p}"
+        p.contains("> \"/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf\""),
+        "#291: TEST mode must write a transient no-display systemd drop-in to /run. Got:\n{p}"
     );
     assert!(
-        p.contains("ExecStart=") && p.contains("ExecStart=/usr/local/bin/camera-box"),
-        "#291: the drop-in must reset ExecStart and set the no-display camera-box command. Got:\n{p}"
+        p.contains("echo 'ExecStart='")
+            && p.contains("echo \"ExecStart=/usr/local/bin/camera-box\""),
+        "#291: the drop-in must reset ExecStart and set the no-display camera-box command \
+         (no --display). Got:\n{p}"
     );
     assert!(
         p.contains("systemctl daemon-reload") && p.contains("systemctl restart camera-box"),
@@ -189,8 +193,10 @@ fn test_mode_keeps_camera_box_capturing_and_emitting() {
          Got:\n{p}"
     );
     assert!(
-        p.contains("systemctl show -p ExecStart") && p.contains("--display"),
-        "#291: TEST mode must verify the effective ExecStart no longer has --display (so a \
+        p.contains(
+            "systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'"
+        ),
+        "#291: TEST mode must verify the EFFECTIVE ExecStart no longer has --display (so a \
          Restart=always respawn cannot re-grab fb0). Got:\n{p}"
     );
 }
@@ -244,14 +250,24 @@ fn event_mode_stops_via_pidfile_restores_display() {
     );
     // #291: remove the transient no-display drop-in TEST mode installed, then RESTART (the unit was
     // never fully stopped — it was reconfigured to no-display — so a plain `start` would not revert).
+    // Assert the FULL removal command + the same effective --display check TEST uses (symmetric).
     assert!(
-        p.contains("zz-rig-test-no-display.conf") && p.contains("rm -f"),
+        p.contains(
+            "rm -f \"/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf\""
+        ),
         "#291: EVENT mode must remove the transient no-display drop-in installed by TEST mode. \
          Got:\n{p}"
     );
     assert!(
         p.contains("systemctl daemon-reload") && p.contains("systemctl restart camera-box"),
         "#291: EVENT mode must daemon-reload + RESTART to revert ExecStart back to --display"
+    );
+    assert!(
+        p.contains(
+            "systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'"
+        ),
+        "#291: EVENT mode must verify --display restored via the EFFECTIVE ExecStart (symmetric \
+         with TEST, not a `systemctl cat` that could false-pass on the base unit). Got:\n{p}"
     );
     assert!(
         p.contains("is-active camera-box") && p.contains("not active after start"),

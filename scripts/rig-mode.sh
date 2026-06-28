@@ -66,6 +66,11 @@ QR_SIZE="${QR_SIZE:-700}"
 PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
+CAMERA_BOX_BIN="${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}"   # the deployed camera-box binary on cam2
+# #291: the TRANSIENT no-display systemd drop-in TEST mode installs (and EVENT mode removes). Single
+# source of truth so install (painter_launch_remote) and remove (painter_stop_remote) can never desync.
+# In /run (tmpfs) so a reboot auto-reverts to the deployed --display unit.
+RIG_TEST_DROPIN="${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}"
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
@@ -77,8 +82,8 @@ PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
 # without a live cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY.
 painter_launch_remote() {
   local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
-  local cbbin="${6:-/usr/local/bin/camera-box}"
-  local dropin="${7:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}"
+  local cbbin="${6:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
+  local dropin="${7:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
   cat <<REMOTE
 set -e
@@ -157,7 +162,7 @@ REMOTE
 # (camera-box re-grabbed /dev/fb0 to paint the interkom return on the monitor).
 painter_stop_remote() {
   local pidfile="$1"
-  local dropin="${2:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}"
+  local dropin="${2:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
   cat <<REMOTE
 set -e
@@ -187,8 +192,10 @@ if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (5) verify --display is restored: the ExecStart carries --display AND camera-box re-grabbed /dev/fb0.
-if ! systemctl cat camera-box 2>/dev/null | grep -q -- '--display'; then
+# (5) verify --display is restored: the EFFECTIVE ExecStart carries --display (same resolved check
+#     TEST mode uses — `systemctl show`, NOT `systemctl cat`, so a silently-failed drop-in removal
+#     can't false-pass on the base unit's --display line) AND camera-box re-grabbed /dev/fb0.
+if ! systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'; then
   echo "FAIL: camera-box ExecStart has no --display — interkom monitor not restored" >&2
   exit 1
 fi
