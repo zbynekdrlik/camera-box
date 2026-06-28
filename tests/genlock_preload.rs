@@ -2475,6 +2475,15 @@ mod distroav_source {
             "{WINDOWS_GENLOCK_WF}: #245 — the production build no longer asserts the editable \
              per-source latency int field; re-add the pwsh #245 gate."
         );
+        // #292: the build must also gate on the source-arrival-fps drop-cap budget, so a subtree
+        // revert that re-caps a deep latency at ~450ms fails at the token, not silently in prod.
+        assert!(
+            wf.contains("#define GENLOCK_MAX_SOURCE_FPS 60")
+                && wf.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
+            "{WINDOWS_GENLOCK_WF}: #292 — the production build no longer gates on the \
+             GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a revert re-caps latency at \
+             ~450ms. Re-add the pwsh #292 gate."
+        );
     }
 
     #[test]
@@ -2495,6 +2504,15 @@ mod distroav_source {
             wf.contains("obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC"),
             "{WINDOWS_GENLOCK_FAST_WF}: #249/#245 — the FAST build does not assert the editable \
              per-source latency int field; add the pwsh #245 gate."
+        );
+        // #292: the FAST build must also gate on the source-arrival-fps drop-cap budget (mirror the
+        // slow gate), so a subtree pull can't hot-swap an obs.dll that re-caps latency at ~450ms.
+        assert!(
+            wf.contains("#define GENLOCK_MAX_SOURCE_FPS 60")
+                && wf.contains("source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #292 — the FAST build does not gate on the \
+             GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a subtree pull could hot-swap an \
+             obs.dll that re-caps latency at ~450ms. Add the pwsh #292 gate, mirroring windows-genlock.yml."
         );
     }
 

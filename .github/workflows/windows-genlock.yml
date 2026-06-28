@@ -163,6 +163,16 @@ jobs:
           if ($obs -notmatch [regex]::Escape('#define GENLOCK_SOURCE_LATENCY_MS_MAX 2000')) {
             Write-Error "obs-source.c: GENLOCK_SOURCE_LATENCY_MS_MAX no longer 2000 — #245 per-source cap reverted"; exit 1
           }
+          # #292: the drop-cap must budget the held depth at the SOURCE arrival fps (60), not the canvas
+          # output fps — a 60fps NDI feed into a 30fps stream canvas parks 2x the canvas-rate frames, so a
+          # canvas-fps budget force-drains a deep latency at ~450ms. A subtree revert that drops the define
+          # or the budget term silently re-caps the operator's A/V-align delay; fail the build at the token.
+          if ($obs -notmatch [regex]::Escape('#define GENLOCK_MAX_SOURCE_FPS 60')) {
+            Write-Error "obs-source.c: GENLOCK_MAX_SOURCE_FPS no longer 60 — #292 drop-cap arrival-fps budget reverted (latency re-caps at ~450ms)"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('source->genlock_latency_ms * GENLOCK_MAX_SOURCE_FPS')) {
+            Write-Error "obs-source.c: genlock_source_drop_cap no longer budgets latency_frames at the source arrival rate — #292 deep latency force-drains at ~450ms"; exit 1
+          }
           $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
           if ($api -notmatch [regex]::Escape('EXPORT void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t')) {
             Write-Error "obs.h: obs_source_set_genlock_latency_ms not EXPORTed — #245 DistroAV cannot resolve the setter"; exit 1
