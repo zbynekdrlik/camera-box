@@ -250,6 +250,23 @@ guard, so their pure functions can be sourced directly (see `urlencode_name` / `
 Structural guards (the script CONTAINS the gate/flag) complement — but don't replace — a behavioral
 mirror of the decision logic.
 
+**Heredoc-authoring footgun (rig-mode.sh `painter_*_remote`, #291):** the remote-bash builders use an
+UNQUOTED `cat <<REMOTE` heredoc so build-time locals (`$cbbin`, `$dropin`) expand. That means
+backticks AND `$( … )` in the heredoc body — **including in COMMENTS** — run on the LOCAL (dev1)
+shell while building the string, not on the cam. A comment like `` # use `systemctl show` not `systemctl cat` ``
+silently runs `systemctl cat` on dev1 ("Too few arguments") and emits a MANGLED comment to the cam.
+Rules for editing these heredocs: remote runtime vars/substitutions MUST be `\$`-escaped (`\$(systemctl
+is-active …)`, `\$i`); local vars are bare (`$cbbin`); and **never put backticks or `$()` in a heredoc
+comment** — use single quotes (`'systemctl show'`). Verify after editing: `bash -c '. scripts/rig-mode.sh;
+painter_launch_remote … >/dev/null; painter_stop_remote … >/dev/null'` must print ZERO stderr.
+
+**Why a systemd drop-in, not loopback's manual `nohup camera-box`:** `loopback-e2e.sh` runs a manual
+no-display camera-box (stop service → `nohup /usr/local/bin/camera-box &`), fine for a single-box
+loopback. rig-mode TEST (#291) instead installs a `/run` ExecStart drop-in so cam2 stays UNDER systemd
+with all its directives (Nice=-10, SCHED_FIFO, CPUAffinity, NDI env, Restart=always) — cam2 must emit
+PRODUCTION-quality NDI to strih during the whole test, and Restart=always must respawn the no-display
+command (never re-grab fb0). Use the drop-in for rig-mode; the manual nohup is loopback-only.
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).

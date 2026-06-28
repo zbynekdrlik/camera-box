@@ -13,6 +13,15 @@ description: >
 (`/dev/fb0`) on a low-priority decoupled thread (`main.rs` spawns it; `apply_low_priority`
 sets nice 19 + core-0 affinity). It is SECONDARY — it must NEVER degrade capture/NDI-emit.
 
+**Display is enabled PURELY via the `--display` CLI flag on the deployed unit** — the cam2 unit
+(`scripts/setup-device.sh:222`) is `ExecStart=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)"`
+and the generated `/etc/camera-box/config.toml` has NO `[display]` section (so `config.display = None`).
+`main.rs:191` builds `display_config` = `Some` only when `--display` is passed OR `config.display`
+exists; `run_capture_loop` spawns the display thread only when it's `Some`. So **running camera-box
+WITHOUT `--display` cleanly disables ONLY display** (no fb0 grab) while capture (`/dev/video0`) + NDI
+emit keep running — this is exactly what rig-mode TEST mode (#291) exploits via a transient ExecStart
+drop-in, and what `loopback-e2e.sh` does via a manual no-display launch. "display output ≠ capture input."
+
 ## Phantom / latched framebuffer — the core gotcha (#135)
 
 i915 KMS LATCHES the last monitor's mode on fb0. After a monitor is hot-unplugged, the
