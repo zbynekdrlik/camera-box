@@ -146,6 +146,27 @@ jobs:
           if ($bqr -notmatch [regex]::Escape('std::memset(row, 0xFF,')) { Write-Error "burn-qr.hpp: #275 bulk-fill (per-row white memset) gone — burn render reverted to the slow per-pixel path that overran the 60fps budget"; exit 1 }
           Write-Output "#278 multiview adaptive budget-skip decouple + #275 bulk-fill burn render present — OK"
 
+      # #152 (the #269 YAML lock-step): OBSBasic.cpp (UpdateTitleBar) is frontend-only — the
+      # FAST path does NOT build the frontend — but the source-text check still catches a
+      # `git subtree pull` (#44) that restores the stock OBS title and drops the
+      # newlevel.media build identity. Mirrors tests/obs_titlebar_newlevel.rs (Linux-only,
+      # can't compile on this runner) AND the full windows-genlock.yml #152 gate; keep all
+      # three in lock-step.
+      - name: Assert newlevel.media build identity + date in OBS title (#152)
+        shell: pwsh
+        run: |
+          $b = (Get-Content "vendor/obs-studio/frontend/widgets/OBSBasic.cpp" -Raw) -replace '\s+', ' '
+          if ($b -notmatch [regex]::Escape('name << " - newlevel.media build " << NewlevelBuildDate();')) {
+            Write-Error "OBSBasic.cpp: the #152 newlevel.media build marker is missing from the OBS window title — upstream merge likely restored the stock title; re-apply the genlock #152 patch"; exit 1
+          }
+          if ($b -notmatch [regex]::Escape('static std::string NewlevelBuildDate()')) {
+            Write-Error "OBSBasic.cpp: the #152 NewlevelBuildDate() helper is gone — the title would lose its build date; re-apply"; exit 1
+          }
+          if ($b -notmatch [regex]::Escape('const std::string d = __DATE__;')) {
+            Write-Error "OBSBasic.cpp: the #152 build-date no longer reads the compiler __DATE__ — must be injected at build time, never hardcoded; re-apply"; exit 1
+          }
+          Write-Output "#152 newlevel.media build identity + date in OBS title — OK"
+
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.
       - name: Configure OBS (windows-x64 preset)

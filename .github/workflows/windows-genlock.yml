@@ -49,6 +49,28 @@ jobs:
           }
           Write-Output "source-flag updater-disable patch present (opt_disable_updater=true + IsUpdaterDisabled wiring) — OK"
 
+      # #152: the FULL build compiles the frontend where UpdateTitleBar() lives, so assert
+      # the newlevel.media build-identity title marker is present in the vendored source
+      # BEFORE the 150-min build. Without it a `git subtree pull` (#44) could restore the
+      # stock OBS title and ship a production OBS with no build identity on the box (the
+      # version-integrity gap epic #125). Mirrors the canonical Linux-CI guard
+      # tests/obs_titlebar_newlevel.rs (that crate is Linux-only and cannot compile on this
+      # Windows runner). Keep both — and the FAST workflow's copy — in lock-step.
+      - name: Assert newlevel.media build identity + date in OBS title (#152)
+        shell: pwsh
+        run: |
+          $b = (Get-Content "vendor/obs-studio/frontend/widgets/OBSBasic.cpp" -Raw) -replace '\s+', ' '
+          if ($b -notmatch [regex]::Escape('name << " - newlevel.media build " << NewlevelBuildDate();')) {
+            Write-Error "OBSBasic.cpp: the #152 newlevel.media build marker is missing from the OBS window title — upstream merge likely restored the stock title; re-apply the genlock #152 patch"; exit 1
+          }
+          if ($b -notmatch [regex]::Escape('static std::string NewlevelBuildDate()')) {
+            Write-Error "OBSBasic.cpp: the #152 NewlevelBuildDate() helper is gone — the title would lose its build date; re-apply"; exit 1
+          }
+          if ($b -notmatch [regex]::Escape('const std::string d = __DATE__;')) {
+            Write-Error "OBSBasic.cpp: the #152 build-date no longer reads the compiler __DATE__ — must be injected at build time, never hardcoded; re-apply"; exit 1
+          }
+          Write-Output "#152 newlevel.media build identity + date in OBS title — OK"
+
       # #70/#102: assert the genlock FIFO patch is present in the vendored OBS source
       # BEFORE the 150-min build, so a future `git subtree pull` (#44) that reverts the
       # zero-loss fix fails HERE rather than shipping a regressed binary. #102 changed
