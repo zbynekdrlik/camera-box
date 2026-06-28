@@ -19,9 +19,10 @@
  * multiview-must-not-affect-program rule = decouple, not freeze; the program render,
  * render_divisor <= 1, is always left untouched).
  *
- * RED (#293 test:[red]): this header currently has NO anti-starvation floor — an over-budget
- * monitoring display is skipped on every tick (the #278 freeze). tests/obs_display_budget.rs
- * therefore FAILS here. The GREEN fix adds the OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS floor below.
+ * #293 GREEN: an over-budget monitoring display is skipped at most
+ * OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS ticks in a row; the next over-budget tick is FORCED to
+ * render (and render_display() resets the per-display skip counter), so the Multiview throttles
+ * to a reduced-but-NONZERO cadence (~15fps at a 60fps tick for K=3) instead of freezing.
  */
 
 #pragma once
@@ -67,7 +68,8 @@ static inline bool obs_display_should_skip(uint32_t render_divisor, uint64_t ewm
 	if (elapsed_ns + ewma_ns <= budget_ns) /* fits the remaining budget this tick: render */
 		return false;
 
-	/* over budget. RED (#293): no anti-starvation floor yet -> skip forever (the freeze). */
-	(void)consecutive_skips;
-	return true;
+	/* over budget: skip — but NEVER starve (#293). Skip only while it has not yet been
+	 * skipped K ticks in a row; the (K+1)-th over-budget tick renders, so the heavy
+	 * Multiview keeps updating at >= 1/(K+1) of the tick rate and can never freeze solid. */
+	return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;
 }

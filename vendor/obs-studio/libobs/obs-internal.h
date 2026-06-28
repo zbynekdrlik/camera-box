@@ -313,9 +313,14 @@ struct obs_display {
 	 * draw, α=1/4; 0 = not warmed up) fits the budget REMAINING after the program this tick.
 	 * Both fields are PER-INSTANCE (never static — a static counter would lockstep every
 	 * projector) and read+written only on the graphics thread; render_divisor is set once
-	 * from the Qt thread at display create (same unguarded pattern as background_color). */
+	 * from the Qt thread at display create (same unguarded pattern as background_color).
+	 * render_consecutive_skips (#293) is the anti-starvation counter: how many ticks in a row
+	 * an over-budget monitoring display has been skipped — capped at
+	 * OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS (obs-display-budget.h) so the Multiview can never
+	 * freeze; reset to 0 after every real render. Per-instance, graphics-thread-only. */
 	uint64_t render_ewma_ns;
 	uint32_t render_divisor;
+	uint32_t render_consecutive_skips;
 
 	struct obs_display *next;
 	struct obs_display **prev_next;

@@ -122,7 +122,11 @@ fn over_budget_monitoring_display_never_starves() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let work = std::env::temp_dir().join(format!("obs_display_budget_{}_{}", std::process::id(), stamp));
+    let work = std::env::temp_dir().join(format!(
+        "obs_display_budget_{}_{}",
+        std::process::id(),
+        stamp
+    ));
     std::fs::create_dir_all(&work).expect("create temp workdir");
     let src = work.join("harness.c");
     let bin = work.join("harness");

@@ -18,6 +18,7 @@
 #include "graphics/vec4.h"
 #include "obs.h"
 #include "obs-internal.h"
+#include "obs-display-budget.h" /* camera-box #293: pure, testable monitoring-skip decision */
 
 bool obs_display_init(struct obs_display *display, const struct gs_init_data *graphics_data)
 {
@@ -256,10 +257,18 @@ void render_display(struct obs_display *display)
 	 * time would exceed 90% of the frame interval. Skipping HERE (before begin) costs
 	 * ~nothing — no gs_load_swapchain, no gs_clear, no gs_present — and leaves the last
 	 * presented frame on screen, so there is no flicker. ewma==0 (not yet warmed) → render
-	 * once to measure (never starved to 0). Result: the program renders 60fps with 0
+	 * once to measure (never starved to 0). Result: the program renders 60fps with ~0
 	 * renderSkip no matter how heavy the monitoring display is; the monitoring display
-	 * self-throttles to whatever slack is left (may drop to a low fps / freeze under
-	 * sustained over-budget load — fine, it is monitoring; the program is the requirement). */
+	 * self-throttles to whatever slack is left.
+	 *
+	 * #293 (regression of #278): a SINGLE 4-live-cam multiview render (~18-23ms) ALONE exceeds
+	 * the budget every tick, so the skip fired on EVERY tick and the strih Multiview FROZE
+	 * solid for a whole live event. The skip now has an anti-starvation floor
+	 * (obs_display_should_skip(), obs-display-budget.h): an over-budget monitoring display is
+	 * skipped at most OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS ticks in a row; the (K+1)-th over-budget
+	 * tick is FORCED to render (and the per-display skip counter resets after the draw, below).
+	 * So the Multiview throttles to a reduced-but-NONZERO cadence (~15fps at K=3) instead of
+	 * freezing — decouple, not disable (the multiview-must-not-affect-program rule). */
 	if (display->render_divisor > 1) {
 		const uint64_t interval = obs->video.video_frame_interval_ns;
 		const uint64_t tick_start = obs->video.graphics_frame_start_ns;
@@ -268,8 +277,11 @@ void render_display(struct obs_display *display)
 			const uint64_t now = os_gettime_ns();
 			const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
 			const uint64_t budget = interval - interval / 10; /* 90% safety margin */
-			if (elapsed + ewma > budget)
+			if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,
+						    display->render_consecutive_skips)) {
+				display->render_consecutive_skips++;
 				return;
+			}
 		}
 	}
 
@@ -319,6 +331,9 @@ void render_display(struct obs_display *display)
 			const uint64_t dur = os_gettime_ns() - render_begin_ns;
 			const uint64_t prev = display->render_ewma_ns;
 			display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;
+			/* #293: a real render clears the skip run so the anti-starvation floor
+			 * counts only CONSECUTIVE skips. */
+			display->render_consecutive_skips = 0;
 		}
 	}
 }

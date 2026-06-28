@@ -1049,31 +1049,37 @@ pub fn genlock_ts_audit_sample(
 /// monitoring display ONLY when its measured cost (EWMA, ns) fits the budget REMAINING after
 /// the program has already rendered this tick.
 ///
-/// The vendored C, in `render_display()` BEFORE `render_display_begin()` (skipping there is
-/// ~0 cost — no clear/present — and leaves the last presented frame, so no flicker), is:
+/// This mirrors only the BUDGET portion of the decision. As of #293 the full decision the
+/// vendored C uses also has an anti-starvation FLOOR (a 4-live-cam multiview render alone
+/// exceeds the budget every tick, so a budget-only skip froze the strih Multiview solid for a
+/// whole live event). The full, OBS-dependency-free decision now lives in
+/// `vendor/obs-studio/libobs/obs-display-budget.h` as `obs_display_should_skip(...)` and is
+/// directly unit-tested by `tests/obs_display_budget.rs` (a standalone C harness over that
+/// real header). `render_display()` calls it BEFORE `render_display_begin()` (skipping there
+/// is ~0 cost — no clear/present — and leaves the last presented frame, so no flicker):
 /// ```c
 /// if (display->render_divisor > 1) {
-///     ... read interval, tick_start, ewma ...
-///     if (ewma != 0 && interval != 0 && tick_start != 0) {
-///         uint64_t elapsed = now - tick_start;
-///         uint64_t budget  = interval - interval / 10; /* 90% safety margin */
-///         if (elapsed + ewma > budget) return;          /* no slack → skip this frame */
+///     ... read interval, tick_start, ewma; compute elapsed, budget = interval - interval/10 ...
+///     if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,
+///                                 display->render_consecutive_skips)) {
+///         display->render_consecutive_skips++;   /* #293: count the skip */
+///         return;
 ///     }
 /// }
+/// /* a real render resets display->render_consecutive_skips = 0 */
 /// ```
-/// Returns `true` iff the display should be SKIPPED this frame. Guarantees:
+/// `display_render_skip_budget` returns `true` iff the display is over budget this frame.
+/// Guarantees of the BUDGET portion:
 /// - `render_divisor <= 1` (program output + preview) → NEVER throttled (always render).
 /// - `ewma_ns == 0` (not warmed up) or `interval_ns == 0` (no timing yet) → render once to
 ///   measure — so a monitoring display is NEVER starved to 0 before it is even measured.
-/// - Otherwise skip iff `elapsed + ewma > 90% of the frame interval`, i.e. render only when
-///   there is genuine slack left after the program → the monitoring render can NEVER push
-///   the graphics loop past the deadline → the program never skips. A monitoring display
-///   whose single render genuinely exceeds the budget (4-live-cam multiview) self-throttles
-///   to whatever slack is left (may freeze under sustained over-budget load — fine, it is
-///   monitoring; the program stays clean 60 fps, which is the non-negotiable requirement).
+/// - Otherwise over budget iff `elapsed + ewma > 90% of the frame interval`. The C floor
+///   (#293) then caps consecutive skips at `OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS` so a heavy
+///   monitoring display throttles to a reduced-but-NONZERO cadence (~15 fps at K=3) instead
+///   of freezing, while the program (divisor ≤ 1) stays clean 60 fps.
 ///
-/// This is the only unit-testable part of #278 (the real GPU render timing needs the rig,
-/// which is why the supervisor rig-verifies the 4-live-cam case).
+/// Real GPU render timing needs the rig, which is why the supervisor rig-verifies the
+/// 4-live-cam Multiview-unfreeze case.
 pub fn display_render_skip_budget(
     render_divisor: u32,
     elapsed_ns: u64,
