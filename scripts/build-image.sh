@@ -120,6 +120,11 @@ EOF
         ca-certificates \
         ffmpeg
 
+    # #295: pin the kernel on the appliance image too — an appliance must never silently gain a new
+    # kernel (an auto-installed initrd-less kernel bricked the rw-root CAM3/CAM4 boxes). The ro-root
+    # overlay image is the durable target; keep its kernel policy aligned with the setup scripts.
+    chroot "${WORK_DIR}/rootfs" apt-mark hold linux-image-amd64 2>/dev/null || true
+
     # Clean up apt cache
     chroot "${WORK_DIR}/rootfs" apt-get clean
     rm -rf "${WORK_DIR}/rootfs/var/lib/apt/lists/"*
@@ -234,9 +239,12 @@ install_bootloader() {
     chroot "${WORK_DIR}/rootfs" grub-install --target=x86_64-efi \
         --efi-directory=/boot/efi --bootloader-id=camera-box --removable
 
-    # Configure GRUB
+    # Configure GRUB. #295: GRUB_DEFAULT=saved pins the default to an explicitly-saved known-good
+    # kernel rather than whatever is "newest" — so an initrd-less kernel can never become the
+    # default (the CAM3/CAM4 brick). The single image kernel already has its initrd from
+    # configure_overlay's `update-initramfs -u`, which runs before this bootloader step.
     cat > "${WORK_DIR}/rootfs/etc/default/grub" << 'EOF'
-GRUB_DEFAULT=0
+GRUB_DEFAULT=saved
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Camera-Box"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
@@ -244,6 +252,7 @@ GRUB_CMDLINE_LINUX=""
 EOF
 
     chroot "${WORK_DIR}/rootfs" update-grub
+    chroot "${WORK_DIR}/rootfs" grub-set-default 0
 }
 
 install_ndi_library() {

@@ -114,3 +114,29 @@ A detect+alert watchdog for this state is tracked separately in **#266** (split 
 solo redesign — the first cut over-/under-discriminated STUCK vs benign IDLE). No watchdog script
 lives in the tree yet; until #266 lands, the stuck state is caught by hand (genlock-fifo audit fps +
 dantesync CPU) and recovered by reboot per above.
+
+## #295 — cam-box boot hardening (what bricked CAM3/CAM4 + the durable fix)
+
+**How the boxes ACTUALLY boot:** the live cam boxes run a plain **RW root on `/dev/sda2`**
+(ext4 rw,relatime), provisioned MANUALLY — NOT the repo's ro-root+overlay image. `build-image.sh`
+designs a read-only root + 512M overlay, but the deployed boxes don't use it (long-term target;
+operational re-image tracked in **#301**).
+
+**The brick (NOT fs corruption):** `unattended-upgrades` was active → auto-installed a `6.8.0-124`
+kernel; a FULL 100M `/var/cache` tmpfs broke apt with ENOSPC so its **initrd never generated**; a
+later `update-grub` (the #289 isolcpus edit) made that initrd-less kernel the default → can't mount
+root → unbootable. Recovery was a dev1 chroot: `update-initramfs -c -k <ver>` + `update-grub`.
+
+**Durable fix (PR #306, in provisioning `setup.sh` + `setup-device.sh`):**
+- `apt-mark hold linux-image-generic linux-headers-generic linux-generic` — **BEFORE** `apt-get upgrade`.
+- unattended upgrades OFF (`/etc/apt/apt.conf.d/20auto-upgrades` periodic=0 + kernel blacklist + masked).
+- every kernel gets an initrd BEFORE `update-grub` (loop + `/etc/kernel/postinst.d/zz-camera-box-initrd-guarantee`).
+- `GRUB_DEFAULT=saved` + validate the default grub.cfg menuentry has BOTH a kernel image AND an initrd
+  (abort loudly otherwise) + `grub-set-default 0`.
+- `/var/cache` tmpfs sized **512M** uniformly (was the 100M that ENOSPC'd).
+
+**Live-box rules (unchanged):** NEVER edit `/etc/default/grub` + `update-grub` on a live box — that
+is what bricked them. Kernel-cmdline tuning (#303 nohz_full/rcu_nocbs) stays DEFERRED. Safe live
+mitigation already on survivors (.61/.62/.64): kernels dpkg-held, `/var/cache` freed. Extending the
+hardening to the base-image builder (`create-usb-linux.sh`) + a `build-image.sh` fail-closed grub
+guard is **#307**.
