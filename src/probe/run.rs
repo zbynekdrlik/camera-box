@@ -66,14 +66,24 @@ pub fn default_paint_fps(
     paint_only: bool,
     synth_ndi: bool,
 ) -> f64 {
-    // #79: the KMS page-flip presenter is vblank-locked at the capture rate, so the
-    // configured paint_fps should match that cadence. The original logic excluded
-    // paint_only — believing it never opens a presenter — but `run_paint_only` does
-    // (`run_paint_only` → `run_painter` → `open_presenter`). See #290.
-    let kms_presenter_path =
-        !matches!(presenter, PresenterKind::Fbdev) && !synth_ndi && !paint_only;
+    // A path that drives a real HDMI presenter must paint at the full capture rate so
+    // every captured frame resolves a DISTINCT tick (#290):
+    //   - the single-box loopback `run()` on the KMS/auto presenter is vblank-locked
+    //     at the capture rate (the configured value matches that cadence; #79);
+    //   - the rig `--paint-only` painter ALSO opens a presenter (`run_paint_only` →
+    //     `run_painter` → `open_presenter`): under KMS it is vblank-locked, under the
+    //     fbdev fallback it sleep-paces at this configured rate — so the configured
+    //     rate MUST be the capture rate or the fbdev-fallback painter ticks too
+    //     slowly (the #290 30fps-painter-vs-60fps-capture bug). The original logic
+    //     wrongly excluded `paint_only`, treating it like the presenter-less synth
+    //     path.
+    // Only the single-box fbdev loopback GATE keeps the sub-capture coverage default
+    // (its in-process `run()` reader wants ≥2 clean samples per id, no tearing
+    // false-loss), and the presenter-less `--synth-ndi` golden reference keeps it too.
+    let full_rate_presenter_path =
+        (!matches!(presenter, PresenterKind::Fbdev) || paint_only) && !synth_ndi;
     match mode {
-        PaintMode::Coverage if kms_presenter_path => capture_fps,
+        PaintMode::Coverage if full_rate_presenter_path => capture_fps,
         PaintMode::Coverage => 12.0,
         PaintMode::FullRate => capture_fps,
     }
@@ -274,7 +284,11 @@ mod tests {
     /// so a too-slow configured rate is the #290 30fps-painter bug on the fbdev path.
     #[test]
     fn paint_only_tracks_capture_rate_across_presenters_and_rates() {
-        for presenter in [PresenterKind::Auto, PresenterKind::Kms, PresenterKind::Fbdev] {
+        for presenter in [
+            PresenterKind::Auto,
+            PresenterKind::Kms,
+            PresenterKind::Fbdev,
+        ] {
             for cap in [50.0, 60.0, 120.0] {
                 let fps = default_paint_fps(PaintMode::Coverage, cap, presenter, true, false);
                 assert_eq!(
@@ -291,7 +305,13 @@ mod tests {
     /// paths take the capture rate.
     #[test]
     fn fbdev_loopback_gate_keeps_coverage_default() {
-        let fps = default_paint_fps(PaintMode::Coverage, 60.0, PresenterKind::Fbdev, false, false);
+        let fps = default_paint_fps(
+            PaintMode::Coverage,
+            60.0,
+            PresenterKind::Fbdev,
+            false,
+            false,
+        );
         assert_eq!(
             fps, 12.0,
             "the fbdev single-box loopback gate must keep the 12 fps coverage default"
@@ -303,7 +323,13 @@ mod tests {
         );
         // full-rate mode is always the capture rate; synth-ndi keeps the coverage default.
         assert_eq!(
-            default_paint_fps(PaintMode::FullRate, 60.0, PresenterKind::Fbdev, false, false),
+            default_paint_fps(
+                PaintMode::FullRate,
+                60.0,
+                PresenterKind::Fbdev,
+                false,
+                false
+            ),
             60.0
         );
         assert_eq!(

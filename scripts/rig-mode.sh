@@ -16,7 +16,8 @@
 #                  no-display systemd drop-in instead of stopping it — display output is the ONLY thing
 #                  that grabs fb0; /dev/video0 capture + NDI emit do not), so cam2 stays a MEASURABLE
 #                  camera during the test. Then launch the PINNED dual-QR vernier painter
-#                  (frame-probe --paint-only --dual-qr --qr-size 700 --duration-secs N), verify it is
+#                  (frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs N
+#                  — #290: 60fps to match the 60fps capture so 60 distinct ticks/s resolve), verify it is
 #                  up + writing /dev/fb0 AND camera-box is still active + capturing/emitting. Then
 #                  PRINT the OBS test step (burns ON, run_id strih 911002 / stream 911004).
 #   EVENT : cam2 — stop the painter cleanly (via its PID file — NOT a naive `pkill -f frame-probe`,
@@ -47,6 +48,10 @@
 #   PAINTER_IP             cam2 device IP (default 10.77.9.62 — the box with the physical monitor)
 #   PAINTER_BIN            painter binary path on cam2 (default /usr/local/bin/frame-probe)
 #   QR_SIZE                dual-QR module size px (default 700 — the validated vernier size)
+#   PAINTER_FPS            painter frame rate (default 60 — MUST match the 60fps capture, #290; the
+#                          painter must paint 60 distinct ticks/s so 60fps optical timing can resolve.
+#                          Under the KMS presenter the painter is vblank-locked at the monitor refresh
+#                          and this is a no-op; on the fbdev fallback it is what forces the right rate.)
 #   PAINTER_DURATION_SECS  painter run length (default 7200 = 2 h; event mode stops it sooner via pidfile)
 #   PAINTER_PIDFILE        painter PID file on cam2 (default /run/rig-painter.pid)
 #   PAINTER_EXTRA_FLAGS    extra painter flags for a MEASUREMENT run (default empty), e.g.
@@ -63,6 +68,7 @@ PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monit
 CAM1_IP="${CAM1_IP:-10.77.9.61}"             # cam1 — the SOURCE camera (NOT reconfigured here; for the print)
 PAINTER_BIN="${PAINTER_BIN:-/usr/local/bin/frame-probe}"
 QR_SIZE="${QR_SIZE:-700}"
+PAINTER_FPS="${PAINTER_FPS:-60}"             # painter rate — MUST match the 60fps capture (#290)
 PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
@@ -82,6 +88,7 @@ RIG_TEST_DROPIN="${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-
 # without a live cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY.
 painter_launch_remote() {
   local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
+  local fps="${PAINTER_FPS:-60}"   # #290: paint at the 60fps capture rate (60 distinct ticks/s)
   local cbbin="${6:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
   local dropin="${7:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
@@ -140,8 +147,11 @@ if [ ! -x "$bin" ]; then
   exit 1
 fi
 # (4) launch the PINNED dual-QR vernier painter; record its PID for a clean event-mode stop.
+#     --paint-fps $fps pins the rate to the 60fps capture (#290): the painter must paint 60 distinct
+#     ticks/s or no 60fps optical timing can be resolved. Under KMS the painter is vblank-locked at the
+#     monitor refresh and the flag is a documented no-op; on the fbdev fallback it forces the rate.
 rm -f "$pidfile" 2>/dev/null || true
-nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur $extra >/tmp/rig-painter.log 2>&1 &
+nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps $fps $extra >/tmp/rig-painter.log 2>&1 &
 echo \$! > "$pidfile"
 PAINTER_PID=\$(cat "$pidfile")
 sleep 3
@@ -153,7 +163,7 @@ if ! kill -0 "\$PAINTER_PID" 2>/dev/null; then
 fi
 i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if ! fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: painter PID \$PAINTER_PID alive but NOT writing /dev/fb0" >&2; exit 1; fi
-echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, ${dur}s)"
+echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, ${fps}fps, ${dur}s)"
 REMOTE
 }
 
