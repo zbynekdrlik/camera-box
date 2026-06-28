@@ -10,6 +10,8 @@
 // downloaded to dev1. grab_record calls crate::capture::yuyv_to_gray8, so it is gated in
 // lock-step. vban (pure UDP) and the probe tree (which the verdict needs) stay cross-platform.
 #[cfg(target_os = "linux")]
+pub mod affinity;
+#[cfg(target_os = "linux")]
 pub mod capture;
 #[cfg(target_os = "linux")]
 pub mod config;
