@@ -193,12 +193,14 @@ pub fn certified_cam1_controls() -> Vec<CaptureControl> {
 
 /// Parse a `CAMERA_BOX_CAPTURE_CONTROLS` env value into capture controls.
 ///
-/// Format: comma-separated `name=value` pairs, where `name` is `contrast` or
-/// `saturation` (the certified set) — e.g. `"contrast=75,saturation=0"`. The
+/// Format: comma-separated `name=value` pairs, where `name` is `contrast`,
+/// `saturation`, or `hue` — e.g. `"saturation=50,contrast=50,hue=0"`. The override
+/// covers every control the production colour set ([`color_production_controls`])
+/// enforces, so an operator can fully retune the picture (incl. resetting hue). The
 /// special value `"certified"` (case-insensitive) expands to
 /// [`certified_cam1_controls`]. Unknown names and malformed pairs are skipped with
 /// a logged warning (a bad env must NOT crash capture). An empty / whitespace-only
-/// string yields no controls (the prod default — controls untouched).
+/// string yields no controls (the explicit "touch nothing" override).
 pub fn parse_capture_controls(spec: &str) -> Vec<CaptureControl> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -220,6 +222,7 @@ pub fn parse_capture_controls(spec: &str) -> Vec<CaptureControl> {
         let id = match name.trim().to_ascii_lowercase().as_str() {
             "contrast" => V4L2_CID_CONTRAST,
             "saturation" => V4L2_CID_SATURATION,
+            "hue" => V4L2_CID_HUE,
             other => {
                 tracing::warn!("CAMERA_BOX_CAPTURE_CONTROLS: skipping unknown control {other:?}");
                 continue;
@@ -1026,6 +1029,31 @@ mod tests {
         // Production default: unset / whitespace-only env touches no controls.
         assert!(parse_capture_controls("").is_empty());
         assert!(parse_capture_controls("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_capture_controls_supports_hue_for_full_color_override() {
+        // The env override must cover every control the production colour set enforces
+        // (saturation/contrast/HUE), so an operator can fully retune the picture,
+        // including resetting hue — symmetric with `color_production_controls`.
+        let c = parse_capture_controls("saturation=50,contrast=50,hue=0");
+        assert_eq!(
+            c,
+            vec![
+                CaptureControl {
+                    id: V4L2_CID_SATURATION,
+                    value: 50
+                },
+                CaptureControl {
+                    id: V4L2_CID_CONTRAST,
+                    value: 50
+                },
+                CaptureControl {
+                    id: V4L2_CID_HUE,
+                    value: 0
+                },
+            ]
+        );
     }
 
     #[test]
