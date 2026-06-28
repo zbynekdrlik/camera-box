@@ -65,21 +65,67 @@ impl NetworkSignature {
     }
 }
 
+/// Interface-name prefixes that are NOT the camera's discoverable LAN NIC: loopback,
+/// container/VM bridges, virtual ethernet, VPN/overlay tunnels. Their addresses must NOT enter
+/// the signature — a `docker0` / `virbr0` / `tailscale0` / `veth*` address appearing or
+/// flapping would otherwise flip the signature and needlessly re-create the sender, dropping
+/// the LIVE program feed for a change that has nothing to do with LAN discoverability. Matched
+/// case-insensitively as a prefix. (Loopback is already excluded by `IFF_LOOPBACK` at the IO
+/// layer; `"lo"` here is belt-and-braces.)
+const NON_LAN_IFACE_PREFIXES: &[&str] = &[
+    "lo",
+    "docker",
+    "veth",
+    "virbr",
+    "br-",
+    "tailscale",
+    "tun",
+    "tap",
+    "wg",
+    "zt",
+    "cni",
+    "flannel",
+    "kube",
+    "cali",
+    "vboxnet",
+    "vmnet",
+];
+
+/// True when `name` is a real LAN NIC whose IPv4 address belongs in the discovery signature
+/// (i.e. NOT loopback / a bridge / virtual / VPN interface). The Linux IO layer
+/// (`crate::ndi::current_network_signature`) filters `getifaddrs` results through this so the
+/// re-announce trigger keys on the LAN address only — matching the intent ("the LAN address
+/// settled / flapped") and never re-announcing because an unrelated virtual interface moved.
+pub fn is_discoverable_interface(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    if n.is_empty() {
+        return false;
+    }
+    !NON_LAN_IFACE_PREFIXES.iter().any(|p| n.starts_with(p))
+}
+
 /// Decide whether the NDI sender should be re-announced (destroyed + re-created so the NDI
 /// runtime re-registers it via mDNS on the CURRENT network).
 ///
-/// Re-announce iff the current usable-network signature is NON-EMPTY and DIFFERS from the
-/// signature the sender was last announced with. Both guards are load-bearing:
+/// Re-announce iff the current usable-network signature is NON-EMPTY **and** either it DIFFERS
+/// from the signature the sender was last announced with, **or** the network was observed DOWN
+/// since the last announce (a link bounce that returned the same address still drops the mDNS
+/// registration). The guards are load-bearing:
 ///
-/// - **Empty current → never.** While the network is still down there is nothing to announce
-///   on; re-creating the sender onto no network is pointless churn. Wait for an address to
-///   appear — that appearance is itself a change and triggers once it does.
-/// - **Equal → never.** A stable network must NOT re-create the sender, because a re-create
-///   forces every connected receiver (OBS) to drop + reconnect the feed. Only a real change to
-///   the usable-address set is worth that.
-pub fn should_reannounce(announced: &NetworkSignature, current: &NetworkSignature) -> bool {
+/// - **Empty current → never.** While the network is down there is nothing to announce on;
+///   re-creating the sender onto no network is pointless churn. Wait for an address to appear
+///   (an address change, or — if it returns the same — `saw_down_since_announce`, triggers it).
+/// - **Equal and no down event → never.** A stable network must NOT re-create the sender,
+///   because a re-create forces every connected receiver (OBS) to drop + reconnect the feed.
+///   Only a real change, or a recovery from an outage that already disrupted the feed, is worth
+///   that.
+pub fn should_reannounce(
+    announced: &NetworkSignature,
+    current: &NetworkSignature,
+    saw_down_since_announce: bool,
+) -> bool {
     if current.is_empty() {
         return false;
     }
-    announced != current
+    announced != current || saw_down_since_announce
 }

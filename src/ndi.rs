@@ -492,6 +492,14 @@ fn current_network_signature() -> crate::reannounce::NetworkSignature {
             if flags & libc::IFF_UP == 0 || flags & libc::IFF_LOOPBACK != 0 {
                 continue; // skip down + loopback interfaces
             }
+            // Keep only the real LAN NIC(s); drop docker/virbr/veth/tailscale/tun/… so an
+            // unrelated virtual interface flapping can't trigger a re-announce (#297 review).
+            if !ifa.ifa_name.is_null() {
+                let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+                if !crate::reannounce::is_discoverable_interface(&name) {
+                    continue;
+                }
+            }
             let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
             let ip = u32::from_be(sin.sin_addr.s_addr);
             addrs.push(format!(
@@ -518,6 +526,10 @@ pub struct NdiSender {
     // appeared / flapped) re-registers the sender so the OBS NDI finder rediscovers it.
     announced_sig: crate::reannounce::NetworkSignature,
     last_reannounce_check: std::time::Instant,
+    // True once the network has been observed DOWN (empty signature) since the last announce,
+    // so a link bounce that returns the SAME address still re-announces (the mDNS registration
+    // is dropped during the outage). Cleared on each successful re-announce.
+    saw_down_since_announce: bool,
     // Single buffer for sync sending (no double buffer needed)
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
@@ -574,6 +586,7 @@ impl NdiSender {
             // calls `maybe_reannounce()` and re-registers if this set later changes.
             announced_sig: current_network_signature(),
             last_reannounce_check: std::time::Instant::now(),
+            saw_down_since_announce: false,
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
             external_pacing: false,
@@ -613,14 +626,25 @@ impl NdiSender {
         }
         self.last_reannounce_check = std::time::Instant::now();
         let current = current_network_signature();
-        if !crate::reannounce::should_reannounce(&self.announced_sig, &current) {
+        let reannounce = crate::reannounce::should_reannounce(
+            &self.announced_sig,
+            &current,
+            self.saw_down_since_announce,
+        );
+        if current.is_empty() {
+            // Network down — remember the outage so the recovery re-announces even if the same
+            // address returns; nothing to announce on right now.
+            self.saw_down_since_announce = true;
+        }
+        if !reannounce {
             return Ok(false);
         }
         tracing::warn!(
-            "#297 NDI sender '{}' re-announce: usable network changed {:?} -> {:?}, re-registering",
+            "#297 NDI sender '{}' re-announce: network changed {:?} -> {:?} (saw_down={}), re-registering",
             self.ndi_name.to_string_lossy(),
             self.announced_sig.addrs(),
-            current.addrs()
+            current.addrs(),
+            self.saw_down_since_announce
         );
         self.reannounce_now(current)
     }
@@ -646,6 +670,7 @@ impl NdiSender {
         let old = std::mem::replace(&mut self.sender, new_sender);
         unsafe { (self.lib.send_destroy)(old) };
         self.announced_sig = current;
+        self.saw_down_since_announce = false;
         tracing::info!(
             "#297 NDI sender '{}' re-announced on {:?}",
             self.ndi_name.to_string_lossy(),
