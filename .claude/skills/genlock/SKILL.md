@@ -473,11 +473,12 @@ skip is driven by the display's measured render cost vs the remaining frame budg
   interval/10` (90% margin)**. `ewma==0` / no timing → render once to measure (never starved to 0).
   After a real render, update `render_ewma_ns = prev ? (prev*3 + dur)/4 : dur`. Program + preview
   (divisor 0/1) are NEVER throttled. Skipping before begin() = ~0 cost, last frame stays → no flicker.
-- **Tradeoff (accepted, documented):** when a single monitoring render genuinely exceeds the whole
-  budget (4-live-cam multiview), it has NO slack ever → it freezes/very-low-fps. That is fine — it is
-  MONITORING; the program staying clean 60fps is the non-negotiable requirement. No periodic
-  over-budget "probe" render is done (it would reintroduce renderSkip). To force a re-measure after
-  load drops, close+reopen the projector (fresh display → ewma=0 → re-warms).
+- **#278 froze the multiview solid (→ #293).** When a single monitoring render genuinely exceeds the
+  whole budget (4-live-cam multiview ~18-23ms > ~15ms), it had NO slack ever → skipped every tick →
+  FROZE for a whole live event. #278 called that "fine, it's monitoring" — it is NOT (a camera
+  operator needs the multiview live). **#293 added an anti-starvation floor** (see the #293 section
+  below): an over-budget display is skipped at most K=3 ticks in a row, then FORCED to render. Re-warm
+  after load drops still works via close+reopen (ewma=0), but the floor means it never freezes.
 - **DEPLOY is LIBOBS-ONLY** (unlike #276, which changed OBSProjector.cpp → needed the **obs64.exe**
   frontend swap). #278 touches only `obs-display.c`/`obs-video.c`/`obs-internal.h` → the **fast
   obs.dll hot-swap is sufficient** (the `windows-genlock-fast.yml` build validates it). The
@@ -496,6 +497,37 @@ skip is driven by the display's measured render cost vs the remaining frame budg
 - **ACCEPTANCE (the supervisor rig-verifies — the prior #276 fix failed exactly this):** multiview
   open showing 4 LIVE cams + program single-cam → program MUST be 0 renderSkip / activeFps 60 /
   avgRenderMs-for-program under budget, while the multiview renders at whatever reduced fps.
+
+## #293 — multiview anti-starvation FLOOR (the #278 budget-skip froze the strih Multiview)
+#278's budget skip had NO liveness floor: a 4-cam multiview render (~18-23ms) alone exceeds the ~15ms
+budget on EVERY tick → skipped forever → the strih Multiview FROZE solid for a whole live event.
+- **The skip decision is now a pure, OBS-dep-free helper** `obs_display_should_skip(render_divisor,
+  ewma, elapsed, budget, consecutive_skips)` in **`vendor/obs-studio/libobs/obs-display-budget.h`**
+  (`#define OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS 3u`). Over budget → skip ONLY while
+  `consecutive_skips < K`; the (K+1)-th over-budget tick is FORCED to render → ~15fps multiview at K=3
+  instead of 0fps. divisor<=1 and ewma==0 never skip (unchanged).
+- `obs-display.c` `render_display()`: `#include "obs-display-budget.h"`, call the helper,
+  `display->render_consecutive_skips++` on skip, reset `= 0` after every real render. New per-display
+  `uint32_t render_consecutive_skips` in obs-internal.h. LIBOBS-ONLY (obs.dll hot-swap, like #278).
+- **Accepted tradeoff:** the forced render every K+1 ticks costs ~1 program frame during sustained
+  4-cam overload — the user-chosen price of never-freeze (vs #278's frozen-but-0%-hit). Do NOT
+  "fix" this by removing the floor; #293 is exactly the requirement that the multiview stay live.
+- **TESTABILITY PATTERN (reusable for ANY vendored-C decision):** extract the decision into a pure
+  header (only `<stdbool.h>`/`<stdint.h>`, a `static inline`) and unit-test it from a DEFAULT-features
+  Rust integration test that compiles+runs a tiny `cc -std=c11` harness over the real header
+  (`tests/obs_display_budget.rs`). This sidesteps BOTH the probe-local-build ban AND "Linux can't
+  build libobs" — the test exercises the EXACT production code, RED→GREEN verifiable locally, no probe.
+- **Pinned source anchors changed (the #269 lock-step — update ALL of `tests/genlock_preload.rs`
+  (probe-gated) + BOTH `windows-genlock{,-fast}.yml` pwsh gates together):** the OLD
+  `if (elapsed + ewma > budget) return;` anchor is REPLACED by
+  `if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,` +
+  `display->render_consecutive_skips++;` (obs-display.c) and a new `$bud` read of obs-display-budget.h
+  asserting `return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;`. Struct anchor added:
+  `uint32_t render_consecutive_skips;`. The `budget`/EWMA/`graphics_frame_start_ns`/divisor anchors stay.
+- The Rust `display_render_skip_budget` mirror in `src/probe/genlock.rs` stays the BUDGET-only predicate
+  (the floor is layered by the C caller); its doc says so. The MSVC compile of the header rides
+  `windows-genlock-fast.yml` (fires on `vendor/obs-studio/**` push). Live 4-cam unfreeze = supervisor
+  rig step at the coordinated OBS rollout.
 
 ## #275 — cheaper measurement burn (bulk-fill render); wire format is LOCKED by the #186 fixtures
 The per-frame QR burn (strih/stream `genlock_burn` filter `vendor/distroav/src/burn-qr.hpp` render())

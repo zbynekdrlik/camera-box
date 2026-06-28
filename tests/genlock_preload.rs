@@ -980,6 +980,9 @@ mod vendored_source {
     pub const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
     // #276/#278 multiview render-divisor: libobs render path + frontend projector + the burn renderer.
     pub const OBS_DISPLAY: &str = "vendor/obs-studio/libobs/obs-display.c";
+    // #293: the pure, OBS-dependency-free skip decision (with the anti-starvation floor) that
+    // render_display() calls — extracted so it is unit-testable (tests/obs_display_budget.rs).
+    pub const OBS_DISPLAY_BUDGET: &str = "vendor/obs-studio/libobs/obs-display-budget.h";
     // #278: the graphics-thread loop publishes the per-tick start used by the adaptive skip.
     pub const OBS_VIDEO: &str = "vendor/obs-studio/libobs/obs-video.c";
     pub const OBSPROJECTOR: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.cpp";
@@ -1950,11 +1953,32 @@ mod vendored_source {
         // multiview render overran). A subtree pull dropping this re-opens the 29%
         // program-renderSkip / 43fps regression measured on the rig.
         let src = squish(&vendor_file(OBS_DISPLAY));
+        // #293: the skip decision is now the pure obs_display_should_skip() helper (with the
+        // anti-starvation floor); render_display() must call it with the per-display skip
+        // counter and bump that counter on a skip.
         assert!(
-            src.contains("if (elapsed + ewma > budget) return;"),
-            "{OBS_DISPLAY}: #278 — the adaptive budget-skip ('elapsed + ewma > budget → \
-             return') in render_display() is gone; the multiview would steal the 60fps \
+            src.contains("#include \"obs-display-budget.h\""),
+            "{OBS_DISPLAY}: #293 — render_display() no longer includes obs-display-budget.h; the \
+             pure, testable skip decision (with the anti-starvation floor) is gone."
+        );
+        assert!(
+            src.contains(
+                "if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,"
+            ),
+            "{OBS_DISPLAY}: #278/#293 — render_display() no longer calls obs_display_should_skip(); \
+             the adaptive budget-skip gate is gone and the multiview would steal the 60fps \
              program budget again."
+        );
+        assert!(
+            src.contains("display->render_consecutive_skips++;"),
+            "{OBS_DISPLAY}: #293 — render_display() no longer bumps render_consecutive_skips on a \
+             skip; the anti-starvation floor cannot count consecutive skips and the multiview \
+             could freeze again."
+        );
+        assert!(
+            src.contains("display->render_consecutive_skips = 0;"),
+            "{OBS_DISPLAY}: #293 — render_display() no longer resets render_consecutive_skips after \
+             a real render; the floor would force a render on a stale count."
         );
         assert!(
             src.contains("const uint64_t budget = interval - interval / 10;"),
@@ -1972,6 +1996,19 @@ mod vendored_source {
             "{OBS_DISPLAY}: #278 — obs_display_set_render_divisor() impl missing; the frontend \
              cannot mark the multiview as a throttleable monitoring display."
         );
+
+        // #293: the pure skip decision + its liveness floor live in obs-display-budget.h.
+        let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
+        assert!(
+            bud.contains("#define OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS 3u"),
+            "{OBS_DISPLAY_BUDGET}: #293 — the OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS liveness-floor \
+             constant is gone; an over-budget monitoring display could freeze forever."
+        );
+        assert!(
+            bud.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
+            "{OBS_DISPLAY_BUDGET}: #293 — the anti-starvation floor (skip an over-budget display \
+             only while consecutive_skips < K) is gone; the #278 freeze returns."
+        );
     }
 
     #[test]
@@ -1987,6 +2024,12 @@ mod vendored_source {
         assert!(
             hdr.contains("uint32_t render_divisor;"),
             "{OBS_INTERNAL}: #278 — obs_display.render_divisor field missing; re-apply."
+        );
+        assert!(
+            hdr.contains("uint32_t render_consecutive_skips;"),
+            "{OBS_INTERNAL}: #293 — obs_display.render_consecutive_skips field missing; the \
+             anti-starvation floor has nowhere to count consecutive skips → the multiview can \
+             freeze again."
         );
         assert!(
             hdr.contains("uint64_t graphics_frame_start_ns;"),
@@ -2415,9 +2458,14 @@ mod distroav_source {
         // that lets the multiview steal the 60fps program budget again.
         let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
         assert!(
-            wf.contains("if (elapsed + ewma > budget) return;"),
-            "{WINDOWS_GENLOCK_WF}: #278 — the production build no longer asserts the adaptive \
-             budget-skip gate; re-add the pwsh #278 gate."
+            wf.contains("if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,"),
+            "{WINDOWS_GENLOCK_WF}: #278/#293 — the production build no longer asserts the adaptive \
+             budget-skip gate (obs_display_should_skip call); re-add the pwsh gate."
+        );
+        assert!(
+            wf.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
+            "{WINDOWS_GENLOCK_WF}: #293 — the production build no longer asserts the anti-starvation \
+             floor in obs-display-budget.h; re-add the pwsh gate (the multiview could freeze)."
         );
         assert!(
             wf.contains("display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;"),
@@ -2439,9 +2487,17 @@ mod distroav_source {
         // fails here on the fast path too, mirroring the slow gate (the #269 lock-step rule).
         let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
         assert!(
-            wf.contains("if (elapsed + ewma > budget) return;"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #278 — the FAST build does not assert the adaptive \
-             budget-skip gate; add the pwsh #278 gate, mirroring windows-genlock.yml."
+            wf.contains(
+                "if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,"
+            ),
+            "{WINDOWS_GENLOCK_FAST_WF}: #278/#293 — the FAST build does not assert the adaptive \
+             budget-skip gate (obs_display_should_skip call); add the pwsh gate, mirroring \
+             windows-genlock.yml."
+        );
+        assert!(
+            wf.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #293 — the FAST build does not assert the anti-starvation \
+             floor in obs-display-budget.h; add the pwsh gate (the multiview could freeze)."
         );
         assert!(
             wf.contains("display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;"),
