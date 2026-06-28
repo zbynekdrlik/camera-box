@@ -179,6 +179,25 @@ Linux test → runs Tier-0; RED→GREEN provable locally by running the built
 source-anchor gate in BOTH `windows-genlock{,-fast}.yml` (the FAST path doesn't build the
 frontend but still source-text-gates the token, same as the #276/#278 OBSProjector gate).
 
+**#313 — that #152 `NewlevelBuildDate()` parse CRASHED OBS at startup (regression).** It
+`d.substr(7, 4)`-ed `__DATE__` with NO size guard, so a non-11-char compile-date string threw
+`std::out_of_range` (MSVC `std::_Xran` "invalid string position") out of `UpdateTitleBar()`
+during `OBSBasic` construction → OBS aborted on EVERY launch. **A title-bar helper must NEVER
+throw.** Fix: the parse is now the pure, OBS/Qt-free `newlevel_iso_date(const std::string&)`
+in `vendor/obs-studio/frontend/widgets/NewlevelBuildDate.hpp`, guarded
+`if (compileDate.size() < 11) return "unknown";` before any indexing/`substr`.
+`NewlevelBuildDate()` keeps the pinned anchor line `const std::string d = __DATE__;` then
+`return newlevel_iso_date(d);` — so the two `windows-genlock{,-fast}.yml` source gates +
+`tests/obs_titlebar_newlevel.rs` stay GREEN with NO lock-step change.
+**THE LESSON — the OBS FRONTEND (`OBSBasic.cpp` + all of `frontend/`) compiles ONLY on the
+150-min `windows-genlock.yml`; neither the fast build nor normal PR CI compiles it.** A frontend
+C++ bug is therefore INVISIBLE to PR CI until the supervisor's full rebuild. Extract ANY
+non-trivial frontend logic into a pure header and behaviorally unit-test it off-rig with the #293
+harness pattern — **which now covers C++ too**: `tests/obs_titlebar_newlevel_parse.rs`
+compiles+runs `NewlevelBuildDate.hpp` via `c++ -std=c++17` (the `obs_display_budget.rs` twin uses
+`cc -std=c11`). Run it Tier-0 with `cargo test --no-run --test obs_titlebar_newlevel_parse` then
+execute the built `target/debug/deps/obs_titlebar_newlevel_parse-*` directly (no probe, no bypass).
+
 Two LAYERS guard "the deployed stack is the build we think it is":
 
 - **drift-guard (#45)** — marketing versions + critical settings (OBS 32.1.2 / DistroAV
