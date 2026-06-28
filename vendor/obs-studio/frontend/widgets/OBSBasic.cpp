@@ -2083,8 +2083,10 @@ void OBSBasic::UpdateEditMenu()
 /* genlock (#152): the compiler build date, reformatted from `__DATE__` ("Mmm DD YYYY",
  * day space-padded for <10) to ISO "YYYY-MM-DD". The value comes from the compiler at
  * build time — never hardcoded — so the production OBS title always shows the date the
- * running build was compiled (version-integrity epic #125). Uses only <string>/<sstream>
- * (already included). Guarded by tests/obs_titlebar_newlevel.rs + the
+ * running build was compiled (version-integrity epic #125). Uses only std::string +
+ * std::ostringstream — the same <string>/<sstream> dependency as the existing
+ * `stringstream name;` in UpdateTitleBar (so no new includes, and identical compile
+ * footprint on the Windows build target). Guarded by tests/obs_titlebar_newlevel.rs + the
  * windows-genlock{,-fast}.yml source-anchor gates; keep all three in lock-step. */
 static std::string NewlevelBuildDate()
 {
