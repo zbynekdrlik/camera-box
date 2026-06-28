@@ -325,21 +325,9 @@ pub fn apply_low_priority() {
         }
     }
 
-    // Set CPU affinity to core 0 (camera uses isolated core 3, intercom uses core 1)
-    unsafe {
-        let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-
-        // Use core 0 for display
-        libc::CPU_SET(0, &mut cpuset);
-
-        let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
-
-        if result == 0 {
-            tracing::info!("NDI display: CPU affinity set to core 0");
-        } else {
-            tracing::debug!("NDI display: Could not set CPU affinity (non-critical)");
-        }
-    }
+    // #289 — keep the --display render OFF the isolated capture core (onto the
+    // general cores) so the HDMI render path can never steal from the realtime grab.
+    crate::affinity::pin_off_capture_core("NDI display");
 }
 
 #[cfg(test)]

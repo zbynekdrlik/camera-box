@@ -189,6 +189,11 @@ pub fn run_painter(
     stop: Arc<AtomicBool>,
     emitted: Arc<Mutex<Vec<(u32, i64, i64)>>>,
 ) -> Result<()> {
+    // #289 — keep the QR painter OFF the isolated capture core (onto the general
+    // cores 0-2) so on the painter box (.62) generation can never steal from the
+    // capture core. The non-capture cores are derived from /sys (never hardcoded).
+    crate::affinity::pin_off_capture_core("painter");
+
     let mut presenter: Box<dyn Presenter> = open_presenter(
         params.presenter,
         &params.fb_device,

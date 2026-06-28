@@ -6,6 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# #289 — route the USB capture-controller IRQ(s) onto the isolated core before the
+# grab starts (best-effort; the leading '-' means a failure never blocks startup).
+ExecStartPre=-/usr/local/bin/camera-box --setup-irq-affinity
 ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
@@ -14,6 +17,15 @@ RestartSec=3
 Nice=-10
 CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=50
+
+# #289 — belt-and-braces realtime CPU isolation: confine the process to the
+# isolated core (isolcpus=3 on the cam-box fleet) so the SCHED_FIFO grab runs
+# ALONE on the reserved core by default, with no manual taskset. CPUAffinity is a
+# SOFT (inherited) mask, so camera-box still moves its painter / --display /
+# intercom threads OFF onto the general cores (0-2) at thread start; the binary
+# also derives the isolated core from /sys (authoritative — this static value
+# just matches the current fleet's isolcpus=3).
+CPUAffinity=3
 
 # Environment for NDI SDK
 Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi

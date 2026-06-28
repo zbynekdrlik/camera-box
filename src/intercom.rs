@@ -431,12 +431,13 @@ fn run_receiver(
 // =============================================================================
 
 fn apply_intercom_priority() {
+    // SAFETY: nice() with no pointer args; lowers this thread's priority.
     unsafe {
         libc::nice(10);
-        let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(1, &mut cpuset);
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
     }
+    // #289 — keep the intercom OFF the isolated capture core (onto the general
+    // cores) so audio never steals from the realtime grab.
+    crate::affinity::pin_off_capture_core("intercom");
 }
 
 pub fn run_intercom(config: IntercomConfig, running: Arc<AtomicBool>) -> Result<()> {

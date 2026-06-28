@@ -19,13 +19,40 @@
 //! [`select_painter_cores`], [`parse_capture_irqs`], [`smp_affinity_mask_hex`]) is
 //! unit-tested; the syscall/`/proc`/`/sys` IO around it is thin glue.
 
+/// Ops escape-hatch env var: force the capture core to an explicit index. UNSET
+/// (the default) ⇒ auto-derive from `/sys` (the `isolcpus`-reserved core). Only
+/// honoured when it names an online core; otherwise ignored and derivation wins.
+const CAPTURE_CORE_ENV: &str = "CAMERA_BOX_CAPTURE_CORE";
+
+/// Keywords for generic capture-IRQ discovery in `/proc/interrupts`. The
+/// ShadowCast / NZXT capture cards are UVC-over-USB, so their data delivery is
+/// the USB host-controller IRQ (xHCI/EHCI/OHCI) plus, where present, a uvcvideo
+/// line — never a hardcoded IRQ number.
+const CAPTURE_IRQ_KEYWORDS: &[&str] = &["xhci", "ehci", "ohci", "uvcvideo", "usb"];
+
 /// Parse a Linux cpulist string (`/sys/devices/system/cpu/{online,isolated}`,
 /// the kernel "0-3" / "3" / "0,2-3" comma+range format) into a sorted, deduped
 /// vec of core indices. Whitespace and a trailing newline are tolerated; an
 /// empty / unparseable field yields an empty vec.
-pub fn parse_cpulist(_s: &str) -> Vec<usize> {
-    // stub — implemented in the GREEN commit (#289)
-    Vec::new()
+pub fn parse_cpulist(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for part in s.trim().split(',') {
+        // An empty / whitespace-only field falls through both arms (the `parse`
+        // below returns Err) and contributes nothing — no explicit guard needed.
+        let part = part.trim();
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+                for c in a..=b {
+                    out.push(c);
+                }
+            }
+        } else if let Ok(c) = part.parse::<usize>() {
+            out.push(c);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Pick the core the CAPTURE + EMIT hot thread should run on (and the core the
@@ -37,11 +64,21 @@ pub fn parse_cpulist(_s: &str) -> Vec<usize> {
 /// (the "last online core" fallback) PROVIDED there is more than one online
 /// core (never strand a single-core box). `None` ⇒ leave the thread unpinned.
 pub fn select_capture_core(
-    _override_core: Option<usize>,
-    _isolated: &[usize],
-    _online: &[usize],
+    override_core: Option<usize>,
+    isolated: &[usize],
+    online: &[usize],
 ) -> Option<usize> {
-    // stub — implemented in the GREEN commit (#289)
+    if let Some(c) = override_core {
+        if online.contains(&c) {
+            return Some(c);
+        }
+    }
+    if let Some(&c) = isolated.iter().filter(|c| online.contains(c)).max() {
+        return Some(c);
+    }
+    if online.len() > 1 {
+        return online.iter().copied().max();
+    }
     None
 }
 
@@ -49,9 +86,16 @@ pub fn select_capture_core(
 /// every online core EXCEPT the capture core, so generation/render/audio can
 /// never steal from the isolated capture core. If excluding the capture core
 /// would leave nothing (single-core box), fall back to all online cores.
-pub fn select_painter_cores(_capture_core: Option<usize>, _online: &[usize]) -> Vec<usize> {
-    // stub — implemented in the GREEN commit (#289)
-    Vec::new()
+pub fn select_painter_cores(capture_core: Option<usize>, online: &[usize]) -> Vec<usize> {
+    let cores: Vec<usize> = match capture_core {
+        Some(cc) => online.iter().copied().filter(|&c| c != cc).collect(),
+        None => online.to_vec(),
+    };
+    if cores.is_empty() {
+        online.to_vec()
+    } else {
+        cores
+    }
 }
 
 /// Parse `/proc/interrupts` and return the IRQ numbers whose description matches
@@ -59,17 +103,192 @@ pub fn select_painter_cores(_capture_core: Option<usize>, _online: &[usize]) -> 
 /// uvcvideo capture-controller IRQ(s) rather than hardcoding a number. Lines
 /// with a non-numeric label (`NMI:`, `LOC:`, `ERR:`, the `CPUn` header) are
 /// skipped. The result is sorted + deduped.
-pub fn parse_capture_irqs(_contents: &str, _keywords: &[&str]) -> Vec<u32> {
-    // stub — implemented in the GREEN commit (#289)
-    Vec::new()
+pub fn parse_capture_irqs(contents: &str, keywords: &[&str]) -> Vec<u32> {
+    let lc: Vec<String> = keywords.iter().map(|k| k.to_ascii_lowercase()).collect();
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let Some((label, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(irq) = label.trim().parse::<u32>() else {
+            continue;
+        };
+        let desc = rest.to_ascii_lowercase();
+        if lc.iter().any(|k| desc.contains(k.as_str())) {
+            out.push(irq);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Build the `/proc/irq/<n>/smp_affinity` hex bitmask (lowercase, no `0x`) for a
 /// set of cores: bit `c` set for each core `c`. `[3]` ⇒ `"8"`, `[0,1,2]` ⇒
 /// `"7"`, `[]` ⇒ `"0"`.
-pub fn smp_affinity_mask_hex(_cores: &[usize]) -> String {
-    // stub — implemented in the GREEN commit (#289)
-    String::new()
+pub fn smp_affinity_mask_hex(cores: &[usize]) -> String {
+    let mut mask: u64 = 0;
+    for &c in cores {
+        if c < 64 {
+            mask |= 1u64 << c;
+        }
+    }
+    format!("{mask:x}")
+}
+
+// ---------------------------------------------------------------------------
+// IO / syscall glue around the pure logic above (not unit-tested — reads /sys,
+// /proc, calls sched_setaffinity).
+// ---------------------------------------------------------------------------
+
+/// The optional ops override from [`CAPTURE_CORE_ENV`].
+fn env_capture_core() -> Option<usize> {
+    std::env::var(CAPTURE_CORE_ENV)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+}
+
+/// Online cores from `/sys/devices/system/cpu/online`; falls back to
+/// `sysconf(_SC_NPROCESSORS_ONLN)` if the file can't be read.
+fn read_online_cores() -> Vec<usize> {
+    match std::fs::read_to_string("/sys/devices/system/cpu/online") {
+        Ok(s) => parse_cpulist(&s),
+        Err(e) => {
+            tracing::debug!("affinity: could not read cpu/online ({e}); using sysconf nproc");
+            // SAFETY: sysconf is a pure query with no pointer arguments.
+            let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+            if n > 0 {
+                (0..n as usize).collect()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Isolated (`isolcpus`) cores from `/sys/devices/system/cpu/isolated`; empty if
+/// the file is absent or no core is isolated.
+fn read_isolated_cores() -> Vec<usize> {
+    std::fs::read_to_string("/sys/devices/system/cpu/isolated")
+        .map(|s| parse_cpulist(&s))
+        .unwrap_or_default()
+}
+
+/// Pin the CURRENT thread to `cores` via `sched_setaffinity`. Returns whether the
+/// syscall succeeded. Pinning the calling thread to a subset of cores needs no
+/// privileges.
+fn pin_current_thread(cores: &[usize]) -> bool {
+    if cores.is_empty() {
+        return false;
+    }
+    // SAFETY: `set` is zero-initialised then populated only via the libc CPU_SET
+    // macro for in-range indices; sched_setaffinity(0, ...) targets the current
+    // thread (always permitted) and reads `set` for the passed size only.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for &c in cores {
+            libc::CPU_SET(c, &mut set);
+        }
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
+/// Pin the calling thread (the capture + NDI-emit hot path) onto the isolated
+/// core. Call this ONCE from the capture thread before the grab loop.
+pub fn pin_capture_thread() {
+    let online = read_online_cores();
+    let isolated = read_isolated_cores();
+    match select_capture_core(env_capture_core(), &isolated, &online) {
+        Some(core) => {
+            if pin_current_thread(&[core]) {
+                tracing::info!(
+                    "#289 capture+emit thread pinned to isolated core {core} (isolated={isolated:?}, online={online:?})"
+                );
+            } else {
+                tracing::warn!(
+                    "#289 could not pin capture+emit thread to core {core} (sched_setaffinity failed)"
+                );
+            }
+        }
+        None => tracing::warn!(
+            "#289 no isolated core derived (online={online:?}); capture+emit thread left unpinned"
+        ),
+    }
+}
+
+/// Pin the calling thread (a painter / `--display` render / intercom auxiliary
+/// thread, `label` for the log) OFF the capture core, onto the general cores.
+pub fn pin_off_capture_core(label: &str) {
+    let online = read_online_cores();
+    let isolated = read_isolated_cores();
+    let capture = select_capture_core(env_capture_core(), &isolated, &online);
+    let cores = select_painter_cores(capture, &online);
+    if pin_current_thread(&cores) {
+        tracing::info!(
+            "#289 {label} thread pinned OFF the capture core to {cores:?} (capture core={capture:?})"
+        );
+    } else {
+        tracing::warn!("#289 {label} thread: could not pin to non-capture cores {cores:?}");
+    }
+}
+
+/// Route the USB / uvcvideo capture-controller IRQ(s) onto the isolated capture
+/// core via `/proc/irq/<n>/smp_affinity`, so URB delivery runs on the quiet core
+/// next to the consumer instead of contending on the loaded general cores.
+///
+/// Invoked once as `camera-box --setup-irq-affinity` from the unit's
+/// `ExecStartPre` (needs root to write `/proc/irq`). Idempotent and entirely
+/// best-effort: every failure is logged and swallowed so it can NEVER block the
+/// service from starting (managed MSI IRQs reject `smp_affinity` writes — the
+/// cmdline `irqaffinity=` path for those is deferred to #295's safe-grub work).
+pub fn setup_irq_affinity() {
+    let online = read_online_cores();
+    let isolated = read_isolated_cores();
+    let Some(core) = select_capture_core(env_capture_core(), &isolated, &online) else {
+        tracing::warn!(
+            "#289 IRQ affinity: no isolated/capture core derived (online={online:?}); leaving IRQ routing untouched"
+        );
+        return;
+    };
+    let interrupts = match std::fs::read_to_string("/proc/interrupts") {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "#289 IRQ affinity: could not read /proc/interrupts ({e}); leaving IRQ routing untouched"
+            );
+            return;
+        }
+    };
+    let irqs = parse_capture_irqs(&interrupts, CAPTURE_IRQ_KEYWORDS);
+    if irqs.is_empty() {
+        tracing::warn!(
+            "#289 IRQ affinity: no USB/uvcvideo capture IRQs found in /proc/interrupts; nothing to route"
+        );
+        return;
+    }
+    let mask = smp_affinity_mask_hex(&[core]);
+    tracing::info!(
+        "#289 IRQ affinity: routing capture IRQs {irqs:?} to core {core} (smp_affinity={mask})"
+    );
+    for irq in irqs {
+        let path = format!("/proc/irq/{irq}/smp_affinity");
+        let prev = std::fs::read_to_string(&path).unwrap_or_default();
+        let prev = prev.trim().to_string();
+        if prev.eq_ignore_ascii_case(&mask) {
+            tracing::info!("#289 IRQ {irq}: smp_affinity already {mask} — unchanged");
+            continue;
+        }
+        match std::fs::write(&path, format!("{mask}\n")) {
+            Ok(()) => {
+                tracing::info!("#289 IRQ {irq}: smp_affinity {prev} -> {mask} (capture core {core})")
+            }
+            // Managed (kernel-affinity) MSI IRQs reject smp_affinity writes (EIO) — non-fatal:
+            // the cmdline irqaffinity= path that covers those is deferred to #295 (safe-grub).
+            Err(e) => tracing::warn!(
+                "#289 IRQ {irq}: could not set smp_affinity to {mask} ({e}) — likely a managed IRQ (needs cmdline irqaffinity=, #295)"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +358,13 @@ mod tests {
     fn capture_core_ignores_offline_override() {
         // An override naming a core that isn't online is ignored → derive instead.
         assert_eq!(select_capture_core(Some(9), &[3], &[0, 1, 2, 3]), Some(3));
+    }
+
+    #[test]
+    fn capture_core_skips_isolated_core_that_is_not_online() {
+        // An isolated entry that is not online is ignored → highest ONLINE
+        // isolated core wins (core 5 is isolated but offline → use 3).
+        assert_eq!(select_capture_core(None, &[3, 5], &[0, 1, 2, 3]), Some(3));
     }
 
     #[test]
@@ -216,5 +442,17 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     #[test]
     fn smp_mask_disjoint_cores() {
         assert_eq!(smp_affinity_mask_hex(&[0, 3]), "9");
+    }
+
+    #[test]
+    fn smp_mask_duplicate_cores_are_idempotent() {
+        // OR semantics: a repeated core sets the bit once (not XOR/ADD).
+        assert_eq!(smp_affinity_mask_hex(&[3, 3]), "8");
+    }
+
+    #[test]
+    fn smp_mask_ignores_out_of_range_cores() {
+        // Cores >= 64 don't fit a u64 mask and are skipped (no shift overflow).
+        assert_eq!(smp_affinity_mask_hex(&[0, 64, 65]), "1");
     }
 }
