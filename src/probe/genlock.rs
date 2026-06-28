@@ -1136,9 +1136,9 @@ pub fn display_render_ewma_update(prev_ewma_ns: u64, measured_ns: u64) -> u64 {
 // a slow consumer to prove the 1:1 / in-order / no-drop / timecode-passthrough guarantee
 // without an OBS/NDI build.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// #275b — depth of the async cam1-burn ring: how many emitted frames the capture thread may
@@ -1268,6 +1268,80 @@ pub fn run_burn_ring<T>(rx: Receiver<T>, mut burn_and_send: impl FnMut(T)) {
 /// Pure so the render-vs-passthrough decision is unit-locked.
 pub fn burn_should_render_qr(fourcc: &str) -> bool {
     fourcc == "YUYV"
+}
+
+/// #280 — capacity of the cam1-burn buffer pool's free list: [`BURN_RING_DEPTH`] + 2.
+///
+/// At most `ring depth (3 queued) + 1 (capture thread filling the next frame) + 1 (burn thread
+/// rendering/sending the current frame)` = 5 buffers are ever in flight at once, so a free list of
+/// 5 holds every recycled buffer without ever dropping one in steady state, while still bounding
+/// total memory (no unbounded growth).
+pub const BURN_POOL_CAP: usize = BURN_RING_DEPTH + 2;
+
+/// #280 — bounded pool of reusable frame buffers for the async cam1-burn copy.
+///
+/// The #275b async burn hands each emitted frame's bytes capture-thread → burn-thread over the
+/// [`BurnRing`]; the bytes MUST be copied off the V4L2 mmap (valid only inside the capture
+/// callback). #275b copied with a per-frame `Vec::to_vec` (~4 MB at 1080p YUYV) → a fresh heap
+/// allocation + free on EVERY emitted frame at up to 60 fps. This pool recycles those buffers: the
+/// capture thread [`take`](Self::take)s a buffer (reusing a returned one, or allocating only when
+/// the free list is empty), copies the frame in, and submits; the burn thread [`put`](Self::put)s
+/// the buffer back after the NDI send. The free list is BOUNDED ([`BURN_POOL_CAP`]) so it can never
+/// grow without limit — a `put` over the cap simply drops the buffer (it is freed). Memory is then
+/// bounded by the peak in-flight count instead of churning one alloc per frame.
+///
+/// This is a pure MEMORY optimization — it carries no frame identity, so it CANNOT change the burn
+/// id ↔ emitted-frame mapping, the frame ORDER, or the carried timecode (all stamped on the capture
+/// thread and carried in the [`BurnRing`] job). Shared capture-thread ↔ burn-thread via `Arc`.
+pub struct BufferPool {
+    free: Mutex<Vec<Vec<u8>>>,
+    cap: usize,
+    /// Count of FRESH allocations [`take`](Self::take) had to make (free list was empty). After
+    /// warm-up this stops climbing — that flat count is the proof the pool recycles rather than
+    /// allocating per frame (vs the #275b `to_vec`, which allocated once per emitted frame).
+    allocated: AtomicUsize,
+}
+
+impl BufferPool {
+    /// Create an empty pool whose free list is bounded at `cap` buffers.
+    pub fn new(cap: usize) -> Self {
+        Self {
+            free: Mutex::new(Vec::new()),
+            cap,
+            allocated: AtomicUsize::new(0),
+        }
+    }
+
+    /// Take a buffer to copy a frame into. The caller `clear()`s + fills it; a reused buffer keeps
+    /// its ~4 MB capacity so the fill does not reallocate.
+    ///
+    /// #280 STUB (RED): always allocates a fresh `Vec` — it does NOT consult the free list, so it
+    /// never recycles (reproducing the #275b per-frame `to_vec` churn). The GREEN flips this to pop
+    /// the free list first.
+    pub fn take(&self) -> Vec<u8> {
+        self.allocated.fetch_add(1, Ordering::Relaxed);
+        Vec::new()
+    }
+
+    /// Return a buffer for reuse after the burn thread has sent it.
+    ///
+    /// #280 STUB (RED): a no-op — the returned buffer is dropped (freed) and never recycled. The
+    /// GREEN pushes it onto the bounded free list.
+    pub fn put(&self, buf: Vec<u8>) {
+        let _ = buf;
+    }
+
+    /// Number of FRESH allocations [`take`](Self::take) has made (free list empty). A count that
+    /// stays flat after warm-up proves the pool recycles instead of allocating per frame.
+    pub fn allocations(&self) -> usize {
+        self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Current number of idle buffers held in the free list (≤ `cap`). Observability for the
+    /// shutdown audit log; also lets a test assert the free list never grows past the cap.
+    pub fn free_len(&self) -> usize {
+        self.free.lock().unwrap().len()
+    }
 }
 
 #[cfg(test)]
@@ -2425,5 +2499,119 @@ mod tests {
                 "{other} must NOT be QR-burned — emit it UNBURNED (passthrough), never drop"
             );
         }
+    }
+
+    // ---- #280 cam1-burn buffer pool (recycle, no per-frame to_vec churn) -----
+
+    #[test]
+    fn buffer_pool_recycles_a_returned_buffer_instead_of_reallocating() {
+        // The narrow recycle contract: a buffer returned via `put` is handed back by the next
+        // `take` (no fresh allocation), and its ~4 MB capacity survives so the refill never
+        // reallocates. RED stub (`take` always allocs, `put` no-op) ⇒ `allocations()` climbs on
+        // every take and the returned capacity is lost ⇒ this FAILS. GREEN ⇒ one allocation reused.
+        let pool = BufferPool::new(BURN_POOL_CAP);
+        let mut buf = pool.take(); // first take: free list empty ⇒ 1 allocation
+        assert_eq!(pool.allocations(), 1);
+        buf.resize(4096, 0); // give it a real capacity, as a frame copy would
+        let cap_before = buf.capacity();
+        pool.put(buf); // return it for reuse
+        assert_eq!(pool.free_len(), 1, "the returned buffer is held for reuse");
+
+        let reused = pool.take(); // must come from the free list — NOT a fresh allocation
+        assert_eq!(
+            pool.allocations(),
+            1,
+            "a returned buffer is recycled — take must NOT allocate again"
+        );
+        assert!(
+            reused.capacity() >= cap_before,
+            "the recycled buffer keeps its capacity so the refill does not reallocate (got {}, was {})",
+            reused.capacity(),
+            cap_before
+        );
+        assert_eq!(pool.free_len(), 0, "the reused buffer left the free list");
+    }
+
+    #[test]
+    fn pooled_async_burn_recycles_buffers_and_preserves_1to1_ordering_under_backpressure() {
+        // #280 — the cam1 async-burn frame copy now reuses a bounded [`BufferPool`] instead of a
+        // per-frame ~4 MB `to_vec`. Both invariants proven TOGETHER on the REAL ring + a slow
+        // consumer (the same back-pressure harness as the #275b 1:1 test):
+        //   (1) RECYCLE — across N emitted frames at most [`BURN_POOL_CAP`] buffers are ever
+        //       ALLOCATED (no per-frame heap churn, no unbounded growth), because the burn thread
+        //       RETURNS each buffer to the pool after "sending" and the capture thread reuses it.
+        //       RED stub (`take` always allocs) ⇒ allocations == N ⇒ FAILS. GREEN ⇒ bounded.
+        //   (2) 1:1 / IN ORDER / TIMECODE — the pool is a memory optimization ONLY; it must not
+        //       change the frame_id↔emit mapping or the carried timecode (same bar as #275b/#279).
+        use std::thread;
+        use std::time::Duration;
+
+        const FRAME: usize = 4096; // stand-in for the 1080p YUYV frame bytes
+        const N: u32 = 500;
+
+        let pool = Arc::new(BufferPool::new(BURN_POOL_CAP));
+        let running = Arc::new(AtomicBool::new(true));
+        // Job carries (frame_id, timecode, buffer) — the buffer is the pooled allocation.
+        let (ring, rx) = burn_ring::<(u32, i64, Vec<u8>)>(Arc::clone(&running));
+
+        let consumer_pool = Arc::clone(&pool);
+        let consumer = thread::spawn(move || {
+            let mut seen: Vec<(u32, i64)> = Vec::new();
+            run_burn_ring(rx, |(frame_id, tc, buf)| {
+                // a slow burn render → the bounded ring fills → the producer must back-pressure.
+                thread::sleep(Duration::from_micros(50));
+                seen.push((frame_id, tc));
+                consumer_pool.put(buf); // #280 — return the buffer for the capture thread to reuse
+            });
+            seen
+        });
+
+        let mut ids = BurnFrameIdSource::default();
+        for k in 0..N {
+            let frame_id = ids.next_id();
+            // a stand-in genlock 60 fps boundary timecode, stamped at the gate instant.
+            let emit_tc = 1_000_000 + (k as i64) * 166_667;
+            let mut buf = pool.take(); // reuse a returned buffer (or alloc only when empty)
+            buf.clear();
+            buf.resize(FRAME, (k & 0xFF) as u8); // copy "the frame" in (reuses capacity)
+            ring.submit((frame_id, emit_tc, buf))
+                .expect("the bounded ring blocks; it must never drop while the consumer is alive");
+        }
+        drop(ring); // close the channel so the consumer's recv loop ends
+        let seen = consumer.join().expect("burn thread joins cleanly");
+
+        // (2) 1:1 / in-order / timecode carried — unchanged by the pool.
+        assert_eq!(
+            seen.len(),
+            N as usize,
+            "every emitted frame's burn job survives the ring — no drop, no duplicate (got {})",
+            seen.len()
+        );
+        for (k, (frame_id, tc)) in seen.iter().enumerate() {
+            assert_eq!(
+                *frame_id, k as u32,
+                "burn ids stay strictly monotonic AND in emit order (1:1, no reorder)"
+            );
+            assert_eq!(
+                *tc,
+                1_000_000 + (k as i64) * 166_667,
+                "the gate-stamped emitted-frame timecode is carried through the ring unchanged"
+            );
+        }
+        // (1) RECYCLE — fresh allocations bounded by the pool cap, NOT N (the per-frame to_vec).
+        assert!(
+            pool.allocations() <= BURN_POOL_CAP,
+            "pool recycles buffers: {} allocations for {} frames (must be ≤ {})",
+            pool.allocations(),
+            N,
+            BURN_POOL_CAP
+        );
+        // NO UNBOUNDED GROWTH — the free list never exceeds the cap.
+        assert!(
+            pool.free_len() <= BURN_POOL_CAP,
+            "free list bounded: {} (must be ≤ {})",
+            pool.free_len(),
+            BURN_POOL_CAP
+        );
     }
 }
