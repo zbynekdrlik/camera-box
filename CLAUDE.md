@@ -8,6 +8,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 ## Playbook router
 
 - Rig ops (DanteSync clock, device deploy, recovery) → load `.claude/skills/ops`
+- V4L2 capture controls (colour vs sharp sets, device-state persistence, NZXT CAM4 no-controls, grayscale/tint) → load `.claude/skills/capture`
 - Genlock OBS (deployed state, monorepo direction, NDI input mapping, timecode lag) → load `.claude/skills/genlock`
   - Genlock latency is ONE user knob in MS (#235): `OBS_GENLOCK_LATENCY_MS=N` (canonical; `OBS_GENLOCK_RESERVE_MS` is the back-compat alias; prod=3ms). Setting it implies ts-align on; preload is internal/auto-derived. Display: `latency = N ms (≈ M frames)`.
 - OBS launch/recovery on strih/stream → load `.claude/skills/obs-ops`
