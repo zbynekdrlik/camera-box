@@ -135,6 +135,72 @@ pub fn should_reannounce(
     announced != current || saw_down_since_announce
 }
 
+/// #297 — the SENDER-side re-announce trigger state: the network signature the NDI sender was
+/// last announced on, plus whether the network has been observed DOWN since. It bundles the pure
+/// decision ([`should_reannounce`]) with the state transitions, so the convergence contract is
+/// unit-tested WITHOUT the real NDI runtime (the actual FFI re-create lives in `crate::ndi`,
+/// which owns one of these and drives it).
+///
+/// The contract this type enforces (and that the shipped dev.139 bug violated):
+/// - a successful re-announce ADVANCES the trigger to the announced network and clears the down
+///   flag, so a subsequent STABLE poll does NOT re-fire — killing the infinite 2s re-announce
+///   loop that destroyed-nothing-and-bailed on every poll;
+/// - a FAILED re-announce LEAVES the state unchanged, so the next poll RETRIES (the sender is
+///   absent until a create succeeds; the emit path guards the null handle).
+#[derive(Debug, Clone, Default)]
+pub struct ReannounceState {
+    /// The usable-network signature the sender is currently announced on.
+    announced: NetworkSignature,
+    /// True once the network has been observed down (empty signature) since the last successful
+    /// announce, so a link bounce that returns the SAME address still re-announces.
+    saw_down_since_announce: bool,
+}
+
+impl ReannounceState {
+    /// Seed the trigger with the signature the sender was just created/announced on. When the
+    /// network is already up at creation this is the live signature (no spurious first
+    /// re-announce); during a boot race it is empty and the first poll with an address fires.
+    pub fn new(announced: NetworkSignature) -> Self {
+        Self {
+            announced,
+            saw_down_since_announce: false,
+        }
+    }
+
+    /// The signature the sender is currently announced on (for logging).
+    pub fn announced(&self) -> &NetworkSignature {
+        &self.announced
+    }
+
+    /// Whether the network was observed down since the last successful announce (for logging).
+    pub fn saw_down(&self) -> bool {
+        self.saw_down_since_announce
+    }
+
+    /// Decide whether the sender should be re-announced for `current` now (pure
+    /// [`should_reannounce`] against the trigger's recorded state).
+    pub fn should_reannounce(&self, current: &NetworkSignature) -> bool {
+        should_reannounce(&self.announced, current, self.saw_down_since_announce)
+    }
+
+    /// Record that the network was observed DOWN this poll (empty signature), so a recovery
+    /// re-announces even if the same address later returns.
+    pub fn mark_down(&mut self) {
+        self.saw_down_since_announce = true;
+    }
+
+    /// Record the outcome of a re-announce attempt on `current`. On SUCCESS the trigger advances
+    /// to `current` and the down flag clears (a stable poll then no longer fires — no loop). On
+    /// FAILURE the state is deliberately LEFT UNCHANGED so the next poll re-evaluates as "still
+    /// needs re-announce" and retries the create.
+    pub fn record_reannounce_attempt(&mut self, current: NetworkSignature, created_ok: bool) {
+        if created_ok {
+            self.announced = current;
+            self.saw_down_since_announce = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
