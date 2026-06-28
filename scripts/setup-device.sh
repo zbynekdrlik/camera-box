@@ -316,10 +316,10 @@ if [ -f "$GRUB_CFG" ]; then
         echo -e "${RED}#295: grub default entry lacks a kernel image or initrd — aborting to avoid a brick${NC}"
         exit 1
     fi
-    RUNNING_KVER="$(uname -r)"
-    if [ -e "/boot/vmlinuz-${RUNNING_KVER}" ] && [ -e "/boot/initrd.img-${RUNNING_KVER}" ]; then
-        grub-set-default 0
-    fi
+    # The default entry (index 0) is now proven to carry both a kernel image and an initrd. Pin it
+    # explicitly as the saved default so it boots deterministically. The kernel is held (apt-mark
+    # hold), so index 0 is the single known-good kernel on a freshly-provisioned appliance.
+    grub-set-default 0
 fi
 echo "  GRUB: timeout 0s, default pinned to known-good kernel with initrd [#295]"
 

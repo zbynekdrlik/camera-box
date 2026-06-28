@@ -110,22 +110,46 @@ fn provisioning_guarantees_initrd_for_every_kernel_before_grub() {
             "{script} must install a /etc/kernel/postinst.d hook so any future kernel install always \
              gets an initrd before grub is regenerated (#295)"
         );
-        // Ordering: the initrd guarantee must run BEFORE update-grub, or grub could still be
-        // regenerated while an initrd-less kernel is present. Compare the first *command* occurrence
-        // of each — ignore comment lines, since a comment may merely *mention* "update-grub".
-        let first_cmd_line = |needle: &str| -> Option<usize> {
-            body.lines().position(|l| {
-                let t = l.trim_start();
-                !t.starts_with('#') && t.contains(needle)
-            })
+        // Ordering: the initrd guarantee must be INVOKED before update-grub, or grub could still be
+        // regenerated while an initrd-less kernel is present. Index over non-comment COMMAND lines
+        // only (a comment may merely *mention* update-grub). Crucially, key on the INVOCATION, not a
+        // mere textual mention: a script that defines a helper function (whose body holds
+        // `update-initramfs -c -k`) but CALLS it after update-grub (or not at all) must still fail.
+        let cmds: Vec<&str> = body
+            .lines()
+            .map(str::trim_start)
+            .filter(|t| !t.starts_with('#'))
+            .collect();
+        let grub_idx = cmds
+            .iter()
+            .position(|t| t.contains("update-grub"))
+            .expect("update-grub command present");
+        // What counts as "guarantee initrds for all kernels" being invoked: either the inline
+        // `update-initramfs -c -k` loop, or a CALL to the helper (its name WITHOUT the `() {`
+        // definition suffix). The function DEFINITION line is excluded so it can't satisfy this.
+        let is_initrd_guarantee_invocation = |t: &str| -> bool {
+            t.contains("update-initramfs -c -k")
+                || (t.contains("camera_box_ensure_all_kernels_have_initrd") && !t.contains("() {"))
         };
-        let initrd_line = first_cmd_line("update-initramfs -c -k")
-            .expect("update-initramfs -c -k command present");
-        let grub_line = first_cmd_line("update-grub").expect("update-grub command present");
+        // The function-body `update-initramfs -c -k` (a definition, sorts near the top of the file)
+        // must NOT be what satisfies the ordering: require an invocation that is itself before grub
+        // AND is not merely the definition body. We do this by checking that among the command lines
+        // BEFORE update-grub there is an invocation, and that the LAST invocation before grub is a
+        // real call/inline step rather than only the definition body.
+        let invocation_before_grub = cmds[..grub_idx].iter().any(|t| {
+            is_initrd_guarantee_invocation(t)
+                // exclude the helper's own definition body lines: the inline loop and the call both
+                // run unconditionally; the definition body only runs when called. We treat a bare
+                // `update-initramfs -c -k` as an invocation ONLY in scripts that do not DEFINE the
+                // helper (inline style); scripts that define the helper must show the CALL.
+                && !(body.contains("camera_box_ensure_all_kernels_have_initrd() {")
+                    && t.contains("update-initramfs -c -k"))
+        });
         assert!(
-            initrd_line < grub_line,
-            "{script} must guarantee initrds (update-initramfs -c -k) BEFORE it runs update-grub — \
-             otherwise update-grub can still default-boot an initrd-less kernel (#295)"
+            invocation_before_grub,
+            "{script} must INVOKE the initrd guarantee (inline `update-initramfs -c -k` loop, or a \
+             call to camera_box_ensure_all_kernels_have_initrd) BEFORE update-grub — otherwise \
+             update-grub can still default-boot an initrd-less kernel (#295)"
         );
     }
 }
@@ -146,15 +170,21 @@ fn provisioning_pins_a_safe_grub_default() {
             body.contains("grub-set-default"),
             "{script} must `grub-set-default` to the known-good kernel after regenerating grub (#295)"
         );
-        // The generated default entry must be validated to contain both a kernel image and an initrd
-        // line — the guard reads the produced grub.cfg.
+        // The guard must (a) read the generated grub.cfg and extract its default menuentry, and
+        // (b) grep THAT entry for an initrd line — not merely mention "initrd" somewhere (the ensure
+        // loop references /boot/initrd.img independently). A specific grep-for-initrd validation line
+        // is what catches a regression that drops the brick-prevention check.
         assert!(
-            body.contains("grub.cfg"),
-            "{script} must validate the generated /boot/grub/grub.cfg default entry (#295)"
+            body.contains("grub.cfg") && body.contains("menuentry "),
+            "{script} must read /boot/grub/grub.cfg and extract its default menuentry to validate it (#295)"
         );
+        let validates_default_has_initrd = body
+            .lines()
+            .any(|l| l.contains("grep") && l.contains("initrd"));
         assert!(
-            body.contains("initrd"),
-            "{script} must validate the default grub entry references an initrd (#295)"
+            validates_default_has_initrd,
+            "{script} must grep the extracted grub default entry for an initrd line and abort if absent \
+             — without it grub could still default-boot an initrd-less kernel (#295)"
         );
     }
 }
@@ -176,14 +206,22 @@ fn provisioning_sizes_var_cache_adequately() {
             .split("size=")
             .nth(1)
             .and_then(|s| s.split([',', ' ']).next())
-            .unwrap_or("");
-        // Accept M or G suffix; convert to MiB.
+            .unwrap_or("")
+            .to_uppercase();
+        let size_tok = size_tok.as_str();
+        // Accept a K/M/G suffix (case-insensitive) or a bare byte count; convert to MiB.
         let mib: u32 = if let Some(g) = size_tok.strip_suffix('G') {
             g.parse::<u32>().unwrap_or(0) * 1024
         } else if let Some(m) = size_tok.strip_suffix('M') {
             m.parse::<u32>().unwrap_or(0)
+        } else if let Some(k) = size_tok.strip_suffix('K') {
+            k.parse::<u32>().unwrap_or(0) / 1024
         } else {
-            0
+            // bare byte count (e.g. size=536870912) → MiB
+            size_tok
+                .parse::<u64>()
+                .map(|b| (b / (1024 * 1024)) as u32)
+                .unwrap_or(0)
         };
         assert!(
             mib >= MIN_VAR_CACHE_MIB,

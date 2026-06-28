@@ -181,7 +181,7 @@ camera_box_ensure_all_kernels_have_initrd() {
 # (known-good) kernel. Validates the generated /boot/grub/grub.cfg default entry references BOTH a
 # kernel image AND an initrd; aborts loudly if not (never ship a brickable default).
 camera_box_pin_safe_grub_default() {
-    local cfg="/boot/grub/grub.cfg" kver default_block
+    local cfg="/boot/grub/grub.cfg" default_block
     [[ -f "$cfg" ]] || {
         warn "#295: $cfg not found — cannot validate grub default"
         return 0
@@ -192,10 +192,10 @@ camera_box_pin_safe_grub_default() {
         || ! grep -q 'initrd' <<<"$default_block"; then
         error "#295: grub default entry is missing a kernel image or initrd line — refusing to leave the box brickable"
     fi
-    kver="$(uname -r)"
-    if [[ -e "/boot/vmlinuz-${kver}" && -e "/boot/initrd.img-${kver}" ]]; then
-        grub-set-default 0
-    fi
+    # The default entry (index 0) is now proven to carry both a kernel image and an initrd. Pin it
+    # explicitly as the saved default so it boots deterministically. The kernel is held (apt-mark
+    # hold), so on a freshly-provisioned appliance index 0 is the single known-good kernel.
+    grub-set-default 0
 }
 
 # #295: PIN the appliance kernel and disable unattended upgrades. The brick was an auto-installed
