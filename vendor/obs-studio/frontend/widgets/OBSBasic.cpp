@@ -2080,6 +2080,26 @@ void OBSBasic::UpdateEditMenu()
 	ui->actionHorizontalCenter->setEnabled(canTransformMultiple);
 }
 
+/* genlock (#152): the compiler build date, reformatted from `__DATE__` ("Mmm DD YYYY",
+ * day space-padded for <10) to ISO "YYYY-MM-DD". The value comes from the compiler at
+ * build time — never hardcoded — so the production OBS title always shows the date the
+ * running build was compiled (version-integrity epic #125). Uses only <string>/<sstream>
+ * (already included). Guarded by tests/obs_titlebar_newlevel.rs + the
+ * windows-genlock{,-fast}.yml source-anchor gates; keep all three in lock-step. */
+static std::string NewlevelBuildDate()
+{
+	static const std::string months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+	const std::string d = __DATE__;
+	const std::string::size_type mpos = months.find(d.substr(0, 3));
+	const int month = mpos == std::string::npos ? 0 : int(mpos / 3) + 1;
+	const char dayTens = d[4]; /* ' ' when the day is a single digit */
+	const char dayOnes = d[5];
+	std::ostringstream iso;
+	iso << d.substr(7, 4) << "-" << (month < 10 ? "0" : "") << month << "-"
+	    << (dayTens == ' ' ? '0' : dayTens) << dayOnes;
+	return iso.str();
+}
+
 void OBSBasic::UpdateTitleBar()
 {
 	stringstream name;
@@ -2096,6 +2116,13 @@ void OBSBasic::UpdateTitleBar()
 		name << " (" << Str("TitleBar.SafeMode") << ")";
 	if (App()->IsPortableMode())
 		name << " - " << Str("TitleBar.PortableMode");
+
+	/* genlock (#152): stamp the newlevel.media build identity + compile date into the
+	 * window title so the running build is unambiguous on the box (version-integrity epic
+	 * #125). The date is injected at build time via NewlevelBuildDate() (above) — never
+	 * hardcoded. Guarded by tests/obs_titlebar_newlevel.rs + the
+	 * windows-genlock{,-fast}.yml source-anchor gates; keep all three in lock-step. */
+	name << " - newlevel.media build " << NewlevelBuildDate();
 
 	name << " - " << Str("TitleBar.Profile") << ": " << profile;
 	name << " - " << Str("TitleBar.Scenes") << ": " << sceneCollection;
