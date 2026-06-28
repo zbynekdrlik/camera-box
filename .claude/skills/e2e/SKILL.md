@@ -73,6 +73,24 @@ loss. Jitter balanced: step 0↔4 = 9/9, step 1↔3 = 49/49 → sampling beat ar
 there ARE step-events (9 dup + 58 skip strih). The step-events are rig sampling-beat artifacts,
 not chain loss.
 
+**Painter MUST paint at the CAPTURE rate (#290).** The painter's tick rate must equal the capture
+rate or each painted id covers ≥1 extra camera frame and no per-frame timing resolves. The default
+is the pure `default_paint_fps(mode, capture_fps, presenter, paint_only, synth_ndi)` in
+`src/probe/run.rs`: **`--paint-only` is a REAL-presenter path** (`run_paint_only` → `run_painter` →
+`open_presenter` — it DOES open a presenter, the old comment claiming otherwise was wrong) so it
+defaults to the full `capture_fps` (60), NOT the sub-capture coverage 12. Only the fbdev single-box
+loopback gate + the presenter-less `--synth-ndi` keep the 12fps coverage default. Under KMS the
+painter is vblank-locked at the monitor refresh (`--paint-fps` ignored); on the fbdev fallback
+`--paint-fps` is what forces the rate. `rig-mode.sh test` launches with an explicit `--paint-fps 60`
+(`PAINTER_FPS` pinned constant). NOTE: the dual-QR `vernier_ids(tick)` ALREADY emits a distinct
+`logical_id == refresh_tick` per refresh — so the bug was the RATE, never the dual-QR id logic.
+
+**Vernier methodology at 60fps capture is an OPEN decision (#310, needs-decision).** The Vernier
+(`tick = max(left_even, right_odd)`) was designed to resolve the 60→30 BEAT between a 60Hz painter
+and a 30fps camera. At 60fps painter + 60fps capture (#11) that beat is gone, so whether to keep
+dual-QR (still anti-blur + unique per frame), switch to a single full-rate QR, or keep dual-QR for
+redundancy is a measurement-correctness decision for the USER — do NOT redesign it unilaterally.
+
 **Analysis tools on dev1:** `.qr_dual.py` (split L/R decode), `.e2e_report.py`
 (2-panel PNG: continuity line slope-2 + deviation band). NOTE: the old multitap-tap report
 (`scripts/e2e-report.py`) was removed with the tap harness (#210); the recording-proof path
@@ -201,8 +219,8 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   (the old `systemctl stop camera-box` killed all three and wrongly dropped cam2). The drop-in lives
   in /run (tmpfs) so a reboot auto-reverts; EVENT mode removes it. The unit's Restart=always now
   respawns the no-display command, so a restart can never re-grab fb0. → launch the painter
-  `frame-probe --paint-only --dual-qr --qr-size 700 --duration-secs N` (700px = the validated
-  vernier), PID → `/run/rig-painter.pid`. Painter binary = `/usr/local/bin/frame-probe` from the CI
+  `frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs N` (700px = the
+  validated vernier; --paint-fps 60 matches the 60fps capture, #290), PID → `/run/rig-painter.pid`. Painter binary = `/usr/local/bin/frame-probe` from the CI
   `probe-tools-linux-amd64` artifact (`gh run download <run> -n probe-tools-linux-amd64` → scp to
   cam2); TEST mode **FAILS LOUD** if it is absent. For a measurement run add `PAINTER_EXTRA_FLAGS="--wall-clock --run-id <N>"`.
 - **cam1 (10.77.9.61):** NOT reconfigured — runs its DEPLOYED service (already 30 fps / certified v4l2

@@ -39,6 +39,9 @@ fn run_sourced(body: &str) -> String {
         .arg("-c")
         .arg(&harness)
         .env("SCRIPT", script())
+        // Clear painter overrides from the ambient env so the tests assert the script's PINNED
+        // defaults (e.g. PAINTER_FPS default = 60), not whatever the test runner happened to export.
+        .env_remove("PAINTER_FPS")
         .output()
         .expect("failed to run bash harness");
     assert!(
@@ -58,6 +61,7 @@ fn run_sourced_status(body: &str) -> (i32, String) {
         .arg("-c")
         .arg(&harness)
         .env("SCRIPT", script())
+        .env_remove("PAINTER_FPS")
         .output()
         .expect("failed to run bash harness");
     (
@@ -134,6 +138,22 @@ fn test_mode_launches_pinned_painter() {
         ),
         "#247: TEST mode must launch the PINNED painter flags (--paint-only --dual-qr --qr-size 700 \
          --duration-secs N) — got:\n{p}"
+    );
+}
+
+/// #290: TEST mode must launch the painter at the FULL 60 fps capture rate — the chain moved to
+/// 60fps (#11) but the painter was launched without forcing a rate, so on the fbdev-fallback path it
+/// fell to the 12 fps coverage default and the optical tick advanced far too slowly to resolve
+/// 60fps timing. The invocation must pass an explicit `--paint-fps 60` so the painter paints 60
+/// distinct ticks/s (under KMS it is vblank-locked at the monitor refresh and the flag is a no-op;
+/// on the fbdev fallback it is what makes the rate correct).
+#[test]
+fn test_mode_painter_runs_at_60fps_capture_rate() {
+    let p = painter_launch();
+    assert!(
+        p.contains("--paint-fps 60"),
+        "#290: TEST mode must launch the painter at the 60fps capture rate (--paint-fps 60) so it \
+         paints 60 distinct ticks/s — got:\n{p}"
     );
 }
 

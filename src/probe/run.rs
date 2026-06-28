@@ -50,6 +50,45 @@ pub struct RunConfig {
     pub paint_log: Option<String>,
 }
 
+/// The painter's default frame rate (frames/sec) when the user did not pass an
+/// explicit `--paint-fps`, given the paint `mode`, the `capture_fps`, the chosen
+/// `presenter`, and whether this is a `paint_only` (rig) or `synth_ndi` run.
+///
+/// A path that drives a real HDMI presenter (and so must match the capture cadence
+/// to resolve every captured frame) defaults to the FULL `capture_fps`; the
+/// single-box fbdev loopback GATE keeps the sub-capture coverage default (12 fps —
+/// its in-process `run()` reader wants ≥2 clean samples per id, no tearing
+/// false-loss); the presenter-less `--synth-ndi` golden reference keeps it too.
+pub fn default_paint_fps(
+    mode: PaintMode,
+    capture_fps: f64,
+    presenter: PresenterKind,
+    paint_only: bool,
+    synth_ndi: bool,
+) -> f64 {
+    // A path that drives a real HDMI presenter must paint at the full capture rate so
+    // every captured frame resolves a DISTINCT tick (#290):
+    //   - the single-box loopback `run()` on the KMS/auto presenter is vblank-locked
+    //     at the capture rate (the configured value matches that cadence; #79);
+    //   - the rig `--paint-only` painter ALSO opens a presenter (`run_paint_only` →
+    //     `run_painter` → `open_presenter`): under KMS it is vblank-locked, under the
+    //     fbdev fallback it sleep-paces at this configured rate — so the configured
+    //     rate MUST be the capture rate or the fbdev-fallback painter ticks too
+    //     slowly (the #290 30fps-painter-vs-60fps-capture bug). The original logic
+    //     wrongly excluded `paint_only`, treating it like the presenter-less synth
+    //     path.
+    // Only the single-box fbdev loopback GATE keeps the sub-capture coverage default
+    // (its in-process `run()` reader wants ≥2 clean samples per id, no tearing
+    // false-loss), and the presenter-less `--synth-ndi` golden reference keeps it too.
+    let full_rate_presenter_path =
+        (!matches!(presenter, PresenterKind::Fbdev) || paint_only) && !synth_ndi;
+    match mode {
+        PaintMode::Coverage if full_rate_presenter_path => capture_fps,
+        PaintMode::Coverage => 12.0,
+        PaintMode::FullRate => capture_fps,
+    }
+}
+
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
@@ -212,7 +251,92 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::serialize_painter_log;
+    use super::{default_paint_fps, serialize_painter_log};
+    use crate::probe::analyzer::PaintMode;
+    use crate::probe::presenter::PresenterKind;
+
+    /// #290 HEADLINE: the rig `--paint-only --dual-qr` painter (presenter = `Auto`,
+    /// the deployed cam2 path) must default to the FULL 60 fps capture rate, so it
+    /// paints 60 distinct ticks/s when capture is 60 — NOT the sub-capture coverage
+    /// default. At 30/12 ticks/s each painted id covers ≥2 capture frames and no
+    /// 60fps optical timing can be resolved. RED before the fix (the path was wrongly
+    /// excluded from the full-rate default and fell to 12.0).
+    #[test]
+    fn paint_only_defaults_to_full_capture_rate_at_60fps() {
+        let fps = default_paint_fps(
+            PaintMode::Coverage,
+            60.0,
+            PresenterKind::Auto,
+            /* paint_only */ true,
+            /* synth_ndi */ false,
+        );
+        assert_eq!(
+            fps, 60.0,
+            "#290: the rig paint-only painter must default to the capture rate (60 fps), \
+             so it paints 60 distinct ticks/s — got {fps} (a sub-capture rate cannot resolve \
+             60fps optical timing)"
+        );
+    }
+
+    /// The paint-only painter must track the capture rate whatever the presenter, and
+    /// whatever the capture rate — under the KMS auto path it is vblank-locked at the
+    /// capture rate, under the fbdev fallback it sleep-paces at this configured rate,
+    /// so a too-slow configured rate is the #290 30fps-painter bug on the fbdev path.
+    #[test]
+    fn paint_only_tracks_capture_rate_across_presenters_and_rates() {
+        for presenter in [
+            PresenterKind::Auto,
+            PresenterKind::Kms,
+            PresenterKind::Fbdev,
+        ] {
+            for cap in [50.0, 60.0, 120.0] {
+                let fps = default_paint_fps(PaintMode::Coverage, cap, presenter, true, false);
+                assert_eq!(
+                    fps, cap,
+                    "#290: paint-only must default to the capture rate ({cap}) on {presenter:?}"
+                );
+            }
+        }
+    }
+
+    /// The fix must NOT regress the single-box fbdev loopback GATE: its in-process
+    /// `run()` reader still wants the sub-capture coverage default (12 fps — ≥2 clean
+    /// samples per id, no tearing false-loss). Only the real-presenter / paint-only
+    /// paths take the capture rate.
+    #[test]
+    fn fbdev_loopback_gate_keeps_coverage_default() {
+        let fps = default_paint_fps(
+            PaintMode::Coverage,
+            60.0,
+            PresenterKind::Fbdev,
+            false,
+            false,
+        );
+        assert_eq!(
+            fps, 12.0,
+            "the fbdev single-box loopback gate must keep the 12 fps coverage default"
+        );
+        // The KMS/auto loopback run keeps its capture-rate default (unchanged by #290).
+        assert_eq!(
+            default_paint_fps(PaintMode::Coverage, 60.0, PresenterKind::Auto, false, false),
+            60.0
+        );
+        // full-rate mode is always the capture rate; synth-ndi keeps the coverage default.
+        assert_eq!(
+            default_paint_fps(
+                PaintMode::FullRate,
+                60.0,
+                PresenterKind::Fbdev,
+                false,
+                false
+            ),
+            60.0
+        );
+        assert_eq!(
+            default_paint_fps(PaintMode::Coverage, 60.0, PresenterKind::Auto, false, true),
+            12.0
+        );
+    }
 
     #[test]
     fn painter_log_csv_has_header_and_one_row_per_tick() {
