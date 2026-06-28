@@ -1312,23 +1312,26 @@ impl BufferPool {
         }
     }
 
-    /// Take a buffer to copy a frame into. The caller `clear()`s + fills it; a reused buffer keeps
-    /// its ~4 MB capacity so the fill does not reallocate.
-    ///
-    /// #280 STUB (RED): always allocates a fresh `Vec` — it does NOT consult the free list, so it
-    /// never recycles (reproducing the #275b per-frame `to_vec` churn). The GREEN flips this to pop
-    /// the free list first.
+    /// Take a buffer to copy a frame into: reuse a returned one when the free list is non-empty,
+    /// else allocate a fresh `Vec` (and count it). The caller `clear()`s + fills it; a reused
+    /// buffer keeps its ~4 MB capacity so the fill does not reallocate.
     pub fn take(&self) -> Vec<u8> {
-        self.allocated.fetch_add(1, Ordering::Relaxed);
-        Vec::new()
+        if let Some(buf) = self.free.lock().unwrap().pop() {
+            buf
+        } else {
+            self.allocated.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
     }
 
-    /// Return a buffer for reuse after the burn thread has sent it.
-    ///
-    /// #280 STUB (RED): a no-op — the returned buffer is dropped (freed) and never recycled. The
-    /// GREEN pushes it onto the bounded free list.
+    /// Return a buffer for reuse after the burn thread has sent it. BOUNDED: if the free list is
+    /// already at `cap`, drop the buffer (it is freed) so the pool can never grow without limit.
     pub fn put(&self, buf: Vec<u8>) {
-        let _ = buf;
+        let mut free = self.free.lock().unwrap();
+        if free.len() < self.cap {
+            free.push(buf);
+        }
+        // else: at capacity — drop `buf` (freed). Bounds the pool's memory.
     }
 
     /// Number of FRESH allocations [`take`](Self::take) has made (free list empty). A count that

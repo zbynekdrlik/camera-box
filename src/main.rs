@@ -443,12 +443,23 @@ async fn run_capture_loop(
         let mut burn_ring: Option<camera_box::probe::genlock::BurnRing<BurnJob>> = None;
         #[cfg(feature = "probe")]
         let mut burn_handle: Option<std::thread::JoinHandle<()>> = None;
+        // #280 — bounded pool of reusable frame buffers for the async cam1-burn copy. The capture
+        // thread takes a buffer here (reuse, or alloc only when empty), copies the emitted frame in,
+        // and submits; the burn thread returns it after the NDI send. Replaces the per-frame ~4MB
+        // `to_vec` allocation churn at up to 60 fps with recycled buffers (no order/mapping change).
+        #[cfg(feature = "probe")]
+        let burn_pool = Arc::new(camera_box::probe::genlock::BufferPool::new(
+            camera_box::probe::genlock::BURN_POOL_CAP,
+        ));
         #[cfg(feature = "probe")]
         if burn_run_id.is_some() {
             // #279 FIX 2 — hand the burn ring the capture loop's `running` flag so a full-ring
             // submit is interruptible on shutdown (never wedges the capture thread).
             let (ring, rx) =
                 camera_box::probe::genlock::burn_ring::<BurnJob>(Arc::clone(&running_capture));
+            // #280 — the burn thread's handle on the buffer pool: it returns each frame's buffer
+            // here after the NDI send so the capture thread can refill it instead of reallocating.
+            let burn_pool_consumer = Arc::clone(&burn_pool);
             let mut burn_sender = capture_sender
                 .take()
                 .expect("NDI sender is present before the burn thread takes it");
@@ -514,6 +525,9 @@ async fn run_capture_loop(
                                 e
                             );
                         }
+                        // #280 — the frame is sent; return its buffer (with its ~4MB capacity) to
+                        // the pool so the capture thread refills it instead of allocating a new one.
+                        burn_pool_consumer.put(job.buf);
                     });
                 })
                 .expect("spawn cam1-burn thread");
@@ -586,8 +600,16 @@ async fn run_capture_loop(
                         );
                     }
                     let frame_id = burn_ids.next_id();
+                    // #280 — copy the mmap frame into a RECYCLED pool buffer (reused, or allocated
+                    // only when the free list is empty) instead of a fresh per-frame `to_vec`. The
+                    // mmap is valid only inside this callback, so a copy is still required to cross
+                    // the thread boundary — but a reused buffer keeps its ~4MB capacity so the
+                    // copy does not reallocate. clear()+extend reuses that capacity in place.
+                    let mut buf = burn_pool.take();
+                    buf.clear();
+                    buf.extend_from_slice(data);
                     let job = BurnJob {
-                        buf: data.to_vec(),
+                        buf,
                         info,
                         run_id,
                         frame_id,
@@ -693,6 +715,17 @@ async fn run_capture_loop(
             if let Err(e) = h.join() {
                 tracing::error!("#275b cam1-burn thread panicked during shutdown: {:?}", e);
             }
+        }
+        // #280 — pool audit: how many frame buffers were ever ALLOCATED (vs one `to_vec` per
+        // emitted frame before this change) and how many sit idle now. A small allocation count
+        // against a long run is the proof the pool recycled instead of churning per-frame heap.
+        #[cfg(feature = "probe")]
+        if burn_run_id.is_some() {
+            tracing::info!(
+                "#280 cam1-burn buffer pool: {} total buffers allocated, {} idle at shutdown (recycled across the run instead of per-frame to_vec)",
+                burn_pool.allocations(),
+                burn_pool.free_len()
+            );
         }
         // cam2→cam1 LOSS sidecar: write cam1's final V4L2 capture-drop count so the verdict
         // reports the camera-leg loss (a non-fatal best effort — a write failure only means
