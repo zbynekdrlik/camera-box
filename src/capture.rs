@@ -159,6 +159,10 @@ pub fn yuyv_to_gray8(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u
 pub const V4L2_CID_CONTRAST: u32 = 0x0098_0901;
 /// V4L2 control id for picture SATURATION (`V4L2_CID_SATURATION`).
 pub const V4L2_CID_SATURATION: u32 = 0x0098_0902;
+/// V4L2 control id for picture HUE (`V4L2_CID_HUE`, `V4L2_CID_BASE+3`). Driving it
+/// to a neutral `0` at capture open guarantees no colour tint leaks in from a stray
+/// prior setting (#296 colour self-heal).
+pub const V4L2_CID_HUE: u32 = 0x0098_0903;
 
 /// One certified V4L2 capture control (`id`, `value`) to apply at device open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +233,167 @@ pub fn parse_capture_controls(spec: &str) -> Vec<CaptureControl> {
         }
     }
     out
+}
+
+/// The CERTIFIED COLOUR production V4L2 capture controls, ENFORCED at every device
+/// open so the production stream is ALWAYS normal colour, regardless of any stray
+/// control a prior QR-test grab — or a previous process — left on the card (#296).
+///
+/// Why this exists: [`certified_cam1_controls`] (#156) deliberately sets
+/// `saturation=0` (+ `contrast=75`) to sharpen the filmed QR for decode. That
+/// control PERSISTS on the ShadowCast card after the grab process exits — and the
+/// production path previously applied NO controls (`Vec::new()`), so once any grab /
+/// QR-test had run, the card stayed at `saturation=0` and EVERY camera went
+/// grayscale on live air (the church-event regression). Enforcing a known COLOUR
+/// set on every open is the self-healing counterpart of the #150/#257 genlock
+/// lockdown: colour is restored on every open, no matter what ran before.
+///
+/// Values: `saturation=50` — the ShadowCast factory colour level, proven on the
+/// live rig to produce normal colour (channel_diff ≈ 35); `contrast=50` — the
+/// factory default, symmetric with the certified grayscale set's `75`; `hue=0` — a
+/// neutral, untinted picture. A card that lacks any of these controls (e.g. the
+/// NZXT CAM4 grab card, which exposes NO v4l2 picture controls) logs a warning and
+/// PROCEEDS — see [`apply_controls_with`]; a missing control is never fatal.
+pub fn color_production_controls() -> Vec<CaptureControl> {
+    vec![
+        CaptureControl {
+            id: V4L2_CID_SATURATION,
+            value: 50,
+        },
+        CaptureControl {
+            id: V4L2_CID_CONTRAST,
+            value: 50,
+        },
+        CaptureControl {
+            id: V4L2_CID_HUE,
+            value: 0,
+        },
+    ]
+}
+
+/// Choose the V4L2 capture controls to enforce at device open.
+///
+/// - `env_spec = Some(spec)` — an explicit `CAMERA_BOX_CAPTURE_CONTROLS` override;
+///   parse it ([`parse_capture_controls`]). Used by ad-hoc rig tweaks; an empty /
+///   whitespace spec yields no controls (deliberate "touch nothing" escape hatch).
+/// - `env_spec = None`, `record_grab = true` — a grab / QR-test run; the certified
+///   SHARP set ([`certified_cam1_controls`], `saturation=0`/`contrast=75`) so the
+///   filmed QR decodes.
+/// - `env_spec = None`, `record_grab = false` — PRODUCTION; the certified COLOUR set
+///   ([`color_production_controls`]). #296: this branch previously returned NO
+///   controls, so a stray `saturation=0` left by a prior grab persisted and the
+///   live cameras went grayscale. Production now self-heals colour on every open.
+pub fn select_capture_controls(env_spec: Option<&str>, record_grab: bool) -> Vec<CaptureControl> {
+    match env_spec {
+        Some(spec) => parse_capture_controls(spec),
+        None if record_grab => certified_cam1_controls(),
+        None => Vec::new(),
+    }
+}
+
+/// Outcome tally of applying a set of [`CaptureControl`]s, for logging + tests.
+/// NONE of these outcomes abort capture — a device that rejects or clamps a control
+/// (e.g. the NZXT CAM4 card, which exposes no picture controls) is tolerated, so a
+/// box with a control-less grab card still streams (#296 — must not regress CAM4).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ControlReport {
+    /// Set, and read back EXACTLY as requested.
+    pub applied: usize,
+    /// Set succeeded but the device reported a DIFFERENT value (driver clamped), or
+    /// the read-back itself failed (can't verify) — soft, non-fatal.
+    pub adjusted: usize,
+    /// The device REJECTED the set — the control is not supported (the NZXT case).
+    /// Logged loudly; capture proceeds.
+    pub failed: usize,
+}
+
+/// Abstraction over a V4L2 device's integer picture-control get/set, so the
+/// apply-controls POLICY (warn-and-continue, NEVER fatal) is unit-testable without a
+/// real `/dev/video*` node. Implemented for the live [`Device`]; tests inject a fake
+/// device (incl. one that supports NO controls — the NZXT CAM4 card).
+pub trait ControlIo {
+    /// Error type surfaced when a get/set fails (only ever logged — never fatal).
+    type Err: std::fmt::Display;
+    /// Set integer control `id` to `value`.
+    fn set_ctrl(&self, id: u32, value: i64) -> std::result::Result<(), Self::Err>;
+    /// Read integer control `id` back.
+    fn get_ctrl(&self, id: u32) -> std::result::Result<i64, Self::Err>;
+}
+
+impl ControlIo for Device {
+    type Err = std::io::Error;
+
+    fn set_ctrl(&self, id: u32, value: i64) -> std::result::Result<(), Self::Err> {
+        self.set_control(Control {
+            id,
+            value: Value::Integer(value),
+        })
+    }
+
+    fn get_ctrl(&self, id: u32) -> std::result::Result<i64, Self::Err> {
+        match self.control(id)?.value {
+            Value::Integer(got) => Ok(got),
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("control id={id:#010x} read back non-integer {other:?}"),
+            )),
+        }
+    }
+}
+
+/// Apply `controls` through any [`ControlIo`], verifying each by read-back, and
+/// return a [`ControlReport`]. A control that fails to SET (driver rejects it — the
+/// NZXT CAM4 card has no picture controls) or reads back DIFFERENT is logged loudly
+/// (`warn`) but NEVER aborts: a soft-but-running stream beats no stream, and the
+/// warning surfaces the drift to the operator. This function CANNOT return an error —
+/// that "never fatal" guarantee is what the NZXT regression test pins (#296). Empty
+/// `controls` is a no-op (the explicit "touch nothing" override).
+pub fn apply_controls_with<IO: ControlIo>(io: &IO, controls: &[CaptureControl]) -> ControlReport {
+    let mut report = ControlReport::default();
+    for c in controls {
+        match io.set_ctrl(c.id, c.value) {
+            Ok(()) => match io.get_ctrl(c.id) {
+                Ok(got) if got == c.value => {
+                    report.applied += 1;
+                    tracing::info!(
+                        "capture control id={:#010x} set to {} (verified)",
+                        c.id,
+                        c.value
+                    );
+                }
+                Ok(got) => {
+                    report.adjusted += 1;
+                    tracing::warn!(
+                        "capture control id={:#010x} requested {} but device reports {} \
+                         (driver clamped/ignored)",
+                        c.id,
+                        c.value,
+                        got
+                    );
+                }
+                Err(e) => {
+                    report.adjusted += 1;
+                    tracing::warn!(
+                        "capture control id={:#010x} set to {} but read-back failed: {}",
+                        c.id,
+                        c.value,
+                        e
+                    );
+                }
+            },
+            Err(e) => {
+                report.failed += 1;
+                tracing::warn!(
+                    "capture control id={:#010x} -> {} FAILED to apply: {} \
+                     (capture continues; device may lack this control)",
+                    c.id,
+                    c.value,
+                    e
+                );
+            }
+        }
+    }
+    report
 }
 
 /// V4L2 video capture wrapper
@@ -362,52 +527,20 @@ impl VideoCapture {
         })
     }
 
-    /// Apply each [`CaptureControl`] to an open V4L2 `device` and verify it stuck by
-    /// reading the value back. A control that fails to SET (driver rejects it) or
-    /// reads back DIFFERENT than requested is logged loudly (`warn`) but never aborts
-    /// capture — a soft-but-running grab beats no grab, and the warning surfaces the
-    /// drift. Empty `controls` is a no-op (production default).
+    /// Apply each [`CaptureControl`] to an open V4L2 `device`, verifying by read-back.
+    /// Delegates to the device-agnostic [`apply_controls_with`] (which is unit-tested
+    /// against a fake control-less device for the NZXT CAM4 case). A control that
+    /// fails to SET or reads back DIFFERENT is logged loudly but NEVER aborts capture
+    /// — a soft-but-running stream beats no stream. Empty `controls` is a no-op.
     fn apply_controls(device: &Device, controls: &[CaptureControl]) {
-        for c in controls {
-            match device.set_control(Control {
-                id: c.id,
-                value: Value::Integer(c.value),
-            }) {
-                Ok(()) => match device.control(c.id) {
-                    Ok(ctrl) => match ctrl.value {
-                        Value::Integer(got) if got == c.value => tracing::info!(
-                            "capture control id={:#010x} set to {} (verified)",
-                            c.id,
-                            c.value
-                        ),
-                        Value::Integer(got) => tracing::warn!(
-                            "capture control id={:#010x} requested {} but device reports {} \
-                             (driver clamped/ignored — grab may be softer than certified)",
-                            c.id,
-                            c.value,
-                            got
-                        ),
-                        other => tracing::warn!(
-                            "capture control id={:#010x} read back non-integer {:?}",
-                            c.id,
-                            other
-                        ),
-                    },
-                    Err(e) => tracing::warn!(
-                        "capture control id={:#010x} set to {} but read-back failed: {}",
-                        c.id,
-                        c.value,
-                        e
-                    ),
-                },
-                Err(e) => tracing::warn!(
-                    "capture control id={:#010x} -> {} FAILED to apply: {} \
-                     (capture continues; grab may decode worse)",
-                    c.id,
-                    c.value,
-                    e
-                ),
-            }
+        let report = apply_controls_with(device, controls);
+        if report.adjusted > 0 || report.failed > 0 {
+            tracing::warn!(
+                "capture controls applied with {} clamped/unverified and {} unsupported \
+                 (device may lack picture controls — capture continues)",
+                report.adjusted,
+                report.failed
+            );
         }
     }
 
@@ -902,6 +1035,229 @@ mod tests {
                 value: 75
             }],
             "only the valid contrast pair survives"
+        );
+    }
+
+    #[test]
+    fn color_production_controls_is_saturation50_contrast50_hue0() {
+        // #296: the certified COLOUR production set is exactly saturation=50,
+        // contrast=50, hue=0 — a normal, untinted picture. saturation=50 is the
+        // ShadowCast factory colour level proven on the live rig (channel_diff≈35).
+        let c = color_production_controls();
+        assert_eq!(
+            c,
+            vec![
+                CaptureControl {
+                    id: V4L2_CID_SATURATION,
+                    value: 50
+                },
+                CaptureControl {
+                    id: V4L2_CID_CONTRAST,
+                    value: 50
+                },
+                CaptureControl {
+                    id: V4L2_CID_HUE,
+                    value: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn production_path_enforces_color_controls() {
+        // #296 REGRESSION GUARD: production (no CAMERA_BOX_CAPTURE_CONTROLS override,
+        // no --record-grab) MUST enforce the certified COLOUR set at capture open, so a
+        // stray saturation=0 left by a prior QR-test grab can NEVER persist as
+        // grayscale on a live restart (the church-event regression). BEFORE the fix
+        // this branch returned NO controls (Vec::new()), so this test FAILS on the
+        // unfixed code and PASSES once production selects color_production_controls().
+        let c = select_capture_controls(None, false);
+        assert!(
+            c.contains(&CaptureControl {
+                id: V4L2_CID_SATURATION,
+                value: 50
+            }),
+            "production must restore saturation=50 (colour) — got {c:?}"
+        );
+        assert!(
+            c.contains(&CaptureControl {
+                id: V4L2_CID_CONTRAST,
+                value: 50
+            }),
+            "production must restore contrast=50 — got {c:?}"
+        );
+        assert!(
+            c.contains(&CaptureControl {
+                id: V4L2_CID_HUE,
+                value: 0
+            }),
+            "production must set hue=0 (neutral) — got {c:?}"
+        );
+        assert_eq!(
+            c,
+            color_production_controls(),
+            "production path must be exactly the certified colour set"
+        );
+    }
+
+    #[test]
+    fn select_capture_controls_grab_uses_certified_sharp_set() {
+        // --record-grab (no env override) keeps the #156 sharp set so the filmed QR
+        // still decodes — the fix must NOT change the grab path.
+        assert_eq!(
+            select_capture_controls(None, true),
+            certified_cam1_controls()
+        );
+    }
+
+    #[test]
+    fn select_capture_controls_env_override_wins_over_both() {
+        // An explicit CAMERA_BOX_CAPTURE_CONTROLS override is honoured even in
+        // production (record_grab=false) and even during a grab (record_grab=true).
+        let parsed = parse_capture_controls("contrast=75,saturation=0");
+        assert_eq!(
+            select_capture_controls(Some("contrast=75,saturation=0"), false),
+            parsed
+        );
+        assert_eq!(
+            select_capture_controls(Some("contrast=75,saturation=0"), true),
+            parsed
+        );
+    }
+
+    #[test]
+    fn select_capture_controls_explicit_empty_override_touches_nothing() {
+        // An explicit empty/whitespace override is the deliberate "touch nothing"
+        // escape hatch — it must NOT silently fall back to the colour set.
+        assert!(select_capture_controls(Some(""), false).is_empty());
+        assert!(select_capture_controls(Some("   "), false).is_empty());
+    }
+
+    /// Fake [`ControlIo`] device: supports only the listed control ids; any other id
+    /// errors on set AND get — modelling a card (the NZXT CAM4 grab card) that
+    /// exposes NO v4l2 picture controls.
+    struct FakeDevice {
+        supported: std::collections::HashSet<u32>,
+        values: std::cell::RefCell<std::collections::HashMap<u32, i64>>,
+    }
+
+    impl FakeDevice {
+        fn supporting(ids: &[u32]) -> Self {
+            Self {
+                supported: ids.iter().copied().collect(),
+                values: std::cell::RefCell::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl ControlIo for FakeDevice {
+        type Err = String;
+
+        fn set_ctrl(&self, id: u32, value: i64) -> std::result::Result<(), String> {
+            if self.supported.contains(&id) {
+                self.values.borrow_mut().insert(id, value);
+                Ok(())
+            } else {
+                Err(format!(
+                    "control id={id:#010x} not supported by this device"
+                ))
+            }
+        }
+
+        fn get_ctrl(&self, id: u32) -> std::result::Result<i64, String> {
+            self.values
+                .borrow()
+                .get(&id)
+                .copied()
+                .ok_or_else(|| format!("control id={id:#010x} not supported by this device"))
+        }
+    }
+
+    #[test]
+    fn apply_controls_tolerates_device_missing_a_control() {
+        // #296 NZXT CAM4 GUARD: the NZXT Signal HD60 grab card exposes NO v4l2 picture
+        // controls. Enforcing the colour set on it must log a warning and PROCEED —
+        // NEVER become fatal — so CAM4 still streams. apply_controls_with returns a
+        // tally (it cannot return an error); a control-less device yields all-failed
+        // with capture continuing.
+        let nzxt = FakeDevice::supporting(&[]); // supports nothing — the NZXT case
+        let report = apply_controls_with(&nzxt, &color_production_controls());
+        assert_eq!(
+            report.failed, 3,
+            "every unsupported control is a non-fatal failure"
+        );
+        assert_eq!(
+            report.applied, 0,
+            "nothing could be applied on a control-less card"
+        );
+        assert_eq!(report.adjusted, 0);
+        // Reaching here at all proves the apply NEVER aborted — the graceful guarantee.
+    }
+
+    #[test]
+    fn apply_controls_applies_supported_controls_on_shadowcast_like_device() {
+        // A ShadowCast-like card (CAM1/2/3) supports saturation+contrast+hue: every
+        // colour control applies and verifies, restoring colour.
+        let shadowcast =
+            FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST, V4L2_CID_HUE]);
+        let report = apply_controls_with(&shadowcast, &color_production_controls());
+        assert_eq!(report.applied, 3, "all three colour controls verified");
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.adjusted, 0);
+        assert_eq!(
+            *shadowcast
+                .values
+                .borrow()
+                .get(&V4L2_CID_SATURATION)
+                .unwrap(),
+            50,
+            "saturation driven to the colour level"
+        );
+    }
+
+    #[test]
+    fn apply_controls_partial_support_skips_only_the_missing_control() {
+        // A card that supports saturation+contrast but NOT hue (a plausible
+        // intermediate device): the two supported controls apply, hue is a non-fatal
+        // failure, capture proceeds.
+        let partial = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST]);
+        let report = apply_controls_with(&partial, &color_production_controls());
+        assert_eq!(report.applied, 2, "saturation + contrast applied");
+        assert_eq!(report.failed, 1, "hue unsupported -> one non-fatal failure");
+    }
+
+    #[test]
+    fn apply_controls_reports_clamp_when_readback_differs() {
+        // Driver clamp: a device that accepts the set but reports a different value
+        // back is 'adjusted' (soft/unverified), never fatal. Model it with a device
+        // that stores a fixed clamped value regardless of the request.
+        struct ClampDevice;
+        impl ControlIo for ClampDevice {
+            type Err = String;
+            fn set_ctrl(&self, _id: u32, _value: i64) -> std::result::Result<(), String> {
+                Ok(())
+            }
+            fn get_ctrl(&self, _id: u32) -> std::result::Result<i64, String> {
+                Ok(999) // clamped to a value we never requested
+            }
+        }
+        let report = apply_controls_with(&ClampDevice, &color_production_controls());
+        assert_eq!(report.applied, 0);
+        assert_eq!(
+            report.adjusted, 3,
+            "all three read back clamped -> adjusted"
+        );
+        assert_eq!(report.failed, 0);
+    }
+
+    #[test]
+    fn apply_controls_empty_is_noop() {
+        let nzxt = FakeDevice::supporting(&[]);
+        let report = apply_controls_with(&nzxt, &[]);
+        assert_eq!(
+            report,
+            ControlReport::default(),
+            "no controls -> empty report"
         );
     }
 }
