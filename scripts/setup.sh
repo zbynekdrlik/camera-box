@@ -728,8 +728,11 @@ main() {
     check_root
     expand_disk      # First! Before anything that needs disk space
     set_hostname
+    # #295: PIN the kernel + disable auto-upgrades BEFORE update_system runs `apt-get upgrade -y`,
+    # so provisioning can never silently install (and then boot) a new kernel. The box keeps the
+    # known-good kernel it is already running.
+    harden_appliance_kernel
     update_system
-    harden_appliance_kernel   # #295: pin kernel + kill auto-upgrades + initrd hook BEFORE grub work
     configure_system
     install_dantesync
     install_camera_box

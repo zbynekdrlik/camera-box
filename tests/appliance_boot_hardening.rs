@@ -49,24 +49,17 @@ const MIN_VAR_CACHE_MIB: u32 = 512;
 ///    kernel — the strongest guarantee that the box keeps booting the kernel it was provisioned with.
 #[test]
 fn provisioning_holds_the_appliance_kernel() {
+    // Assert the EXACT hold command (all three meta-packages in one line), not a bare
+    // `apt-mark hold` substring — the latter also matches the explanatory `// ... apt-mark hold`
+    // comment, so it would false-pass even if the real command were deleted.
+    const HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
     for script in SETUP_SCRIPTS {
         let body = read(script);
         assert!(
-            body.contains("apt-mark hold"),
-            "{script} must `apt-mark hold` the kernel meta-packages so a surprise kernel can never \
-             be installed on the appliance (the auto-installed 6.8.0-124 kernel bricked CAM3/CAM4, #295)"
+            body.contains(HOLD_CMD),
+            "{script} must run `{HOLD_CMD}` so a surprise kernel can never be installed on the \
+             appliance (the auto-installed 6.8.0-124 kernel bricked CAM3/CAM4, #295)"
         );
-        for pkg in [
-            "linux-image-generic",
-            "linux-headers-generic",
-            "linux-generic",
-        ] {
-            assert!(
-                body.contains(pkg),
-                "{script}'s kernel hold must cover {pkg} so the whole kernel meta-package set is \
-                 pinned (#295)"
-            );
-        }
     }
 }
 
