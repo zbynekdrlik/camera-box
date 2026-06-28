@@ -68,9 +68,18 @@ impl NetworkSignature {
 /// Decide whether the NDI sender should be re-announced (destroyed + re-created so the NDI
 /// runtime re-registers it via mDNS on the CURRENT network).
 ///
-/// STUB (#297 RED): currently returns `false` unconditionally — i.e. the sender NEVER
-/// re-announces, which is exactly the bug (a box whose network came up after start stays
-/// invisible to the OBS NDI finder forever). The GREEN commit implements the real decision.
-pub fn should_reannounce(_announced: &NetworkSignature, _current: &NetworkSignature) -> bool {
-    false
+/// Re-announce iff the current usable-network signature is NON-EMPTY and DIFFERS from the
+/// signature the sender was last announced with. Both guards are load-bearing:
+///
+/// - **Empty current → never.** While the network is still down there is nothing to announce
+///   on; re-creating the sender onto no network is pointless churn. Wait for an address to
+///   appear — that appearance is itself a change and triggers once it does.
+/// - **Equal → never.** A stable network must NOT re-create the sender, because a re-create
+///   forces every connected receiver (OBS) to drop + reconnect the feed. Only a real change to
+///   the usable-address set is worth that.
+pub fn should_reannounce(announced: &NetworkSignature, current: &NetworkSignature) -> bool {
+    if current.is_empty() {
+        return false;
+    }
+    announced != current
 }

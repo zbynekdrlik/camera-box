@@ -462,13 +462,62 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
     (true, next)
 }
 
+/// #297 — read the host's current usable (up, non-loopback, IPv4) network addresses into a
+/// canonical [`crate::reannounce::NetworkSignature`]. This is the Linux IO half of the
+/// re-announce trigger (the pure decision lives in `crate::reannounce`). A `getifaddrs`
+/// failure yields an EMPTY signature, which [`crate::reannounce::should_reannounce`] treats as
+/// "network down → do nothing" — so a transient read error never spuriously re-creates the
+/// sender. IPv4 only: NDI discovery on this LAN is IPv4 mDNS.
+fn current_network_signature() -> crate::reannounce::NetworkSignature {
+    let mut addrs: Vec<String> = Vec::new();
+    // SAFETY: getifaddrs allocates a linked list we free with freeifaddrs; every pointer is
+    // null-checked before deref and we never retain a pointer past freeifaddrs.
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
+            tracing::warn!("#297 getifaddrs failed; treating network as down this cycle");
+            return crate::reannounce::NetworkSignature::default();
+        }
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() {
+                continue;
+            }
+            if (*ifa.ifa_addr).sa_family as i32 != libc::AF_INET {
+                continue; // IPv4 only
+            }
+            let flags = ifa.ifa_flags as i32;
+            if flags & libc::IFF_UP == 0 || flags & libc::IFF_LOOPBACK != 0 {
+                continue; // skip down + loopback interfaces
+            }
+            let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+            let ip = u32::from_be(sin.sin_addr.s_addr);
+            addrs.push(format!(
+                "{}.{}.{}.{}",
+                (ip >> 24) & 0xff,
+                (ip >> 16) & 0xff,
+                (ip >> 8) & 0xff,
+                ip & 0xff
+            ));
+        }
+        libc::freeifaddrs(ifap);
+    }
+    crate::reannounce::NetworkSignature::from_addrs(addrs)
+}
+
 pub struct NdiSender {
     lib: NdiLib,
     sender: *mut c_void,
-    #[allow(dead_code)]
-    ndi_name: CString, // Keep CString alive while sender exists
+    ndi_name: CString, // Keep CString alive while sender exists; reused on re-announce (#297)
     frame_rate: FrameRate,
     frame_count: u64,
+    // #297 — re-announce state: the usable-network signature the sender was last announced
+    // with, and the last time we polled for a change. A change in `announced_sig` (an address
+    // appeared / flapped) re-registers the sender so the OBS NDI finder rediscovers it.
+    announced_sig: crate::reannounce::NetworkSignature,
+    last_reannounce_check: std::time::Instant,
     // Single buffer for sync sending (no double buffer needed)
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
@@ -521,6 +570,10 @@ impl NdiSender {
             ndi_name,
             frame_rate,
             frame_count: 0,
+            // #297 — record the network the sender was just announced on; the capture loop
+            // calls `maybe_reannounce()` and re-registers if this set later changes.
+            announced_sig: current_network_signature(),
+            last_reannounce_check: std::time::Instant::now(),
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
             external_pacing: false,
@@ -543,6 +596,62 @@ impl NdiSender {
             "NDI sender: external pacing {} (genlock decimation by caller)",
             if enabled { "ENABLED" } else { "disabled" }
         );
+    }
+
+    /// #297 — re-announce the NDI sender if the host's usable network changed since it was
+    /// last announced, so the OBS/DistroAV NDI finder rediscovers a box whose network came up
+    /// after start (boot race) or flapped to a new address. Throttled to
+    /// [`crate::reannounce::REANNOUNCE_POLL_INTERVAL`]; call it freely from the capture loop.
+    ///
+    /// Returns `Ok(true)` if it re-created (re-registered) the sender, `Ok(false)` if nothing
+    /// was needed. A re-create briefly drops any connected receiver — but that only happens on
+    /// a real network change (already a disruption), NEVER in steady state, because
+    /// [`crate::reannounce::should_reannounce`] returns false for an unchanged address set.
+    pub fn maybe_reannounce(&mut self) -> Result<bool> {
+        if self.last_reannounce_check.elapsed() < crate::reannounce::REANNOUNCE_POLL_INTERVAL {
+            return Ok(false);
+        }
+        self.last_reannounce_check = std::time::Instant::now();
+        let current = current_network_signature();
+        if !crate::reannounce::should_reannounce(&self.announced_sig, &current) {
+            return Ok(false);
+        }
+        tracing::warn!(
+            "#297 NDI sender '{}' re-announce: usable network changed {:?} -> {:?}, re-registering",
+            self.ndi_name.to_string_lossy(),
+            self.announced_sig.addrs(),
+            current.addrs()
+        );
+        self.reannounce_now(current)
+    }
+
+    /// Re-register the NDI sender on the CURRENT network: create a fresh sender (same name +
+    /// settings) FIRST, then destroy the old handle — so a valid sender is always present even
+    /// if `NDIlib_send_create` fails (the old one is kept and the next poll retries). The brief
+    /// same-name overlap is harmless: it only occurs during a network change, which already
+    /// disrupted the feed.
+    fn reannounce_now(&mut self, current: crate::reannounce::NetworkSignature) -> Result<bool> {
+        let create_settings = NDIlib_send_create_t {
+            p_ndi_name: self.ndi_name.as_ptr(),
+            p_groups: ptr::null(),
+            clock_video: false, // match new(): no internal pacing
+            clock_audio: false,
+        };
+        let new_sender = unsafe { (self.lib.send_create)(&create_settings) };
+        if new_sender.is_null() {
+            anyhow::bail!(
+                "#297 re-announce: NDIlib_send_create returned null; kept existing sender"
+            );
+        }
+        let old = std::mem::replace(&mut self.sender, new_sender);
+        unsafe { (self.lib.send_destroy)(old) };
+        self.announced_sig = current;
+        tracing::info!(
+            "#297 NDI sender '{}' re-announced on {:?}",
+            self.ndi_name.to_string_lossy(),
+            self.announced_sig.addrs()
+        );
+        Ok(true)
     }
 
     /// Detect AVX2 CPU support

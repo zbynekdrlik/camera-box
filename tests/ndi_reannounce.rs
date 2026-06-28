@@ -54,7 +54,10 @@ fn enumeration_order_is_not_a_change() {
     // network. Two enumerations of the same addresses in different order are NOT a change.
     let announced = NetworkSignature::from_addrs(["10.77.9.61", "10.77.9.200"]);
     let current = NetworkSignature::from_addrs(["10.77.9.200", "10.77.9.61"]);
-    assert_eq!(announced, current, "address SET equality must be order-independent");
+    assert_eq!(
+        announced, current,
+        "address SET equality must be order-independent"
+    );
     assert!(
         !should_reannounce(&announced, &current),
         "the same address set in a different order is NOT a network change"
@@ -65,7 +68,10 @@ fn enumeration_order_is_not_a_change() {
 fn duplicate_addresses_are_not_a_change() {
     let announced = NetworkSignature::from_addrs(["10.77.9.61"]);
     let current = NetworkSignature::from_addrs(["10.77.9.61", "10.77.9.61"]);
-    assert_eq!(announced, current, "duplicate addresses must canonicalize away");
+    assert_eq!(
+        announced, current,
+        "duplicate addresses must canonicalize away"
+    );
     assert!(!should_reannounce(&announced, &current));
 }
 
