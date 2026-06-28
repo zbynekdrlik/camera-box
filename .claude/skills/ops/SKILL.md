@@ -115,6 +115,35 @@ solo redesign — the first cut over-/under-discriminated STUCK vs benign IDLE).
 lives in the tree yet; until #266 lands, the stuck state is caught by hand (genlock-fifo audit fps +
 dantesync CPU) and recovered by reboot per above.
 
+## #297 — NDI sender re-announce (OBS discovery reliability across reboots)
+
+OBS/DistroAV mDNS NDI discovery is flaky on this LAN: the source dropdown does NOT reliably list
+all live senders (observed live: finder returned only {CAM2} while CAM1/3/4 were up + emitting; a
+rebooted box appears "gone"). Setting `ndi_source_name` by hand still connects → the source IS
+reachable, only DISCOVERY fails.
+
+**Sender-side fix (shipped, code):** the camera-box NDI sender (`NDIlib_send_create`, `src/ndi.rs`)
+used to be created ONCE at startup and never re-register. It now **re-announces** (re-creates the
+sender → re-runs the mDNS announce on the CURRENT network) when the host's usable **LAN** address
+set CHANGES or RECOVERS from an outage. Pure trigger in `src/reannounce.rs`
+(`should_reannounce(announced, current, saw_down_since_announce)`, `is_discoverable_interface()`
+LAN-NIC denylist, `REANNOUNCE_POLL_INTERVAL=2s`); Linux IO (`getifaddrs`) +
+`NdiSender::maybe_reannounce()` in `src/ndi.rs`; called each report tick by the capture loop.
+Steady state never re-creates (would drop connected OBS receivers) — only a real change does.
+
+**SCOPE LIMIT (do NOT overstate):** re-announce fixes the **boot-race / late-DHCP / link-flap**
+cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
+(stable network, no change → no trigger) — and the cam boxes have STATIC IPs, so a clean reboot may
+present a stable sig from process start. That persistent-flakiness case is the **central NDI
+Discovery Server** (`NDI_DISCOVERY_SERVER` on every cam box + both OBS) or a LAN multicast fix
+(avahi reflector / IGMP snooping) — a **fleet-infra decision raised to the user** (pending; file a
+follow-up if chosen). When diagnosing "camera missing from OBS dropdown", check WHICH case it is
+(boot-race/flap → re-announce should cure within ~2s; stable-lost-announce → needs the discovery
+server).
+
+**Rig verify (supervisor):** reboot a box, confirm it reappears in the OBS NDI dropdown within
+seconds (and on a link flap). The unit tests prove the trigger logic only — discovery is a rig check.
+
 ## #295 — cam-box boot hardening (what bricked CAM3/CAM4 + the durable fix)
 
 **How the boxes ACTUALLY boot:** the live cam boxes run a plain **RW root on `/dev/sda2`**
