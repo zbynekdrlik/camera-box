@@ -80,7 +80,7 @@ RIG_TEST_DROPIN="${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
-# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [CBBIN] [DROPIN] -> the REMOTE bash run on cam2
+# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [FPS] [CBBIN] [DROPIN] -> the REMOTE bash run on cam2
 # (over ssh) to enter TEST mode: stop any prior painter, free /dev/fb0 WITHOUT killing capture+emit
 # (#291: switch camera-box to a no-display drop-in instead of stopping it), fail loud if the painter
 # binary is absent, launch the PINNED dual-QR vernier painter recording its PID, then verify it is up
@@ -88,9 +88,12 @@ RIG_TEST_DROPIN="${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-
 # without a live cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY.
 painter_launch_remote() {
   local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
-  local fps="${PAINTER_FPS:-60}"   # #290: paint at the 60fps capture rate (60 distinct ticks/s)
-  local cbbin="${6:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
-  local dropin="${7:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
+  # #290: painter rate — positional like the other params, with the PAINTER_FPS pinned constant as
+  # the fallback (keeps the builder pure; the call site passes "$PAINTER_FPS"). Paint at the 60fps
+  # capture rate so the optical tick advances 60 distinct ids/s.
+  local fps="${6:-${PAINTER_FPS:-60}}"
+  local cbbin="${7:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
+  local dropin="${8:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
   cat <<REMOTE
 set -e
@@ -324,7 +327,7 @@ do_test() {
   require_sshpass
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
-  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS")"
+  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS")"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test

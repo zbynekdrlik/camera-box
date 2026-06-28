@@ -32,7 +32,9 @@ struct Args {
     /// Run duration in seconds
     #[arg(long, default_value_t = 300)]
     duration_secs: u64,
-    /// Painter rate (defaults: coverage 12, full-rate = capture rate)
+    /// Painter rate. Default (when omitted) = `default_paint_fps`: the capture rate on the
+    /// real-presenter / paint-only paths (#290), 12 fps for the fbdev single-box loopback coverage
+    /// gate and the presenter-less synth-ndi reference, capture rate for full-rate mode.
     #[arg(long)]
     paint_fps: Option<f64>,
     /// Expected capture rate (1080p60 pipeline default)

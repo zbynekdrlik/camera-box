@@ -39,6 +39,9 @@ fn run_sourced(body: &str) -> String {
         .arg("-c")
         .arg(&harness)
         .env("SCRIPT", script())
+        // Clear painter overrides from the ambient env so the tests assert the script's PINNED
+        // defaults (e.g. PAINTER_FPS default = 60), not whatever the test runner happened to export.
+        .env_remove("PAINTER_FPS")
         .output()
         .expect("failed to run bash harness");
     assert!(
@@ -58,6 +61,7 @@ fn run_sourced_status(body: &str) -> (i32, String) {
         .arg("-c")
         .arg(&harness)
         .env("SCRIPT", script())
+        .env_remove("PAINTER_FPS")
         .output()
         .expect("failed to run bash harness");
     (
