@@ -700,6 +700,23 @@ async fn run_capture_loop(
                         emit_count = 0;
                         last_report = std::time::Instant::now();
                     }
+
+                    // #297 — re-announce the NDI sender if the host's usable network changed
+                    // (boot race / link flap), so the OBS NDI finder rediscovers this box.
+                    // Throttled internally to REANNOUNCE_POLL_INTERVAL; a stable network is a
+                    // no-op (never re-creates the sender, so steady state is unaffected). The
+                    // PRODUCTION (non-burn) sender is the one being discovered; in a burn/E2E
+                    // run the sender lives on the burn thread and re-announce is not needed.
+                    #[cfg(not(feature = "probe"))]
+                    if let Err(e) = sender.maybe_reannounce() {
+                        tracing::warn!("#297 NDI sender re-announce check failed: {}", e);
+                    }
+                    #[cfg(feature = "probe")]
+                    if let Some(s) = capture_sender.as_mut() {
+                        if let Err(e) = s.maybe_reannounce() {
+                            tracing::warn!("#297 NDI sender re-announce check failed: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to capture frame: {}", e);

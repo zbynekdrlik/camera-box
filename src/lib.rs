@@ -27,5 +27,10 @@ pub mod ndi;
 pub mod ndi_display;
 pub mod vban;
 
+// #297 — NDI sender re-announce trigger (pure decision + network signature). Cross-platform
+// (no v4l/libc) so it unit-tests Tier-0; the Linux-only IO (interface read + sender re-create)
+// lives in `ndi`.
+pub mod reannounce;
+
 #[cfg(feature = "probe")]
 pub mod probe;
