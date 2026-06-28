@@ -96,6 +96,11 @@ const NON_LAN_IFACE_PREFIXES: &[&str] = &[
 /// (`crate::ndi::current_network_signature`) filters `getifaddrs` results through this so the
 /// re-announce trigger keys on the LAN address only — matching the intent ("the LAN address
 /// settled / flapped") and never re-announcing because an unrelated virtual interface moved.
+///
+/// This is a DENYLIST of known virtual prefixes (the cam boxes have a single physical NIC, so a
+/// denylist matches reality without risking a real NIC being excluded). A plain `br0` (a bridge
+/// that itself carries the LAN IP) is deliberately NOT filtered — it is the LAN. If deployments
+/// ever diversify, tighten this to an allowlist (`en*`/`eth*`/`wl*`).
 pub fn is_discoverable_interface(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
     if n.is_empty() {

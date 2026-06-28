@@ -501,14 +501,10 @@ fn current_network_signature() -> crate::reannounce::NetworkSignature {
                 }
             }
             let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-            let ip = u32::from_be(sin.sin_addr.s_addr);
-            addrs.push(format!(
-                "{}.{}.{}.{}",
-                (ip >> 24) & 0xff,
-                (ip >> 16) & 0xff,
-                (ip >> 8) & 0xff,
-                ip & 0xff
-            ));
+            // s_addr is in network byte order; from_be → host order, then Ipv4Addr renders the
+            // dotted-quad (idiomatic, no hand-rolled shift/mask to re-verify for endianness).
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            addrs.push(ip.to_string());
         }
         libc::freeifaddrs(ifap);
     }
@@ -621,6 +617,10 @@ impl NdiSender {
     /// a real network change (already a disruption), NEVER in steady state, because
     /// [`crate::reannounce::should_reannounce`] returns false for an unchanged address set.
     pub fn maybe_reannounce(&mut self) -> Result<bool> {
+        // The poll interval is the deliberate sampling window: a network state shorter than it
+        // (a sub-2s flap that returns the same IP between two polls) is not observed — accepted
+        // for a LAN appliance where real changes are seconds-scale. A genuinely flapping NIC
+        // re-creates the sender at most once per interval (no tighter hysteresis is needed).
         if self.last_reannounce_check.elapsed() < crate::reannounce::REANNOUNCE_POLL_INTERVAL {
             return Ok(false);
         }
