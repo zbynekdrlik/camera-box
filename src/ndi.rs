@@ -409,6 +409,78 @@ impl Drop for NdiLib {
     }
 }
 
+/// #317 — test seam at the NDI sender FFI boundary.
+///
+/// `NdiLib` embeds a live `libloading::Library`, so an `NdiSender` cannot be constructed in a
+/// unit test without loading a real NDI `.so`. This trait abstracts the ONLY two FFI calls the
+/// re-announce dance makes — `NDIlib_send_create` and `NDIlib_send_destroy` — so
+/// [`reannounce_dance`] can be driven in a test with a FAKE function table that records call
+/// ORDER. The production impl ([`NdiLib`]) is a thin, inlined pass-through to the loaded raw
+/// function pointers, so the live path stays byte-identical to the hand-written calls it
+/// replaces.
+///
+/// The methods are safe to CALL: the single caller ([`reannounce_dance`]) upholds the FFI
+/// preconditions (a non-null, not-yet-destroyed handle for `send_destroy`; a `settings` whose
+/// `p_ndi_name` outlives the call for `send_create`), and each impl encapsulates the `unsafe`
+/// it needs.
+trait NdiSendOps {
+    /// Create a same-name NDI sender; returns the new handle, or null on failure — notably the
+    /// SDK refusing a SECOND sender whose name is already live (the create-first trap of #297).
+    fn send_create(&self, settings: &NDIlib_send_create_t) -> *mut c_void;
+    /// Destroy an NDI sender handle. Never called with null by [`reannounce_dance`].
+    fn send_destroy(&self, sender: *mut c_void);
+}
+
+impl NdiSendOps for NdiLib {
+    #[inline]
+    fn send_create(&self, settings: &NDIlib_send_create_t) -> *mut c_void {
+        // SAFETY: thin wrapper over the loaded NDIlib_send_create fn pointer; `settings` (and the
+        // `p_ndi_name` it borrows) is owned by the caller and valid for this call's duration.
+        unsafe { (self.send_create)(settings) }
+    }
+    #[inline]
+    fn send_destroy(&self, sender: *mut c_void) {
+        // SAFETY: thin wrapper over the loaded NDIlib_send_destroy fn pointer; the caller passes
+        // only a non-null handle previously returned by `send_create`.
+        unsafe { (self.send_destroy)(sender) }
+    }
+}
+
+/// #297/#317 — the re-announce dance, parameterized over [`NdiSendOps`] so the load-bearing
+/// destroy-BEFORE-create ordering AND the null-handle safety are unit-testable with a fake
+/// function table (no real NDI / no `libloading::Library`).
+///
+/// DESTROY the old handle FIRST: the NDI SDK refuses a same-name create while the old sender is
+/// still live, so create-first ALWAYS returns null (the #297 infinite re-announce loop). Then
+/// create the fresh same-name sender. The `sender` slot is nulled in the same step as the
+/// destroy, so a failed create leaves a valid NULL handle (guarded by the emit path) rather than
+/// a dangling/destroyed pointer; a RETRY after a prior failed create has an already-null slot,
+/// and `send_destroy(null)` is the case [`Drop`] avoids — so the null is guarded here.
+///
+/// On SUCCESS `*sender` becomes the new live handle and `trigger` advances to `current` (a stable
+/// poll then no longer fires — no loop). On a null create `*sender` stays NULL and `trigger` is
+/// left UNCHANGED so the next poll RETRIES. Returns whether the create succeeded.
+fn reannounce_dance<O: NdiSendOps>(
+    ops: &O,
+    sender: &mut *mut c_void,
+    settings: &NDIlib_send_create_t,
+    trigger: &mut crate::reannounce::ReannounceState,
+    current: crate::reannounce::NetworkSignature,
+) -> bool {
+    let old = std::mem::replace(sender, ptr::null_mut());
+    if !old.is_null() {
+        ops.send_destroy(old);
+    }
+    let new_sender = ops.send_create(settings);
+    let created_ok = !new_sender.is_null();
+    // Advance the trigger ONLY on success; on failure it stays put so the next poll retries.
+    trigger.record_reannounce_attempt(current, created_ok);
+    if created_ok {
+        *sender = new_sender;
+    }
+    created_ok
+}
+
 /// NDI sender wrapper - optimized for low latency
 /// Genlock decimation gate (#11): given the current wall-clock time `now_ns`, the
 /// next emit boundary `next_boundary_ns` (0 = uninitialized), and the boundary
@@ -660,33 +732,28 @@ impl NdiSender {
     /// left unchanged (via `record_reannounce_attempt(_, false)`) so the next poll RETRIES the
     /// create, and this returns Err for the caller to log.
     fn reannounce_now(&mut self, current: crate::reannounce::NetworkSignature) -> Result<bool> {
-        // Destroy FIRST so the name is free for the same-name create below. `self.sender` is set
-        // to null in the same step: if the create fails, the struct stays valid (null, guarded by
-        // the emit path) rather than holding a destroyed/dangling handle. Guard the null case —
-        // on a RETRY after a prior failed re-create `self.sender` is already null, and passing a
-        // null handle to `NDIlib_send_destroy` is the exact case `Drop` avoids.
-        let old = std::mem::replace(&mut self.sender, ptr::null_mut());
-        if !old.is_null() {
-            unsafe { (self.lib.send_destroy)(old) };
-        }
-
         let create_settings = NDIlib_send_create_t {
             p_ndi_name: self.ndi_name.as_ptr(),
             p_groups: ptr::null(),
             clock_video: false, // match new(): no internal pacing
             clock_audio: false,
         };
-        let new_sender = unsafe { (self.lib.send_create)(&create_settings) };
-        let created_ok = !new_sender.is_null();
-        // Advance the trigger ONLY on success; on failure it stays put so the next poll retries.
-        self.reannounce
-            .record_reannounce_attempt(current, created_ok);
+        // #297/#317 — destroy-FIRST then same-name create, via the test-seam dance so the
+        // load-bearing ordering + null-handle safety are locked by unit tests (no real NDI). On
+        // success the dance has already swapped `self.sender` to the new handle and advanced the
+        // trigger; on failure it left `self.sender` NULL and the trigger unchanged (retry next).
+        let created_ok = reannounce_dance(
+            &self.lib,
+            &mut self.sender,
+            &create_settings,
+            &mut self.reannounce,
+            current,
+        );
         if !created_ok {
             anyhow::bail!(
                 "#297 re-announce: NDIlib_send_create returned null after destroy; sender absent, retrying next poll"
             );
         }
-        self.sender = new_sender;
         tracing::info!(
             "#297 NDI sender '{}' re-announced on {:?}",
             self.ndi_name.to_string_lossy(),
@@ -1862,6 +1929,211 @@ mod tests {
         assert!(
             (29..=31).contains(&emitted),
             "60fps capture must decimate to ~30 emits, got {emitted}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ffi_seam_tests {
+    //! #317 — lock the NDI sender re-announce FFI ORDERING (destroy-before-create) by driving
+    //! [`reannounce_dance`] with a FAKE function table. This catches a revert to create-first
+    //! that every pure `crate::reannounce` test would miss (those never call the FFI). The fake
+    //! models the real SDK rule that caused #297: only ONE sender per name may be live at a
+    //! time, so a create while the old same-name handle is still live returns null.
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    /// A recorded FFI call. `Destroy` carries the freed handle so the test asserts the OLD sender
+    /// (not some other handle) is the one destroyed.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Op {
+        Create,
+        Destroy(usize),
+    }
+
+    /// Fake NDI function table: records call order and models the SDK's one-live-sender-per-name
+    /// rule (a create while a same-name sender is live returns null — the #297 create-first trap).
+    struct FakeNdi {
+        calls: RefCell<Vec<Op>>,
+        live: Cell<bool>,         // a same-name sender is currently registered
+        next_handle: Cell<usize>, // mints distinct non-null handles
+        fail_create: bool,        // also fail a create even once the name is free (genuine failure)
+    }
+
+    impl FakeNdi {
+        /// Seed with a sender ALREADY live (steady state before a re-announce). Returns the fake
+        /// plus the "old" live handle to feed in as the current `self.sender`.
+        fn with_live_sender(fail_create: bool) -> (Self, *mut c_void) {
+            let old_handle = 0x1000usize;
+            (
+                Self {
+                    calls: RefCell::new(Vec::new()),
+                    live: Cell::new(true),
+                    next_handle: Cell::new(0xA000),
+                    fail_create,
+                },
+                old_handle as *mut c_void,
+            )
+        }
+    }
+
+    impl NdiSendOps for FakeNdi {
+        fn send_create(&self, _settings: &NDIlib_send_create_t) -> *mut c_void {
+            self.calls.borrow_mut().push(Op::Create);
+            // SDK rule: refuse a second same-name sender while one is still live → null. This is
+            // exactly why create-first could never succeed (#297). Also honor an injected failure.
+            if self.live.get() || self.fail_create {
+                return ptr::null_mut();
+            }
+            self.live.set(true);
+            let handle = self.next_handle.get();
+            self.next_handle.set(handle + 1);
+            handle as *mut c_void
+        }
+
+        fn send_destroy(&self, sender: *mut c_void) {
+            self.calls.borrow_mut().push(Op::Destroy(sender as usize));
+            self.live.set(false);
+        }
+    }
+
+    fn sig(addrs: &[&str]) -> crate::reannounce::NetworkSignature {
+        crate::reannounce::NetworkSignature::from_addrs(addrs.iter().copied())
+    }
+
+    fn dummy_settings() -> NDIlib_send_create_t {
+        // The dance only forwards this struct to the ops; the fake never dereferences its pointers.
+        NDIlib_send_create_t {
+            p_ndi_name: ptr::null(),
+            p_groups: ptr::null(),
+            clock_video: false,
+            clock_audio: false,
+        }
+    }
+
+    #[test]
+    fn reannounce_destroys_old_before_creating_new_and_advances_trigger() {
+        // Acceptance (a)+(c): destroy(old) BEFORE create; a successful create swaps the handle and
+        // advances the trigger (announced_sig). A revert to create-first FAILS this test two ways:
+        // the recorded order flips, AND the create returns null (name still live) so created_ok is
+        // false and the trigger never advances — exactly the #297 infinite re-announce loop.
+        let (fake, old) = FakeNdi::with_live_sender(false);
+        let up = sig(&["10.77.9.62"]);
+        // Boot-race seed: created before the net was up, so a poll once an address appears fires.
+        let mut trigger =
+            crate::reannounce::ReannounceState::new(crate::reannounce::NetworkSignature::default());
+        assert!(trigger.should_reannounce(&up), "boot-race poll must fire");
+
+        let mut sender = old;
+        let settings = dummy_settings();
+        let created_ok = reannounce_dance(&fake, &mut sender, &settings, &mut trigger, up.clone());
+
+        // (a) ORDERING — the load-bearing #297 invariant.
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![Op::Destroy(old as usize), Op::Create],
+            "re-announce MUST destroy the old sender BEFORE creating the same-name sender"
+        );
+        // (c) a successful create swaps the handle and advances the trigger.
+        assert!(created_ok, "create after destroy must succeed (name freed)");
+        assert!(
+            !sender.is_null(),
+            "successful create installs a live handle"
+        );
+        assert_ne!(
+            sender as usize, old as usize,
+            "handle is swapped, not the old one"
+        );
+        assert!(
+            !trigger.should_reannounce(&up),
+            "a successful re-announce advances the trigger so a stable poll does not re-fire"
+        );
+        assert_eq!(
+            trigger.announced().addrs(),
+            up.addrs(),
+            "announced_sig advanced to the current network"
+        );
+    }
+
+    #[test]
+    fn null_create_after_destroy_leaves_sender_null_and_trigger_unchanged() {
+        // Acceptance (b): a null create AFTER the destroy leaves self.sender NULL and the trigger
+        // unchanged, so the box RETRIES on the next poll instead of stranding with no sender.
+        let (fake, old) = FakeNdi::with_live_sender(true); // create fails even after the destroy
+        let up = sig(&["10.77.9.62"]);
+        let mut trigger =
+            crate::reannounce::ReannounceState::new(crate::reannounce::NetworkSignature::default());
+        assert!(trigger.should_reannounce(&up));
+
+        let mut sender = old;
+        let settings = dummy_settings();
+        let created_ok = reannounce_dance(&fake, &mut sender, &settings, &mut trigger, up.clone());
+
+        // Destroy STILL happened first — the old handle is freed before the create is attempted.
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![Op::Destroy(old as usize), Op::Create],
+            "the destroy must precede the (failing) create"
+        );
+        assert!(!created_ok, "create returned null");
+        assert!(
+            sender.is_null(),
+            "sender is left NULL after a failed re-create"
+        );
+        assert!(
+            trigger.should_reannounce(&up),
+            "a failed re-create leaves the trigger firing so the next poll RETRIES"
+        );
+    }
+
+    #[test]
+    fn retry_after_failed_create_then_succeeds() {
+        // The recovery sequence end-to-end: poll 1's create fails (sender NULL, trigger still
+        // firing); poll 2 retries against the now-null slot — the destroy is SKIPPED (already
+        // null, the Drop-null guard) and the create succeeds, converging the trigger.
+        let up = sig(&["10.77.9.62"]);
+        let mut trigger =
+            crate::reannounce::ReannounceState::new(crate::reannounce::NetworkSignature::default());
+
+        // Poll 1: create fails after the destroy.
+        let (fake1, old) = FakeNdi::with_live_sender(true);
+        let mut sender = old;
+        assert!(!reannounce_dance(
+            &fake1,
+            &mut sender,
+            &dummy_settings(),
+            &mut trigger,
+            up.clone()
+        ));
+        assert!(sender.is_null());
+        assert!(
+            trigger.should_reannounce(&up),
+            "still firing → retry next poll"
+        );
+
+        // Poll 2: the slot is null (no live sender) → destroy skipped, create succeeds.
+        let fake2 = FakeNdi {
+            calls: RefCell::new(Vec::new()),
+            live: Cell::new(false), // the previous create never registered one
+            next_handle: Cell::new(0xB000),
+            fail_create: false,
+        };
+        assert!(reannounce_dance(
+            &fake2,
+            &mut sender,
+            &dummy_settings(),
+            &mut trigger,
+            up.clone()
+        ));
+        assert_eq!(
+            *fake2.calls.borrow(),
+            vec![Op::Create],
+            "a retry on a null slot skips the destroy (no NDIlib_send_destroy(null)) and creates"
+        );
+        assert!(!sender.is_null(), "retry installs a live handle");
+        assert!(
+            !trigger.should_reannounce(&up),
+            "retry converges the trigger"
         );
     }
 }
