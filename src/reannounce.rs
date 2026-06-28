@@ -134,3 +134,84 @@ pub fn should_reannounce(
     }
     announced != current || saw_down_since_announce
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sig(addrs: &[&str]) -> NetworkSignature {
+        NetworkSignature::from_addrs(addrs.iter().copied())
+    }
+
+    #[test]
+    fn seeded_with_live_network_does_not_fire() {
+        // #297(3): the sender is created when the network is ALREADY up — the trigger is seeded
+        // with that live signature, so the first stable poll must NOT spuriously re-create the
+        // sender (which would needlessly drop the program feed on every clean boot).
+        let st = ReannounceState::new(sig(&["10.77.9.62"]));
+        assert!(
+            !st.should_reannounce(&sig(&["10.77.9.62"])),
+            "a sender seeded with the live network must not re-announce on a stable poll"
+        );
+    }
+
+    #[test]
+    fn converges_after_successful_announce() {
+        // THE #297 infinite-loop regression: boot race — the sender was created before the
+        // network came up (empty seed). The first poll once an address appears MUST fire, and
+        // after the re-announce SUCCEEDS the trigger must advance so the next STABLE poll does
+        // NOT fire again. The shipped bug left the trigger at the empty baseline forever, so it
+        // re-fired every poll (2s WARN spam) and never converged.
+        let mut st = ReannounceState::new(NetworkSignature::default()); // booted before net up
+        let up = sig(&["10.77.9.130", "10.77.9.62"]);
+        assert!(
+            st.should_reannounce(&up),
+            "an address appearing after start MUST fire the re-announce (boot race)"
+        );
+        st.record_reannounce_attempt(up.clone(), true); // re-create succeeded (destroy-first)
+        assert!(
+            !st.should_reannounce(&up),
+            "after a successful re-announce a stable poll MUST NOT re-fire (no infinite loop)"
+        );
+    }
+
+    #[test]
+    fn retries_after_failed_create_then_converges() {
+        // The now-rare null create AFTER the destroy: the old handle is gone, the new one failed,
+        // so the sender is absent. The trigger state must be LEFT UNCHANGED so the very next poll
+        // RETRIES the create (recover ASAP) — it must not silently advance and strand the box
+        // with no sender. Once a retry succeeds, it converges.
+        let mut st = ReannounceState::new(NetworkSignature::default());
+        let up = sig(&["10.77.9.62"]);
+        assert!(st.should_reannounce(&up), "first poll fires");
+        st.record_reannounce_attempt(up.clone(), false); // create returned null after destroy
+        assert!(
+            st.should_reannounce(&up),
+            "a FAILED re-create must leave the trigger firing so the next poll retries"
+        );
+        st.record_reannounce_attempt(up.clone(), true); // retry succeeded
+        assert!(
+            !st.should_reannounce(&up),
+            "once the retry succeeds the trigger converges"
+        );
+    }
+
+    #[test]
+    fn recovers_from_outage_then_converges() {
+        // A link bounce that returned the SAME address: the mDNS registration was dropped during
+        // the outage, so the trigger must fire once (saw_down) even though the address set is
+        // unchanged, then converge after the re-announce succeeds.
+        let mut st = ReannounceState::new(sig(&["10.77.9.62"]));
+        st.mark_down(); // network observed down this poll
+        let back = sig(&["10.77.9.62"]); // same address returned
+        assert!(
+            st.should_reannounce(&back),
+            "recovery from an outage MUST re-announce even on the same address"
+        );
+        st.record_reannounce_attempt(back.clone(), true);
+        assert!(
+            !st.should_reannounce(&back),
+            "after recovery the down flag is cleared and a stable poll does not re-fire"
+        );
+    }
+}
