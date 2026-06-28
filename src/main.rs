@@ -476,6 +476,12 @@ async fn run_capture_loop(
             let handle = std::thread::Builder::new()
                 .name("cam1-burn".into())
                 .spawn(move || {
+                    // #289 — in burn mode (probe/E2E) the NDI sender lives HERE, so this thread is
+                    // the EMIT hot path. Pin it explicitly to the isolated core (issue point 1:
+                    // capture + EMIT → isolated core) rather than relying on the affinity it
+                    // inherits from the capture thread — same core, but explicit + robust to any
+                    // future spawn-order change.
+                    camera_box::affinity::pin_capture_thread();
                     // Burn thread: (optionally) render the QR into the copied frame + NDI-send it in
                     // receive (= emit) order. Ends when the capture loop drops the ring (shutdown).
                     camera_box::probe::genlock::run_burn_ring(rx, |mut job: BurnJob| {

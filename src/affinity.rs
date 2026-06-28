@@ -26,9 +26,12 @@ const CAPTURE_CORE_ENV: &str = "CAMERA_BOX_CAPTURE_CORE";
 
 /// Keywords for generic capture-IRQ discovery in `/proc/interrupts`. The
 /// ShadowCast / NZXT capture cards are UVC-over-USB, so their data delivery is
-/// the USB host-controller IRQ (xHCI/EHCI/OHCI) plus, where present, a uvcvideo
-/// line — never a hardcoded IRQ number.
-const CAPTURE_IRQ_KEYWORDS: &[&str] = &["xhci", "ehci", "ohci", "uvcvideo", "usb"];
+/// the USB HOST-CONTROLLER IRQ (xHCI/EHCI/OHCI) plus, where present, a uvcvideo
+/// line — never a hardcoded IRQ number. Deliberately NOT the bare `"usb"`: that
+/// also matches unrelated `usbN` device lines (usbhid, usb-storage, a USB NIC),
+/// which would drag non-capture interrupts onto the isolated core. The host
+/// controller keywords already catch the `xhci_hcd:usbN` line the capture card sits on.
+const CAPTURE_IRQ_KEYWORDS: &[&str] = &["xhci", "ehci", "ohci", "uvcvideo"];
 
 /// Parse a Linux cpulist string (`/sys/devices/system/cpu/{online,isolated}`,
 /// the kernel "0-3" / "3" / "0,2-3" comma+range format) into a sorted, deduped

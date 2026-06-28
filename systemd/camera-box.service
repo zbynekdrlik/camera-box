@@ -46,7 +46,12 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadOnlyPaths=/
-ReadWritePaths=/dev /sys /run
+# /proc/irq (#289): ProtectSystem=strict + ReadOnlyPaths=/ make the tree read-only;
+# the --setup-irq-affinity ExecStartPre must WRITE /proc/irq/<n>/smp_affinity, so
+# grant it RW explicitly (ReadWritePaths wins over ReadOnlyPaths for this subtree).
+# /proc/interrupts is only READ, so it needs no grant. Without this the IRQ routing
+# would fail EROFS and silently no-op.
+ReadWritePaths=/dev /sys /run /proc/irq
 
 # Allow access to video devices
 SupplementaryGroups=video
