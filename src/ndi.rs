@@ -662,9 +662,13 @@ impl NdiSender {
     fn reannounce_now(&mut self, current: crate::reannounce::NetworkSignature) -> Result<bool> {
         // Destroy FIRST so the name is free for the same-name create below. `self.sender` is set
         // to null in the same step: if the create fails, the struct stays valid (null, guarded by
-        // the emit path) rather than holding a destroyed/dangling handle.
+        // the emit path) rather than holding a destroyed/dangling handle. Guard the null case —
+        // on a RETRY after a prior failed re-create `self.sender` is already null, and passing a
+        // null handle to `NDIlib_send_destroy` is the exact case `Drop` avoids.
         let old = std::mem::replace(&mut self.sender, ptr::null_mut());
-        unsafe { (self.lib.send_destroy)(old) };
+        if !old.is_null() {
+            unsafe { (self.lib.send_destroy)(old) };
+        }
 
         let create_settings = NDIlib_send_create_t {
             p_ndi_name: self.ndi_name.as_ptr(),
