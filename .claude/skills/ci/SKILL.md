@@ -126,3 +126,21 @@ commits), so two things bite here repeatedly:
    is ignored). Keep the `[no-test: …]` opening `[` and closing `]` on the SAME commit-message line.
    Bare `[no-test]` (no reason) is rejected outright. Every bypass is logged to
    `~/devel/airuleset/audits/no-test-skips.log`.
+
+## New file mixing PURE + syscall/IO glue → update BOTH coverage & mutants (kms.rs precedent)
+
+When you add a Rust file whose PURE functions are unit-testable but which also has glue that CANNOT
+be (raw syscalls, `/proc`/`/sys` IO, FFI, live hardware), CI's two strict gates will fail unless you
+exclude the glue — follow how `kms.rs` / `painter.rs` are already handled (#289 `src/affinity.rs` did this):
+
+1. **Coverage** (`ci.yml` "Generate coverage report"): add the file to `--ignore-filename-regex`
+   (it's whole-FILE only — can't exclude individual functions). The pure functions' unit tests still
+   RUN; the file just doesn't drag the `--fail-under-lines` threshold with untestable glue lines.
+2. **Mutants** (`ci.yml` "Mutation testing", `--in-diff`): add a `--exclude-re '\b<glue_fn>\b'` per
+   glue function. KEEP the pure functions mutated — and make them mutation-ROBUST (a surviving mutant
+   in the diff FAILS the job, and you can't run cargo-mutants locally: it needs `--features probe`):
+   - Drop redundant guards whose mutant is a no-op (e.g. an empty-string `if x.is_empty(){continue}`
+     when the downstream `parse` already returns `Err` → the `if false` mutant survives; just remove it).
+   - Add edge tests that kill value mutants: a duplicate input (kills `|=`→`^=`/`+=`), an out-of-range
+     value (kills a `< N` bound flipped to `<= N` / `if true`), a "skipped" input (kills a filter negation).
+   - Unit-returning calls (`vec.sort_unstable()`, `vec.dedup()`) are NOT mutated — don't over-test them.
