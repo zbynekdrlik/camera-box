@@ -192,7 +192,15 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
 ```
 
 **TEST mode (pinned):**
-- **cam2 (10.77.9.62):** `systemctl stop camera-box` (frees /dev/fb0) → launch the painter
+- **cam2 (10.77.9.62):** free /dev/fb0 WITHOUT killing capture+emit (#291). cam2 does THREE
+  independent things — DISPLAY (`--display` → /dev/fb0/HDMI), CAPTURE (/dev/video0) and EMIT (NDI to
+  strih); ONLY display grabs fb0. So TEST mode installs a TRANSIENT systemd drop-in
+  (`/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf` — overrides ExecStart to
+  run camera-box WITHOUT `--display`) then `daemon-reload` + `restart camera-box`: display output
+  stops (fb0 freed) while capture+emit KEEP RUNNING → **cam2 stays a measurable camera in test mode**
+  (the old `systemctl stop camera-box` killed all three and wrongly dropped cam2). The drop-in lives
+  in /run (tmpfs) so a reboot auto-reverts; EVENT mode removes it. The unit's Restart=always now
+  respawns the no-display command, so a restart can never re-grab fb0. → launch the painter
   `frame-probe --paint-only --dual-qr --qr-size 700 --duration-secs N` (700px = the validated
   vernier), PID → `/run/rig-painter.pid`. Painter binary = `/usr/local/bin/frame-probe` from the CI
   `probe-tools-linux-amd64` artifact (`gh run download <run> -n probe-tools-linux-amd64` → scp to
@@ -209,8 +217,10 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
 
 **EVENT mode (pinned — the #246 guard):**
 - **cam2:** stop the painter via its PID file (NOT `pkill -f frame-probe` — a shell whose cmdline
-  contains "frame-probe" would self-kill; `pkill -x frame-probe` is the safe fallback) →
-  `systemctl start camera-box` → verify active + `--display` restored (re-holds /dev/fb0).
+  contains "frame-probe" would self-kill; `pkill -x frame-probe` is the safe fallback) → REMOVE the
+  transient no-display drop-in TEST mode installed (#291) → `daemon-reload` + `restart camera-box`
+  (a `restart`, not a bare `start`, since TEST mode reconfigured rather than stopped it) → verify
+  active + `--display` restored (re-holds /dev/fb0).
 - **strih + stream OBS:** the measurement burn is toggled OFF over OBS WebSocket — the #246 guard,
   **NO relaunch, NO env**: `rig-mode.sh event` runs `scripts/obs_burn_filter.py remove` on both
   boxes (per-source `genlock_burn=false`; the EFFECT filter stays registered, pass-through — no QR
@@ -240,6 +250,23 @@ guard, so their pure functions can be sourced directly (see `urlencode_name` / `
 Structural guards (the script CONTAINS the gate/flag) complement — but don't replace — a behavioral
 mirror of the decision logic.
 
+**Heredoc-authoring footgun (rig-mode.sh `painter_*_remote`, #291):** the remote-bash builders use an
+UNQUOTED `cat <<REMOTE` heredoc so build-time locals (`$cbbin`, `$dropin`) expand. That means
+backticks AND `$( … )` in the heredoc body — **including in COMMENTS** — run on the LOCAL (dev1)
+shell while building the string, not on the cam. A comment like `` # use `systemctl show` not `systemctl cat` ``
+silently runs `systemctl cat` on dev1 ("Too few arguments") and emits a MANGLED comment to the cam.
+Rules for editing these heredocs: remote runtime vars/substitutions MUST be `\$`-escaped (`\$(systemctl
+is-active …)`, `\$i`); local vars are bare (`$cbbin`); and **never put backticks or `$()` in a heredoc
+comment** — use single quotes (`'systemctl show'`). Verify after editing: `bash -c '. scripts/rig-mode.sh;
+painter_launch_remote … >/dev/null; painter_stop_remote … >/dev/null'` must print ZERO stderr.
+
+**Why a systemd drop-in, not loopback's manual `nohup camera-box`:** `loopback-e2e.sh` runs a manual
+no-display camera-box (stop service → `nohup /usr/local/bin/camera-box &`), fine for a single-box
+loopback. rig-mode TEST (#291) instead installs a `/run` ExecStart drop-in so cam2 stays UNDER systemd
+with all its directives (Nice=-10, SCHED_FIFO, CPUAffinity, NDI env, Restart=always) — cam2 must emit
+PRODUCTION-quality NDI to strih during the whole test, and Restart=always must respawn the no-display
+command (never re-grab fb0). Use the drop-in for rig-mode; the manual nohup is loopback-only.
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).
@@ -258,12 +285,18 @@ The dual-QR painter on cam2 is REQUIRED for every frame-loss / sync verification
 tick the cameras film). Without it the cameras show only the operator view → NOTHING decodes (a
 blank/operator capture is NOT "the QR is broken/overexposed" — the QR simply isn't painted).
 
-- **Turn QR ON:**  `scripts/rig-mode.sh test`   → stops camera-box on cam2 (.62, frees /dev/fb0) +
-  launches `frame-probe --paint-only --dual-qr --qr-size 700` + toggles the genlock_burn ON.
+- **Turn QR ON:**  `scripts/rig-mode.sh test`   → switches cam2 (.62) camera-box to no-display
+  (frees /dev/fb0, KEEPS capture+emit — #291) + launches `frame-probe --paint-only --dual-qr
+  --qr-size 700` + toggles the genlock_burn ON.
 - **Turn QR OFF (back to broadcast):** `scripts/rig-mode.sh event` → stops the painter (pidfile),
-  restarts camera-box on cam2 (--display), burns OFF. ALWAYS run this before a live event.
-- In TEST mode cam2 (.62) is the PAINTER, so it does NOT capture — only the OTHER cam boxes
-  (cam1/3/4) film the QR. To measure cam2 AS A CAMERA you need the painter on a different display/box.
+  removes the no-display drop-in + restarts camera-box on cam2 (--display restored), burns OFF.
+  ALWAYS run this before a live event.
+- In TEST mode cam2 (.62) PAINTS the monitor on fb0 AND its camera-box stays running in no-display
+  mode (still captures /dev/video0 + emits NDI — #291), instead of being fully stopped. So cam2 is
+  no longer auto-dropped as a camera in test mode. Whether cam2's emitted NDI actually carries the
+  vernier QR depends on the rig HW (its /dev/video0 ShadowCast seeing the painted monitor via the
+  split HDMI) — confirm that on the rig (decode cam2's NDI for the QR); the switch alone does NOT
+  prove it. cam1/3/4 also film the QR as before.
 
 **GOTCHA — check the painter with `pgrep -x frame-probe` (EXACT name), NEVER `pgrep -f frame-probe`.**
 `pgrep -f` matches the whole cmdline → it matches YOUR OWN shell/ssh command that contains the string

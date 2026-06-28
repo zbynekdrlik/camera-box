@@ -12,15 +12,18 @@
 # the env-free genlock relaunch (no --mode) is PRINTED to run via the win-*
 # MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
 #
-#   TEST  : cam2 — stop camera-box (frees /dev/fb0), launch the PINNED dual-QR vernier painter
+#   TEST  : cam2 — free /dev/fb0 WITHOUT killing capture+emit (#291: switch camera-box to a TRANSIENT
+#                  no-display systemd drop-in instead of stopping it — display output is the ONLY thing
+#                  that grabs fb0; /dev/video0 capture + NDI emit do not), so cam2 stays a MEASURABLE
+#                  camera during the test. Then launch the PINNED dual-QR vernier painter
 #                  (frame-probe --paint-only --dual-qr --qr-size 700 --duration-secs N), verify it is
-#                  up + writing /dev/fb0. Then PRINT the OBS test step (burns ON via the #128 wrapper,
-#                  run_id strih 911002 / stream 911004 set ONLY in the launch shell — NEVER Machine).
+#                  up + writing /dev/fb0 AND camera-box is still active + capturing/emitting. Then
+#                  PRINT the OBS test step (burns ON, run_id strih 911002 / stream 911004).
 #   EVENT : cam2 — stop the painter cleanly (via its PID file — NOT a naive `pkill -f frame-probe`,
-#                  which would self-kill a shell whose cmdline contains "frame-probe"), restart
-#                  camera-box, verify the service is active + --display restored. Then PRINT the OBS
-#                  event step (burns OFF: cleared in the launch shell AND asserted ABSENT from Machine
-#                  — the #246 guard; the wrapper refuses to launch otherwise).
+#                  which would self-kill a shell whose cmdline contains "frame-probe"), REMOVE the
+#                  transient no-display drop-in TEST mode installed (#291), then reload + restart
+#                  camera-box and verify the service is active + --display restored. Then PRINT the OBS
+#                  event step (burns OFF: the #246 guard; the wrapper refuses to launch otherwise).
 #
 # The painter binary on cam2 comes from the CI probe-tools-linux-amd64 artifact:
 #   gh run download <latest CI run> -n probe-tools-linux-amd64
@@ -63,16 +66,25 @@ QR_SIZE="${QR_SIZE:-700}"
 PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
+CAMERA_BOX_BIN="${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}"   # the deployed camera-box binary on cam2
+# #291: the TRANSIENT no-display systemd drop-in TEST mode installs (and EVENT mode removes). Single
+# source of truth so install (painter_launch_remote) and remove (painter_stop_remote) can never desync.
+# In /run (tmpfs) so a reboot auto-reverts to the deployed --display unit.
+RIG_TEST_DROPIN="${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}"
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
-# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] -> the REMOTE bash run on cam2 (over ssh) to enter
-# TEST mode: stop any prior painter, stop camera-box to free /dev/fb0, fail loud if the painter binary
-# is absent, launch the PINNED dual-QR vernier painter recording its PID, then verify it is up AND
-# writing /dev/fb0. Pure string so a unit test can assert the pinned flags + the safety properties
+# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [CBBIN] [DROPIN] -> the REMOTE bash run on cam2
+# (over ssh) to enter TEST mode: stop any prior painter, free /dev/fb0 WITHOUT killing capture+emit
+# (#291: switch camera-box to a no-display drop-in instead of stopping it), fail loud if the painter
+# binary is absent, launch the PINNED dual-QR vernier painter recording its PID, then verify it is up
+# AND writing /dev/fb0. Pure string so a unit test can assert the pinned flags + the safety properties
 # without a live cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY.
 painter_launch_remote() {
   local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
+  local cbbin="${6:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
+  local dropin="${7:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
+  local dropin_dir; dropin_dir="$(dirname "$dropin")"
   cat <<REMOTE
 set -e
 # (0) idempotency: stop any painter from a previous TEST run so re-running never stacks two painters on
@@ -83,13 +95,42 @@ if [ -f "$pidfile" ]; then
   [ -n "\$OLD" ] && kill "\$OLD" 2>/dev/null || true
 fi
 pkill -x frame-probe 2>/dev/null || true
-# (1) free /dev/fb0: cam2's camera-box runs --display and HOLDS the framebuffer; STOP the service
-#     (NOT kill — the unit is Restart=always, a kill would respawn it and re-grab fb0).
-systemctl stop camera-box
-# (2) wait until /dev/fb0 is actually free (fbdev teardown is async after the process dies).
+# (1) free /dev/fb0 WITHOUT killing capture+emit (#291). cam2 does THREE independent things: DISPLAY
+#     (--display -> /dev/fb0/HDMI), CAPTURE (/dev/video0) and EMIT (NDI to strih). ONLY display grabs
+#     fb0; capture+emit do not. The old switch fully STOPPED the whole service, which killed all three
+#     and dropped cam2 as a measurable camera. Instead install a TRANSIENT systemd drop-in that
+#     overrides ExecStart to run camera-box WITHOUT --display, then reload + restart: display output
+#     stops (fb0 freed for the painter) while capture+emit keep running. The drop-in lives in /run
+#     (tmpfs) so a reboot auto-reverts to the deployed --display unit; EVENT mode removes it
+#     explicitly. Because the drop-in IS the active ExecStart, the unit's Restart=always now respawns
+#     the NO-display command — a restart can never re-grab fb0 (the footgun a naive kill+respawn had).
+mkdir -p "$dropin_dir"
+{
+  echo '[Service]'
+  echo 'ExecStart='
+  echo "ExecStart=$cbbin"
+} > "$dropin"
+systemctl daemon-reload
+systemctl restart camera-box
+# (2) wait until /dev/fb0 is actually free (the no-display camera-box released it; teardown is async).
 i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done
-if fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: /dev/fb0 still held after stopping camera-box" >&2; exit 1; fi
-echo "ok: /dev/fb0 free"
+if fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: /dev/fb0 still held after switching camera-box to no-display mode" >&2; exit 1; fi
+echo "ok: /dev/fb0 free (camera-box NOT stopped — only display output dropped; capture+emit keep running)"
+# (2b) #291: verify camera-box is STILL ACTIVE (so capture+emit keep running — the whole point) and
+#      now runs WITHOUT --display, so a Restart=always respawn can never re-grab fb0. NOTE: this is a
+#      systemd is-active check (Type=simple → 'active' == process forked); it does NOT itself prove the
+#      NDI emit reached strih — that optical/network proof is a rig step (see the e2e skill).
+i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
+  echo "FAIL: camera-box not active after switching to no-display mode (capture+emit must keep running)" >&2
+  systemctl status camera-box --no-pager >&2 2>/dev/null || true
+  exit 1
+fi
+if systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'; then
+  echo "FAIL: camera-box still launches with --display — fb0 would be re-grabbed" >&2
+  exit 1
+fi
+echo "ok: camera-box ACTIVE in no-display mode (not stopped; capture+emit running) — fb0 free for the painter"
 # (3) the painter binary MUST be present — deploy the CI probe-tools-linux-amd64 artifact to it.
 if [ ! -x "$bin" ]; then
   echo "FAIL: painter binary $bin missing/not-executable on cam2." >&2
@@ -116,12 +157,15 @@ echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, $
 REMOTE
 }
 
-# painter_stop_remote PIDFILE -> the REMOTE bash run on cam2 to enter EVENT mode: stop the painter
-# cleanly via its PID file (NEVER a 'pkill -f frame-probe' — that matches the remote shell's own
-# cmdline and self-kills the cleanup), restart camera-box, then verify the service is active AND
-# --display is restored (camera-box re-grabbed /dev/fb0 to paint the interkom return on the monitor).
+# painter_stop_remote PIDFILE [DROPIN] -> the REMOTE bash run on cam2 to enter EVENT mode: stop the
+# painter cleanly via its PID file (NEVER a 'pkill -f frame-probe' — that matches the remote shell's
+# own cmdline and self-kills the cleanup), REMOVE the transient no-display drop-in TEST mode installed
+# (#291), then reload + restart camera-box and verify the service is active AND --display is restored
+# (camera-box re-grabbed /dev/fb0 to paint the interkom return on the monitor).
 painter_stop_remote() {
   local pidfile="$1"
+  local dropin="${2:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
+  local dropin_dir; dropin_dir="$(dirname "$dropin")"
   cat <<REMOTE
 set -e
 # (1) stop the painter cleanly via its PID file (the self-match-safe path).
@@ -133,18 +177,27 @@ fi
 # (2) belt-and-suspenders: pkill -x matches the process NAME only (comm), so it can NEVER match the
 #     remote shell's own cmdline — immune to the self-match that strands cleanups (NOT pkill -f).
 pkill -x frame-probe 2>/dev/null || true
-# (3) wait until /dev/fb0 is released by the painter, then restart camera-box (--display interkom).
+# (3) wait until /dev/fb0 is released by the painter, then RESTORE the deployed --display camera-box
+#     (#291): remove the transient no-display drop-in TEST mode installed, reload, and RESTART so the
+#     unit's ExecStart reverts to --display and camera-box re-grabs /dev/fb0 for the interkom return.
+#     (TEST mode no longer STOPS camera-box — it switches it to no-display — so EVENT mode RESTARTS
+#     rather than just starts, to drop the override.)
 i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-systemctl start camera-box
+rm -f "$dropin" 2>/dev/null || true
+rmdir "$dropin_dir" 2>/dev/null || true
+systemctl daemon-reload
+systemctl restart camera-box
 # (4) verify the service is active.
 i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
-  echo "FAIL: camera-box service not active after start" >&2
+  echo "FAIL: camera-box service not active after restart" >&2
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (5) verify --display is restored: the ExecStart carries --display AND camera-box re-grabbed /dev/fb0.
-if ! systemctl cat camera-box 2>/dev/null | grep -q -- '--display'; then
+# (5) verify --display is restored: the EFFECTIVE ExecStart carries --display (same resolved check
+#     TEST mode uses — 'systemctl show', NOT 'systemctl cat', so a silently-failed drop-in removal
+#     can't false-pass on the base unit's --display line) AND camera-box re-grabbed /dev/fb0.
+if ! systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'; then
   echo "FAIL: camera-box ExecStart has no --display — interkom monitor not restored" >&2
   exit 1
 fi
@@ -259,8 +312,8 @@ cam_ssh() {
 
 do_test() {
   require_sshpass
-  echo "===== rig-mode TEST (#247/#257) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
-  echo "[cam2 ${PAINTER_IP}] stop camera-box -> free /dev/fb0 -> launch PINNED painter (qr=${QR_SIZE}px)"
+  echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
+  echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
   cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS")"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
@@ -269,6 +322,8 @@ do_test() {
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
+  echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
+  echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream program inputs (WebSocket, no relaunch)."
   echo "NEXT: confirm the PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> TEST mode."
@@ -277,8 +332,8 @@ do_test() {
 
 do_event() {
   require_sshpass
-  echo "===== rig-mode EVENT (#247/#257) — stop QR, restore clean broadcast, genlock_burn OFF ====="
-  echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> restart camera-box -> verify --display restored"
+  echo "===== rig-mode EVENT (#247/#257/#291) — stop QR, restore clean broadcast, genlock_burn OFF ====="
+  echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove no-display drop-in -> restart camera-box -> verify --display restored"
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
