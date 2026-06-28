@@ -147,7 +147,7 @@ pub fn should_reannounce(
 ///   loop that destroyed-nothing-and-bailed on every poll;
 /// - a FAILED re-announce LEAVES the state unchanged, so the next poll RETRIES (the sender is
 ///   absent until a create succeeds; the emit path guards the null handle).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReannounceState {
     /// The usable-network signature the sender is currently announced on.
     announced: NetworkSignature,
