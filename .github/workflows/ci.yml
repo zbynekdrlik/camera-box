@@ -143,7 +143,11 @@ jobs:
         # threshold reflects testable logic. kms.rs's PURE decision functions (pick_mode,
         # copy_plan, copy_bgra_into, next_bo_index) are unit-tested, but its live DRM
         # `hw` glue cannot be, so the file follows the same exclusion as fb.rs.
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict)\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        # src/affinity.rs (#289): its PURE selection/parse functions are unit- AND
+        # mutation-tested, but its sched_setaffinity / /proc-irq / /sys IO glue cannot
+        # be — so the file follows the same whole-file exclusion as kms.rs (glue
+        # excluded from coverage, pure functions still mutated in the mutants job).
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
   mutants:
     name: Mutation Testing
@@ -223,6 +227,12 @@ jobs:
         # zero-loss/real-drop assertions in merge_of_partials_reproduces_the_fused_verdict), the
         # burn-id contiguity engine, and RecordingPartial::{from_frames,to_json,from_json} (the
         # recording_partial roundtrip + schema unit tests).
+        # #289 affinity glue (env_capture_core / read_online_cores / read_isolated_cores /
+        # pin_current_thread / pin_capture_thread / pin_off_capture_core / setup_irq_affinity):
+        # sched_setaffinity + /sys + /proc-irq IO — uncatchable by a unit test (no live core
+        # topology / no writable /proc/irq in CI). The PURE logic they wrap IS mutated + covered:
+        # parse_cpulist, select_capture_core, select_painter_cores, parse_capture_irqs,
+        # smp_affinity_mask_hex (the src/affinity.rs unit tests).
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
             cargo mutants --in-diff pr.diff --features probe \
@@ -245,6 +255,13 @@ jobs:
               --exclude-re 'RecordingPartial::save' \
               --exclude-re 'RecordingPartial::load' \
               --exclude-re '\breport_recording_diag\b' \
+              --exclude-re '\benv_capture_core\b' \
+              --exclude-re '\bread_online_cores\b' \
+              --exclude-re '\bread_isolated_cores\b' \
+              --exclude-re '\bpin_current_thread\b' \
+              --exclude-re '\bpin_capture_thread\b' \
+              --exclude-re '\bpin_off_capture_core\b' \
+              --exclude-re '\bsetup_irq_affinity\b' \
               --timeout 120
           else
             echo "No Rust source changes in this PR — skipping mutation testing."

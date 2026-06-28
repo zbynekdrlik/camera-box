@@ -74,6 +74,22 @@ sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box && 
 
 Use IP addresses — `.lan` DNS may not resolve.
 
+## Realtime CPU + IRQ isolation of the grab (#289)
+
+The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbles under box load
+(USB kworkers, ssh, the QR painter on .62) → fps dips + underruns + head_skew. The logic lives in
+`src/affinity.rs` (pure, unit-tested) + its call sites:
+- **Capture+emit** thread → the isolated core; **painter / `--display` / intercom** → OFF it (cores 0-2).
+- The isolated core is DERIVED from `/sys/devices/system/cpu/isolated` (highest online isolated;
+  fallback last online; `CAMERA_BOX_CAPTURE_CORE` override) — **never hardcode a core number**.
+- USB capture IRQ routed onto the isolated core via `/proc/irq/<n>/smp_affinity`, discovered from
+  `/proc/interrupts` — run by `camera-box --setup-irq-affinity` from the unit's `ExecStartPre`.
+- `systemd/camera-box.service` carries `CPUAffinity=3` (soft belt-and-braces; the binary refines).
+- Verify on a box: `taskset -acp $(pidof camera-box)` (capture threads on the isolated core),
+  `journalctl -u camera-box | grep '#289'` (pin + IRQ log lines), `grep . /proc/irq/*/smp_affinity`.
+- **Kernel-cmdline tuning is DEFERRED** (`nohz_full`/`rcu_nocbs`/`irqaffinity=`, #303) — it needs the
+  #295 safe-grub work first. **NEVER edit `/etc/default/grub` + `update-grub`** (bricked 2 boxes, #295/#301).
+
 ## Rig Recovery Policy
 
 The camera-box rig (cam1-4, strih.lan, stream.lan) is a **dev rig, not production**.

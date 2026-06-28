@@ -6,6 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# #289 — route the USB capture-controller IRQ(s) onto the isolated core before the
+# grab starts (best-effort; the leading '-' means a failure never blocks startup).
+ExecStartPre=-/usr/local/bin/camera-box --setup-irq-affinity
 ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
@@ -14,6 +17,20 @@ RestartSec=3
 Nice=-10
 CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=50
+
+# #289 — belt-and-braces realtime CPU isolation: confine the process to the
+# isolated core (isolcpus=3 on the cam-box fleet) so the SCHED_FIFO grab runs on
+# the reserved core by default, with no manual taskset. CPUAffinity is a SOFT
+# (inherited) mask — NOT a cpuset hard cap — so the per-thread sched_setaffinity
+# calls in the binary still succeed: camera-box moves its painter / --display /
+# intercom threads OFF onto the general cores (0-2) at thread start, and re-pins
+# the capture+emit thread to the /sys-derived isolated core (authoritative — this
+# static value just matches the fleet's isolcpus=3). Threads the binary does NOT
+# re-pin (the tokio runtime workers, NDI SDK internals) stay on core 3, but they
+# are SCHED_OTHER while the capture thread is SCHED_FIFO prio 90, so they can
+# never preempt the grab; they only use core 3's idle slack. If the in-binary pin
+# ever fails, this keeps the FIFO grab on the isolated core regardless.
+CPUAffinity=3
 
 # Environment for NDI SDK
 Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi
@@ -29,7 +46,12 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadOnlyPaths=/
-ReadWritePaths=/dev /sys /run
+# /proc/irq (#289): ProtectSystem=strict + ReadOnlyPaths=/ make the tree read-only;
+# the --setup-irq-affinity ExecStartPre must WRITE /proc/irq/<n>/smp_affinity, so
+# grant it RW explicitly (ReadWritePaths wins over ReadOnlyPaths for this subtree).
+# /proc/interrupts is only READ, so it needs no grant. Without this the IRQ routing
+# would fail EROFS and silently no-op.
+ReadWritePaths=/dev /sys /run /proc/irq
 
 # Allow access to video devices
 SupplementaryGroups=video

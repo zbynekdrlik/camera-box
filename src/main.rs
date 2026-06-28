@@ -96,23 +96,12 @@ fn apply_memory_locking() {
     }
 }
 
-/// Set CPU affinity to pin capture thread to a specific core
+/// Pin the capture + NDI-emit hot thread to the isolated core (#289) so the
+/// SCHED_FIFO grab runs ALONE on the `isolcpus`-reserved core, immune to the box
+/// load on the general cores (USB kworkers, rsyslogd, ssh, the QR painter, ...).
+/// The isolated core is derived from `/sys` — never hardcoded; see [`camera_box::affinity`].
 fn apply_cpu_affinity() {
-    unsafe {
-        let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-
-        // Pin to CPU core 1 (leave core 0 for system tasks)
-        libc::CPU_SET(1, &mut cpuset);
-
-        let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
-
-        if result == 0 {
-            tracing::info!("CPU affinity set to core 1");
-        } else {
-            // Not critical - just a hint to the scheduler
-            tracing::debug!("Could not set CPU affinity (non-critical)");
-        }
-    }
+    camera_box::affinity::pin_capture_thread();
 }
 
 /// Simple USB video capture to NDI streaming appliance
@@ -159,6 +148,12 @@ struct Args {
     /// Required when --record-grab is set; scp it back to dev1 after the run.
     #[arg(long, default_value = "/tmp/cam1-grab-ts.csv")]
     record_grab_ts: String,
+
+    /// #289 — internal helper: route the USB capture-controller IRQ(s) onto the
+    /// isolated core (writes /proc/irq/<n>/smp_affinity, needs root) then exit.
+    /// Invoked by the systemd unit's ExecStartPre — not for interactive use.
+    #[arg(long = "setup-irq-affinity")]
+    setup_irq_affinity: bool,
 }
 
 #[tokio::main]
@@ -172,6 +167,13 @@ async fn main() -> Result<()> {
         EnvFilter::new("camera_box=info")
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // #289 — ExecStartPre helper: route the USB capture IRQ(s) onto the isolated
+    // core, then exit (a oneshot before the main service process starts).
+    if args.setup_irq_affinity {
+        camera_box::affinity::setup_irq_affinity();
+        return Ok(());
+    }
 
     tracing::info!("camera-box starting...");
 
@@ -474,6 +476,12 @@ async fn run_capture_loop(
             let handle = std::thread::Builder::new()
                 .name("cam1-burn".into())
                 .spawn(move || {
+                    // #289 — in burn mode (probe/E2E) the NDI sender lives HERE, so this thread is
+                    // the EMIT hot path. Pin it explicitly to the isolated core (issue point 1:
+                    // capture + EMIT → isolated core) rather than relying on the affinity it
+                    // inherits from the capture thread — same core, but explicit + robust to any
+                    // future spawn-order change.
+                    camera_box::affinity::pin_capture_thread();
                     // Burn thread: (optionally) render the QR into the copied frame + NDI-send it in
                     // receive (= emit) order. Ends when the capture loop drops the ring (shutdown).
                     camera_box::probe::genlock::run_burn_ring(rx, |mut job: BurnJob| {
@@ -790,6 +798,9 @@ mod tests {
         assert!(!args.debug);
         assert!(args.intercom_stream.is_none());
         assert_eq!(args.intercom_target, "strih.lan");
+        // #289 — the IRQ-affinity ExecStartPre helper flag is OFF by default
+        // (a normal `camera-box` run never touches /proc/irq).
+        assert!(!args.setup_irq_affinity);
     }
 
     #[test]
