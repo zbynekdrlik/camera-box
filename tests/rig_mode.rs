@@ -137,15 +137,34 @@ fn test_mode_launches_pinned_painter() {
     );
 }
 
-/// TEST mode frees /dev/fb0 by STOPPING the camera-box service (NOT kill — the unit is
-/// Restart=always, a kill would respawn it and re-grab the framebuffer) and WAITS until fb0 is
-/// actually free (fbdev teardown is async), failing loud if it stays held.
+/// #291: TEST mode frees /dev/fb0 WITHOUT a full `systemctl stop camera-box` (which killed cam2's
+/// capture+emit too). It installs a TRANSIENT systemd drop-in that overrides ExecStart to run
+/// camera-box WITHOUT `--display`, reloads + restarts, then WAITS until fb0 is actually free
+/// (fbdev teardown is async), failing loud if it stays held. Display output is the ONLY thing that
+/// grabs fb0; capture (/dev/video0) + NDI emit do not.
 #[test]
-fn test_mode_stops_camera_box_and_waits_for_fb0_free() {
+fn test_mode_frees_fb0_via_no_display_dropin_not_full_stop() {
     let p = painter_launch();
+    // The #291 bug: TEST mode must NOT stop the WHOLE service (that kills capture+emit, dropping
+    // cam2 as a measurable camera). The only acceptable "stop" is the display output.
     assert!(
-        p.contains("systemctl stop camera-box"),
-        "#247: TEST mode must STOP camera-box to free /dev/fb0"
+        !p.contains("systemctl stop camera-box"),
+        "#291: TEST mode must NOT fully stop camera-box — that kills cam2's capture+emit. \
+         Switch it to no-display instead. Got:\n{p}"
+    );
+    // It installs a transient drop-in (in /run — tmpfs, so a reboot auto-reverts) overriding
+    // ExecStart to camera-box WITHOUT --display, then reloads + restarts to apply it.
+    assert!(
+        p.contains("camera-box.service.d") && p.contains("zz-rig-test-no-display.conf"),
+        "#291: TEST mode must install a transient no-display systemd drop-in. Got:\n{p}"
+    );
+    assert!(
+        p.contains("ExecStart=") && p.contains("ExecStart=/usr/local/bin/camera-box"),
+        "#291: the drop-in must reset ExecStart and set the no-display camera-box command. Got:\n{p}"
+    );
+    assert!(
+        p.contains("systemctl daemon-reload") && p.contains("systemctl restart camera-box"),
+        "#291: TEST mode must daemon-reload + restart to apply the no-display drop-in. Got:\n{p}"
     );
     assert!(
         p.contains("fuser -s /dev/fb0"),
@@ -153,7 +172,26 @@ fn test_mode_stops_camera_box_and_waits_for_fb0_free() {
     );
     assert!(
         p.contains("/dev/fb0 still held"),
-        "#247: TEST mode must FAIL LOUD if /dev/fb0 stays held after stopping camera-box"
+        "#247: TEST mode must FAIL LOUD if /dev/fb0 stays held after releasing the display"
+    );
+}
+
+/// #291 headline: TEST mode KEEPS cam2 capturing + emitting NDI while the painter owns /dev/fb0 —
+/// the whole point of the fix. After switching to no-display it verifies the service is STILL active
+/// (capture+emit alive) and that the effective ExecStart no longer carries `--display` (so the
+/// unit's Restart=always can never respawn a process that re-grabs fb0).
+#[test]
+fn test_mode_keeps_camera_box_capturing_and_emitting() {
+    let p = painter_launch();
+    assert!(
+        p.contains("is-active camera-box"),
+        "#291: TEST mode must verify camera-box is STILL active (capture+emit must keep running). \
+         Got:\n{p}"
+    );
+    assert!(
+        p.contains("systemctl show -p ExecStart") && p.contains("--display"),
+        "#291: TEST mode must verify the effective ExecStart no longer has --display (so a \
+         Restart=always respawn cannot re-grab fb0). Got:\n{p}"
     );
 }
 
@@ -189,8 +227,10 @@ fn test_mode_fails_loud_when_painter_binary_absent() {
 }
 
 /// EVENT mode stops the painter via its PID FILE and ALSO `pkill -x frame-probe` (exact NAME match —
-/// can never self-match the remote shell's cmdline), then RESTARTS camera-box and VERIFIES the
-/// service is active AND `--display` is restored (the interkom monitor is back).
+/// can never self-match the remote shell's cmdline), then RESTORES the deployed --display camera-box
+/// and VERIFIES the service is active AND `--display` is restored (the interkom monitor is back).
+/// #291: TEST mode no longer STOPS camera-box (it switches it to no-display via a drop-in), so EVENT
+/// mode must REMOVE that drop-in and RESTART (not just `start`) to revert ExecStart to --display.
 #[test]
 fn event_mode_stops_via_pidfile_restores_display() {
     let p = painter_stop();
@@ -202,9 +242,16 @@ fn event_mode_stops_via_pidfile_restores_display() {
         p.contains("pkill -x frame-probe"),
         "#247: EVENT mode's belt-and-suspenders kill must be `pkill -x` (exact name, never self-match)"
     );
+    // #291: remove the transient no-display drop-in TEST mode installed, then RESTART (the unit was
+    // never fully stopped — it was reconfigured to no-display — so a plain `start` would not revert).
     assert!(
-        p.contains("systemctl start camera-box"),
-        "#247: EVENT mode must restart camera-box"
+        p.contains("zz-rig-test-no-display.conf") && p.contains("rm -f"),
+        "#291: EVENT mode must remove the transient no-display drop-in installed by TEST mode. \
+         Got:\n{p}"
+    );
+    assert!(
+        p.contains("systemctl daemon-reload") && p.contains("systemctl restart camera-box"),
+        "#291: EVENT mode must daemon-reload + RESTART to revert ExecStart back to --display"
     );
     assert!(
         p.contains("is-active camera-box") && p.contains("not active after start"),
