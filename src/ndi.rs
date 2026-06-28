@@ -517,15 +517,12 @@ pub struct NdiSender {
     ndi_name: CString, // Keep CString alive while sender exists; reused on re-announce (#297)
     frame_rate: FrameRate,
     frame_count: u64,
-    // #297 — re-announce state: the usable-network signature the sender was last announced
-    // with, and the last time we polled for a change. A change in `announced_sig` (an address
-    // appeared / flapped) re-registers the sender so the OBS NDI finder rediscovers it.
-    announced_sig: crate::reannounce::NetworkSignature,
+    // #297 — re-announce trigger state: the usable-network signature the sender was last
+    // announced on + whether the network has been seen down since. A change (an address appeared
+    // / flapped / recovered) re-registers the sender so the OBS NDI finder rediscovers it. The
+    // convergence + retry contract is unit-tested in `crate::reannounce`.
+    reannounce: crate::reannounce::ReannounceState,
     last_reannounce_check: std::time::Instant,
-    // True once the network has been observed DOWN (empty signature) since the last announce,
-    // so a link bounce that returns the SAME address still re-announces (the mDNS registration
-    // is dropped during the outage). Cleared on each successful re-announce.
-    saw_down_since_announce: bool,
     // Single buffer for sync sending (no double buffer needed)
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
@@ -578,11 +575,13 @@ impl NdiSender {
             ndi_name,
             frame_rate,
             frame_count: 0,
-            // #297 — record the network the sender was just announced on; the capture loop
-            // calls `maybe_reannounce()` and re-registers if this set later changes.
-            announced_sig: current_network_signature(),
+            // #297 — seed the trigger with the network the sender was just announced on; the
+            // capture loop calls `maybe_reannounce()` and re-registers if this set later changes.
+            // When the network is already up at creation this is the live signature, so a clean
+            // boot does NOT trigger a spurious first re-announce; during a boot race it is empty
+            // and the first poll with a real address fires.
+            reannounce: crate::reannounce::ReannounceState::new(current_network_signature()),
             last_reannounce_check: std::time::Instant::now(),
-            saw_down_since_announce: false,
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
             external_pacing: false,
@@ -626,15 +625,11 @@ impl NdiSender {
         }
         self.last_reannounce_check = std::time::Instant::now();
         let current = current_network_signature();
-        let reannounce = crate::reannounce::should_reannounce(
-            &self.announced_sig,
-            &current,
-            self.saw_down_since_announce,
-        );
+        let reannounce = self.reannounce.should_reannounce(&current);
         if current.is_empty() {
             // Network down — remember the outage so the recovery re-announces even if the same
             // address returns; nothing to announce on right now.
-            self.saw_down_since_announce = true;
+            self.reannounce.mark_down();
         }
         if !reannounce {
             return Ok(false);
@@ -642,19 +637,39 @@ impl NdiSender {
         tracing::warn!(
             "#297 NDI sender '{}' re-announce: network changed {:?} -> {:?} (saw_down={}), re-registering",
             self.ndi_name.to_string_lossy(),
-            self.announced_sig.addrs(),
+            self.reannounce.announced().addrs(),
             current.addrs(),
-            self.saw_down_since_announce
+            self.reannounce.saw_down()
         );
         self.reannounce_now(current)
     }
 
-    /// Re-register the NDI sender on the CURRENT network: create a fresh sender (same name +
-    /// settings) FIRST, then destroy the old handle — so a valid sender is always present even
-    /// if `NDIlib_send_create` fails (the old one is kept and the next poll retries). The brief
-    /// same-name overlap is harmless: it only occurs during a network change, which already
-    /// disrupted the feed.
+    /// Re-register the NDI sender on the CURRENT network: DESTROY the old handle FIRST, then
+    /// create a fresh sender with the same name + settings.
+    ///
+    /// The order is load-bearing (#297): the NDI SDK refuses to register a SECOND sender whose
+    /// name is already live in this process, so a same-name `NDIlib_send_create` while the old
+    /// handle still exists ALWAYS returns null. The shipped dev.139 created-first, so re-announce
+    /// could never succeed — it bailed every 2s without ever advancing the trigger (infinite
+    /// WARN loop, box never rediscovered). The brief same-name gap created by destroying first is
+    /// acceptable: re-announce only fires on a real network change, which already disrupted the
+    /// feed.
+    ///
+    /// On the now-genuinely-rare null create AFTER the destroy, the sender is left NULL: the emit
+    /// path skips a null handle (a frame is dropped, not UB), the trigger state is deliberately
+    /// left unchanged (via `record_reannounce_attempt(_, false)`) so the next poll RETRIES the
+    /// create, and this returns Err for the caller to log.
     fn reannounce_now(&mut self, current: crate::reannounce::NetworkSignature) -> Result<bool> {
+        // Destroy FIRST so the name is free for the same-name create below. `self.sender` is set
+        // to null in the same step: if the create fails, the struct stays valid (null, guarded by
+        // the emit path) rather than holding a destroyed/dangling handle. Guard the null case —
+        // on a RETRY after a prior failed re-create `self.sender` is already null, and passing a
+        // null handle to `NDIlib_send_destroy` is the exact case `Drop` avoids.
+        let old = std::mem::replace(&mut self.sender, ptr::null_mut());
+        if !old.is_null() {
+            unsafe { (self.lib.send_destroy)(old) };
+        }
+
         let create_settings = NDIlib_send_create_t {
             p_ndi_name: self.ndi_name.as_ptr(),
             p_groups: ptr::null(),
@@ -662,19 +677,20 @@ impl NdiSender {
             clock_audio: false,
         };
         let new_sender = unsafe { (self.lib.send_create)(&create_settings) };
-        if new_sender.is_null() {
+        let created_ok = !new_sender.is_null();
+        // Advance the trigger ONLY on success; on failure it stays put so the next poll retries.
+        self.reannounce
+            .record_reannounce_attempt(current, created_ok);
+        if !created_ok {
             anyhow::bail!(
-                "#297 re-announce: NDIlib_send_create returned null; kept existing sender"
+                "#297 re-announce: NDIlib_send_create returned null after destroy; sender absent, retrying next poll"
             );
         }
-        let old = std::mem::replace(&mut self.sender, new_sender);
-        unsafe { (self.lib.send_destroy)(old) };
-        self.announced_sig = current;
-        self.saw_down_since_announce = false;
+        self.sender = new_sender;
         tracing::info!(
             "#297 NDI sender '{}' re-announced on {:?}",
             self.ndi_name.to_string_lossy(),
-            self.announced_sig.addrs()
+            self.reannounce.announced().addrs()
         );
         Ok(true)
     }
@@ -934,6 +950,14 @@ impl NdiSender {
         stride: u32,
         timecode_100ns: i64,
     ) -> Result<()> {
+        // #297 — the sender is null only in the rare window after a re-announce destroyed the old
+        // handle and the same-name re-create returned null; `maybe_reannounce` retries the create
+        // on the next poll (≤ REANNOUNCE_POLL_INTERVAL). Calling NDIlib_send_send_video_v2 with a
+        // null handle is UB — drop this frame instead. Bounded, self-healing, and only reachable
+        // after a genuine network change plus a create failure, so no per-frame log spam.
+        if self.sender.is_null() {
+            return Ok(());
+        }
         let fourcc_str = fourcc.str()?;
 
         // Convert to UYVY, get stride
