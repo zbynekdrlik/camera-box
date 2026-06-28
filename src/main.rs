@@ -288,21 +288,23 @@ async fn run_capture_loop(
 
     // Open capture device at 1920x1080 @ 60fps.
     //
-    // #156 durable fix: when grab-recording (or when CAMERA_BOX_CAPTURE_CONTROLS is
-    // set) apply the certified V4L2 picture controls (saturation=0, contrast=75) so a
-    // camera-box restart can NEVER silently revert the device to its soft defaults and
-    // collapse the cam1 grab QR decode. The env overrides the default; --record-grab
-    // alone implies the certified set. Production (no grab, no env) leaves controls
-    // untouched.
+    // Select the V4L2 picture controls to ENFORCE at open (see
+    // `select_capture_controls`):
+    // - `CAMERA_BOX_CAPTURE_CONTROLS` set  -> that explicit override,
+    // - else `--record-grab`               -> the certified SHARP set (saturation=0,
+    //                                          contrast=75) so the filmed QR decodes (#156),
+    // - else PRODUCTION                    -> the certified COLOUR set (#296) so a stray
+    //                                          saturation=0 left by a prior grab can NEVER
+    //                                          persist and turn the live cameras grayscale.
+    let env_spec = std::env::var("CAMERA_BOX_CAPTURE_CONTROLS").ok();
     let capture_controls: Vec<camera_box::capture::CaptureControl> =
-        match std::env::var("CAMERA_BOX_CAPTURE_CONTROLS") {
-            Ok(spec) => camera_box::capture::parse_capture_controls(&spec),
-            Err(_) if record_grab.is_some() => camera_box::capture::certified_cam1_controls(),
-            Err(_) => Vec::new(),
-        };
-    if !capture_controls.is_empty() {
+        camera_box::capture::select_capture_controls(env_spec.as_deref(), record_grab.is_some());
+    if capture_controls.is_empty() {
+        tracing::info!("no v4l2 capture controls to enforce at open (explicit empty override)");
+    } else {
         tracing::info!(
-            "applying {} certified capture control(s) for a sharp grab (#156)",
+            "enforcing {} certified v4l2 capture control(s) at open \
+             (#296 colour self-heal / #156 sharp grab)",
             capture_controls.len()
         );
     }
