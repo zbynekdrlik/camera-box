@@ -18,25 +18,38 @@
 //! For each window we discard a TRANSITION GUARD ([`DEFAULT_TRANSITION_GUARD_NS`], 1s) on EACH
 //! side of every boundary — the program switch takes a few frames plus the 60→30 decimation +
 //! latency to settle, so frames inside the guard are EXCLUDED from attribution (NOT counted as
-//! loss). The remaining in-window frames run the SAME continuity check the per-node burn verdict
-//! uses ([`burn_contiguity_in_window_with_step`]) on the PAINTED TICK (the cam2 optical Vernier
-//! tick, common to every cambox through the splitter). We report per cambox:
+//! loss). The remaining in-window frames run the painted-tick continuity check (the cam2 optical
+//! Vernier tick, common to every cambox through the splitter) — see [`window_segment`], which
+//! mirrors the per-node burn check's definitions (in [`crate::probe::burn_contiguity`] — the
+//! `None`-credit and the integer-division decimation excess) but is painted-tick-specific (a
+//! duplicate tick is a stale copy, never a misdecoded burn). We report per cambox:
 //!
 //! - `frames`: in-window delivered frames after the guard discard.
 //! - `undecodable`: delivered frames whose painted tick did not decode.
 //! - `copies`: stale/frozen frames (the painted tick repeated — it MUST advance per frame).
-//! - `gaps`: REAL DROPs the reused check found (a forward skip beyond the step, or a backward jump).
+//! - `gaps`: real drops (a forward skip beyond the by-design step, or a backward jump).
 //! - `pass`: `frames > 0 && undecodable == 0 && copies == 0 && gaps == 0`.
 //!
 //! The painted tick increments PER PAINTED FRAME and is captured at the cambox rate, so its
 //! by-design step in the recording is the decimation factor (`expected_step`): cam→strih 60fps
 //! capture of the 60Hz painter ⇒ step 1; strih→stream 60→30 ⇒ step 2. `expected_step` is a
 //! PARAMETER (the binary derives it from the configured fps, the harness can override) — the
-//! logic bakes NO 30-vs-60 assumption; the reused check already detects gaps/copies rate-agnostically.
+//! logic bakes NO 30-vs-60 assumption.
 //!
 //! A window with ZERO in-window frames FAILS (an absent cambox proves nothing — never read as a
 //! pass), so the verdict can "clearly report which cameras were covered and which were not"
 //! (#312 acceptance) without ever implying full coverage when a box was absent (e.g. CAM3 down #301).
+//!
+//! ## Phase-1 limitation — attribution needs a `gen_ts` anchor
+//!
+//! A frame is placed on the schedule timeline by its burn `gen_ts_ns`. A frame carrying NO
+//! decodable mark at all (no node burn AND no optical QR — e.g. a fully-corrupt/black frame) has
+//! no anchor and CANNOT be attributed to a cambox window; the binary counts it (`frames_without_
+//! anchor` in the verdict JSON) but it does not enter a per-cambox segment. The single continuous
+//! stream recording's per-node BURN contiguity verdict (the #186 headline, which runs on the same
+//! recording) is what catches such corrupt frames as a burn-id gap — the all-cambox segment
+//! verdict GATES ALONGSIDE it, it does not replace it. Phase-2 (a cambox-id in the burn pixels)
+//! removes the schedule-correlation dependency entirely.
 //!
 //! This module is PURE (no I/O beyond reading the schedule file) and unit-tested with synthetic
 //! frame sequences; the binary glue (extracting [`SegmentFrame`]s from decoded [`crate::probe::
@@ -46,10 +59,6 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-
-use crate::probe::burn_contiguity::{
-    burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind, RecordedBurnFrame,
-};
 
 /// The transition guard discarded on EACH side of every schedule boundary, in nanoseconds.
 /// 1s — the program switch takes a few frames plus the 60→30 + latency to settle; frames inside
@@ -97,8 +106,8 @@ pub struct CamboxSegment {
     pub undecodable: u32,
     /// Stale/frozen frames — the painted tick repeated the previous present tick.
     pub copies: u32,
-    /// REAL DROPs from the reused continuity check (forward skip beyond the decimation step,
-    /// or a backward jump).
+    /// Real dropped painted frames (a forward skip beyond the by-design decimation step, or a
+    /// backward jump). See [`window_segment`].
     pub gaps: u32,
     /// First / last painted tick seen in-window (informational; `None` ⇒ no readable tick).
     pub first_tick: Option<u32>,
@@ -240,25 +249,29 @@ pub fn segment_continuity(
     }
 }
 
-/// The per-window continuity, on the painted tick. `undecodable` is the count of `None`-tick
-/// delivered frames (robust even when EVERY frame is undecodable, which the reused check returns
-/// as an empty missing-slot set); `gaps` is the REAL-DROP count from
-/// [`burn_contiguity_in_window_with_step`] (the SAME check the per-node burn verdict uses); `copies`
-/// is the count of stale repeats of the painted tick — a metric the burn check (a monotone counter
-/// never repeats) does not surface but the painted tick (which MUST advance per frame) requires.
+/// The per-window painted-tick continuity. Reports three disjoint counts:
 ///
-/// ## Rate selection — the painted tick is a per-painted-FRAME counter, sampled at the cambox rate
+/// - `undecodable`: delivered frames whose painted tick did not decode (`tick == None`).
+/// - `copies`: stale/frozen frames — the painted tick repeated the previous present tick.
+/// - `gaps`: real dropped painted frames — a forward skip beyond the by-design `expected_step`
+///   (per the integer-division excess, crediting any `None` frames that fell in the gap), or a
+///   backward jump (the painter is monotone, so an earlier tick after a later one is a fault).
 ///
-/// The painted tick increments once per painted frame, so a forward SKIP is loss at EVERY rate —
-/// unlike the strih/stream node burn (a free-running render-tick counter, where a forward gap at
-/// the full rate is expected). [`BurnRate::PerRenderTick`] only charges forward gaps for a
-/// DECIMATED hop (`expected_step >= 2`), and IGNORES them at step 1 — wrong for the painted tick.
-/// So we pick the rate by step: at `expected_step >= 2` (the 60→30 stream recording) PerRenderTick
-/// is exactly right (a gap == step is the decimation, a gap > step charges the excess); at
-/// `expected_step == 1` (the full-rate cam→strih case) [`BurnRate::PerEmittedFrame`] is right (its
-/// set-based check flags every absent integer as a drop). BOTH credit `None` frames against the
-/// gap math (so an undecodable frame is never double-charged as a gap), giving a correct, reused,
-/// rate-agnostic result without baking any 30-vs-60 assumption into the logic.
+/// ## Why a direct walk and not [`burn_contiguity_in_window_with_step`]
+///
+/// The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
+/// render-tick counter. It mirrors burn_contiguity's DEFINITIONS — `None`-credit and the
+/// integer-division decimation excess (`delta / expected_step − 1`) — so it stays consistent with
+/// the proven per-node burn check, and `expected_step` is a parameter so no 30-vs-60 assumption is
+/// baked in (1 = full-rate cam→strih, 2 = 60→30 stream recording). But the burn check is the WRONG
+/// tool for the painted tick in two ways: (1) its `PerRenderTick` rate IGNORES forward gaps at
+/// step 1 (a render counter legitimately ticks faster than frames), masking a real step-1 drop;
+/// (2) its `PerEmittedFrame` rate carries the #226 "duplicate ⇒ BURN-UNREADABLE" reclassification
+/// — for a node burn a duplicate id means a delivered-but-misdecoded frame (not a drop), but for
+/// the painted tick a duplicate is a STALE/FROZEN copy and the tick missing behind a non-adjacent
+/// freeze is a REAL drop, which that reclassification would silently clear (a FALSE PASS on a
+/// zero-loss verdict). So the painted-tick continuity is computed directly here, where a duplicate
+/// is always a copy and a forward skip beyond the step is always a gap.
 fn window_segment(
     cambox: &str,
     start_ns: i64,
@@ -267,45 +280,42 @@ fn window_segment(
     expected_step: i64,
 ) -> CamboxSegment {
     let frame_count = frames.len() as u32;
-
     let undecodable = frames.iter().filter(|f| f.tick.is_none()).count() as u32;
 
-    // copies (stale): a delivered frame whose painted tick equals the immediately preceding
-    // PRESENT tick — a frozen/duplicate frame. The painter advances the tick per painted frame,
-    // so a repeat is a held frame, never a by-design step (which the gap check handles).
+    // Walk the in-window frames in recorded order. `nones_since_prev` accumulates undecodable
+    // (`None`) frames so a real forward gap that straddles an undecodable frame credits it (an
+    // undecodable frame DID reach the recording — it is not also a dropped frame).
     let mut copies: u32 = 0;
-    let mut prev_present: Option<u32> = None;
+    let mut gaps: u32 = 0;
+    let mut prev: Option<u32> = None;
+    let mut nones_since_prev: i64 = 0;
     for f in frames {
-        if let Some(t) = f.tick {
-            if prev_present == Some(t) {
-                copies = copies.saturating_add(1);
+        match f.tick {
+            None => nones_since_prev += 1,
+            Some(t) => {
+                if let Some(p) = prev {
+                    if t == p {
+                        // The painted tick froze — a stale/duplicate copy frame.
+                        copies = copies.saturating_add(1);
+                    } else if t < p {
+                        // Backward jump — the monotone painter never goes back; a reorder/freeze fault.
+                        gaps = gaps.saturating_add(1);
+                    } else {
+                        // Forward: the slots between p and t number `delta/expected_step − 1`;
+                        // `nones_since_prev` of them were delivered-but-undecodable, the rest are
+                        // real drops. Integer division makes step±1 genlock-beat jitter charge 0.
+                        let delta = i64::from(t) - i64::from(p);
+                        let lost = (delta / expected_step) - 1 - nones_since_prev;
+                        if lost > 0 {
+                            gaps = gaps.saturating_add(lost as u32);
+                        }
+                    }
+                }
+                prev = Some(t);
+                nones_since_prev = 0;
             }
-            prev_present = Some(t);
         }
     }
-
-    // gaps: reuse the existing in-window continuity check on the painted tick. The rate is chosen
-    // by the by-design step (see the docstring above): PerRenderTick for a decimated recording
-    // (step >= 2), PerEmittedFrame for a full-rate one (step 1). `None` frames are charged
-    // BURN-UNREADABLE there and credited against the gap math, so they never double-count as gaps.
-    let recorded: Vec<RecordedBurnFrame> = frames
-        .iter()
-        .map(|f| RecordedBurnFrame {
-            frame_index: f.frame_index,
-            burn_id: f.tick,
-        })
-        .collect();
-    let rate = if expected_step >= 2 {
-        BurnRate::PerRenderTick
-    } else {
-        BurnRate::PerEmittedFrame
-    };
-    let in_window = burn_contiguity_in_window_with_step(cambox, &recorded, rate, expected_step);
-    let gaps = in_window
-        .missing_slots
-        .iter()
-        .filter(|s| s.kind == InWindowMissingKind::RealDrop)
-        .count() as u32;
 
     let first_tick = frames.iter().find_map(|f| f.tick);
     let last_tick = frames.iter().rev().find_map(|f| f.tick);
@@ -497,6 +507,49 @@ mod tests {
         );
         assert_eq!(v.segments[1].gaps, 0);
         assert_eq!(v.segments[1].undecodable, 0);
+    }
+
+    #[test]
+    fn non_adjacent_freeze_hiding_a_real_drop_still_fails() {
+        // REGRESSION (code-review finding): at expected_step=1 the per-node burn check's
+        // PerEmittedFrame #226 logic would reclassify the dropped tick 102 as BURN-UNREADABLE
+        // (a non-adjacent duplicate 100 sits in the gap) while a consecutive-only copy counter
+        // misses that non-adjacent freeze → a FALSE PASS. The direct painted-tick walk must FAIL:
+        // ticks 100,101,100,103 carry a backward jump (the frozen 100 after 101) AND a forward
+        // skip to 103 (102 dropped). Neither is silently cleared.
+        let schedule = vec![win("cam1", 0, 10_000)];
+        let frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(100),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(101),
+            },
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: Some(100),
+            }, // non-adjacent freeze
+            SegmentFrame {
+                frame_index: 3,
+                gen_ts_ns: 400,
+                tick: Some(103),
+            }, // 102 dropped
+        ];
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert!(
+            !v.overall_pass,
+            "a hidden drop behind a non-adjacent freeze must FAIL: {v:?}"
+        );
+        assert!(
+            v.segments[0].gaps >= 1,
+            "the real drop is counted as a gap, not silently cleared: {:?}",
+            v.segments[0]
+        );
     }
 
     #[test]
