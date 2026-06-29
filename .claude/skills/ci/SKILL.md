@@ -105,6 +105,17 @@ still runs gated tests. `tests/local_build_policy_bounds_target.rs` enforces bot
 FAILS if any probe-using test is ungated or if the CLAUDE.md local gate command block uses
 `--all-features`/`--features probe`).
 
+**Gotcha — a clippy lint inside a probe-gated file (`src/probe/*`) is INVISIBLE to local Tier-0
+clippy and only FAILS on CI's Lint job** (which runs `cargo clippy --all-targets --all-features`).
+Default-feature local clippy never compiles `src/probe/*`, so a lint there passes locally and red-X's
+CI — a wasted CI cycle (#312/#324: a `clippy::doc_lazy_continuation` in `recording_segments.rs`
+module-doc passed Tier-0 but failed CI). When you edit ANY `src/probe/*` file — **especially doc
+comments** — eyeball it for clippy patterns before pushing; you cannot lint-verify it locally (running
+`--all-features` to check is banned — it re-balloons `target/`). Recurring doc trap: a `[label]:`
+token mid-paragraph (e.g. `` [`crate::x`]: text ``) makes pulldown-cmark parse a link-reference
+definition → the next lines become a `doc_lazy_continuation` lint; reword to drop the `]:` (e.g.
+`` (in [`crate::x`] — text ``) or add a blank line.
+
 **Backstop:** `scripts/install-git-hooks.sh` installs a non-blocking pre-push hook running
 `scripts/purge-target.sh` (cargo clean when `target/` > `${THRESHOLD_MB:-4096}`; SKIPS while a live
 E2E has probe binaries running — matched by truncated `/proc` comm, e.g. `recording-verdi`,
