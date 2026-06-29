@@ -389,18 +389,22 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
 - **Coverage honesty (#301):** a scheduled cambox with ZERO in-window frames FAILs — an absent box
   (e.g. CAM3 down) never reads as a pass. Active set today = CAM1/2/4.
 
-**Phase-2 harness (`recording-e2e.sh ALL_CAMBOX=1`) — RUN IT AS `ALL_CAMBOX=1 VERDICT_ON_STREAM=0`.**
-The sweep (`switch_schedule.py` + `obs_phase2.py switch`) writes `switch-schedule.json` and appends
-`--switch-schedule` to **`VERDICT_ARGS`**. But `VERDICT_ARGS` is consumed ONLY by the decode-on-dev1
-verdict; the DEFAULT per-box path (`VERDICT_ON_STREAM=1`) decodes via `--extract-partial` /
-`--merge-partials` (`MERGE_ARGS`) and `exit 0`s without ever touching `VERDICT_ARGS` — so under the
-default the schedule is written but SILENTLY ignored and a dropping cambox PASSES. The harness now
-FAILS FAST if `ALL_CAMBOX=1` without `VERDICT_ON_STREAM=0`. Sweep config: `CAMBOX_SWEEP` (default
-`Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4` — the verified scrambled scene→box mapping; CAM3/.63 down #301
-excluded), `SEGMENT_SECS` (default 30). Switch boundaries are dev1 epoch-ns (DanteSync-slaved to the
-painter = the burn `gen_ts_ns` timeline); a runtime dev1↔painter offset assertion is filed as #326.
-Wiring `--switch-schedule` into the per-box merge path (so the default decode mode also gates) is a
-separate verdict change, not done.
+**Phase-2 harness (`recording-e2e.sh ALL_CAMBOX=1`) — RUNS ON THE DEFAULT `VERDICT_ON_STREAM=1`
+(#332).** The sweep (`switch_schedule.py` + `obs_phase2.py switch`) writes `switch-schedule.json`
+and appends `--switch-schedule` to BOTH verdict paths: the legacy decode-on-dev1 `VERDICT_ARGS`
+AND the DEFAULT per-box `MERGE_ARGS` (the `--merge-partials` step). The per-cambox
+`all_cambox_continuity` is computed in the SHARED `build_and_print_verdict` (which `run_merge`
+calls), so the merge path produces it IDENTICALLY to the fused/legacy path — the all-cambox verdict
+now runs ON the stream box (#193, decode where the video lives), NOT forced onto dev1. The old guard
+that forced `VERDICT_ON_STREAM=0` is GONE (#332). Just run `ALL_CAMBOX=1 bash scripts/recording-e2e.sh`
+(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default **`Cam 5:CAM1 Cam 1:CAM4`** —
+the non-painter CAPTURE boxes; **CAM2/.62 the dual-QR PAINTER is EXCLUDED (#333)** — while painting
+it emits no camera NDI so its window is empty/frames=0 by construction; CAM3/.63 down #301 also
+excluded), `SEGMENT_SECS` (default 30). To prove the painter box itself, a DIFFERENT box must paint
+that run (override `$CAMBOX_SWEEP`). A swept box that yields `frames=0` FAILs with an explicit
+`CamboxSegment.note` painter/no-emit diagnostic (#333), so an empty window is never misread as chain
+loss. Switch boundaries are dev1 epoch-ns (DanteSync-slaved to the painter = the burn `gen_ts_ns`
+timeline); a runtime dev1↔painter offset assertion is filed as #326.
 
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
