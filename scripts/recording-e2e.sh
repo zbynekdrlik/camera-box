@@ -95,6 +95,7 @@ STRIH_REC="$OUTDIR/strih-${RUN_ID}.mkv"
 STREAM_REC="$OUTDIR/stream-${RUN_ID}.mp4"
 REPORT_JSON="$OUTDIR/verdict-${RUN_ID}.json"
 REPORT_PNG="$OUTDIR/report-${RUN_ID}.png"
+SWITCH_SCHEDULE_JSON="$OUTDIR/switch-schedule.json"  # #312 Phase-2 all-cambox sweep (ALL_CAMBOX=1)
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
 # #220: CAMERA PRE-RUN CHECKLIST. The cam2->cam1 OPTICAL injection leg (cam1 broadcast camera
@@ -418,8 +419,60 @@ echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
 
-echo "[6/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
-sleep "$DURATION"
+# #312 Phase-2 ALL-CAMBOX SWEEP (opt-in via ALL_CAMBOX=1). Instead of one steady-state hold on a
+# single cambox, sequentially cut EACH active cambox into strih PROGRAM for ~SEGMENT_SECS, cycling
+# the sweep until the total reaches DURATION, while the ONE continuous stream recording keeps
+# running. All boxes capture the SAME cam2-painted tick through the HDMI splitter, so per-segment
+# painted-tick continuity == per-box zero-loss. Each switch's wall-clock epoch-ns (the burn
+# gen_ts_ns timeline — dev1 CLOCK_REALTIME, DanteSync-slaved to the painter) is captured as a
+# window boundary; the switch schedule is written for recording-verdict --switch-schedule (step
+# [8/8]). The strih/stream PROGRAM-OUTPUT burns (911002/911004) ride across scene switches, so the
+# [4b/8] burn-ON gate is unaffected. The DEFAULT path (no ALL_CAMBOX) is the unchanged single hold.
+ALL_CAMBOX="${ALL_CAMBOX:-0}"
+# scene:label pairs (the #284/#151 scene names are scrambled — this is the verified mapping):
+#   'Cam 5'->CAM1(.61)  'Cam 3'->CAM2(.62)  'Cam 1'->CAM4(.64)   (CAM3/.63 is DOWN #301, excluded)
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4}"
+SEGMENT_SECS="${SEGMENT_SECS:-30}"
+if [ "$ALL_CAMBOX" = "1" ]; then
+  echo "[6/8] ALL-CAMBOX sweep: cut each cambox into strih program ${SEGMENT_SECS}s, cycling '$CAMBOX_SWEEP' until >=${DURATION}s (run_id=$RUN_ID)"
+  # Build the per-segment cut plan (scene + label), cycling the sweep to cover DURATION. Python owns
+  # the colon-pair parsing (scene names contain spaces, e.g. 'Cam 5'), so bash never word-splits it.
+  mapfile -t _SWEEP_PLAN < <(python3 "$HERE/switch_schedule.py" plan \
+    --sweep "$CAMBOX_SWEEP" --segment-secs "$SEGMENT_SECS" --duration "$DURATION")
+  if [ "${#_SWEEP_PLAN[@]}" -eq 0 ]; then
+    echo "ERROR: empty cambox sweep plan from CAMBOX_SWEEP='$CAMBOX_SWEEP' — fix it, then re-run." >&2
+    exit 1
+  fi
+  _SWITCH_START_NS=""        # window[0].start_ns — the very FIRST switch opens window 0
+  _SEG_BOUNDARIES=()         # epoch-ns CLOSING each segment (the next switch, then the final stop)
+  _seg_i=0
+  _seg_n="${#_SWEEP_PLAN[@]}"
+  for _seg in "${_SWEEP_PLAN[@]}"; do
+    _scene="${_seg%%$'\t'*}"; _label="${_seg##*$'\t'}"
+    # Cut strih PROGRAM to this cambox's scene; the subcommand prints the switch epoch-ns
+    # (time.time_ns()) on stdout and fails loud if the scene renders black (dead cambox).
+    _switch_ns="$(python3 "$HERE/obs_phase2.py" switch --host "$STRIH" --program-scene "$_scene")"
+    echo "    [seg $((_seg_i+1))/${_seg_n}] $_label via '$_scene' switched at ${_switch_ns} ns"
+    if [ -z "$_SWITCH_START_NS" ]; then
+      _SWITCH_START_NS="$_switch_ns"          # first switch = window 0 start
+    else
+      _SEG_BOUNDARIES+=("$_switch_ns")        # each later switch CLOSES the previous segment
+    fi
+    sleep "$SEGMENT_SECS"
+    _seg_i=$((_seg_i+1))
+  done
+  _SEG_BOUNDARIES+=("$(date +%s%N)")          # final boundary = end of the last segment (≈ stop)
+  # Assemble + validate the ordered, non-overlapping schedule JSON from the captured boundaries.
+  python3 "$HERE/switch_schedule.py" build \
+    --sweep "$CAMBOX_SWEEP" --segment-secs "$SEGMENT_SECS" --duration "$DURATION" \
+    --start-ns "$_SWITCH_START_NS" \
+    --boundaries "$(IFS=,; echo "${_SEG_BOUNDARIES[*]}")" \
+    > "$SWITCH_SCHEDULE_JSON"
+  echo "    wrote switch schedule -> $SWITCH_SCHEDULE_JSON"
+else
+  echo "[6/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
+  sleep "$DURATION"
+fi
 
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"
 # #178: the StopRecord→verdict region is RESILIENT. run 172046073 completed the recording
@@ -506,6 +559,15 @@ VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --capture-fps "$STRIH_CAPTURE_
 if [ -f "$STREAM_REC" ]; then VERDICT_ARGS+=(--stream "$STREAM_REC"); fi
 if [ -f "$PAINTER_CSV" ]; then VERDICT_ARGS+=(--painter "$PAINTER_CSV"); fi
 if [ -f "$CAM1_CAPTURE_STATS" ]; then VERDICT_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
+# #312 Phase-2: in the all-cambox sweep, feed the per-segment switch schedule so the verdict
+# partitions the SINGLE continuous stream recording into per-cambox windows (by burn gen_ts_ns,
+# minus the 1s transition guard) and gates each box's painted-tick continuity. Needs --stream
+# (appended above); the legacy decode-on-dev1 path (VERDICT_ON_STREAM=0) consumes VERDICT_ARGS
+# directly. `if`-form (NOT `[ -f ] && ...`) so a missing file never set -e-aborts (#178).
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
+  VERDICT_ARGS+=(--switch-schedule "$SWITCH_SCHEDULE_JSON")
+  echo "    #312 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON"
+fi
 
 # #208 PER-BOX DECODE-IN-PLACE (refines #193): by default decode EACH recording ON ITS OWN BOX —
 # the strih recording ON the strih box, the stream recording ON the stream box — and merge the
