@@ -1,0 +1,176 @@
+//! #312 Phase-1 integration test — the all-cambox per-SEGMENT continuity public API that the
+//! harness and CI use: parse a switch-schedule JSON, partition the single continuous stream
+//! recording's decoded frames into per-cambox windows (by burn `gen_ts_ns`, minus the transition
+//! guard) and verify the painted-tick continuity PER cambox.
+//!
+//! Synthetic frames only (no rig): realistic nanosecond timescales, step-2 painted tick (the
+//! 60→30 stream-recording decimation). The probe-gated pure logic lives in
+//! `src/probe/recording_segments.rs` (with its own exhaustive unit tests); this exercises the same
+//! logic through the crate's PUBLIC entry points end-to-end, the way `recording-verdict` does.
+
+#![cfg(feature = "probe")]
+
+use camera_box::probe::recording_segments::{
+    parse_switch_schedule, segment_continuity, SegmentFrame,
+};
+
+const S: i64 = 1_000_000_000; // one second in ns
+const GUARD: i64 = S; // 1s transition guard (the production default)
+const STEP: i64 = 2; // 60→30 painted-tick decimation in the stream recording
+
+/// A two-cambox schedule: cam1 in program [0s, 5s), cam2 [5s, 10s) — the harness's JSON shape.
+fn two_window_schedule_json() -> &'static str {
+    r#"[
+        {"cambox":"cam1","start_ns":0,          "end_ns":5000000000},
+        {"cambox":"cam2","start_ns":5000000000, "end_ns":10000000000}
+    ]"#
+}
+
+/// Frames at 100ms spacing across `[start_ns, start_ns + 5s)` with a step-2 painted tick — the
+/// settled-core (outside the 1s guards) is contiguous, so the cambox passes.
+fn clean_window_frames(start_ns: i64, base_index: u64, start_tick: u32) -> Vec<SegmentFrame> {
+    (0..50)
+        .map(|i| SegmentFrame {
+            frame_index: base_index + i as u64,
+            gen_ts_ns: start_ns + (i as i64) * (S / 10), // 100ms apart
+            tick: Some(start_tick + (i as u32) * STEP as u32),
+        })
+        .collect()
+}
+
+#[test]
+fn clean_two_cambox_run_passes_overall() {
+    let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
+    let mut frames = clean_window_frames(0, 0, 1000);
+    frames.extend(clean_window_frames(5 * S, 1000, 9000));
+
+    let v = segment_continuity(&frames, &schedule, GUARD, STEP);
+
+    assert!(v.overall_pass, "a clean all-cambox run is PASS: {v:?}");
+    assert_eq!(v.segments.len(), 2);
+    assert!(
+        v.segments.iter().all(|s| s.pass),
+        "every cambox clean: {v:?}"
+    );
+    // The 1s guards on each side trim the 50 frames (0..5s, 100ms apart) to the 1s..4s core.
+    for s in &v.segments {
+        assert!(s.frames > 0, "{} has attributed frames: {s:?}", s.cambox);
+        assert_eq!(s.undecodable, 0);
+        assert_eq!(s.copies, 0);
+        assert_eq!(s.gaps, 0);
+    }
+    assert!(
+        v.discarded_guard_frames > 0,
+        "guard frames were discarded: {v:?}"
+    );
+}
+
+#[test]
+fn one_cambox_dropping_fails_only_that_cambox_and_overall() {
+    let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
+    let mut frames = clean_window_frames(0, 0, 1000); // cam1 clean
+
+    // cam2: inject a REAL gap deep in the settled core (gen_ts 2.5s into its window) — the painted
+    // tick jumps by 6 (3 step-2 slots) where it should jump by 2, well past the guard.
+    let mut cam2 = clean_window_frames(5 * S, 1000, 9000);
+    let mid = cam2.len() / 2;
+    for f in cam2.iter_mut().skip(mid) {
+        if let Some(t) = f.tick.as_mut() {
+            *t += 4; // shift the tail up by 4 → a 6-step jump at the seam (a 2-frame drop)
+        }
+    }
+    frames.extend(cam2);
+
+    let v = segment_continuity(&frames, &schedule, GUARD, STEP);
+
+    assert!(!v.overall_pass, "a cambox dropping ⇒ overall FAIL: {v:?}");
+    assert!(v.segments[0].pass, "cam1 still clean: {:?}", v.segments[0]);
+    assert!(
+        !v.segments[1].pass,
+        "cam2 dropped → FAIL: {:?}",
+        v.segments[1]
+    );
+    assert!(
+        v.segments[1].gaps >= 1,
+        "cam2 gap counted: {:?}",
+        v.segments[1]
+    );
+}
+
+#[test]
+fn a_switch_transient_inside_the_guard_is_not_charged_as_loss() {
+    // The program switch itself produces undecodable/duplicate frames RIGHT at the boundary. A 1s
+    // guard discards them: the same bad frames inside the guard must NOT fail the cambox.
+    let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
+    let mut frames = clean_window_frames(0, 0, 1000);
+
+    // cam2 clean core + two transient bad frames within the leading 1s guard ([5.0s, 5.3s)).
+    let mut cam2 = clean_window_frames(5 * S, 1000, 9000);
+    cam2.push(SegmentFrame {
+        frame_index: 5000,
+        gen_ts_ns: 5 * S + S / 10,
+        tick: None,
+    }); // undecodable in guard
+    cam2.push(SegmentFrame {
+        frame_index: 5001,
+        gen_ts_ns: 5 * S + S / 5,
+        tick: Some(9000),
+    }); // copy in guard
+    frames.extend(cam2);
+
+    let v = segment_continuity(&frames, &schedule, GUARD, STEP);
+
+    assert!(
+        v.overall_pass,
+        "switch transients inside the guard must not fail: {v:?}"
+    );
+    assert!(
+        v.segments[1].pass,
+        "cam2 passes (transients guarded): {:?}",
+        v.segments[1]
+    );
+    assert_eq!(
+        v.segments[1].undecodable, 0,
+        "the in-guard None is not charged"
+    );
+    assert_eq!(v.segments[1].copies, 0, "the in-guard copy is not charged");
+    assert!(
+        v.discarded_guard_frames >= 2,
+        "the transients are guard discards: {v:?}"
+    );
+}
+
+#[test]
+fn an_absent_cambox_is_reported_as_uncovered_not_a_pass() {
+    // #312 coverage honesty (#301 CAM3 down): a scheduled cambox with NO frames must FAIL, so the
+    // verdict never implies full coverage when a box was absent.
+    let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
+    let frames = clean_window_frames(0, 0, 1000); // only cam1 captured; cam2 was down
+
+    let v = segment_continuity(&frames, &schedule, GUARD, STEP);
+
+    assert!(
+        !v.overall_pass,
+        "an absent cambox ⇒ NOT a full-coverage pass: {v:?}"
+    );
+    assert!(v.segments[0].pass, "cam1 covered + clean");
+    assert!(
+        !v.segments[1].pass,
+        "cam2 absent → FAIL: {:?}",
+        v.segments[1]
+    );
+    assert_eq!(v.segments[1].frames, 0);
+}
+
+#[test]
+fn malformed_or_overlapping_schedule_is_rejected() {
+    assert!(parse_switch_schedule("{ not an array }").is_err());
+    let overlapping = r#"[
+        {"cambox":"cam1","start_ns":0,          "end_ns":6000000000},
+        {"cambox":"cam2","start_ns":5000000000, "end_ns":10000000000}
+    ]"#;
+    assert!(
+        parse_switch_schedule(overlapping).is_err(),
+        "overlap rejected"
+    );
+}
