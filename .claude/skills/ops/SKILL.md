@@ -103,17 +103,36 @@ restartom pc a pokracovat vo vyvoji!!!"
 Do NOT gate, classify, or ask before recovering dev rig infra.
 The user interrupts Claude when the rig is needed live.
 
-## #265 — NDI-receive STUCK state (recovery = reboot)
+## #265 — NDI-receive STUCK state (detect by NDI fps, NOT by dantesync CPU)
 
 THE STUCK STATE (intermittent, after long uptime): the cam→OBS NDI receive on a broadcast box
-(strih/stream) collapses to ~10 fps (genlock STARVED, huge underruns) while `dantesync.exe` pegs
-~1 of 16 cores. Restarting the dantesync service does NOT fix it — only a full PC reboot does
-(2026-06-26: cam1→strih ~10→30.2 fps, underruns 290k→0 after reboot). Recovery = reboot (#265).
+(strih/stream) collapses to ~10 fps (genlock STARVED, underruns CLIMBING). When this genuinely
+happens, a full PC reboot clears it (2026-06-26: cam1→strih ~10→30.2 fps, underruns 290k→0 after
+reboot). Restarting only the dantesync service does NOT fix the NDI collapse.
 
-A detect+alert watchdog for this state is tracked separately in **#266** (split out of PR #268 for a
-solo redesign — the first cut over-/under-discriminated STUCK vs benign IDLE). No watchdog script
-lives in the tree yet; until #266 lands, the stuck state is caught by hand (genlock-fifo audit fps +
-dantesync CPU) and recovered by reboot per above.
+**DO NOT use `dantesync.exe` CPU as the stuck signal on strih — it is a RED HERRING (corrected
+2026-06-29).** strih is the cluster NTP MASTER (`ntp_server_mode.enabled=true` in
+`C:\ProgramData\DanteSync\config.json`); its NTP-serving thread busy-loops ~99% of ONE core
+CONTINUOUSLY since process start — present at every boot, healthy or not. The stream box (an NTP
+client) does NOT do this. So a 99%-core dantesync on strih is NORMAL and a reboot does NOT fix it
+(the busy-loop resumes identically next boot). The 2026-06-29 incident: a black #312 program +
+dantesync-core-peg were mis-read as "#265 stuck"; forensics showed NDI receive was actually HEALTHY
+(all sources 60 fps, underruns CONSTANT not climbing) — the black program was cam1's NDI
+mid-renegotiation after its restart (see #312 self-check fix), not a stuck box. The dantesync
+busy-loop itself is a fixable bug in `~/devel/dantetimesync` (NTP-server socket set non-blocking AND
+read-timeout → `recv_from` spins) — tracked + fixed separately; once deployed strih's dantesync
+idles ~0%.
+
+**Stuck-state detection keys SOLELY on the NDI receive trajectory, never on CPU:** read the OBS
+`genlock-fifo audit` lines for the cam sources — STUCK = received-fps dropped to ~10 AND underruns
+CLIMBING between samples. Healthy = 60 fps received==consumed, underruns CONSTANT. (On the stream
+box, an NTP client, dantesync CPU is still a valid secondary signal; on strih it is not.)
+
+A detect+alert watchdog is tracked in **#266** (split out of PR #268; first cut over-/under-
+discriminated STUCK vs benign IDLE). It MUST key on the NDI received-fps + underrun trajectory
+(2-live-sample on its own monotonic clock), NOT on dantesync CPU. No watchdog script lives in the
+tree yet; until #266 lands, a genuine stuck state is caught by hand (genlock-fifo audit fps +
+climbing underruns) and recovered by reboot.
 
 ## #297 — NDI sender re-announce (OBS discovery reliability across reboots)
 
