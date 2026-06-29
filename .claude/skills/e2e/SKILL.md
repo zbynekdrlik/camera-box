@@ -285,6 +285,17 @@ with all its directives (Nice=-10, SCHED_FIFO, CPUAffinity, NDI env, Restart=alw
 PRODUCTION-quality NDI to strih during the whole test, and Restart=always must respawn the no-display
 command (never re-grab fb0). Use the drop-in for rig-mode; the manual nohup is loopback-only.
 
+**Any camera-box "restore" MUST clear the #291 drop-in first (#309).** The TEST-mode no-display
+drop-in is single-sourced in **`scripts/lib/rig-test-dropin.sh`** — the `RIG_TEST_DROPIN` path
+constant + the pure `rig_test_dropin_clear_cmds` builder (`rm -f` drop-in + `rmdir` + `daemon-reload`,
+idempotent). `rig-mode.sh` (EVENT restore), `recording-e2e.sh` (cleanup cam2 restore) and
+`loopback-e2e.sh` (remote cleanup, carried in via `build_remote_env`'s `RIG_TEST_DROPIN_CLEAR=%q` then
+`eval`'d) all source it and clear BEFORE their `systemctl restart/start camera-box`. Reason: a leftover
+`rig-mode.sh test` drop-in would otherwise make a sibling harness's plain restart bring camera-box back
+WITHOUT `--display` (dark interkom return monitor) while the operator believes broadcast is restored —
+a #246-class silent test-state leak. NEVER hard-code the drop-in path in a script; add the sourced
+helper + the clear-before-restore call to any NEW path that restarts cam2's camera-box.
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).
