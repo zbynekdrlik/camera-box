@@ -235,13 +235,16 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   "$HERE/clock-offset-painter-gate.sh" --painter "cam2=$PAINTER_IP"
 fi
 
-# cam1 v4l2 capture controls (#156 durable): apply the certified sharp controls
-# (saturation=0, contrast=75) BEFORE the run so a soft-default device can never silently
-# degrade the camera's optical dual-QR decode. The cam1 launch step ([2/8]) re-applies them
-# at open too; this is the belt-and-braces preflight the harness owns regardless.
-echo "[0/8] apply certified cam1 v4l2 capture controls (saturation=0, contrast=75) (#156)"
+# cam1 v4l2 capture controls (#338/#312): apply the device-default colour controls
+# (saturation=50, contrast=50) BEFORE the run. The old "sharp set" (saturation=0,
+# contrast=75) was meant to aid the optical dual-QR decode but HURT it (#312 run 312005:
+# the ShadowCast box with the sharp set read ~50% undecodable while the NZXT card on
+# device defaults read the SAME monitor clean). Device defaults decode fine; saturation=0
+# also tinted/greyed the picture. The cam1 launch step ([2/8]) re-applies the same colour
+# set at open; this is the belt-and-braces preflight the harness owns regardless.
+echo "[0/8] apply device-default colour controls (saturation=50, contrast=50) (#338/#312)"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-  "v4l2-ctl -d /dev/video0 --set-ctrl=saturation=0,contrast=75 2>/dev/null; \
+  "v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
    v4l2-ctl -d /dev/video0 --get-ctrl=saturation,contrast 2>/dev/null" \
   || echo "WARNING: could not pre-apply cam1 v4l2 controls (the cam1 launch step re-applies them)" >&2
 
@@ -361,8 +364,9 @@ echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 captur
 # CAMERA_BOX_BURN_RUN_ID, so it draws the cam1 run_id + per-emit frame_id + CAPTURE
 # wall-clock ts into the EMITTED frame, which rides through NDI → strih → stream. #179: the
 # grab-record flags are GONE — the cam1 mark in the stream recording fully replaces the
-# 7.3GB grab, so cam1 just emits NDI with the burn. Re-apply the #156 certified v4l2 controls
-# (saturation=0/contrast=75) directly here (the grab path that used to self-apply is gone).
+# 7.3GB grab, so cam1 just emits NDI with the burn. Apply the device-default colour v4l2
+# controls (saturation=50/contrast=50) directly here (#338/#312: the old sharp set
+# saturation=0/contrast=75 hurt the decode and tinted the picture; device defaults read clean).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$PROBE_BIN_DIR"/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
@@ -370,7 +374,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
   "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
    chmod +x $CAM1_BURN_BIN; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-   v4l2-ctl -d /dev/video0 --set-ctrl=saturation=0,contrast=75 2>/dev/null; \
+   v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
    (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID \
      CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"

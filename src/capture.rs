@@ -159,9 +159,14 @@ pub fn yuyv_to_gray8(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u
 pub const V4L2_CID_CONTRAST: u32 = 0x0098_0901;
 /// V4L2 control id for picture SATURATION (`V4L2_CID_SATURATION`).
 pub const V4L2_CID_SATURATION: u32 = 0x0098_0902;
-/// V4L2 control id for picture HUE (`V4L2_CID_HUE`, `V4L2_CID_BASE+3`). Driving it
-/// to a neutral `0` at capture open guarantees no colour tint leaks in from a stray
-/// prior setting (#296 colour self-heal).
+/// V4L2 control id for picture HUE (`V4L2_CID_HUE`, `V4L2_CID_BASE+3`).
+///
+/// #338: hue is NEVER force-set on the grab/production path. `0` is NOT a neutral
+/// value — on the ShadowCast capture card the V4L2 hue control is `min=0 max=100
+/// default=50`, so forcing `0` is a MAX shift that tints the picture pink/magenta.
+/// The only way hue is touched is an explicit operator `CAMERA_BOX_CAPTURE_CONTROLS`
+/// override (`parse_capture_controls`); the certified colour set leaves it alone so
+/// each card keeps its own neutral default.
 pub const V4L2_CID_HUE: u32 = 0x0098_0903;
 
 /// One certified V4L2 capture control (`id`, `value`) to apply at device open.
@@ -253,10 +258,18 @@ pub fn parse_capture_controls(spec: &str) -> Vec<CaptureControl> {
 ///
 /// Values: `saturation=50` — the ShadowCast factory colour level, proven on the
 /// live rig to produce normal colour (channel_diff ≈ 35); `contrast=50` — the
-/// factory default, symmetric with the certified grayscale set's `75`; `hue=0` — a
-/// neutral, untinted picture. A card that lacks any of these controls (e.g. the
-/// NZXT CAM4 grab card, which exposes NO v4l2 picture controls) logs a warning and
-/// PROCEEDS — see [`apply_controls_with`]; a missing control is never fatal.
+/// factory default. Both equal the device defaults, so this set restores the
+/// known-good colour without imposing any non-default picture shift.
+///
+/// #338: hue is deliberately NOT force-set. Forcing `hue=0` ("neutral") tinted the
+/// live camera PINK — on the ShadowCast card hue is `min=0 max=100 default=50`, so
+/// `0` is a MAX shift, not neutral. The grab path must never disturb hue, and
+/// hardcoding any one hue value tints every card whose neutral isn't that value. Hue
+/// is only ever touched via an explicit `CAMERA_BOX_CAPTURE_CONTROLS` override.
+///
+/// A card that lacks any of these controls (e.g. the NZXT CAM4 grab card, which
+/// exposes NO v4l2 picture controls) logs a warning and PROCEEDS — see
+/// [`apply_controls_with`]; a missing control is never fatal.
 pub fn color_production_controls() -> Vec<CaptureControl> {
     vec![
         CaptureControl {
@@ -267,10 +280,6 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
             id: V4L2_CID_CONTRAST,
             value: 50,
         },
-        CaptureControl {
-            id: V4L2_CID_HUE,
-            value: 0,
-        },
     ]
 }
 
@@ -279,22 +288,26 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
 /// - `env_spec = Some(spec)` — an explicit `CAMERA_BOX_CAPTURE_CONTROLS` override;
 ///   parse it ([`parse_capture_controls`]). Used by ad-hoc rig tweaks; an empty /
 ///   whitespace spec yields no controls (deliberate "touch nothing" escape hatch).
-/// - `env_spec = None`, `record_grab = true` — a grab / QR-test run; the certified
-///   SHARP set ([`certified_cam1_controls`], `saturation=0`/`contrast=75`) so the
-///   filmed QR decodes.
-/// - `env_spec = None`, `record_grab = false` — PRODUCTION; the certified COLOUR set
-///   ([`color_production_controls`]). #296: this branch previously returned NO
-///   controls, so a stray `saturation=0` left by a prior grab persisted and the
-///   live cameras went grayscale. Production now self-heals colour on every open.
-pub fn select_capture_controls(env_spec: Option<&str>, record_grab: bool) -> Vec<CaptureControl> {
+///   The certified SHARP set ([`certified_cam1_controls`]) stays available ON DEMAND
+///   via `CAMERA_BOX_CAPTURE_CONTROLS=certified`.
+/// - `env_spec = None` — both PRODUCTION and a grab / QR-test run get the certified
+///   COLOUR set ([`color_production_controls`]: device-default `saturation=50`,
+///   `contrast=50`, hue untouched).
+///
+/// #296: this no-override branch previously returned NO controls, so a stray
+/// `saturation=0` left by a prior grab persisted and the live cameras went
+/// grayscale. The colour set now self-heals colour on every open.
+///
+/// #338/#312: the grab path is NO LONGER auto-given the SHARP set
+/// ([`certified_cam1_controls`], `saturation=0`/`contrast=75`). That set was meant
+/// to aid QR decode but HURT it (run 312005: a ShadowCast box with the sharp set
+/// read the painter QR ~50% undecodable, while the NZXT card on device defaults read
+/// the SAME monitor clean). The optical decode worked fine on device defaults before
+/// these controls were added, so grab now selects the device-default colour set too.
+/// `_record_grab` is retained for call-site clarity but no longer affects selection.
+pub fn select_capture_controls(env_spec: Option<&str>, _record_grab: bool) -> Vec<CaptureControl> {
     match env_spec {
         Some(spec) => parse_capture_controls(spec),
-        None if record_grab => certified_cam1_controls(),
-        // #296 ROOT FIX: production now ENFORCES the certified colour set on every
-        // open (previously `Vec::new()` — controls untouched), so a stray
-        // saturation=0 left by a prior grab can never persist and turn the live
-        // cameras grayscale. Self-healing colour, same philosophy as the genlock
-        // lockdown.
         None => color_production_controls(),
     }
 }
@@ -1072,10 +1085,13 @@ mod tests {
     }
 
     #[test]
-    fn color_production_controls_is_saturation50_contrast50_hue0() {
-        // #296: the certified COLOUR production set is exactly saturation=50,
-        // contrast=50, hue=0 — a normal, untinted picture. saturation=50 is the
-        // ShadowCast factory colour level proven on the live rig (channel_diff≈35).
+    fn color_production_controls_is_saturation50_contrast50_no_hue_338() {
+        // #338: the certified COLOUR production set is exactly saturation=50,
+        // contrast=50 (both = device defaults) and NOTHING ELSE. The old assertion
+        // also required `hue=0` — that encoded the #338 regression: hue=0 is a MAX
+        // shift on the ShadowCast card (default 50) = a pink tint, so hue must NOT be
+        // force-set. saturation=50 is the ShadowCast factory colour level proven on
+        // the live rig (channel_diff≈35).
         let c = color_production_controls();
         assert_eq!(
             c,
@@ -1088,11 +1104,11 @@ mod tests {
                     id: V4L2_CID_CONTRAST,
                     value: 50
                 },
-                CaptureControl {
-                    id: V4L2_CID_HUE,
-                    value: 0
-                },
             ]
+        );
+        assert!(
+            !c.iter().any(|x| x.id == V4L2_CID_HUE),
+            "colour set must NOT force hue (the #338 pink-tint regression) — got {c:?}"
         );
     }
 
@@ -1119,12 +1135,11 @@ mod tests {
             }),
             "production must restore contrast=50 — got {c:?}"
         );
+        // #338: production must NOT force hue (the old assertion required hue=0, which
+        // is a pink tint on the ShadowCast card — that encoded the regression).
         assert!(
-            c.contains(&CaptureControl {
-                id: V4L2_CID_HUE,
-                value: 0
-            }),
-            "production must set hue=0 (neutral) — got {c:?}"
+            !c.iter().any(|x| x.id == V4L2_CID_HUE),
+            "production must NOT force hue (the #338 pink-tint regression) — got {c:?}"
         );
         assert_eq!(
             c,
@@ -1134,12 +1149,22 @@ mod tests {
     }
 
     #[test]
-    fn select_capture_controls_grab_uses_certified_sharp_set() {
-        // --record-grab (no env override) keeps the #156 sharp set so the filmed QR
-        // still decodes — the fix must NOT change the grab path.
+    fn select_capture_controls_grab_uses_color_set_not_sharp_312() {
+        // #312: --record-grab (no env override) now selects the device-default COLOUR
+        // set, NOT the #156 sharp set. The old assertion required the sharp set
+        // (saturation=0/contrast=75) — that encoded the #312 regression: the sharp
+        // set HURT the optical decode (ShadowCast ~50% undecodable vs the NZXT card
+        // reading the same monitor clean on device defaults). Grab now matches
+        // production. The sharp set stays available on demand via
+        // CAMERA_BOX_CAPTURE_CONTROLS=certified (asserted separately).
         assert_eq!(
             select_capture_controls(None, true),
-            certified_cam1_controls()
+            color_production_controls()
+        );
+        assert_ne!(
+            select_capture_controls(None, true),
+            certified_cam1_controls(),
+            "grab must NOT auto-apply the desaturating sharp set"
         );
     }
 
@@ -1216,8 +1241,8 @@ mod tests {
         let nzxt = FakeDevice::supporting(&[]); // supports nothing — the NZXT case
         let report = apply_controls_with(&nzxt, &color_production_controls());
         assert_eq!(
-            report.failed, 3,
-            "every unsupported control is a non-fatal failure"
+            report.failed, 2,
+            "every unsupported colour control (saturation+contrast) is a non-fatal failure"
         );
         assert_eq!(
             report.applied, 0,
@@ -1229,12 +1254,13 @@ mod tests {
 
     #[test]
     fn apply_controls_applies_supported_controls_on_shadowcast_like_device() {
-        // A ShadowCast-like card (CAM1/2/3) supports saturation+contrast+hue: every
-        // colour control applies and verifies, restoring colour.
+        // A ShadowCast-like card (CAM1/2/3) supports saturation+contrast+hue. The
+        // certified colour set drives only saturation+contrast (#338: hue is left
+        // untouched), so both apply and verify, restoring colour without a hue shift.
         let shadowcast =
             FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST, V4L2_CID_HUE]);
         let report = apply_controls_with(&shadowcast, &color_production_controls());
-        assert_eq!(report.applied, 3, "all three colour controls verified");
+        assert_eq!(report.applied, 2, "both colour controls verified");
         assert_eq!(report.failed, 0);
         assert_eq!(report.adjusted, 0);
         assert_eq!(
@@ -1250,13 +1276,17 @@ mod tests {
 
     #[test]
     fn apply_controls_partial_support_skips_only_the_missing_control() {
-        // A card that supports saturation+contrast but NOT hue (a plausible
-        // intermediate device): the two supported controls apply, hue is a non-fatal
-        // failure, capture proceeds.
-        let partial = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST]);
+        // A card that supports saturation but NOT contrast (a plausible intermediate
+        // device): the supported control applies, the missing one is a non-fatal
+        // failure, capture proceeds. (#338: the colour set is saturation+contrast —
+        // hue is no longer in the set, so contrast stands in as the missing control.)
+        let partial = FakeDevice::supporting(&[V4L2_CID_SATURATION]);
         let report = apply_controls_with(&partial, &color_production_controls());
-        assert_eq!(report.applied, 2, "saturation + contrast applied");
-        assert_eq!(report.failed, 1, "hue unsupported -> one non-fatal failure");
+        assert_eq!(report.applied, 1, "saturation applied");
+        assert_eq!(
+            report.failed, 1,
+            "contrast unsupported -> one non-fatal failure"
+        );
     }
 
     #[test]
@@ -1277,8 +1307,8 @@ mod tests {
         let report = apply_controls_with(&ClampDevice, &color_production_controls());
         assert_eq!(report.applied, 0);
         assert_eq!(
-            report.adjusted, 3,
-            "all three read back clamped -> adjusted"
+            report.adjusted, 2,
+            "both colour controls read back clamped -> adjusted"
         );
         assert_eq!(report.failed, 0);
     }
