@@ -21,17 +21,30 @@ lockdown (#150/#257).
 
 | Set | fn | Values | When |
 |---|---|---|---|
-| SHARP (grab/QR decode) | `certified_cam1_controls()` (#156) | contrast=75, saturation=0 | `--record-grab` or `CAMERA_BOX_CAPTURE_CONTROLS` |
-| COLOUR (production) | `color_production_controls()` (#296) | saturation=50, contrast=50, hue=0 | production (no env, no grab) |
+| COLOUR (default — production AND grab) | `color_production_controls()` (#296/#338) | saturation=50, contrast=50 (no hue) | ANY no-env open: production OR grab |
+| SHARP (on demand only) | `certified_cam1_controls()` (#156) | contrast=75, saturation=0 | ONLY `CAMERA_BOX_CAPTURE_CONTROLS=certified` |
 
-`saturation=0` = the sharp grayscale grab (kills chroma for QR edges).
-`saturation=50` = the ShadowCast factory colour level, proven on the rig
-(channel_diff ≈ 35). `hue=0` = neutral.
+`saturation=50` / `contrast=50` = the ShadowCast factory defaults, normal colour,
+proven on the rig (channel_diff ≈ 35). This is the device-default set; both
+production and grab now use it.
 
-Selection is centralised in `select_capture_controls(env_spec, record_grab)`:
-env override → `parse_capture_controls`; else grab → sharp set; else → colour set.
-`CAMERA_BOX_CAPTURE_CONTROLS` understands `contrast`/`saturation`/`hue` (and the
-keyword `certified`); an empty/whitespace value = explicit "touch nothing".
+**#338 — NEVER force hue, and `hue=0` is NOT neutral.** The ShadowCast V4L2 hue is
+`min=0 max=100 default=50`, so forcing `hue=0` is a MAX shift = a PINK/magenta tint
+on the live camera (the #338 symptom: one cam pink, the NZXT cam clean). The colour
+set therefore touches ONLY saturation+contrast and leaves hue alone. Hue is only
+ever changed via an explicit `CAMERA_BOX_CAPTURE_CONTROLS=hue=N` operator override.
+
+**#312 — the sharp set is NOT auto-applied to grab.** `saturation=0`/`contrast=75`
+was meant to sharpen the filmed QR but HURT the optical decode (run 312005:
+ShadowCast w/ sharp set ~50% undecodable; the NZXT card on device defaults read the
+SAME monitor CLEAN). Grab now uses the device-default colour set; the sharp set is
+opt-in only via `CAMERA_BOX_CAPTURE_CONTROLS=certified`.
+
+Selection is centralised in `select_capture_controls(env_spec, _record_grab)`:
+env override → `parse_capture_controls`; else → colour set (record_grab no longer
+changes selection — kept only for call-site clarity). `CAMERA_BOX_CAPTURE_CONTROLS`
+understands `contrast`/`saturation`/`hue` (and the keyword `certified`); an
+empty/whitespace value = explicit "touch nothing".
 
 V4L2 control ids (V4L2_CID_BASE 0x00980900): CONTRAST=+1 (0x0980901),
 SATURATION=+2 (0x0980902), HUE=+3 (0x0980903).
@@ -43,7 +56,8 @@ graceful: a rejected control logs a warning and PROCEEDS — capture never abort
 This is structural, not conventional: `apply_controls_with()` returns a
 `ControlReport` tally (applied/adjusted/failed) and has NO error return; the
 `VideoCapture::apply_controls` wrapper is `-> ()`. So enforcing the colour set on a
-control-less card is a 3× warn + continue, never fatal.
+control-less card is a 2× warn + continue (saturation+contrast — #338 dropped hue
+from the set), never fatal.
 
 CAM4 was *also* mono during the incident but from a DIFFERENT root (colorspace /
 2-video-node / YUV range) — tracked separately in **#299**, NOT fixed by #296.
