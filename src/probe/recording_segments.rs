@@ -243,10 +243,22 @@ pub fn segment_continuity(
 /// The per-window continuity, on the painted tick. `undecodable` is the count of `None`-tick
 /// delivered frames (robust even when EVERY frame is undecodable, which the reused check returns
 /// as an empty missing-slot set); `gaps` is the REAL-DROP count from
-/// [`burn_contiguity_in_window_with_step`] (the SAME check the per-node burn verdict uses, so a
-/// by-design decimation step is not loss but a true skip/backward-jump is); `copies` is the count
-/// of stale repeats of the painted tick — a metric the burn check (a free-running counter never
-/// repeats) does not surface but the painted tick (which MUST advance per frame) requires.
+/// [`burn_contiguity_in_window_with_step`] (the SAME check the per-node burn verdict uses); `copies`
+/// is the count of stale repeats of the painted tick — a metric the burn check (a monotone counter
+/// never repeats) does not surface but the painted tick (which MUST advance per frame) requires.
+///
+/// ## Rate selection — the painted tick is a per-painted-FRAME counter, sampled at the cambox rate
+///
+/// The painted tick increments once per painted frame, so a forward SKIP is loss at EVERY rate —
+/// unlike the strih/stream node burn (a free-running render-tick counter, where a forward gap at
+/// the full rate is expected). [`BurnRate::PerRenderTick`] only charges forward gaps for a
+/// DECIMATED hop (`expected_step >= 2`), and IGNORES them at step 1 — wrong for the painted tick.
+/// So we pick the rate by step: at `expected_step >= 2` (the 60→30 stream recording) PerRenderTick
+/// is exactly right (a gap == step is the decimation, a gap > step charges the excess); at
+/// `expected_step == 1` (the full-rate cam→strih case) [`BurnRate::PerEmittedFrame`] is right (its
+/// set-based check flags every absent integer as a drop). BOTH credit `None` frames against the
+/// gap math (so an undecodable frame is never double-charged as a gap), giving a correct, reused,
+/// rate-agnostic result without baking any 30-vs-60 assumption into the logic.
 fn window_segment(
     cambox: &str,
     start_ns: i64,
@@ -272,9 +284,9 @@ fn window_segment(
         }
     }
 
-    // gaps: reuse the existing in-window continuity check on the painted tick (PerRenderTick +
-    // expected_step — a forward gap == step is the by-design decimation, a larger gap charges the
-    // excess as a REAL DROP, a backward jump is a fault). undecodable (`None`) frames are charged
+    // gaps: reuse the existing in-window continuity check on the painted tick. The rate is chosen
+    // by the by-design step (see the docstring above): PerRenderTick for a decimated recording
+    // (step >= 2), PerEmittedFrame for a full-rate one (step 1). `None` frames are charged
     // BURN-UNREADABLE there and credited against the gap math, so they never double-count as gaps.
     let recorded: Vec<RecordedBurnFrame> = frames
         .iter()
@@ -283,12 +295,12 @@ fn window_segment(
             burn_id: f.tick,
         })
         .collect();
-    let in_window = burn_contiguity_in_window_with_step(
-        cambox,
-        &recorded,
-        BurnRate::PerRenderTick,
-        expected_step,
-    );
+    let rate = if expected_step >= 2 {
+        BurnRate::PerRenderTick
+    } else {
+        BurnRate::PerEmittedFrame
+    };
+    let in_window = burn_contiguity_in_window_with_step(cambox, &recorded, rate, expected_step);
     let gaps = in_window
         .missing_slots
         .iter()
