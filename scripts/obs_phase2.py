@@ -758,15 +758,29 @@ def _resolve_own_output(ws, host, ndi_name, terminal):
 # We key on the PEAK (max), NOT the mean: a legitimately dark-but-live camera frame can
 # have a very low mean (the live 'Cam 5' read mean ~30, but a darker scene could be ~1)
 # while still carrying a decodable QR — only an all-zero frame (max==0) is truly black.
-def _luma_is_black(luma_max):
-    """#163 fail-fast self-check (pure): True iff the rendered program frame is black
-    (no signal). Black == peak luma 0; any non-zero peak is real content. The decision
-    is on the PEAK only — the caller logs the mean separately for diagnostics, but the
-    mean never gates this (a dark-but-live frame has a low mean and a non-zero peak)."""
-    return int(luma_max) == 0
+#
+# #312: peak-only is insufficient for a source that is mid-RENEGOTIATION (cam1's NDI right after
+# its [2/8] camera-box restart). That renders an almost-entirely-black frame with a few moderately
+# bright pixels — peak ~117 but mean ~2.7 (312006/312007) — which peak-only accepted instantly and
+# recorded as a black program. So callers that route to a KNOWN-BRIGHT scene (the dual-QR monitor,
+# mean ~105 when settled) pass a MEAN floor (min_mean>0): a frame below it is treated as not-yet-
+# non-black so the existing POLL keeps WAITING until cam1 settles and delivers the real bright frame
+# (a deterministic settle, not a fixed sleep). min_mean=0 (the default) keeps the original peak-only
+# behavior for a legitimately dark-but-live prod camera.
+def _luma_is_black(luma_max, luma_mean=None, min_mean=0):
+    """#163 fail-fast self-check (pure): True iff the rendered program frame should be treated as
+    black (not yet delivering real content). Black == peak luma 0 (no signal at all). Additionally,
+    when *min_mean* > 0 and a *luma_mean* is given, a frame whose mean is below the floor is ALSO
+    treated as black (#312: a mid-renegotiation frame has a high peak but a near-zero mean). With the
+    default min_mean=0 the mean never gates (preserving the dark-but-live peak-only behavior)."""
+    if int(luma_max) == 0:
+        return True
+    if min_mean > 0 and luma_mean is not None and luma_mean < min_mean:
+        return True
+    return False
 
 
-def _blackcheck_verdict(luma_max, elapsed_s, timeout_s):
+def _blackcheck_verdict(luma_max, elapsed_s, timeout_s, luma_mean=None, min_mean=0):
     """#111 (pure, testable): poll-aware verdict for the #163 non-black self-check.
 
     The original check read the program luma ONCE, 2 s after switching to the record
@@ -785,7 +799,9 @@ def _blackcheck_verdict(luma_max, elapsed_s, timeout_s):
     """
     if luma_max is None:
         return "WAIT" if elapsed_s < timeout_s else "UNKNOWN"
-    if not _luma_is_black(luma_max):
+    # #312: pass the mean + floor so a high-peak/near-black-mean renegotiation frame counts as black
+    # (WAIT until the deadline) instead of falsely passing on peak alone. min_mean=0 -> peak-only.
+    if not _luma_is_black(luma_max, luma_mean, min_mean):
         return "OK"
     return "WAIT" if elapsed_s < timeout_s else "BLACK"
 
@@ -836,12 +852,19 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint):
     BLACK at the deadline. Consolidating the loop in one place (was duplicated) keeps the #111/#163
     timeout-race tuning from drifting between the two call sites."""
     blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
+    # #312: callers here route to a KNOWN-BRIGHT scene (the dual-QR monitor, mean ~105 when settled),
+    # so require a MEAN floor — a mid-renegotiation frame (peak ~117 but mean ~2.7 right after cam1's
+    # [2/8] restart) then keeps the poll WAITING until cam1's NDI settles, instead of falsely passing
+    # on peak and recording a black program. Env-overridable; set 0 to restore pure peak-only (e.g. a
+    # genuinely dark-but-live prod scene). Default 20: well above the 2.7 garbage, below the ~105 frame.
+    min_mean = float(os.environ.get("OBS_NONBLACK_MIN_MEAN", "20"))
     poll_interval = 1.0
     t0 = time.monotonic()
     while True:
         luma_max, luma_mean = _program_luma(ws, scene)
         elapsed = time.monotonic() - t0
-        verdict = _blackcheck_verdict(luma_max, elapsed, blackcheck_timeout)
+        verdict = _blackcheck_verdict(
+            luma_max, elapsed, blackcheck_timeout, luma_mean=luma_mean, min_mean=min_mean)
         if verdict == "OK":
             sys.stderr.write(
                 f"[obs] {host}: {label} self-check OK — program '{scene}' NON-BLACK "
