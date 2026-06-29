@@ -365,7 +365,14 @@ def _conn(host, password=""):
 
     ws = create_connection(f"ws://{host}:{PORT}", timeout=10)
     hello = json.loads(ws.recv())
-    ident = {"op": 1, "d": {"rpcVersion": 1}}
+    # #331: subscribe to ZERO obs-websocket events. This client is pure request/response (op-6 ->
+    # op-7 in _rpc); it consumes no events. Omitting eventSubscriptions defaults the session to
+    # EventSubscription::All, so a COLD `NDI 2ME PGM` reactivation on the stream box makes DistroAV
+    # flood op-5 events and _rpc's read loop drains them forever while the matching op-7 never
+    # arrives -> the #328 wall-clock timeout that hung prod-scene+teardown and failed #312 runs
+    # 312006/312007. Subscribing to nothing makes the client structurally immune to the entire
+    # event-flood class (this source and any future one); the #328 cap stays as the loud backstop.
+    ident = {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0}}
     auth = hello["d"].get("authentication")
     if auth:
         secret = base64.b64encode(
