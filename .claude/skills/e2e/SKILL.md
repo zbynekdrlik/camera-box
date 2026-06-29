@@ -153,6 +153,15 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
    `scripts/obs_burn_filter.py add --host <ip> --input "<program input>"`. The burn run_id comes
    from the box's host role (strih=911002 bottom-left / stream=911004 bottom-right), NOT env. Verify
    the OBS log: `[burn] ON  genlock_burn=true on '<input>'`.
+   **#334 gotcha — a DISABLED effect filter renders NOTHING even with `genlock_burn=true`.** The
+   DistroAV QR burn is an OBS EFFECT filter; if `GetSourceFilterList` shows it `filterEnabled=False`
+   on the program input, OBS never calls its `video_render`, so the burn is absent from the recording
+   even though the C++ setter fired (`genlock: measurement burn ON`) and `genlock_burn=true`. This is
+   how strih(911002)+stream(911004) went missing from an all-cambox run. `obs_burn_filter.py` now
+   gates on it: `check` reports `burn_on=True` only when `genlock_burn=true AND filter present AND
+   filter_enabled` (prints `filter_enabled=<bool>`), and `add` unconditionally re-enables a
+   present-but-disabled filter (`SetSourceFilterEnabled filterEnabled:true`). When `[4b/8]` passes,
+   confirm the printed line includes `filter_enabled=True`, not just `filter_on_input=True`.
    (#235/#257: genlock latency is the per-source DistroAV UI int (floor 3, prod=3 ms); the render
    tick + ts-align are BUILD DEFAULTS. There is NO `OBS_GENLOCK_*` / `OBS_BURN_*` env any more — the
    old `$env:OBS_BURN_QR=1; OBS_GENLOCK_LATENCY_MS=3` launch model is GONE (#257/#261); OBS launches
