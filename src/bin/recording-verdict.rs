@@ -47,6 +47,9 @@ use camera_box::probe::recording_latency::{
     write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
+use camera_box::probe::recording_segments::{
+    load_switch_schedule, segment_continuity, SegmentFrame, DEFAULT_TRANSITION_GUARD_NS,
+};
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
@@ -187,6 +190,27 @@ struct Args {
     /// recording is read here — only the small partial JSONs.
     #[arg(long, value_name = "BOX=JSON")]
     merge_partials: Vec<String>,
+    /// #312 Phase-1 ALL-CAMBOX per-segment continuity. Path to a switch-schedule JSON — an
+    /// ordered, non-overlapping array of `{"cambox":<label>,"start_ns":<i64>,"end_ns":<i64>}`
+    /// windows on the burn `gen_ts_ns` timeline (the harness logs the sequential program-switch
+    /// wall-times). The SINGLE continuous stream recording's decoded frames are partitioned into
+    /// these windows (discarding `--switch-guard-ns` on each side of every boundary) and the per-
+    /// cambox PAINTED-tick continuity (undecodable / copies / gaps) is reported, gating the
+    /// headline alongside the per-node burn verdict. Emitted under `all_cambox_continuity` in
+    /// `--json`. Requires the stream recording (`--stream`).
+    #[arg(long)]
+    switch_schedule: Option<PathBuf>,
+    /// #312: the transition guard discarded on EACH side of every schedule boundary (ns). The
+    /// program switch + the 60→30 + latency take a few frames to settle; in-guard frames are
+    /// excluded from attribution (NOT counted as loss). Default 1s.
+    #[arg(long, default_value_t = DEFAULT_TRANSITION_GUARD_NS)]
+    switch_guard_ns: i64,
+    /// #312: the by-design decimation step of the painted tick in the stream recording (the
+    /// painter increments per painted frame, captured at the recording rate). `0` = derive from
+    /// `round(--refresh-hz / --stream-capture-fps)` (60/30 = 2 for the stream recording). Pass a
+    /// fixed value to override. Kept a parameter so the continuity bakes no 30-vs-60 assumption.
+    #[arg(long, default_value_t = 0)]
+    switch_expected_step: i64,
 }
 
 impl Args {
@@ -517,6 +541,53 @@ fn node_render_step(node: &str, strih_emit_fps: f64, stream_capture_fps: f64) ->
         }
         _ => 1,
     }
+}
+
+/// #312 — build the per-frame inputs for the all-cambox segment continuity from the decoded
+/// SINGLE stream recording. The attribution `gen_ts_ns` (the schedule's timeline) is taken from
+/// a node BURN — the strih burn first (the program-switch box's render time), then the stream
+/// burn (both passed in `anchor_run_ids`, priority order) — falling back to the cam2 OPTICAL paint
+/// gen_ts (the pinned `cam2_run_id`, else any non-burn payload) so a frame missing both node burns
+/// can still be placed. The painted `tick` is the cam2 optical Vernier tick ([`RecordingFrame::
+/// tick`], which already excludes node burns). A frame carrying NO usable gen_ts anchor at all is
+/// dropped (it cannot be placed on the timeline); the dropped count is returned so it is reported,
+/// never hidden.
+fn segment_frames_from_recording(
+    frames: &[RecordingFrame],
+    anchor_run_ids: &[u32],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+) -> (Vec<SegmentFrame>, usize) {
+    let mut out = Vec::with_capacity(frames.len());
+    let mut no_anchor: usize = 0;
+    for f in frames {
+        let gen_ts = anchor_run_ids
+            .iter()
+            .find_map(|rid| {
+                f.payloads
+                    .iter()
+                    .find(|p| p.run_id == *rid)
+                    .map(|p| p.gen_ts_ns)
+            })
+            .or_else(|| {
+                f.payloads
+                    .iter()
+                    .find(|p| match cam2_run_id {
+                        Some(rid) => p.run_id == rid,
+                        None => !all_burn_run_ids.contains(&p.run_id),
+                    })
+                    .map(|p| p.gen_ts_ns)
+            });
+        match gen_ts {
+            Some(gen_ts_ns) => out.push(SegmentFrame {
+                frame_index: f.frame_index,
+                gen_ts_ns,
+                tick: f.tick,
+            }),
+            None => no_anchor += 1,
+        }
+    }
+    (out, no_anchor)
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -1953,6 +2024,102 @@ fn build_and_print_verdict(
             "frames_captured": stats.frames_captured,
             "source": "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare",
         });
+    }
+
+    // #312 Phase-1 — ALL-CAMBOX per-segment continuity (the all-active splitter proof). When a
+    // switch schedule is supplied, partition the SINGLE continuous stream recording into the per-
+    // cambox program windows (by burn gen_ts_ns, minus the transition guard on each boundary) and
+    // verify the painted-tick continuity PER cambox. Gates the headline alongside the per-node burn
+    // verdict so a single cambox dropping in ITS ~30s window fails the run.
+    if let Some(schedule_path) = &args.switch_schedule {
+        match &stream_frames_opt {
+            Some(stream_frames) => {
+                let schedule = load_switch_schedule(schedule_path)?;
+                // The painted tick's by-design step in the stream recording = the decimation of the
+                // 60Hz painter at the recording rate (refresh_hz / stream_capture_fps = 2). Derived
+                // from the configured fps when --switch-expected-step is 0, else the explicit value.
+                let expected_step = if args.switch_expected_step > 0 {
+                    args.switch_expected_step
+                } else if args.stream_capture_fps > 0.0 {
+                    (args.refresh_hz / args.stream_capture_fps).round().max(1.0) as i64
+                } else {
+                    1
+                };
+                let anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+                let all_burns = [
+                    args.burn_cam1_run_id,
+                    args.burn_strih_run_id,
+                    args.burn_stream_run_id,
+                ];
+                let (seg_frames, no_anchor) = segment_frames_from_recording(
+                    stream_frames,
+                    &anchor_run_ids,
+                    &all_burns,
+                    cam2_pin,
+                );
+                let seg =
+                    segment_continuity(&seg_frames, &schedule, args.switch_guard_ns, expected_step);
+                println!();
+                println!(
+                    "=== #312 ALL-CAMBOX per-segment continuity ({} window(s), guard {} ns, painted-tick step {}) ===",
+                    seg.segments.len(),
+                    seg.guard_ns,
+                    seg.expected_step
+                );
+                for s in &seg.segments {
+                    println!(
+                        "  {} [{}..{}): frames={} undecodable={} copies={} gaps={} → {}",
+                        s.cambox,
+                        s.start_ns,
+                        s.end_ns,
+                        s.frames,
+                        s.undecodable,
+                        s.copies,
+                        s.gaps,
+                        if s.pass { "PASS" } else { "FAIL" }
+                    );
+                }
+                if no_anchor > 0 {
+                    println!(
+                        "  ({no_anchor} recorded frame(s) had no burn/optical gen_ts anchor — not placed)"
+                    );
+                }
+                if seg.unplaceable_frames > 0 {
+                    println!(
+                        "  ({} frame(s) fell outside every scheduled window — not attributed)",
+                        seg.unplaceable_frames
+                    );
+                }
+                println!(
+                    "  >>> {}",
+                    if seg.overall_pass {
+                        "ALL camboxes CONTINUITY-CLEAN across their program windows."
+                    } else {
+                        "NOT clean: one or more cambox windows FAILED (see per-cambox above)."
+                    }
+                );
+                let mut seg_json = serde_json::to_value(&seg).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = seg_json.as_object_mut() {
+                    obj.insert(
+                        "frames_without_anchor".to_string(),
+                        serde_json::json!(no_anchor),
+                    );
+                }
+                report["all_cambox_continuity"] = seg_json;
+                all_pass &= seg.overall_pass;
+            }
+            None => {
+                eprintln!(
+                    "WARNING: --switch-schedule given but no --stream recording — the all-cambox \
+                     per-segment continuity needs the SINGLE continuous stream recording. The \
+                     verdict cannot pass without it."
+                );
+                report["all_cambox_continuity"] = serde_json::json!({
+                    "error": "no stream recording supplied (--stream is required for --switch-schedule)",
+                });
+                all_pass = false;
+            }
+        }
     }
 
     // Record the headline verdict and write the machine-readable report (BEFORE any

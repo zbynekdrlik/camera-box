@@ -191,13 +191,30 @@ pub fn segment_continuity(
     let guard_ns = guard_ns.max(0);
     let expected_step = expected_step.max(1);
 
-    // STUB (RED): the gen_ts partition is not implemented yet — every window gets NO frames, so
-    // each cambox FAILs (frames == 0) and the behaviour tests are RED until the real partition +
-    // per-cambox painted-tick continuity lands in the GREEN commit.
-    let _ = frames;
-    let window_frames: Vec<Vec<SegmentFrame>> = vec![Vec::new(); schedule.len()];
-    let discarded_guard_frames: u32 = 0;
-    let unplaceable_frames: u32 = 0;
+    let mut window_frames: Vec<Vec<SegmentFrame>> = vec![Vec::new(); schedule.len()];
+    let mut discarded_guard_frames: u32 = 0;
+    let mut unplaceable_frames: u32 = 0;
+
+    for f in frames {
+        // Windows are ordered + non-overlapping, so a gen_ts can fall in at most one.
+        match schedule
+            .iter()
+            .position(|w| f.gen_ts_ns >= w.start_ns && f.gen_ts_ns < w.end_ns)
+        {
+            Some(wi) => {
+                let w = &schedule[wi];
+                let after_lead = f.gen_ts_ns >= w.start_ns.saturating_add(guard_ns);
+                let before_trail = f.gen_ts_ns < w.end_ns.saturating_sub(guard_ns);
+                if after_lead && before_trail {
+                    window_frames[wi].push(*f);
+                } else {
+                    // Inside the transition guard on one side of a boundary — excluded, NOT loss.
+                    discarded_guard_frames = discarded_guard_frames.saturating_add(1);
+                }
+            }
+            None => unplaceable_frames = unplaceable_frames.saturating_add(1),
+        }
+    }
 
     let mut overall_pass = !schedule.is_empty();
     let mut segments = Vec::with_capacity(schedule.len());
