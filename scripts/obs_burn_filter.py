@@ -40,6 +40,31 @@ def _has_filter(ws, input_name):
     return any(f.get("filterName") == BURN_FILTER_NAME for f in data.get("filters", []))
 
 
+def _filter_enabled(ws, input_name):
+    """Read the burn filter's ENABLED state (None if the filter is absent).
+
+    #334: a DISABLED effect filter's video_render is never invoked by OBS, so the burn never
+    renders even when genlock_burn=true and the C++ setter fires. The `check` gate and the `add`
+    path therefore MUST consider this, not just the filter's presence.
+    """
+    data = _rpc(ws, "GetSourceFilterList", {"sourceName": input_name}, ignore_err=True)
+    for f in data.get("filters", []):
+        if f.get("filterName") == BURN_FILTER_NAME:
+            return bool(f.get("filterEnabled"))
+    return None
+
+
+def compute_burn_on(genlock_burn, filter_present, filter_enabled):
+    """Pure gate for whether a measurement burn will actually RENDER into the program.
+
+    A burn renders only when ALL hold (#257 + #334):
+      - the per-source genlock_burn bool is true,
+      - the renderer effect filter is attached, AND
+      - that filter is ENABLED (a disabled effect filter never renders — #334).
+    """
+    return (genlock_burn is True) and bool(filter_present) and bool(filter_enabled)
+
+
 def _genlock_burn(ws, input_name):
     """Read the per-source genlock_burn bool from the input's settings (None if unknown)."""
     data = _rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
@@ -55,30 +80,32 @@ def _set_genlock_burn(ws, input_name, value):
 
 
 def _ensure_filter(ws, input_name):
-    """Make sure the burn RENDERER filter is attached (the genlock_burn bool only gates rendering;
-    no filter = nothing to render even with the bool on). Idempotent."""
-    if _has_filter(ws, input_name):
-        return
-    kinds = _filter_kinds(ws)
-    if BURN_FILTER_KIND not in kinds:
-        sys.exit(
-            f"[burn] FAIL: filter kind '{BURN_FILTER_KIND}' is NOT registered on this OBS.\n"
-            f"        The #111/#257 burn filter is registered by the camera-box DistroAV build —\n"
-            f"        this OBS is not running it (stock OBS?). Deploy the genlock build + relaunch.\n"
-            f"        Known kinds: {sorted(kinds)}"
-        )
-    _rpc(ws, "CreateSourceFilter", {
-        "sourceName": input_name,
-        "filterName": BURN_FILTER_NAME,
-        "filterKind": BURN_FILTER_KIND,
-    })
+    """Make sure the burn RENDERER filter is attached AND ENABLED (the genlock_burn bool only gates
+    rendering; no filter = nothing to render, and a DISABLED filter never renders either — #334).
+    Idempotent: creates the filter if absent, then unconditionally (re-)enables it."""
+    if not _has_filter(ws, input_name):
+        kinds = _filter_kinds(ws)
+        if BURN_FILTER_KIND not in kinds:
+            sys.exit(
+                f"[burn] FAIL: filter kind '{BURN_FILTER_KIND}' is NOT registered on this OBS.\n"
+                f"        The #111/#257 burn filter is registered by the camera-box DistroAV build —\n"
+                f"        this OBS is not running it (stock OBS?). Deploy the genlock build + relaunch.\n"
+                f"        Known kinds: {sorted(kinds)}"
+            )
+        _rpc(ws, "CreateSourceFilter", {
+            "sourceName": input_name,
+            "filterName": BURN_FILTER_NAME,
+            "filterKind": BURN_FILTER_KIND,
+        })
+        if not _has_filter(ws, input_name):
+            sys.exit(f"[burn] FAIL: burn filter did not attach to '{input_name}'")
+    # #334: ALWAYS (re-)enable — a present-but-disabled filter never renders the burn, which is
+    # exactly how the strih(911002)+stream(911004) burns went missing from the recording.
     _rpc(ws, "SetSourceFilterEnabled", {
         "sourceName": input_name,
         "filterName": BURN_FILTER_NAME,
         "filterEnabled": True,
     }, ignore_err=True)
-    if not _has_filter(ws, input_name):
-        sys.exit(f"[burn] FAIL: burn filter did not attach to '{input_name}'")
 
 
 def cmd_add(ws, input_name):
@@ -101,15 +128,17 @@ def cmd_remove(ws, input_name):
 def cmd_check(ws, input_name):
     burn = _genlock_burn(ws, input_name)
     present = _has_filter(ws, input_name)
+    enabled = _filter_enabled(ws, input_name)
     registered = BURN_FILTER_KIND in _filter_kinds(ws)
     # `burn_on` is the authoritative tell: a burn RENDERS only when the per-source bool is true
-    # AND the renderer filter is attached (no filter => nothing renders even with the bool on,
-    # per this script's contract). Both conditions are required. kind_registered/filter_on_input
-    # are kept for diagnostics.
-    burn_on = (burn is True) and present
+    # AND the renderer filter is attached AND that filter is ENABLED. A present-but-DISABLED
+    # filter never renders (its video_render is not invoked), so it must NOT report burn_on=True
+    # (the #334 false positive that let the [4b/8] pre-record gate pass with no burn in the
+    # recording). genlock_burn/filter_on_input/filter_enabled/kind_registered are kept for diag.
+    burn_on = compute_burn_on(burn, present, enabled)
     print(
         f"[burn] burn_on={burn_on} genlock_burn={burn} filter_on_input={present} "
-        f"kind_registered={registered} input='{input_name}'"
+        f"filter_enabled={enabled} kind_registered={registered} input='{input_name}'"
     )
     if not registered:
         print("[burn]   NOTE: this OBS does not have the camera-box burn filter (stock OBS?)")
