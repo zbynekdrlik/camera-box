@@ -933,6 +933,10 @@ def prod_scene(a):
     ws = _conn(a.host, a.password)
     try:
         prev = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+        # #343: save the ACTUAL current program before _restore_target overwrites `prev` with
+        # the teardown restore target. Used below to decide whether a SetCurrentProgramScene
+        # is needed at all (already on target → skip; needs switch + ensure_source → pre-warm).
+        curr_prog = prev
         studio = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
         prev_preview = (
             _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get("currentPreviewSceneName")
@@ -1011,7 +1015,20 @@ def prod_scene(a):
             )
 
         # Switch program to the prod recording scene.
-        _rpc(ws, "SetCurrentProgramScene", {"sceneName": target})
+        # #343: two mitigations for the heavy-FIFO scene-switch blocking > OBS_OP_TIMEOUT_S:
+        #   (a) already on target — skip SetCurrentProgramScene entirely (source is warm,
+        #       zero activation cost, avoids re-triggering the FIFO init).
+        #   (b) need to switch + --ensure-source (ephemeral scene, NDI 2ME PGM 450 ms FIFO)
+        #       — use timeout_s=0 (no #328 deadline) so OBS can finish the FIFO init without
+        #       being cut off at 60 s. This is the one legitimately unbounded op; all
+        #       subsequent calls keep their OBS_OP_TIMEOUT_S cap.
+        if curr_prog == target:
+            pass  # (a) already on target: source is warm, switch is a no-op
+        elif a.ensure_source:
+            # (b) pre-warm: no deadline — let OBS activate the heavy FIFO without #328 cut-off
+            _rpc(ws, "SetCurrentProgramScene", {"sceneName": target}, timeout_s=0)
+        else:
+            _rpc(ws, "SetCurrentProgramScene", {"sceneName": target})
         # In Studio Mode also set it to preview so the rendered program is the prod scene
         # (a stale preview scene keeps render-ticking and can confuse a viewer, but does
         # not affect the recorded PROGRAM output).
