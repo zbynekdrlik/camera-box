@@ -17,6 +17,12 @@
 # clean core with grub-mkimage whose embedded config chains straight to
 # /boot/grub/grub.cfg by root filesystem UUID (topology-independent: works no
 # matter which disk slot the USB ends up in). Proven via scripts/test-usb-grub-boot.sh.
+#
+# SECURE BOOT (#344): the grub-mkimage core is UNSIGNED, so the target firmware must have UEFI
+# Secure Boot DISABLED. This is NOT a regression — the prior `grub-install --removable` core was
+# not shim-chained either, so these sticks already required Secure Boot off; the cam-box appliances
+# run with it disabled. If a future target needs Secure Boot, that's a separate shim+signed-grub
+# task, not this boot fix.
 build_grub_efi_core() {
     local efi_dir="$1"
     local root_uuid="$2"

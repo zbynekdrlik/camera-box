@@ -8,7 +8,7 @@ set -euo pipefail
 DEVICE="${1:-}"
 MOUNT_ROOT="/mnt/usb-root"
 MOUNT_EFI="/mnt/usb-efi"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Colors for output
 RED='\033[0;31m'
