@@ -1364,4 +1364,74 @@ mod tests {
             "grab must select the device-default colour set, same as production"
         );
     }
+
+    // ── #299 chroma metric tests ─────────────────────────────────────────────
+
+    #[test]
+    fn mean_chroma_grayscale_yuyv_is_near_zero_299() {
+        // #299 RED: synthetic YUYV frame with all U=128, V=128 (neutral chroma =
+        // grayscale). mean_chroma must return values close to 0 for both channels.
+        // Width=4 pixels (2 macropixels), height=1.
+        // Macropixel layout: Y0 U Y1 V — both U and V are 128 here.
+        let frame: Vec<u8> = [0u8, 128, 0u8, 128] // macropixel 1
+            .iter()
+            .chain([0u8, 128, 0u8, 128].iter()) // macropixel 2
+            .copied()
+            .collect();
+        let (u_dev, v_dev) = mean_chroma(&frame, 4, 1);
+        assert!(
+            u_dev < 0.5,
+            "grayscale YUYV: mean |U-128| must be near 0, got {u_dev}"
+        );
+        assert!(
+            v_dev < 0.5,
+            "grayscale YUYV: mean |V-128| must be near 0, got {v_dev}"
+        );
+        // Also verify the classifier agrees
+        assert!(
+            !is_color_frame(u_dev, v_dev),
+            "grayscale frame must not be classified as colour: u={u_dev} v={v_dev}"
+        );
+    }
+
+    #[test]
+    fn mean_chroma_colour_yuyv_exceeds_threshold_299() {
+        // #299 RED: synthetic YUYV frame simulating a saturated blue field.
+        // Approximate YUV for blue: Y≈41, U≈240, V≈110.
+        // mean |U-128| ≈ 112, mean |V-128| ≈ 18 — both >> CHROMA_COLOR_THRESHOLD.
+        // 256 pixels wide, 1 row: 128 macropixels = 512 bytes.
+        let macro_pixel: [u8; 4] = [41, 240, 41, 110];
+        let frame: Vec<u8> = macro_pixel.iter().copied().cycle().take(512).collect();
+        let (u_dev, v_dev) = mean_chroma(&frame, 256, 1);
+        assert!(
+            u_dev > CHROMA_COLOR_THRESHOLD,
+            "blue field: mean |U-128| ({u_dev:.1}) must exceed CHROMA_COLOR_THRESHOLD ({CHROMA_COLOR_THRESHOLD})"
+        );
+        assert!(
+            is_color_frame(u_dev, v_dev),
+            "colour YUYV must be classified as colour: u={u_dev:.1} v={v_dev:.1}"
+        );
+    }
+
+    #[test]
+    fn is_color_frame_threshold_boundary_299() {
+        // #299 RED: verify the threshold boundary behaves correctly.
+        // At or below threshold → grayscale; above → colour.
+        assert!(
+            !is_color_frame(CHROMA_COLOR_THRESHOLD, 0.0),
+            "exactly at threshold must be grayscale (exclusive bound)"
+        );
+        assert!(
+            !is_color_frame(0.0, CHROMA_COLOR_THRESHOLD),
+            "exactly at threshold (V) must be grayscale"
+        );
+        assert!(
+            is_color_frame(CHROMA_COLOR_THRESHOLD + 0.01, 0.0),
+            "just above threshold (U) must be colour"
+        );
+        assert!(
+            is_color_frame(0.0, CHROMA_COLOR_THRESHOLD + 0.01),
+            "just above threshold (V) must be colour"
+        );
+    }
 }
