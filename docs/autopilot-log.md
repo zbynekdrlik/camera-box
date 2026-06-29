@@ -973,3 +973,19 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - `scripts/obs_phase2.py` `switch` subcommand (commit 41bd8a453): `SetCurrentProgramScene` + capture switch epoch-ns (`time.time_ns()`) immediately, then the #163/#111 POLLED non-black self-check (reuses pure `_program_luma`/`_blackcheck_verdict`); prints the boundary ns. Lightweight — no STATE/preload/upstream dance (prod_scene() already routed in [4/8]). 3 wiring tests `tests/python/test_obs_phase2_switch.py`.
 - `scripts/recording-e2e.sh` (commit 5bd7a9e8f): ALL_CAMBOX=1 sweep replaces [6/8]'s single `sleep` (DEFAULT path UNCHANGED). CAMBOX_SWEEP default `Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4` (verified scrambled-name mapping; CAM3/.63 down #301 excluded), SEGMENT_SECS 30. Step [8/8] appends `--switch-schedule` (if-form, not `&& ` #178) when ALL_CAMBOX=1 + file exists. Program-output burns 911002/911004 ride scene switches → [4b/8] gate unaffected.
 - Verified locally: Tier-0 fmt/check/clippy(-D warnings)/test --no-run clean (default features only — never `--features probe`), ruff clean, bash -n + shellcheck clean, python 51/51, end-to-end sweep-glue smoke (mock switch + real switch_schedule.py) → valid ordered/contiguous schedule. NO rig/ssh/OBS — supervisor drives the actual rig run.
+
+## #312 Phase-1 — all-cambox per-segment continuity verdict (2026-06-29)
+- Feature: `recording-verdict --switch-schedule <json>` partitions the single continuous stream
+  recording into per-cambox program windows (by burn `gen_ts_ns`, minus a 1s transition guard on
+  each boundary) and reports per-cambox painted-tick continuity (undecodable/copies/gaps + PASS) →
+  `all_cambox_continuity` in the verdict JSON; gates the headline alongside the per-node burn verdict.
+- New pure module `src/probe/recording_segments.rs` (`SwitchWindow`/`SegmentFrame`/`CamboxSegment`/
+  `SegmentedContinuity`, `validate_schedule`/`parse_switch_schedule`/`segment_continuity`/`window_segment`).
+- RED→GREEN: test:[red] cad6f8949 (stub) → feat:[green] 60d43c0ce (impl). CI Test job verifies all
+  probe-gated unit + integration tests (locally verified via an isolated non-probe crate, 62 tests).
+- CODE-REVIEW FIX (7dac0dbca + regression test `non_adjacent_freeze_hiding_a_real_drop_still_fails`):
+  the painted-tick continuity must NOT reuse `burn_contiguity` — at expected_step==1 its #226
+  duplicate⇒BURN-UNREADABLE reclassification cleared a real drop behind a non-adjacent freeze
+  (FALSE PASS). Now computed directly (forward-excess gap, backward-jump gap, repeat=copy, None=undecodable).
+- PRs: #323 (Phase-1 code, merged by user at 4999b8005) + #324 (false-pass fix, merged 366acc51a).
+  Issue #312 STAYS OPEN — Phase-2 (cambox-id in burn pixels) + the harness + the rig run remain.

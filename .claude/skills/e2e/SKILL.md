@@ -354,9 +354,9 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
 - **Verdict (CI-testable, `src/probe/recording_segments.rs` + `recording-verdict`):**
   `recording-verdict --stream <rec> --switch-schedule <schedule.json>` partitions the decoded
   stream frames into per-cambox windows by burn `gen_ts_ns ∈ [start_ns,end_ns)` (minus a 1s
-  transition guard on EACH boundary — `--switch-guard-ns`), runs `burn_contiguity_in_window_with_step`
-  on the PAINTED tick per window, and emits `all_cambox_continuity` in the `--json` summary
-  (per-cambox `frames/undecodable/copies/gaps/pass` + `overall_pass`). It GATES the headline.
+  transition guard on EACH boundary — `--switch-guard-ns`), runs the per-window painted-tick
+  continuity (`window_segment`) per window, and emits `all_cambox_continuity` in the `--json`
+  summary (per-cambox `frames/undecodable/copies/gaps/pass` + `overall_pass`). It GATES the headline.
 - **Schedule JSON:** an ordered, non-overlapping array of `{"cambox":<label>,"start_ns":<i64>,"end_ns":<i64>}`
   on the burn `gen_ts_ns` timeline. Validation rejects overlap / out-of-order / start≥end / empty.
 - **`expected_step`** (the painted-tick by-design step) is a PARAMETER, NOT hardcoded: default
@@ -365,13 +365,20 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
 - **Coverage honesty (#301):** a scheduled cambox with ZERO in-window frames FAILs — an absent box
   (e.g. CAM3 down) never reads as a pass. Active set today = CAM1/2/4.
 
-**Design gotcha — copies need their own pass.** `burn_contiguity_in_window_with_step` (PerRenderTick)
-surfaces `undecodable` (None frames → BurnUnreadable) and `gaps` (forward skip beyond `expected_step`,
-or backward jump → RealDrop), but NOT `copies`: a free-running burn counter never repeats, so its
-walk ignores `id == prev`. The PAINTED tick MUST advance per painted frame, so a repeat IS a stale
-frame — `window_segment` counts copies in a separate explicit pass (consecutive equal present ticks).
-`undecodable` is counted directly (the in-window check returns an EMPTY missing set for an all-None
-window, so do not derive undecodable from its slots).
+**Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
+The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
+render-tick counter, so `burn_contiguity_in_window_with_step` is the wrong tool two ways: (1) its
+`PerRenderTick` rate IGNORES forward gaps at `expected_step == 1` (a render counter legitimately
+ticks faster than frames), masking a real step-1 drop; (2) its `PerEmittedFrame` rate carries the
+#226 "duplicate ⇒ BURN-UNREADABLE" reclassification — for a NODE BURN a duplicate id is a
+delivered-but-misdecoded frame (not a drop), but for the PAINTED tick a duplicate is a STALE/FROZEN
+copy and the tick missing behind a *non-adjacent* freeze is a REAL drop, which that reclassification
+silently clears (a FALSE PASS on a zero-loss verdict — caught in code review, ticks `100,101,100,103`).
+So `window_segment` computes the painted-tick continuity DIRECTLY: a forward skip beyond
+`expected_step` (integer-division excess, crediting `None` frames) or a backward jump is a `gap`; a
+repeated tick is a `copy`; `undecodable` is the direct `None` count. It mirrors `burn_contiguity`'s
+definitions but treats a duplicate as a copy, never burn-unreadable. Regression-locked by
+`non_adjacent_freeze_hiding_a_real_drop_still_fails`.
 
 ## Clippy gotcha — `doc_lazy_continuation` under `--all-features`
 
