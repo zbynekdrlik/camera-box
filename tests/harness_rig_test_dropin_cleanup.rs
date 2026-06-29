@@ -38,6 +38,25 @@ fn read(rel: &str) -> String {
 const DROPIN_BASENAME: &str = "zz-rig-test-no-display.conf";
 const LIB_REL: &str = "scripts/lib/rig-test-dropin.sh";
 
+/// Best-effort strip of bash comments so the single-source guard keys on EXECUTABLE code, not prose:
+/// a future doc comment that merely mentions the drop-in filename must not false-trip "hard-coded
+/// path". Drops full-line `#` comments and the inline ` # …` tail (a space-prefixed `#`, so
+/// `${VAR#pat}` parameter expansion — `#` not preceded by space — is preserved).
+fn code_only(src: &str) -> String {
+    src.lines()
+        .map(|l| {
+            if l.trim_start().starts_with('#') {
+                return "";
+            }
+            match l.find(" #") {
+                Some(i) => &l[..i],
+                None => l,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Headline behavioral RED→GREEN: the shared clear builder must emit remote bash that REMOVES a
 /// rig-test no-display drop-in. We create a fake drop-in at a temp path, run the emitted commands
 /// locally, and assert the file is GONE afterwards. This is exactly what the harness restore now
@@ -134,8 +153,9 @@ fn dropin_path_is_single_sourced_in_the_lib() {
         "scripts/loopback-e2e.sh",
     ] {
         assert!(
-            !read(s).contains(DROPIN_BASENAME),
-            "#309: {s} must NOT hard-code the drop-in path — source it from {LIB_REL} (no duplication)"
+            !code_only(&read(s)).contains(DROPIN_BASENAME),
+            "#309: {s} must NOT hard-code the drop-in path in executable code — source it from \
+             {LIB_REL} (no duplication; a doc comment mentioning it is fine)"
         );
     }
 }
