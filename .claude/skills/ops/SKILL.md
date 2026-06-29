@@ -188,6 +188,13 @@ root → unbootable. Recovery was a dev1 chroot: `update-initramfs -c -k <ver>` 
 
 **Live-box rules (unchanged):** NEVER edit `/etc/default/grub` + `update-grub` on a live box — that
 is what bricked them. Kernel-cmdline tuning (#303 nohz_full/rcu_nocbs) stays DEFERRED. Safe live
-mitigation already on survivors (.61/.62/.64): kernels dpkg-held, `/var/cache` freed. Extending the
-hardening to the base-image builder (`create-usb-linux.sh`) + a `build-image.sh` fail-closed grub
-guard is **#307**.
+mitigation already on survivors (.61/.62/.64): kernels dpkg-held, `/var/cache` freed.
+
+**#307 SHIPPED (PR #322):** the hardening now also covers the two builders the setup scripts didn't —
+`create-usb-linux.sh` (master base-image builder: `apt-mark hold` the kernel + unattended-upgrades off
+via `20auto-upgrades` periodic=0 + `GRUB_DEFAULT=saved`/`grub-set-default 0`, was the hardcoded
+boot-newest default) and `build-image.sh install_bootloader` (fail-closed guard: validate the generated
+grub.cfg default menuentry has BOTH a kernel image AND an initrd before pinning). All four scripts
+(`setup.sh`, `setup-device.sh`, `create-usb-linux.sh`, `build-image.sh`) are now content-asserted by
+`tests/appliance_boot_hardening.rs` (10 tests). These are BUILD-time scripts — verified by
+content-assertion tests in CI, NOT a rig deploy (runtime boot-verify happens at the #301 re-image).
