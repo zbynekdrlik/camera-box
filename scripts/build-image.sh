@@ -4,7 +4,7 @@ set -euo pipefail
 # Camera-Box USB Image Builder
 # Creates a bootable USB image with read-only root filesystem
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 BINARY_TARBALL="${1:-}"
 OUTPUT_IMAGE="camera-box-image.img"
 IMAGE_SIZE="4G"
@@ -249,6 +249,8 @@ GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Camera-Box"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
 GRUB_CMDLINE_LINUX=""
+# #344: do NOT let os-prober add cross-disk stowaway entries (the build host's other disks).
+GRUB_DISABLE_OS_PROBER=true
 EOF
 
     chroot "${WORK_DIR}/rootfs" update-grub
@@ -269,6 +271,16 @@ EOF
     fi
 
     chroot "${WORK_DIR}/rootfs" grub-set-default 0
+
+    # #344: grub-install's --removable BOOTX64.EFI core is broken on Ubuntu 24.04 — its embedded
+    # live-media probe (/.disk/info) fails on an installed root and drops to the grub> rescue prompt,
+    # so the image never boots. Overwrite that core with a clean grub-mkimage core that chains
+    # straight to /boot/grub/grub.cfg by root fs UUID (the same fix create-usb-linux.sh applies; see
+    # scripts/lib/install-grub-efi.sh + the boot proof scripts/test-usb-grub-boot.sh).
+    cp "${SCRIPT_DIR}/lib/install-grub-efi.sh" "${WORK_DIR}/rootfs/tmp/install-grub-efi.sh"
+    chroot "${WORK_DIR}/rootfs" bash -c \
+        'source /tmp/install-grub-efi.sh && build_grub_efi_core /boot/efi "$(grub-probe --target=fs_uuid /)"'
+    rm -f "${WORK_DIR}/rootfs/tmp/install-grub-efi.sh"
 }
 
 install_ndi_library() {
