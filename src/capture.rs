@@ -1293,4 +1293,45 @@ mod tests {
             "no controls -> empty report"
         );
     }
+
+    #[test]
+    fn production_controls_must_not_force_hue_338() {
+        // #338 REGRESSION GUARD: color_production_controls() must NOT force HUE.
+        // Production previously forced hue=0 (doc-claimed "neutral"), but the
+        // ShadowCast capture card's V4L2 hue is min=0 max=100 default=50 — so hue=0
+        // is a MAX shift = a pink/magenta tint on the live camera (the #338 symptom:
+        // one cam pink, the NZXT cam — which exposes no controls — clean). The colour
+        // set must touch only saturation+contrast (both = device default 50) and
+        // leave hue untouched. FAILS on the unfixed code (which includes hue=0).
+        assert!(
+            !color_production_controls()
+                .iter()
+                .any(|c| c.id == V4L2_CID_HUE),
+            "production colour set must NOT force hue (hue=0 is a pink tint on ShadowCast) — got {:?}",
+            color_production_controls()
+        );
+    }
+
+    #[test]
+    fn grab_selection_must_not_desaturate_312() {
+        // #312 REGRESSION GUARD: the grab / QR-decode selection (no env override)
+        // must NOT desaturate the capture. The #156 sharp set (saturation=0,
+        // contrast=75) was auto-applied to grab runs but HURT the optical decode (run
+        // 312005: CAM1 ShadowCast w/ sharp set ~50% undecodable; CAM4 on device
+        // defaults read the SAME monitor clean). The grab path must select the
+        // device-default colour set instead. FAILS on the unfixed code (which selects
+        // certified_cam1_controls() with saturation=0).
+        let grab = select_capture_controls(None, true);
+        assert!(
+            !grab
+                .iter()
+                .any(|c| c.id == V4L2_CID_SATURATION && c.value == 0),
+            "grab selection must NOT desaturate (saturation=0 hurts QR decode) — got {grab:?}"
+        );
+        assert_eq!(
+            grab,
+            color_production_controls(),
+            "grab must select the device-default colour set, same as production"
+        );
+    }
 }
