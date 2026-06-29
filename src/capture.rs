@@ -155,6 +155,88 @@ pub fn yuyv_to_gray8(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u
     out
 }
 
+// ── #299 colour-capture metric ────────────────────────────────────────────────
+
+/// Minimum mean chroma deviation (|U−128| or |V−128|) to classify a YUYV frame
+/// as colour. Values at or below this threshold indicate a monochrome/grayscale
+/// source (both channels stay close to the neutral 128 point).
+pub const CHROMA_COLOR_THRESHOLD: f32 = 2.0;
+
+/// Macropixel sampling stride for [`mean_chroma`]: sample every Nth macropixel.
+/// At N=64 and 1920×1080 (≈518 k macropixels) ≈8 k samples per call — negligible
+/// cost even at the 1 Hz periodic log rate.
+const CHROMA_SAMPLE_STRIDE: usize = 64;
+
+/// How many captured frames to skip between chroma samples in the capture loop.
+/// At 60 fps capture this yields one sample per second, giving the periodic
+/// 5-second report window five fresh measurements to choose the most recent from.
+/// `pub` (not `pub(crate)`): the `camera-box` binary is a SEPARATE crate that
+/// reads this as `camera_box::capture::CHROMA_SAMPLE_FRAMES`, so it must be part
+/// of the library's public surface.
+pub const CHROMA_SAMPLE_FRAMES: u32 = 60;
+
+/// Compute mean |U−128| and mean |V−128| over a subsampled YUYV422 frame.
+///
+/// YUYV422 macropixel layout: `Y0 U Y1 V` (4 bytes, 2 pixels). The U byte is
+/// at offset 1 and the V byte at offset 3 within each macropixel. Neutral grey
+/// encodes U=V=128; a chromatic source pushes U and V away from 128.
+///
+/// Honors `stride` (bytes per row) so a device that pads its rows is sampled on
+/// REAL pixel data only — the V4L2 mmap buffer length is `stride * height`, not
+/// `width * 2 * height`, and a padded device (`stride > width * 2`) would
+/// otherwise have its padding bytes sampled as bogus chroma. (Same reason
+/// [`yuyv_to_gray8`] takes a stride.) Within each row it samples every
+/// [`CHROMA_SAMPLE_STRIDE`] macropixels to keep per-call cost small; at
+/// 1920×1080 stride=3840 that is ~15 samples/row × 1080 rows ≈ 16 k samples —
+/// negligible even at the 1 Hz periodic log rate.
+///
+/// `width`/`height` are pixel dimensions; `stride` is the row pitch in bytes
+/// (use `width * 2` for a tightly packed frame). A sample whose bytes fall
+/// outside the buffer is skipped (defensive against a short final buffer).
+///
+/// Returns `(mean |U−128|, mean |V−128|)` in `[0.0, 128.0]`. For a grayscale
+/// source both values are close to 0; a colour source produces values clearly
+/// above [`CHROMA_COLOR_THRESHOLD`]. Returns `(0.0, 0.0)` when no in-bounds
+/// sample exists (empty/undersized buffer or zero dimensions).
+pub fn mean_chroma(frame: &[u8], width: usize, height: usize, stride: usize) -> (f32, f32) {
+    let macropixels_per_row = width / 2; // YUYV packs 2 pixels per 4-byte macropixel
+    if macropixels_per_row == 0 || height == 0 {
+        return (0.0, 0.0);
+    }
+    let mut u_sum: u64 = 0;
+    let mut v_sum: u64 = 0;
+    let mut count: u64 = 0;
+    for y in 0..height {
+        let row_start = y * stride;
+        let mut mp = 0usize;
+        while mp < macropixels_per_row {
+            // Macropixel `mp` of row `y`: Y0 U Y1 V — U at +1, V at +3.
+            let idx = row_start + mp * 4;
+            if idx + 3 < frame.len() {
+                let u = frame[idx + 1] as i16 - 128;
+                let v = frame[idx + 3] as i16 - 128;
+                u_sum += u.unsigned_abs() as u64;
+                v_sum += v.unsigned_abs() as u64;
+                count += 1;
+            }
+            mp += CHROMA_SAMPLE_STRIDE;
+        }
+    }
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+    (u_sum as f32 / count as f32, v_sum as f32 / count as f32)
+}
+
+/// Classify chroma deviations as colour or grayscale.
+///
+/// Returns `true` when either the U or V mean deviation (from [`mean_chroma`])
+/// exceeds [`CHROMA_COLOR_THRESHOLD`], indicating discernible colour information
+/// in the captured frame.
+pub fn is_color_frame(u_dev: f32, v_dev: f32) -> bool {
+    u_dev > CHROMA_COLOR_THRESHOLD || v_dev > CHROMA_COLOR_THRESHOLD
+}
+
 /// V4L2 control id for picture CONTRAST (`V4L2_CID_CONTRAST`).
 pub const V4L2_CID_CONTRAST: u32 = 0x0098_0901;
 /// V4L2 control id for picture SATURATION (`V4L2_CID_SATURATION`).
@@ -1362,6 +1444,121 @@ mod tests {
             grab,
             color_production_controls(),
             "grab must select the device-default colour set, same as production"
+        );
+    }
+
+    // ── #299 chroma metric tests ─────────────────────────────────────────────
+
+    #[test]
+    fn mean_chroma_grayscale_yuyv_is_near_zero_299() {
+        // #299 RED: synthetic YUYV frame with all U=128, V=128 (neutral chroma =
+        // grayscale). mean_chroma must return values close to 0 for both channels.
+        // Width=4 pixels (2 macropixels), height=1.
+        // Macropixel layout: Y0 U Y1 V — both U and V are 128 here.
+        let frame: Vec<u8> = [0u8, 128, 0u8, 128] // macropixel 1
+            .iter()
+            .chain([0u8, 128, 0u8, 128].iter()) // macropixel 2
+            .copied()
+            .collect();
+        // stride = width * 2 (tightly packed, no row padding).
+        let (u_dev, v_dev) = mean_chroma(&frame, 4, 1, 8);
+        assert!(
+            u_dev < 0.5,
+            "grayscale YUYV: mean |U-128| must be near 0, got {u_dev}"
+        );
+        assert!(
+            v_dev < 0.5,
+            "grayscale YUYV: mean |V-128| must be near 0, got {v_dev}"
+        );
+        // Also verify the classifier agrees
+        assert!(
+            !is_color_frame(u_dev, v_dev),
+            "grayscale frame must not be classified as colour: u={u_dev} v={v_dev}"
+        );
+    }
+
+    #[test]
+    fn mean_chroma_colour_yuyv_exceeds_threshold_299() {
+        // #299 RED: synthetic YUYV frame simulating a saturated blue field.
+        // Approximate YUV for blue: Y≈41, U≈240, V≈110.
+        // mean |U-128| ≈ 112 (clearly above threshold); mean |V-128| ≈ 18 (above
+        // threshold by a smaller margin). Both must exceed CHROMA_COLOR_THRESHOLD.
+        // 256 pixels wide, 1 row: 128 macropixels = 512 bytes; stride = width * 2.
+        let macro_pixel: [u8; 4] = [41, 240, 41, 110];
+        let frame: Vec<u8> = macro_pixel.iter().copied().cycle().take(512).collect();
+        let (u_dev, v_dev) = mean_chroma(&frame, 256, 1, 512);
+        assert!(
+            u_dev > CHROMA_COLOR_THRESHOLD,
+            "blue field: mean |U-128| ({u_dev:.1}) must exceed CHROMA_COLOR_THRESHOLD ({CHROMA_COLOR_THRESHOLD})"
+        );
+        assert!(
+            v_dev > CHROMA_COLOR_THRESHOLD,
+            "blue field: mean |V-128| ({v_dev:.1}) must also exceed CHROMA_COLOR_THRESHOLD ({CHROMA_COLOR_THRESHOLD})"
+        );
+        assert!(
+            is_color_frame(u_dev, v_dev),
+            "colour YUYV must be classified as colour: u={u_dev:.1} v={v_dev:.1}"
+        );
+    }
+
+    #[test]
+    fn mean_chroma_honors_stride_padding_299() {
+        // #299: a row-padded device (stride > width*2) must be sampled on REAL
+        // pixel data only — never the padding bytes. 2px wide × 2 rows, stride=6
+        // (4 packed bytes + 2 pad). Row 0 is neutral grey (U=V=128 → dev 0);
+        // row 1 is strongly chromatic (U=V=255 → dev 127). With stride honored,
+        // both rows' real macropixels are sampled → mean dev = (0 + 127)/2 = 63.5
+        // and the frame classifies as colour. If stride were ignored (treated as
+        // packed width*2=4), row 1's data would be missed and/or padding (0 →
+        // dev 128) wrongly sampled — either way the result would differ.
+        let row0 = [0u8, 128, 0u8, 128, 0, 0]; // Y0 U Y1 V pad pad — neutral
+        let row1 = [0u8, 255, 0u8, 255, 0, 0]; // Y0 U Y1 V pad pad — saturated
+        let mut data = Vec::new();
+        data.extend_from_slice(&row0);
+        data.extend_from_slice(&row1);
+        let (u_dev, v_dev) = mean_chroma(&data, 2, 2, 6);
+        assert!(
+            (u_dev - 63.5).abs() < 0.01,
+            "stride-padded: mean |U-128| must be 63.5 (rows 0+1 sampled, padding skipped), got {u_dev}"
+        );
+        assert!(
+            (v_dev - 63.5).abs() < 0.01,
+            "stride-padded: mean |V-128| must be 63.5, got {v_dev}"
+        );
+        assert!(
+            is_color_frame(u_dev, v_dev),
+            "stride-padded chromatic frame must classify as colour: u={u_dev} v={v_dev}"
+        );
+    }
+
+    #[test]
+    fn mean_chroma_empty_or_zero_dims_is_zero_299() {
+        // #299: defensive — empty buffer or zero dimensions yields (0,0), no panic.
+        assert_eq!(mean_chroma(&[], 0, 0, 0), (0.0, 0.0));
+        assert_eq!(mean_chroma(&[1, 2, 3, 4], 0, 1, 0), (0.0, 0.0));
+        // Undersized buffer (no in-bounds macropixel) also yields (0,0).
+        assert_eq!(mean_chroma(&[1, 2], 2, 1, 4), (0.0, 0.0));
+    }
+
+    #[test]
+    fn is_color_frame_threshold_boundary_299() {
+        // #299 RED: verify the threshold boundary behaves correctly.
+        // At or below threshold → grayscale; above → colour.
+        assert!(
+            !is_color_frame(CHROMA_COLOR_THRESHOLD, 0.0),
+            "exactly at threshold must be grayscale (exclusive bound)"
+        );
+        assert!(
+            !is_color_frame(0.0, CHROMA_COLOR_THRESHOLD),
+            "exactly at threshold (V) must be grayscale"
+        );
+        assert!(
+            is_color_frame(CHROMA_COLOR_THRESHOLD + 0.01, 0.0),
+            "just above threshold (U) must be colour"
+        );
+        assert!(
+            is_color_frame(0.0, CHROMA_COLOR_THRESHOLD + 0.01),
+            "just above threshold (V) must be colour"
         );
     }
 }
