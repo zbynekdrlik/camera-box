@@ -428,6 +428,13 @@ async fn run_capture_loop(
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
 
+        // #299 — colour-capture metric: sample chroma once per CHROMA_SAMPLE_FRAMES
+        // captured frames (≈1 Hz at 60 fps) and log alongside the 5-second fps report.
+        // A grayscale log line ("grayscale (source likely monochrome)") is the automatic
+        // regression signal that replaces the previous "look at it and wonder" method.
+        let mut last_chroma: (f32, f32) = (0.0, 0.0);
+        let mut chroma_frame_ctr: u32 = 0;
+
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
@@ -555,6 +562,18 @@ async fn run_capture_loop(
         while running_capture.load(Ordering::Relaxed) {
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
+                // #299 — chroma sample: every CHROMA_SAMPLE_FRAMES captured frames
+                // (regardless of emit/decimate decisions so we always sample the raw
+                // device output). Stored in `last_chroma`; logged on the 5-second tick.
+                chroma_frame_ctr = chroma_frame_ctr.wrapping_add(1);
+                if chroma_frame_ctr.is_multiple_of(camera_box::capture::CHROMA_SAMPLE_FRAMES) {
+                    last_chroma = camera_box::capture::mean_chroma(
+                        data,
+                        info.width as usize,
+                        info.height as usize,
+                    );
+                }
+
                 if out_interval_ns > 0 {
                     // Genlock decimation: emit only the capture at/after each
                     // wall-clock boundary (pure logic in ndi::genlock_emit_gate).
@@ -696,6 +715,22 @@ async fn run_capture_loop(
                                 dropped
                             );
                         }
+                        // #299 — log the most recent chroma sample alongside the fps report.
+                        // A "grayscale" line here means the capture card is delivering
+                        // monochrome frames — the automatic regression signal for colour-capture.
+                        let (u_dev, v_dev) = last_chroma;
+                        let colour_label = if camera_box::capture::is_color_frame(u_dev, v_dev) {
+                            "colour"
+                        } else {
+                            "grayscale (source likely monochrome)"
+                        };
+                        tracing::info!(
+                            "capture chroma: u_dev={:.1} v_dev={:.1} -> {}",
+                            u_dev,
+                            v_dev,
+                            colour_label
+                        );
+
                         frame_count = 0;
                         emit_count = 0;
                         last_report = std::time::Instant::now();

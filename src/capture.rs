@@ -155,6 +155,72 @@ pub fn yuyv_to_gray8(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u
     out
 }
 
+// ── #299 colour-capture metric ────────────────────────────────────────────────
+
+/// Minimum mean chroma deviation (|U−128| or |V−128|) to classify a YUYV frame
+/// as colour. Values at or below this threshold indicate a monochrome/grayscale
+/// source (both channels stay close to the neutral 128 point).
+pub const CHROMA_COLOR_THRESHOLD: f32 = 2.0;
+
+/// Macropixel sampling stride for [`mean_chroma`]: sample every Nth macropixel.
+/// At N=64 and 1920×1080 (≈518 k macropixels) ≈8 k samples per call — negligible
+/// cost even at the 1 Hz periodic log rate.
+const CHROMA_SAMPLE_STRIDE: usize = 64;
+
+/// How many captured frames to skip between chroma samples in the capture loop.
+/// At 60 fps capture this yields one sample per second, giving the periodic
+/// 5-second report window five fresh measurements to choose the most recent from.
+pub const CHROMA_SAMPLE_FRAMES: u32 = 60;
+
+/// Compute mean |U−128| and mean |V−128| over a subsampled YUYV422 frame.
+///
+/// YUYV422 macropixel layout: `Y0 U Y1 V` (4 bytes, 2 pixels). The U byte is
+/// at offset 1 and the V byte at offset 3 within each macropixel. Neutral grey
+/// encodes U=V=128; a chromatic source pushes U and V away from 128.
+///
+/// Samples every [`CHROMA_SAMPLE_STRIDE`] macropixels to keep per-call cost
+/// small. `width` and `height` are the frame dimensions in pixels; the buffer
+/// must contain at least `width * height * 2` bytes (YUYV422 is 2 bytes/pixel).
+///
+/// Returns `(mean |U−128|, mean |V−128|)` in `[0.0, 128.0]`. For a grayscale
+/// source both values are close to 0; a colour source produces values clearly
+/// above [`CHROMA_COLOR_THRESHOLD`]. Returns `(0.0, 0.0)` for an empty or
+/// undersized buffer.
+pub fn mean_chroma(frame: &[u8], width: usize, height: usize) -> (f32, f32) {
+    // YUYV422: 2 bytes per pixel → frame_bytes = width * height * 2.
+    let frame_bytes = width.saturating_mul(height).saturating_mul(2);
+    if frame_bytes == 0 || frame.len() < frame_bytes {
+        return (0.0, 0.0);
+    }
+    let step = CHROMA_SAMPLE_STRIDE.saturating_mul(4); // bytes per stride (4 bytes/macropixel)
+    let mut u_sum: u64 = 0;
+    let mut v_sum: u64 = 0;
+    let mut count: u64 = 0;
+    let mut i = 0usize;
+    while i + 3 < frame_bytes {
+        // Macropixel: Y0 U Y1 V — U at offset 1, V at offset 3.
+        let u = frame[i + 1] as i16 - 128;
+        let v = frame[i + 3] as i16 - 128;
+        u_sum += u.unsigned_abs() as u64;
+        v_sum += v.unsigned_abs() as u64;
+        count += 1;
+        i += step;
+    }
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+    (u_sum as f32 / count as f32, v_sum as f32 / count as f32)
+}
+
+/// Classify chroma deviations as colour or grayscale.
+///
+/// Returns `true` when either the U or V mean deviation (from [`mean_chroma`])
+/// exceeds [`CHROMA_COLOR_THRESHOLD`], indicating discernible colour information
+/// in the captured frame.
+pub fn is_color_frame(u_dev: f32, v_dev: f32) -> bool {
+    u_dev > CHROMA_COLOR_THRESHOLD || v_dev > CHROMA_COLOR_THRESHOLD
+}
+
 /// V4L2 control id for picture CONTRAST (`V4L2_CID_CONTRAST`).
 pub const V4L2_CID_CONTRAST: u32 = 0x0098_0901;
 /// V4L2 control id for picture SATURATION (`V4L2_CID_SATURATION`).
