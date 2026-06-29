@@ -20,7 +20,7 @@
 //! latency to settle, so frames inside the guard are EXCLUDED from attribution (NOT counted as
 //! loss). The remaining in-window frames run the painted-tick continuity check (the cam2 optical
 //! Vernier tick, common to every cambox through the splitter) — see [`window_segment`], which
-//! mirrors the per-node burn check's definitions ([`crate::probe::burn_contiguity`]: the
+//! mirrors the per-node burn check's definitions (in [`crate::probe::burn_contiguity`] — the
 //! `None`-credit and the integer-division decimation excess) but is painted-tick-specific (a
 //! duplicate tick is a stale copy, never a misdecoded burn). We report per cambox:
 //!
