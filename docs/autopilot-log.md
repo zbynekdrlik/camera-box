@@ -989,3 +989,10 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   (FALSE PASS). Now computed directly (forward-excess gap, backward-jump gap, repeat=copy, None=undecodable).
 - PRs: #323 (Phase-1 code, merged by user at 4999b8005) + #324 (false-pass fix, merged 366acc51a).
   Issue #312 STAYS OPEN — Phase-2 (cambox-id in burn pixels) + the harness + the rig run remain.
+
+## #312 Phase-2 follow-up — code-review fixes (1.7.0-dev.148, #312 stays OPEN)
+- PR #325 (Phase-2 harness) was merged by the supervisor (main cc085db22) while the review ran; these two findings + one cleanup landed AFTER, shipped as this follow-up.
+- FIX (critical, commit 4f3b67d6e): `recording-e2e.sh` ALL_CAMBOX=1 now FAILS FAST unless VERDICT_ON_STREAM=0. The sweep appends `--switch-schedule` to VERDICT_ARGS, but the DEFAULT per-box path (VERDICT_ON_STREAM=1) decodes via `--extract-partial`/`--merge-partials` (MERGE_ARGS) and `exit 0`s WITHOUT consuming VERDICT_ARGS → the schedule was silently ignored and a dropping cambox would PASS (the exact #312 hole). New harness test `recording_e2e_all_cambox_sweep_is_guarded_and_wired` locks the guard + the if-form append + the unchanged default sleep.
+- REFACTOR (commit e26a7cc4d): extracted `_assert_program_nonblack(ws, host, scene, label, black_hint)` — the #111/#163 POLLED non-black self-check — and called it from BOTH `prod_scene()` and `switch()` (was a near-verbatim duplicate that could drift). Behaviour-preserving; full python suite 54/54.
+- Filed #326 (Finding 2): the sweep stamps switch boundaries on dev1's clock vs the painter's burn gen_ts_ns; relies on DanteSync sub-1s alignment, unverified at runtime — add a dev1↔painter clock-offset assertion before the sweep (robustness; the dispatch mandated dev1's clock).
+- Verified: Tier-0 fmt/check/clippy(-D warnings)/test --no-run clean (default features), ruff clean, bash -n + shellcheck clean, python 54/54. NO rig — supervisor drives the run (use `ALL_CAMBOX=1 VERDICT_ON_STREAM=0`).

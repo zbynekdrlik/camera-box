@@ -365,6 +365,19 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
 - **Coverage honesty (#301):** a scheduled cambox with ZERO in-window frames FAILs — an absent box
   (e.g. CAM3 down) never reads as a pass. Active set today = CAM1/2/4.
 
+**Phase-2 harness (`recording-e2e.sh ALL_CAMBOX=1`) — RUN IT AS `ALL_CAMBOX=1 VERDICT_ON_STREAM=0`.**
+The sweep (`switch_schedule.py` + `obs_phase2.py switch`) writes `switch-schedule.json` and appends
+`--switch-schedule` to **`VERDICT_ARGS`**. But `VERDICT_ARGS` is consumed ONLY by the decode-on-dev1
+verdict; the DEFAULT per-box path (`VERDICT_ON_STREAM=1`) decodes via `--extract-partial` /
+`--merge-partials` (`MERGE_ARGS`) and `exit 0`s without ever touching `VERDICT_ARGS` — so under the
+default the schedule is written but SILENTLY ignored and a dropping cambox PASSES. The harness now
+FAILS FAST if `ALL_CAMBOX=1` without `VERDICT_ON_STREAM=0`. Sweep config: `CAMBOX_SWEEP` (default
+`Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4` — the verified scrambled scene→box mapping; CAM3/.63 down #301
+excluded), `SEGMENT_SECS` (default 30). Switch boundaries are dev1 epoch-ns (DanteSync-slaved to the
+painter = the burn `gen_ts_ns` timeline); a runtime dev1↔painter offset assertion is filed as #326.
+Wiring `--switch-schedule` into the per-box merge path (so the default decode mode also gates) is a
+separate verdict change, not done.
+
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
 render-tick counter, so `burn_contiguity_in_window_with_step` is the wrong tool two ways: (1) its
