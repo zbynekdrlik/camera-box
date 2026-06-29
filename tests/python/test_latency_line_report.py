@@ -13,7 +13,6 @@ A SYNTHETIC CSV is fine here per the issue (the real PNG comes from the next rig
 """
 import csv
 import importlib.util
-import os
 import pathlib
 import re
 import sys
