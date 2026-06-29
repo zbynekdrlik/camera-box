@@ -8,6 +8,7 @@ set -euo pipefail
 DEVICE="${1:-}"
 MOUNT_ROOT="/mnt/usb-root"
 MOUNT_EFI="/mnt/usb-efi"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors for output
 RED='\033[0;31m'
@@ -252,14 +253,24 @@ GRUB_DISTRIBUTOR="Ubuntu"
 GRUB_CMDLINE_LINUX_DEFAULT=""
 GRUB_CMDLINE_LINUX="console=tty0"
 GRUB_TERMINAL="console"
+# #344: do NOT let os-prober add cross-disk stowaway entries (the build host's
+# other disks) to this image's menu.
+GRUB_DISABLE_OS_PROBER=true
 GRUBEOF
 
-# Install GRUB
+# Install GRUB. grub-install lays down the /boot/grub/x86_64-efi modules + grubx64,
+# but its --removable BOOTX64.EFI core is BROKEN on Ubuntu 24.04 (a live-media probe
+# drops it to the grub> rescue prompt and the USB never boots — #344). So after
+# grub-install we OVERWRITE that core with a clean grub-mkimage core that chains
+# straight to grub.cfg by root fs UUID (see /tmp/install-grub-efi.sh).
+source /tmp/install-grub-efi.sh
 grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable
 update-grub
 # #295/#307: pin index 0 (the single freshly-installed known-good kernel, with its initrd) as the
 # saved default so the base image boots deterministically the kernel it was provisioned with.
 grub-set-default 0
+# #344: replace the broken removable core with a clean, bootable one.
+build_grub_efi_core /boot/efi "$(grub-probe --target=fs_uuid /)"
 
 # Clean up
 apt-get clean
@@ -316,11 +327,15 @@ SETUP_EOF
 
     chmod +x "$MOUNT_ROOT/tmp/setup.sh"
 
+    # #344: make the shared GRUB EFI core installer available inside the chroot
+    # (setup.sh sources it to overwrite the broken --removable core).
+    cp "$SCRIPT_DIR/lib/install-grub-efi.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh"
+
     log "Running configuration inside chroot..."
     chroot "$MOUNT_ROOT" /tmp/setup.sh
 
     # Clean up setup script
-    rm -f "$MOUNT_ROOT/tmp/setup.sh"
+    rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh"
 }
 
 # Cleanup and unmount
