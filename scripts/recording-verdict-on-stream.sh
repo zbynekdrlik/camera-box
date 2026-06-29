@@ -49,6 +49,7 @@ build_onbox_command() {
   # translates them), so each is wrapped in PowerShell DOUBLE quotes verbatim (NOT bash %q,
   # which would double the backslashes and corrupt the Windows path). A literal double-quote in
   # an arg is PowerShell-escaped as `"" (rare for file paths; handled for safety).
+  # shellcheck disable=SC2016  # single-quoted PowerShell syntax; $env: must NOT expand in bash
   printf '$env:RUST_LOG="info"; & "%s"' "$exe"
   local a esc
   for a in "$@"; do
@@ -69,6 +70,14 @@ main() {
   local -a PASS_ARGS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      # --skip-if-exists <partial-path>: if the partial JSON from a PREVIOUS run already exists on
+      # dev1 (durable state, #281), skip re-decode entirely so a re-dispatched worker is idempotent.
+      --skip-if-exists)
+        if [ -f "$2" ]; then
+          echo "SKIP: stream partial already exists at $2 — skipping re-decode (#281)"
+          return 0
+        fi
+        shift 2 ;;
       --stream-rec)  STREAM_REC="$2"; shift 2 ;;
       --verdict-exe) VERDICT_EXE="$2"; shift 2 ;;
       --out-dir)     OUT_DIR="$2"; shift 2 ;;

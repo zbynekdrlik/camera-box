@@ -32,7 +32,11 @@ fn stream_planner() -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("verdict-done-marker-{}-{}", std::process::id(), name));
+    let dir = std::env::temp_dir().join(format!(
+        "verdict-done-marker-{}-{}",
+        std::process::id(),
+        name
+    ));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -101,10 +105,7 @@ fn strih_no_skip_when_partial_absent() {
             r"C:\out\strih-partial.json",
         ],
     );
-    assert_eq!(
-        code, 0,
-        "#281 strih: normal run must succeed\n"
-    );
+    assert_eq!(code, 0, "#281 strih: normal run must succeed\n");
     assert!(
         stdout.contains("STEP 2") || stdout.contains("STEP 1"),
         "#281 strih: plan must be emitted when partial does NOT exist\nstdout: {stdout}"
@@ -188,7 +189,10 @@ fn strih_without_skip_flag_emits_plan_regardless() {
             r"C:\out\strih-partial.json",
         ],
     );
-    assert_eq!(code, 0, "#281: strih planner without --skip-if-exists must succeed");
+    assert_eq!(
+        code, 0,
+        "#281: strih planner without --skip-if-exists must succeed"
+    );
     assert!(
         stdout.contains("STEP 1"),
         "#281: without --skip-if-exists the plan must always be emitted\nstdout: {stdout}"

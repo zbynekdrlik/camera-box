@@ -18,7 +18,7 @@
 //! Pure-shell / file-system tests — no rig, no ssh.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
@@ -31,11 +31,8 @@ fn lib() -> PathBuf {
 
 /// Scratch directory unique per test process + test name; cleaned up at the end.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "with-rig-restore-{}-{}",
-        std::process::id(),
-        name
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("with-rig-restore-{}-{}", std::process::id(), name));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
