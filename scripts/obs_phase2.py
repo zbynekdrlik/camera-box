@@ -31,7 +31,7 @@ import sys
 import time
 
 try:
-    from websocket import create_connection
+    from websocket import WebSocketTimeoutException, create_connection
 except ImportError:
     sys.exit("missing dep: pip install websocket-client")
 
@@ -380,11 +380,50 @@ def _conn(host, password=""):
     return ws
 
 
-def _rpc(ws, rtype, rdata=None, ignore_err=False):
+# #328: a HARD overall wall-clock deadline (seconds) for a single obs-websocket request. The
+# _rpc read loop below drains op-5 EVENTS until the matching op-7 response arrives; while OBS
+# renegotiates an NDI source it can emit a continuous event flood, so each recv() keeps succeeding
+# within the socket timeout yet the response NEVER comes — and the loop then spins for as long as
+# events keep arriving. That is the #328 ~28-min `prod-scene` (and then `teardown`) hang on stream:
+# the WS was healthy, but the request never completed, so the whole #312 rig run blocked and the
+# stuck teardown left a cam box's capture device held (#281 class). Bounding the TOTAL wall-clock per
+# request makes any stuck OBS op FAIL LOUD (TimeoutError -> non-zero exit for prod-scene/setup/switch,
+# or a logged warning inside teardown's best-effort guard) instead of blocking the run indefinitely.
+# Named + env-overridable; set 0 (or negative) to disable the bound (wait indefinitely).
+OBS_OP_TIMEOUT_S = float(os.environ.get("OBS_OP_TIMEOUT_S", "60"))
+
+
+def _rpc_timed_out(elapsed_s, timeout_s):
+    """#328 (pure, testable): True iff a single obs-websocket request has run longer than its hard
+    wall-clock deadline and MUST fail loud rather than keep draining events. A non-positive
+    *timeout_s* disables the bound (wait indefinitely) — the explicit opt-out."""
+    return timeout_s > 0 and elapsed_s >= timeout_s
+
+
+def _rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+    """Send an obs-websocket request and return its responseData, BOUNDED by a hard overall
+    wall-clock deadline (OBS_OP_TIMEOUT_S; override per-call via *timeout_s*) so a stuck OBS op can
+    never hang the run (#328). The loop drains op-5 events waiting for the matching op-7 response;
+    during an NDI renegotiation OBS can flood events while the response never arrives, so once the
+    deadline passes we raise TimeoutError (fail loud). *ignore_err* suppresses an OBS request-level
+    error (a normal failed RPC), but NEVER the timeout — a hang is always fatal to the op."""
+    deadline_s = OBS_OP_TIMEOUT_S if timeout_s is None else timeout_s
     ws.send(json.dumps({"op": 6, "d": {
         "requestType": rtype, "requestId": rtype, "requestData": rdata or {}}}))
+    t0 = time.monotonic()
     while True:
-        m = json.loads(ws.recv())
+        if _rpc_timed_out(time.monotonic() - t0, deadline_s):
+            raise TimeoutError(
+                f"obs-websocket request {rtype!r} got no response within {deadline_s:.0f}s — the "
+                f"connection is reachable but the request never completed (an NDI source "
+                f"mid-renegotiation can flood events while the response never arrives, #328). "
+                f"Failing loud instead of blocking the run; raise OBS_OP_TIMEOUT_S if a slow op "
+                f"is legitimately needed."
+            )
+        try:
+            m = json.loads(ws.recv())
+        except WebSocketTimeoutException:
+            continue  # no frame within the socket timeout; re-check the overall deadline
         if m["op"] == 7 and m["d"]["requestId"] == rtype:
             st = m["d"]["requestStatus"]
             if not st["result"] and not ignore_err:

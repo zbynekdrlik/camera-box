@@ -27,7 +27,9 @@ fn read(p: &str) -> String {
 /// The body of cleanup() — from `cleanup()` to the `\ntrap ` that installs it (same slice the
 /// sibling cleanup tests use).
 fn cleanup_body(s: &str) -> String {
-    let start = s.find("cleanup()").expect("recording-e2e.sh must define cleanup()");
+    let start = s
+        .find("cleanup()")
+        .expect("recording-e2e.sh must define cleanup()");
     let end = s[start..]
         .find("\ntrap ")
         .map(|i| start + i)
@@ -62,18 +64,14 @@ fn cleanup_frees_cam_device_before_obs_teardown() {
 #[test]
 fn cleanup_obs_calls_are_timeout_bounded() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
-    for line in body
-        .lines()
-        .filter(|l| l.contains("obs_phase2.py") || l.contains("obs_burn_filter.py"))
-    {
-        let code = line.trim_start();
-        // Only executable invocations (skip comments); a real invocation begins the command
-        // (possibly via $(...) capture) and must be guarded by `timeout`.
-        if code.starts_with('#') {
-            continue;
-        }
+    // Target only EXECUTABLE invocations (`python3 "$HERE/<script>"`), not advisory echo/comment
+    // text that merely names a script. Every such invocation must be guarded by `timeout`.
+    for line in body.lines().filter(|l| {
+        l.contains("python3 \"$HERE/obs_phase2.py\"")
+            || l.contains("python3 \"$HERE/obs_burn_filter.py\"")
+    }) {
         assert!(
-            code.contains("timeout "),
+            line.contains("timeout "),
             "#328: every blocking OBS call in cleanup() must be wrapped in `timeout` so a hung \
              obs-websocket op can't block the trap and strand a cam device. Unbounded line: {line:?}"
         );

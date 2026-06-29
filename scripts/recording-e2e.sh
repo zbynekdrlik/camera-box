@@ -98,6 +98,14 @@ REPORT_PNG="$OUTDIR/report-${RUN_ID}.png"
 SWITCH_SCHEDULE_JSON="$OUTDIR/switch-schedule.json"  # #312 Phase-2 all-cambox sweep (ALL_CAMBOX=1)
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
+# #328: hard timeouts so a hung obs-websocket op (the #328 prod-scene/teardown hang) can NEVER
+# block the cleanup trap and strand a cam capture device. OBS_CLEANUP_TIMEOUT bounds each
+# obs_phase2/obs_burn_filter call in cleanup(); CLEANUP_SSH_TIMEOUT bounds each cam-box restore ssh
+# (so a stuck cam1 ssh can't block cam2's restore either). Both env-overridable. (obs_phase2.py
+# also self-bounds each WS request via OBS_OP_TIMEOUT_S=60 — these are the shell-side backstop.)
+OBS_CLEANUP_TIMEOUT="${OBS_CLEANUP_TIMEOUT:-90}"
+CLEANUP_SSH_TIMEOUT="${CLEANUP_SSH_TIMEOUT:-30}"
+
 # #220: CAMERA PRE-RUN CHECKLIST. The cam2->cam1 OPTICAL injection leg (cam1 broadcast camera
 # filming the cam2 monitor QR) depends on the cam1 camera's MANUAL settings, which the harness
 # CANNOT read or set: camera-box reads /dev/video0 (the ShadowCast capture card), which does NOT
@@ -225,23 +233,32 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
-  echo "[cleanup] restore OBS program scenes + cam1/cam2 services"
-  python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop >/dev/null 2>&1
-  python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
-  python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
-  python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
-  # cam1: stop the manual #174 burn binary (its own basename) AND any camera-box, remove
-  # the deployed test binary, restore the clean deployed service.
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
-    "pkill -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+  # #328: FREE the cam capture devices FIRST — before, and independent of, the OBS restore — so a
+  # hung obs-websocket op (the #328 prod-scene/teardown hang) can NEVER strand /dev/video0. In the
+  # #312 incident the OBS teardown ran first and hung, the trap never reached the cam1 restore, and
+  # cam1's burn binary kept holding /dev/video0 → the prod camera-box crash-looped. Freeing the
+  # device is the safety-critical action, so it leads; every cam ssh AND every OBS call below is
+  # wrapped in `timeout` so nothing in cleanup() can block the trap indefinitely.
+  echo "[cleanup] #328 FREE cam1/cam2 capture devices FIRST (never gated behind OBS teardown)"
+  # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
+  # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
+  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+    "pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it. #309: FIRST clear any
   # leftover #291 rig-mode no-display drop-in (a prior `rig-mode.sh test` would otherwise make this
   # restart bring camera-box back WITHOUT --display — the interkom return monitor stays dark). The
   # clear is single-sourced (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent).
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
+  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true"
+  # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
+  # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
+  echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
+  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop >/dev/null 2>&1
+  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
+  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
+  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
   # running (e.g. the run is aborting for another reason), stop the whole group so a
   # multi-GB decode is never orphaned. The monitor already group-kills on STALL; this
@@ -257,9 +274,9 @@ systemctl restart camera-box 2>/dev/null || true"
   echo "[cleanup] #246/#257 clear + verify OBS burns OFF (genlock_burn=false) on strih + stream"
   for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (defined before the trap)
     _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
-    python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
       | sed "s/^/    [$_bn burn-clear] /" || true
-    _vrf="$(python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
+    _vrf="$(timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
     printf '%s\n' "$_vrf" | sed "s/^/    [$_bn burn-verify] /"
     # The block above PROMISES to VERIFY burns OFF; surface a LOUD warning if a burn is still on
     # (e.g. the remove SetInputSettings was swallowed by a transient WS hiccup) so a lingering
