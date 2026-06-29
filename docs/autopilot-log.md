@@ -1051,3 +1051,13 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - PR **#347** dev→main, merge commit **c420565523**, main CI 28405819518 all green. #299 auto-closed.
 - DEPLOY + LIVE-RIG COLOUR VERIFICATION LEFT TO SUPERVISOR (#281 / drive-rig-steps-in-supervisor): paint colour bars on cam2 fb0 → read cam1 `capture chroma:` log to confirm u_dev/v_dev > threshold = colour. Worker did clean-code only; NO ssh to boxes, NO deploy.
 - Playbook: see playbook-review note in completion report.
+
+## 2026-06-30 — #281 Part A+B: with-rig-restore wrapper + verdict done-marker (worker, v1.7.0-dev.158)
+
+- Part A: `scripts/lib/with-rig-restore.sh` (new, 78 lines) — `with_rig_restore [--on-failure] <restore_cmd> -- <step_cmd>`. HUP/INT/TERM traps; `_wr_done` idempotency guard; preserves exit code; pure shell.
+- Part B: `--skip-if-exists <partial-path>` added to `recording-verdict-on-strih.sh` + `recording-verdict-on-stream.sh`. Emits `SKIP` + exit 0 when partial already exists — re-dispatched workers idempotent.
+- RED commit: `b831848f1` (harness tests for both parts — lib_exists, always/on-failure modes, exit-code range, idempotency, SIGTERM, signal-trap static guard; + 5 verdict done-marker tests). GREEN commit: `35c94241d`.
+- Pre-existing SC2016 (PowerShell `$env:` in single quotes) suppressed inline in both planner scripts.
+- Fix#3 (auto-restore watchdog) excluded — pending user decision on auto-act vs alert-only.
+- PR **#348** dev→main, merge commit **3434d85d960**, dev CI 28407730862 all green, main CI 28408210977 all green.
+- No deploy (shell scripts only; camera-box binaries not changed).
