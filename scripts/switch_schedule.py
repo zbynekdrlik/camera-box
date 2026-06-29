@@ -24,9 +24,10 @@ import sys
 def parse_sweep(spec):
     """Parse a ``"<scene>:<label> <scene>:<label> ..."`` sweep spec into ``[(scene, label), ...]``.
 
-    The default sweep is ``"Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4"``: SCENE NAMES CONTAIN SPACES
-    (``"Cam 5"``), so a plain whitespace split breaks the pairs. Each pair's LABEL (``CAM1`` /
-    ``CAM2`` / ``CAM4`` — no spaces, no ``:``) is the token after the ``:``; the scene is
+    The default sweep is ``"Cam 5:CAM1 Cam 1:CAM4"`` (#333 — the painter box CAM2/"Cam 3" is
+    EXCLUDED; it emits no camera NDI while painting): SCENE NAMES CONTAIN SPACES (``"Cam 5"``), so
+    a plain whitespace split breaks the pairs. Each pair's LABEL (``CAM1`` / ``CAM4`` — no spaces,
+    no ``:``) is the token after the ``:``; the scene is
     everything before it. We split on whitespace and re-join tokens until one carries the ``:``
     that closes the pair: that token's pre-``:`` part finishes the scene, its post-``:`` part is
     the label.

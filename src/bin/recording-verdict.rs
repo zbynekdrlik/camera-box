@@ -2086,6 +2086,11 @@ fn build_and_print_verdict(
                         s.gaps,
                         if s.pass { "PASS" } else { "FAIL" }
                     );
+                    // #333: a frames=0 window is empty by construction (the painter / a non-emitting
+                    // box), NOT chain loss — print the explicit diagnostic so it is not misread.
+                    if let Some(note) = &s.note {
+                        println!("      ⚠ {note}");
+                    }
                 }
                 if no_anchor > 0 {
                     println!(
@@ -2678,6 +2683,141 @@ mod tests {
             "#208: the missing cam1 id must be classified as a REAL DROP: {}",
             drop["full_chain"]["real_drops"]
         );
+    }
+
+    /// #332: the all-cambox `all_cambox_continuity` block must be produced by the per-box MERGE path
+    /// (stream frames sourced from a per-box partial JSON) IDENTICALLY to the fused path, when the
+    /// SAME `--switch-schedule` is supplied — proving the all-cambox verdict can run on the stream
+    /// box (the default decode-on-stream path) and need NOT be forced onto dev1. The all_cambox
+    /// computation lives in the SHARED `build_and_print_verdict`, which `run_merge` calls, so it
+    /// flows through whether the stream frames came from a live decode (fused) or a deserialized
+    /// partial (merge). The harness wiring (`MERGE_ARGS+=(--switch-schedule …)`, guard removed) is
+    /// covered by `tests/harness_recording_e2e_paths.rs::recording_e2e_all_cambox_sweep_runs_on_stream_box`.
+    #[test]
+    fn merge_path_computes_all_cambox_continuity_like_the_fused_path() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S; // schedule on a realistic gen_ts_ns timeline
+        let win = 5 * ONE_S; // two 5 s program windows
+        let dir = std::env::temp_dir().join(format!("cb-332-allcambox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        // Two NON-overlapping windows on the burn gen_ts_ns timeline, CAM1 then CAM4 (#333 default
+        // sweep — the painter box CAM2 is excluded). The same shape the harness writes.
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}},{{"cambox":"CAM4","start_ns":{b},"end_ns":{c}}}]"#,
+            a = base,
+            b = base + win,
+            c = base + 2 * win,
+        );
+        std::fs::write(&sched_path, &sched).unwrap();
+
+        // Build the SINGLE continuous stream recording's frames: 40 per window at 100 ms spacing,
+        // each carrying a STRIH burn payload as the gen_ts ANCHOR (anchor_run_ids = [strih, stream])
+        // and an optical Vernier tick (RecordingFrame::tick) stepping by 2 (the 60→30 decimation).
+        // The optical tick is globally continuous (all boxes capture the SAME painter via the
+        // splitter), so each window is internally contiguous ⇒ a clean all-cambox PASS.
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        for i in 0..80u64 {
+            let wi = (i / 40) as i64; // window 0 then window 1
+            let j = (i % 40) as i64; // within-window position
+            let wstart = base + wi * win;
+            let gen_ts = wstart + (j + 1) * (ONE_S / 10); // 0.1 s .. 4.0 s inside the 5 s window
+            let optical = 1000u32 + 2 * i as u32;
+            stream_frames.push(RecordingFrame {
+                frame_index: i,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH, // the segmentation anchor (strih program render time)
+                        frame_id: 1670 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2, // the optical paint payload (non-burn)
+                        frame_id: optical,
+                        gen_ts_ns: gen_ts,
+                    },
+                ],
+                tick: Some(optical),
+            });
+        }
+
+        // guard 0 + explicit step 2 so the windows aren't trimmed and no fps is inferred.
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+
+        // FUSED: stream frames decoded here (rec_path Some-vs-None is irrelevant to all_cambox).
+        let (fused, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames.clone(),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+        )
+        .expect("fused verdict");
+
+        // MERGE: round-trip the stream frames through the per-box partial JSON (exactly what
+        // run_merge loads), then build the verdict — the all_cambox block must be identical.
+        let stream_p = RecordingPartial::from_frames(
+            "stream",
+            &PathBuf::from("stream.mp4"),
+            &[CAM1B, STRIH, STREAM],
+            stream_frames,
+        );
+        let stream_back = RecordingPartial::from_json(&stream_p.to_json().unwrap()).unwrap();
+        let (merged, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_back.frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+        )
+        .expect("merged verdict");
+
+        let fused_seg = &fused["all_cambox_continuity"];
+        let merged_seg = &merged["all_cambox_continuity"];
+        assert!(
+            !fused_seg.is_null(),
+            "#332: the fused path must compute all_cambox_continuity when --switch-schedule is given"
+        );
+        assert_eq!(
+            merged_seg, fused_seg,
+            "#332: the MERGE path must compute the SAME all_cambox_continuity as the fused path \
+             (stream frames from a partial JSON ⇒ identical per-cambox verdict)"
+        );
+        assert_eq!(
+            merged_seg["overall_pass"],
+            serde_json::json!(true),
+            "clean per-window painted ticks ⇒ all-cambox PASS in the merge: {merged_seg}"
+        );
+        let labels: Vec<&str> = merged_seg["segments"]
+            .as_array()
+            .expect("segments array")
+            .iter()
+            .map(|s| s["cambox"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["CAM1", "CAM4"],
+            "#332: both swept (non-painter) camboxes are attributed in the merge"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #186/#208 BLOCKER: `--extract-partial` must IDENTIFY this box's pixel-proof frames so the

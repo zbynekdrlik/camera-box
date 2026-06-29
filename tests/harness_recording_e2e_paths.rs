@@ -1166,38 +1166,73 @@ fn recording_e2e_defaults_to_mixed_60_30_and_threads_per_box_fps() {
     );
 }
 
-/// #312 Phase-2: the env-gated all-cambox sweep must (a) GUARD that ALL_CAMBOX=1 requires
-/// VERDICT_ON_STREAM=0 (the only verdict path that consumes --switch-schedule via VERDICT_ARGS —
-/// the default per-box merge path silently ignores it, which would let a cambox dropping in its
-/// window PASS), and (b) append --switch-schedule to VERDICT_ARGS only under ALL_CAMBOX, and (c)
-/// leave the DEFAULT single-scene hold (`sleep "$DURATION"`) intact for non-sweep runs.
+/// #332: the env-gated all-cambox sweep must run the per-cambox verdict on the DEFAULT decode-on-
+/// stream path (VERDICT_ON_STREAM=1, #193). The old guard that FORCED VERDICT_ON_STREAM=0 (which
+/// pulled the multi-GB decode onto dev1) is GONE; the per-box `--merge-partials` step now consumes
+/// `--switch-schedule`, so the all_cambox continuity is computed on the stream box. The legacy
+/// decode-on-dev1 path (VERDICT_ON_STREAM=0) still wires it via VERDICT_ARGS. The DEFAULT (non-
+/// sweep) single-scene hold (`sleep "$DURATION"`) stays intact for non-sweep runs.
 #[test]
-fn recording_e2e_all_cambox_sweep_is_guarded_and_wired() {
+fn recording_e2e_all_cambox_sweep_runs_on_stream_box() {
     let s = read("scripts/recording-e2e.sh");
-    // (a) the fail-fast guard: ALL_CAMBOX=1 must require VERDICT_ON_STREAM=0.
+    // (a) the #332 guard that forced VERDICT_ON_STREAM=0 for ALL_CAMBOX must be REMOVED — the sweep
+    //     must NOT error out / force the dev1 decode any more.
     assert!(
-        s.contains(r#"ALL_CAMBOX=1 requires VERDICT_ON_STREAM=0"#),
-        "#312: the sweep must FAIL FAST when ALL_CAMBOX=1 without VERDICT_ON_STREAM=0 (else the \
-         per-cambox switch-schedule gating is silently skipped and a dropping cambox PASSES)."
+        !s.contains("ALL_CAMBOX=1 requires VERDICT_ON_STREAM=0"),
+        "#332: the guard forcing VERDICT_ON_STREAM=0 for ALL_CAMBOX must be removed — the all-cambox \
+         verdict now runs on the stream box via the merge path (#193, decode on stream.lan)."
     );
     assert!(
-        s.contains(r#"if [ "${VERDICT_ON_STREAM:-1}" != "0" ]; then"#),
-        "#312: the guard must check VERDICT_ON_STREAM before running the sweep."
+        !s.contains(r#"if [ "${VERDICT_ON_STREAM:-1}" != "0" ]; then"#),
+        "#332: the VERDICT_ON_STREAM!=0 fail-fast guard for ALL_CAMBOX must be gone."
     );
-    // (b) the schedule is fed to the verdict via VERDICT_ARGS, gated on ALL_CAMBOX + file present,
-    //     using the if-form (NOT `] && VERDICT_ARGS+=(`, which set -e-aborts on a missing file #178).
+    // (b) the per-box MERGE path (the default VERDICT_ON_STREAM=1 decode-on-stream) must now append
+    //     --switch-schedule to MERGE_ARGS, gated on ALL_CAMBOX + the schedule file (if-form, #178).
     assert!(
-        s.contains("VERDICT_ARGS+=(--switch-schedule"),
-        "#312: --switch-schedule must be appended to VERDICT_ARGS for the all-cambox verdict."
+        s.contains("MERGE_ARGS+=(--switch-schedule"),
+        "#332: --switch-schedule must be appended to MERGE_ARGS so the all_cambox continuity is \
+         computed in the per-box merge (the default decode-on-stream path)."
     );
     assert!(
         s.contains(r#"if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then"#),
-        "#312: the --switch-schedule append must be gated on ALL_CAMBOX=1 AND the schedule file \
-         existing, in if-form (not `] && VERDICT_ARGS+=(` which set -e-aborts when absent, #178)."
+        "#332: the --switch-schedule append must be gated on ALL_CAMBOX=1 AND the schedule file \
+         existing, in if-form (not `] && MERGE_ARGS+=(` which set -e-aborts when absent, #178)."
     );
-    // (c) the DEFAULT (no ALL_CAMBOX) path must keep the single steady-state hold.
+    // (c) the LEGACY decode-on-dev1 path (VERDICT_ON_STREAM=0) keeps its VERDICT_ARGS wiring.
+    assert!(
+        s.contains("VERDICT_ARGS+=(--switch-schedule"),
+        "#332: the legacy decode-on-dev1 path must still wire --switch-schedule via VERDICT_ARGS."
+    );
+    // (d) the DEFAULT (no ALL_CAMBOX) path must keep the single steady-state hold.
     assert!(
         s.contains(r#"sleep "$DURATION""#),
         "#312: the default (non-sweep) path must keep the single `sleep \"$DURATION\"` hold."
+    );
+}
+
+/// #333: the all-cambox DEFAULT sweep must EXCLUDE the dual-QR painter box (CAM2 / .62, scene
+/// "Cam 3"). While painting the monitor, the painter does NOT capture/emit its own camera NDI
+/// (#179 "cam2 paints, NO grab"), so switching strih program to its scene shows nothing →
+/// frames=0 → a guaranteed FAIL that also inflates frames_without_anchor. The default must sweep
+/// only the non-painter capture boxes (CAM1/.61 + CAM4/.64), still overridable via $CAMBOX_SWEEP.
+#[test]
+fn recording_e2e_default_sweep_excludes_the_painter_box() {
+    let s = read("scripts/recording-e2e.sh");
+    let line = s
+        .lines()
+        .find(|l| l.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-"))
+        .expect("#333: recording-e2e.sh must define a default CAMBOX_SWEEP");
+    assert!(
+        !line.contains("CAM2") && !line.contains("Cam 3"),
+        "#333: the default CAMBOX_SWEEP must NOT include the painter box (CAM2 / scene 'Cam 3') — \
+         it never emits its own NDI while painting, so its window is empty by construction: {line}"
+    );
+    assert!(
+        line.contains("CAM1") && line.contains("CAM4"),
+        "#333: the default sweep must still cover the non-painter capture boxes CAM1 + CAM4: {line}"
+    );
+    assert!(
+        line.contains("${CAMBOX_SWEEP:-"),
+        "#333: CAMBOX_SWEEP must remain env-overridable: {line}"
     );
 }

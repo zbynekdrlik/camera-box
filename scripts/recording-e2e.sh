@@ -447,27 +447,24 @@ python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
 # [4b/8] burn-ON gate is unaffected. The DEFAULT path (no ALL_CAMBOX) is the unchanged single hold.
 ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # scene:label pairs (the #284/#151 scene names are scrambled — this is the verified mapping):
-#   'Cam 5'->CAM1(.61)  'Cam 3'->CAM2(.62)  'Cam 1'->CAM4(.64)   (CAM3/.63 is DOWN #301, excluded)
-CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4}"
+#   'Cam 5'->CAM1(.61)  'Cam 1'->CAM4(.64)
+# #333: the default sweeps ONLY the non-painter CAPTURE boxes. CAM3/.63 is DOWN (#301); CAM2/.62
+# is the dual-QR PAINTER — while painting the monitor (/dev/fb0 → HDMI splitter) it does NOT
+# capture/emit its OWN camera NDI (#179 "cam2 paints, NO grab"), so switching strih program to its
+# scene shows nothing → frames=0, a guaranteed FAIL that also inflates frames_without_anchor.
+# So the painter can never be a swept capture source; it is excluded from the default. To prove the
+# painter box itself, override $CAMBOX_SWEEP for a run where a DIFFERENT box paints.
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM4}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
-  # #312 Phase-2 GUARD (fail FAST, before the multi-minute sweep): the per-cambox window gating is
-  # consumed via --switch-schedule on VERDICT_ARGS, which ONLY the decode-on-dev1 verdict
-  # (VERDICT_ON_STREAM=0, step [8/8]) runs. The DEFAULT per-box path (VERDICT_ON_STREAM=1) decodes
-  # via --extract-partial/--merge-partials (MERGE_ARGS) and `exit 0`s WITHOUT ever consuming
-  # VERDICT_ARGS — so under the default the schedule would be written but SILENTLY IGNORED, the
-  # verdict would skip segment_continuity, and a cambox dropping in ITS ~30s window would PASS (the
-  # exact #312 single-cam-proxy hole). Require the decode-on-dev1 path explicitly rather than run a
-  # 30-min sweep whose verdict can't gate it. (Per-box merge-path switch-schedule support is a
-  # separate verdict change — see the filed follow-up.)
-  if [ "${VERDICT_ON_STREAM:-1}" != "0" ]; then
-    echo "ERROR: ALL_CAMBOX=1 requires VERDICT_ON_STREAM=0 — the #312 per-cambox switch-schedule" >&2
-    echo "       gating is consumed only by the decode-on-dev1 verdict; the default per-box merge" >&2
-    echo "       path does not take --stream/--switch-schedule, so the per-cambox check would be" >&2
-    echo "       SILENTLY skipped (a cambox dropping in its window would PASS). Re-run with:" >&2
-    echo "         ALL_CAMBOX=1 VERDICT_ON_STREAM=0 $0" >&2
-    exit 1
-  fi
+  # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,
+  # #193 — decode where the video lives, never pull the multi-GB recordings to dev1). The per-box
+  # `--merge-partials` step consumes `--switch-schedule` (appended to MERGE_ARGS below), so the
+  # per-cambox `all_cambox_continuity` is computed in the merge ON the stream box — the SAME shared
+  # verdict builder the fused path uses. (The old guard that FORCED VERDICT_ON_STREAM=0 — pulling the
+  # decode onto dev1 because the merge path didn't take --switch-schedule — is gone; that follow-up
+  # IS this issue.) The legacy decode-on-dev1 path (VERDICT_ON_STREAM=0) still wires it via
+  # VERDICT_ARGS for a box with no uploaded verdict.exe.
   echo "[6/8] ALL-CAMBOX sweep: cut each cambox into strih program ${SEGMENT_SECS}s, cycling '$CAMBOX_SWEEP' until >=${DURATION}s (run_id=$RUN_ID)"
   # Build the per-segment cut plan (scene + label), cycling the sweep to cover DURATION. Python owns
   # the colon-pair parsing (scene names contain spaces, e.g. 'Cam 5'), so bash never word-splits it.
@@ -675,6 +672,17 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
+  # #332 all-cambox: feed the per-segment switch schedule into the MERGE step so the per-cambox
+  # `all_cambox_continuity` is computed ON the stream box (this default decode-on-stream path),
+  # NOT forced onto dev1. The merge reads the stream partial's per-frame ticks + gen_ts and the
+  # schedule's window boundaries — the SAME computation the fused/legacy path produces. `if`-form
+  # (NOT `[ -f ] && ...`) so a missing schedule never set -e-aborts (#178). Needs --cam2-run-id
+  # (already above, for the optical anchor) + the stream partial (the all-cambox segmentation reads
+  # the SINGLE continuous stream recording's frames, carried in stream=$STREAM_PARTIAL).
+  if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
+    MERGE_ARGS+=(--switch-schedule "$SWITCH_SCHEDULE_JSON")
+    echo "    #332 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON (per-cambox continuity in the merge, ON the stream box)"
+  fi
   VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
   printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
   echo "    The win-* MCP holder runs 8/8a + 8/8b on each box, pulls both small partials (+ their"

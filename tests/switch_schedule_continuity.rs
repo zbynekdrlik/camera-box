@@ -163,6 +163,45 @@ fn an_absent_cambox_is_reported_as_uncovered_not_a_pass() {
 }
 
 #[test]
+fn an_empty_window_emits_a_painter_no_emit_diagnostic() {
+    // #333: a swept cambox window with ZERO in-window frames is most likely the dual-QR PAINTER
+    // box (it does NOT emit its own camera NDI while painting — #179) or a down / non-emitting
+    // box, NOT a chain frame loss. The verdict still FAILs (frames=0 ⇒ pass=false), but it MUST
+    // also carry an explicit diagnostic so an empty window is never mistaken for a continuity
+    // break — telling the operator to exclude that box from CAMBOX_SWEEP.
+    let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
+    let frames = clean_window_frames(0, 0, 1000); // only cam1 captured; cam2's window is empty
+
+    let v = segment_continuity(&frames, &schedule, GUARD, STEP);
+
+    assert!(!v.segments[1].pass, "an empty window FAILs (frames=0)");
+    assert_eq!(v.segments[1].frames, 0);
+    let note = v.segments[1]
+        .note
+        .as_deref()
+        .expect("#333: a frames=0 window must carry an explicit painter/no-emit diagnostic note");
+    let lower = note.to_lowercase();
+    assert!(
+        lower.contains("0 frames") || lower.contains("no frames"),
+        "#333: the note must state the window produced no frames: {note}"
+    );
+    assert!(
+        lower.contains("painter") || lower.contains("emit"),
+        "#333: the note must point at the painter / not-emitting cause: {note}"
+    );
+    assert!(
+        lower.contains("cambox_sweep"),
+        "#333: the note must tell the operator to exclude it from CAMBOX_SWEEP: {note}"
+    );
+    // A covered, clean window carries NO such note (the field is empty when frames > 0).
+    assert!(
+        v.segments[0].note.is_none(),
+        "a covered, clean window has no painter note: {:?}",
+        v.segments[0]
+    );
+}
+
+#[test]
 fn malformed_or_overlapping_schedule_is_rejected() {
     assert!(parse_switch_schedule("{ not an array }").is_err());
     let overlapping = r#"[
