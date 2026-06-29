@@ -75,3 +75,8 @@ dist-111/
 /probe-windows/
 /proof-*/
 /obs184-dll/
+
+# Stray stdout/stderr redirect captures from ad-hoc debug runs (#320). Root-anchored +
+# narrow so they never get committed again (err_a.txt / outB.txt style).
+/err_*.txt
+/out[A-Z].txt
