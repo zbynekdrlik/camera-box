@@ -181,6 +181,21 @@ on strih+stream via the win-* MCP (PipeDirection.In; strip the 4-byte header to 
 write `{ntp_offset_us,is_locked,mode,...}` to `/tmp/recording-e2e-<RUN_ID>/dante-{strih,stream}.json`
 BEFORE launching the harness. Then the gate passes all 4 nodes.
 
+**dev1↔painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326):** the all-cambox sweep stamps
+each program-switch WINDOW boundary on dev1's CLOCK_REALTIME, while `recording-verdict
+--switch-schedule` partitions by the cam2-painter burn `gen_ts_ns`. Two different machines' clocks
+— if dev1 drifts from the painter past the verdict's switch-guard (`DEFAULT_TRANSITION_GUARD_NS`,
+1 s), frames near every boundary are mis-attributed to the WRONG cambox window (silent #312 false
+FAIL / false PASS). `scripts/clock-offset-painter-gate.sh` (invoked by recording-e2e.sh in the
+`ALL_CAMBOX=1` path, after the DanteSync/version gates, before the sweep) reads dev1's local
+`journalctl -u dantesync` + the painter's over SSH, computes `|dev1 - painter|` (both DanteSync
+offsets on the shared strih basis), and FAILS FAST (exit 20) if it exceeds the guard (default
+200 ms = 1/5 of the 1 s switch-guard). Bypass with `SKIP_CLOCK_OFFSET_ASSERT=1` (on by default).
+The pure comparator (`painter_offset_check`) lives in `clock-offset-guard.sh` and is unit-tested
+in `tests/clock_offset_guard.rs`; the gate flow is unit-tested no-rig in
+`tests/clock_offset_painter_gate.rs` by feeding `DEV1_DANTE_JOURNAL` / `PAINTER_DANTE_JOURNAL`
+fixture files (same "pre-fetch status to a file" trick the DanteSync gate uses for Windows nodes).
+
 **Decode on stream.lan (#193), NOT dev1:** the strih recording lives on the strih box; copy it
 DIRECTLY strih→stream box (`New-PSDrive \\10.77.9.204\C$` + Copy-Item, ~751MB in ~7s, NEVER via
 dev1). Run the verdict as a DETACHED `Start-Process -PassThru -RedirectStandardOutput` and POLL

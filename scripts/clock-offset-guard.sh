@@ -213,6 +213,42 @@ offset_check() {
   return 2
 }
 
+# painter_offset_check LABEL DEV1_OFFSET_US PAINTER_OFFSET_US GUARD_US -> prints a status line;
+# returns 0 OK / 2 DRIFT / 3 UNKNOWN. This is the #326 all-cambox-sweep comparator: the sweep
+# stamps each program-switch window boundary on dev1's CLOCK_REALTIME, while the painted ticks
+# (and the burns the verdict keys on) ride the painter (cam2) DanteSync clock. Both dev1 and the
+# painter are DanteSync-slaved to the SAME NTP master (strih), so each reports its own absolute
+# "[NTP] offset:+Nus". The dev1<->painter RELATIVE offset = |DEV1_OFFSET_US - PAINTER_OFFSET_US|
+# on that shared basis; OK iff that relative offset <= GUARD_US (NUMERIC compare). If it exceeds
+# the guard, window boundaries misalign with the painted-tick timeline by more than the verdict's
+# ±guard discard zone -> frames get attributed to the WRONG cambox window (silent #312
+# mis-attribution). An EMPTY or non-numeric EITHER offset is UNKNOWN (rc 3), never OK — an offset
+# we could not read must never look in-bound (test-strictness: no silent pass).
+painter_offset_check() {
+  local label="$1" dev1="$2" painter="$3" guard="$4" rel mag
+  if [ -z "$dev1" ] || [ -z "$painter" ]; then
+    printf '  %-18s UNKNOWN  (offset unread: dev1=%s painter=%s; guard %s us)\n' \
+      "$label" "${dev1:-<none>}" "${painter:-<none>}" "$guard"
+    return 3
+  fi
+  if ! printf '%s' "$dev1" | grep -qE '^[+-]?[0-9]+$' \
+     || ! printf '%s' "$painter" | grep -qE '^[+-]?[0-9]+$'; then
+    printf '  %-18s UNKNOWN  (malformed offset: dev1=%s painter=%s; guard %s us)\n' \
+      "$label" "$dev1" "$painter" "$guard"
+    return 3
+  fi
+  rel=$(( dev1 - painter ))          # both are plain signed ints (offset_us_from_journal strips '+')
+  mag="$(abs_int "$rel")"
+  if [ "$mag" -le "$guard" ]; then
+    printf '  %-18s OK       (dev1 %s us, painter %s us, |Δ|=%s <= %s)\n' \
+      "$label" "$dev1" "$painter" "$mag" "$guard"
+    return 0
+  fi
+  printf '  %-18s DRIFT    (dev1 %s us, painter %s us, |Δ|=%s > %s us guard)\n' \
+    "$label" "$dev1" "$painter" "$mag" "$guard"
+  return 2
+}
+
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0

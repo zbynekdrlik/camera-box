@@ -220,6 +220,71 @@ fn offset_check_uses_numeric_not_lexical_comparison() {
     );
 }
 
+// --- painter_offset_check (the #326 all-cambox dev1<->painter comparator) -------------------
+
+#[test]
+fn painter_offset_check_in_bound_out_of_bound_and_missing() {
+    // (dev1_us, painter_us, guard_us, want_status_substr, want_rc). The check is on the RELATIVE
+    // offset |dev1 - painter| (both DanteSync offsets on the same strih NTP-master basis).
+    // rc: 0 = OK (|Δ| <= guard), 2 = DRIFT (|Δ| > guard), 3 = UNKNOWN (either offset unread).
+    let cases = [
+        ("300", "280", "200000", "OK", 0), // typical: dev1/painter ~20 us apart, in bound
+        ("300", "-280", "200000", "OK", 0), // opposite signs: |580| still in bound
+        ("200000", "0", "200000", "OK", 0), // |Δ| exactly at the guard -> OK
+        ("200001", "0", "200000", "DRIFT", 2), // one µs over the guard -> DRIFT
+        ("0", "300000", "200000", "DRIFT", 2), // painter ahead by 300 ms -> DRIFT
+        ("-500000", "0", "200000", "DRIFT", 2), // dev1 behind by 500 ms -> DRIFT
+        ("", "300", "200000", "UNKNOWN", 3), // dev1 offset unread -> UNKNOWN, never OK
+        ("300", "", "200000", "UNKNOWN", 3), // painter offset unread -> UNKNOWN, never OK
+        ("abc", "300", "200000", "UNKNOWN", 3), // malformed dev1 offset -> UNKNOWN
+    ];
+    for (dev1, painter, guard, want_sub, want_rc) in cases {
+        let body = "rc=0; painter_offset_check node \"$D\" \"$P\" \"$G\" || rc=$?; echo \"RC=$rc\"";
+        let out = run_sourced(body, &[("D", dev1), ("P", painter), ("G", guard)]);
+        assert!(
+            out.contains(want_sub),
+            "painter_offset_check({dev1},{painter},{guard}) should print {want_sub}: {out:?}"
+        );
+        assert!(
+            out.contains(&format!("RC={want_rc}")),
+            "painter_offset_check({dev1},{painter},{guard}) should return {want_rc}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn painter_offset_check_compares_the_relative_offset_not_each_absolute() {
+    // THE defining property of the #326 gate: it must trip on dev1<->painter DIVERGENCE, not on
+    // either node's absolute offset. Both nodes can sit at a large (but EQUAL) absolute offset vs
+    // the NTP master and still be perfectly aligned to EACH OTHER — windows then attribute
+    // correctly. dev1 +900000 µs, painter +899990 µs: each absolute (900 ms) is 4.5x the 200 ms
+    // guard, yet the RELATIVE |Δ|=10 µs is tiny -> the gate MUST pass. A regression that compared
+    // each absolute offset against the guard would wrongly FAIL here.
+    let out = run_sourced(
+        "rc=0; painter_offset_check n \"$D\" \"$P\" \"$G\" || rc=$?; echo RC=$rc",
+        &[("D", "900000"), ("P", "899990"), ("G", "200000")],
+    );
+    assert!(
+        out.contains("OK") && out.contains("RC=0"),
+        "relative |Δ|=10 us is in bound even though each absolute offset (900 ms) exceeds it: {out:?}"
+    );
+}
+
+#[test]
+fn painter_offset_check_uses_numeric_not_lexical_comparison() {
+    // A lexical compare would rank "100" < "30". The relative-vs-guard check must be NUMERIC:
+    // dev1=100, painter=0, guard=30 -> |Δ|=100 > 30 -> DRIFT. A regression to a string compare
+    // would wrongly call it OK (lexically "100" < "30").
+    let out = run_sourced(
+        "rc=0; painter_offset_check n \"$D\" \"$P\" \"$G\" || rc=$?; echo RC=$rc",
+        &[("D", "100"), ("P", "0"), ("G", "30")],
+    );
+    assert!(
+        out.contains("DRIFT") && out.contains("RC=2"),
+        "100 > 30 numerically (but lexically '100' < '30') — must be DRIFT: {out:?}"
+    );
+}
+
 #[test]
 fn default_bound_is_documented_and_well_under_the_frame_period() {
     // The script exposes its chosen bound as DEFAULT_BOUND_US. It must be a sane value WELL under
