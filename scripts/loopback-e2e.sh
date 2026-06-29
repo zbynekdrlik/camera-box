@@ -31,6 +31,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
+# #309: single-sourced #291 no-display drop-in path + clear-on-restore builder (shared with
+# rig-mode.sh) — the remote cleanup clears any leftover drop-in before restarting camera-box.
+# shellcheck source=scripts/lib/rig-test-dropin.sh
+. "$HERE/lib/rig-test-dropin.sh"
 camera_resolve "${CAM:-cam2}"
 
 CAM_IP="${CAM_IP:-$CAMERA_IP}"
@@ -68,8 +72,13 @@ build_remote_env() {
   # root shell — the #39 hardening. Safe here because BOTH this builder (#!/usr/bin/env
   # bash) and the remote consumer (`bash -s`) are bash: %q may emit bash-only $'…'
   # ANSI-C quoting, which a POSIX sh/dash would not parse — don't reuse this in an sh ctx.
-  printf 'MODE=%q DURATION=%q SOURCE=%q QR_SIZE=%q SETTLE_MS=%q CAPTURE_FPS=%q MAX_P99_MS=%q MAX_FREEZE_PERIODS=%q OUT=%q' \
-    "$MODE" "$DURATION_SECS" "$SOURCE" "$QR_SIZE" "$SETTLE_MS" "$CAPTURE_FPS" "$MAX_P99_MS" "$MAX_FREEZE_PERIODS" "$REMOTE_OUT"
+  # #309: also carry the single-sourced #291 drop-in CLEAR commands to the remote shell, so its
+  # cleanup trap removes any leftover `rig-mode.sh test` no-display drop-in BEFORE restoring
+  # camera-box (else the restore would bring it back WITHOUT --display — dark interkom monitor).
+  # %q-quoted like every other value, so the multi-line clear script is injection-safe on the ssh
+  # command line (the #39 hardening).
+  printf 'MODE=%q DURATION=%q SOURCE=%q QR_SIZE=%q SETTLE_MS=%q CAPTURE_FPS=%q MAX_P99_MS=%q MAX_FREEZE_PERIODS=%q OUT=%q RIG_TEST_DROPIN_CLEAR=%q' \
+    "$MODE" "$DURATION_SECS" "$SOURCE" "$QR_SIZE" "$SETTLE_MS" "$CAPTURE_FPS" "$MAX_P99_MS" "$MAX_FREEZE_PERIODS" "$REMOTE_OUT" "$(rig_test_dropin_clear_cmds)"
 }
 
 # When sourced (the #39 regression test exercises build_remote_env in isolation), stop
@@ -99,6 +108,11 @@ MANUAL_PID=""
 cleanup() {
   if [ -n "$MANUAL_PID" ]; then kill "$MANUAL_PID" 2>/dev/null || true; fi
   sleep 1
+  # #309: clear any leftover #291 rig-mode no-display drop-in BEFORE restoring camera-box — else a
+  # prior `rig-mode.sh test` would make this `start` bring camera-box back WITHOUT --display (the
+  # interkom return monitor stays dark). The clear commands are single-sourced + passed in via the
+  # env prefix; idempotent (rm -f is a no-op if absent).
+  eval "${RIG_TEST_DROPIN_CLEAR:-}"
   systemctl start camera-box
   echo ">> CLEANUP: camera-box service restarted ($(systemctl is-active camera-box))"
 }
