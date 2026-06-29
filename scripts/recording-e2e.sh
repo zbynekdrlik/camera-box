@@ -220,6 +220,21 @@ fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
   --win-state "strih=$VERSION_STRIH_STATE" \
   --win-state "stream=$VERSION_STREAM_STATE"
 
+# dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
+# all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
+# CLOCK_REALTIME, while the painted ticks (and the burns recording-verdict --switch-schedule keys
+# on) ride the painter (cam2) DanteSync clock. If dev1's clock is offset from the painter by more
+# than the verdict's transition guard, frames near every boundary get attributed to the WRONG
+# cambox window (silent #312 mis-attribution → false gaps/copies or a hidden real loss). So before
+# the multi-minute sweep, assert the dev1<->painter offset is well within the guard and FAIL FAST
+# otherwise — the same fail-fast spirit as the DanteSync/version gates above. ON by default;
+# bypass with SKIP_CLOCK_OFFSET_ASSERT=1 (the gate honours it). Only the all-cambox path stamps
+# windows on dev1's clock, so the gate is irrelevant to the default single-hold run.
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[0/8] dev1<->painter clock-offset gate — all-cambox window attribution must be trustworthy (#326)"
+  "$HERE/clock-offset-painter-gate.sh" --painter "cam2=$PAINTER_IP"
+fi
+
 # cam1 v4l2 capture controls (#156 durable): apply the certified sharp controls
 # (saturation=0, contrast=75) BEFORE the run so a soft-default device can never silently
 # degrade the camera's optical dual-QR decode. The cam1 launch step ([2/8]) re-applies them

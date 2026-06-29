@@ -402,6 +402,39 @@ fn dantesync_gate_runs_before_any_recording() {
     );
 }
 
+/// #326: the all-cambox sweep stamps each program-switch window boundary on dev1's CLOCK_REALTIME,
+/// while the verdict partitions by the painter (cam2) burn gen_ts_ns. recording-e2e.sh MUST assert
+/// the dev1<->painter clock offset is within the switch-guard before the sweep — and only for the
+/// ALL_CAMBOX path (the default single-hold run doesn't stamp windows on dev1's clock). The gate
+/// must run BEFORE the all-cambox sweep step and BEFORE StartRecord (fail fast, no long sweep with
+/// untrustworthy attribution).
+#[test]
+fn painter_clock_offset_gate_runs_before_the_all_cambox_sweep() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate = s
+        .find("clock-offset-painter-gate.sh")
+        .expect("recording-e2e.sh must invoke clock-offset-painter-gate.sh (#326)");
+    // It must be gated to the ALL_CAMBOX path: the line invoking the gate is inside an
+    // `if [ "${ALL_CAMBOX:-0}" = "1" ]` block. Assert the nearest preceding ALL_CAMBOX guard.
+    let head = &s[..gate];
+    assert!(
+        head.contains(r#"if [ "${ALL_CAMBOX:-0}" = "1" ]"#),
+        "the painter clock-offset gate must be conditioned on ALL_CAMBOX (only the sweep stamps \
+         windows on dev1's clock)"
+    );
+    let sweep = s
+        .find("ALL-CAMBOX sweep:")
+        .expect("recording-e2e.sh must have the all-cambox sweep step");
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        gate < start_record && gate < sweep,
+        "the dev1<->painter clock-offset gate must run BEFORE StartRecord and the sweep \
+         (fail fast on a misaligned clock, never mid-sweep)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #163 — record the PRODUCTION scene program, never a colliding probe input.
 //
