@@ -59,8 +59,38 @@ This is structural, not conventional: `apply_controls_with()` returns a
 control-less card is a 2× warn + continue (saturation+contrast — #338 dropped hue
 from the set), never fatal.
 
-CAM4 was *also* mono during the incident but from a DIFFERENT root (colorspace /
-2-video-node / YUV range) — tracked separately in **#299**, NOT fixed by #296.
+CAM4's "grayscale" was NOT a code bug (#299 — REFRAMED). The ticket-validator
+proved camera-box selects the correct `/dev/video0`, negotiates YUYV, and converts
+YUYV→UYVY chroma-preserving; all three boxes measured *identically* grayscale, so
+the mono image was SOURCE CONTENT (grayscale console screens), not a colorspace /
+2-video-node defect. No colorspace fix was needed; #299 instead shipped an
+always-on colour-capture metric (below) so the recurring "is colour actually
+captured?" question is answered automatically, not by eye.
+
+## Colour-capture metric — the #299 always-on grayscale watchdog
+
+`mean_chroma(frame, width, height, stride) -> (f32, f32)` in `src/capture.rs`
+returns `(mean |U-128|, mean |V-128|)` over the captured YUYV422 frame. Neutral
+grey is U=V=128 → both ≈ 0; a coloured source pushes them up. `is_color_frame(u,v)`
+classifies via `CHROMA_COLOR_THRESHOLD = 2.0` LSB (named const). `main.rs` samples
+once per `CHROMA_SAMPLE_FRAMES = 60` captured frames (~1 Hz @ 60 fps) and logs on
+the existing 5 s streaming report:
+
+```
+capture chroma: u_dev=3.1 v_dev=4.7 -> colour
+capture chroma: u_dev=0.2 v_dev=0.1 -> grayscale (source likely monochrome)
+```
+
+To check colour on a live box: `journalctl -u camera-box | grep 'capture chroma'`.
+A steady `-> grayscale` while a coloured source is on-camera is the regression.
+
+**Gotcha — sampling MUST honor `stride`.** The V4L2 mmap buffer length is
+`stride * height`, NOT `width * 2 * height`; a row-padded device (`stride >
+width*2`) would otherwise sample padding bytes as bogus chroma. `mean_chroma`
+iterates row-by-row at `row_start = y * stride`, same as `yuyv_to_gray8`. Any
+future per-pixel frame analysis in this crate must take and honor `stride` too.
+Cost is bounded by `CHROMA_SAMPLE_STRIDE = 64` macropixels/row (~16 k samples at
+1080p) so it never perturbs the realtime grab.
 
 ## Unit-testing the apply path without /dev/video
 
