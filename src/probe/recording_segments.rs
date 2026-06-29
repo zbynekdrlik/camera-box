@@ -20,9 +20,9 @@
 //! latency to settle, so frames inside the guard are EXCLUDED from attribution (NOT counted as
 //! loss). The remaining in-window frames run the painted-tick continuity check (the cam2 optical
 //! Vernier tick, common to every cambox through the splitter) — see [`window_segment`], which
-//! mirrors the per-node burn check's definitions ([`crate::probe::burn_contiguity`]: `None`-credit
-//! + the integer-division decimation excess) but is painted-tick-specific (a duplicate tick is a
-//! stale copy, never a misdecoded burn). We report per cambox:
+//! mirrors the per-node burn check's definitions ([`crate::probe::burn_contiguity`]: the
+//! `None`-credit and the integer-division decimation excess) but is painted-tick-specific (a
+//! duplicate tick is a stale copy, never a misdecoded burn). We report per cambox:
 //!
 //! - `frames`: in-window delivered frames after the guard discard.
 //! - `undecodable`: delivered frames whose painted tick did not decode.
@@ -250,6 +250,7 @@ pub fn segment_continuity(
 }
 
 /// The per-window painted-tick continuity. Reports three disjoint counts:
+///
 /// - `undecodable`: delivered frames whose painted tick did not decode (`tick == None`).
 /// - `copies`: stale/frozen frames — the painted tick repeated the previous present tick.
 /// - `gaps`: real dropped painted frames — a forward skip beyond the by-design `expected_step`
