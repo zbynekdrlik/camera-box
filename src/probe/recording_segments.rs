@@ -114,6 +114,12 @@ pub struct CamboxSegment {
     pub last_tick: Option<u32>,
     /// This cambox's segment is clean ⇔ `frames > 0 && undecodable == 0 && copies == 0 && gaps == 0`.
     pub pass: bool,
+    /// #333: an explicit human diagnostic, populated ONLY for a `frames == 0` window — the most
+    /// likely cause is the dual-QR PAINTER box (it does not emit its own camera NDI while painting,
+    /// #179) or a down / non-emitting box, NOT a chain frame loss. Surfaced so an empty window is
+    /// never mistaken for a continuity break. `None` on any covered window (`frames > 0`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The whole-recording segmented-continuity verdict.
@@ -321,6 +327,15 @@ fn window_segment(
     let last_tick = frames.iter().rev().find_map(|f| f.tick);
 
     let pass = frame_count > 0 && undecodable == 0 && copies == 0 && gaps == 0;
+    // #333: a ZERO-frame window is empty by construction, not chain loss — flag it loudly so it is
+    // not misread as a continuity break. The dominant cause is sweeping the dual-QR painter box
+    // (it does not emit its own camera NDI while painting, #179) or a down / non-emitting box.
+    let note = (frame_count == 0).then(|| {
+        format!(
+            "swept cambox {cambox} produced 0 frames in its window — is it the dual-QR painter / \
+             not emitting NDI? Exclude it from CAMBOX_SWEEP."
+        )
+    });
     CamboxSegment {
         cambox: cambox.to_string(),
         start_ns,
@@ -332,6 +347,7 @@ fn window_segment(
         first_tick,
         last_tick,
         pass,
+        note,
     }
 }
 

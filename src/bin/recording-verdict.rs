@@ -2086,6 +2086,11 @@ fn build_and_print_verdict(
                         s.gaps,
                         if s.pass { "PASS" } else { "FAIL" }
                     );
+                    // #333: a frames=0 window is empty by construction (the painter / a non-emitting
+                    // box), NOT chain loss — print the explicit diagnostic so it is not misread.
+                    if let Some(note) = &s.note {
+                        println!("      ⚠ {note}");
+                    }
                 }
                 if no_anchor > 0 {
                     println!(

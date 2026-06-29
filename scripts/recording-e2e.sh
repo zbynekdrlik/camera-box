@@ -447,8 +447,14 @@ python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
 # [4b/8] burn-ON gate is unaffected. The DEFAULT path (no ALL_CAMBOX) is the unchanged single hold.
 ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # scene:label pairs (the #284/#151 scene names are scrambled — this is the verified mapping):
-#   'Cam 5'->CAM1(.61)  'Cam 3'->CAM2(.62)  'Cam 1'->CAM4(.64)   (CAM3/.63 is DOWN #301, excluded)
-CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4}"
+#   'Cam 5'->CAM1(.61)  'Cam 1'->CAM4(.64)
+# #333: the default sweeps ONLY the non-painter CAPTURE boxes. CAM3/.63 is DOWN (#301); CAM2/.62
+# is the dual-QR PAINTER — while painting the monitor (/dev/fb0 → HDMI splitter) it does NOT
+# capture/emit its OWN camera NDI (#179 "cam2 paints, NO grab"), so switching strih program to its
+# scene shows nothing → frames=0, a guaranteed FAIL that also inflates frames_without_anchor.
+# So the painter can never be a swept capture source; it is excluded from the default. To prove the
+# painter box itself, override $CAMBOX_SWEEP for a run where a DIFFERENT box paints.
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM4}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #312 Phase-2 GUARD (fail FAST, before the multi-minute sweep): the per-cambox window gating is
