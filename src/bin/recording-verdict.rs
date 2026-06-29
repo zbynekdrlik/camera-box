@@ -551,7 +551,15 @@ fn node_render_step(node: &str, strih_emit_fps: f64, stream_capture_fps: f64) ->
 /// can still be placed. The painted `tick` is the cam2 optical Vernier tick ([`RecordingFrame::
 /// tick`], which already excludes node burns). A frame carrying NO usable gen_ts anchor at all is
 /// dropped (it cannot be placed on the timeline); the dropped count is returned so it is reported,
-/// never hidden.
+/// never hidden (the per-node burn contiguity verdict on the same recording catches such frames).
+///
+/// The schedule MUST be logged on the SAME timeline the primary anchor uses — the strih burn's
+/// render time (the harness logs the program-switch wall-time at the strih box). The optical
+/// fallback's paint gen_ts differs from a node burn's render gen_ts only by the small per-hop
+/// genlock latency (prod 3ms), far inside the 1s transition guard, so a rare fallback frame near a
+/// boundary stays correctly attributed. When `cam2_run_id` is pinned the optical fallback is
+/// deliberately STRICT (run_id == pin) so a foreign/previous-run paint can never anchor a frame
+/// (#273); an unpinned run uses any non-burn payload.
 fn segment_frames_from_recording(
     frames: &[RecordingFrame],
     anchor_run_ids: &[u32],
