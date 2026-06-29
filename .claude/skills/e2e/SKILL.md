@@ -339,3 +339,45 @@ camera's cam2 painter `frame_id` → equal frame_id across cameras = they captur
 instant = synced. Proven 2026-06-28: cam1/3/4 13/14 rounds spread 0, max spread 2 frames, at uniform
 3ms latency. cv2 QRCodeDetector is too weak for the filmed QR — use zxing-cpp (`pip install
 --break-system-packages zxing-cpp`). head_skew from the genlock FIFO audit is NOT content alignment.
+
+## All-Cambox per-SEGMENT continuity (#312 Phase-1) — `recording-verdict --switch-schedule`
+
+The all-cambox E2E (#312) switches each active cambox into strih PROGRAM sequentially (~30s each);
+ALL camboxes capture the SAME painted source via the HDMI splitter, so ONE continuous stream
+recording must stay continuity-clean across every window — any cambox that drops shows as a break
+in ITS window. Phase-1 attributes per cambox by a SCHEDULE (no cambox-id in the pixels yet — that
+is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock build).
+
+- **Harness (drives the rig, supervisor — NOT this verdict code):** sequential
+  `SetCurrentProgramScene` switch to each active cambox over strih OBS WS, logging
+  `(cambox, switch_wall_ns)`; ONE continuous stream recording. Writes the switch-schedule JSON.
+- **Verdict (CI-testable, `src/probe/recording_segments.rs` + `recording-verdict`):**
+  `recording-verdict --stream <rec> --switch-schedule <schedule.json>` partitions the decoded
+  stream frames into per-cambox windows by burn `gen_ts_ns ∈ [start_ns,end_ns)` (minus a 1s
+  transition guard on EACH boundary — `--switch-guard-ns`), runs `burn_contiguity_in_window_with_step`
+  on the PAINTED tick per window, and emits `all_cambox_continuity` in the `--json` summary
+  (per-cambox `frames/undecodable/copies/gaps/pass` + `overall_pass`). It GATES the headline.
+- **Schedule JSON:** an ordered, non-overlapping array of `{"cambox":<label>,"start_ns":<i64>,"end_ns":<i64>}`
+  on the burn `gen_ts_ns` timeline. Validation rejects overlap / out-of-order / start≥end / empty.
+- **`expected_step`** (the painted-tick by-design step) is a PARAMETER, NOT hardcoded: default
+  `round(--refresh-hz / --stream-capture-fps)` = 60/30 = 2 for the stream recording; override with
+  `--switch-expected-step`. Keeps the check rate-agnostic (cam→strih step 1, strih→stream step 2).
+- **Coverage honesty (#301):** a scheduled cambox with ZERO in-window frames FAILs — an absent box
+  (e.g. CAM3 down) never reads as a pass. Active set today = CAM1/2/4.
+
+**Design gotcha — copies need their own pass.** `burn_contiguity_in_window_with_step` (PerRenderTick)
+surfaces `undecodable` (None frames → BurnUnreadable) and `gaps` (forward skip beyond `expected_step`,
+or backward jump → RealDrop), but NOT `copies`: a free-running burn counter never repeats, so its
+walk ignores `id == prev`. The PAINTED tick MUST advance per painted frame, so a repeat IS a stale
+frame — `window_segment` counts copies in a separate explicit pass (consecutive equal present ticks).
+`undecodable` is counted directly (the in-window check returns an EMPTY missing set for an all-None
+window, so do not derive undecodable from its slots).
+
+## Clippy gotcha — `doc_lazy_continuation` under `--all-features`
+
+CI runs `cargo clippy --all-targets --all-features -- -D warnings`. The `doc_lazy_continuation` lint
+fires when a doc-comment (`//!` / `///`) line STARTS with a markdown bullet char (`+ ` / `- ` / `* `)
+without a blank doc line before the list, or on a wrapped bullet whose continuation is mis-indented.
+A `tests/*.rs` doc comment is linted by `clippy --all-targets` even when the test body is
+`#![cfg(feature = "probe")]` (the doc is always compiled). Fix: put a blank `//!`/`///` line before a
+list, keep bullets single-line, and never start a prose line with `+ `/`- `/`* `.
