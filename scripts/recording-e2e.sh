@@ -434,6 +434,23 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 3:CAM2 Cam 1:CAM4}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
+  # #312 Phase-2 GUARD (fail FAST, before the multi-minute sweep): the per-cambox window gating is
+  # consumed via --switch-schedule on VERDICT_ARGS, which ONLY the decode-on-dev1 verdict
+  # (VERDICT_ON_STREAM=0, step [8/8]) runs. The DEFAULT per-box path (VERDICT_ON_STREAM=1) decodes
+  # via --extract-partial/--merge-partials (MERGE_ARGS) and `exit 0`s WITHOUT ever consuming
+  # VERDICT_ARGS — so under the default the schedule would be written but SILENTLY IGNORED, the
+  # verdict would skip segment_continuity, and a cambox dropping in ITS ~30s window would PASS (the
+  # exact #312 single-cam-proxy hole). Require the decode-on-dev1 path explicitly rather than run a
+  # 30-min sweep whose verdict can't gate it. (Per-box merge-path switch-schedule support is a
+  # separate verdict change — see the filed follow-up.)
+  if [ "${VERDICT_ON_STREAM:-1}" != "0" ]; then
+    echo "ERROR: ALL_CAMBOX=1 requires VERDICT_ON_STREAM=0 — the #312 per-cambox switch-schedule" >&2
+    echo "       gating is consumed only by the decode-on-dev1 verdict; the default per-box merge" >&2
+    echo "       path does not take --stream/--switch-schedule, so the per-cambox check would be" >&2
+    echo "       SILENTLY skipped (a cambox dropping in its window would PASS). Re-run with:" >&2
+    echo "         ALL_CAMBOX=1 VERDICT_ON_STREAM=0 $0" >&2
+    exit 1
+  fi
   echo "[6/8] ALL-CAMBOX sweep: cut each cambox into strih program ${SEGMENT_SECS}s, cycling '$CAMBOX_SWEEP' until >=${DURATION}s (run_id=$RUN_ID)"
   # Build the per-segment cut plan (scene + label), cycling the sweep to cover DURATION. Python owns
   # the colon-pair parsing (scene names contain spaces, e.g. 'Cam 5'), so bash never word-splits it.

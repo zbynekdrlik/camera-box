@@ -1165,3 +1165,39 @@ fn recording_e2e_defaults_to_mixed_60_30_and_threads_per_box_fps() {
          stream extract, the merge, and the fused verdict (>=3 each); found emit={emit} dec={dec}."
     );
 }
+
+/// #312 Phase-2: the env-gated all-cambox sweep must (a) GUARD that ALL_CAMBOX=1 requires
+/// VERDICT_ON_STREAM=0 (the only verdict path that consumes --switch-schedule via VERDICT_ARGS —
+/// the default per-box merge path silently ignores it, which would let a cambox dropping in its
+/// window PASS), and (b) append --switch-schedule to VERDICT_ARGS only under ALL_CAMBOX, and (c)
+/// leave the DEFAULT single-scene hold (`sleep "$DURATION"`) intact for non-sweep runs.
+#[test]
+fn recording_e2e_all_cambox_sweep_is_guarded_and_wired() {
+    let s = read("scripts/recording-e2e.sh");
+    // (a) the fail-fast guard: ALL_CAMBOX=1 must require VERDICT_ON_STREAM=0.
+    assert!(
+        s.contains(r#"ALL_CAMBOX=1 requires VERDICT_ON_STREAM=0"#),
+        "#312: the sweep must FAIL FAST when ALL_CAMBOX=1 without VERDICT_ON_STREAM=0 (else the \
+         per-cambox switch-schedule gating is silently skipped and a dropping cambox PASSES)."
+    );
+    assert!(
+        s.contains(r#"if [ "${VERDICT_ON_STREAM:-1}" != "0" ]; then"#),
+        "#312: the guard must check VERDICT_ON_STREAM before running the sweep."
+    );
+    // (b) the schedule is fed to the verdict via VERDICT_ARGS, gated on ALL_CAMBOX + file present,
+    //     using the if-form (NOT `] && VERDICT_ARGS+=(`, which set -e-aborts on a missing file #178).
+    assert!(
+        s.contains("VERDICT_ARGS+=(--switch-schedule"),
+        "#312: --switch-schedule must be appended to VERDICT_ARGS for the all-cambox verdict."
+    );
+    assert!(
+        s.contains(r#"if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then"#),
+        "#312: the --switch-schedule append must be gated on ALL_CAMBOX=1 AND the schedule file \
+         existing, in if-form (not `] && VERDICT_ARGS+=(` which set -e-aborts when absent, #178)."
+    );
+    // (c) the DEFAULT (no ALL_CAMBOX) path must keep the single steady-state hold.
+    assert!(
+        s.contains(r#"sleep "$DURATION""#),
+        "#312: the default (non-sweep) path must keep the single `sleep \"$DURATION\"` hold."
+    );
+}
