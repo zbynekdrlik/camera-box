@@ -244,3 +244,148 @@ fn setup_md_documents_the_ro_root_overlay_target() {
         "SETUP.md must tie the hardening section to #295 so the rationale is traceable"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #307 — extend the #295 boot-hardening to the two builders the setup scripts do NOT cover:
+//   (1) `scripts/create-usb-linux.sh` — the MASTER base-image builder. It builds the "clean Ubuntu
+//       + SSH only" image that `setup.sh` later hardens, so there is a narrow first-boot window
+//       (before setup.sh runs) where the original brick exposure exists. It must carry the same
+//       kernel-pin + unattended-upgrades-off + saved-grub-default hardening at the source.
+//   (2) `scripts/build-image.sh` `install_bootloader` — the durable ro-root+overlay image. It pins
+//       a saved grub default but never VALIDATES (like the setup scripts do) that the generated
+//       default entry has BOTH a kernel image AND an initrd before pinning. Add the same fail-closed
+//       guard so the durable image stays consistent with setup.sh / setup-device.sh.
+// Style mirrors the #295 tests above: read the REAL scripts and assert on the REAL contract.
+
+/// The master base-image builder ("clean Ubuntu + SSH" image that setup.sh later hardens).
+const BASE_IMAGE_BUILDER: &str = "scripts/create-usb-linux.sh";
+
+/// The durable read-only-root + overlay image builder (the long-term appliance target, #301).
+const RO_IMAGE_BUILDER: &str = "scripts/build-image.sh";
+
+/// Extract a top-level shell function body (`name() { ... }`) from a script. Returns the text from
+/// the `name() {` line through the matching closing `}` (these scripts close their functions with a
+/// bare `}` at column 0). Lets a test scope its assertions to ONE function so a mention elsewhere in
+/// the file cannot false-pass — the guard must live where the default is actually pinned.
+fn extract_shell_function(script: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = script.lines().collect();
+    let start = lines.iter().position(|l| {
+        let t = l.trim_start();
+        t.starts_with(&format!("{name}()")) || t.starts_with(&format!("{name} ()"))
+    })?;
+    let mut out = Vec::new();
+    for line in &lines[start..] {
+        out.push(*line);
+        if *line == "}" {
+            break;
+        }
+    }
+    Some(out.join("\n"))
+}
+
+/// 6. The base-image builder must PIN the appliance kernel — the same `apt-mark hold` the setup
+///    scripts use. Without it the base image can gain a surprise kernel in the window before setup.sh
+///    runs, recreating the #295 exposure at the source.
+#[test]
+fn base_image_builder_holds_the_appliance_kernel() {
+    const HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
+    let body = read(BASE_IMAGE_BUILDER);
+    assert!(
+        body.contains(HOLD_CMD),
+        "{BASE_IMAGE_BUILDER} must run `{HOLD_CMD}` so the base image can never gain a surprise \
+         kernel before setup.sh hardens the box (#307, extends #295)"
+    );
+}
+
+/// 7. The base-image builder must disable unattended (automatic) upgrades — the same mechanism the
+///    setup scripts use (`/etc/apt/apt.conf.d/20auto-upgrades` with periodic = 0). An active
+///    unattended-upgrades is HOW the brick kernel auto-installed.
+#[test]
+fn base_image_builder_disables_automatic_kernel_upgrades() {
+    let body = read(BASE_IMAGE_BUILDER);
+    assert!(
+        body.contains("20auto-upgrades"),
+        "{BASE_IMAGE_BUILDER} must write /etc/apt/apt.conf.d/20auto-upgrades to turn OFF unattended \
+         upgrades on the base image — an active unattended-upgrades auto-installed the kernel that \
+         bricked CAM3/CAM4 (#307, extends #295)"
+    );
+    assert!(
+        body.contains(r#"APT::Periodic::Unattended-Upgrade "0""#),
+        "{BASE_IMAGE_BUILDER} must set `APT::Periodic::Unattended-Upgrade \"0\"` so the base image \
+         never auto-installs a kernel before setup.sh runs (#307, extends #295)"
+    );
+}
+
+/// 8. The base-image builder must pin a SAVED grub default instead of the hardcoded `GRUB_DEFAULT=0`
+///    (boot-newest). Boot-newest is exactly how an initrd-less auto-installed kernel became the
+///    default and bricked CAM3/CAM4. Replace it with `GRUB_DEFAULT=saved` + `grub-set-default 0`.
+#[test]
+fn base_image_builder_pins_a_saved_grub_default() {
+    let body = read(BASE_IMAGE_BUILDER);
+    assert!(
+        body.contains("GRUB_DEFAULT=saved"),
+        "{BASE_IMAGE_BUILDER} must set GRUB_DEFAULT=saved so the base image pins an explicitly-saved \
+         known-good kernel as the default, not whatever is newest (#307, extends #295)"
+    );
+    assert!(
+        !body.contains("GRUB_DEFAULT=0"),
+        "{BASE_IMAGE_BUILDER} must NOT keep the hardcoded GRUB_DEFAULT=0 (boot-newest) — that is how \
+         an initrd-less kernel became the default and bricked CAM3/CAM4 (#307, extends #295)"
+    );
+    assert!(
+        body.contains("grub-set-default 0"),
+        "{BASE_IMAGE_BUILDER} must `grub-set-default 0` after update-grub to pin the known-good \
+         kernel as the saved default (#307, extends #295)"
+    );
+}
+
+/// 9. The ro-root+overlay image builder's `install_bootloader` must carry the SAME fail-closed
+///    grub-default validation the setup scripts use: before pinning the saved default, read the
+///    generated /boot/grub/grub.cfg, extract its default menuentry, and assert it references BOTH a
+///    kernel image AND an initrd — aborting loudly otherwise. Scope the assertions to the function
+///    body so a mention elsewhere cannot satisfy the guard.
+#[test]
+fn ro_image_builder_validates_grub_default_before_pinning() {
+    let body = read(RO_IMAGE_BUILDER);
+    let func = extract_shell_function(&body, "install_bootloader")
+        .expect("build-image.sh must define an install_bootloader function");
+    assert!(
+        func.contains("grub.cfg") && func.contains("menuentry "),
+        "install_bootloader must read the generated /boot/grub/grub.cfg and extract its default \
+         menuentry to validate it before pinning (#307, mirrors setup.sh)"
+    );
+    let validates_kernel_image = func
+        .lines()
+        .any(|l| l.contains("grep") && (l.contains("vmlinuz") || l.contains("linux ")));
+    assert!(
+        validates_kernel_image,
+        "install_bootloader must grep the extracted grub default entry for a kernel image line \
+         (vmlinuz / linux) before pinning (#307)"
+    );
+    let validates_initrd = func
+        .lines()
+        .any(|l| l.contains("grep") && l.contains("initrd"));
+    assert!(
+        validates_initrd,
+        "install_bootloader must grep the extracted grub default entry for an initrd line and abort \
+         if absent — without it the image could default-boot an initrd-less kernel (#307)"
+    );
+    assert!(
+        func.contains("error ") || func.contains("exit 1"),
+        "install_bootloader's grub-default validation must FAIL CLOSED — abort loudly (error/exit) \
+         when the default entry lacks a kernel image or initrd (#307)"
+    );
+    // Ordering: the validation must run BEFORE grub-set-default pins the default, or a brickable
+    // default could still be pinned.
+    let validate_idx = func
+        .find("initrd")
+        .expect("initrd validation present in install_bootloader");
+    let pin_idx = func
+        .find("grub-set-default")
+        .expect("grub-set-default present in install_bootloader");
+    assert!(
+        validate_idx < pin_idx,
+        "install_bootloader must validate the grub default (kernel image + initrd) BEFORE \
+         grub-set-default pins it (#307)"
+    );
+}
