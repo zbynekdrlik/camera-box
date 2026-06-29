@@ -39,8 +39,11 @@ fn watchdog() -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join(format!("rig-restore-watchdog-{}-{}", std::process::id(), name));
+    let dir = std::env::temp_dir().join(format!(
+        "rig-restore-watchdog-{}-{}",
+        std::process::id(),
+        name
+    ));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -151,9 +154,17 @@ fn fresh_heartbeat_never_acts_even_when_stranded() {
         &[("RIG_HB_ACTIVE", "1"), ("RIG_PREV_CONFIRM", "5")],
         &["cam cam1 down=1 probe=1", "obs strih scene=PHASE2-PROBE"],
     );
-    assert_eq!(d.get("act").map(String::as_str), Some("0"), "fresh heartbeat must NEVER act");
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "fresh heartbeat must NEVER act"
+    );
     assert_eq!(d.get("alert").map(String::as_str), Some("0"));
-    assert_eq!(d.get("confirm").map(String::as_str), Some("0"), "fresh heartbeat resets the counter");
+    assert_eq!(
+        d.get("confirm").map(String::as_str),
+        Some("0"),
+        "fresh heartbeat resets the counter"
+    );
 }
 
 #[test]
@@ -163,7 +174,11 @@ fn no_stranded_signal_resets_and_does_not_act() {
         &["cam cam1 down=0 probe=0", "obs strih scene=Cam 5"],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("0"));
-    assert_eq!(d.get("confirm").map(String::as_str), Some("0"), "clean rig resets the confirm counter");
+    assert_eq!(
+        d.get("confirm").map(String::as_str),
+        Some("0"),
+        "clean rig resets the confirm counter"
+    );
 }
 
 #[test]
@@ -174,7 +189,11 @@ fn first_stranded_sighting_is_observe_only() {
         &["cam cam1 down=1 probe=0"],
     );
     assert_eq!(d.get("confirm").map(String::as_str), Some("1"));
-    assert_eq!(d.get("act").map(String::as_str), Some("0"), "first sighting must be observe-only");
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "first sighting must be observe-only"
+    );
     assert_eq!(d.get("alert").map(String::as_str), Some("0"));
 }
 
@@ -185,10 +204,20 @@ fn second_consecutive_confirmation_acts_and_alerts() {
         &["cam cam1 down=1 probe=0"],
     );
     assert_eq!(d.get("confirm").map(String::as_str), Some("2"));
-    assert_eq!(d.get("act").map(String::as_str), Some("1"), "2nd consecutive confirmation must act");
-    assert_eq!(d.get("alert").map(String::as_str), Some("1"), "acting must ALWAYS alert");
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("1"),
+        "2nd consecutive confirmation must act"
+    );
+    assert_eq!(
+        d.get("alert").map(String::as_str),
+        Some("1"),
+        "acting must ALWAYS alert"
+    );
     assert!(
-        d.get("actions").map(|s| s.contains("restore_cam:cam1")).unwrap_or(false),
+        d.get("actions")
+            .map(|s| s.contains("restore_cam:cam1"))
+            .unwrap_or(false),
         "actions must include restore_cam:cam1 — got {:?}",
         d.get("actions")
     );
@@ -201,7 +230,10 @@ fn stale_probe_alone_is_a_stranded_signal() {
         &["cam cam2 down=0 probe=1"],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("1"));
-    assert!(d.get("actions").map(|s| s.contains("restore_cam:cam2")).unwrap_or(false));
+    assert!(d
+        .get("actions")
+        .map(|s| s.contains("restore_cam:cam2"))
+        .unwrap_or(false));
 }
 
 #[test]
@@ -212,7 +244,9 @@ fn obs_on_known_test_scene_is_a_stranded_signal() {
     );
     assert_eq!(d.get("act").map(String::as_str), Some("1"));
     assert!(
-        d.get("actions").map(|s| s.contains("restore_obs:strih")).unwrap_or(false),
+        d.get("actions")
+            .map(|s| s.contains("restore_obs:strih"))
+            .unwrap_or(false),
         "OBS on a known TEST scene must trigger restore_obs — got {:?}",
         d.get("actions")
     );
@@ -273,7 +307,10 @@ fn known_test_scene_set_is_overridable_via_env() {
         &["obs stream scene=REC-STRIH-TMP"],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("1"));
-    assert!(d.get("actions").map(|s| s.contains("restore_obs:stream")).unwrap_or(false));
+    assert!(d
+        .get("actions")
+        .map(|s| s.contains("restore_obs:stream"))
+        .unwrap_or(false));
 }
 
 // ─── heartbeat helpers ───────────────────────────────────────────────────────
@@ -281,16 +318,23 @@ fn known_test_scene_set_is_overridable_via_env() {
 #[test]
 fn heartbeat_is_fresh_is_a_pure_age_check() {
     // rig_heartbeat_is_fresh <last_epoch> <now_epoch> <stale_sec> -> exit 0 (fresh) / 1 (stale).
-    let (code_fresh, _o, e) = run_bash(
-        r#". "$HEARTBEAT_LIB"; rig_heartbeat_is_fresh 1000 1010 60; echo "rc=$?""#,
-    );
+    let (code_fresh, _o, e) =
+        run_bash(r#". "$HEARTBEAT_LIB"; rig_heartbeat_is_fresh 1000 1010 60; echo "rc=$?""#);
     assert_eq!(code_fresh, 0, "harness must run: {e}");
-    let (_c, out_fresh, _e) =
-        run_bash(r#". "$HEARTBEAT_LIB"; rig_heartbeat_is_fresh 1000 1010 60 && echo FRESH || echo STALE"#);
-    assert!(out_fresh.contains("FRESH"), "10s old with 60s threshold is FRESH — got {out_fresh}");
-    let (_c2, out_stale, _e2) =
-        run_bash(r#". "$HEARTBEAT_LIB"; rig_heartbeat_is_fresh 1000 1200 60 && echo FRESH || echo STALE"#);
-    assert!(out_stale.contains("STALE"), "200s old with 60s threshold is STALE — got {out_stale}");
+    let (_c, out_fresh, _e) = run_bash(
+        r#". "$HEARTBEAT_LIB"; rig_heartbeat_is_fresh 1000 1010 60 && echo FRESH || echo STALE"#,
+    );
+    assert!(
+        out_fresh.contains("FRESH"),
+        "10s old with 60s threshold is FRESH — got {out_fresh}"
+    );
+    let (_c2, out_stale, _e2) = run_bash(
+        r#". "$HEARTBEAT_LIB"; rig_heartbeat_is_fresh 1000 1200 60 && echo FRESH || echo STALE"#,
+    );
+    assert!(
+        out_stale.contains("STALE"),
+        "200s old with 60s threshold is STALE — got {out_stale}"
+    );
 }
 
 #[test]
@@ -328,7 +372,10 @@ fn heartbeat_clear_is_idempotent_when_absent() {
         p = path.display()
     );
     let (code, stdout, _stderr) = run_bash(&script);
-    assert_eq!(code, 0, "clearing an absent heartbeat must be a no-op success");
+    assert_eq!(
+        code, 0,
+        "clearing an absent heartbeat must be a no-op success"
+    );
     assert!(stdout.contains("rc=0"));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -488,11 +535,15 @@ fn obs_phase2_has_a_program_scene_reader_subcommand() {
 #[test]
 fn systemd_timer_and_service_units_exist() {
     assert!(
-        manifest_dir().join("systemd/rig-restore-watchdog.service").exists(),
+        manifest_dir()
+            .join("systemd/rig-restore-watchdog.service")
+            .exists(),
         "#281: systemd/rig-restore-watchdog.service must exist"
     );
     assert!(
-        manifest_dir().join("systemd/rig-restore-watchdog.timer").exists(),
+        manifest_dir()
+            .join("systemd/rig-restore-watchdog.timer")
+            .exists(),
         "#281: systemd/rig-restore-watchdog.timer must exist"
     );
 }
