@@ -1050,10 +1050,64 @@ def record(a):
         ws.close()
 
 
+def switch(a):
+    """#312 Phase-2 all-cambox sweep: cut strih PROGRAM to *a.program_scene* and confirm it
+    renders NON-BLACK, then print the switch wall-clock epoch-ns (``time.time_ns()``) on stdout.
+
+    The all-cambox sweep (scripts/recording-e2e.sh ALL_CAMBOX=1) cuts each active cambox into
+    strih program for ~SEGMENT_SECS while ONE continuous stream recording runs; the printed ns is
+    the switch BOUNDARY the harness records on the burn ``gen_ts_ns`` timeline (dev1 CLOCK_REALTIME,
+    DanteSync-slaved to the painter) to build the verdict's --switch-schedule windows.
+
+    LIGHTWEIGHT vs prod_scene(): NO STATE save, NO genlock_preload force, NO upstream-resolve /
+    own-output dance — the prod scenes already exist and were routed by prod_scene() in step [4/8];
+    this only re-points PROGRAM among them per segment. It DOES reuse the #163/#111 non-black
+    self-check (the pure ``_program_luma`` + ``_blackcheck_verdict`` helpers, POLLED) so a segment
+    that switches to a dead/black cambox scene fails LOUDLY instead of silently recording a black,
+    all-undecodable ~30s window. The boundary ns is captured IMMEDIATELY after the switch lands (so
+    it marks when the new cambox enters program); the black-check polls AFTER and never moves it."""
+    ws = _conn(a.host, a.password)
+    try:
+        _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
+        switch_ns = time.time_ns()  # the boundary — right after the switch lands
+        blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
+        t0 = time.monotonic()
+        while True:
+            luma_max, luma_mean = _program_luma(ws, a.program_scene)
+            elapsed = time.monotonic() - t0
+            verdict = _blackcheck_verdict(luma_max, elapsed, blackcheck_timeout)
+            if verdict == "OK":
+                sys.stderr.write(
+                    f"[obs] {a.host}: #312 switch -> '{a.program_scene}' NON-BLACK "
+                    f"(luma peak={luma_max}, mean={luma_mean:.1f}) after {elapsed:.1f}s\n"
+                )
+                break
+            if verdict == "UNKNOWN":
+                sys.stderr.write(
+                    f"[obs] {a.host}: WARN could not read program luma for the #312 switch "
+                    f"non-black self-check after {elapsed:.1f}s (GetSourceScreenshot/PIL "
+                    f"unavailable) — proceeding; recording-verdict still catches an all-black "
+                    f"window.\n"
+                )
+                break
+            if verdict == "BLACK":
+                raise SystemExit(
+                    f"[obs] {a.host}: #312 switch self-check FAIL — program scene "
+                    f"'{a.program_scene}' renders BLACK (luma peak={luma_max}, mean="
+                    f"{(luma_mean or 0):.1f}) after {elapsed:.1f}s. The cambox feeding it is not "
+                    f"delivering frames; aborting the sweep so a black segment never wastes the run."
+                )
+            # verdict == "WAIT": the receiver may still be filling — keep polling.
+            time.sleep(1.0)
+    finally:
+        ws.close()
+    print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("setup", "teardown", "record", "prod-scene"):
+    for name in ("setup", "teardown", "record", "prod-scene", "switch"):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
@@ -1089,9 +1143,14 @@ def main():
             # resolves the full NDI name itself). NON-terminal boxes (strih) keep the
             # protective abort. Defaults False — strih and teardown are non-terminal.
             p.add_argument("--terminal", action="store_true")
+        if name == "switch":
+            # #312 Phase-2 all-cambox sweep: cut PROGRAM to this scene + print the switch
+            # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
+            # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
+            p.add_argument("--program-scene", required=True)
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
-     "prod-scene": prod_scene}[a.cmd](a)
+     "prod-scene": prod_scene, "switch": switch}[a.cmd](a)
 
 
 if __name__ == "__main__":
