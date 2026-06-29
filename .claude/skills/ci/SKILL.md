@@ -26,6 +26,20 @@ gh run download --repo zbynekdrlik/camera-box -n probe-tools-windows-amd64 --dir
 chmod +x ./probe-bins/*   # or ./dist/camera-box
 ```
 
+## Python harness tests (`tests/python/`)
+
+CI job `python-tests` runs `python -m pytest tests/python -v` after `pip install pytest
+websocket-client matplotlib` (clean, minimal). These pin the `obs_phase2.py` pure helpers + arg
+parsing (no live OBS) — e.g. the `_blackcheck_verdict`, `_diverging_locked_keys`, and `#328`
+`_rpc_timed_out` deadline helper.
+
+**Local gotcha:** dev1's global pytest has a broken `pytest-html` plugin (missing `jinja2`) that
+aborts collection with `ModuleNotFoundError: No module named 'jinja2'`. CI is unaffected (its venv
+has only the three deps above). Locally, disable the plugin:
+```bash
+python3 -m pytest tests/python -q -p no:html -p no:cacheprovider
+```
+
 ## Discord CI Notifications (#25)
 
 camera-box CI posts failures to Discord via the NewLevelMedia Discord bot REST API,

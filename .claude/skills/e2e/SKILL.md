@@ -296,6 +296,30 @@ WITHOUT `--display` (dark interkom return monitor) while the operator believes b
 a #246-class silent test-state leak. NEVER hard-code the drop-in path in a script; add the sourced
 helper + the clear-before-restore call to any NEW path that restarts cam2's camera-box.
 
+## obs_phase2 ops + cleanup MUST be timeout-bounded (#328) — a hung OBS op can strand a cam device
+
+**`obs_phase2.py` `_rpc` had NO overall wall-clock deadline (the #328 ~28-min hang).** Its read loop
+drains op-5 EVENTS until the matching op-7 response; while OBS renegotiates an NDI source it FLOODS
+events, so every `recv()` keeps succeeding within the 10s socket timeout yet the response never
+arrives → the loop spins forever (a healthy WS, not a dead one). Now bounded by **`OBS_OP_TIMEOUT_S`
+(default 60s, env-overridable)** via the pure `_rpc_timed_out(elapsed, timeout)` helper; past the
+deadline `_rpc` raises `TimeoutError` (fail loud — non-zero exit for prod-scene/setup/switch, caught
++warned inside teardown's best-effort guard). `ignore_err` suppresses a normal failed RPC but NEVER
+the timeout (a hang is always fatal). If you add a legitimately-slow OBS op, raise the env knob — do
+NOT remove the bound.
+
+**`recording-e2e.sh` cleanup() FREES the cam capture devices FIRST, independent of OBS (#328/#281).**
+The cam1/cam2 device restore (`pkill -9 -f 'camera-box-burn-'` → `rm -f /tmp/camera-box-burn-*` →
+`systemctl restart camera-box`) leads cleanup(); the OBS record-stop/teardown runs AFTER, and EVERY
+cam ssh + EVERY `obs_phase2.py`/`obs_burn_filter.py` call is wrapped in `timeout`
+(`CLEANUP_SSH_TIMEOUT`=30s, `OBS_CLEANUP_TIMEOUT`=90s, env-overridable). Reason: in the #312 run the
+OBS teardown ran first and hung, so the trap never reached the cam1 restore and the #174 burn binary
+kept holding /dev/video0 → prod camera-box crash-looped ("Device or resource busy"). Guards:
+`tests/harness_recording_e2e_cleanup_resilient.rs` (cam-free-before-OBS ordering + every OBS call
+timeout-bounded + pkill -9), `tests/python/test_obs_phase2_timeout.py` (the pure deadline helper).
+**Any NEW blocking obs-websocket/ssh call in a cleanup/trap MUST be timeout-wrapped and ordered after
+the cam-device free.**
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).
