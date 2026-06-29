@@ -777,6 +777,48 @@ def _program_luma(ws, scene_name):
         return None, None
 
 
+def _assert_program_nonblack(ws, host, scene, label, black_hint):
+    """#163/#111 FAIL-FAST non-black self-check, POLLED — the ONE shared implementation used by
+    both prod_scene() (step [4/8] routing) and switch() (the #312 all-cambox sweep). A black program
+    records all-undecodable and wastes the whole run (#163); but a cold DistroAV receiver (high
+    genlock_preload, re-establishing from idle) needs longer than a single read to render its first
+    non-black frame (#111), so a black read BEFORE the deadline is WAIT (keep polling), not FAIL —
+    only black AT the deadline is a genuine dead-source abort.
+
+    *label* tags the log lines (e.g. '#163', '#312 switch'); *black_hint* is the context-specific
+    guidance appended to the BLACK SystemExit. Returns on OK/UNKNOWN; raises SystemExit on a genuine
+    BLACK at the deadline. Consolidating the loop in one place (was duplicated) keeps the #111/#163
+    timeout-race tuning from drifting between the two call sites."""
+    blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
+    poll_interval = 1.0
+    t0 = time.monotonic()
+    while True:
+        luma_max, luma_mean = _program_luma(ws, scene)
+        elapsed = time.monotonic() - t0
+        verdict = _blackcheck_verdict(luma_max, elapsed, blackcheck_timeout)
+        if verdict == "OK":
+            sys.stderr.write(
+                f"[obs] {host}: {label} self-check OK — program '{scene}' NON-BLACK "
+                f"(luma peak={luma_max}, mean={luma_mean:.1f}) after {elapsed:.1f}s\n"
+            )
+            return
+        if verdict == "UNKNOWN":
+            sys.stderr.write(
+                f"[obs] {host}: WARN could not read program luma for the {label} non-black "
+                f"self-check after {elapsed:.1f}s (GetSourceScreenshot/PIL unavailable) — "
+                f"proceeding; recording-verdict still catches all-black.\n"
+            )
+            return
+        if verdict == "BLACK":
+            raise SystemExit(
+                f"[obs] {host}: {label} self-check FAIL — program scene '{scene}' renders BLACK "
+                f"(luma peak={luma_max}, mean={(luma_mean or 0):.1f}) after {elapsed:.1f}s. "
+                f"{black_hint}"
+            )
+        # verdict == "WAIT": receiver may still be filling — keep polling.
+        time.sleep(poll_interval)
+
+
 def _restore_target(prev, target, ephemeral, scenes, saved_prev=None):
     """#163 (pure, testable): decide the scene teardown should restore PROGRAM to, given
     the program scene seen at prod-scene time (*prev*), the record *target*, whether the
@@ -914,44 +956,19 @@ def prod_scene(a):
         _force_test_preload(ws, a.host, getattr(a, "upstream", ""),
                             getattr(a, "test_preload", 1), state)
 
-        # #163/#111 FAIL-FAST non-black self-check, POLLED: a black program records all-
-        # undecodable and wastes the whole run (#163). But a cold DistroAV receiver (high
-        # genlock_preload, re-establishing from idle) needs longer than the old single 2 s
-        # read to render its first non-black frame — that race aborted a healthy run on
-        # the #111 deploy. So we POLL the program luma until it is NON-BLACK or a timeout
-        # elapses; only black AT the deadline is a genuine dead-source abort.
-        blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
-        poll_interval = 1.0
-        t0 = time.monotonic()
-        luma_max = luma_mean = None
-        while True:
-            luma_max, luma_mean = _program_luma(ws, target)
-            elapsed = time.monotonic() - t0
-            verdict = _blackcheck_verdict(luma_max, elapsed, blackcheck_timeout)
-            if verdict == "OK":
-                sys.stderr.write(
-                    f"[obs] {a.host}: #163 self-check OK — program '{target}' NON-BLACK "
-                    f"(luma peak={luma_max}, mean={luma_mean:.1f}) after {elapsed:.1f}s\n"
-                )
-                break
-            if verdict == "UNKNOWN":
-                sys.stderr.write(
-                    f"[obs] {a.host}: WARN could not read program luma for the non-black "
-                    f"self-check after {elapsed:.1f}s (GetSourceScreenshot/PIL unavailable) "
-                    f"— proceeding without it; recording-verdict still catches all-black.\n"
-                )
-                break
-            if verdict == "BLACK":
-                raise SystemExit(
-                    f"[obs] {a.host}: #163 self-check FAIL — program scene '{target}' "
-                    f"still renders BLACK (luma peak={luma_max}, mean="
-                    f"{(luma_mean or 0):.1f}) after {elapsed:.1f}s. The source is not "
-                    f"delivering frames; aborting BEFORE StartRecord so a black recording "
-                    f"never wastes a full run. Check the certified prod input feeding "
-                    f"'{target}' is receiving NDI."
-                )
-            # verdict == "WAIT": receiver may still be filling — keep polling.
-            time.sleep(poll_interval)
+        # #163/#111 FAIL-FAST non-black self-check, POLLED (shared helper): a black program records
+        # all-undecodable and wastes the whole run; poll until non-black or the timeout (a cold
+        # DistroAV receiver needs longer than a single read to fill its FIFO). Only black AT the
+        # deadline aborts BEFORE StartRecord.
+        _assert_program_nonblack(
+            ws,
+            a.host,
+            target,
+            "#163",
+            f"The source is not delivering frames; aborting BEFORE StartRecord so a black recording "
+            f"never wastes a full run. Check the certified prod input feeding '{target}' is "
+            f"receiving NDI.",
+        )
 
         sys.stderr.write(
             f"[obs] {a.host}: program -> {target} (prod scene); Main Output NDI "
@@ -1070,35 +1087,16 @@ def switch(a):
     try:
         _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
-        blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
-        t0 = time.monotonic()
-        while True:
-            luma_max, luma_mean = _program_luma(ws, a.program_scene)
-            elapsed = time.monotonic() - t0
-            verdict = _blackcheck_verdict(luma_max, elapsed, blackcheck_timeout)
-            if verdict == "OK":
-                sys.stderr.write(
-                    f"[obs] {a.host}: #312 switch -> '{a.program_scene}' NON-BLACK "
-                    f"(luma peak={luma_max}, mean={luma_mean:.1f}) after {elapsed:.1f}s\n"
-                )
-                break
-            if verdict == "UNKNOWN":
-                sys.stderr.write(
-                    f"[obs] {a.host}: WARN could not read program luma for the #312 switch "
-                    f"non-black self-check after {elapsed:.1f}s (GetSourceScreenshot/PIL "
-                    f"unavailable) — proceeding; recording-verdict still catches an all-black "
-                    f"window.\n"
-                )
-                break
-            if verdict == "BLACK":
-                raise SystemExit(
-                    f"[obs] {a.host}: #312 switch self-check FAIL — program scene "
-                    f"'{a.program_scene}' renders BLACK (luma peak={luma_max}, mean="
-                    f"{(luma_mean or 0):.1f}) after {elapsed:.1f}s. The cambox feeding it is not "
-                    f"delivering frames; aborting the sweep so a black segment never wastes the run."
-                )
-            # verdict == "WAIT": the receiver may still be filling — keep polling.
-            time.sleep(1.0)
+        # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black cambox
+        # scene fails loud instead of silently recording a black, all-undecodable segment.
+        _assert_program_nonblack(
+            ws,
+            a.host,
+            a.program_scene,
+            "#312 switch",
+            "The cambox feeding it is not delivering frames; aborting the sweep so a black segment "
+            "never wastes the run.",
+        )
     finally:
         ws.close()
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
