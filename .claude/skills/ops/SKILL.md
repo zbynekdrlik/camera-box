@@ -217,3 +217,18 @@ grub.cfg default menuentry has BOTH a kernel image AND an initrd before pinning)
 (`setup.sh`, `setup-device.sh`, `create-usb-linux.sh`, `build-image.sh`) are now content-asserted by
 `tests/appliance_boot_hardening.rs` (10 tests). These are BUILD-time scripts — verified by
 content-assertion tests in CI, NOT a rig deploy (runtime boot-verify happens at the #301 re-image).
+
+**#344 SHIPPED (PR #345) — USB/image actually BOOTS (the historical "USB never boots" pain):**
+`grub-install --removable` on Ubuntu 24.04 embeds a signed-grub memdisk core whose live-media probe
+(`search /.disk/info`) FAILS on an installed root → never chains to the real grub.cfg → drops to the
+`grub>` rescue prompt → USB never boots. **Fix:** a shared `scripts/lib/install-grub-efi.sh`
+`build_grub_efi_core` rebuilds `EFI/BOOT/BOOTX64.EFI` with `grub-mkimage` + a minimal embedded config
+(`search.fs_uuid <root> → set prefix=($root)/boot/grub → configfile $prefix/grub.cfg`) — topology-
+independent, no live-media probe (819 KB clean core vs 2.3 MB broken Ubuntu core). Wired into BOTH
+`create-usb-linux.sh` AND `build-image.sh` (after `grub-set-default 0`) + `GRUB_DISABLE_OS_PROBER=true`.
+**Secure Boot must be OFF** on the target (the grub-mkimage core is UNSIGNED — not a regression, the
+old --removable core wasn't shim-chained either; cam boxes run SB off). Boot regression test
+`scripts/test-usb-grub-boot.sh` (on-demand, root+qemu+OVMF): builds a loopback GPT image, installs the
+core, boots it headless over a USB-storage controller, asserts a marker reaches the serial. The cam3
+USB stick (clone of cam4 + cam3 identity, static 10.77.9.63) was built + boot-proven this way before
+hand-off.
