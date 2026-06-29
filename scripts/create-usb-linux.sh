@@ -173,6 +173,30 @@ apt-get install -y \
     less \
     dhcpcd-base
 
+# #295/#307: harden the appliance kernel at the SOURCE. This builds the "clean Ubuntu + SSH" base
+# image that setup.sh later hardens, so there is a narrow first-boot window (before setup.sh runs)
+# where the original brick exposure exists. Pin the kernel so a surprise kernel can never be
+# installed, and disable unattended upgrades — an active unattended-upgrades auto-installed the
+# initrd-less kernel that bricked CAM3/CAM4. (Same idiom as setup.sh harden_appliance_kernel.)
+apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
+
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUTOUPG_EOF'
+// Camera-box appliance: never auto-update. An unattended kernel install without an initrd bricked
+// CAM3/CAM4 (#295). Kernels are pinned with `apt-mark hold`; updates are operator-driven.
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+AUTOUPG_EOF
+
+# Belt-and-braces: even if unattended-upgrades is ever re-enabled, kernels stay blacklisted.
+cat > /etc/apt/apt.conf.d/51camera-box-no-kernel-autoupgrade << 'NOKERNEL_EOF'
+// #295: never let unattended-upgrades touch the kernel on the appliance.
+Unattended-Upgrade::Package-Blacklist {
+    "linux-image";
+    "linux-headers";
+    "linux-generic";
+};
+NOKERNEL_EOF
+
 # Create user newlevel
 useradd -m -s /bin/bash -G sudo newlevel
 echo "newlevel:newlevel" | chpasswd
@@ -218,8 +242,11 @@ systemctl enable systemd-resolved
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 # Configure GRUB for physical console (NOT serial)
+# #295/#307: GRUB_DEFAULT=saved pins the default to an explicitly-saved known-good kernel rather
+# than whatever is "newest" — a boot-newest default is how an initrd-less auto-installed kernel
+# became the default and bricked CAM3/CAM4.
 cat > /etc/default/grub << 'GRUBEOF'
-GRUB_DEFAULT=0
+GRUB_DEFAULT=saved
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Ubuntu"
 GRUB_CMDLINE_LINUX_DEFAULT=""
@@ -230,6 +257,9 @@ GRUBEOF
 # Install GRUB
 grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable
 update-grub
+# #295/#307: pin index 0 (the single freshly-installed known-good kernel, with its initrd) as the
+# saved default so the base image boots deterministically the kernel it was provisioned with.
+grub-set-default 0
 
 # Clean up
 apt-get clean
