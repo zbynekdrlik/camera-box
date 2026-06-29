@@ -62,6 +62,15 @@
 #             a usage error (exit 2).
 set -euo pipefail
 
+# #291/#309: SINGLE SOURCE OF TRUTH for the transient no-display drop-in — the path constant
+# (RIG_TEST_DROPIN) AND the clear-on-restore builder (rig_test_dropin_clear_cmds), shared with the
+# sibling e2e harnesses (recording-e2e.sh / loopback-e2e.sh) so the path can never desync across the
+# three scripts. Sourced here (before the source-guard) so both the executed flow and the unit tests
+# that source this script get the constant + builder.
+RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/rig-test-dropin.sh
+. "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
+
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
@@ -73,10 +82,10 @@ PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
 CAMERA_BOX_BIN="${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}"   # the deployed camera-box binary on cam2
-# #291: the TRANSIENT no-display systemd drop-in TEST mode installs (and EVENT mode removes). Single
-# source of truth so install (painter_launch_remote) and remove (painter_stop_remote) can never desync.
-# In /run (tmpfs) so a reboot auto-reverts to the deployed --display unit.
-RIG_TEST_DROPIN="${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}"
+# RIG_TEST_DROPIN (the transient no-display drop-in TEST mode installs / EVENT mode removes) is now
+# defined in scripts/lib/rig-test-dropin.sh, sourced above — the single source shared with the e2e
+# harnesses (#309). install = painter_launch_remote; remove = painter_stop_remote (via the shared
+# rig_test_dropin_clear_cmds builder).
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
@@ -93,7 +102,7 @@ painter_launch_remote() {
   # capture rate so the optical tick advances 60 distinct ids/s.
   local fps="${6:-${PAINTER_FPS:-60}}"
   local cbbin="${7:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
-  local dropin="${8:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
+  local dropin="${8:-$RIG_TEST_DROPIN}"   # path single-sourced in lib/rig-test-dropin.sh (#309)
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
   cat <<REMOTE
 set -e
@@ -177,8 +186,7 @@ REMOTE
 # (camera-box re-grabbed /dev/fb0 to paint the interkom return on the monitor).
 painter_stop_remote() {
   local pidfile="$1"
-  local dropin="${2:-${RIG_TEST_DROPIN:-/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf}}"
-  local dropin_dir; dropin_dir="$(dirname "$dropin")"
+  local dropin="${2:-$RIG_TEST_DROPIN}"   # path single-sourced in lib/rig-test-dropin.sh (#309)
   cat <<REMOTE
 set -e
 # (1) stop the painter cleanly via its PID file (the self-match-safe path).
@@ -196,9 +204,7 @@ pkill -x frame-probe 2>/dev/null || true
 #     (TEST mode no longer STOPS camera-box — it switches it to no-display — so EVENT mode RESTARTS
 #     rather than just starts, to drop the override.)
 i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-rm -f "$dropin" 2>/dev/null || true
-rmdir "$dropin_dir" 2>/dev/null || true
-systemctl daemon-reload
+$(rig_test_dropin_clear_cmds "$dropin")
 systemctl restart camera-box
 # (4) verify the service is active.
 i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done

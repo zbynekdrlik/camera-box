@@ -47,6 +47,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
+# #309: single-sourced #291 no-display drop-in path + clear-on-restore builder (shared with
+# rig-mode.sh) — cleanup() clears any leftover drop-in before restoring cam2's camera-box.
+# shellcheck source=scripts/lib/rig-test-dropin.sh
+. "$HERE/lib/rig-test-dropin.sh"
 camera_resolve "${CAM:-cam1}"
 
 CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
@@ -230,9 +234,13 @@ cleanup() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
     "pkill -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
-  # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it.
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-    "pkill -x frame-probe 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
+  # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it. #309: FIRST clear any
+  # leftover #291 rig-mode no-display drop-in (a prior `rig-mode.sh test` would otherwise make this
+  # restart bring camera-box back WITHOUT --display — the interkom return monitor stays dark). The
+  # clear is single-sourced (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent).
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
+$(rig_test_dropin_clear_cmds)
+systemctl restart camera-box 2>/dev/null || true"
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
   # running (e.g. the run is aborting for another reason), stop the whole group so a
   # multi-GB decode is never orphaned. The monitor already group-kills on STALL; this
