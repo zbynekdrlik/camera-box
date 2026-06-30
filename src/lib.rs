@@ -36,5 +36,19 @@ pub mod reannounce;
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
 
+// #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
+// `colour_scale` table/geometry, samples each reference patch's mean colour from a frame
+// (dodging the burn columns), and decides per-patch + per-camera PASS/FAIL (grayscale collapse,
+// hue-shift, out-of-tolerance). No probe deps, so it unit-tests Tier-0; the probe-gated pixel
+// sampling + ffmpeg colour pass live in `probe::colour_sample`, and the verdict gate wiring is in
+// `bin/recording-verdict`.
+pub mod colour_verify;
+
+// #373 — the zero-loss HEADLINE analyzed-span duration gate (pure decision). A collapsed/partial
+// cam2 optical read must not vacuously pass the headline over a handful of frames. No probe deps,
+// so it unit-tests Tier-0; the probe-gated `bin/recording-verdict` feeds each node's optical-span
+// frame count here to gate the headline alongside contiguity + the optical + colour gates.
+pub mod recording_span_gate;
+
 #[cfg(feature = "probe")]
 pub mod probe;

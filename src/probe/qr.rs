@@ -58,8 +58,10 @@ pub enum VAnchor {
 /// Top-edge clearance (px) for [`VAnchor::Top`] — the camera dual-QR's top row sits this
 /// far below the frame top, leaving the rest of the frame's lower region for the bottom
 /// burns. Kept modest so a ~700px QR + this margin still ends well above the bottom-corner
-/// burns on a 1080-tall frame (700 + 24 = 724 < the burn band start ~740).
-pub const TOP_MARGIN_PX: u32 = 24;
+/// burns on a 1080-tall frame (700 + 24 = 724 < the burn band start ~740). SINGLE source of
+/// truth is [`crate::colour_scale::TOP_MARGIN_PX`] (the Tier-0 module that derives the colour
+/// column's vertical span from it); re-exposed here at the QR module's documented path.
+pub const TOP_MARGIN_PX: u32 = crate::colour_scale::TOP_MARGIN_PX;
 
 /// Top-left y origin for a `qh`-tall QR on a `canvas_h`-tall canvas under `anchor`.
 /// Pure geometry so the no-overlap test can assert the camera QR vs burn rectangles
@@ -251,14 +253,23 @@ pub fn render_qr_dual_bgra(
 /// Fill the #367 fixed colour-reference scale into a BGRA `canvas` (`canvas_w×canvas_h` —
 /// the same buffer `render_qr_*_bgra` produced), per the pure
 /// [`crate::colour_scale::colour_scale_patches`] layout. Each reference patch's rectangle
-/// is filled with its known sRGB colour (BGRA byte order, opaque) in the bottom band,
-/// clear of the top dual-QR. The painter calls this AFTER rendering the QR(s) (when
-/// `--colour-scale` is on), so the recorded frame carries a colour reference alongside the
-/// dual-QR — the per-patch sample the #364 colour gate compares against. No-op for a canvas
-/// too small to hold the band (`colour_scale_patches` returns empty). Each write is bounds-
-/// checked so a short/odd buffer is never indexed out of range (never panics).
-pub fn blit_colour_scale_bgra(canvas: &mut [u8], canvas_w: u32, canvas_h: u32) {
-    for (rect, rgb) in crate::colour_scale::colour_scale_patches(canvas_w, canvas_h) {
+/// is filled with its known sRGB colour (BGRA byte order, opaque) in the VERTICAL column inside
+/// the central gap between the two dual-QR halves (derived from `qr_size` + `top_margin` — the
+/// SAME geometry `render_qr_dual_bgra` used). The painter calls this AFTER rendering the QR(s)
+/// (when `--colour-scale` is on), so the recorded frame carries a colour reference between the
+/// dual-QR halves — the per-patch sample the #364 colour gate compares against. No-op for a
+/// degenerate layout (`colour_scale_patches` returns empty). Each write is bounds-checked so a
+/// short/odd buffer is never indexed out of range (never panics).
+pub fn blit_colour_scale_bgra(
+    canvas: &mut [u8],
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+) {
+    for (rect, rgb) in
+        crate::colour_scale::colour_scale_patches(canvas_w, canvas_h, qr_size, top_margin)
+    {
         let y_end = (rect.y + rect.h).min(canvas_h);
         let x_end = (rect.x + rect.w).min(canvas_w);
         for y in rect.y..y_end {
@@ -1244,16 +1255,16 @@ mod tests {
     // ---- #367 colour-reference scale blit ----
 
     #[test]
-    fn colour_scale_blit_fills_each_patch_and_leaves_the_qr_band_untouched() {
-        use crate::colour_scale::colour_scale_patches;
+    fn colour_scale_blit_fills_each_patch_and_leaves_the_qr_halves_untouched() {
+        use crate::colour_scale::{colour_scale_patches, DEFAULT_QR_SIZE, TOP_MARGIN_PX};
         let (w, h) = (1920u32, 1080u32);
         let mut canvas = vec![255u8; (w * h * 4) as usize];
-        blit_colour_scale_bgra(&mut canvas, w, h);
+        blit_colour_scale_bgra(&mut canvas, w, h, DEFAULT_QR_SIZE, TOP_MARGIN_PX);
 
         // Each patch CENTRE carries exactly its known colour in BGRA order, opaque — proving
         // the blit honours the pure layout's colour table (not a tautology: it reads the real
         // framebuffer bytes the painter would present).
-        let patches = colour_scale_patches(w, h);
+        let patches = colour_scale_patches(w, h, DEFAULT_QR_SIZE, TOP_MARGIN_PX);
         assert!(!patches.is_empty(), "1920x1080 must yield patches");
         for (rect, rgb) in &patches {
             let cx = rect.x + rect.w / 2;
@@ -1264,14 +1275,14 @@ mod tests {
             assert_eq!(canvas[i + 2], rgb.r, "R at patch centre ({cx},{cy})");
             assert_eq!(canvas[i + 3], 255, "opaque at patch centre ({cx},{cy})");
         }
-        // The colour scale touches ONLY the bottom band: a pixel well above it (y=500, in the
-        // dual-QR band) is still the untouched white background — the scale never bleeds up
-        // into the QR region.
-        let above = (((500 * w) + 10) * 4) as usize;
+        // The colour column lives ONLY in the central gap: a pixel inside the LEFT QR half
+        // (x=200, y=400) is still the untouched white background — the scale never bleeds into
+        // either QR region.
+        let in_left_qr = (((400 * w) + 200) * 4) as usize;
         assert_eq!(
-            &canvas[above..above + 4],
+            &canvas[in_left_qr..in_left_qr + 4],
             &[255u8, 255, 255, 255],
-            "rows above the bottom band are untouched by the colour scale"
+            "the dual-QR halves are untouched by the colour scale"
         );
     }
 

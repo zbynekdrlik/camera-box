@@ -21,6 +21,10 @@ pub mod recording_latency;
 pub mod recording_partial;
 pub mod recording_segments;
 pub mod recording_verdict;
+// #364 — colour-sampling glue for the per-camera colour gate (RgbImage adapter + burn-exclusion
+// geometry + ffmpeg colour pass). Cross-platform (Command + image + the pure colour_verify), like
+// the recording set above; the JUDGEMENT is the Tier-0 `colour_verify` module.
+pub mod colour_sample;
 
 // #193: the probe HARDWARE GLUE is Linux-only — fb (/dev/fb0 + libc ioctl), kms/presenter
 // (drm page-flip), painter (fb+evdev), reader/multi_reader (v4l), run (drives all of them).

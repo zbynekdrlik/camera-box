@@ -80,3 +80,6 @@ dist-111/
 # narrow so they never get committed again (err_a.txt / outB.txt style).
 /err_*.txt
 /out[A-Z].txt
+
+# Windows build artifacts pulled for rig runs (never commit)
+dist-win/
