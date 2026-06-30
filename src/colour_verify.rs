@@ -162,12 +162,60 @@ impl PatchOutcome {
 /// Decide one reference patch: known colour `expected` vs the sampled mean `sampled` (`None` when
 /// no samplable pixel survived the burn-dodge). See the module-level decision description.
 pub fn classify_patch(expected: Rgb, sampled: Option<Rgb>) -> PatchOutcome {
-    // #364 RED STUB — gate not implemented yet. Treats every samplable patch as a pass, so the
-    // grayscale / hue-shift regression tests FAIL (RED). The GREEN commit replaces this body with
-    // the real decision.
-    match sampled {
-        None => PatchOutcome::Unsamplable { expected },
-        Some(_) => PatchOutcome::Pass,
+    let Some(sampled) = sampled else {
+        return PatchOutcome::Unsamplable { expected };
+    };
+    let dist = srgb_dist(expected, sampled);
+    if chroma(expected) >= CHROMATIC_EXPECTED_MIN {
+        // A primary/secondary — it must arrive saturated, with the right hue, near the right level.
+        let sampled_chroma = chroma(sampled);
+        if sampled_chroma < GRAYSCALE_CHROMA_MIN {
+            // Collapsed toward gray — no meaningful hue to compare, report the collapse.
+            return PatchOutcome::Grayscale {
+                expected,
+                sampled,
+                sampled_chroma,
+            };
+        }
+        // Both have chroma > 0 here, so both hues are defined.
+        let (he, hs) = (
+            hue_deg(expected).unwrap_or(0.0),
+            hue_deg(sampled).unwrap_or(0.0),
+        );
+        let hue_err_deg = hue_diff_deg(he, hs);
+        if hue_err_deg > HUE_TOL_DEG {
+            return PatchOutcome::HueShift {
+                expected,
+                sampled,
+                hue_err_deg,
+            };
+        }
+        if dist > SRGB_DIST_TOL {
+            return PatchOutcome::OutOfTolerance {
+                expected,
+                sampled,
+                dist,
+            };
+        }
+        PatchOutcome::Pass
+    } else {
+        // A neutral (white/black/gray) — it must stay near-neutral and near the right level.
+        let cast = chroma(sampled);
+        if cast > NEUTRAL_CHROMA_MAX {
+            return PatchOutcome::NeutralTint {
+                expected,
+                sampled,
+                chroma: cast,
+            };
+        }
+        if dist > SRGB_DIST_TOL {
+            return PatchOutcome::OutOfTolerance {
+                expected,
+                sampled,
+                dist,
+            };
+        }
+        PatchOutcome::Pass
     }
 }
 
