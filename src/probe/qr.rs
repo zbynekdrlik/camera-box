@@ -471,20 +471,30 @@ fn binarize_otsu(img: &GrayImage) -> GrayImage {
     out
 }
 
-/// Decode ALL CRC-valid QR payloads in one grayscale image. First the plain rqrr pass
-/// (rqrr's own adaptive prepare — best for the clean genlocked strih/stream recordings);
-/// if it finds NOTHING, retry once on the Otsu-binarized image. The binarized retry
-/// recovers the SOFT optical cam1 grab (a QR filmed off a monitor at gray8) that the
-/// plain pass misses, WITHOUT changing the clean-path result (which already decodes on
-/// pass 1, so the retry never runs there). `detect_grids` returns every QR in one pass,
-/// so the two side-by-side dual-QR codes are read together.
+/// Decode ALL CRC-valid QR payloads in one grayscale image: the plain rqrr pass UNION the
+/// Otsu-binarized pass, de-duped by `(run_id, frame_id)` ([`merge_payloads`]). BOTH passes
+/// ALWAYS run.
+///
+/// #363 — the optical dual-QR read is the HARD verdict gate (restored in #372), so a
+/// present-but-SOFT optical QR (a QR filmed off a monitor: low-contrast + moiré +
+/// colour-cast) must NEVER be left undecoded as a phantom `optical_undecodable`. The OLD
+/// logic ran the Otsu retry ONLY when the plain pass found NOTHING (`if !first.is_empty()
+/// { return first }`). On the stream recording the plain pass finds the crisp DIGITAL BURNS
+/// (so `first` is non-empty) but MISSES the soft optical dual-QR — so the Otsu retry was
+/// SKIPPED and the present optical QR was never recovered, marking ~87 % of stream frames
+/// optical-undecodable even though rqrr reads the very same frames once Otsu-binarized.
+/// Merging plain ∪ Otsu recovers the optical even when the plain pass already returned the
+/// burns; the result is always a SUPERSET of the plain pass (never fewer). rqrr's
+/// `detect_grids` returns every QR in one pass, so the two side-by-side dual-QR codes are
+/// read together. Cost: one extra cheap full-frame Otsu rqrr pass per frame on the OFFLINE
+/// decode (correctness over offline-decode speed); the ~10× tiled passes stay conditional
+/// behind the fast/robust gate.
 pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
-    let first = rqrr_decode_all(img.clone());
-    if !first.is_empty() {
-        return first;
-    }
-    // Nothing on the plain pass — the soft optical capture. Retry on a hard Otsu cut.
-    rqrr_decode_all(binarize_otsu(&img))
+    let mut out = rqrr_decode_all(img.clone());
+    // The hard Otsu cut recovers the soft optical capture the plain adaptive prepare misses,
+    // even when the plain pass already decoded the crisp burns (#363).
+    merge_payloads(&mut out, rqrr_decode_all(binarize_otsu(&img)));
+    out
 }
 
 /// Panic-safe twin of [`decode_qr_luma_all`] for the #202 tile passes (plain pass, then an
@@ -831,6 +841,89 @@ mod tests {
     }
 
     // ============================================================================
+    // #363 — the SOFT optical dual-QR (a QR filmed off a monitor: low-contrast +
+    // moiré + colour-cast) must be RECOVERED from the real stream-recording frames
+    // even though the crisp DIGITAL BURNS already decode on the plain pass. The
+    // optical read is the HARD verdict gate (#372). The OLD `decode_qr_luma_all`
+    // ran the Otsu retry ONLY when the plain pass found NOTHING — so on these frames
+    // the plain pass returned the burns (non-empty) → the Otsu retry was SKIPPED →
+    // the present optical QR was marked a PHANTOM `optical_undecodable` (~87 % of
+    // stream frames). The fix runs plain ∪ Otsu ALWAYS, recovering it.
+    // ============================================================================
+
+    /// Load a committed real recording-frame fixture as the luma plane the decoder
+    /// consumes (the exact gray8 the verdict feeds rqrr).
+    fn optical_fixture_luma(name: &str) -> GrayImage {
+        let path: std::path::PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", name]
+            .iter()
+            .collect();
+        image::open(&path)
+            .unwrap_or_else(|e| panic!("open fixture {}: {e}", path.display()))
+            .to_luma8()
+    }
+
+    #[test]
+    fn optical_soft_dual_qr_recovered_on_real_stream_frames() {
+        // The optical dual-QR's run_id on the real failing recording (run 354003); its two
+        // Vernier halves carry an even and an odd frame_id (consecutive frames).
+        const OPTICAL_RUN_ID: u32 = 354_003;
+        // The f5/f150 cam1/strih/stream digital-burn run_ids — the recording per-frame path.
+        const BURN_IDS: &[u32] = &[911_001, 911_002, 911_004];
+        for name in ["optical-soft-f5.png", "optical-soft-f150.png"] {
+            let luma = optical_fixture_luma(name);
+
+            // RED-condition lock (permanent): the PLAIN rqrr pass MISSES the optical dual-QR.
+            // It finds the crisp burns but not the soft optical — exactly what the old
+            // early-return ("Otsu only if plain empty") swallowed (plain non-empty ⇒ Otsu
+            // skipped ⇒ optical never recovered). If a future decoder reads the optical on the
+            // plain pass, this documents the shift — re-tune, never delete.
+            let plain = rqrr_decode_all(luma.clone());
+            assert!(
+                !plain.iter().any(|p| p.run_id == OPTICAL_RUN_ID),
+                "{name}: the PLAIN rqrr pass is expected to MISS the soft optical dual-QR \
+                 (run_id {OPTICAL_RUN_ID}); got {:?}",
+                plain
+                    .iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            );
+
+            // GREEN: decode_qr_luma_all (plain ∪ Otsu) recovers BOTH optical halves — two
+            // distinct frame_ids (the even+odd Vernier pair) under run_id 354003. Reverting
+            // to the early-return makes this return only burns → 0 optical → this fails.
+            let all = decode_qr_luma_all(luma.clone());
+            let mut optical: Vec<u32> = all
+                .iter()
+                .filter(|p| p.run_id == OPTICAL_RUN_ID)
+                .map(|p| p.frame_id)
+                .collect();
+            optical.sort_unstable();
+            optical.dedup();
+            assert!(
+                optical.len() >= 2,
+                "{name}: decode_qr_luma_all must recover BOTH optical dual-QR halves \
+                 (≥2 distinct frame_ids, run_id {OPTICAL_RUN_ID}); got optical frame_ids \
+                 {optical:?} from {:?}",
+                all.iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            );
+
+            // AND the recording per-frame path (fast-then-robust, gated on the burn ids) also
+            // surfaces the optical — the verdict's actual decode call reads it too.
+            let rec = decode_qr_luma_all_fast_then_robust(luma, BURN_IDS);
+            assert!(
+                rec.iter().any(|p| p.run_id == OPTICAL_RUN_ID),
+                "{name}: the recording per-frame decode must also surface the optical dual-QR \
+                 (run_id {OPTICAL_RUN_ID}); got {:?}",
+                rec.iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // ============================================================================
     // #202 — robust offline decode recovers the small node burns rqrr's single
     // full-frame `detect_grids` pass intermittently misses (the residual
     // burn-unreadable misses on PRESENT, sharp frames; cv2 reads them, rqrr's
@@ -854,16 +947,22 @@ mod tests {
     }
 
     #[test]
-    fn robust_recovers_a_softened_burn_the_full_frame_pass_misses() {
-        // THE #202 BUG, reproduced deterministically: a 1920×1080 frame carrying the LARGE
-        // optical dual-QR (top) plus a 260px node burn (bottom-left corner) that is SOFTENED
-        // by a Gaussian blur (sigma 2.8) — the exact real-recording condition, where the
-        // burn pixels are present but anti-aliased by the NDI/encode/4K-upscale chain (cv2
-        // reads every flagged real frame from the identical pixels; rqrr's single full-frame
-        // detect_grids does not — #186/#202). At this blur the full-frame plain pass MISSES
-        // the burn; the tiled+upscaled robust pass gives rqrr the burn in a sub-tile where it
-        // is large-relative and its finder locks, so robust RECOVERS it. (Threshold found by
-        // a blur sweep: at qpx 220-260 / sigma 1.6-2.8, plain=miss, robust=recover.)
+    fn full_frame_otsu_union_recovers_a_softened_burn_bare_rqrr_misses() {
+        // A 1920×1080 frame carrying the LARGE optical dual-QR (top) plus a 260px node burn
+        // (bottom-left corner) SOFTENED by a Gaussian blur (sigma 2.8) — anti-aliased as the
+        // NDI/encode chain leaves it. The BARE single rqrr pass (rqrr's own adaptive prepare)
+        // MISSES this softened burn; #363's full-frame Otsu union (`decode_qr_luma_all` = plain
+        // ∪ Otsu) RECOVERS it — a hard black/white cut at the Otsu split locks rqrr's finder
+        // where the soft adaptive prepare failed. This locks the #363 improvement at the unit
+        // level: the union does real recovery work beyond the bare plain pass.
+        //
+        // NOTE on the #202 tiled recovery: #363 strengthened the full-frame pass enough that
+        // this *synthetic* perfect-QR-plus-blur burn no longer needs the tiles (the Otsu union
+        // reads it full-frame). The genuine "the full-frame pass misses a burn that only the
+        // tiled+upscaled robust pass recovers" gap is a size-disparity / detector-coverage
+        // effect that only reproduces on real encoder-degraded 4K frames — it is locked on
+        // REAL pixels by `fast_then_robust_falls_back_to_robust_on_a_real_burn_unreadable_frame`
+        // (below) and by tests/burn_fixture_decode.rs.
         let left = Payload {
             run_id: 136_141_133,
             frame_id: 4000,
@@ -889,26 +988,31 @@ mod tests {
         blit_burn_luma(&mut luma, &burn, 260, 40, h - qh - 40);
         let luma = image::imageops::blur(&luma, 2.8);
 
-        let plain = decode_qr_luma_all(luma.clone());
+        let bare = rqrr_decode_all(luma.clone());
+        let full = decode_qr_luma_all(luma.clone());
         let robust = decode_qr_luma_all_robust(luma);
 
-        // The big optical QRs still decode either way (sanity: the frame is well-formed).
+        // The big optical QRs decode on the bare pass (sanity: the frame is well-formed).
         assert!(
-            plain.iter().any(|p| p.run_id == left.run_id),
-            "the big optical QR must decode on the plain pass (frame is well-formed): {plain:?}"
+            bare.iter().any(|p| p.run_id == left.run_id),
+            "the big optical QR must decode on the bare rqrr pass (frame is well-formed): {bare:?}"
         );
-        // The whole point: the softened burn is recovered by robust.
+        // RED condition this locks: the BARE single rqrr pass MISSES the softened burn — exactly
+        // what the old early-return swallowed (it returned the bare pass when non-empty).
+        assert!(
+            !bare.contains(&burn),
+            "the bare single rqrr pass is expected to MISS the softened burn (the soft-capture \
+             condition #363 recovers); bare={bare:?}"
+        );
+        // GREEN: the #363 full-frame Otsu union recovers it — and robust (⊇ full) keeps it.
+        assert!(
+            full.contains(&burn),
+            "#363: the full-frame Otsu union must recover the softened cam1 burn the bare pass \
+             missed; full={full:?}"
+        );
         assert!(
             robust.contains(&burn),
-            "robust must recover the softened cam1 burn (#202): robust={robust:?}"
-        );
-        // And the burn is exactly what the plain full-frame pass missed (the RED condition
-        // this locks): if a future rqrr/decoder change finds it full-frame, this test no
-        // longer reproduces the bug — re-tune the blur via the sweep in the commit message.
-        assert!(
-            !plain.contains(&burn),
-            "the plain full-frame pass is expected to MISS the softened burn (the #202 \
-             condition); plain={plain:?}"
+            "robust must keep the recovered burn (superset of the full-frame pass): robust={robust:?}"
         );
     }
 
@@ -1377,46 +1481,45 @@ mod tests {
     }
 
     #[test]
-    fn robust_fallback_taken_when_plain_misses_an_expected_burn() {
-        // A SOFTENED frame: the 260px bottom burn is present but blurred so the plain
-        // full-frame pass MISSES it (the #186/#202 condition). The fast gate must detect the
-        // missing expected burn and fall back to the robust tiled recovery — the call reports
-        // DecodePath::Robust and the burn is RECOVERED. Same blur that the synthetic #202 test
-        // (`robust_recovers_a_softened_burn…`) proved triggers plain=miss / robust=recover.
-        let left = Payload {
-            run_id: 136_141_133,
-            frame_id: 4000,
-            gen_ts_ns: 1,
-        };
-        let right = Payload {
-            run_id: 136_141_133,
-            frame_id: 4001,
-            gen_ts_ns: 2,
-        };
-        let burn = Payload {
-            run_id: 911_001,
-            frame_id: 1234,
-            gen_ts_ns: 3,
-        };
-        let luma = dual_with_bottom_burn(&left, &right, &burn, 260, 2.8);
+    fn fast_then_robust_falls_back_to_robust_on_a_real_burn_unreadable_frame() {
+        // A REAL "burn-unreadable" recording frame (cam1 burn 911001.1727) where the
+        // full-frame pass — even #363's plain ∪ Otsu union — genuinely MISSES the node burn
+        // (the #186/#202 size-disparity / detector-coverage gap; cv2 reads it from the same
+        // pixels, rqrr's full-frame detect_grids does not). The #207 fast gate must detect the
+        // missing expected burn, fall back to the robust tiled recovery (DecodePath::Robust),
+        // and RECOVER the exact burn. This is the genuine gap that the synthetic perfect-QR
+        // model can no longer reproduce after #363 strengthened the full-frame pass — so it is
+        // locked here against the real pixels (the verdict's actual input). Cross-checked by
+        // tests/burn_fixture_decode.rs.
+        const RID: u32 = 911_001; // BURN_RUN_ID_CAM1
+        const FID: u32 = 1727;
+        let luma = optical_fixture_luma("burn-unreadable/cam1-frame-1148.png");
 
-        // Precondition: the plain pass MISSES the softened burn (the #186 bug condition).
-        let plain = decode_qr_luma_all(luma.clone());
+        // Precondition: even the #363 full-frame Otsu union MISSES this real burn.
+        let full = decode_qr_luma_all(luma.clone());
         assert!(
-            !plain.contains(&burn),
-            "precondition: the plain pass must MISS the softened burn (the #186 condition): \
-             {plain:?}"
+            !full.iter().any(|p| p.run_id == RID && p.frame_id == FID),
+            "precondition: the full-frame pass (plain ∪ Otsu) must MISS this real burn \
+             ({RID}.{FID}) — the #186 detector-coverage gap; full={:?}",
+            full.iter()
+                .map(|p| (p.run_id, p.frame_id))
+                .collect::<Vec<_>>()
         );
 
-        let (got, path) = decode_qr_luma_all_fast_then_robust_pathed(luma, &[burn.run_id]);
+        let (got, path) = decode_qr_luma_all_fast_then_robust_pathed(luma, &[RID]);
         assert_eq!(
             path,
             DecodePath::Robust,
-            "a frame missing an expected burn from the plain pass must take the ROBUST fallback"
+            "a frame missing an expected burn from the full-frame pass must take the ROBUST \
+             fallback"
         );
         assert!(
-            got.contains(&burn),
-            "the robust fallback must RECOVER the softened burn (#186 0-miss preserved): {got:?}"
+            got.iter().any(|p| p.run_id == RID && p.frame_id == FID),
+            "the robust fallback must RECOVER the real burn ({RID}.{FID}) — #186 0-miss \
+             preserved: {:?}",
+            got.iter()
+                .map(|p| (p.run_id, p.frame_id))
+                .collect::<Vec<_>>()
         );
     }
 
