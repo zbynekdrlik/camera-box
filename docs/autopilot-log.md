@@ -1081,3 +1081,14 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - **PR #351** merged da5495803; dev CI + main CI all green. No deploy (shell/test only).
 - **#350 comment** posted: enable step can proceed with the corrected default.
 - Complete known-test-scenes: `PHASE2-PROBE` (strih phase2 probe) + `REC-STRIH-TMP` (stream ephemeral recording scene); prod scenes (`Cam 5`, `PRO`, `PRE`) excluded.
+
+## 2026-06-30 — #360 verdict cam2-tick gating + strih free-running step (worker, v1.7.0-dev.162)
+
+- **Root cause (2 cooperating)**: (1) `in_window_burn_frames` windowed strih/stream (PerRenderTick) burn contiguity to OPTICAL-only frames → at high latency the cam2 dual-QR was ~87% (354003) / ~91% (354001) undecodable, excising burn-present delivered frames; (2) `node_render_step` assumed strih steps by clean `round(60/30)=2`, but the strih burn is a FREE-RUNNING render-tick stepping irregularly 0–10 (mean ~4) → the step-2 excess-gap math charged ~17300 phantom REAL DROPs.
+- **Fix** (`src/bin/recording-verdict.rs`): membership now `is_optical(f) || has_node_burn(f)` for ALL rates (cam2 optical no longer gates the digital burn-chain; extends cam1 #204); `node_render_step` → 1 for all nodes (strih gap-ignore). `burn_contiguity_in_window_with_step` step≥2 capability + #11 tests retained but unused by any node.
+- **RED** `7d391df8a` (`test:[red]` — `node_verdict_strih_zero_loss_when_cam2_optical_mostly_undecodable_360`, RED proved: expected_count=11 optical-only + 130 phantom). **GREEN** `fd9ab4e0b` (`fix:[green]`). Updated 2 obsolete tests that encoded old behavior; added `strih_burn_on_a_non_optical_frame_inside_span_is_included_360` + `node_render_step_is_gap_ignore_for_all_nodes_360`.
+- **Validated** (sanctioned probe re-merge, purged after): 354003 strih 17300→0, stream 0; 354001 (#356's run) strih 17829→0. Full suite: bin 49/49, lib 607/607.
+- **PROOF strih gaps are jitter not loss**: every strih gap>8 on 354003 coincided with a CLEAN stream-burn step (stream burn never gapped = zero stream-output loss).
+- **#356 kept OPEN** (not closed): the #360 fix removes the DOMINANT over-count (strih 17829/20080 on 354001) but the residual cam1 over-count (2251/2297, softened cam1 burn in the strih recording at high latency, 0% present downstream — a cam1-burn READABILITY limit, distinct from the cam2-tick bug) persists → #356 now tracks that.
+- **CLI surface unchanged** — re-merge with the SAME flags: `recording-verdict --merge-partials strih=… --merge-partials stream=… --min-secs 300 --capture-fps 60 --strih-emit-fps 60 --stream-capture-fps 30 --cam2-run-id <run> --burn-cam1-run-id 911001 --burn-strih-run-id 911002 --burn-stream-run-id 911004 --json out.json`.
+- No deploy (probe binaries are CI-built artifacts; no rig touched — pure code PR).
