@@ -243,11 +243,18 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   `dual_qr_gap()` helper, so painter and gate compute IDENTICAL rects. At default 1920×1080 / qr 700
   / tm 24 the column is x∈[840,1080), y∈[24,724). The gate iterates the SAME table:
   - `src/colour_verify.rs` (Tier-0, default features — the JUDGEMENT, mutation-tested): sampler +
-    `classify_patch` (Grayscale if chroma<40 / HueShift if hue err>30° / OutOfTolerance if sRGB
-    dist>96 / NeutralTint if a neutral patch chroma>48) + `summarize_node_colour` (strict-majority
-    vote over sampled frames). A burn-covered patch is `Unsamplable` → SKIPPED, not charged (a real
-    colour defect is global → still fails on the visible patches); fail-closed only when NOTHING is
-    checkable.
+    `classify_patch` (chromatic: Grayscale if chroma<40 / HueShift if hue err>30° / else Pass —
+    neutral: NeutralTint if chroma>48 / else Pass) + `summarize_node_colour` (strict-majority vote
+    over sampled frames). A burn-covered patch is `Unsamplable` → SKIPPED, not charged (a real colour
+    defect is global → still fails on the visible patches); fail-closed only when NOTHING is checkable.
+  - **#364 calibration — gate on HUE + CHROMA, NOT brightness.** The level/sRGB-distance check was
+    REMOVED: the rig's optical capture is ~7× DIM by physics (60 Hz monitor + 1/1000 s shutter samples
+    ~1 ms mid-redraw), so a distance/level check only false-fails a correct camera. REAL per-patch
+    measurement of a genuine cam1 chain frame: every patch correct hue (≤19.6°) + chroma (≥50
+    chromatic, ≤38 neutral cast), 9/13 failed ONLY on level. Dropping it is NOT weakening — every real
+    fault (grayscale collapse, dead channel, hue shift, WB cast) still fails on hue/chroma. Locked by
+    `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail` with genuine sampled values
+    (real→PASS 13/13, grayscale→FAIL, dead-red→FAIL). `NEUTRAL_CHROMA_MAX`=48 (real cast maxes 38).
   - `src/probe/colour_sample.rs` (probe, CI-only — the I/O glue): `node_burn_exclusions` +
     `extract_recording_colour_summary` (ffmpeg input-seek, N evenly-spaced RGB frames).
 - **#364 rig finding — why the column moved to the central gap:** the original BOTTOM-band scale
