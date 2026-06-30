@@ -404,6 +404,7 @@ fn ro_image_builder_validates_grub_default_before_pinning() {
 /// Every path that builds a runnable cam box must carry the NDI/audio runtime deps:
 ///   - `create-usb-linux.sh` — the base-image builder (the fresh-clone source; the #362 incident),
 ///   - `setup.sh` / `setup-device.sh` — the two provisioning paths.
+///
 /// A gap in ANY one leaves a path that produces a camera-box which cannot dlopen libndi.
 const NDI_RUNTIME_SCRIPTS: [&str; 3] = [
     "scripts/create-usb-linux.sh",
