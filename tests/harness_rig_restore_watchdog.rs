@@ -362,42 +362,223 @@ fn spaced_scene_name_in_known_set_does_not_match_full_record() {
     );
 }
 
-// ─── #350 gap: REC-STRIH-TMP must be in the DEFAULT known-test-scenes set ────
+// ─── #353: REC-STRIH-TMP is legacy (per #343 the stream box stays on prod PRO); the E2E MARKER,
+//      not a scene-name list, now detects a stranded rig ──────────────────────────────────────
 
 #[test]
-fn rec_strih_tmp_is_stranded_by_default_no_env_override() {
-    // REC-STRIH-TMP is the STREAM_PROG_SCENE default in recording-e2e.sh — the ephemeral
-    // full-screen scene the stream box is left on when a rig step dies mid-proof (the
-    // primary #281-class case). It MUST be in the DEFAULT RIG_KNOWN_TEST_SCENES so the
-    // watchdog detects a stranded stream box WITHOUT an env override.
-    // This test is RED with the old default ("PHASE2-PROBE" only) and GREEN after the fix
-    // ("PHASE2-PROBE REC-STRIH-TMP").  No RIG_KNOWN_TEST_SCENES env override here.
-    let d = decide(
+fn rec_strih_tmp_no_longer_default_scene_marker_detects_instead() {
+    // #343 changed recording-e2e.sh to record the stream box's ALREADY-ACTIVE prod scene (PRO)
+    // instead of building + switching to the ephemeral REC-STRIH-TMP scene, so the stream box
+    // never lands on REC-STRIH-TMP any more. #353 therefore DROPS REC-STRIH-TMP from the default
+    // RIG_KNOWN_TEST_SCENES (dead since #343) and replaces scene-name scraping with the E2E
+    // MARKER: a harness that entered a test state and died without cleaning up leaves the marker
+    // behind, and THAT (not the scraped scene name) is the stranded signal.
+    //
+    // Without a marker, a box merely sitting on REC-STRIH-TMP is NOT flagged by the default set
+    // (the legacy scene is gone). RED with the old default ("PHASE2-PROBE REC-STRIH-TMP") — which
+    // would still flag it — GREEN after the default drops to "PHASE2-PROBE".
+    let no_marker = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
         &["obs stream scene=REC-STRIH-TMP"],
     );
     assert_eq!(
-        d.get("act").map(String::as_str),
+        no_marker.get("act").map(String::as_str),
+        Some("0"),
+        "#353: REC-STRIH-TMP is no longer in the DEFAULT known-test-scenes (legacy since #343) — \
+         without an E2E marker a box on it must NOT trigger a restore — got act={:?} reason={:?}",
+        no_marker.get("act"),
+        no_marker.get("reason")
+    );
+
+    // WITH the marker present (a harness left it behind on an unclean death), the SAME box IS
+    // flagged — regardless of which scene it is on — and gets a restore_obs.
+    let with_marker = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
+        &["obs stream scene=REC-STRIH-TMP"],
+    );
+    assert_eq!(
+        with_marker.get("act").map(String::as_str),
         Some("1"),
-        "stream stranded on REC-STRIH-TMP must trigger restore with the DEFAULT \
-         known-test-scenes (Refs #350 — bug: default was PHASE2-PROBE only, missed \
-         REC-STRIH-TMP) — got act={:?} reason={:?}",
-        d.get("act"),
-        d.get("reason")
+        "#353: with the E2E marker present, a stranded stream box is detected regardless of scene \
+         — got act={:?} reason={:?}",
+        with_marker.get("act"),
+        with_marker.get("reason")
     );
     assert!(
-        d.get("actions")
+        with_marker
+            .get("actions")
             .map(|s| s.contains("restore_obs:stream"))
             .unwrap_or(false),
         "actions must include restore_obs:stream — got {:?}",
-        d.get("actions")
+        with_marker.get("actions")
+    );
+}
+
+// ─── #353: the E2E MARKER — durable stranded-rig detection (replaces scene scraping) ────────
+
+#[test]
+fn marker_present_strands_every_observed_obs_box_regardless_of_scene() {
+    // A harness (recording-e2e.sh) writes the marker on entry and removes it ONLY on clean exit.
+    // A leftover marker + no fresh heartbeat = a harness entered a test state and died without
+    // cleaning up. The watchdog must then restore EVERY observed OBS box, regardless of scene —
+    // robust to env-overridden / custom scene names, no scene-list to keep in sync (#353).
+    let d = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
+        // both boxes on genuine PROD scenes — scene scraping would flag NEITHER
+        &["obs strih scene=Cam 5", "obs stream scene=PRO"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("1"),
+        "#353: marker present + heartbeat absent must strand the rig even when OBS is on prod \
+         scenes — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+    let actions = d.get("actions").cloned().unwrap_or_default();
+    assert!(actions.contains("restore_obs:strih"), "got {actions}");
+    assert!(actions.contains("restore_obs:stream"), "got {actions}");
+}
+
+#[test]
+fn marker_present_is_still_gated_by_a_fresh_heartbeat() {
+    // The heartbeat gate is a SEPARATE mechanism that must stay intact: while a legit E2E runs it
+    // holds BOTH a fresh heartbeat AND the marker. A fresh heartbeat must still win → NEVER act,
+    // so the watchdog can never fight a live E2E (the #266 false-positive lesson).
+    let d = decide(
+        &[
+            ("RIG_HB_ACTIVE", "1"),
+            ("RIG_PREV_CONFIRM", "5"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
+        &["obs stream scene=PRO"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "#353: a fresh heartbeat must override the marker — a live E2E is running, never act"
+    );
+    assert_eq!(d.get("confirm").map(String::as_str), Some("0"));
+}
+
+#[test]
+fn marker_absent_falls_back_to_scene_list_no_false_positive() {
+    // With NO marker (older harness / manual testing) the RIG_KNOWN_TEST_SCENES fallback still
+    // works AND a prod scene is still safe (no false positive): PHASE2-PROBE (default) → act,
+    // a prod scene → no act.
+    let on_test_scene = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["obs strih scene=PHASE2-PROBE"],
+    );
+    assert_eq!(
+        on_test_scene.get("act").map(String::as_str),
+        Some("1"),
+        "#353: with no marker, the scene-list fallback must still flag a known TEST scene"
+    );
+    let on_prod = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["obs strih scene=Cam 5", "obs stream scene=PRO"],
+    );
+    assert_eq!(
+        on_prod.get("act").map(String::as_str),
+        Some("0"),
+        "#353: with no marker, prod scenes must NOT trigger a restore"
+    );
+}
+
+#[test]
+fn marker_present_does_not_restore_a_healthy_cam() {
+    // The marker fixes the FRAGILE part (OBS scene detection). Cam restore stays driven by the
+    // RELIABLE down/probe signals — a healthy cam (up, no stale probe) must NOT be restored just
+    // because a marker is present, even though its OBS boxes are restored (#353).
+    let d = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
+        &["cam cam1 down=0 probe=0", "obs strih scene=PRO"],
+    );
+    let actions = d.get("actions").cloned().unwrap_or_default();
+    assert!(
+        !actions.contains("restore_cam:cam1"),
+        "#353: a healthy cam must NOT be restored on marker-presence alone — got {actions}"
+    );
+    assert!(
+        actions.contains("restore_obs:strih"),
+        "#353: but the observed OBS box IS restored on marker-presence — got {actions}"
+    );
+}
+
+// ─── #353: the marker helpers (rig-heartbeat.sh) ─────────────────────────────
+
+#[test]
+fn marker_set_present_clear_round_trips() {
+    let dir = scratch("marker-roundtrip");
+    let path = dir.join("rig-in-e2e");
+    let script = format!(
+        r#"set -e
+. "$HEARTBEAT_LIB"
+export CAMERA_BOX_RIG_E2E_MARKER="{p}"
+rig_e2e_marker_present && {{ echo "PRESENT before set"; exit 11; }}
+rig_e2e_marker_set "unit-test"
+test -f "{p}" || {{ echo "MISSING after set"; exit 12; }}
+rig_e2e_marker_present || {{ echo "not PRESENT after set"; exit 13; }}
+rig_e2e_marker_clear
+test -f "{p}" && {{ echo "STILL EXISTS after clear"; exit 14; }}
+rig_e2e_marker_present && {{ echo "PRESENT after clear"; exit 15; }}
+echo OK
+"#,
+        p = path.display()
+    );
+    let (code, stdout, stderr) = run_bash(&script);
+    assert_eq!(
+        code, 0,
+        "#353: marker set→present→clear must round-trip\nstdout:{stdout}\nstderr:{stderr}"
+    );
+    assert!(stdout.contains("OK"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn marker_clear_is_idempotent_when_absent() {
+    let dir = scratch("marker-idem");
+    let path = dir.join("rig-in-e2e");
+    let script = format!(
+        r#". "$HEARTBEAT_LIB"; export CAMERA_BOX_RIG_E2E_MARKER="{p}"; rig_e2e_marker_clear; echo rc=$?"#,
+        p = path.display()
+    );
+    let (code, stdout, _stderr) = run_bash(&script);
+    assert_eq!(
+        code, 0,
+        "#353: clearing an absent marker must be a no-op success"
+    );
+    assert!(stdout.contains("rc=0"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn marker_path_resolves_to_the_documented_rig_in_e2e_file() {
+    let (code, stdout, stderr) = run_bash(r#". "$HEARTBEAT_LIB"; rig_e2e_marker_path"#);
+    assert_eq!(code, 0, "rig_e2e_marker_path must run: {stderr}");
+    assert!(
+        stdout.contains("rig-in-e2e"),
+        "#353: marker path must be the documented rig-in-e2e file — got {stdout}"
     );
 }
 
 #[test]
 fn prod_scene_pro_not_in_default_known_test_scenes() {
     // "PRO" is the real prod scene on the stream box — it must NOT appear in the default
-    // known-test-scenes set (no false positive even after widening to include REC-STRIH-TMP).
+    // known-test-scenes set, so (with no marker) it never triggers a restore (no false positive).
     let d = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
         &["obs strih scene=Cam 5", "obs stream scene=PRO"],
@@ -628,6 +809,72 @@ fn recording_e2e_starts_and_stops_the_heartbeat() {
         src.contains("rig_heartbeat_stop") || src.contains("rig_heartbeat_clear"),
         "#281: recording-e2e.sh cleanup() must STOP/clear the heartbeat on exit (trap-protected)"
     );
+}
+
+// ─── #353: wiring — harness writes/removes the marker, watchdog reads + clears it ────────────
+
+#[test]
+fn recording_e2e_sets_and_clears_the_e2e_marker() {
+    let src = fs::read_to_string(manifest_dir().join("scripts/recording-e2e.sh"))
+        .expect("read recording-e2e.sh");
+    assert!(
+        src.contains("rig_e2e_marker_set"),
+        "#353: recording-e2e.sh must SET the E2E marker on entry (a harness in a test state)"
+    );
+    assert!(
+        src.contains("rig_e2e_marker_clear"),
+        "#353: recording-e2e.sh cleanup() must CLEAR the marker on clean exit (trap-protected)"
+    );
+}
+
+#[test]
+fn watchdog_reads_and_clears_the_e2e_marker() {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("rig_e2e_marker_present"),
+        "#353: the watchdog must read the E2E marker as a stranded-rig signal"
+    );
+    assert!(
+        src.contains("RIG_E2E_MARKER"),
+        "#353: the watchdog must feed the marker presence into the decision as RIG_E2E_MARKER"
+    );
+    assert!(
+        src.contains("rig_e2e_marker_clear"),
+        "#353: the watchdog must CLEAR the marker after it restores prod, so a stale marker does \
+         not re-trigger (and re-alert) on the next pass"
+    );
+}
+
+#[test]
+fn rec_strih_tmp_dropped_from_default_known_test_scenes_in_both_files() {
+    // #353/#343: the now-legacy REC-STRIH-TMP scene must be removed from the DEFAULT
+    // RIG_KNOWN_TEST_SCENES in BOTH the decision lib and the watchdog (the two-file-sync the
+    // marker mechanism eliminates). PHASE2-PROBE stays (still a live obs_phase2 probe scene).
+    for f in [
+        "scripts/lib/rig-restore-decision.sh",
+        "scripts/rig-restore-watchdog.sh",
+    ] {
+        let src = fs::read_to_string(manifest_dir().join(f)).expect("read file");
+        let default_lines: Vec<&str> = src
+            .lines()
+            .filter(|l| l.contains("RIG_KNOWN_TEST_SCENES:-"))
+            .collect();
+        assert!(
+            !default_lines.is_empty(),
+            "{f} must set a RIG_KNOWN_TEST_SCENES default"
+        );
+        for l in default_lines {
+            assert!(
+                !l.contains("REC-STRIH-TMP"),
+                "#353: {f} must DROP REC-STRIH-TMP from the default RIG_KNOWN_TEST_SCENES (legacy \
+                 since #343) — line: {l}"
+            );
+            assert!(
+                l.contains("PHASE2-PROBE"),
+                "#353: {f} default must still include PHASE2-PROBE — line: {l}"
+            );
+        }
+    }
 }
 
 #[test]
