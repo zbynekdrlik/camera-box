@@ -1,0 +1,15 @@
+[Unit]
+# Fires the #281 Fix#3 rig auto-restore watchdog every ~2 min. The 2-consecutive-confirmation
+# logic in the watchdog means a stranded rig is restored ~2-4 min after the last fresh heartbeat.
+# SHIPS DISABLED — enabled/live-verified by the supervisor only. See the README.
+Description=Run the camera-box rig auto-restore watchdog every ~2 min (#281 Fix#3)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

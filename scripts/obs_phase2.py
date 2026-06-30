@@ -1188,10 +1188,25 @@ def switch(a):
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
 
 
+def program_scene(a):
+    """#281 Fix#3: print the current program scene name to stdout (one line).
+
+    The rig-restore watchdog (scripts/rig-restore-watchdog.sh) reads the live OBS program scene to
+    detect a stranded TEST state (program left on PHASE2-PROBE). Reusing _conn/_rpc here means the
+    watchdog never re-implements the obs-websocket handshake/auth.
+    """
+    ws = _conn(a.host, a.password)
+    try:
+        scene = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
+    finally:
+        ws.close()
+    print(scene)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("setup", "teardown", "record", "prod-scene", "switch"):
+    for name in ("setup", "teardown", "record", "prod-scene", "switch", "program-scene"):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
@@ -1234,7 +1249,8 @@ def main():
             p.add_argument("--program-scene", required=True)
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
-     "prod-scene": prod_scene, "switch": switch}[a.cmd](a)
+     "prod-scene": prod_scene, "switch": switch,
+     "program-scene": program_scene}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,15 @@
+[Unit]
+# camera-box rig auto-restore watchdog (#281 Fix#3). ONE detect -> restore -> alert pass.
+# SHIPS DISABLED — installed/enabled/live-verified by the supervisor only. See the README.
+Description=camera-box rig auto-restore watchdog (#281 Fix#3) — one detect/restore/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/rig-restore-watchdog.sh
+# The watchdog ssh's the dev rig + reads OBS over WS; give it room but never hang the timer.
+TimeoutStartSec=120
+# Credentials (cam root pw, OBS WS pw) come from the user environment / the box password store,
+# NOT from this unit — set them in ~/.config/environment.d/ or an EnvironmentFile if needed:
+#   Environment=OBS_WS_PASSWORD=...   (NOT committed)

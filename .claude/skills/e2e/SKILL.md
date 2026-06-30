@@ -453,3 +453,45 @@ without a blank doc line before the list, or on a wrapped bullet whose continuat
 A `tests/*.rs` doc comment is linted by `clippy --all-targets` even when the test body is
 `#![cfg(feature = "probe")]` (the doc is always compiled). Fix: put a blank `//!`/`///` line before a
 list, keep bullets single-line, and never start a prose line with `+ `/`- `/`* `.
+
+## Generic rig-step restore wrapper — `scripts/lib/with-rig-restore.sh` (#281 Part A)
+
+**The problem:** recording-e2e.sh has a full `cleanup()` trap; ad-hoc rig steps (a quick deploy, a
+single probe run, an MCP-driven scene change) have NO restore net — they can strand the rig in
+TEST/BURN state if they crash or are killed.
+
+**The fix:** source the wrapper before any rig step that touches rig state:
+
+```bash
+. scripts/lib/with-rig-restore.sh
+with_rig_restore [--on-failure] <restore_cmd> -- <step_cmd> [args...]
+```
+
+- **Default (no flag):** restore always runs — success OR failure (use when the rig must be left clean unconditionally).
+- **`--on-failure`:** restore only when step exits non-zero or is killed (use when the step's own success is the "done" state).
+- Restore runs **exactly once** (`_wr_done` idempotency guard — safe when both the exit-code path and a signal trap both trigger).
+- Step exit code preserved and returned to the caller.
+- `restore_cmd` is `eval`'d — can be a compound shell expression with pipes/variables.
+- Arms **HUP / INT / TERM** traps; re-raises the signal after restoring so the caller sees the die.
+- **Pure shell — no rig, no ssh** — test with `bash -c '. lib; with_rig_restore ...'`.
+
+10 behavioral tests in `tests/harness_with_rig_restore.rs`. The `_wr_restore_once` helper is defined
+inside `with_rig_restore()` as a shell-level function (bash scoping quirk) so trap strings can name it.
+
+**Limitation:** nested `with_rig_restore` calls are NOT supported (inner call overwrites the global
+`_wr_restore_once` and breaks the outer guard). Use one wrapper per rig step.
+
+## Resumable / idempotent per-box decode — `--skip-if-exists` on planner scripts (#281 Part B)
+
+`recording-verdict-on-strih.sh` and `recording-verdict-on-stream.sh` accept:
+
+```bash
+--skip-if-exists <partial-path>
+```
+
+If the partial JSON already exists on dev1 (durable state from a prior run, #208), the planner
+prints `SKIP` and exits 0 instead of re-emitting the decode plan. Makes re-dispatched decode workers
+idempotent — the same planner call is safe to issue twice.
+
+Pass it BEFORE other flags. When the file is absent, the flag is silently consumed and the plan
+emits normally. 5 tests in `tests/harness_verdict_done_marker.rs`.

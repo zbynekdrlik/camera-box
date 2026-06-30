@@ -70,6 +70,13 @@ set -euo pipefail
 RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
+# #281 Fix#3: the rig-active heartbeat. TEST mode SETS it (deliberate "rig is in a test state"
+# marker); EVENT mode CLEARS it. Unlike recording-e2e.sh this is a one-shot write (rig-mode exits),
+# so the marker goes STALE after RIG_HEARTBEAT_STALE_SEC (default 10 min) — an idle TEST rig with a
+# clear stranded signal then becomes watchdog-actionable (the intended safety net: the rig must not
+# sit indefinitely in a test state with prod unprotected). Run an active E2E to keep it fresh.
+# shellcheck source=scripts/lib/rig-heartbeat.sh
+. "$RIG_MODE_DIR/lib/rig-heartbeat.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
@@ -331,6 +338,11 @@ cam_ssh() {
 
 do_test() {
   require_sshpass
+  # #281 Fix#3: mark the rig as deliberately in a TEST state so the rig-restore watchdog does not
+  # fight an in-progress test (until the marker goes stale — see the lib-source note above).
+  rig_heartbeat_write "rig-mode:test" 2>/dev/null \
+    && echo "[#281] rig-active heartbeat SET ($(rig_heartbeat_path))" \
+    || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
   cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS")"
@@ -351,6 +363,11 @@ do_test() {
 
 do_event() {
   require_sshpass
+  # #281 Fix#3: clear the rig-active heartbeat — we are returning the rig to a clean prod/EVENT
+  # state, so the watchdog need no longer treat it as "a test is running".
+  rig_heartbeat_clear 2>/dev/null \
+    && echo "[#281] rig-active heartbeat CLEARED" \
+    || true
   echo "===== rig-mode EVENT (#247/#257/#291) — stop QR, restore clean broadcast, genlock_burn OFF ====="
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove no-display drop-in -> restart camera-box -> verify --display restored"
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"

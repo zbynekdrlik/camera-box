@@ -134,6 +134,37 @@ discriminated STUCK vs benign IDLE). It MUST key on the NDI received-fps + under
 tree yet; until #266 lands, a genuine stuck state is caught by hand (genlock-fifo audit fps +
 climbing underruns) and recovered by reboot.
 
+## #281 Fix#3 — rig stranded-in-TEST auto-restore watchdog (heartbeat-gated)
+
+Dead workers leave the rig in a TEST state (prod `camera-box` down + a manual `/tmp` probe holding
+the device; OBS program on `PHASE2-PROBE`; burns on). Fix#3 added a conservative safety net.
+
+**Heartbeat = "a legit E2E is running, do NOT auto-restore."** `scripts/lib/rig-heartbeat.sh` owns a
+well-known file `${XDG_RUNTIME_DIR}/camera-box-rig-active` (fallback `/tmp/camera-box-rig-active`):
+- `recording-e2e.sh` `rig_heartbeat_start` (after the cleanup trap is armed) + `rig_heartbeat_stop`
+  (FIRST line of `cleanup()`) → fresh for the whole run, cleared on clean exit OR death.
+- `rig-mode.sh` TEST `rig_heartbeat_write`, EVENT `rig_heartbeat_clear`. **One-shot** (rig-mode
+  exits) → goes STALE after `RIG_HEARTBEAT_STALE_SEC` (default 600s); an idle TEST rig then becomes
+  watchdog-actionable (intended — run an active E2E to keep it fresh).
+
+**Pure decision** `scripts/lib/rig-restore-decision.sh::rig_restore_decide` (no I/O, unit-tested in
+`tests/harness_rig_restore_watchdog.rs`): fresh heartbeat → never act; else a CLEAR stranded signal
+(cam down / stale probe / OBS on a known TEST scene `RIG_KNOWN_TEST_SCENES`, default `PHASE2-PROBE`)
+→ act, but only after **2 consecutive confirmations** (`RIG_CONFIRM_THRESHOLD`, the #266 lesson);
+acting ALWAYS alerts.
+
+**Watchdog** `scripts/rig-restore-watchdog.sh` (runs on dev1 from a `systemd --user` timer,
+session-independent): probes cam1/2/4 (`systemctl is-active camera-box` + stale-probe `pgrep`) + OBS
+program scene (new `obs_phase2.py program-scene` reader, reuses `_conn`/`_rpc`), persists the confirm
+counter across runs in a state file, restores prod (`systemctl restart camera-box` /
+`obs_phase2.py teardown`) and ALWAYS `airuleset.py notify`. `--dry-run` = observe+decide+log only.
+
+**SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` committed but NOT installed/
+enabled. The **supervisor** installs, live-verifies (real E2E heartbeat → no act; simulated stranded
+state → detect→restore→alert), then `systemctl --user enable --now rig-restore-watchdog.timer`.
+Full procedure: `systemd/rig-restore-watchdog.README.md`. This is the conservative re-do of the
+#266 watchdog (removed for false positives) — heartbeat gate + 2-confirm + clear-signal-only.
+
 ## #297 — NDI sender re-announce (OBS discovery reliability across reboots)
 
 OBS/DistroAV mDNS NDI discovery is flaky on this LAN: the source dropdown does NOT reliably list

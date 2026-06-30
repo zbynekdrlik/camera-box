@@ -51,6 +51,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # rig-mode.sh) — cleanup() clears any leftover drop-in before restoring cam2's camera-box.
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$HERE/lib/rig-test-dropin.sh"
+# #281 Fix#3: the rig-active heartbeat — tells the rig-restore watchdog "a legit E2E is running, do
+# NOT auto-restore prod". Started after the cleanup trap is armed (below); cleanup() stops it on
+# EXIT/HUP/INT/TERM, so a clean exit OR a mid-flight death clears/lapses the heartbeat and the
+# watchdog may then recover a genuinely stranded rig.
+# shellcheck source=scripts/lib/rig-heartbeat.sh
+. "$HERE/lib/rig-heartbeat.sh"
 camera_resolve "${CAM:-cam1}"
 
 CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
@@ -251,6 +257,10 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
+  # #281 Fix#3: clear the rig-active heartbeat + stop its refresher FIRST — before the cam/OBS
+  # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
+  # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
+  rig_heartbeat_stop 2>/dev/null || true
   # #328: FREE the cam capture devices FIRST — before, and independent of, the OBS restore — so a
   # hung obs-websocket op (the #328 prod-scene/teardown hang) can NEVER strand /dev/video0. In the
   # #312 incident the OBS teardown ran first and hung, the trap never reached the cam1 restore, and
@@ -322,6 +332,10 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the sce
 # var on an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap).
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE")
 trap cleanup EXIT HUP INT TERM
+# #281 Fix#3: start the rig-active heartbeat NOW (trap is armed, so cleanup() will stop it on any
+# exit). The background refresher keeps it fresh for the whole long run; the rig-restore watchdog
+# treats a fresh heartbeat as "a legit E2E is running" and will NOT auto-restore prod underneath it.
+rig_heartbeat_start "recording-e2e" || echo "WARNING: could not start rig-active heartbeat (#281)" >&2
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
 #   $PROBE_BIN_DIR/camera-box      — PROBE-featured appliance with the #174 cam1 burn

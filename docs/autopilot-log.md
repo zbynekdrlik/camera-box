@@ -1051,3 +1051,23 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - PR **#347** dev→main, merge commit **c420565523**, main CI 28405819518 all green. #299 auto-closed.
 - DEPLOY + LIVE-RIG COLOUR VERIFICATION LEFT TO SUPERVISOR (#281 / drive-rig-steps-in-supervisor): paint colour bars on cam2 fb0 → read cam1 `capture chroma:` log to confirm u_dev/v_dev > threshold = colour. Worker did clean-code only; NO ssh to boxes, NO deploy.
 - Playbook: see playbook-review note in completion report.
+
+## 2026-06-30 — #281 Part A+B: with-rig-restore wrapper + verdict done-marker (worker, v1.7.0-dev.158)
+
+- Part A: `scripts/lib/with-rig-restore.sh` (new, 78 lines) — `with_rig_restore [--on-failure] <restore_cmd> -- <step_cmd>`. HUP/INT/TERM traps; `_wr_done` idempotency guard; preserves exit code; pure shell.
+- Part B: `--skip-if-exists <partial-path>` added to `recording-verdict-on-strih.sh` + `recording-verdict-on-stream.sh`. Emits `SKIP` + exit 0 when partial already exists — re-dispatched workers idempotent.
+- RED commit: `b831848f1` (harness tests for both parts — lib_exists, always/on-failure modes, exit-code range, idempotency, SIGTERM, signal-trap static guard; + 5 verdict done-marker tests). GREEN commit: `35c94241d`.
+- Pre-existing SC2016 (PowerShell `$env:` in single quotes) suppressed inline in both planner scripts.
+- Fix#3 (auto-restore watchdog) excluded — pending user decision on auto-act vs alert-only.
+- PR **#348** dev→main, merge commit **3434d85d960**, dev CI 28407730862 all green, main CI 28408210977 all green.
+- No deploy (shell scripts only; camera-box binaries not changed).
+
+## #281 Fix#3 — rig auto-restore watchdog (2026-06-30, autopilot-worker)
+- Version bump 1.7.0-dev.158 → **dev.159** (commit 9662b7514).
+- RED `tests/harness_rig_restore_watchdog.rs` (30 tests) — commit 25ce02589; GREEN — see fix commit below. RED proven (libs/scripts/units absent), GREEN 30/30 pass.
+- **Pure decision fn** `scripts/lib/rig-restore-decision.sh::rig_restore_decide` (no I/O, unit-tested): heartbeat-fresh → NEVER act; clear stranded signal (cam down / stale probe / OBS on known TEST scene `PHASE2-PROBE`) → act; **2 consecutive confirmations** required (the #266 lesson); always alert when acting.
+- **Heartbeat** `scripts/lib/rig-heartbeat.sh`: well-known file `${XDG_RUNTIME_DIR}/camera-box-rig-active` (fallback `/tmp`), refresher loop keeps it fresh; `rig_heartbeat_is_fresh` pure age-check. Wired: `recording-e2e.sh` start (after trap) + stop (first in cleanup); `rig-mode.sh` TEST writes / EVENT clears.
+- **Watchdog** `scripts/rig-restore-watchdog.sh` (dev1, independent of any Claude session): probes cam1/2/4 (.61/.62/.64) + OBS strih/stream program scene (new `obs_phase2.py program-scene` reader), persists confirm counter in a state file, restores prod (restart camera-box / `obs_phase2.py teardown`) + ALWAYS `airuleset.py notify`. `--dry-run` for live-verify.
+- **SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` + `.README.md` committed, NOT installed/enabled. **Supervisor enables + live-verifies** (simulate stranded state → detect→restore→alert, no false positive) before turning the timer on.
+- TDD GREEN + Closes #281 in the fix commit; ONE push, ONE PR dev→main. Parts A+B (PR #348) already merged → this completes #281.
+- No deploy (shell/test/systemd only; camera-box binaries unchanged).
