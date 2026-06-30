@@ -150,23 +150,28 @@ rig_heartbeat_stop() {
 #
 # Marker path (single well-known location, documented):
 #   $CAMERA_BOX_RIG_E2E_MARKER                       (explicit override, used by tests)
-#   else ${XDG_RUNTIME_DIR:-/run}/rig-in-e2e         (preferred / fallback)
+#   else  <dir of rig_heartbeat_path>/rig-in-e2e    (co-located with the heartbeat)
+# Co-locating with the heartbeat reuses its WRITABILITY-CHECKED runtime dir (XDG_RUNTIME_DIR, with
+# the same /tmp fallback) so a non-root harness can always write it — and the harness (writer) and
+# watchdog (reader) resolve via THIS one function, so they always agree on the path.
 rig_e2e_marker_path() {
   if [ -n "${CAMERA_BOX_RIG_E2E_MARKER:-}" ]; then
     printf '%s\n' "$CAMERA_BOX_RIG_E2E_MARKER"
     return 0
   fi
-  printf '%s\n' "${XDG_RUNTIME_DIR:-/run}/rig-in-e2e"
+  printf '%s\n' "$(dirname "$(rig_heartbeat_path)")/rig-in-e2e"
 }
 
 # rig_e2e_marker_set [label] -> create the marker (records epoch<TAB>label<TAB>pid for diagnosis).
-# Creates the parent dir if needed. Presence — not freshness — is the signal.
+# Creates the parent dir if needed. Presence — not freshness — is the signal. Returns the write's
+# REAL exit status (NOT swallowed) so the caller's `|| echo WARNING` guard actually fires on a failed
+# write — a silently-missing marker would make the watchdog blind to a stranded rig (#353 review).
 rig_e2e_marker_set() {
   local label="${1:-rig-e2e}"
   local path; path="$(rig_e2e_marker_path)"
   local dir; dir="$(dirname "$path")"
   [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || true
-  printf '%s\t%s\t%s\n' "$(date +%s)" "$label" "$$" > "$path" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$label" "$$" > "$path" 2>/dev/null
 }
 
 # rig_e2e_marker_clear -> remove the marker. Idempotent: clearing an absent marker is a no-op success.

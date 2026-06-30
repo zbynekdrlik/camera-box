@@ -139,6 +139,20 @@ EOF
   return 0
 }
 
+# rig_marker_should_clear <marker> <act> <obs_unreadable> <obs_failed> -> exit 0 to CLEAR the marker.
+# #353 (review): the watchdog must clear the E2E marker (left by an unclean harness death) ONLY once
+# it has POSITIVELY restored every OBS box that could be stranded — i.e. it acted, AND no OBS box was
+# unreadable this pass (an unreadable box might hide a stranded scene the marker must keep flagging),
+# AND every OBS teardown succeeded. Otherwise KEEP the marker so a later pass retries — clearing
+# prematurely drops the durable signal and a box on a custom/env scene (outside the fallback list)
+# would stay stranded forever (the masking bug). PURE: integer args only, unit-tested. Any
+# non-numeric/empty arg is treated conservatively as "KEEP" (never clear on garbage input).
+rig_marker_should_clear() {
+  local marker="${1:-0}" act="${2:-0}" obs_unreadable="${3:-0}" obs_failed="${4:-0}"
+  case "$marker$act$obs_unreadable$obs_failed" in *[!0-9]* | "") return 1 ;; esac
+  [ "$marker" = "1" ] && [ "$act" = "1" ] && [ "$obs_unreadable" -eq 0 ] && [ "$obs_failed" -eq 0 ]
+}
+
 # _rig_decide_emit <confirm> <act> <alert> <actions> <reason>
 _rig_decide_emit() {
   printf 'confirm=%s\n' "$1"
