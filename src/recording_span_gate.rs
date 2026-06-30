@@ -39,11 +39,7 @@ pub fn span_secs(span_frames: usize, capture_fps: f64) -> f64 {
 /// including a 0-second / no-signal span) must FAIL so the headline cannot vacuously pass over a
 /// handful of frames. Returns `true` only when the span is at least the floor (`>= min_secs`).
 pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool {
-    // STUB (RED): mirrors today's vacuous behaviour — the headline ignores the analyzed-span
-    // duration entirely, so every span (even a collapsed 0-second one) is treated as long enough.
-    // The GREEN fix replaces this with the real `analyzed_span_secs >= min_secs` floor (#373).
-    let _ = (analyzed_span_secs, min_secs);
-    true
+    analyzed_span_secs >= min_secs
 }
 
 #[cfg(test)]

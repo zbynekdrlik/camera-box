@@ -349,6 +349,15 @@ struct NodeVerdict {
     /// are unaffected; the on-host/fused colour pass populates it (see `colour_sample`). NEVER
     /// weakenable.
     colour_fail: usize,
+    /// #373 — the number of recorded frames in this node's cam2 OPTICAL span (the FIRST..=LAST frame
+    /// whose dual-QR decoded, [`optical_span`]). 0 when there is no optical frame at all. Divided by
+    /// the capture rate this is the ANALYZED span in seconds; the headline gates on it being
+    /// >= `min_secs` ([`NodeVerdict::span_ok`]) so a COLLAPSED / partial optical read cannot
+    /// vacuously pass (over a tiny span undecodable==0 and the burns are trivially contiguous — the
+    /// fake-green hole #373 closes). It is NOT part of [`is_zero`] (which stays the per-node
+    /// delivery+optical+colour gate, matched to the existing fixtures); the duration FLOOR is a
+    /// run-level headline term applied alongside `is_zero`.
+    optical_span_frames: usize,
 }
 
 impl NodeVerdict {
@@ -359,6 +368,21 @@ impl NodeVerdict {
     /// if every node's digital burn is present (reverts the #360 burn-only weakening).
     fn is_zero(&self) -> bool {
         self.contiguity.is_contiguous() && self.optical_undecodable == 0 && self.colour_fail == 0
+    }
+    /// #373 — the analyzed optical span in seconds for this node (the cam2 dual-QR FIRST..=LAST
+    /// window) from the recorded frame count and the camera capture rate.
+    fn analyzed_span_secs(&self, capture_fps: f64) -> f64 {
+        camera_box::recording_span_gate::span_secs(self.optical_span_frames, capture_fps)
+    }
+    /// #373 — does this node clear the >=`min_secs` headline DURATION floor? A collapsed / partial
+    /// optical read fails it even when delivery + optical + colour are clean over the truncated span
+    /// (the vacuous-pass hole #373 closes). Applied at the headline ALONGSIDE [`is_zero`], never
+    /// folded into `is_zero` (which stays the per-node delivery gate).
+    fn span_ok(&self, capture_fps: f64, min_secs: f64) -> bool {
+        camera_box::recording_span_gate::analyzed_span_long_enough(
+            self.analyzed_span_secs(capture_fps),
+            min_secs,
+        )
     }
     fn real_drops(&self) -> usize {
         self.classified
@@ -431,6 +455,23 @@ fn optical_undecodable_in_span(
             .iter()
             .filter(|f| !frame_is_delivered_optical(f, all_burn_run_ids, cam2_run_id))
             .count(),
+        None => 0,
+    }
+}
+
+/// #373 — the number of recorded frames in the cam2 OPTICAL span (FIRST..=LAST decoded optical
+/// frame, [`optical_span`]); 0 when there is no optical frame at all. Divided by the capture rate
+/// this is the ANALYZED span in seconds, which the headline gates on being >= `min_secs` so a
+/// COLLAPSED / partial optical read cannot vacuously pass (the per-node burn window over a tiny span
+/// is trivially contiguous — the fake-green hole #373 closes). The PASS/FAIL decision is the pure,
+/// Tier-0 `recording_span_gate` module; this just measures the span width for it.
+fn optical_span_frames(
+    stream: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+) -> usize {
+    match optical_span(stream, all_burn_run_ids, cam2_run_id) {
+        Some((first, last)) => last - first + 1,
         None => 0,
     }
 }
@@ -746,6 +787,10 @@ fn node_verdict(
     // passed on the digital burns alone (reverts the #360 weakening).
     let optical_undecodable =
         optical_undecodable_in_span(source, all_burn_run_ids, spec.cam2_run_id);
+    // #373 — measure the analyzed optical span (frames) so the headline can refuse a vacuous pass
+    // over a COLLAPSED / partial read. NOT a per-node `is_zero` term — the duration floor is applied
+    // at the headline (see the #186 loop) alongside the delivery/optical/colour gate.
+    let optical_span_frames = optical_span_frames(source, all_burn_run_ids, spec.cam2_run_id);
 
     // The pure check already paired each missing id with the recorded frame to view and WHY
     // it is missing (RealDrop for a per-emit gap / backward jump, BurnUnreadable for a
@@ -794,6 +839,7 @@ fn node_verdict(
         // #364 — the colour gate is populated by the caller (the on-host/fused colour pass) so the
         // pure analysis stays I/O-free for its many unit callers; 0 here means "colour not gated".
         colour_fail: 0,
+        optical_span_frames,
     })
 }
 
@@ -907,8 +953,17 @@ fn print_node_verdict(v: &NodeVerdict) {
     }
 }
 
-/// JSON for one node's trustworthy verdict.
-fn node_verdict_json(v: &NodeVerdict) -> serde_json::Value {
+/// JSON for one node's trustworthy verdict. `analyzed_secs` / `span_ok` / `min_secs` are the #373
+/// headline duration gate (the analyzed optical span and whether it cleared the floor), so the
+/// report explains a FAIL caused by a collapsed/partial optical read — not just a bare
+/// `overall_pass: false`. `zero_loss` here is the per-node DELIVERY gate (`is_zero`); the headline
+/// `overall_pass` ANDs it with `span_ok`.
+fn node_verdict_json(
+    v: &NodeVerdict,
+    analyzed_secs: f64,
+    span_ok: bool,
+    min_secs: f64,
+) -> serde_json::Value {
     serde_json::json!({
         "node": v.contiguity.node,
         "zero_loss": v.is_zero(),
@@ -921,6 +976,10 @@ fn node_verdict_json(v: &NodeVerdict) -> serde_json::Value {
         "burn_unreadable": v.burn_unreadable(),
         "optical_undecodable": v.optical_undecodable,
         "colour_fail": v.colour_fail,
+        "optical_span_frames": v.optical_span_frames,
+        "analyzed_secs": analyzed_secs,
+        "span_ok": span_ok,
+        "min_secs": min_secs,
         "classified": v.classified,
     })
 }
@@ -1918,15 +1977,35 @@ fn build_and_print_verdict(
                 // `colour_verify` module.
                 nv.colour_fail = build_node_colour_fail(&spec, args)?;
                 print_node_verdict(&nv);
-                all_pass &= nv.is_zero();
-                report["full_chain"]["loss"][spec.node] = node_verdict_json(&nv);
+                // #373 — the analyzed OPTICAL span (the cam2 dual-QR FIRST..=LAST decoded-frame
+                // window) must clear the >=min_secs floor, or the headline VACUOUSLY passes over a
+                // COLLAPSED / partial read: over a tiny span optical_undecodable==0 and the burn
+                // window is trivially contiguous, so `is_zero()` alone would declare a fake green.
+                // The PASS/FAIL decision is the pure, Tier-0 `recording_span_gate` module.
+                let span_secs = nv.analyzed_span_secs(cfg.capture_fps);
+                let span_ok = nv.span_ok(cfg.capture_fps, cfg.min_secs);
+                if !span_ok {
+                    println!(
+                        "  [{}] NOT zero — analyzed optical span {:.1}s < {:.1}s floor: the cam2 \
+                         dual-QR read COLLAPSED to {} frame(s); a contiguous burn window over so few \
+                         frames proves nothing (#373).",
+                        spec.node, span_secs, cfg.min_secs, nv.optical_span_frames
+                    );
+                }
+                all_pass &= nv.is_zero() && span_ok;
+                report["full_chain"]["loss"][spec.node] =
+                    node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs);
                 node_verdicts.push(nv);
             }
             // The single binary headline, in plain words.
             let total_real: usize = node_verdicts.iter().map(NodeVerdict::real_drops).sum();
             let total_burn_unreadable: usize =
                 node_verdicts.iter().map(NodeVerdict::burn_unreadable).sum();
-            let all_zero = node_verdicts.iter().all(NodeVerdict::is_zero);
+            // #373 — the headline is ZERO loss only when every node is delivery-clean AND its
+            // analyzed optical span cleared the duration floor (no vacuous pass over a collapsed read).
+            let all_zero = node_verdicts
+                .iter()
+                .all(|nv| nv.is_zero() && nv.span_ok(cfg.capture_fps, cfg.min_secs));
             if all_zero {
                 println!(
                     "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
@@ -4227,6 +4306,108 @@ mod tests {
             v.real_drops(),
             0,
             "the failure is COLOUR — not a digital drop"
+        );
+    }
+
+    #[test]
+    fn collapsed_optical_span_fails_the_headline_duration_gate_373() {
+        // #373 — the live failure shape: the cam2 optical read decoded only a SMALL early cluster
+        // (6 frames here). Delivery is clean over the cluster, so the per-node delivery gate
+        // is_zero() is TRUE and the burns are contiguous — exactly the shape that VACUOUSLY passed
+        // the headline. The #373 duration floor must FAIL it: the analyzed span (6 / 30 fps = 0.2 s)
+        // is far below the >=300 s zero-loss bar. The headline ANDs is_zero() with span_ok().
+        let stream: Vec<RecordingFrame> = (0..6)
+            .map(|i| frame(i, &[(CAM2, 100 + i as u32), (STRIH, 2000 + (i as u32) * 2)]))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        // The delivery gate ALONE says zero loss (the vacuous-pass shape #360/#363 left open)...
+        assert!(
+            v.is_zero(),
+            "delivery+optical+colour are clean over the tiny span (the vacuous-pass shape): {:?}",
+            v.contiguity
+        );
+        assert_eq!(
+            v.optical_span_frames, 6,
+            "the optical span is the 6 optically-delivered frames"
+        );
+        // ...but the analyzed span (0.2 s) does NOT clear the 300 s headline floor ⇒ NOT zero loss.
+        assert!(
+            !v.span_ok(30.0, 300.0),
+            "a 0.2 s collapsed span must FAIL the >=300 s headline duration floor (#373)"
+        );
+        // The floor never fails a genuine full-length run: 9000 frames @ 30 fps = 300 s passes.
+        let full: Vec<RecordingFrame> = (0..9000)
+            .map(|i| frame(i, &[(CAM2, 100 + i as u32), (STRIH, 2000 + (i as u32) * 2)]))
+            .collect();
+        let vf = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &full,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(vf.optical_span_frames, 9000);
+        assert!(
+            vf.is_zero() && vf.span_ok(30.0, 300.0),
+            "a real 300 s run is delivery-clean AND clears the duration floor (#373)"
+        );
+    }
+
+    #[test]
+    fn empty_optical_span_has_zero_frames_and_fails_the_duration_gate_373() {
+        // No cam2 optical frame at all (e.g. a fully green-cast camera): optical_span is None ⇒
+        // optical_span_frames == 0 ⇒ analyzed span 0 s ⇒ span_ok false. (is_zero() also fails here
+        // via the empty burn window; the duration floor is the belt-and-braces #373 guard the
+        // headline ANDs alongside it.)
+        let stream: Vec<RecordingFrame> = (0..4)
+            .map(|i| frame(i, &[(STRIH, 2000 + (i as u32) * 2)])) // strih burn only, NO cam2 optical
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            v.optical_span_frames, 0,
+            "no cam2 optical frame ⇒ empty optical span (0 frames)"
+        );
+        assert!(
+            !v.span_ok(30.0, 300.0),
+            "a 0-frame optical span must FAIL the >=300 s duration floor (#373)"
         );
     }
 
