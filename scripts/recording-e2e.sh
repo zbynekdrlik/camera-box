@@ -57,6 +57,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # watchdog may then recover a genuinely stranded rig.
 # shellcheck source=scripts/lib/rig-heartbeat.sh
 . "$HERE/lib/rig-heartbeat.sh"
+# #359: the painter-CSV freshness verdict (pure + unit-tested in
+# tests/harness_painter_csv_freshness.rs) — used by the fail-loud gate after the painter pull.
+# shellcheck source=scripts/lib/painter-csv-freshness.sh
+. "$HERE/lib/painter-csv-freshness.sh"
 camera_resolve "${CAM:-cam1}"
 
 CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
@@ -96,6 +100,10 @@ STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
 BURN_CAM1_RUN_ID="${BURN_CAM1_RUN_ID:-911001}"
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
+# #359: wall-clock run start. The painter ground-truth CSV (gen_ts_ns = CLOCK_REALTIME epoch
+# ns under --wall-clock) is freshness-gated against this — a stale CSV whose first gen_ts is
+# hours off (run 354002 was 14.9h off) is REJECTED before it can corrupt the verdict.
+RUN_START_EPOCH="$(date +%s)"
 PAINTER_CSV="$OUTDIR/painter-${RUN_ID}.csv"
 STRIH_REC="$OUTDIR/strih-${RUN_ID}.mkv"
 STREAM_REC="$OUTDIR/stream-${RUN_ID}.mp4"
@@ -397,12 +405,17 @@ sleep 4  # let cam1's NDI sender (with the burn) become discoverable
 echo "[3/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$PROBE_BIN_DIR"/frame-probe root@"$PAINTER_IP":/tmp/frame-probe
+# #359: `rm -f /tmp/painter.csv` FIRST. frame-probe writes the ground-truth CSV ONLY on its
+# clean --duration-secs self-exit, so a painter killed early (or a prior aborted run) leaves a
+# STALE /tmp/painter.csv in place. Removing it before launch guarantees the file we later pull
+# is THIS run's — never a silently-trusted leftover (run 354002's 14.9h-offset fake FAIL).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-  "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
+  "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv; \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
       --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+60)) \
       >/tmp/painter.log 2>&1 &)"
+PAINTER_LAUNCH_EPOCH="$(date +%s)"  # #359: when the painter's --duration-secs lifetime started
 sleep 3  # let the painter put the QR on the monitor cam1 films
 
 # #163: record the CERTIFIED PRODUCTION scene program on each box — NOT a probe
@@ -561,7 +574,27 @@ STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --actio
   || echo "WARNING: stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
-# Stop the painter + the cam1 burn binary so the files finalise (no grab stream to flush).
+# #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
+# --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
+# fired at ~DURATION, BEFORE the painter's DURATION+60 self-exit, so it never wrote a fresh CSV and
+# a STALE leftover got pulled → a fake catastrophic FAIL (run 354002). WAIT for the painter to
+# self-exit: poll until its PROCESS is gone AND a non-empty /tmp/painter.csv freshly written THIS
+# run exists (remote mtime >= run start), bounded by its --duration-secs deadline + grace. A
+# backstop kill only fires if it overran, so the painter can never be left holding /dev/fb0.
+PAINTER_EXIT_DEADLINE=$(( PAINTER_LAUNCH_EPOCH + DURATION + 60 ))
+PAINTER_WAIT_UNTIL=$(( PAINTER_EXIT_DEADLINE + 45 ))   # 45s grace past the painter self-exit
+echo "    #359 waiting for the cam2 painter to self-exit + write a fresh CSV (until $(date -d "@$PAINTER_WAIT_UNTIL" '+%H:%M:%S' 2>/dev/null || echo "$PAINTER_WAIT_UNTIL"))"
+while [ "$(date +%s)" -lt "$PAINTER_WAIT_UNTIL" ]; do
+  if sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+       root@"$PAINTER_IP" \
+       "! pgrep -x frame-probe >/dev/null 2>&1 && [ -s /tmp/painter.csv ] \
+        && [ \"\$(stat -c %Y /tmp/painter.csv 2>/dev/null || echo 0)\" -ge $RUN_START_EPOCH ]" \
+       2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
+# Backstop: if the painter somehow overran its self-exit window, stop it so it never holds /dev/fb0.
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null; true"
 # cam1: send SIGINT (graceful) so camera-box's shutdown handler runs and writes the
 # cam2→cam1 LOSS sidecar (CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt — cam1's V4L2
@@ -576,6 +609,24 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$PAINTER_IP":/tmp/painter.csv "$PAINTER_CSV" 2>/dev/null || \
   echo "WARNING: could not fetch painter CSV (cam→strih assessment omitted)" >&2
+# #359: FAIL LOUD if the pulled painter ground-truth is stale/missing — NEVER run the verdict
+# against stale ground truth (a stale /tmp/painter.csv produced a fake 14.9h-offset catastrophic
+# FAIL on run 354002). The CSV (header `tick,gen_ts_ns,flip_ts_ns`; gen_ts_ns = CLOCK_REALTIME
+# epoch ns) must be present+non-empty, span ≈ DURATION (not a tiny ~40s stale file), and its
+# gen_ts_ns must overlap THIS run's wall clock (not hours off from RUN_START_EPOCH). set +e is
+# active here, so the gate exits non-zero EXPLICITLY (the EXIT trap still restores the rig). The
+# verdict logic lives in the pure, unit-tested painter_csv_freshness() (lib sourced above).
+read -r PAINTER_VERDICT PAINTER_SPAN PAINTER_OFFSET <<EOF
+$(painter_csv_freshness "$PAINTER_CSV" "$RUN_START_EPOCH" "$DURATION")
+EOF
+if [ "$PAINTER_VERDICT" != "OK" ]; then
+  echo "FATAL #359: painter ground-truth CSV not fresh ($PAINTER_VERDICT): span=${PAINTER_SPAN}s" >&2
+  echo "            (expected ≈ ${DURATION}s), gen_ts offset from run start=${PAINTER_OFFSET}s." >&2
+  echo "            A stale/absent ground truth yields a fake catastrophic FAIL — refusing to run" >&2
+  echo "            the verdict. The painter did not write a fresh /tmp/painter.csv for this run." >&2
+  exit 1
+fi
+echo "    #359 painter ground-truth FRESH: span=${PAINTER_SPAN}s offset=${PAINTER_OFFSET}s (OK)"
 # Download cam1's V4L2 capture-drop sidecar (the cam2→cam1 LOSS — the camera leg). The
 # verdict reports v4l2_dropped as cam2→cam1 loss (NOT a painter-tick compare). Best effort:
 # absent ⇒ the verdict simply omits the cam2→cam1 loss line.

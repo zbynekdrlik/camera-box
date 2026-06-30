@@ -44,6 +44,14 @@ MAIN_OUTPUT = "NDI Main Output"
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
 
+# #355: bound for waiting an orphan recording's output to FINALIZE (outputActive=False)
+# after StopRecord, before this run's StartRecord. A large MP4 (the live 24.5 GB stream-box
+# orphan) takes many seconds to finalize; a flat sleep(1.0) was too short, so StartRecord ran
+# while the output was still active and OBS returned {code:500} → the whole capstone run
+# aborted. POLL until idle, FAIL LOUD on timeout. Env-overridable for a pathological disk.
+RECORD_FINALIZE_TIMEOUT_S = float(os.environ.get("OBS_RECORD_FINALIZE_TIMEOUT_S", "120"))
+RECORD_FINALIZE_POLL_S = float(os.environ.get("OBS_RECORD_FINALIZE_POLL_S", "2"))
+
 # #63/#149: the probe ndi_source MUST be configured EXACTLY like the live, certified, proven-
 # working genlock camera inputs (NDI cam1/3/5 on strih) so the harness measures the SAME config
 # that ships in production — never a divergent one. _LOCKED_BASELINE_KEYS below are asserted to
@@ -1116,6 +1124,31 @@ def teardown(a):
         sys.stderr.write(f"[obs] {a.host}: teardown warning: {e}\n")
 
 
+def _wait_record_idle(ws, host, timeout_s=None, poll_s=None):
+    """#355: POLL GetRecordStatus until the recording output is idle (finalized), then return.
+
+    A large orphan MP4 (the live 24.5 GB stream-box file) takes many seconds to FINALIZE after
+    StopRecord; StartRecord returns {code:500} while the output is still active. Poll every
+    *poll_s* until `outputActive` is False, bounded by *timeout_s*. If it never idles, FAIL LOUD
+    (SystemExit) rather than charge ahead into a doomed StartRecord. `outputActive` defaults to
+    True when absent so an unreadable status is treated as "still active" (never a silent pass).
+    """
+    timeout_s = RECORD_FINALIZE_TIMEOUT_S if timeout_s is None else timeout_s
+    poll_s = RECORD_FINALIZE_POLL_S if poll_s is None else poll_s
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if not _rpc(ws, "GetRecordStatus").get("outputActive", True):
+            return
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"[obs] {host}: recording output still ACTIVE {timeout_s:.0f}s after StopRecord — "
+                f"a stranded recording never finalized; aborting before StartRecord 500s on it "
+                f"(#355). Free the orphan on the box, or raise OBS_RECORD_FINALIZE_TIMEOUT_S if a "
+                f"very large file legitimately needs longer to finalize."
+            )
+        time.sleep(poll_s)
+
+
 def record(a):
     """#105 recording-based E2E: control OBS program recording over the WebSocket.
 
@@ -1134,12 +1167,20 @@ def record(a):
     ws = _conn(a.host, a.password)
     try:
         if a.action == "start":
-            st = _rpc(ws, "GetRecordStatus").get("outputActive", False)
-            if st:
-                # Already recording (a prior run's leftover) — stop it first so this
-                # run gets a clean single file, never appended to a stale one.
+            status = _rpc(ws, "GetRecordStatus")
+            if status.get("outputActive", False):
+                # Already recording (a prior run's leftover orphan) — stop it first so this
+                # run gets a clean single file, never appended to a stale one. #355: a large
+                # orphan (the live 24.5 GB stream-box file) takes many seconds to FINALIZE;
+                # the old flat sleep(1.0) then ran StartRecord while the output was still
+                # active → OBS {code:500} aborted the run. Log LOUD, then POLL to idle.
+                tc = status.get("outputTimecode", "?")
+                sys.stderr.write(
+                    f"WARN: {a.host} had an orphan recording active tc={tc} — finalizing it "
+                    f"first (#355)\n"
+                )
                 _rpc(ws, "StopRecord", ignore_err=True)
-                time.sleep(1.0)
+                _wait_record_idle(ws, a.host)
             _rpc(ws, "StartRecord")
             sys.stderr.write(f"[obs] {a.host}: recording STARTED\n")
         elif a.action == "stop":

@@ -313,6 +313,55 @@ fn known_test_scene_set_is_overridable_via_env() {
         .unwrap_or(false));
 }
 
+// ─── #352: scene names in RIG_KNOWN_TEST_SCENES must NOT contain spaces ──────
+
+#[test]
+fn spaced_scene_name_in_known_set_does_not_match_full_record() {
+    // #352 invariant: the matcher word-splits $known (`for ks in $known`), so a TWO-WORD entry
+    // like "NDI 2ME PGM" splits into "NDI","2ME","PGM" — none of which equals the full program
+    // scene name "NDI 2ME PGM". This lock test PROVES the documented no-spaces constraint: a
+    // spaced entry does NOT match the OBS record carrying that exact full name, so it can never
+    // (silently) trigger a restore. A future maintainer who adds a spaced scene name and expects
+    // it to match will see THIS test fail, pointing them at the no-spaces requirement.
+    let d = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_KNOWN_TEST_SCENES", "NDI 2ME PGM"),
+        ],
+        &["obs stream scene=NDI 2ME PGM"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "#352: a SPACED scene name in RIG_KNOWN_TEST_SCENES must NOT match (the word-split makes \
+         it impossible) — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+    assert_eq!(
+        d.get("confirm").map(String::as_str),
+        Some("0"),
+        "#352: a non-matching (spaced) known-scene entry means no stranded signal → counter resets"
+    );
+    // Control: the SAME full name, but added to the set as a single hyphen-joined token, DOES
+    // match — confirming the non-match above is caused purely by the spaces, not the name itself.
+    let hyphenated = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_KNOWN_TEST_SCENES", "NDI-2ME-PGM"),
+        ],
+        &["obs stream scene=NDI-2ME-PGM"],
+    );
+    assert_eq!(
+        hyphenated.get("act").map(String::as_str),
+        Some("1"),
+        "#352 control: a hyphenated (space-free) scene name matches normally — proving the \
+         spaced-name non-match is the word-split invariant, not a different bug"
+    );
+}
+
 // ─── #350 gap: REC-STRIH-TMP must be in the DEFAULT known-test-scenes set ────
 
 #[test]
