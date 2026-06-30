@@ -211,3 +211,88 @@ def test_no_ensure_source_switch_uses_default_timeout(monkeypatch):
         f"SetCurrentProgramScene WITHOUT --ensure-source must use timeout_s=None (the "
         f"default #328 deadline), got {ts!r} — the bounded protection must be preserved"
     )
+
+
+# ---------------------------------------------------------------------------
+# #343 teardown half — a same-scene restore must be SKIPPED.
+#
+# Live-confirmed on the stream box (2026-06-30): SetCurrentProgramScene to the scene ALREADY on
+# program HANGS (>60 s, no ws response) when that scene carries the heavy NDI 2ME PGM source
+# mid-renegotiation (off-air) — the #328 flood. prod_scene already skips the switch when already
+# on target (tests above), but teardown restored prev_scene UNCONDITIONALLY, so it re-triggered
+# the same hang at run end (the "same block recurs in teardown" the issue warned about). The fix:
+# teardown reads the current program/preview and only switches when it actually differs from the
+# restore target.
+# ---------------------------------------------------------------------------
+
+def _make_teardown_args():
+    import types
+    a = types.SimpleNamespace()
+    a.host = "10.77.9.204"
+    a.password = ""
+    return a
+
+
+def _make_teardown_rpc(curr_prog, curr_preview, studio=True):
+    """fake_rpc for teardown: program/preview reads return the given current scenes; all
+    setters/clears are recorded no-ops."""
+    rpc_calls = []
+
+    def fake_rpc(ws, op, payload=None, ignore_err=False, timeout_s=None):
+        rpc_calls.append({"op": op, "payload": payload or {}, "timeout_s": timeout_s})
+        if op == "GetCurrentProgramScene":
+            return {"currentProgramSceneName": curr_prog}
+        if op == "GetCurrentPreviewScene":
+            return {"currentPreviewSceneName": curr_preview}
+        if op == "GetStudioModeEnabled":
+            return {"studioModeEnabled": studio}
+        return {}
+
+    return fake_rpc, rpc_calls
+
+
+def _patch_teardown_helpers(monkeypatch, prev_scene, prev_preview):
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, pwd: FakeWS())
+    monkeypatch.setattr(
+        obs_phase2, "_load_state",
+        lambda: {"10.77.9.204": {"prev_scene": prev_scene, "prev_preview": prev_preview}},
+    )
+    monkeypatch.setattr(obs_phase2, "_save_state", lambda s: None)
+    monkeypatch.setattr(obs_phase2, "_restore_test_preload", lambda ws, host, state: None)
+
+
+def test_teardown_skips_program_switch_when_already_on_prev(monkeypatch):
+    """#343 teardown: program already on prev_scene → SetCurrentProgramScene must NOT be called
+    (a same-scene switch hangs on the heavy NDI 2ME PGM, the teardown half of the proof hang)."""
+    fake_rpc, calls = _make_teardown_rpc(curr_prog="PRO", curr_preview="PRO")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+    _patch_teardown_helpers(monkeypatch, prev_scene="PRO", prev_preview="PRO")
+
+    obs_phase2.teardown(_make_teardown_args())
+
+    prog = [c for c in calls if c["op"] == "SetCurrentProgramScene"]
+    assert prog == [], (
+        "#343 teardown: SetCurrentProgramScene must NOT be called when program is already on "
+        "prev_scene — a same-scene switch HANGS on the heavy NDI 2ME PGM (no ws response, #328)."
+    )
+    prev = [c for c in calls if c["op"] == "SetCurrentPreviewScene"]
+    assert prev == [], (
+        "#343 teardown: SetCurrentPreviewScene must NOT be called when preview is already on "
+        "prev_preview (same heavy-source hang risk)."
+    )
+
+
+def test_teardown_switches_program_when_different(monkeypatch):
+    """Regression: when program is NOT on prev_scene, teardown MUST restore it (the legit
+    restore path is preserved — only the redundant same-scene switch is skipped)."""
+    fake_rpc, calls = _make_teardown_rpc(curr_prog="REC-LEFTOVER", curr_preview="REC-LEFTOVER")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+    _patch_teardown_helpers(monkeypatch, prev_scene="PRO", prev_preview="PRO")
+
+    obs_phase2.teardown(_make_teardown_args())
+
+    prog = [c for c in calls if c["op"] == "SetCurrentProgramScene"]
+    assert len(prog) == 1 and prog[0]["payload"].get("sceneName") == "PRO", (
+        f"#343 teardown: when program differs from prev_scene it MUST be restored to 'PRO'; "
+        f"got {prog}"
+    )
