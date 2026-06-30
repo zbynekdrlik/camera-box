@@ -915,9 +915,9 @@ def prod_scene(a):
     with the always-on prod input on the same NDI source-name (which records pure black).
 
     On strih the prod scene (e.g. 'Cam 5') already shows cam1 via the genlock-certified
-    'NDI cam5' input; on stream a full-screen scene (e.g. 'REC-STRIH-TMP') already shows
-    strih's feed via 'NDI 2ME PGM'. Either way: NO second receiver, NO source-name
-    collision — the bug #163 closes.
+    'NDI cam5' input; on stream the prod scene (e.g. 'PRO') already shows strih's feed via
+    'NDI 2ME PGM' (#343: record that already-active scene, not a fresh ephemeral one).
+    Either way: NO second receiver, NO source-name collision — the bug #163 closes.
 
     Steps (mirrors setup()'s safety order):
       1. Record prev program + (studio) prev preview to STATE so teardown restores them
@@ -1075,14 +1075,25 @@ def teardown(a):
         _restore_test_preload(ws, a.host, state)
         host_state = state.get(a.host, {})
         prev = host_state.get("prev_scene")
+        # #343: a SetCurrentProgramScene to the scene ALREADY on program HANGS (>60s, no ws
+        # response, #328) when that scene carries the heavy NDI 2ME PGM source mid-renegotiation —
+        # the teardown half of the proof-blocking hang. prod_scene already skips a same-scene
+        # switch; teardown must too. Only switch when the current program differs from the target.
         if prev:
-            _rpc(ws, "SetCurrentProgramScene", {"sceneName": prev}, ignore_err=True)
+            curr_prog = _rpc(ws, "GetCurrentProgramScene", ignore_err=True).get(
+                "currentProgramSceneName")
+            if curr_prog != prev:
+                _rpc(ws, "SetCurrentProgramScene", {"sceneName": prev}, ignore_err=True)
         # Restore the prior PREVIEW too (Studio Mode): leaving the probe scene in preview
         # keeps its idle ndi_source active and render-ticking the genlock FIFO (#70 underrun
-        # spam). Falls back to the program scene when no prior preview was recorded.
+        # spam). Falls back to the program scene when no prior preview was recorded. Same #343
+        # skip-if-already-there guard — a same-scene preview set hangs on the heavy source too.
         prev_preview = host_state.get("prev_preview") or prev
         if prev_preview:
-            _rpc(ws, "SetCurrentPreviewScene", {"sceneName": prev_preview}, ignore_err=True)
+            curr_preview = _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
+                "currentPreviewSceneName")
+            if curr_preview != prev_preview:
+                _rpc(ws, "SetCurrentPreviewScene", {"sceneName": prev_preview}, ignore_err=True)
         # Idle the NDI receiver but KEEP the stable scene+input for the next run (#22).
         # Clearing ndi_source_name makes DistroAV tear the receiver down cleanly (destroying
         # an ndi_source while it is actively receiving the 1080p feed faults the NDI runtime
