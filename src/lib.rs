@@ -44,5 +44,11 @@ pub mod colour_scale;
 // `bin/recording-verdict`.
 pub mod colour_verify;
 
+// #373 — the zero-loss HEADLINE analyzed-span duration gate (pure decision). A collapsed/partial
+// cam2 optical read must not vacuously pass the headline over a handful of frames. No probe deps,
+// so it unit-tests Tier-0; the probe-gated `bin/recording-verdict` feeds each node's optical-span
+// frame count here to gate the headline alongside contiguity + the optical + colour gates.
+pub mod recording_span_gate;
+
 #[cfg(feature = "probe")]
 pub mod probe;
