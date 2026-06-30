@@ -170,7 +170,10 @@ mod tests {
         let ramp: Vec<u8> = patches[8..13].iter().map(|(_, c)| c.r).collect();
         assert_eq!(ramp, vec![0, 64, 128, 192, 255], "grayscale ramp steps");
         for (_, c) in &patches[8..13] {
-            assert!(c.r == c.g && c.g == c.b, "ramp patch is neutral gray: {c:?}");
+            assert!(
+                c.r == c.g && c.g == c.b,
+                "ramp patch is neutral gray: {c:?}"
+            );
         }
     }
 
@@ -227,7 +230,10 @@ mod tests {
     #[test]
     fn band_sits_below_and_never_overlaps_the_dual_qr_region() {
         let patches = colour_scale_patches(CANVAS_W, CANVAS_H);
-        assert!(!patches.is_empty(), "must produce patches to check non-overlap");
+        assert!(
+            !patches.is_empty(),
+            "must produce patches to check non-overlap"
+        );
         // The two top-anchored dual-QR halves (default qr_size), as rendered by
         // render_qr_dual_bgra: each centered in its half-width, top margin 24.
         let qr_bottom = QR_TOP_MARGIN_PX + DEFAULT_QR_SIZE; // 724
@@ -269,10 +275,39 @@ mod tests {
 
     #[test]
     fn rect_intersects_is_half_open() {
-        let a = Rect { x: 0, y: 0, w: 10, h: 10 };
-        assert!(a.intersects(&Rect { x: 5, y: 5, w: 10, h: 10 }), "overlap");
+        let a = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        assert!(
+            a.intersects(&Rect {
+                x: 5,
+                y: 5,
+                w: 10,
+                h: 10
+            }),
+            "overlap"
+        );
         // Touching along the right edge (x = 10) does NOT intersect (half-open).
-        assert!(!a.intersects(&Rect { x: 10, y: 0, w: 10, h: 10 }), "edge-touch");
-        assert!(!a.intersects(&Rect { x: 20, y: 20, w: 5, h: 5 }), "disjoint");
+        assert!(
+            !a.intersects(&Rect {
+                x: 10,
+                y: 0,
+                w: 10,
+                h: 10
+            }),
+            "edge-touch"
+        );
+        assert!(
+            !a.intersects(&Rect {
+                x: 20,
+                y: 20,
+                w: 5,
+                h: 5
+            }),
+            "disjoint"
+        );
     }
 }
