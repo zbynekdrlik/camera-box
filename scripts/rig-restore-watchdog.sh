@@ -13,8 +13,10 @@
 #
 # CONSERVATIVE BY DESIGN (the #266 auto-watchdog was removed for false positives):
 #   - A FRESH heartbeat (scripts/lib/rig-heartbeat.sh, written by a live E2E) => NEVER act.
-#   - Acts ONLY on a CLEAR stranded signal: cam-box down, stale probe running, or OBS program on a
-#     known TEST scene (default "PHASE2-PROBE REC-STRIH-TMP"; RIG_KNOWN_TEST_SCENES overrides).
+#   - Acts ONLY on a CLEAR stranded signal: cam-box down, stale probe running, the #353 E2E MARKER
+#     (a harness left it behind on an unclean death => restore every observed OBS box regardless of
+#     scene), or — fallback — OBS program on a known TEST scene (default "PHASE2-PROBE";
+#     RIG_KNOWN_TEST_SCENES overrides). The marker replaces the fragile scene-name scraping.
 #   - Requires RIG_CONFIRM_THRESHOLD (default 2) CONSECUTIVE confirmations before acting.
 # ALL "should we act?" logic lives in the PURE scripts/lib/rig-restore-decision.sh (unit-tested);
 # this script only GATHERS observations and EXECUTES the decided restores.
@@ -76,7 +78,10 @@ REPO_SLUG="${RIG_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 
 # Export decision tunables consumed by rig_restore_decide.
 export RIG_CONFIRM_THRESHOLD="${RIG_CONFIRM_THRESHOLD:-2}"
-export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE REC-STRIH-TMP}"
+# #343/#353: REC-STRIH-TMP dropped from the default — the marker (below), not a scene name, detects a
+# stranded stream box now (recording-e2e.sh records the already-active prod scene PRO). PHASE2-PROBE
+# stays (still a live obs_phase2 probe scene on strih). RIG_KNOWN_TEST_SCENES is now a fallback only.
+export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE}"
 export RIG_HEARTBEAT_STALE_SEC="${RIG_HEARTBEAT_STALE_SEC:-600}"
 
 # ── logging (verbose per comprehensive-logging.md) ───────────────────────────
@@ -182,6 +187,20 @@ main() {
   fi
   export RIG_HB_ACTIVE="$hb_active"
 
+  # #353 E2E MARKER: recording-e2e.sh writes it on entry and removes it ONLY on clean exit, so a
+  # leftover marker = a harness entered a test state and died WITHOUT cleaning up. Combined with the
+  # absent/stale heartbeat above, that is the durable "rig stranded" signal — robust to env-overridden
+  # OBS scene names (replaces the fragile scene-name scraping; no scene-list to keep in sync). When
+  # present, the decision restores every observed OBS box regardless of scene.
+  local marker=0
+  if rig_e2e_marker_present; then
+    marker=1
+    log "e2e-marker: PRESENT ($(rig_e2e_marker_path)) — a harness entered a test state and did NOT clean up"
+  else
+    log "e2e-marker: absent — no uncleaned test-state harness"
+  fi
+  export RIG_E2E_MARKER="$marker"
+
   # Gather observations (each helper logs + emits 0/1 record lines).
   local obs=""
   obs+="$(probe_cam cam1 "$CAM1_IP")"$'\n'
@@ -227,6 +246,14 @@ main() {
       *) log "unknown action token '$tok' — skipping" ;;
     esac
   done
+
+  # #353: prod is now restored — CLEAR the E2E marker (left behind by the dead harness) so the next
+  # pass does not re-detect the same stale marker and re-act/re-alert every ~2 min. Idempotent: a
+  # no-op when no marker was present (e.g. the act was driven purely by a cam down/probe signal).
+  if [ "$marker" = "1" ]; then
+    log "e2e-marker: clearing $(rig_e2e_marker_path) now that prod is restored"
+    rig_e2e_marker_clear 2>/dev/null || true
+  fi
 
   # ALWAYS alert when we act (so the supervisor/user ALWAYS know).
   if [ "${alert:-0}" = "1" ]; then

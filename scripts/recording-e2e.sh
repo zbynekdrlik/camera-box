@@ -269,6 +269,11 @@ cleanup() {
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
   # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
   rig_heartbeat_stop 2>/dev/null || true
+  # #353: remove the E2E marker on this CLEAN exit. The marker is the durable "rig in an uncleaned
+  # test state" signal: it is written on entry and removed ONLY here, so an UNCLEAN death (SIGKILL /
+  # interrupted trap) leaves it behind and the watchdog detects the stranded rig regardless of which
+  # scene OBS is on (replaces the fragile scene-name scraping, #353).
+  rig_e2e_marker_clear 2>/dev/null || true
   # #328: FREE the cam capture devices FIRST — before, and independent of, the OBS restore — so a
   # hung obs-websocket op (the #328 prod-scene/teardown hang) can NEVER strand /dev/video0. In the
   # #312 incident the OBS teardown ran first and hung, the trap never reached the cam1 restore, and
@@ -344,6 +349,11 @@ trap cleanup EXIT HUP INT TERM
 # exit). The background refresher keeps it fresh for the whole long run; the rig-restore watchdog
 # treats a fresh heartbeat as "a legit E2E is running" and will NOT auto-restore prod underneath it.
 rig_heartbeat_start "recording-e2e" || echo "WARNING: could not start rig-active heartbeat (#281)" >&2
+# #353: write the E2E MARKER now (trap is armed, so cleanup() removes it on a CLEAN exit). Unlike the
+# heartbeat (which the refresher removes the instant the harness dies), the marker persists across an
+# UNCLEAN death — so "marker present AND heartbeat absent/stale" is the durable stranded-rig signal
+# the rig-restore watchdog keys on, regardless of which scene OBS is left on.
+rig_e2e_marker_set "recording-e2e" || echo "WARNING: could not write rig-in-e2e marker (#353)" >&2
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
 #   $PROBE_BIN_DIR/camera-box      — PROBE-featured appliance with the #174 cam1 burn
