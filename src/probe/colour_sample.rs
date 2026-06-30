@@ -23,9 +23,10 @@
 
 use crate::colour_scale::Rect;
 use crate::colour_verify::{
-    canvas_dual_qr_corners, fit_affine, summarize_node_colour, verify_rgb_frame,
-    verify_rgb_frame_affine, CameraColourVerdict, NodeColourSummary,
+    fit_affine, summarize_node_colour, verify_rgb_frame, verify_rgb_frame_affine,
+    CameraColourVerdict, NodeColourSummary,
 };
+use crate::probe::payload::Payload;
 use crate::probe::qr;
 use anyhow::{Context, Result};
 use image::{GrayImage, RgbImage};
@@ -196,64 +197,89 @@ fn order_corners(p: [(f64, f64); 4]) -> [(f64, f64); 4] {
     [tl, tr, br, bl]
 }
 
-/// One detected QR grid for dual-QR selection: `(shoelace area, centroid-y, the four corners)`.
-type DetectedGrid = (f64, f64, [(f64, f64); 4]);
-
-/// From every detected QR grid `(area, centroid_y, corners)`, pick the TWO dual-QR halves and return
-/// their 8 corners (left half then right half, each ordered TL,TR,BR,BL) — the `dst` for
-/// [`fit_affine`]. The dual-QRs are the two LARGEST grids in the TOP half of the frame: the four
-/// node burns are all bottom-anchored (centroid below mid-height) and smaller, so they are excluded.
-/// `None` when fewer than two top-half grids exist (the frame cannot be localized → it is skipped,
-/// never sampled at the wrong place). Pure (no rqrr) so the selection is unit-tested directly.
-fn select_dual_qr_corners(grids: &[DetectedGrid], frame_h: f64) -> Option<Vec<(f64, f64)>> {
-    let mut top: Vec<&DetectedGrid> = grids.iter().filter(|g| g.1 < frame_h / 2.0).collect();
+/// Pick the two dual-QR halves from candidate grids described by `(area, centroid_y, centroid_x)`,
+/// returning their indices `[left, right]` ordered left→right by centroid x. The dual-QRs are the two
+/// LARGEST grids in the TOP half of the frame: the four node burns are all bottom-anchored (centroid
+/// below mid-height) and smaller, so they are excluded. `None` when fewer than two top-half
+/// candidates exist (the frame cannot be localized → it is skipped). Pure (no rqrr) — unit-tested.
+fn select_two_dual_qr(items: &[(f64, f64, f64)], frame_h: f64) -> Option<[usize; 2]> {
+    let mut top: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].1 < frame_h / 2.0)
+        .collect();
     if top.len() < 2 {
         return None;
     }
-    // Two LARGEST top-half grids are the dual-QR halves.
-    top.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // Two LARGEST top-half candidates are the dual-QR halves.
+    top.sort_by(|&a, &b| items[b].0.total_cmp(&items[a].0));
     top.truncate(2);
     // Order them left → right by centroid x.
-    let cx = |g: &DetectedGrid| g.2.iter().map(|c| c.0).sum::<f64>() / 4.0;
-    top.sort_by(|a, b| cx(a).total_cmp(&cx(b)));
-    let mut pts = Vec::with_capacity(8);
-    for g in top {
-        pts.extend_from_slice(&order_corners(g.2));
-    }
-    Some(pts)
+    top.sort_by(|&a, &b| items[a].2.total_cmp(&items[b].2));
+    Some([top[0], top[1]])
 }
 
-/// Detect the two dual-QR halves in a recorded RGB frame and return their 8 corners (left then
-/// right, each TL,TR,BR,BL) in RECORDING coordinates — the `dst` correspondences for
-/// [`fit_affine`]. `None` when the two halves cannot be located (frame skipped — see
-/// [`select_dual_qr_corners`]).
-fn detect_dual_qr_corners(img: &RgbImage) -> Option<Vec<(f64, f64)>> {
+/// A `canvas_w*canvas_h` BGRA buffer → packed-RGB8 `RgbImage` (drops alpha, B/G/R → R/G/B). Used to
+/// feed a re-rendered reference canvas back through `rqrr`.
+fn bgra_to_rgb(bgra: &[u8], canvas_w: u32, canvas_h: u32) -> RgbImage {
+    let mut img = RgbImage::new(canvas_w, canvas_h);
+    for (i, px) in img.pixels_mut().enumerate() {
+        let j = i * 4;
+        *px = image::Rgb([bgra[j + 2], bgra[j + 1], bgra[j]]);
+    }
+    img
+}
+
+/// Detect the two dual-QR halves in an RGB frame: returns their decoded payloads `(left, right)` and
+/// their 8 corners (left then right, each TL,TR,BR,BL). The halves are the two LARGEST top-half QR
+/// grids that DECODE — the four node burns are bottom-anchored (excluded by position). `None` when
+/// fewer than two such grids are found (frame cannot be localized → skipped).
+fn detect_dual_qr(img: &RgbImage) -> Option<(Payload, Payload, Vec<(f64, f64)>)> {
     let luma = rgb_to_luma(img);
     let frame_h = luma.height() as f64;
     let mut prepared = rqrr::PreparedImage::prepare(luma);
-    let mut grids: Vec<DetectedGrid> = Vec::new();
+    let mut corners: Vec<[(f64, f64); 4]> = Vec::new();
+    let mut payloads: Vec<Payload> = Vec::new();
+    let mut items: Vec<(f64, f64, f64)> = Vec::new();
     for grid in prepared.detect_grids() {
         let b = grid.bounds;
-        let corners = [
+        let c = [
             (b[0].x as f64, b[0].y as f64),
             (b[1].x as f64, b[1].y as f64),
             (b[2].x as f64, b[2].y as f64),
             (b[3].x as f64, b[3].y as f64),
         ];
-        let cy = corners.iter().map(|c| c.1).sum::<f64>() / 4.0;
-        grids.push((quad_area(&corners), cy, corners));
+        if let Ok((_meta, content)) = grid.decode() {
+            if let Some(p) = Payload::decode(&content) {
+                let area = quad_area(&c);
+                let cy = c.iter().map(|q| q.1).sum::<f64>() / 4.0;
+                let cx = c.iter().map(|q| q.0).sum::<f64>() / 4.0;
+                items.push((area, cy, cx));
+                corners.push(c);
+                payloads.push(p);
+            }
+        }
     }
-    select_dual_qr_corners(&grids, frame_h)
+    let [li, ri] = select_two_dual_qr(&items, frame_h)?;
+    let mut pts = Vec::with_capacity(8);
+    pts.extend_from_slice(&order_corners(corners[li]));
+    pts.extend_from_slice(&order_corners(corners[ri]));
+    Some((payloads[li].clone(), payloads[ri].clone(), pts))
 }
 
-/// Sample + classify ONE recorded frame's colour scale, LOCALIZED through the affine fit from the
-/// frame's own detected dual-QR corners — the #364 camera-of-a-monitor fix (the painted column does
-/// NOT land at fixed canvas coords; it is shifted/scaled by the camera framing). The painter canvas
-/// geometry is `canvas_w`/`canvas_h` with `qr_size`/`top_margin`; `exclusions` are CANVAS-space burn
-/// rects. Returns `None` when the two dual-QRs could not be located or the corner fit is degenerate,
-/// so the caller SKIPS this frame (never samples at the wrong place; fail-closed if none localize).
-/// No fixed-coord fallback: a mis-located sample is a false signal (strict-test mandate).
-#[allow(clippy::too_many_arguments)]
+/// Sample + classify ONE recorded frame's colour scale, LOCALIZED to where the camera actually
+/// landed the painter canvas — the #364 camera-of-a-monitor fix. The recording is a broadcast camera
+/// filming the cam2 MONITOR, so the painted column does NOT sit at fixed canvas coords.
+///
+/// The canvas→recording affine is derived from the dual-QR fiducials WITHOUT coupling to the QR
+/// renderer's internals (quiet zone, integer-module rounding, sub-`qr_size` render): decode the
+/// recording's two dual-QR payloads, RE-RENDER the reference canvas from those exact payloads via the
+/// same painter path (`render_qr_dual_bgra`), detect the reference's dual-QR corners (the true
+/// CANVAS-frame positions of the very same symbols), and fit reference-corners → recording-corners.
+/// Pairing like-with-like (symbol↔symbol of identical geometry) makes the fit the PURE camera
+/// transform, so sampling the colour column ([`crate::colour_scale::colour_scale_patches`], same
+/// canvas geometry the painter used) through it lands exactly where the camera put it. Returns
+/// `None` when the two
+/// dual-QRs can't be decoded/located or the fit is degenerate — the caller SKIPS the frame
+/// (fail-closed; no fixed-coord fallback, since a mis-located sample is a false signal).
 pub fn colour_verdict_from_rgb_image_localized(
     img: &RgbImage,
     canvas_w: u32,
@@ -262,9 +288,14 @@ pub fn colour_verdict_from_rgb_image_localized(
     top_margin: u32,
     exclusions: &[Rect],
 ) -> Option<CameraColourVerdict> {
-    let dst = detect_dual_qr_corners(img)?;
-    let src = canvas_dual_qr_corners(canvas_w, canvas_h, qr_size, top_margin)?;
-    let affine = fit_affine(&src, &dst)?;
+    let (left, right, rec_corners) = detect_dual_qr(img)?;
+    // Reference canvas: the SAME painter render for these exact payloads. Its detected dual-QR
+    // corners are the true canvas-frame positions of the identical symbols, so the fit is the pure
+    // camera transform (no box-vs-symbol / quiet-zone mismatch).
+    let ref_bgra = qr::render_qr_dual_bgra(&left, &right, canvas_w, canvas_h, qr_size);
+    let ref_rgb = bgra_to_rgb(&ref_bgra, canvas_w, canvas_h);
+    let (_, _, ref_corners) = detect_dual_qr(&ref_rgb)?;
+    let affine = fit_affine(&ref_corners, &rec_corners)?;
     Some(verify_rgb_frame_affine(
         img.as_raw(),
         img.width(),
@@ -575,12 +606,7 @@ mod tests {
         };
         let mut bgra = qr::render_qr_dual_bgra(&left, &right, W, H, QR);
         qr::blit_colour_scale_bgra(&mut bgra, W, H, QR, TM);
-        let mut img = RgbImage::new(W, H);
-        for (i, px) in img.pixels_mut().enumerate() {
-            let j = i * 4;
-            *px = image::Rgb([bgra[j + 2], bgra[j + 1], bgra[j]]); // R,G,B from B,G,R,A
-        }
-        img
+        bgra_to_rgb(&bgra, W, H)
     }
 
     /// Warp an RGB image through `a` (canvas→recording) — simulating the camera filming the monitor.
@@ -616,50 +642,23 @@ mod tests {
     }
 
     #[test]
-    fn select_picks_the_two_largest_top_half_grids_left_to_right() {
-        let left_qr = (
-            490_000.0,
-            374.0,
-            [(130.0, 24.0), (830.0, 24.0), (830.0, 724.0), (130.0, 724.0)],
-        );
-        let right_qr = (
-            490_000.0,
-            374.0,
-            [
-                (1090.0, 24.0),
-                (1790.0, 24.0),
-                (1790.0, 724.0),
-                (1090.0, 724.0),
-            ],
-        );
-        // A bottom-anchored burn (centroid y 889 > 540) and a small top-half noise grid — both must
-        // be excluded (burn by position, noise by being smaller than the two QRs).
-        let bottom_burn = (
-            90_000.0,
-            889.0,
-            [
-                (40.0, 738.0),
-                (342.0, 738.0),
-                (342.0, 1040.0),
-                (40.0, 1040.0),
-            ],
-        );
-        let noise = (
-            400.0,
-            100.0,
-            [(900.0, 90.0), (920.0, 90.0), (920.0, 110.0), (900.0, 110.0)],
-        );
-        // Deliberately out of order; result must be LEFT QR corners then RIGHT QR corners.
-        let grids = vec![right_qr, bottom_burn, left_qr, noise];
-        let pts = select_dual_qr_corners(&grids, 1080.0).expect("two top-half QRs");
-        assert_eq!(pts.len(), 8);
-        assert_eq!(pts[0], (130.0, 24.0), "left QR TL first");
-        assert_eq!(pts[4], (1090.0, 24.0), "right QR TL after the left QR");
+    fn select_two_dual_qr_picks_largest_top_half_left_to_right() {
+        // (area, centroid_y, centroid_x): two big top-half QRs + a bottom-anchored burn (excluded by
+        // position) + a small top-half noise grid (excluded by area).
+        let items = vec![
+            (490_000.0, 374.0, 1440.0), // right QR
+            (90_000.0, 889.0, 191.0),   // bottom burn — centroid below mid-height ⇒ excluded
+            (490_000.0, 374.0, 480.0),  // left QR
+            (400.0, 100.0, 910.0),      // top-half noise — smaller than the two QRs ⇒ excluded
+        ];
+        let [li, ri] = select_two_dual_qr(&items, 1080.0).expect("two top-half QRs");
+        assert_eq!(items[li].2, 480.0, "left QR (smaller cx) first");
+        assert_eq!(items[ri].2, 1440.0, "right QR second");
 
-        // Fewer than two top-half grids ⇒ None (cannot localize).
-        assert!(select_dual_qr_corners(&[left_qr], 1080.0).is_none());
+        // Fewer than two top-half candidates ⇒ None (cannot localize).
+        assert!(select_two_dual_qr(&[(490_000.0, 374.0, 480.0)], 1080.0).is_none());
         assert!(
-            select_dual_qr_corners(&[bottom_burn, bottom_burn], 1080.0).is_none(),
+            select_two_dual_qr(&[(9e4, 889.0, 191.0), (9e4, 900.0, 1700.0)], 1080.0).is_none(),
             "all bottom-anchored ⇒ no dual-QR pair"
         );
     }
