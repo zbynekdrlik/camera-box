@@ -831,6 +831,89 @@ mod tests {
     }
 
     // ============================================================================
+    // #363 — the SOFT optical dual-QR (a QR filmed off a monitor: low-contrast +
+    // moiré + colour-cast) must be RECOVERED from the real stream-recording frames
+    // even though the crisp DIGITAL BURNS already decode on the plain pass. The
+    // optical read is the HARD verdict gate (#372). The OLD `decode_qr_luma_all`
+    // ran the Otsu retry ONLY when the plain pass found NOTHING — so on these frames
+    // the plain pass returned the burns (non-empty) → the Otsu retry was SKIPPED →
+    // the present optical QR was marked a PHANTOM `optical_undecodable` (~87 % of
+    // stream frames). The fix runs plain ∪ Otsu ALWAYS, recovering it.
+    // ============================================================================
+
+    /// Load a committed real recording-frame fixture as the luma plane the decoder
+    /// consumes (the exact gray8 the verdict feeds rqrr).
+    fn optical_fixture_luma(name: &str) -> GrayImage {
+        let path: std::path::PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", name]
+            .iter()
+            .collect();
+        image::open(&path)
+            .unwrap_or_else(|e| panic!("open fixture {}: {e}", path.display()))
+            .to_luma8()
+    }
+
+    #[test]
+    fn optical_soft_dual_qr_recovered_on_real_stream_frames() {
+        // The optical dual-QR's run_id on the real failing recording (run 354003); its two
+        // Vernier halves carry an even and an odd frame_id (consecutive frames).
+        const OPTICAL_RUN_ID: u32 = 354_003;
+        // The f5/f150 cam1/strih/stream digital-burn run_ids — the recording per-frame path.
+        const BURN_IDS: &[u32] = &[911_001, 911_002, 911_004];
+        for name in ["optical-soft-f5.png", "optical-soft-f150.png"] {
+            let luma = optical_fixture_luma(name);
+
+            // RED-condition lock (permanent): the PLAIN rqrr pass MISSES the optical dual-QR.
+            // It finds the crisp burns but not the soft optical — exactly what the old
+            // early-return ("Otsu only if plain empty") swallowed (plain non-empty ⇒ Otsu
+            // skipped ⇒ optical never recovered). If a future decoder reads the optical on the
+            // plain pass, this documents the shift — re-tune, never delete.
+            let plain = rqrr_decode_all(luma.clone());
+            assert!(
+                !plain.iter().any(|p| p.run_id == OPTICAL_RUN_ID),
+                "{name}: the PLAIN rqrr pass is expected to MISS the soft optical dual-QR \
+                 (run_id {OPTICAL_RUN_ID}); got {:?}",
+                plain
+                    .iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            );
+
+            // GREEN: decode_qr_luma_all (plain ∪ Otsu) recovers BOTH optical halves — two
+            // distinct frame_ids (the even+odd Vernier pair) under run_id 354003. Reverting
+            // to the early-return makes this return only burns → 0 optical → this fails.
+            let all = decode_qr_luma_all(luma.clone());
+            let mut optical: Vec<u32> = all
+                .iter()
+                .filter(|p| p.run_id == OPTICAL_RUN_ID)
+                .map(|p| p.frame_id)
+                .collect();
+            optical.sort_unstable();
+            optical.dedup();
+            assert!(
+                optical.len() >= 2,
+                "{name}: decode_qr_luma_all must recover BOTH optical dual-QR halves \
+                 (≥2 distinct frame_ids, run_id {OPTICAL_RUN_ID}); got optical frame_ids \
+                 {optical:?} from {:?}",
+                all.iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            );
+
+            // AND the recording per-frame path (fast-then-robust, gated on the burn ids) also
+            // surfaces the optical — the verdict's actual decode call reads it too.
+            let rec = decode_qr_luma_all_fast_then_robust(luma, BURN_IDS);
+            assert!(
+                rec.iter().any(|p| p.run_id == OPTICAL_RUN_ID),
+                "{name}: the recording per-frame decode must also surface the optical dual-QR \
+                 (run_id {OPTICAL_RUN_ID}); got {:?}",
+                rec.iter()
+                    .map(|p| (p.run_id, p.frame_id))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // ============================================================================
     // #202 — robust offline decode recovers the small node burns rqrr's single
     // full-frame `detect_grids` pass intermittently misses (the residual
     // burn-unreadable misses on PRESENT, sharp frames; cv2 reads them, rqrr's
