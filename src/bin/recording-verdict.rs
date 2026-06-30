@@ -187,8 +187,10 @@ struct Args {
     /// (cam2→cam1, cam1→strih, strih→stream, cam1 contiguity, all loss + latency). PASS is the
     /// #186 gate: EVERY node's burn-id sequence is CONTIGUOUS (no missing id — a missing id, incl.
     /// a BURN-UNREADABLE one, FAILS) AND (when `--cam1-capture-stats` is given) cam2→cam1 V4L2
-    /// capture-drop = 0. The analyzed span (`--min-secs`) and the per-recording undecodable beat
-    /// are DIAGNOSTIC only — they do NOT gate the headline. Repeat per box:
+    /// capture-drop = 0 AND the analyzed optical span clears the >= `--min-secs` duration floor
+    /// (#373 — the merge path runs through the SAME `build_and_print_verdict`, so a collapsed
+    /// optical span fails the merge headline too, not just the fused one). The per-recording
+    /// undecodable 60→30 BEAT metric is DIAGNOSTIC only — it does NOT gate the headline. Repeat per box:
     /// `--merge-partials strih=<json> --merge-partials stream=<json>`. Combined with the small
     /// `--painter` / `--cam1-capture-stats` files (already on dev1) and written to `--json`. NO
     /// recording is read here — only the small partial JSONs.
@@ -862,7 +864,11 @@ fn node_verdict_with_optical(
 /// recorded fixture exercises it on the rig). The JUDGEMENT it wraps IS mutation-tested: the pure
 /// `colour_verify` module (`classify_patch` / `summarize_node_colour`) and `NodeVerdict::is_zero`'s
 /// `colour_fail == 0` term (locked by `node_verdict_colour_fail_is_a_hard_fail_364`).
-fn build_node_colour_fail(spec: &NodeSpec, args: &Args) -> Result<usize> {
+fn build_node_colour_fail(
+    spec: &NodeSpec,
+    args: &Args,
+    cache: &mut HashMap<PathBuf, usize>,
+) -> Result<usize> {
     if !args.colour_gate {
         return Ok(0);
     }
@@ -873,6 +879,10 @@ fn build_node_colour_fail(spec: &NodeSpec, args: &Args) -> Result<usize> {
             spec.node
         )
     })?;
+    // #364 — strih and stream share the stream recording; sample each source recording at most once.
+    if let Some(&fail) = cache.get(rec) {
+        return Ok(fail);
+    }
     // The permanent cam2 painter renders the dual-QR + colour column at the default layout, so the
     // gate derives the same central-gap geometry from those defaults (single source of truth with
     // the painter via `colour_scale`).
@@ -889,7 +899,9 @@ fn build_node_colour_fail(spec: &NodeSpec, args: &Args) -> Result<usize> {
         rec.display(),
         spec.node
     );
-    Ok(summary.fail_count())
+    let fail = summary.fail_count();
+    cache.insert(rec.to_path_buf(), fail);
+    Ok(fail)
 }
 
 /// Build the human-readable verdict line(s) for a node — the pure body of [`print_node_verdict`],
@@ -900,14 +912,21 @@ fn build_node_colour_fail(spec: &NodeSpec, args: &Args) -> Result<usize> {
 /// already explained the failure. Previously an empty burn window WITH interior optical holes
 /// co-printed BOTH the OPTICAL-UNDECODABLE line and the NO-burn line (redundant output); the
 /// `explained` guard removes the duplication without dropping any specific reason.
-fn node_verdict_lines(v: &NodeVerdict) -> Vec<String> {
+fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     let c = &v.contiguity;
     let span = match (c.first_id, c.last_id) {
         (Some(f), Some(l)) => format!("ids {f}..={l}, {} present", c.present_count),
         _ => "no burn ids decoded".to_string(),
     };
     let mut lines: Vec<String> = Vec::new();
-    if v.is_zero() {
+    // #373 — the per-node "ZERO loss … optical read complete" line may ONLY be printed when the
+    // analyzed span ALSO cleared the duration floor. A delivery-clean node whose optical span
+    // COLLAPSED is `is_zero()` but NOT span_ok: printing "ZERO loss … optical read complete" there
+    // would be a per-node fake-green that the headline then flatly contradicts with its COLLAPSED
+    // line (the no-overstatement rule). When `is_zero() && !span_ok` we fall through; the non-zero
+    // branches below are all empty for a clean node, so this returns no per-node line and the
+    // headline's COLLAPSED line stands as the sole verdict.
+    if v.is_zero() && span_ok {
         lines.push(format!(
             "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}) AND cam2 optical read complete.",
             c.node
@@ -981,8 +1000,8 @@ fn node_verdict_lines(v: &NodeVerdict) -> Vec<String> {
 }
 
 /// Print the ONE trustworthy binary verdict for a node, human-readable, no jargon.
-fn print_node_verdict(v: &NodeVerdict) {
-    for line in node_verdict_lines(v) {
+fn print_node_verdict(v: &NodeVerdict, span_ok: bool) {
+    for line in node_verdict_lines(v, span_ok) {
         println!("{line}");
     }
 }
@@ -1951,6 +1970,11 @@ fn build_and_print_verdict(
             // optical-span scan twice.
             let stream_optical = optical_span_facts(stream_frames, &all_burns, cam2_pin);
             let cam1_optical = optical_span_facts(cam1_source, &all_burns, cam2_pin);
+            // #364 — the colour gate samples a recording by path; strih and stream both point at the
+            // stream recording, so without memoization that recording is colour-sampled TWICE
+            // (identical work — mirrors the #374 nit 1 dedup of the optical scan). Cache the per-path
+            // colour fail count so each source recording is sampled at most once.
+            let mut colour_fail_cache: HashMap<PathBuf, usize> = HashMap::new();
             for (spec, present, optical) in [
                 (
                     NodeSpec {
@@ -2024,15 +2048,26 @@ fn build_and_print_verdict(
                 // is off. The ffmpeg/process glue lives in `build_node_colour_fail` (excluded from
                 // mutants like the other I/O glue); the JUDGEMENT is the mutation-tested
                 // `colour_verify` module.
-                nv.colour_fail = build_node_colour_fail(&spec, args)?;
-                print_node_verdict(&nv);
+                nv.colour_fail = build_node_colour_fail(&spec, args, &mut colour_fail_cache)?;
                 // #373 — the analyzed OPTICAL span (the cam2 dual-QR FIRST..=LAST decoded-frame
                 // window) must clear the >=min_secs floor, or the headline VACUOUSLY passes over a
                 // COLLAPSED / partial read: over a tiny span optical_undecodable==0 and the burn
                 // window is trivially contiguous, so `is_zero()` alone would declare a fake green.
                 // The PASS/FAIL decision is the pure, Tier-0 `recording_span_gate` module.
-                let span_secs = nv.analyzed_span_secs(cfg.capture_fps);
-                let span_ok = nv.span_ok(cfg.capture_fps, cfg.min_secs);
+                // #373 — divide by the PER-RECORDING capture rate, not one shared rate: cam1's
+                // optical span is read from the strih recording (`capture_fps`, 60 on the rig);
+                // strih/stream from the stream recording (`stream_capture_fps`, 30). One rate would
+                // false-fail strih/stream's real 300 s span on the rig's --capture-fps 60.
+                let node_fps = camera_box::recording_span_gate::node_capture_fps(
+                    spec.node,
+                    args.capture_fps,
+                    args.stream_capture_fps,
+                );
+                let span_secs = nv.analyzed_span_secs(node_fps);
+                let span_ok = nv.span_ok(node_fps, cfg.min_secs);
+                // Printed AFTER span_ok is known so the per-node line can be suppressed on a
+                // delivery-clean-but-collapsed-span node (no "ZERO loss" contradicting the headline).
+                print_node_verdict(&nv, span_ok);
                 if !span_ok {
                     println!(
                         "  [{}] NOT zero — analyzed optical span {:.1}s < {:.1}s floor: the cam2 \
@@ -2052,9 +2087,17 @@ fn build_and_print_verdict(
                 node_verdicts.iter().map(NodeVerdict::burn_unreadable).sum();
             // #373 — the headline is ZERO loss only when every node is delivery-clean AND its
             // analyzed optical span cleared the duration floor (no vacuous pass over a collapsed read).
-            let all_zero = node_verdicts
-                .iter()
-                .all(|nv| nv.is_zero() && nv.span_ok(cfg.capture_fps, cfg.min_secs));
+            let all_zero = node_verdicts.iter().all(|nv| {
+                nv.is_zero()
+                    && nv.span_ok(
+                        camera_box::recording_span_gate::node_capture_fps(
+                            &nv.contiguity.node,
+                            args.capture_fps,
+                            args.stream_capture_fps,
+                        ),
+                        cfg.min_secs,
+                    )
+            });
             if all_zero {
                 println!(
                     "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
@@ -3034,6 +3077,55 @@ mod tests {
             "#208: the missing cam1 id must be classified as a REAL DROP: {}",
             drop["full_chain"]["real_drops"]
         );
+    }
+
+    /// #373 — the headline duration floor must scale each node's span by its SOURCE recording's
+    /// capture rate, NOT one shared `--capture-fps`. cam1 is read from the strih recording
+    /// (`--capture-fps`, 60 on the rig); strih + stream from the stream recording
+    /// (`--stream-capture-fps`, 30). A single rate halves strih/stream's reported span and
+    /// FALSE-FAILS a genuine zero-loss run on the rig's `--capture-fps 60`. This is the end-to-end
+    /// wiring lock (the pure decision is `recording_span_gate::node_capture_fps`): a revert to one
+    /// shared rate in `build_and_print_verdict` would FALSE-FAIL this real run.
+    #[test]
+    fn headline_span_floor_uses_per_recording_capture_fps_373() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        // Rig rates: cam1/strih recording @ 60, stream recording @ 30; floor 5 s.
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "5",
+            "--capture-fps",
+            "60",
+            "--stream-capture-fps",
+            "30",
+        ]);
+        // strih recording (cam1's source, read @60): 300 frames = exactly 5 s ⇒ clears the floor.
+        let strih = window(300, false, None);
+        // stream recording (strih+stream source, read @30): 200 frames = 6.67 s at the RIGHT rate
+        // (clears 5 s), but only 3.33 s if wrongly divided by 60 (the bug ⇒ strih+stream FALSE-FAIL).
+        let stream = window(200, true, None);
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+        )
+        .expect("verdict");
+        assert!(
+            pass,
+            "#373: strih/stream span must scale by stream_capture_fps (30) not capture_fps (60) — a \
+             real >=floor run MUST pass; a single shared rate would false-fail it: {}",
+            v["full_chain"]["loss"]
+        );
+        assert_eq!(v["overall_pass"], serde_json::json!(true));
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(true));
     }
 
     /// #332: the all-cambox `all_cambox_continuity` block must be produced by the per-box MERGE path
@@ -4517,7 +4609,7 @@ mod tests {
             "the strih burn never decoded"
         );
         assert_eq!(v.optical_undecodable, 1, "frame 1 is one optical hole");
-        let lines = super::node_verdict_lines(&v);
+        let lines = super::node_verdict_lines(&v, true);
         assert!(
             lines.iter().any(|l| l.contains("OPTICAL-UNDECODABLE")),
             "the specific optical fault line must print: {lines:?}"
@@ -4555,7 +4647,7 @@ mod tests {
         .unwrap();
         assert!(v.contiguity.first_id.is_none());
         assert_eq!(v.optical_undecodable, 0, "no interior optical hole here");
-        let lines = super::node_verdict_lines(&v);
+        let lines = super::node_verdict_lines(&v, true);
         assert!(
             lines.iter().any(|l| l.contains("NO burn id decoded")),
             "the sole-reason no-burn line must still print: {lines:?}"

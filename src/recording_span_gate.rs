@@ -42,6 +42,22 @@ pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool
     analyzed_span_secs >= min_secs
 }
 
+/// #373 — the CAPTURE rate to divide a node's `optical_span_frames` by, when converting to the
+/// analyzed-span SECONDS the duration floor gates on. The nodes do NOT share one rate: cam1's burn
+/// (and its optical span) is read from the CLEAN strih recording (#133), captured at `capture_fps`
+/// (60 on the rig); strih and stream are read from the stream recording, captured at
+/// `stream_capture_fps` (30). Dividing every node by ONE rate mis-scales the others: with the rig's
+/// `--capture-fps 60`, a real 300 s strih/stream span (9000 frames @ 30 fps) would read 150 s and
+/// FALSE-FAIL the >=300 s floor — failing exactly the genuine zero-loss runs the floor must pass.
+/// So cam1 uses `capture_fps`; every other node uses `stream_capture_fps`.
+pub fn node_capture_fps(node: &str, capture_fps: f64, stream_capture_fps: f64) -> f64 {
+    if node == "cam1" {
+        capture_fps
+    } else {
+        stream_capture_fps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +100,47 @@ mod tests {
         assert!(
             !analyzed_span_long_enough(299.9, MIN),
             "just below the floor must still FAIL"
+        );
+    }
+
+    #[test]
+    fn node_capture_fps_uses_the_per_recording_rate_not_one_shared_rate_373() {
+        // The rig passes --capture-fps 60 (the strih recording's cam1 diagnostic rate). cam1 is read
+        // from the 60 fps strih recording; strih + stream from the 30 fps stream recording. A single
+        // rate for all nodes false-fails strih/stream.
+        let (cap, stream_cap) = (60.0, 30.0);
+        assert_eq!(
+            node_capture_fps("cam1", cap, stream_cap),
+            60.0,
+            "cam1's optical span comes from the 60 fps strih recording"
+        );
+        assert_eq!(
+            node_capture_fps("strih", cap, stream_cap),
+            30.0,
+            "strih is read from the 30 fps stream recording"
+        );
+        assert_eq!(
+            node_capture_fps("stream", cap, stream_cap),
+            30.0,
+            "stream is read from the 30 fps stream recording"
+        );
+        // The bug this locks: a real 300 s strih span = 9000 frames @ 30 fps. Scaled by the WRONG
+        // rate (60) it reads 150 s and FALSE-FAILS the floor; by the right rate (30) it reads 300 s
+        // and PASSES.
+        let strih_frames = 9000;
+        assert!(
+            !analyzed_span_long_enough(
+                span_secs(strih_frames, node_capture_fps("strih", cap, cap)), // WRONG: 60
+                MIN
+            ),
+            "wrong shared rate would false-fail a real 300 s strih run"
+        );
+        assert!(
+            analyzed_span_long_enough(
+                span_secs(strih_frames, node_capture_fps("strih", cap, stream_cap)), // RIGHT: 30
+                MIN
+            ),
+            "the per-recording rate passes the real 300 s strih run"
         );
     }
 

@@ -374,9 +374,16 @@ impl NodeColourSummary {
     /// essentially every frame, while a one-off compression glitch on a single frame does not flip
     /// the gate. This is the node's `colour_fail` that the verdict gate uses.
     pub fn fail_count(&self) -> usize {
+        // The majority is over the frames on which the patch was actually CHECKED, not the total
+        // sampled: a patch burn-covered on most frames but WRONG on every frame it WAS visible is a
+        // real defect that must still be charged. Using `frames_sampled` as the denominator would
+        // let such a patch escape (a vacuous-pass hole) once coverage becomes intermittent. Under
+        // the current central-gap geometry the column is never burn-covered, so `checked ==
+        // frames_sampled` for every patch and this matches the old behaviour exactly.
         self.patch_wrong_counts
             .iter()
-            .filter(|&&c| c * 2 > self.frames_sampled)
+            .zip(self.patch_checked_counts.iter())
+            .filter(|(&wrong, &checked)| checked > 0 && wrong * 2 > checked)
             .count()
     }
 
@@ -920,6 +927,25 @@ mod tests {
             TOP_MARGIN,
             &[],
         )
+    }
+
+    #[test]
+    fn patch_wrong_on_all_checked_but_burn_covered_majority_is_still_charged() {
+        // Latent fail-open: a patch burn-covered on most frames (checked on only a few) but WRONG on
+        // EVERY frame it WAS visible is a real colour defect. With the majority taken over total
+        // sampled frames (the old `wrong * 2 > frames_sampled`), such a patch escapes the gate
+        // (2*2=4 is not > 9) — a vacuous-pass hole. The majority must be over the CHECKED count.
+        let s = NodeColourSummary {
+            patch_wrong_counts: vec![2],   // wrong on both frames it was checked
+            patch_checked_counts: vec![2], // checked on only 2 of 9 frames (burn-covered on 7)
+            frames_sampled: 9,
+        };
+        assert_eq!(
+            s.fail_count(),
+            1,
+            "a patch wrong on all its CHECKED frames must be charged even when burn-covered on the \
+             majority (denominator is per-patch checked, not total sampled)"
+        );
     }
 
     #[test]
