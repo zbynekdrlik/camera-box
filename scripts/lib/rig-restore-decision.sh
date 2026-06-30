@@ -14,7 +14,11 @@
 #   RIG_CONFIRM_THRESHOLD  consecutive confirmations required before acting (default 2 — the #266
 #                          "2-live-sample" lesson). 1 = act on the first sighting.
 #   RIG_KNOWN_TEST_SCENES  space-separated list of program scene names that PROVE a TEST state
-#                          (default "PHASE2-PROBE" — the canonical obs_phase2.py probe scene).
+#                          (default "PHASE2-PROBE REC-STRIH-TMP":
+#                            PHASE2-PROBE   — the canonical obs_phase2.py phase2 probe scene on strih
+#                            REC-STRIH-TMP  — the ephemeral full-screen scene recording-e2e.sh builds
+#                                             on the stream box (STREAM_PROG_SCENE default; the primary
+#                                             #281-class case: stream stranded mid-proof)).
 #   RIG_OBS                newline-separated observation records:
 #                            cam <name> down=<0|1> probe=<0|1>
 #                            obs <name> scene=<program scene name>
@@ -40,7 +44,7 @@ rig_restore_decide() {
   local hb_active="${RIG_HB_ACTIVE:-0}"
   local prev="${RIG_PREV_CONFIRM:-0}"
   local threshold="${RIG_CONFIRM_THRESHOLD:-2}"
-  local known="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE}"
+  local known="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE REC-STRIH-TMP}"
   case "$prev$threshold" in *[!0-9]* | "") prev=0; threshold=2 ;; esac
 
   # Rule 1 — fresh heartbeat: a legit E2E is running, NEVER act (resets the counter).

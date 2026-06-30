@@ -313,6 +313,60 @@ fn known_test_scene_set_is_overridable_via_env() {
         .unwrap_or(false));
 }
 
+// ─── #350 gap: REC-STRIH-TMP must be in the DEFAULT known-test-scenes set ────
+
+#[test]
+fn rec_strih_tmp_is_stranded_by_default_no_env_override() {
+    // REC-STRIH-TMP is the STREAM_PROG_SCENE default in recording-e2e.sh — the ephemeral
+    // full-screen scene the stream box is left on when a rig step dies mid-proof (the
+    // primary #281-class case). It MUST be in the DEFAULT RIG_KNOWN_TEST_SCENES so the
+    // watchdog detects a stranded stream box WITHOUT an env override.
+    // This test is RED with the old default ("PHASE2-PROBE" only) and GREEN after the fix
+    // ("PHASE2-PROBE REC-STRIH-TMP").  No RIG_KNOWN_TEST_SCENES env override here.
+    let d = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["obs stream scene=REC-STRIH-TMP"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("1"),
+        "stream stranded on REC-STRIH-TMP must trigger restore with the DEFAULT \
+         known-test-scenes (Refs #350 — bug: default was PHASE2-PROBE only, missed \
+         REC-STRIH-TMP) — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+    assert!(
+        d.get("actions")
+            .map(|s| s.contains("restore_obs:stream"))
+            .unwrap_or(false),
+        "actions must include restore_obs:stream — got {:?}",
+        d.get("actions")
+    );
+}
+
+#[test]
+fn prod_scene_pro_not_in_default_known_test_scenes() {
+    // "PRO" is the real prod scene on the stream box — it must NOT appear in the default
+    // known-test-scenes set (no false positive even after widening to include REC-STRIH-TMP).
+    let d = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["obs strih scene=Cam 5", "obs stream scene=PRO"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "prod scenes Cam 5 + PRO must NOT trigger restore — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+    assert_eq!(
+        d.get("confirm").map(String::as_str),
+        Some("0"),
+        "clean rig (prod scenes only) must reset the counter"
+    );
+}
+
 // ─── heartbeat helpers ───────────────────────────────────────────────────────
 
 #[test]

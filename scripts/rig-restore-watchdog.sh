@@ -14,7 +14,7 @@
 # CONSERVATIVE BY DESIGN (the #266 auto-watchdog was removed for false positives):
 #   - A FRESH heartbeat (scripts/lib/rig-heartbeat.sh, written by a live E2E) => NEVER act.
 #   - Acts ONLY on a CLEAR stranded signal: cam-box down, stale probe running, or OBS program on a
-#     known TEST scene (default PHASE2-PROBE; RIG_KNOWN_TEST_SCENES overrides).
+#     known TEST scene (default "PHASE2-PROBE REC-STRIH-TMP"; RIG_KNOWN_TEST_SCENES overrides).
 #   - Requires RIG_CONFIRM_THRESHOLD (default 2) CONSECUTIVE confirmations before acting.
 # ALL "should we act?" logic lives in the PURE scripts/lib/rig-restore-decision.sh (unit-tested);
 # this script only GATHERS observations and EXECUTES the decided restores.
@@ -76,7 +76,7 @@ REPO_SLUG="${RIG_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 
 # Export decision tunables consumed by rig_restore_decide.
 export RIG_CONFIRM_THRESHOLD="${RIG_CONFIRM_THRESHOLD:-2}"
-export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE}"
+export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE REC-STRIH-TMP}"
 export RIG_HEARTBEAT_STALE_SEC="${RIG_HEARTBEAT_STALE_SEC:-600}"
 
 # ── logging (verbose per comprehensive-logging.md) ───────────────────────────
