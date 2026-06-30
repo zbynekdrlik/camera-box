@@ -4,10 +4,14 @@
 //! produces a HARD-FAIL zero-loss verdict with NO thresholds:
 //!
 //!   PASS (#186) = EVERY node's burn-id sequence is CONTIGUOUS (no missing id — a
-//!   missing id, incl. a BURN-UNREADABLE one, FAILS) AND (when `--cam1-capture-stats`
-//!   is given) cam2→cam1 V4L2 capture-drop = 0. The per-recording undecodable / 60→30
-//!   beat metrics and the analyzed span (`--min-secs`) are DIAGNOSTIC only — they are
-//!   reported for context but do NOT gate the headline.
+//!   missing id, incl. a BURN-UNREADABLE one, FAILS) AND (#363) the cam2 OPTICAL dual-QR
+//!   read is COMPLETE across the span (0 OPTICAL-UNDECODABLE in-span frames — the real
+//!   camera-captured pixel path is the HARD gate) AND (when `--cam1-capture-stats` is given)
+//!   cam2→cam1 V4L2 capture-drop = 0. The digital node burns are injected AFTER capture, so
+//!   they prove node→node DIGITAL delivery only — they can NEVER substitute for the optical
+//!   read (reverts the #360 weakening that let a digital-burn-only frame pass the gate). The
+//!   per-recording 60→30 beat metrics and the analyzed span (`--min-secs`) are DIAGNOSTIC
+//!   only — they are reported for context but do NOT gate the headline.
 //!
 //! The free-running 60→30 camera-sampling beat (mean step exactly 2.0, symmetric)
 //! is recognized and NOT counted as loss; the burn-id contiguity is the trustworthy verdict.
@@ -317,13 +321,22 @@ fn frame_is_delivered_optical(
 struct NodeVerdict {
     contiguity: NodeContiguity,
     classified: Vec<ClassifiedMissing>,
+    /// #363 — count of in-span frames whose cam2 OPTICAL dual-QR did NOT decode (the real
+    /// camera-captured pixel path could not be proven). The cam2 optical read is the HARD gate:
+    /// any undecodable in-span frame FAILS the node, even when the digital burn is contiguous.
+    /// A distinct category — NOT a phantom chain drop (the pre-#360 problem), NOT passed (the #360
+    /// fraud). See [`optical_undecodable_in_span`].
+    optical_undecodable: usize,
 }
 
 impl NodeVerdict {
-    /// ZERO loss ⇔ contiguous (no missing id). A BURN-UNREADABLE missing id is a real
-    /// DEFECT to fix and still makes the node NOT-zero (it is never silently excluded).
+    /// ZERO loss ⇔ the burn-id sequence is contiguous (no missing id — a BURN-UNREADABLE missing
+    /// id is a real DEFECT and still makes the node NOT-zero, never silently excluded) AND the
+    /// cam2 OPTICAL read is complete across the span (#363: `optical_undecodable == 0`). The
+    /// optical read is the HARD gate — a run where the filmed dual-QR went undecodable FAILS even
+    /// if every node's digital burn is present (reverts the #360 burn-only weakening).
     fn is_zero(&self) -> bool {
-        self.contiguity.is_contiguous()
+        self.contiguity.is_contiguous() && self.optical_undecodable == 0
     }
     fn real_drops(&self) -> usize {
         self.classified
@@ -362,6 +375,44 @@ fn node_burn_id_on(f: &RecordingFrame, burn_run_id: u32) -> Option<u32> {
 /// the user's HARD 0-gap bar. So this constant governs the trailing teardown tail only.
 const TEARDOWN_TAIL_MAX_FRAMES: usize = 45;
 
+/// #363 — the optical signal span: the index range from the FIRST to the LAST recorded frame whose
+/// cam2 OPTICAL dual-QR decoded (a delivered frame). `None` ⇒ no optical frame at all (no signal
+/// window). Both the in-window burn sequence ([`in_window_burn_frames`]) and the optical-undecodable
+/// count ([`optical_undecodable_in_span`]) anchor on this span, so the boundary rule lives in ONE
+/// place. (`cam2_run_id` honours the #273 pin: a foreign/previous-run paint never anchors the span.)
+fn optical_span(
+    stream: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+) -> Option<(usize, usize)> {
+    let is_optical =
+        |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids, cam2_run_id);
+    let first = stream.iter().position(is_optical)?;
+    let last = stream.iter().rposition(is_optical)?;
+    Some((first, last))
+}
+
+/// #363 — count the in-span frames whose cam2 OPTICAL dual-QR did NOT decode. The window boundaries
+/// are optically anchored ([`optical_span`]), so these are strictly INTERIOR optical holes: each is
+/// a frame where the real camera-captured pixel path could not be proven. This is the DISTINCT
+/// OPTICAL-UNDECODABLE hard-fail count — the cam2 optical read is the HARD gate (reverts the #360
+/// burn-only weakening): a run with ANY undecodable in-span frame FAILS, even when every node's
+/// digital burn is present. Returns 0 when there is no optical frame at all — then the burn
+/// contiguity already FAILS (`first_id == None`), so the run can never vacuously pass.
+fn optical_undecodable_in_span(
+    stream: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+) -> usize {
+    match optical_span(stream, all_burn_run_ids, cam2_run_id) {
+        Some((first, last)) => stream[first..=last]
+            .iter()
+            .filter(|f| !frame_is_delivered_optical(f, all_burn_run_ids, cam2_run_id))
+            .count(),
+        None => 0,
+    }
+}
+
 /// Build the IN-WINDOW per-recorded-frame burn-presence sequence for a node (#198).
 ///
 /// The window is the leading-discard-trimmed signal body: from the FIRST to the LAST
@@ -372,8 +423,9 @@ const TEARDOWN_TAIL_MAX_FRAMES: usize = 45;
 /// only a free-running render-tick burn may sit) are EXCLUDED — so their burn ids can never
 /// inflate the range or be counted as missing (#198 point 1). Frames inside the window that
 /// are NOT delivered (no cam2 QR — an interior optical hole) are excluded from the burn
-/// sequence; that optical loss is the separate per-recording continuity check, not a burn
-/// fault for this node.
+/// sequence; #363 charges each such interior hole as a DISTINCT OPTICAL-UNDECODABLE hard-fail
+/// (the cam2 optical read is the gate — see [`optical_undecodable_in_span`]), never silently
+/// passed and never a phantom burn drop.
 fn in_window_burn_frames(
     stream: &[RecordingFrame],
     burn_run_id: u32,
@@ -400,26 +452,45 @@ fn in_window_burn_frames(
     //   id and manufacturing a PHANTOM forward-gap "REAL DROP" on the next frame (#204: run
     //   136141133 frame 5905 carried cam1 burn 6485 with a blurred top dual-QR → 6485 dropped
     //   from the window → phantom drop). So for cam1 a frame is in-window if it carries the
-    //   cam2 optical QR OR the cam1 burn.
-    // - strih/stream (PerRenderTick): #360 EXTENDS the same reasoning. Their burn is a digital,
-    //   CRC-validated QR that rides through the chain INDEPENDENTLY of the cam2 optical paint, so
-    //   a frame carrying the strih/stream burn IS a delivered output frame regardless of whether
-    //   THAT frame's cam2 optical QR decoded. At high genlock latency the filmed cam2 dual-QR
-    //   went ~87% undecodable (run 354003) — the OLD strict optical-only membership then EXCISED
-    //   those burn-present delivered frames, the surviving burn ids jumped ~30 between the sparse
-    //   optical frames, and the decimation gap math manufactured ~17300 phantom REAL DROPs out of
-    //   a clean run. A test-rig OPTICAL-READ failure must NEVER manufacture digital-chain loss.
-    //   The lead-in/out trim that the optical signal used to provide is preserved by the
-    //   OPTICAL-anchored window BOUNDARIES below (first/last optical frame); WITHIN that span a
-    //   burn on a non-optical frame is a real delivered frame, not pre/post-signal noise. So all
-    //   rates now use the same membership: optical-delivered OR carries this node's burn.
+    //   cam2 optical QR OR the cam1 burn — KEPT under #363 (the cam1 burn is genuine per-emit
+    //   delivery proof, so this avoids the phantom; the optical hole on such a frame is still
+    //   charged as OPTICAL-UNDECODABLE below, so it FAILS — never silently passed).
+    // - strih/stream (PerRenderTick): #363 REVERTS the #360 extension. #360 included a frame
+    //   carrying ONLY the strih/stream digital burn (no cam2 optical) as "delivered" — but that
+    //   burn is injected at the OBS render tick, AFTER capture, so it proves node→node DIGITAL
+    //   delivery, NOT that the real camera captured the pixel path. At high genlock latency the
+    //   filmed cam2 dual-QR went ~87% undecodable (run 354003) and #360 routed the verdict AROUND
+    //   the optical read, PASSING on the digital burns alone — the fraud #363 reverts. So a
+    //   strih/stream frame is in-window ONLY when its cam2 OPTICAL QR decoded; a burn on a
+    //   non-optical in-span frame is an OPTICAL-READ failure (counted as OPTICAL-UNDECODABLE
+    //   below — a HARD fail), not a delivered frame. Because strih/stream are PerRenderTick with
+    //   gap-ignore (step 1), excluding those frames does NOT manufacture a phantom drop (forward
+    //   gaps between the surviving optical frames are ignored) — the pre-#360 phantom came from
+    //   the now-removed step-2 decimation math, not from optical-only membership.
     let is_optical =
         |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids, cam2_run_id);
     let has_node_burn = |f: &RecordingFrame| node_burn_id_on(f, burn_run_id).is_some();
-    let in_window = |f: &RecordingFrame| is_optical(f) || has_node_burn(f);
-    // `rate` no longer changes membership (the optical BOUNDARIES still trim lead-in/out); it
-    // still drives the per-rate loss accounting downstream (burn_contiguity_in_window_with_step).
-    let _ = rate;
+    // #363 — the cam2 OPTICAL dual-QR read is the HARD gate (reverts the #360 weakening). A frame
+    // counts as a delivered burn-window frame ONLY when its cam2 OPTICAL QR decoded (the real
+    // camera-captured pixel path). The #360 `|| has_node_burn` fallback let a frame with ONLY a
+    // software-injected digital burn (no optical read) count as delivered, so an 87%-optically-
+    // undecodable run PASSED on the digital burns alone — the fraud #363 reverts. The in-span
+    // frames whose optical QR did NOT decode are charged as a DISTINCT OPTICAL-UNDECODABLE hard-fail
+    // (see [`optical_undecodable_in_span`] / [`NodeVerdict::optical_undecodable`]) — never a phantom
+    // chain drop, never a pass.
+    //
+    // EXCEPTION — cam1 ([`BurnRate::PerEmittedFrame`]): its burn increments once per EMITTED frame,
+    // so a frame carrying the cam1 burn PROVES cam1 emitted+delivered THAT frame regardless of
+    // whether its separate cam2 optical QR decoded. KEEPING the cam1 burn in the window is the #204
+    // fix — it stops an optically-undecodable-but-cam1-delivered frame from orphaning the cam1 id
+    // and manufacturing a PHANTOM forward-gap REAL DROP. That frame is NOT silently passed: it is
+    // still counted as OPTICAL-UNDECODABLE and FAILS the verdict. strih/stream
+    // ([`BurnRate::PerRenderTick`]) get NO burn fallback — their digital burn is a free-running
+    // render tick, not per-emit delivery proof, so an in-span non-optical frame is purely an
+    // optical-read failure.
+    let in_window = |f: &RecordingFrame| {
+        is_optical(f) || (matches!(rate, BurnRate::PerEmittedFrame) && has_node_burn(f))
+    };
 
     // Boundaries: the optical signal span (the painted run). For cam1 this still anchors the
     // window to the optical signal; an in-window non-optical frame carrying the cam1 burn is
@@ -434,12 +505,10 @@ fn in_window_burn_frames(
     // paint is optical" rule that appeared to cover it was itself the #273 bug (it charged the
     // foreign residue as loss). The guarantee that IS preserved + tested: a current-paint frame
     // with an absent burn is KEPT and FAILS (pinned_real_leading_current_run_loss_still_fails).
-    let first = stream.iter().position(is_optical);
-    let last = stream.iter().rposition(is_optical);
-    let (first, last) = match (first, last) {
-        (Some(f), Some(l)) => (f, l),
+    let (first, last) = match optical_span(stream, all_burn_run_ids, cam2_run_id) {
+        Some(fl) => fl,
         // No optical frame at all ⇒ no signal window ⇒ nothing to prove (empty).
-        _ => return Vec::new(),
+        None => return Vec::new(),
     };
     let mut frames: Vec<RecordedBurnFrame> = stream[first..=last]
         .iter()
@@ -649,6 +718,12 @@ fn node_verdict(
     );
     let in_window = burn_contiguity_in_window_with_step(node, &window, spec.rate, spec.step);
     let contiguity = in_window.contiguity;
+    // #363 — the cam2 OPTICAL dual-QR read is the HARD gate. Count the in-span frames whose optical
+    // QR did NOT decode (the real camera-captured pixel path is unproven on each). This is a
+    // DISTINCT failure category gated by `NodeVerdict::is_zero` — never a phantom burn drop, never
+    // passed on the digital burns alone (reverts the #360 weakening).
+    let optical_undecodable =
+        optical_undecodable_in_span(source, all_burn_run_ids, spec.cam2_run_id);
 
     // The pure check already paired each missing id with the recorded frame to view and WHY
     // it is missing (RealDrop for a per-emit gap / backward jump, BurnUnreadable for a
@@ -693,6 +768,7 @@ fn node_verdict(
     Ok(NodeVerdict {
         contiguity,
         classified,
+        optical_undecodable,
     })
 }
 
@@ -705,10 +781,19 @@ fn print_node_verdict(v: &NodeVerdict) {
     };
     if v.is_zero() {
         println!(
-            "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}).",
+            "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}) AND cam2 optical read complete.",
             c.node
         );
         return;
+    }
+    // #363 — the cam2 OPTICAL dual-QR read is the HARD gate. Surface an undecodable optical span
+    // FIRST: it is the real-camera-path failure, NOT a digital burn fault. The digital burns can
+    // be 100% present and the run still FAILS here (the #360 fraud this reverts).
+    if v.optical_undecodable > 0 {
+        println!(
+            "  [{}] NOT zero — {} OPTICAL-UNDECODABLE frame(s): the cam2 dual-QR (the REAL camera-captured pixel path) did not decode in-span. The digital burn proves node→node delivery only; it can NEVER substitute for the optical read (#363).",
+            c.node, v.optical_undecodable
+        );
     }
     // No burn decoded at all (empty / all-unreadable window) ⇒ NOT a pass, but there is no
     // missing-id list to print — say so plainly instead of "0 missing id(s)".
@@ -717,6 +802,11 @@ fn print_node_verdict(v: &NodeVerdict) {
             "  [{}] NOT zero — NO burn id decoded in the signal window (nothing proven; {} delivered frame(s) carried no readable {} burn).",
             c.node, c.expected_count, c.node
         );
+        return;
+    }
+    // Burn-id faults (may be empty when the failure is PURELY optical — then only the line above
+    // prints, and the per-slot loop below is a no-op).
+    if c.missing_ids.is_empty() {
         return;
     }
     println!(
@@ -751,6 +841,7 @@ fn node_verdict_json(v: &NodeVerdict) -> serde_json::Value {
         "missing_ids": v.contiguity.missing_ids,
         "real_drops": v.real_drops(),
         "burn_unreadable": v.burn_unreadable(),
+        "optical_undecodable": v.optical_undecodable,
         "classified": v.classified,
     })
 }
@@ -2524,8 +2615,8 @@ fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
 mod tests {
     use super::{
         frame_is_delivered_optical, in_window_burn_frames, node_burn_id_on, node_verdict,
-        parse_cam1_capture_stats_str, parse_grab_ts, parse_painter_flip_str,
-        parse_painter_ticks_str,
+        optical_undecodable_in_span, parse_cam1_capture_stats_str, parse_grab_ts,
+        parse_painter_flip_str, parse_painter_ticks_str,
     };
     use camera_box::probe::burn_contiguity::{BurnRate, InWindowMissingKind};
     use camera_box::probe::payload::Payload;
@@ -3614,20 +3705,21 @@ mod tests {
     }
 
     #[test]
-    fn node_verdict_strih_zero_loss_when_cam2_optical_mostly_undecodable_360() {
-        // #360 REGRESSION (run 354003, 1000ms genlock latency). The filmed cam2 optical dual-QR
-        // went ~87% undecodable, while the DIGITAL strih burn was present on 100% of delivered
-        // frames. The OLD verdict (a) windowed strih to ONLY the optically-decoded frames (the
-        // cam2-tick gating) so the strih burn jumped ~30 ids between the sparse optical frames,
-        // and (b) assumed a clean step-2 decimation — the step-2 gap math then manufactured
-        // thousands of phantom REAL DROPs (the real run reported strih real_drops=17300, which
-        // EXCEEDS the 8999 frame count). The chain delivered every frame; a test-rig OPTICAL-READ
-        // failure must NEVER manufacture digital burn-chain loss.
+    fn node_verdict_fails_when_cam2_optical_mostly_undecodable_363() {
+        // #363 (reverts the #360 fraud). Run 354003: the filmed cam2 optical dual-QR went ~87%
+        // undecodable while the DIGITAL strih burn was present on 100% of frames. #360 routed the
+        // verdict AROUND the optical read — windowing on `is_optical || has_node_burn` so the
+        // burn-present-but-optically-undecodable frames counted as delivered, and the run PASSED on
+        // the digital burns alone. That is the fraud: a digital burn is injected at the node's
+        // render tick (AFTER capture) — it proves node→node DIGITAL delivery, NOT that the real
+        // camera captured the pixel path. The cam2 OPTICAL dual-QR read is the ONLY measurement of
+        // the real camera path, and it is the HARD gate: any in-span frame whose optical QR did not
+        // decode is an OPTICAL-UNDECODABLE hard-fail (NOT a phantom chain drop, NOT a pass).
         //
-        // Build 71 DELIVERED frames: the strih digital burn is present on EVERY frame (a
-        // free-running render tick, here a representative clean +4 step), the cam2 optical paint
-        // decodes only every 7th frame (undecodable / tick null on the other ~86%). NO real loss.
-        // Frame 0 and frame 70 are both optical so the optical-anchored boundary spans all 71.
+        // Build 71 frames: the strih digital burn is present on EVERY frame (a free-running render
+        // tick, +4 step), the cam2 optical paint decodes only every 7th frame (11 optical, 60
+        // optically-undecodable). Frame 0 and frame 70 are both optical so the optical-anchored
+        // boundary spans all 71. The 60 undecodable frames MUST fail the verdict.
         let n = 71u32;
         let stream: Vec<RecordingFrame> = (0..n)
             .map(|i| {
@@ -3635,7 +3727,7 @@ mod tests {
                 if i % 7 == 0 {
                     ps.push((CAM2, 100 + i)); // cam2 optical decoded only ~1-in-7 frames
                 }
-                ps.push((STRIH, 2000 + i * 4)); // strih digital burn on EVERY delivered frame
+                ps.push((STRIH, 2000 + i * 4)); // strih digital burn on EVERY frame
                 frame(i as u64, &ps)
             })
             .collect();
@@ -3655,20 +3747,36 @@ mod tests {
             0,
         )
         .unwrap();
-        // Every delivered (strih-burn-bearing) frame is verified — NOT just the ~11 optically
-        // decoded ones. (OLD code: expected_count == 11, the optical-only window.)
+        // The 60 frames with no cam2 optical QR are OPTICAL-UNDECODABLE — the real camera path is
+        // unproven on each. (i%7==0 over 0..71 ⇒ 11 optical, 60 undecodable.)
         assert_eq!(
-            v.contiguity.expected_count, n,
-            "all delivered frames (burn present) must be in the window, not only the optical ones: {:?}",
+            v.optical_undecodable, 60,
+            "the 60 in-span frames with no cam2 optical QR must register as OPTICAL-UNDECODABLE: {:?}",
             v.contiguity
         );
-        // And the free-running strih render-tick's forward gaps are not charged as loss.
+        // HARD GATE: an 87%-optically-undecodable run FAILS even with 100% digital burns present.
         assert!(
-            v.is_zero(),
-            "cam2 optical undecodability must not manufacture strih burn-chain loss: {:?}",
+            !v.is_zero(),
+            "optical undecodability must FAIL the verdict, never pass on the digital burns (#363): {:?}",
             v.contiguity
         );
-        assert_eq!(v.real_drops(), 0, "no phantom real drops");
+        // The strih burn over the OPTICAL-ONLY window (11 frames) is contiguous (per-render forward
+        // gaps ignored) — so the failure is the OPTICAL read, NOT a manufactured digital drop.
+        assert_eq!(
+            v.contiguity.expected_count, 11,
+            "the burn window is the 11 optically-delivered frames (optical is the gate, #363): {:?}",
+            v.contiguity
+        );
+        assert_eq!(
+            v.real_drops(),
+            0,
+            "no phantom real drops — the failure is optical, not digital"
+        );
+        assert_eq!(
+            v.burn_unreadable(),
+            0,
+            "the optical-only burn window is contiguous; no burn-unreadable slots"
+        );
     }
 
     #[test]
@@ -3828,7 +3936,11 @@ mod tests {
         // contiguous 50,51,52,53 — NOTHING is lost. The old filter dropped frame 1 (no cam2
         // QR) from the window, leaving 50→52 as "consecutive delivered" → a phantom drop of
         // 51. With the #204 fix (cam1 in-window membership = optical QR OR cam1 burn) the
-        // burn-carrying frame is kept, the run is contiguous, and the verdict is ZERO loss.
+        // burn-carrying frame is kept and the cam1 id run stays contiguous — NO phantom drop.
+        // #363: the OVERALL verdict now nonetheless FAILS, because that frame's cam2 OPTICAL QR
+        // was undecodable (one OPTICAL-UNDECODABLE hard-fail) — but as an optical failure, never a
+        // manufactured cam1 drop. cam1 burn-delivery contiguity (no phantom) and the optical hard
+        // gate are SEPARATE: this test pins that the #204 anti-phantom guarantee survives #363.
         let strih = vec![
             frame(0, &[(CAM2, 100), (CAM1B, 50)]),
             frame(1, &[(CAM1B, 51)]), // cam2 optical QR blurred → only the cam1 burn decoded
@@ -3865,7 +3977,10 @@ mod tests {
             iw.contiguity.missing_ids
         );
 
-        // And the full node_verdict from this strih slice is ZERO loss (no pixel path touched).
+        // #363: the full node_verdict — cam1's burn delivery is still proven (id 51 kept ⇒ NO
+        // phantom RealDrop, the #204 guarantee), but the run now FAILS because that frame's cam2
+        // OPTICAL QR did not decode: one OPTICAL-UNDECODABLE hard-fail. The failure is the optical
+        // read, never a manufactured cam1 drop. (No missing burn slot ⇒ pixel path untouched.)
         let tmp = tempfile::tempdir().unwrap();
         let nv = node_verdict(
             &super::NodeSpec {
@@ -3882,26 +3997,35 @@ mod tests {
             5,
         )
         .unwrap();
-        assert!(
-            nv.is_zero(),
-            "ZERO loss, no phantom drop: {:?}",
+        assert_eq!(
+            nv.real_drops(),
+            0,
+            "no phantom cam1 drop — the cam1 burn proves delivery (#204 preserved): {:?}",
             nv.contiguity
         );
-        assert_eq!(nv.real_drops(), 0);
+        assert_eq!(
+            nv.optical_undecodable, 1,
+            "the optical-blurred frame is one OPTICAL-UNDECODABLE hard-fail (#363): {:?}",
+            nv.contiguity
+        );
+        assert!(
+            !nv.is_zero(),
+            "the run FAILS on the restored optical hard gate (#363), with NO phantom drop: {:?}",
+            nv.contiguity
+        );
     }
 
     #[test]
-    fn strih_burn_on_a_non_optical_frame_inside_span_is_included_360() {
-        // #360: a strih burn on a non-optical frame INSIDE the optical span is now INCLUDED (the
-        // #204 cam1 reasoning extended to strih/stream). The digital, CRC-validated strih burn
-        // rides the chain independently of the cam2 optical paint, so a frame carrying it IS a
-        // delivered output frame even when its cam2 optical QR did not decode (the ~87%-undecodable
-        // high-latency case, run 354003). Frame 1 here has only the strih render burn (no cam2);
-        // it must be counted. Lead-in/out is still trimmed by the optical-anchored BOUNDARIES
-        // (frames 0 and 2 are the optical span ends).
+    fn strih_burn_on_a_non_optical_frame_inside_span_is_excluded_and_undecodable_363() {
+        // #363 (reverts #360): a strih burn on a NON-OPTICAL frame inside the optical span is NO
+        // LONGER counted as a delivered frame. strih/stream (PerRenderTick) get NO digital-burn
+        // fallback — the cam2 OPTICAL read is the gate. Frame 1 here has only the strih render burn
+        // (its cam2 optical QR did not decode); it is EXCLUDED from the strih burn window and
+        // instead registers as one OPTICAL-UNDECODABLE hard-fail. Lead-in/out is still trimmed by
+        // the optical-anchored BOUNDARIES (frames 0 and 2 are the optical span ends).
         let stream = vec![
             frame(0, &[(CAM2, 100), (STRIH, 1670)]),
-            frame(1, &[(STRIH, 1673)]), // strih burn on a non-optical frame INSIDE the span — included
+            frame(1, &[(STRIH, 1673)]), // non-optical frame INSIDE the span — excluded, undecodable
             frame(2, &[(CAM2, 102), (STRIH, 1676)]),
         ];
         let w = in_window_burn_frames(
@@ -3914,8 +4038,60 @@ mod tests {
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
-            vec![Some(1670), Some(1673), Some(1676)],
-            "a burn-present non-optical frame inside the span is a delivered frame (#360): {ids:?}"
+            vec![Some(1670), Some(1676)],
+            "a non-optical frame inside the span is NOT a delivered strih frame (#363): {ids:?}"
+        );
+        // It is the distinct OPTICAL-UNDECODABLE failure (the real camera path is unproven there).
+        assert_eq!(
+            optical_undecodable_in_span(&stream, &[STRIH, STREAM], None),
+            1,
+            "the in-span non-optical frame is one OPTICAL-UNDECODABLE hard-fail (#363)"
+        );
+    }
+
+    #[test]
+    fn node_verdict_optical_undecodable_is_a_hard_fail_363() {
+        // #363 — the minimal hard-gate lock. The cam2 OPTICAL dual-QR read is the HARD gate: an
+        // in-span frame whose optical QR did NOT decode is an OPTICAL-UNDECODABLE hard-fail, even
+        // when a software-injected digital burn is present on it. A digital-burn-only frame proves
+        // node→node DIGITAL delivery, NOT that the real camera captured the pixel path (the burn is
+        // added AFTER capture). #360 let such a frame pass on its burn; #363 reverts that.
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (STRIH, 1670)]),
+            frame(1, &[(STRIH, 1673)]), // optical QR did NOT decode — only the digital strih burn
+            frame(2, &[(CAM2, 102), (STRIH, 1676)]),
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            v.optical_undecodable, 1,
+            "frame 1's missing cam2 optical QR is one OPTICAL-UNDECODABLE hard-fail: {:?}",
+            v.contiguity
+        );
+        assert!(
+            !v.is_zero(),
+            "an optically-undecodable in-span frame must FAIL, never pass on the digital burn (#363): {:?}",
+            v.contiguity
+        );
+        assert_eq!(
+            v.real_drops(),
+            0,
+            "the failure is the OPTICAL read — NOT a phantom digital drop: {:?}",
+            v.contiguity
         );
     }
 
