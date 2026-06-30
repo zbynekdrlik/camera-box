@@ -216,6 +216,38 @@ the cam1 burn PRESENT-but-blurred → it's a burn-readability DECODE-MISS, NOT c
 A genuine drop is randomly spaced + FIFO overruns>0. ALWAYS view the flagged frames' pixels
 (download the `pp/cam1-missing/*.png`, decode the base64, Read it) before claiming loss.
 
+## Per-camera COLOUR gate (#364) — `recording-verdict --colour-gate`
+
+The zero-loss verdict proves frame DELIVERY only — it never checks COLOUR, so a camera that goes
+grayscale / hue-shifted / white-balance-cast delivers every frame and still PASSES. `--colour-gate`
+is the HARD per-camera colour gate (sibling of the #363 optical read): `NodeVerdict.colour_fail`
+gates `is_zero()` alongside contiguity + `optical_undecodable`.
+
+- **Where the logic lives (one source of truth):** the #367 painter blits a known-sRGB colour scale
+  along the bottom band (`src/colour_scale.rs` — `colour_scale_patches()` + `PATCH_COLOURS`, 13
+  patches). The gate iterates the SAME table:
+  - `src/colour_verify.rs` (Tier-0, default features — the JUDGEMENT, mutation-tested): sampler +
+    `classify_patch` (Grayscale if chroma<40 / HueShift if hue err>30° / OutOfTolerance if sRGB
+    dist>96 / NeutralTint if a neutral patch chroma>48) + `summarize_node_colour` (strict-majority
+    vote over sampled frames). A burn-covered patch is `Unsamplable` → SKIPPED, not charged (a real
+    colour defect is global → still fails on the visible patches); fail-closed only when NOTHING is
+    checkable.
+  - `src/probe/colour_sample.rs` (probe, CI-only — the I/O glue): `node_burn_exclusions` +
+    `extract_recording_colour_summary` (ffmpeg input-seek, N evenly-spaced RGB frames).
+- **Burn-dodge geometry (why every patch survives):** all four bottom burns are bottom-anchored
+  leaving a clear strip at the very bottom of the band, so the sampler dodges them and still reads
+  every patch. cam1 = `qr::cam1_burn_origin` (320px, center, clear strip ≈24px on 1080); strih
+  (bottom-left) / stream (bottom-right) = `burn_geom::corner_placement` in `vendor/distroav/src/
+  burn-geom.hpp` (side `0.28·h` ≈302px, margin `40/1080·h` ≈40px, clear strip ≈40px on 1080). If
+  you change the band or a burn, re-confirm the dodge leaves each patch samplable.
+- **Run it:** add `--colour-gate` (off by default → delivery-only runs unchanged; rig TEST mode
+  paints the scale so enable it there). `--colour-samples N` (default 12) bounds cost. Fused /
+  on-host only — in `--merge-partials` mode the recording is not on the host so it ERRORS LOUDLY
+  (never silently skips a requested gate); the cross-box carry-through is #377.
+- **Tolerances are a STRICT REAL signal — NEVER loosen to force a pass** (strict-test mandate). Hue
+  is the sharp discriminator (exposure/compression robust). The recorded fixture (with a bad-colour
+  variant) is what locks the bar end-to-end on the rig.
+
 ## Rig TEST / EVENT Mode Switch (#247) — `scripts/rig-mode.sh`
 
 THE deterministic, single-source-of-truth switch between TEST mode (QR/E2E measurement) and EVENT
