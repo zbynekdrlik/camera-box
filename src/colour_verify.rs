@@ -275,13 +275,22 @@ impl CameraColourVerdict {
 }
 
 /// Sample the mean colour of every reference patch from a packed **RGB8** (`r,g,b` per pixel)
-/// frame buffer of size `w`×`h`, DODGING the `exclusions` rectangles (the burn columns that sit on
-/// the colour band — strih bottom-left, cam1 bottom-center, stream bottom-right). For each patch
-/// from [`colour_scale_patches`], the mean is taken over the patch's pixels that are NOT inside any
-/// exclusion rect and are within the buffer; `None` when no such pixel exists (patch fully behind a
-/// burn / off canvas). Returns one entry per [`PATCH_COLOURS`] patch, in order.
-pub fn sample_patch_means(rgb: &[u8], w: u32, h: u32, exclusions: &[Rect]) -> Vec<Option<Rgb>> {
-    colour_scale_patches(w, h)
+/// frame buffer of size `w`×`h`, using the SAME central-gap column geometry the painter used
+/// (derived from `qr_size` + `top_margin`), and DODGING the `exclusions` rectangles (the
+/// bottom-anchored burns — strih bottom-left, cam1 bottom-center, stream bottom-right; with the
+/// column now in the central gap these no longer overlap a patch, so the dodge is belt-and-braces).
+/// For each patch from [`colour_scale_patches`], the mean is taken over the patch's pixels that are
+/// NOT inside any exclusion rect and are within the buffer; `None` when no such pixel exists (patch
+/// off canvas / fully excluded). Returns one entry per [`PATCH_COLOURS`] patch, in order.
+pub fn sample_patch_means(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> Vec<Option<Rgb>> {
+    colour_scale_patches(w, h, qr_size, top_margin)
         .into_iter()
         .map(|(rect, _)| sample_rect_mean(rgb, w, h, rect, exclusions))
         .collect()
@@ -330,9 +339,17 @@ pub fn verify_samples(samples: &[Option<Rgb>]) -> CameraColourVerdict {
 }
 
 /// Sample a packed RGB8 frame and classify it in one step — the entry point the probe glue calls
-/// with the real recorded pixels + the per-node burn-exclusion rects.
-pub fn verify_rgb_frame(rgb: &[u8], w: u32, h: u32, exclusions: &[Rect]) -> CameraColourVerdict {
-    verify_samples(&sample_patch_means(rgb, w, h, exclusions))
+/// with the real recorded pixels + the dual-QR layout (`qr_size`, `top_margin`) + the per-node
+/// burn-exclusion rects.
+pub fn verify_rgb_frame(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> CameraColourVerdict {
+    verify_samples(&sample_patch_means(rgb, w, h, qr_size, top_margin, exclusions))
 }
 
 /// Per-patch fail tallies across many sampled frames of ONE node's recording, used to reduce
@@ -407,12 +424,15 @@ mod tests {
 
     const CANVAS_W: u32 = 1920;
     const CANVAS_H: u32 = 1080;
+    const QR_SIZE: u32 = crate::colour_scale::DEFAULT_QR_SIZE;
+    const TOP_MARGIN: u32 = crate::colour_scale::TOP_MARGIN_PX;
 
-    /// Paint a packed RGB8 canvas with the reference colour scale, transforming each patch's
-    /// colour through `f` (identity = a perfectly-correct frame). The non-band area is left black.
+    /// Paint a packed RGB8 canvas with the reference colour scale (the central-gap column for the
+    /// default dual-QR layout), transforming each patch's colour through `f` (identity = a
+    /// perfectly-correct frame). The non-patch area is left black.
     fn paint_canvas(w: u32, h: u32, f: impl Fn(Rgb) -> Rgb) -> Vec<u8> {
         let mut buf = vec![0u8; (w * h * 3) as usize];
-        for (rect, rgb) in colour_scale_patches(w, h) {
+        for (rect, rgb) in colour_scale_patches(w, h, QR_SIZE, TOP_MARGIN) {
             let c = f(rgb);
             for y in rect.y..(rect.y + rect.h).min(h) {
                 for x in rect.x..(rect.x + rect.w).min(w) {
@@ -469,7 +489,7 @@ mod tests {
     #[test]
     fn sampler_reads_each_patch_mean_exactly_on_a_clean_frame() {
         let buf = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
-        let samples = sample_patch_means(&buf, CANVAS_W, CANVAS_H, &[]);
+        let samples = sample_patch_means(&buf, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
         assert_eq!(samples.len(), PATCH_COLOURS.len());
         for (i, s) in samples.iter().enumerate() {
             assert_eq!(*s, Some(PATCH_COLOURS[i]), "patch {i} mean is exact");
@@ -482,11 +502,13 @@ mod tests {
         // overlaps several patches — exactly what a burn column does. With that strip excluded, the
         // sampled means must stay the correct patch colours (the burn is dodged, not averaged in).
         let mut buf = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
+        // A strip that overlaps the central colour column (x in [840,1080), y in [24,724)) only
+        // PARTIALLY in width, so each crossed patch keeps samplable pixels on either side.
         let burn = Rect {
             x: 900,
-            y: CANVAS_H - 96,
+            y: 100,
             w: 120,
-            h: 96,
+            h: 300,
         };
         for y in burn.y..burn.y + burn.h {
             for x in burn.x..burn.x + burn.w {
@@ -497,8 +519,8 @@ mod tests {
             }
         }
         // Without dodging, the patches under the strip would be polluted toward red.
-        let polluted = sample_patch_means(&buf, CANVAS_W, CANVAS_H, &[]);
-        let dodged = sample_patch_means(&buf, CANVAS_W, CANVAS_H, &[burn]);
+        let polluted = sample_patch_means(&buf, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
+        let dodged = sample_patch_means(&buf, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[burn]);
         let mut any_differs = false;
         for (i, (p, d)) in polluted.iter().zip(&dodged).enumerate() {
             assert_eq!(*d, Some(PATCH_COLOURS[i]), "dodged patch {i} stays correct");
@@ -655,8 +677,8 @@ mod tests {
     fn a_patch_fully_behind_a_burn_is_unsamplable() {
         let buf = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
         // Exclude the entire first patch region.
-        let (rect0, _) = colour_scale_patches(CANVAS_W, CANVAS_H)[0];
-        let samples = sample_patch_means(&buf, CANVAS_W, CANVAS_H, &[rect0]);
+        let (rect0, _) = colour_scale_patches(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN)[0];
+        let samples = sample_patch_means(&buf, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[rect0]);
         assert_eq!(samples[0], None, "patch 0 fully excluded ⇒ unsamplable");
     }
 
@@ -666,7 +688,7 @@ mod tests {
     fn colour_gate_passes_on_correct_fails_on_grayscale_and_hue_shift() {
         // Correct frame ⇒ every patch passes ⇒ camera PASSES.
         let correct = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
-        let v_ok = verify_rgb_frame(&correct, CANVAS_W, CANVAS_H, &[]);
+        let v_ok = verify_rgb_frame(&correct, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
         assert!(
             v_ok.is_pass(),
             "a correct colour scale must PASS (fails: {:?})",
@@ -682,7 +704,7 @@ mod tests {
         // Grayscale camera ⇒ every CHROMATIC patch collapses ⇒ camera FAILS, and the failures are
         // Grayscale (not some other category).
         let gray = paint_canvas(CANVAS_W, CANVAS_H, to_gray);
-        let v_gray = verify_rgb_frame(&gray, CANVAS_W, CANVAS_H, &[]);
+        let v_gray = verify_rgb_frame(&gray, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
         assert!(
             !v_gray.is_pass(),
             "a grayscale camera must FAIL the colour gate"
@@ -705,7 +727,7 @@ mod tests {
         // Hue-shifted camera ⇒ chromatic patches keep chroma but land on the wrong hue ⇒ FAIL, and
         // at least one failure is specifically a HueShift (not grayscale, not distance-only).
         let hue = paint_canvas(CANVAS_W, CANVAS_H, rotate_channels);
-        let v_hue = verify_rgb_frame(&hue, CANVAS_W, CANVAS_H, &[]);
+        let v_hue = verify_rgb_frame(&hue, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
         assert!(
             !v_hue.is_pass(),
             "a hue-shifted camera must FAIL the colour gate"
@@ -730,7 +752,7 @@ mod tests {
             let j = |v: u8, d: i32| (v as i32 + d).clamp(0, 255) as u8;
             Rgb::new(j(c.r, 12), j(c.g, -9), j(c.b, 7))
         });
-        let v = verify_rgb_frame(&noisy, CANVAS_W, CANVAS_H, &[]);
+        let v = verify_rgb_frame(&noisy, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
         assert!(
             v.is_pass(),
             "realistic compression jitter must still PASS: {:?}",
@@ -748,7 +770,7 @@ mod tests {
                 c
             }
         });
-        let v = verify_rgb_frame(&buf, CANVAS_W, CANVAS_H, &[]);
+        let v = verify_rgb_frame(&buf, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
         assert!(!v.is_pass(), "a neutral patch with a colour cast must FAIL");
         assert!(
             v.outcomes
@@ -779,9 +801,9 @@ mod tests {
         // chromatic patch to gray. The covered patches are SKIPPED (not charged), but the visible
         // grayscale chromatic patches still FAIL — a global defect is caught despite the burns.
         let gray = paint_canvas(CANVAS_W, CANVAS_H, to_gray);
-        let patches = colour_scale_patches(CANVAS_W, CANVAS_H);
+        let patches = colour_scale_patches(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN);
         let cover = vec![patches[0].0, patches[1].0];
-        let v = verify_rgb_frame(&gray, CANVAS_W, CANVAS_H, &cover);
+        let v = verify_rgb_frame(&gray, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &cover);
         assert!(
             matches!(v.outcomes[0], PatchOutcome::Unsamplable { .. }),
             "patch 0 skipped"
@@ -802,7 +824,7 @@ mod tests {
         // And the converse: burn-covered patches on an otherwise-CORRECT frame still PASS (the
         // skipped patches don't fail the camera).
         let correct = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
-        let v_ok = verify_rgb_frame(&correct, CANVAS_W, CANVAS_H, &cover);
+        let v_ok = verify_rgb_frame(&correct, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &cover);
         assert!(
             v_ok.is_pass(),
             "burn-covered patches must not fail a correct camera"
@@ -818,12 +840,16 @@ mod tests {
             &paint_canvas(CANVAS_W, CANVAS_H, |c| c),
             CANVAS_W,
             CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
             &[],
         );
         let gray = verify_rgb_frame(
             &paint_canvas(CANVAS_W, CANVAS_H, to_gray),
             CANVAS_W,
             CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
             &[],
         );
 
@@ -877,6 +903,8 @@ mod tests {
             &paint_canvas(CANVAS_W, CANVAS_H, |c| c),
             CANVAS_W,
             CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
             &[],
         )
     }
@@ -885,6 +913,8 @@ mod tests {
             &paint_canvas(CANVAS_W, CANVAS_H, to_gray),
             CANVAS_W,
             CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
             &[],
         )
     }

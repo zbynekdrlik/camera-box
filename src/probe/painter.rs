@@ -165,10 +165,18 @@ fn paint_one_frame(
         )
     };
 
-    // #367: paint the colour-reference scale onto the SAME frame (bottom band, clear of the
-    // QR), so the displayed monitor + the recording carry it alongside the dual-QR.
+    // #367/#364: paint the colour-reference scale onto the SAME frame (a VERTICAL column in the
+    // central gap BETWEEN the two dual-QR halves — where the camera reliably captures it), so the
+    // displayed monitor + the recording carry it alongside the dual-QR. The column is derived from
+    // the SAME qr_size/top_margin the dual-QR was rendered with, so painter and gate agree.
     if params.colour_scale {
-        crate::probe::qr::blit_colour_scale_bgra(&mut bgra, params.canvas_w, params.canvas_h);
+        crate::probe::qr::blit_colour_scale_bgra(
+            &mut bgra,
+            params.canvas_w,
+            params.canvas_h,
+            params.qr_size,
+            crate::probe::qr::TOP_MARGIN_PX,
+        );
     }
 
     // For KMS this blocks until the vblank flip completes — that block IS the 1:1 pacing

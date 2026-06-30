@@ -10,15 +10,16 @@
 //!
 //! ## Why the burns are dodged (and why every patch survives)
 //!
-//! The #367 colour scale is a full-width band along the bottom of the canvas
-//! ([`crate::colour_scale`]). The four burns also sit at the bottom (#111 4-corner layout): the
-//! cam1 capture burn CENTER-bottom ([`qr::cam1_burn_origin`], 320px), strih bottom-LEFT and stream
-//! bottom-RIGHT (`burn_geom::corner_placement`, ~0.28·h ≈ 302px on 1080). Each is bottom-anchored
-//! with an edge margin, so it leaves a clear strip at the very bottom of the band (cam1 ≈ 24px,
-//! corners ≈ 40px on 1080). The sampler ([`crate::colour_verify::sample_patch_means`]) takes each
-//! patch's mean over the pixels NOT inside these rects, so every patch keeps samplable pixels and
-//! the burn QRs never pollute the colour reading. Confirmed on the rig by the supervisor when the
-//! real fixture lands; the rects here match the writers' geometry exactly.
+//! The #367 colour scale is a VERTICAL column in the central gap between the two dual-QR halves
+//! ([`crate::colour_scale`]), spanning the QR's vertical extent (y ≈ 24..724 on 1080). The four
+//! burns all sit at the BOTTOM (#111 4-corner layout): the cam1 capture burn CENTER-bottom
+//! ([`qr::cam1_burn_origin`], 320px, top row ≈ 736), strih bottom-LEFT and stream bottom-RIGHT
+//! (`burn_geom::corner_placement`, ~0.28·h ≈ 302px on 1080, top row ≈ 738). Because the column ends
+//! at the QR bottom (≈724) and every burn starts below it, the burns no longer overlap any patch
+//! at all — so the burn-exclusion rects ([`node_burn_exclusions`]) are now belt-and-braces: the
+//! sampler ([`crate::colour_verify::sample_patch_means`]) still dodges them, but no patch loses a
+//! pixel. Confirmed on the rig by the supervisor when the real fixture lands; the rects here match
+//! the writers' geometry exactly.
 
 use crate::colour_scale::Rect;
 use crate::colour_verify::{
@@ -116,10 +117,24 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
 }
 
 /// Sample + classify ONE recorded frame's colour scale. `img` is the native-resolution RGB frame;
-/// `exclusions` are the per-node burn rects from [`node_burn_exclusions`]. Pure handoff to
-/// [`verify_rgb_frame`] — `RgbImage` is packed RGB8, exactly what the sampler expects.
-pub fn colour_verdict_from_rgb_image(img: &RgbImage, exclusions: &[Rect]) -> CameraColourVerdict {
-    verify_rgb_frame(img.as_raw(), img.width(), img.height(), exclusions)
+/// `qr_size`/`top_margin` are the dual-QR layout the column was painted with (so the gate samples
+/// the same central-gap rects the painter wrote); `exclusions` are the per-node burn rects from
+/// [`node_burn_exclusions`]. Pure handoff to [`verify_rgb_frame`] — `RgbImage` is packed RGB8,
+/// exactly what the sampler expects.
+pub fn colour_verdict_from_rgb_image(
+    img: &RgbImage,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> CameraColourVerdict {
+    verify_rgb_frame(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        qr_size,
+        top_margin,
+        exclusions,
+    )
 }
 
 /// Native width×height of a recording's first video stream, via `ffprobe`.
@@ -266,9 +281,16 @@ fn decode_one_rgb_frame_at(
 /// Pull up to `samples` evenly-spaced RGB frames from `path` and reduce their colour-scale readings
 /// to ONE [`NodeColourSummary`] (the per-camera colour verdict for this recording). Frames are
 /// sampled by input-seek so the cost is bounded by `samples`, independent of the recording length.
-/// The burn rects are derived from the recording's own native dimensions. Errors out if NO frame
-/// could be read (the colour gate must never silently pass when it could not look).
-pub fn extract_recording_colour_summary(path: &Path, samples: usize) -> Result<NodeColourSummary> {
+/// `qr_size`/`top_margin` are the dual-QR layout the painter rendered (so the central-gap column is
+/// sampled where it was painted). The burn rects are derived from the recording's own native
+/// dimensions. Errors out if NO frame could be read (the colour gate must never silently pass when
+/// it could not look).
+pub fn extract_recording_colour_summary(
+    path: &Path,
+    samples: usize,
+    qr_size: u32,
+    top_margin: u32,
+) -> Result<NodeColourSummary> {
     let samples = samples.max(1);
     let (width, height) = probe_dimensions(path)?;
     let duration = probe_duration_secs(path)?;
@@ -280,7 +302,12 @@ pub fn extract_recording_colour_summary(path: &Path, samples: usize) -> Result<N
         // frame, which can be a partial teardown frame).
         let ts = duration * ((i as f64) + 0.5) / (samples as f64);
         if let Some(img) = decode_one_rgb_frame_at(path, ts, width, height)? {
-            verdicts.push(colour_verdict_from_rgb_image(&img, &exclusions));
+            verdicts.push(colour_verdict_from_rgb_image(
+                &img,
+                qr_size,
+                top_margin,
+                &exclusions,
+            ));
         }
     }
     anyhow::ensure!(
@@ -300,16 +327,18 @@ pub fn extract_recording_colour_summary(path: &Path, samples: usize) -> Result<N
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::colour_scale::{colour_scale_patches, Rgb, PATCH_COLOURS};
+    use crate::colour_scale::{colour_scale_patches, Rgb, DEFAULT_QR_SIZE, PATCH_COLOURS, TOP_MARGIN_PX};
 
     const W: u32 = 1920;
     const H: u32 = 1080;
+    const QR: u32 = DEFAULT_QR_SIZE;
+    const TM: u32 = TOP_MARGIN_PX;
 
-    /// Paint a packed-RGB8 `RgbImage` with the reference colour scale through `f` (identity = a
-    /// correct frame). Non-band pixels stay black.
+    /// Paint a packed-RGB8 `RgbImage` with the reference colour scale (central-gap column) through
+    /// `f` (identity = a correct frame). Non-patch pixels stay black.
     fn paint_rgb_image(f: impl Fn(Rgb) -> Rgb) -> RgbImage {
         let mut img = RgbImage::new(W, H);
-        for (rect, rgb) in colour_scale_patches(W, H) {
+        for (rect, rgb) in colour_scale_patches(W, H, QR, TM) {
             let c = f(rgb);
             for y in rect.y..rect.y + rect.h {
                 for x in rect.x..rect.x + rect.w {
@@ -340,7 +369,7 @@ mod tests {
         // Every colour patch must still have ≥1 samplable pixel after dodging — otherwise the gate
         // would lose that patch. (The burns leave a clear strip at the very bottom of the band.)
         let correct = paint_rgb_image(|c| c);
-        let v = colour_verdict_from_rgb_image(&correct, &ex);
+        let v = colour_verdict_from_rgb_image(&correct, QR, TM, &ex);
         assert_eq!(
             v.checked_count(),
             PATCH_COLOURS.len(),
@@ -355,10 +384,10 @@ mod tests {
     #[test]
     fn adapter_passes_correct_and_fails_grayscale_through_the_real_burn_dodge() {
         let ex = node_burn_exclusions(W, H);
-        let correct = colour_verdict_from_rgb_image(&paint_rgb_image(|c| c), &ex);
+        let correct = colour_verdict_from_rgb_image(&paint_rgb_image(|c| c), QR, TM, &ex);
         assert!(correct.is_pass(), "correct camera passes");
 
-        let gray = colour_verdict_from_rgb_image(&paint_rgb_image(to_gray), &ex);
+        let gray = colour_verdict_from_rgb_image(&paint_rgb_image(to_gray), QR, TM, &ex);
         assert!(
             !gray.is_pass(),
             "grayscale camera FAILS even with the burns dodged"

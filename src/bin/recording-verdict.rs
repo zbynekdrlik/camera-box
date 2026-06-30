@@ -819,9 +819,14 @@ fn build_node_colour_fail(spec: &NodeSpec, args: &Args) -> Result<usize> {
             spec.node
         )
     })?;
+    // The permanent cam2 painter renders the dual-QR + colour column at the default layout, so the
+    // gate derives the same central-gap geometry from those defaults (single source of truth with
+    // the painter via `colour_scale`).
     let summary = camera_box::probe::colour_sample::extract_recording_colour_summary(
         rec,
         args.colour_samples,
+        camera_box::colour_scale::DEFAULT_QR_SIZE,
+        camera_box::colour_scale::TOP_MARGIN_PX,
     )?;
     anyhow::ensure!(
         summary.any_checked(),
