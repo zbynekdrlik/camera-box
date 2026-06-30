@@ -153,9 +153,24 @@ pub enum PatchOutcome {
 }
 
 impl PatchOutcome {
-    /// True only for [`PatchOutcome::Pass`]; every other variant is a FAIL.
+    /// True only for [`PatchOutcome::Pass`].
     pub fn is_pass(&self) -> bool {
         matches!(self, PatchOutcome::Pass)
+    }
+
+    /// True for a WRONG-COLOUR verdict (grayscale / hue / distance / neutral tint) — a real colour
+    /// defect. This is what the gate counts. [`PatchOutcome::Unsamplable`] is NOT a wrong colour:
+    /// it is a patch we could not read (fully behind a known burn), so it is SKIPPED, not charged —
+    /// a real colour defect (grayscale / white-balance) is global and still fails on every VISIBLE
+    /// patch, so skipping a burn-covered patch never lets a defect through.
+    pub fn is_wrong(&self) -> bool {
+        !matches!(self, PatchOutcome::Pass | PatchOutcome::Unsamplable { .. })
+    }
+
+    /// True when the patch had samplable pixels and was actually checked (Pass or a wrong-colour
+    /// verdict) — i.e. NOT [`PatchOutcome::Unsamplable`].
+    pub fn is_checked(&self) -> bool {
+        !matches!(self, PatchOutcome::Unsamplable { .. })
     }
 }
 
@@ -227,23 +242,32 @@ pub struct CameraColourVerdict {
 }
 
 impl CameraColourVerdict {
-    /// Number of reference patches that FAILED the colour check.
-    pub fn fail_count(&self) -> usize {
-        self.outcomes.iter().filter(|o| !o.is_pass()).count()
+    /// Number of reference patches with a WRONG colour (grayscale / hue / distance / tint). This is
+    /// the gate count; burn-covered ([`PatchOutcome::Unsamplable`]) patches are NOT included.
+    pub fn wrong_count(&self) -> usize {
+        self.outcomes.iter().filter(|o| o.is_wrong()).count()
     }
 
-    /// The camera PASSES the colour gate only when EVERY reference patch passed AND there was at
-    /// least one patch to check (an empty verdict is fail-closed — nothing was proven).
+    /// Number of reference patches that had samplable pixels and were actually checked (Pass or
+    /// wrong) — i.e. not burn-covered. The colour scale is only meaningfully verified when this is
+    /// > 0.
+    pub fn checked_count(&self) -> usize {
+        self.outcomes.iter().filter(|o| o.is_checked()).count()
+    }
+
+    /// The camera PASSES colour only when at least one patch was actually CHECKED (fail-closed: a
+    /// frame where every patch was burn-covered / unsamplable proves nothing) AND no checked patch
+    /// has a wrong colour.
     pub fn is_pass(&self) -> bool {
-        !self.outcomes.is_empty() && self.fail_count() == 0
+        self.checked_count() > 0 && self.wrong_count() == 0
     }
 
-    /// The first `n` failing patches paired with their table index, for human-readable reporting.
+    /// The wrong-colour patches paired with their table index, for human-readable reporting.
     pub fn failures(&self) -> impl Iterator<Item = (usize, &PatchOutcome)> {
         self.outcomes
             .iter()
             .enumerate()
-            .filter(|(_, o)| !o.is_pass())
+            .filter(|(_, o)| o.is_wrong())
     }
 }
 
@@ -312,45 +336,64 @@ pub fn verify_rgb_frame(rgb: &[u8], w: u32, h: u32, exclusions: &[Rect]) -> Came
 /// transient single-frame compression noise to a stable per-node verdict.
 #[derive(Clone, PartialEq, Debug)]
 pub struct NodeColourSummary {
-    /// `patch_fail_counts[i]` = number of sampled frames on which patch `i` failed.
-    pub patch_fail_counts: Vec<usize>,
+    /// `patch_wrong_counts[i]` = number of sampled frames on which patch `i` had a WRONG colour.
+    pub patch_wrong_counts: Vec<usize>,
+    /// `patch_checked_counts[i]` = number of sampled frames on which patch `i` was actually checked
+    /// (had samplable pixels — not burn-covered).
+    pub patch_checked_counts: Vec<usize>,
     /// How many frames were sampled (the denominator for the majority rule).
     pub frames_sampled: usize,
 }
 
 impl NodeColourSummary {
-    /// A patch is charged as a node-level colour FAIL when it failed on a STRICT MAJORITY of the
-    /// sampled frames — a real colour defect (grayscale camera, hue cast) fails on essentially
-    /// every frame, while a one-off compression glitch on a single frame does not flip the gate.
+    /// A patch is charged as a node-level colour FAIL when it had a WRONG colour on a STRICT
+    /// MAJORITY of the sampled frames — a real colour defect (grayscale camera, hue cast) fails on
+    /// essentially every frame, while a one-off compression glitch on a single frame does not flip
+    /// the gate. This is the node's `colour_fail` that the verdict gate uses.
     pub fn fail_count(&self) -> usize {
-        self.patch_fail_counts
+        self.patch_wrong_counts
             .iter()
             .filter(|&&c| c * 2 > self.frames_sampled)
             .count()
     }
 
-    /// The node PASSES colour only when no patch failed on a majority of frames AND at least one
-    /// frame was sampled (fail-closed: zero sampled frames proves nothing).
+    /// True when at least one patch was checked on at least one frame — i.e. the colour scale was
+    /// actually readable somewhere. When false (every patch burn-covered / no frames), the colour
+    /// is UNVERIFIABLE and the gate must treat it as a hard setup failure, not a silent pass.
+    pub fn any_checked(&self) -> bool {
+        self.patch_checked_counts.iter().any(|&c| c > 0)
+    }
+
+    /// The node PASSES colour only when frames were sampled, at least one patch was checkable, and
+    /// no patch was wrong on a majority of frames (fail-closed: nothing checked proves nothing).
     pub fn is_pass(&self) -> bool {
-        self.frames_sampled > 0 && self.fail_count() == 0
+        self.frames_sampled > 0 && self.any_checked() && self.fail_count() == 0
     }
 }
 
 /// Reduce per-frame colour verdicts of ONE node's recording to a [`NodeColourSummary`]. Each
-/// verdict must cover the same [`PATCH_COLOURS`] patches; the summary tallies, per patch, how many
-/// frames failed it. An empty input yields a fail-closed summary (`frames_sampled == 0`).
+/// verdict covers the same [`PATCH_COLOURS`] patches; the summary tallies, per patch, how many
+/// frames found it WRONG and how many actually checked it. An empty input yields a fail-closed
+/// summary (`frames_sampled == 0`).
 pub fn summarize_node_colour(frames: &[CameraColourVerdict]) -> NodeColourSummary {
     let n_patches = PATCH_COLOURS.len();
-    let mut patch_fail_counts = vec![0usize; n_patches];
+    let mut patch_wrong_counts = vec![0usize; n_patches];
+    let mut patch_checked_counts = vec![0usize; n_patches];
     for v in frames {
         for (i, o) in v.outcomes.iter().enumerate() {
-            if i < n_patches && !o.is_pass() {
-                patch_fail_counts[i] += 1;
+            if i < n_patches {
+                if o.is_wrong() {
+                    patch_wrong_counts[i] += 1;
+                }
+                if o.is_checked() {
+                    patch_checked_counts[i] += 1;
+                }
             }
         }
     }
     NodeColourSummary {
-        patch_fail_counts,
+        patch_wrong_counts,
+        patch_checked_counts,
         frames_sampled: frames.len(),
     }
 }
@@ -460,7 +503,10 @@ mod tests {
                 any_differs = true;
             }
         }
-        assert!(any_differs, "the burn strip must actually pollute ≥1 patch when NOT dodged");
+        assert!(
+            any_differs,
+            "the burn strip must actually pollute ≥1 patch when NOT dodged"
+        );
     }
 
     #[test]
@@ -484,14 +530,25 @@ mod tests {
             "a correct colour scale must PASS (fails: {:?})",
             v_ok.failures().collect::<Vec<_>>()
         );
-        assert_eq!(v_ok.fail_count(), 0);
+        assert_eq!(v_ok.wrong_count(), 0);
+        assert_eq!(
+            v_ok.checked_count(),
+            PATCH_COLOURS.len(),
+            "all patches checked"
+        );
 
         // Grayscale camera ⇒ every CHROMATIC patch collapses ⇒ camera FAILS, and the failures are
         // Grayscale (not some other category).
         let gray = paint_canvas(CANVAS_W, CANVAS_H, to_gray);
         let v_gray = verify_rgb_frame(&gray, CANVAS_W, CANVAS_H, &[]);
-        assert!(!v_gray.is_pass(), "a grayscale camera must FAIL the colour gate");
-        let chromatic = PATCH_COLOURS.iter().filter(|c| chroma(**c) >= CHROMATIC_EXPECTED_MIN).count();
+        assert!(
+            !v_gray.is_pass(),
+            "a grayscale camera must FAIL the colour gate"
+        );
+        let chromatic = PATCH_COLOURS
+            .iter()
+            .filter(|c| chroma(**c) >= CHROMATIC_EXPECTED_MIN)
+            .count();
         assert!(chromatic >= 6, "table has the 6 primaries/secondaries");
         let grayscale_fails = v_gray
             .outcomes
@@ -507,7 +564,10 @@ mod tests {
         // at least one failure is specifically a HueShift (not grayscale, not distance-only).
         let hue = paint_canvas(CANVAS_W, CANVAS_H, rotate_channels);
         let v_hue = verify_rgb_frame(&hue, CANVAS_W, CANVAS_H, &[]);
-        assert!(!v_hue.is_pass(), "a hue-shifted camera must FAIL the colour gate");
+        assert!(
+            !v_hue.is_pass(),
+            "a hue-shifted camera must FAIL the colour gate"
+        );
         let hue_fails = v_hue
             .outcomes
             .iter()
@@ -549,42 +609,108 @@ mod tests {
         let v = verify_rgb_frame(&buf, CANVAS_W, CANVAS_H, &[]);
         assert!(!v.is_pass(), "a neutral patch with a colour cast must FAIL");
         assert!(
-            v.outcomes.iter().any(|o| matches!(o, PatchOutcome::NeutralTint { .. })),
+            v.outcomes
+                .iter()
+                .any(|o| matches!(o, PatchOutcome::NeutralTint { .. })),
             "the cast neutral patch fails as NeutralTint: {:?}",
             v.failures().collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn unsamplable_patches_fail_closed() {
-        // No samples at all ⇒ every patch unsamplable ⇒ NOT a pass.
+    fn all_unsamplable_is_fail_closed_not_a_pass() {
+        // No samples at all ⇒ every patch unsamplable ⇒ nothing checked ⇒ NOT a pass (fail-closed),
+        // but unsamplable is NOT counted as a WRONG colour (it is skipped, not charged).
         let v = verify_samples(&[]);
-        assert_eq!(v.fail_count(), PATCH_COLOURS.len());
-        assert!(!v.is_pass(), "nothing sampled proves nothing ⇒ fail-closed");
-        assert!(v.outcomes.iter().all(|o| matches!(o, PatchOutcome::Unsamplable { .. })));
+        assert_eq!(v.checked_count(), 0, "nothing was checkable");
+        assert_eq!(v.wrong_count(), 0, "unsamplable is not a wrong colour");
+        assert!(!v.is_pass(), "nothing checked proves nothing ⇒ fail-closed");
+        assert!(v
+            .outcomes
+            .iter()
+            .all(|o| matches!(o, PatchOutcome::Unsamplable { .. })));
+    }
+
+    #[test]
+    fn burn_covered_patches_are_skipped_but_visible_defects_still_fail() {
+        // Cover the first two patches entirely (as a corner burn would) AND collapse every
+        // chromatic patch to gray. The covered patches are SKIPPED (not charged), but the visible
+        // grayscale chromatic patches still FAIL — a global defect is caught despite the burns.
+        let gray = paint_canvas(CANVAS_W, CANVAS_H, to_gray);
+        let patches = colour_scale_patches(CANVAS_W, CANVAS_H);
+        let cover = vec![patches[0].0, patches[1].0];
+        let v = verify_rgb_frame(&gray, CANVAS_W, CANVAS_H, &cover);
+        assert!(
+            matches!(v.outcomes[0], PatchOutcome::Unsamplable { .. }),
+            "patch 0 skipped"
+        );
+        assert!(
+            matches!(v.outcomes[1], PatchOutcome::Unsamplable { .. }),
+            "patch 1 skipped"
+        );
+        assert!(
+            v.checked_count() < PATCH_COLOURS.len(),
+            "two patches were not checked"
+        );
+        assert!(
+            !v.is_pass(),
+            "grayscale still FAILS on the visible chromatic patches"
+        );
+
+        // And the converse: burn-covered patches on an otherwise-CORRECT frame still PASS (the
+        // skipped patches don't fail the camera).
+        let correct = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
+        let v_ok = verify_rgb_frame(&correct, CANVAS_W, CANVAS_H, &cover);
+        assert!(
+            v_ok.is_pass(),
+            "burn-covered patches must not fail a correct camera"
+        );
+        assert_eq!(v_ok.checked_count(), PATCH_COLOURS.len() - 2);
     }
 
     // ---- per-node aggregation across frames (majority rule) ----
 
     #[test]
     fn node_summary_charges_only_majority_patch_failures() {
-        let correct = verify_rgb_frame(&paint_canvas(CANVAS_W, CANVAS_H, |c| c), CANVAS_W, CANVAS_H, &[]);
-        let gray = verify_rgb_frame(&paint_canvas(CANVAS_W, CANVAS_H, to_gray), CANVAS_W, CANVAS_H, &[]);
+        let correct = verify_rgb_frame(
+            &paint_canvas(CANVAS_W, CANVAS_H, |c| c),
+            CANVAS_W,
+            CANVAS_H,
+            &[],
+        );
+        let gray = verify_rgb_frame(
+            &paint_canvas(CANVAS_W, CANVAS_H, to_gray),
+            CANVAS_W,
+            CANVAS_H,
+            &[],
+        );
 
         // 5 clean frames + 4 grayscale: grayscale is a MINORITY (4 of 9) ⇒ no patch charged.
         let mut frames = vec![correct.clone(); 5];
         frames.extend(vec![gray.clone(); 4]);
         let minority = summarize_node_colour(&frames);
         assert_eq!(minority.frames_sampled, 9);
-        assert_eq!(minority.fail_count(), 0, "a minority of bad frames must not flip the gate");
+        assert!(minority.any_checked());
+        assert_eq!(
+            minority.fail_count(),
+            0,
+            "a minority of bad frames must not flip the gate"
+        );
         assert!(minority.is_pass());
 
         // 4 clean + 5 grayscale: grayscale is the MAJORITY ⇒ every chromatic patch charged.
         let mut frames = vec![correct; 4];
         frames.extend(vec![gray; 5]);
         let majority = summarize_node_colour(&frames);
-        let chromatic = PATCH_COLOURS.iter().filter(|c| chroma(**c) >= CHROMATIC_EXPECTED_MIN).count();
-        assert_eq!(majority.fail_count(), chromatic, "a majority grayscale node FAILS");
+        let chromatic = PATCH_COLOURS
+            .iter()
+            .filter(|c| chroma(**c) >= CHROMATIC_EXPECTED_MIN)
+            .count();
+        assert_eq!(
+            majority.fail_count(),
+            chromatic,
+            "a majority grayscale node FAILS"
+        );
         assert!(!majority.is_pass());
     }
 
@@ -592,6 +718,23 @@ mod tests {
     fn empty_node_summary_is_fail_closed() {
         let s = summarize_node_colour(&[]);
         assert_eq!(s.frames_sampled, 0);
+        assert!(!s.any_checked());
         assert!(!s.is_pass(), "zero sampled frames proves nothing");
+    }
+
+    #[test]
+    fn node_with_no_checkable_patch_is_unverifiable_fail_closed() {
+        // Frames where every patch is burn-covered ⇒ checked nowhere ⇒ unverifiable ⇒ NOT a pass.
+        let blank = CameraColourVerdict {
+            outcomes: PATCH_COLOURS
+                .iter()
+                .map(|&expected| PatchOutcome::Unsamplable { expected })
+                .collect(),
+        };
+        let s = summarize_node_colour(&[blank.clone(), blank]);
+        assert_eq!(s.frames_sampled, 2);
+        assert!(!s.any_checked(), "no patch was ever checkable");
+        assert_eq!(s.fail_count(), 0, "unsamplable patches are not wrong");
+        assert!(!s.is_pass(), "colour unverifiable ⇒ fail-closed");
     }
 }
