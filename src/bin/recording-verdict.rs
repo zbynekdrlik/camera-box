@@ -866,16 +866,33 @@ fn node_verdict_with_optical(
 /// `colour_fail == 0` term (locked by `node_verdict_colour_fail_is_a_hard_fail_364`).
 fn build_node_colour_fail(
     spec: &NodeSpec,
+    carried: Option<&camera_box::colour_verify::NodeColourSummary>,
     args: &Args,
     cache: &mut HashMap<PathBuf, usize>,
 ) -> Result<usize> {
+    // #377 — MERGE mode: the box already sampled the colour scale ON its host during
+    // `--extract-partial --colour-gate` and carried the per-recording summary in its partial (the
+    // colour gate is fused/on-host — the recording is only on the box). Honor that carried summary
+    // here regardless of THIS process's `--colour-gate` flag: a carried summary means the gate WAS
+    // requested at extract, and the merge must not silently drop it. The fused path passes `None`
+    // and samples the recording below.
+    if let Some(summary) = carried {
+        anyhow::ensure!(
+            summary.any_checked(),
+            "colour gate: the carried colour summary for node {} had NO checkable patch (the colour \
+             scale was missing / fully burn-covered in that box's recording) — cannot verify colour",
+            spec.node
+        );
+        return Ok(summary.fail_count());
+    }
     if !args.colour_gate {
         return Ok(0);
     }
     let rec = spec.rec_path.with_context(|| {
         format!(
-            "--colour-gate set but node {} has no recording on this host (merge mode); run the \
-             colour gate on the box / fused path",
+            "--colour-gate set but node {} has no recording on this host AND no carried colour \
+             summary (merge mode without a --colour-gate extract); re-run --extract-partial with \
+             --colour-gate so the box samples colour on-host and carries it in its partial",
             spec.node
         )
     })?;
@@ -1561,7 +1578,8 @@ fn main() -> Result<()> {
         },
     };
 
-    let (_report, all_pass) = build_and_print_verdict(&args, strih, stream, cam1)?;
+    // Fused path: no carried colour — `build_node_colour_fail` samples each node's recording directly.
+    let (_report, all_pass) = build_and_print_verdict(&args, strih, stream, cam1, None, None)?;
     if !all_pass {
         std::process::exit(1);
     }
@@ -1574,11 +1592,18 @@ fn main() -> Result<()> {
 /// verdict is therefore equivalent to the fused output (same fields, same PASS semantics). The
 /// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
 /// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
+#[allow(clippy::too_many_arguments)]
 fn build_and_print_verdict(
     args: &Args,
     strih: Option<DecodedRec>,
     stream: Option<DecodedRec>,
     cam1: Cam1Source,
+    // #377 — the per-recording COLOUR summaries carried from the per-box `--extract-partial`
+    // (merge mode). `strih_colour` is the strih recording's colour (→ cam1, whose clean source is
+    // the strih recording, #133); `stream_colour` is the stream recording's colour (→ strih + stream).
+    // Both `None` on the fused path, where colour is sampled directly from each node's `rec_path`.
+    strih_colour: Option<camera_box::colour_verify::NodeColourSummary>,
+    stream_colour: Option<camera_box::colour_verify::NodeColourSummary>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -1975,7 +2000,18 @@ fn build_and_print_verdict(
             // (identical work — mirrors the #374 nit 1 dedup of the optical scan). Cache the per-path
             // colour fail count so each source recording is sampled at most once.
             let mut colour_fail_cache: HashMap<PathBuf, usize> = HashMap::new();
-            for (spec, present, optical) in [
+            // #377 — per-node CARRIED colour (merge mode): cam1 takes the colour of its SOURCE
+            // recording (the strih recording when --strih is supplied, else the stream fallback);
+            // strih + stream take the stream recording's colour. All `None` on the fused path, where
+            // `build_node_colour_fail` samples each node's `rec_path` directly.
+            let cam1_carried_colour = if strih_data.is_some() {
+                strih_colour.as_ref()
+            } else {
+                stream_colour.as_ref()
+            };
+            let strih_carried_colour = stream_colour.as_ref();
+            let stream_carried_colour = stream_colour.as_ref();
+            for (spec, present, optical, carried_colour) in [
                 (
                     NodeSpec {
                         node: "cam1",
@@ -1993,6 +2029,7 @@ fn build_and_print_verdict(
                     },
                     !cam1_ids.is_empty(),
                     cam1_optical,
+                    cam1_carried_colour,
                 ),
                 (
                     NodeSpec {
@@ -2012,6 +2049,7 @@ fn build_and_print_verdict(
                     },
                     !strih_ids_seq.is_empty(),
                     stream_optical,
+                    strih_carried_colour,
                 ),
                 (
                     NodeSpec {
@@ -2031,6 +2069,7 @@ fn build_and_print_verdict(
                     },
                     !stream_ids_seq.is_empty(),
                     stream_optical,
+                    stream_carried_colour,
                 ),
             ] {
                 if !present {
@@ -2048,7 +2087,8 @@ fn build_and_print_verdict(
                 // is off. The ffmpeg/process glue lives in `build_node_colour_fail` (excluded from
                 // mutants like the other I/O glue); the JUDGEMENT is the mutation-tested
                 // `colour_verify` module.
-                nv.colour_fail = build_node_colour_fail(&spec, args, &mut colour_fail_cache)?;
+                nv.colour_fail =
+                    build_node_colour_fail(&spec, carried_colour, args, &mut colour_fail_cache)?;
                 // #373 — the analyzed OPTICAL span (the cam2 dual-QR FIRST..=LAST decoded-frame
                 // window) must clear the >=min_secs floor, or the headline VACUOUSLY passes over a
                 // COLLAPSED / partial read: over a tiny span optical_undecodable==0 and the burn
@@ -2715,7 +2755,29 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
         );
     }
 
-    let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames);
+    // #377 — when --colour-gate, sample THIS recording's colour scale ON the box (the colour gate is
+    // fused/on-host — the recording is only here) and carry the per-recording summary in the partial,
+    // so the dev1 merge can gate colour without ever reading the recording. Errors LOUDLY if the
+    // scale is unreadable (never a silent skip of a requested gate).
+    let colour = if args.colour_gate {
+        let summary = camera_box::probe::colour_sample::extract_recording_colour_summary(
+            rec_path,
+            args.colour_samples,
+            camera_box::colour_scale::DEFAULT_QR_SIZE,
+            camera_box::colour_scale::TOP_MARGIN_PX,
+        )?;
+        anyhow::ensure!(
+            summary.any_checked(),
+            "colour gate: no colour patch was checkable in {} (the colour scale is missing or fully \
+             burn-covered) — cannot verify colour for the {box_name} recording",
+            rec_path.display()
+        );
+        Some(summary)
+    } else {
+        None
+    };
+    let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames)
+        .with_colour(colour);
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -2741,6 +2803,11 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
 fn run_merge(args: &Args) -> Result<()> {
     let mut strih: Option<DecodedRec> = None;
     let mut stream: Option<DecodedRec> = None;
+    // #377 — the per-recording colour summaries carried in each partial (Some only when the box
+    // extracted with --colour-gate). Threaded into the verdict so the colour gate works through the
+    // split decode path (the gate is fused/on-host — the recording is only on the box).
+    let mut strih_colour: Option<camera_box::colour_verify::NodeColourSummary> = None;
+    let mut stream_colour: Option<camera_box::colour_verify::NodeColourSummary> = None;
     // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
     // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
     let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
@@ -2779,13 +2846,21 @@ fn run_merge(args: &Args) -> Result<()> {
             }
         }
         box_paths.push((box_name.to_string(), PathBuf::from(path)));
+        // #377 — take the carried colour summary before `frames` moves into the DecodedRec.
+        let colour = partial.colour;
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
         };
         match box_name {
-            "strih" => strih = Some(rec),
-            "stream" => stream = Some(rec),
+            "strih" => {
+                strih = Some(rec);
+                strih_colour = colour;
+            }
+            "stream" => {
+                stream = Some(rec);
+                stream_colour = colour;
+            }
             other => anyhow::bail!(
                 "--merge-partials: unknown box {other:?} (expected `strih` or `stream`)"
             ),
@@ -2817,7 +2892,14 @@ fn run_merge(args: &Args) -> Result<()> {
     );
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
-    let (_report, all_pass) = build_and_print_verdict(args, strih, stream, Cam1Source::Absent)?;
+    let (_report, all_pass) = build_and_print_verdict(
+        args,
+        strih,
+        stream,
+        Cam1Source::Absent,
+        strih_colour,
+        stream_colour,
+    )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
         std::process::exit(1);
@@ -2945,6 +3027,109 @@ mod tests {
             .collect()
     }
 
+    /// #377 — the carried per-recording COLOUR summary flows through the merge path to the RIGHT
+    /// nodes and FAILS the headline on a colour fault even when delivery + optical are clean. The
+    /// node→recording mapping mirrors the fused path: the strih recording's colour → cam1 (#133),
+    /// the stream recording's colour → strih + stream. Proves the #377 carry-through end to end
+    /// (the colour gate is fused/on-host, so the merge MUST rely on the carried summary).
+    #[test]
+    fn merge_carried_colour_maps_to_nodes_and_fails_the_headline_377() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use camera_box::colour_verify::NodeColourSummary;
+        use clap::Parser;
+
+        // --min-secs 1 so a small contiguous window trivially clears the #373 span floor, isolating
+        // COLOUR as the only possible failure (delivery + optical are clean).
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        // strih recording: cam1 + strih burns; stream recording: all three. Contiguous ⇒ clean delivery.
+        let strih_frames = window(60, false, None);
+        let stream_frames = window(60, true, None);
+
+        let clean = NodeColourSummary {
+            patch_wrong_counts: vec![0; 13],
+            patch_checked_counts: vec![6; 13],
+            frames_sampled: 6,
+        };
+        // 3 chromatic patches wrong on every sampled frame ⇒ fail_count() == 3.
+        let failing = NodeColourSummary {
+            patch_wrong_counts: vec![6, 0, 6, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0],
+            patch_checked_counts: vec![6; 13],
+            frames_sampled: 6,
+        };
+        assert_eq!(
+            failing.fail_count(),
+            3,
+            "test fixture: 3 patches wrong on a majority"
+        );
+
+        let build = |strih_colour, stream_colour| {
+            build_and_print_verdict(
+                &args,
+                Some(DecodedRec {
+                    frames: strih_frames.clone(),
+                    rec_path: None,
+                }),
+                Some(DecodedRec {
+                    frames: stream_frames.clone(),
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                strih_colour,
+                stream_colour,
+            )
+            .expect("verdict")
+        };
+
+        // FAILING stream recording colour → strih + stream fail; clean strih recording → cam1 OK.
+        let (v, pass) = build(Some(clean.clone()), Some(failing.clone()));
+        let loss = &v["full_chain"]["loss"];
+        assert_eq!(
+            loss["cam1"]["colour_fail"],
+            serde_json::json!(0),
+            "cam1 ← clean strih recording"
+        );
+        assert_eq!(
+            loss["strih"]["colour_fail"],
+            serde_json::json!(3),
+            "strih ← failing stream recording"
+        );
+        assert_eq!(
+            loss["stream"]["colour_fail"],
+            serde_json::json!(3),
+            "stream ← failing stream recording"
+        );
+        assert!(
+            !pass,
+            "a colour failure FAILS the headline even with clean delivery + optical"
+        );
+
+        // Mirror: FAILING strih recording colour → cam1 fails; clean stream → strih + stream OK.
+        let (v2, pass2) = build(Some(failing), Some(clean));
+        let loss2 = &v2["full_chain"]["loss"];
+        assert_eq!(
+            loss2["cam1"]["colour_fail"],
+            serde_json::json!(3),
+            "cam1 ← failing strih recording"
+        );
+        assert_eq!(
+            loss2["strih"]["colour_fail"],
+            serde_json::json!(0),
+            "strih ← clean stream recording"
+        );
+        assert!(!pass2, "a cam1 colour failure FAILS the headline");
+
+        // No carried colour (delivery-only merge) ⇒ colour ungated ⇒ clean delivery PASSES.
+        let (v3, pass3) = build(None, None);
+        assert_eq!(
+            v3["full_chain"]["loss"]["stream"]["colour_fail"],
+            serde_json::json!(0)
+        );
+        assert!(
+            pass3,
+            "no carried colour ⇒ colour ungated ⇒ a clean delivery still passes"
+        );
+    }
+
     /// #208: merging the per-box partials (strih partial + stream partial) reproduces the SAME
     /// full-chain verdict the fused single-process path produces — same JSON, same PASS — for a
     /// clean ZERO-loss run AND a run with a real cam1 drop. This is the equivalence the per-box
@@ -2974,6 +3159,8 @@ mod tests {
                     rec_path: None,
                 }),
                 Cam1Source::Absent,
+                None,
+                None,
             )
             .expect("fused verdict");
 
@@ -3003,6 +3190,8 @@ mod tests {
                     rec_path: None,
                 }),
                 Cam1Source::Absent,
+                None,
+                None,
             )
             .expect("merged verdict");
 
@@ -3116,6 +3305,8 @@ mod tests {
                 rec_path: None,
             }),
             Cam1Source::Absent,
+            None,
+            None,
         )
         .expect("verdict");
         assert!(
@@ -3209,6 +3400,8 @@ mod tests {
                 rec_path: None,
             }),
             Cam1Source::Absent,
+            None,
+            None,
         )
         .expect("fused verdict");
 
@@ -3229,6 +3422,8 @@ mod tests {
                 rec_path: None,
             }),
             Cam1Source::Absent,
+            None,
+            None,
         )
         .expect("merged verdict");
 
@@ -3432,6 +3627,8 @@ mod tests {
                 rec_path: None,
             }),
             Cam1Source::DecodeFailed("cam1 grab decode failed: boom".to_string()),
+            None,
+            None,
         )
         .expect("verdict with a failed cam1 grab");
         assert_eq!(
@@ -3457,6 +3654,8 @@ mod tests {
                 frames: window(12, false, None),
                 rec_path: None,
             }),
+            None,
+            None,
         )
         .expect("verdict with a decoded cam1 grab");
         assert_eq!(

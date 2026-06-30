@@ -33,6 +33,7 @@
 //! than the recording it was decoded from. The merge re-runs the EXACT verdict logic on these
 //! frames, so the merged verdict is equivalent to the fused single-process output.
 
+use crate::colour_verify::NodeColourSummary;
 use crate::probe::recording::RecordingFrame;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,11 @@ use std::path::Path;
 
 /// The partial JSON schema version. Bump on any breaking change to the wire shape; [`load`]
 /// refuses an unknown version rather than silently mis-reading an incompatible file.
-pub const PARTIAL_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (#377) adds the optional `colour` field — the per-recording [`NodeColourSummary`] the
+/// box computed on-host during `--colour-gate` extract, carried through to the dev1 merge. extract
+/// and merge always run from the SAME binary build, so a mixed v1/v2 read never occurs in practice.
+pub const PARTIAL_SCHEMA_VERSION: u32 = 2;
 
 /// One box's decode-in-place result — the small JSON the cross-box merge consumes (#208).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +65,13 @@ pub struct RecordingPartial {
     /// One entry per analyzed recorded frame, in file (capture) order. Ids + timestamps only —
     /// no pixels (see [`RecordingFrame`]).
     pub frames: Vec<RecordingFrame>,
+    /// #377 — the per-camera COLOUR verdict of THIS box's recording, computed ON the box during
+    /// `--colour-gate` extract (the colour gate is fused/on-host: the recording is only here). The
+    /// merge applies it to the node(s) this recording backs — the stream recording's summary → strih
+    /// + stream, the strih recording's summary → cam1 (mirrors the fused node→recording mapping).
+    /// `None` when `--colour-gate` was off (delivery-only runs), so old behaviour is unchanged.
+    #[serde(default)]
+    pub colour: Option<NodeColourSummary>,
 }
 
 impl RecordingPartial {
@@ -81,7 +93,16 @@ impl RecordingPartial {
             recording,
             expected_burns: expected_burns.to_vec(),
             frames,
+            colour: None,
         }
+    }
+
+    /// Attach the per-recording colour summary (#377) — set by `--extract-partial` when
+    /// `--colour-gate` is on, after sampling THIS box's recording. Builder so `from_frames` stays a
+    /// pure ids+timestamps constructor and the colour I/O lives in the probe-gated caller.
+    pub fn with_colour(mut self, colour: Option<NodeColourSummary>) -> Self {
+        self.colour = colour;
+        self
     }
 
     /// Serialize to compact JSON (NOT pretty — the file moves over the LAN; keep it lean).
@@ -173,6 +194,41 @@ mod tests {
             "recording is reduced to its basename"
         );
         assert_eq!(restored.expected_burns, vec![911001, 911002]);
+    }
+
+    #[test]
+    fn colour_summary_survives_the_partial_roundtrip_377() {
+        // #377 — the per-recording colour summary the box computed on-host must round-trip through
+        // the partial JSON so the dev1 merge can apply it (the colour gate is fused/on-host).
+        let colour = NodeColourSummary {
+            patch_wrong_counts: vec![0, 2, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            patch_checked_counts: vec![6; 13],
+            frames_sampled: 6,
+        };
+        let p = RecordingPartial::from_frames(
+            "stream",
+            Path::new("stream-9.mp4"),
+            &[911001, 911002, 911004],
+            vec![],
+        )
+        .with_colour(Some(colour.clone()));
+        let restored = RecordingPartial::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(
+            restored.colour,
+            Some(colour),
+            "the carried colour summary must survive the JSON roundtrip exactly"
+        );
+    }
+
+    #[test]
+    fn colour_defaults_to_none_when_absent_in_json() {
+        // A delivery-only partial (no --colour-gate at extract) has no colour; an older/clean JSON
+        // without the field must deserialize to None via #[serde(default)], never error.
+        let p = RecordingPartial::from_frames("strih", Path::new("strih-1.mkv"), &[], vec![]);
+        assert_eq!(p.colour, None, "from_frames defaults colour to None");
+        let j = r#"{"schema_version":2,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
+        let restored = RecordingPartial::from_json(j).unwrap();
+        assert_eq!(restored.colour, None, "absent colour field ⇒ None");
     }
 
     #[test]

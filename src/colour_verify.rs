@@ -336,8 +336,9 @@ pub fn verify_rgb_frame(
 }
 
 /// Per-patch fail tallies across many sampled frames of ONE node's recording, used to reduce
-/// transient single-frame compression noise to a stable per-node verdict.
-#[derive(Clone, PartialEq, Debug)]
+/// transient single-frame compression noise to a stable per-node verdict. Serializable so the #208
+/// per-box extract can carry it through the partial to the dev1 merge (#377).
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeColourSummary {
     /// `patch_wrong_counts[i]` = number of sampled frames on which patch `i` had a WRONG colour.
     pub patch_wrong_counts: Vec<usize>,
