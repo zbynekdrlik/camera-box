@@ -54,7 +54,7 @@
 //! rig's dim optical capture) passes comfortably while a grayscale / hue-shifted / channel-dead
 //! camera fails by a wide margin — hue is exposure/compression robust, and chroma collapse is
 //! unmistakable. They are a STRICT bar; the recorded-fixture proof
-//! ([`real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail`]) locks them against real
+//! (`real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail`) locks them against real
 //! per-patch rig values. They are NEVER to be loosened to force a pass (strict-test mandate) — and
 //! dropping the level check is the OPPOSITE of loosening: it removes a check that only ever
 //! false-fails the physically-dim rig, while every real colour fault still fails on hue/chroma.
@@ -117,14 +117,6 @@ pub fn hue_deg(c: Rgb) -> Option<f64> {
 pub fn hue_diff_deg(a: f64, b: f64) -> f64 {
     let d = (a - b).abs() % 360.0;
     d.min(360.0 - d)
-}
-
-/// Euclidean distance between two sRGB colours in `[0, ≈441]`.
-pub fn srgb_dist(a: Rgb, b: Rgb) -> f64 {
-    let dr = a.r as f64 - b.r as f64;
-    let dg = a.g as f64 - b.g as f64;
-    let db = a.b as f64 - b.b as f64;
-    (dr * dr + dg * dg + db * db).sqrt()
 }
 
 /// The per-patch outcome of the colour check. Every variant except [`PatchOutcome::Pass`] is a
@@ -475,11 +467,10 @@ mod tests {
     }
 
     #[test]
-    fn chroma_and_distance_are_concrete() {
+    fn chroma_is_concrete() {
         assert_eq!(chroma(Rgb::new(255, 0, 0)), 255.0);
         assert_eq!(chroma(Rgb::new(128, 128, 128)), 0.0);
-        assert_eq!(srgb_dist(Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)), 0.0);
-        assert!((srgb_dist(Rgb::new(255, 0, 0), Rgb::new(0, 0, 0)) - 255.0).abs() < 1e-9);
+        assert_eq!(chroma(Rgb::new(64, 0, 0)), 64.0);
     }
 
     // ---- the sampler (geometry + burn-dodge) ----
