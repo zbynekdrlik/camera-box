@@ -3593,6 +3593,64 @@ mod tests {
     }
 
     #[test]
+    fn node_verdict_strih_zero_loss_when_cam2_optical_mostly_undecodable_360() {
+        // #360 REGRESSION (run 354003, 1000ms genlock latency). The filmed cam2 optical dual-QR
+        // went ~87% undecodable, while the DIGITAL strih burn was present on 100% of delivered
+        // frames. The OLD verdict (a) windowed strih to ONLY the optically-decoded frames (the
+        // cam2-tick gating) so the strih burn jumped ~30 ids between the sparse optical frames,
+        // and (b) assumed a clean step-2 decimation — the step-2 gap math then manufactured
+        // thousands of phantom REAL DROPs (the real run reported strih real_drops=17300, which
+        // EXCEEDS the 8999 frame count). The chain delivered every frame; a test-rig OPTICAL-READ
+        // failure must NEVER manufacture digital burn-chain loss.
+        //
+        // Build 71 DELIVERED frames: the strih digital burn is present on EVERY frame (a
+        // free-running render tick, here a representative clean +4 step), the cam2 optical paint
+        // decodes only every 7th frame (undecodable / tick null on the other ~86%). NO real loss.
+        // Frame 0 and frame 70 are both optical so the optical-anchored boundary spans all 71.
+        let n = 71u32;
+        let stream: Vec<RecordingFrame> = (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = Vec::new();
+                if i % 7 == 0 {
+                    ps.push((CAM2, 100 + i)); // cam2 optical decoded only ~1-in-7 frames
+                }
+                ps.push((STRIH, 2000 + i * 4)); // strih digital burn on EVERY delivered frame
+                frame(i as u64, &ps)
+            })
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        // Every delivered (strih-burn-bearing) frame is verified — NOT just the ~11 optically
+        // decoded ones. (OLD code: expected_count == 11, the optical-only window.)
+        assert_eq!(
+            v.contiguity.expected_count, n,
+            "all delivered frames (burn present) must be in the window, not only the optical ones: {:?}",
+            v.contiguity
+        );
+        // And the free-running strih render-tick's forward gaps are not charged as loss.
+        assert!(
+            v.is_zero(),
+            "cam2 optical undecodability must not manufacture strih burn-chain loss: {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "no phantom real drops");
+    }
+
+    #[test]
     fn node_verdict_cam1_per_emit_gap_is_a_real_drop() {
         // cam1 routed with BurnRate::PerEmittedFrame: a forward integer gap (52 absent) on
         // delivered frames IS a real cam1 drop — the regression the review caught. The verdict
