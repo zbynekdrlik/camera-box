@@ -499,9 +499,12 @@ echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups
 echo ""
 echo -e "${GREEN}[16/${TOTAL_STEPS}] Installing required packages...${NC}"
 apt-get update -qq
-apt-get install -y -qq avahi-daemon libavahi-client3 v4l-utils alsa-utils ethtool 2>/dev/null || true
+# #362: include the FULL NDI/audio runtime dep set so a fresh box can RUN camera-box (the CAM3
+# clone crash-looped on missing libndi deps): libasound2t64 (ALSA, intercom), libavahi-common3
+# (libndi links it alongside libavahi-client3), and avahi-utils (avahi-browse for diagnosis).
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, libavahi-client3, v4l-utils, alsa-utils, ethtool"
+echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'

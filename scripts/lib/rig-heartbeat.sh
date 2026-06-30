@@ -136,3 +136,52 @@ rig_heartbeat_clear() {
 rig_heartbeat_stop() {
   rig_heartbeat_clear
 }
+
+# ── #353: the "rig is in an UNCLEANED E2E test state" MARKER ──────────────────────────────────
+# DISTINCT from the heartbeat above (which stays a separate "don't act during a LIVE E2E" gate):
+#   - The HEARTBEAT is REFRESHED while a legit E2E runs and the refresher REMOVES it the instant the
+#     harness dies — so a FRESH heartbeat means "a legit E2E is live, never act".
+#   - The MARKER is written ONCE on harness entry and removed ONLY by the harness's clean-exit
+#     cleanup(). An UNCLEAN death (SIGKILL / interrupted trap) leaves it behind.
+# Therefore "marker present AND heartbeat absent/stale" = a harness entered a test state and never
+# cleaned up = the rig is STRANDED, regardless of which scene OBS is on. This replaces the fragile
+# OBS scene-name scraping (#353): no scene-list to keep in sync across two files, robust to
+# env-overridden / custom scene names.
+#
+# Marker path (single well-known location, documented):
+#   $CAMERA_BOX_RIG_E2E_MARKER                       (explicit override, used by tests)
+#   else  <dir of rig_heartbeat_path>/rig-in-e2e    (co-located with the heartbeat)
+# Co-locating with the heartbeat reuses its WRITABILITY-CHECKED runtime dir (XDG_RUNTIME_DIR, with
+# the same /tmp fallback) so a non-root harness can always write it — and the harness (writer) and
+# watchdog (reader) resolve via THIS one function, so they always agree on the path.
+rig_e2e_marker_path() {
+  if [ -n "${CAMERA_BOX_RIG_E2E_MARKER:-}" ]; then
+    printf '%s\n' "$CAMERA_BOX_RIG_E2E_MARKER"
+    return 0
+  fi
+  printf '%s\n' "$(dirname "$(rig_heartbeat_path)")/rig-in-e2e"
+}
+
+# rig_e2e_marker_set [label] -> create the marker (records epoch<TAB>label<TAB>pid for diagnosis).
+# Creates the parent dir if needed. Presence — not freshness — is the signal. Returns the write's
+# REAL exit status (NOT swallowed) so the caller's `|| echo WARNING` guard actually fires on a failed
+# write — a silently-missing marker would make the watchdog blind to a stranded rig (#353 review).
+rig_e2e_marker_set() {
+  local label="${1:-rig-e2e}"
+  local path; path="$(rig_e2e_marker_path)"
+  local dir; dir="$(dirname "$path")"
+  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$label" "$$" > "$path" 2>/dev/null
+}
+
+# rig_e2e_marker_clear -> remove the marker. Idempotent: clearing an absent marker is a no-op success.
+rig_e2e_marker_clear() {
+  rm -f "$(rig_e2e_marker_path)" 2>/dev/null || true
+  return 0
+}
+
+# rig_e2e_marker_present -> exit 0 if the marker file exists, else 1. The marker has NO freshness
+# window — it persists until a clean cleanup() removes it (that persistence IS the stranded signal).
+rig_e2e_marker_present() {
+  [ -f "$(rig_e2e_marker_path)" ]
+}

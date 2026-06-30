@@ -74,6 +74,22 @@ sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box && 
 
 Use IP addresses — `.lan` DNS may not resolve.
 
+**#362 — a FRESH USB clone needs the NDI/audio RUNTIME deps baked in (re-image / #301 checklist).**
+A fresh CAM3 clone booted but camera-box crash-looped because libndi could not `dlopen`. If a fresh
+box crash-loops camera-box, check these four (the builders now bake all of them — verify if a clone
+predates the fix):
+1. `libasound2t64` (ALSA) — camera-box exits on missing `libasound.so.2` (intercom).
+2. `/etc/ld.so.conf.d/ndi.conf` = `/usr/lib/ndi` (+ `ldconfig`) — without it `dlopen("libndi.so")`
+   fails (`cannot open shared object file`) even though the lib is present at `/usr/lib/ndi/`.
+3. `libavahi-client3` + `libavahi-common3` — libndi links them; NDI load fails without them.
+4. `avahi-daemon` (installed + `systemctl enable`d + running) — libndi browses mDNS via it for NDI
+   source discovery; no daemon → `find()` returns nothing → black `--display` receiver even though
+   the source is reachable at TCP level. `avahi-utils` (`avahi-browse _ndi._tcp`) diagnoses it.
+   avahi-daemon is mDNS only — NO conflict with DanteSync's clock ownership (cam4 runs both; do NOT
+   touch chrony/timesyncd/timedatectl).
+Baked into `scripts/create-usb-linux.sh` (base image) + `setup.sh` + `setup-device.sh`; pinned by
+content-assertion tests in `tests/appliance_boot_hardening.rs`.
+
 ## Realtime CPU + IRQ isolation of the grab (#289)
 
 The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbles under box load
@@ -149,36 +165,53 @@ well-known file `${XDG_RUNTIME_DIR}/camera-box-rig-active` (fallback `/tmp/camer
 
 **Pure decision** `scripts/lib/rig-restore-decision.sh::rig_restore_decide` (no I/O, unit-tested in
 `tests/harness_rig_restore_watchdog.rs`): fresh heartbeat → never act; else a CLEAR stranded signal
-(cam down / stale probe / OBS on a known TEST scene `RIG_KNOWN_TEST_SCENES`) → act, but only after
-**2 consecutive confirmations** (`RIG_CONFIRM_THRESHOLD`, the #266 lesson); acting ALWAYS alerts.
+(cam down / stale probe / the **#353 E2E marker** / — fallback — OBS on a known TEST scene
+`RIG_KNOWN_TEST_SCENES`) → act, but only after **2 consecutive confirmations**
+(`RIG_CONFIRM_THRESHOLD`, the #266 lesson); acting ALWAYS alerts.
 
-**Known-test-scenes default** (both scripts must stay consistent — `rig-restore-decision.sh` line ~43
-and `rig-restore-watchdog.sh` line ~79):
+**#353 — the E2E MARKER is now the PRIMARY stranded signal (replaced scene-name scraping).**
+`scripts/lib/rig-heartbeat.sh` gained `rig_e2e_marker_{path,set,clear,present}`. The marker
+(`${XDG_RUNTIME_DIR:-/run}/rig-in-e2e`) is written ONCE on harness entry and removed ONLY on clean
+exit — so an UNCLEAN death (SIGKILL / interrupted trap) leaves it behind. This is **distinct from the
+heartbeat**, which the background refresher self-removes the instant the harness dies. So:
+- **marker present AND heartbeat absent/stale** = a harness entered a test state and never cleaned up
+  = rig stranded, REGARDLESS of which scene OBS is on. When set, the decision restores EVERY observed
+  OBS box (`RIG_E2E_MARKER=1` env). The watchdog reads it (`rig_e2e_marker_present`) → exports it →
+  **clears it after restoring** so a stale marker can't re-trigger/re-alert each pass.
+- Wired: `recording-e2e.sh` sets the marker next to `rig_heartbeat_start`, clears it in `cleanup()`.
+- Why: scene scraping was fragile (env-overridden / custom scene names slip through; two files to keep
+  in sync). The marker needs no scene-list and is robust to any scene name.
+
+**`RIG_KNOWN_TEST_SCENES` is now a FALLBACK only** (marker-less runs: older harness / manual testing).
+Default (both `rig-restore-decision.sh` ~line 60 and `rig-restore-watchdog.sh` ~line 80):
 
 ```
-RIG_KNOWN_TEST_SCENES="PHASE2-PROBE REC-STRIH-TMP"
+RIG_KNOWN_TEST_SCENES="PHASE2-PROBE"
 ```
 
-- `PHASE2-PROBE` — the `obs_phase2.py` phase2 probe scene on strih (`SCENE` constant at line 44).
-- `REC-STRIH-TMP` — the stream box's ephemeral full-screen scene built by `obs_phase2.py prod-scene
-  --ensure-source`; this is `STREAM_PROG_SCENE` default in `recording-e2e.sh`. The primary #281-class
-  case: the stream box strands on this scene when a rig step dies mid-proof.
+- `PHASE2-PROBE` — the `obs_phase2.py` phase2 probe scene on strih (still a live test scene).
+- **`REC-STRIH-TMP` was DROPPED** (#343/#353): `recording-e2e.sh` now records the stream box's
+  already-active prod scene `PRO` (`STREAM_PROG_SCENE` default), so the stream box never lands on an
+  ephemeral scene — the marker, not a scene name, detects a stranded stream box now.
 
-**INVARIANT**: when adding a new ephemeral scene to the harness (any new `SCENE` constant in
-obs_phase2.py or any new `*_PROG_SCENE` default in recording-e2e.sh that an `--ensure-source` call
-builds), add it to both default strings AND add/update a test in
-`tests/harness_rig_restore_watchdog.rs` (`rec_strih_tmp_is_stranded_by_default_no_env_override`
-pattern — use the DEFAULT, no `RIG_KNOWN_TEST_SCENES` env override).
+**INVARIANT (post-#353)**: prefer the MARKER for new rig-touching harnesses — wrap them so they
+`rig_e2e_marker_set` on entry + `rig_e2e_marker_clear` on clean exit (and the heartbeat too). The
+scene-list fallback only matters for marker-less callers; if you DO add a scene to it, add it to BOTH
+default strings (decision + watchdog — the two-file sync the marker eliminates) and a test.
 
-**GOTCHA — scene names must not contain spaces**: the match loop uses IFS word-split
+**GOTCHA — fallback scene names must not contain spaces**: the match loop uses IFS word-split
 (`for ks in $known; do`) — a name like `"NDI 2ME PGM"` would split into three tokens and silently
-fail to match. All current names are hyphenated. See #352 (planned code-level comment + test).
+fail to match. All current names are hyphenated. Locked by #352 (code comment + lock test).
 
 **Watchdog** `scripts/rig-restore-watchdog.sh` (runs on dev1 from a `systemd --user` timer,
-session-independent): probes cam1/2/4 (`systemctl is-active camera-box` + stale-probe `pgrep`) + OBS
-program scene (new `obs_phase2.py program-scene` reader, reuses `_conn`/`_rpc`), persists the confirm
-counter across runs in a state file, restores prod (`systemctl restart camera-box` /
-`obs_phase2.py teardown`) and ALWAYS `airuleset.py notify`. `--dry-run` = observe+decide+log only.
+session-independent): probes cam1/2/4 (`systemctl is-active camera-box` + stale-probe `pgrep`) + the
+E2E marker + OBS program scene (`obs_phase2.py program-scene` reader, reuses `_conn`/`_rpc`), persists
+the confirm counter across runs in a state file, restores prod (`systemctl restart camera-box` /
+`obs_phase2.py teardown`), clears the marker **only after a POSITIVE full OBS restore** (pure
+`rig_marker_should_clear`: marker present + acted + no OBS box unreadable + every teardown succeeded —
+else KEEP so a later pass retries; clearing while an OBS box was unreadable/failed would mask a
+still-stranded box), and ALWAYS `airuleset.py notify`. `--dry-run` = observe+decide+log only (never
+clears the marker).
 
 **SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` committed but NOT installed/
 enabled. The **supervisor** installs, live-verifies (real E2E heartbeat → no act; simulated stranded

@@ -150,7 +150,9 @@ update_system() {
         ethtool \
         v4l-utils \
         libavahi-client3 \
+        libavahi-common3 \
         avahi-daemon \
+        avahi-utils \
         ca-certificates \
         "$ALSA_PKG" \
         alsa-utils
@@ -642,6 +644,11 @@ EOF
 
     # Create NDI directory
     mkdir -p "$NDI_DIR"
+    # #362: put /usr/lib/ndi on the dynamic-linker path so dlopen("libndi.so") resolves once the
+    # (licensing-restricted) NDI lib is copied in. Without this a fresh box crash-loops camera-box on
+    # "libndi.so: cannot open shared object file" even though the lib is present at /usr/lib/ndi.
+    echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
+    ldconfig
 
     systemctl daemon-reload
     systemctl enable camera-box

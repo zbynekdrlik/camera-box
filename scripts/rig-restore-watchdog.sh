@@ -13,8 +13,10 @@
 #
 # CONSERVATIVE BY DESIGN (the #266 auto-watchdog was removed for false positives):
 #   - A FRESH heartbeat (scripts/lib/rig-heartbeat.sh, written by a live E2E) => NEVER act.
-#   - Acts ONLY on a CLEAR stranded signal: cam-box down, stale probe running, or OBS program on a
-#     known TEST scene (default "PHASE2-PROBE REC-STRIH-TMP"; RIG_KNOWN_TEST_SCENES overrides).
+#   - Acts ONLY on a CLEAR stranded signal: cam-box down, stale probe running, the #353 E2E MARKER
+#     (a harness left it behind on an unclean death => restore every observed OBS box regardless of
+#     scene), or — fallback — OBS program on a known TEST scene (default "PHASE2-PROBE";
+#     RIG_KNOWN_TEST_SCENES overrides). The marker replaces the fragile scene-name scraping.
 #   - Requires RIG_CONFIRM_THRESHOLD (default 2) CONSECUTIVE confirmations before acting.
 # ALL "should we act?" logic lives in the PURE scripts/lib/rig-restore-decision.sh (unit-tested);
 # this script only GATHERS observations and EXECUTES the decided restores.
@@ -76,7 +78,10 @@ REPO_SLUG="${RIG_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 
 # Export decision tunables consumed by rig_restore_decide.
 export RIG_CONFIRM_THRESHOLD="${RIG_CONFIRM_THRESHOLD:-2}"
-export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE REC-STRIH-TMP}"
+# #343/#353: REC-STRIH-TMP dropped from the default — the marker (below), not a scene name, detects a
+# stranded stream box now (recording-e2e.sh records the already-active prod scene PRO). PHASE2-PROBE
+# stays (still a live obs_phase2 probe scene on strih). RIG_KNOWN_TEST_SCENES is now a fallback only.
+export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE}"
 export RIG_HEARTBEAT_STALE_SEC="${RIG_HEARTBEAT_STALE_SEC:-600}"
 
 # ── logging (verbose per comprehensive-logging.md) ───────────────────────────
@@ -150,9 +155,17 @@ restore_obs() {
     *) log "restore_obs: unknown obs '$name' — skipping"; return 0 ;;
   esac
   log "RESTORE obs $name ($host): obs_phase2.py teardown (restore prod scene) + burns OFF"
+  # #353 (review): preserve the teardown's REAL exit status (return it) so the caller can tell whether
+  # the box was actually restored — the marker is cleared only after EVERY OBS restore succeeded.
+  local rc=0
   timeout "$OBS_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown \
-    --host "$host" --password "$OBS_WS_PASSWORD" >/dev/null 2>&1 \
-    && log "RESTORE obs $name: teardown done" || log "RESTORE obs $name: teardown returned non-zero"
+    --host "$host" --password "$OBS_WS_PASSWORD" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "RESTORE obs $name: teardown done"
+  else
+    log "RESTORE obs $name: teardown returned non-zero ($rc)"
+  fi
+  return "$rc"
 }
 
 # ── read / write the persisted confirm counter ───────────────────────────────
@@ -182,6 +195,20 @@ main() {
   fi
   export RIG_HB_ACTIVE="$hb_active"
 
+  # #353 E2E MARKER: recording-e2e.sh writes it on entry and removes it ONLY on clean exit, so a
+  # leftover marker = a harness entered a test state and died WITHOUT cleaning up. Combined with the
+  # absent/stale heartbeat above, that is the durable "rig stranded" signal — robust to env-overridden
+  # OBS scene names (replaces the fragile scene-name scraping; no scene-list to keep in sync). When
+  # present, the decision restores every observed OBS box regardless of scene.
+  local marker=0
+  if rig_e2e_marker_present; then
+    marker=1
+    log "e2e-marker: PRESENT ($(rig_e2e_marker_path)) — a harness entered a test state and did NOT clean up"
+  else
+    log "e2e-marker: absent — no uncleaned test-state harness"
+  fi
+  export RIG_E2E_MARKER="$marker"
+
   # Gather observations (each helper logs + emits 0/1 record lines).
   local obs=""
   obs+="$(probe_cam cam1 "$CAM1_IP")"$'\n'
@@ -190,6 +217,14 @@ main() {
   obs+="$(probe_obs strih "$STRIH_HOST")"$'\n'
   obs+="$(probe_obs stream "$STREAM_HOST")"$'\n'
   export RIG_OBS="$obs"
+
+  # #353 (review): how many of the 2 OBS boxes (strih, stream) were UNREADABLE this pass. probe_obs
+  # emits an `obs ...` record only for a readable box, so unreadable = 2 - seen. An unreadable box may
+  # hide a stranded scene, so the marker must NOT be cleared while any OBS probe failed (below).
+  local obs_seen obs_unreadable
+  obs_seen="$(printf '%s\n' "$obs" | grep -c '^obs ')"
+  obs_unreadable=$(( 2 - obs_seen ))
+  [ "$obs_unreadable" -lt 0 ] && obs_unreadable=0
 
   local prev; prev="$(read_prev_confirm)"
   export RIG_PREV_CONFIRM="$prev"
@@ -218,15 +253,28 @@ main() {
     return 0
   fi
 
-  # Execute the decided restores.
-  local tok
+  # Execute the decided restores. Count any OBS teardown that FAILED so the marker is kept (below)
+  # until every OBS box is positively restored.
+  local tok obs_failed=0
   for tok in $actions; do
     case "$tok" in
       restore_cam:*) restore_cam "${tok#restore_cam:}" ;;
-      restore_obs:*) restore_obs "${tok#restore_obs:}" ;;
+      restore_obs:*) restore_obs "${tok#restore_obs:}" || obs_failed=$(( obs_failed + 1 )) ;;
       *) log "unknown action token '$tok' — skipping" ;;
     esac
   done
+
+  # #353 (review): clear the E2E marker (left behind by the dead harness) ONLY after a POSITIVE full
+  # OBS restore — marker present, we acted, NO OBS box was unreadable this pass, and EVERY OBS
+  # teardown succeeded. Otherwise KEEP it so a later pass retries; clearing while an OBS box was
+  # unreadable/failed would drop the durable signal and a box on a custom/env scene (outside the
+  # fallback list) would never be detected again (the masking bug).
+  if rig_marker_should_clear "$marker" "$act" "$obs_unreadable" "$obs_failed"; then
+    log "e2e-marker: clearing $(rig_e2e_marker_path) — prod fully restored (obs_unreadable=$obs_unreadable obs_failed=$obs_failed)"
+    rig_e2e_marker_clear 2>/dev/null || true
+  elif [ "$marker" = "1" ]; then
+    log "e2e-marker: KEPT ($(rig_e2e_marker_path)) — not a positive full restore (obs_unreadable=$obs_unreadable obs_failed=$obs_failed); a later pass will retry"
+  fi
 
   # ALWAYS alert when we act (so the supervisor/user ALWAYS know).
   if [ "${alert:-0}" = "1" ]; then

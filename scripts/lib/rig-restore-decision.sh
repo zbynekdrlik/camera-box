@@ -13,12 +13,25 @@
 #   RIG_PREV_CONFIRM       the prior consecutive-stranded count the CALLER persisted (default 0).
 #   RIG_CONFIRM_THRESHOLD  consecutive confirmations required before acting (default 2 — the #266
 #                          "2-live-sample" lesson). 1 = act on the first sighting.
+#   RIG_E2E_MARKER         1 = the E2E MARKER file is present (scripts/lib/rig-heartbeat.sh:
+#                          rig_e2e_marker_*). #353: the harness writes the marker on entry and
+#                          removes it ONLY on clean exit, so a leftover marker (while the heartbeat
+#                          is absent/stale — Rule 1 still gates this) means a harness entered a TEST
+#                          state and died WITHOUT cleaning up = the rig is stranded, REGARDLESS of
+#                          which scene OBS is on. When set, EVERY observed `obs` box is restored.
+#                          This is the PRIMARY stranded signal — it replaces the fragile OBS
+#                          scene-name scraping (robust to env-overridden/custom scene names, no
+#                          two-file scene-list to keep in sync). RIG_KNOWN_TEST_SCENES below stays as
+#                          a belt-and-suspenders fallback for runs with no marker (older harness /
+#                          manual testing). Cam restore is unaffected (the reliable down/probe
+#                          signals drive it — a healthy cam is never restored on the marker alone).
 #   RIG_KNOWN_TEST_SCENES  space-separated list of program scene names that PROVE a TEST state
-#                          (default "PHASE2-PROBE REC-STRIH-TMP":
-#                            PHASE2-PROBE   — the canonical obs_phase2.py phase2 probe scene on strih
-#                            REC-STRIH-TMP  — the ephemeral full-screen scene recording-e2e.sh builds
-#                                             on the stream box (STREAM_PROG_SCENE default; the primary
-#                                             #281-class case: stream stranded mid-proof)).
+#                          (fallback when no marker; default "PHASE2-PROBE":
+#                            PHASE2-PROBE — the canonical obs_phase2.py phase2 probe scene on strih).
+#                          #343/#353: REC-STRIH-TMP was DROPPED from the default — recording-e2e.sh
+#                          now records the stream box's already-active prod scene (PRO), so the
+#                          stream box never lands on the ephemeral REC-STRIH-TMP scene; the marker
+#                          (above), not a scene name, detects a stranded stream box now.
 #                          #352: each scene name in this list must NOT contain spaces — the matcher
 #                          word-splits on $known (see the loop below), so a spaced entry like
 #                          "NDI 2ME PGM" would split into 3 tokens and never match the full program
@@ -48,7 +61,8 @@ rig_restore_decide() {
   local hb_active="${RIG_HB_ACTIVE:-0}"
   local prev="${RIG_PREV_CONFIRM:-0}"
   local threshold="${RIG_CONFIRM_THRESHOLD:-2}"
-  local known="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE REC-STRIH-TMP}"
+  local known="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE}"
+  local marker="${RIG_E2E_MARKER:-0}"
   case "$prev$threshold" in *[!0-9]* | "") prev=0; threshold=2 ;; esac
 
   # Rule 1 — fresh heartbeat: a legit E2E is running, NEVER act (resets the counter).
@@ -79,15 +93,26 @@ rig_restore_decide() {
         ;;
       obs)
         local scene="${rest#scene=}" ks
-        # #352: scene names in $known must NOT contain spaces — this word-split is INTENTIONAL.
-        # A spaced entry (e.g. "NDI 2ME PGM") splits into separate tokens, none of which equals
-        # the full program scene name, so it would silently never match. Keep test scenes hyphenated.
-        for ks in $known; do
-          if [ "$scene" = "$ks" ]; then
-            actions="$actions restore_obs:$name"
-            break
-          fi
-        done
+        # #353: the E2E MARKER is the PRIMARY stranded signal. When the harness left its marker
+        # behind (entered a test state and never cleaned up) while the heartbeat is absent/stale
+        # (Rule 1 already short-circuited a fresh heartbeat above), restore EVERY observed OBS box
+        # REGARDLESS of which scene it is on. This replaces the fragile scene-name scraping — robust
+        # to env-overridden/custom scene names, no two-file scene-list to keep in sync. The
+        # RIG_KNOWN_TEST_SCENES match below remains a belt-and-suspenders fallback for runs with no
+        # marker (older harness / manual testing).
+        if [ "$marker" = "1" ]; then
+          actions="$actions restore_obs:$name"
+        else
+          # #352: scene names in $known must NOT contain spaces — this word-split is INTENTIONAL.
+          # A spaced entry (e.g. "NDI 2ME PGM") splits into separate tokens, none of which equals
+          # the full program scene name, so it would silently never match. Keep test scenes hyphenated.
+          for ks in $known; do
+            if [ "$scene" = "$ks" ]; then
+              actions="$actions restore_obs:$name"
+              break
+            fi
+          done
+        fi
         ;;
     esac
   done <<EOF
@@ -112,6 +137,20 @@ EOF
     _rig_decide_emit "$new_confirm" 0 0 "" "observe-only-sighting-${new_confirm}of${threshold}"
   fi
   return 0
+}
+
+# rig_marker_should_clear <marker> <act> <obs_unreadable> <obs_failed> -> exit 0 to CLEAR the marker.
+# #353 (review): the watchdog must clear the E2E marker (left by an unclean harness death) ONLY once
+# it has POSITIVELY restored every OBS box that could be stranded — i.e. it acted, AND no OBS box was
+# unreadable this pass (an unreadable box might hide a stranded scene the marker must keep flagging),
+# AND every OBS teardown succeeded. Otherwise KEEP the marker so a later pass retries — clearing
+# prematurely drops the durable signal and a box on a custom/env scene (outside the fallback list)
+# would stay stranded forever (the masking bug). PURE: integer args only, unit-tested. Any
+# non-numeric/empty arg is treated conservatively as "KEEP" (never clear on garbage input).
+rig_marker_should_clear() {
+  local marker="${1:-0}" act="${2:-0}" obs_unreadable="${3:-0}" obs_failed="${4:-0}"
+  case "$marker$act$obs_unreadable$obs_failed" in *[!0-9]* | "") return 1 ;; esac
+  [ "$marker" = "1" ] && [ "$act" = "1" ] && [ "$obs_unreadable" -eq 0 ] && [ "$obs_failed" -eq 0 ]
 }
 
 # _rig_decide_emit <confirm> <act> <alert> <actions> <reason>
