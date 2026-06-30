@@ -80,6 +80,11 @@ pub struct PaintParams {
     /// settled (sharp) when the camera fires. When `false` (default) the original
     /// single-QR path is used unchanged.
     pub dual_qr: bool,
+    /// #367: also paint the fixed colour-reference scale (a row of solid known-sRGB
+    /// patches) along the bottom band of the canvas, clear of the dual-QR. Lets the
+    /// monitor's colours be checked by eye AND sampled per-patch from the recording
+    /// (the #364 colour gate). When `false` the canvas carries only the QR(s).
+    pub colour_scale: bool,
 }
 
 /// Vernier dual-QR ids for refresh counter `tick`. LEFT carries the latest EVEN
@@ -123,7 +128,7 @@ fn paint_one_frame(
 
     // The logical id is decided + the QR rendered here (pre-flip); the id is what the
     // camera reads from the QR.
-    let (logical_id, bgra) = if params.dual_qr {
+    let (logical_id, mut bgra) = if params.dual_qr {
         // Vernier anti-blur: LEFT carries the latest EVEN tick, RIGHT the latest ODD
         // tick. Exactly one half changes per refresh — the other is settled (sharp).
         let (l, r) = vernier_ids(refresh_tick);
@@ -159,6 +164,12 @@ fn paint_one_frame(
             render_qr_bgra(&payload, params.canvas_w, params.canvas_h, params.qr_size),
         )
     };
+
+    // #367: paint the colour-reference scale onto the SAME frame (bottom band, clear of the
+    // QR), so the displayed monitor + the recording carry it alongside the dual-QR.
+    if params.colour_scale {
+        crate::probe::qr::blit_colour_scale_bgra(&mut bgra, params.canvas_w, params.canvas_h);
+    }
 
     // For KMS this blocks until the vblank flip completes — that block IS the 1:1 pacing
     // (one new id per HDMI vblank). For fbdev it returns at once.
@@ -311,6 +322,7 @@ mod tests {
             qr_size: 32,
             wall_clock: false,
             dual_qr: false,
+            colour_scale: false,
         }
     }
 
