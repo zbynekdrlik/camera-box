@@ -215,6 +215,19 @@ struct Args {
     /// fixed value to override. Kept a parameter so the continuity bakes no 30-vs-60 assumption.
     #[arg(long, default_value_t = 0)]
     switch_expected_step: i64,
+    /// #364 — enable the per-camera COLOUR gate. When set, each node's recording (cam1 from the
+    /// strih recording; strih/stream from the stream recording) is sampled for the #367 painted
+    /// colour scale and a per-camera colour verdict is computed; ANY reference patch wrong on a
+    /// majority of sampled frames FAILS the node (a HARD gate, mirrors the optical read). Default
+    /// OFF so delivery-only runs are unchanged. Set it on the E2E run where the painter painted the
+    /// colour scale (the harness enables it in TEST mode). On-host / fused only — a node with no
+    /// recording on this host (merge mode) errors loudly rather than silently skipping the gate.
+    #[arg(long)]
+    colour_gate: bool,
+    /// #364 — number of frames sampled per recording for the colour gate (input-seek, so the cost
+    /// is bounded independent of the recording length). Default [`colour_sample::DEFAULT_COLOUR_SAMPLES`].
+    #[arg(long, default_value_t = camera_box::probe::colour_sample::DEFAULT_COLOUR_SAMPLES)]
+    colour_samples: usize,
 }
 
 impl Args {
@@ -327,6 +340,15 @@ struct NodeVerdict {
     /// A distinct category — NOT a phantom chain drop (the pre-#360 problem), NOT passed (the #360
     /// fraud). See [`optical_undecodable_in_span`].
     optical_undecodable: usize,
+    /// #364 — number of reference COLOUR patches that FAILED the per-camera colour check on this
+    /// node's recording (grayscale collapse / hue-shift / out-of-tolerance / neutral tint), charged
+    /// on a strict MAJORITY of the sampled frames. The colour gate is HARD and mirrors
+    /// `optical_undecodable`: any failed patch makes the node NOT zero, even when delivery AND the
+    /// optical read are perfect — a camera that delivers every frame in the WRONG colour must FAIL.
+    /// 0 when colour was not gated this run (`--colour-gate` off), so existing delivery-only runs
+    /// are unaffected; the on-host/fused colour pass populates it (see `colour_sample`). NEVER
+    /// weakenable.
+    colour_fail: usize,
 }
 
 impl NodeVerdict {
@@ -336,7 +358,7 @@ impl NodeVerdict {
     /// optical read is the HARD gate — a run where the filmed dual-QR went undecodable FAILS even
     /// if every node's digital burn is present (reverts the #360 burn-only weakening).
     fn is_zero(&self) -> bool {
-        self.contiguity.is_contiguous() && self.optical_undecodable == 0
+        self.contiguity.is_contiguous() && self.optical_undecodable == 0 && self.colour_fail == 0
     }
     fn real_drops(&self) -> usize {
         self.classified
@@ -769,7 +791,46 @@ fn node_verdict(
         contiguity,
         classified,
         optical_undecodable,
+        // #364 — the colour gate is populated by the caller (the on-host/fused colour pass) so the
+        // pure analysis stays I/O-free for its many unit callers; 0 here means "colour not gated".
+        colour_fail: 0,
     })
+}
+
+/// #364 — the colour-gate I/O glue. Returns 0 when `--colour-gate` is off; otherwise samples this
+/// node's recording for the #367 painted colour scale and returns the number of reference patches
+/// WRONG on a majority of sampled frames (the node's `colour_fail`). Errors LOUDLY when the
+/// recording is not on this host (merge mode) or the colour scale is not readable — a requested
+/// gate must NEVER silently pass.
+///
+/// ffmpeg / process glue, like `decode_for` / `run_merge` / `extract_partial` — EXCLUDED from the
+/// mutation gate (it cannot be unit-tested without a live recording on disk; the supervisor's
+/// recorded fixture exercises it on the rig). The JUDGEMENT it wraps IS mutation-tested: the pure
+/// `colour_verify` module (`classify_patch` / `summarize_node_colour`) and `NodeVerdict::is_zero`'s
+/// `colour_fail == 0` term (locked by `node_verdict_colour_fail_is_a_hard_fail_364`).
+fn build_node_colour_fail(spec: &NodeSpec, args: &Args) -> Result<usize> {
+    if !args.colour_gate {
+        return Ok(0);
+    }
+    let rec = spec.rec_path.with_context(|| {
+        format!(
+            "--colour-gate set but node {} has no recording on this host (merge mode); run the \
+             colour gate on the box / fused path",
+            spec.node
+        )
+    })?;
+    let summary = camera_box::probe::colour_sample::extract_recording_colour_summary(
+        rec,
+        args.colour_samples,
+    )?;
+    anyhow::ensure!(
+        summary.any_checked(),
+        "colour gate: no colour patch was checkable in {} for node {} — the colour scale is \
+         missing or fully burn-covered (cannot verify colour)",
+        rec.display(),
+        spec.node
+    );
+    Ok(summary.fail_count())
 }
 
 /// Print the ONE trustworthy binary verdict for a node, human-readable, no jargon.
@@ -785,6 +846,18 @@ fn print_node_verdict(v: &NodeVerdict) {
             c.node
         );
         return;
+    }
+    // #364 — the per-camera COLOUR gate. Surface a colour failure FIRST among the non-delivery
+    // faults: a node can deliver every frame, with a complete optical read, and still be WRONG in
+    // colour (grayscale / hue-shift / cast). The zero-loss verdict proved DELIVERY; this proves the
+    // colour arrived correct, and a failure here FAILS the node like any other (#364).
+    if v.colour_fail > 0 {
+        println!(
+            "  [{}] NOT zero — {} reference COLOUR patch(es) WRONG on a majority of sampled frames \
+             (grayscale / hue-shift / out-of-tolerance / cast). The camera delivered frames in the \
+             WRONG colour — delivery being complete can NEVER substitute for correct colour (#364).",
+            c.node, v.colour_fail
+        );
     }
     // #363 — the cam2 OPTICAL dual-QR read is the HARD gate. Surface an undecodable optical span
     // FIRST: it is the real-camera-path failure, NOT a digital burn fault. The digital burns can
@@ -842,6 +915,7 @@ fn node_verdict_json(v: &NodeVerdict) -> serde_json::Value {
         "real_drops": v.real_drops(),
         "burn_unreadable": v.burn_unreadable(),
         "optical_undecodable": v.optical_undecodable,
+        "colour_fail": v.colour_fail,
         "classified": v.classified,
     })
 }
@@ -1831,7 +1905,13 @@ fn build_and_print_verdict(
                 if !present {
                     continue;
                 }
-                let nv = node_verdict(&spec, &all_burns, &args.out_dir, args.max_pixel_proof)?;
+                let mut nv = node_verdict(&spec, &all_burns, &args.out_dir, args.max_pixel_proof)?;
+                // #364 — the per-camera COLOUR gate: charge any reference patch wrong on a majority
+                // of sampled frames as a HARD fail (mirrors the optical read). 0 when `--colour-gate`
+                // is off. The ffmpeg/process glue lives in `build_node_colour_fail` (excluded from
+                // mutants like the other I/O glue); the JUDGEMENT is the mutation-tested
+                // `colour_verify` module.
+                nv.colour_fail = build_node_colour_fail(&spec, args)?;
                 print_node_verdict(&nv);
                 all_pass &= nv.is_zero();
                 report["full_chain"]["loss"][spec.node] = node_verdict_json(&nv);
@@ -4092,6 +4172,56 @@ mod tests {
             0,
             "the failure is the OPTICAL read — NOT a phantom digital drop: {:?}",
             v.contiguity
+        );
+    }
+
+    #[test]
+    fn node_verdict_colour_fail_is_a_hard_fail_364() {
+        // #364 — the per-camera COLOUR gate is a HARD gate, mirroring optical_undecodable. A node
+        // can deliver every frame WITH a complete optical read (zero loss on delivery), yet a colour
+        // failure on the painted reference (grayscale / hue-shift / cast) FAILS it: a complete
+        // delivery can NEVER substitute for correct colour.
+        let stream: Vec<RecordingFrame> = (0..6)
+            .map(|i| frame(i, &[(CAM2, 100 + i as u32), (STRIH, 2000 + (i as u32) * 2)]))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        // Delivery + optical are clean ⇒ ZERO loss BEFORE the colour gate, and colour ungated ⇒ 0
+        // (so existing delivery-only runs are unaffected).
+        assert!(
+            v.is_zero(),
+            "clean delivery is zero loss before colour: {:?}",
+            v.contiguity
+        );
+        assert_eq!(
+            v.colour_fail, 0,
+            "colour ungated ⇒ 0 (delivery-only runs unaffected)"
+        );
+        // A colour failure (2 reference patches wrong on a majority of frames) makes it NOT zero,
+        // with perfect delivery — and it is NOT charged as a digital drop.
+        v.colour_fail = 2;
+        assert!(
+            !v.is_zero(),
+            "a per-camera colour failure must FAIL the node even with perfect delivery (#364)"
+        );
+        assert_eq!(
+            v.real_drops(),
+            0,
+            "the failure is COLOUR — not a digital drop"
         );
     }
 

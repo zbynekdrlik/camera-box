@@ -35,10 +35,13 @@
 //! - **NEUTRAL** expected (white/black/gray ramp — chroma < [`CHROMATIC_EXPECTED_MIN`]):
 //!   - sampled chroma above [`NEUTRAL_CHROMA_MAX`] ⇒ **NeutralTint** (a cast where there is none).
 //!   - else sRGB distance above [`SRGB_DIST_TOL`] ⇒ **OutOfTolerance**.
-//! - a patch with NO samplable pixels (fully behind a burn / off canvas) ⇒ **Unsamplable** — a
-//!   FAIL, never a silent pass (fail-closed: an unproven colour is not a correct colour).
+//! - a patch with NO samplable pixels (fully behind a known burn / off canvas) ⇒ **Unsamplable** —
+//!   SKIPPED, not charged: a real colour defect is global and still fails on the VISIBLE patches, so
+//!   dodging a burn-covered patch never lets a defect through. The verdict is fail-closed only when
+//!   NOTHING was checkable (zero checked patches proves nothing).
 //!
-//! A camera FAILS the gate if ANY patch fails. The tolerances are calibrated so a CORRECT colour
+//! A camera FAILS the gate if ANY checked patch is wrong (or nothing was checkable). The tolerances
+//! are calibrated so a CORRECT colour
 //! through real H.264/NDI transport (compression, gamma) passes comfortably while a grayscale /
 //! hue-shifted camera fails by a wide margin — hue is exposure/compression robust, and chroma
 //! collapse is unmistakable. They are a STRICT bar; the recorded-fixture proof locks them. They
@@ -510,6 +513,145 @@ mod tests {
     }
 
     #[test]
+    fn classify_patch_outcomes_are_exhaustive_and_correct() {
+        // Direct lock on each decision branch (independent of the synthetic-frame helpers), so a
+        // future tweak to a tolerance or branch order is caught.
+        let red = Rgb::new(255, 0, 0);
+        let gray = Rgb::new(128, 128, 128);
+
+        // Pass — exact, and within tolerance.
+        assert!(classify_patch(red, Some(red)).is_pass());
+        assert!(
+            classify_patch(red, Some(Rgb::new(235, 18, 14))).is_pass(),
+            "near-correct red"
+        );
+        assert!(
+            classify_patch(gray, Some(Rgb::new(132, 124, 130))).is_pass(),
+            "near-correct gray"
+        );
+
+        // Grayscale — a chromatic patch with collapsed chroma.
+        assert!(matches!(
+            classify_patch(red, Some(Rgb::new(90, 90, 90))),
+            PatchOutcome::Grayscale { .. }
+        ));
+        // HueShift — chromatic, full chroma, wrong hue (red sampled as green).
+        assert!(matches!(
+            classify_patch(red, Some(Rgb::new(0, 255, 0))),
+            PatchOutcome::HueShift { .. }
+        ));
+        // OutOfTolerance (chromatic) — right hue + enough chroma, but the level is far off.
+        assert!(matches!(
+            classify_patch(red, Some(Rgb::new(140, 0, 0))),
+            PatchOutcome::OutOfTolerance { .. }
+        ));
+        // NeutralTint — a neutral patch with a colour cast.
+        assert!(matches!(
+            classify_patch(gray, Some(Rgb::new(190, 110, 110))),
+            PatchOutcome::NeutralTint { .. }
+        ));
+        // OutOfTolerance (neutral) — near-neutral (no tint) but the wrong level.
+        assert!(matches!(
+            classify_patch(gray, Some(Rgb::new(20, 22, 18))),
+            PatchOutcome::OutOfTolerance { .. }
+        ));
+        // Unsamplable — no sample at all.
+        assert!(matches!(
+            classify_patch(red, None),
+            PatchOutcome::Unsamplable { .. }
+        ));
+    }
+
+    #[test]
+    fn tolerance_boundaries_are_exact() {
+        // Pin each threshold at its EXACT value and one step over, so the relational operator and
+        // the constant cannot drift (a `>`↔`>=` or value tweak flips one of these). Every boundary
+        // is reachable with integer sRGB, so the comparison direction is fully constrained.
+        let red = Rgb::new(255, 0, 0);
+        let gray = Rgb::new(128, 128, 128);
+
+        // CHROMATIC_EXPECTED_MIN = 64: expected chroma 64 is CHROMATIC (≥), 63 is NEUTRAL.
+        assert!(
+            classify_patch(Rgb::new(64, 0, 0), Some(Rgb::new(64, 0, 0))).is_pass(),
+            "expected chroma 64 ⇒ chromatic ⇒ identical sample passes"
+        );
+        assert!(
+            matches!(
+                classify_patch(Rgb::new(63, 0, 0), Some(Rgb::new(63, 0, 0))),
+                PatchOutcome::NeutralTint { .. }
+            ),
+            "expected chroma 63 ⇒ neutral ⇒ its own chroma 63 > NEUTRAL_CHROMA_MAX ⇒ tint"
+        );
+
+        // GRAYSCALE_CHROMA_MIN = 40: sampled chroma exactly 40 is NOT grayscale; 39 IS.
+        assert!(
+            !matches!(
+                classify_patch(red, Some(Rgb::new(40, 0, 0))),
+                PatchOutcome::Grayscale { .. }
+            ),
+            "sampled chroma 40 is at the floor — NOT grayscale"
+        );
+        assert!(
+            matches!(
+                classify_patch(red, Some(Rgb::new(39, 0, 0))),
+                PatchOutcome::Grayscale { .. }
+            ),
+            "sampled chroma 39 is below the floor — grayscale"
+        );
+
+        // NEUTRAL_CHROMA_MAX = 48: a neutral patch with sampled chroma exactly 48 is NOT a tint; 49 is.
+        assert!(
+            !matches!(
+                classify_patch(gray, Some(Rgb::new(176, 128, 128))),
+                PatchOutcome::NeutralTint { .. }
+            ),
+            "neutral sample chroma 48 is at the cap — NOT a tint"
+        );
+        assert!(
+            matches!(
+                classify_patch(gray, Some(Rgb::new(177, 128, 128))),
+                PatchOutcome::NeutralTint { .. }
+            ),
+            "neutral sample chroma 49 exceeds the cap — tint"
+        );
+
+        // SRGB_DIST_TOL = 96: a chromatic sample at distance exactly 96 (right hue) PASSES; 97 fails.
+        assert!(
+            classify_patch(red, Some(Rgb::new(159, 0, 0))).is_pass(),
+            "single-channel distance 96 is at the tolerance — passes"
+        );
+        assert!(
+            matches!(
+                classify_patch(red, Some(Rgb::new(158, 0, 0))),
+                PatchOutcome::OutOfTolerance { .. }
+            ),
+            "distance 97 exceeds the tolerance"
+        );
+
+        // HUE_TOL_DEG = 30: (254,127,0) is hue exactly 30° from red ⇒ NOT a hue fail (it fails the
+        // distance backstop instead); (254,128,0) is just over 30° ⇒ HueShift.
+        assert_eq!(
+            hue_deg(Rgb::new(254, 127, 0)),
+            Some(30.0),
+            "exact 30° hue sample"
+        );
+        assert!(
+            !matches!(
+                classify_patch(red, Some(Rgb::new(254, 127, 0))),
+                PatchOutcome::HueShift { .. }
+            ),
+            "hue error exactly 30° is at the tolerance — NOT a HueShift"
+        );
+        assert!(
+            matches!(
+                classify_patch(red, Some(Rgb::new(254, 128, 0))),
+                PatchOutcome::HueShift { .. }
+            ),
+            "hue error just over 30° is a HueShift"
+        );
+    }
+
+    #[test]
     fn a_patch_fully_behind_a_burn_is_unsamplable() {
         let buf = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
         // Exclude the entire first patch region.
@@ -712,6 +854,39 @@ mod tests {
             "a majority grayscale node FAILS"
         );
         assert!(!majority.is_pass());
+
+        // STRICT majority boundary: exactly HALF (2 bad of 4) is NOT a majority ⇒ no patch charged.
+        // Locks the `wrong*2 > frames` comparison (a `>`→`>=` drift would charge the tie).
+        let mut frames = vec![correct_for_boundary(); 2];
+        frames.extend(vec![gray_for_boundary(); 2]);
+        let tie = summarize_node_colour(&frames);
+        assert_eq!(tie.frames_sampled, 4);
+        assert_eq!(
+            tie.fail_count(),
+            0,
+            "exactly half the frames bad is NOT a strict majority — no patch charged"
+        );
+        assert!(
+            tie.is_pass(),
+            "a 2-of-4 tie must PASS (strict majority required)"
+        );
+    }
+
+    fn correct_for_boundary() -> CameraColourVerdict {
+        verify_rgb_frame(
+            &paint_canvas(CANVAS_W, CANVAS_H, |c| c),
+            CANVAS_W,
+            CANVAS_H,
+            &[],
+        )
+    }
+    fn gray_for_boundary() -> CameraColourVerdict {
+        verify_rgb_frame(
+            &paint_canvas(CANVAS_W, CANVAS_H, to_gray),
+            CANVAS_W,
+            CANVAS_H,
+            &[],
+        )
     }
 
     #[test]
