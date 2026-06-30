@@ -437,6 +437,8 @@ STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
 # A fresh ephemeral scene + --ensure-source would cold-activate the 450ms-FIFO NDI 2ME PGM on the
 # graphics thread → SetCurrentProgramScene blocks >60s (#328 timeout, proof can't run). With program
 # already on PRO, prod_scene's `curr_prog == target` branch skips the switch entirely → no hang.
+# PRECONDITION: the stream box runs on its prod 'PRO' scene in normal operation; if it has DRIFTED
+# off PRO, prod_scene takes the bounded switch and fails LOUD at the #328 timeout (no silent hang).
 STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
   --program-scene "$STREAM_PROG_SCENE" \
   --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD")

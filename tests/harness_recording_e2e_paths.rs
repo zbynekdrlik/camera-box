@@ -537,7 +537,13 @@ fn recording_e2e_stream_records_already_active_prod_scene_no_reactivation() {
     let stream_call = s.find("prod-scene --host \"$STREAM\"").expect(
         "#343: recording-e2e.sh must route the stream program via `prod-scene --host \"$STREAM\"`",
     );
-    let block = &s[stream_call..(stream_call + 400).min(s.len())];
+    // Scope to exactly the `$(...)` command (up to its closing paren) — not a fixed-width window
+    // that could overrun into a later unrelated command's args.
+    let block_end = stream_call
+        + s[stream_call..]
+            .find(')')
+            .expect("#343: the stream prod-scene $(...) command must close with ')'");
+    let block = &s[stream_call..block_end];
     assert!(
         !block.contains("--ensure-source"),
         "#343: the stream prod-scene call must NOT pass --ensure-source — forcing source \
