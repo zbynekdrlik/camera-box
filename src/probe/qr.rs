@@ -267,7 +267,9 @@ pub fn blit_colour_scale_bgra(
     qr_size: u32,
     top_margin: u32,
 ) {
-    for (rect, rgb) in crate::colour_scale::colour_scale_patches(canvas_w, canvas_h, qr_size, top_margin) {
+    for (rect, rgb) in
+        crate::colour_scale::colour_scale_patches(canvas_w, canvas_h, qr_size, top_margin)
+    {
         let y_end = (rect.y + rect.h).min(canvas_h);
         let x_end = (rect.x + rect.w).min(canvas_w);
         for y in rect.y..y_end {

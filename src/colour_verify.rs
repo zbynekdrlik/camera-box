@@ -7,9 +7,10 @@
 //!
 //! ## How it ties to the painter (one source of truth)
 //!
-//! The #367 painter ([`crate::colour_scale`]) blits a row of KNOWN-sRGB reference patches along
-//! the bottom band of the cam2 monitor — the same content rides cam1→strih→stream and lands in
-//! every node's recording. This module iterates the SAME [`colour_scale_patches`] geometry and
+//! The #367 painter ([`crate::colour_scale`]) blits a column of KNOWN-sRGB reference patches in the
+//! central gap between the two dual-QR halves on the cam2 monitor — the same content rides
+//! cam1→strih→stream and lands in every node's recording. This module iterates the SAME
+//! [`colour_scale_patches`] geometry and
 //! [`PATCH_COLOURS`] table, samples each patch's mean colour from a recorded frame, and compares
 //! it to the known value. There is ONE colour table and ONE geometry for both the painter (write)
 //! and this verifier (read).
@@ -349,7 +350,9 @@ pub fn verify_rgb_frame(
     top_margin: u32,
     exclusions: &[Rect],
 ) -> CameraColourVerdict {
-    verify_samples(&sample_patch_means(rgb, w, h, qr_size, top_margin, exclusions))
+    verify_samples(&sample_patch_means(
+        rgb, w, h, qr_size, top_margin, exclusions,
+    ))
 }
 
 /// Per-patch fail tallies across many sampled frames of ONE node's recording, used to reduce

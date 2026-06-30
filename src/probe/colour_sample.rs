@@ -34,7 +34,8 @@ use std::process::{Command, Stdio};
 
 /// A few px of pad added around every burn-exclusion rectangle, covering the QR quiet zone and any
 /// integer rounding in the canvas-relative geometry, so a burn module never bleeds into a sample.
-/// Over-excluding by a few px is safe — each patch still keeps its clear bottom strip.
+/// Over-excluding by a few px is safe — the colour column sits in the central gap, well above the
+/// bottom-anchored burns, so no patch loses pixels regardless.
 const BURN_EXCLUSION_PAD_PX: u32 = 6;
 
 /// Canvas-height fraction of the strih/stream corner burn QR (mirrors
@@ -64,7 +65,7 @@ fn pad_rect(r: Rect, pad: u32, canvas_w: u32, canvas_h: u32) -> Rect {
     }
 }
 
-/// The burn rectangles to DODGE when sampling the colour band on a `canvas_w`×`canvas_h` frame:
+/// The burn rectangles to DODGE when sampling the colour column on a `canvas_w`×`canvas_h` frame:
 /// the cam1 capture burn (center-bottom) and the strih/stream corner burns (bottom-left /
 /// bottom-right). Each is computed from the SAME geometry the writers use (`qr::cam1_burn_origin`
 /// and `burn_geom::corner_placement`), then padded by [`BURN_EXCLUSION_PAD_PX`]. Empty for a canvas
@@ -327,7 +328,9 @@ pub fn extract_recording_colour_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::colour_scale::{colour_scale_patches, Rgb, DEFAULT_QR_SIZE, PATCH_COLOURS, TOP_MARGIN_PX};
+    use crate::colour_scale::{
+        colour_scale_patches, Rgb, DEFAULT_QR_SIZE, PATCH_COLOURS, TOP_MARGIN_PX,
+    };
 
     const W: u32 = 1920;
     const H: u32 = 1080;

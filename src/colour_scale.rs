@@ -82,10 +82,6 @@ pub const DEFAULT_QR_SIZE: u32 = 700;
 /// never touches a QR edge (covers the QR quiet zone + any integer rounding in the gap geometry).
 pub const COLUMN_INNER_MARGIN_PX: u32 = 10;
 
-/// Height (px) of the legacy BOTTOM colour-scale band — kept only as the stub layout while the
-/// vertical-column geometry is being introduced (RED step); removed by the GREEN implementation.
-pub const BAND_H: u32 = 120;
-
 /// The fixed reference colours, painted TOP → BOTTOM down the column: white, black, the
 /// six primaries/secondaries (R, G, B, C, M, Y), then a 5-step grayscale ramp
 /// (0, 64, 128, 192, 255). Each is a KNOWN sRGB value so the #364 colour gate can sample
@@ -127,33 +123,79 @@ pub fn colour_scale_patches(
     qr_size: u32,
     top_margin: u32,
 ) -> Vec<(Rect, Rgb)> {
-    // RED stub: still the legacy full-width BOTTOM-band layout (ignores the dual-QR gap). The
-    // GREEN implementation replaces this body with the central-column geometry.
-    let _ = (qr_size, top_margin);
     let n = PATCH_COLOURS.len() as u32;
-    if canvas_w < n || canvas_h <= BAND_H {
+    let Some(gap) = dual_qr_gap(canvas_w, canvas_h, qr_size, top_margin) else {
+        return Vec::new();
+    };
+    // Inset the column inside the gap on BOTH sides so a patch never touches a QR edge.
+    let inset = COLUMN_INNER_MARGIN_PX;
+    if gap.w <= 2 * inset {
         return Vec::new();
     }
-    let band_y = canvas_h - BAND_H;
-    let patch_w = canvas_w / n;
+    let col_x = gap.x + inset;
+    let col_w = gap.w - 2 * inset;
+    let (col_y, col_h) = (gap.y, gap.h);
+    let patch_h = col_h / n;
+    // Too short to give every patch at least one pixel ⇒ paint nothing.
+    if patch_h == 0 {
+        return Vec::new();
+    }
     PATCH_COLOURS
         .iter()
         .enumerate()
         .map(|(i, &rgb)| {
             let i = i as u32;
-            let x = i * patch_w;
-            let w = if i == n - 1 { canvas_w - x } else { patch_w };
+            let y = col_y + i * patch_h;
+            // The LAST patch absorbs the integer remainder so the column reaches its bottom with
+            // no unpainted strip.
+            let h = if i == n - 1 {
+                col_y + col_h - y
+            } else {
+                patch_h
+            };
             (
                 Rect {
-                    x,
-                    y: band_y,
-                    w,
-                    h: BAND_H,
+                    x: col_x,
+                    y,
+                    w: col_w,
+                    h,
                 },
                 rgb,
             )
         })
         .collect()
+}
+
+/// The central captured gap between the two top-anchored dual-QR halves, derived from the SAME
+/// geometry `render_qr_dual_bgra` / `blit_qr_bgra` use: `half = canvas_w / 2`; each QR centered in
+/// its half (`ox = band_x + (band_w − qw) / 2`, `qw = qr_size.min(band_w)`); top-anchored at
+/// `top_margin` over its vertical extent `qh = qr_size.min(canvas_h)`. Returns the gap rectangle
+/// `[left_qr_end, right_qr_start) × [qr_top, qr_top + qr_height)`, or `None` when the layout is
+/// degenerate (a QR half doesn't fit, or the halves leave no gap between them).
+fn dual_qr_gap(canvas_w: u32, canvas_h: u32, qr_size: u32, top_margin: u32) -> Option<Rect> {
+    let half = canvas_w / 2;
+    let right_band_w = canvas_w - half;
+    // Mirror blit_qr_bgra's `qw = qr.width().min(band_w)` for the left ([0, half)) and right
+    // ([half, canvas_w)) halves, and the QR's vertical extent.
+    let qw_l = qr_size.min(half);
+    let qw_r = qr_size.min(right_band_w);
+    let qh = qr_size.min(canvas_h);
+    if qw_l == 0 || qw_r == 0 || qh == 0 {
+        return None;
+    }
+    let left_qr_end = (half - qw_l) / 2 + qw_l; // band_x = 0
+    let right_qr_start = half + (right_band_w - qw_r) / 2; // band_x = half
+    if right_qr_start <= left_qr_end {
+        return None; // the halves meet — no gap
+    }
+    // Mirror qr_origin_y(canvas_h, qh, VAnchor::Top) = top_margin.min(canvas_h − qh).
+    let oy = top_margin.min(canvas_h - qh);
+    Some(Rect {
+        x: left_qr_end,
+        y: oy,
+        w: right_qr_start - left_qr_end,
+        h: qh,
+    })
 }
 
 #[cfg(test)]
@@ -173,7 +215,7 @@ mod tests {
     const HALF: u32 = CANVAS_W / 2; // 960
     const QX: u32 = (HALF - QR_SIZE) / 2; // 130 — each QR centered in its half
     const QR_BOTTOM: u32 = TOP_MARGIN + QR_SIZE; // 724
-    // Left QR  [130, 830) x [24, 724);  Right QR [1090, 1790) x [24, 724).
+                                                 // Left QR  [130, 830) x [24, 724);  Right QR [1090, 1790) x [24, 724).
     const QR_LEFT: Rect = Rect {
         x: QX,
         y: TOP_MARGIN,
@@ -248,7 +290,10 @@ mod tests {
         let ramp: Vec<u8> = patches[8..13].iter().map(|(_, c)| c.r).collect();
         assert_eq!(ramp, vec![0, 64, 128, 192, 255], "grayscale ramp steps");
         for (_, c) in &patches[8..13] {
-            assert!(c.r == c.g && c.g == c.b, "ramp patch is neutral gray: {c:?}");
+            assert!(
+                c.r == c.g && c.g == c.b,
+                "ramp patch is neutral gray: {c:?}"
+            );
         }
     }
 
