@@ -351,8 +351,8 @@ struct NodeVerdict {
     colour_fail: usize,
     /// #373 — the number of recorded frames in this node's cam2 OPTICAL span (the FIRST..=LAST frame
     /// whose dual-QR decoded, [`optical_span`]). 0 when there is no optical frame at all. Divided by
-    /// the capture rate this is the ANALYZED span in seconds; the headline gates on it being
-    /// >= `min_secs` ([`NodeVerdict::span_ok`]) so a COLLAPSED / partial optical read cannot
+    /// the capture rate this is the ANALYZED span in seconds; the headline gates on it being at
+    /// least `min_secs` ([`NodeVerdict::span_ok`]) so a COLLAPSED / partial optical read cannot
     /// vacuously pass (over a tiny span undecodable==0 and the burns are trivially contiguous — the
     /// fake-green hole #373 closes). It is NOT part of [`is_zero`] (which stays the per-node
     /// delivery+optical+colour gate, matched to the existing fixtures); the duration FLOOR is a
