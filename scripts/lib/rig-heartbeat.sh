@@ -92,12 +92,22 @@ rig_heartbeat_start() {
   local label="${1:-rig-test}"
   rig_heartbeat_write "$label"
   local interval="${RIG_HEARTBEAT_REFRESH_SEC:-30}"
-  # Subshell refresher: re-write on each tick until killed. Detached from the caller's job control.
+  # The OWNER is the harness shell that called start. The refresher self-terminates AND removes the
+  # heartbeat the moment the owner dies — even on SIGKILL (-9), which bypasses the harness's cleanup
+  # trap. Without this, the disowned refresher would keep re-writing a "fresh" heartbeat forever
+  # after a -9'd harness, so the watchdog would NEVER recover that genuinely-stranded rig (the exact
+  # #281 failure). `$$` is the harness PID even inside the subshell (overridable for tests).
+  local owner="${RIG_HEARTBEAT_OWNER_PID:-$$}"
+  local path; path="$(rig_heartbeat_path)"
+  # Subshell refresher: re-write each tick while the owner lives; on owner death / interrupt, remove
+  # the heartbeat so it can never lie "fresh". Detached from the caller's job control.
   (
     while :; do
-      sleep "$interval" || exit 0
-      rig_heartbeat_write "$label" || exit 0
+      sleep "$interval" || break
+      kill -0 "$owner" 2>/dev/null || break   # owner gone (incl. SIGKILL) -> stop lying "fresh"
+      rig_heartbeat_write "$label" || break
     done
+    rm -f "$path" 2>/dev/null
   ) >/dev/null 2>&1 &
   local rpid=$!
   printf '%s\n' "$rpid" > "$(_rig_hb_refresher_pidfile)" 2>/dev/null || true

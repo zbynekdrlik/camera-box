@@ -390,6 +390,41 @@ fn heartbeat_path_resolves_to_a_well_known_location() {
     );
 }
 
+#[test]
+fn refresher_removes_heartbeat_when_its_owner_dies() {
+    // A SIGKILL'd harness bypasses its cleanup trap; the disowned refresher must NOT keep the
+    // heartbeat "fresh" forever (that would make the watchdog blind to the exact #281 stranded
+    // rig). The refresher checks its owner PID each tick and removes the heartbeat once the owner
+    // is gone. Here we point the owner at a guaranteed-dead PID so the FIRST tick self-expires it.
+    let dir = scratch("hb-owner-death");
+    let path = dir.join("rig-active");
+    let script = format!(
+        r#". "$HEARTBEAT_LIB"
+export CAMERA_BOX_RIG_HEARTBEAT="{p}"
+export RIG_HEARTBEAT_REFRESH_SEC=1
+# A PID that is already dead: spawn `true`, reap it, reuse its PID as the (dead) owner.
+( true ) & dead=$!; wait "$dead" 2>/dev/null
+export RIG_HEARTBEAT_OWNER_PID="$dead"
+rig_heartbeat_start "owner-death-test"
+test -f "{p}" || {{ echo "MISSING right after start"; exit 21; }}
+# Within a few refresh intervals the refresher sees the dead owner and removes the heartbeat.
+for _ in 1 2 3 4 5 6; do
+  sleep 1
+  [ -f "{p}" ] || {{ echo OK_REMOVED; exit 0; }}
+done
+echo "STILL FRESH after owner death"; exit 22
+"#,
+        p = path.display()
+    );
+    let (code, stdout, stderr) = run_bash(&script);
+    assert_eq!(
+        code, 0,
+        "#281: the refresher must remove the heartbeat once its owner dies\nstdout:{stdout}\nstderr:{stderr}"
+    );
+    assert!(stdout.contains("OK_REMOVED"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ─── watchdog script: syntax + wiring (static, no rig) ────────────────────────
 
 #[test]
