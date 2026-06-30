@@ -105,12 +105,12 @@ struct Args {
     /// Monitor refresh Hz of the painted logical counter.
     #[arg(long, default_value_t = 60.0)]
     refresh_hz: f64,
-    /// #11 mixed 60/30: the strih OBS render/emit fps (the rate the strih DistroAV burn-id counter
-    /// advances). RIG-PINNED constant, never user-tuned (a wrong value would mask real loss). With
-    /// `--stream-capture-fps` it gives the strih burn's by-design DECIMATION step in the stream
-    /// recording: `round(strih_emit_fps / stream_capture_fps)` = 60/30 = 2. A recorded forward gap
-    /// of exactly that step is the decimation (not loss); a larger gap charges the excess as a real
-    /// drop. Default 60 (the LED-wall IMAG program rate).
+    /// #11 → #360: the strih OBS render/emit fps. RIG-PINNED constant, never user-tuned. It used to
+    /// derive the strih burn's decimation step (`round(strih_emit_fps / stream_capture_fps)` =
+    /// 60/30 = 2), but #360 found the strih burn is a FREE-RUNNING render tick with an IRREGULAR
+    /// per-frame step (NOT a clean 2), so its forward gaps are jitter, not loss — strih now uses
+    /// gap-ignore (see `node_render_step`). This flag is RETAINED on the CLI for provenance/
+    /// back-compat; it no longer drives the strih loss step. Default 60 (the LED-wall IMAG rate).
     #[arg(long, default_value_t = 60.0)]
     strih_emit_fps: f64,
     /// #11 mixed 60/30: the fps the STREAM recording was captured at — the stream OBS output rate
@@ -401,16 +401,25 @@ fn in_window_burn_frames(
     //   136141133 frame 5905 carried cam1 burn 6485 with a blurred top dual-QR → 6485 dropped
     //   from the window → phantom drop). So for cam1 a frame is in-window if it carries the
     //   cam2 optical QR OR the cam1 burn.
-    // - strih/stream (PerRenderTick): their burn is a free-running render counter, so a
-    //   render-tick burn on a NON-optical frame is pre/post-signal noise, NOT an emitted
-    //   frame — they keep the strict optical-delivered membership (the #198 behaviour).
+    // - strih/stream (PerRenderTick): #360 EXTENDS the same reasoning. Their burn is a digital,
+    //   CRC-validated QR that rides through the chain INDEPENDENTLY of the cam2 optical paint, so
+    //   a frame carrying the strih/stream burn IS a delivered output frame regardless of whether
+    //   THAT frame's cam2 optical QR decoded. At high genlock latency the filmed cam2 dual-QR
+    //   went ~87% undecodable (run 354003) — the OLD strict optical-only membership then EXCISED
+    //   those burn-present delivered frames, the surviving burn ids jumped ~30 between the sparse
+    //   optical frames, and the decimation gap math manufactured ~17300 phantom REAL DROPs out of
+    //   a clean run. A test-rig OPTICAL-READ failure must NEVER manufacture digital-chain loss.
+    //   The lead-in/out trim that the optical signal used to provide is preserved by the
+    //   OPTICAL-anchored window BOUNDARIES below (first/last optical frame); WITHIN that span a
+    //   burn on a non-optical frame is a real delivered frame, not pre/post-signal noise. So all
+    //   rates now use the same membership: optical-delivered OR carries this node's burn.
     let is_optical =
         |f: &RecordingFrame| frame_is_delivered_optical(f, all_burn_run_ids, cam2_run_id);
     let has_node_burn = |f: &RecordingFrame| node_burn_id_on(f, burn_run_id).is_some();
-    let in_window = |f: &RecordingFrame| match rate {
-        BurnRate::PerEmittedFrame => is_optical(f) || has_node_burn(f),
-        BurnRate::PerRenderTick => is_optical(f),
-    };
+    let in_window = |f: &RecordingFrame| is_optical(f) || has_node_burn(f);
+    // `rate` no longer changes membership (the optical BOUNDARIES still trim lead-in/out); it
+    // still drives the per-rate loss accounting downstream (burn_contiguity_in_window_with_step).
+    let _ = rate;
 
     // Boundaries: the optical signal span (the painted run). For cam1 this still anchors the
     // window to the optical signal; an in-window non-optical frame carrying the cam1 burn is
@@ -518,29 +527,41 @@ struct NodeSpec<'a> {
     /// boundary so a foreign/previous-run paint in the lead-in cannot inflate the leading edge.
     /// `None` ⇒ the pre-#273 "any non-burn payload is cam2" rule.
     cam2_run_id: Option<u32>,
-    /// #11 mixed 60/30: the by-design per-recorded-frame burn-id step for a [`BurnRate::PerRenderTick`]
-    /// node — the DECIMATION factor of this node's render rate over the recording's capture rate.
-    /// `2` for the 60fps strih burn read from the 30fps stream recording (a gap of 2 is decimation,
-    /// a larger gap charges the excess as a real drop); `1` for a non-decimated hop (the stream burn,
-    /// recorded by its own OBS) — today's unconditional-ignore. Ignored for cam1 (PerEmittedFrame,
+    /// #11 mixed 60/30 → #360 REVISED: the by-design per-recorded-frame burn-id step for a
+    /// [`BurnRate::PerRenderTick`] node — the DECIMATION factor used by the step>=2 excess-gap
+    /// charging in [`burn_contiguity_in_window_with_step`]. That charging is RETAINED for a
+    /// genuinely-clean-decimation hop, but NO current node feeds it `>= 2` (see [`node_render_step`]):
+    /// strih's burn turned out to be a FREE-RUNNING render tick with an IRREGULAR step (not a clean
+    /// 2), so it uses gap-ignore (`1`) like the stream burn. Ignored for cam1 (PerEmittedFrame,
     /// set-based). See [`node_render_step`].
     step: i64,
 }
 
-/// #11 mixed 60/30 — the by-design per-recorded-frame burn-id step for a PerRenderTick node, given
-/// the strih render rate and the stream recording's capture rate (both RIG-PINNED). The strih burn
-/// (rendered at `strih_emit_fps`, read from the stream recording captured at `stream_capture_fps`)
-/// steps by `round(strih_emit_fps / stream_capture_fps)` = 60/30 = 2 — the genlock decimation. The
-/// stream burn is emitted AND recorded by the same stream OBS, so it steps by exactly 1 (no
-/// decimation between its render and its own recording). cam1 is PerEmittedFrame (set-based) so its
-/// step is never consulted; it returns 1 harmlessly.
+/// #11 → #360: the per-recorded-frame burn-id step for a [`BurnRate::PerRenderTick`] node. The
+/// decimation-aware excess-gap charging in [`burn_contiguity_in_window_with_step`] (a forward gap
+/// `> step` charges the excess as a real drop) is CORRECT only when the node's burn steps by a
+/// CLEAN integer per recorded frame. The rig data refutes that for strih:
+///
+/// - **strih** is a FREE-RUNNING DistroAV render-tick, NOT a per-output-frame counter. Read from the
+///   30fps stream recording its per-frame step is IRREGULAR (run 354003: 0–10, mean ~4 — NOT the
+///   assumed `round(60/30) = 2`), so a forward gap is render-clock jitter, not a lost frame: EVERY
+///   strih gap > 8 on 354003 coincided with a CLEAN stream-burn step (the stream burn never gapped
+///   ⇒ zero stream-output loss). The old strih=2 charging therefore manufactured ~17 300 phantom
+///   REAL DROPs. So strih now uses gap-ignore (`1`): a delivered frame MISSING its strih burn is
+///   still BURN-UNREADABLE (FAILS), and real loss is caught by the stream burn (per-output-frame)
+///   plus cam1 (per-emitted). A strih→stream NDI content-hold loss shows as a SMALL strih step (a
+///   held frame), never the large gap the old code charged — that detection belongs to the
+///   per-frame continuity reconciliation (#356), not this free-running-tick gap math.
+/// - **stream** is emitted AND recorded by the same stream OBS ⇒ `1` (no decimation).
+/// - **cam1** is PerEmittedFrame (set-based) ⇒ its step is never consulted; returns `1` harmlessly.
+///
+/// `strih_emit_fps` / `stream_capture_fps` stay on the CLI (and are read here) for provenance and
+/// the separate OPTICAL diagnostic step; they no longer drive the strih loss step.
 fn node_render_step(node: &str, strih_emit_fps: f64, stream_capture_fps: f64) -> i64 {
-    match node {
-        "strih" if stream_capture_fps > 0.0 => {
-            (strih_emit_fps / stream_capture_fps).round().max(1.0) as i64
-        }
-        _ => 1,
-    }
+    // Read the rig-pinned fps for provenance; no current node is a clean integer decimation, so
+    // every node uses gap-ignore (see the docstring above for why strih is NOT a clean step-2).
+    let _ = (node, strih_emit_fps, stream_capture_fps);
+    1
 }
 
 /// #312 — build the per-frame inputs for the all-cambox segment continuity from the decoded
@@ -2227,8 +2248,9 @@ fn extract_partial_flagged_frames(
     // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
     // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop); strih/stream burn
     // per-RENDER-tick (a forward gap is not loss, but a delivered frame missing its burn is).
-    // #11: the same decimation-aware step the merge verdict uses, so the on-box pixel-proof
-    // flagging matches what the merge flags (strih=2 in the 30fps stream recording, stream=1).
+    // #360: the same step the merge verdict uses (node_render_step → gap-ignore for all current
+    // nodes, since strih's free-running render tick is not a clean decimation), so the on-box
+    // pixel-proof flagging matches what the merge flags.
     let strih_step = node_render_step("strih", args.strih_emit_fps, args.stream_capture_fps);
     let owned: &[(&str, u32, BurnRate, i64)] = match box_name {
         "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame, 1)],
@@ -3507,24 +3529,23 @@ mod tests {
     }
 
     #[test]
-    fn node_render_step_maps_mixed_topology_to_strih_2_stream_1() {
-        // #11: the rig-pinned decimation factor. strih (60fps render) read from the 30fps stream
-        // recording ⇒ step 2; stream (recorded by its own OBS) ⇒ step 1; cam1 (set-based) ⇒ 1.
-        assert_eq!(super::node_render_step("strih", 60.0, 30.0), 2);
+    fn node_render_step_is_gap_ignore_for_all_nodes_360() {
+        // #360: strih's burn is a FREE-RUNNING render tick with an IRREGULAR step (run 354003:
+        // 0–10, mean ~4), NOT the clean 60/30=2 the old code assumed — its forward gaps are
+        // render-clock jitter, not loss. So every node now uses gap-ignore (step 1); the
+        // step>=2 excess-gap charging in burn_contiguity stays as a tested capability for a
+        // genuinely-clean-decimation hop, but no current node feeds it. (Inputs ignored.)
+        assert_eq!(super::node_render_step("strih", 60.0, 30.0), 1);
         assert_eq!(super::node_render_step("stream", 60.0, 30.0), 1);
         assert_eq!(super::node_render_step("cam1", 60.0, 30.0), 1);
-        // A 60-in-60 case (strih burn read from a 60fps recording) ⇒ step 1 (no decimation).
-        assert_eq!(super::node_render_step("strih", 60.0, 60.0), 1);
-        // Never below 1, and a zero/garbage denominator degrades safely to 1 (no panic).
-        assert_eq!(super::node_render_step("strih", 30.0, 60.0), 1);
         assert_eq!(super::node_render_step("strih", 60.0, 0.0), 1);
     }
 
     #[test]
     fn node_verdict_strih_decimation_step2_clean_is_zero_loss() {
-        // #11 binary level: the strih burn in the 30fps stream recording steps by 2 (every-other
-        // render tick). With the strih node's step=2, this clean decimation is ZERO loss — no
-        // false positive. (rec_path is never read: a zero-loss verdict has no missing slot.)
+        // A clean every-other-id strih sequence (ids step by 2) is ZERO loss. Post-#360 the strih
+        // node uses gap-ignore (node_render_step→1), so forward gaps of 2 are ignored — still
+        // ZERO loss, no false positive. (rec_path is never read: a zero-loss verdict has no slot.)
         let stream: Vec<RecordingFrame> = (0..6)
             .map(|i| frame(i, &[(CAM2, 100 + i as u32), (STRIH, 2000 + (i as u32) * 2)]))
             .collect();
@@ -3590,6 +3611,64 @@ mod tests {
         );
         assert_eq!(v.real_drops(), 0);
         assert_eq!(v.burn_unreadable(), 0);
+    }
+
+    #[test]
+    fn node_verdict_strih_zero_loss_when_cam2_optical_mostly_undecodable_360() {
+        // #360 REGRESSION (run 354003, 1000ms genlock latency). The filmed cam2 optical dual-QR
+        // went ~87% undecodable, while the DIGITAL strih burn was present on 100% of delivered
+        // frames. The OLD verdict (a) windowed strih to ONLY the optically-decoded frames (the
+        // cam2-tick gating) so the strih burn jumped ~30 ids between the sparse optical frames,
+        // and (b) assumed a clean step-2 decimation — the step-2 gap math then manufactured
+        // thousands of phantom REAL DROPs (the real run reported strih real_drops=17300, which
+        // EXCEEDS the 8999 frame count). The chain delivered every frame; a test-rig OPTICAL-READ
+        // failure must NEVER manufacture digital burn-chain loss.
+        //
+        // Build 71 DELIVERED frames: the strih digital burn is present on EVERY frame (a
+        // free-running render tick, here a representative clean +4 step), the cam2 optical paint
+        // decodes only every 7th frame (undecodable / tick null on the other ~86%). NO real loss.
+        // Frame 0 and frame 70 are both optical so the optical-anchored boundary spans all 71.
+        let n = 71u32;
+        let stream: Vec<RecordingFrame> = (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = Vec::new();
+                if i % 7 == 0 {
+                    ps.push((CAM2, 100 + i)); // cam2 optical decoded only ~1-in-7 frames
+                }
+                ps.push((STRIH, 2000 + i * 4)); // strih digital burn on EVERY delivered frame
+                frame(i as u64, &ps)
+            })
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        // Every delivered (strih-burn-bearing) frame is verified — NOT just the ~11 optically
+        // decoded ones. (OLD code: expected_count == 11, the optical-only window.)
+        assert_eq!(
+            v.contiguity.expected_count, n,
+            "all delivered frames (burn present) must be in the window, not only the optical ones: {:?}",
+            v.contiguity
+        );
+        // And the free-running strih render-tick's forward gaps are not charged as loss.
+        assert!(
+            v.is_zero(),
+            "cam2 optical undecodability must not manufacture strih burn-chain loss: {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "no phantom real drops");
     }
 
     #[test]
@@ -3812,14 +3891,17 @@ mod tests {
     }
 
     #[test]
-    fn strih_render_burn_on_a_non_optical_frame_stays_excluded() {
-        // The #204 fix is cam1-ONLY: strih/stream burn per RENDER tick, so a render-tick burn
-        // on a NON-optical frame is pre/post-signal noise, NOT an emitted frame — it must
-        // still be excluded (the #198 behaviour). Frame 1 here has only a strih render burn
-        // (no cam2) INSIDE the optical span; for PerRenderTick it is NOT counted.
+    fn strih_burn_on_a_non_optical_frame_inside_span_is_included_360() {
+        // #360: a strih burn on a non-optical frame INSIDE the optical span is now INCLUDED (the
+        // #204 cam1 reasoning extended to strih/stream). The digital, CRC-validated strih burn
+        // rides the chain independently of the cam2 optical paint, so a frame carrying it IS a
+        // delivered output frame even when its cam2 optical QR did not decode (the ~87%-undecodable
+        // high-latency case, run 354003). Frame 1 here has only the strih render burn (no cam2);
+        // it must be counted. Lead-in/out is still trimmed by the optical-anchored BOUNDARIES
+        // (frames 0 and 2 are the optical span ends).
         let stream = vec![
             frame(0, &[(CAM2, 100), (STRIH, 1670)]),
-            frame(1, &[(STRIH, 1673)]), // render tick on a non-optical frame — excluded for strih
+            frame(1, &[(STRIH, 1673)]), // strih burn on a non-optical frame INSIDE the span — included
             frame(2, &[(CAM2, 102), (STRIH, 1676)]),
         ];
         let w = in_window_burn_frames(
@@ -3832,8 +3914,8 @@ mod tests {
         let ids: Vec<Option<u32>> = w.iter().map(|f| f.burn_id).collect();
         assert_eq!(
             ids,
-            vec![Some(1670), Some(1676)],
-            "a non-optical render-tick burn stays excluded for strih (#198/#204): {ids:?}"
+            vec![Some(1670), Some(1673), Some(1676)],
+            "a burn-present non-optical frame inside the span is a delivered frame (#360): {ids:?}"
         );
     }
 

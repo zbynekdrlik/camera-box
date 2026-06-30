@@ -402,13 +402,52 @@ bug fix — it's the documented `[no-test: <reason>]` case. Put the marker (e.g.
 `[no-test: dead-code removal, no behavior change — remaining tests cover it]`) on the **LATEST**
 commit of the push (the hook reads `git log -1`). Never `[no-test:]` a real fix.
 
-## #11 — DECIMATION-AWARE contiguity (the mixed 60/30 topology)
+## #360 — SUPERSEDES #11 for strih: the strih burn is a FREE-RUNNING tick, NOT a clean step-2
 
-Final topology: cam(60)→strih(60, LED-wall IMAG)→stream(30, every-other-frame)→restreamer(30). The
+**READ THIS BEFORE TRUSTING THE #11 "strih steps by 2" PREMISE BELOW — the rig data refutes it.**
+The strih burn is **NOT** a per-output-frame counter that steps by a clean `round(60/30)=2`. It is a
+FREE-RUNNING DistroAV render-tick whose per-recorded-frame step is **IRREGULAR**: on the 30fps stream
+recording it steps 0–10 (mean ~4), and on the 60fps strih recording ~2. So its forward gaps are
+render-clock JITTER, not lost frames — PROOF (run 354003): EVERY strih gap > 8 coincided with a CLEAN
+stream-burn step (the stream burn never gapped ⇒ zero stream-output loss). The old `node_render_step`
+strih=2 charging manufactured ~17 300 phantom REAL DROPs out of a clean run.
+
+Two cooperating #360 bugs, both fixed in `recording-verdict.rs`:
+1. **cam2-optical-tick gating.** `in_window_burn_frames` windowed the strih/stream (PerRenderTick) burn
+   contiguity to ONLY the optically-decoded frames. At ≥1000ms latency the filmed cam2 dual-QR went
+   ~87% undecodable (run 354003) / ~91% (354001), so 87–91% of burn-present DELIVERED frames were
+   excised and the surviving burn ids jumped ~30. FIX: membership is now `is_optical(f) ||
+   has_node_burn(f)` for ALL rates (the digital CRC-validated burn proves delivery independent of the
+   cam2 optical read — extends the cam1 #204 reasoning). Lead-in/out is still trimmed by the OPTICAL
+   window BOUNDARIES (so #198/#267/#273 are preserved).
+2. **`node_render_step` now returns 1 for ALL nodes** (strih gap-ignore). A delivered frame MISSING its
+   strih burn is still BURN-UNREADABLE (FAILS); real loss is caught by the stream burn (per-output-frame)
+   + cam1 (per-emitted). The `burn_contiguity_in_window_with_step` step≥2 capability + its #11 tests are
+   RETAINED for a genuinely-clean-decimation hop, but no current node feeds it ≥2.
+
+RED→GREEN lock: `node_verdict_strih_zero_loss_when_cam2_optical_mostly_undecodable_360`,
+`strih_burn_on_a_non_optical_frame_inside_span_is_included_360`,
+`node_render_step_is_gap_ignore_for_all_nodes_360` (all in `recording-verdict.rs`). Validated via the
+sanctioned probe re-merge (below): 354003 strih 17300→0, 354001 strih 17829→0.
+
+**Residual cam1 over-count (→ #356, NOT #360):** the cam1 burn read from the SOFTENED strih recording
+at ≥1000ms is heavily blurred — ~35% misdecode to duplicates (BURN-UNREADABLE) and ~2300 ids are absent
+from BOTH recordings (0% present downstream; the stream rec is decimated AND softened too), so they
+classify as REAL DROP though cam1 is present 100% in the downstream stream rec. This is a cam1-burn
+READABILITY measurement limit, distinct from the cam2-optical-tick bug; the verdict still FAILs on it
+(safe — a false-FAIL never masks). The #356 "headline must agree with the per-frame CSV" is satisfied
+for strih/stream after #360 but NOT yet for cam1.
+
+---
+
+## #11 — DECIMATION-AWARE contiguity (the mixed 60/30 topology) — strih part SUPERSEDED by #360 above
+
+Final topology: cam(60)→strih(60, LED-wall IMAG)→stream(30, every-other-frame)→restreamer(30). ~~The
 strih burn is the strih OBS render-tick counter at 60fps; read from the 30fps STREAM recording it
-steps by **2** by design (the stream's genlock FIFO keeps every other strih frame). The PerRenderTick
-path used to UNCONDITIONALLY ignore forward gaps — which MASKED real strih→stream loss (a gap of 4,
-where 2 is by-design, was a lost frame read as a false ZERO).
+steps by **2** by design~~ (REFUTED — see #360 above: the strih tick is free-running/irregular). The
+PerRenderTick path used to UNCONDITIONALLY ignore forward gaps — which #11 believed MASKED real
+strih→stream loss, but on the real rig such loss shows as a SMALL strih step (a held frame), never the
+large gap #11 charged, so the step≥2 charging only ever produced false positives for strih.
 
 `burn_contiguity_in_window_with_step(node, frames, rate, expected_step)` (`src/probe/burn_contiguity.rs`):
 - `expected_step >= 2` ⇒ a forward gap **== step** is the by-design decimation (not loss); a gap
