@@ -57,6 +57,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # watchdog may then recover a genuinely stranded rig.
 # shellcheck source=scripts/lib/rig-heartbeat.sh
 . "$HERE/lib/rig-heartbeat.sh"
+# #359: the painter-CSV freshness verdict (pure + unit-tested in
+# tests/harness_painter_csv_freshness.rs) — used by the fail-loud gate after the painter pull.
+# shellcheck source=scripts/lib/painter-csv-freshness.sh
+. "$HERE/lib/painter-csv-freshness.sh"
 camera_resolve "${CAM:-cam1}"
 
 CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
@@ -610,31 +614,16 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # FAIL on run 354002). The CSV (header `tick,gen_ts_ns,flip_ts_ns`; gen_ts_ns = CLOCK_REALTIME
 # epoch ns) must be present+non-empty, span ≈ DURATION (not a tiny ~40s stale file), and its
 # gen_ts_ns must overlap THIS run's wall clock (not hours off from RUN_START_EPOCH). set +e is
-# active here, so the gate exits non-zero EXPLICITLY (the EXIT trap still restores the rig).
-if [ ! -s "$PAINTER_CSV" ]; then
-  echo "FATAL #359: painter ground-truth CSV missing/empty ($PAINTER_CSV) — the cam2 painter did" >&2
-  echo "            not produce a fresh CSV this run. Refusing to run the verdict against absent" >&2
-  echo "            ground truth (an absent/stale CSV yields a fake catastrophic FAIL)." >&2
-  exit 1
-fi
-PAINTER_FRESHNESS=$(awk -F, -v run_start="$RUN_START_EPOCH" -v dur="$DURATION" '
-  NR==1 { next }                                  # skip the "tick,gen_ts_ns,flip_ts_ns" header
-  $2 ~ /^[0-9]+$/ { if (first=="") first=$2; last=$2; n++ }
-  END {
-    if (n < 2) { print "EMPTY 0 0"; exit }
-    span   = (last - first) / 1e9                 # seconds spanned by the painted ticks
-    offset = (first / 1e9) - run_start; if (offset < 0) offset = -offset
-    verdict = (span < dur * 0.5) ? "SHORT" : ((offset > dur + 600) ? "OFFSET" : "OK")
-    printf "%s %d %d\n", verdict, span, offset
-  }' "$PAINTER_CSV")
+# active here, so the gate exits non-zero EXPLICITLY (the EXIT trap still restores the rig). The
+# verdict logic lives in the pure, unit-tested painter_csv_freshness() (lib sourced above).
 read -r PAINTER_VERDICT PAINTER_SPAN PAINTER_OFFSET <<EOF
-$PAINTER_FRESHNESS
+$(painter_csv_freshness "$PAINTER_CSV" "$RUN_START_EPOCH" "$DURATION")
 EOF
 if [ "$PAINTER_VERDICT" != "OK" ]; then
-  echo "FATAL #359: painter ground-truth CSV is STALE ($PAINTER_VERDICT): span=${PAINTER_SPAN}s" >&2
+  echo "FATAL #359: painter ground-truth CSV not fresh ($PAINTER_VERDICT): span=${PAINTER_SPAN}s" >&2
   echo "            (expected ≈ ${DURATION}s), gen_ts offset from run start=${PAINTER_OFFSET}s." >&2
-  echo "            A stale ground truth yields a fake catastrophic FAIL — refusing to run the" >&2
-  echo "            verdict. The painter did not write a fresh /tmp/painter.csv for this run." >&2
+  echo "            A stale/absent ground truth yields a fake catastrophic FAIL — refusing to run" >&2
+  echo "            the verdict. The painter did not write a fresh /tmp/painter.csv for this run." >&2
   exit 1
 fi
 echo "    #359 painter ground-truth FRESH: span=${PAINTER_SPAN}s offset=${PAINTER_OFFSET}s (OK)"
