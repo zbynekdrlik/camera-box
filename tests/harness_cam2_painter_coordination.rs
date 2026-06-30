@@ -43,9 +43,11 @@ fn harness_stops_cam2_painter_before_launching_its_own_painter() {
          own /dev/fb0 painter (else the two fight for the DRM master and the harness painter \
          can't take it)",
     );
-    // The harness's own painter launch — the nohup'd frame-probe --paint-only on cam2.
+    // The harness's own painter launch — the nohup'd frame-probe --paint-only on cam2. Use
+    // rfind: the FIRST `frame-probe --paint-only` in the file is the header COMMENT describing
+    // the pipeline; the actual executable launch is the last occurrence.
     let launch = s
-        .find("frame-probe --paint-only")
+        .rfind("frame-probe --paint-only")
         .expect("#367: the harness must launch its own frame-probe --paint-only painter");
     assert!(
         stop < launch,

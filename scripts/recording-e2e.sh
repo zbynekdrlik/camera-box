@@ -292,7 +292,8 @@ cleanup() {
   # clear is single-sourced (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent).
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
-systemctl restart camera-box 2>/dev/null || true"
+systemctl restart camera-box 2>/dev/null || true
+systemctl start cam2-painter 2>/dev/null || true"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
@@ -420,7 +421,8 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # STALE /tmp/painter.csv in place. Removing it before launch guarantees the file we later pull
 # is THIS run's — never a silently-trusted leftover (run 354002's 14.9h-offset fake FAIL).
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-  "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv; \
+  "systemctl stop cam2-painter 2>/dev/null || true; \
+   systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv; \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
       --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+60)) \
