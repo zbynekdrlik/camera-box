@@ -21,9 +21,21 @@ Past claims of "everything works, zero loss, low latency" were untrustworthy/fal
 3. **HARD-FAIL bar (#186 headline gate) — PASS = EVERY node's burn-id sequence CONTIGUOUS (no
    missing id; a BURN-UNREADABLE id also FAILS) AND (when `--cam1-capture-stats` is given)
    cam2→cam1 V4L2 capture-drop = 0.** No thresholds, no "0.02% negligible", no explaining-away.
-   The per-recording undecodable / 60→30-beat metrics AND the analyzed span (`--min-secs`) are
-   **DIAGNOSTIC only — they do NOT gate the headline** (an old overstatement was "PASS = 0
-   undecodable AND 0 copy AND 0 gap AND span≥300s" — that conflated diagnostics with the gate).
+   The per-recording undecodable / 60→30-beat metrics are **DIAGNOSTIC only — they do NOT gate the
+   headline** (an old overstatement was "PASS = 0 undecodable AND 0 copy AND 0 gap AND span≥300s" —
+   that conflated diagnostics with the gate).
+   **#373 nuance on the analyzed span (`--min-secs`)**: a SHORT-BUT-REAL run is NOT failed merely for
+   a short diagnostic NOTE — BUT a **COLLAPSED / partial optical span DOES gate the headline now**.
+   The headline ANDs each node's `is_zero()` (delivery + #363 optical + #364 colour) with a
+   **duration FLOOR**: the analyzed OPTICAL span (the cam2 dual-QR FIRST..=LAST decoded-frame window,
+   `NodeVerdict.optical_span_frames / capture_fps`) must be `>= min_secs` (default 300 s). Reason: a
+   green-cast / dying cam2 read shrinks the span to a handful of frames (or 0); over that truncated
+   span `optical_undecodable==0` and the burn window is trivially contiguous, so `is_zero()` ALONE
+   vacuously PASSES (a fake green — live repro: `nodes.strih.analyzed_secs=0.0`, `overall_pass=true`).
+   The floor rejects ONLY the collapsed read; it never fails a genuine `>=min_secs` run. The PASS/FAIL
+   decision is the pure Tier-0 `recording_span_gate` module (`span_secs` + `analyzed_span_long_enough`);
+   `is_zero()` itself is UNCHANGED (still the per-node delivery gate — the duration floor is a
+   run-level headline term). Per-node JSON carries `analyzed_secs`/`span_ok`/`min_secs`.
 4. Every undecodable/anomaly frame must be **extracted as real pixels and shown** — black = real
    lost/empty frame = FAIL; blurred QR = decode miss (fix decoder to 0). Prove with pixels.
 5. Duration ≥300s to claim zero-loss; ideal 1800s (30min).
@@ -416,6 +428,17 @@ aborts the run. The start branch reads `GetRecordStatus`, on an active orphan lo
 - **Rust harness tests are pure static reads** (no probe, default features) — to verify RED→GREEN
   locally without the CI-only `cargo test` (run), `cargo test --no-run --test <name>` (Tier-0
   allowed) then EXECUTE the produced `target/debug/deps/<name>-<hash>` binary directly.
+- **`bin/recording-verdict` is `required-features=["probe"]` → NOT compiled on default features.**
+  So `cargo check` / `cargo clippy --all-targets` (default) SKIP it entirely — local cheap checks do
+  NOT compile-verify ANY edit to that binary; CI (`--all-features`) is the only compile gate.
+  Consequences: (1) put the GATE DECISION in a pure crate-root module (e.g. `recording_span_gate`
+  #373, `colour_verify` #364, `reannounce` #297) so RED→GREEN is observable on default features via
+  `cargo test --lib <mod> # airuleset:build-ok`; the probe-gated binary just calls it. (2) A
+  test-ONLY free function at the binary's MODULE scope triggers `dead_code` in the NON-test bin build
+  (CI `-D warnings`) — keep test helpers INSIDE `mod tests` (a `fn` in `mod tests` calling
+  `super::…`), never a module-level wrapper used only by tests (#374: the `node_verdict` test helper
+  lives in `mod tests`; the headline path uses `node_verdict_with_optical`). `cargo fmt` DOES format
+  the probe binary (rustfmt doesn't compile), so `cargo fmt --all --check` still catches its layout.
 
 ## Reporting Scope — NEVER Claim Partial as Full
 
