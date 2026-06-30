@@ -1071,3 +1071,13 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - **SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` + `.README.md` committed, NOT installed/enabled. **Supervisor enables + live-verifies** (simulate stranded state → detect→restore→alert, no false positive) before turning the timer on.
 - TDD GREEN + Closes #281 in the fix commit; ONE push, ONE PR dev→main. Parts A+B (PR #348) already merged → this completes #281.
 - No deploy (shell/test/systemd only; camera-box binaries unchanged).
+
+## 2026-06-30 — #350 watchdog gap fix (PR #351)
+
+- **Issue**: `RIG_KNOWN_TEST_SCENES` default was `"PHASE2-PROBE"` only; `REC-STRIH-TMP` (stream box's ephemeral scene, `STREAM_PROG_SCENE` default in `recording-e2e.sh`) was missing — the watchdog would miss a stranded stream box without an env override.
+- **Version bump**: b24497f51 (dev.159→dev.160)
+- **RED**: 5c7fecc77 — test `rec_strih_tmp_is_stranded_by_default_no_env_override` (fails: act=0 vs expected act=1)
+- **GREEN**: 48d47d59f — widen default in `scripts/lib/rig-restore-decision.sh` + `scripts/rig-restore-watchdog.sh` to `"PHASE2-PROBE REC-STRIH-TMP"`
+- **PR #351** merged da5495803; dev CI + main CI all green. No deploy (shell/test only).
+- **#350 comment** posted: enable step can proceed with the corrected default.
+- Complete known-test-scenes: `PHASE2-PROBE` (strih phase2 probe) + `REC-STRIH-TMP` (stream ephemeral recording scene); prod scenes (`Cam 5`, `PRO`, `PRE`) excluded.

@@ -149,9 +149,26 @@ well-known file `${XDG_RUNTIME_DIR}/camera-box-rig-active` (fallback `/tmp/camer
 
 **Pure decision** `scripts/lib/rig-restore-decision.sh::rig_restore_decide` (no I/O, unit-tested in
 `tests/harness_rig_restore_watchdog.rs`): fresh heartbeat → never act; else a CLEAR stranded signal
-(cam down / stale probe / OBS on a known TEST scene `RIG_KNOWN_TEST_SCENES`, default `PHASE2-PROBE`)
-→ act, but only after **2 consecutive confirmations** (`RIG_CONFIRM_THRESHOLD`, the #266 lesson);
-acting ALWAYS alerts.
+(cam down / stale probe / OBS on a known TEST scene `RIG_KNOWN_TEST_SCENES`) → act, but only after
+**2 consecutive confirmations** (`RIG_CONFIRM_THRESHOLD`, the #266 lesson); acting ALWAYS alerts.
+
+**Known-test-scenes default** (both scripts must stay consistent — `rig-restore-decision.sh` line ~43
+and `rig-restore-watchdog.sh` line ~79):
+
+```
+RIG_KNOWN_TEST_SCENES="PHASE2-PROBE REC-STRIH-TMP"
+```
+
+- `PHASE2-PROBE` — the `obs_phase2.py` phase2 probe scene on strih (`SCENE` constant at line 44).
+- `REC-STRIH-TMP` — the stream box's ephemeral full-screen scene built by `obs_phase2.py prod-scene
+  --ensure-source`; this is `STREAM_PROG_SCENE` default in `recording-e2e.sh`. The primary #281-class
+  case: the stream box strands on this scene when a rig step dies mid-proof.
+
+**INVARIANT**: when adding a new ephemeral scene to the harness (any new `SCENE` constant in
+obs_phase2.py or any new `*_PROG_SCENE` default in recording-e2e.sh that an `--ensure-source` call
+builds), add it to both default strings AND add/update a test in
+`tests/harness_rig_restore_watchdog.rs` (`rec_strih_tmp_is_stranded_by_default_no_env_override`
+pattern — use the DEFAULT, no `RIG_KNOWN_TEST_SCENES` env override).
 
 **Watchdog** `scripts/rig-restore-watchdog.sh` (runs on dev1 from a `systemd --user` timer,
 session-independent): probes cam1/2/4 (`systemctl is-active camera-box` + stale-probe `pgrep`) + OBS
