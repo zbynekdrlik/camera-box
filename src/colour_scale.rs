@@ -91,9 +91,33 @@ pub const PATCH_COLOURS: &[Rgb] = &[
 /// EMPTY for a canvas too small to hold the band (`canvas_w < n` or `canvas_h <= BAND_H`),
 /// so the painter simply draws nothing rather than panicking.
 pub fn colour_scale_patches(canvas_w: u32, canvas_h: u32) -> Vec<(Rect, Rgb)> {
-    // STUB (RED): real geometry filled in by the GREEN commit.
-    let _ = (canvas_w, canvas_h);
-    Vec::new()
+    let n = PATCH_COLOURS.len() as u32;
+    // Too narrow for one patch per colour, or shorter than the band ⇒ paint nothing.
+    if canvas_w < n || canvas_h <= BAND_H {
+        return Vec::new();
+    }
+    let band_y = canvas_h - BAND_H;
+    let patch_w = canvas_w / n;
+    PATCH_COLOURS
+        .iter()
+        .enumerate()
+        .map(|(i, &rgb)| {
+            let i = i as u32;
+            let x = i * patch_w;
+            // The LAST patch absorbs the integer remainder so the band spans the full
+            // width with no unpainted right-edge column.
+            let w = if i == n - 1 { canvas_w - x } else { patch_w };
+            (
+                Rect {
+                    x,
+                    y: band_y,
+                    w,
+                    h: BAND_H,
+                },
+                rgb,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
