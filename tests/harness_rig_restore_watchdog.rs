@@ -576,6 +576,60 @@ fn marker_path_resolves_to_the_documented_rig_in_e2e_file() {
 }
 
 #[test]
+fn marker_set_returns_nonzero_when_the_path_is_unwritable() {
+    // #353 review (finding 3): rig_e2e_marker_set must NOT swallow a failed write — it must return
+    // the real exit status so recording-e2e.sh's `|| echo WARNING` guard actually fires. A silently-
+    // missing marker would make the watchdog blind to a stranded rig. Point the marker at a path
+    // whose parent cannot be created (under /dev/null), so both mkdir -p and the write fail.
+    let (code, _o, _e) = run_bash(
+        r#". "$HEARTBEAT_LIB"; export CAMERA_BOX_RIG_E2E_MARKER=/dev/null/nope/rig-in-e2e; rig_e2e_marker_set "x"; echo rc=$?"#,
+    );
+    assert_eq!(code, 0, "harness wrapper itself runs");
+    let (_c, stdout, _e2) = run_bash(
+        r#". "$HEARTBEAT_LIB"; export CAMERA_BOX_RIG_E2E_MARKER=/dev/null/nope/rig-in-e2e; rig_e2e_marker_set "x" && echo SET_OK || echo SET_FAIL"#,
+    );
+    assert!(
+        stdout.contains("SET_FAIL"),
+        "#353: rig_e2e_marker_set must return non-zero when the write fails (so the WARNING guard \
+         fires) — got {stdout}"
+    );
+}
+
+// ─── #353 review (finding 1): the watchdog clears the marker ONLY after a positive full restore ──
+
+#[test]
+fn marker_should_clear_only_after_a_positive_full_obs_restore() {
+    // The masking bug: clearing the marker on ANY act (gated only on marker presence) drops the
+    // durable stranded signal even when the OBS box that the marker exists to catch was NEVER
+    // restored this pass (OBS unreadable → no restore_obs emitted; or a teardown failed). The next
+    // pass then has no marker and — if the box sits on a custom/env scene outside the fallback list
+    // — it stays stranded forever. The pure `rig_marker_should_clear <marker> <act> <obs_unreadable>
+    // <obs_failed>` gate fixes it: CLEAR (exit 0) ONLY when marker present, we acted, NO OBS box was
+    // unreadable, and NO OBS teardown failed; otherwise KEEP (exit 1) so a later pass retries.
+    let cases: &[(&str, i32, &str)] = &[
+        // marker act unreadable failed
+        ("1 1 0 0", 0, "all conditions met → CLEAR"),
+        ("1 1 1 0", 1, "an OBS box was unreadable → KEEP (might hide a stranded box)"),
+        ("1 1 0 1", 1, "an OBS teardown failed → KEEP (box not confirmed restored)"),
+        ("1 1 2 1", 1, "unreadable AND failed → KEEP"),
+        ("0 1 0 0", 1, "no marker → KEEP (nothing to clear via this path)"),
+        ("1 0 0 0", 1, "did not act → KEEP"),
+        ("x 1 0 0", 1, "non-numeric arg → conservatively KEEP"),
+    ];
+    for (args, want_rc, why) in cases {
+        let script = format!(
+            r#". "$DECISION_LIB"; rig_marker_should_clear {args}; echo rc=$?"#
+        );
+        let (_c, stdout, stderr) = run_bash(&script);
+        let got = if stdout.contains("rc=0") { 0 } else { 1 };
+        assert_eq!(
+            got, *want_rc,
+            "#353 rig_marker_should_clear {args} → expected rc={want_rc} ({why})\nstdout:{stdout}\nstderr:{stderr}"
+        );
+    }
+}
+
+#[test]
 fn prod_scene_pro_not_in_default_known_test_scenes() {
     // "PRO" is the real prod scene on the stream box — it must NOT appear in the default
     // known-test-scenes set, so (with no marker) it never triggers a restore (no false positive).
@@ -842,6 +896,12 @@ fn watchdog_reads_and_clears_the_e2e_marker() {
         src.contains("rig_e2e_marker_clear"),
         "#353: the watchdog must CLEAR the marker after it restores prod, so a stale marker does \
          not re-trigger (and re-alert) on the next pass"
+    );
+    assert!(
+        src.contains("rig_marker_should_clear"),
+        "#353 (review): the watchdog must gate the marker-clear behind rig_marker_should_clear so it \
+         only clears after a positive full OBS restore (never while an OBS box was unreadable or a \
+         teardown failed — that would mask a still-stranded box)"
     );
 }
 
