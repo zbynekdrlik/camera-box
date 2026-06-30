@@ -322,7 +322,7 @@ systemctl restart camera-box 2>/dev/null || true"
 # failure/abort window the burn-off guard must cover. Detailed rationale at the #183 block below.
 STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
-STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-REC-STRIH-TMP}" # full-screen scene over NDI 2ME PGM
+STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"          # #343: record the ALREADY-ACTIVE prod scene (NDI 2ME PGM already warm) — no cold re-activation
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
 # #252: single source of truth for the host=ip=source burn triples. The #195 pre-record burn-ON
 # gate and the #246 cleanup() burn-clear loop iterate the SAME set; keeping it in one array means a
@@ -433,8 +433,14 @@ STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
   --upstream "$STRIH_UPSTREAM_NDI" --test-preload "$TEST_PRELOAD")
 # stream's upstream is strih's program NDI name (just printed above) — force preload=1 on the
 # stream box's 'NDI 2ME PGM' input (the prod copy of 31 the issue calls out).
+# #343: record the ALREADY-ACTIVE prod scene 'PRO' (NDI 2ME PGM already warm) — NO --ensure-source.
+# A fresh ephemeral scene + --ensure-source would cold-activate the 450ms-FIFO NDI 2ME PGM on the
+# graphics thread → SetCurrentProgramScene blocks >60s (#328 timeout, proof can't run). With program
+# already on PRO, prod_scene's `curr_prog == target` branch skips the switch entirely → no hang.
+# PRECONDITION: the stream box runs on its prod 'PRO' scene in normal operation; if it has DRIFTED
+# off PRO, prod_scene takes the bounded switch and fails LOUD at the #328 timeout (no silent hang).
 STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
-  --program-scene "$STREAM_PROG_SCENE" --ensure-source "$STREAM_PROG_SOURCE" \
+  --program-scene "$STREAM_PROG_SCENE" \
   --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
