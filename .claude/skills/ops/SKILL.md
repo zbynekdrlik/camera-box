@@ -170,6 +170,10 @@ builds), add it to both default strings AND add/update a test in
 `tests/harness_rig_restore_watchdog.rs` (`rec_strih_tmp_is_stranded_by_default_no_env_override`
 pattern — use the DEFAULT, no `RIG_KNOWN_TEST_SCENES` env override).
 
+**GOTCHA — scene names must not contain spaces**: the match loop uses IFS word-split
+(`for ks in $known; do`) — a name like `"NDI 2ME PGM"` would split into three tokens and silently
+fail to match. All current names are hyphenated. See #352 (planned code-level comment + test).
+
 **Watchdog** `scripts/rig-restore-watchdog.sh` (runs on dev1 from a `systemd --user` timer,
 session-independent): probes cam1/2/4 (`systemctl is-active camera-box` + stale-probe `pgrep`) + OBS
 program scene (new `obs_phase2.py program-scene` reader, reuses `_conn`/`_rpc`), persists the confirm
