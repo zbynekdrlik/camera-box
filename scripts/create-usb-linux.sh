@@ -174,6 +174,29 @@ apt-get install -y \
     less \
     dhcpcd-base
 
+# #362: bake the NDI/audio RUNTIME deps into the base image so a fresh clone can RUN camera-box
+# without hand-provisioning. The fresh CAM3 clone (#301 re-image) booted but camera-box crash-looped
+# because libndi.so could not dlopen: the ALSA runtime + the avahi client/common libs were absent,
+# /usr/lib/ndi was not on the dynamic-linker path, and no avahi-daemon ran for the mDNS NDI-source
+# discovery libndi performs. avahi-daemon is mDNS only — no conflict with DanteSync's clock ownership
+# (cam4 runs both). These are public Ubuntu packages (main/universe), installable in the chroot.
+apt-get install -y \
+    libasound2t64 \
+    libavahi-client3 \
+    libavahi-common3 \
+    avahi-daemon \
+    avahi-utils
+
+# Put /usr/lib/ndi on the dynamic-linker path so dlopen("libndi.so") resolves once the (licensing-
+# restricted) NDI lib is copied in — without it a fresh box fails on "libndi.so: cannot open shared
+# object file" even though the lib is present at /usr/lib/ndi.
+echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
+ldconfig
+
+# libndi browses mDNS via avahi-daemon for NDI source discovery — enable it so a fresh --display
+# receiver can find sources (with no daemon, NDI find() returns nothing and the display stays black).
+systemctl enable avahi-daemon
+
 # #295/#307: harden the appliance kernel at the SOURCE. This builds the "clean Ubuntu + SSH" base
 # image that setup.sh later hardens, so there is a narrow first-boot window (before setup.sh runs)
 # where the original brick exposure exists. Pin the kernel so a surprise kernel can never be
