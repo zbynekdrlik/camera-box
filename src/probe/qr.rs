@@ -248,6 +248,33 @@ pub fn render_qr_dual_bgra(
     canvas
 }
 
+/// Fill the #367 fixed colour-reference scale into a BGRA `canvas` (`canvas_w×canvas_h` —
+/// the same buffer `render_qr_*_bgra` produced), per the pure
+/// [`crate::colour_scale::colour_scale_patches`] layout. Each reference patch's rectangle
+/// is filled with its known sRGB colour (BGRA byte order, opaque) in the bottom band,
+/// clear of the top dual-QR. The painter calls this AFTER rendering the QR(s) (when
+/// `--colour-scale` is on), so the recorded frame carries a colour reference alongside the
+/// dual-QR — the per-patch sample the #364 colour gate compares against. No-op for a canvas
+/// too small to hold the band (`colour_scale_patches` returns empty). Each write is bounds-
+/// checked so a short/odd buffer is never indexed out of range (never panics).
+pub fn blit_colour_scale_bgra(canvas: &mut [u8], canvas_w: u32, canvas_h: u32) {
+    for (rect, rgb) in crate::colour_scale::colour_scale_patches(canvas_w, canvas_h) {
+        let y_end = (rect.y + rect.h).min(canvas_h);
+        let x_end = (rect.x + rect.w).min(canvas_w);
+        for y in rect.y..y_end {
+            for x in rect.x..x_end {
+                let ci = (((y * canvas_w) + x) * 4) as usize;
+                if ci + 3 < canvas.len() {
+                    canvas[ci] = rgb.b; // B
+                    canvas[ci + 1] = rgb.g; // G
+                    canvas[ci + 2] = rgb.r; // R
+                    canvas[ci + 3] = 255; // A (opaque)
+                }
+            }
+        }
+    }
+}
+
 /// Decode the first QR found in a grayscale image into a Payload, or None.
 pub fn decode_qr_luma(img: GrayImage) -> Option<Payload> {
     let mut prepared = rqrr::PreparedImage::prepare(img);
@@ -1107,6 +1134,40 @@ mod tests {
         assert_eq!(
             decode_capture_dual(fourcc, &blanked, cw, ch, cw * 4, 620),
             Some(l)
+        );
+    }
+
+    // ---- #367 colour-reference scale blit ----
+
+    #[test]
+    fn colour_scale_blit_fills_each_patch_and_leaves_the_qr_band_untouched() {
+        use crate::colour_scale::colour_scale_patches;
+        let (w, h) = (1920u32, 1080u32);
+        let mut canvas = vec![255u8; (w * h * 4) as usize];
+        blit_colour_scale_bgra(&mut canvas, w, h);
+
+        // Each patch CENTRE carries exactly its known colour in BGRA order, opaque — proving
+        // the blit honours the pure layout's colour table (not a tautology: it reads the real
+        // framebuffer bytes the painter would present).
+        let patches = colour_scale_patches(w, h);
+        assert!(!patches.is_empty(), "1920x1080 must yield patches");
+        for (rect, rgb) in &patches {
+            let cx = rect.x + rect.w / 2;
+            let cy = rect.y + rect.h / 2;
+            let i = (((cy * w) + cx) * 4) as usize;
+            assert_eq!(canvas[i], rgb.b, "B at patch centre ({cx},{cy})");
+            assert_eq!(canvas[i + 1], rgb.g, "G at patch centre ({cx},{cy})");
+            assert_eq!(canvas[i + 2], rgb.r, "R at patch centre ({cx},{cy})");
+            assert_eq!(canvas[i + 3], 255, "opaque at patch centre ({cx},{cy})");
+        }
+        // The colour scale touches ONLY the bottom band: a pixel well above it (y=500, in the
+        // dual-QR band) is still the untouched white background — the scale never bleeds up
+        // into the QR region.
+        let above = (((500 * w) + 10) * 4) as usize;
+        assert_eq!(
+            &canvas[above..above + 4],
+            &[255u8, 255, 255, 255],
+            "rows above the bottom band are untouched by the colour scale"
         );
     }
 

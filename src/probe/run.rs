@@ -44,6 +44,10 @@ pub struct RunConfig {
     /// halves on receive. At least one half is always sharp on a mid-transition
     /// capture, eliminating the false-loss artifact from the single-QR path.
     pub dual_qr: bool,
+    /// #367: paint the fixed colour-reference scale along the bottom band, alongside the
+    /// dual-QR (for eye + recording colour verification, the #364 gate). Forwarded into
+    /// the painter's `PaintParams`.
+    pub colour_scale: bool,
     /// Optional path for `run_paint_only` to write the painter's emitted-tick
     /// CSV (`tick,gen_ts_ns`) — the cam→strih ground truth consumed by
     /// `recording-verdict --painter` (#105). `None` ⇒ no log written.
@@ -127,6 +131,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             // gen here would break that — force monotonic regardless of cfg.
             wall_clock: false,
             dual_qr: cfg.dual_qr,
+            colour_scale: cfg.colour_scale,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };
@@ -223,6 +228,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             // absolute latency. Defaults false (Phase-2 relative latency only).
             wall_clock: cfg.wall_clock,
             dual_qr: cfg.dual_qr,
+            colour_scale: cfg.colour_scale,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted))
     };

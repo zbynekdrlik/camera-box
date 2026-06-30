@@ -32,5 +32,9 @@ pub mod vban;
 // lives in `ndi`.
 pub mod reannounce;
 
+// #367 — colour-scale reference layout (pure geometry + colour table). Cross-platform, no
+// probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
+pub mod colour_scale;
+
 #[cfg(feature = "probe")]
 pub mod probe;

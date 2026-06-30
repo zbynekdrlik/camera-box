@@ -51,6 +51,17 @@ probe crates.
 
 Heavy builds in CI only: `cargo build --release`, running `cargo test`, `cargo bench`, `--features probe`.
 
+**Make probe logic Tier-0 testable — pure seam at the CRATE ROOT, not in `src/probe/`.**
+The whole `probe` module is `#[cfg(feature = "probe")]` (lib.rs), so its tests run ONLY under
+`--features probe` (CI only — banned locally). To get a locally-verifiable RED→GREEN on probe
+work, extract the PURE logic (geometry, decisions, tables) into a crate-root module that compiles
+on default features — the `src/reannounce.rs` / `src/colour_scale.rs` (#367) pattern — and have
+the probe-gated code (`src/probe/…`) iterate/call it. The pure module's tests run on default
+features; the probe-gated glue (framebuffer blit, ioctl) gets a thin probe-gated test CI runs.
+To OBSERVE RED→GREEN on a cheap default-feature test (the Tier-0 hook blocks all `cargo test`
+that RUNS), append the one-off bypass: `cargo test --lib <module> # airuleset:build-ok` (or
+`--test <file>`).
+
 **Bound the shared dev1 `target/` (backstop).** Even default-feature checks + rust-analyzer
 accumulate over a day (incremental cache, never purged). Keep it under ~4 GB:
 ```bash

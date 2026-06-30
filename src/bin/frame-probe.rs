@@ -97,6 +97,14 @@ struct Args {
     /// halves the same way.
     #[arg(long, default_value_t = false)]
     dual_qr: bool,
+    /// Paint the fixed colour-reference scale (#367) along the bottom of the canvas,
+    /// alongside the dual-QR, so colours are checkable BY EYE on the monitor AND
+    /// sampled per-patch from the recording (the #364 per-camera colour gate).
+    /// Default: ON in --paint-only mode (the permanent cam2 painter shows it), OFF
+    /// otherwise. Force with --colour-scale / --colour-scale=true, disable with
+    /// --colour-scale=false.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    colour_scale: Option<bool>,
     /// Paint QR frames DIRECTLY into an NDI sender with this name (no
     /// framebuffer, no capture hardware) at an exact --paint-fps. The
     /// software-only source for genlock validation (#42) and the OBS-bypass
@@ -175,6 +183,10 @@ fn main() -> Result<()> {
         Some(r) => r,
         None => (SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() & 0xFFFF_FFFF) as u32,
     };
+    // #367: the colour scale defaults ON in --paint-only mode (so the permanent cam2
+    // painter shows it without a flag change) and OFF otherwise; an explicit
+    // --colour-scale[=bool] always wins.
+    let colour_scale = args.colour_scale.unwrap_or(args.paint_only);
 
     tracing::info!(
         "frame-probe start: mode={:?} run_id={} source={:?} paint_fps={} dur={}s",
@@ -205,6 +217,7 @@ fn main() -> Result<()> {
         max_freeze_periods_gate: args.max_freeze_periods,
         wall_clock: args.wall_clock,
         dual_qr: args.dual_qr,
+        colour_scale,
         paint_log: args.paint_log.clone(),
     };
 
