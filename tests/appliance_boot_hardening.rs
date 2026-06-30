@@ -438,6 +438,15 @@ fn appears_on_active_line(body: &str, needle: &str) -> bool {
     })
 }
 
+/// True if `needle` appears on a non-`#`-comment line. Like `appears_on_active_line` but WITHOUT the
+/// echo-exclusion — for needles whose real command is itself an `echo … > file` write (the ndi.conf
+/// write), where excluding `echo` lines would wrongly reject the real command. Still revert-proof
+/// against a comment that merely mentions the needle.
+fn on_noncomment_line(body: &str, needle: &str) -> bool {
+    body.lines()
+        .any(|l| l.contains(needle) && !l.trim_start().starts_with('#'))
+}
+
 /// 10. Every builder must INSTALL the full NDI/audio runtime package set. Without any one of them
 ///     camera-box crash-loops on a fresh box (missing libasound.so.2 / libavahi-*.so / no NDI find).
 #[test]
@@ -464,11 +473,11 @@ fn builders_put_usr_lib_ndi_on_the_linker_path() {
     for script in NDI_RUNTIME_SCRIPTS {
         let body = read(script);
         assert!(
-            body.contains("/etc/ld.so.conf.d/ndi.conf"),
+            on_noncomment_line(&body, "/etc/ld.so.conf.d/ndi.conf"),
             "{script} must write /etc/ld.so.conf.d/ndi.conf so libndi.so is on the linker path (#362)"
         );
         assert!(
-            body.contains("/usr/lib/ndi"),
+            on_noncomment_line(&body, "/usr/lib/ndi"),
             "{script} must register /usr/lib/ndi as the NDI library directory (#362)"
         );
         assert!(
@@ -487,7 +496,7 @@ fn builders_enable_avahi_daemon_for_ndi_discovery() {
     for script in NDI_RUNTIME_SCRIPTS {
         let body = read(script);
         assert!(
-            body.contains("systemctl enable avahi-daemon"),
+            on_noncomment_line(&body, "systemctl enable avahi-daemon"),
             "{script} must `systemctl enable avahi-daemon` so NDI mDNS source discovery works on a \
              fresh box — libndi find() returns nothing without it (#362)"
         );
