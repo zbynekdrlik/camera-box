@@ -36,5 +36,13 @@ pub mod reannounce;
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
 
+// #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
+// `colour_scale` table/geometry, samples each reference patch's mean colour from a frame
+// (dodging the burn columns), and decides per-patch + per-camera PASS/FAIL (grayscale collapse,
+// hue-shift, out-of-tolerance). No probe deps, so it unit-tests Tier-0; the probe-gated pixel
+// sampling + ffmpeg colour pass live in `probe::colour_sample`, and the verdict gate wiring is in
+// `bin/recording-verdict`.
+pub mod colour_verify;
+
 #[cfg(feature = "probe")]
 pub mod probe;

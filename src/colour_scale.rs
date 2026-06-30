@@ -37,6 +37,12 @@ impl Rect {
             && self.y < other.y + other.h
             && other.y < self.y + self.h
     }
+
+    /// True when pixel `(x, y)` lies inside this rectangle (half-open: `x in [x, x+w)`,
+    /// `y in [y, y+h)`). Used by the #364 colour sampler to skip burn-covered pixels.
+    pub fn contains(&self, x: u32, y: u32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
 }
 
 /// A solid sRGB colour (8-bit per channel) — the KNOWN value of one reference patch.
