@@ -344,6 +344,39 @@ timeout-bounded + pkill -9), `tests/python/test_obs_phase2_timeout.py` (the pure
 **Any NEW blocking obs-websocket/ssh call in a cleanup/trap MUST be timeout-wrapped and ordered after
 the cam-device free.**
 
+## Painter ground-truth CSV lifecycle + recording orphan guard (#355 / #359)
+
+**frame-probe writes the painter ground-truth `/tmp/painter.csv` ONLY on its clean `--duration-secs`
+self-exit** (`src/probe/run.rs`: the main thread waits out `cfg.duration`, signals stop, joins, THEN
+`std::fs::write(paint_log)`). So a painter `pkill`'d early NEVER writes a fresh CSV. `recording-e2e.sh`
+must therefore (#359): (1) `rm -f /tmp/painter.csv` on the painter box BEFORE launch (no stale
+leftover survives); (2) NOT kill the painter at `[7/8]` — instead WAIT for its self-exit
+(`PAINTER_LAUNCH_EPOCH + DURATION + 60` + grace; poll `pgrep -x frame-probe` gone AND a non-empty CSV
+with remote mtime ≥ `RUN_START_EPOCH`), backstop-kill only on overrun; (3) after the scp pull, a
+**FAIL-LOUD freshness gate** (`set +e` is active → explicit `exit 1`) rejecting a missing/empty CSV,
+span << `DURATION`, or gen_ts offset by hours. The bug it kills: a stale CSV (14.9h offset, 40s span)
+silently pulled → fake catastrophic verdict FAIL that was a measurement artifact, not real loss. CSV
+format = `tick,gen_ts_ns,flip_ts_ns` (gen_ts_ns = CLOCK_REALTIME epoch ns under `--wall-clock`).
+Guard: `tests/harness_recording_e2e_painter_freshness.rs`.
+
+**`obs_phase2.py record --action start` orphan guard MUST poll to idle, never a flat sleep (#355).**
+A large orphan recording (a prior aborted run's MP4 — the live 24.5 GB one) takes many seconds to
+FINALIZE after `StopRecord`; `StartRecord` returns `{code:500}` while the output is still active and
+aborts the run. The start branch reads `GetRecordStatus`, on an active orphan logs a LOUD `WARN`
+(box + timecode), `StopRecord`s, then `_wait_record_idle()` POLLS `GetRecordStatus` every
+`OBS_RECORD_FINALIZE_POLL_S` (2 s) until `outputActive=False`, bounded by
+`OBS_RECORD_FINALIZE_TIMEOUT_S` (120 s) — FAIL LOUD (`SystemExit`) on timeout, never a doomed
+`StartRecord`. Guard: `tests/python/test_obs_phase2_record.py`.
+
+## Local test verification gotchas (Tier-0)
+
+- **Python harness tests:** run with `python3 -m pytest tests/python/ -p no:html` — the repo's
+  `pytest_html` plugin pulls `jinja2` which isn't installed locally and errors collection without
+  `-p no:html`.
+- **Rust harness tests are pure static reads** (no probe, default features) — to verify RED→GREEN
+  locally without the CI-only `cargo test` (run), `cargo test --no-run --test <name>` (Tier-0
+  allowed) then EXECUTE the produced `target/debug/deps/<name>-<hash>` binary directly.
+
 ## Reporting Scope — NEVER Claim Partial as Full
 
 "Done/working" for camera-box = full source→endpoint path (cam→strih OBS→stream OBS→endpoint).
