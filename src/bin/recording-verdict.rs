@@ -2974,8 +2974,16 @@ mod tests {
             (fused, fused_pass)
         };
 
-        // CLEAN run: contiguous burns end-to-end ⇒ ZERO loss PASS.
-        let (clean, clean_pass) = run_both(window(12, false, None), window(12, true, None));
+        // CLEAN run: contiguous burns end-to-end ⇒ ZERO loss PASS. The window must be a REAL
+        // full-length span (9000 recorded frames @ the default 30 fps capture = 300 s) so it clears
+        // the #373 headline DURATION floor — a 12-frame synthetic window has a ~0 s analyzed span
+        // and (correctly) cannot declare zero loss. This exercises merge==fused over a realistic
+        // zero-loss run, keeping the #373 gate strict (its own RED/GREEN tests lock the floor).
+        const FULL_SPAN_FRAMES: u32 = 9000; // 300 s @ 30 fps default capture (#373 floor)
+        let (clean, clean_pass) = run_both(
+            window(FULL_SPAN_FRAMES, false, None),
+            window(FULL_SPAN_FRAMES, true, None),
+        );
         assert!(clean_pass, "#208: contiguous burns ⇒ overall PASS");
         assert_eq!(clean["overall_pass"], serde_json::json!(true));
         assert_eq!(clean["full_chain"]["zero_loss"], serde_json::json!(true));
@@ -2995,13 +3003,13 @@ mod tests {
         );
         assert_eq!(
             clean["full_chain"]["burn_ids_present"]["cam1"],
-            serde_json::json!(12),
+            serde_json::json!(FULL_SPAN_FRAMES),
             "cam1 burn ids come from the STRIH partial (#133): {}",
             clean["full_chain"]["burn_ids_present"]
         );
         assert_eq!(
             clean["full_chain"]["burn_ids_present"]["stream"],
-            serde_json::json!(12)
+            serde_json::json!(FULL_SPAN_FRAMES)
         );
         assert!(
             clean["full_chain"]["cam1_source"]
@@ -3014,7 +3022,11 @@ mod tests {
 
         // REAL cam1 DROP: cam1's contiguity source is the STRIH recording (#133); a forward gap
         // (id 5005 missing from frame 5 on) is a real cam1 drop ⇒ NOT zero ⇒ FAIL. Merge agrees.
-        let (drop, drop_pass) = run_both(window(12, false, Some(5)), window(12, true, None));
+        // Same full-length span so the FAIL is the cam1 drop, not the #373 duration floor.
+        let (drop, drop_pass) = run_both(
+            window(FULL_SPAN_FRAMES, false, Some(5)),
+            window(FULL_SPAN_FRAMES, true, None),
+        );
         assert!(!drop_pass, "#208: a real cam1 drop ⇒ overall FAIL");
         assert_eq!(drop["full_chain"]["zero_loss"], serde_json::json!(false));
         assert!(
