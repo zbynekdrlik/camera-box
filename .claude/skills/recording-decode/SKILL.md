@@ -473,3 +473,24 @@ stream burn is emitted AND recorded by the same OBS ⇒ no decimation). RED→GR
 `in_window_decimation_step2_extra_missing_id_is_a_real_drop_not_masked` (gap 4 → 1 RealDrop) +
 `..._two_lost_frames_charge_two_real_drops` (gap 6 → 2) + `..._every_other_id_is_zero_loss` (clean) +
 `..._jitter_gap_of_one_or_three_is_not_loss` + `in_window_step1_strih_recording_..._none_still_caught`.
+
+**#360 SUPERSEDES the above step-2 math at runtime:** `node_render_step` now returns **1 for ALL
+nodes** (`node_render_step_is_gap_ignore_for_all_nodes_360`) — strih's burn is a FREE-RUNNING render
+tick with an IRREGULAR step (run 354003: 0–10, mean ~4), NOT a clean 60/30=2, so a forward gap is
+render-clock jitter, not loss. The step≥2 excess-gap charging stays in `burn_contiguity` as a tested
+capability, but NO current node feeds it ≥2. (The decimation-step doc above is the historical design;
+the live value is 1.)
+
+## #363 — the cam2 OPTICAL dual-QR read is the HARD verdict gate (NEVER re-weaken it)
+
+The verdict PASS gate (`src/bin/recording-verdict.rs` `NodeVerdict::is_zero`) is **two** conditions:
+`contiguity.is_contiguous() && optical_undecodable == 0`. The cam2 OPTICAL dual-QR is the ONLY proof
+of the real camera-captured pixel path; the digital node burns are injected at the OBS render tick
+**AFTER capture**, so they prove node→node DIGITAL delivery only — **they can NEVER substitute for the
+optical read.**
+
+- **The trap (#360, reverted by #363):** do NOT make the in-window membership `is_optical(f) || has_node_burn(f)` for strih/stream. That let a frame with ONLY a digital burn (no optical read) count as delivered, so an 87%-optically-undecodable run PASSED on the burns alone (the fraud). **Membership for strih/stream (PerRenderTick) is OPTICAL-ONLY.**
+- **cam1 (PerEmittedFrame) KEEPS `is_optical || has_cam1_burn`** — its burn is genuine per-emit delivery proof, so dropping it would orphan the cam1 id and manufacture a PHANTOM forward-gap REAL DROP (the #204 fix). The membership is rate-gated: `is_optical(f) || (matches!(rate, PerEmittedFrame) && has_node_burn(f))`.
+- **An in-span frame whose cam2 optical QR did NOT decode is a DISTINCT `optical_undecodable` hard-fail** — never a phantom chain drop (pre-#360), never a pass (#360). Computed by `optical_undecodable_in_span()` over the optically-anchored span (`optical_span()` = first..=last `is_optical`). cam1 still reports NO phantom drop on such a frame (its burn keeps the id present); the run nonetheless FAILS via `optical_undecodable`.
+- Removing the strih/stream burn fallback does NOT re-introduce a phantom drop: PerRenderTick uses gap-ignore (step=1, see above), so forward gaps between the surviving optical frames are ignored. The pre-#360 phantom came from the now-dead step-2 math, not from optical-only membership.
+- **HARD means hard:** no flag / env / threshold / "tolerance" / "allow N undecodable" — ever. A fake green is worse than honest red. RED→GREEN lock (probe-gated, CI-only): `node_verdict_optical_undecodable_is_a_hard_fail_363`, `node_verdict_fails_when_cam2_optical_mostly_undecodable_363`, `strih_burn_on_a_non_optical_frame_inside_span_is_excluded_and_undecodable_363`, and the updated `cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop` (run FAILS on optical, cam1 still no phantom).
