@@ -196,18 +196,17 @@ fn order_corners(p: [(f64, f64); 4]) -> [(f64, f64); 4] {
     [tl, tr, br, bl]
 }
 
+/// One detected QR grid for dual-QR selection: `(shoelace area, centroid-y, the four corners)`.
+type DetectedGrid = (f64, f64, [(f64, f64); 4]);
+
 /// From every detected QR grid `(area, centroid_y, corners)`, pick the TWO dual-QR halves and return
 /// their 8 corners (left half then right half, each ordered TL,TR,BR,BL) — the `dst` for
 /// [`fit_affine`]. The dual-QRs are the two LARGEST grids in the TOP half of the frame: the four
 /// node burns are all bottom-anchored (centroid below mid-height) and smaller, so they are excluded.
 /// `None` when fewer than two top-half grids exist (the frame cannot be localized → it is skipped,
 /// never sampled at the wrong place). Pure (no rqrr) so the selection is unit-tested directly.
-fn select_dual_qr_corners(
-    grids: &[(f64, f64, [(f64, f64); 4])],
-    frame_h: f64,
-) -> Option<Vec<(f64, f64)>> {
-    let mut top: Vec<&(f64, f64, [(f64, f64); 4])> =
-        grids.iter().filter(|g| g.1 < frame_h / 2.0).collect();
+fn select_dual_qr_corners(grids: &[DetectedGrid], frame_h: f64) -> Option<Vec<(f64, f64)>> {
+    let mut top: Vec<&DetectedGrid> = grids.iter().filter(|g| g.1 < frame_h / 2.0).collect();
     if top.len() < 2 {
         return None;
     }
@@ -215,7 +214,7 @@ fn select_dual_qr_corners(
     top.sort_by(|a, b| b.0.total_cmp(&a.0));
     top.truncate(2);
     // Order them left → right by centroid x.
-    let cx = |g: &(f64, f64, [(f64, f64); 4])| g.2.iter().map(|c| c.0).sum::<f64>() / 4.0;
+    let cx = |g: &DetectedGrid| g.2.iter().map(|c| c.0).sum::<f64>() / 4.0;
     top.sort_by(|a, b| cx(a).total_cmp(&cx(b)));
     let mut pts = Vec::with_capacity(8);
     for g in top {
@@ -232,7 +231,7 @@ fn detect_dual_qr_corners(img: &RgbImage) -> Option<Vec<(f64, f64)>> {
     let luma = rgb_to_luma(img);
     let frame_h = luma.height() as f64;
     let mut prepared = rqrr::PreparedImage::prepare(luma);
-    let mut grids: Vec<(f64, f64, [(f64, f64); 4])> = Vec::new();
+    let mut grids: Vec<DetectedGrid> = Vec::new();
     for grid in prepared.detect_grids() {
         let b = grid.bounds;
         let corners = [
@@ -249,11 +248,11 @@ fn detect_dual_qr_corners(img: &RgbImage) -> Option<Vec<(f64, f64)>> {
 
 /// Sample + classify ONE recorded frame's colour scale, LOCALIZED through the affine fit from the
 /// frame's own detected dual-QR corners — the #364 camera-of-a-monitor fix (the painted column does
-/// NOT land at fixed canvas coords; it is shifted/scaled by the camera framing). `canvas_w`/`canvas_h`
-/// + `qr_size`/`top_margin` are the painter canvas geometry; `exclusions` are CANVAS-space burn
-/// rects. Returns `None` when the two dual-QRs could not be located or the corner fit is degenerate
-/// — the caller then SKIPS this frame (never samples at the wrong place; fail-closed if none
-/// localize). No fixed-coord fallback: a mis-located sample is a false signal (strict-test mandate).
+/// NOT land at fixed canvas coords; it is shifted/scaled by the camera framing). The painter canvas
+/// geometry is `canvas_w`/`canvas_h` with `qr_size`/`top_margin`; `exclusions` are CANVAS-space burn
+/// rects. Returns `None` when the two dual-QRs could not be located or the corner fit is degenerate,
+/// so the caller SKIPS this frame (never samples at the wrong place; fail-closed if none localize).
+/// No fixed-coord fallback: a mis-located sample is a false signal (strict-test mandate).
 #[allow(clippy::too_many_arguments)]
 pub fn colour_verdict_from_rgb_image_localized(
     img: &RgbImage,
@@ -672,21 +671,34 @@ mod tests {
         // the colour column, and a CORRECT frame must PASS — proving the fixed-coord false-fail is
         // cured end-to-end through real QR detection.
         let canvas = render_canvas_rgb();
+        let ex = node_burn_exclusions(W, H);
+
+        // Sanity: rqrr must locate the two dual-QRs on the un-warped render, and the (near-identity)
+        // localized gate passes — isolates real QR DETECTION from the warp.
+        let v0 = colour_verdict_from_rgb_image_localized(&canvas, W, H, QR, TM, &ex)
+            .expect("dual-QRs detected on the un-warped render");
+        assert!(
+            v0.is_pass(),
+            "un-warped correct frame passes: {:?}",
+            v0.failures().collect::<Vec<_>>()
+        );
+
+        // A clean INTEGER translation (camera framing offset) — keeps the QR modules pixel-aligned so
+        // rqrr detects reliably; the full scale/shear fit is proven in colour_verify's Tier-0 test.
         let a = Affine {
             a: 1.0,
-            b: 0.004,
-            tx: 28.0,
-            c: 0.003,
-            d: 1.03,
-            ty: 36.0,
+            b: 0.0,
+            tx: 40.0,
+            c: 0.0,
+            d: 1.0,
+            ty: 30.0,
         };
         let warped = warp_rgb(&canvas, a);
-        let ex = node_burn_exclusions(W, H);
         let v = colour_verdict_from_rgb_image_localized(&warped, W, H, QR, TM, &ex)
-            .expect("dual-QRs detected + localized in the warped frame");
+            .expect("dual-QRs detected + localized in the shifted frame");
         assert!(
             v.is_pass(),
-            "a correct warped frame PASSES once localized: {:?}",
+            "a correct shifted frame PASSES once localized: {:?}",
             v.failures().collect::<Vec<_>>()
         );
         assert_eq!(
