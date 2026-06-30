@@ -60,8 +60,12 @@ OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}" # strih may require it; stream is no-auth
 
 SSH_TIMEOUT="${RIG_WATCHDOG_SSH_TIMEOUT:-8}"
 OBS_TIMEOUT="${RIG_WATCHDOG_OBS_TIMEOUT:-15}"
-# Stale-probe process patterns (the test artifacts that strand a capture device).
-PROBE_PATTERNS="${RIG_WATCHDOG_PROBE_PATTERNS:-camera-box-burn-|recording-verdict|frame-probe|/tmp/camera-box-probe}"
+# Stale-probe process patterns (the test artifacts that strand a capture device). The FIRST char
+# of each alternative is a single-char class ([c], [r], …) — the classic "pgrep can't match its own
+# wrapper shell" trick: the ERE still matches the real process cmdlines, but the literal pattern
+# STRING (carried in the ssh `sh -c '<pattern>'` wrapper's own argv) does NOT contain the matched
+# substring, so pgrep never returns its own wrapper's PID → no false "stale probe" on a healthy box.
+PROBE_PATTERNS="${RIG_WATCHDOG_PROBE_PATTERNS:-[c]amera-box-burn-|[r]ecording-verdict|[f]rame-probe|[/]tmp/camera-box-probe}"
 
 # Confirm-counter state file (persists across timer invocations).
 STATE_DIR="${RIG_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
