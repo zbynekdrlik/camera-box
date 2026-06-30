@@ -2615,8 +2615,8 @@ fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
 mod tests {
     use super::{
         frame_is_delivered_optical, in_window_burn_frames, node_burn_id_on, node_verdict,
-        parse_cam1_capture_stats_str, parse_grab_ts, parse_painter_flip_str,
-        parse_painter_ticks_str,
+        optical_undecodable_in_span, parse_cam1_capture_stats_str, parse_grab_ts,
+        parse_painter_flip_str, parse_painter_ticks_str,
     };
     use camera_box::probe::burn_contiguity::{BurnRate, InWindowMissingKind};
     use camera_box::probe::payload::Payload;
