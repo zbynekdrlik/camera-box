@@ -19,6 +19,10 @@
 #                            REC-STRIH-TMP  — the ephemeral full-screen scene recording-e2e.sh builds
 #                                             on the stream box (STREAM_PROG_SCENE default; the primary
 #                                             #281-class case: stream stranded mid-proof)).
+#                          #352: each scene name in this list must NOT contain spaces — the matcher
+#                          word-splits on $known (see the loop below), so a spaced entry like
+#                          "NDI 2ME PGM" would split into 3 tokens and never match the full program
+#                          scene name. Use hyphenated test-scene names only.
 #   RIG_OBS                newline-separated observation records:
 #                            cam <name> down=<0|1> probe=<0|1>
 #                            obs <name> scene=<program scene name>
@@ -75,6 +79,9 @@ rig_restore_decide() {
         ;;
       obs)
         local scene="${rest#scene=}" ks
+        # #352: scene names in $known must NOT contain spaces — this word-split is INTENTIONAL.
+        # A spaced entry (e.g. "NDI 2ME PGM") splits into separate tokens, none of which equals
+        # the full program scene name, so it would silently never match. Keep test scenes hyphenated.
         for ks in $known; do
           if [ "$scene" = "$ks" ]; then
             actions="$actions restore_obs:$name"
