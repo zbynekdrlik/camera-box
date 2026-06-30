@@ -224,8 +224,12 @@ is the HARD per-camera colour gate (sibling of the #363 optical read): `NodeVerd
 gates `is_zero()` alongside contiguity + `optical_undecodable`.
 
 - **Where the logic lives (one source of truth):** the #367 painter blits a known-sRGB colour scale
-  along the bottom band (`src/colour_scale.rs` — `colour_scale_patches()` + `PATCH_COLOURS`, 13
-  patches). The gate iterates the SAME table:
+  as a VERTICAL column in the CENTRAL GAP between the two dual-QR halves (`src/colour_scale.rs` —
+  `colour_scale_patches(canvas_w, canvas_h, qr_size, top_margin)` + `PATCH_COLOURS`, 13 patches).
+  The gap is derived from the SAME formula `qr::blit_qr_bgra`/`render_qr_dual_bgra` use (half =
+  canvas_w/2; each QR centered in its half; top-anchored at `top_margin` over `qr_size` tall) by the
+  `dual_qr_gap()` helper, so painter and gate compute IDENTICAL rects. At default 1920×1080 / qr 700
+  / tm 24 the column is x∈[840,1080), y∈[24,724). The gate iterates the SAME table:
   - `src/colour_verify.rs` (Tier-0, default features — the JUDGEMENT, mutation-tested): sampler +
     `classify_patch` (Grayscale if chroma<40 / HueShift if hue err>30° / OutOfTolerance if sRGB
     dist>96 / NeutralTint if a neutral patch chroma>48) + `summarize_node_colour` (strict-majority
@@ -234,12 +238,16 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
     checkable.
   - `src/probe/colour_sample.rs` (probe, CI-only — the I/O glue): `node_burn_exclusions` +
     `extract_recording_colour_summary` (ffmpeg input-seek, N evenly-spaced RGB frames).
-- **Burn-dodge geometry (why every patch survives):** all four bottom burns are bottom-anchored
-  leaving a clear strip at the very bottom of the band, so the sampler dodges them and still reads
-  every patch. cam1 = `qr::cam1_burn_origin` (320px, center, clear strip ≈24px on 1080); strih
-  (bottom-left) / stream (bottom-right) = `burn_geom::corner_placement` in `vendor/distroav/src/
-  burn-geom.hpp` (side `0.28·h` ≈302px, margin `40/1080·h` ≈40px, clear strip ≈40px on 1080). If
-  you change the band or a burn, re-confirm the dodge leaves each patch samplable.
+- **#364 rig finding — why the column moved to the central gap:** the original BOTTOM-band scale
+  (y=960..1080) was CROPPED off the bottom by the camera's framing of the cam2 monitor — it never
+  reached the recording, so the gate had nothing to sample (painted fb0 was clean; only the bottom
+  strip was out of frame). The dual-QR halves ARE captured (they decode), so the gap between them is
+  reliably in frame. The column ends at the QR bottom (~724), ABOVE all three bottom-anchored burns
+  (cam1 `qr::cam1_burn_origin` top row ~736; strih/stream `burn_geom::corner_placement` top row ~738
+  — side `0.28·h`≈302, margin `40/1080·h`≈40), so the burns no longer overlap any patch at all —
+  `node_burn_exclusions` is now belt-and-braces (no patch loses pixels). If you change `qr_size`,
+  `top_margin`, the gap, or a burn, re-confirm the Tier-0 tests (`cargo test --lib colour
+  # airuleset:build-ok`) still show no patch intersecting a QR half or burn.
 - **Run it:** add `--colour-gate` (off by default → delivery-only runs unchanged; rig TEST mode
   paints the scale so enable it there). `--colour-samples N` (default 12) bounds cost. Fused /
   on-host only — in `--merge-partials` mode the recording is not on the host so it ERRORS LOUDLY
