@@ -389,3 +389,94 @@ fn ro_image_builder_validates_grub_default_before_pinning() {
          grub-set-default pins it (#307)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #362 — bake the NDI/audio RUNTIME deps into the image builders so a fresh clone can RUN
+// camera-box without hand-provisioning. The fresh CAM3 USB clone (built for the #301 re-image)
+// booted but camera-box crash-looped: libndi.so could not dlopen — the ALSA runtime + the avahi
+// client/common libs were missing, /usr/lib/ndi was not on the dynamic-linker path, and there was
+// no avahi-daemon for the mDNS NDI-source discovery libndi performs (a black --display receiver
+// even though the source was reachable at TCP level). CAM3 was brought to parity by hand; these
+// guards pin that the BUILDERS install + enable it so the next re-image never repeats the brick.
+// avahi-daemon is mDNS only — no conflict with DanteSync's clock ownership (cam4 runs both).
+// Style mirrors the #295/#307 guards above: read the REAL scripts and assert on the REAL contract.
+
+/// Every path that builds a runnable cam box must carry the NDI/audio runtime deps:
+///   - `create-usb-linux.sh` — the base-image builder (the fresh-clone source; the #362 incident),
+///   - `setup.sh` / `setup-device.sh` — the two provisioning paths.
+/// A gap in ANY one leaves a path that produces a camera-box which cannot dlopen libndi.
+const NDI_RUNTIME_SCRIPTS: [&str; 3] = [
+    "scripts/create-usb-linux.sh",
+    "scripts/setup.sh",
+    "scripts/setup-device.sh",
+];
+
+/// The exact runtime packages camera-box needs to load libndi + run intercom audio — each confirmed
+/// MISSING on the fresh CAM3 clone (#362), each crash-looping camera-box in turn:
+///   libasound2t64    — ALSA runtime (intercom); camera-box exited on missing libasound.so.2
+///   libavahi-client3 — libndi links it; NDI load failed on libavahi-client.so.3 without it
+///   libavahi-common3 — libndi links it; NDI load failed on libavahi-common.so.3 without it
+///   avahi-daemon     — the mDNS daemon libndi browses for NDI source discovery
+///   avahi-utils      — avahi-browse etc. for diagnosing discovery
+const NDI_RUNTIME_PACKAGES: [&str; 5] = [
+    "libasound2t64",
+    "libavahi-client3",
+    "libavahi-common3",
+    "avahi-daemon",
+    "avahi-utils",
+];
+
+/// 10. Every builder must INSTALL the full NDI/audio runtime package set. Without any one of them
+///     camera-box crash-loops on a fresh box (missing libasound.so.2 / libavahi-*.so / no NDI find).
+#[test]
+fn builders_install_the_ndi_runtime_packages() {
+    for script in NDI_RUNTIME_SCRIPTS {
+        let body = read(script);
+        for pkg in NDI_RUNTIME_PACKAGES {
+            assert!(
+                body.contains(pkg),
+                "{script} must install the NDI/audio runtime package `{pkg}` — it was missing on the \
+                 fresh CAM3 clone and crash-looped camera-box (#362)"
+            );
+        }
+    }
+}
+
+/// 11. Every builder must put /usr/lib/ndi on the dynamic-linker path. Without
+///     `/etc/ld.so.conf.d/ndi.conf` (= /usr/lib/ndi) + `ldconfig`, dlopen("libndi.so") fails with
+///     "cannot open shared object file" even though the lib is present at /usr/lib/ndi (it is not on
+///     the default linker path).
+#[test]
+fn builders_put_usr_lib_ndi_on_the_linker_path() {
+    for script in NDI_RUNTIME_SCRIPTS {
+        let body = read(script);
+        assert!(
+            body.contains("/etc/ld.so.conf.d/ndi.conf"),
+            "{script} must write /etc/ld.so.conf.d/ndi.conf so libndi.so is on the linker path (#362)"
+        );
+        assert!(
+            body.contains("/usr/lib/ndi"),
+            "{script} must register /usr/lib/ndi as the NDI library directory (#362)"
+        );
+        assert!(
+            body.contains("ldconfig"),
+            "{script} must run ldconfig after writing ndi.conf so the linker cache picks up \
+             /usr/lib/ndi (#362)"
+        );
+    }
+}
+
+/// 12. Every builder must ENABLE avahi-daemon (not merely install it). libndi browses mDNS via
+///     avahi-daemon for NDI source discovery — with no daemon running, NDI `find()` returns nothing
+///     and a `--display` receiver stays black even when the source is reachable at TCP level (#362).
+#[test]
+fn builders_enable_avahi_daemon_for_ndi_discovery() {
+    for script in NDI_RUNTIME_SCRIPTS {
+        let body = read(script);
+        assert!(
+            body.contains("systemctl enable avahi-daemon"),
+            "{script} must `systemctl enable avahi-daemon` so NDI mDNS source discovery works on a \
+             fresh box — libndi find() returns nothing without it (#362)"
+        );
+    }
+}
