@@ -21,10 +21,10 @@
 //! pixel. Confirmed on the rig by the supervisor when the real fixture lands; the rects here match
 //! the writers' geometry exactly.
 
-use crate::colour_scale::Rect;
+use crate::colour_scale::{Rect, Rgb, PATCH_COLOURS};
 use crate::colour_verify::{
-    fit_affine, summarize_node_colour, verify_rgb_frame, verify_rgb_frame_affine,
-    CameraColourVerdict, NodeColourSummary,
+    chroma, fit_affine, hue_deg, sample_patch_means_affine, summarize_node_colour,
+    verify_rgb_frame, verify_samples, CameraColourVerdict, NodeColourSummary,
 };
 use crate::probe::payload::Payload;
 use crate::probe::qr;
@@ -292,6 +292,23 @@ pub fn colour_verdict_from_rgb_image_localized(
     top_margin: u32,
     exclusions: &[Rect],
 ) -> Option<CameraColourVerdict> {
+    localized_patch_means(img, canvas_w, canvas_h, qr_size, top_margin, exclusions)
+        .map(|m| verify_samples(&m))
+}
+
+/// The localized per-patch MEANS of ONE recorded frame — the colour column sampled THROUGH the
+/// affine fit from the dual-QR fiducials (the method documented on
+/// [`colour_verdict_from_rgb_image_localized`]). `None` when the frame can't be localized. The raw
+/// means feed BOTH the verdict ([`verify_samples`]) and the calibration/diagnostic log, from ONE
+/// sample pass.
+fn localized_patch_means(
+    img: &RgbImage,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> Option<Vec<Option<Rgb>>> {
     let (left, right, rec_corners) = detect_dual_qr(img)?;
     // Reference canvas: the SAME painter render for these exact payloads. Its detected dual-QR
     // corners are the true canvas-frame positions of the identical symbols, so the fit is the pure
@@ -300,7 +317,7 @@ pub fn colour_verdict_from_rgb_image_localized(
     let ref_rgb = bgra_to_rgb(&ref_bgra, canvas_w, canvas_h);
     let (_, _, ref_corners) = detect_dual_qr(&ref_rgb)?;
     let affine = fit_affine(&ref_corners, &rec_corners)?;
-    Some(verify_rgb_frame_affine(
+    Some(sample_patch_means_affine(
         img.as_raw(),
         img.width(),
         img.height(),
@@ -311,6 +328,42 @@ pub fn colour_verdict_from_rgb_image_localized(
         top_margin,
         exclusions,
     ))
+}
+
+/// Log the LOCALIZED per-patch means (averaged across the localized frames) with chroma + hue — the
+/// #364 calibration / diagnostic surface. The strict colour thresholds (`NEUTRAL_CHROMA_MAX`,
+/// `GRAYSCALE_CHROMA_MIN`, `HUE_TOL_DEG`) are set against the REAL rig-localized values; emitting
+/// them every `--colour-gate` run means a future drift (camera/monitor/optics change) is visible in
+/// the log without a code change (`comprehensive-logging`). Always-on at INFO — only ~13 lines.
+fn log_localized_patch_diagnostics(frame_means: &[Vec<Option<Rgb>>]) {
+    for (i, &expected) in PATCH_COLOURS.iter().enumerate() {
+        let samples: Vec<Rgb> = frame_means
+            .iter()
+            .filter_map(|m| m.get(i).copied().flatten())
+            .collect();
+        if samples.is_empty() {
+            tracing::info!(
+                patch = i,
+                expected = ?expected,
+                "colour-dump: patch unsamplable on every localized frame"
+            );
+            continue;
+        }
+        let (sr, sg, sb) = samples.iter().fold((0u32, 0u32, 0u32), |(r, g, b), c| {
+            (r + c.r as u32, g + c.g as u32, b + c.b as u32)
+        });
+        let k = samples.len() as u32;
+        let mean = Rgb::new((sr / k) as u8, (sg / k) as u8, (sb / k) as u8);
+        tracing::info!(
+            patch = i,
+            expected = ?expected,
+            mean = ?mean,
+            chroma = chroma(mean),
+            hue = ?hue_deg(mean),
+            frames = k,
+            "colour-dump (localized per-patch mean)"
+        );
+    }
 }
 
 /// Native width×height of a recording's first video stream, via `ffprobe`.
@@ -474,7 +527,7 @@ pub fn extract_recording_colour_summary(
     // sampler tests exclusions against the inverse-mapped canvas coordinate.
     let exclusions = node_burn_exclusions(PAINTER_CANVAS_W, PAINTER_CANVAS_H);
 
-    let mut verdicts: Vec<CameraColourVerdict> = Vec::with_capacity(samples);
+    let mut frame_means: Vec<Vec<Option<Rgb>>> = Vec::with_capacity(samples);
     let mut localize_failures = 0usize;
     for i in 0..samples {
         // Sample at the CENTER of each of `samples` equal time slices (avoids the very first/last
@@ -483,7 +536,7 @@ pub fn extract_recording_colour_summary(
         if let Some(img) = decode_one_rgb_frame_at(path, ts, width, height)? {
             // Localize via the frame's own dual-QR corners; a frame whose dual-QRs can't be located
             // is SKIPPED (never sampled at the wrong canvas coords) rather than mis-measured.
-            match colour_verdict_from_rgb_image_localized(
+            match localized_patch_means(
                 &img,
                 PAINTER_CANVAS_W,
                 PAINTER_CANVAS_H,
@@ -491,19 +544,23 @@ pub fn extract_recording_colour_summary(
                 top_margin,
                 &exclusions,
             ) {
-                Some(v) => verdicts.push(v),
+                Some(means) => frame_means.push(means),
                 None => localize_failures += 1,
             }
         }
     }
     anyhow::ensure!(
-        !verdicts.is_empty(),
+        !frame_means.is_empty(),
         "colour gate: could not localize the dual-QR colour scale in ANY of {} sampled frames of \
          {} ({} frames had no locatable dual-QR pair) — cannot verify colour",
         samples,
         path.display(),
         localize_failures
     );
+    // Calibration / drift diagnostic: the localized per-patch means (always-on, ~13 INFO lines).
+    log_localized_patch_diagnostics(&frame_means);
+    let verdicts: Vec<CameraColourVerdict> =
+        frame_means.iter().map(|m| verify_samples(m)).collect();
     tracing::info!(
         file = %path.display(),
         localized = verdicts.len(),
