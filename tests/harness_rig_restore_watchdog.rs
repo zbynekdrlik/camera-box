@@ -609,17 +609,27 @@ fn marker_should_clear_only_after_a_positive_full_obs_restore() {
     let cases: &[(&str, i32, &str)] = &[
         // marker act unreadable failed
         ("1 1 0 0", 0, "all conditions met → CLEAR"),
-        ("1 1 1 0", 1, "an OBS box was unreadable → KEEP (might hide a stranded box)"),
-        ("1 1 0 1", 1, "an OBS teardown failed → KEEP (box not confirmed restored)"),
+        (
+            "1 1 1 0",
+            1,
+            "an OBS box was unreadable → KEEP (might hide a stranded box)",
+        ),
+        (
+            "1 1 0 1",
+            1,
+            "an OBS teardown failed → KEEP (box not confirmed restored)",
+        ),
         ("1 1 2 1", 1, "unreadable AND failed → KEEP"),
-        ("0 1 0 0", 1, "no marker → KEEP (nothing to clear via this path)"),
+        (
+            "0 1 0 0",
+            1,
+            "no marker → KEEP (nothing to clear via this path)",
+        ),
         ("1 0 0 0", 1, "did not act → KEEP"),
         ("x 1 0 0", 1, "non-numeric arg → conservatively KEEP"),
     ];
     for (args, want_rc, why) in cases {
-        let script = format!(
-            r#". "$DECISION_LIB"; rig_marker_should_clear {args}; echo rc=$?"#
-        );
+        let script = format!(r#". "$DECISION_LIB"; rig_marker_should_clear {args}; echo rc=$?"#);
         let (_c, stdout, stderr) = run_bash(&script);
         let got = if stdout.contains("rc=0") { 0 } else { 1 };
         assert_eq!(

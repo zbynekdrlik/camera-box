@@ -207,8 +207,11 @@ fail to match. All current names are hyphenated. Locked by #352 (code comment + 
 session-independent): probes cam1/2/4 (`systemctl is-active camera-box` + stale-probe `pgrep`) + the
 E2E marker + OBS program scene (`obs_phase2.py program-scene` reader, reuses `_conn`/`_rpc`), persists
 the confirm counter across runs in a state file, restores prod (`systemctl restart camera-box` /
-`obs_phase2.py teardown`), clears the marker, and ALWAYS `airuleset.py notify`. `--dry-run` =
-observe+decide+log only (does NOT clear the marker).
+`obs_phase2.py teardown`), clears the marker **only after a POSITIVE full OBS restore** (pure
+`rig_marker_should_clear`: marker present + acted + no OBS box unreadable + every teardown succeeded —
+else KEEP so a later pass retries; clearing while an OBS box was unreadable/failed would mask a
+still-stranded box), and ALWAYS `airuleset.py notify`. `--dry-run` = observe+decide+log only (never
+clears the marker).
 
 **SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` committed but NOT installed/
 enabled. The **supervisor** installs, live-verifies (real E2E heartbeat → no act; simulated stranded
