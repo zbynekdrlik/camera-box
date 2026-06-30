@@ -427,6 +427,17 @@ const NDI_RUNTIME_PACKAGES: [&str; 5] = [
     "avahi-utils",
 ];
 
+/// True if `needle` appears on a "live command" line — not in a `#` comment and not in an `echo`
+/// output line. Makes a content assertion revert-proof: deleting the real install/ldconfig command
+/// must fail the test even when the name still appears in a nearby comment or an `echo "Installed:
+/// ..."` summary (the #362 review caught this false-pass on setup-device.sh).
+fn appears_on_active_line(body: &str, needle: &str) -> bool {
+    body.lines().any(|l| {
+        let t = l.trim_start();
+        l.contains(needle) && !t.starts_with('#') && !l.contains("echo ")
+    })
+}
+
 /// 10. Every builder must INSTALL the full NDI/audio runtime package set. Without any one of them
 ///     camera-box crash-loops on a fresh box (missing libasound.so.2 / libavahi-*.so / no NDI find).
 #[test]
@@ -435,9 +446,10 @@ fn builders_install_the_ndi_runtime_packages() {
         let body = read(script);
         for pkg in NDI_RUNTIME_PACKAGES {
             assert!(
-                body.contains(pkg),
-                "{script} must install the NDI/audio runtime package `{pkg}` — it was missing on the \
-                 fresh CAM3 clone and crash-looped camera-box (#362)"
+                appears_on_active_line(&body, pkg),
+                "{script} must install the NDI/audio runtime package `{pkg}` on a real command line \
+                 (not just a comment/echo) — it was missing on the fresh CAM3 clone and crash-looped \
+                 camera-box (#362)"
             );
         }
     }
@@ -460,9 +472,9 @@ fn builders_put_usr_lib_ndi_on_the_linker_path() {
             "{script} must register /usr/lib/ndi as the NDI library directory (#362)"
         );
         assert!(
-            body.contains("ldconfig"),
-            "{script} must run ldconfig after writing ndi.conf so the linker cache picks up \
-             /usr/lib/ndi (#362)"
+            appears_on_active_line(&body, "ldconfig"),
+            "{script} must run ldconfig (on a real command line, not just a comment) after writing \
+             ndi.conf so the linker cache picks up /usr/lib/ndi (#362)"
         );
     }
 }
