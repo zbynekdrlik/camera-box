@@ -6,8 +6,12 @@ The offline recording verdict decodes every recorded frame's QR(s): the big opti
 
 ## The decode functions (do NOT confuse them)
 
-- `decode_qr_luma_all(img)` — plain full-frame rqrr pass (+ one Otsu-binarized retry). Cheap.
-  Reads the big dual-QR on every well-formed frame and ~99 %+ of node burns on a clean rec.
+- `decode_qr_luma_all(img)` — full-frame rqrr pass UNION the Otsu-binarized rqrr pass, merged
+  + de-duped (#363, BOTH passes always run). Cheap (~2 full-frame rqrr passes). Reads the big
+  dual-QR + the SOFT optical dual-QR on every well-formed frame and ~99 %+ of node burns on a
+  clean rec. (See "#363 — optical-robustness half" below: the Otsu pass used to be gated to
+  run ONLY when the plain pass was empty, which silently dropped the soft optical when burns
+  decoded — the bug this PR fixed.)
 - `robust_tile_passes(&img, &mut out)` — the EXPENSIVE part (#202): bottom-band split into 3
   overlapping cubic-upscaled column tiles, rqrr each, merge-dedup into `out`. ~10× the plain
   cost. Recovers the rare small burn the full-frame finder misses (the #186 coverage gap).
@@ -494,3 +498,56 @@ optical read.**
 - **An in-span frame whose cam2 optical QR did NOT decode is a DISTINCT `optical_undecodable` hard-fail** — never a phantom chain drop (pre-#360), never a pass (#360). Computed by `optical_undecodable_in_span()` over the optically-anchored span (`optical_span()` = first..=last `is_optical`). cam1 still reports NO phantom drop on such a frame (its burn keeps the id present); the run nonetheless FAILS via `optical_undecodable`.
 - Removing the strih/stream burn fallback does NOT re-introduce a phantom drop: PerRenderTick uses gap-ignore (step=1, see above), so forward gaps between the surviving optical frames are ignored. The pre-#360 phantom came from the now-dead step-2 math, not from optical-only membership.
 - **HARD means hard:** no flag / env / threshold / "tolerance" / "allow N undecodable" — ever. A fake green is worse than honest red. RED→GREEN lock (probe-gated, CI-only): `node_verdict_optical_undecodable_is_a_hard_fail_363`, `node_verdict_fails_when_cam2_optical_mostly_undecodable_363`, `strih_burn_on_a_non_optical_frame_inside_span_is_excluded_and_undecodable_363`, and the updated `cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop` (run FAILS on optical, cam1 still no phantom).
+
+## #363 — optical-robustness half: `decode_qr_luma_all` must merge plain ∪ Otsu (the Otsu-gating bug)
+
+The HARD gate above (`optical_undecodable == 0`) only PASSES if the cam2 optical dual-QR is
+actually DECODED on the delivered frames. After the gate was restored (#372) the stream
+recording still showed **~87% optical-undecodable** — but the optical QR pixels were PRESENT
+and readable. The cause was a DECODER gating bug, NOT the camera.
+
+**THE BUG (`src/probe/qr.rs::decode_qr_luma_all`):** it ran the Otsu-binarized rqrr retry ONLY
+when the plain rqrr pass found NOTHING:
+```rust
+let first = rqrr_decode_all(img.clone());
+if !first.is_empty() { return first; }      // <-- the trap
+rqrr_decode_all(binarize_otsu(&img))
+```
+On the stream recording the plain pass reads the crisp DIGITAL BURNS (so `first` is non-empty)
+but MISSES the SOFT optical dual-QR (a QR filmed off a monitor: low-contrast + moiré +
+colour-cast). Because `first` was non-empty the Otsu retry was SKIPPED → the present optical QR
+was never recovered → ~87% of stream frames marked phantom `optical_undecodable`. PROOF: on the
+real failing frames `f-5.png` / `f-150.png` (run 354003) rqrr returns the optical dual-QR when
+the image is `binarize_otsu`-ed but NONE on the plain pass.
+
+**THE FIX:** ALWAYS run BOTH passes and `merge_payloads` (de-dup by `(run_id, frame_id)`):
+```rust
+let mut out = rqrr_decode_all(img.clone());
+merge_payloads(&mut out, rqrr_decode_all(binarize_otsu(&img)));
+out
+```
+Result is a SUPERSET of the plain pass (never fewer). Fixes `decode_qr_luma_all_robust` and
+`decode_qr_luma_all_fast_then_robust` for free (both call it). Cost: +1 cheap full-frame Otsu
+rqrr pass per OFFLINE-decoded frame; the ~10× tiled passes stay conditional behind the
+fast/robust gate. `decode_qr_luma_all_tile` (the upscaled-tile path) keeps its own
+"plain-then-Otsu-if-empty" — the tile gating is about small node burns, not the soft optical.
+
+**SIDE EFFECT — the full-frame pass got STRONGER:** the Otsu union now reads, full-frame, some
+burns that previously needed the #202 tiles (3 of the 5 real burn-unreadable fixtures flipped
+to the FAST path). This is good (fewer frames need the expensive tile fallback) but it
+INVALIDATED two synthetic qr.rs tests whose premise was "the full-frame pass MISSES a softened
+260px/blur-2.8 burn": that synthetic perfect-QR+blur burn is now recovered by the full-frame
+Otsu pass. The synthetic blit model can NO LONGER reproduce the genuine "full-frame misses /
+tiles recover" gap (a size-disparity / detector-coverage effect that needs real
+encoder-degraded 4K pixels). So:
+- the gap is locked on REAL pixels — `fast_then_robust_falls_back_to_robust_on_a_real_burn_unreadable_frame`
+  (uses `tests/fixtures/burn-unreadable/cam1-frame-1148.png`) + `tests/burn_fixture_decode.rs`;
+- the synthetic test was repurposed to lock the #363 improvement itself —
+  `full_frame_otsu_union_recovers_a_softened_burn_bare_rqrr_misses` (bare single rqrr misses →
+  the Otsu union recovers).
+
+RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr.rs`):
+`optical_soft_dual_qr_recovered_on_real_stream_frames` (fixtures `tests/fixtures/optical-soft-f5.png`
+/ `optical-soft-f150.png`, run 354003): the plain pass returns NO run_id 354003; `decode_qr_luma_all`
+returns BOTH optical halves; the recording per-frame path surfaces it too. Reverting to the
+early-return makes `decode_qr_luma_all` return only the burns → the GREEN assert fails.
