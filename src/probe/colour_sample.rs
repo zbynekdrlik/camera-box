@@ -228,11 +228,15 @@ fn bgra_to_rgb(bgra: &[u8], canvas_w: u32, canvas_h: u32) -> RgbImage {
     img
 }
 
+/// The two dual-QR halves located in a frame: `(left payload, right payload, 8 corners)` — the
+/// corners are left-half then right-half, each TL,TR,BR,BL.
+type DualQr = (Payload, Payload, Vec<(f64, f64)>);
+
 /// Detect the two dual-QR halves in an RGB frame: returns their decoded payloads `(left, right)` and
 /// their 8 corners (left then right, each TL,TR,BR,BL). The halves are the two LARGEST top-half QR
 /// grids that DECODE — the four node burns are bottom-anchored (excluded by position). `None` when
 /// fewer than two such grids are found (frame cannot be localized → skipped).
-fn detect_dual_qr(img: &RgbImage) -> Option<(Payload, Payload, Vec<(f64, f64)>)> {
+fn detect_dual_qr(img: &RgbImage) -> Option<DualQr> {
     let luma = rgb_to_luma(img);
     let frame_h = luma.height() as f64;
     let mut prepared = rqrr::PreparedImage::prepare(luma);
@@ -262,7 +266,7 @@ fn detect_dual_qr(img: &RgbImage) -> Option<(Payload, Payload, Vec<(f64, f64)>)>
     let mut pts = Vec::with_capacity(8);
     pts.extend_from_slice(&order_corners(corners[li]));
     pts.extend_from_slice(&order_corners(corners[ri]));
-    Some((payloads[li].clone(), payloads[ri].clone(), pts))
+    Some((payloads[li], payloads[ri], pts))
 }
 
 /// Sample + classify ONE recorded frame's colour scale, LOCALIZED to where the camera actually
