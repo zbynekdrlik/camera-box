@@ -495,6 +495,57 @@ fn recording_e2e_names_the_certified_prod_scenes() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #343 — the stream prod-scene step must record the ALREADY-ACTIVE prod scene, never
+// cold-re-activate the heavy 450 ms-FIFO NDI 2ME PGM source.
+//
+// Root cause (live-confirmed stream 2026-06-29): the harness routed the stream PROGRAM to a
+// fresh ephemeral scene `REC-STRIH-TMP` built via `--ensure-source "NDI 2ME PGM"`. Because that
+// scene is NEVER already-program, prod_scene fell to the `SetCurrentProgramScene` switch, which
+// COLD-ACTIVATES the NDI 2ME PGM source on OBS's graphics thread; that source carries a 450 ms
+// genlock FIFO (#257) whose preload-to-reserve on activation blocks the graphics thread > 60 s,
+// so the obs-websocket response never arrives — the #328 timeout fires and the #312 proof can't
+// run. The merged #346 mitigation (skip-if-on-target) never triggered because program was never
+// already on the ephemeral scene. Fix: record the ALREADY-ACTIVE prod scene `PRO` (NDI 2ME PGM
+// already warm) and DROP `--ensure-source` for the stream box, so `curr_prog == target` → the
+// switch is skipped entirely → no cold re-activation → no hang (and the teardown hang too).
+// ---------------------------------------------------------------------------
+
+/// #343: the stream prod-scene step must record the already-active prod scene `PRO` and must NOT
+/// re-activate the heavy NDI 2ME PGM source — i.e. STREAM_PROG_SCENE defaults to `PRO` (not the
+/// ephemeral `REC-STRIH-TMP`), there is no `REC-STRIH-TMP` reference left in the harness, and the
+/// stream prod-scene invocation passes NO `--ensure-source` (which forces the hanging activation).
+#[test]
+fn recording_e2e_stream_records_already_active_prod_scene_no_reactivation() {
+    let s = read("scripts/recording-e2e.sh");
+    // (a) The stream program scene default is the already-active prod scene `PRO` — never the
+    // ephemeral REC-STRIH-TMP (which is never already-program → forces a cold re-activation).
+    assert!(
+        s.contains("STREAM_PROG_SCENE=\"${STREAM_PROG_SCENE:-PRO}\""),
+        "#343: STREAM_PROG_SCENE must default to the already-active prod scene 'PRO' (NDI 2ME PGM \
+         already warm) so prod_scene's `curr_prog == target` branch fires and NO \
+         SetCurrentProgramScene runs (the >60s graphics-thread hang path)."
+    );
+    assert!(
+        !s.contains("REC-STRIH-TMP"),
+        "#343: the harness must NOT route the stream program to the ephemeral REC-STRIH-TMP scene \
+         — it is never already-program, so switching to it cold-re-activates the 450ms-FIFO NDI \
+         2ME PGM on the graphics thread and SetCurrentProgramScene blocks >60s (#328 timeout)."
+    );
+    // (b) The stream prod-scene invocation must NOT pass --ensure-source (which builds the
+    // ephemeral scene + forces the heavy source activation). Scope to the stream prod-scene block.
+    let stream_call = s.find("prod-scene --host \"$STREAM\"").expect(
+        "#343: recording-e2e.sh must route the stream program via `prod-scene --host \"$STREAM\"`",
+    );
+    let block = &s[stream_call..(stream_call + 400).min(s.len())];
+    assert!(
+        !block.contains("--ensure-source"),
+        "#343: the stream prod-scene call must NOT pass --ensure-source — forcing source \
+         activation cold-loads the 450ms NDI 2ME PGM FIFO on the graphics thread and hangs \
+         SetCurrentProgramScene. Record the already-active PRO scene (source warm). Got: {block:?}"
+    );
+}
+
 /// Teardown must restore the prior PROGRAM scenes on BOTH boxes (it routed them to the
 /// prod recording scene for the run). The prod-scene action records prev program/preview
 /// to state; teardown restores it — never strands the recording scene as live program.
