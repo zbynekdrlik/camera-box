@@ -9,11 +9,11 @@
 //! (`recording-verdict --extract-partial <box>`) into this partial; dev1 combines the partials
 //! (`recording-verdict --merge-partials strih=… stream=…`) into the identical full verdict.
 //!
-//! ## JSON schema (`schema_version = 1`)
+//! ## JSON schema (`schema_version = 2`)
 //!
 //! ```json
 //! {
-//!   "schema_version": 1,
+//!   "schema_version": 2,
 //!   "box": "strih",                 // which box decoded this — "strih" | "stream"
 //!   "recording": "strih-1234.mkv",  // basename of the local recording (provenance only)
 //!   "expected_burns": [911001, 911002],  // node-burn run_ids this extract decoded for (#207)
@@ -23,7 +23,9 @@
 //!                     { "run_id": 911002, "frame_id": 1670, "gen_ts_ns": 1700000000000000123 } ],
 //!       "tick": 100 }
 //!     // …
-//!   ]
+//!   ],
+//!   "colour": null                  // #377 per-recording NodeColourSummary (Some only after a
+//!                                   // --colour-gate extract; absent/null on delivery-only runs)
 //! }
 //! ```
 //!
@@ -67,9 +69,9 @@ pub struct RecordingPartial {
     pub frames: Vec<RecordingFrame>,
     /// #377 — the per-camera COLOUR verdict of THIS box's recording, computed ON the box during
     /// `--colour-gate` extract (the colour gate is fused/on-host: the recording is only here). The
-    /// merge applies it to the node(s) this recording backs — the stream recording's summary → strih
-    /// + stream, the strih recording's summary → cam1 (mirrors the fused node→recording mapping).
-    /// `None` when `--colour-gate` was off (delivery-only runs), so old behaviour is unchanged.
+    /// merge applies it to the node(s) this recording backs: the stream recording's summary covers
+    /// strih and stream, the strih recording's summary covers cam1 (mirrors the fused node-to-recording
+    /// mapping). `None` when `--colour-gate` was off (delivery-only runs), so old behaviour is unchanged.
     #[serde(default)]
     pub colour: Option<NodeColourSummary>,
 }
