@@ -85,6 +85,129 @@ pub fn detect_chirp_onsets(
     picked
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmittedMarker {
+    pub frame_id: u32,
+    pub video_time_s: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AvOffsetEstimate {
+    pub offset_ms: f64,
+    pub matched: usize,
+    pub mad_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OffsetSearch {
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub step_ms: f64,
+    pub tol_ms: f64,
+    pub min_matches: usize,
+    pub max_mad_ms: f64,
+}
+
+pub fn default_search() -> OffsetSearch {
+    OffsetSearch {
+        min_ms: -500.0,
+        max_ms: 2500.0,
+        step_ms: 5.0,
+        tol_ms: 60.0,
+        min_matches: 4,
+        max_mad_ms: 40.0,
+    }
+}
+
+pub fn estimate_av_offset_ms(
+    emitted: &[EmittedMarker],
+    onsets_s: &[f64],
+    search: &OffsetSearch,
+) -> Option<AvOffsetEstimate> {
+    if emitted.is_empty() || onsets_s.is_empty() {
+        return None;
+    }
+    let tol_s = search.tol_ms / 1000.0;
+    let mut best_d_ms = search.min_ms;
+    let mut best_votes = 0usize;
+
+    let steps = ((search.max_ms - search.min_ms) / search.step_ms)
+        .round()
+        .max(0.0) as i64;
+    for k in 0..=steps {
+        let d_ms = search.min_ms + k as f64 * search.step_ms;
+        let d_s = d_ms / 1000.0;
+        let mut votes = 0usize;
+        for m in emitted {
+            let expected_audio = m.video_time_s - d_s;
+            if onsets_s
+                .iter()
+                .any(|&o| (o - expected_audio).abs() <= tol_s)
+            {
+                votes += 1;
+            }
+        }
+        if votes > best_votes {
+            best_votes = votes;
+            best_d_ms = d_ms;
+        }
+    }
+    if best_votes < search.min_matches {
+        return None;
+    }
+
+    // refine: median of per-marker residuals at the winning D, nearest-onset matched
+    let best_d_s = best_d_ms / 1000.0;
+    let mut residuals_ms: Vec<f64> = Vec::new();
+    for m in emitted {
+        let expected_audio = m.video_time_s - best_d_s;
+        if let Some(&nearest) = onsets_s.iter().min_by(|a, b| {
+            (**a - expected_audio)
+                .abs()
+                .partial_cmp(&(**b - expected_audio).abs())
+                .unwrap()
+        }) {
+            if (nearest - expected_audio).abs() <= tol_s {
+                // actual offset for this marker = video - audio
+                residuals_ms.push((m.video_time_s - nearest) * 1000.0);
+            }
+        }
+    }
+    if residuals_ms.len() < search.min_matches {
+        return None;
+    }
+    let offset_ms = median(&mut residuals_ms.clone());
+    let mut abs_dev: Vec<f64> = residuals_ms.iter().map(|r| (r - offset_ms).abs()).collect();
+    let mad_ms = median(&mut abs_dev);
+    if mad_ms > search.max_mad_ms {
+        return None;
+    }
+    Some(AvOffsetEstimate {
+        offset_ms,
+        matched: residuals_ms.len(),
+        mad_ms,
+    })
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// Required genlock video-delay to zero the measured offset.
+/// `offset_ms = video_time - audio_time`; positive = video lags audio → REDUCE the delay.
+pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
+    let raw = (current_delay_ms as f64 - offset_ms).round() as i32;
+    raw.clamp(3, 2000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +260,69 @@ mod tests {
         let template = generate_chirp(48_000, 50, 1000.0, 3000.0);
         let buf = vec![0.0f32; 48_000];
         assert!(detect_chirp_onsets(&buf, &template, 0.4, template.len()).is_empty());
+    }
+
+    fn markers(times: &[f64]) -> Vec<EmittedMarker> {
+        times
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| EmittedMarker {
+                frame_id: i as u32,
+                video_time_s: t,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recovers_constant_offset() {
+        // video at 1,5,9,13,17 s; audio 300 ms EARLIER (video lags by +300 ms)
+        let em = markers(&[1.0, 5.0, 9.0, 13.0, 17.0]);
+        let onsets: Vec<f64> = em.iter().map(|m| m.video_time_s - 0.300).collect();
+        let est = estimate_av_offset_ms(&em, &onsets, &default_search()).unwrap();
+        assert!(
+            (est.offset_ms - 300.0).abs() <= 5.0,
+            "offset {}",
+            est.offset_ms
+        );
+        assert_eq!(est.matched, 5);
+        assert!(est.mad_ms <= 5.0);
+    }
+
+    #[test]
+    fn tolerates_one_missed_onset_and_one_spurious() {
+        let em = markers(&[1.0, 5.0, 9.0, 13.0, 17.0]);
+        let mut onsets: Vec<f64> = em.iter().map(|m| m.video_time_s - 0.300).collect();
+        onsets.remove(2); // a missed marker
+        onsets.push(3.7); // a spurious onset
+        let est = estimate_av_offset_ms(&em, &onsets, &default_search()).unwrap();
+        assert!((est.offset_ms - 300.0).abs() <= 10.0);
+        assert!(est.matched >= 4);
+    }
+
+    #[test]
+    fn too_few_matches_returns_none() {
+        let em = markers(&[1.0, 5.0]);
+        let onsets = vec![0.7, 4.7];
+        assert!(estimate_av_offset_ms(&em, &onsets, &default_search()).is_none());
+    }
+
+    #[test]
+    fn inconsistent_markers_return_none() {
+        let em = markers(&[1.0, 5.0, 9.0, 13.0, 17.0]);
+        // onsets scattered — no constant offset aligns >= min_matches within tol
+        let onsets = vec![0.1, 4.9, 8.2, 13.9, 15.5];
+        assert!(estimate_av_offset_ms(&em, &onsets, &default_search()).is_none());
+    }
+
+    #[test]
+    fn required_delay_sign_and_clamp() {
+        // video lags audio (+120 ms) → reduce delay
+        assert_eq!(required_delay_ms(1000, 120.0), 880);
+        // video leads audio (-120 ms) → increase delay
+        assert_eq!(required_delay_ms(1000, -120.0), 1120);
+        // clamp low / high
+        assert_eq!(required_delay_ms(1000, 5000.0), 3);
+        assert_eq!(required_delay_ms(1000, -5000.0), 2000);
+        assert_eq!(required_delay_ms(3, 0.0), 3);
     }
 }
