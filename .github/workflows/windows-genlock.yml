@@ -562,6 +562,23 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # #188: build the A/V sync dock (norihiro/obs-audio-video-sync-dock, vendored) against the
+      # SAME genlocked OBS SDK, standalone, mirroring the DistroAV path above. Ships as a
+      # first-party OBS plugin so the user can measure LIVE A/V sync inside his own OBS.
+      - name: Configure av-sync-dock against the genlocked OBS (#188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: >
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DQT_VERSION=6
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build av-sync-dock (#188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
       # SECONDARY / defense-in-depth (#55): the disable MECHANISM is the SOURCE gate at
       # the top of this job; this is a packaging-layout check that the built rundir ships
       # no `updater.exe` binary at all. It is intentionally redundant — belt-and-braces
@@ -589,6 +606,12 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/distroav" | Out-Null
           Copy-Item -Recurse "vendor/distroav/data/*" "stage/data/obs-plugins/distroav/" -ErrorAction SilentlyContinue
+          # av-sync-dock plugin + data (first-party OBS plugin path, #188). Fail loud if unbuilt.
+          $dockdll = Get-ChildItem -Recurse vendor/av-sync-dock/build_x64 -Filter obs-audio-video-sync-dock.dll | Select-Object -First 1
+          if (!$dockdll) { Write-Error "obs-audio-video-sync-dock.dll not built (#188)"; exit 1 }
+          Copy-Item $dockdll.FullName "stage/obs-plugins/64bit/"
+          New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/obs-audio-video-sync-dock" | Out-Null
+          Copy-Item -Recurse "vendor/av-sync-dock/data/*" "stage/data/obs-plugins/obs-audio-video-sync-dock/"
           git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
 
       # #120: emit the per-component SHA manifest INTO the bundle (stage/BUNDLE_MANIFEST.json).

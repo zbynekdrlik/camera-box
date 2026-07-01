@@ -34,6 +34,7 @@ on:
     paths:
       - 'vendor/obs-studio/**'
       - 'vendor/distroav/**'
+      - 'vendor/av-sync-dock/**'
       - '.github/workflows/windows-genlock-fast.yml'
 
 permissions:
@@ -324,7 +325,24 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # #188: compile-check the A/V sync dock against the SAME installed OBS SDK (reuses the
+      # OBS build above — no second full OBS build). Catches a dock C++/Qt/CMake error at the
+      # pre-merge gate instead of after the 150-min full windows-genlock build.
+      - name: Configure av-sync-dock against the genlocked OBS (#188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: >
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DQT_VERSION=6
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Compile-check av-sync-dock (build the plugin, #188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
       - name: Compile gate passed
         shell: bash
         run: |
-          echo "#101 vendored OBS/DistroAV C++ compiled clean - pre-merge gate green."
+          echo "#101 vendored OBS/DistroAV + #188 av-sync-dock C++ compiled clean - pre-merge gate green."

@@ -9,6 +9,8 @@ an unpinned/stock build.
 |---|---|---|---|
 | `vendor/obs-studio` | github.com/obsproject/obs-studio | **32.1.2** (commit `fb4d98bf8`) | git subtree --squash |
 | `vendor/distroav` | github.com/DistroAV/DistroAV | **6.2.1** (commit `038d9d6`) | git subtree --squash |
+| `vendor/av-sync-dock` | github.com/norihiro/obs-audio-video-sync-dock | **0.1.4** | vendored files (#188 A/V-sync dock) |
+| `vendor/av-sync-dock/deps/quirc` | github.com/dlbeer/quirc | commit `927d680904dc95fdff4cd9d022eb374b438ff8f2` | vendored `lib/` sources (pin in `deps/quirc/QUIRC_PINNED_SHA.txt`) |
 | NDI SDK headers | shipped inside DistroAV (`vendor/distroav/lib/ndi/`) | SDK v6 (plugin requires **NDI ≥ 6.3.0**) | part of the DistroAV tree |
 
 The NDI **runtime** (`libndi.so` / `Processing.NDI.Lib.x64.dll`) is NOT committed —
