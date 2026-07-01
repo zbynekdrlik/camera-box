@@ -50,5 +50,13 @@ pub mod colour_verify;
 // frame count here to gate the headline alongside contiguity + the optical + colour gates.
 pub mod recording_span_gate;
 
+// #356 — cross-recording cam1 loss reconciliation (pure kernel). In the recording-verdict MERGE,
+// a cam1 REAL DROP read from the clean upstream strih recording that IS decoded in the downstream
+// stream recording was proven delivered → re-classify it BURN-UNREADABLE (a strih-recording
+// readability gap at the high-latency 60→30 hop), never a chain loss. No probe deps, so it
+// unit-tests Tier-0; the probe-gated `bin/recording-verdict` computes the downstream cam1 id set
+// and applies the returned downgrade to the cam1 node's classification.
+pub mod burn_reconcile;
+
 #[cfg(feature = "probe")]
 pub mod probe;
