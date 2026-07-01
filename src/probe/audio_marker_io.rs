@@ -82,6 +82,10 @@ fn run_emit(
         stereo.push(v);
     }
     let mut last_fired = 0u64;
+    // Acquire the IO handle ONCE. The alsa crate forbids a second live IO object per PCM
+    // (panics `No hw_params call or additional IO objects allowed`), so we reuse this one
+    // handle for both the write AND the post-recover retry — never re-acquire it.
+    let io = pcm.io_i16()?;
     while !stop.load(Ordering::Relaxed) {
         let tick = refresh.load(Ordering::Relaxed);
         if crate::av_sync::should_emit_marker(tick, cadence_ticks) && tick != last_fired {
@@ -89,16 +93,13 @@ fn run_emit(
             let fid = current_id.load(Ordering::Relaxed);
             let ts = crate::probe::clock_ns(start, wall_clock);
             log.lock().unwrap().push((fid, ts));
-            let io = pcm.io_i16()?;
             if let Err(e) = io.writei(&stereo) {
                 // The bursty chirp-then-idle pattern underruns the small buffer between
-                // markers (XRUN); recover and REPLAY this chirp so every marker actually
-                // sounds. A bare recover-without-retry leaves the failed cycle silent, so
-                // only the first chirp ever played (appl_ptr stuck at one chirp on the rig).
+                // markers (XRUN); recover and REPLAY this chirp (reusing the same IO handle)
+                // so every marker actually sounds. A bare recover-without-retry left every
+                // cycle after the first silent (appl_ptr stuck at one chirp on the rig).
                 let _ = pcm.recover(e.errno(), true);
-                if let Ok(io2) = pcm.io_i16() {
-                    let _ = io2.writei(&stereo);
-                }
+                let _ = io.writei(&stereo);
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
