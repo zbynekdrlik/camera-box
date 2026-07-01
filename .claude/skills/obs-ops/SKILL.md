@@ -130,6 +130,16 @@ The user has repeated this 2-3× and gets angry when re-asked which recovery met
    OBS restart alone often does NOT clear a wedged GPU. **Reboot the PC.**
    strih: render-black + crash + ~205% CPU hang (no D3D11 TDR signature, open: #93, dual RTX 2070 SUPER).
    User directive: fix GPU stability first (suggested nvidia driver upgrade on stream.lan).
+   **Diagnosis refinements (proven 2026-07-02):**
+   - **`nvidia-smi` healthy ≠ D3D healthy.** After the TDR, nvidia-smi answered normally (0 %,
+     normal temp) while EVERY new D3D device stayed broken — a freshly relaunched OBS re-hit
+     `Device Removed 887A0007` within seconds and NVENC failed `NV_ENC_ERR_INVALID_DEVICE`.
+     Don't let a clean nvidia-smi talk you out of the reboot.
+   - **Signature over WS:** `StartRecord` returns OK but `outputActive` stays False (0 bytes,
+     no file) and/or `StopRecord` → 501; obs-websocket log spams `Sending message to client
+     failed: invalid state`. That silent no-op = encoder/device dead ⇒ TDR path, not a config bug.
+   - **Reading the OBS log on stream:** it is DROWNED by `ytfast.py`/`ytslow.py` script spam
+     (~4 lines/s). Filter first: `Get-Content $log | Where-Object { $_ -notmatch 'Unknown Script|ytfast|ytslow' }`.
 
 Do NOT use AskUserQuestion for OBS recovery — just recover it.
 
