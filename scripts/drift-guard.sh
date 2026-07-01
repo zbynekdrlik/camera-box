@@ -436,8 +436,12 @@ drift_check_source_latency() {
     printf '  %-20s UNKNOWN  (expected pin is empty)\n' "genlock_src_latency"
     return 3
   fi
-  [ "$unknown" -gt 0 ] && return 3
+  # DRIFT takes priority over UNKNOWN — consistent with all sibling checkers (drift_check_all_files,
+  # drift_check_inputs). When a source is drifted AND another source is unobserved, the correct
+  # top-level verdict is DRIFT (exit 20 to callers), not UNKNOWN (exit 11). The per-source UNKNOWN
+  # lines are printed regardless; the top-level exit code names the WORST condition.
   [ "$drift" -gt 0 ] && return 2
+  [ "$unknown" -gt 0 ] && return 3
   return 0
 }
 

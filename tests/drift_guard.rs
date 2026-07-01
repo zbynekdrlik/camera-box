@@ -1658,6 +1658,25 @@ fn drift_check_source_latency_catches_drift_and_passes_on_match() {
         unknown.contains("UNKNOWN"),
         "must print UNKNOWN status line: {unknown:?}"
     );
+
+    // mixed: one source drifted + one source absent → DRIFT must win (rc 2, not rc 3)
+    // This validates the return-order fix (DRIFT before UNKNOWN) — without it the
+    // unobserved source would mask the drift and exit 3 instead of 2.
+    let mixed = run_sourced(
+        r#"rc=0; drift_check_source_latency "$EXP" "$OBS" || rc=$?; echo "RC=$rc""#,
+        &[
+            ("EXP", "NDI 2ME PGM=450,NDI cam5=3"),
+            ("OBS", "NDI 2ME PGM=900"), // cam5 absent, PGM drifted
+        ],
+    );
+    assert!(
+        mixed.contains("RC=2"),
+        "drift must take priority over unknown in the mixed case (rc 2, not 3): {mixed:?}"
+    );
+    assert!(
+        mixed.contains("DRIFT"),
+        "must print DRIFT for the drifted source: {mixed:?}"
+    );
 }
 
 #[test]
