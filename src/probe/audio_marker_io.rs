@@ -91,7 +91,7 @@ fn run_emit(
             log.lock().unwrap().push((fid, ts));
             let io = pcm.io_i16()?;
             if let Err(e) = io.writei(&stereo) {
-                let _ = pcm.recover(e.errno() as i32, true);
+                let _ = pcm.recover(e.errno(), true);
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
