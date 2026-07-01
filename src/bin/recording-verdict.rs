@@ -1564,8 +1564,11 @@ fn run_av_sync(args: &Args) -> Result<()> {
         args.av_min_matched,
         args.av_cluster_tol_ms,
     )?;
-    // The measured offset + the genlock delay it implies. offset > 0 ⇒ video LAGS audio.
-    let suggested = camera_box::qpsk_marker::required_delay_ms(0, report.offset.offset_ms);
+    // The measured offset + the latency ADJUSTMENT it implies: ADD this (signed) to the video
+    // source's current genlock latency to zero the offset (offset > 0 ⇒ video lags ⇒ negative
+    // adjust). Reported as a raw signed delta — the operator applies it to THEIR current value,
+    // then clamps to the genlock range via required_delay_ms (a clamped absolute here would hide
+    // the sign whenever the unknown current delay isn't passed in).
     let json = serde_json::json!({
         "av_offset_ms": report.offset.offset_ms,
         "mad_ms": report.offset.mad_ms,
@@ -1575,7 +1578,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
         "video_ticks": report.video_ticks,
         "emit_rows": report.emit_rows,
         "video_fps": report.fps,
-        "genlock_delay_to_zero_ms": suggested,
+        "latency_adjust_ms": -report.offset.offset_ms,
     });
     println!("{}", serde_json::to_string_pretty(&json)?);
     tracing::info!(

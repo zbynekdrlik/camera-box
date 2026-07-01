@@ -336,24 +336,30 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
     out
 }
 
-/// Serialize the emitter's marker log as CSV `index,frame_id,emit_ts_ns`, one row per marker.
-/// recording-verdict reads this to map a decoded audio `index` → the dual-QR `frame_id` shown when
-/// it played, then to that frame's video time. Pure so the round-trip is Tier-0 tested.
-pub fn serialize_qpsk_marker_log(markers: &[(u8, u32, i64)]) -> String {
-    let mut s = String::from("index,frame_id,emit_ts_ns\n");
+/// Serialize the emitter's marker log as CSV `index,frame_id,emit_ts_ns`, one row per marker,
+/// prefixed with a `#`-comment recording the emit `AudioParams` — the decoder MUST demodulate with
+/// the same params, and persisting them in the log makes a silent emitter/decoder drift visible
+/// (the two sides otherwise hardcode `rig60()` independently). recording-verdict reads this to map
+/// a decoded audio `index` → the dual-QR `frame_id` shown when it played, then to that frame's
+/// video time. Pure so the round-trip is Tier-0 tested.
+pub fn serialize_qpsk_marker_log(markers: &[(u8, u32, i64)], p: &AudioParams) -> String {
+    let mut s = format!(
+        "# qpsk-params sr={} carrier={} c={} q={} vr={}/{}\nindex,frame_id,emit_ts_ns\n",
+        p.sample_rate, p.carrier_hz, p.c, p.q, p.vr_num, p.vr_den
+    );
     for (idx, fid, ts) in markers {
         s.push_str(&format!("{idx},{fid},{ts}\n"));
     }
     s
 }
 
-/// Parse `serialize_qpsk_marker_log` output back to `(index, frame_id, emit_ts_ns)`. The header row
-/// and any blank/malformed line are skipped (robust to a truncated file).
+/// Parse `serialize_qpsk_marker_log` output back to `(index, frame_id, emit_ts_ns)`. The header
+/// row, `#` comments, and any blank/malformed line are skipped (robust to a truncated file).
 pub fn parse_qpsk_marker_log(csv: &str) -> Vec<(u8, u32, i64)> {
     let mut out = Vec::new();
     for line in csv.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("index") {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("index") {
             continue;
         }
         let mut it = line.split(',');
@@ -383,7 +389,7 @@ pub struct AvOffset {
 }
 
 fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     let n = v.len();
     if n == 0 {
         0.0
@@ -444,7 +450,7 @@ pub fn cluster_offset_ms(
         return None;
     }
     let mut s: Vec<f64> = candidates.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    s.sort_by(|a, b| a.total_cmp(b));
     let w = 2.0 * cluster_tol_ms;
     // Densest window of width `w` via a two-pointer sweep over the sorted offsets.
     let (mut best_lo, mut best_cnt) = (0usize, 0usize);
@@ -492,9 +498,13 @@ pub fn playout_frame_id(
     vr_num: u32,
     vr_den: u32,
 ) -> u32 {
-    // Pre-fix semantics: pair with the enqueue-instant frame_id (uncompensated).
-    let _ = (delay_frames, sample_rate, vr_num, vr_den);
-    fid
+    if delay_frames <= 0 || sample_rate == 0 || vr_den == 0 {
+        return fid;
+    }
+    let fps = vr_num as f64 / vr_den as f64;
+    let adv = (delay_frames as f64 * fps / sample_rate as f64).round();
+    // Both crystal clocks; over a ≤200 ms ring the 48k↔60fps conversion error is microscopic.
+    fid.saturating_add(adv as u32)
 }
 
 /// `start_time` of a stream as reported by ffprobe (`-show_entries stream=start_time`), seconds.
@@ -503,9 +513,10 @@ pub fn playout_frame_id(
 /// per-stream start (mux edit list, encoder priming) would otherwise shift the measured offset
 /// silently by the difference.
 pub fn parse_ffprobe_start_time(s: &str) -> f64 {
-    // Pre-fix semantics: origins assumed 0 (unverified).
-    let _ = s;
-    0.0
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() => v,
+        _ => 0.0, // "N/A" / empty / garbage / non-finite → container origin
+    }
 }
 
 /// Required genlock video-delay to zero the measured offset. `offset_ms = video − audio`; positive
@@ -671,7 +682,10 @@ mod tests {
             (200, 456, -42),
             (255, 4_000_000, 9_999_999_999),
         ];
-        let parsed = parse_qpsk_marker_log(&serialize_qpsk_marker_log(&log));
+        let serialized = serialize_qpsk_marker_log(&log, &AudioParams::rig60());
+        // the params comment is present and skipped by the parser
+        assert!(serialized.starts_with("# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\n"));
+        let parsed = parse_qpsk_marker_log(&serialized);
         assert_eq!(parsed, log);
         // header-only / blank input → empty, no panic
         assert!(parse_qpsk_marker_log("index,frame_id,emit_ts_ns\n\n").is_empty());

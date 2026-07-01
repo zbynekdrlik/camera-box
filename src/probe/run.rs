@@ -296,7 +296,10 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     if let Some(emitter) = audio_emitter {
         let marker_entries = emitter.join();
         if let Some(path) = &cfg.marker_log {
-            let csv = crate::qpsk_marker::serialize_qpsk_marker_log(&marker_entries);
+            let csv = crate::qpsk_marker::serialize_qpsk_marker_log(
+                &marker_entries,
+                &crate::qpsk_marker::AudioParams::rig60(),
+            );
             std::fs::write(path, csv)
                 .with_context(|| format!("write marker log {}", path.display()))?;
             tracing::info!(path = %path.display(), markers = marker_entries.len(), "qpsk marker log written");

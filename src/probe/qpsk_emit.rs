@@ -102,11 +102,21 @@ fn run_emit(
         if tick >= last_fired + cadence && tick > 0 {
             last_fired = tick;
             // Playout time = now + the frames still queued ahead of ours (ALSA delay) → the real
-            // DAC instant this marker sounds, not the enqueue instant. frame_id = the dual-QR id
-            // showing at that instant (current painter id — sub-2-frame ring skew is bounded).
+            // DAC instant this marker sounds, not the enqueue instant. The continuous feed keeps
+            // the ring NEARLY FULL (~150–170 ms at the 8192-frame ring), so the frame_id must be
+            // compensated the same way: `playout_frame_id` converts the ALSA delay into painter
+            // frames (~10 @ 60 fps) so the logged id is the dual-QR actually ON SCREEN when the
+            // marker is heard. Logging the raw enqueue-instant id biased the measured A/V offset
+            // by the whole ring delay (the −194.5 ms live number carried ~160 ms of it).
             let delay_frames = pcm.delay().unwrap_or(0);
             let ts = crate::probe::clock_ns(start, wall_clock) + delay_frames * 1_000_000_000 / sr;
-            let fid = current_id.load(Ordering::Relaxed);
+            let fid = crate::qpsk_marker::playout_frame_id(
+                current_id.load(Ordering::Relaxed),
+                delay_frames,
+                params.sample_rate,
+                params.vr_num,
+                params.vr_den,
+            );
             log.lock().unwrap().push((index, fid, ts));
             write_all(&pcm, &io, &markers[index as usize])?;
             index = index.wrapping_add(1);

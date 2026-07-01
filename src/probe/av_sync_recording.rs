@@ -10,8 +10,8 @@
 
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_marker::{
-    av_offset_candidates, cluster_offset_ms, decode_markers, parse_qpsk_marker_log, AudioParams,
-    AvOffset,
+    av_offset_candidates, cluster_offset_ms, decode_markers, parse_ffprobe_start_time,
+    parse_qpsk_marker_log, AudioParams, AvOffset,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -78,6 +78,37 @@ fn probe_video_fps(path: &Path) -> Result<f64> {
     Ok(fps)
 }
 
+/// `start_time` (s) of one stream (`selector` e.g. `"v:0"` / `"a:1"`) via ffprobe. Video
+/// `frame_index/fps` and audio `sample/rate` each count from their OWN stream's first
+/// packet; a non-zero per-stream `start_time` (mux edit list, encoder priming) would shift the
+/// measured offset by the DIFFERENCE silently, so both timelines are rebased onto the shared
+/// container origin. Missing/`N/A` parses as 0.0 (stream at the origin).
+fn probe_stream_start_time(path: &Path, selector: &str) -> Result<f64> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            selector,
+            "-show_entries",
+            "stream=start_time",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
+        .arg(path)
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawn ffprobe (install ffmpeg)")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ffprobe start_time ({selector}) failed on {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    Ok(parse_ffprobe_start_time(s.lines().next().unwrap_or("")))
+}
+
 /// Extract audio track `track` of `path` as mono f32 @ 48 kHz via ffmpeg (channels mixed to mono —
 /// the marker survives the mix, and the QPSK decode is amplitude-tolerant).
 fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Result<Vec<f32>> {
@@ -142,6 +173,10 @@ pub fn av_sync_from_recording(
         "emit log is empty (no markers logged)"
     );
 
+    // Rebase both timelines onto the shared container origin (per-stream start_time can differ).
+    let video_start = probe_stream_start_time(recording, "v:0")?;
+    let audio_start = probe_stream_start_time(recording, &format!("a:{audio_track}"))?;
+
     // Video: decode every frame's optical tick → sorted (tick, video_ts) samples, first per tick.
     let frames = analyze_recording(recording)
         .with_context(|| format!("decode video {}", recording.display()))?;
@@ -150,16 +185,19 @@ pub fn av_sync_from_recording(
     for fr in &frames {
         if let Some(t) = fr.tick {
             if seen.insert(t) {
-                ticks.push((t, fr.frame_index as f64 / fps));
+                ticks.push((t, video_start + fr.frame_index as f64 / fps));
             }
         }
     }
     ticks.sort_by_key(|&(t, _)| t);
     let video_ticks = ticks.len();
 
-    // Audio: extract the mbc track → QPSK markers (audio_ts, index).
+    // Audio: extract the mbc track → QPSK markers (audio_ts, index), on the container origin.
     let audio = extract_audio_mono_f32(recording, audio_track, params.sample_rate)?;
-    let audio_markers = decode_markers(&audio, params, threshold);
+    let audio_markers: Vec<(f64, u8)> = decode_markers(&audio, params, threshold)
+        .into_iter()
+        .map(|(ts, idx)| (audio_start + ts, idx))
+        .collect();
     let n_audio = audio_markers.len();
 
     // Pair: index-match every audio marker to its emit-log frame_id(s), interpolate the video time
