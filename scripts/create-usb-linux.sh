@@ -367,28 +367,8 @@ SETUP_EOF
     # so a fresh USB key always uses the full disk. cam4 shipped 3.5G/92%-full on a 57G disk.
     # Fault-tolerant: script writes the marker even when grow/resize fails (non-fatal exit).
     mkdir -p "$MOUNT_ROOT/usr/local/sbin"
-    cat > "$MOUNT_ROOT/usr/local/sbin/camera-box-grow-root.sh" << 'GROW_EOF'
-#!/bin/bash
-set -uo pipefail
-MARKER=/var/lib/camera-box/grow-root.done
-[ -f "$MARKER" ] && exit 0
-ROOT_DEV=$(findmnt -n -o SOURCE /) || { mkdir -p /var/lib/camera-box && touch "$MARKER"; exit 0; }
-DISK_DEV=$(echo "$ROOT_DEV" | sed -E 's/p?[0-9]+$//')
-PART_NUM=$(echo "$ROOT_DEV" | grep -oE '[0-9]+$')
-DISK_SIZE=$(lsblk -b -n -o SIZE "$DISK_DEV" 2>/dev/null | head -1)
-PART_SIZE=$(lsblk -b -n -o SIZE "$ROOT_DEV" 2>/dev/null | head -1)
-if [[ -n "$DISK_SIZE" && -n "$PART_SIZE" && $(( DISK_SIZE - PART_SIZE )) -gt 1073741824 ]]; then
-    echo "[camera-box-grow-root] Growing root $ROOT_DEV ..."
-    growpart "$DISK_DEV" "$PART_NUM" 2>/dev/null && resize2fs "$ROOT_DEV" 2>/dev/null \
-        && echo "[camera-box-grow-root] Success" \
-        || echo "[camera-box-grow-root] grow/resize skipped (non-fatal)"
-else
-    echo "[camera-box-grow-root] Already at capacity — skipping"
-fi
-mkdir -p /var/lib/camera-box
-touch "$MARKER"
-GROW_EOF
-    chmod 0755 "$MOUNT_ROOT/usr/local/sbin/camera-box-grow-root.sh"
+    install -m 0755 "$SCRIPT_DIR/lib/camera-box-grow-root.sh" \
+        "$MOUNT_ROOT/usr/local/sbin/camera-box-grow-root.sh"
     cp "$SCRIPT_DIR/../systemd/camera-box-grow-root.service" \
        "$MOUNT_ROOT/etc/systemd/system/camera-box-grow-root.service"
     chroot "$MOUNT_ROOT" systemctl enable camera-box-grow-root.service

@@ -15,6 +15,7 @@ Description=camera-box: auto-grow root partition on first boot (#369)
 Documentation=https://github.com/zbynekdrlik/camera-box
 ConditionPathExists=!/var/lib/camera-box/grow-root.done
 After=local-fs.target
+Before=multi-user.target
 
 [Service]
 Type=oneshot
