@@ -98,3 +98,20 @@ fn frozen_gate_has_bounded_retry_for_post_restart_reconnect_race() {
          (FROZEN_CAM_ATTEMPTS + settle sleep) so the harness can't race its own [3/8] cam restart"
     );
 }
+
+/// #365/#399: the [4c/8] gate's DEFAULT source list must EXCLUDE strih inputs bound to the
+/// painter box's own NDI sender ("CAM2 (usb)"). In rig TEST mode cam2's display is OFF until
+/// the painter starts, so its HDMI-splitter self-feed is BY DESIGN static at gate time — an
+/// input bound to it (the #399 drifted 'NDI cam3') false-aborts the run DETERMINISTICALLY
+/// (run 7020001: same hash across 4 retry attempts / 4.5 min, while the box's emitter was
+/// healthy at 60 fps). Sampling the painter box's self-view is not a real broadcast signal;
+/// excluding it scopes the gate to the feeds a recording actually depends on.
+#[test]
+fn frozen_gate_excludes_painter_box_bound_inputs() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("FROZEN_CAM_EXCLUDE_SENDER"),
+        "recording-e2e.sh [4c/8] must derive the frozen-gate source list excluding inputs \
+         bound to the painter box's own NDI sender (FROZEN_CAM_EXCLUDE_SENDER)"
+    );
+}
