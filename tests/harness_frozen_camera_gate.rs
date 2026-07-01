@@ -81,3 +81,20 @@ fn e2e_skill_documents_frozen_camera_gate() {
          source names, and threshold defaults."
     );
 }
+
+/// #365/#399: the [4c/8] gate must run with BOUNDED RETRY attempts so it cannot false-trip on
+/// the NDI-reconnect race the harness itself causes: step [3/8] restarts cam2's camera-box
+/// (frees fb0), dropping its NDI sender; a strih input bound to that box (the #399 drifted
+/// mapping binds 'NDI cam3' to CAM2) HOLDS the last frame while DistroAV reconnects — sampled
+/// seconds later the gate reads 8 identical hashes and aborts the run (observed twice, run
+/// 7020001 2026-07-02). A retry with a settle sleep clears the race; a GENUINELY frozen camera
+/// fails every attempt, so the verdict is not weakened.
+#[test]
+fn frozen_gate_has_bounded_retry_for_post_restart_reconnect_race() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("FROZEN_CAM_ATTEMPTS"),
+        "recording-e2e.sh [4c/8] must wrap the frozen-camera gate in a bounded retry \
+         (FROZEN_CAM_ATTEMPTS + settle sleep) so the harness can't race its own [3/8] cam restart"
+    );
+}
