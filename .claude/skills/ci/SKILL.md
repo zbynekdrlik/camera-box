@@ -152,6 +152,26 @@ commits), so two things bite here repeatedly:
    Bare `[no-test]` (no reason) is rejected outright. Every bypass is logged to
    `~/devel/airuleset/audits/no-test-skips.log`.
 
+## Adding a default-features binary that needs `serde_json` (#365 gotcha)
+
+`serde_json` was originally optional (probe-only). If you add a `[[bin]]` entry that must run on
+**default features** and needs JSON parsing, make `serde_json` non-optional in `Cargo.toml`:
+
+```toml
+# BEFORE (broken for a default-features binary):
+serde_json = { version = "1", optional = true }
+# and in [features]:
+probe = ["dep:serde_json", ...]
+
+# AFTER (serde_json always available):
+serde_json = "1"
+# and in [features]:
+probe = ["dep:crc", ...]    # remove dep:serde_json from here
+```
+
+Removing `dep:serde_json` from the `probe` feature list is safe: making it non-optional means it
+is compiled unconditionally and the `dep:` prefix (optional-dep activation) is no longer needed.
+
 ## New file mixing PURE + syscall/IO glue → update BOTH coverage & mutants (kms.rs precedent)
 
 When you add a Rust file whose PURE functions are unit-testable but which also has glue that CANNOT
