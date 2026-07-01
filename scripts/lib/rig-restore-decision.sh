@@ -161,3 +161,53 @@ _rig_decide_emit() {
   printf 'actions=%s\n' "$4"
   printf 'reason=%s\n' "$5"
 }
+
+# ── #370: alert classification + rate-limit (pure, unit-tested seam) ─────────
+
+# rig_classify_restore <act> <obs_unreadable> <obs_failed>
+# -> stdout: kind=positive  (acted, 0 unreadable, 0 failed → full restore)
+#         or kind=partial   (acted but unreadable>0 or failed>0 → partial/KEPT)
+# Pure integer args; any non-numeric or empty → conservatively kind=partial.
+rig_classify_restore() {
+  local act="${1:-0}" obs_unreadable="${2:-0}" obs_failed="${3:-0}"
+  case "$act$obs_unreadable$obs_failed" in *[!0-9]* | "") printf 'kind=partial\n'; return 0 ;; esac
+  if [ "$act" = "1" ] && [ "$obs_unreadable" -eq 0 ] && [ "$obs_failed" -eq 0 ]; then
+    printf 'kind=positive\n'
+  else
+    printf 'kind=partial\n'
+  fi
+}
+
+# rig_alert_throttle <kind> <current_sig> <prior_sig> <prior_passes> [throttle_n]
+# -> stdout: alert_now=0|1  new_sig=<sig>  new_passes=<n>
+# Pure decision: whether to fire the Discord alert this pass.
+#   kind=positive -> always alert (positive full restore is always worth a ping; never throttled)
+#   kind=partial  -> throttle: alert on first occurrence (sig change) or after throttle_n passes
+# throttle_n: from $5 arg, or RIG_ALERT_THROTTLE_PASSES env, or default 5.
+rig_alert_throttle() {
+  local kind="${1:-partial}"
+  local current_sig="${2:-}"
+  local prior_sig="${3:-}"
+  local prior_passes="${4:-0}"
+  local throttle_n="${5:-${RIG_ALERT_THROTTLE_PASSES:-5}}"
+  case "$prior_passes$throttle_n" in *[!0-9]* | "") prior_passes=0; throttle_n=5 ;; esac
+
+  if [ "$kind" = "positive" ]; then
+    # Positive full restore: always alert, reset state (counter to 0 — positive is not throttled)
+    printf 'alert_now=1\nnew_sig=%s\nnew_passes=0\n' "$current_sig"
+    return 0
+  fi
+
+  # Partial/KEPT condition — throttle repeat alerts for the same unreadable-box set.
+  if [ "$current_sig" != "$prior_sig" ]; then
+    # Signature changed (new unreadable box, different failed count, or first occurrence): alert
+    printf 'alert_now=1\nnew_sig=%s\nnew_passes=1\n' "$current_sig"
+  elif [ "$prior_passes" -ge "$throttle_n" ]; then
+    # Same condition, N passes elapsed since last alert: re-alert and reset
+    printf 'alert_now=1\nnew_sig=%s\nnew_passes=1\n' "$current_sig"
+  else
+    # Same condition, not yet N passes: suppress and increment counter
+    local new_p=$(( prior_passes + 1 ))
+    printf 'alert_now=0\nnew_sig=%s\nnew_passes=%s\n' "$current_sig" "$new_p"
+  fi
+}

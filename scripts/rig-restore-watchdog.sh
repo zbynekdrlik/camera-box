@@ -168,16 +168,34 @@ restore_obs() {
   return "$rc"
 }
 
-# ── read / write the persisted confirm counter ───────────────────────────────
-read_prev_confirm() {
-  local v=0
-  [ -f "$STATE_FILE" ] && v="$(cat "$STATE_FILE" 2>/dev/null)"
-  case "$v" in ''|*[!0-9]*) v=0 ;; esac
-  printf '%s\n' "$v"
+# ── read / write the persisted state (confirm counter + #370 alert throttle) ──
+# State file format (key=value, one per line — backward-compat: a bare number is legacy confirm):
+#   confirm=<n>       — consecutive-stranded confirmation counter (the #281 2-sample gate)
+#   alert_sig=<str>   — fingerprint of the last-alerted condition (for throttle dedup)
+#   alert_passes=<n>  — passes elapsed since the last alert for the same sig (throttle counter)
+read_state() {
+  local confirm=0 alert_sig="" alert_passes=0
+  if [ -f "$STATE_FILE" ]; then
+    local raw; raw="$(cat "$STATE_FILE" 2>/dev/null)"
+    if printf '%s\n' "$raw" | grep -q '^confirm='; then
+      # Current key=value format
+      confirm="$(printf '%s\n' "$raw" | sed -n 's/^confirm=//p')"
+      alert_sig="$(printf '%s\n' "$raw" | sed -n 's/^alert_sig=//p')"
+      alert_passes="$(printf '%s\n' "$raw" | sed -n 's/^alert_passes=//p')"
+    else
+      # Legacy bare-number format (confirm counter only — upgrade on next write)
+      case "$raw" in ''|*[!0-9]*) confirm=0 ;; *) confirm="$raw" ;; esac
+    fi
+  fi
+  case "$confirm" in ''|*[!0-9]*) confirm=0 ;; esac
+  case "$alert_passes" in ''|*[!0-9]*) alert_passes=0 ;; esac
+  printf 'confirm=%s\nalert_sig=%s\nalert_passes=%s\n' "$confirm" "$alert_sig" "$alert_passes"
 }
-write_confirm() {
+write_state() {
+  # write_state <confirm> <alert_sig> <alert_passes>
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  printf '%s\n' "$1" > "$STATE_FILE" 2>/dev/null || true
+  printf 'confirm=%s\nalert_sig=%s\nalert_passes=%s\n' "$1" "${2:-}" "${3:-0}" \
+    > "$STATE_FILE" 2>/dev/null || true
 }
 
 # ── main pass ────────────────────────────────────────────────────────────────
@@ -226,8 +244,13 @@ main() {
   obs_unreadable=$(( 2 - obs_seen ))
   [ "$obs_unreadable" -lt 0 ] && obs_unreadable=0
 
-  local prev; prev="$(read_prev_confirm)"
-  export RIG_PREV_CONFIRM="$prev"
+  # Read ALL persisted state: confirm counter + #370 alert throttle state.
+  local state_out prev prior_alert_sig prior_alert_passes
+  state_out="$(read_state)"
+  prev="$(printf '%s\n' "$state_out" | sed -n 's/^confirm=//p')"
+  prior_alert_sig="$(printf '%s\n' "$state_out" | sed -n 's/^alert_sig=//p')"
+  prior_alert_passes="$(printf '%s\n' "$state_out" | sed -n 's/^alert_passes=//p')"
+  export RIG_PREV_CONFIRM="${prev:-0}"
 
   # Decide (PURE).
   local decision confirm act alert actions reason
@@ -239,8 +262,10 @@ main() {
   reason="$(printf '%s\n' "$decision" | sed -n 's/^reason=//p')"
   log "decision: prev_confirm=$prev -> confirm=$confirm act=$act alert=$alert reason='$reason' actions='$actions'"
 
-  # Persist the new counter for the next invocation.
-  write_confirm "${confirm:-0}"
+  # Persist the new confirm counter early (before executing restores so a crash mid-restore
+  # doesn't lose the counter — the next pass will continue from the confirmed count).
+  # Alert throttle state is unchanged at this point; it is updated after the restores below.
+  write_state "${confirm:-0}" "$prior_alert_sig" "${prior_alert_passes:-0}"
 
   if [ "${act:-0}" != "1" ]; then
     log "pass end — no action this pass"
@@ -276,13 +301,53 @@ main() {
     log "e2e-marker: KEPT ($(rig_e2e_marker_path)) — not a positive full restore (obs_unreadable=$obs_unreadable obs_failed=$obs_failed); a later pass will retry"
   fi
 
-  # ALWAYS alert when we act (so the supervisor/user ALWAYS know).
-  if [ "${alert:-0}" = "1" ]; then
+  # #370: Classify this restore (positive full / partial-KEPT) and apply the alert rate-limit.
+  # Names of OBS boxes that were unreadable this pass (missing from obs records → probe failed).
+  local obs_unreadable_names=""
+  for _box_name in strih stream; do
+    if ! printf '%s\n' "$obs" | grep -q "^obs $_box_name "; then
+      obs_unreadable_names="${obs_unreadable_names:+$obs_unreadable_names }$_box_name"
+    fi
+  done
+
+  # Pure classification: positive (full restore) or partial (KEPT — some OBS box unreadable/failed).
+  local classify_out restore_kind
+  classify_out="$(rig_classify_restore "${act:-0}" "$obs_unreadable" "$obs_failed")"
+  restore_kind="$(printf '%s\n' "$classify_out" | sed -n 's/^kind=//p')"
+
+  # Fingerprint the current alert condition for throttle dedup (kind + unreadable names + failed count).
+  local current_alert_sig="${restore_kind}:${obs_unreadable_names}:${obs_failed}"
+
+  # Throttle decision: positive restores always alert; partial/KEPT condition only alerts on first
+  # occurrence or signature change, then once per RIG_ALERT_THROTTLE_PASSES passes (default 5).
+  local throttle_out alert_now new_alert_sig new_alert_passes
+  throttle_out="$(rig_alert_throttle "$restore_kind" "$current_alert_sig" \
+                   "$prior_alert_sig" "${prior_alert_passes:-0}")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_alert_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_alert_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  log "alert#370: kind=$restore_kind sig='$current_alert_sig' prior_sig='$prior_alert_sig' prior_passes=${prior_alert_passes:-0} alert_now=$alert_now new_passes=$new_alert_passes"
+
+  # Persist updated state (confirm counter is already persisted early; update alert throttle now).
+  write_state "${confirm:-0}" "$new_alert_sig" "${new_alert_passes:-0}"
+
+  # Fire the Discord alert when the decision says to act AND the throttle permits it.
+  if [ "${alert:-0}" = "1" ] && [ "${alert_now:-0}" = "1" ]; then
     local msg
-    msg="🛟 #281 rig-restore-watchdog AUTO-RECOVERED a stranded rig ($REPO_SLUG). Reason: $reason. Restored: $actions. (No active E2E heartbeat; ${RIG_CONFIRM_THRESHOLD} consecutive confirmations.)"
-    log "ALERT: firing Discord notification"
+    if [ "$restore_kind" = "positive" ]; then
+      # Full positive restore — use the existing AUTO-RECOVERED body (every occurrence pings).
+      msg="🛟 #281 rig-restore-watchdog AUTO-RECOVERED a stranded rig ($REPO_SLUG). Reason: $reason. Restored: $actions. (No active E2E heartbeat; ${RIG_CONFIRM_THRESHOLD} consecutive confirmations.)"
+    else
+      # PARTIAL restore — marker KEPT, one or more OBS boxes unreadable or teardown failed.
+      # Lower-urgency body; rate-limited to avoid repeated pings while the condition persists.
+      local unreadable_desc="${obs_unreadable_names:-none}"
+      msg="⚠️ #281 rig-restore-watchdog: PARTIAL restore — prod only partially recovered ($REPO_SLUG). OBS box(es) unreadable: ${unreadable_desc}. Failed teardowns: ${obs_failed}. Marker KEPT for retry. Reason: $reason."
+    fi
+    log "ALERT: firing Discord notification (kind=$restore_kind)"
     python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
       || log "ALERT: airuleset.py notify failed (non-fatal) — restore already executed"
+  elif [ "${alert:-0}" = "1" ] && [ "${alert_now:-0}" = "0" ]; then
+    log "ALERT: suppressed by throttle (kind=$restore_kind passes=${prior_alert_passes:-0}/${RIG_ALERT_THROTTLE_PASSES:-5} — same partial condition persists)"
   fi
 
   log "pass end — acted on: $actions"

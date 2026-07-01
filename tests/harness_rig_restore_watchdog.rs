@@ -1185,7 +1185,13 @@ fn alert_throttle_partial_first_occurrence_alerts() {
 #[test]
 fn alert_throttle_partial_same_sig_suppressed() {
     // Same sig, prior_passes=1, throttle_n=5 → 1 < 5 → suppress, increment counter
-    let m = alert_throttle("partial", "partial:strih:0", "partial:strih:0", "1", Some("5"));
+    let m = alert_throttle(
+        "partial",
+        "partial:strih:0",
+        "partial:strih:0",
+        "1",
+        Some("5"),
+    );
     assert_eq!(
         m.get("alert_now").map(String::as_str),
         Some("0"),
@@ -1201,7 +1207,13 @@ fn alert_throttle_partial_same_sig_suppressed() {
 #[test]
 fn alert_throttle_partial_same_sig_repeat_alerts_after_n_passes() {
     // Same sig, prior_passes=5 ≥ throttle_n=5 → re-alert, reset to 1
-    let m = alert_throttle("partial", "partial:strih:0", "partial:strih:0", "5", Some("5"));
+    let m = alert_throttle(
+        "partial",
+        "partial:strih:0",
+        "partial:strih:0",
+        "5",
+        Some("5"),
+    );
     assert_eq!(
         m.get("alert_now").map(String::as_str),
         Some("1"),
