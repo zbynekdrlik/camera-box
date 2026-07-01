@@ -224,11 +224,43 @@ Two new pure functions in `rig-restore-decision.sh` (unit-tested in `harness_rig
   bare-number legacy files are transparently upgraded on next write). Two-write pattern:
   early write (crash-safe confirm), late write (alert state, only runs when act=1).
 
-**SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` committed but NOT installed/
-enabled. The **supervisor** installs, live-verifies (real E2E heartbeat → no act; simulated stranded
-state → detect→restore→alert), then `systemctl --user enable --now rig-restore-watchdog.timer`.
-Full procedure: `systemd/rig-restore-watchdog.README.md`. This is the conservative re-do of the
-#266 watchdog (removed for false positives) — heartbeat gate + 2-confirm + clear-signal-only.
+**ENABLED + live-verified on dev1 (#350, 2026-07-01).** The timer is active (~2 min cadence). The
+conservative re-do of the #266 watchdog (removed for false positives) — heartbeat gate + 2-confirm +
+clear-signal-only. Full procedure: `systemd/rig-restore-watchdog.README.md`. Enable recipe used:
+
+```bash
+cp systemd/rig-restore-watchdog.{service,timer} ~/.config/systemd/user/
+# strih OBS-WS secret is NOT committed — supply it via a LOCAL drop-in (mode 0600, not git):
+mkdir -p ~/.config/systemd/user/rig-restore-watchdog.service.d
+printf '[Service]\nEnvironment=OBS_WS_PASSWORD=<strih WS pw — local memory, NOT committed>\nEnvironment=CAM_PW=newlevel\n' \
+  > ~/.config/systemd/user/rig-restore-watchdog.service.d/override.conf
+systemctl --user daemon-reload
+systemctl --user enable --now rig-restore-watchdog.timer
+systemctl --user list-timers | grep rig-restore-watchdog   # confirm NEXT is ~2 min out
+```
+
+Live-verify (all passed): dry-run on the healthy rig → `no-stranded-signal`; simulate a strand by
+`rig_e2e_marker_set` (source `scripts/lib/rig-heartbeat.sh`) with NO heartbeat → pass1 `confirm=1
+act=0`, pass2 `confirm=2 act=1` restore both OBS boxes + Discord alert + marker auto-cleared; then
+`rig_heartbeat_write` a fresh heartbeat WITH the marker still set → `heartbeat-fresh-legit-e2e act=0`.
+Confirm one UNATTENDED timer-driven pass fired (`journalctl --user -u rig-restore-watchdog`). Clear the
+test marker/heartbeat + `rm` the state file after.
+
+**GOTCHA — `obs_phase2.py teardown` consults `/tmp/obs_phase2_state.json`; a STALE leftover switches a
+healthy box's scene.** teardown restores the `prev_scene`/`prev_preview` that a prior `setup`/`prod-scene`
+saved there, and only switches when current≠saved. A leftover state from an OLD session (e.g. the
+simulation above ran teardown while a Jun-30 file said stream `prev_scene:"PRO"`) makes teardown move a
+healthy box's program to that stale scene. In a REAL strand this is correct (the dead harness saved the
+true pre-test scene); when SIMULATING against a healthy rig, `rm -f /tmp/obs_phase2_state.json` first (or
+expect the switch and restore after). Prod scenes: strih `Cam 5`; stream `PRO` = live program,
+`PRE` = standby (both real scenes — `PRO` is what `recording-e2e.sh` records).
+
+**GOTCHA (observability, #394) — under the systemd unit the per-box observation LOG lines are
+intermittently dropped from the journal** (journald racing `log()` in the fast-exiting `$()` subshells
+of `obs+="$(probe_obs …)"`). The detect→restore path is UNAFFECTED — the `obs … scene=…` RECORD is
+captured in-process, not via journald (proven: dry-run+marker → `restore_obs:strih restore_obs:stream`
+even on a pass whose log line is missing). To SEE the reads reliably, run the script directly or with
+`bash -x`. Fix tracked in #394 (collect observations without a per-call `$()` subshell).
 
 ## #297 — NDI sender re-announce (OBS discovery reliability across reboots)
 
