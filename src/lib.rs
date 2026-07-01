@@ -39,7 +39,14 @@ pub mod colour_scale;
 // #188/#145 — A/V-sync calibration: pure chirp gen + offset estimate + controller math.
 // Cross-platform, no probe deps, so it unit-tests Tier-0; the painter emission + recording-verdict
 // detection wiring live in their respective gated modules.
+// NOTE (#188): the chirp path is SUPERSEDED by `qpsk_marker` (norihiro QR-based audio); only the
+// protocol-agnostic estimator here is salvaged. `av_sync` is scrapped once the QPSK path lands.
 pub mod av_sync;
+
+// #188/#145 — QR-based (QPSK) audio marker, byte-compatible with the norihiro
+// obs-audio-video-sync-dock protocol. Pure Tier-0 (encode + decode + estimator); the continuous-feed
+// ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
+pub mod qpsk_marker;
 
 // #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
 // `colour_scale` table/geometry, samples each reference patch's mean colour from a frame
