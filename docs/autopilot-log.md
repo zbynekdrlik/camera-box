@@ -2,6 +2,14 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-01 — #370 rig-restore-watchdog: distinct partial alert + rate-limit (PR TBD, v1.7.0-dev.179)
+- **Ticket-validator**: STILL_VALID — `rig-restore-watchdog.sh` lacked classification of partial vs positive restores and fired Discord unconditionally on every ~2-min pass while OBS was unreadable.
+- **Part A** — `rig_classify_restore(act, obs_unreadable, obs_failed)` → `kind=positive|partial` in `scripts/lib/rig-restore-decision.sh`. Positive = full restore (0 unreadable, 0 failed). Partial = marker KEPT.
+- **Part B** — `rig_alert_throttle(kind, current_sig, prior_sig, prior_passes)` → `alert_now=0|1 + new_sig + new_passes`. Positive always alerts. Partial throttled to once per N=5 passes (or signature change). State file extended to key=value with `confirm + alert_sig + alert_passes`. Two-write pattern: early (crash-safe confirm) + late (alert state). Backward-compat with legacy bare-number state.
+- **Part C** — 13 new tests in `tests/harness_rig_restore_watchdog.rs`. 60/60 pass. No existing test weakened.
+- **TDD**: RED `7d1527308` → GREEN `8ccf3ef7d`. All Tier-0 checks clean.
+- **No live deploy** — watchdog ships DISABLED; supervisor enables separately.
+
 ## 2026-07-01 — #369 auto-grow root + 512M /var/cache in builders + fleet disk-space guard (PR #384, v1.7.0-dev.178)
 - **Ticket-validator**: PARTIAL — setup.sh + setup-device.sh already had 512M /var/cache; image builders (create-usb-linux.sh + build-image.sh) were MISSING it + missing grow-root + missing cloud-guest-utils.
 - **Root cause**: cam4 shipped 3.5G/92%-full on a 57G disk (partition never grown); cam1 /var/cache was 100M/100%-full (old image pre-#306). Both image builders lacked auto-grow AND the uniform 512M /var/cache fstab line.
