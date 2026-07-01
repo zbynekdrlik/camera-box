@@ -208,6 +208,57 @@ pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
     raw.clamp(3, 2000)
 }
 
+/// Chirp shape parameters (shared between the painter emitter and the
+/// recording-verdict onset detector — one source of truth).
+#[derive(Debug, Clone, Copy)]
+pub struct ChirpParams {
+    /// Chirp duration in milliseconds.
+    pub dur_ms: u32,
+    /// Start frequency in Hz.
+    pub f0_hz: f32,
+    /// End frequency in Hz.
+    pub f1_hz: f32,
+}
+
+impl Default for ChirpParams {
+    fn default() -> Self {
+        Self {
+            dur_ms: 50,
+            f0_hz: 1000.0,
+            f1_hz: 3000.0,
+        }
+    }
+}
+
+/// Returns `true` when the painter should emit a marker on this `refresh_tick`.
+/// Fires on every non-zero multiple of `cadence_ticks`; never on tick 0 (the very
+/// first frame) and never when `cadence_ticks` is 0 (disabled).
+pub fn should_emit_marker(refresh_tick: u64, cadence_ticks: u64) -> bool {
+    cadence_ticks > 0 && refresh_tick > 0 && refresh_tick.is_multiple_of(cadence_ticks)
+}
+
+/// Serialize `(frame_id, emit_wall_ts_ns)` pairs as a CSV string.
+/// Round-trips with [`parse_marker_log`].
+pub fn serialize_marker_log(entries: &[(u32, i64)]) -> String {
+    let mut s = String::from("frame_id,emit_wall_ts_ns\n");
+    for (fid, ts) in entries {
+        s.push_str(&format!("{fid},{ts}\n"));
+    }
+    s
+}
+
+/// Parse the frame-id column from a marker-log CSV produced by
+/// [`serialize_marker_log`]. Returns the `frame_id` of every data row.
+pub fn parse_marker_log(csv: &str) -> Vec<u32> {
+    csv.lines()
+        .skip(1) // skip header
+        .filter_map(|line| {
+            let mut cols = line.splitn(2, ',');
+            cols.next()?.trim().parse::<u32>().ok()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +375,21 @@ mod tests {
         assert_eq!(required_delay_ms(1000, 5000.0), 3);
         assert_eq!(required_delay_ms(1000, -5000.0), 2000);
         assert_eq!(required_delay_ms(3, 0.0), 3);
+    }
+
+    #[test]
+    fn cadence_fires_on_multiples_only() {
+        assert!(!should_emit_marker(0, 300));
+        assert!(!should_emit_marker(299, 300));
+        assert!(should_emit_marker(300, 300));
+        assert!(should_emit_marker(600, 300));
+        assert!(!should_emit_marker(300, 0)); // disabled
+    }
+
+    #[test]
+    fn marker_log_round_trips() {
+        let e = vec![(300u32, 111i64), (600u32, 222i64)];
+        let s = serialize_marker_log(&e);
+        assert_eq!(parse_marker_log(&s), vec![300u32, 600u32]);
     }
 }

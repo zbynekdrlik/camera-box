@@ -33,6 +33,8 @@ pub mod colour_sample;
 // cross-platform). Gating them on cfg(target_os="linux") lets the verdict cross-build for
 // Windows (so the #193 decode runs ON stream.lan), while the Linux probe build is unchanged.
 #[cfg(target_os = "linux")]
+pub mod audio_marker_io;
+#[cfg(target_os = "linux")]
 pub mod fb;
 #[cfg(target_os = "linux")]
 pub mod kms;

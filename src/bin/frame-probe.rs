@@ -116,6 +116,21 @@ struct Args {
     canvas_w: u32,
     #[arg(long, default_value_t = 1080)]
     canvas_h: u32,
+    /// #188: emit an A/V-sync chirp on the cam2 USB audio output at the marker cadence.
+    /// Use with --paint-only. The emitted (frame_id, wall_ts_ns) pairs are written to
+    /// --marker-log for offline latency estimation.
+    #[arg(long, default_value_t = false)]
+    audio_marker: bool,
+    /// ALSA device string for the A/V-sync chirp (enumerate with `aplay -l` on the camera box).
+    #[arg(long, default_value = "hw:CARD=cam2usb,DEV=0")]
+    audio_marker_device: String,
+    /// Emit the A/V-sync chirp every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
+    #[arg(long, default_value_t = 300)]
+    audio_marker_cadence_ticks: u64,
+    /// With --audio-marker: write the emitted-marker CSV (`frame_id,emit_wall_ts_ns`) to this
+    /// path. scp it back to dev1 for offline A/V-latency estimation. Omitted ⇒ no log written.
+    #[arg(long)]
+    marker_log: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -149,6 +164,11 @@ fn main() -> Result<()> {
     if args.paint_log.is_some() && !args.paint_only {
         anyhow::bail!(
             "--paint-log only applies with --paint-only (it records the painter's emitted ticks)"
+        );
+    }
+    if (args.audio_marker || args.marker_log.is_some()) && !args.paint_only {
+        anyhow::bail!(
+            "--audio-marker / --marker-log only apply with --paint-only (the rig A/V-sync path)"
         );
     }
     let presenter = camera_box::probe::presenter::PresenterKind::parse(&args.presenter)?;
@@ -219,6 +239,10 @@ fn main() -> Result<()> {
         dual_qr: args.dual_qr,
         colour_scale,
         paint_log: args.paint_log.clone(),
+        audio_marker: args.audio_marker,
+        audio_marker_device: args.audio_marker_device.clone(),
+        audio_marker_cadence_ticks: args.audio_marker_cadence_ticks,
+        marker_log: args.marker_log.clone(),
     };
 
     if let Some(name) = args.synth_ndi.as_deref() {

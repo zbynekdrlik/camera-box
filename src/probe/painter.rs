@@ -21,7 +21,7 @@ use crate::probe::payload::Payload;
 use crate::probe::presenter::{open_presenter, Presenter, PresenterKind};
 use crate::probe::qr::{render_qr_bgra, render_qr_dual_bgra};
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -207,6 +207,8 @@ pub fn run_painter(
     start: Instant,
     stop: Arc<AtomicBool>,
     emitted: Arc<Mutex<Vec<(u32, i64, i64)>>>,
+    current_id: Option<Arc<AtomicU32>>,
+    refresh_out: Option<Arc<AtomicU64>>,
 ) -> Result<()> {
     // #289 — keep the QR painter OFF the isolated capture core (onto the general
     // cores 0-2) so on the painter box (.62) generation can never steal from the
@@ -261,6 +263,12 @@ pub fn run_painter(
             .unwrap()
             .push((logical_id, gen_ts_ns, flip_ts_ns));
         refresh_tick = refresh_tick.wrapping_add(1);
+        if let Some(ref c) = current_id {
+            c.store(logical_id, Ordering::Relaxed);
+        }
+        if let Some(ref r) = refresh_out {
+            r.store(refresh_tick, Ordering::Relaxed);
+        }
 
         if !params.dual_qr {
             frame_id = frame_id.wrapping_add(1);
