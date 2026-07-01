@@ -304,7 +304,12 @@ jobs:
       - name: Install OBS SDK prefix
         working-directory: vendor/obs-studio
         shell: bash
-        run: cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
+        run: |
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          # #188: the default install omits the EXCLUDE_FROM_ALL "Development" component (the cmake
+          # package configs libobsConfig.cmake / obs-frontend-apiConfig.cmake + headers + import
+          # libs). The standalone av-sync-dock build needs them, so install it explicitly.
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
 
       # Configure DistroAV against the genlock-patched OBS SDK — identical to the
       # production windows-genlock.yml configure step.
@@ -334,20 +339,21 @@ jobs:
         run: |
           set -eu
           WS=$(cygpath "$GITHUB_WORKSPACE")
-          # OBS installs its cmake package configs under the SDK prefix (flat in cmake/ on
-          # Windows). The old norihiro plugin template's find_package(libobs/obs-frontend-api)
-          # does NOT reach them via CMAKE_PREFIX_PATH alone (DistroAV's modern template wires
-          # its own deps), so locate the configs and point <pkg>_DIR at them explicitly.
-          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 5 -iname 'libobs*config.cmake' | head -1)
-          FRONTEND_CFG=$(find "$WS/obs-sdk" -maxdepth 5 -iname 'obs-frontend-api*config.cmake' | head -1)
-          # Qt6 cmake package: reuse the obs-deps Qt6 the OBS/DistroAV build already downloaded.
-          QT6_DEP=$(ls -d "$WS"/vendor/distroav/.deps/*qt6*-x64 "$WS"/vendor/obs-studio/.deps/*qt6*-x64 2>/dev/null | head -1)
-          echo "libobs cfg=$LIBOBS_CFG"; echo "frontend cfg=$FRONTEND_CFG"; echo "qt6 dep=$QT6_DEP"
-          test -n "$LIBOBS_CFG"   || { echo "ERROR: libobsConfig.cmake not found under obs-sdk"; find "$WS/obs-sdk" -iname '*.cmake' | head -40; exit 1; }
-          test -n "$FRONTEND_CFG" || { echo "ERROR: obs-frontend-api config not found under obs-sdk"; exit 1; }
-          test -n "$QT6_DEP"      || { echo "ERROR: Qt6 obs-dep not found under .deps"; ls -d "$WS"/vendor/*/.deps/* 2>/dev/null || true; exit 1; }
+          # obs-sdk now carries the Development component (libobs / obs-frontend-api / w32-pthreads
+          # cmake configs + the finders/ modules). libobsConfig also find_dependency(SIMDe, Threads)
+          # and obs-frontend-api needs Qt6 — SIMDe + Qt6 live in the obs-deps the OBS/DistroAV build
+          # downloaded, so add every .deps root to the prefix so all transitive deps resolve.
+          PREFIX="$(cygpath -m "$WS/obs-sdk")"
+          for d in "$WS"/vendor/obs-studio/.deps/*-x64 "$WS"/vendor/distroav/.deps/*-x64; do
+            [ -d "$d" ] && PREFIX="$PREFIX;$(cygpath -m "$d")"
+          done
+          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'libobs*config.cmake' | head -1)
+          FRONTEND_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'obs-frontend-api*config.cmake' | head -1)
+          echo "prefix=$PREFIX"; echo "libobs cfg=$LIBOBS_CFG"; echo "frontend cfg=$FRONTEND_CFG"
+          test -n "$LIBOBS_CFG"   || { echo "ERROR: libobsConfig.cmake not in obs-sdk (Development install failed?)"; find "$WS/obs-sdk" -iname '*.cmake' | head -60; exit 1; }
+          test -n "$FRONTEND_CFG" || { echo "ERROR: obs-frontend-apiConfig.cmake not in obs-sdk"; exit 1; }
           cmake -B build_x64 -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_PREFIX_PATH="$(cygpath -m "$WS/obs-sdk");$(cygpath -m "$QT6_DEP")" \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
             -Dlibobs_DIR="$(cygpath -m "$(dirname "$LIBOBS_CFG")")" \
             -Dobs-frontend-api_DIR="$(cygpath -m "$(dirname "$FRONTEND_CFG")")" \
             -DQT_VERSION=6 \
