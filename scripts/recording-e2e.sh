@@ -374,7 +374,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
   if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
     cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
   fi
-  for b in camera-box frame-probe recording-verdict; do
+  for b in camera-box frame-probe recording-verdict frozen-camera-gate; do
     if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
       echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
       echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
@@ -388,6 +388,8 @@ else
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
   cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
+  # #365: build the frozen-camera-gate binary (default features — no probe deps, no disk balloon).
+  cargo build --release --bin frozen-camera-gate  # airuleset:build-ok
 fi
 
 echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
@@ -495,6 +497,22 @@ for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set clea
   fi
   echo "    [$_bn burn-check] OK — burns ON (genlock_burn=true on '$_bsrc', runtime, no relaunch)"
 done
+
+echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updating (not a frozen feed)"
+# Precondition: the Multiview projector must be OPEN on strih (#276) so all NDI inputs render.
+# Hash each raw NDI camera input via GetSourceScreenshot; feed the per-camera timeline to the
+# Rust binary (frozen-camera-gate) which returns FROZEN names on exit 1 / PASS on exit 0.
+# Threshold, sources, and sample count are env-overridable so operators can tune without a code
+# change. Default: 8 samples at 1s cadence, FROZEN if > 3 consecutive hashes identical.
+# The Rust binary lives alongside the probe tools in $PROBE_BIN_DIR; the Python harness discovers
+# it via FROZEN_GATE_BIN or PROBE_BIN_DIR.
+FROZEN_GATE_BIN="${FROZEN_GATE_BIN:-$PROBE_BIN_DIR/frozen-camera-gate}"
+export FROZEN_GATE_BIN
+python3 "$HERE/frozen-camera-gate.py" \
+  --host "$STRIH" \
+  --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
+  --samples   "${FROZEN_CAM_SAMPLES:-8}" \
+  --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam5}"
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
