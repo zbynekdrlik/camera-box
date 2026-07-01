@@ -502,3 +502,168 @@ fn builders_enable_avahi_daemon_for_ndi_discovery() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// #369 — "cam-box image: auto-grow root on first boot + uniform 512M /var/cache + fleet
+// disk-space guard — prevent ENOSPC bricks."
+//
+// ROOT CAUSE: cam4 shipped a 3.5G/92%-full root partition (never grown) on a 57G disk;
+// cam1's /var/cache was 100M/100%-full (old image; #306 fix didn't reach all boxes). Both
+// the base-image builder (create-usb-linux.sh) and the ro-root builder (build-image.sh)
+// lacked (a) a first-boot auto-grow mechanism and (b) the uniform 512M /var/cache fstab line.
+//
+// Fixes tested here:
+//   13. Both image builders install cloud-guest-utils (provides growpart) so auto-grow can run.
+//   14. Both image builders enable camera-box-grow-root.service so the root partition auto-
+//       expands to fill the disk on first boot — no manual setup.sh run required.
+//   15. Both image builders write a ≥512M /var/cache tmpfs line to fstab — matching the
+//       setup.sh / setup-device.sh provisioning paths that already carry this line (#295).
+//   16. The fleet disk-space guard threshold decision (scripts/lib/disk-guard-thresholds.sh)
+//       is behaviorally correct: ≥80% triggers an alert, <80% does not.
+
+/// The two image builders that were MISSING the grow-root + 512M /var/cache. The setup-script
+/// paths (setup.sh + setup-device.sh) already carry these; these tests extend coverage to the
+/// builders.
+const IMAGE_BUILDERS: [&str; 2] = ["scripts/create-usb-linux.sh", "scripts/build-image.sh"];
+
+/// 13. Both image builders must INSTALL cloud-guest-utils (growpart) so the first-boot
+///     auto-grow service can run. Without growpart, the grow-root service silently falls back
+///     but the package must be present for the happy path.
+#[test]
+fn image_builders_install_cloud_guest_utils() {
+    for script in IMAGE_BUILDERS {
+        let body = read(script);
+        assert!(
+            appears_on_active_line(&body, "cloud-guest-utils"),
+            "{script} must install cloud-guest-utils (provides growpart) on a real command line \
+             (not just a comment) so the first-boot root auto-grow service can run (#369, cam4 \
+             shipped 3.5G/92%-full on a 57G disk because the partition was never grown)"
+        );
+    }
+}
+
+/// 14. Both image builders must ENABLE camera-box-grow-root.service so the root partition
+///     auto-expands to fill the disk on first boot — no manual setup.sh run required. Without
+///     this, a fresh USB key written to a large disk ships with the image's small root partition
+///     and will fill up prematurely (the exact cam4 ENOSPC brick path, #369).
+#[test]
+fn image_builders_enable_grow_root_service() {
+    for script in IMAGE_BUILDERS {
+        let body = read(script);
+        assert!(
+            on_noncomment_line(&body, "camera-box-grow-root.service"),
+            "{script} must reference camera-box-grow-root.service on a non-comment line \
+             (copy/install + enable) so the root partition auto-grows on first boot (#369)"
+        );
+        assert!(
+            on_noncomment_line(&body, "systemctl enable camera-box-grow-root"),
+            "{script} must `systemctl enable camera-box-grow-root.service` so the service \
+             is active on first boot — without it the partition never grows (#369)"
+        );
+    }
+}
+
+/// 15. Both image builders must write a ≥512M /var/cache tmpfs line to fstab. The setup
+///     provisioning scripts (setup.sh + setup-device.sh) already carry this line (#295/#306);
+///     the image builders were missing it, leaving cam1 with a 100M /var/cache that filled up
+///     and triggered an apt ENOSPC → initrd-less kernel → brick (#369 follow-on to #295).
+///
+///     Reuses the same size-parsing logic as the existing provisioning_sizes_var_cache_adequately
+///     test so the assertion is consistent across ALL provisioning paths.
+#[test]
+fn image_builders_size_var_cache_512m() {
+    for script in IMAGE_BUILDERS {
+        let body = read(script);
+        let line = body
+            .lines()
+            .find(|l| l.contains("/var/cache") && l.contains("tmpfs") && l.contains("size="))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{script} must mount /var/cache as a sized tmpfs in fstab — the builder was \
+                     missing this line (uniform 512M /var/cache prevents apt ENOSPC, #369/#295)"
+                )
+            });
+        let size_tok = line
+            .split("size=")
+            .nth(1)
+            .and_then(|s| s.split([',', ' ']).next())
+            .unwrap_or("")
+            .to_uppercase();
+        let mib: u32 = if let Some(g) = size_tok.strip_suffix('G') {
+            g.parse::<u32>().unwrap_or(0) * 1024
+        } else if let Some(m) = size_tok.strip_suffix('M') {
+            m.parse::<u32>().unwrap_or(0)
+        } else if let Some(k) = size_tok.strip_suffix('K') {
+            k.parse::<u32>().unwrap_or(0) / 1024
+        } else {
+            size_tok
+                .parse::<u64>()
+                .map(|b| (b / (1024 * 1024)) as u32)
+                .unwrap_or(0)
+        };
+        assert!(
+            mib >= MIN_VAR_CACHE_MIB,
+            "{script} sizes /var/cache tmpfs to `{size_tok}` (= {mib} MiB) — it must be \
+             ≥{MIN_VAR_CACHE_MIB}M so apt can never ENOSPC and leave a kernel without an \
+             initrd (#369/#295). Line: {line}"
+        );
+    }
+}
+
+/// 16. The fleet disk-space guard's pure threshold function must be behaviourally correct.
+///     cam_disk_alert_needed(used_pct, threshold): returns 0 (alert) when used_pct ≥ threshold;
+///     returns 1 (ok) when used_pct < threshold. This is the ONLY logic that decides "alert or
+///     not" — unit-testing it prevents a threshold regression that would silence real alerts
+///     (the exact gap that allowed cam4 to reach 92%-full with no notification, #369).
+#[test]
+fn disk_guard_threshold_decision_correct() {
+    let thresholds_sh = manifest_dir().join("scripts/lib/disk-guard-thresholds.sh");
+    assert!(
+        thresholds_sh.exists(),
+        "scripts/lib/disk-guard-thresholds.sh must exist — it holds the pure threshold \
+         decision for the fleet disk-space guard (#369)"
+    );
+    // Helper: run bash and return "YES" or "NO"
+    let check = |used_pct: u8, threshold: u8| -> String {
+        let cmd = format!(
+            ". {path} && cam_disk_alert_needed {used} {thr} && echo YES || echo NO",
+            path = thresholds_sh.display(),
+            used = used_pct,
+            thr = threshold,
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .expect("bash available");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // Boundary: exactly at threshold → alert.
+    assert_eq!(
+        check(80, 80),
+        "YES",
+        "cam_disk_alert_needed(80, 80) must return 0 (alert) — at 80% exactly the threshold fires"
+    );
+    // One below threshold → no alert.
+    assert_eq!(
+        check(79, 80),
+        "NO",
+        "cam_disk_alert_needed(79, 80) must return 1 (ok) — below threshold, no alert"
+    );
+    // Well over threshold → alert.
+    assert_eq!(check(92, 80), "YES",
+        "cam_disk_alert_needed(92, 80) must return 0 (alert) — cam4 was 92%-full and must have alerted");
+    // At 0% → no alert.
+    assert_eq!(
+        check(0, 80),
+        "NO",
+        "cam_disk_alert_needed(0, 80) must return 1 (ok) — empty disk never alerts"
+    );
+    // Full disk (100%) → alert.
+    assert_eq!(
+        check(100, 80),
+        "YES",
+        "cam_disk_alert_needed(100, 80) must return 0 (alert) — full /var/cache must alert"
+    );
+}
