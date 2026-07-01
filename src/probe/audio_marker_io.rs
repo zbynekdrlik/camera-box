@@ -91,7 +91,14 @@ fn run_emit(
             log.lock().unwrap().push((fid, ts));
             let io = pcm.io_i16()?;
             if let Err(e) = io.writei(&stereo) {
+                // The bursty chirp-then-idle pattern underruns the small buffer between
+                // markers (XRUN); recover and REPLAY this chirp so every marker actually
+                // sounds. A bare recover-without-retry leaves the failed cycle silent, so
+                // only the first chirp ever played (appl_ptr stuck at one chirp on the rig).
                 let _ = pcm.recover(e.errno(), true);
+                if let Ok(io2) = pcm.io_i16() {
+                    let _ = io2.writei(&stereo);
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
