@@ -27,6 +27,7 @@ host requires auth; LAN boxes here use none).
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -329,7 +330,6 @@ def _parse_latency_ms_from_audit_line(line: str):
     NOTE: matches `latency_ms=` NOT `src_latency_ms=` (underscore prefix) — the effective
     held value (what the FIFO actually delivers) vs the per-source setting stored in OBS.
     The sed pattern in drift-guard.sh:292 uses the same disambiguation."""
-    import re
     # Match ' latency_ms=N' (space before) so it does NOT match 'src_latency_ms='.
     m = re.search(r"genlock-fifo audit '([^']+)'.*? latency_ms=(\d+)", line)
     if m:
