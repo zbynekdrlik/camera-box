@@ -568,11 +568,27 @@ jobs:
       - name: Configure av-sync-dock against the genlocked OBS (#188)
         working-directory: vendor/av-sync-dock
         shell: bash
-        run: >
-          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64
-          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
-          -DQT_VERSION=6
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: |
+          set -eu
+          WS=$(cygpath "$GITHUB_WORKSPACE")
+          # OBS installs its cmake package configs under the SDK prefix (flat in cmake/ on
+          # Windows). The old norihiro plugin template's find_package(libobs/obs-frontend-api)
+          # does NOT reach them via CMAKE_PREFIX_PATH alone (DistroAV's modern template wires
+          # its own deps), so locate the configs and point <pkg>_DIR at them explicitly.
+          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 5 -iname 'libobs*config.cmake' | head -1)
+          FRONTEND_CFG=$(find "$WS/obs-sdk" -maxdepth 5 -iname 'obs-frontend-api*config.cmake' | head -1)
+          # Qt6 cmake package: reuse the obs-deps Qt6 the OBS/DistroAV build already downloaded.
+          QT6_DEP=$(ls -d "$WS"/vendor/distroav/.deps/*qt6*-x64 "$WS"/vendor/obs-studio/.deps/*qt6*-x64 2>/dev/null | head -1)
+          echo "libobs cfg=$LIBOBS_CFG"; echo "frontend cfg=$FRONTEND_CFG"; echo "qt6 dep=$QT6_DEP"
+          test -n "$LIBOBS_CFG"   || { echo "ERROR: libobsConfig.cmake not found under obs-sdk"; find "$WS/obs-sdk" -iname '*.cmake' | head -40; exit 1; }
+          test -n "$FRONTEND_CFG" || { echo "ERROR: obs-frontend-api config not found under obs-sdk"; exit 1; }
+          test -n "$QT6_DEP"      || { echo "ERROR: Qt6 obs-dep not found under .deps"; ls -d "$WS"/vendor/*/.deps/* 2>/dev/null || true; exit 1; }
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$(cygpath -m "$WS/obs-sdk");$(cygpath -m "$QT6_DEP")" \
+            -Dlibobs_DIR="$(cygpath -m "$(dirname "$LIBOBS_CFG")")" \
+            -Dobs-frontend-api_DIR="$(cygpath -m "$(dirname "$FRONTEND_CFG")")" \
+            -DQT_VERSION=6 \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
       - name: Build av-sync-dock (#188)
         working-directory: vendor/av-sync-dock
