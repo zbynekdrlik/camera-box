@@ -525,6 +525,38 @@ export FROZEN_GATE_BIN
 # attempt (~2.5 min total) — the per-attempt verdict is untouched, so the gate is NOT weakened.
 FROZEN_CAM_ATTEMPTS="${FROZEN_CAM_ATTEMPTS:-4}"
 FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
+# #365/#399 EXCLUDE the painter box's own feed — in TEST mode cam2's display is OFF until the
+# painter starts, so a strih input bound to cam2's NDI sender (the #399 drifted 'NDI cam3' →
+# 'CAM2 (usb)') shows the HDMI-splitter self-view: BY DESIGN static at gate time. That is not a
+# broadcast signal — sampling it false-aborts DETERMINISTICALLY (run 7020001: identical hash
+# across 4 retry attempts while cam2's emitter ran healthy at 60 fps). Derive the source list
+# live: keep every default input EXCEPT those bound to FROZEN_CAM_EXCLUDE_SENDER. An explicit
+# FROZEN_CAM_SOURCES env still overrides everything (operator escape hatch, unchanged).
+FROZEN_CAM_EXCLUDE_SENDER="${FROZEN_CAM_EXCLUDE_SENDER:-CAM2 (usb)}"
+if [ -z "${FROZEN_CAM_SOURCES:-}" ]; then
+  FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("o", sys.argv[3])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+host, exclude = sys.argv[1], sys.argv[2]
+ws = m._conn(host, os.environ.get("OBS_PASSWORD", ""))
+keep = []
+for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam5"]:
+    try:
+        s = m._rpc(ws, "GetInputSettings", {"inputName": inp}).get("inputSettings", {})
+        sender = s.get("ndi_source_name", "")
+    except Exception:
+        sender = ""
+    if exclude and exclude in sender:
+        print(f"    [frozen-camera-gate] excluding {inp!r} (bound to {sender!r} — the painter box's self-feed, static by design pre-paint)", file=sys.stderr)
+    else:
+        keep.append(inp)
+ws.close()
+print(",".join(keep))
+PYEOF
+)"
+  echo "    [frozen-camera-gate] derived sources: ${FROZEN_CAM_SOURCES} (excluded any bound to '${FROZEN_CAM_EXCLUDE_SENDER}')"
+fi
 frozen_ok=0
 for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
   if python3 "$HERE/frozen-camera-gate.py" \
