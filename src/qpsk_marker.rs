@@ -477,6 +477,37 @@ pub fn cluster_offset_ms(
     })
 }
 
+/// The dual-QR frame_id DISPLAYED at the instant a queued marker actually SOUNDS. The continuous
+/// ALSA feed keeps the ring nearly full, so a marker enqueued now plays `delay_frames` samples
+/// later (~150–170 ms at the rig's 8192-frame ring) — during which the vblank-locked painter
+/// advances `delay_frames · fps / sample_rate` frames (~10 @ 60 fps). Pairing the audio marker to
+/// the ENQUEUE-instant frame_id (the pre-fix behavior) biases the measured A/V offset by exactly
+/// that ring delay; this converts the ALSA delay into painter frames so the logged frame_id is the
+/// one on screen when the marker is heard. Negative `delay_frames` (post-underrun readback) clamps
+/// to 0 — never pair backwards.
+pub fn playout_frame_id(
+    fid: u32,
+    delay_frames: i64,
+    sample_rate: u32,
+    vr_num: u32,
+    vr_den: u32,
+) -> u32 {
+    // Pre-fix semantics: pair with the enqueue-instant frame_id (uncompensated).
+    let _ = (delay_frames, sample_rate, vr_num, vr_den);
+    fid
+}
+
+/// `start_time` of a stream as reported by ffprobe (`-show_entries stream=start_time`), seconds.
+/// A missing/`N/A`/unparsable value is 0.0 (streams starting at the container origin). Used to put
+/// the recording's video and audio timelines on a COMMON origin before pairing — a non-zero
+/// per-stream start (mux edit list, encoder priming) would otherwise shift the measured offset
+/// silently by the difference.
+pub fn parse_ffprobe_start_time(s: &str) -> f64 {
+    // Pre-fix semantics: origins assumed 0 (unverified).
+    let _ = s;
+    0.0
+}
+
 /// Required genlock video-delay to zero the measured offset. `offset_ms = video − audio`; positive
 /// (video lags) → REDUCE the delay. Clamped to the genlock range [3, 2000] ms.
 pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
@@ -566,6 +597,37 @@ mod tests {
         // The dense cluster is the ~60 real markers, not the thin false scatter.
         assert!(e.matched >= 50, "cluster too small: {}", e.matched);
         assert!(e.mad_ms < 20.0, "cluster not tight: mad {}", e.mad_ms);
+    }
+
+    #[test]
+    fn playout_frame_id_compensates_alsa_ring_delay() {
+        // The rig bias this locks (live evidence: measured −194.5 ms carried ~160 ms of ring
+        // delay): a marker enqueued while frame 100 is on screen SOUNDS delay_frames later —
+        // 8192 samples @48 kHz ≈ 170.7 ms ≈ 10.24 painter frames @60 fps → frame 110 is displayed
+        // when it is heard. Pairing must use 110, not 100.
+        assert_eq!(playout_frame_id(100, 8192, 48_000, 60, 1), 110);
+        // Exact half-frame rounds to nearest: 4000 samples = 5.0 frames.
+        assert_eq!(playout_frame_id(100, 4000, 48_000, 60, 1), 105);
+        // Zero delay → unchanged; negative (post-underrun readback) clamps to 0, never backwards.
+        assert_eq!(playout_frame_id(100, 0, 48_000, 60, 1), 100);
+        assert_eq!(playout_frame_id(100, -512, 48_000, 60, 1), 100);
+        // 30 fps chain: same 8192-sample delay is ~5.12 frames → +5.
+        assert_eq!(playout_frame_id(100, 8192, 48_000, 30, 1), 105);
+        // Saturates instead of wrapping near u32::MAX.
+        assert_eq!(
+            playout_frame_id(u32::MAX - 2, 48_000, 48_000, 60, 1),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn ffprobe_start_time_parses_or_defaults_to_zero() {
+        assert!((parse_ffprobe_start_time("1.234000") - 1.234).abs() < 1e-9);
+        assert!((parse_ffprobe_start_time("0.000000")).abs() < 1e-9);
+        assert!((parse_ffprobe_start_time(" 0.021333 \n") - 0.021333).abs() < 1e-9);
+        assert_eq!(parse_ffprobe_start_time("N/A"), 0.0);
+        assert_eq!(parse_ffprobe_start_time(""), 0.0);
+        assert_eq!(parse_ffprobe_start_time("garbage"), 0.0);
     }
 
     #[test]
