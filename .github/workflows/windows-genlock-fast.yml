@@ -34,6 +34,7 @@ on:
     paths:
       - 'vendor/obs-studio/**'
       - 'vendor/distroav/**'
+      - 'vendor/av-sync-dock/**'
       - '.github/workflows/windows-genlock-fast.yml'
 
 permissions:
@@ -303,7 +304,12 @@ jobs:
       - name: Install OBS SDK prefix
         working-directory: vendor/obs-studio
         shell: bash
-        run: cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
+        run: |
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          # #188: the default install omits the EXCLUDE_FROM_ALL "Development" component (the cmake
+          # package configs libobsConfig.cmake / obs-frontend-apiConfig.cmake + headers + import
+          # libs). The standalone av-sync-dock build needs them, so install it explicitly.
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
 
       # Configure DistroAV against the genlock-patched OBS SDK — identical to the
       # production windows-genlock.yml configure step.
@@ -324,7 +330,41 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # #188: compile-check the A/V sync dock against the SAME installed OBS SDK (reuses the
+      # OBS build above — no second full OBS build). Catches a dock C++/Qt/CMake error at the
+      # pre-merge gate instead of after the 150-min full windows-genlock build.
+      - name: Configure av-sync-dock against the genlocked OBS (#188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: |
+          set -eu
+          WS=$(cygpath "$GITHUB_WORKSPACE")
+          # obs-sdk now carries the Development component (libobs / obs-frontend-api / w32-pthreads
+          # cmake configs + the finders/ modules). libobsConfig also find_dependency(SIMDe, Threads)
+          # and obs-frontend-api needs Qt6 — SIMDe + Qt6 live in the obs-deps the OBS/DistroAV build
+          # downloaded, so add every .deps root to the prefix so all transitive deps resolve.
+          PREFIX="$(cygpath -m "$WS/obs-sdk")"
+          for d in "$WS"/vendor/obs-studio/.deps/*-x64 "$WS"/vendor/distroav/.deps/*-x64; do
+            [ -d "$d" ] && PREFIX="$PREFIX;$(cygpath -m "$d")"
+          done
+          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'libobs*config.cmake' | head -1)
+          FRONTEND_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'obs-frontend-api*config.cmake' | head -1)
+          echo "prefix=$PREFIX"; echo "libobs cfg=$LIBOBS_CFG"; echo "frontend cfg=$FRONTEND_CFG"
+          test -n "$LIBOBS_CFG"   || { echo "ERROR: libobsConfig.cmake not in obs-sdk (Development install failed?)"; find "$WS/obs-sdk" -iname '*.cmake' | head -60; exit 1; }
+          test -n "$FRONTEND_CFG" || { echo "ERROR: obs-frontend-apiConfig.cmake not in obs-sdk"; exit 1; }
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -Dlibobs_DIR="$(cygpath -m "$(dirname "$LIBOBS_CFG")")" \
+            -Dobs-frontend-api_DIR="$(cygpath -m "$(dirname "$FRONTEND_CFG")")" \
+            -DQT_VERSION=6 \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Compile-check av-sync-dock (build the plugin, #188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
       - name: Compile gate passed
         shell: bash
         run: |
-          echo "#101 vendored OBS/DistroAV C++ compiled clean - pre-merge gate green."
+          echo "#101 vendored OBS/DistroAV + #188 av-sync-dock C++ compiled clean - pre-merge gate green."

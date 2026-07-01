@@ -5,7 +5,8 @@ use crate::probe::painter::{run_painter, PaintParams};
 use crate::probe::presenter::PresenterKind;
 use crate::probe::reader::{run_reader, ReadParams};
 use anyhow::{Context, Result};
-use std::sync::atomic::AtomicBool;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,15 @@ pub struct RunConfig {
     /// CSV (`tick,gen_ts_ns`) — the cam→strih ground truth consumed by
     /// `recording-verdict --painter` (#105). `None` ⇒ no log written.
     pub paint_log: Option<String>,
+    /// #188: enable A/V-sync chirp emission on the ALSA device at `audio_marker_cadence_ticks`.
+    pub audio_marker: bool,
+    /// ALSA device string for the A/V-sync chirp (e.g. `hw:CARD=cam2usb,DEV=0`).
+    pub audio_marker_device: String,
+    /// Emit the chirp every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
+    pub audio_marker_cadence_ticks: u64,
+    /// Optional path for `run_paint_only` to write the A/V-sync marker log CSV
+    /// (`frame_id,emit_wall_ts_ns`). `None` ⇒ no log written.
+    pub marker_log: Option<PathBuf>,
 }
 
 /// The painter's default frame rate (frames/sec) when the user did not pass an
@@ -133,7 +143,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             dual_qr: cfg.dual_qr,
             colour_scale: cfg.colour_scale,
         };
-        std::thread::spawn(move || run_painter(params, start, stop, emitted))
+        std::thread::spawn(move || run_painter(params, start, stop, emitted, None, None))
     };
 
     // Run for the duration, but stop early if either thread dies (e.g. the
@@ -211,9 +221,25 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // #188: shared atomics published by the painter each iteration so the audio-marker
+    // thread can read the current frame id and refresh tick without touching the
+    // vblank-locked paint path.
+    let current_id = Arc::new(AtomicU32::new(0));
+    let refresh_out = Arc::new(AtomicU64::new(0));
+
     let painter_handle = {
         let stop = stop.clone();
         let emitted = emitted.clone();
+        let current_id_p = if cfg.audio_marker {
+            Some(current_id.clone())
+        } else {
+            None
+        };
+        let refresh_out_p = if cfg.audio_marker {
+            Some(refresh_out.clone())
+        } else {
+            None
+        };
         let params = PaintParams {
             run_id: cfg.run_id,
             fb_device: cfg.fb_device.clone(),
@@ -230,7 +256,31 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             dual_qr: cfg.dual_qr,
             colour_scale: cfg.colour_scale,
         };
-        std::thread::spawn(move || run_painter(params, start, stop, emitted))
+        std::thread::spawn(move || {
+            run_painter(params, start, stop, emitted, current_id_p, refresh_out_p)
+        })
+    };
+
+    // #188: spawn the audio-marker thread when enabled.
+    let audio_emitter = if cfg.audio_marker {
+        let chirp = crate::av_sync::ChirpParams::default();
+        let sample_rate = 48_000u32;
+        Some(
+            crate::probe::audio_marker_io::AudioMarkerEmitter::spawn(
+                cfg.audio_marker_device.clone(),
+                sample_rate,
+                chirp,
+                current_id.clone(),
+                refresh_out.clone(),
+                stop.clone(),
+                start,
+                cfg.wall_clock,
+                cfg.audio_marker_cadence_ticks,
+            )
+            .with_context(|| format!("open audio-marker device {}", cfg.audio_marker_device))?,
+        )
+    } else {
+        None
     };
 
     let deadline = Instant::now() + cfg.duration;
@@ -242,6 +292,17 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     painter_handle.join().expect("painter panicked")?;
+
+    // Join the audio emitter and write its log before returning.
+    if let Some(emitter) = audio_emitter {
+        let marker_entries = emitter.join();
+        if let Some(path) = &cfg.marker_log {
+            let csv = crate::av_sync::serialize_marker_log(&marker_entries);
+            std::fs::write(path, csv)
+                .with_context(|| format!("write marker log {}", path.display()))?;
+            tracing::info!(path = %path.display(), markers = marker_entries.len(), "marker log written");
+        }
+    }
 
     let emitted_vec = emitted.lock().unwrap();
     // Write the cam→strih ground-truth CSV (#105) when a path was given, BEFORE

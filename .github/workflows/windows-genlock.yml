@@ -547,7 +547,12 @@ jobs:
       - name: Install OBS SDK prefix
         working-directory: vendor/obs-studio
         shell: bash
-        run: cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
+        run: |
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          # #188: the default install omits the EXCLUDE_FROM_ALL "Development" component (the cmake
+          # package configs libobsConfig.cmake / obs-frontend-apiConfig.cmake + headers + import
+          # libs). The standalone av-sync-dock build needs them, so install it explicitly.
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
 
       - name: Configure DistroAV against the genlocked OBS
         working-directory: vendor/distroav
@@ -559,6 +564,40 @@ jobs:
 
       - name: Build DistroAV
         working-directory: vendor/distroav
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
+      # #188: build the A/V sync dock (norihiro/obs-audio-video-sync-dock, vendored) against the
+      # SAME genlocked OBS SDK, standalone, mirroring the DistroAV path above. Ships as a
+      # first-party OBS plugin so the user can measure LIVE A/V sync inside his own OBS.
+      - name: Configure av-sync-dock against the genlocked OBS (#188)
+        working-directory: vendor/av-sync-dock
+        shell: bash
+        run: |
+          set -eu
+          WS=$(cygpath "$GITHUB_WORKSPACE")
+          # obs-sdk now carries the Development component (libobs / obs-frontend-api / w32-pthreads
+          # cmake configs + the finders/ modules). libobsConfig also find_dependency(SIMDe, Threads)
+          # and obs-frontend-api needs Qt6 — SIMDe + Qt6 live in the obs-deps the OBS/DistroAV build
+          # downloaded, so add every .deps root to the prefix so all transitive deps resolve.
+          PREFIX="$(cygpath -m "$WS/obs-sdk")"
+          for d in "$WS"/vendor/obs-studio/.deps/*-x64 "$WS"/vendor/distroav/.deps/*-x64; do
+            [ -d "$d" ] && PREFIX="$PREFIX;$(cygpath -m "$d")"
+          done
+          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'libobs*config.cmake' | head -1)
+          FRONTEND_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'obs-frontend-api*config.cmake' | head -1)
+          echo "prefix=$PREFIX"; echo "libobs cfg=$LIBOBS_CFG"; echo "frontend cfg=$FRONTEND_CFG"
+          test -n "$LIBOBS_CFG"   || { echo "ERROR: libobsConfig.cmake not in obs-sdk (Development install failed?)"; find "$WS/obs-sdk" -iname '*.cmake' | head -60; exit 1; }
+          test -n "$FRONTEND_CFG" || { echo "ERROR: obs-frontend-apiConfig.cmake not in obs-sdk"; exit 1; }
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -Dlibobs_DIR="$(cygpath -m "$(dirname "$LIBOBS_CFG")")" \
+            -Dobs-frontend-api_DIR="$(cygpath -m "$(dirname "$FRONTEND_CFG")")" \
+            -DQT_VERSION=6 \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build av-sync-dock (#188)
+        working-directory: vendor/av-sync-dock
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
@@ -589,6 +628,12 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/distroav" | Out-Null
           Copy-Item -Recurse "vendor/distroav/data/*" "stage/data/obs-plugins/distroav/" -ErrorAction SilentlyContinue
+          # av-sync-dock plugin + data (first-party OBS plugin path, #188). Fail loud if unbuilt.
+          $dockdll = Get-ChildItem -Recurse vendor/av-sync-dock/build_x64 -Filter obs-audio-video-sync-dock.dll | Select-Object -First 1
+          if (!$dockdll) { Write-Error "obs-audio-video-sync-dock.dll not built (#188)"; exit 1 }
+          Copy-Item $dockdll.FullName "stage/obs-plugins/64bit/"
+          New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/obs-audio-video-sync-dock" | Out-Null
+          Copy-Item -Recurse "vendor/av-sync-dock/data/*" "stage/data/obs-plugins/obs-audio-video-sync-dock/"
           git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
 
       # #120: emit the per-component SHA manifest INTO the bundle (stage/BUNDLE_MANIFEST.json).
