@@ -16,6 +16,7 @@
 //! chirp approach (`src/av_sync.rs`) — see
 //! `docs/superpowers/plans/2026-07-01-av-sync-norihiro-dock-port.md`.
 
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 /// Audio sample rate (Hz) — norihiro `--ar` default.
@@ -393,20 +394,85 @@ fn median(v: &mut [f64]) -> f64 {
     }
 }
 
-/// A/V offset from index-paired `(video_ts_s, audio_ts_s)` markers. The QPSK index pairs each audio
-/// marker to its exact dual-QR frame, so each pair yields a direct offset (video − audio); median +
-/// MAD reject the odd mis-decode. `None` if fewer than `min_matched` pairs.
-pub fn av_offset_ms(pairs: &[(f64, f64)], min_matched: usize) -> Option<AvOffset> {
-    if pairs.len() < min_matched.max(1) {
+/// Every candidate A/V offset (ms) from index-matching each decoded audio marker to its emit-log
+/// frame_id(s) and interpolating that frame's video time. Robust to false audio decodes AND to the
+/// index WRAP (an index can recur every 256 markers): an audio marker is matched to EVERY emit row
+/// carrying its index (usually one; more only across laps), each producing one candidate. Real
+/// markers land in a tight `video − audio` cluster; false decodes and wrong-lap matches scatter
+/// across the recording. `cluster_offset_ms` then picks the dense cluster. This replaces the old
+/// lockstep `pair_audio_to_frameids` walk, which a burst of false decodes (CRC-4 is only 4 bits, so
+/// a sliding scan of a music-laden mix passes it ~1/16) could desync — advancing its monotonic
+/// pointer past every real marker and yielding zero pairs (observed live: 1691 audio decodes, 0
+/// paired). Cluster selection needs no assumption about how many decodes are real.
+pub fn av_offset_candidates(
+    emit_log: &[(u8, u32, i64)],
+    audio: &[(f64, u8)],
+    ticks: &[(u32, f64)],
+) -> Vec<f64> {
+    let mut by_idx: HashMap<u8, Vec<u32>> = HashMap::new();
+    for &(idx, fid, _) in emit_log {
+        by_idx.entry(idx).or_default().push(fid);
+    }
+    let mut cand = Vec::new();
+    for &(ts, idx) in audio {
+        if let Some(fids) = by_idx.get(&idx) {
+            for &fid in fids {
+                if let Some(vts) = interp_video_ts(ticks, fid) {
+                    cand.push((vts - ts) * 1000.0);
+                }
+            }
+        }
+    }
+    cand
+}
+
+/// The robust A/V offset: the median of the DENSEST cluster of candidate offsets (window width
+/// `2 * cluster_tol_ms`). The real markers pile into one narrow band (their `video − audio` is a
+/// near-constant pipeline delay); false decodes and wrong-lap matches spread thinly across the whole
+/// recording, so the densest window is the real one whenever the real markers outnumber the false
+/// hits in ANY single band — which holds even at a high false rate (thousands of false hits spread
+/// over a ~150 s recording are < 1 per 100 ms band, versus dozens of real markers in one band).
+/// Returns the cluster median + MAD + the cluster size (`matched`). `None` if fewer than
+/// `min_matched` candidates fall in the densest window.
+pub fn cluster_offset_ms(
+    candidates: &[f64],
+    min_matched: usize,
+    cluster_tol_ms: f64,
+) -> Option<AvOffset> {
+    let need = min_matched.max(1);
+    if candidates.len() < need {
         return None;
     }
-    let off: Vec<f64> = pairs.iter().map(|(v, a)| (v - a) * 1000.0).collect();
-    let offset_ms = median(&mut off.clone());
-    let mut dev: Vec<f64> = off.iter().map(|x| (x - offset_ms).abs()).collect();
+    let mut s: Vec<f64> = candidates.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let w = 2.0 * cluster_tol_ms;
+    // Densest window of width `w` via a two-pointer sweep over the sorted offsets.
+    let (mut best_lo, mut best_cnt) = (0usize, 0usize);
+    let mut j = 0usize;
+    for i in 0..s.len() {
+        if j < i {
+            j = i;
+        }
+        while j + 1 < s.len() && s[j + 1] - s[i] <= w {
+            j += 1;
+        }
+        let cnt = j - i + 1;
+        if cnt > best_cnt {
+            best_cnt = cnt;
+            best_lo = i;
+        }
+    }
+    let (lo, hi) = (s[best_lo], s[best_lo] + w);
+    let keep: Vec<f64> = s.into_iter().filter(|&x| x >= lo && x <= hi).collect();
+    if keep.len() < need {
+        return None;
+    }
+    let offset_ms = median(&mut keep.clone());
+    let mut dev: Vec<f64> = keep.iter().map(|x| (x - offset_ms).abs()).collect();
     let mad_ms = median(&mut dev);
     Some(AvOffset {
         offset_ms,
-        matched: pairs.len(),
+        matched: keep.len(),
         mad_ms,
     })
 }
@@ -415,31 +481,6 @@ pub fn av_offset_ms(pairs: &[(f64, f64)], min_matched: usize) -> Option<AvOffset
 /// (video lags) → REDUCE the delay. Clamped to the genlock range [3, 2000] ms.
 pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
     ((current_delay_ms as f64 - offset_ms).round() as i32).clamp(3, 2000)
-}
-
-/// Align time-ordered decoded audio markers `(audio_ts_s, index)` to the ordered emit log
-/// `(index, frame_id, _)`, returning `(frame_id, audio_ts_s)` per matched marker.
-///
-/// The QPSK index wraps every 256, so a global index→frame_id map is ambiguous over a long run.
-/// Both sequences follow the SAME wrapping 0..255 order (the emitter increments; the recording plays
-/// them in time), so we walk them in lockstep: for each audio marker, find the next emit row with a
-/// matching index within one lap. This tolerates a DROPPED audio marker (skips its emit row) and a
-/// spurious/false audio decode (no match within a lap ⇒ that audio marker is skipped, `j` unmoved).
-pub fn pair_audio_to_frameids(emit_log: &[(u8, u32, i64)], audio: &[(f64, u8)]) -> Vec<(u32, f64)> {
-    let mut out = Vec::new();
-    let mut j = 0usize;
-    for &(ts, idx) in audio {
-        let end = (j + 300).min(emit_log.len()); // ≤ ~1 lap of look-ahead
-        let mut k = j;
-        while k < end && emit_log[k].0 != idx {
-            k += 1;
-        }
-        if k < end && emit_log[k].0 == idx {
-            out.push((emit_log[k].1, ts));
-            j = k + 1;
-        }
-    }
-    out
 }
 
 /// Linear-interpolate the video time of a target cam2 `frame_id` from the recorded dual-QR
@@ -484,54 +525,73 @@ mod tests {
     }
 
     #[test]
-    fn pairs_audio_to_frameids_in_order_with_drops_and_wrap() {
-        // emit log: indices 254,255,0,1,2 → frame_ids 1000..1004 (wraps 255→0)
-        let emit = vec![
-            (254u8, 1000u32, 0i64),
-            (255, 1001, 0),
-            (0, 1002, 0),
-            (1, 1003, 0),
-            (2, 1004, 0),
-        ];
-        // audio: markers 254,255,1,2 in time order (index 0 DROPPED)
-        let audio = vec![(1.0f64, 254u8), (6.0, 255), (16.0, 1), (21.0, 2)];
-        let pairs = pair_audio_to_frameids(&emit, &audio);
-        // dropped index 0 must not misalign the rest
-        assert_eq!(
-            pairs,
-            vec![(1000, 1.0), (1001, 6.0), (1003, 16.0), (1004, 21.0)]
+    fn cluster_offset_recovers_true_offset_under_heavy_false_decodes() {
+        // The live #188 failure: ~50 real markers + ~1600 false CRC-4 decodes on a music mix. The
+        // real markers share a constant video−audio offset (+300 ms here); false decodes carry
+        // arbitrary indices at arbitrary times, so their candidate offsets scatter across the whole
+        // recording. cluster_offset_ms must still recover +300 ms — the OLD lockstep pair walk
+        // returned 0 pairs on exactly this input.
+        //
+        // Emit log: 60 markers, index i (no wrap) at frame_id 100 + 10*i, emitted every 3 s.
+        let mut emit = Vec::new();
+        let mut ticks = Vec::new();
+        for i in 0..60u32 {
+            let fid = 100 + 10 * i;
+            emit.push((i as u8, fid, 0i64));
+            // video tick fid shown at video_ts = 3*i + 1.0 s (a clean monotonic mapping).
+            ticks.push((fid, 3.0 * i as f64 + 1.0));
+        }
+        // Real audio markers: index i heard 300 ms BEFORE its video frame → offset video−audio=+300.
+        let mut audio: Vec<(f64, u8)> = (0..60u32)
+            .map(|i| (3.0 * i as f64 + 1.0 - 0.300, i as u8))
+            .collect();
+        // 1600 false decodes: deterministic pseudo-random index (0..60, in-range so they DO match an
+        // emit row) at times spread across the 0..180 s recording. Their offsets scatter widely.
+        for k in 0..1600u32 {
+            let idx = ((k * 37) % 60) as u8;
+            let ts = (k as f64 * 179.0) / 1600.0; // 0..179 s, unrelated to the index
+            audio.push((ts, idx));
+        }
+        let cand = av_offset_candidates(&emit, &audio, &ticks);
+        // Every real marker + every in-range false decode forms a candidate.
+        assert!(cand.len() >= 60 + 1600, "candidates {}", cand.len());
+        let e = cluster_offset_ms(&cand, 20, 50.0).expect("cluster found");
+        assert!(
+            (e.offset_ms - 300.0).abs() < 5.0,
+            "offset {} (matched {}, mad {})",
+            e.offset_ms,
+            e.matched,
+            e.mad_ms
         );
-        // a spurious audio index not in the log is skipped without breaking alignment
-        let audio2 = vec![(1.0f64, 254u8), (2.0, 99), (6.0, 255)];
-        assert_eq!(
-            pair_audio_to_frameids(&emit, &audio2),
-            vec![(1000, 1.0), (1001, 6.0)]
-        );
+        // The dense cluster is the ~60 real markers, not the thin false scatter.
+        assert!(e.matched >= 50, "cluster too small: {}", e.matched);
+        assert!(e.mad_ms < 20.0, "cluster not tight: mad {}", e.mad_ms);
     }
 
     #[test]
-    fn av_offset_from_index_pairs() {
-        // video at 1,5,9,13 s; audio 300 ms earlier each → +300 ms (video lags audio).
-        let pairs = [(1.0, 0.7), (5.0, 4.7), (9.0, 8.7), (13.0, 12.7)];
-        let e = av_offset_ms(&pairs, 4).unwrap();
-        assert!((e.offset_ms - 300.0).abs() < 1e-6, "offset {}", e.offset_ms);
-        assert_eq!(e.matched, 4);
-        assert!(e.mad_ms < 1e-6);
-        // one wild mis-decode must not move the median
-        let noisy = [
-            (1.0, 0.7),
-            (5.0, 4.7),
-            (9.0, 8.7),
-            (13.0, 12.7),
-            (17.0, 0.0),
-        ];
-        let e2 = av_offset_ms(&noisy, 4).unwrap();
-        assert!(
-            (e2.offset_ms - 300.0).abs() < 1.0,
-            "median moved: {}",
-            e2.offset_ms
-        );
-        assert!(av_offset_ms(&pairs, 5).is_none()); // too few
+    fn cluster_offset_needs_min_matched() {
+        // Only 3 real candidates in the densest band → below min_matched(4) → None (no guess).
+        let cand = vec![300.0, 301.0, 299.0, -5000.0, 8000.0];
+        assert!(cluster_offset_ms(&cand, 4, 50.0).is_none());
+        // With the same candidates but min_matched 3, the 3-wide cluster is reported.
+        let e = cluster_offset_ms(&cand, 3, 50.0).unwrap();
+        assert!((e.offset_ms - 300.0).abs() < 1e-6);
+        assert_eq!(e.matched, 3);
+    }
+
+    #[test]
+    fn candidates_handle_index_wrap_via_multiple_frameids() {
+        // index 5 recurs across two laps (frame_ids 105 and 405); a decoded audio marker with index
+        // 5 yields BOTH candidates — the wrong-lap one lands far from the cluster and is rejected.
+        let emit = vec![(5u8, 105u32, 0i64), (5u8, 405u32, 0i64)];
+        let ticks = vec![(105u32, 2.0f64), (405u32, 8.0f64)];
+        // Real: heard at 1.7 s (frame 105 at 2.0 s → +300 ms). Both fids produce a candidate.
+        let audio = vec![(1.7f64, 5u8)];
+        let cand = av_offset_candidates(&emit, &audio, &ticks);
+        assert_eq!(cand.len(), 2, "one per matching emit fid");
+        // +300 ms (real, fid 105) and +6300 ms (wrong lap, fid 405).
+        assert!(cand.iter().any(|&c| (c - 300.0).abs() < 1e-6));
+        assert!(cand.iter().any(|&c| (c - 6300.0).abs() < 1e-6));
     }
 
     #[test]

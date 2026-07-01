@@ -10,8 +10,8 @@
 
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_marker::{
-    av_offset_ms, decode_markers, interp_video_ts, pair_audio_to_frameids, parse_qpsk_marker_log,
-    AudioParams, AvOffset,
+    av_offset_candidates, cluster_offset_ms, decode_markers, parse_qpsk_marker_log, AudioParams,
+    AvOffset,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -30,6 +30,10 @@ pub struct AvSyncReport {
     pub video_ticks: usize,
     /// Emit-log rows parsed.
     pub emit_rows: usize,
+    /// Candidate offsets formed (audio marker × matching emit frame_id, video-interpolable). The
+    /// offset is the median of the densest cluster of these; `candidates − matched` is the rejected
+    /// scatter (false audio decodes + wrong-lap matches).
+    pub candidates: usize,
 }
 
 /// Video frame rate of `path`'s first video stream (`r_frame_rate` "num/den"), via ffprobe.
@@ -119,9 +123,9 @@ fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Result<V
 /// mbc audio marker) using the cam2 `marker_log_csv` (the emitter's `index,frame_id,emit_ts_ns`).
 ///
 /// Steps: ffprobe fps → decode every recorded frame's dual-QR tick → (tick, video_ts) samples;
-/// extract audio track → QPSK-decode (audio_ts, index); pair each audio index to its emit-log
-/// frame_id (ordered, drop-tolerant); interpolate each frame_id's video_ts; offset = median(video −
-/// audio).
+/// extract audio track → QPSK-decode (audio_ts, index); form a candidate `video − audio` offset per
+/// index-match (`av_offset_candidates`); the offset is the median of the DENSEST cluster of those
+/// candidates (`cluster_offset_ms`) — robust to false audio decodes and the index wrap.
 pub fn av_sync_from_recording(
     recording: &Path,
     marker_log_csv: &str,
@@ -129,6 +133,7 @@ pub fn av_sync_from_recording(
     audio_track: u32,
     threshold: f64,
     min_matched: usize,
+    cluster_tol_ms: f64,
 ) -> Result<AvSyncReport> {
     let fps = probe_video_fps(recording)?;
     let emit_log = parse_qpsk_marker_log(marker_log_csv);
@@ -157,22 +162,21 @@ pub fn av_sync_from_recording(
     let audio_markers = decode_markers(&audio, params, threshold);
     let n_audio = audio_markers.len();
 
-    // Pair: audio index → emit-log frame_id (ordered) → interpolated video_ts.
-    let fid_pairs = pair_audio_to_frameids(&emit_log, &audio_markers);
-    let mut vt_pairs: Vec<(f64, f64)> = Vec::new();
-    for (fid, audio_ts) in fid_pairs {
-        if let Some(vts) = interp_video_ts(&ticks, fid) {
-            vt_pairs.push((vts, audio_ts));
-        }
-    }
+    // Pair: index-match every audio marker to its emit-log frame_id(s), interpolate the video time
+    // of that frame, and form a `video − audio` candidate offset. The true offset is the median of
+    // the densest cluster of these candidates (false decodes + wrong-lap matches scatter and are
+    // rejected). This is robust to the massive false-decode rate CRC-4 lets through on a music mix.
+    let candidates = av_offset_candidates(&emit_log, &audio_markers, &ticks);
+    let n_cand = candidates.len();
 
-    let offset = av_offset_ms(&vt_pairs, min_matched).with_context(|| {
-        format!(
-            "too few A/V pairs to estimate (audio markers {n_audio}, video ticks {video_ticks}, \
-             paired {}, need {min_matched}) — check the audio track index and the emit log",
-            vt_pairs.len()
-        )
-    })?;
+    let offset =
+        cluster_offset_ms(&candidates, min_matched, cluster_tol_ms).with_context(|| {
+            format!(
+                "too few clustered A/V pairs to estimate (audio markers {n_audio}, video ticks \
+             {video_ticks}, candidates {n_cand}, need {min_matched} within ±{cluster_tol_ms} ms) — \
+             check the audio track index and the emit log"
+            )
+        })?;
 
     Ok(AvSyncReport {
         offset,
@@ -180,5 +184,6 @@ pub fn av_sync_from_recording(
         audio_markers: n_audio,
         video_ticks,
         emit_rows: emit_log.len(),
+        candidates: n_cand,
     })
 }

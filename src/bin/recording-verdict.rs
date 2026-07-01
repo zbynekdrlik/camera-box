@@ -248,9 +248,14 @@ struct Args {
     /// noisy mic'd recording. Default 0.35.
     #[arg(long, default_value_t = 0.35)]
     av_threshold: f64,
-    /// #188 A/V-sync: minimum index-paired markers required to report an offset. Default 4.
+    /// #188 A/V-sync: minimum clustered markers required to report an offset. Default 4.
     #[arg(long, default_value_t = 4)]
     av_min_matched: usize,
+    /// #188 A/V-sync: half-width (ms) of the offset cluster window. Candidate offsets within
+    /// ±this of the densest band are the real markers; the rest (false decodes, wrong-lap matches)
+    /// are rejected. Default 60.
+    #[arg(long, default_value_t = 60.0)]
+    av_cluster_tol_ms: f64,
 }
 
 impl Args {
@@ -1557,6 +1562,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
         args.av_audio_track,
         args.av_threshold,
         args.av_min_matched,
+        args.av_cluster_tol_ms,
     )?;
     // The measured offset + the genlock delay it implies. offset > 0 ⇒ video LAGS audio.
     let suggested = camera_box::qpsk_marker::required_delay_ms(0, report.offset.offset_ms);
@@ -1564,6 +1570,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
         "av_offset_ms": report.offset.offset_ms,
         "mad_ms": report.offset.mad_ms,
         "matched": report.offset.matched,
+        "candidates": report.candidates,
         "audio_markers_decoded": report.audio_markers,
         "video_ticks": report.video_ticks,
         "emit_rows": report.emit_rows,
