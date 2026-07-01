@@ -79,10 +79,22 @@ pub const GRAYSCALE_CHROMA_MIN: f64 = 40.0;
 pub const HUE_TOL_DEG: f64 = 30.0;
 
 /// A NEUTRAL (white/black/gray) patch must stay near-neutral — sampled chroma above this is an
-/// unexpected colour cast (e.g. a white-balance tint), which FAILS. On the real rig the benign
-/// optical cast measures ≤ 38 chroma across the neutral ramp (white 29, g255 38), so 48 sits above
-/// the rig's natural cast yet well below a real white-balance fault / dead channel (tens to >100).
-pub const NEUTRAL_CHROMA_MAX: f64 = 48.0;
+/// unexpected colour cast (e.g. a white-balance tint), which FAILS.
+///
+/// Calibrated to the REAL rig signal (2026-06-30 recording, affine-localized dual-QR sampling — the
+/// `--colour-gate` `colour-dump` diagnostic). The rig has a benign bright-neutral CYAN cast (~203°)
+/// that is an accepted optical/moiré artifact — the SAME physics as the dimness (the 60 Hz monitor
+/// sampled by the 1/1000 s shutter mid-refresh), NOT a camera fault (the user's explicit call). The
+/// localized neutral cast peaks at **chroma 54** (white 54, g192 53, g255 49, g128 47; the darker
+/// neutrals crush to near-black at chroma ≤ 6). So 72 sits above the rig's natural cast with headroom
+/// for run-to-run optical variance, yet well below a real white-balance fault / dead channel (which
+/// push a neutral's chroma to tens above 90 — a dead channel to 150+). The old 48 was set against
+/// the pre-localization sampler's MISLOCATED (patch-diluted) values (white 29, g255 38) and
+/// false-failed white/g192/g255 on the real localized signal; the fixture
+/// `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail` now locks the localized
+/// values. Raising it here is calibration to the measured real signal, NOT loosening — the HUE gate
+/// (the sharp chromatic discriminator) is unchanged and every real fault still fails on hue/chroma.
+pub const NEUTRAL_CHROMA_MAX: f64 = 72.0;
 
 /// Chroma of an sRGB colour: `max(channel) − min(channel)`, 0 (neutral) .. 255 (pure primary).
 pub fn chroma(c: Rgb) -> f64 {
@@ -864,10 +876,10 @@ mod tests {
         );
         assert!(
             matches!(
-                classify_patch(Rgb::new(63, 0, 0), Some(Rgb::new(63, 0, 0))),
+                classify_patch(Rgb::new(63, 0, 0), Some(Rgb::new(80, 0, 0))),
                 PatchOutcome::NeutralTint { .. }
             ),
-            "expected chroma 63 ⇒ neutral ⇒ its own chroma 63 > NEUTRAL_CHROMA_MAX ⇒ tint"
+            "expected chroma 63 ⇒ neutral path ⇒ a sample chroma 80 > NEUTRAL_CHROMA_MAX(72) ⇒ tint"
         );
 
         // GRAYSCALE_CHROMA_MIN = 40: sampled chroma exactly 40 is NOT grayscale; 39 IS.
@@ -886,20 +898,20 @@ mod tests {
             "sampled chroma 39 is below the floor — grayscale"
         );
 
-        // NEUTRAL_CHROMA_MAX = 48: a neutral patch with sampled chroma exactly 48 is NOT a tint; 49 is.
+        // NEUTRAL_CHROMA_MAX = 72: a neutral patch with sampled chroma exactly 72 is NOT a tint; 73 is.
         assert!(
             !matches!(
-                classify_patch(gray, Some(Rgb::new(176, 128, 128))),
+                classify_patch(gray, Some(Rgb::new(200, 128, 128))),
                 PatchOutcome::NeutralTint { .. }
             ),
-            "neutral sample chroma 48 is at the cap — NOT a tint"
+            "neutral sample chroma 72 is at the cap — NOT a tint"
         );
         assert!(
             matches!(
-                classify_patch(gray, Some(Rgb::new(177, 128, 128))),
+                classify_patch(gray, Some(Rgb::new(201, 128, 128))),
                 PatchOutcome::NeutralTint { .. }
             ),
-            "neutral sample chroma 49 exceeds the cap — tint"
+            "neutral sample chroma 73 exceeds the cap — tint"
         );
 
         // Level is NOT a gate: a chromatic sample far in sRGB distance but with the right hue +
@@ -1011,21 +1023,29 @@ mod tests {
     /// here. Captured 2026-06-30; if the rig camera/monitor changes materially, re-capture + update.
     #[test]
     fn real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail() {
+        // REAL per-patch means from the affine-localized `--colour-gate` on the 2026-06-30 rig
+        // recording (D:\_REC\2026-06-30 23-52-46.mkv, 12 frames, localize_failures=0 — the
+        // `colour-dump (localized per-patch mean)` diagnostic). These SUPERSEDE the earlier
+        // fixed-coord values: the old sampler read at fixed canvas coords while the recording is a
+        // camera-of-a-monitor (content shifted/scaled), so it DILUTED every patch with neighbouring
+        // pixels and under-reported the cast (white 29 vs the true 54). The rig has a benign bright
+        // CYAN cast (~203°) on the neutrals — an accepted optical/moiré artifact (same physics as the
+        // dimness), which is why NEUTRAL_CHROMA_MAX is 72 (> the localized peak of 54).
         // PATCH_COLOURS order: white, black, R, G, B, C, M, Y, g0, g64, g128, g192, g255.
         let real: [Rgb; 13] = [
-            Rgb::new(106, 129, 135), // white  — dim, blue cast (chroma 29)
-            Rgb::new(33, 34, 36),    // black
-            Rgb::new(95, 45, 46),    // red    — hue err 1.2°, chroma 50
-            Rgb::new(62, 163, 54),   // green  — hue err 4.4°, chroma 109
-            Rgb::new(29, 41, 132),   // blue   — hue err 7.0°, chroma 103
-            Rgb::new(53, 162, 155),  // cyan   — hue err 3.9°, chroma 109
-            Rgb::new(113, 37, 150),  // magenta— hue err 19.6°, chroma 113
-            Rgb::new(134, 166, 61),  // yellow — hue err 18.3°, chroma 105
-            Rgb::new(37, 46, 42),    // g0
-            Rgb::new(38, 53, 55),    // g64
-            Rgb::new(64, 89, 94),    // g128   — cast chroma 30
-            Rgb::new(96, 122, 131),  // g192   — cast chroma 35
-            Rgb::new(122, 150, 160), // g255   — cast chroma 38 (max neutral cast)
+            Rgb::new(129, 162, 183), // white  — cyan cast, chroma 54 (localized neutral peak)
+            Rgb::new(1, 3, 1),       // black  — chroma 2
+            Rgb::new(57, 3, 7),      // red    — hue 356° (err 4°), chroma 54
+            Rgb::new(61, 176, 38),   // green  — hue 110° (err 10°), chroma 138
+            Rgb::new(0, 1, 68),      // blue   — hue 239° (err 1°), chroma 68
+            Rgb::new(28, 176, 192),  // cyan   — hue 186° (err 6°), chroma 164
+            Rgb::new(106, 7, 153),   // magenta— hue 281° (err 19°), chroma 146
+            Rgb::new(162, 184, 48),  // yellow — hue 70° (err 10°), chroma 136
+            Rgb::new(1, 3, 1),       // g0     — chroma 2
+            Rgb::new(4, 10, 9),      // g64    — chroma 6 (crushed to near-black)
+            Rgb::new(42, 70, 89),    // g128   — cast chroma 47
+            Rgb::new(103, 132, 156), // g192   — cast chroma 53
+            Rgb::new(146, 172, 195), // g255   — cast chroma 49
         ];
         assert_eq!(
             real.len(),
@@ -1057,15 +1077,17 @@ mod tests {
             v_gray.wrong_count()
         );
 
-        // Dead RED channel (r ⇒ 0) ON TOP of the same dim capture ⇒ neutrals gain a huge cyan tint
-        // and the red patch hue-shifts ⇒ FAIL.
+        // Dead RED channel (r ⇒ 0) ON TOP of the same dim capture ⇒ the already-cyan neutrals gain a
+        // huge cyan tint (white → chroma 183), the red patch collapses to near-black, and yellow /
+        // magenta hue-shift ⇒ FAIL. Proves the raised NEUTRAL_CHROMA_MAX(72) still catches a real
+        // channel fault by a wide margin.
         let dead_red: Vec<Option<Rgb>> =
             real.iter().map(|&c| Some(Rgb::new(0, c.g, c.b))).collect();
         let v_dead = verify_samples(&dead_red);
         assert!(!v_dead.is_pass(), "a dead red channel must FAIL");
         assert!(
             v_dead.wrong_count() >= 4,
-            "neutrals tint + red patch hue-shifts: {}",
+            "neutrals tint + red collapses + yellow/magenta hue-shift: {}",
             v_dead.wrong_count()
         );
     }
