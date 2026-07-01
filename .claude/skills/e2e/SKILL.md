@@ -548,6 +548,19 @@ repeated tick is a `copy`; `undecodable` is the direct `None` count. It mirrors 
 definitions but treats a duplicate as a copy, never burn-unreadable. Regression-locked by
 `non_adjacent_freeze_hiding_a_real_drop_still_fails`.
 
+## Verdict ACCOUNTING seam — headline COUNT vs pass/FAIL are separate (safe place to fix over-counts)
+
+The recording-verdict has TWO independent layers; know which you are touching:
+
+- **Pass/FAIL gate** = `NodeVerdict::is_zero()` = `contiguity.is_contiguous() && optical_undecodable==0 && colour_fail==0`, and `is_contiguous()` = `first_id.is_some() && missing_ids.is_empty()` (`burn_contiguity.rs`). **Only `missing_ids` decides zero/not-zero.**
+- **Headline COUNT** = `total_real` / `total_burn_unreadable` = counts over `NodeVerdict.classified[].kind` (`RealDrop` vs `BurnUnreadable`). This is presentation only.
+
+**The safe seam:** re-classifying an id `RealDrop`↔`BurnUnreadable` in `classified` changes the HEADLINE COUNT but NEVER `is_zero()` (a BURN-UNREADABLE id is still in `missing_ids` → still non-contiguous → still FAILs). So an over-count fix that ONLY edits `classified[].kind` and NEVER touches `missing_ids` **cannot create a false ZERO**. This is how #356 was made strict-safe. If you ever need to make a node PASS, you must change `missing_ids` — that is the dangerous path, gate it hard.
+
+**#356 cross-recording reconciliation** (`src/burn_reconcile.rs`, pure Tier-0 kernel): in the shared verdict loop, for the cam1 node only and only when `strih_data.is_some()`, a cam1 id classified `RealDrop` from the clean upstream STRIH recording that IS decoded in the DOWNSTREAM stream recording (`burn_ids_in(stream_frames, burn_cam1_run_id)`) was proven delivered → downgrade to `BurnUnreadable`. SAFETY: an id absent from the stream recording (genuine loss OR 30fps-decimated) is NEVER downgraded — stays `RealDrop`. Gate on `strih_data.is_some()` is load-bearing: without it cam1 falls back to reading the stream recording itself and every id is vacuously "present" → mass false downgrade.
+
+**Any change in `build_and_print_verdict` applies to BOTH fused and merge** — `merge_of_partials_reproduces_the_fused_verdict` asserts the two JSONs are byte-identical. So (a) never make the merge path diverge from fused, and (b) that test's synthetic `window(n, with_stream, cam1_gap_at)` data must stay self-consistent: a cam1 gap that is present downstream is NOT a real drop under #356, so to test a GENUINE real drop inject the gap into BOTH the strih and stream `window()` calls (`Some(g)` on both).
+
 ## Clippy gotcha — `doc_lazy_continuation` under `--all-features`
 
 CI runs `cargo clippy --all-targets --all-features -- -D warnings`. The `doc_lazy_continuation` lint
