@@ -341,7 +341,9 @@ Run-once first-boot service installed + enabled by BOTH builders. Key design dec
 that both `create-usb-linux.sh` AND `build-image.sh` need into `scripts/lib/<name>.sh`; then each
 builder does `install -m 0755 "$SCRIPT_DIR/lib/<name>.sh" "$MOUNT_ROOT/usr/local/sbin/<name>.sh"`.
 Do NOT embed the same script verbatim via heredoc in both builders (the reviewer flagged that as
-important and it was refactored out in commit `6ea08a216`). Current `scripts/lib/` contents:
+important and it was refactored out in commit `6ea08a216`). For **service unit files**, always use
+`install -m 0644 … "$MOUNT_ROOT/etc/systemd/system/<name>.service"` — NOT bare `cp`; `cp` is
+mode-preserving from the source and silently propagates any unusual source mode. Current `scripts/lib/` contents:
 `install-grub-efi.sh`, `rig-heartbeat.sh`, `rig-restore-decision.sh`, `camera-box-grow-root.sh`,
 `disk-guard-thresholds.sh`.
 
