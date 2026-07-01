@@ -104,7 +104,7 @@ fn run_emit(
             // Playout time = now + the frames still queued ahead of ours (ALSA delay) → the real
             // DAC instant this marker sounds, not the enqueue instant. frame_id = the dual-QR id
             // showing at that instant (current painter id — sub-2-frame ring skew is bounded).
-            let delay_frames = pcm.delay().unwrap_or(0) as i64;
+            let delay_frames = pcm.delay().unwrap_or(0);
             let ts = crate::probe::clock_ns(start, wall_clock) + delay_frames * 1_000_000_000 / sr;
             let fid = current_id.load(Ordering::Relaxed);
             log.lock().unwrap().push((index, fid, ts));
