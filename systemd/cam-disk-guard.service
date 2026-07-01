@@ -1,0 +1,19 @@
+[Unit]
+# camera-box fleet disk-space guard — one observation+alert pass (#369).
+# SHIPS DISABLED — installed/enabled/live-verified by the supervisor only. See the README.
+# Pattern mirrors rig-restore-watchdog.service (#281 Fix#3).
+Description=camera-box fleet disk-space guard — one observation+alert pass (#369)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/cam-disk-guard.sh
+# SSH to 3 cam boxes + notify; give it time but never hang the timer.
+TimeoutStartSec=60
+# Credentials (cam root pw) come from the user environment.
+# Set in ~/.config/environment.d/ or an EnvironmentFile if needed:
+#   Environment=CAM_PW=...   (NOT committed)
+
+[Install]
+WantedBy=default.target

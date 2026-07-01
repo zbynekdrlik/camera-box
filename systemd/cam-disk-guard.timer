@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #369 fleet disk-space guard once a day.
+# SHIPS DISABLED — enabled/live-verified by the supervisor only.
+# Pattern mirrors rig-restore-watchdog.timer (#281 Fix#3).
+Description=Run the camera-box fleet disk-space guard daily (#369)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+# Run daily; first fire 10 min after boot so SSH is available.
+OnBootSec=10min
+OnUnitActiveSec=24h
+AccuracySec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

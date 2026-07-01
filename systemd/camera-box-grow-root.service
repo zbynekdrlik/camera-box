@@ -1,0 +1,25 @@
+[Unit]
+# camera-box first-boot root auto-grow (#369).
+# Grows the root partition to fill the disk on first boot so a fresh USB key always uses the
+# full disk. cam4 shipped 3.5G/92%-full on a 57G disk because the partition was never grown;
+# this service prevents that by auto-expanding at first boot via growpart + resize2fs.
+#
+# Safe to leave enabled: ConditionPathExists guards all subsequent boots once the marker is
+# written at /var/lib/camera-box/grow-root.done. Fault-tolerant: exits 0 on any non-fatal
+# failure (e.g. root is not the last partition in an overlay-image layout) so boot is never
+# blocked.
+#
+# SHIPPED ENABLED in the image builders (create-usb-linux.sh + build-image.sh). No manual
+# setup.sh run required.
+Description=camera-box: auto-grow root partition on first boot (#369)
+Documentation=https://github.com/zbynekdrlik/camera-box
+ConditionPathExists=!/var/lib/camera-box/grow-root.done
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/camera-box-grow-root.sh
+
+[Install]
+WantedBy=multi-user.target
