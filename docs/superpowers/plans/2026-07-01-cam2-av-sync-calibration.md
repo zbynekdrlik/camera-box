@@ -113,7 +113,7 @@ mod tests {
     fn detects_two_chirps_at_known_positions() {
         let sr = 48_000;
         let template = generate_chirp(sr, 50, 1000.0, 3000.0);
-        let mut buf = vec![0.0f32; sr as usize * 3]; // 3 s of silence
+        let mut buf = vec![0.0f32; sr as usize * 4]; // 4 s of silence (p2=150k must fit)
         let p1 = 20_000usize;
         let p2 = 150_000usize;
         for (i, &s) in template.iter().enumerate() {
