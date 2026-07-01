@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.179"
+version = "1.7.0-dev.180"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -40,7 +40,7 @@ anyhow = "1"
 # These are ALL pure-Rust, cross-platform crates, so the #193 probe tooling
 # (recording-verdict) builds on Windows too — letting the recording decode run ON
 # stream.lan where the video lives, never downloaded to slow dev1.
-serde_json = { version = "1", optional = true }
+serde_json = "1"
 crc = { version = "3", optional = true }
 qrcode = { version = "0.14", optional = true, features = ["image"] }
 rqrr = { version = "0.9", optional = true }
@@ -87,7 +87,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # build) `dep:drm` resolves to nothing because the dependency does not exist there,
 # so the probe feature still activates the cross-platform crates (image/rqrr/…) while
 # the KMS/fb modules that need drm are cfg(target_os="linux")-gated out.
-probe = ["dep:serde_json", "dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
+probe = ["dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
+
+[[bin]]
+name = "frozen-camera-gate"
+path = "src/bin/frozen-camera-gate.rs"
 
 [[bin]]
 name = "frame-probe"

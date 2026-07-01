@@ -597,6 +597,60 @@ inside `with_rig_restore()` as a shell-level function (bash scoping quirk) so tr
 **Limitation:** nested `with_rig_restore` calls are NOT supported (inner call overwrites the global
 `_wr_restore_once` and breaks the outer guard). Use one wrapper per rig step.
 
+## #365 frozen-camera gate — pre-record freshness check (NDI inputs, not Multiview tile)
+
+**Purpose:** Block a recording run if any camera feed is frozen (stuck NDI repeating the same
+frame), which would produce an undecodable or loss-inflated recording and waste the whole run.
+
+**Step position:** `[4c/8]` — immediately after the burn-ON gate `[4b/8]`, before `StartRecord [5/8]`.
+
+**Why raw NDI inputs, not the Multiview tile:**
+The Multiview tiles on strih contain animating overlays (AbleSet spinner, CG text) that update
+continuously even when the underlying camera NDI is stuck. Hashing a Multiview tile would
+**false-pass** a genuinely frozen camera. Instead we hash the raw OBS source named `NDI cam1`,
+`NDI cam2`, etc. via `GetSourceScreenshot {sourceName: "NDI cam1", imageFormat: "png",
+imageWidth: 320}`. A live-but-dark camera still has sensor noise (hash changes every sample at
+mean luma ~5–7); a frozen NDI repeats identical PNG bytes → STATIC → FAIL.
+
+**Precondition (#276):** the Multiview projector must be OPEN on strih so all raw NDI inputs
+are rendering. A source that is not rendering produces all-black frames (identical hashes) and
+is correctly detected as FROZEN — the right fail-safe to prevent wasting a run on a dead feed.
+
+**Sources checked by default:** `NDI cam1, NDI cam2, NDI cam3, NDI cam5` (the raw strih inputs).
+
+**Threshold:** > 3 consecutive identical hashes = FROZEN. A run of ≤ 3 identical is allowed
+(e.g. sensor temporarily settling). Fail-closed: < 2 successful samples also = FROZEN.
+
+**Components:**
+- `src/frozen_camera.rs` — pure Tier-0 Rust decision (`frozen_cameras(&timelines, threshold)`),
+  unit-tested with `cargo test --lib frozen_camera # airuleset:build-ok`.
+- `src/bin/frozen-camera-gate.rs` — thin CLI binary (default features, no probe deps): reads
+  per-camera hash timeline as JSON from stdin, exits 0 (PASS) or 1 (FROZEN + names).
+- `scripts/frozen-camera-gate.py` — Python OBS-WS harness: connects to strih, captures
+  `--samples` screenshots at `--cadence` seconds, builds the timeline, calls the Rust binary.
+- `tests/harness_frozen_camera_gate.rs` — content-assert guards: recording-e2e.sh references
+  the gate, the Python uses `json.dumps`, the skill documents it.
+- `tests/python/test_frozen_camera_gate.py` — pure Python unit tests (`_hash_png`,
+  `_extract_png`, `_build_timeline_json`).
+
+**Env overrides in recording-e2e.sh:**
+```bash
+FROZEN_CAM_THRESHOLD=3      # consecutive-static threshold (default 3)
+FROZEN_CAM_SAMPLES=8        # samples to collect (default 8 → ~8 s window)
+FROZEN_CAM_SOURCES="NDI cam1,NDI cam2,NDI cam3,NDI cam5"  # sources to check
+FROZEN_GATE_BIN=/path/to/frozen-camera-gate  # binary path (auto-discovered via PROBE_BIN_DIR)
+```
+
+**Binary discovery in frozen-camera-gate.py:**
+1. `--verdict-bin` CLI arg or `FROZEN_GATE_BIN` env var
+2. `$PROBE_BIN_DIR/frozen-camera-gate` (same dir the E2E harness uses for probe tools)
+3. `<repo>/target/release/frozen-camera-gate` (local dev build)
+
+**CI artifact:** `frozen-camera-gate` is built (default features) alongside the probe tools
+and uploaded into the `probe-tools-linux-amd64` artifact.
+
+---
+
 ## Resumable / idempotent per-box decode — `--skip-if-exists` on planner scripts (#281 Part B)
 
 `recording-verdict-on-strih.sh` and `recording-verdict-on-stream.sh` accept:

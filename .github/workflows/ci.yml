@@ -329,20 +329,24 @@ jobs:
           path: target/release/camera-box
 
       # The probe/verdict tools require --features probe and are NOT in the appliance
-      # binary above. Build + upload ALL THREE binaries the recording-e2e harness needs
+      # binary above. Build + upload ALL FOUR binaries the recording-e2e harness needs
       # so a FULL trustworthy rig run can be driven on the dev host WITHOUT a local
       # Tier-0 build (no-local-builds.md, #133):
-      #   recording-verdict — the #186/#198 burn-id contiguity verdict (runs on dev1).
-      #   frame-probe       — the cam2 dual-QR painter ground truth (deployed to cam2).
-      #   camera-box        — the PROBE-featured appliance with the #174 cam1-capture
-      #                       burn (deployed to cam1; the clean prod camera-box above has
-      #                       NO burn). Named camera-box-probe in the artifact so it is
-      #                       never confused with the production camera-box-linux-amd64.
+      #   recording-verdict   — the #186/#198 burn-id contiguity verdict (runs on dev1).
+      #   frame-probe         — the cam2 dual-QR painter ground truth (deployed to cam2).
+      #   camera-box          — the PROBE-featured appliance with the #174 cam1-capture
+      #                         burn (deployed to cam1; the clean prod camera-box above
+      #                         has NO burn). Named camera-box-probe in the artifact so
+      #                         it is never confused with the production binary.
+      #   frozen-camera-gate  — #365 freshness gate (default features, no probe deps).
       - name: Build probe tools (verdict + frame-probe + probe camera-box)
         run: |
           cargo build --release --features probe \
             --bin recording-verdict --bin frame-probe --bin camera-box
           cp target/release/camera-box target/release/camera-box-probe
+
+      - name: Build frozen-camera-gate (default features — #365)
+        run: cargo build --release --bin frozen-camera-gate
 
       - name: Upload probe tools
         uses: actions/upload-artifact@v4
@@ -352,6 +356,7 @@ jobs:
             target/release/recording-verdict
             target/release/frame-probe
             target/release/camera-box-probe
+            target/release/frozen-camera-gate
 
   windows-probe:
     name: Windows probe build (recording-verdict.exe)

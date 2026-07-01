@@ -58,5 +58,12 @@ pub mod recording_span_gate;
 // and applies the returned downgrade to the cam1 node's classification.
 pub mod burn_reconcile;
 
+// #365 — frozen-camera freshness gate (pure decision + hash-timeline analysis). Hashes each
+// camera's raw NDI input from OBS GetSourceScreenshot at ~1 s cadence; a camera whose hash is
+// unchanged for > FREEZE_THRESHOLD consecutive samples is FROZEN. Fail-closed: < 2 successful
+// samples → FROZEN. Pure Rust, no probe deps, so it unit-tests Tier-0; the OBS I/O lives in
+// `scripts/frozen-camera-gate.py`; the thin CLI binary lives in `src/bin/frozen-camera-gate.rs`.
+pub mod frozen_camera;
+
 #[cfg(feature = "probe")]
 pub mod probe;
