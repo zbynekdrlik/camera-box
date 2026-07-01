@@ -59,7 +59,7 @@
 //! dropping the level check is the OPPOSITE of loosening: it removes a check that only ever
 //! false-fails the physically-dim rig, while every real colour fault still fails on hue/chroma.
 
-use crate::colour_scale::{colour_scale_patches, Rect, Rgb, PATCH_COLOURS};
+use crate::colour_scale::{colour_scale_patches, dual_qr_rects, Rect, Rgb, PATCH_COLOURS};
 
 /// A reference patch whose KNOWN colour has chroma (max−min channel) at or above this is treated
 /// as CHROMATIC (the six primaries/secondaries — chroma 255). Below it the patch is NEUTRAL
@@ -79,10 +79,22 @@ pub const GRAYSCALE_CHROMA_MIN: f64 = 40.0;
 pub const HUE_TOL_DEG: f64 = 30.0;
 
 /// A NEUTRAL (white/black/gray) patch must stay near-neutral — sampled chroma above this is an
-/// unexpected colour cast (e.g. a white-balance tint), which FAILS. On the real rig the benign
-/// optical cast measures ≤ 38 chroma across the neutral ramp (white 29, g255 38), so 48 sits above
-/// the rig's natural cast yet well below a real white-balance fault / dead channel (tens to >100).
-pub const NEUTRAL_CHROMA_MAX: f64 = 48.0;
+/// unexpected colour cast (e.g. a white-balance tint), which FAILS.
+///
+/// Calibrated to the REAL rig signal (2026-06-30 recording, affine-localized dual-QR sampling — the
+/// `--colour-gate` `colour-dump` diagnostic). The rig has a benign bright-neutral CYAN cast (~203°)
+/// that is an accepted optical/moiré artifact — the SAME physics as the dimness (the 60 Hz monitor
+/// sampled by the 1/1000 s shutter mid-refresh), NOT a camera fault (the user's explicit call). The
+/// localized neutral cast peaks at **chroma 54** (white 54, g192 53, g255 49, g128 47; the darker
+/// neutrals crush to near-black at chroma ≤ 6). So 72 sits above the rig's natural cast with headroom
+/// for run-to-run optical variance, yet well below a real white-balance fault / dead channel (which
+/// push a neutral's chroma to tens above 90 — a dead channel to 150+). The old 48 was set against
+/// the pre-localization sampler's MISLOCATED (patch-diluted) values (white 29, g255 38) and
+/// false-failed white/g192/g255 on the real localized signal; the fixture
+/// `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail` now locks the localized
+/// values. Raising it here is calibration to the measured real signal, NOT loosening — the HUE gate
+/// (the sharp chromatic discriminator) is unchanged and every real fault still fails on hue/chroma.
+pub const NEUTRAL_CHROMA_MAX: f64 = 72.0;
 
 /// Chroma of an sRGB colour: `max(channel) − min(channel)`, 0 (neutral) .. 255 (pure primary).
 pub fn chroma(c: Rgb) -> f64 {
@@ -239,11 +251,24 @@ impl CameraColourVerdict {
         self.outcomes.iter().filter(|o| o.is_checked()).count()
     }
 
-    /// The camera PASSES colour only when at least one patch was actually CHECKED (fail-closed: a
-    /// frame where every patch was burn-covered / unsamplable proves nothing) AND no checked patch
-    /// has a wrong colour.
+    /// Number of CHROMATIC reference patches (the six R/G/B/C/M/Y primaries/secondaries) actually
+    /// CHECKED (not burn-covered). Only a chromatic patch can reveal a grayscale / desaturated
+    /// camera — the neutrals stay neutral under a luma collapse — so a frame with zero chromatic
+    /// coverage cannot prove the camera is not grayscale. Mirrors
+    /// [`NodeColourSummary::any_chromatic_checked`].
+    pub fn chromatic_checked_count(&self) -> usize {
+        PATCH_COLOURS
+            .iter()
+            .zip(self.outcomes.iter())
+            .filter(|(&c, o)| chroma(c) >= CHROMATIC_EXPECTED_MIN && o.is_checked())
+            .count()
+    }
+
+    /// The camera PASSES colour only when at least one CHROMATIC patch was actually CHECKED
+    /// (fail-closed: a frame where every chromatic patch was burn-covered / unsamplable cannot
+    /// prove the camera is not grayscale) AND no checked patch has a wrong colour.
     pub fn is_pass(&self) -> bool {
-        self.checked_count() > 0 && self.wrong_count() == 0
+        self.chromatic_checked_count() > 0 && self.wrong_count() == 0
     }
 
     /// The wrong-colour patches paired with their table index, for human-readable reporting.
@@ -335,9 +360,284 @@ pub fn verify_rgb_frame(
     ))
 }
 
+// ============================================================================================
+// #364 affine LOCALIZATION — the camera-of-a-monitor fix
+//
+// The fixed-coord sampler above assumes the recording is pixel-identical to the painted canvas. It
+// is NOT: the recording is a broadcast camera filming the cam2 MONITOR, so the painted colour
+// column + dual-QR land SHIFTED + SCALED + slightly keystoned. On the real rig the fixed-coord path
+// therefore reads the WRONG pixels for every patch and FALSE-FAILS a perfectly correct camera (the
+// failure proven to be GEOMETRY, not colour). The fix: derive the canvas→recording affine from the
+// dual-QR corners the probe DETECTS in the recording (paired with the KNOWN canvas QR corners), and
+// sample each colour patch THROUGH that transform. All math is pure (Tier-0), locked by the
+// RED→GREEN test `affine_localization_recovers_patches_where_fixed_coords_misplace_them_364`.
+// ============================================================================================
+
+/// An affine map `(x, y) → (a·x + b·y + tx, c·x + d·y + ty)` from CANVAS coordinates (where the
+/// painter laid the colour column + dual-QR) to RECORDING coordinates (where the camera-of-the-
+/// monitor actually landed that content). Six parameters, so it captures translation, independent
+/// x/y scale, AND the slight shear/keystone of a near-on-axis camera (a full perspective homography
+/// is not needed — the least-squares fit over the eight dual-QR corners averages out the small
+/// residual perspective error).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Affine {
+    pub a: f64,
+    pub b: f64,
+    pub tx: f64,
+    pub c: f64,
+    pub d: f64,
+    pub ty: f64,
+}
+
+impl Affine {
+    /// Map a canvas point to its recording point.
+    pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.a * x + self.b * y + self.tx,
+            self.c * x + self.d * y + self.ty,
+        )
+    }
+
+    /// The inverse map (recording → canvas), or `None` when the linear part is singular (a
+    /// degenerate fit). The sampler needs the inverse to test which canvas patch a recording pixel
+    /// belongs to; a `None` here makes the gate fail closed rather than sample garbage.
+    pub fn inverse(&self) -> Option<Affine> {
+        let det = self.a * self.d - self.b * self.c;
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let (a, b, c, d) = (self.d * inv, -self.b * inv, -self.c * inv, self.a * inv);
+        Some(Affine {
+            a,
+            b,
+            tx: -(a * self.tx + b * self.ty),
+            c,
+            d,
+            ty: -(c * self.tx + d * self.ty),
+        })
+    }
+}
+
+/// Least-squares fit of the [`Affine`] mapping `src[i]` (canvas) → `dst[i]` (recording). Needs ≥3
+/// non-collinear correspondences; the two detected dual-QRs supply 8 corners (well-conditioned).
+/// Returns `None` when there are too few/mismatched points or the normal-equations matrix is
+/// singular (collinear / degenerate points) — the caller then fails closed instead of trusting a
+/// garbage transform.
+pub fn fit_affine(src: &[(f64, f64)], dst: &[(f64, f64)]) -> Option<Affine> {
+    if src.len() < 3 || src.len() != dst.len() {
+        return None;
+    }
+    // Normal equations: the same symmetric 3×3 `m` for both rows, with separate RHS for dst-x / dst-y.
+    let (mut sxx, mut sxy, mut sx, mut syy, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut sxdx, mut sydx, mut sdx) = (0.0, 0.0, 0.0);
+    let (mut sxdy, mut sydy, mut sdy) = (0.0, 0.0, 0.0);
+    for (&(xx, yy), &(dx, dy)) in src.iter().zip(dst.iter()) {
+        sxx += xx * xx;
+        sxy += xx * yy;
+        sx += xx;
+        syy += yy * yy;
+        sy += yy;
+        n += 1.0;
+        sxdx += xx * dx;
+        sydx += yy * dx;
+        sdx += dx;
+        sxdy += xx * dy;
+        sydy += yy * dy;
+        sdy += dy;
+    }
+    let m = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]];
+    let (a, b, tx) = solve3(m, [sxdx, sydx, sdx])?;
+    let (c, d, ty) = solve3(m, [sxdy, sydy, sdy])?;
+    Some(Affine { a, b, tx, c, d, ty })
+}
+
+/// Solve `M·x = r` for a 3×3 `M` by Cramer's rule; `None` when `M` is singular.
+fn solve3(m: [[f64; 3]; 3], r: [f64; 3]) -> Option<(f64, f64, f64)> {
+    let det = det3(m);
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let cx = det3([
+        [r[0], m[0][1], m[0][2]],
+        [r[1], m[1][1], m[1][2]],
+        [r[2], m[2][1], m[2][2]],
+    ]);
+    let cy = det3([
+        [m[0][0], r[0], m[0][2]],
+        [m[1][0], r[1], m[1][2]],
+        [m[2][0], r[2], m[2][2]],
+    ]);
+    let cz = det3([
+        [m[0][0], m[0][1], r[0]],
+        [m[1][0], m[1][1], r[1]],
+        [m[2][0], m[2][1], r[2]],
+    ]);
+    Some((cx / det, cy / det, cz / det))
+}
+
+/// Determinant of a 3×3 matrix.
+fn det3(m: [[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// The four corners (TL, TR, BR, BL) of a rectangle as `f64` points.
+fn rect_corners(r: Rect) -> [(f64, f64); 4] {
+    let (x0, y0) = (r.x as f64, r.y as f64);
+    let (x1, y1) = ((r.x + r.w) as f64, (r.y + r.h) as f64);
+    [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+}
+
+/// The eight canvas-side corners of the two dual-QR halves — left QR then right QR, each in
+/// TL,TR,BR,BL order — the fixed `src` correspondences for [`fit_affine`]. The probe glue pairs
+/// these with the SAME eight corners it detects in the recording (the two QRs sorted left→right by
+/// x, each QR's corners in the same TL,TR,BR,BL winding). `None` for a degenerate layout.
+pub fn canvas_dual_qr_corners(
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+) -> Option<Vec<(f64, f64)>> {
+    let [left, right] = dual_qr_rects(canvas_w, canvas_h, qr_size, top_margin)?;
+    let mut pts = Vec::with_capacity(8);
+    pts.extend_from_slice(&rect_corners(left));
+    pts.extend_from_slice(&rect_corners(right));
+    Some(pts)
+}
+
+/// Fraction inset on EACH side of a patch before sampling THROUGH the affine: only the central
+/// region is averaged, so camera blur at the boundary with the vertically-adjacent patch never
+/// bleeds into the mean. 0.25 keeps the central 50%×50% — ample pixels even for the short patches.
+pub const PATCH_SAMPLE_INSET_FRAC: f64 = 0.25;
+
+/// Localized counterpart of [`sample_patch_means`]: sample every reference patch's mean colour from
+/// a packed RGB8 RECORDING of size `rec_w`×`rec_h`, mapping each CANVAS patch
+/// ([`colour_scale_patches`] over `canvas_w`×`canvas_h`) into the recording through `affine` instead
+/// of assuming pixel-identity. For each patch, its central region (inset by
+/// [`PATCH_SAMPLE_INSET_FRAC`]) is mapped to the recording; the recording pixels whose
+/// inverse-mapped canvas position lands inside that central region — and outside every `exclusions`
+/// rect (exclusions are in CANVAS coords, the known burn geometry) — are averaged. `None` for a
+/// patch with no such pixel. This is the #364 fix for the camera-of-a-monitor framing.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_patch_means_affine(
+    rgb: &[u8],
+    rec_w: u32,
+    rec_h: u32,
+    affine: Affine,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> Vec<Option<Rgb>> {
+    let Some(inv) = affine.inverse() else {
+        // Degenerate transform ⇒ nothing localizable ⇒ every patch unsamplable (fail-closed).
+        return vec![None; PATCH_COLOURS.len()];
+    };
+    colour_scale_patches(canvas_w, canvas_h, qr_size, top_margin)
+        .into_iter()
+        .map(|(rect, _)| {
+            sample_rect_mean_affine(rgb, rec_w, rec_h, rect, &affine, &inv, exclusions)
+        })
+        .collect()
+}
+
+/// Mean of one canvas patch's central region, sampled from the recording through the affine.
+fn sample_rect_mean_affine(
+    rgb: &[u8],
+    rec_w: u32,
+    rec_h: u32,
+    patch: Rect,
+    affine: &Affine,
+    inv: &Affine,
+    exclusions: &[Rect],
+) -> Option<Rgb> {
+    // Central region of the patch in canvas coords (inset to avoid neighbour-bleed under camera blur).
+    let (px, py, pw, ph) = (
+        patch.x as f64,
+        patch.y as f64,
+        patch.w as f64,
+        patch.h as f64,
+    );
+    let (ix, iy) = (PATCH_SAMPLE_INSET_FRAC * pw, PATCH_SAMPLE_INSET_FRAC * ph);
+    let (cx0, cy0, cx1, cy1) = (px + ix, py + iy, px + pw - ix, py + ph - iy);
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return None;
+    }
+    // Recording-space bounding box of the transformed central region (covers any rotation/shear).
+    let (mut rxmin, mut rymin) = (f64::INFINITY, f64::INFINITY);
+    let (mut rxmax, mut rymax) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in &[(cx0, cy0), (cx1, cy0), (cx1, cy1), (cx0, cy1)] {
+        let (rx, ry) = affine.apply(x, y);
+        rxmin = rxmin.min(rx);
+        rxmax = rxmax.max(rx);
+        rymin = rymin.min(ry);
+        rymax = rymax.max(ry);
+    }
+    let x0 = rxmin.floor().max(0.0) as u32;
+    let y0 = rymin.floor().max(0.0) as u32;
+    let x1 = ((rxmax.ceil().max(0.0)) as u32).min(rec_w);
+    let y1 = ((rymax.ceil().max(0.0)) as u32).min(rec_h);
+    let (mut sr, mut sg, mut sb, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for ry in y0..y1 {
+        for rx in x0..x1 {
+            // Inverse-map the recording pixel CENTRE to canvas; keep it only if it lands inside the
+            // patch's central region and outside every (canvas-space) exclusion.
+            let (cx, cy) = inv.apply(rx as f64 + 0.5, ry as f64 + 0.5);
+            if cx < cx0 || cx >= cx1 || cy < cy0 || cy >= cy1 {
+                continue;
+            }
+            if exclusions.iter().any(|e| {
+                cx >= e.x as f64
+                    && cx < (e.x + e.w) as f64
+                    && cy >= e.y as f64
+                    && cy < (e.y + e.h) as f64
+            }) {
+                continue;
+            }
+            let i = (((ry * rec_w) + rx) * 3) as usize;
+            if i + 2 < rgb.len() {
+                sr += rgb[i] as u64;
+                sg += rgb[i + 1] as u64;
+                sb += rgb[i + 2] as u64;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let round = |s: u64| ((s + n / 2) / n) as u8;
+    Some(Rgb::new(round(sr), round(sg), round(sb)))
+}
+
+/// Localized counterpart of [`verify_rgb_frame`]: sample + classify a recording THROUGH the
+/// canvas→recording `affine` (derived from the detected dual-QR corners via [`fit_affine`]). This is
+/// what the probe glue calls on the real rig recording, where the fixed-coord path mis-locates the
+/// column.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_rgb_frame_affine(
+    rgb: &[u8],
+    rec_w: u32,
+    rec_h: u32,
+    affine: Affine,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> CameraColourVerdict {
+    verify_samples(&sample_patch_means_affine(
+        rgb, rec_w, rec_h, affine, canvas_w, canvas_h, qr_size, top_margin, exclusions,
+    ))
+}
+
 /// Per-patch fail tallies across many sampled frames of ONE node's recording, used to reduce
-/// transient single-frame compression noise to a stable per-node verdict.
-#[derive(Clone, PartialEq, Debug)]
+/// transient single-frame compression noise to a stable per-node verdict. Serializable so the #208
+/// per-box extract can carry it through the partial to the dev1 merge (#377).
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeColourSummary {
     /// `patch_wrong_counts[i]` = number of sampled frames on which patch `i` had a WRONG colour.
     pub patch_wrong_counts: Vec<usize>,
@@ -374,10 +674,29 @@ impl NodeColourSummary {
         self.patch_checked_counts.iter().any(|&c| c > 0)
     }
 
-    /// The node PASSES colour only when frames were sampled, at least one patch was checkable, and
-    /// no patch was wrong on a majority of frames (fail-closed: nothing checked proves nothing).
+    /// True when at least one CHROMATIC patch (a primary/secondary — the six R/G/B/C/M/Y) was
+    /// checked on at least one frame. This is the STRONGER coverage requirement the gate needs:
+    /// only a chromatic patch can reveal a grayscale / desaturated camera, because the neutrals
+    /// (white/black/gray) stay neutral under a luma collapse. So a summary that checked ONLY
+    /// neutral patches (every chromatic one burn-covered) cannot prove the camera is not grayscale
+    /// — it is UNVERIFIABLE for the headline colour fault and must fail-closed exactly like no
+    /// coverage at all. Under the central-gap geometry every patch is always checked, so this holds
+    /// whenever [`any_checked`](Self::any_checked) does; requiring it hardens the gate against a
+    /// future geometry change that could burn-cover the chromatic patches while a neutral stays
+    /// visible (which would otherwise let a grayscale camera pass on the neutrals alone).
+    pub fn any_chromatic_checked(&self) -> bool {
+        PATCH_COLOURS
+            .iter()
+            .zip(self.patch_checked_counts.iter())
+            .any(|(&c, &checked)| chroma(c) >= CHROMATIC_EXPECTED_MIN && checked > 0)
+    }
+
+    /// The node PASSES colour only when frames were sampled, at least one CHROMATIC patch was
+    /// checkable (so grayscale is detectable — see [`any_chromatic_checked`](Self::any_chromatic_checked)),
+    /// and no patch was wrong on a majority of frames (fail-closed: no chromatic coverage proves
+    /// nothing about a grayscale camera).
     pub fn is_pass(&self) -> bool {
-        self.frames_sampled > 0 && self.any_checked() && self.fail_count() == 0
+        self.frames_sampled > 0 && self.any_chromatic_checked() && self.fail_count() == 0
     }
 }
 
@@ -589,10 +908,10 @@ mod tests {
         );
         assert!(
             matches!(
-                classify_patch(Rgb::new(63, 0, 0), Some(Rgb::new(63, 0, 0))),
+                classify_patch(Rgb::new(63, 0, 0), Some(Rgb::new(80, 0, 0))),
                 PatchOutcome::NeutralTint { .. }
             ),
-            "expected chroma 63 ⇒ neutral ⇒ its own chroma 63 > NEUTRAL_CHROMA_MAX ⇒ tint"
+            "expected chroma 63 ⇒ neutral path ⇒ a sample chroma 80 > NEUTRAL_CHROMA_MAX(72) ⇒ tint"
         );
 
         // GRAYSCALE_CHROMA_MIN = 40: sampled chroma exactly 40 is NOT grayscale; 39 IS.
@@ -611,20 +930,20 @@ mod tests {
             "sampled chroma 39 is below the floor — grayscale"
         );
 
-        // NEUTRAL_CHROMA_MAX = 48: a neutral patch with sampled chroma exactly 48 is NOT a tint; 49 is.
+        // NEUTRAL_CHROMA_MAX = 72: a neutral patch with sampled chroma exactly 72 is NOT a tint; 73 is.
         assert!(
             !matches!(
-                classify_patch(gray, Some(Rgb::new(176, 128, 128))),
+                classify_patch(gray, Some(Rgb::new(200, 128, 128))),
                 PatchOutcome::NeutralTint { .. }
             ),
-            "neutral sample chroma 48 is at the cap — NOT a tint"
+            "neutral sample chroma 72 is at the cap — NOT a tint"
         );
         assert!(
             matches!(
-                classify_patch(gray, Some(Rgb::new(177, 128, 128))),
+                classify_patch(gray, Some(Rgb::new(201, 128, 128))),
                 PatchOutcome::NeutralTint { .. }
             ),
-            "neutral sample chroma 49 exceeds the cap — tint"
+            "neutral sample chroma 73 exceeds the cap — tint"
         );
 
         // Level is NOT a gate: a chromatic sample far in sRGB distance but with the right hue +
@@ -736,21 +1055,29 @@ mod tests {
     /// here. Captured 2026-06-30; if the rig camera/monitor changes materially, re-capture + update.
     #[test]
     fn real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail() {
+        // REAL per-patch means from the affine-localized `--colour-gate` on the 2026-06-30 rig
+        // recording (D:\_REC\2026-06-30 23-52-46.mkv, 12 frames, localize_failures=0 — the
+        // `colour-dump (localized per-patch mean)` diagnostic). These SUPERSEDE the earlier
+        // fixed-coord values: the old sampler read at fixed canvas coords while the recording is a
+        // camera-of-a-monitor (content shifted/scaled), so it DILUTED every patch with neighbouring
+        // pixels and under-reported the cast (white 29 vs the true 54). The rig has a benign bright
+        // CYAN cast (~203°) on the neutrals — an accepted optical/moiré artifact (same physics as the
+        // dimness), which is why NEUTRAL_CHROMA_MAX is 72 (> the localized peak of 54).
         // PATCH_COLOURS order: white, black, R, G, B, C, M, Y, g0, g64, g128, g192, g255.
         let real: [Rgb; 13] = [
-            Rgb::new(106, 129, 135), // white  — dim, blue cast (chroma 29)
-            Rgb::new(33, 34, 36),    // black
-            Rgb::new(95, 45, 46),    // red    — hue err 1.2°, chroma 50
-            Rgb::new(62, 163, 54),   // green  — hue err 4.4°, chroma 109
-            Rgb::new(29, 41, 132),   // blue   — hue err 7.0°, chroma 103
-            Rgb::new(53, 162, 155),  // cyan   — hue err 3.9°, chroma 109
-            Rgb::new(113, 37, 150),  // magenta— hue err 19.6°, chroma 113
-            Rgb::new(134, 166, 61),  // yellow — hue err 18.3°, chroma 105
-            Rgb::new(37, 46, 42),    // g0
-            Rgb::new(38, 53, 55),    // g64
-            Rgb::new(64, 89, 94),    // g128   — cast chroma 30
-            Rgb::new(96, 122, 131),  // g192   — cast chroma 35
-            Rgb::new(122, 150, 160), // g255   — cast chroma 38 (max neutral cast)
+            Rgb::new(129, 162, 183), // white  — cyan cast, chroma 54 (localized neutral peak)
+            Rgb::new(1, 3, 1),       // black  — chroma 2
+            Rgb::new(57, 3, 7),      // red    — hue 356° (err 4°), chroma 54
+            Rgb::new(61, 176, 38),   // green  — hue 110° (err 10°), chroma 138
+            Rgb::new(0, 1, 68),      // blue   — hue 239° (err 1°), chroma 68
+            Rgb::new(28, 176, 192),  // cyan   — hue 186° (err 6°), chroma 164
+            Rgb::new(106, 7, 153),   // magenta— hue 281° (err 19°), chroma 146
+            Rgb::new(162, 184, 48),  // yellow — hue 70° (err 10°), chroma 136
+            Rgb::new(1, 3, 1),       // g0     — chroma 2
+            Rgb::new(4, 10, 9),      // g64    — chroma 6 (crushed to near-black)
+            Rgb::new(42, 70, 89),    // g128   — cast chroma 47
+            Rgb::new(103, 132, 156), // g192   — cast chroma 53
+            Rgb::new(146, 172, 195), // g255   — cast chroma 49
         ];
         assert_eq!(
             real.len(),
@@ -782,15 +1109,34 @@ mod tests {
             v_gray.wrong_count()
         );
 
-        // Dead RED channel (r ⇒ 0) ON TOP of the same dim capture ⇒ neutrals gain a huge cyan tint
-        // and the red patch hue-shifts ⇒ FAIL.
+        // Dead RED channel (r ⇒ 0) ON TOP of the same dim capture ⇒ the already-cyan neutrals gain a
+        // huge cyan tint (white → chroma 183), the red patch collapses to near-black, and yellow /
+        // magenta hue-shift ⇒ FAIL. Proves the raised NEUTRAL_CHROMA_MAX(72) still catches a real
+        // channel fault by a wide margin.
         let dead_red: Vec<Option<Rgb>> =
             real.iter().map(|&c| Some(Rgb::new(0, c.g, c.b))).collect();
         let v_dead = verify_samples(&dead_red);
         assert!(!v_dead.is_pass(), "a dead red channel must FAIL");
+        // Tight bracket on NEUTRAL_CHROMA_MAX (not just wrong_count ≥ 4, which a raise up to ~194
+        // would leave green): the localized g128 (42,70,89) with red killed → (0,70,89), chroma 89,
+        // must specifically be a NeutralTint. That locks NEUTRAL_CHROMA_MAX < 89 — so together with
+        // the good capture passing (its neutral peak, white/g192 ~53-54, must stay < the cap) the
+        // fixture brackets the threshold to the narrow window (54, 89) around the calibrated 72. A
+        // future raise past 89 (which starts letting a dead-channel neutral through) breaks THIS
+        // assert; the good-capture assert above breaks any drop below the rig's real cast.
+        assert!(
+            matches!(v_dead.outcomes[10], PatchOutcome::NeutralTint { chroma, .. } if chroma == 89.0),
+            "dead-red g128 (chroma 89) must be a NeutralTint (locks NEUTRAL_CHROMA_MAX < 89): {:?}",
+            v_dead.outcomes[10]
+        );
+        assert!(
+            matches!(v_dead.outcomes[0], PatchOutcome::NeutralTint { .. }),
+            "dead-red white (chroma 183) must be a NeutralTint: {:?}",
+            v_dead.outcomes[0]
+        );
         assert!(
             v_dead.wrong_count() >= 4,
-            "neutrals tint + red patch hue-shifts: {}",
+            "neutrals tint + red collapses + yellow/magenta hue-shift: {}",
             v_dead.wrong_count()
         );
     }
@@ -1011,5 +1357,338 @@ mod tests {
         assert!(!s.any_checked(), "no patch was ever checkable");
         assert_eq!(s.fail_count(), 0, "unsamplable patches are not wrong");
         assert!(!s.is_pass(), "colour unverifiable ⇒ fail-closed");
+    }
+
+    #[test]
+    fn only_neutral_patches_checked_is_fail_closed_grayscale_would_otherwise_pass() {
+        // A grayscale / desaturated camera is revealed ONLY by the CHROMATIC patches — the neutrals
+        // stay neutral under a luma collapse. So a summary that checked ONLY neutral patches (every
+        // chromatic one burn-covered) shows no wrong patch even for a grayscale camera; it must
+        // fail-closed, NOT pass on the neutrals alone. (Unreachable under the central-gap geometry
+        // where all 13 patches are always checked; this guards a future geometry change that could
+        // burn-cover the chromatic patches.)
+        let n = PATCH_COLOURS.len();
+        let checked: Vec<usize> = PATCH_COLOURS
+            .iter()
+            .map(|&c| {
+                if chroma(c) >= CHROMATIC_EXPECTED_MIN {
+                    0
+                } else {
+                    3
+                }
+            })
+            .collect();
+        let s = NodeColourSummary {
+            patch_wrong_counts: vec![0; n],
+            patch_checked_counts: checked,
+            frames_sampled: 3,
+        };
+        assert!(s.any_checked(), "the neutral patches WERE checked");
+        assert!(
+            !s.any_chromatic_checked(),
+            "but NO chromatic patch was checkable"
+        );
+        assert_eq!(
+            s.fail_count(),
+            0,
+            "no patch wrong (a grayscale camera looks fine on neutrals)"
+        );
+        assert!(
+            !s.is_pass(),
+            "zero chromatic coverage ⇒ grayscale undetectable ⇒ fail-closed, not a pass"
+        );
+
+        // The per-frame verdict mirrors it: every chromatic patch unsamplable, neutrals passing.
+        let outcomes: Vec<PatchOutcome> = PATCH_COLOURS
+            .iter()
+            .map(|&expected| {
+                if chroma(expected) >= CHROMATIC_EXPECTED_MIN {
+                    PatchOutcome::Unsamplable { expected }
+                } else {
+                    PatchOutcome::Pass
+                }
+            })
+            .collect();
+        let v = CameraColourVerdict { outcomes };
+        assert!(v.checked_count() > 0, "neutrals checked");
+        assert_eq!(v.chromatic_checked_count(), 0, "no chromatic patch checked");
+        assert_eq!(v.wrong_count(), 0);
+        assert!(!v.is_pass(), "zero chromatic coverage ⇒ fail-closed");
+    }
+
+    // ---- #364 affine LOCALIZATION (the camera-of-a-monitor fix) ----
+
+    const EPS: f64 = 1e-6;
+
+    /// Build a synthetic RECORDING by warping `canvas` through `a` (canvas→recording): each recording
+    /// pixel's centre is inverse-mapped to the canvas and nearest-sampled (off-canvas ⇒ black). This
+    /// is what a camera filming the cam2 monitor produces — the painted content shifted/scaled/sheared.
+    fn warp(canvas: &[u8], cw: u32, ch: u32, a: Affine, rw: u32, rh: u32) -> Vec<u8> {
+        let inv = a.inverse().unwrap();
+        let mut rec = vec![0u8; (rw * rh * 3) as usize];
+        for ry in 0..rh {
+            for rx in 0..rw {
+                let (cx, cy) = inv.apply(rx as f64 + 0.5, ry as f64 + 0.5);
+                if cx < 0.0 || cy < 0.0 {
+                    continue;
+                }
+                let (ux, uy) = (cx as u32, cy as u32);
+                if ux >= cw || uy >= ch {
+                    continue;
+                }
+                let si = (((uy * cw) + ux) * 3) as usize;
+                let di = (((ry * rw) + rx) * 3) as usize;
+                rec[di] = canvas[si];
+                rec[di + 1] = canvas[si + 1];
+                rec[di + 2] = canvas[si + 2];
+            }
+        }
+        rec
+    }
+
+    #[test]
+    fn affine_apply_and_inverse_roundtrip() {
+        let a = Affine {
+            a: 1.018,
+            b: 0.01,
+            tx: 76.0,
+            c: -0.008,
+            d: 1.02,
+            ty: 10.0,
+        };
+        let inv = a.inverse().expect("non-singular");
+        for &(x, y) in &[(0.0, 0.0), (840.0, 24.0), (1080.0, 724.0), (1790.0, 700.0)] {
+            let (rx, ry) = a.apply(x, y);
+            let (bx, by) = inv.apply(rx, ry);
+            assert!(
+                (bx - x).abs() < EPS && (by - y).abs() < EPS,
+                "roundtrip ({x},{y}) → ({rx},{ry}) → ({bx},{by})"
+            );
+        }
+        // A singular linear part has no inverse.
+        assert!(Affine {
+            a: 1.0,
+            b: 2.0,
+            tx: 0.0,
+            c: 2.0,
+            d: 4.0,
+            ty: 0.0
+        }
+        .inverse()
+        .is_none());
+    }
+
+    #[test]
+    fn fit_affine_recovers_a_known_affine() {
+        let a = Affine {
+            a: 1.018,
+            b: 0.012,
+            tx: 76.0,
+            c: -0.009,
+            d: 1.021,
+            ty: 11.0,
+        };
+        // The 8 dual-QR corners (canvas) warped by `a` are the perfect correspondences.
+        let src = canvas_dual_qr_corners(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN).unwrap();
+        let dst: Vec<(f64, f64)> = src.iter().map(|&(x, y)| a.apply(x, y)).collect();
+        let fit = fit_affine(&src, &dst).expect("8 non-collinear corners fit");
+        for (got, want) in [
+            (fit.a, a.a),
+            (fit.b, a.b),
+            (fit.tx, a.tx),
+            (fit.c, a.c),
+            (fit.d, a.d),
+            (fit.ty, a.ty),
+        ] {
+            assert!((got - want).abs() < 1e-3, "coeff {got} vs {want}");
+        }
+        // And it predicts a fresh point.
+        let (fx, fy) = fit.apply(960.0, 400.0);
+        let (ax, ay) = a.apply(960.0, 400.0);
+        assert!((fx - ax).abs() < 1e-3 && (fy - ay).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fit_affine_rejects_too_few_or_degenerate_points() {
+        // Fewer than 3 correspondences.
+        assert!(fit_affine(&[(0.0, 0.0), (1.0, 1.0)], &[(0.0, 0.0), (1.0, 1.0)]).is_none());
+        // Mismatched lengths.
+        assert!(fit_affine(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)], &[(0.0, 0.0)]).is_none());
+        // Collinear src (all on y=0) ⇒ singular normal equations.
+        let coll = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)];
+        let dst = [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0), (6.0, 0.0)];
+        assert!(
+            fit_affine(&coll, &dst).is_none(),
+            "collinear ⇒ no unique affine"
+        );
+    }
+
+    #[test]
+    fn affine_localization_recovers_patches_where_fixed_coords_misplace_them_364() {
+        // The recording is a camera-of-a-monitor: the painted canvas lands SHIFTED + SCALED +
+        // slightly sheared, NOT pixel-identical. Fixed canvas-coord sampling then reads the WRONG
+        // pixels (the real-rig flaw that false-failed a correct camera); sampling THROUGH the affine
+        // recovered from the dual-QR corners reads the right patches.
+        let canvas = paint_canvas(CANVAS_W, CANVAS_H, |c| c); // correct colours, full bright
+                                                              // A camera-of-a-monitor warp dominated by a VERTICAL offset+scale (the column sits lower +
+                                                              // stretched in frame). The vertical displacement (≈ one patch height) is what makes the
+                                                              // fixed-coord sampler read the WRONG patch — a purely horizontal shift would only dilute
+                                                              // each patch with BLACK, which preserves hue/chroma and the level-robust gate tolerates it;
+                                                              // cross-PATCH contamination (a neighbour's different colour) is the real rig failure. A small
+                                                              // shear is included so the GREEN path exercises the full six-parameter affine.
+        let a = Affine {
+            a: 1.0,
+            b: 0.005,
+            tx: 12.0,
+            c: 0.002,
+            d: 1.04,
+            ty: 60.0,
+        };
+        let rec = warp(&canvas, CANVAS_W, CANVAS_H, a, CANVAS_W, CANVAS_H);
+
+        // RED witness: the fixed-coord gate mis-locates the warped column and FALSE-FAILS a correct
+        // camera (it samples canvas coords directly on the shifted recording — reading neighbour
+        // patches of the wrong colour).
+        let fixed = verify_rgb_frame(&rec, CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN, &[]);
+        assert!(
+            !fixed.is_pass(),
+            "fixed-coord sampling must mis-locate the warped column (the #364 flaw); \
+             instead it passed: {:?}",
+            fixed.outcomes
+        );
+
+        // GREEN: recover the affine from the DETECTED dual-QR corners (here, the canvas corners
+        // warped by the SAME transform the camera applied — what rqrr reports from the recording),
+        // then sample through it. Every patch is recovered ⇒ the correct camera PASSES.
+        let canvas_corners =
+            canvas_dual_qr_corners(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN).unwrap();
+        let rec_corners: Vec<(f64, f64)> =
+            canvas_corners.iter().map(|&(x, y)| a.apply(x, y)).collect();
+        let fit = fit_affine(&canvas_corners, &rec_corners).expect("8 QR corners fit an affine");
+        let loc = verify_rgb_frame_affine(
+            &rec,
+            CANVAS_W,
+            CANVAS_H,
+            fit,
+            CANVAS_W,
+            CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
+            &[],
+        );
+        assert!(
+            loc.is_pass(),
+            "affine-localized sampling must recover every patch (fails: {:?})",
+            loc.failures().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            loc.checked_count(),
+            PATCH_COLOURS.len(),
+            "every patch sampled after localization"
+        );
+        assert_eq!(loc.wrong_count(), 0, "no patch wrong after localization");
+    }
+
+    #[test]
+    fn affine_localization_still_catches_a_real_grayscale_fault() {
+        // The localization must not become a way to PASS a real fault: a grayscale camera, even
+        // correctly localized, still FAILS (the fix only fixes WHERE we sample, never the verdict).
+        let gray_canvas = paint_canvas(CANVAS_W, CANVAS_H, to_gray);
+        let a = Affine {
+            a: 1.02,
+            b: 0.0,
+            tx: 60.0,
+            c: 0.0,
+            d: 1.02,
+            ty: 8.0,
+        };
+        let rec = warp(&gray_canvas, CANVAS_W, CANVAS_H, a, CANVAS_W, CANVAS_H);
+        let corners = canvas_dual_qr_corners(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN).unwrap();
+        let rec_corners: Vec<(f64, f64)> = corners.iter().map(|&(x, y)| a.apply(x, y)).collect();
+        let fit = fit_affine(&corners, &rec_corners).unwrap();
+        let v = verify_rgb_frame_affine(
+            &rec,
+            CANVAS_W,
+            CANVAS_H,
+            fit,
+            CANVAS_W,
+            CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
+            &[],
+        );
+        assert!(
+            !v.is_pass(),
+            "a grayscale camera must FAIL even when correctly localized"
+        );
+    }
+
+    #[test]
+    fn sample_patch_means_affine_with_identity_matches_fixed_coords() {
+        // The identity affine must reproduce the fixed-coord sampler (modulo the central inset),
+        // proving the localized path is a strict generalization, not a different measurement.
+        let canvas = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
+        let id = Affine {
+            a: 1.0,
+            b: 0.0,
+            tx: 0.0,
+            c: 0.0,
+            d: 1.0,
+            ty: 0.0,
+        };
+        let means = sample_patch_means_affine(
+            &canvas,
+            CANVAS_W,
+            CANVAS_H,
+            id,
+            CANVAS_W,
+            CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
+            &[],
+        );
+        let v = verify_samples(&means);
+        assert!(
+            v.is_pass(),
+            "identity-affine sampling of a correct frame passes"
+        );
+        assert_eq!(v.checked_count(), PATCH_COLOURS.len());
+        // Each patch's mean is exactly its known solid colour (solid patches, central region).
+        for (i, m) in means.iter().enumerate() {
+            assert_eq!(
+                *m,
+                Some(PATCH_COLOURS[i]),
+                "patch {i} mean is its solid colour"
+            );
+        }
+    }
+
+    #[test]
+    fn degenerate_affine_makes_every_patch_unsamplable_fail_closed() {
+        let canvas = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
+        let singular = Affine {
+            a: 1.0,
+            b: 1.0,
+            tx: 0.0,
+            c: 1.0,
+            d: 1.0,
+            ty: 0.0,
+        }; // det = 0
+        let means = sample_patch_means_affine(
+            &canvas,
+            CANVAS_W,
+            CANVAS_H,
+            singular,
+            CANVAS_W,
+            CANVAS_H,
+            QR_SIZE,
+            TOP_MARGIN,
+            &[],
+        );
+        assert!(means.iter().all(|m| m.is_none()), "no patch localizable");
+        assert!(
+            !verify_samples(&means).is_pass(),
+            "a degenerate transform fails closed, never silently passes"
+        );
     }
 }

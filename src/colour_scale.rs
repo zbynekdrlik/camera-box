@@ -166,13 +166,23 @@ pub fn colour_scale_patches(
         .collect()
 }
 
-/// The central captured gap between the two top-anchored dual-QR halves, derived from the SAME
-/// geometry `render_qr_dual_bgra` / `blit_qr_bgra` use: `half = canvas_w / 2`; each QR centered in
-/// its half (`ox = band_x + (band_w − qw) / 2`, `qw = qr_size.min(band_w)`); top-anchored at
-/// `top_margin` over its vertical extent `qh = qr_size.min(canvas_h)`. Returns the gap rectangle
-/// `[left_qr_end, right_qr_start) × [qr_top, qr_top + qr_height)`, or `None` when the layout is
-/// degenerate (a QR half doesn't fit, or the halves leave no gap between them).
-fn dual_qr_gap(canvas_w: u32, canvas_h: u32, qr_size: u32, top_margin: u32) -> Option<Rect> {
+/// The two top-anchored dual-QR halves' pixel rectangles on the canvas, `[left, right]`, derived
+/// from the SAME geometry `render_qr_dual_bgra` / `blit_qr_bgra` use: `half = canvas_w / 2`; each QR
+/// centered in its half (`ox = band_x + (band_w − qw) / 2`, `qw = qr_size.min(band_w)`);
+/// top-anchored at `top_margin` over its vertical extent `qh = qr_size.min(canvas_h)`. `None` for a
+/// degenerate layout (a QR half doesn't fit).
+///
+/// The #364 colour gate uses these KNOWN canvas QR positions as the fixed correspondences for the
+/// affine that localizes the recorded colour column: a camera filming the cam2 monitor lands the
+/// painted content shifted + scaled + slightly keystoned, NOT pixel-identical, so the gate pairs
+/// these canvas QR corners with the QR corners the probe DETECTS in the recording and fits the
+/// canvas→recording transform from them (see `colour_verify::fit_affine`).
+pub fn dual_qr_rects(
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+) -> Option<[Rect; 2]> {
     let half = canvas_w / 2;
     let right_band_w = canvas_w - half;
     // Mirror blit_qr_bgra's `qw = qr.width().min(band_w)` for the left ([0, half)) and right
@@ -183,18 +193,42 @@ fn dual_qr_gap(canvas_w: u32, canvas_h: u32, qr_size: u32, top_margin: u32) -> O
     if qw_l == 0 || qw_r == 0 || qh == 0 {
         return None;
     }
-    let left_qr_end = (half - qw_l) / 2 + qw_l; // band_x = 0
-    let right_qr_start = half + (right_band_w - qw_r) / 2; // band_x = half
+    let left_x = (half - qw_l) / 2; // band_x = 0
+    let right_x = half + (right_band_w - qw_r) / 2; // band_x = half
+                                                    // Mirror qr_origin_y(canvas_h, qh, VAnchor::Top) = top_margin.min(canvas_h − qh).
+    let oy = top_margin.min(canvas_h - qh);
+    Some([
+        Rect {
+            x: left_x,
+            y: oy,
+            w: qw_l,
+            h: qh,
+        },
+        Rect {
+            x: right_x,
+            y: oy,
+            w: qw_r,
+            h: qh,
+        },
+    ])
+}
+
+/// The central captured gap between the two top-anchored dual-QR halves: the rectangle
+/// `[left_qr_end, right_qr_start) × [qr_top, qr_top + qr_height)`, derived from [`dual_qr_rects`] so
+/// there is ONE QR geometry. `None` when the layout is degenerate (a QR half doesn't fit, or the
+/// halves leave no gap between them).
+fn dual_qr_gap(canvas_w: u32, canvas_h: u32, qr_size: u32, top_margin: u32) -> Option<Rect> {
+    let [left, right] = dual_qr_rects(canvas_w, canvas_h, qr_size, top_margin)?;
+    let left_qr_end = left.x + left.w;
+    let right_qr_start = right.x;
     if right_qr_start <= left_qr_end {
         return None; // the halves meet — no gap
     }
-    // Mirror qr_origin_y(canvas_h, qh, VAnchor::Top) = top_margin.min(canvas_h − qh).
-    let oy = top_margin.min(canvas_h - qh);
     Some(Rect {
         x: left_qr_end,
-        y: oy,
+        y: left.y,
         w: right_qr_start - left_qr_end,
-        h: qh,
+        h: left.h,
     })
 }
 

@@ -21,16 +21,27 @@
 //! pixel. Confirmed on the rig by the supervisor when the real fixture lands; the rects here match
 //! the writers' geometry exactly.
 
-use crate::colour_scale::Rect;
+use crate::colour_scale::{Rect, Rgb, PATCH_COLOURS};
 use crate::colour_verify::{
-    summarize_node_colour, verify_rgb_frame, CameraColourVerdict, NodeColourSummary,
+    chroma, fit_affine, hue_deg, sample_patch_means_affine, summarize_node_colour,
+    verify_rgb_frame, verify_samples, CameraColourVerdict, NodeColourSummary,
 };
+use crate::probe::payload::Payload;
 use crate::probe::qr;
 use anyhow::{Context, Result};
-use image::RgbImage;
+use image::{GrayImage, RgbImage};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+/// The cam2 PAINTER canvas the colour column + dual-QR are rendered on (the cam2 monitor is 1080p).
+/// The #364 colour gate maps these CANVAS coordinates into each recording through the affine fit
+/// from the detected dual-QR corners — so a camera-of-a-monitor recording (shifted / scaled / not
+/// pixel-identical, possibly a different resolution) is sampled where the content actually landed,
+/// not at fixed canvas coords. If the cam2 monitor resolution changes, update these (same
+/// convention as `colour_scale`'s test constants; the painter `qr_size`/`top_margin` are passed in).
+pub const PAINTER_CANVAS_W: u32 = 1920;
+pub const PAINTER_CANVAS_H: u32 = 1080;
 
 /// A few px of pad added around every burn-exclusion rectangle, covering the QR quiet zone and any
 /// integer rounding in the canvas-relative geometry, so a burn module never bleeds into a sample.
@@ -136,6 +147,226 @@ pub fn colour_verdict_from_rgb_image(
         top_margin,
         exclusions,
     )
+}
+
+/// Rec.601 luma of a packed-RGB8 frame — what `rqrr` ingests to find the dual-QR finder patterns.
+fn rgb_to_luma(img: &RgbImage) -> GrayImage {
+    let (w, h) = (img.width(), img.height());
+    let src = img.as_raw();
+    let mut out = GrayImage::new(w, h);
+    for (i, px) in out.pixels_mut().enumerate() {
+        let j = i * 3;
+        let (r, g, b) = (src[j] as f32, src[j + 1] as f32, src[j + 2] as f32);
+        *px = image::Luma([(0.299 * r + 0.587 * g + 0.114 * b).round() as u8]);
+    }
+    out
+}
+
+/// Shoelace area of a quad given its 4 corners (winding-agnostic, always ≥ 0).
+fn quad_area(p: &[(f64, f64); 4]) -> f64 {
+    let mut a = 0.0;
+    for i in 0..4 {
+        let (x1, y1) = p[i];
+        let (x2, y2) = p[(i + 1) % 4];
+        a += x1 * y2 - x2 * y1;
+    }
+    (a / 2.0).abs()
+}
+
+/// Reorder 4 quad corners into canonical TL, TR, BR, BL by the sum/difference rule — robust to the
+/// winding `rqrr` reports AND to small camera rotation: TL has min(x+y), BR max(x+y), TR max(x−y),
+/// BL min(x−y). Pairing these with [`canvas_dual_qr_corners`] (also TL,TR,BR,BL) gives correct
+/// correspondences for the affine fit regardless of detection order.
+fn order_corners(p: [(f64, f64); 4]) -> [(f64, f64); 4] {
+    let by = |f: fn((f64, f64)) -> f64, max: bool| -> (f64, f64) {
+        let mut best = p[0];
+        let mut bv = f(p[0]);
+        for &c in &p[1..] {
+            let v = f(c);
+            if (max && v > bv) || (!max && v < bv) {
+                bv = v;
+                best = c;
+            }
+        }
+        best
+    };
+    let tl = by(|c| c.0 + c.1, false);
+    let br = by(|c| c.0 + c.1, true);
+    let tr = by(|c| c.0 - c.1, true);
+    let bl = by(|c| c.0 - c.1, false);
+    [tl, tr, br, bl]
+}
+
+/// Pick the two dual-QR halves from candidate grids described by `(area, centroid_y, centroid_x)`,
+/// returning their indices `[left, right]` ordered left→right by centroid x. The dual-QRs are the two
+/// LARGEST grids in the TOP half of the frame: the four node burns are all bottom-anchored (centroid
+/// below mid-height) and smaller, so they are excluded. `None` when fewer than two top-half
+/// candidates exist (the frame cannot be localized → it is skipped). Pure (no rqrr) — unit-tested.
+fn select_two_dual_qr(items: &[(f64, f64, f64)], frame_h: f64) -> Option<[usize; 2]> {
+    let mut top: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].1 < frame_h / 2.0)
+        .collect();
+    if top.len() < 2 {
+        return None;
+    }
+    // Two LARGEST top-half candidates are the dual-QR halves.
+    top.sort_by(|&a, &b| items[b].0.total_cmp(&items[a].0));
+    top.truncate(2);
+    // Order them left → right by centroid x.
+    top.sort_by(|&a, &b| items[a].2.total_cmp(&items[b].2));
+    Some([top[0], top[1]])
+}
+
+/// A `canvas_w*canvas_h` BGRA buffer → packed-RGB8 `RgbImage` (drops alpha, B/G/R → R/G/B). Used to
+/// feed a re-rendered reference canvas back through `rqrr`.
+fn bgra_to_rgb(bgra: &[u8], canvas_w: u32, canvas_h: u32) -> RgbImage {
+    let mut img = RgbImage::new(canvas_w, canvas_h);
+    for (i, px) in img.pixels_mut().enumerate() {
+        let j = i * 4;
+        *px = image::Rgb([bgra[j + 2], bgra[j + 1], bgra[j]]);
+    }
+    img
+}
+
+/// The two dual-QR halves located in a frame: `(left payload, right payload, 8 corners)` — the
+/// corners are left-half then right-half, each TL,TR,BR,BL.
+type DualQr = (Payload, Payload, Vec<(f64, f64)>);
+
+/// Detect the two dual-QR halves in an RGB frame: returns their decoded payloads `(left, right)` and
+/// their 8 corners (left then right, each TL,TR,BR,BL). The halves are the two LARGEST top-half QR
+/// grids that DECODE — the four node burns are bottom-anchored (excluded by position). `None` when
+/// fewer than two such grids are found (frame cannot be localized → skipped).
+fn detect_dual_qr(img: &RgbImage) -> Option<DualQr> {
+    let luma = rgb_to_luma(img);
+    let frame_h = luma.height() as f64;
+    let mut prepared = rqrr::PreparedImage::prepare(luma);
+    let mut corners: Vec<[(f64, f64); 4]> = Vec::new();
+    let mut payloads: Vec<Payload> = Vec::new();
+    let mut items: Vec<(f64, f64, f64)> = Vec::new();
+    for grid in prepared.detect_grids() {
+        let b = grid.bounds;
+        let c = [
+            (b[0].x as f64, b[0].y as f64),
+            (b[1].x as f64, b[1].y as f64),
+            (b[2].x as f64, b[2].y as f64),
+            (b[3].x as f64, b[3].y as f64),
+        ];
+        if let Ok((_meta, content)) = grid.decode() {
+            if let Some(p) = Payload::decode(&content) {
+                let area = quad_area(&c);
+                let cy = c.iter().map(|q| q.1).sum::<f64>() / 4.0;
+                let cx = c.iter().map(|q| q.0).sum::<f64>() / 4.0;
+                items.push((area, cy, cx));
+                corners.push(c);
+                payloads.push(p);
+            }
+        }
+    }
+    let [li, ri] = select_two_dual_qr(&items, frame_h)?;
+    let mut pts = Vec::with_capacity(8);
+    pts.extend_from_slice(&order_corners(corners[li]));
+    pts.extend_from_slice(&order_corners(corners[ri]));
+    Some((payloads[li], payloads[ri], pts))
+}
+
+/// Sample + classify ONE recorded frame's colour scale, LOCALIZED to where the camera actually
+/// landed the painter canvas — the #364 camera-of-a-monitor fix. The recording is a broadcast camera
+/// filming the cam2 MONITOR, so the painted column does NOT sit at fixed canvas coords.
+///
+/// The canvas→recording affine is derived from the dual-QR fiducials WITHOUT coupling to the QR
+/// renderer's internals (quiet zone, integer-module rounding, sub-`qr_size` render): decode the
+/// recording's two dual-QR payloads, RE-RENDER the reference canvas from those exact payloads via the
+/// same painter path (`render_qr_dual_bgra`), detect the reference's dual-QR corners (the true
+/// CANVAS-frame positions of the very same symbols), and fit reference-corners → recording-corners.
+/// Pairing like-with-like (symbol↔symbol of identical geometry) makes the fit the PURE camera
+/// transform, so sampling the colour column ([`crate::colour_scale::colour_scale_patches`], same
+/// canvas geometry the painter used) through it lands exactly where the camera put it. Returns
+/// `None` when the two
+/// dual-QRs can't be decoded/located or the fit is degenerate — the caller SKIPS the frame
+/// (fail-closed; no fixed-coord fallback, since a mis-located sample is a false signal).
+pub fn colour_verdict_from_rgb_image_localized(
+    img: &RgbImage,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> Option<CameraColourVerdict> {
+    localized_patch_means(img, canvas_w, canvas_h, qr_size, top_margin, exclusions)
+        .map(|m| verify_samples(&m))
+}
+
+/// The localized per-patch MEANS of ONE recorded frame — the colour column sampled THROUGH the
+/// affine fit from the dual-QR fiducials (the method documented on
+/// [`colour_verdict_from_rgb_image_localized`]). `None` when the frame can't be localized. The raw
+/// means feed BOTH the verdict ([`verify_samples`]) and the calibration/diagnostic log, from ONE
+/// sample pass.
+fn localized_patch_means(
+    img: &RgbImage,
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    exclusions: &[Rect],
+) -> Option<Vec<Option<Rgb>>> {
+    let (left, right, rec_corners) = detect_dual_qr(img)?;
+    // Reference canvas: the SAME painter render for these exact payloads. Its detected dual-QR
+    // corners are the true canvas-frame positions of the identical symbols, so the fit is the pure
+    // camera transform (no box-vs-symbol / quiet-zone mismatch).
+    let ref_bgra = qr::render_qr_dual_bgra(&left, &right, canvas_w, canvas_h, qr_size);
+    let ref_rgb = bgra_to_rgb(&ref_bgra, canvas_w, canvas_h);
+    let (_, _, ref_corners) = detect_dual_qr(&ref_rgb)?;
+    let affine = fit_affine(&ref_corners, &rec_corners)?;
+    Some(sample_patch_means_affine(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        affine,
+        canvas_w,
+        canvas_h,
+        qr_size,
+        top_margin,
+        exclusions,
+    ))
+}
+
+/// Log the LOCALIZED per-patch means (averaged across the localized frames) with chroma + hue — the
+/// #364 calibration / diagnostic surface. The strict colour thresholds (`NEUTRAL_CHROMA_MAX`,
+/// `GRAYSCALE_CHROMA_MIN`, `HUE_TOL_DEG`) are set against the REAL rig-localized values; emitting
+/// them every `--colour-gate` run means a future drift (camera/monitor/optics change) is visible in
+/// the log without a code change (`comprehensive-logging`). Always-on at INFO — only ~13 lines.
+fn log_localized_patch_diagnostics(frame_means: &[Vec<Option<Rgb>>]) {
+    for (i, &expected) in PATCH_COLOURS.iter().enumerate() {
+        let samples: Vec<Rgb> = frame_means
+            .iter()
+            .filter_map(|m| m.get(i).copied().flatten())
+            .collect();
+        if samples.is_empty() {
+            tracing::info!(
+                patch = i,
+                expected = ?expected,
+                "colour-dump: patch unsamplable on every localized frame"
+            );
+            continue;
+        }
+        let (sr, sg, sb) = samples.iter().fold((0u32, 0u32, 0u32), |(r, g, b), c| {
+            (r + c.r as u32, g + c.g as u32, b + c.b as u32)
+        });
+        let k = samples.len() as u32;
+        // Round-to-nearest (match the sampler's per-patch mean), so the logged calibration means are
+        // authoritative — the value used to set NEUTRAL_CHROMA_MAX / the fixture, not ≤1 LSB off.
+        let round = |s: u32| ((s + k / 2) / k) as u8;
+        let mean = Rgb::new(round(sr), round(sg), round(sb));
+        tracing::info!(
+            patch = i,
+            expected = ?expected,
+            mean = ?mean,
+            chroma = chroma(mean),
+            hue = ?hue_deg(mean),
+            frames = k,
+            "colour-dump (localized per-patch mean)"
+        );
+    }
 }
 
 /// Native width×height of a recording's first video stream, via `ffprobe`.
@@ -295,32 +526,50 @@ pub fn extract_recording_colour_summary(
     let samples = samples.max(1);
     let (width, height) = probe_dimensions(path)?;
     let duration = probe_duration_secs(path)?;
-    let exclusions = node_burn_exclusions(width, height);
+    // Burn exclusions are in CANVAS space — the affine maps canvas→recording and the localized
+    // sampler tests exclusions against the inverse-mapped canvas coordinate.
+    let exclusions = node_burn_exclusions(PAINTER_CANVAS_W, PAINTER_CANVAS_H);
 
-    let mut verdicts: Vec<CameraColourVerdict> = Vec::with_capacity(samples);
+    let mut frame_means: Vec<Vec<Option<Rgb>>> = Vec::with_capacity(samples);
+    let mut localize_failures = 0usize;
     for i in 0..samples {
         // Sample at the CENTER of each of `samples` equal time slices (avoids the very first/last
         // frame, which can be a partial teardown frame).
         let ts = duration * ((i as f64) + 0.5) / (samples as f64);
         if let Some(img) = decode_one_rgb_frame_at(path, ts, width, height)? {
-            verdicts.push(colour_verdict_from_rgb_image(
+            // Localize via the frame's own dual-QR corners; a frame whose dual-QRs can't be located
+            // is SKIPPED (never sampled at the wrong canvas coords) rather than mis-measured.
+            match localized_patch_means(
                 &img,
+                PAINTER_CANVAS_W,
+                PAINTER_CANVAS_H,
                 qr_size,
                 top_margin,
                 &exclusions,
-            ));
+            ) {
+                Some(means) => frame_means.push(means),
+                None => localize_failures += 1,
+            }
         }
     }
     anyhow::ensure!(
-        !verdicts.is_empty(),
-        "colour gate: could not read ANY frame from {} (cannot verify colour)",
-        path.display()
+        !frame_means.is_empty(),
+        "colour gate: could not localize the dual-QR colour scale in ANY of {} sampled frames of \
+         {} ({} frames had no locatable dual-QR pair) — cannot verify colour",
+        samples,
+        path.display(),
+        localize_failures
     );
+    // Calibration / drift diagnostic: the localized per-patch means (always-on, ~13 INFO lines).
+    log_localized_patch_diagnostics(&frame_means);
+    let verdicts: Vec<CameraColourVerdict> =
+        frame_means.iter().map(|m| verify_samples(m)).collect();
     tracing::info!(
         file = %path.display(),
-        sampled = verdicts.len(),
+        localized = verdicts.len(),
+        localize_failures,
         requested = samples,
-        "colour-scale sampling complete"
+        "colour-scale sampling complete (affine-localized)"
     );
     Ok(summarize_node_colour(&verdicts))
 }
@@ -331,6 +580,8 @@ mod tests {
     use crate::colour_scale::{
         colour_scale_patches, Rgb, DEFAULT_QR_SIZE, PATCH_COLOURS, TOP_MARGIN_PX,
     };
+    use crate::colour_verify::Affine;
+    use crate::probe::payload::Payload;
 
     const W: u32 = 1920;
     const H: u32 = 1080;
@@ -399,6 +650,139 @@ mod tests {
             gray.wrong_count() >= 6,
             "all chromatic patches wrong: {}",
             gray.wrong_count()
+        );
+    }
+
+    // ---- #364 affine LOCALIZATION glue (camera-of-a-monitor) ----
+
+    /// Render the full painter canvas (dual-QR + colour column) to a packed-RGB8 image — exactly
+    /// what the cam2 monitor shows (before any camera warp).
+    fn render_canvas_rgb() -> RgbImage {
+        let left = Payload {
+            run_id: 7,
+            frame_id: 100,
+            gen_ts_ns: 1_700_000_000_000_000_000,
+        };
+        let right = Payload {
+            run_id: 7,
+            frame_id: 101,
+            gen_ts_ns: 1_700_000_000_000_000_001,
+        };
+        let mut bgra = qr::render_qr_dual_bgra(&left, &right, W, H, QR);
+        qr::blit_colour_scale_bgra(&mut bgra, W, H, QR, TM);
+        bgra_to_rgb(&bgra, W, H)
+    }
+
+    /// Warp an RGB image through `a` (canvas→recording) — simulating the camera filming the monitor.
+    fn warp_rgb(src: &RgbImage, a: Affine) -> RgbImage {
+        let inv = a.inverse().unwrap();
+        let (w, h) = (src.width(), src.height());
+        let mut out = RgbImage::new(w, h);
+        for ry in 0..h {
+            for rx in 0..w {
+                let (cx, cy) = inv.apply(rx as f64 + 0.5, ry as f64 + 0.5);
+                if cx < 0.0 || cy < 0.0 {
+                    continue;
+                }
+                let (ux, uy) = (cx as u32, cy as u32);
+                if ux >= w || uy >= h {
+                    continue;
+                }
+                out.put_pixel(rx, ry, *src.get_pixel(ux, uy));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn order_corners_canonicalizes_any_winding() {
+        // A near-axis quad's corners in canonical TL, TR, BR, BL.
+        let canon = [(10.0, 20.0), (110.0, 22.0), (108.0, 122.0), (12.0, 120.0)];
+        // Fed in any rotation/reversal, it must come back canonical.
+        let rotated = [canon[2], canon[3], canon[0], canon[1]];
+        assert_eq!(order_corners(rotated), canon);
+        let reversed = [canon[3], canon[2], canon[1], canon[0]];
+        assert_eq!(order_corners(reversed), canon);
+    }
+
+    #[test]
+    fn select_two_dual_qr_picks_largest_top_half_left_to_right() {
+        // (area, centroid_y, centroid_x): two big top-half QRs + a bottom-anchored burn (excluded by
+        // position) + a small top-half noise grid (excluded by area).
+        let items = vec![
+            (490_000.0, 374.0, 1440.0), // right QR
+            (90_000.0, 889.0, 191.0),   // bottom burn — centroid below mid-height ⇒ excluded
+            (490_000.0, 374.0, 480.0),  // left QR
+            (400.0, 100.0, 910.0),      // top-half noise — smaller than the two QRs ⇒ excluded
+        ];
+        let [li, ri] = select_two_dual_qr(&items, 1080.0).expect("two top-half QRs");
+        assert_eq!(items[li].2, 480.0, "left QR (smaller cx) first");
+        assert_eq!(items[ri].2, 1440.0, "right QR second");
+
+        // Fewer than two top-half candidates ⇒ None (cannot localize).
+        assert!(select_two_dual_qr(&[(490_000.0, 374.0, 480.0)], 1080.0).is_none());
+        assert!(
+            select_two_dual_qr(&[(9e4, 889.0, 191.0), (9e4, 900.0, 1700.0)], 1080.0).is_none(),
+            "all bottom-anchored ⇒ no dual-QR pair"
+        );
+    }
+
+    #[test]
+    fn localized_gate_passes_a_warped_correct_frame_and_fails_grayscale() {
+        // Render the real monitor canvas, then WARP it (shift + scale + slight shear) as a camera
+        // filming the monitor would. rqrr must find the two real dual-QRs, the affine must localize
+        // the colour column, and a CORRECT frame must PASS — proving the fixed-coord false-fail is
+        // cured end-to-end through real QR detection.
+        let canvas = render_canvas_rgb();
+        let ex = node_burn_exclusions(W, H);
+
+        // Sanity: rqrr must locate the two dual-QRs on the un-warped render, and the (near-identity)
+        // localized gate passes — isolates real QR DETECTION from the warp.
+        let v0 = colour_verdict_from_rgb_image_localized(&canvas, W, H, QR, TM, &ex)
+            .expect("dual-QRs detected on the un-warped render");
+        assert!(
+            v0.is_pass(),
+            "un-warped correct frame passes: {:?}",
+            v0.failures().collect::<Vec<_>>()
+        );
+
+        // A clean INTEGER translation (camera framing offset) — keeps the QR modules pixel-aligned so
+        // rqrr detects reliably; the full scale/shear fit is proven in colour_verify's Tier-0 test.
+        let a = Affine {
+            a: 1.0,
+            b: 0.0,
+            tx: 40.0,
+            c: 0.0,
+            d: 1.0,
+            ty: 30.0,
+        };
+        let warped = warp_rgb(&canvas, a);
+        let v = colour_verdict_from_rgb_image_localized(&warped, W, H, QR, TM, &ex)
+            .expect("dual-QRs detected + localized in the shifted frame");
+        assert!(
+            v.is_pass(),
+            "a correct shifted frame PASSES once localized: {:?}",
+            v.failures().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            v.checked_count(),
+            PATCH_COLOURS.len(),
+            "every patch sampled after localization"
+        );
+
+        // Grayscale the warped frame (QRs stay black/white so they still detect; the colour column
+        // collapses) — the gate must still FAIL. Localization fixes WHERE we sample, never the verdict.
+        let mut gray = warped.clone();
+        for px in gray.pixels_mut() {
+            let y =
+                (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32).round() as u8;
+            *px = image::Rgb([y, y, y]);
+        }
+        let vg = colour_verdict_from_rgb_image_localized(&gray, W, H, QR, TM, &ex)
+            .expect("dual-QRs still detected on the grayscale frame");
+        assert!(
+            !vg.is_pass(),
+            "a grayscale camera FAILS even when correctly localized"
         );
     }
 }

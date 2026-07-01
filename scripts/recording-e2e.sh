@@ -680,11 +680,22 @@ BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
 # #11: --capture-fps = the strih recording's rate (the fused fallback reads the cam1 burn from the
 # strih recording). The decimation step for the strih burn (read from the 30fps stream recording)
 # is pinned via --strih-emit-fps / --stream-capture-fps, decoupled from the diagnostic --capture-fps.
+# #364/#377 — the per-camera COLOUR gate (one definition for BOTH the per-box and the legacy paths).
+# ON by default: rig TEST mode paints the #367 colour scale (frame-probe --colour-scale), so every
+# recording carries it and `--colour-gate` HARD-fails the headline on a grayscale / hue-shifted /
+# white-balance-cast camera that the delivery-only verdict would pass. Set COLOUR_GATE=0 for a
+# delivery-only run whose painter does NOT paint the scale (extract would otherwise abort: scale
+# missing). In the per-box path each box samples its OWN recording during extract and carries the
+# summary in its partial (#377 cross-box carry-through); in the legacy fused path the gate samples
+# directly on dev1 where the recordings live.
+CG=""
+if [ "${COLOUR_GATE:-1}" = "1" ]; then CG="--colour-gate"; fi
 VERDICT_ARGS=(--strih "$STRIH_REC" --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
   --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
   --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
   --burn-cam1-run-id "$BURN_CAM1_RUN_ID" \
   --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
+if [ -n "$CG" ]; then VERDICT_ARGS+=("$CG"); fi
 # #178: use `if` blocks for the optional verdict inputs (NOT a `test && append` one-liner) —
 # a FALSE file-test returns non-zero and would `set -e`-abort the script before the verdict;
 # an `if` condition is exempt, so an absent optional recording degrades gracefully (the
@@ -719,6 +730,10 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # pulled back to dev1; the merge runs on dev1 from the two small JSONs (no recording on dev1).
   VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
   OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
+  # $CG (--colour-gate, ON by default unless COLOUR_GATE=0) is defined once above, before
+  # VERDICT_ARGS — see the #364/#377 comment there. Each box's extract samples its OWN recording's
+  # colour and carries the summary in its partial; the dev1 merge applies it (strih rec → cam1,
+  # stream rec → strih+stream) and FAILS the headline on any wrong colour.
   STREAM_REC_WIN="${STREAM_REC_WIN:-<the stream recording AS IT LIVES ON THE STREAM BOX>}"
   STRIH_REC_WIN="${STRIH_REC_WIN:-<the strih recording AS IT LIVES ON THE STRIH BOX>}"
   STRIH_PARTIAL_WIN="$OUT_DIR_WIN\\strih-partial-${RUN_ID}.json"
@@ -741,7 +756,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
     -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$STRIH_CAPTURE_FPS" \
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
-       --out "$STRIH_PARTIAL_WIN"
+       $CG --out "$STRIH_PARTIAL_WIN"
   echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
   echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
   echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
@@ -757,7 +772,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
        --cam2-run-id "$RUN_ID" \
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
        --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
-       --out "$STREAM_PARTIAL_WIN"
+       $CG --out "$STREAM_PARTIAL_WIN"
   echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
   echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
@@ -772,6 +787,11 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
     --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
+  # #377 — pass --colour-gate to the merge too (defense in depth): with it set, a partial that
+  # LACKS its carried colour summary ERRORS LOUDLY ("re-run extract with --colour-gate") instead of
+  # silently skipping a requested gate. The carried summary is honored regardless; this just catches
+  # a stale/forgotten extract. Empty $CG (COLOUR_GATE=0) adds nothing.
+  if [ -n "$CG" ]; then MERGE_ARGS+=("$CG"); fi
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
   # #332 all-cambox: feed the per-segment switch schedule into the MERGE step so the per-cambox
