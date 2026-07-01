@@ -103,6 +103,7 @@ bootstrap_rootfs() {
 tmpfs           /tmp            tmpfs   defaults,noatime,nosuid,nodev,mode=1777  0 0
 tmpfs           /var/log        tmpfs   defaults,noatime,nosuid,nodev,size=64M   0 0
 tmpfs           /var/tmp        tmpfs   defaults,noatime,nosuid,nodev,mode=1777  0 0
+tmpfs           /var/cache      tmpfs   defaults,noatime,nosuid,nodev,mode=0755,size=512M  0 0
 EOF
 
     # Install additional packages
@@ -118,6 +119,7 @@ EOF
         openssh-server \
         curl \
         ca-certificates \
+        cloud-guest-utils \
         ffmpeg
 
     # #295: pin the kernel on the appliance image too — an appliance must never silently gain a new
@@ -145,6 +147,17 @@ install_camera_box() {
     chroot "${WORK_DIR}/rootfs" systemctl enable camera-box.service
     chroot "${WORK_DIR}/rootfs" systemctl enable avahi-daemon.service
     chroot "${WORK_DIR}/rootfs" systemctl enable ssh.service
+
+    # #369: install auto-grow-root first-boot service into the ro-root overlay image.
+    # growpart (from cloud-guest-utils, installed above) expands root on first boot.
+    # Note: the overlay image has 3 partitions (EFI+root+overlay); growpart is fault-tolerant
+    # and writes the marker even when grow/resize is skipped (non-fatal exit).
+    mkdir -p "${WORK_DIR}/rootfs/usr/local/sbin"
+    install -m 0755 "${SCRIPT_DIR}/lib/camera-box-grow-root.sh" \
+        "${WORK_DIR}/rootfs/usr/local/sbin/camera-box-grow-root.sh"
+    install -m 0644 "${SCRIPT_DIR}/../systemd/camera-box-grow-root.service" \
+        "${WORK_DIR}/rootfs/etc/systemd/system/camera-box-grow-root.service"
+    chroot "${WORK_DIR}/rootfs" systemctl enable camera-box-grow-root.service
 
     # Disable conflicting services
     chroot "${WORK_DIR}/rootfs" systemctl mask systemd-timesyncd.service

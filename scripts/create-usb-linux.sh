@@ -151,6 +151,7 @@ EOF
     cat > "$MOUNT_ROOT/etc/fstab" << EOF
 UUID=$ROOT_UUID /         ext4  errors=remount-ro 0 1
 UUID=$EFI_UUID  /boot/efi vfat  umask=0077        0 1
+tmpfs           /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
 EOF
 
     # Create setup script to run inside chroot
@@ -172,7 +173,8 @@ apt-get install -y \
     sudo \
     vim \
     less \
-    dhcpcd-base
+    dhcpcd-base \
+    cloud-guest-utils
 
 # #362: bake the NDI/audio RUNTIME deps into the base image so a fresh clone can RUN camera-box
 # without hand-provisioning. The fresh CAM3 clone (#301 re-image) booted but camera-box crash-looped
@@ -359,6 +361,17 @@ SETUP_EOF
 
     # Clean up setup script
     rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh"
+
+    # #369: install auto-grow-root first-boot service into the rw-root image.
+    # growpart (from cloud-guest-utils, installed above) expands root to fill the disk on first boot
+    # so a fresh USB key always uses the full disk. cam4 shipped 3.5G/92%-full on a 57G disk.
+    # Fault-tolerant: script writes the marker even when grow/resize fails (non-fatal exit).
+    mkdir -p "$MOUNT_ROOT/usr/local/sbin"
+    install -m 0755 "$SCRIPT_DIR/lib/camera-box-grow-root.sh" \
+        "$MOUNT_ROOT/usr/local/sbin/camera-box-grow-root.sh"
+    cp "$SCRIPT_DIR/../systemd/camera-box-grow-root.service" \
+       "$MOUNT_ROOT/etc/systemd/system/camera-box-grow-root.service"
+    chroot "$MOUNT_ROOT" systemctl enable camera-box-grow-root.service
 }
 
 # Cleanup and unmount
