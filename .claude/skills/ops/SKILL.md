@@ -213,6 +213,17 @@ else KEEP so a later pass retries; clearing while an OBS box was unreadable/fail
 still-stranded box), and ALWAYS `airuleset.py notify`. `--dry-run` = observe+decide+log only (never
 clears the marker).
 
+**#370 — distinct alert body + rate-limit for the partial/KEPT case.**
+Two new pure functions in `rig-restore-decision.sh` (unit-tested in `harness_rig_restore_watchdog.rs`):
+- `rig_classify_restore(act, obs_unreadable, obs_failed)` → `kind=positive|partial`. Positive = full
+  restore (0 unreadable, 0 failed → "AUTO-RECOVERED"). Partial = marker KEPT, lower-urgency body.
+- `rig_alert_throttle(kind, current_sig, prior_sig, prior_passes, [N])` → `alert_now=0|1 + new_sig +
+  new_passes`. Positive: always alert. Partial: alert on first occurrence or after `N` passes
+  (default `RIG_ALERT_THROTTLE_PASSES=5`). Sig = `kind:unreadable_names:failed_count`.
+  STATE_FILE extended to `confirm=N / alert_sig=... / alert_passes=N` (key=value; backward-compat:
+  bare-number legacy files are transparently upgraded on next write). Two-write pattern:
+  early write (crash-safe confirm), late write (alert state, only runs when act=1).
+
 **SHIPS DISABLED** — `systemd/rig-restore-watchdog.{service,timer}` committed but NOT installed/
 enabled. The **supervisor** installs, live-verifies (real E2E heartbeat → no act; simulated stranded
 state → detect→restore→alert), then `systemctl --user enable --now rig-restore-watchdog.timer`.
@@ -317,3 +328,39 @@ old --removable core wasn't shim-chained either; cam boxes run SB off). Boot reg
 core, boots it headless over a USB-storage controller, asserts a marker reaches the serial. The cam3
 USB stick (clone of cam4 + cam3 identity, static 10.77.9.63) was built + boot-proven this way before
 hand-off.
+
+## #369 — auto-grow root partition + fleet disk-space guard (PR #384)
+
+**Root cause:** cam4 shipped 3.5G/92%-full on a 57G disk — the partition was written by the image builder
+but NEVER expanded to fill the physical disk. cam1's `/var/cache` tmpfs was 100M/100%-full (pre-#306 era).
+
+**Fix: `systemd/camera-box-grow-root.service` + `scripts/lib/camera-box-grow-root.sh`**
+
+Run-once first-boot service installed + enabled by BOTH builders. Key design decisions:
+
+- **Run-once gate:** `ConditionPathExists=!/var/lib/camera-box/grow-root.done`. Marker written
+  unconditionally at end of script regardless of growpart/resize2fs success. The marker ALWAYS lands
+  so subsequent boots skip the service entirely and boot is never blocked.
+- **Fault-tolerant growpart:** `build-image.sh` creates a 3-partition layout (EFI + root + overlay).
+  Root is NOT the last partition, so `growpart` WILL refuse to expand it (non-zero exit). Script handles
+  this with `growpart … 2>/dev/null && resize2fs … 2>/dev/null || echo "non-fatal"`. The marker is
+  still written. `create-usb-linux.sh` images have root as the last partition — growpart succeeds there.
+- **Unit in `[Unit]` section:** `After=local-fs.target` + `Before=multi-user.target` (ordering explicit
+  so grow happens before any service that needs space).
+
+**`scripts/lib/` is the canonical shared-helper location for both builders.** Extract any bash helper
+that both `create-usb-linux.sh` AND `build-image.sh` need into `scripts/lib/<name>.sh`; then each
+builder does `install -m 0755 "$SCRIPT_DIR/lib/<name>.sh" "$MOUNT_ROOT/usr/local/sbin/<name>.sh"`.
+Do NOT embed the same script verbatim via heredoc in both builders (the reviewer flagged that as
+important and it was refactored out in commit `6ea08a216`). For **service unit files**, always use
+`install -m 0644 … "$MOUNT_ROOT/etc/systemd/system/<name>.service"` — NOT bare `cp`; `cp` is
+mode-preserving from the source and silently propagates any unusual source mode. Current `scripts/lib/` contents:
+`install-grub-efi.sh`, `rig-heartbeat.sh`, `rig-restore-decision.sh`, `camera-box-grow-root.sh`,
+`disk-guard-thresholds.sh`.
+
+**Fleet disk-space guard (SHIPS DISABLED):** `scripts/cam-disk-guard.sh` + `scripts/lib/disk-guard-thresholds.sh`
++ `systemd/cam-disk-guard.{service,timer}` are committed to the repo but NOT installed/enabled — same
+pattern as `systemd/rig-restore-watchdog.{service,timer}` (#281 Fix#3). Enable manually on dev1 when
+ready: `systemctl --user enable --now cam-disk-guard.timer`. Checks CAM1/CAM2/CAM4 only (cam3 excluded,
+#301). Alert threshold: `CAM_DISK_ALERT_THRESHOLD=80` (env-overridable; pure function in
+`scripts/lib/disk-guard-thresholds.sh` makes it Tier-0 unit-testable without SSH).

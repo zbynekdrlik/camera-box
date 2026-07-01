@@ -2,6 +2,25 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-01 — #370 rig-restore-watchdog: distinct partial alert + rate-limit (PR TBD, v1.7.0-dev.179)
+- **Ticket-validator**: STILL_VALID — `rig-restore-watchdog.sh` lacked classification of partial vs positive restores and fired Discord unconditionally on every ~2-min pass while OBS was unreadable.
+- **Part A** — `rig_classify_restore(act, obs_unreadable, obs_failed)` → `kind=positive|partial` in `scripts/lib/rig-restore-decision.sh`. Positive = full restore (0 unreadable, 0 failed). Partial = marker KEPT.
+- **Part B** — `rig_alert_throttle(kind, current_sig, prior_sig, prior_passes)` → `alert_now=0|1 + new_sig + new_passes`. Positive always alerts. Partial throttled to once per N=5 passes (or signature change). State file extended to key=value with `confirm + alert_sig + alert_passes`. Two-write pattern: early (crash-safe confirm) + late (alert state). Backward-compat with legacy bare-number state.
+- **Part C** — 13 new tests in `tests/harness_rig_restore_watchdog.rs`. 60/60 pass. No existing test weakened.
+- **TDD**: RED `7d1527308` → GREEN `8ccf3ef7d`. All Tier-0 checks clean.
+- **No live deploy** — watchdog ships DISABLED; supervisor enables separately.
+
+## 2026-07-01 — #369 auto-grow root + 512M /var/cache in builders + fleet disk-space guard (PR #384, v1.7.0-dev.178)
+- **Ticket-validator**: PARTIAL — setup.sh + setup-device.sh already had 512M /var/cache; image builders (create-usb-linux.sh + build-image.sh) were MISSING it + missing grow-root + missing cloud-guest-utils.
+- **Root cause**: cam4 shipped 3.5G/92%-full on a 57G disk (partition never grown); cam1 /var/cache was 100M/100%-full (old image pre-#306). Both image builders lacked auto-grow AND the uniform 512M /var/cache fstab line.
+- **Part 1 — auto-grow**: New `scripts/lib/camera-box-grow-root.sh` (canonical helper, installed by both builders at `/usr/local/sbin/`). `systemd/camera-box-grow-root.service` (oneshot, `ConditionPathExists=!/var/lib/camera-box/grow-root.done`, `After=local-fs.target`, `Before=multi-user.target`). Fault-tolerant: exits 0 when root is not the last partition (3-partition overlay image layout). Both builders install + enable it.
+- **Part 2 — 512M /var/cache**: Added `tmpfs /var/cache tmpfs defaults,...,size=512M` to fstab heredoc in both builders.
+- **Part 3 — cloud-guest-utils**: Added to `apt-get install -y` in both builders (provides growpart).
+- **Part 4 — fleet disk-space guard (dev1, SHIPS DISABLED)**: `scripts/cam-disk-guard.sh` SSHes CAM1/CAM2/CAM4, checks df /, df /var/cache, fires Discord alert at ≥80%. `scripts/lib/disk-guard-thresholds.sh` is the pure threshold seam (unit-tested). `systemd/cam-disk-guard.{service,timer}` ship DISABLED (same pattern as rig-restore-watchdog #281 Fix#3).
+- **TDD** (content-assertion gate): version bump `2060cae36` → RED `bc7a0a088` (4 new assertions in `tests/appliance_boot_hardening.rs`: tests 13-16) → GREEN `ea771fef9` (implementation) → refactor `6ea08a216` (extract helper to shared file, add Before= per reviewer).
+- **Key decisions**: grow-root helper extracted to `scripts/lib/camera-box-grow-root.sh` (code-review follow-up; was duplicated verbatim in both builders via heredoc, now shared via `install`). `Before=multi-user.target` added to service unit (explicit ordering). cam3 excluded from fleet guard (pending re-image, #301).
+- **Merge**: PR #384 merged `d457746b0ec11d80fac35844fcb404a49d3bf4f2`, main CI all green. No deploy (provisioning-only change; next image built from CI artifact picks up the new service). Closes #369.
+
 ## 2026-07-01 — #356 residual cam1 over-count: cross-recording reconciliation (PR #383, v1.7.0-dev.177)
 - **Scope (rescoped by owner)**: #356's dominant strih/cam2 20080 over-count was already fixed by #360/PR #361; the OWNER rescoped #356 to the RESIDUAL cam1 over-count (~2251 on 354001). Fixed ONLY that; did NOT touch the #360 strih gap-ignore or `src/probe/burn_contiguity.rs` (#216/#226/#267 untouched).
 - **Root cause**: cam1 contiguity is read from the CLEAN strih recording (#133); at the 60→30 hop with ~450ms latency the small cam1 burn QR softens → some cam1 ids UNREADABLE in the strih recording though the frame WAS delivered (present downstream) → wrongly counted REAL DROP, inflating the merge headline.
