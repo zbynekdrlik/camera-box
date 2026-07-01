@@ -452,9 +452,16 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 #   stream records 'NDI 2ME PGM' whose source-name is strih's program NDI name ($STRIH_OUT).
 STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-CAM1 (usb)}"  # cam1's NDI name (NDI cam5 input src)
 TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 for the test
+# #358: delivery-verify gate — set stream box's 'NDI 2ME PGM' to GENLOCK_TEST_LATENCY_MS (1000ms)
+# for the test window, then restore prod A/V-align (450ms) on teardown. The live FIFO audit log
+# read-back (latency_ms= field) confirms the FIFO actually HELD 1000ms (the #292 silent-non-apply
+# gate). Supervisor runs the live rig-validate step; this ships the code + pure-function tests.
+GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-1000}"
+GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}"
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
+echo "      #358: setting $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src=$GENLOCK_TEST_LATENCY_MS for delivery-verify"
 STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
   --program-scene "$STRIH_PROG_SCENE" \
   --upstream "$STRIH_UPSTREAM_NDI" --test-preload "$TEST_PRELOAD")
@@ -468,7 +475,9 @@ STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
 # off PRO, prod_scene takes the bounded switch and fails LOUD at the #328 timeout (no silent hang).
 STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
   --program-scene "$STREAM_PROG_SCENE" \
-  --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD")
+  --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD" \
+  --test-latency-source "$GENLOCK_TEST_LATENCY_SOURCE" \
+  --test-latency-ms "$GENLOCK_TEST_LATENCY_MS")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
