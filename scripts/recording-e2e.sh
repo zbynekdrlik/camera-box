@@ -517,11 +517,33 @@ echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updat
 # it via FROZEN_GATE_BIN or PROBE_BIN_DIR.
 FROZEN_GATE_BIN="${FROZEN_GATE_BIN:-$PROBE_BIN_DIR/frozen-camera-gate}"
 export FROZEN_GATE_BIN
-python3 "$HERE/frozen-camera-gate.py" \
-  --host "$STRIH" \
-  --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
-  --samples   "${FROZEN_CAM_SAMPLES:-8}" \
-  --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam5}"
+# #365/#399 BOUNDED RETRY — the gate must not race the harness's OWN [3/8] cam2 restart: that
+# restart drops cam2's NDI sender, and a strih input bound to that box (the #399 drifted mapping
+# binds 'NDI cam3' to CAM2) HOLDS the last frame while DistroAV reconnects — sampled seconds
+# later the gate reads 8 identical hashes and false-aborts the run (run 7020001, twice,
+# 2026-07-02). A reconnect race clears within a retry; a GENUINELY frozen camera fails every
+# attempt (~2.5 min total) — the per-attempt verdict is untouched, so the gate is NOT weakened.
+FROZEN_CAM_ATTEMPTS="${FROZEN_CAM_ATTEMPTS:-4}"
+FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
+frozen_ok=0
+for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
+  if python3 "$HERE/frozen-camera-gate.py" \
+      --host "$STRIH" \
+      --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
+      --samples   "${FROZEN_CAM_SAMPLES:-8}" \
+      --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam5}"; then
+    frozen_ok=1
+    break
+  fi
+  if [ "$frozen_attempt" -lt "$FROZEN_CAM_ATTEMPTS" ]; then
+    echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} FROZEN — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
+    sleep "$FROZEN_CAM_RETRY_SLEEP"
+  fi
+done
+if [ "$frozen_ok" -ne 1 ]; then
+  echo "    [frozen-camera-gate] FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365)"
+  exit 1
+fi
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
