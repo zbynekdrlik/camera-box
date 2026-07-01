@@ -189,3 +189,54 @@ exclude the glue — follow how `kms.rs` / `painter.rs` are already handled (#28
    - Add edge tests that kill value mutants: a duplicate input (kills `|=`→`^=`/`+=`), an out-of-range
      value (kills a `< N` bound flipped to `<= N` / `if true`), a "skipped" input (kills a filter negation).
    - Unit-returning calls (`vec.sort_unstable()`, `vec.dedup()`) are NOT mutated — don't over-test them.
+
+## Building an OBS PLUGIN from source against the genlock OBS (the #188 A/V-sync dock)
+
+The `windows-genlock.yml` (+ `-fast`) workflow builds a first-party OBS plugin (the vendored
+norihiro `obs-audio-video-sync-dock` at `vendor/av-sync-dock/`, with `deps/quirc`) standalone
+against the from-source genlock OBS. A plugin's CMake does `find_package(libobs)` /
+`find_package(obs-frontend-api)`, which needs the OBS **SDK config packages** — and getting those
+to exist + resolve took 3 CI iterations (#188). The three gotchas, do NOT re-derive:
+
+1. **`libobsConfig.cmake` is installed under the `Development` component with `EXCLUDE_FROM_ALL`.**
+   A plain `cmake --install build_x64` SKIPS it, so the SDK prefix ends up with ZERO `.cmake` files
+   and the plugin's `find_package(libobs)` fails. Fix — install the component explicitly AFTER the
+   normal install:
+   ```bash
+   cmake --install build_x64 --config RelWithDebInfo --prefix "$WS/obs-sdk" --component Development
+   ```
+2. **Broad `CMAKE_PREFIX_PATH`** — `libobsConfig.cmake` has transitive `find_dependency(...)`
+   (w32-pthreads, SIMDe via `cmake/finders/FindSIMDe.cmake`, Threads) whose headers live in the
+   obs-deps roots. Pass EVERY `.deps/*-x64` root of both `vendor/obs-studio` and `vendor/distroav`
+   (semicolon-joined) as the prefix, so SIMDe/Qt6/etc. resolve.
+3. **Explicit `-Dlibobs_DIR` / `-Dobs-frontend-api_DIR`** pointing at the dirs of the found config
+   files (locate with `find "$WS/obs-sdk" -iname 'libobs*config.cmake'`). Fail LOUD if either is
+   missing rather than letting CMake fall back silently.
+
+`vendor/av-sync-dock/CMakeLists.txt` also needs an alias guard so the modern DistroAV template's
+`OBS::obs-frontend-api` satisfies the old template's `OBS::frontend-api`:
+```cmake
+if(NOT TARGET OBS::frontend-api)
+    add_library(OBS::frontend-api ALIAS OBS::obs-frontend-api)
+endif()
+```
+Artifact: the dock DLL + `data/` are staged into the genlock OBS artifact
+(`obs-plugins/64bit/obs-audio-video-sync-dock.dll` + `data/obs-plugins/obs-audio-video-sync-dock/`).
+Download it like any CI artifact (Artifact Download section above).
+
+### Deploying the dock DLL to strih + stream (first-party plugin path)
+
+The dock is a FIRST-PARTY plugin → `C:\Program Files\obs-studio\obs-plugins\64bit\` (NOT ProgramData
+— that's DistroAV's canonical path, see obs-ops #124). Deploy safely (no-destructive-remote-actions):
+1. **Look before overwrite** — the stock norihiro dock already ships on both boxes; back it up first
+   (`Copy-Item …\obs-audio-video-sync-dock.dll C:\Temp\avdock\backup\`).
+2. **Canary** — swap **strih first**, relaunch via `scripts/launch-obs-genlock.sh --box strih --force`,
+   confirm the OBS log shows `[obs-audio-video-sync-dock] plugin loaded (version 0.1.4)` +
+   `[obs-audio-video-sync-dock] quirc (version 1.0)` with render tick ENABLED. Only then do stream.
+3. **Hash-verify** the deployed DLL (`Get-FileHash` == the CI artifact's SHA) after copy.
+4. **Rollback** — if the new DLL fails to load, restore from the `C:\Temp\avdock\backup\` copy.
+
+A cleanly-loading plugin (the log line above) == the dock is registered in the OBS **Docks** menu
+(norihiro's dock uses `obs_frontend_add_dock_by_id` at load); the live A/V-offset readout is the
+operator's self-service step (phone playing the norihiro QR-sync video + hand mic into the Dante
+path). Phase 2 (#188/#145) adds the rig-side cam2 QPSK audio marker so the phone is not needed.
