@@ -287,6 +287,179 @@ def _restore_test_preload(ws, host, state):
     _save_state(state)
 
 
+# ---------------------------------------------------------------------------
+# #358: genlock-latency-delivery hard gate
+# ---------------------------------------------------------------------------
+
+# STATE key under which 'NDI 2ME PGM' per-source latency + gpu_delay filter states
+# are saved so teardown can restore them exactly (#358).
+# Entry per host: {"input": <name>, "latency_ms": <prod value>, "render_delays": [...]}.
+_TEST_LATENCY_STATE_KEY = "test_latency_saved"
+
+# OBS property name for the per-source genlock latency (PROP_GENLOCK_LATENCY_MS_SRC in
+# ndi-source.cpp, DistroAV fork — the "Latency (ms)" slider per source, default 3ms,
+# range [3, 2000]; prod 'NDI 2ME PGM' on stream runs 450ms for A/V-align).
+_GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
+
+# Render-Delay filter kind (OBS filter id "gpu_delay" — gpu-delay.c).
+_GPU_DELAY_KIND = "gpu_delay"
+
+
+def _latency_delivery_ok(set_ms: int, delivered_ms: int, tolerance_ms: int = 100) -> bool:
+    """#358 PURE decision: did the genlock FIFO actually HOLD the configured latency?
+
+    Returns True iff `delivered_ms >= set_ms - tolerance_ms`, i.e. the effective held
+    latency is within `tolerance_ms` below the set value.
+
+    The #292 bug caused the FIFO to be force-drained to ~3-50ms even when 1000ms was
+    configured (the drop-cap was budgeted at canvas fps instead of source arrival fps).
+    A force-drained FIFO at 3-50ms clearly fails this gate (1000-100=900ms threshold).
+
+    Pure function — no I/O, no OBS calls. Tier-0 testable on default features."""
+    return delivered_ms >= set_ms - tolerance_ms
+
+
+def _parse_latency_ms_from_audit_line(line: str):
+    """#358 PURE: parse the EFFECTIVE held latency from a genlock-fifo audit log line.
+
+    Returns the integer value of `latency_ms=N` from a line matching:
+        genlock-fifo audit 'SOURCE': ... latency_ms=N (≈F frames @ fps) src_latency_ms=...
+    or None if the line is not a genlock-fifo audit line.
+
+    NOTE: matches `latency_ms=` NOT `src_latency_ms=` (underscore prefix) — the effective
+    held value (what the FIFO actually delivers) vs the per-source setting stored in OBS.
+    The sed pattern in drift-guard.sh:292 uses the same disambiguation."""
+    import re
+    # Match ' latency_ms=N' (space before) so it does NOT match 'src_latency_ms='.
+    m = re.search(r"genlock-fifo audit '([^']+)'.*? latency_ms=(\d+)", line)
+    if m:
+        return int(m.group(2))
+    return None
+
+
+def _snapshot_and_set_test_latency(ws, host, source_name, test_latency_ms, state):
+    """#358: snapshot the per-source genlock latency + gpu_delay filter states on
+    `source_name` ('NDI 2ME PGM'), set the test latency, and disable any gpu_delay
+    filters so they don't mask the effective FIFO depth in the audit log.
+
+    Saves the snapshot to `state[host][_TEST_LATENCY_STATE_KEY]` (persisted to disk)
+    BEFORE making changes — crash-safe, mirrors the #183 preload pattern. No-op and no
+    state entry when `source_name` is empty. Returns True iff it changed anything."""
+    if not source_name:
+        return False
+
+    # Read current per-source latency.
+    inp_settings = _rpc(ws, "GetInputSettings", {"inputName": source_name},
+                        ignore_err=True).get("inputSettings", {})
+    prod_latency = inp_settings.get(_GENLOCK_SRC_LATENCY_KEY, 3)  # 3ms floor default
+
+    # Read current gpu_delay filters.
+    filter_list = _rpc(ws, "GetSourceFilterList", {"sourceName": source_name},
+                       ignore_err=True).get("filters", [])
+    render_delays = [
+        {
+            "filterName": f["filterName"],
+            "was_enabled": f.get("filterEnabled", True),
+            "delay_ms": f.get("filterSettings", {}).get("delay_ms", 0),
+        }
+        for f in filter_list
+        if f.get("filterKind") == _GPU_DELAY_KIND
+    ]
+
+    if prod_latency == test_latency_ms:
+        sys.stderr.write(
+            f"[obs] {host}: #358 '{source_name}' already at genlock_latency_ms_src="
+            f"{test_latency_ms}; nothing to force\n"
+        )
+        state.setdefault(host, {}).pop(_TEST_LATENCY_STATE_KEY, None)
+        _save_state(state)
+        return False
+
+    # Save snapshot FIRST (crash-safe), THEN apply changes.
+    host_state = state.setdefault(host, {})
+    host_state[_TEST_LATENCY_STATE_KEY] = {
+        "input": source_name,
+        "latency_ms": prod_latency,
+        "render_delays": render_delays,
+    }
+    _save_state(state)
+
+    # Set test latency.
+    _rpc(ws, "SetInputSettings", {
+        "inputName": source_name,
+        "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: test_latency_ms},
+        "overlay": True,
+    }, ignore_err=True)
+
+    # Disable gpu_delay filters so they don't mask the FIFO depth in audit lines.
+    for rd in render_delays:
+        if rd["was_enabled"]:
+            _rpc(ws, "SetSourceFilterEnabled", {
+                "sourceName": source_name,
+                "filterName": rd["filterName"],
+                "filterEnabled": False,
+            }, ignore_err=True)
+
+    sys.stderr.write(
+        f"[obs] {host}: #358 FORCED '{source_name}' genlock_latency_ms_src "
+        f"{prod_latency} -> {test_latency_ms} for delivery-verify test "
+        f"(will restore on teardown)\n"
+    )
+    return True
+
+
+def _restore_test_latency(ws, host, state):
+    """#358: restore the per-source genlock latency + gpu_delay filters saved by
+    _snapshot_and_set_test_latency. No-op when nothing was snapshotted. Emits a LOUD
+    warning (mirroring #246 burn-verify) if the read-back after restore ≠ snapshot —
+    prod A/V-align depends on exact restore. Best-effort; clears state entry always."""
+    host_state = state.get(host, {})
+    saved = host_state.get(_TEST_LATENCY_STATE_KEY)
+    if not saved:
+        return
+
+    source_name = saved.get("input", "")
+    prod_latency = saved.get("latency_ms")
+    render_delays = saved.get("render_delays", [])
+
+    if source_name and prod_latency is not None:
+        # Restore the per-source latency.
+        _rpc(ws, "SetInputSettings", {
+            "inputName": source_name,
+            "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: prod_latency},
+            "overlay": True,
+        }, ignore_err=True)
+
+        # Verify the read-back matches (#246 pattern: LOUD warn on mismatch).
+        readback = _rpc(ws, "GetInputSettings", {"inputName": source_name},
+                        ignore_err=True).get("inputSettings", {})
+        actual = readback.get(_GENLOCK_SRC_LATENCY_KEY)
+        if actual != prod_latency:
+            sys.stderr.write(
+                f"[obs] {host}: #358 WARN mismatch after restore — "
+                f"'{source_name}' genlock_latency_ms_src read-back={actual!r} "
+                f"expected={prod_latency}; prod A/V-align may be off! "
+                f"Manual check required.\n"
+            )
+        else:
+            sys.stderr.write(
+                f"[obs] {host}: #358 RESTORED '{source_name}' genlock_latency_ms_src "
+                f"-> {prod_latency} (prod A/V-align 450ms restored)\n"
+            )
+
+    # Re-enable gpu_delay filters that were enabled before the test.
+    for rd in render_delays:
+        if rd.get("was_enabled"):
+            _rpc(ws, "SetSourceFilterEnabled", {
+                "sourceName": source_name,
+                "filterName": rd["filterName"],
+                "filterEnabled": True,
+            }, ignore_err=True)
+
+    host_state.pop(_TEST_LATENCY_STATE_KEY, None)
+    _save_state(state)
+
+
 def _diverging_locked_keys(certified, probe, keys=_LOCKED_BASELINE_KEYS):
     """#149 self-verify CORE (pure, testable): given the CERTIFIED prod genlock input's
     settings *certified* and the PROBE ingest's effective settings *probe*, return the
@@ -1050,6 +1223,20 @@ def prod_scene(a):
         _force_test_preload(ws, a.host, getattr(a, "upstream", ""),
                             getattr(a, "test_preload", 1), state)
 
+        # #358: SNAPSHOT + SET the per-source genlock latency on the stream-box prod input
+        # ('NDI 2ME PGM', passed via --test-latency-source) to the configured test value
+        # (default 1000ms, env GENLOCK_TEST_LATENCY_MS). Disables gpu_delay (Render-Delay)
+        # filters for the test window so they don't mask the effective FIFO depth in audit
+        # lines. Saved and restored in teardown (prod A/V-align 450ms restored exactly).
+        # The delivery-verify gate (live FIFO audit log read vs set value) is run by the
+        # supervisor against the live rig; this commit ships the code + pure-function tests.
+        _snapshot_and_set_test_latency(
+            ws, a.host,
+            getattr(a, "test_latency_source", ""),
+            getattr(a, "test_latency_ms", 1000),
+            state,
+        )
+
         # #163/#111 FAIL-FAST non-black self-check, POLLED (shared helper): a black program records
         # all-undecodable and wastes the whole run; poll until non-black or the timeout (a cold
         # DistroAV receiver needs longer than a single read to fill its FIFO). Only black AT the
@@ -1077,6 +1264,11 @@ def teardown(a):
     state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
         ws = _conn(a.host, a.password)
+        # #358: restore the prod stream input's per-source genlock latency (450ms A/V-align)
+        # and re-enable any gpu_delay filters that were disabled for the test. BEFORE preload
+        # restore and scene switches so prod is back on its A/V-align config immediately.
+        # LOUD warn if read-back ≠ snapshot (mirrors #246 burn-verify at recording-e2e.sh:316).
+        _restore_test_latency(ws, a.host, state)
         # #183: restore the prod input's genlock_preload that prod-scene forced to the test
         # value, BEFORE anything else, so prod audio-sync is back to its production depth even
         # if a later step warns. No-op when nothing was forced.
@@ -1284,6 +1476,22 @@ def main():
             # (default 1 = the true lowest-latency genlock hop). Only applied when --upstream
             # is also given. The prod value is saved and restored on teardown.
             p.add_argument("--test-preload", type=int, default=1)
+            # #358: the OBS ndi_source input on the stream box whose per-source genlock
+            # latency is SET to --test-latency-ms for the delivery-verify gate. Typically
+            # 'NDI 2ME PGM' (prod stream box A/V-align at 450ms). Omitted ⇒ no latency set.
+            # env: GENLOCK_TEST_LATENCY_SOURCE (set by recording-e2e.sh for the stream hop).
+            p.add_argument(
+                "--test-latency-source",
+                default=os.environ.get("GENLOCK_TEST_LATENCY_SOURCE", ""),
+            )
+            # #358: per-source genlock latency to SET for the delivery-verify test window.
+            # Default 1000ms (the rescoped #358 value, well above the A/V-align 450ms).
+            # env: GENLOCK_TEST_LATENCY_MS (overridable in recording-e2e.sh).
+            p.add_argument(
+                "--test-latency-ms",
+                type=int,
+                default=int(os.environ.get("GENLOCK_TEST_LATENCY_MS", "1000")),
+            )
         if name == "setup":
             p.add_argument("--upstream", required=True)
             # #91: mark a TERMINAL box — one whose Main Output feeds NO downstream OBS
