@@ -15,6 +15,10 @@
 #
 # Supports standard partition naming: /dev/sda2, /dev/nvme0n1p2, /dev/mmcblk0p2.
 set -uo pipefail
+# NOTE: -e (exit-on-error) is deliberately ABSENT. Without it, growpart/resize2fs
+# failures are non-fatal and the unconditional `touch "$MARKER"` at the end always
+# runs. Do NOT add -e here — it would break the fault-tolerant "always write marker"
+# contract and risk blocking boot on the 3-partition overlay image layout.
 
 MARKER=/var/lib/camera-box/grow-root.done
 [ -f "$MARKER" ] && exit 0

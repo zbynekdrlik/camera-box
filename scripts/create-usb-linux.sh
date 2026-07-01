@@ -369,8 +369,8 @@ SETUP_EOF
     mkdir -p "$MOUNT_ROOT/usr/local/sbin"
     install -m 0755 "$SCRIPT_DIR/lib/camera-box-grow-root.sh" \
         "$MOUNT_ROOT/usr/local/sbin/camera-box-grow-root.sh"
-    cp "$SCRIPT_DIR/../systemd/camera-box-grow-root.service" \
-       "$MOUNT_ROOT/etc/systemd/system/camera-box-grow-root.service"
+    install -m 0644 "$SCRIPT_DIR/../systemd/camera-box-grow-root.service" \
+        "$MOUNT_ROOT/etc/systemd/system/camera-box-grow-root.service"
     chroot "$MOUNT_ROOT" systemctl enable camera-box-grow-root.service
 }
 
