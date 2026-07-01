@@ -230,6 +230,32 @@ struct Args {
     /// is bounded independent of the recording length). Default [`colour_sample::DEFAULT_COLOUR_SAMPLES`].
     #[arg(long, default_value_t = camera_box::probe::colour_sample::DEFAULT_COLOUR_SAMPLES)]
     colour_samples: usize,
+    /// #188 A/V-SYNC MODE — measure the video↔audio offset from a recording that carries BOTH the
+    /// cam2 dual-QR video AND the mbc audio marker (the stream OBS recording). Requires
+    /// `--av-marker-log` (the cam2 emitter's `index,frame_id,emit_ts_ns` CSV). Prints the offset
+    /// (video − audio, ms) and exits — a standalone mode, not part of the zero-loss verdict.
+    #[arg(long)]
+    av_sync: Option<PathBuf>,
+    /// #188 A/V-sync: path to the cam2 QPSK emit log (`index,frame_id,emit_ts_ns`) from the painter's
+    /// `--marker-log`. Required with `--av-sync`.
+    #[arg(long)]
+    av_marker_log: Option<PathBuf>,
+    /// #188 A/V-sync: which audio track of the recording carries the mbc marker (0-based). The stream
+    /// OBS records multiple tracks; pick the one with the hand-mic. Default 0.
+    #[arg(long, default_value_t = 0)]
+    av_audio_track: u32,
+    /// #188 A/V-sync: QPSK preamble detection threshold (0..1). Lower = more sensitive on a weak/
+    /// noisy mic'd recording. Default 0.35.
+    #[arg(long, default_value_t = 0.35)]
+    av_threshold: f64,
+    /// #188 A/V-sync: minimum clustered markers required to report an offset. Default 4.
+    #[arg(long, default_value_t = 4)]
+    av_min_matched: usize,
+    /// #188 A/V-sync: half-width (ms) of the offset cluster window. Candidate offsets within
+    /// ±this of the densest band are the real markers; the rest (false decodes, wrong-lap matches)
+    /// are rejected. Default 60.
+    #[arg(long, default_value_t = 60.0)]
+    av_cluster_tol_ms: f64,
 }
 
 impl Args {
@@ -1520,6 +1546,52 @@ fn decode_for(path: Option<&Path>, expected_node_burns: &[u32]) -> Result<Option
     }))
 }
 
+/// #188 A/V-SYNC MODE — measure + report the video↔audio offset from one recording.
+fn run_av_sync(args: &Args) -> Result<()> {
+    let recording = args.av_sync.as_ref().expect("av_sync set");
+    let marker_log_path = args.av_marker_log.as_ref().context(
+        "--av-sync requires --av-marker-log <cam2 emit log CSV (index,frame_id,emit_ts_ns)>",
+    )?;
+    let marker_csv = std::fs::read_to_string(marker_log_path)
+        .with_context(|| format!("read av marker log {}", marker_log_path.display()))?;
+    let params = camera_box::qpsk_marker::AudioParams::rig60();
+    let report = camera_box::probe::av_sync_recording::av_sync_from_recording(
+        recording,
+        &marker_csv,
+        &params,
+        args.av_audio_track,
+        args.av_threshold,
+        args.av_min_matched,
+        args.av_cluster_tol_ms,
+    )?;
+    // The measured offset + the latency ADJUSTMENT it implies: ADD this (signed) to the video
+    // source's current genlock latency to zero the offset (offset > 0 ⇒ video lags ⇒ negative
+    // adjust). Reported as a raw signed delta — the operator applies it to THEIR current value,
+    // then clamps to the genlock range via required_delay_ms (a clamped absolute here would hide
+    // the sign whenever the unknown current delay isn't passed in).
+    let json = serde_json::json!({
+        "av_offset_ms": report.offset.offset_ms,
+        "mad_ms": report.offset.mad_ms,
+        "matched": report.offset.matched,
+        "candidates": report.candidates,
+        "audio_markers_decoded": report.audio_markers,
+        "video_ticks": report.video_ticks,
+        "emit_rows": report.emit_rows,
+        "video_fps": report.fps,
+        "latency_adjust_ms": -report.offset.offset_ms,
+    });
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    tracing::info!(
+        av_offset_ms = report.offset.offset_ms,
+        mad_ms = report.offset.mad_ms,
+        matched = report.offset.matched,
+        audio_markers = report.audio_markers,
+        video_ticks = report.video_ticks,
+        "A/V-sync offset measured (video − audio; >0 = video lags audio)"
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1541,6 +1613,9 @@ fn main() -> Result<()> {
     }
     if !args.merge_partials.is_empty() {
         return run_merge(&args);
+    }
+    if args.av_sync.is_some() {
+        return run_av_sync(&args);
     }
 
     tracing::info!(

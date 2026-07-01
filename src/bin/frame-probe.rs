@@ -117,19 +117,22 @@ struct Args {
     canvas_w: u32,
     #[arg(long, default_value_t = 1080)]
     canvas_h: u32,
-    /// #188: emit an A/V-sync chirp on the cam2 USB audio output at the marker cadence.
-    /// Use with --paint-only. The emitted (frame_id, wall_ts_ns) pairs are written to
-    /// --marker-log for offline latency estimation.
+    /// #188: emit the QR-based (QPSK, norihiro-compatible) A/V-sync audio marker on the cam2 HDMI
+    /// audio output at the marker cadence. Use with --paint-only. The emitted
+    /// (index, frame_id, emit_ts_ns) rows are written to --marker-log so recording-verdict can pair
+    /// a decoded audio index → its dual-QR frame → the A/V offset.
     #[arg(long, default_value_t = false)]
     audio_marker: bool,
-    /// ALSA device string for the A/V-sync chirp (enumerate with `aplay -l` on the camera box).
-    #[arg(long, default_value = "hw:CARD=cam2usb,DEV=0")]
+    /// ALSA device string for the QPSK A/V-sync marker. Default = the cam2 monitor HDMI out
+    /// (card0 USB is the intercom, held exclusively by camera-box). Enumerate with `aplay -l`.
+    #[arg(long, default_value = "hw:CARD=PCH,DEV=3")]
     audio_marker_device: String,
-    /// Emit the A/V-sync chirp every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
+    /// Emit the QPSK marker every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
     #[arg(long, default_value_t = 300)]
     audio_marker_cadence_ticks: u64,
-    /// With --audio-marker: write the emitted-marker CSV (`frame_id,emit_wall_ts_ns`) to this
-    /// path. scp it back to dev1 for offline A/V-latency estimation. Omitted ⇒ no log written.
+    /// With --audio-marker: write the emitted-marker CSV (`index,frame_id,emit_ts_ns`) to this
+    /// path. scp it back to dev1 so recording-verdict can pair audio index → frame → A/V offset.
+    /// Omitted ⇒ no log written.
     #[arg(long)]
     marker_log: Option<PathBuf>,
 }
