@@ -26,6 +26,10 @@ pub mod recording_verdict;
 // the recording set above; the JUDGEMENT is the Tier-0 `colour_verify` module.
 pub mod colour_sample;
 
+// #188 — A/V-sync offset from a recording (ffmpeg audio extract + cam2 dual-QR video + the pure
+// qpsk_marker decode/pair/offset). Cross-platform like the recording set, so it runs on stream.lan.
+pub mod av_sync_recording;
+
 // #193: the probe HARDWARE GLUE is Linux-only — fb (/dev/fb0 + libc ioctl), kms/presenter
 // (drm page-flip), painter (fb+evdev), reader/multi_reader (v4l), run (drives all of them).
 // None are needed by recording-verdict (its transitive set is recording/recording_verdict/

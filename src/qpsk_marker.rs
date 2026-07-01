@@ -417,9 +417,97 @@ pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
     ((current_delay_ms as f64 - offset_ms).round() as i32).clamp(3, 2000)
 }
 
+/// Align time-ordered decoded audio markers `(audio_ts_s, index)` to the ordered emit log
+/// `(index, frame_id, _)`, returning `(frame_id, audio_ts_s)` per matched marker.
+///
+/// The QPSK index wraps every 256, so a global index→frame_id map is ambiguous over a long run.
+/// Both sequences follow the SAME wrapping 0..255 order (the emitter increments; the recording plays
+/// them in time), so we walk them in lockstep: for each audio marker, find the next emit row with a
+/// matching index within one lap. This tolerates a DROPPED audio marker (skips its emit row) and a
+/// spurious/false audio decode (no match within a lap ⇒ that audio marker is skipped, `j` unmoved).
+pub fn pair_audio_to_frameids(emit_log: &[(u8, u32, i64)], audio: &[(f64, u8)]) -> Vec<(u32, f64)> {
+    let mut out = Vec::new();
+    let mut j = 0usize;
+    for &(ts, idx) in audio {
+        let end = (j + 300).min(emit_log.len()); // ≤ ~1 lap of look-ahead
+        let mut k = j;
+        while k < end && emit_log[k].0 != idx {
+            k += 1;
+        }
+        if k < end && emit_log[k].0 == idx {
+            out.push((emit_log[k].1, ts));
+            j = k + 1;
+        }
+    }
+    out
+}
+
+/// Linear-interpolate the video time of a target cam2 `frame_id` from the recorded dual-QR
+/// `(tick, video_ts_s)` samples (sorted ascending by tick, first occurrence per tick). video_ts
+/// rises monotonically with tick, so interpolation recovers the time of a frame_id the (e.g. 30fps)
+/// recording never sampled exactly — better than snapping to the nearest tick (±1 frame). `None` if
+/// `fid` is outside the sampled range or there are no samples.
+pub fn interp_video_ts(samples: &[(u32, f64)], fid: u32) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    match samples.binary_search_by_key(&fid, |&(t, _)| t) {
+        Ok(i) => Some(samples[i].1),
+        Err(i) => {
+            if i == 0 || i >= samples.len() {
+                return None; // out of the sampled range — don't extrapolate
+            }
+            let (t0, v0) = samples[i - 1];
+            let (t1, v1) = samples[i];
+            if t1 == t0 {
+                return Some(v0);
+            }
+            let frac = (fid - t0) as f64 / (t1 - t0) as f64;
+            Some(v0 + frac * (v1 - v0))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interp_video_ts_exact_and_between() {
+        let s = [(100u32, 1.0f64), (130, 2.0), (160, 3.0)]; // 30 ticks per 1.0 s
+        assert_eq!(interp_video_ts(&s, 100), Some(1.0)); // exact
+        assert_eq!(interp_video_ts(&s, 130), Some(2.0)); // exact
+        assert_eq!(interp_video_ts(&s, 115), Some(1.5)); // halfway between 100 and 130
+        assert_eq!(interp_video_ts(&s, 90), None); // below range
+        assert_eq!(interp_video_ts(&s, 200), None); // above range
+        assert!(interp_video_ts(&[], 100).is_none());
+    }
+
+    #[test]
+    fn pairs_audio_to_frameids_in_order_with_drops_and_wrap() {
+        // emit log: indices 254,255,0,1,2 → frame_ids 1000..1004 (wraps 255→0)
+        let emit = vec![
+            (254u8, 1000u32, 0i64),
+            (255, 1001, 0),
+            (0, 1002, 0),
+            (1, 1003, 0),
+            (2, 1004, 0),
+        ];
+        // audio: markers 254,255,1,2 in time order (index 0 DROPPED)
+        let audio = vec![(1.0f64, 254u8), (6.0, 255), (16.0, 1), (21.0, 2)];
+        let pairs = pair_audio_to_frameids(&emit, &audio);
+        // dropped index 0 must not misalign the rest
+        assert_eq!(
+            pairs,
+            vec![(1000, 1.0), (1001, 6.0), (1003, 16.0), (1004, 21.0)]
+        );
+        // a spurious audio index not in the log is skipped without breaking alignment
+        let audio2 = vec![(1.0f64, 254u8), (2.0, 99), (6.0, 255)];
+        assert_eq!(
+            pair_audio_to_frameids(&emit, &audio2),
+            vec![(1000, 1.0), (1001, 6.0)]
+        );
+    }
 
     #[test]
     fn av_offset_from_index_pairs() {
