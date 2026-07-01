@@ -43,11 +43,10 @@ pub fn cam1_real_drops_proven_delivered_downstream<I>(
 where
     I: IntoIterator<Item = u32>,
 {
-    // STUB (RED — #356): reconciliation not yet implemented. Returns nothing to downgrade, matching
-    // the pre-#356 behaviour (every strih REAL DROP stays REAL DROP). Replaced by the real
-    // intersection in the GREEN commit.
-    let _ = (real_drop_ids.into_iter().count(), downstream_cam1_ids.len());
-    BTreeSet::new()
+    real_drop_ids
+        .into_iter()
+        .filter(|id| downstream_cam1_ids.contains(id))
+        .collect()
 }
 
 #[cfg(test)]

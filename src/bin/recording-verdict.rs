@@ -3303,9 +3303,15 @@ mod tests {
         // REAL cam1 DROP: cam1's contiguity source is the STRIH recording (#133); a forward gap
         // (id 5005 missing from frame 5 on) is a real cam1 drop ⇒ NOT zero ⇒ FAIL. Merge agrees.
         // Same full-length span so the FAIL is the cam1 drop, not the #373 duration floor.
+        // #356: the gap must ALSO be absent from the DOWNSTREAM stream recording, or the new
+        // cross-recording reconciliation (correctly) reads the id as delivered-downstream and
+        // re-classifies it BURN-UNREADABLE — which is not a REAL DROP. To keep this a GENUINE real
+        // drop (absent from BOTH recordings, the case the reconciliation must never mask), inject
+        // the SAME gap into the stream frames too. (The dedicated #356 reconciliation RED/GREEN +
+        // SAFETY tests lock the downgrade and the never-mask invariant.)
         let (drop, drop_pass) = run_both(
             window(FULL_SPAN_FRAMES, false, Some(5)),
-            window(FULL_SPAN_FRAMES, true, None),
+            window(FULL_SPAN_FRAMES, true, Some(5)),
         );
         assert!(!drop_pass, "#208: a real cam1 drop ⇒ overall FAIL");
         assert_eq!(drop["full_chain"]["zero_loss"], serde_json::json!(false));
