@@ -643,3 +643,36 @@ fixed (a boundary impossibly far in the future re-latches).
   lock-step): `max_ts > wall_now + interval`, `source->genlock_backward_steps++`,
   `source->genlock_in_backward_step = true`/`= false`. (The pre-#269 token was
   `source->async_frames.array[0]->timestamp > wall_now + interval` — replaced by the max-ts trigger.)
+
+## Per-source latency WebSocket API + delivery gate (#358)
+
+**OBS WebSocket key for per-source genlock latency:** `genlock_latency_ms_src`
+(from `PROP_GENLOCK_LATENCY_MS_SRC` in `vendor/distroav/src/ndi-source.cpp:38`).
+Use with `GetInputSettings` / `SetInputSettings` (`overlay=true`).
+
+**Render-Delay filter kind:** `gpu_delay`
+(from `.id = "gpu_delay"` in `vendor/obs-studio/plugins/obs-filters/gpu-delay.c:348`).
+Use with `GetSourceFilterList` / `SetSourceFilterEnabled`.
+
+**CI delivery gate — `_latency_delivery_ok(set_ms, delivered_ms, tolerance_ms=100):`**
+In `scripts/obs_phase2.py`. Returns `delivered_ms >= set_ms - tolerance_ms`.
+The #292 bug force-drained the FIFO to ~3-50ms even at 1000ms setting → threshold 1000-100=900ms
+clearly catches it. This pure function is Tier-0 testable (no OBS calls).
+CI proves the code; the SUPERVISOR runs the live rig verify (set 1000ms on prod `NDI 2ME PGM`,
+measure actual delivery, restore 450ms A/V-align).
+
+**Snapshot+restore pattern (mirrors `_TEST_PRELOAD_STATE_KEY`):**
+`_TEST_LATENCY_STATE_KEY = "test_latency_saved"` in `scripts/obs_phase2.py`.
+Save BEFORE changing (crash-safe), restore in `teardown()` BEFORE `_restore_test_preload`
+(prod A/V-align back first), read-back verify with LOUD WARN on mismatch (#246 burn-verify pattern).
+CLI env: `GENLOCK_TEST_LATENCY_SOURCE` / `GENLOCK_TEST_LATENCY_MS` (default 1000);
+wired into `recording-e2e.sh`.
+
+**prod A/V-align on stream:** `NDI 2ME PGM` runs 450ms `genlock_latency_ms_src`. Must be restored
+EXACTLY after any test window. Re-pin drift-guard `genlock_source_latency=NDI 2ME PGM=450` ONLY
+on deliberate A/V-align rollout, NOT on drift.
+
+**Audit line disambiguation (see also #357):** `latency_ms=N` (space before) = effective held
+value; `src_latency_ms=M` (underscore prefix) = per-source setting. The regex
+`r"genlock-fifo audit '([^']+)'.*? latency_ms=(\d+)"` (space before `latency_ms`) captures the
+effective, not the setting.
