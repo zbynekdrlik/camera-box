@@ -237,6 +237,16 @@ pub fn should_emit_marker(refresh_tick: u64, cadence_ticks: u64) -> bool {
     cadence_ticks > 0 && refresh_tick > 0 && refresh_tick.is_multiple_of(cadence_ticks)
 }
 
+/// Minimum ALSA playback ring size (in frames) to emit a bursty A/V-sync chirp of
+/// `chirp_frames` cleanly on ANY output device. The WHOLE chirp must fit in the ring so
+/// a single blocking write never underruns mid-chirp — the #188 HDMI XRUN: a fixed
+/// 1024-frame ring with a 2400-frame (50 ms @ 48 kHz) chirp played the FIRST marker then
+/// stalled (XRUN not recovering on the HDMI device, unlike USB). Size the ring from the
+/// chirp: round up to a power of two ≥ the chirp, then double for restart headroom.
+pub fn marker_buffer_frames(_chirp_frames: usize) -> i64 {
+    1024 // RED stub: the old fixed ring — smaller than a 2400-frame chirp (fixed below)
+}
+
 /// Serialize `(frame_id, emit_wall_ts_ns)` pairs as a CSV string.
 /// Round-trips with [`parse_marker_log`].
 pub fn serialize_marker_log(entries: &[(u32, i64)]) -> String {
@@ -311,6 +321,26 @@ mod tests {
         let template = generate_chirp(48_000, 50, 1000.0, 3000.0);
         let buf = vec![0.0f32; 48_000];
         assert!(detect_chirp_onsets(&buf, &template, 0.4, template.len()).is_empty());
+    }
+
+    #[test]
+    fn marker_buffer_holds_whole_chirp() {
+        // #188 HDMI XRUN: the ALSA ring MUST hold the whole chirp so one write never
+        // underruns mid-chirp. A 50 ms @ 48 kHz chirp is 2400 frames; the old fixed
+        // 1024-frame ring was smaller and stalled after the FIRST marker on HDMI.
+        let chirp_frames = generate_chirp(48_000, 50, 1000.0, 3000.0).len(); // 2400
+        let buf = marker_buffer_frames(chirp_frames);
+        assert!(
+            buf >= chirp_frames as i64,
+            "ring {buf} must hold the whole {chirp_frames}-frame chirp (#188 HDMI XRUN)"
+        );
+        // at least one chirp of headroom so a clean restart never truncates the next marker
+        assert!(
+            buf >= 2 * chirp_frames as i64,
+            "ring {buf} wants ≥1 chirp of restart headroom"
+        );
+        // a tiny chirp still yields a usable (nonzero) ring
+        assert!(marker_buffer_frames(1) >= 1);
     }
 
     fn markers(times: &[f64]) -> Vec<EmittedMarker> {
