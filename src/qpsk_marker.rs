@@ -335,9 +335,137 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
     out
 }
 
+/// Serialize the emitter's marker log as CSV `index,frame_id,emit_ts_ns`, one row per marker.
+/// recording-verdict reads this to map a decoded audio `index` → the dual-QR `frame_id` shown when
+/// it played, then to that frame's video time. Pure so the round-trip is Tier-0 tested.
+pub fn serialize_qpsk_marker_log(markers: &[(u8, u32, i64)]) -> String {
+    let mut s = String::from("index,frame_id,emit_ts_ns\n");
+    for (idx, fid, ts) in markers {
+        s.push_str(&format!("{idx},{fid},{ts}\n"));
+    }
+    s
+}
+
+/// Parse `serialize_qpsk_marker_log` output back to `(index, frame_id, emit_ts_ns)`. The header row
+/// and any blank/malformed line are skipped (robust to a truncated file).
+pub fn parse_qpsk_marker_log(csv: &str) -> Vec<(u8, u32, i64)> {
+    let mut out = Vec::new();
+    for line in csv.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("index") {
+            continue;
+        }
+        let mut it = line.split(',');
+        if let (Some(a), Some(b), Some(c)) = (it.next(), it.next(), it.next()) {
+            if let (Ok(idx), Ok(fid), Ok(ts)) = (
+                a.trim().parse::<u8>(),
+                b.trim().parse::<u32>(),
+                c.trim().parse::<i64>(),
+            ) {
+                out.push((idx, fid, ts));
+            }
+        }
+    }
+    out
+}
+
+/// A/V offset estimate from index-paired (video_ts, audio_ts) samples (salvaged from the scrapped
+/// chirp `av_sync`; the QPSK path pairs by exact decoded index, so no timing search is needed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AvOffset {
+    /// median(video_ts − audio_ts) in ms; > 0 = video LAGS audio (reduce genlock delay).
+    pub offset_ms: f64,
+    /// number of index-paired markers used.
+    pub matched: usize,
+    /// median absolute deviation (ms) — spread / confidence of the estimate.
+    pub mad_ms: f64,
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// A/V offset from index-paired `(video_ts_s, audio_ts_s)` markers. The QPSK index pairs each audio
+/// marker to its exact dual-QR frame, so each pair yields a direct offset (video − audio); median +
+/// MAD reject the odd mis-decode. `None` if fewer than `min_matched` pairs.
+pub fn av_offset_ms(pairs: &[(f64, f64)], min_matched: usize) -> Option<AvOffset> {
+    if pairs.len() < min_matched.max(1) {
+        return None;
+    }
+    let off: Vec<f64> = pairs.iter().map(|(v, a)| (v - a) * 1000.0).collect();
+    let offset_ms = median(&mut off.clone());
+    let mut dev: Vec<f64> = off.iter().map(|x| (x - offset_ms).abs()).collect();
+    let mad_ms = median(&mut dev);
+    Some(AvOffset {
+        offset_ms,
+        matched: pairs.len(),
+        mad_ms,
+    })
+}
+
+/// Required genlock video-delay to zero the measured offset. `offset_ms = video − audio`; positive
+/// (video lags) → REDUCE the delay. Clamped to the genlock range [3, 2000] ms.
+pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
+    ((current_delay_ms as f64 - offset_ms).round() as i32).clamp(3, 2000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn av_offset_from_index_pairs() {
+        // video at 1,5,9,13 s; audio 300 ms earlier each → +300 ms (video lags audio).
+        let pairs = [(1.0, 0.7), (5.0, 4.7), (9.0, 8.7), (13.0, 12.7)];
+        let e = av_offset_ms(&pairs, 4).unwrap();
+        assert!((e.offset_ms - 300.0).abs() < 1e-6, "offset {}", e.offset_ms);
+        assert_eq!(e.matched, 4);
+        assert!(e.mad_ms < 1e-6);
+        // one wild mis-decode must not move the median
+        let noisy = [
+            (1.0, 0.7),
+            (5.0, 4.7),
+            (9.0, 8.7),
+            (13.0, 12.7),
+            (17.0, 0.0),
+        ];
+        let e2 = av_offset_ms(&noisy, 4).unwrap();
+        assert!(
+            (e2.offset_ms - 300.0).abs() < 1.0,
+            "median moved: {}",
+            e2.offset_ms
+        );
+        assert!(av_offset_ms(&pairs, 5).is_none()); // too few
+    }
+
+    #[test]
+    fn required_delay_sign_and_clamp() {
+        assert_eq!(required_delay_ms(1000, 120.0), 880); // video lags → reduce
+        assert_eq!(required_delay_ms(1000, -120.0), 1120); // video leads → increase
+        assert_eq!(required_delay_ms(1000, 5000.0), 3); // clamp low
+        assert_eq!(required_delay_ms(1000, -5000.0), 2000); // clamp high
+    }
+
+    #[test]
+    fn qpsk_marker_log_round_trips() {
+        let log = vec![
+            (0u8, 123u32, 1_000_000i64),
+            (200, 456, -42),
+            (255, 4_000_000, 9_999_999_999),
+        ];
+        let parsed = parse_qpsk_marker_log(&serialize_qpsk_marker_log(&log));
+        assert_eq!(parsed, log);
+        // header-only / blank input → empty, no panic
+        assert!(parse_qpsk_marker_log("index,frame_id,emit_ts_ns\n\n").is_empty());
+    }
 
     #[test]
     fn crc4_roundtrip_matches_norihiro() {

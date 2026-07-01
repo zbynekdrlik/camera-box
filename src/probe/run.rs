@@ -53,14 +53,14 @@ pub struct RunConfig {
     /// CSV (`tick,gen_ts_ns`) — the cam→strih ground truth consumed by
     /// `recording-verdict --painter` (#105). `None` ⇒ no log written.
     pub paint_log: Option<String>,
-    /// #188: enable A/V-sync chirp emission on the ALSA device at `audio_marker_cadence_ticks`.
+    /// #188: enable QPSK A/V-sync marker emission on the ALSA device at `audio_marker_cadence_ticks`.
     pub audio_marker: bool,
-    /// ALSA device string for the A/V-sync chirp (e.g. `hw:CARD=cam2usb,DEV=0`).
+    /// ALSA device string for the QPSK marker (cam2 HDMI out, e.g. `hw:CARD=PCH,DEV=3`).
     pub audio_marker_device: String,
-    /// Emit the chirp every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
+    /// Emit the QPSK marker every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
     pub audio_marker_cadence_ticks: u64,
     /// Optional path for `run_paint_only` to write the A/V-sync marker log CSV
-    /// (`frame_id,emit_wall_ts_ns`). `None` ⇒ no log written.
+    /// (`index,frame_id,emit_ts_ns`). `None` ⇒ no log written.
     pub marker_log: Option<PathBuf>,
 }
 
@@ -261,15 +261,14 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
         })
     };
 
-    // #188: spawn the audio-marker thread when enabled.
+    // #188: spawn the QPSK A/V-sync marker thread when enabled (norihiro-compatible QR-based audio,
+    // continuous-feed — supersedes the chirp). Rig 60fps params (48 kHz / 442 Hz / c=1).
     let audio_emitter = if cfg.audio_marker {
-        let chirp = crate::av_sync::ChirpParams::default();
-        let sample_rate = 48_000u32;
+        let params = crate::qpsk_marker::AudioParams::rig60();
         Some(
-            crate::probe::audio_marker_io::AudioMarkerEmitter::spawn(
+            crate::probe::qpsk_emit::QpskEmitter::spawn(
                 cfg.audio_marker_device.clone(),
-                sample_rate,
-                chirp,
+                params,
                 current_id.clone(),
                 refresh_out.clone(),
                 stop.clone(),
@@ -297,10 +296,10 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     if let Some(emitter) = audio_emitter {
         let marker_entries = emitter.join();
         if let Some(path) = &cfg.marker_log {
-            let csv = crate::av_sync::serialize_marker_log(&marker_entries);
+            let csv = crate::qpsk_marker::serialize_qpsk_marker_log(&marker_entries);
             std::fs::write(path, csv)
                 .with_context(|| format!("write marker log {}", path.display()))?;
-            tracing::info!(path = %path.display(), markers = marker_entries.len(), "marker log written");
+            tracing::info!(path = %path.display(), markers = marker_entries.len(), "qpsk marker log written");
         }
     }
 

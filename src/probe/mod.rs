@@ -33,8 +33,6 @@ pub mod colour_sample;
 // cross-platform). Gating them on cfg(target_os="linux") lets the verdict cross-build for
 // Windows (so the #193 decode runs ON stream.lan), while the Linux probe build is unchanged.
 #[cfg(target_os = "linux")]
-pub mod audio_marker_io;
-#[cfg(target_os = "linux")]
 pub mod fb;
 #[cfg(target_os = "linux")]
 pub mod kms;
@@ -44,6 +42,9 @@ pub mod multi_reader;
 pub mod painter;
 #[cfg(target_os = "linux")]
 pub mod presenter;
+// #188: continuous-feed QPSK A/V-sync marker emitter (norihiro-compatible; replaced the chirp).
+#[cfg(target_os = "linux")]
+pub mod qpsk_emit;
 #[cfg(target_os = "linux")]
 pub mod reader;
 #[cfg(target_os = "linux")]

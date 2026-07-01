@@ -528,3 +528,26 @@ assumption in code — make the emit device a flag and document the OBS-side rou
    `src/probe/qpsk_emit.rs` (continuous feed, RED→GREEN) + recording-verdict decode (RED→GREEN) +
    scrap the chirp code. → merge → deploy cam2 appliance → verify a phone-free A/V-sync ms off the
    recording, and (Decision 3) the dock reading the cam2 marker live.
+
+---
+
+## DECISION UPDATE (user, 2026-07-01 evening) — Decision 1 → OPTION A (adapt the custom dock to OUR dual-QR)
+
+The user chose: the CUSTOM dock (#188) reads **OUR dual-QR Vernier** (video) + **OUR QPSK audio** +
+genlock telemetry — the true "custom version for our needs". This OVERRIDES Decision 1's original
+recommendation (which kept norihiro's QR and deferred adapting the dock's video reader).
+
+Consequences for the build:
+
+- The dock's VIDEO reader is customized to decode our dual-QR payload
+  (`P{run_id}.{frame_id}.{gen_ts}.{crc32}`, `src/probe/payload.rs`), NOT norihiro's `q=,i=,f=,c=` QR.
+  cam2 does NOT paint a norihiro QR → the guarded zero-loss dual-QR gate stays untouched (this is WHY
+  option A was chosen over B).
+- The AUDIO stays the norihiro-compatible QPSK modem (proven, §2.1) but is PAIRED to OUR `frame_id`
+  (the QPSK index maps to our dual-QR frame_id). cam2 emits QPSK on HDMI `hw:CARD=PCH,DEV=3`.
+- PRESERVE the phone/norihiro method: the custom dock MUST still support norihiro's original QR+audio
+  so the user's CURRENT phone-based manual sync keeps working (do NOT break his existing workflow —
+  his explicit fear). Dock decodes BOTH formats.
+- DEPLOY DISCIPLINE: do NOT deploy a changed dock DLL right before an event/rehearsal. Build +
+  CI-verify + verify against a recording first; deploy only when proven — never risk the working dock
+  before a scheduled use.
