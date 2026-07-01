@@ -4,6 +4,7 @@ use anyhow::Result;
 use camera_box::probe::analyzer::PaintMode;
 use camera_box::probe::run::{run, RunConfig};
 use clap::Parser;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
@@ -130,7 +131,7 @@ struct Args {
     /// With --audio-marker: write the emitted-marker CSV (`frame_id,emit_wall_ts_ns`) to this
     /// path. scp it back to dev1 for offline A/V-latency estimation. Omitted ⇒ no log written.
     #[arg(long)]
-    marker_log: Option<String>,
+    marker_log: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {

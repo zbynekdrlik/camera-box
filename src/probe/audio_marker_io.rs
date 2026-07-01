@@ -108,8 +108,15 @@ fn open_playback(device: &str, sample_rate: u32) -> Result<PCM> {
         hwp.set_rate(sample_rate, ValueOr::Nearest)?;
         hwp.set_format(Format::s16())?;
         hwp.set_access(Access::RWInterleaved)?;
+        hwp.set_period_size(256i64, ValueOr::Nearest)?;
+        hwp.set_buffer_size(256i64 * 4)?;
         pcm.hw_params(&hwp)?;
     }
-    pcm.prepare()?;
+    {
+        let swp = pcm.sw_params_current()?;
+        swp.set_start_threshold(256i64)?;
+        swp.set_avail_min(256i64)?;
+        pcm.sw_params(&swp)?;
+    }
     Ok(pcm)
 }

@@ -5,6 +5,7 @@ use crate::probe::painter::{run_painter, PaintParams};
 use crate::probe::presenter::PresenterKind;
 use crate::probe::reader::{run_reader, ReadParams};
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -60,7 +61,7 @@ pub struct RunConfig {
     pub audio_marker_cadence_ticks: u64,
     /// Optional path for `run_paint_only` to write the A/V-sync marker log CSV
     /// (`frame_id,emit_wall_ts_ns`). `None` ⇒ no log written.
-    pub marker_log: Option<String>,
+    pub marker_log: Option<PathBuf>,
 }
 
 /// The painter's default frame rate (frames/sec) when the user did not pass an
@@ -297,8 +298,9 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
         let marker_entries = emitter.join();
         if let Some(path) = &cfg.marker_log {
             let csv = crate::av_sync::serialize_marker_log(&marker_entries);
-            std::fs::write(path, csv).with_context(|| format!("write marker log {path}"))?;
-            tracing::info!(path = %path, markers = marker_entries.len(), "marker log written");
+            std::fs::write(path, csv)
+                .with_context(|| format!("write marker log {}", path.display()))?;
+            tracing::info!(path = %path.display(), markers = marker_entries.len(), "marker log written");
         }
     }
 
