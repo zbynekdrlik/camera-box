@@ -878,9 +878,10 @@ fn build_node_colour_fail(
     // and samples the recording below.
     if let Some(summary) = carried {
         anyhow::ensure!(
-            summary.any_checked(),
-            "colour gate: the carried colour summary for node {} had NO checkable patch (the colour \
-             scale was missing / fully burn-covered in that box's recording) — cannot verify colour",
+            summary.any_chromatic_checked(),
+            "colour gate: the carried colour summary for node {} had NO checkable CHROMATIC patch \
+             (the colour scale was missing / its R/G/B/C/M/Y patches were fully burn-covered in that \
+             box's recording) — cannot verify colour / detect a grayscale camera",
             spec.node
         );
         return Ok(summary.fail_count());
@@ -910,9 +911,10 @@ fn build_node_colour_fail(
         camera_box::colour_scale::TOP_MARGIN_PX,
     )?;
     anyhow::ensure!(
-        summary.any_checked(),
-        "colour gate: no colour patch was checkable in {} for node {} — the colour scale is \
-         missing or fully burn-covered (cannot verify colour)",
+        summary.any_chromatic_checked(),
+        "colour gate: no CHROMATIC colour patch was checkable in {} for node {} — the colour scale \
+         is missing or its R/G/B/C/M/Y patches are fully burn-covered (cannot verify colour / detect \
+         a grayscale camera)",
         rec.display(),
         spec.node
     );
@@ -2767,9 +2769,10 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
             camera_box::colour_scale::TOP_MARGIN_PX,
         )?;
         anyhow::ensure!(
-            summary.any_checked(),
-            "colour gate: no colour patch was checkable in {} (the colour scale is missing or fully \
-             burn-covered) — cannot verify colour for the {box_name} recording",
+            summary.any_chromatic_checked(),
+            "colour gate: no CHROMATIC colour patch was checkable in {} (the colour scale is missing \
+             or its R/G/B/C/M/Y patches are fully burn-covered) — cannot verify colour / detect a \
+             grayscale camera for the {box_name} recording",
             rec_path.display()
         );
         Some(summary)

@@ -251,11 +251,24 @@ impl CameraColourVerdict {
         self.outcomes.iter().filter(|o| o.is_checked()).count()
     }
 
-    /// The camera PASSES colour only when at least one patch was actually CHECKED (fail-closed: a
-    /// frame where every patch was burn-covered / unsamplable proves nothing) AND no checked patch
-    /// has a wrong colour.
+    /// Number of CHROMATIC reference patches (the six R/G/B/C/M/Y primaries/secondaries) actually
+    /// CHECKED (not burn-covered). Only a chromatic patch can reveal a grayscale / desaturated
+    /// camera — the neutrals stay neutral under a luma collapse — so a frame with zero chromatic
+    /// coverage cannot prove the camera is not grayscale. Mirrors
+    /// [`NodeColourSummary::any_chromatic_checked`].
+    pub fn chromatic_checked_count(&self) -> usize {
+        PATCH_COLOURS
+            .iter()
+            .zip(self.outcomes.iter())
+            .filter(|(&c, o)| chroma(c) >= CHROMATIC_EXPECTED_MIN && o.is_checked())
+            .count()
+    }
+
+    /// The camera PASSES colour only when at least one CHROMATIC patch was actually CHECKED
+    /// (fail-closed: a frame where every chromatic patch was burn-covered / unsamplable cannot
+    /// prove the camera is not grayscale) AND no checked patch has a wrong colour.
     pub fn is_pass(&self) -> bool {
-        self.checked_count() > 0 && self.wrong_count() == 0
+        self.chromatic_checked_count() > 0 && self.wrong_count() == 0
     }
 
     /// The wrong-colour patches paired with their table index, for human-readable reporting.
@@ -661,10 +674,29 @@ impl NodeColourSummary {
         self.patch_checked_counts.iter().any(|&c| c > 0)
     }
 
-    /// The node PASSES colour only when frames were sampled, at least one patch was checkable, and
-    /// no patch was wrong on a majority of frames (fail-closed: nothing checked proves nothing).
+    /// True when at least one CHROMATIC patch (a primary/secondary — the six R/G/B/C/M/Y) was
+    /// checked on at least one frame. This is the STRONGER coverage requirement the gate needs:
+    /// only a chromatic patch can reveal a grayscale / desaturated camera, because the neutrals
+    /// (white/black/gray) stay neutral under a luma collapse. So a summary that checked ONLY
+    /// neutral patches (every chromatic one burn-covered) cannot prove the camera is not grayscale
+    /// — it is UNVERIFIABLE for the headline colour fault and must fail-closed exactly like no
+    /// coverage at all. Under the central-gap geometry every patch is always checked, so this holds
+    /// whenever [`any_checked`](Self::any_checked) does; requiring it hardens the gate against a
+    /// future geometry change that could burn-cover the chromatic patches while a neutral stays
+    /// visible (which would otherwise let a grayscale camera pass on the neutrals alone).
+    pub fn any_chromatic_checked(&self) -> bool {
+        PATCH_COLOURS
+            .iter()
+            .zip(self.patch_checked_counts.iter())
+            .any(|(&c, &checked)| chroma(c) >= CHROMATIC_EXPECTED_MIN && checked > 0)
+    }
+
+    /// The node PASSES colour only when frames were sampled, at least one CHROMATIC patch was
+    /// checkable (so grayscale is detectable — see [`any_chromatic_checked`](Self::any_chromatic_checked)),
+    /// and no patch was wrong on a majority of frames (fail-closed: no chromatic coverage proves
+    /// nothing about a grayscale camera).
     pub fn is_pass(&self) -> bool {
-        self.frames_sampled > 0 && self.any_checked() && self.fail_count() == 0
+        self.frames_sampled > 0 && self.any_chromatic_checked() && self.fail_count() == 0
     }
 }
 
@@ -1085,6 +1117,23 @@ mod tests {
             real.iter().map(|&c| Some(Rgb::new(0, c.g, c.b))).collect();
         let v_dead = verify_samples(&dead_red);
         assert!(!v_dead.is_pass(), "a dead red channel must FAIL");
+        // Tight bracket on NEUTRAL_CHROMA_MAX (not just wrong_count ≥ 4, which a raise up to ~194
+        // would leave green): the localized g128 (42,70,89) with red killed → (0,70,89), chroma 89,
+        // must specifically be a NeutralTint. That locks NEUTRAL_CHROMA_MAX < 89 — so together with
+        // the good capture passing (its neutral peak, white/g192 ~53-54, must stay < the cap) the
+        // fixture brackets the threshold to the narrow window (54, 89) around the calibrated 72. A
+        // future raise past 89 (which starts letting a dead-channel neutral through) breaks THIS
+        // assert; the good-capture assert above breaks any drop below the rig's real cast.
+        assert!(
+            matches!(v_dead.outcomes[10], PatchOutcome::NeutralTint { chroma, .. } if chroma == 89.0),
+            "dead-red g128 (chroma 89) must be a NeutralTint (locks NEUTRAL_CHROMA_MAX < 89): {:?}",
+            v_dead.outcomes[10]
+        );
+        assert!(
+            matches!(v_dead.outcomes[0], PatchOutcome::NeutralTint { .. }),
+            "dead-red white (chroma 183) must be a NeutralTint: {:?}",
+            v_dead.outcomes[0]
+        );
         assert!(
             v_dead.wrong_count() >= 4,
             "neutrals tint + red collapses + yellow/magenta hue-shift: {}",
@@ -1308,6 +1357,63 @@ mod tests {
         assert!(!s.any_checked(), "no patch was ever checkable");
         assert_eq!(s.fail_count(), 0, "unsamplable patches are not wrong");
         assert!(!s.is_pass(), "colour unverifiable ⇒ fail-closed");
+    }
+
+    #[test]
+    fn only_neutral_patches_checked_is_fail_closed_grayscale_would_otherwise_pass() {
+        // A grayscale / desaturated camera is revealed ONLY by the CHROMATIC patches — the neutrals
+        // stay neutral under a luma collapse. So a summary that checked ONLY neutral patches (every
+        // chromatic one burn-covered) shows no wrong patch even for a grayscale camera; it must
+        // fail-closed, NOT pass on the neutrals alone. (Unreachable under the central-gap geometry
+        // where all 13 patches are always checked; this guards a future geometry change that could
+        // burn-cover the chromatic patches.)
+        let n = PATCH_COLOURS.len();
+        let checked: Vec<usize> = PATCH_COLOURS
+            .iter()
+            .map(|&c| {
+                if chroma(c) >= CHROMATIC_EXPECTED_MIN {
+                    0
+                } else {
+                    3
+                }
+            })
+            .collect();
+        let s = NodeColourSummary {
+            patch_wrong_counts: vec![0; n],
+            patch_checked_counts: checked,
+            frames_sampled: 3,
+        };
+        assert!(s.any_checked(), "the neutral patches WERE checked");
+        assert!(
+            !s.any_chromatic_checked(),
+            "but NO chromatic patch was checkable"
+        );
+        assert_eq!(
+            s.fail_count(),
+            0,
+            "no patch wrong (a grayscale camera looks fine on neutrals)"
+        );
+        assert!(
+            !s.is_pass(),
+            "zero chromatic coverage ⇒ grayscale undetectable ⇒ fail-closed, not a pass"
+        );
+
+        // The per-frame verdict mirrors it: every chromatic patch unsamplable, neutrals passing.
+        let outcomes: Vec<PatchOutcome> = PATCH_COLOURS
+            .iter()
+            .map(|&expected| {
+                if chroma(expected) >= CHROMATIC_EXPECTED_MIN {
+                    PatchOutcome::Unsamplable { expected }
+                } else {
+                    PatchOutcome::Pass
+                }
+            })
+            .collect();
+        let v = CameraColourVerdict { outcomes };
+        assert!(v.checked_count() > 0, "neutrals checked");
+        assert_eq!(v.chromatic_checked_count(), 0, "no chromatic patch checked");
+        assert_eq!(v.wrong_count(), 0);
+        assert!(!v.is_pass(), "zero chromatic coverage ⇒ fail-closed");
     }
 
     // ---- #364 affine LOCALIZATION (the camera-of-a-monitor fix) ----

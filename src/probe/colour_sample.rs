@@ -353,7 +353,10 @@ fn log_localized_patch_diagnostics(frame_means: &[Vec<Option<Rgb>>]) {
             (r + c.r as u32, g + c.g as u32, b + c.b as u32)
         });
         let k = samples.len() as u32;
-        let mean = Rgb::new((sr / k) as u8, (sg / k) as u8, (sb / k) as u8);
+        // Round-to-nearest (match the sampler's per-patch mean), so the logged calibration means are
+        // authoritative — the value used to set NEUTRAL_CHROMA_MAX / the fixture, not ≤1 LSB off.
+        let round = |s: u32| ((s + k / 2) / k) as u8;
+        let mean = Rgb::new(round(sr), round(sg), round(sb));
         tracing::info!(
             patch = i,
             expected = ?expected,
