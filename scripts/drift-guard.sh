@@ -289,6 +289,27 @@ genlock_capability_from_log() {
   return 0
 }
 
+# genlock_source_latency_from_log TEXT -> CSV "NAME=latency_ms,..." of per-source genlock held-latency
+# parsed from `genlock-fifo audit 'SOURCE': … latency_ms=N …` log lines (#357). Returns every source
+# found as "NAME=N" joined by commas. Empty output = no audit lines present. Drain-safe (grep|true
+# convention — never grep -q to avoid SIGPIPE under set -euo pipefail).
+genlock_source_latency_from_log() {
+  local text="$1" result="" line name lat
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    name="$(printf '%s' "$line" | sed -n "s/.*genlock-fifo audit '\([^']*\)'.*/\1/p" || true)"
+    # Match `latency_ms=N` where the preceding char is a space — this picks the EFFECTIVE latency
+    # (the actual held value) and not `src_latency_ms=` or `global_latency_ms=` (both have
+    # underscores immediately before `latency_ms`).
+    lat="$(printf '%s' "$line" | sed -n 's/.* latency_ms=\([0-9][0-9]*\).*/\1/p' || true)"
+    if [ -n "$name" ] && [ -n "$lat" ]; then
+      [ -n "$result" ] && result="${result},"
+      result="${result}${name}=${lat}"
+    fi
+  done <<< "$(printf '%s\n' "$text" | grep -E "genlock-fifo audit '" || true)"
+  printf '%s' "$result"
+}
+
 # drift_check LABEL MODE EXPECTED OBSERVED -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. MODE is "exact" (string equality) or "min" (observed semver >= expected, sort -V).
 # An empty OBSERVED is UNKNOWN, never OK — a value we could not read must never look clean.
@@ -361,6 +382,66 @@ drift_check_inputs() {
     return 3
   fi
   [ "$drift" -gt 0 ] && return 2
+  return 0
+}
+
+# drift_check_source_latency EXPECTED_CSV OBSERVED_CSV -> per-source genlock FIFO held-latency gate
+# (#357). EXPECTED_CSV is the pinned "NAME=ms,…" list from the manifest (host-keyed:
+# genlock_source_latency_strih or _stream). OBSERVED_CSV is the live "NAME=ms,…" read from the OBS
+# log via genlock_source_latency_from_log. Each source in EXPECTED is checked against OBSERVED;
+# a source present in EXPECTED but absent in OBSERVED is UNKNOWN (never silently OK). Returns
+# 0 OK / 2 DRIFT / 3 UNKNOWN. Prints one status line per expected source.
+drift_check_source_latency() {
+  local expected_csv="$1" observed_csv="$2" drift=0 unknown=0 n=0
+  if [ -z "$observed_csv" ]; then
+    printf '  %-20s UNKNOWN  (per-source genlock latency not read — no genlock-fifo audit lines?)\n' \
+      "genlock_src_latency"
+    return 3
+  fi
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a obs_entries=($observed_csv)
+  local -a exp_entries=($expected_csv)
+  IFS="$OLDIFS"
+  local exp_entry obs_entry exp_name exp_lat obs_name obs_val obs_lat
+  for exp_entry in "${exp_entries[@]}"; do
+    [ -z "$exp_entry" ] && continue
+    exp_name="${exp_entry%%=*}"; exp_lat="${exp_entry#*=}"
+    exp_name="${exp_name#"${exp_name%%[![:space:]]*}"}"; exp_name="${exp_name%"${exp_name##*[![:space:]]}"}"
+    exp_lat="${exp_lat#"${exp_lat%%[![:space:]]*}"}"; exp_lat="${exp_lat%"${exp_lat##*[![:space:]]}"}"
+    [ -z "$exp_name" ] && continue
+    n=$((n + 1))
+    obs_lat=""
+    for obs_entry in "${obs_entries[@]}"; do
+      [ -z "$obs_entry" ] && continue
+      obs_name="${obs_entry%%=*}"; obs_val="${obs_entry#*=}"
+      obs_name="${obs_name#"${obs_name%%[![:space:]]*}"}"; obs_name="${obs_name%"${obs_name##*[![:space:]]}"}"
+      obs_val="${obs_val#"${obs_val%%[![:space:]]*}"}"; obs_val="${obs_val%"${obs_val##*[![:space:]]}"}"
+      if [ "$obs_name" = "$exp_name" ]; then
+        obs_lat="$obs_val"
+        break
+      fi
+    done
+    if [ -z "$obs_lat" ]; then
+      printf '  source %-20s UNKNOWN  (pinned latency_ms=%s, source not in log)\n' "$exp_name" "$exp_lat"
+      unknown=$((unknown + 1))
+    elif [ "$obs_lat" = "$exp_lat" ]; then
+      printf '  source %-20s OK       (latency_ms=%s)\n' "$exp_name" "$obs_lat"
+    else
+      printf '  source %-20s DRIFT    (pinned latency_ms=%s, observed %s)\n' "$exp_name" "$exp_lat" "$obs_lat"
+      drift=$((drift + 1))
+    fi
+  done
+  if [ "$n" -eq 0 ]; then
+    printf '  %-20s UNKNOWN  (expected pin is empty)\n' "genlock_src_latency"
+    return 3
+  fi
+  # DRIFT takes priority over UNKNOWN — consistent with all sibling checkers (drift_check_all_files,
+  # drift_check_inputs). When a source is drifted AND another source is unobserved, the correct
+  # top-level verdict is DRIFT (exit 20 to callers), not UNKNOWN (exit 11). The per-source UNKNOWN
+  # lines are printed regardless; the top-level exit code names the WORST condition.
+  [ "$drift" -gt 0 ] && return 2
+  [ "$unknown" -gt 0 ] && return 3
   return 0
 }
 
@@ -586,17 +667,21 @@ EOF
 
 check_pins() {
   local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps_strih="$5" p_fps_stream="$6" p_genlock="$7" p_latency="$8" p_plugin="$9"
+  local p_src_lat_strih="${10}" p_src_lat_stream="${11}"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
-  validate_semver   "obs_version"           "$p_obs"        || errs=$((errs + 1))
-  validate_semver   "distroav_version"      "$p_distroav"   || errs=$((errs + 1))
-  validate_semver   "ndi_runtime_min"       "$p_ndi"        || errs=$((errs + 1))
+  validate_semver   "obs_version"                    "$p_obs"             || errs=$((errs + 1))
+  validate_semver   "distroav_version"               "$p_distroav"        || errs=$((errs + 1))
+  validate_semver   "ndi_runtime_min"                "$p_ndi"             || errs=$((errs + 1))
   # #11 mixed 60/30: both host-keyed output_fps pins MUST be present (strih=60, stream=30).
-  validate_nonempty "output_fps_strih"      "$p_fps_strih"  || errs=$((errs + 1))
-  validate_nonempty "output_fps_stream"     "$p_fps_stream" || errs=$((errs + 1))
-  validate_nonempty "genlock_wall_clock"    "$p_genlock"    || errs=$((errs + 1))
-  validate_nonempty "ndi_input_latency"     "$p_latency"    || errs=$((errs + 1))
-  validate_nonempty "canonical_plugin_path" "$p_plugin"     || errs=$((errs + 1))
+  validate_nonempty "output_fps_strih"               "$p_fps_strih"       || errs=$((errs + 1))
+  validate_nonempty "output_fps_stream"              "$p_fps_stream"      || errs=$((errs + 1))
+  validate_nonempty "genlock_wall_clock"             "$p_genlock"         || errs=$((errs + 1))
+  validate_nonempty "ndi_input_latency"              "$p_latency"         || errs=$((errs + 1))
+  validate_nonempty "canonical_plugin_path"          "$p_plugin"          || errs=$((errs + 1))
+  # #357 per-source genlock FIFO held-latency: both host-keyed pins MUST be present.
+  validate_nonempty "genlock_source_latency_strih"   "$p_src_lat_strih"   || errs=$((errs + 1))
+  validate_nonempty "genlock_source_latency_stream"  "$p_src_lat_stream"  || errs=$((errs + 1))
   if [ "$errs" -gt 0 ]; then
     echo >&2
     echo "!! $errs pinned value(s) missing or malformed in $readme." >&2
@@ -607,6 +692,7 @@ check_pins() {
   echo "All pins present + well-formed:"
   echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps_strih=$p_fps_strih output_fps_stream=$p_fps_stream genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
   echo "  canonical_plugin_path=$p_plugin"
+  echo "  genlock_source_latency_strih=$p_src_lat_strih  genlock_source_latency_stream=$p_src_lat_stream"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
   # This catches a `git subtree pull` that bumped vendor/distroav without updating the table
@@ -641,6 +727,8 @@ compare_observed() {
   local o_bundle_hashes="${20}"
   # #246 prod burn-env facet (opt-in when burn_env= is supplied):
   local o_burn="${21:-}"
+  # #357 per-source genlock FIFO held-latency (opt-in when genlock_source_latency= is supplied):
+  local p_src_lat_strih="${22:-}" p_src_lat_stream="${23:-}" o_src_latency="${24:-}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -769,6 +857,29 @@ compare_observed() {
     [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
   fi
 
+  # Per-source genlock FIFO held-latency (#357): the effective latency each OBS source holds in the
+  # genlock FIFO must match its pinned value. OPT-IN: runs only when genlock_source_latency= is
+  # supplied (preserving backward compat for all historic --compare calls). The pin is HOST-KEYED
+  # (genlock_source_latency_strih vs _stream) because stream deliberately holds NDI 2ME PGM at 450ms
+  # (A/V-align latency) while strih holds all camera inputs at the 3ms global floor.
+  if [ -n "$o_src_latency" ]; then
+    local p_src_lat
+    case "$host" in
+      strih)  p_src_lat="$p_src_lat_strih" ;;
+      stream) p_src_lat="$p_src_lat_stream" ;;
+      *)      p_src_lat="" ;;
+    esac
+    if [ -z "$p_src_lat" ]; then
+      printf '  %-20s UNKNOWN  (no per-source latency pin for host=%s)\n' "genlock_src_latency" "$host"
+      unknown=$((unknown + 1))
+    else
+      rc=0
+      drift_check_source_latency "$p_src_lat" "$o_src_latency" || rc=$?
+      [ "$rc" -eq 2 ] && drift=$((drift + 1))
+      [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+    fi
+  fi
+
   echo
   if [ "$drift" -gt 0 ]; then
     echo "!! DRIFT DETECTED on ${host:-target}: $drift setting(s) differ from the pinned zero-loss set." >&2
@@ -849,7 +960,7 @@ main() {
   # --status is a read-only dump of the live genlock + burn state — it needs NONE of the pinned
   # set, so skip the manifest requirement + pin load for it (it must work even without
   # vendor/README.md, e.g. a checkout that only ships the script). #246.
-  local p_obs p_distroav p_ndi p_fps p_fps_strih p_fps_stream p_genlock p_latency p_plugin
+  local p_obs p_distroav p_ndi p_fps p_fps_strih p_fps_stream p_genlock p_latency p_plugin p_src_lat_strih p_src_lat_stream
   if [ "$mode" != "status" ]; then
     [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
     p_obs="$(pinned_obs_version "$readme")"
@@ -863,15 +974,19 @@ main() {
     p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
     p_latency="$(pinned_setting "$readme" ndi_input_latency)"
     p_plugin="$(pinned_setting "$readme" canonical_plugin_path)"
+    # #357 host-keyed per-source genlock FIFO held-latency pins.
+    p_src_lat_strih="$(pinned_setting "$readme" genlock_source_latency_strih)"
+    p_src_lat_stream="$(pinned_setting "$readme" genlock_source_latency_stream)"
     if [ "$mode" = "check-pins" ]; then
-      check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps_strih" "$p_fps_stream" "$p_genlock" "$p_latency" "$p_plugin"
+      check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps_strih" "$p_fps_stream" "$p_genlock" "$p_latency" "$p_plugin" \
+        "$p_src_lat_strih" "$p_src_lat_stream"
       exit $?
     fi
   fi
 
   # --compare / --status: collect observed key=val pairs (both facets read the same inputs).
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
-  local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn=""
+  local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn="" o_src_latency=""
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -888,7 +1003,8 @@ main() {
       distroav_dll_sha256) o_distroav_sha="$v" ;; # #122: live Get-FileHash of the deployed distroav.dll
       genlock_capability) o_capability="$v" ;;   # #122: the live OBS-log genlock marker text
       bundle_hashes)      o_bundle_hashes="$v" ;; # #121: live `relpath=sha256,…` of every deployed bundle file
-      burn_env)           o_burn="$v" ;;         # #246: prod burn-env state ("none" or NAME=VALUE,…)
+      burn_env)              o_burn="$v" ;;         # #246: prod burn-env state ("none" or NAME=VALUE,…)
+      genlock_source_latency) o_src_latency="$v" ;; # #357: per-source genlock held-latency CSV
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
@@ -912,7 +1028,8 @@ main() {
 
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
-    "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn"
+    "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \
+    "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency"
 }
 
 main "$@"

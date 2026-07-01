@@ -75,6 +75,8 @@ const MANIFEST_FIXTURE: &str = "\
 | `genlock_wall_clock` | `1` | OBS log |
 | `ndi_input_latency` | `0` | obs-websocket GetInputSettings |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | Get-ChildItem the OBS scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log genlock-fifo audit |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log genlock-fifo audit |
 ";
 
 /// The ACTUAL OBS log lines captured from strih/stream 2026-06-14. Note the graphics-adapter
@@ -135,6 +137,16 @@ fn parses_pinned_versions_and_settings_from_manifest() {
         setting("canonical_plugin_path"),
         r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit",
         "must read the pinned single canonical OBS plugin-load path (#124)"
+    );
+    assert_eq!(
+        setting("genlock_source_latency_strih"),
+        "NDI cam5=3,NDI cam1=3,NDI cam3=3",
+        "must read strih per-source genlock held-latency pin (#357)"
+    );
+    assert_eq!(
+        setting("genlock_source_latency_stream"),
+        "NDI 2ME PGM=450",
+        "must read stream per-source genlock held-latency pin (NDI 2ME PGM A/V-align=450ms, #357)"
     );
 
     let _ = std::fs::remove_file(&readme);
@@ -319,6 +331,8 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | `genlock_wall_clock` | `0` | env |
 | `ndi_input_latency` | `0` | obs-websocket |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log |
 ",
     )
     .unwrap();
@@ -1543,5 +1557,186 @@ fn status_surface_does_not_require_the_pinned_manifest() {
     assert!(
         !stderr.contains("manifest not found"),
         "--status must skip the manifest-required check. stderr={stderr:?}"
+    );
+}
+
+// --- #357: pin + check per-source genlock FIFO held-latency (genlock_source_latency) -----------
+//
+// The drift-guard had ZERO coverage of the per-source genlock held-latency (`latency_ms=N` from
+// the `genlock-fifo audit` OBS log line). Only `ndi_input_latency` (the DistroAV INPUT buffer
+// mode 0/1/2) was pinned — a completely different setting. So the deliberate A/V-align per-source
+// override (`NDI 2ME PGM`=450ms on the stream box, slowing video to sync with the ~1s-late
+// mastered audio) went UNCHECKED: a drift from 450ms to 900ms would be silently passed. This adds:
+//   • `genlock_source_latency_from_log TEXT` — parses the per-source `latency_ms=N` from the OBS
+//     `genlock-fifo audit 'SOURCE': … latency_ms=N …` lines into a `source=N,source=N,…` CSV.
+//   • `drift_check_source_latency EXPECTED_CSV OBSERVED_CSV` — per-source check; for each pinned
+//     source the observed `latency_ms` must match exactly (UNKNOWN if not observed, DRIFT if
+//     different).
+//   • `genlock_source_latency_strih` + `genlock_source_latency_stream` rows in vendor/README.md.
+//   • `check_pins` validation of both new pins.
+//   • `--compare genlock_source_latency=` opt-in facet: dormant when the key is absent (backward
+//     compat), fails loudly on drift when supplied.
+
+/// A single `genlock-fifo audit` log line in the exact format obs-source.c emits (#357).
+/// `NDI 2ME PGM` carries a deliberate 450ms per-source override; `NDI cam5` follows the 3ms global.
+const GENLOCK_FIFO_AUDIT_FIXTURE: &str = "\
+07:42:38.746: genlock-fifo audit 'NDI 2ME PGM': received=1200 consumed=1200 underruns=0 holds=1200 \
+overruns=0 backward_steps=0 depth=27 peak=27 latency_ms=450 (\u{2248}27 frames @ 59.940fps) \
+src_latency_ms=450 global_latency_ms=3 preload=0 (=0 ms) reserve_ms=450 cap=30 empty_run=0 (re-arm@0)\n\
+07:42:38.747: genlock-fifo audit 'NDI cam5': received=3600 consumed=3600 underruns=0 holds=3600 \
+overruns=0 backward_steps=0 depth=1 peak=1 latency_ms=3 (\u{2248}0 frames @ 59.940fps) \
+src_latency_ms=0 global_latency_ms=3 preload=0 (=0 ms) reserve_ms=3 cap=2 empty_run=0 (re-arm@0)\n\
+";
+
+#[test]
+fn genlock_source_latency_parser_extracts_per_source_effective_latency() {
+    // RED: `genlock_source_latency_from_log` does not exist yet → sourced harness exits non-zero.
+    // GREEN: parses the `latency_ms=N` field per source from `genlock-fifo audit 'SOURCE':` lines.
+    // NDI 2ME PGM has a deliberate per-source override (src_latency_ms=450); NDI cam5 follows
+    // the global 3ms (src_latency_ms=0 -> effective latency_ms=3). We pin latency_ms (the
+    // EFFECTIVE held latency), not src_latency_ms, because that is what the FIFO actually holds.
+    let out = run_sourced(
+        r#"genlock_source_latency_from_log "$LOG""#,
+        &[("LOG", GENLOCK_FIFO_AUDIT_FIXTURE)],
+    );
+    assert!(
+        out.trim().contains("NDI 2ME PGM=450"),
+        "must extract NDI 2ME PGM latency_ms=450 (per-source A/V-align override): {out:?}"
+    );
+    assert!(
+        out.trim().contains("NDI cam5=3"),
+        "must extract NDI cam5 effective latency_ms=3 (follows global): {out:?}"
+    );
+    // must NOT bleed in src_latency_ms / global_latency_ms (different fields)
+    assert!(
+        !out.contains("=0"),
+        "src_latency_ms=0 (follows-global sentinel) must not appear in the result: {out:?}"
+    );
+}
+
+#[test]
+fn drift_check_source_latency_catches_drift_and_passes_on_match() {
+    // RED: `drift_check_source_latency` does not exist yet → sourced harness exits non-zero.
+    // GREEN: per-source check — for each pinned source the observed latency_ms must match exactly.
+    //   • 450ms observed vs 450ms pinned → OK (rc 0)
+    //   • 900ms observed vs 450ms pinned → DRIFT (rc 2) — the failure mode #357 exists to catch
+    //   • empty observed               → UNKNOWN (rc 3)
+    let case = |observed: &str| -> String {
+        run_sourced(
+            r#"rc=0; drift_check_source_latency "$EXP" "$OBS" || rc=$?; echo "RC=$rc""#,
+            &[("EXP", "NDI 2ME PGM=450"), ("OBS", observed)],
+        )
+    };
+
+    // match → OK
+    let ok = case("NDI 2ME PGM=450");
+    assert!(ok.contains("RC=0"), "450ms matches the pin → OK: {ok:?}");
+    assert!(ok.contains("OK"), "must print OK status line: {ok:?}");
+
+    // drift: 900ms vs pinned 450ms → DRIFT (rc 2); must name the source + both values
+    let drift = case("NDI 2ME PGM=900");
+    assert!(
+        drift.contains("RC=2"),
+        "900ms vs pinned 450ms must return rc 2 (DRIFT): {drift:?}"
+    );
+    assert!(
+        drift.contains("DRIFT"),
+        "must print DRIFT status line: {drift:?}"
+    );
+    assert!(
+        drift.contains("NDI 2ME PGM"),
+        "must name the drifted source: {drift:?}"
+    );
+
+    // unread → UNKNOWN (rc 3)
+    let unknown = case("");
+    assert!(
+        unknown.contains("RC=3"),
+        "empty observed must return rc 3 (UNKNOWN): {unknown:?}"
+    );
+    assert!(
+        unknown.contains("UNKNOWN"),
+        "must print UNKNOWN status line: {unknown:?}"
+    );
+
+    // mixed: one source drifted + one source absent → DRIFT must win (rc 2, not rc 3)
+    // This validates the return-order fix (DRIFT before UNKNOWN) — without it the
+    // unobserved source would mask the drift and exit 3 instead of 2.
+    let mixed = run_sourced(
+        r#"rc=0; drift_check_source_latency "$EXP" "$OBS" || rc=$?; echo "RC=$rc""#,
+        &[
+            ("EXP", "NDI 2ME PGM=450,NDI cam5=3"),
+            ("OBS", "NDI 2ME PGM=900"), // cam5 absent, PGM drifted
+        ],
+    );
+    assert!(
+        mixed.contains("RC=2"),
+        "drift must take priority over unknown in the mixed case (rc 2, not 3): {mixed:?}"
+    );
+    assert!(
+        mixed.contains("DRIFT"),
+        "must print DRIFT for the drifted source: {mixed:?}"
+    );
+}
+
+#[test]
+fn real_manifest_pins_genlock_source_latency_per_box() {
+    // RED: vendor/README.md has no `genlock_source_latency_strih` / `genlock_source_latency_stream`
+    // rows yet → `pinned_setting` returns empty → assertion fails.
+    // GREEN: both pins present with correct values.
+    let readme = manifest_dir().join("vendor/README.md");
+    let env = [("README", readme.to_str().unwrap())];
+    let setting = |k: &str| -> String {
+        run_sourced(&format!("pinned_setting \"$README\" {k}"), &env)
+            .trim()
+            .to_string()
+    };
+
+    let strih = setting("genlock_source_latency_strih");
+    assert!(
+        !strih.is_empty(),
+        "real manifest must pin genlock_source_latency_strih (strih cameras at 3ms global); got empty"
+    );
+    // strih cameras follow the global 3ms: NDI cam5, NDI cam1, NDI cam3
+    assert!(
+        strih.contains("NDI cam5=3"),
+        "strih pin must include NDI cam5=3 (follows global 3ms): {strih:?}"
+    );
+
+    let stream = setting("genlock_source_latency_stream");
+    assert!(
+        stream.contains("NDI 2ME PGM=450"),
+        "real manifest must pin NDI 2ME PGM=450 on stream (deliberate A/V-align latency, #357): {stream:?}"
+    );
+}
+
+#[test]
+fn compare_fails_when_per_source_genlock_latency_drifted() {
+    // RED: `genlock_source_latency=` is not yet a recognised key → ignored with WARN → exit 0, but
+    // we expect exit 20.
+    // GREEN: the per-source latency facet detects `NDI 2ME PGM` at 900ms vs pinned 450ms → DRIFT.
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_source_latency=NDI 2ME PGM=900", // drifted: pinned=450, observed=900
+    ]);
+    assert_eq!(
+        code, 20,
+        "drifted per-source latency must exit 20. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("NDI 2ME PGM") && stdout.contains("DRIFT"),
+        "must name the drifted source in stdout. stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly on stderr. stderr={stderr:?}"
     );
 }

@@ -2,6 +2,13 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-01 — #365 frozen-camera gate: NDI input freshness check (PR #386, v1.7.0-dev.180)
+
+- RED `0feba9d9e` (5 content-assert tests all fail), GREEN `8a6bd9b30` (full impl), playbook `30b5a5082`
+- Tests: `all_changing_is_pass`, `static_exactly_threshold_is_ok`, `static_exceeds_threshold_is_frozen`, `mixed_cameras_names_only_frozen_one`, `too_few_samples_is_frozen`, `empty_timeline_is_frozen`, `none_breaks_consecutive_run`, `output_is_sorted_lexicographically`, `exactly_two_successful_is_not_fail_closed`, `threshold_zero_any_repeat_is_frozen`, `all_frozen_cameras_are_listed` + 16 Python unit tests + 5 harness content-assert tests
+- PR #386 merged `96c4c6479f`, main CI run 28496836055 all-green. No web deploy (binary artifact only).
+- Key decision: raw NDI inputs (not Multiview tiles) because overlays animate even on frozen NDI. `serde_json` made non-optional for `frozen-camera-gate` binary. Fail-closed on <2 successful samples.
+
 ## 2026-07-01 — #370 rig-restore-watchdog: distinct partial alert + rate-limit (PR TBD, v1.7.0-dev.179)
 - **Ticket-validator**: STILL_VALID — `rig-restore-watchdog.sh` lacked classification of partial vs positive restores and fired Discord unconditionally on every ~2-min pass while OBS was unreadable.
 - **Part A** — `rig_classify_restore(act, obs_unreadable, obs_failed)` → `kind=positive|partial` in `scripts/lib/rig-restore-decision.sh`. Positive = full restore (0 unreadable, 0 failed). Partial = marker KEPT.
