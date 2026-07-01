@@ -2091,6 +2091,51 @@ fn build_and_print_verdict(
                 // `colour_verify` module.
                 nv.colour_fail =
                     build_node_colour_fail(&spec, carried_colour, args, &mut colour_fail_cache)?;
+                // #356 — cross-recording cam1 reconciliation. cam1's contiguity is read from the
+                // CLEAN upstream strih recording (#133); at the high-latency 60→30 hop the small
+                // cam1 burn QR softens and some ids go UNREADABLE in the strih recording even though
+                // the frame was DELIVERED. A cam1 REAL-DROP id that IS decoded in the DOWNSTREAM
+                // stream recording was proven delivered → re-classify it BURN-UNREADABLE (a
+                // strih-recording readability gap), NOT a chain loss — honest headline accounting
+                // (the #226 spirit, reconciled ACROSS recordings). Applied ONLY to cam1, ONLY when a
+                // distinct downstream stream recording backs the claim (strih_data.is_some() ⇒ cam1
+                // reads from the strih recording and `stream_frames` is the genuine downstream
+                // recording; NEVER when cam1 already falls back to the stream recording itself, where
+                // "present in stream" would be vacuously true for every id). SAFETY: an id ABSENT
+                // from the stream recording (a genuine loss, OR a 30 fps-decimated id we cannot
+                // prove) is NEVER downgraded — it stays REAL DROP. This only moves the CLASSIFICATION
+                // bucket; it never touches `missing_ids`, so a downgraded id still makes the sequence
+                // non-contiguous — `is_zero()` is unchanged and NO false ZERO can ever be created.
+                if spec.node == "cam1" && strih_data.is_some() {
+                    let downstream_cam1: std::collections::BTreeSet<u32> =
+                        burn_ids_in(stream_frames, args.burn_cam1_run_id)
+                            .into_iter()
+                            .collect();
+                    let real_drop_ids: Vec<u32> = nv
+                        .classified
+                        .iter()
+                        .filter(|c| c.kind == MissingKind::RealDrop)
+                        .map(|c| c.id)
+                        .collect();
+                    let downgrade =
+                        camera_box::burn_reconcile::cam1_real_drops_proven_delivered_downstream(
+                            real_drop_ids,
+                            &downstream_cam1,
+                        );
+                    if !downgrade.is_empty() {
+                        for c in nv.classified.iter_mut() {
+                            if c.kind == MissingKind::RealDrop && downgrade.contains(&c.id) {
+                                c.kind = MissingKind::BurnUnreadable;
+                            }
+                        }
+                        println!(
+                            "  [cam1] #356 cross-recording reconcile: {} REAL-DROP id(s) present in \
+                             the downstream stream recording were DELIVERED → re-classified \
+                             BURN-UNREADABLE (strih-recording readability gap, not a chain loss).",
+                            downgrade.len()
+                        );
+                    }
+                }
                 // #373 — the analyzed OPTICAL span (the cam2 dual-QR FIRST..=LAST decoded-frame
                 // window) must clear the >=min_secs floor, or the headline VACUOUSLY passes over a
                 // COLLAPSED / partial read: over a tiny span optical_undecodable==0 and the burn
@@ -3268,6 +3313,95 @@ mod tests {
             drop["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
             "#208: the missing cam1 id must be classified as a REAL DROP: {}",
             drop["full_chain"]["real_drops"]
+        );
+    }
+
+    /// #356 — cross-recording reconciliation. A cam1 id that is a REAL DROP in the (clean, upstream)
+    /// strih recording but IS decoded in the DOWNSTREAM stream recording was delivered (the frame
+    /// reached the stream) — the small cam1 burn was merely UNREADABLE in the strih recording at the
+    /// high-latency 60→30 hop. It must be classified BURN-UNREADABLE, NOT REAL DROP, so the merge
+    /// headline stops over-counting (the #356 residual cam1 over-count). Runs through the SHARED
+    /// `build_and_print_verdict` (fused == merge), so the merge production flow gets it identically.
+    #[test]
+    fn cam1_real_drop_present_downstream_is_burn_unreadable_not_real_drop_356() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        // --min-secs 1 so the small contiguous window trivially clears the #373 span floor.
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        const N: u32 = 600;
+        // strih (cam1's source, #133): cam1 id 5005 MISSING (unreadable through the deep buffer).
+        let strih = window(N, false, Some(5));
+        // stream (downstream): cam1 CONTIGUOUS — 5005 IS present ⇒ that frame WAS delivered.
+        let stream = window(N, true, None);
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+        // The node still FAILs (the id IS missing from the strih recording — a real burn-readability
+        // defect to fix), but it is charged BURN-UNREADABLE, not REAL DROP: no false ZERO, honest bucket.
+        assert!(
+            !pass,
+            "#356: a still-missing cam1 id keeps the run NOT zero (never a false ZERO)"
+        );
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert_eq!(
+            v["full_chain"]["real_drops"],
+            serde_json::json!(0),
+            "#356: a cam1 REAL DROP present in the downstream stream recording must NOT be counted a \
+             REAL DROP (delivered downstream): {}",
+            v["full_chain"]
+        );
+        assert!(
+            v["full_chain"]["burn_unreadable"].as_u64().unwrap() >= 1,
+            "#356: the delivered-but-strih-unreadable cam1 id must be charged BURN-UNREADABLE: {}",
+            v["full_chain"]
+        );
+    }
+
+    /// #356 SAFETY (the #1 invariant): a cam1 id ABSENT from BOTH the strih AND the downstream stream
+    /// recording is a GENUINE chain loss and MUST stay REAL DROP — the reconciliation must NEVER mask
+    /// it (no false ZERO). This test FAILS if the fix is too aggressive (downgrades an unproven id).
+    #[test]
+    fn cam1_real_drop_absent_from_both_stays_real_drop_356() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        const N: u32 = 600;
+        // cam1 id 5005 missing from BOTH the strih AND the stream recording ⇒ genuine loss.
+        let strih = window(N, false, Some(5));
+        let stream = window(N, true, Some(5));
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+        assert!(!pass, "#356: a genuine cam1 loss ⇒ overall FAIL");
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert!(
+            v["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
+            "#356 SAFETY: a cam1 id absent from BOTH recordings MUST stay REAL DROP — never masked: {}",
+            v["full_chain"]
         );
     }
 
