@@ -36,6 +36,11 @@ pub mod reannounce;
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
 
+// #188/#145 — A/V-sync calibration: pure chirp gen + offset estimate + controller math.
+// Cross-platform, no probe deps, so it unit-tests Tier-0; the painter emission + recording-verdict
+// detection wiring live in their respective gated modules.
+pub mod av_sync;
+
 // #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
 // `colour_scale` table/geometry, samples each reference patch's mean colour from a frame
 // (dodging the burn columns), and decides per-patch + per-camera PASS/FAIL (grayscale collapse,
