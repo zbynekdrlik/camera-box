@@ -309,6 +309,19 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   (`obs[.]dll`) so it is matched literally not as a regex wildcard; an obs.dll-only
   manifest labels a supplied distroav SHA `SKIPPED` (not `OK`) — an unchecked value must
   never read as verified (verdict stays NO DRIFT; SKIPPED ≠ DRIFT/UNKNOWN).
+- **per-source genlock FIFO held-latency (#357, DONE)** — the FIFO audit line
+  `genlock-fifo audit 'SOURCE': … latency_ms=N src_latency_ms=M global_latency_ms=P …`
+  has THREE latency fields; drift-guard must parse the EFFECTIVE value `latency_ms=N`
+  (the one with a SPACE before it), NOT `src_latency_ms` or `global_latency_ms` (both have
+  underscores). Pattern: `sed -n 's/.* latency_ms=\([0-9][0-9]*\).*/\1/p'`.
+  OPT-IN `genlock_source_latency=NAME=N,NAME2=M` key in `--compare`; dormant without it
+  (historic calls unchanged). Pins are HOST-KEYED: strih = `NDI cam5=3,NDI cam1=3,NDI cam3=3`
+  (follows global 3ms floor); stream = `NDI 2ME PGM=450` (deliberate A/V-align — slows video
+  to sync with ~1s-late mastered audio; re-pin ONLY on deliberate A/V-align rollout, NOT on drift).
+  `drift_check_source_latency` (tested in `tests/drift_guard.rs`). **RC priority**: DRIFT (rc=2)
+  MUST come before UNKNOWN (rc=3) in the return chain — same as all sibling checkers
+  (`drift_check_all_files`, `drift_check_inputs`); inverted order silently turns a mixed
+  DRIFT+UNKNOWN case into exit 11 instead of exit 20.
 
 GOTCHA: the 150-min `windows-genlock.yml` is `workflow_dispatch`-only (can't run
 per-PR), so manifest LOGIC is proven on the Linux `test` job; editing
