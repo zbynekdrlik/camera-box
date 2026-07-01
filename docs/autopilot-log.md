@@ -2,6 +2,13 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-01 — #357 drift-guard: per-source genlock FIFO latency pin + check (PR #387, v1.7.0-dev.181)
+
+- RED `0a4118e18` (4 failing tests: `genlock_source_latency_parser_extracts_per_source_effective_latency`, `drift_check_source_latency_catches_drift_and_passes_on_match`, `real_manifest_pins_genlock_source_latency_per_box`, `compare_fails_when_per_source_genlock_latency_drifted`), GREEN `ed750d9bb`, review fix `469612a4d` (DRIFT-before-UNKNOWN return-code order)
+- Added `genlock_source_latency_from_log()` parser (picks `latency_ms=N` — the EFFECTIVE held latency, not `src_latency_ms`/`global_latency_ms`), `drift_check_source_latency()` (per-source CSV comparison, DRIFT rc=2 beats UNKNOWN rc=3), opt-in `genlock_source_latency=` facet in `compare_observed`/`check_pins`
+- Pins: strih=`NDI cam5=3,NDI cam1=3,NDI cam3=3` (global 3ms floor), stream=`NDI 2ME PGM=450` (deliberate A/V-align — NOT drift)
+- PR #387 merged `d59cc5bb7`, main CI run 28500234758 all-green. No live deploy (drift-guard.sh is a monitoring script).
+
 ## 2026-07-01 — #365 frozen-camera gate: NDI input freshness check (PR #386, v1.7.0-dev.180)
 
 - RED `0feba9d9e` (5 content-assert tests all fail), GREEN `8a6bd9b30` (full impl), playbook `30b5a5082`
