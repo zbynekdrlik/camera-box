@@ -1025,3 +1025,266 @@ fn systemd_install_note_documents_disabled_by_default() {
         "#281: the install note must state the SUPERVISOR enables + live-verifies before turning it on"
     );
 }
+
+// ─── #370: alert classification + rate-limit (pure seam, Tier-0) ─────────────
+
+/// Invoke `rig_classify_restore` with positional integer args; parse key=val stdout.
+fn classify_restore(act: &str, obs_unreadable: &str, obs_failed: &str) -> HashMap<String, String> {
+    let script = format!(
+        r#"set -u
+. "$DECISION_LIB"
+rig_classify_restore {act} {obs_unreadable} {obs_failed}
+"#
+    );
+    let (code, stdout, stderr) = run_bash(&script);
+    assert_eq!(
+        code, 0,
+        "#370: rig_classify_restore must exit 0\nstdout:{stdout}\nstderr:{stderr}"
+    );
+    let mut map = HashMap::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    map
+}
+
+/// Invoke `rig_alert_throttle`; parse key=val stdout.
+fn alert_throttle(
+    kind: &str,
+    current_sig: &str,
+    prior_sig: &str,
+    prior_passes: &str,
+    throttle_n: Option<&str>,
+) -> HashMap<String, String> {
+    let tn_arg = match throttle_n {
+        Some(n) => format!(" {}", shell_quote(n)),
+        None => String::new(),
+    };
+    let script = format!(
+        r#"set -u
+. "$DECISION_LIB"
+rig_alert_throttle {kind} {csig} {psig} {pp}{tn}
+"#,
+        kind = shell_quote(kind),
+        csig = shell_quote(current_sig),
+        psig = shell_quote(prior_sig),
+        pp = shell_quote(prior_passes),
+        tn = tn_arg,
+    );
+    let (code, stdout, stderr) = run_bash(&script);
+    assert_eq!(
+        code, 0,
+        "#370: rig_alert_throttle must exit 0\nstdout:{stdout}\nstderr:{stderr}"
+    );
+    let mut map = HashMap::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    map
+}
+
+// ── rig_classify_restore ──────────────────────────────────────────────────────
+
+#[test]
+fn classify_restore_positive_when_full_restore() {
+    // act=1, obs_unreadable=0, obs_failed=0 → kind=positive (all OBS boxes restored)
+    let m = classify_restore("1", "0", "0");
+    assert_eq!(
+        m.get("kind").map(String::as_str),
+        Some("positive"),
+        "#370: full restore (0 unreadable, 0 failed) must be classified as positive"
+    );
+}
+
+#[test]
+fn classify_restore_partial_when_obs_unreadable() {
+    // An OBS box was unreadable → marker KEPT, prod only partially restored → partial
+    let m = classify_restore("1", "1", "0");
+    assert_eq!(
+        m.get("kind").map(String::as_str),
+        Some("partial"),
+        "#370: obs_unreadable>0 must classify as partial (marker KEPT for retry)"
+    );
+}
+
+#[test]
+fn classify_restore_partial_when_teardown_failed() {
+    // An OBS teardown returned non-zero → box NOT confirmed restored → partial
+    let m = classify_restore("1", "0", "1");
+    assert_eq!(
+        m.get("kind").map(String::as_str),
+        Some("partial"),
+        "#370: obs_failed>0 must classify as partial (box restore unconfirmed)"
+    );
+}
+
+#[test]
+fn classify_restore_partial_when_both_unreadable_and_failed() {
+    let m = classify_restore("1", "1", "1");
+    assert_eq!(
+        m.get("kind").map(String::as_str),
+        Some("partial"),
+        "#370: unreadable AND failed must classify as partial"
+    );
+}
+
+#[test]
+fn classify_restore_partial_on_non_numeric_args() {
+    // Non-numeric input → conservatively partial (never classify garbage as positive)
+    let m = classify_restore("x", "0", "0");
+    assert_eq!(
+        m.get("kind").map(String::as_str),
+        Some("partial"),
+        "#370: non-numeric act must default to partial (fail-conservative)"
+    );
+}
+
+// ── rig_alert_throttle ────────────────────────────────────────────────────────
+
+#[test]
+fn alert_throttle_positive_always_alerts() {
+    // Positive restore: ALWAYS alert regardless of prior state; counter resets to 0
+    let m = alert_throttle("positive", "positive::0", "positive::0", "3", Some("5"));
+    assert_eq!(
+        m.get("alert_now").map(String::as_str),
+        Some("1"),
+        "#370: positive kind must always alert (never throttled even with same sig + passes)"
+    );
+    assert_eq!(
+        m.get("new_passes").map(String::as_str),
+        Some("0"),
+        "#370: positive restore resets throttle pass counter to 0"
+    );
+}
+
+#[test]
+fn alert_throttle_partial_first_occurrence_alerts() {
+    // prior_sig="" (no prior) → first occurrence → alert, new_passes=1
+    let m = alert_throttle("partial", "partial:strih:0", "", "0", None);
+    assert_eq!(
+        m.get("alert_now").map(String::as_str),
+        Some("1"),
+        "#370: first partial occurrence (no prior sig) must alert"
+    );
+    assert_eq!(
+        m.get("new_sig").map(String::as_str),
+        Some("partial:strih:0"),
+        "#370: new_sig must be set to current_sig after first alert"
+    );
+    assert_eq!(
+        m.get("new_passes").map(String::as_str),
+        Some("1"),
+        "#370: first alert sets new_passes=1 (1 pass since last alert)"
+    );
+}
+
+#[test]
+fn alert_throttle_partial_same_sig_suppressed() {
+    // Same sig, prior_passes=1, throttle_n=5 → 1 < 5 → suppress, increment counter
+    let m = alert_throttle("partial", "partial:strih:0", "partial:strih:0", "1", Some("5"));
+    assert_eq!(
+        m.get("alert_now").map(String::as_str),
+        Some("0"),
+        "#370: same partial condition (passes=1 < throttle_n=5) must be suppressed"
+    );
+    assert_eq!(
+        m.get("new_passes").map(String::as_str),
+        Some("2"),
+        "#370: suppressed pass increments counter to 2"
+    );
+}
+
+#[test]
+fn alert_throttle_partial_same_sig_repeat_alerts_after_n_passes() {
+    // Same sig, prior_passes=5 ≥ throttle_n=5 → re-alert, reset to 1
+    let m = alert_throttle("partial", "partial:strih:0", "partial:strih:0", "5", Some("5"));
+    assert_eq!(
+        m.get("alert_now").map(String::as_str),
+        Some("1"),
+        "#370: same partial condition after throttle_n (5) passes must re-alert"
+    );
+    assert_eq!(
+        m.get("new_passes").map(String::as_str),
+        Some("1"),
+        "#370: re-alert resets pass counter to 1"
+    );
+}
+
+#[test]
+fn alert_throttle_partial_sig_change_always_alerts() {
+    // Signature changed (different unreadable box) → alert immediately
+    let m = alert_throttle(
+        "partial",
+        "partial:stream:0",
+        "partial:strih:0",
+        "2",
+        Some("5"),
+    );
+    assert_eq!(
+        m.get("alert_now").map(String::as_str),
+        Some("1"),
+        "#370: a different unreadable box (sig change) must always alert"
+    );
+    assert_eq!(
+        m.get("new_sig").map(String::as_str),
+        Some("partial:stream:0"),
+        "#370: new_sig must reflect the new (changed) current_sig"
+    );
+    assert_eq!(
+        m.get("new_passes").map(String::as_str),
+        Some("1"),
+        "#370: sig-change alert sets new_passes=1"
+    );
+}
+
+// ── watchdog wiring (static source checks) ────────────────────────────────────
+
+#[test]
+fn watchdog_calls_rig_classify_restore() {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("rig_classify_restore"),
+        "#370: the watchdog must call rig_classify_restore to classify positive vs partial"
+    );
+}
+
+#[test]
+fn watchdog_calls_rig_alert_throttle() {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("rig_alert_throttle"),
+        "#370: the watchdog must call rig_alert_throttle to rate-limit repeat KEPT/partial alerts"
+    );
+}
+
+#[test]
+fn watchdog_alert_body_distinguishes_partial_from_positive() {
+    // The positive body must keep "AUTO-RECOVERED"; the partial body must be distinct.
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("AUTO-RECOVERED"),
+        "#370: the positive alert body must still contain AUTO-RECOVERED (unchanged from #281)"
+    );
+    assert!(
+        src.to_uppercase().contains("PARTIAL") || src.contains("KEPT"),
+        "#370: the watchdog must emit a DISTINCT lower-urgency body for the partial/KEPT case"
+    );
+}
+
+#[test]
+fn watchdog_state_persists_alert_sig_and_passes() {
+    // The STATE_FILE must be extended to hold alert_sig + alert_passes for throttle dedup.
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("alert_sig"),
+        "#370: watchdog state must persist alert_sig across invocations (throttle dedup)"
+    );
+    assert!(
+        src.contains("alert_passes"),
+        "#370: watchdog state must persist alert_passes across invocations (throttle pass counting)"
+    );
+}
