@@ -75,6 +75,8 @@ const MANIFEST_FIXTURE: &str = "\
 | `genlock_wall_clock` | `1` | OBS log |
 | `ndi_input_latency` | `0` | obs-websocket GetInputSettings |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | Get-ChildItem the OBS scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log genlock-fifo audit |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log genlock-fifo audit |
 ";
 
 /// The ACTUAL OBS log lines captured from strih/stream 2026-06-14. Note the graphics-adapter
@@ -135,6 +137,16 @@ fn parses_pinned_versions_and_settings_from_manifest() {
         setting("canonical_plugin_path"),
         r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit",
         "must read the pinned single canonical OBS plugin-load path (#124)"
+    );
+    assert_eq!(
+        setting("genlock_source_latency_strih"),
+        "NDI cam5=3,NDI cam1=3,NDI cam3=3",
+        "must read strih per-source genlock held-latency pin (#357)"
+    );
+    assert_eq!(
+        setting("genlock_source_latency_stream"),
+        "NDI 2ME PGM=450",
+        "must read stream per-source genlock held-latency pin (NDI 2ME PGM A/V-align=450ms, #357)"
     );
 
     let _ = std::fs::remove_file(&readme);
@@ -319,6 +331,8 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | `genlock_wall_clock` | `0` | env |
 | `ndi_input_latency` | `0` | obs-websocket |
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log |
 ",
     )
     .unwrap();
