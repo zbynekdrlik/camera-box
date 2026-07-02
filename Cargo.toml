@@ -102,6 +102,10 @@ name = "obs-watchdog-gate"
 path = "src/bin/obs-watchdog-gate.rs"
 
 [[bin]]
+name = "av-restart-sync-gate"
+path = "src/bin/av-restart-sync-gate.rs"
+
+[[bin]]
 name = "frame-probe"
 path = "src/bin/frame-probe.rs"
 required-features = ["probe"]
