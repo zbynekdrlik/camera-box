@@ -93,7 +93,6 @@ fn run_emit(
     // One period of silence keeps the ring fed between markers (continuous feed).
     let silence = vec![0i16; SILENCE_FRAMES * 2];
 
-    let mut index: u8 = 0;
     let mut last_fired: u64 = 0;
     let cadence = cadence_ticks.max(1);
     while !stop.load(Ordering::Relaxed) {
@@ -117,9 +116,14 @@ fn run_emit(
                 params.vr_num,
                 params.vr_den,
             );
+            // #398: the index IS `fid`'s low byte (not an independent free-running counter) so a
+            // LIVE receiver (the OBS dock) can pair audio→video with NO side channel — it just
+            // looks up "which recent frame had this low byte". The offline emit-log CSV pairing
+            // (`av_offset_candidates`) is index-derivation-agnostic (groups by whatever value is
+            // logged), so this is a no-op change for the already-calibrated recording-verdict path.
+            let index = crate::qpsk_marker::frame_id_to_index(fid);
             log.lock().unwrap().push((index, fid, ts));
             write_all(&pcm, &io, &markers[index as usize])?;
-            index = index.wrapping_add(1);
         } else {
             // Keep the stream alive & self-paced (blocking write) — never let the ring drain.
             write_all(&pcm, &io, &silence)?;

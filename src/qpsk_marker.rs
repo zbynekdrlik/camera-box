@@ -515,8 +515,8 @@ pub fn playout_frame_id(
 /// video decode (our dual-QR carries `frame_id` directly) look up "which recent frame had this low
 /// byte" with zero extra plumbing. Safe against wrap because 256 low-byte values ≈ 4.3 s @ 60 fps
 /// vastly exceeds the video→decode round-trip (~hundreds of ms).
-pub fn frame_id_to_index(_frame_id: u32) -> u8 {
-    todo!("#398: derive the QPSK index from the dual-QR frame_id's low byte")
+pub fn frame_id_to_index(frame_id: u32) -> u8 {
+    (frame_id & 0xFF) as u8
 }
 
 /// `start_time` of a stream as reported by ffprobe (`-show_entries stream=start_time`), seconds.
