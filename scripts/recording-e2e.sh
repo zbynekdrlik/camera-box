@@ -577,6 +577,31 @@ if [ "$frozen_ok" -ne 1 ]; then
   exit 1
 fi
 
+echo "[4d/8] #405/#406 render-budget gate — with burns ON + Multiview open, BOTH boxes MUST hold the render frame budget (strih 60fps, stream 30fps)"
+# The 2026-07-02 regression: a measurement burn left ON dropped strih RENDER 60->27fps (36ms >
+# 16.6ms/60fps budget) while the encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
+# caught it, because the delivery verdict checks burn-id contiguity (which stays contiguous at
+# 27fps) not render fps. This gate snapshots OBS WS GetStats deltas on BOTH boxes in the exact
+# recording state (burns ON from [4b/8], Multiview open) and FAILS FAST if either misses its
+# frame-time budget — so a choked pipeline can never be recorded and then "pass" on delivery.
+# STRICT (strict-test mandate): no warn-only, no override. A fail = fix the root cause (an
+# expensive burn is #404's full-frame readback; a render regression is a real regression).
+# The decision lives ONLY in the Rust render-budget-gate bin (render_budget::classify) — single
+# source of truth, no threshold duplicated in python.
+RENDER_GATE_BIN="${RENDER_GATE_BIN:-$PROBE_BIN_DIR/render-budget-gate}"
+export RENDER_GATE_BIN
+if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="" \
+    python3 "$HERE/render-budget-gate.py" \
+      --box "strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-60}" \
+      --box "stream=${STREAM}:${RENDER_TARGET_FPS_STREAM:-30}" \
+      --window-s "${RENDER_GATE_WINDOW_S:-6}"; then
+  echo "    [render-budget-gate] a box missed the render frame budget with burns ON — aborting BEFORE recording (#405)." >&2
+  echo "    A recording made in this state would judder (encoder duplicates frames) yet pass delivery-contiguity." >&2
+  echo "    Root cause is almost always the expensive measurement burn (#404 full-frame readback) or a render regression." >&2
+  echo "    Clear burns with scripts/rig-mode.sh event; see EPIC #406." >&2
+  exit 1
+fi
+
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start

@@ -345,8 +345,8 @@ jobs:
             --bin recording-verdict --bin frame-probe --bin camera-box
           cp target/release/camera-box target/release/camera-box-probe
 
-      - name: Build frozen-camera-gate (default features — #365)
-        run: cargo build --release --bin frozen-camera-gate
+      - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405)
+        run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate
 
       - name: Upload probe tools
         uses: actions/upload-artifact@v4
@@ -357,6 +357,7 @@ jobs:
             target/release/frame-probe
             target/release/camera-box-probe
             target/release/frozen-camera-gate
+            target/release/render-budget-gate
 
   windows-probe:
     name: Windows probe build (recording-verdict.exe)
