@@ -182,15 +182,37 @@ overnight/unattended case the watchdog exists to cover. `scripts/obs-self-heal-i
 `camera_box::obs_self_heal`) emits a per-box Windows Task Scheduler job (~2 min cadence) that runs
 ENTIRELY on the box itself: no ssh, no MCP, no agent session. It gathers a LOCAL sample
 (`Get-Process obs64`: count / `Responding` / CPU% — no OBS WebSocket round-trip), pipes it through
-the SAME `obs-watchdog-gate.exe` binary (reusing `obs_watchdog::classify` unchanged — never a
-re-derived threshold), and on a CONFIRMED wedge force-kills + relaunches obs64 via
-`launch-obs-genlock.sh`'s own program (one launch path, reused verbatim). The AHK race documented
-above is solved structurally: `Stop-Process AutoHotkey64` runs FIRST (before obs64 is ever
-touched), and AHK is restarted only LAST, after the relaunch is verified — a double-launch is
-impossible by construction, not just by convention. Ships DISABLED (`<Enabled>false</Enabled>` in
-the generated Task Scheduler XML); run `scripts/obs-self-heal-install.sh --box strih|stream --help`
-for the full install + mandatory live-verify (healthy-box dry run + simulated-wedge run) procedure
-before enabling on either box.
+`obs-watchdog-gate.exe` for the WEDGE VERDICT (reusing `obs_watchdog::classify` unchanged), and
+SEPARATELY pipes its persisted state through `obs-self-heal-gate.exe` for the RECOVERY decision
+(reusing `obs_self_heal::decide` unchanged — confirm-threshold / throttle / single-recovery-lock /
+stale-lock detection). **Both decisions get their own thin gate binary** — the pattern generalizes
+beyond stateless classification (#391) to genuinely stateful branching logic (#411): whenever a
+decision needs to be reused in a PowerShell script, bridge it through a small Rust CLI with a JSON
+stdin/stdout contract and a `0`/`1`/`2` exit-code convention (`0`=no action, `1`=act,
+`2`=tooling-error-in-our-own-payload — kept DISTINCT from an unexpected/unknown exit code, which
+must fail loud rather than silently read as healthy), rather than re-deriving the logic in
+PowerShell. On a CONFIRMED wedge it force-kills + relaunches obs64 via `launch-obs-genlock.sh`'s
+own program (one launch path, reused verbatim). The AHK race documented above is solved
+structurally: `Stop-Process AutoHotkey64` runs FIRST (before obs64 is ever touched), and AHK is
+restarted only LAST, after the relaunch is verified — a double-launch is impossible by
+construction, not just by convention. Ships DISABLED (`<Enabled>false</Enabled>` in the generated
+Task Scheduler XML); run `scripts/obs-self-heal-install.sh --box strih|stream --help` for the full
+install + mandatory live-verify (healthy-box dry run + simulated-wedge run) procedure before
+enabling on either box.
+
+### Gotchas hit building this (apply to any future Windows-planner-script / CI-gate work)
+
+- **`${var:-default text}` in bash breaks if `default text` contains an apostrophe/single-quote —
+  even inside an outer double-quoted string.** `local x="${y:-obs-self-heal-gate.exe's default}"`
+  fails with `unexpected EOF while looking for matching ''` — bash re-parses quoting INSIDE a
+  `${parameter:-word}` expansion independently of the enclosing quotes. Never put a literal `'`
+  in a `${var:-...}` fallback string; rephrase without a contraction/possessive.
+- **A GitHub Actions `pwsh` step FAILS on any lingering non-zero `$LASTEXITCODE` at script end —
+  even when your OWN `if` check already treated that exact code as the expected pass case.**
+  E.g. `'{}' | ./gate.exe; if ($LASTEXITCODE -ne 2) { throw ... }` still fails the step when the
+  gate correctly exits 2, because GH Actions checks `$LASTEXITCODE` itself after the script
+  finishes. Fix: explicitly `exit 0` at the end of the step once your own checks pass, to override
+  the residual exit code from the last native command.
 
 ## WebSocket Credentials
 
