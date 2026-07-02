@@ -67,11 +67,13 @@ pub enum RecoveryStep {
 /// The fixed, ordered recovery plan (#411): always these four steps, always in this order. A
 /// `Vec` (not a const array) so callers can log/iterate uniformly with the rest of this codebase's
 /// planner shape (`launch_obs_genlock`'s `build_launch_program` also returns an owned `String`).
-///
-/// STUB (test:[red] commit) — deliberately WRONG order so the AHK-race ordering test fails
-/// until the GREEN commit implements the real fixed plan.
 pub fn recovery_plan() -> Vec<RecoveryStep> {
-    vec![RecoveryStep::KillAndRelaunchObs]
+    vec![
+        RecoveryStep::StopAhk,
+        RecoveryStep::KillAndRelaunchObs,
+        RecoveryStep::VerifyRecovered,
+        RecoveryStep::RestartAhk,
+    ]
 }
 
 /// Consecutive wedged passes required before acting. Mirrors
@@ -134,43 +136,96 @@ pub enum SelfHealDecision {
 ///
 /// The lock (`prev.recovery_in_progress`) is checked FIRST and wins over every other signal —
 /// a recovery already in flight is never joined by a second one, healthy or not.
-// STUB (test:[red] commit) — always reports Healthy and never sets the lock, threshold,
-// throttle, or ordering. GREEN commit implements the real state machine next.
 pub fn decide(
     prev: SelfHealState,
-    _wedged: bool,
-    _now_epoch_s: u64,
-    _threshold: u32,
-    _min_interval_s: u64,
+    wedged: bool,
+    now_epoch_s: u64,
+    threshold: u32,
+    min_interval_s: u64,
 ) -> (SelfHealDecision, SelfHealState) {
-    (SelfHealDecision::Healthy, prev)
+    if prev.recovery_in_progress {
+        return (SelfHealDecision::AlreadyRecovering, prev);
+    }
+
+    if !wedged {
+        return (
+            SelfHealDecision::Healthy,
+            SelfHealState {
+                confirm_count: 0,
+                ..prev
+            },
+        );
+    }
+
+    let confirm_count = prev.confirm_count.saturating_add(1);
+    let effective_threshold = threshold.max(1);
+    if confirm_count < effective_threshold {
+        return (
+            SelfHealDecision::Confirming {
+                count: confirm_count,
+                threshold,
+            },
+            SelfHealState {
+                confirm_count,
+                ..prev
+            },
+        );
+    }
+
+    if let Some(last) = prev.last_attempt_epoch_s {
+        let elapsed = now_epoch_s.saturating_sub(last);
+        if elapsed < min_interval_s {
+            return (
+                SelfHealDecision::Throttled {
+                    seconds_remaining: min_interval_s - elapsed,
+                },
+                SelfHealState {
+                    confirm_count,
+                    ..prev
+                },
+            );
+        }
+    }
+
+    (
+        SelfHealDecision::Recover(recovery_plan()),
+        SelfHealState {
+            confirm_count,
+            last_attempt_epoch_s: Some(now_epoch_s),
+            recovery_in_progress: true,
+        },
+    )
 }
 
 /// The caller marks a recovery attempt complete (success OR failure) by clearing the lock — the
 /// ONLY way `recovery_in_progress` goes back to `false`. A crash mid-recovery (the script dies
 /// before calling this) leaves the lock HELD, which is deliberately fail-safe (see
 /// `lock_is_stale` below for how a truly abandoned lock eventually clears itself).
-// STUB (test:[red] commit) — a no-op; never actually clears the lock.
 pub fn clear_recovery_lock(state: SelfHealState) -> SelfHealState {
-    state
+    SelfHealState {
+        recovery_in_progress: false,
+        ..state
+    }
 }
 
 /// `true` when `state`'s recovery lock has been held longer than `stale_lock_s` — i.e. the process
 /// that set it almost certainly crashed before calling `clear_recovery_lock`. Callers should
 /// `clear_recovery_lock` before calling `decide` when this is `true`, so one abandoned run does
 /// not permanently disable self-heal for the box.
-// STUB (test:[red] commit) — always false.
-pub fn lock_is_stale(_state: &SelfHealState, _now_epoch_s: u64, _stale_lock_s: u64) -> bool {
-    false
+pub fn lock_is_stale(state: &SelfHealState, now_epoch_s: u64, stale_lock_s: u64) -> bool {
+    state.recovery_in_progress
+        && state
+            .last_attempt_epoch_s
+            .map(|started| now_epoch_s.saturating_sub(started) > stale_lock_s)
+            .unwrap_or(false)
 }
 
 /// Post-recovery success rule (#411 spec): recovery is VERIFIED only when there is exactly one
 /// obs64 process AND the freshly-relaunched OBS log shows the genlock render tick ENABLED (the
 /// SAME proof `launch-obs-genlock.sh`'s own verify step checks). Stated once here so the Rust
 /// tests and the emitted PowerShell agree on exactly what "recovered" means.
-// STUB (test:[red] commit) — always true.
-pub fn recovery_verified(_obs64_count: u32, _render_tick_enabled: bool) -> bool {
-    true
+pub fn recovery_verified(obs64_count: u32, render_tick_enabled: bool) -> bool {
+    obs64_count == 1 && render_tick_enabled
 }
 
 #[cfg(test)]
