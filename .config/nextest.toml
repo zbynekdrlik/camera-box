@@ -36,7 +36,11 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 # parallel_decode_matches_single_threaded_result_exactly to its own CPU pool
 # (a #416 mitigation for suspected cross-binary nextest scheduling
 # contention) is removed here — with the ~10x-cost robust-path bug fixed,
-# the test runs in ~15s and should no longer need sole use of the runner's
-# thread pool to avoid starvation. This is being validated on the SAME PR's
-# next CI run (without the override); if contention reappears there, the
-# override goes back in a follow-up commit before merge.
+# the test no longer needs sole use of the runner's thread pool to avoid
+# starvation. Confirmed on this PR's own follow-up CI run (28625021631,
+# override absent): parallel_decode_matches_single_threaded_result_exactly
+# ran in 30.9s (vs 14.8s WITH the override on the prior run, 28624626907 —
+# some cross-binary contention is real, but 30.9s is nowhere near the new
+# 8-minute bound), all 1521 tests still passed with the same 3 (intrinsic,
+# genlock_manifest) tests reported slow, and the Test job's total wall time
+# (329s) matched the prior run (340s) within noise.
