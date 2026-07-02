@@ -10,12 +10,20 @@
 //! 43.9–57.7 distinct fps of a 60 fps flow, invisible in the audit (8,511 ids lost with
 //! zero counter movement).
 //!
-//! The fix ports `src/probe/genlock.rs` `ReleaseCadence` (CI-green at 73ae3fca) into
+//! The fix ports `src/probe/genlock.rs` `ReleaseCadence` (v2, cc815e73e) into
 //! `vendor/obs-studio/libobs/obs-source.c`: the deadline comes from a LOCKED per-source
 //! boundary that advances exactly one interval per presented frame (slew-immune by
-//! construction); the wall clock only acquires the lock and detects drift beyond
-//! `2*interval + interval/4` (re-lock = stall catch-up, keeping the IMAG latency contract);
-//! and EVERY discarded frame is counted (`genlock_dropped_due`) — never silent again.
+//! construction); the wall clock only acquires the lock; and EVERY discarded frame is
+//! counted (`genlock_dropped_due`) — never silent again.
+//!
+//! v2 (live canary of v1, 2026-07-02, strih `NDI cam5`): v1's wall-based drift guard
+//! (`present_ts > boundary + 2*interval + interval/4`) EMBEDS the constant stamp→arrival
+//! skew (59 ms live at the 3 ms reserve) and relock-stormed — dropped_due 2918 of 4202
+//! received (69 %), relocks 1076. v2 replaces it with a QUEUE-DEPTH backlog guard
+//! (`GENLOCK_QDEPTH_RELOCK`): steady depth is ~1–2 at ANY skew (the boundary paces
+//! arrivals), so depth is skew-immune where wall−boundary drift is not; the steady path
+//! presents the OLDEST matured frame (strict FIFO, transient 2-frame maturation drains
+//! losslessly) and a GAP RESYNC re-anchors past upstream-skipped stamps.
 //!
 //! This is a SOURCE-presence guard (same convention as tests/distroav_genlock_lockdown.rs,
 //! tests/obs_updater_disabled.rs): it runs on DEFAULT features (per-PR Linux CI + local
@@ -73,14 +81,29 @@ fn release_is_phase_locked_not_per_tick_wall_compare() {
          wall-compare release loses ~16 of 60 distinct fps at grid-aligned reserves. \
          Re-apply (mirror: src/probe/genlock.rs ReleaseCadence::tick)."
     );
-    // The drift guard threshold must mirror ReleaseCadence::relock_drift_ns EXACTLY:
-    // two intervals plus a quarter-interval margin (small enough that a stall catches up
-    // within ~2 frames; large enough that the steady lock offset never trips it).
+    // v2: the v1 WALL-DRIFT relock guard must be GONE. It compared `present_ts` against
+    // `boundary + 2*interval + interval/4`, which EMBEDS the constant stamp→arrival skew
+    // (59 ms on the live rig) — the 2026-07-02 canary relock-stormed: dropped_due 2918 of
+    // 4202 received, relocks 1076. Any wall−boundary drift threshold reintroduces that
+    // skew dependence; the backlog guard must be queue-relative (depth), never wall-based.
     assert!(
-        src.contains("2 * interval + interval / 4"),
-        "{OBS_SOURCE}: #401 — the re-lock drift threshold no longer mirrors \
-         relock_drift_ns (2*interval + interval/4); keep the C and the Rust mirror in \
-         lock-step (src/probe/genlock.rs ReleaseCadence::relock_drift_ns)."
+        !src.contains("2 * interval + interval / 4"),
+        "{OBS_SOURCE}: #401 v2 — the v1 wall-drift relock guard (2*interval + interval/4 \
+         vs present_ts − boundary) is BACK; it embeds the constant stamp→arrival skew and \
+         relock-storms live (canary: dropped_due 2918/4202, relocks 1076). Use the \
+         queue-depth guard (GENLOCK_QDEPTH_RELOCK) — mirror: src/probe/genlock.rs \
+         ReleaseCadence::tick (v2)."
+    );
+    // v2: the QUEUE-DEPTH backlog guard must be present — a named constant so the
+    // rationale travels with the threshold. Steady depth is ~1–2 at any arrival skew
+    // (the locked boundary paces arrivals), so depth > GENLOCK_QDEPTH_RELOCK is
+    // unambiguous backlog; the re-lock jumps to the newest due frame counting every
+    // jumped frame (visible catch-up, IMAG latency contract kept).
+    assert!(
+        src.contains("GENLOCK_QDEPTH_RELOCK"),
+        "{OBS_SOURCE}: #401 v2 — the queue-depth backlog guard (GENLOCK_QDEPTH_RELOCK) is \
+         missing; without it a genuine stall's backlog never re-locks to the live edge. \
+         Mirror src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK."
     );
     // The mirror pointer must survive so the next maintainer finds the PROVEN Rust
     // reference (and its three cadence tests) before touching the C.
