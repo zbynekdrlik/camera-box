@@ -1572,6 +1572,18 @@ mod tests {
         skew_ns: u64,
         n_frames: u64,
     ) -> (Vec<u64>, Vec<u64>, usize) {
+        run_cadence_sim_skewfn(reserve_ms, &|_f| skew_ns, n_frames)
+    }
+
+    /// Like [`run_cadence_sim`] but with a per-frame arrival-skew function — models a
+    /// mid-run pipeline change (the live 2026-07-02 canary saw the stamp→arrival skew at
+    /// 59 ms where the earlier audit read 19–21 ms; v1's wall-based drift guard embedded
+    /// that constant and relock-stormed: dropped_due=2918/4202, relocks=1076).
+    fn run_cadence_sim_skewfn(
+        reserve_ms: u32,
+        skew_of: &dyn Fn(u64) -> u64,
+        n_frames: u64,
+    ) -> (Vec<u64>, Vec<u64>, usize) {
         const I: u64 = 16_666_667; // 60 Hz interval
         const BASE: u64 = 1_000_000_000_000; // arbitrary epoch offset
         let mut cadence = ReleaseCadence::new();
@@ -1590,7 +1602,10 @@ mod tests {
             // WITHOUT it the pre-#401 release only churns at grid-aligned reserves; with
             // it the live curve reproduces (17–50% silent loss at 3/8/16/33 ms).
             while next_arrival < n_frames
-                && BASE + next_arrival * I + skew_ns + ((next_arrival * 2_654_435_761) % 8_000_001)
+                && BASE
+                    + next_arrival * I
+                    + skew_of(next_arrival)
+                    + ((next_arrival * 2_654_435_761) % 8_000_001)
                     - 4_000_000
                     <= wall
             {
@@ -1639,6 +1654,48 @@ mod tests {
             sorted.sort_unstable();
             assert_eq!(uniq, sorted, "reserve {reserve_ms} ms: presentation order");
         }
+    }
+
+    /// #401 v2 REGRESSION LOCK — the LIVE canary failure of cadence v1 (2026-07-02,
+    /// strih `NDI cam5`): with the stamp→arrival skew at 59 ms and the 3 ms reserve, v1's
+    /// wall-based drift guard (`deadline − boundary > 2.25·I`) embedded the constant
+    /// arrival latency (59 − 3 = 56 ms > 37.5 ms) and RELOCK-STORMED — dropped_due
+    /// 2918 of 4202 received (69 %), relocks 1076. The cadence must deliver every frame
+    /// at ANY constant arrival skew: the steady release may key ONLY on queue-relative
+    /// state (matured backlog, queue depth), never on wall−boundary drift.
+    #[test]
+    fn cadence_survives_deep_arrival_skew() {
+        for skew_ms in [20u64, 59, 90] {
+            for reserve_ms in [3u32, 16, 33] {
+                let (presented, dropped, _late) =
+                    run_cadence_sim_skewfn(reserve_ms, &|_f| skew_ms * 1_000_000, 600);
+                assert_eq!(
+                    dropped,
+                    Vec::<u64>::new(),
+                    "skew {skew_ms} ms / reserve {reserve_ms} ms: zero drops required \
+                     (v1 relock-stormed at skew 59)"
+                );
+                let mut uniq = presented.clone();
+                uniq.dedup();
+                assert_eq!(
+                    uniq.len(),
+                    600,
+                    "skew {skew_ms} ms / reserve {reserve_ms} ms"
+                );
+            }
+        }
+    }
+
+    /// #401 v2 — a MID-RUN skew shift (pipeline slows 20 → 80 ms) must lose nothing: the
+    /// cadence holds through the transition and settles at the new arrival phase.
+    #[test]
+    fn cadence_adapts_to_mid_run_skew_shift() {
+        let (presented, dropped, _late) =
+            run_cadence_sim_skewfn(3, &|f| if f < 300 { 20_000_000 } else { 80_000_000 }, 600);
+        assert_eq!(dropped, Vec::<u64>::new(), "skew shift must drop nothing");
+        let mut uniq = presented.clone();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 600);
     }
 
     /// #401 — a genuine upstream STALL must still catch up (the IMAG latency contract):
