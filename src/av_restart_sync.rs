@@ -183,7 +183,10 @@ mod tests {
         let before = trusted(-70.2);
         let after = trusted(-58.7); // 11.5ms drift — normal measurement noise
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(v.is_pass(), "small in-tolerance drift should PASS, got {v:?}");
+        assert!(
+            v.is_pass(),
+            "small in-tolerance drift should PASS, got {v:?}"
+        );
         assert_eq!(v.label(), "PASS");
     }
 
@@ -215,7 +218,10 @@ mod tests {
         let before = trusted(0.0);
         let after = trusted(DEFAULT_TOLERANCE_MS + 0.5);
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(!v.is_pass(), "just-over-tolerance drift must FAIL, got {v:?}");
+        assert!(
+            !v.is_pass(),
+            "just-over-tolerance drift must FAIL, got {v:?}"
+        );
     }
 
     #[test]
@@ -223,7 +229,10 @@ mod tests {
         let before = trusted(0.0);
         let after = trusted(DEFAULT_TOLERANCE_MS - 0.5);
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(v.is_pass(), "just-under-tolerance drift must PASS, got {v:?}");
+        assert!(
+            v.is_pass(),
+            "just-under-tolerance drift must PASS, got {v:?}"
+        );
     }
 
     #[test]
@@ -231,7 +240,10 @@ mod tests {
         let before = trusted(0.0);
         let after = trusted(DEFAULT_TOLERANCE_MS);
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(v.is_pass(), "delta == tolerance is inclusive PASS, got {v:?}");
+        assert!(
+            v.is_pass(),
+            "delta == tolerance is inclusive PASS, got {v:?}"
+        );
     }
 
     #[test]
@@ -245,9 +257,15 @@ mod tests {
         };
         let after = trusted(-70.0);
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(!v.is_pass(), "untrustworthy 'before' must never PASS, got {v:?}");
+        assert!(
+            !v.is_pass(),
+            "untrustworthy 'before' must never PASS, got {v:?}"
+        );
         assert_eq!(v.label(), "UNKNOWN");
-        assert!(v.reasons().iter().any(|r| r.contains("before") && r.contains("matched")));
+        assert!(v
+            .reasons()
+            .iter()
+            .any(|r| r.contains("before") && r.contains("matched")));
     }
 
     #[test]
@@ -260,7 +278,10 @@ mod tests {
         };
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
         assert_eq!(v.label(), "UNKNOWN");
-        assert!(v.reasons().iter().any(|r| r.contains("after") && r.contains("mad_ms")));
+        assert!(v
+            .reasons()
+            .iter()
+            .any(|r| r.contains("after") && r.contains("mad_ms")));
     }
 
     #[test]
@@ -275,7 +296,10 @@ mod tests {
         };
         let after = trusted(-270.0);
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(!v.is_pass(), "untrustworthy + large delta must never PASS, got {v:?}");
+        assert!(
+            !v.is_pass(),
+            "untrustworthy + large delta must never PASS, got {v:?}"
+        );
     }
 
     #[test]
@@ -314,7 +338,10 @@ mod tests {
             mad_ms: 9.5,
         };
         let v = classify(before, after, DEFAULT_TOLERANCE_MS);
-        assert!(v.is_pass(), "rig-recipe-derived healthy pair should PASS, got {v:?}");
+        assert!(
+            v.is_pass(),
+            "rig-recipe-derived healthy pair should PASS, got {v:?}"
+        );
     }
 
     #[test]
