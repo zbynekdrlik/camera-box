@@ -655,14 +655,6 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   AV_RESTART_GATE_BIN="${AV_RESTART_GATE_BIN:-$PROBE_BIN_DIR/av-restart-sync-gate}"
   VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
   OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
-  # Reuse the tested on-box command PLANNER (the same one [8/8a-c] uses) for the decode
-  # emission — its build_onbox_command wraps each Windows path in PowerShell double quotes
-  # verbatim, the CORRECT way to quote a single-backslash Windows path. NEVER bash `printf
-  # %q`, which doubles every backslash and corrupts the path (recording-verdict-on-stream.sh
-  # says so in its own comment). Sourcing only defines its functions — its main() is guarded
-  # to run on execute, not on source.
-  # shellcheck source=scripts/recording-verdict-on-stream.sh
-  . "$HERE/recording-verdict-on-stream.sh"
 
   # $1 = label ("before" | "after"). Records cam2's QPSK-marked stream program for
   # AV_RESTART_RECORD_SECS, pulls the cam2 marker CSV to dev1 (cam2 is Linux — scp
@@ -710,13 +702,17 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
     local rec_win="${stream_host_path:-<the ${label} recording, as it lives on the stream box>}"
     local marker_win="$OUT_DIR_WIN\\av-restart-${label}-${RUN_ID}.csv"
     local partial_win="$OUT_DIR_WIN\\av-restart-${label}-${RUN_ID}.json"
-    local onbox_cmd
-    onbox_cmd="$(build_onbox_command "$VERDICT_EXE_WIN" --av-sync "$rec_win" \
-      --av-marker-log "$marker_win" --av-audio-track "$AV_RESTART_AUDIO_TRACK")"
     echo "    --- win-stream-snv decode plan for '$label' (bash cannot scp/exec on Windows) ---"
     echo "    win-stream-snv FileUpload:   $marker_csv  ->  $marker_win"
-    echo "    win-stream-snv Shell (PowerShell — correctly quoted via build_onbox_command, NOT bash %q):"
-    printf '      %s > "%s"\n' "$onbox_cmd" "$partial_win"
+    echo "    win-stream-snv Shell (PowerShell):"
+    # Emit the PowerShell decode command. Each Windows path is wrapped in PowerShell DOUBLE
+    # quotes verbatim (%s) — the correct way to quote a single-backslash Windows path, the
+    # SAME technique the [8/8] on-box planner uses. NEVER bash `printf %q`, which doubles
+    # every backslash (`C:\x` -> `C:\\x`) and corrupts the path on the box. --av-sync writes
+    # its JSON to stdout, so redirect it into the partial the FileDownload below pulls back.
+    # shellcheck disable=SC2016  # $env:RUST_LOG is a PowerShell var for the Windows box — must NOT expand in bash
+    printf '      $env:RUST_LOG="info"; & "%s" "--av-sync" "%s" "--av-marker-log" "%s" "--av-audio-track" "%s" > "%s"\n' \
+      "$VERDICT_EXE_WIN" "$rec_win" "$marker_win" "$AV_RESTART_AUDIO_TRACK" "$partial_win"
     echo "    win-stream-snv FileDownload: $partial_win  ->  $OUTDIR/av-restart-${label}-${RUN_ID}.json"
   }
 
