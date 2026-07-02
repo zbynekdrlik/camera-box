@@ -123,8 +123,25 @@ The user has repeated this 2-3× and gets angry when re-asked which recovery met
    dialog, renders black) → **force-kill obs64 + relaunch**.
    This is a DEV rig; the restreamer skill's "never kill" is OVERRIDDEN here.
    User verbatim: "kludne ho killni" — just kill it.
-   
+
    After kill: clear `.sentinel\*`, then relaunch cwd=bin\64bit.
+
+   **#391 diagnostic-capture-before-kill (when the #391 obs-liveness-watchdog alerted a wedge and
+   root cause is still unknown):** before force-killing, grab a forensic snapshot via the win-* MCP
+   so a recurrence is diagnosable — no DXGI/TDR signature was found for the 2026-07 ~25h stream-OBS
+   wedge (obs64 pegged ~168% CPU, `Responding=False`, 16.0% render-lag), and Windows Event Log's own
+   hang detector (`Application`, ID 1002) did NOT fire/log for that window, so only this capture (or
+   the watchdog's own `GetStats`/process-state history) preserves any evidence:
+   ```powershell
+   $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+   Get-Process obs64 | Select-Object Id,CPU,WorkingSet,Responding,StartTime |
+     Out-File "$env:TEMP\obs64-wedge-$ts.txt"
+   Get-Content (Get-ChildItem "C:\Users\*\AppData\Roaming\obs-studio\logs\*.txt" |
+     Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail 200 |
+     Out-File -Append "$env:TEMP\obs64-wedge-$ts.txt"
+   ```
+   Then proceed with the force-kill + relaunch as usual. Pull the file back via `FileDownload` if the
+   wedge doesn't reproduce again soon — otherwise it's fine to leave it in `%TEMP%` for later.
 
 3. **GPU wedge on stream box** (`DXGI_ERROR_DEVICE_REMOVED` / TDR on RTX 4060, open: #89):
    OBS restart alone often does NOT clear a wedged GPU. **Reboot the PC.**
@@ -142,6 +159,20 @@ The user has repeated this 2-3× and gets angry when re-asked which recovery met
      (~4 lines/s). Filter first: `Get-Content $log | Where-Object { $_ -notmatch 'Unknown Script|ytfast|ytslow' }`.
 
 Do NOT use AskUserQuestion for OBS recovery — just recover it.
+
+## #391 — broadcast-OBS liveness watchdog (detect+alert; ships disabled)
+
+A wedged obs64 (pegged CPU, `Responding=False`, high render-lag) is otherwise SILENT — it emits no
+error and the encoder can keep reporting a green `outputFps` while the render loop is choking or
+fully stuck. `scripts/obs-liveness-watchdog.sh` (+ `scripts/lib/obs-watchdog-decision.sh` +
+`camera_box::obs_watchdog::classify`) polls `GetStats` on both boxes from a dev1 systemd timer and
+fires a Discord alert once a wedge is confirmed over 2 consecutive passes — see
+`systemd/obs-liveness-watchdog.README.md` for the install/live-verify procedure. **Detection is
+fully automatic from dev1 (no ssh/MCP needed for `GetStats`); recovery is agent-driven** — the
+alert embeds the exact `scripts/launch-obs-genlock.sh --box <box> --force` command, because ssh to
+these boxes is denied and the win-* MCP is agent-only (a dev1 timer cannot itself force-kill or
+relaunch obs64.exe). When you (the agent) see that alert, just run the embedded recovery command —
+do NOT ask before recovering (same "recover it, don't ask" rule as the rest of this file).
 
 ## WebSocket Credentials
 
