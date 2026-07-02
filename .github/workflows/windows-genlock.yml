@@ -567,6 +567,22 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # #398 (Option A, the #269 lock-step) — see windows-genlock-fast.yml for the full rationale;
+      # duplicated here so the slow/full build path can't silently ship a reverted dock either.
+      - name: Assert camera-box dual-QR dock patch present (#398)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "vendor/av-sync-dock/src/camera-box-qr.hpp")) { Write-Error "camera-box-qr.hpp is gone (#398) — the dock no longer knows our dual-QR wire format"; exit 1 }
+          $hdr = (Get-Content "vendor/av-sync-dock/src/camera-box-qr.hpp" -Raw)
+          if ($hdr -notmatch [regex]::Escape('decode_camera_box_qr')) { Write-Error "decode_camera_box_qr gone (#398)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('0xEDB88320')) { Write-Error "camera-box-qr.hpp CRC-32/ISO-HDLC polynomial gone (#398) — no longer matches src/payload.rs"; exit 1 }
+          $src = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('#include "camera-box-qr.hpp"')) { Write-Error "camera-box-qr.hpp include gone from sync-test-output.cpp (#398)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('decode_camera_box_qr((char *)data.payload, &cb)')) { Write-Error "camera-box dual-QR try-first decode gone (#398) — dock reverted to norihiro-only"; exit 1 }
+          if ($src -notmatch [regex]::Escape('cb_video_ts_ns[256]')) { Write-Error "camera-box video-ring (live pairing) gone (#398)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('signal_sync_found(st->context, &si)')) { Write-Error "camera-box live sync_found emit gone (#398) — dock would stop showing our live offset"; exit 1 }
+          Write-Output "#398 camera-box dual-QR dock patch present - OK"
+
       # #188: build the A/V sync dock (norihiro/obs-audio-video-sync-dock, vendored) against the
       # SAME genlocked OBS SDK, standalone, mirroring the DistroAV path above. Ships as a
       # first-party OBS plugin so the user can measure LIVE A/V sync inside his own OBS.

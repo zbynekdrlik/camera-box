@@ -1242,3 +1242,44 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - **Key decision**: property key for per-source genlock latency is `genlock_latency_ms_src` (PROP_GENLOCK_LATENCY_MS_SRC in ndi-source.cpp). Render-Delay filter kind is `"gpu_delay"` (gpu-delay.c L348). OBS `latency_ms=` in genlock-fifo audit = effective held value (source->genlock_latency_ms > 0 ? that : global); `src_latency_ms=` = the per-source setting in state.
 - **Scope**: clean-code ONLY. Supervisor runs live rig-validate (set 1000ms on prod 'NDI 2ME PGM', read audit log, verify delivery ≥ 900ms, restore 450ms A/V-align). No deploy (camera-box deploys to embedded hardware — CI builds artifacts).
 - **PR #389** (playbook commit `7dc77a0f9`): `.claude/skills/genlock/SKILL.md` — per-source WS key, gpu_delay filter kind, delivery gate pattern, snapshot+restore pattern, audit line disambiguation. Merge SHA `30c1c21889e7c9ca4f98681ba2064f3eb48ccce0`.
+
+## #411 Windows-local unattended self-heal for the #391 OBS liveness watchdog (2026-07-02)
+
+- **Issue**: #411 — #391 shipped DETECT+ALERT only (dev1 timer + Discord alert); recovery still
+  needed an agent watching Discord, failing the exact overnight/unattended case the watchdog exists
+  for. Reclassified same-day from needs-decision to mine-technical (the user retracted the "ask the
+  user" framing — this is completing our own feature, not a user decision).
+- **Version**: 1.7.0-dev.195 → 1.7.0-dev.196 (Cargo.toml, commit `b67c65954`).
+- **RED→GREEN kernel** (`src/obs_self_heal.rs`, Tier-0 pure): `test:[red]` `5eea7b753` (9 tests,
+  stubbed decide()/recovery_plan()/etc — 9/9 FAIL, observed via `cargo test --lib obs_self_heal #
+  airuleset:build-ok`) → `feat:[green]` `d35422ab8` (real confirm-threshold/throttle/lock/AHK-order
+  logic — 9/9 PASS). Reuses `obs_watchdog::classify` unchanged for the wedge verdict.
+- **PR #414** (merged `aa5b50b0f` by the user mid-review — see below): `scripts/obs-self-heal-install.sh`
+  bash pure planner (mirrors `launch-obs-genlock.sh`) emitting the per-box Task Scheduler recovery
+  PowerShell + XML; CI `windows-probe` builds+uploads `obs-watchdog-gate.exe`; 21 structural tests.
+- **Review found a real gap**: an 8-angle 5-agent parallel `/review` on PR #414 (still running when
+  the user merged it) found the confirm/throttle/lock RECOVERY decision was hand-rolled in
+  PowerShell — contradicting the PR's own "reuse, never reinvent" principle the WEDGE verdict
+  correctly followed. Filed the fix as **PR #415** (merged `ab09f5ee1`): new `src/bin/obs-self-heal-gate.rs`
+  bridges `camera_box::obs_self_heal::decide` into PowerShell the SAME way `obs-watchdog-gate`
+  bridges `classify` — JSON stdin/stdout, `0`/`1`/`2` exit-code contract, optional
+  threshold/interval/stale-lock defaulting to the Rust `DEFAULT_*` consts. Plus 2 concrete bugs
+  (unknown gate exit codes silently read as healthy; missing-binary path skipped
+  `Save-SelfHealState`). A SECOND review round on #415's own diff (2 agents, independently
+  converging) found 3 more: a deleted stale-lock diagnostic log line, inconsistent exit-2 handling
+  between the two gate binaries, and a literal-drift risk in a display string — all fixed in the
+  same PR #415 before merge (`6bb4d7db4`). Final: 8 unit tests in the new gate binary, 34 structural
+  tests in `tests/obs_self_heal_install.rs` (up from 21), including 2 behavioral cross-checks that
+  invoke the REAL compiled `obs-self-heal-gate` binary via `CARGO_BIN_EXE_obs-self-heal-gate`.
+- **PR #417** (merged `887439e1d`, docs-only): playbook-review pass — generalized the "thin gate
+  binary" pattern in `.claude/skills/obs-ops/SKILL.md` beyond stateless classification to any
+  reused decision, and captured 2 gotchas (bash `${var:-default}` breaks on an apostrophe even
+  under an outer double-quote; a GH Actions pwsh step fails on a lingering `$LASTEXITCODE` even
+  when your own `if` check already treated it as a pass).
+- **Note**: issue #416 (a separate, pre-existing CI foundation gap — the `Test` job has no
+  `timeout-minutes` and isn't nextest-based, observed as a 44min flaky hang on #414's main-branch
+  run) was filed by the USER directly, not by this worker — out of scope for #411, correctly tracked.
+- **Scope**: clean-code + Tier-0 tests only. Ships DISABLED (`<Enabled>false</Enabled>` in the
+  generated Task Scheduler XML). Live rig install + verify on strih + stream is SUPERVISOR-driven,
+  not part of this work — no rig/MCP access needed to verify the pure planner + Rust harness tests.
+  No web dashboard (camera-box has none — CI-built artifacts + a Windows Task Scheduler mechanism).

@@ -354,6 +354,26 @@ jobs:
           path: distroav-stage/
           if-no-files-found: error
 
+      # #398 (Option A, the #269 lock-step): the ONLY intentional camera-box patch on the
+      # vendored av-sync-dock — the dock decodes OUR dual-QR (frame_id, not norihiro's q=,i=,f=,c=)
+      # so the guarded zero-loss gate stays untouched. A future `git subtree pull` of av-sync-dock
+      # would still COMPILE fine if it silently reverted this (stock norihiro compiles too) — only
+      # this text guard catches the behavior regression. Mirrors the Linux-CI guard
+      # tests/av_sync_dock_qr_patch_guard.rs.
+      - name: Assert camera-box dual-QR dock patch present (#398)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "vendor/av-sync-dock/src/camera-box-qr.hpp")) { Write-Error "camera-box-qr.hpp is gone (#398) — the dock no longer knows our dual-QR wire format"; exit 1 }
+          $hdr = (Get-Content "vendor/av-sync-dock/src/camera-box-qr.hpp" -Raw)
+          if ($hdr -notmatch [regex]::Escape('decode_camera_box_qr')) { Write-Error "decode_camera_box_qr gone (#398)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('0xEDB88320')) { Write-Error "camera-box-qr.hpp CRC-32/ISO-HDLC polynomial gone (#398) — no longer matches src/payload.rs"; exit 1 }
+          $src = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('#include "camera-box-qr.hpp"')) { Write-Error "camera-box-qr.hpp include gone from sync-test-output.cpp (#398)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('decode_camera_box_qr((char *)data.payload, &cb)')) { Write-Error "camera-box dual-QR try-first decode gone (#398) — dock reverted to norihiro-only"; exit 1 }
+          if ($src -notmatch [regex]::Escape('cb_video_ts_ns[256]')) { Write-Error "camera-box video-ring (live pairing) gone (#398)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('signal_sync_found(st->context, &si)')) { Write-Error "camera-box live sync_found emit gone (#398) — dock would stop showing our live offset"; exit 1 }
+          Write-Output "#398 camera-box dual-QR dock patch present - OK"
+
       # #188: compile-check the A/V sync dock against the SAME installed OBS SDK (reuses the
       # OBS build above — no second full OBS build). Catches a dock C++/Qt/CMake error at the
       # pre-merge gate instead of after the 150-min full windows-genlock build.
