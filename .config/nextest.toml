@@ -1,0 +1,50 @@
+# camera-box nextest profile (#416).
+#
+# Per-test slow-timeout: a test still running after `period` elapses is
+# reported SLOW; after `terminate-after` consecutive periods it is
+# TERMINATED and reported as a named failure — instead of hanging the whole
+# CI job silently up to its `timeout-minutes` cap (a real 44min flaky hang
+# was observed on the #411 merge, likely a probe thread/sync_channel
+# deadlock in the --all-features suite).
+#
+# period = "60s", terminate-after = 18 -> a single test is killed after 18
+# minutes. CALIBRATION NOTE (#423): the earlier 5-min bound FALSE-KILLED a
+# legitimately CPU-heavy test — `probe::recording::tests::
+# parallel_decode_matches_single_threaded_result_exactly` genuinely runs
+# >300s (parallel-vs-single-threaded QR decode of real 1080p fixtures; the
+# `burn_fixture_decode` / `genlock_manifest` / `recording_latency_decode`
+# real-fixture tests are the other >60s SLOW ones). These are heavy CPU, NOT
+# a sleep/hang, so the bound must clear them. The whole --all-features
+# baseline job is ~10.5 min, so no single legit test exceeds ~10 min; 18 min
+# gives comfortable headroom against a false-kill while still NAMING a true
+# runaway (the observed 44-min hang) well under the job's 25-min
+# `timeout-minutes` cap (which is itself the hard backstop). The real fix —
+# making `parallel_decode` fast/bounded — is tracked in #423; this bound
+# stops it blocking CI meanwhile.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 18 }
+
+# #416 follow-up (see #423): unlike `cargo test` (which runs one test BINARY at a
+# time, parallelizing only the tests within it), nextest schedules tests from ALL
+# binaries concurrently against one global thread-pool. This crate's
+# probe::recording::tests::parallel_decode_matches_single_threaded_result_exactly
+# spawns its OWN internal worker-thread pool (up to 4 OS threads, decode_stream_parallel)
+# to do CPU-heavy QR-image decode work. Under nextest's cross-binary concurrency it was
+# OBSERVED (2/2 PR CI runs for #416, both terminated at exactly the 300s slow-timeout
+# while genlock_manifest + recording_latency_decode's other CPU-heavy tests were ALSO
+# running concurrently) to be starved by CPU oversubscription on the runner, not
+# necessarily deadlocked — under plain `cargo test`'s per-binary-serial model this
+# contention pattern could not occur, which is consistent with the original issue's
+# "did not reproduce on rerun" observation.
+#
+# `threads-required = "num-cpus"` reserves the ENTIRE thread pool for this test's
+# duration, so nextest will not schedule other CPU-heavy tests to run at the same
+# time as this one — removing the oversubscription. Combined with the 18-minute
+# default slow-timeout above (belt-and-braces, in case this test is ALSO
+# legitimately slow even in isolation, not purely contention-bound), a genuine
+# deadlock is still caught and named well within the job's 25-min timeout-minutes
+# cap. See #423 for the follow-up to confirm which mitigation (or both) actually
+# resolves it, and to root-cause whether a scheduling-independent race also exists.
+[[profile.default.overrides]]
+filter = 'test(parallel_decode_matches_single_threaded_result_exactly)'
+threads-required = "num-cpus"
