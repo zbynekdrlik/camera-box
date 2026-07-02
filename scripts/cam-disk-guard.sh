@@ -84,15 +84,30 @@ probe_cam() {
     done <<< "$mounts_data"
 }
 
+# ── collect observations in the MAIN shell (#403) ─────────────────────────────
+# Mirror of the #394 rig-restore-watchdog fix: run each probe in the long-lived main shell with
+# its records REDIRECTED to a temp file (a redirection does not fork), NOT inside a per-probe
+# command substitution. Under the systemd oneshot unit, log() stderr from a fast-exiting `$()`
+# subshell child is intermittently dropped by journald; main-shell collection makes the observation
+# log reliable. Result lands in DISK_OBS.
+DISK_OBS=""
+collect_observations() {
+    local obs_file
+    obs_file="$(mktemp "${TMPDIR:-/tmp}/camera-box-cam-disk-guard-obs.XXXXXX")"
+    probe_cam cam1 "$CAM1_IP" >>"$obs_file"
+    probe_cam cam2 "$CAM2_IP" >>"$obs_file"
+    probe_cam cam4 "$CAM4_IP" >>"$obs_file"
+    DISK_OBS="$(cat "$obs_file")"
+    rm -f "$obs_file"
+}
+
 # ── main pass ────────────────────────────────────────────────────────────────
 main() {
     log "pass start (threshold=${CAM_DISK_ALERT_THRESHOLD}%, dry_run=$DRY_RUN)"
 
     local alerts=()
-    local obs
-    obs="$(probe_cam cam1 "$CAM1_IP")"$'\n'
-    obs+="$(probe_cam cam2 "$CAM2_IP")"$'\n'
-    obs+="$(probe_cam cam4 "$CAM4_IP")"$'\n'
+    # #403: collect in the main shell (no $() subshell per probe) so journald keeps the obs log.
+    collect_observations
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
@@ -104,7 +119,7 @@ main() {
             log "ALERT: cam=$cam mount=$mount used=${used_pct}% >= ${CAM_DISK_ALERT_THRESHOLD}%"
             alerts+=("cam $cam $mount ${used_pct}% (≥${CAM_DISK_ALERT_THRESHOLD}%)")
         fi
-    done <<< "$obs"
+    done <<< "$DISK_OBS"
 
     if [[ ${#alerts[@]} -eq 0 ]]; then
         log "pass end — all cam boxes below threshold"
@@ -129,4 +144,8 @@ main() {
     log "pass end — alerted on ${#alerts[@]} mount(s)"
 }
 
-main
+# #403: run main ONLY when executed, not when sourced — so collect_observations is unit-testable
+# with stubbed probes (mirrors the #394 rig-restore-watchdog guard).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi
