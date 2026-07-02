@@ -26,7 +26,7 @@ import pytest
 
 # av_sync_calibrate.py does `from obs_phase2 import _conn, _rpc`, so scripts/ must be importable
 # (same convention as tests/python/test_obs_burn_filter.py).
-_SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+_SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
