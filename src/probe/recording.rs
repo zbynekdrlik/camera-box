@@ -814,6 +814,22 @@ mod tests {
 
     // ---- #166: parallel decode (order-preserving across the worker pool) ----
 
+    // #423: these three tests pass `&[]` (no expected node burns) instead of
+    // `&NODE_BURN_RUN_IDS`. `dual_qr_luma` renders ONLY the optical dual-QR (run_id
+    // 6519) — it never carries a cam1/strih/stream node burn — so requiring the full
+    // `NODE_BURN_RUN_IDS` set meant `decode_qr_luma_all_fast_then_robust`'s
+    // `all_burns_present` check could NEVER pass, and EVERY synthetic frame silently
+    // fell through to `robust_tile_passes` (the ~10×-cost bottom-band tile
+    // crop+upscale+re-decode, #202/#207) chasing burns that structurally cannot ever
+    // be found. That gratuitous robust-path tax on every frame — not real fixture
+    // size or genuine contention — was the dominant cost behind the >300s CI
+    // timeout (#416/#423): these tests exist to prove parallel/serial ORDERING and
+    // EQUIVALENCE, not burn-recovery (that is `burn_fixture_decode.rs`'s job, on
+    // real hard fixtures where the ~10× cost is the point). `&[]` makes
+    // `all_burns_present` vacuously true, so both sides take the cheap plain+Otsu
+    // fast path — the exact behavior a burn-free (pure-optical) recording gets in
+    // production — while still exercising the real rqrr encode→decode roundtrip and
+    // the real worker-pool threading this test is actually about.
     #[test]
     fn parallel_decode_preserves_capture_order_and_decodes_every_frame() {
         // The parallel decoder fans frames across N workers that complete OUT of
@@ -821,9 +837,12 @@ mod tests {
         // dual-QR frames must come back in EXACT capture order with EVERY frame
         // decoded — proving the reorder logic, not just that it ran. (The single
         // -threaded loop trivially preserved order; this is the regression guard
-        // that the parallelization did not corrupt it.)
-        let n: u64 = 60;
-        let frames = decode_stream_parallel(4, &NODE_BURN_RUN_IDS, |emit| {
+        // that the parallelization did not corrupt it.) n=16 comfortably exceeds the
+        // workers*2=8 bounded job-channel capacity (so the producer must block and
+        // refill it at least once — the backpressure/reorder path is genuinely
+        // exercised), without paying for dozens of needless frames.
+        let n: u64 = 16;
+        let frames = decode_stream_parallel(4, &[], |emit| {
             for i in 0..n {
                 // left = even tick 2i, right = odd tick 2i+1 → tick = 2i+1, unique
                 // per frame so an order bug is detectable.
@@ -849,24 +868,32 @@ mod tests {
     fn parallel_decode_matches_single_threaded_result_exactly() {
         // Byte-for-byte equivalence with the serial reference for the SAME input —
         // the parallelization must not change the decode result, only its speed.
-        let n: u64 = 24;
+        // n=16 still crosses the workers*2=8 job-channel bound for the workers=4
+        // case (see the module note above for why `&[]`/no expected burns).
+        let n: u64 = 16;
         let make = |i: u64| dual_qr_luma(7 * i as u32, 7 * i as u32 + 1);
 
-        let serial: Vec<RecordingFrame> =
-            (0..n).map(|i| decode_recording_frame(i, make(i))).collect();
+        let serial: Vec<RecordingFrame> = (0..n)
+            .map(|i| decode_recording_frame_with_burns(i, make(i), &[]))
+            .collect();
 
-        // workers=1 and workers=4 must both equal the serial reference. Both sides use the
-        // SAME burn set (`decode_recording_frame` defaults to the full `NODE_BURN_RUN_IDS`),
-        // so the #207 fast/robust gate is identical on each path — the comparison is purely
-        // about ordering/parallelism, not the decode path.
+        // workers=1 and workers=4 must both equal the serial reference. Both sides use
+        // the SAME (empty) burn set, so the #207 fast/robust gate is identical on each
+        // path — the comparison is purely about ordering/parallelism, not the decode
+        // path.
         for w in [1usize, 4] {
-            let par = decode_stream_parallel(w, &NODE_BURN_RUN_IDS, |emit| {
+            let par = decode_stream_parallel(w, &[], |emit| {
                 for i in 0..n {
                     emit(i, make(i));
                 }
                 Ok(n)
             })
             .unwrap();
+            assert_eq!(
+                par.len(),
+                serial.len(),
+                "parallel (workers={w}) returns the same frame count as single-threaded"
+            );
             assert_eq!(par, serial, "parallel (workers={w}) == single-threaded");
         }
     }
@@ -874,8 +901,10 @@ mod tests {
     #[test]
     fn parallel_decode_propagates_producer_error() {
         // A producer (ffmpeg/ffprobe) error must surface as an Err, not a silent
-        // short read — otherwise a truncated decode could be read as "0 loss".
-        let r = decode_stream_parallel(4, &NODE_BURN_RUN_IDS, |emit| {
+        // short read — otherwise a truncated decode could be read as "0 loss". The
+        // burn set is irrelevant to error propagation; `&[]` keeps the one decoded
+        // frame on the cheap fast path (see the module note above).
+        let r = decode_stream_parallel(4, &[], |emit| {
             emit(0, dual_qr_luma(0, 1));
             anyhow::bail!("simulated ffmpeg failure");
         });
