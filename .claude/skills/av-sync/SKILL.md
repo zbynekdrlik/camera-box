@@ -7,12 +7,26 @@ stream recording and reports the offset. Convention: `av_offset_ms = video − a
 **negative = video LEADS audio** → ADD `latency_adjust_ms` (= −offset) to the video
 source's genlock latency (DistroAV "Latency (ms)" on the program NDI input, hot-apply).
 
-## Run recipe (proven 2026-07-02, measured −70.2 ms ±10 @ NDI 2ME PGM latency 1000 ms)
+## Run recipe
+
+**#420 (2026-07-02): the earlier "−70.2 ms ±10 @ NDI 2ME PGM latency 1000 ms" result is
+UNVERIFIED, not live-proven.** Live rig evidence showed `rig-mode.sh test` had started ONLY the
+video dual-QR painter (`--paint-only --dual-qr`, no `--audio-marker` flags at all) — no QPSK
+marker was ever emitted, so that recording's audio track carried no real marker and
+`cluster_offset_ms` (built to survive CRC-4 false decodes) could have locked onto a spurious
+cluster in program-audio noise. `rig-mode.sh test` now ALWAYS starts the marker alongside the
+painter (same process — src/probe/qpsk_emit.rs runs as a thread inside `frame-probe
+--paint-only`) and VERIFIES its ALSA PCM is genuinely RUNNING before returning PASS (fail loud +
+kill the painter otherwise) — no more silent, unmeasured runs. The offset must be RE-measured
+with the emitter confirmed live before any number is trusted again.
 
 1. cam2 into TEST mode (fb0 free, capture+emit alive — `rig-mode.sh test` / the `/run` systemd
-   drop-in). Painter (fresh CI `probe-tools-linux` frame-probe):
+   drop-in). As of #420, `rig-mode.sh test` launches the painter WITH the QPSK audio marker
+   already wired in and verifies it is audible — no separate manual frame-probe invocation is
+   needed. The equivalent flags it passes (env-overridable: `AUDIO_MARKER_DEVICE` /
+   `AUDIO_MARKER_CADENCE_TICKS` / `AUDIO_MARKER_LOG`):
    ```
-   frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 300 \
+   frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs N \
      --audio-marker --audio-marker-device hw:CARD=PCH,DEV=3 \
      --audio-marker-cadence-ticks 180 --marker-log /run/rig-qpsk-markers.csv
    ```

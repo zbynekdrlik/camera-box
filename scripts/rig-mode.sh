@@ -17,14 +17,20 @@
 #                  that grabs fb0; /dev/video0 capture + NDI emit do not), so cam2 stays a MEASURABLE
 #                  camera during the test. Then launch the PINNED dual-QR vernier painter
 #                  (frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs N
-#                  — #290: 60fps to match the 60fps capture so 60 distinct ticks/s resolve), verify it is
-#                  up + writing /dev/fb0 AND camera-box is still active + capturing/emitting. Then
-#                  PRINT the OBS test step (burns ON, run_id strih 911002 / stream 911004).
+#                  — #290: 60fps to match the 60fps capture so 60 distinct ticks/s resolve) WITH the
+#                  QPSK A/V-sync audio marker (--audio-marker --audio-marker-device hw:CARD=PCH,DEV=3
+#                  — #420: TEST mode used to launch the painter WITHOUT this, so the A/V-sync
+#                  measurement was silently unmeasured — no marker ever reached the recording), verify
+#                  it is up + writing /dev/fb0 AND camera-box is still active + capturing/emitting AND
+#                  the marker's ALSA PCM is actually RUNNING (#420: fail loud + kill the painter if
+#                  silent). Then PRINT the OBS test step (burns ON, run_id strih 911002 / stream 911004).
 #   EVENT : cam2 — stop the painter cleanly (via its PID file — NOT a naive `pkill -f frame-probe`,
-#                  which would self-kill a shell whose cmdline contains "frame-probe"), REMOVE the
-#                  transient no-display drop-in TEST mode installed (#291), then reload + restart
-#                  camera-box and verify the service is active + --display restored. Then PRINT the OBS
-#                  event step (burns OFF: the #246 guard; the wrapper refuses to launch otherwise).
+#                  which would self-kill a shell whose cmdline contains "frame-probe"); the QPSK audio
+#                  marker is a THREAD inside that same process (#420: no separate stop needed), so this
+#                  also stops the marker. REMOVE the transient no-display drop-in TEST mode installed
+#                  (#291), then reload + restart camera-box and verify the service is active +
+#                  --display restored. Then PRINT the OBS event step (burns OFF: the #246 guard; the
+#                  wrapper refuses to launch otherwise).
 #
 # The painter binary on cam2 comes from the CI probe-tools-linux-amd64 artifact:
 #   gh run download <latest CI run> -n probe-tools-linux-amd64
@@ -57,6 +63,14 @@
 #   PAINTER_EXTRA_FLAGS    extra painter flags for a MEASUREMENT run (default empty), e.g.
 #                          "--wall-clock --run-id 12345" — the pinned switch paints the vernier; a
 #                          full E2E measurement adds these (see scripts/recording-e2e.sh).
+#   AUDIO_MARKER_DEVICE    #420: ALSA device for the QPSK A/V-sync audio marker (default
+#                          hw:CARD=PCH,DEV=3 — the cam2 BenQ HDMI out with the connected speaker,
+#                          confirmed live; card0 is the intercom, held exclusively by camera-box).
+#   AUDIO_MARKER_CADENCE_TICKS  emit the marker every N painter ticks (default 180 ≈ 3s @ 60Hz —
+#                          the av-sync skill's proven recipe).
+#   AUDIO_MARKER_LOG       path on cam2 for the emitted-marker CSV (default
+#                          /run/rig-qpsk-markers.csv — pull it off cam2 for recording-verdict
+#                          --av-sync).
 #
 # Exit codes: 0 = mode applied (cam side verified) + OBS step printed; non-zero = cam-side failure or
 #             a usage error (exit 2).
@@ -89,6 +103,14 @@ PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
 CAMERA_BOX_BIN="${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}"   # the deployed camera-box binary on cam2
+# #420: the QPSK A/V-sync audio marker — a THREAD inside the SAME frame-probe --paint-only process
+# (src/probe/qpsk_emit.rs), never a separate daemon. TEST mode used to launch the painter WITHOUT
+# these flags at all (live evidence 2026-07-02: no audio-marker process running on cam2), so the
+# whole A/V-sync measurement (#188/#398) was silently unmeasured. Defaults match the proven
+# av-sync skill recipe (.claude/skills/av-sync).
+AUDIO_MARKER_DEVICE="${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"        # cam2 BenQ HDMI (confirmed: has a connected speaker)
+AUDIO_MARKER_CADENCE_TICKS="${AUDIO_MARKER_CADENCE_TICKS:-180}"        # ~3s @ 60Hz painter ticks
+AUDIO_MARKER_LOG="${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}"      # emitted-marker CSV on cam2
 # RIG_TEST_DROPIN (the transient no-display drop-in TEST mode installs / EVENT mode removes) is now
 # defined in scripts/lib/rig-test-dropin.sh, sourced above — the single source shared with the e2e
 # harnesses (#309). install = painter_launch_remote; remove = painter_stop_remote (via the shared
@@ -96,12 +118,19 @@ CAMERA_BOX_BIN="${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}"   # the deployed c
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
-# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [FPS] [CBBIN] [DROPIN] -> the REMOTE bash run on cam2
-# (over ssh) to enter TEST mode: stop any prior painter, free /dev/fb0 WITHOUT killing capture+emit
-# (#291: switch camera-box to a no-display drop-in instead of stopping it), fail loud if the painter
-# binary is absent, launch the PINNED dual-QR vernier painter recording its PID, then verify it is up
-# AND writing /dev/fb0. Pure string so a unit test can assert the pinned flags + the safety properties
-# without a live cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY.
+# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [FPS] [CBBIN] [DROPIN] [AUDIO_DEV] [AUDIO_CADENCE]
+#   [MARKER_LOG] -> the REMOTE bash run on cam2 (over ssh) to enter TEST mode: stop any prior
+# painter, free /dev/fb0 WITHOUT killing capture+emit (#291: switch camera-box to a no-display
+# drop-in instead of stopping it), fail loud if the painter binary is absent, launch the PINNED
+# dual-QR vernier painter WITH the QPSK A/V-sync audio marker (#420: the marker is a thread inside
+# this same process — --audio-marker/--audio-marker-device/--audio-marker-cadence-ticks/
+# --marker-log — never a separate launch), recording its PID, then verify it is up AND writing
+# /dev/fb0 AND (#420) the marker's ALSA PCM is actually RUNNING — fail loud + kill the painter if
+# silent (a run with no audible marker is a wasted, unmeasured run). Pure string so a unit test can
+# assert the pinned flags + the safety properties without a live cam. Loop vars (\$i, \$!,
+# \$PAINTER_PID) are \$-escaped so they run REMOTELY; the ALSA card/dev are parsed from AUDIO_DEV
+# LOCALLY (pure bash parameter expansion) so the self-check below is a plain literal path — no
+# remote-side parsing needed inside the already-nested heredoc.
 painter_launch_remote() {
   local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
   # #290: painter rate — positional like the other params, with the PAINTER_FPS pinned constant as
@@ -111,6 +140,16 @@ painter_launch_remote() {
   local cbbin="${7:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
   local dropin="${8:-$RIG_TEST_DROPIN}"   # path single-sourced in lib/rig-test-dropin.sh (#309)
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
+  # #420: the QPSK audio-marker params — same positional-with-env-fallback shape as fps/cbbin/dropin.
+  local audio_dev="${9:-${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}}"
+  local audio_cadence="${10:-${AUDIO_MARKER_CADENCE_TICKS:-180}}"
+  local marker_log="${11:-${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}}"
+  # Parse CARD=<id> / DEV=<n> out of "hw:CARD=<id>,DEV=<n>" with plain bash parameter expansion
+  # (LOCALLY, not on the remote box) so the audible self-check below can bake a literal
+  # /proc/asound/<id>/pcm<n>p/sub0/status path straight into the remote heredoc.
+  local audio_card="${audio_dev#*CARD=}"; audio_card="${audio_card%%,*}"
+  local audio_devnum="${audio_dev#*DEV=}"; audio_devnum="${audio_devnum%%,*}"
+  local audio_status="/proc/asound/$audio_card/pcm${audio_devnum}p/sub0/status"
   cat <<REMOTE
 set -e
 # (0) idempotency: stop any painter from a previous TEST run so re-running never stacks two painters on
@@ -165,12 +204,17 @@ if [ ! -x "$bin" ]; then
   echo "        scp frame-probe root@$PAINTER_IP:$bin   # then chmod +x" >&2
   exit 1
 fi
-# (4) launch the PINNED dual-QR vernier painter; record its PID for a clean event-mode stop.
+# (4) launch the PINNED dual-QR vernier painter WITH the QPSK A/V-sync audio marker (#420: both on
+#     the SAME process — the marker is a thread inside frame-probe, in lock-step with the painter's
+#     frame_id via the shared refresh tick, src/probe/qpsk_emit.rs); record its PID for a clean
+#     event-mode stop (stopping this one process stops both painter AND marker).
 #     --paint-fps $fps pins the rate to the 60fps capture (#290): the painter must paint 60 distinct
 #     ticks/s or no 60fps optical timing can be resolved. Under KMS the painter is vblank-locked at the
 #     monitor refresh and the flag is a documented no-op; on the fbdev fallback it forces the rate.
 rm -f "$pidfile" 2>/dev/null || true
-nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps $fps $extra >/tmp/rig-painter.log 2>&1 &
+nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps $fps \
+  --audio-marker --audio-marker-device $audio_dev --audio-marker-cadence-ticks $audio_cadence \
+  --marker-log $marker_log $extra >/tmp/rig-painter.log 2>&1 &
 echo \$! > "$pidfile"
 PAINTER_PID=\$(cat "$pidfile")
 sleep 3
@@ -183,6 +227,24 @@ fi
 i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if ! fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: painter PID \$PAINTER_PID alive but NOT writing /dev/fb0" >&2; exit 1; fi
 echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, ${fps}fps, ${dur}s)"
+# (6) #420: verify the QPSK audio marker is ACTUALLY producing audio, not just that the process is
+#     alive. The emitter is a CONTINUOUS-FEED writer (silence between markers, tone when due — it
+#     never lets the ALSA ring drain), so a healthy run means the PCM backing $audio_dev is OPEN and
+#     RUNNING right now. #420's root cause was NOTHING opening the device at all (TEST mode never
+#     passed --audio-marker), so this is a REAL kernel-reported signal that catches exactly that
+#     failure class — never a stub that always passes. FAIL LOUD + kill the just-verified painter:
+#     a silent marker means this whole TEST-mode switch produced an unmeasured, wasted run.
+i=0; while [ \$i -lt 20 ]; do
+  if [ -f "$audio_status" ] && grep -q '^state: RUNNING' "$audio_status" 2>/dev/null; then break; fi
+  sleep 0.5; i=\$((i+1))
+done
+if [ ! -f "$audio_status" ] || ! grep -q '^state: RUNNING' "$audio_status" 2>/dev/null; then
+  echo "FAIL: #420 QPSK audio marker ($audio_dev -> $audio_status) is NOT RUNNING — no marker audio is being emitted (silent, unmeasured run)." >&2
+  echo "      status file: \$(cat "$audio_status" 2>/dev/null || echo '<missing>')" >&2
+  kill "\$PAINTER_PID" 2>/dev/null || true
+  exit 1
+fi
+echo "PASS: #420 QPSK audio marker RUNNING on $audio_dev ($audio_status state=RUNNING, cadence=${audio_cadence} ticks, log=$marker_log)"
 REMOTE
 }
 
@@ -360,7 +422,7 @@ do_test() {
     || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
-  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS")"
+  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$CAMERA_BOX_BIN" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
@@ -372,6 +434,7 @@ do_test() {
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
   echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
+  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${AUDIO_MARKER_DEVICE} (#420: cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
   echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream program inputs (WebSocket, no relaunch)."
