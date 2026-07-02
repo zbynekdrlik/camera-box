@@ -38,12 +38,51 @@ impl RenderVerdict {
     }
 }
 
-/// Classify a render sample against a target fps.
+/// fps jitter tolerance: a healthy 60fps box measures ~59.88 activeFps over a short
+/// delta window, so allow a 1 fps band. This does NOT weaken the gate — the render-time
+/// budget below is the hard physical deadline, and a real choke (27 fps) misses the fps
+/// bar by ~32 fps and the time budget by ~2×.
+const FPS_TOLERANCE: f64 = 1.0;
+
+/// Classify a render sample against a target fps. STRICT: any missed frame-time deadline,
+/// any sustained fps shortfall, or any skipped render frame in the window FAILS.
 ///
-/// STUB (RED): not yet implemented — returns Pass unconditionally so the choke/over-budget
-/// tests fail until the real logic lands.
-pub fn classify(_sample: RenderSample, _target_fps: f64) -> RenderVerdict {
-    RenderVerdict::Pass
+/// The frame-time budget (`1000 / target_fps` ms) is the physical deadline: exceeding it
+/// means the compositor could not produce a fresh frame in time, so the encoder duplicated
+/// the previous one (judder) — regardless of a green `outputFps`. Non-finite inputs fail
+/// closed.
+pub fn classify(sample: RenderSample, target_fps: f64) -> RenderVerdict {
+    if !(target_fps.is_finite() && target_fps > 0.0) {
+        return RenderVerdict::Fail(vec![format!("invalid target_fps {target_fps}")]);
+    }
+    let budget_ms = 1000.0 / target_fps;
+    let mut reasons = Vec::new();
+
+    if !sample.avg_render_time_ms.is_finite() || sample.avg_render_time_ms > budget_ms {
+        reasons.push(format!(
+            "avg render time {:.2}ms exceeds {:.2}ms frame budget @ {:.0}fps \
+             (compositor missed the deadline → duplicated/juddered frames)",
+            sample.avg_render_time_ms, budget_ms, target_fps
+        ));
+    }
+    if !sample.active_fps.is_finite() || sample.active_fps < target_fps - FPS_TOLERANCE {
+        reasons.push(format!(
+            "active render fps {:.2} below target {:.0} (render loop not keeping up)",
+            sample.active_fps, target_fps
+        ));
+    }
+    if !sample.render_skipped_frac.is_finite() || sample.render_skipped_frac > 0.0 {
+        reasons.push(format!(
+            "render skipped {:.2}% of frames in window (any lagged render frame fails)",
+            sample.render_skipped_frac * 100.0
+        ));
+    }
+
+    if reasons.is_empty() {
+        RenderVerdict::Pass
+    } else {
+        RenderVerdict::Fail(reasons)
+    }
 }
 
 #[cfg(test)]
