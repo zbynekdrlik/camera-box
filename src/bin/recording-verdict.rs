@@ -356,6 +356,39 @@ fn frame_is_delivered_optical(
     }
 }
 
+/// #376 — the calibrated ceiling for the cam2 OPTICAL dual-QR undecodable RATE
+/// (`optical_undecodable / optical_span_frames`) a node may carry and still pass the #363 HARD
+/// gate. This is a CALIBRATION to the rig's real optical physics, not a weakening of the gate —
+/// the same move as `colour_verify::NEUTRAL_CHROMA_MAX` (#364): the gate stays HARD, just aimed
+/// at the real signal instead of an unreachable theoretical zero.
+///
+/// **Measured floor (2026-06-30, run 354003, stream recording, post-#363 Otsu-union decoder):**
+/// after the #363 decoder fix landed (PR #375) the SAME pixels re-decoded from 86.9% undecodable
+/// down to **22/8999 = 0.2445%**. Those 22 frames are the cam2 dual-QR's RIGHT half arriving
+/// soft/mottled with heavy diagonal moiré (a camera→monitor optical artifact, the same physics
+/// class as the #364 bright-neutral cyan cast) while the LEFT half of the SAME frame decodes
+/// clean — proving the optical path CAN deliver a readable QR and that this residual is a rig
+/// optical-physics floor, not a decoder or chain defect. The user's explicit call (issue #376,
+/// 2026-07-01): *"akceptovateľný optický/moiré artefakt rigu (nakalibrujem prah vyššie)? Ano
+/// akceptovatelne!"* — accept it, calibrate the threshold, do not chase the decoder further and
+/// do not touch the camera.
+///
+/// **Why a RATE, not a raw count:** the residual is a per-frame optical-physics probability, so
+/// it scales with recording length. A raw absolute-count ceiling would silently get stricter on
+/// a long recording and looser on a short one; the rate stays calibrated to the same rig physics
+/// regardless of how long the run is.
+///
+/// **Headroom:** 0.5% is ~2× the measured 0.2445% floor — enough for run-to-run optical variance
+/// (moiré interference pattern shifts with tiny camera/monitor relative motion) while staying far
+/// below any GENUINE optical dropout. A real dropout is qualitatively different: e.g. the #216
+/// slow-shutter window ran ~175 s continuously undecodable — tens of PERCENT of any realistic
+/// analyzed span, two orders of magnitude above this ceiling. See the `_376` regression tests:
+/// a residual AT this rate passes; a rate materially above it (a real dropout shape) still FAILS.
+///
+/// **NEVER raise this without new measured evidence** (mirrors `colour_verify`'s calibration
+/// discipline) — it tolerates the rig's proven moiré floor, never a genuine read failure.
+const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
+
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
 /// contiguous, every missing id classified from the pixels.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -364,9 +397,9 @@ struct NodeVerdict {
     classified: Vec<ClassifiedMissing>,
     /// #363 — count of in-span frames whose cam2 OPTICAL dual-QR did NOT decode (the real
     /// camera-captured pixel path could not be proven). The cam2 optical read is the HARD gate:
-    /// any undecodable in-span frame FAILS the node, even when the digital burn is contiguous.
-    /// A distinct category — NOT a phantom chain drop (the pre-#360 problem), NOT passed (the #360
-    /// fraud). See [`optical_span_facts`].
+    /// an undecodable RATE above [`OPTICAL_UNDECODABLE_RATE_MAX`] FAILS the node, even when the
+    /// digital burn is contiguous. A distinct category — NOT a phantom chain drop (the pre-#360
+    /// problem), NOT unconditionally passed (the #360 fraud). See [`optical_span_facts`].
     optical_undecodable: usize,
     /// #364 — number of reference COLOUR patches that FAILED the per-camera colour check on this
     /// node's recording (grayscale collapse / hue-shift / out-of-tolerance / neutral tint), charged
@@ -391,11 +424,25 @@ struct NodeVerdict {
 impl NodeVerdict {
     /// ZERO loss ⇔ the burn-id sequence is contiguous (no missing id — a BURN-UNREADABLE missing
     /// id is a real DEFECT and still makes the node NOT-zero, never silently excluded) AND the
-    /// cam2 OPTICAL read is complete across the span (#363: `optical_undecodable == 0`). The
-    /// optical read is the HARD gate — a run where the filmed dual-QR went undecodable FAILS even
-    /// if every node's digital burn is present (reverts the #360 burn-only weakening).
+    /// cam2 OPTICAL read is complete across the span WITHIN the calibrated moiré floor (#376:
+    /// [`Self::optical_undecodable_ok`]). The optical read is still the HARD gate — a run where
+    /// the filmed dual-QR went undecodable at a rate ABOVE [`OPTICAL_UNDECODABLE_RATE_MAX`] FAILS
+    /// even if every node's digital burn is present (reverts the #360 burn-only weakening); only
+    /// the rig's PROVEN optical-physics floor (#376) is tolerated, never a genuine read failure.
     fn is_zero(&self) -> bool {
-        self.contiguity.is_contiguous() && self.optical_undecodable == 0 && self.colour_fail == 0
+        self.contiguity.is_contiguous() && self.optical_undecodable_ok() && self.colour_fail == 0
+    }
+    /// #376 — is this node's cam2 OPTICAL undecodable RATE within the calibrated moiré floor?
+    /// `optical_span_frames == 0` (no optical frame at all) keeps the pre-#376 strict `== 0`
+    /// behaviour — there is no span to compute a rate over, and an empty span already fails
+    /// `is_contiguous()` regardless (see `empty_optical_span_has_zero_frames_and_fails_the_
+    /// duration_gate_373`), so this only guards against a spurious 0/0 division.
+    fn optical_undecodable_ok(&self) -> bool {
+        if self.optical_span_frames == 0 {
+            return self.optical_undecodable == 0;
+        }
+        let rate = self.optical_undecodable as f64 / self.optical_span_frames as f64;
+        rate <= OPTICAL_UNDECODABLE_RATE_MAX
     }
     /// #373 — the analyzed optical span in seconds for this node (the cam2 dual-QR FIRST..=LAST
     /// window) from the recorded frame count and the camera capture rate.
@@ -993,13 +1040,21 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
         ));
         explained = true;
     }
-    // #363 — the cam2 OPTICAL dual-QR read is the HARD gate. Surface an undecodable optical span
-    // FIRST: it is the real-camera-path failure, NOT a digital burn fault. The digital burns can
-    // be 100% present and the run still FAILS here (the #360 fraud this reverts).
-    if v.optical_undecodable > 0 {
+    // #363/#376 — the cam2 OPTICAL dual-QR read is the HARD gate, calibrated to the rig's proven
+    // moiré floor (#376: `optical_undecodable_ok`). Surface an ABOVE-FLOOR undecodable rate FIRST:
+    // it is the real-camera-path failure, NOT a digital burn fault. The digital burns can be 100%
+    // present and the run still FAILS here (the #360 fraud this reverts). A non-zero count WITHIN
+    // the calibrated floor is NOT a fault line here — `v.is_zero()` already returned true for it
+    // above (#376), so this branch is reached only when the rate is genuinely above the floor.
+    if !v.optical_undecodable_ok() {
+        let rate_pct = if v.optical_span_frames > 0 {
+            100.0 * v.optical_undecodable as f64 / v.optical_span_frames as f64
+        } else {
+            0.0
+        };
         lines.push(format!(
-            "  [{}] NOT zero — {} OPTICAL-UNDECODABLE frame(s): the cam2 dual-QR (the REAL camera-captured pixel path) did not decode in-span. The digital burn proves node→node delivery only; it can NEVER substitute for the optical read (#363).",
-            c.node, v.optical_undecodable
+            "  [{}] NOT zero — {} OPTICAL-UNDECODABLE frame(s) ({rate_pct:.2}% of the {}-frame optical span, above the {:.2}% calibrated moiré floor): the cam2 dual-QR (the REAL camera-captured pixel path) did not decode in-span. The digital burn proves node→node delivery only; it can NEVER substitute for the optical read (#363/#376).",
+            c.node, v.optical_undecodable, v.optical_span_frames, 100.0 * OPTICAL_UNDECODABLE_RATE_MAX
         ));
         explained = true;
     }
@@ -1073,6 +1128,11 @@ fn node_verdict_json(
         "real_drops": v.real_drops(),
         "burn_unreadable": v.burn_unreadable(),
         "optical_undecodable": v.optical_undecodable,
+        // #376 — the calibrated moiré-floor gate. `optical_undecodable_ok` is the per-node term
+        // `is_zero()` ANDs in; the rate + ceiling are surfaced alongside the raw count so a JSON
+        // consumer can see WHY without recomputing (comprehensive-logging: values, not just labels).
+        "optical_undecodable_ok": v.optical_undecodable_ok(),
+        "optical_undecodable_rate_max": OPTICAL_UNDECODABLE_RATE_MAX,
         "colour_fail": v.colour_fail,
         "optical_span_frames": v.optical_span_frames,
         "analyzed_secs": analyzed_secs,
@@ -4929,6 +4989,129 @@ mod tests {
             v.real_drops(),
             0,
             "the failure is COLOUR — not a digital drop"
+        );
+    }
+
+    /// #376 — build a synthetic optical-window recording of `total` frames where frame 0 and frame
+    /// `total-1` are ALWAYS optical (so the optical span is exactly [0, total-1], `span_frames ==
+    /// total`), every interior frame index in `undecodable` carries NO payload at all (excluded from
+    /// the burn window, counted as OPTICAL-UNDECODABLE), and every other frame carries BOTH the cam2
+    /// optical paint and a strictly-increasing strih burn id (so the burn-id contiguity is trivially
+    /// clean under the PerRenderTick gap-ignore rule — see `node_verdict_colour_fail_is_a_hard_fail_364`
+    /// for the same increasing-id-with-gaps pattern). This isolates the [`OPTICAL_UNDECODABLE_RATE_MAX`]
+    /// gate: contiguity is always TRUE here, so `is_zero()` differences come ONLY from the optical rate.
+    fn optical_run_with_undecodable(
+        total: usize,
+        undecodable: &std::collections::HashSet<usize>,
+    ) -> Vec<RecordingFrame> {
+        (0..total)
+            .map(|i| {
+                if i != 0 && i != total - 1 && undecodable.contains(&i) {
+                    frame(i as u64, &[])
+                } else {
+                    frame(
+                        i as u64,
+                        &[(CAM2, 100 + i as u32), (STRIH, 2000 + i as u32)],
+                    )
+                }
+            })
+            .collect()
+    }
+
+    fn node_verdict_for_optical_run(stream: &[RecordingFrame]) -> super::NodeVerdict {
+        let tmp = tempfile::tempdir().unwrap();
+        node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn optical_undecodable_within_the_moire_floor_passes_the_gate_376() {
+        // #376 — the real measured residual (run 354003, post-#363 decoder fix): 22/8999 = 0.2445%
+        // of the optical span still fails the cam2 dual-QR read (a soft/mottled RIGHT QR half with
+        // heavy diagonal moiré — a rig optical-physics floor, not a decoder or chain defect; the
+        // user's explicit call — see the [`OPTICAL_UNDECODABLE_RATE_MAX`] doc). Mirror it at scale:
+        // 9000 total frames, 22 interior frames with no optical paint (undecodable), the rest clean.
+        let undecodable: std::collections::HashSet<usize> = (1..=22).collect();
+        let stream = optical_run_with_undecodable(9000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 22, "{:?}", v.contiguity);
+        assert_eq!(v.optical_span_frames, 9000, "{:?}", v.contiguity);
+        assert!(
+            v.contiguity.is_contiguous(),
+            "the burn-id sequence is unaffected by the excluded optical holes (gap-ignore): {:?}",
+            v.contiguity
+        );
+        // BEFORE #376 this asserted false (the old `optical_undecodable == 0` hard gate FAILED any
+        // non-zero count). The calibrated floor now PASSES a residual within the rig's proven moiré
+        // physics — this is the RED→GREEN line: it fails against the pre-#376 `== 0` gate and passes
+        // against the calibrated rate gate.
+        assert!(
+            v.is_zero(),
+            "a 0.244% optical-undecodable residual is within the calibrated moiré floor and must \
+             PASS the #376 gate: {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn optical_undecodable_at_the_calibrated_ceiling_still_passes_376() {
+        // #376 boundary: a rate EXACTLY at OPTICAL_UNDECODABLE_RATE_MAX (0.5%) must still pass — the
+        // gate is `<=`, not `<`. 5 undecodable / 1000 total = exactly 0.005.
+        let undecodable: std::collections::HashSet<usize> = (1..=5).collect();
+        let stream = optical_run_with_undecodable(1000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 5, "{:?}", v.contiguity);
+        assert_eq!(v.optical_span_frames, 1000, "{:?}", v.contiguity);
+        assert!(
+            v.is_zero(),
+            "a rate exactly AT the calibrated ceiling (0.5%) must still pass (<=, not <): {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn optical_undecodable_just_above_the_calibrated_ceiling_fails_376() {
+        // #376 boundary: one frame past the ceiling (6/1000 = 0.6%) must FAIL — the calibration
+        // tolerates the measured moiré floor, never a rate genuinely above it.
+        let undecodable: std::collections::HashSet<usize> = (1..=6).collect();
+        let stream = optical_run_with_undecodable(1000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 6, "{:?}", v.contiguity);
+        assert_eq!(v.optical_span_frames, 1000, "{:?}", v.contiguity);
+        assert!(
+            !v.is_zero(),
+            "a rate just above the calibrated ceiling (0.6%) must still FAIL: {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn optical_undecodable_materially_above_the_floor_still_fails_376() {
+        // #376 strict-gate stance (the user's explicit condition on the calibration): a REAL optical
+        // dropout — qualitatively different from the moiré floor, e.g. the #216 slow-shutter ~175 s
+        // gap — is far above the calibrated ceiling and MUST still fail. 200/1000 = 20%, two orders
+        // of magnitude above the 0.5% floor.
+        let undecodable: std::collections::HashSet<usize> = (1..=200).collect();
+        let stream = optical_run_with_undecodable(1000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 200, "{:?}", v.contiguity);
+        assert!(
+            !v.is_zero(),
+            "a real optical dropout (20%) must FAIL — the calibration never masks genuine loss: {:?}",
+            v.contiguity
         );
     }
 
