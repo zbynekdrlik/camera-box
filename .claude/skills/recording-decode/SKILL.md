@@ -30,6 +30,20 @@ set must be the burns the recording REALLY carries, NOT the full `NODE_BURN_RUN_
 - **stream recording** → `[cam1, strih, stream]` (chain endpoint, all three forwarded).
 - **cam1 grab** → `[cam1]`.
 
+**This gotcha bites TESTS too, not just the production verdict (#423).** Any test that builds
+its own synthetic frame and decodes it via `decode_recording_frame` (the 2-arg default, always
+requires the FULL `NODE_BURN_RUN_IDS`) or passes the full set into `decode_stream_parallel` /
+`decode_recording_frame_with_burns` pays the ~10× tile cost on EVERY call if the frame doesn't
+actually carry all three burns — with no payoff, since the tiles can never find a burn that was
+never rendered. This is exactly what made `probe::recording::tests::
+parallel_decode_matches_single_threaded_result_exactly` take >300s (its `dual_qr_luma` frames
+carry ONLY the optical dual-QR, zero node burns) and made
+`tests/recording_latency_decode.rs::dual_vernier_cam2_real_pixels_canonical_tick_and_both_hops`
+take ~50-59s for just 8 frames (each frame carries exactly ONE node burn). Before writing a new
+recording-decode test: pass exactly the burn set the test's own frame-builder actually renders
+(often `&[]` for optical-only synthetic frames), not the full `NODE_BURN_RUN_IDS` — same rule as
+production, same fix (`&[]` / `&[the-one-burn]` instead of `decode_recording_frame`'s default).
+
 Requiring all three on a strih recording would force the tiles on EVERY frame (chasing a stream
 burn that was never recorded) → zero speedup. `decode_recording_frame` (the 2-arg default) keeps
 the full-set / max-robust behavior for the diagnostic tools; the verdict's `ticks_of(path,
