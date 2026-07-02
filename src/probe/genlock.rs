@@ -1498,62 +1498,78 @@ impl ReleaseCadence {
             };
         };
 
-        // DRIFT GUARD: the cadence lags the live edge past the relock threshold (a stall's
-        // backlog just landed, or the stream jumped). Re-lock to the newest due frame,
-        // counting every jumped frame — the catch-up keeps the IMAG latency contract and the
-        // drop is VISIBLE (the pre-#401 release erased silently).
-        if deadline > boundary.saturating_add(Self::relock_drift_ns(interval_ns)) {
+        // BACKLOG STORM (v2 — queue-relative, NEVER wall−boundary drift): a stall's burst
+        // or a persistent inflow>presentation imbalance shows up as QUEUE DEPTH, which is
+        // immune to the constant stamp→arrival skew. v1 guarded on `deadline − boundary`,
+        // which EMBEDS that skew — the live canary (skew 59 ms, reserve 3 ms) relock-stormed:
+        // dropped_due 2918/4202, relocks 1076. Steady depth is ~1–2 at ANY skew (the boundary
+        // paces arrivals), so depth > QDEPTH_RELOCK is unambiguous backlog; re-lock to the
+        // newest due frame, counting every jumped frame (the catch-up keeps the IMAG latency
+        // contract and the drop is VISIBLE).
+        if queue.len() > Self::QDEPTH_RELOCK {
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
-            if due == 0 {
-                // Long-overdue but nothing arrived to jump to — upstream is silent. Hold at
-                // the frozen boundary (late) until frames return, then this branch re-locks.
-                return hold(true);
+            if due > 0 {
+                let mut dropped = Vec::with_capacity(due - 1);
+                for _ in 0..due - 1 {
+                    dropped.push(queue.pop_front().expect("due prefix"));
+                }
+                let presented = queue.pop_front().expect("due frame");
+                self.locked_next_boundary_ns = Some(presented + interval_ns);
+                return CadenceOutcome {
+                    presented: Some(presented),
+                    dropped,
+                    late_hold: false,
+                    relocked: true,
+                };
             }
-            let mut dropped = Vec::with_capacity(due - 1);
-            for _ in 0..due - 1 {
-                dropped.push(queue.pop_front().expect("due prefix"));
-            }
-            let presented = queue.pop_front().expect("due frame");
+            // Deep queue but nothing aged past the reserve yet (a just-landed burst of
+            // fresh frames) — fall through; the matured path drains it next ticks or this
+            // branch re-fires once they age.
+        }
+
+        // STEADY (strict FIFO): release the OLDEST frame matured by the LOCKED boundary —
+        // exactly one in steady state at any arrival skew. Presenting oldest (v1 presented
+        // newest and dropped the rest) is what makes a transient 2-frame maturation lossless:
+        // the extra frame drains on the next tick (depth-bounded by the relock above).
+        let matured = queue.iter().take_while(|&&ts| ts <= boundary).count();
+        if matured > 0 {
+            let presented = queue.pop_front().expect("matured frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
             return CadenceOutcome {
                 presented: Some(presented),
-                dropped,
+                dropped: Vec::new(),
                 late_hold: false,
-                relocked: true,
+                relocked: false,
             };
         }
 
-        // STEADY: release the newest frame matured by the LOCKED boundary (exactly one in
-        // steady state). An older matured frame here is a late arrival whose slot already
-        // passed — dropped and COUNTED (never silent). The boundary re-anchors to the
-        // presented stamp so small stamp jitter cannot accumulate.
-        let matured = queue.iter().take_while(|&&ts| ts <= boundary).count();
-        if matured == 0 {
-            // Not yet arrived. Late only if the wall says it should have been here (its
-            // boundary aged past the reserve); early otherwise (benign).
-            return hold(deadline >= boundary);
+        // GAP RESYNC: nothing matured, but the oldest queued frame is BEYOND the boundary
+        // and has aged past the reserve — upstream skipped stamps (sender restart, upstream
+        // loss). Present it and re-anchor; not a drop of ours (nothing was discarded), not a
+        // relock (no catch-up jump) — the boundary follows the real stream.
+        if let Some(&oldest) = queue.front() {
+            if deadline >= oldest {
+                let presented = queue.pop_front().expect("oldest");
+                self.locked_next_boundary_ns = Some(presented + interval_ns);
+                return CadenceOutcome {
+                    presented: Some(presented),
+                    dropped: Vec::new(),
+                    late_hold: false,
+                    relocked: false,
+                };
+            }
         }
-        let mut dropped = Vec::with_capacity(matured - 1);
-        for _ in 0..matured - 1 {
-            dropped.push(queue.pop_front().expect("matured prefix"));
-        }
-        let presented = queue.pop_front().expect("matured frame");
-        self.locked_next_boundary_ns = Some(presented + interval_ns);
-        CadenceOutcome {
-            presented: Some(presented),
-            dropped,
-            late_hold: false,
-            relocked: false,
-        }
+
+        // HOLD: late if the wall says the boundary frame should already be here (it aged
+        // past the reserve upstream and hasn't arrived), benign otherwise.
+        hold(deadline >= boundary)
     }
 
-    /// Drift beyond which the cadence re-locks to the live edge: two intervals plus a
-    /// quarter-interval margin. Small enough that a genuine stall catches up within ~2
-    /// frames of latency; large enough that the steady-state offset (`2·interval −
-    /// reserve ± slew` at lock, ≈32.6 ms worst-case at the 3 ms floor) never trips it.
-    fn relock_drift_ns(interval_ns: u64) -> u64 {
-        2 * interval_ns + interval_ns / 4
-    }
+    /// Queue depth above which the cadence re-locks to the live edge (backlog storm).
+    /// Steady-state depth is ~1–2 at any arrival skew (the boundary paces arrivals), so 6
+    /// is unambiguous backlog while tolerating burst jitter; a stall's burst catches up
+    /// within one tick with every jumped frame counted.
+    const QDEPTH_RELOCK: usize = 6;
 }
 
 #[cfg(test)]
