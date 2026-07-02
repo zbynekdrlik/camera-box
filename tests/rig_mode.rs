@@ -264,6 +264,131 @@ fn test_mode_fails_loud_when_painter_binary_absent() {
     );
 }
 
+/// #420: the QPSK audio-marker emitter is a THREAD inside the SAME `frame-probe --paint-only`
+/// process (src/probe/qpsk_emit.rs) — not a separate process — so TEST mode must launch the
+/// painter WITH `--audio-marker` (+ device/cadence/log) or no marker is ever emitted at all. Live
+/// evidence (#420): rig TEST mode started only `--paint-only --dual-qr` (video), no audio flags,
+/// so the whole A/V-sync measurement was silently unmeasured (no marker in the recording).
+#[test]
+fn test_mode_starts_qpsk_audio_marker_alongside_painter() {
+    let p = painter_launch();
+    assert!(
+        p.contains("--audio-marker --audio-marker-device hw:CARD=PCH,DEV=3"),
+        "#420: TEST mode must launch the painter with --audio-marker targeting the cam2 BenQ HDMI \
+         audio out (hw:CARD=PCH,DEV=3 — the connected-speaker device, confirmed live). Got:\n{p}"
+    );
+    assert!(
+        p.contains("--audio-marker-cadence-ticks 180"),
+        "#420: default cadence must be 180 ticks (~3s @ 60Hz painter ticks — the av-sync skill \
+         recipe). Got:\n{p}"
+    );
+    assert!(
+        p.contains("--marker-log /run/rig-qpsk-markers.csv"),
+        "#420: TEST mode must write the emitted-marker CSV so it can be pulled off cam2 for \
+         recording-verdict --av-sync. Got:\n{p}"
+    );
+    // The audio-marker flags must be on the SAME nohup'd frame-probe launch line as the painter —
+    // proving it's the SAME process, not a second daemon that could independently die/desync.
+    let launch_line = p
+        .lines()
+        .find(|l| l.contains("nohup") && l.contains("--paint-only"))
+        .expect("#420: expected a single nohup'd frame-probe --paint-only launch line");
+    assert!(
+        launch_line.contains("--dual-qr") && launch_line.contains("--audio-marker"),
+        "#420: --dual-qr (video) and --audio-marker (audio) must be on the SAME launch line \
+         (same process, in lock-step via the shared frame_id/refresh tick). Got:\n{launch_line}"
+    );
+}
+
+/// #420: TEST mode is env-overridable for the audio device/cadence/log, mirroring every other
+/// pinned constant in this script (QR_SIZE, PAINTER_FPS, ...) — never a hardcoded rig assumption.
+#[test]
+fn test_mode_audio_marker_params_are_positional_overrides() {
+    let p = run_sourced(
+        "painter_launch_remote /usr/local/bin/frame-probe 7200 700 /run/rig-painter.pid '' 60 \
+         /usr/local/bin/camera-box /run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf \
+         hw:CARD=USB,DEV=0 60 /tmp/markers.csv",
+    );
+    assert!(
+        p.contains("--audio-marker-device hw:CARD=USB,DEV=0"),
+        "#420: an explicit audio-marker-device override must be honoured. Got:\n{p}"
+    );
+    assert!(
+        p.contains("--audio-marker-cadence-ticks 60"),
+        "#420: an explicit cadence override must be honoured. Got:\n{p}"
+    );
+    assert!(
+        p.contains("--marker-log /tmp/markers.csv"),
+        "#420: an explicit marker-log override must be honoured. Got:\n{p}"
+    );
+    // The self-check below must follow the OVERRIDDEN device, not the pinned default.
+    assert!(
+        p.contains("/proc/asound/USB/pcm0p/sub0/status"),
+        "#420: the audible self-check must derive its ALSA status path from the (possibly \
+         overridden) --audio-marker-device, not a hardcoded default. Got:\n{p}"
+    );
+}
+
+/// #420 root cause, part 2: a started emitter is not a PROVEN emitter. The rig evidence showed the
+/// audio path was silently dead (no process at all), so TEST mode must VERIFY the QPSK marker's
+/// ALSA PCM is actually RUNNING on the target device — a REAL kernel-reported signal (never a
+/// stub/no-op check) — and FAIL LOUD (killing the just-started painter) if it is silent, mirroring
+/// the [4b/8] pre-record burn-ON gate's fail-fast-before-wasting-a-run shape.
+#[test]
+fn test_mode_verifies_audio_marker_pcm_running_fail_loud_if_silent() {
+    let p = painter_launch();
+    assert!(
+        p.contains("/proc/asound/PCH/pcm3p/sub0/status"),
+        "#420: the self-check must read the REAL ALSA PCM status file for hw:CARD=PCH,DEV=3 \
+         (card id PCH, playback device 3) — a genuine kernel signal, not a stub. Got:\n{p}"
+    );
+    assert!(
+        p.contains("state: RUNNING"),
+        "#420: the self-check must assert the PCM is in the RUNNING state (actively streaming — \
+         not just opened/prepared). Got:\n{p}"
+    );
+    assert!(
+        p.contains("is NOT RUNNING") && p.contains("#420"),
+        "#420: a silent marker must FAIL LOUD with a message identifying the problem (never a \
+         silent pass-through). Got:\n{p}"
+    );
+    // The audible-check must come AFTER the painter is confirmed alive/painting (step 5) — it
+    // extends that same verification, it doesn't replace or race it.
+    let painter_alive_pos = p
+        .find("painting /dev/fb0")
+        .expect("#420: expected the existing fb0-painting verification to still be present");
+    let audio_check_pos = p
+        .find("/proc/asound/PCH/pcm3p/sub0/status")
+        .expect("#420: expected the audio PCM self-check");
+    assert!(
+        audio_check_pos > painter_alive_pos,
+        "#420: the audio-marker self-check must run AFTER the painter/fb0 verification. Got:\n{p}"
+    );
+}
+
+/// #420: a silent marker must not be reported as a healthy TEST-mode switch — the self-check kills
+/// the painter it just verified was alive, so a caller cannot mistake "process up" for "marker
+/// audible" (the exact confusion #420 documents: the process WAS up, painting video, with no audio).
+#[test]
+fn test_mode_audio_check_kills_painter_on_silent_marker() {
+    let p = painter_launch();
+    let fail_pos = p
+        .find("is NOT RUNNING")
+        .expect("#420: expected the silent-marker FAIL branch");
+    let kill_pos = p[fail_pos..]
+        .find("kill \"$PAINTER_PID\"")
+        .map(|i| i + fail_pos)
+        .expect(
+            "#420: the silent-marker FAIL branch must kill the just-started painter (a run with \
+             no audio marker is wasted — don't leave it running unmeasured)",
+        );
+    let exit_pos = p[kill_pos..]
+        .find("exit 1")
+        .map(|i| i + kill_pos)
+        .expect("#420: the silent-marker branch must exit non-zero after killing the painter");
+    assert!(kill_pos > fail_pos && exit_pos > kill_pos);
+}
+
 /// EVENT mode stops the painter via its PID FILE and ALSO `pkill -x frame-probe` (exact NAME match —
 /// can never self-match the remote shell's cmdline), then RESTORES the deployed --display camera-box
 /// and VERIFIES the service is active AND `--display` is restored (the interkom monitor is back).
@@ -308,6 +433,21 @@ fn event_mode_stops_via_pidfile_restores_display() {
     assert!(
         p.contains("grep -q -- '--display'") && p.contains("no --display"),
         "#247: EVENT mode must verify --display is restored (the interkom monitor path)"
+    );
+}
+
+/// #420: EVENT mode needs NO separate step to stop the QPSK audio marker — it is a THREAD inside
+/// the same `frame-probe --paint-only` process TEST mode launches (src/probe/qpsk_emit.rs), so
+/// killing that one process (already covered above: pidfile kill + `pkill -x frame-probe`) stops
+/// BOTH the video painter and the audio marker together. This test locks that invariant so a
+/// future split of the emitter into its own process/service does not silently leave it running.
+#[test]
+fn event_mode_stopping_painter_process_stops_the_audio_marker_too() {
+    let p = painter_stop();
+    assert!(
+        p.contains("kill \"$PID\"") && p.contains("pkill -x frame-probe"),
+        "#420: EVENT mode must stop the SAME frame-probe process the audio marker runs inside — \
+         no separate audio-marker process/service exists to stop. Got:\n{p}"
     );
 }
 
