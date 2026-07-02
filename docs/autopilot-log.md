@@ -2,6 +2,26 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-02 — #376 optical-undecodable moiré-floor calibration (PR #409, v1.7.0-dev.192)
+
+- RED `7f9e95cbf` (2/4 new tests fail against the pre-fix `optical_undecodable == 0` gate:
+  `optical_undecodable_within_the_moire_floor_passes_the_gate_376`,
+  `optical_undecodable_at_the_calibrated_ceiling_still_passes_376`), GREEN `881aa9570`
+- User decision (issue #376 comment, 2026-07-01) superseded the ticket's original "chase the
+  decoder / fine-tune the camera" plan: accept the measured 22/8999=0.2445% residual (real
+  run-354003, post-#363 Otsu-union decoder) as a rig moiré floor (same class as #364) and
+  calibrate the gate instead. Added `OPTICAL_UNDECODABLE_RATE_MAX=0.5%` (~2x the measured
+  floor), `NodeVerdict::optical_undecodable_ok()` (rate check replacing the raw `== 0`),
+  wired into `is_zero()`, `node_verdict_lines()`, and the verdict JSON.
+- Strict-above-floor guards locked: `optical_undecodable_just_above_the_calibrated_ceiling_fails_376`,
+  `optical_undecodable_materially_above_the_floor_still_fails_376` (a real dropout, e.g. the
+  #216 ~175s gap, is 2 orders of magnitude above 0.5% and still FAILS).
+- PR #409 merged `740415b80`. No live-rig deploy surface — this only recalibrates the offline
+  `recording-verdict` probe/analysis binary (CI-built artifact, not a standing camera-box
+  service); production camera-box binary (src/main.rs) is untouched. CI (Test job) ran all 64
+  recording-verdict tests including the 4 new `_376` tests, green.
+- Playbook: `.claude/skills/recording-decode` SKILL.md updated with the #376 section.
+
 ## 2026-07-01 — #357 drift-guard: per-source genlock FIFO latency pin + check (PR #387, v1.7.0-dev.181)
 
 - RED `0a4118e18` (4 failing tests: `genlock_source_latency_parser_extracts_per_source_effective_latency`, `drift_check_source_latency_catches_drift_and_passes_on_match`, `real_manifest_pins_genlock_source_latency_per_box`, `compare_fails_when_per_source_genlock_latency_drifted`), GREEN `ed750d9bb`, review fix `469612a4d` (DRIFT-before-UNKNOWN return-code order)
