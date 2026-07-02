@@ -400,7 +400,13 @@ jobs:
       - name: Smoke-check the binaries run (--help)
         run: |
           ./target/release/recording-verdict.exe --help
-          echo '{}' | ./target/release/obs-watchdog-gate.exe ; if ($LASTEXITCODE -ne 2) { throw "obs-watchdog-gate.exe: expected exit 2 on empty JSON, got $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "recording-verdict.exe --help failed: exit $LASTEXITCODE" }
+          '{}' | ./target/release/obs-watchdog-gate.exe
+          $gateExit = $LASTEXITCODE
+          if ($gateExit -ne 2) { throw "obs-watchdog-gate.exe: expected exit 2 on empty JSON (no boxes to gate), got $gateExit" }
+          # GH Actions fails a pwsh step on any lingering non-zero $LASTEXITCODE at script end —
+          # exit 2 above is the EXPECTED pass condition, so explicitly clear it here.
+          exit 0
 
       - name: Upload Windows probe tools
         uses: actions/upload-artifact@v4
