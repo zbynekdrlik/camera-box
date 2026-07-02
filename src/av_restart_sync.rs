@@ -137,12 +137,32 @@ fn trust_reasons(label: &str, m: &AvSyncMeasurement) -> Vec<String> {
 ///
 /// An invalid `tolerance_ms` (non-finite or negative) also fails closed to `Unknown`.
 pub fn classify(
-    _before: AvSyncMeasurement,
-    _after: AvSyncMeasurement,
-    _tolerance_ms: f64,
+    before: AvSyncMeasurement,
+    after: AvSyncMeasurement,
+    tolerance_ms: f64,
 ) -> RestartSyncVerdict {
-    // RED placeholder (#137) — always Pass. GREEN commit replaces this with the real
-    // trust-check + tolerance decision documented above.
+    let mut untrusted = trust_reasons("before", &before);
+    untrusted.extend(trust_reasons("after", &after));
+    if !untrusted.is_empty() {
+        return RestartSyncVerdict::Unknown(untrusted);
+    }
+
+    if !tolerance_ms.is_finite() || tolerance_ms < 0.0 {
+        return RestartSyncVerdict::Unknown(vec![format!(
+            "invalid tolerance_ms {tolerance_ms} (must be finite and >= 0)"
+        )]);
+    }
+
+    let delta = (after.offset_ms - before.offset_ms).abs();
+    if delta > tolerance_ms {
+        return RestartSyncVerdict::Fail(vec![format!(
+            "A/V offset drifted {delta:.1}ms across the OBS restart (before {:.1}ms, \
+             after {:.1}ms) — exceeds the {tolerance_ms:.1}ms tolerance; lipsync would be \
+             destroyed (#137)",
+            before.offset_ms, after.offset_ms
+        )]);
+    }
+
     RestartSyncVerdict::Pass
 }
 
