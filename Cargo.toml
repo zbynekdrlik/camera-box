@@ -94,6 +94,10 @@ name = "frozen-camera-gate"
 path = "src/bin/frozen-camera-gate.rs"
 
 [[bin]]
+name = "render-budget-gate"
+path = "src/bin/render-budget-gate.rs"
+
+[[bin]]
 name = "frame-probe"
 path = "src/bin/frame-probe.rs"
 required-features = ["probe"]
