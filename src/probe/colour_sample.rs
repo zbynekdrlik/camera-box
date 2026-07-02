@@ -785,4 +785,83 @@ mod tests {
             "a grayscale camera FAILS even when correctly localized"
         );
     }
+
+    /// Fill one dual-QR half's canvas rect with featureless mid-gray — no finder pattern
+    /// survives, so that half cannot decode (the mid-transition/blurred half the Vernier
+    /// produces on every real captured frame, #400).
+    fn destroy_half(img: &mut RgbImage, half: usize) {
+        let rects = crate::colour_scale::dual_qr_rects(W, H, QR, TM).expect("default layout");
+        let r = rects[half];
+        for y in r.y..r.y + r.h {
+            for x in r.x..r.x + r.w {
+                img.put_pixel(x, y, image::Rgb([128, 128, 128]));
+            }
+        }
+    }
+
+    #[test]
+    fn localized_gate_works_from_a_single_decoded_half_400() {
+        // #400: the Vernier paints ONE half per 60 Hz refresh (`painter::vernier_ids`), so a real
+        // captured frame has ≥1 SHARP half and usually one mid-transition (undecodable) half —
+        // frames where BOTH halves decode are rare-to-nonexistent through the optical hop (12/12
+        // sampled frames unlocalizable on both real run-7020001 recordings). The gate must
+        // localize from ONE decoded half: its tick parity says WHICH half it is (left = even,
+        // right = odd — `vernier_ids`), so its true canvas rect is known and a 4-corner fit
+        // (8 equations, 6 dof) localizes the column. Requiring the PAIR is the #400 bug.
+        let canvas = render_canvas_rgb(); // left frame_id 100 (even), right 101 (odd)
+        let ex = node_burn_exclusions(W, H);
+        // The same clean integer translation as the pair test (keeps QR modules pixel-aligned so
+        // rqrr detects reliably; the full scale/shear 4-corner fit is proven Tier-0 in
+        // colour_verify's `single_half_four_corner_fit_localizes_the_column_400`).
+        let a = Affine {
+            a: 1.0,
+            b: 0.0,
+            tx: 40.0,
+            c: 0.0,
+            d: 1.0,
+            ty: 30.0,
+        };
+
+        // Destroy the RIGHT half ⇒ only the LEFT (even 100) decodes; then the LEFT ⇒ only the
+        // RIGHT (odd 101) — BOTH parities must localize to their true half.
+        for destroyed in [1usize, 0usize] {
+            let mut img = canvas.clone();
+            destroy_half(&mut img, destroyed);
+            let warped = warp_rgb(&img, a);
+            let v = colour_verdict_from_rgb_image_localized(&warped, W, H, QR, TM, &ex)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ONE decoded half must still localize (destroyed half {destroyed}) — \
+                         requiring the dual-QR PAIR is the #400 real-rig failure"
+                    )
+                });
+            assert!(
+                v.is_pass(),
+                "a correct frame localized from one half PASSES (destroyed {destroyed}): {:?}",
+                v.failures().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                v.checked_count(),
+                PATCH_COLOURS.len(),
+                "every patch sampled after single-half localization (destroyed {destroyed})"
+            );
+        }
+
+        // Single-half localization must not weaken the verdict: grayscale the one-half frame
+        // (the QR stays black/white so it still decodes; the column collapses) — still FAILS.
+        let mut img = canvas.clone();
+        destroy_half(&mut img, 1);
+        let mut gray = warp_rgb(&img, a);
+        for px in gray.pixels_mut() {
+            let y =
+                (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32).round() as u8;
+            *px = image::Rgb([y, y, y]);
+        }
+        let vg = colour_verdict_from_rgb_image_localized(&gray, W, H, QR, TM, &ex)
+            .expect("grayscale one-half frame still localizes");
+        assert!(
+            !vg.is_pass(),
+            "a grayscale camera FAILS even when localized from a single half"
+        );
+    }
 }

@@ -1590,6 +1590,57 @@ mod tests {
     }
 
     #[test]
+    fn single_half_four_corner_fit_localizes_the_column_400() {
+        // #400: the dual-QR Vernier repaints ONE half per 60 Hz refresh, so through the optical
+        // hop a captured frame usually has exactly ONE decodable half — the localization must
+        // work from a SINGLE half's 4 corners (8 equations, 6 dof; [`fit_affine`] is already an
+        // N≥3 least squares, and 4 collinear points still reject per
+        // `fit_affine_rejects_too_few_or_degenerate_points`). Fit from ONLY one half's corners —
+        // left (src[..4]) then right (src[4..]) — and sample the warped recording through it:
+        // every patch recovered, so the probe glue's single-half fallback rests on a proven
+        // Tier-0 fit layer.
+        let canvas = paint_canvas(CANVAS_W, CANVAS_H, |c| c);
+        // The same camera-of-a-monitor warp as the #364 pair test: vertical offset + scale +
+        // slight shear, so the 4-corner fit is exercised across all six parameters.
+        let a = Affine {
+            a: 1.0,
+            b: 0.005,
+            tx: 12.0,
+            c: 0.002,
+            d: 1.04,
+            ty: 60.0,
+        };
+        let rec = warp(&canvas, CANVAS_W, CANVAS_H, a, CANVAS_W, CANVAS_H);
+        let corners = canvas_dual_qr_corners(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN).unwrap();
+        for (name, half) in [("left", &corners[..4]), ("right", &corners[4..])] {
+            let rec_half: Vec<(f64, f64)> = half.iter().map(|&(x, y)| a.apply(x, y)).collect();
+            let fit = fit_affine(half, &rec_half)
+                .unwrap_or_else(|| panic!("4 corners of the {name} half fit an affine"));
+            let v = verify_rgb_frame_affine(
+                &rec,
+                CANVAS_W,
+                CANVAS_H,
+                fit,
+                CANVAS_W,
+                CANVAS_H,
+                QR_SIZE,
+                TOP_MARGIN,
+                &[],
+            );
+            assert!(
+                v.is_pass(),
+                "sampling through the {name}-half 4-corner fit recovers every patch (fails: {:?})",
+                v.failures().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                v.checked_count(),
+                PATCH_COLOURS.len(),
+                "every patch sampled through the {name}-half fit"
+            );
+        }
+    }
+
+    #[test]
     fn affine_localization_still_catches_a_real_grayscale_fault() {
         // The localization must not become a way to PASS a real fault: a grayscale camera, even
         // correctly localized, still FAILS (the fix only fixes WHERE we sample, never the verdict).
