@@ -4248,6 +4248,16 @@ static uint32_t genlock_clamp_preload_u32(uint32_t v)
  * arrival rate so the configured latency is DELIVERED regardless of canvas fps. Mirror of
  * src/probe/genlock.rs GENLOCK_MAX_SOURCE_FPS. */
 #define GENLOCK_MAX_SOURCE_FPS 60
+/* camera-box #401 v2: queue depth above which the ts-align release cadence re-locks to
+ * the live edge (backlog storm). Steady-state depth is ~1-2 at ANY stamp->arrival skew
+ * (the locked boundary paces arrivals), so a depth above 6 is unambiguous backlog while
+ * tolerating burst jitter; a stall's burst catches up within one tick with every jumped
+ * frame counted (genlock_dropped_due). v1 guarded on wall-boundary drift instead
+ * (present_ts > boundary + 2.25*interval), which EMBEDS the constant stamp->arrival
+ * skew — the 2026-07-02 live canary (skew 59 ms at the 3 ms reserve) relock-stormed:
+ * dropped_due 2918 of 4202 received, relocks 1076. Depth is immune to any constant
+ * skew. Mirror of src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK. */
+#define GENLOCK_QDEPTH_RELOCK 6
 /* genlock_latency_ms() is declared further down (after the #184 ms-knob block); forward
  * declare it so genlock_preload_default() can branch on whether the ms knob is set. */
 static uint32_t genlock_latency_ms(void);
@@ -4727,18 +4737,27 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 			: 0ULL;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
-	     "holds=%llu overruns=%llu backward_steps=%llu depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
+	     "holds=%llu overruns=%llu backward_steps=%llu dropped_due=%llu relocks=%llu late_holds=%llu locked=%d "
+	     "depth=%zu peak=%u latency_ms=%u (≈%llu frames @ %.3ffps) "
 	     "src_latency_ms=%u global_latency_ms=%u "
 	     "preload=%u (=%llu ms) reserve_ms=%u cap=%zu empty_run=%u (re-arm@%u) "
 	     "ts_present=%llu ts_due=%u ts_head_skew_ms=%lld "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245)",
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
 	     (unsigned long long)source->genlock_underruns,
 	     (unsigned long long)source->genlock_holds,
 	     (unsigned long long)source->genlock_overruns,
-	     (unsigned long long)source->genlock_backward_steps, source->async_frames.num,
+	     (unsigned long long)source->genlock_backward_steps,
+	     /* camera-box #401: the phase-locked cadence's honest loss/state signals —
+	      * dropped_due (frames the release DISCARDED — the pre-#401 silent erase),
+	      * relocks (drift-guard catch-up jumps), late_holds (boundary matured but the
+	      * frame never arrived — upstream late/lost, distinct from the benign
+	      * source-early holds=), locked (0 = cadence unlocked / re-acquiring). */
+	     (unsigned long long)source->genlock_dropped_due, (unsigned long long)source->genlock_relocks,
+	     (unsigned long long)source->genlock_late_holds,
+	     source->genlock_locked_next_boundary_ns != 0 ? 1 : 0, source->async_frames.num,
 	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
 	     source->genlock_latency_ms, global_latency_ms,
 	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
@@ -4856,12 +4875,14 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				/* camera-box #147: backward wall-clock step (NTP/PTP sawtooth)
 				 * recovery. present_ts = wall_now - reserve; on a BACKWARD clock
 				 * step wall_now (and present_ts) regress below every already-queued
-				 * (pre-step, higher) frame timestamp, so due==0 every tick and the
-				 * unguarded path HOLDs (repeats the last frame) INDEFINITELY — the
-				 * live program feed FREEZES until the clock climbs back. Mirror of
-				 * src/probe/genlock.rs genlock_release_guarded and the cam-EMIT guard
-				 * #131 (a boundary impossibly far in the future re-anchors). */
-				size_t to_drop;
+				 * (pre-step, higher) frame timestamp, so due==0 every tick and an
+				 * unguarded wall-deadline release would HOLD (repeat the last
+				 * frame) INDEFINITELY — the live program feed FREEZES until the
+				 * clock climbs back. Evaluated BEFORE the #401 cadence below (the
+				 * regressed stamp timeline must re-anchor, not be "matured" against
+				 * a pre-step boundary). Mirror of src/probe/genlock.rs
+				 * genlock_release_guarded and the cam-EMIT guard #131 (a boundary
+				 * impossibly far in the future re-anchors). */
 				if (due == 0) {
 					/* camera-box #269 [3]: detect the backward step on the NEWEST
 					 * (max-ts) queued frame, NOT array[0] (the oldest). The newest
@@ -4883,57 +4904,171 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 							max_ts = ts;
 					}
 					const bool head_future = max_ts > wall_now + interval;
-					if (!head_future) {
+					if (head_future) {
+						/* RE-ANCHOR. #269 [0]: present the OLDEST queued frame and drop
+						 * NOTHING extra. The pre-step frames are real captures;
+						 * get_closest_frame erases the presented head each tick, so the buffer
+						 * drains one frame per tick (the genlock consume rate) and the
+						 * configured latency-depth buffer is PRESERVED — a smooth few-frame
+						 * blip at ANY latency. The old "present newest, drop num-1" drained the
+						 * queue to empty, so for a deep per-source latency override the feed
+						 * then FROZE for ~latency_ms while the buffer refilled.
+						 * #269 [2]: count + LOG_WARNING ONCE per EVENT (on the transition INTO
+						 * the re-anchor state), not every recovery tick — the old per-tick
+						 * increment counted one step as N and logged at frame rate, breaking
+						 * the 5 s audit-log gating. */
+						if (!source->genlock_in_backward_step) {
+							source->genlock_backward_steps++;
+							blog(LOG_WARNING,
+							     "genlock-fifo backward clock step '%s': max queued ts %llu > "
+							     "wall_now+interval (%llu) — re-anchoring (present oldest of "
+							     "%zu queued, preserve buffer) instead of freezing the program "
+							     "feed (#147)",
+							     source->context.name ? source->context.name : "?",
+							     (unsigned long long)max_ts,
+							     (unsigned long long)(wall_now + interval),
+							     source->async_frames.num);
+						}
+						source->genlock_in_backward_step = true;
+						next_frame = source->async_frames.array[0];
+						/* camera-box #401: the re-anchor presented a frame OUTSIDE the
+						 * cadence — re-lock the boundary to it (presented + interval) so
+						 * the cadence's STEADY path continues the pre-step stamp grid
+						 * coherently once head_future clears (draining the seam one
+						 * matured frame per tick, no hold gap), instead of keying on a
+						 * boundary the step invalidated. */
+						source->genlock_locked_next_boundary_ns =
+							next_frame->timestamp + interval;
+						source->genlock_frames_consumed++;
+						source->last_frame_ts = next_frame->timestamp;
+						genlock_audit_log(source, now_ns);
+						return true;
+					}
+					/* #269 [2]: not re-anchoring — clear the per-event latch so the
+					 * NEXT distinct backward step counts again. due==0 is no longer a
+					 * hold verdict by itself: the #401 cadence below may still PRESENT
+					 * a frame the LOCKED boundary has matured even though the slewed
+					 * wall deadline says not-due — exactly the per-tick wall-compare
+					 * churn (hold ↔ silent drop) the cadence removes. */
+					source->genlock_in_backward_step = false;
+				} else {
+					/* #269 [2]: a normal due tick ends any backward-step recovery —
+					 * clear the per-event latch so the next step counts again. */
+					source->genlock_in_backward_step = false;
+				}
+
+				/* ---- camera-box #401: PHASE-LOCKED release cadence (v2) ---------
+				 * WHY: this release used to re-derive the deadline from the wall
+				 * clock EVERY tick (present_ts above) and present the NEWEST due
+				 * frame, silently erasing the older due ones (to_drop = due - 1
+				 * with NO counter). With render ticks and capture stamps on the
+				 * same DanteSync 60 Hz grid, a reserve near a multiple of the frame
+				 * interval puts the deadline ON a stamp: the ±2 ms render-tick slew
+				 * then flips that frame due/not-due tick-to-tick — alternating HOLD
+				 * + silent DROP. Measured live (run 7020001, 'NDI cam5'): 43.9–57.7
+				 * distinct fps of a 60 fps flow, 8,511 ids lost, invisible in the
+				 * audit. FIX: key the release on a LOCKED boundary that advances
+				 * exactly one interval per presented frame — slew-immune by
+				 * construction. The wall deadline (present_ts) is consulted ONLY
+				 * to ACQUIRE the lock and to AGE frames (backlog/gap/late paths);
+				 * it is NEVER compared against the boundary to force a re-lock.
+				 * v2 (live canary of v1, 2026-07-02, strih 'NDI cam5'): v1's
+				 * wall-based drift guard (present_ts > boundary + 2.25*interval)
+				 * EMBEDS the constant stamp->arrival skew (59 ms live at the 3 ms
+				 * reserve) and relock-stormed — dropped_due 2918 of 4202 received
+				 * (69 %), relocks 1076. v2 guards backlog QUEUE-RELATIVE (depth >
+				 * GENLOCK_QDEPTH_RELOCK — steady depth is ~1-2 at any skew, the
+				 * boundary paces arrivals) and releases strict FIFO on the STEADY
+				 * path (present the OLDEST matured frame; a transient 2-frame
+				 * maturation drains losslessly next tick). EVERY discarded frame
+				 * counts into genlock_dropped_due (steady state drops ZERO).
+				 * #136 in-sync is preserved: every source stamps on the shared
+				 * grid, so locked boundaries are grid-aligned across sources.
+				 * Mirror of src/probe/genlock.rs ReleaseCadence::tick (v2) — keep
+				 * the C and the Rust reference in lock-step (its cadence tests,
+				 * incl. the deep-skew and mid-run-skew-shift regression locks,
+				 * are the proof harness). */
+				size_t release;
+				if (source->genlock_locked_next_boundary_ns == 0) {
+					/* UNLOCKED — ACQUIRE: the first wall-due frame locks the
+					 * cadence. Jump to the newest due (a startup backlog is stale
+					 * by definition), counting the older ones dropped. */
+					if (due == 0) {
 						/* #148: a BENIGN source-early HOLD (frames queued, none
 						 * yet due) -> genlock_holds, NOT a true-empty
-						 * genlock_underruns. Repeat the current frame this tick.
-						 * #269 [2]: not re-anchoring — clear the per-event latch so
-						 * the NEXT distinct backward step counts again. */
+						 * genlock_underruns. Repeat the current frame this tick. */
 						source->genlock_holds++;
-						source->genlock_in_backward_step = false;
 						genlock_audit_log(source, now_ns);
 						return false;
 					}
-					/* RE-ANCHOR. #269 [0]: present the OLDEST queued frame and drop
-					 * NOTHING extra (to_drop = 0). The pre-step frames are real captures;
-					 * get_closest_frame erases the presented head each tick, so the buffer
-					 * drains one frame per tick (the genlock consume rate) and the
-					 * configured latency-depth buffer is PRESERVED — a smooth few-frame
-					 * blip at ANY latency. The old "present newest, drop num-1" drained the
-					 * queue to empty, so for a deep per-source latency override the feed
-					 * then FROZE for ~latency_ms while the buffer refilled.
-					 * #269 [2]: count + LOG_WARNING ONCE per EVENT (on the transition INTO
-					 * the re-anchor state), not every recovery tick — the old per-tick
-					 * increment counted one step as N and logged at frame rate, breaking
-					 * the 5 s audit-log gating. */
-					if (!source->genlock_in_backward_step) {
-						source->genlock_backward_steps++;
-						blog(LOG_WARNING,
-						     "genlock-fifo backward clock step '%s': max queued ts %llu > "
-						     "wall_now+interval (%llu) — re-anchoring (present oldest of "
-						     "%zu queued, preserve buffer) instead of freezing the program "
-						     "feed (#147)",
-						     source->context.name ? source->context.name : "?",
-						     (unsigned long long)max_ts,
-						     (unsigned long long)(wall_now + interval),
-						     source->async_frames.num);
-					}
-					source->genlock_in_backward_step = true;
-					to_drop = 0;
+					release = due;
+				} else if (source->async_frames.num > GENLOCK_QDEPTH_RELOCK &&
+					   due > 0) {
+					/* BACKLOG STORM (v2 — queue-relative, NEVER wall-boundary
+					 * drift): a stall's burst or a persistent inflow>presentation
+					 * imbalance shows up as QUEUE DEPTH, which is immune to the
+					 * constant stamp->arrival skew that relock-stormed v1's
+					 * wall-based guard live (skew 59 ms, reserve 3 ms:
+					 * dropped_due 2918/4202, relocks 1076). Re-lock to the newest
+					 * due frame, counting every jumped frame — the catch-up keeps
+					 * the IMAG latency contract and the drop is VISIBLE (the
+					 * pre-#401 release erased silently). A deep queue with
+					 * due == 0 (a just-landed burst of FRESH frames, nothing aged
+					 * past the reserve yet) deliberately falls through: the
+					 * STEADY path drains it, or this branch fires once it ages. */
+					source->genlock_relocks++;
+					release = due;
+				} else if (source->async_frames.array[0]->timestamp <=
+					   source->genlock_locked_next_boundary_ns) {
+					/* STEADY (strict FIFO): the queue head matured by the LOCKED
+					 * boundary — present the OLDEST matured frame, exactly one in
+					 * steady state at any arrival skew. Presenting oldest (v1
+					 * presented the newest matured and dropped the rest) is what
+					 * makes a transient 2-frame maturation LOSSLESS: the extra
+					 * frame drains on the next tick (depth-bounded by the backlog
+					 * guard above). The boundary re-anchors to the presented
+					 * stamp below so small stamp jitter cannot accumulate. */
+					release = 1;
+				} else if (present_ts >= source->async_frames.array[0]->timestamp) {
+					/* GAP RESYNC: nothing matured, but the oldest queued frame is
+					 * BEYOND the boundary and has aged past the reserve —
+					 * upstream skipped stamps (sender restart, upstream loss).
+					 * Present it and re-anchor the boundary to the real stream;
+					 * not a drop of ours (nothing is discarded), not a relock (no
+					 * catch-up jump). */
+					release = 1;
 				} else {
-					/* present the NEWEST due frame: erase the (due-1) stale older
-					 * ones via the same da_erase(.,0)+remove_async_frame() idiom.
-					 * #269 [2]: a normal due tick ends any backward-step recovery —
-					 * clear the per-event latch so the next step counts again. */
-					to_drop = due - 1;
-					source->genlock_in_backward_step = false;
+					/* HOLD: the boundary's frame has not arrived. LATE only if
+					 * the wall says it should have been here (the boundary aged
+					 * past the reserve — upstream late/lost); EARLY otherwise
+					 * (benign, the #148 source-early hold). */
+					if (present_ts >= source->genlock_locked_next_boundary_ns)
+						source->genlock_late_holds++;
+					else
+						source->genlock_holds++;
+					genlock_audit_log(source, now_ns);
+					return false;
 				}
+				/* Present the newest frame of the released prefix — the newest
+				 * due at ACQUIRE / backlog re-lock (release = due), the queue
+				 * head on the STEADY / GAP paths (release = 1, nothing erased).
+				 * The (release-1) stale older ones are erased via the same
+				 * da_erase(.,0)+remove_async_frame() idiom — COUNTING each into
+				 * genlock_dropped_due (#401: this erase used to be silent, which
+				 * is how run 7020001 lost 8,511 ids with zero audit movement). */
+				size_t to_drop = release - 1;
 				while (to_drop-- && source->async_frames.num > 1) {
 					struct obs_source_frame *dropped = source->async_frames.array[0];
 					da_erase(source->async_frames, 0);
 					remove_async_frame(source, dropped);
+					source->genlock_dropped_due++;
 				}
 				next_frame = source->async_frames.array[0];
+				/* The lock advances exactly one interval past the presented stamp
+				 * (ACQUIRE, RE-LOCK and STEADY alike) — the next boundary the
+				 * cadence will mature. */
+				source->genlock_locked_next_boundary_ns =
+					next_frame->timestamp + interval;
 				source->genlock_frames_consumed++;
 				source->last_frame_ts = next_frame->timestamp;
 				genlock_audit_log(source, now_ns);

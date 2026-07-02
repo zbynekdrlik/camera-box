@@ -81,3 +81,37 @@ fn e2e_skill_documents_frozen_camera_gate() {
          source names, and threshold defaults."
     );
 }
+
+/// #365/#399: the [4c/8] gate must run with BOUNDED RETRY attempts so it cannot false-trip on
+/// the NDI-reconnect race the harness itself causes: step [3/8] restarts cam2's camera-box
+/// (frees fb0), dropping its NDI sender; a strih input bound to that box (the #399 drifted
+/// mapping binds 'NDI cam3' to CAM2) HOLDS the last frame while DistroAV reconnects — sampled
+/// seconds later the gate reads 8 identical hashes and aborts the run (observed twice, run
+/// 7020001 2026-07-02). A retry with a settle sleep clears the race; a GENUINELY frozen camera
+/// fails every attempt, so the verdict is not weakened.
+#[test]
+fn frozen_gate_has_bounded_retry_for_post_restart_reconnect_race() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("FROZEN_CAM_ATTEMPTS"),
+        "recording-e2e.sh [4c/8] must wrap the frozen-camera gate in a bounded retry \
+         (FROZEN_CAM_ATTEMPTS + settle sleep) so the harness can't race its own [3/8] cam restart"
+    );
+}
+
+/// #365/#399: the [4c/8] gate's DEFAULT source list must EXCLUDE strih inputs bound to the
+/// painter box's own NDI sender ("CAM2 (usb)"). In rig TEST mode cam2's display is OFF until
+/// the painter starts, so its HDMI-splitter self-feed is BY DESIGN static at gate time — an
+/// input bound to it (the #399 drifted 'NDI cam3') false-aborts the run DETERMINISTICALLY
+/// (run 7020001: same hash across 4 retry attempts / 4.5 min, while the box's emitter was
+/// healthy at 60 fps). Sampling the painter box's self-view is not a real broadcast signal;
+/// excluding it scopes the gate to the feeds a recording actually depends on.
+#[test]
+fn frozen_gate_excludes_painter_box_bound_inputs() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("FROZEN_CAM_EXCLUDE_SENDER"),
+        "recording-e2e.sh [4c/8] must derive the frozen-gate source list excluding inputs \
+         bound to the painter box's own NDI sender (FROZEN_CAM_EXCLUDE_SENDER)"
+    );
+}

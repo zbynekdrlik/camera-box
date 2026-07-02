@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.188"
+version = "1.7.0-dev.190"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -92,6 +92,10 @@ probe = ["dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_f
 [[bin]]
 name = "frozen-camera-gate"
 path = "src/bin/frozen-camera-gate.rs"
+
+[[bin]]
+name = "render-budget-gate"
+path = "src/bin/render-budget-gate.rs"
 
 [[bin]]
 name = "frame-probe"

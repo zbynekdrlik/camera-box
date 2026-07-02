@@ -1670,6 +1670,20 @@ fn main() -> Result<()> {
 /// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
 /// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
 #[allow(clippy::too_many_arguments)]
+/// The `VerdictConfig` for the STREAM node's per-recording tick DIAGNOSTIC. The stream box
+/// records at `stream_capture_fps` (30 in the mixed 60+30 topology), NOT the cam/strih
+/// `capture_fps` (60) — run 7020001 wired the base cfg straight through and the diagnostic
+/// halved (`analyzed_secs` = 9022 frames / 60 = 150.4 s where the recording really spans
+/// 300.7 s @30), with `expected_step` 60/60=1 instead of 60/30=2. Seconds and step must both
+/// come from the STREAM rate.
+fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConfig {
+    let mut cfg = base.clone();
+    if stream_capture_fps > 0.0 {
+        cfg.capture_fps = stream_capture_fps;
+    }
+    cfg
+}
+
 fn build_and_print_verdict(
     args: &Args,
     strih: Option<DecodedRec>,
@@ -1743,7 +1757,11 @@ fn build_and_print_verdict(
     if let Some(d) = stream {
         let stream_frames = d.frames;
         let stream_ticks = FrameTick::from_recording_frames(&stream_frames);
-        let stream_v = verdict(&stream_ticks, &cfg);
+        // #11/#282: the stream recording runs at stream_capture_fps (30) — seconds AND the
+        // expected tick step must come from ITS rate, not the cam/strih 60 (run 7020001:
+        // the leaked 60 halved analyzed_secs and mis-set expected_step to 1).
+        let stream_cfg = stream_diag_cfg(&cfg, args.stream_capture_fps);
+        let stream_v = verdict(&stream_ticks, &stream_cfg);
         // Diagnostic (not a gate): surface undecodable + span. The #186 burn-contiguity
         // verdict is authoritative for loss.
         report_recording_diag(
@@ -3083,6 +3101,28 @@ mod tests {
     use camera_box::probe::payload::Payload;
     use camera_box::probe::recording::RecordingFrame;
     use std::io::Write;
+
+    /// #11/#282: the stream node's tick DIAGNOSTIC must use the STREAM capture rate. Run
+    /// 7020001: base capture_fps=60 leaked into the 30 fps stream recording's diagnostic —
+    /// analyzed_secs halved (150.4 vs 300.7) and expected_step read 1 instead of 2.
+    #[test]
+    fn stream_diag_cfg_uses_stream_capture_fps() {
+        let base = super::VerdictConfig {
+            capture_fps: 60.0,
+            min_secs: 300.0,
+            refresh_hz: 60.0,
+        };
+        let cfg = super::stream_diag_cfg(&base, 30.0);
+        assert_eq!(
+            cfg.capture_fps, 30.0,
+            "stream diag must run at the stream rate"
+        );
+        assert_eq!(cfg.min_secs, 300.0);
+        assert_eq!(cfg.refresh_hz, 60.0);
+        // A zero/unset stream rate must not produce a divide-by-zero cfg — keep the base.
+        let cfg0 = super::stream_diag_cfg(&base, 0.0);
+        assert_eq!(cfg0.capture_fps, 60.0);
+    }
 
     /// Test helper — build a node verdict computing this node's optical facts from its OWN source
     /// (the headline path passes facts computed ONCE per source via [`node_verdict_with_optical`],

@@ -1293,10 +1293,14 @@ fn recording_e2e_all_cambox_sweep_runs_on_stream_box() {
         s.contains("VERDICT_ARGS+=(--switch-schedule"),
         "#332: the legacy decode-on-dev1 path must still wire --switch-schedule via VERDICT_ARGS."
     );
-    // (d) the DEFAULT (no ALL_CAMBOX) path must keep the single steady-state hold.
+    // (d) the DEFAULT (no ALL_CAMBOX) path must keep the single steady-state hold — since
+    // #11/#373 padded by RECORD_PAD so the analyzed span can reach the --min-secs DURATION
+    // floor (an exactly-DURATION window always missed it: run 7020001, 299.9 s < 300.0).
+    // The #312 intent (ONE steady hold, not the sweep's segment loop) is unchanged.
     assert!(
-        s.contains(r#"sleep "$DURATION""#),
-        "#312: the default (non-sweep) path must keep the single `sleep \"$DURATION\"` hold."
+        s.contains(r#"sleep "$(( DURATION + RECORD_PAD ))""#),
+        "#312/#11: the default (non-sweep) path must keep the single padded steady-state hold \
+         `sleep \"$(( DURATION + RECORD_PAD ))\"`."
     );
 }
 

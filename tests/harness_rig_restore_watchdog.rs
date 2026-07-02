@@ -8,8 +8,10 @@
 //! The prior #266 auto-watchdog was REMOVED for false positives, so Fix#3 is deliberately
 //! conservative:
 //!   1. A FRESH heartbeat (a legit E2E touches it periodically) means "never act".
-//!   2. It acts ONLY on a CLEAR stranded signal (cam-box down, stale probe, OBS on a known TEST
-//!      scene) while the heartbeat is absent/stale.
+//!   2. It acts ONLY on a CLEAR stranded signal while the heartbeat is absent/stale — and (#396) a
+//!      cam signal (down / stale probe) counts only alongside a positive TEST-STATE signal (the
+//!      #353 E2E marker, or OBS on a known TEST scene). An absent/stale heartbeat merely means "no
+//!      E2E ran recently" (normal idle); idle cam flaps are observe/log only, never actionable.
 //!   3. It requires 2 CONSECUTIVE confirmations before acting (the #266 "2-live-sample" lesson).
 //!   4. When it acts it ALWAYS fires a Discord alert.
 //!
@@ -184,8 +186,14 @@ fn no_stranded_signal_resets_and_does_not_act() {
 #[test]
 fn first_stranded_sighting_is_observe_only() {
     // 1 stranded read = observe-only; counter increments to 1 but does NOT act yet.
+    // (#396: the cam signal is corroborated by the E2E marker — a bare cam signal on an idle rig
+    // is no longer a stranded signal at all; see the #396 section below.)
     let d = decide(
-        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "0")],
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "0"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
         &["cam cam1 down=1 probe=0"],
     );
     assert_eq!(d.get("confirm").map(String::as_str), Some("1"));
@@ -199,8 +207,13 @@ fn first_stranded_sighting_is_observe_only() {
 
 #[test]
 fn second_consecutive_confirmation_acts_and_alerts() {
+    // (#396: marker present = the test-state corroboration a cam signal now requires.)
     let d = decide(
-        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
         &["cam cam1 down=1 probe=0"],
     );
     assert_eq!(d.get("confirm").map(String::as_str), Some("2"));
@@ -224,9 +237,15 @@ fn second_consecutive_confirmation_acts_and_alerts() {
 }
 
 #[test]
-fn stale_probe_alone_is_a_stranded_signal() {
+fn stale_probe_with_test_state_signal_is_a_stranded_signal() {
+    // (#396: was `stale_probe_alone_is_a_stranded_signal` — that locked the false-positive bug.
+    // A stale probe is a stranded signal only WITH a test-state signal; here, the E2E marker.)
     let d = decide(
-        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
         &["cam cam2 down=0 probe=1"],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("1"));
@@ -283,11 +302,13 @@ fn multiple_stranded_signals_each_get_a_restore_action() {
 #[test]
 fn confirm_threshold_is_configurable() {
     // With threshold=1 the watchdog acts on the FIRST sighting (no second confirmation needed).
+    // (#396: marker present = the test-state corroboration a cam signal now requires.)
     let d = decide(
         &[
             ("RIG_HB_ACTIVE", "0"),
             ("RIG_PREV_CONFIRM", "0"),
             ("RIG_CONFIRM_THRESHOLD", "1"),
+            ("RIG_E2E_MARKER", "1"),
         ],
         &["cam cam1 down=1 probe=0"],
     );
@@ -1299,4 +1320,367 @@ fn watchdog_state_persists_alert_sig_and_passes() {
         src.contains("alert_passes"),
         "#370: watchdog state must persist alert_passes across invocations (throttle pass counting)"
     );
+}
+
+// ─── #396 defect 1+3: an IDLE rig must never be misread as stranded ──────────
+//
+// The incident (journal, dev1, 2026-07-01): heartbeat merely absent/stale (age ~96 min — normal
+// idle), e2e-marker ABSENT, OBS on prod scenes — yet a transient cam2 stale_probe=1 was treated as
+// a "clear stranded signal", confirmed, acted on, and Discord was spammed with false
+// 'AUTO-RECOVERED' every ~2 min. An absent/stale heartbeat only means "no E2E ran recently", NOT
+// "a worker died mid-test". A stranded rig requires a POSITIVE test-state signal that idle cannot
+// produce: the #353 E2E marker, or OBS on a known TEST scene. A bare cam down/stale_probe with no
+// test-state signal must be observe/log only — never actionable, never climbing the counter (a
+// flapping probe (defect 3) otherwise re-arms it whenever the flap lands ≥threshold consecutive).
+
+#[test]
+fn idle_cam_stale_probe_without_test_state_is_observe_only() {
+    // The exact incident shape: idle rig (no marker, prod scenes), cam2 stale_probe=1, counter
+    // already climbed → must NOT act, must NOT alert, and the counter must reset.
+    let d = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "2"),
+            ("RIG_E2E_MARKER", "0"),
+        ],
+        &[
+            "cam cam2 down=0 probe=1",
+            "obs strih scene=Cam 5",
+            "obs stream scene=PRO",
+        ],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "#396: a bare cam stale_probe on an idle rig (no marker, prod scenes) must be observe-only \
+         — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+    assert_eq!(
+        d.get("alert").map(String::as_str),
+        Some("0"),
+        "#396: no false 'AUTO-RECOVERED' ping on an idle rig"
+    );
+    assert_eq!(
+        d.get("confirm").map(String::as_str),
+        Some("0"),
+        "#396: an uncorroborated cam signal must not climb the confirm counter"
+    );
+}
+
+#[test]
+fn idle_cam_down_without_test_state_is_observe_only() {
+    // Same rule for down=1: during idle, cams flap for reasons unrelated to a stranded harness
+    // (reboot, deploy, power) — without a test-state signal the watchdog must not touch them.
+    let d = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["cam cam1 down=1 probe=0", "obs stream scene=PRO"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "#396: a bare cam-down on an idle rig must be observe-only — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+    assert_eq!(d.get("confirm").map(String::as_str), Some("0"));
+}
+
+#[test]
+fn flapping_probe_without_test_state_never_acts_regardless_of_prev_confirm() {
+    // #396 defect 3: cam2's stale_probe flapped 1↔0 between passes; whenever the flap landed
+    // ≥threshold consecutive the watchdog re-acted. With no test-state signal the probe signal
+    // must never act NO MATTER how high the persisted counter got.
+    for prev in ["0", "1", "2", "3", "4", "5"] {
+        let d = decide(
+            &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", prev)],
+            &["cam cam2 down=0 probe=1", "obs strih scene=Cam 5"],
+        );
+        assert_eq!(
+            d.get("act").map(String::as_str),
+            Some("0"),
+            "#396: flapping probe with prev_confirm={prev} must never act — got reason={:?}",
+            d.get("reason")
+        );
+    }
+}
+
+#[test]
+fn cam_signal_with_e2e_marker_is_actionable() {
+    // Guard against over-suppression: WITH the test-state corroboration (marker) a cam signal is
+    // still a stranded signal and is restored at the confirm threshold.
+    let d = decide(
+        &[
+            ("RIG_HB_ACTIVE", "0"),
+            ("RIG_PREV_CONFIRM", "1"),
+            ("RIG_E2E_MARKER", "1"),
+        ],
+        &["cam cam2 down=0 probe=1"],
+    );
+    assert_eq!(d.get("act").map(String::as_str), Some("1"));
+    assert!(
+        d.get("actions")
+            .map(|s| s.contains("restore_cam:cam2"))
+            .unwrap_or(false),
+        "#396: marker-corroborated cam signal must restore the cam — got {:?}",
+        d.get("actions")
+    );
+}
+
+#[test]
+fn cam_signal_with_known_test_scene_is_actionable() {
+    // The scene-list fallback corroborates too (older harness / manual testing, no marker).
+    let d = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["cam cam1 down=1 probe=0", "obs strih scene=PHASE2-PROBE"],
+    );
+    assert_eq!(d.get("act").map(String::as_str), Some("1"));
+    let actions = d.get("actions").cloned().unwrap_or_default();
+    assert!(actions.contains("restore_cam:cam1"), "got {actions}");
+    assert!(actions.contains("restore_obs:strih"), "got {actions}");
+}
+
+// ─── #396 defect 2: a FAILED cam restore must never be classified 'positive' ─
+
+#[test]
+fn classify_restore_partial_when_cam_restore_failed() {
+    // The incident: 'RESTORE cam cam2: ssh restore returned non-zero' — yet the pass was
+    // classified kind=positive (only obs_unreadable/obs_failed fed in), so the unthrottled alert
+    // lied "AUTO-RECOVERED" on EVERY failed attempt. rig_classify_restore gains a 4th arg
+    // <cam_failed>: any failed cam restore → partial (throttled, honest body).
+    let script = r#"set -u
+. "$DECISION_LIB"
+rig_classify_restore 1 0 0 1
+"#;
+    let (code, stdout, stderr) = run_bash(script);
+    assert_eq!(code, 0, "stdout:{stdout}\nstderr:{stderr}");
+    assert!(
+        stdout.contains("kind=partial"),
+        "#396: cam_failed=1 must classify as partial (a failed restore is NOT a recovery) — got {stdout}"
+    );
+}
+
+#[test]
+fn classify_restore_positive_with_explicit_zero_cam_failed() {
+    let script = r#"set -u
+. "$DECISION_LIB"
+rig_classify_restore 1 0 0 0
+"#;
+    let (code, stdout, _stderr) = run_bash(script);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("kind=positive"),
+        "#396: cam_failed=0 keeps the full-restore positive classification — got {stdout}"
+    );
+}
+
+// ─── #396: the cam restore itself always failed — pkill -f self-kill ─────────
+
+/// Extract the body of restore_cam() from the watchdog source.
+fn restore_cam_block() -> String {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    let start = src
+        .find("restore_cam() {")
+        .expect("restore_cam() must exist");
+    let rest = &src[start..];
+    let end = rest.find("\n}").expect("restore_cam block end");
+    rest[..end].to_string()
+}
+
+#[test]
+fn pkill_f_pattern_in_its_own_wrapper_cmdline_kills_the_wrapper() {
+    // Mechanism proof (local + safe: the canary string is unique, so the ONLY matching process is
+    // the bash -c wrapper this test spawns). A `pkill -9 -f <pattern>` whose wrapper shell's own
+    // argv contains <pattern> SIGKILLs the wrapper before the rest of the command runs — exactly
+    // what restore_cam's remote `ssh … sh -c '…pkill -9 -f "camera-box-burn-"…'` did on every
+    // pass: the remote shell died at its first pkill, ssh returned non-zero, and camera-box was
+    // NEVER restarted (the "restore always fails" half of #396). The first-char-class disguise
+    // ([c]…, the same trick PROBE_PATTERNS already documents) breaks the self-match: the ERE still
+    // matches the real processes, but the literal pattern text no longer contains the matched
+    // substring.
+    let raw = Command::new("bash")
+        .arg("-c")
+        .arg("pkill -9 -f 'x396-selfkill-canary' 2>/dev/null; echo survived")
+        .output()
+        .expect("spawn raw-pattern wrapper");
+    assert!(
+        !String::from_utf8_lossy(&raw.stdout).contains("survived"),
+        "#396 mechanism: the RAW pattern must self-match the wrapper's own cmdline and kill it"
+    );
+    let disguised = Command::new("bash")
+        .arg("-c")
+        .arg("pkill -9 -f '[x]396-selfkill-canary' 2>/dev/null; echo survived")
+        .output()
+        .expect("spawn disguised-pattern wrapper");
+    assert!(
+        String::from_utf8_lossy(&disguised.stdout).contains("survived"),
+        "#396 mechanism: the first-char-class pattern must NOT self-match — the wrapper survives"
+    );
+}
+
+#[test]
+fn restore_cam_remote_command_cannot_pkill_its_own_wrapper_shell() {
+    // The remote command string travels in the remote `sh -c` wrapper's argv, so NO literal
+    // occurrence of a pkill'd substring may appear anywhere in it — pkill patterns AND the rm glob
+    // must use the first-char-class disguise ([c]…, /tmp/camera-box-[b]urn-*).
+    let block = restore_cam_block();
+    for raw in ["camera-box-burn-", "recording-verdict", "frame-probe"] {
+        assert!(
+            !block.contains(raw),
+            "#396: restore_cam must not carry the literal '{raw}' anywhere in the remote command \
+             (the wrapper shell's argv would self-match the pkill -f) — block:\n{block}"
+        );
+    }
+    for disguised in [
+        "[c]amera-box-burn-",
+        "[r]ecording-verdict",
+        "[f]rame-probe",
+        "/tmp/camera-box-[b]urn-*",
+    ] {
+        assert!(
+            block.contains(disguised),
+            "#396: restore_cam must keep the disguised form '{disguised}' — block:\n{block}"
+        );
+    }
+}
+
+#[test]
+fn watchdog_feeds_cam_restore_failures_into_classification_and_alert() {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    // restore_cam must return the ssh's REAL exit status (previously swallowed by `|| log …`)…
+    assert!(
+        restore_cam_block().contains("return"),
+        "#396: restore_cam must return the restore's real exit status"
+    );
+    // …main must count the failures…
+    assert!(
+        src.contains("cam_failed"),
+        "#396: the watchdog must count failed cam restores (cam_failed)"
+    );
+    // …feed them into the pure classification (4th arg)…
+    let call_line = src
+        .lines()
+        .find(|l| l.contains(r#"rig_classify_restore ""#))
+        .expect("#396: the rig_classify_restore call must exist");
+    assert!(
+        call_line.contains("cam_failed"),
+        "#396: rig_classify_restore must receive cam_failed — got: {call_line}"
+    );
+    // …include them in the throttle fingerprint…
+    let sig_line = src
+        .lines()
+        .find(|l| l.contains("current_alert_sig="))
+        .expect("#396: the alert-sig fingerprint must exist");
+    assert!(
+        sig_line.contains("cam_failed"),
+        "#396: the throttle fingerprint must include cam_failed — got: {sig_line}"
+    );
+    // …and the PARTIAL body must state the cam failures instead of lying "AUTO-RECOVERED".
+    assert!(
+        src.contains("Failed cam restores"),
+        "#396: the partial alert body must state the failed cam restores"
+    );
+}
+
+// ─── #394: observation log lines lost under systemd (journald + fast $() subshells) ──────────
+//
+// Under the systemd unit, `obs+="$(probe_… …)"` forks a short-lived subshell per probe; log()
+// stderr lines from those fast-exiting children are intermittently LOST by journald (0/5 strih,
+// 2/5 stream across 5 timer-style passes; never under the slower `bash -x`). The probes must run
+// in the long-lived MAIN shell with their record lines redirected to a file — a redirection does
+// not fork, so the journal reliably gets the observation log. (The journald loss itself is
+// environmental/timing and not deterministically unit-testable; these tests lock the structural
+// fix: no $() around the probes, byte-identical RIG_OBS, probes in the main process.)
+
+#[test]
+fn watchdog_does_not_collect_observations_via_command_substitution() {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        !src.contains("$(probe_cam") && !src.contains("$(probe_obs"),
+        "#394: probes must NOT run inside $() command substitutions (short-lived subshells whose \
+         journald log lines are intermittently lost under the systemd unit)"
+    );
+    assert!(
+        src.contains("collect_observations"),
+        "#394: the watchdog must collect observations via the collect_observations helper"
+    );
+}
+
+#[test]
+fn watchdog_runs_main_only_when_executed_not_sourced() {
+    // Sourcing the script (tests) must only define functions/config — never run a live pass. This
+    // is what makes collect_observations unit-testable with stubbed probes.
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains(r#"if [[ "${BASH_SOURCE[0]}" == "$0" ]]"#),
+        "#394: main must be gated behind an executed-not-sourced guard"
+    );
+}
+
+#[test]
+fn collect_observations_runs_probes_in_the_main_shell_and_preserves_records() {
+    // Functional lock: source the watchdog (guard skips main), stub the probes to emit their
+    // $BASHPID, and verify (a) RIG_OBS carries all 5 records byte-identically in order, and
+    // (b) every probe ran in the MAIN shell (pid == the main shell's BASHPID — a $() subshell
+    // would fork and report a different pid). Static precondition first so a missing helper fails
+    // fast instead of executing a real pass.
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("collect_observations"),
+        "#394: collect_observations helper missing — cannot run the functional lock"
+    );
+    let dir = scratch("collect-obs");
+    // Unroutable TEST-NET hosts + 1s timeouts + scratch state: even a regressed script that runs
+    // a real pass on source stays rig-free, harmless (--dry-run) and fast.
+    let script = format!(
+        r#"set -u
+export RIG_WATCHDOG_STATE_DIR="{d}"
+export CAMERA_BOX_RIG_HEARTBEAT="{d}/hb"
+export CAMERA_BOX_RIG_E2E_MARKER="{d}/marker"
+export CAM1_IP=192.0.2.1 CAM2_IP=192.0.2.2 CAM4_IP=192.0.2.4
+export STRIH_HOST=192.0.2.11 STREAM_HOST=192.0.2.12
+export RIG_WATCHDOG_SSH_TIMEOUT=1 RIG_WATCHDOG_OBS_TIMEOUT=1
+. "{w}" --dry-run
+main_pid=$BASHPID
+probe_cam() {{ printf 'cam %s down=0 probe=0 pid=%s\n' "$1" "$BASHPID"; }}
+probe_obs() {{ printf 'obs %s scene=STUB pid=%s\n' "$1" "$BASHPID"; }}
+collect_observations
+printf 'MAIN=%s\n' "$main_pid"
+printf 'BEGIN\n%s\nEND\n' "$RIG_OBS"
+"#,
+        d = dir.display(),
+        w = watchdog().display()
+    );
+    let (code, stdout, stderr) = run_bash(&script);
+    assert_eq!(
+        code, 0,
+        "#394: source + collect must succeed\nstdout:{stdout}\nstderr:{stderr}"
+    );
+    let main_pid = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("MAIN="))
+        .expect("MAIN= line")
+        .trim()
+        .to_string();
+    let body: Vec<&str> = stdout
+        .lines()
+        .skip_while(|l| *l != "BEGIN")
+        .skip(1)
+        .take_while(|l| *l != "END")
+        .collect();
+    let expected: Vec<String> = vec![
+        format!("cam cam1 down=0 probe=0 pid={main_pid}"),
+        format!("cam cam2 down=0 probe=0 pid={main_pid}"),
+        format!("cam cam4 down=0 probe=0 pid={main_pid}"),
+        format!("obs strih scene=STUB pid={main_pid}"),
+        format!("obs stream scene=STUB pid={main_pid}"),
+    ];
+    assert_eq!(
+        body,
+        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+        "#394: RIG_OBS must carry the 5 records byte-identically AND every probe must run in the \
+         MAIN shell (pid == main BASHPID; a $() subshell would fork)\nstderr:{stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

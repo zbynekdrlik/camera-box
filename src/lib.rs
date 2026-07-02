@@ -49,6 +49,13 @@ pub mod qpsk_marker;
 // `bin/recording-verdict`.
 pub mod colour_verify;
 
+// #405 / EPIC #406 — pure OBS render-budget verdict. The strict gate signal for whether the
+// program RENDER loop (activeFps + averageFrameRenderTime + renderSkipped) holds its frame
+// deadline — the REAL render-health signal, not the encoder outputFps that duplicates to target
+// and stays green while render chokes (the 2026-07-02 60→27fps burn regression). No probe deps,
+// so it unit-tests Tier-0; the rig E2E (recording-e2e.sh live OBS WS GetStats) calls it to gate.
+pub mod render_budget;
+
 // #373 — the zero-loss HEADLINE analyzed-span duration gate (pure decision). A collapsed/partial
 // cam2 optical read must not vacuously pass the headline over a handful of frames. No probe deps,
 // so it unit-tests Tier-0; the probe-gated `bin/recording-verdict` feeds each node's optical-span

@@ -374,7 +374,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
   if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
     cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
   fi
-  for b in camera-box frame-probe recording-verdict frozen-camera-gate; do
+  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate; do
     if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
       echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
       echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
@@ -388,8 +388,8 @@ else
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
   cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
-  # #365: build the frozen-camera-gate binary (default features — no probe deps, no disk balloon).
-  cargo build --release --bin frozen-camera-gate  # airuleset:build-ok
+  # #365/#405: build the default-feature gate binaries (no probe deps, no disk balloon).
+  cargo build --release --bin frozen-camera-gate --bin render-budget-gate  # airuleset:build-ok
 fi
 
 echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
@@ -517,11 +517,92 @@ echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updat
 # it via FROZEN_GATE_BIN or PROBE_BIN_DIR.
 FROZEN_GATE_BIN="${FROZEN_GATE_BIN:-$PROBE_BIN_DIR/frozen-camera-gate}"
 export FROZEN_GATE_BIN
-python3 "$HERE/frozen-camera-gate.py" \
-  --host "$STRIH" \
-  --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
-  --samples   "${FROZEN_CAM_SAMPLES:-8}" \
-  --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam5}"
+# #365/#399 BOUNDED RETRY — the gate must not race the harness's OWN [3/8] cam2 restart: that
+# restart drops cam2's NDI sender, and a strih input bound to that box (the #399 drifted mapping
+# binds 'NDI cam3' to CAM2) HOLDS the last frame while DistroAV reconnects — sampled seconds
+# later the gate reads 8 identical hashes and false-aborts the run (run 7020001, twice,
+# 2026-07-02). A reconnect race clears within a retry; a GENUINELY frozen camera fails every
+# attempt (~2.5 min total) — the per-attempt verdict is untouched, so the gate is NOT weakened.
+FROZEN_CAM_ATTEMPTS="${FROZEN_CAM_ATTEMPTS:-4}"
+FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
+# #365/#399 EXCLUDE the painter box's own feed — in TEST mode cam2's display is OFF until the
+# painter starts, so a strih input bound to cam2's NDI sender (the #399 drifted 'NDI cam3' →
+# 'CAM2 (usb)') shows the HDMI-splitter self-view: BY DESIGN static at gate time. That is not a
+# broadcast signal — sampling it false-aborts DETERMINISTICALLY (run 7020001: identical hash
+# across 4 retry attempts while cam2's emitter ran healthy at 60 fps). Derive the source list
+# live: keep every default input EXCEPT those bound to FROZEN_CAM_EXCLUDE_SENDER. An explicit
+# FROZEN_CAM_SOURCES env still overrides everything (operator escape hatch, unchanged).
+FROZEN_CAM_EXCLUDE_SENDER="${FROZEN_CAM_EXCLUDE_SENDER:-CAM2 (usb)}"
+if [ -z "${FROZEN_CAM_SOURCES:-}" ]; then
+  FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("o", sys.argv[3])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+host, exclude = sys.argv[1], sys.argv[2]
+ws = m._conn(host, os.environ.get("OBS_PASSWORD", ""))
+keep = []
+for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam5"]:
+    try:
+        s = m._rpc(ws, "GetInputSettings", {"inputName": inp}).get("inputSettings", {})
+        sender = s.get("ndi_source_name", "")
+    except Exception:
+        sender = ""
+    if exclude and exclude in sender:
+        print(f"    [frozen-camera-gate] excluding {inp!r} (bound to {sender!r} — the painter box's self-feed, static by design pre-paint)", file=sys.stderr)
+    else:
+        keep.append(inp)
+ws.close()
+print(",".join(keep))
+PYEOF
+)"
+  echo "    [frozen-camera-gate] derived sources: ${FROZEN_CAM_SOURCES} (excluded any bound to '${FROZEN_CAM_EXCLUDE_SENDER}')"
+fi
+frozen_ok=0
+for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
+  if python3 "$HERE/frozen-camera-gate.py" \
+      --host "$STRIH" \
+      --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
+      --samples   "${FROZEN_CAM_SAMPLES:-8}" \
+      --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam5}"; then
+    frozen_ok=1
+    break
+  fi
+  if [ "$frozen_attempt" -lt "$FROZEN_CAM_ATTEMPTS" ]; then
+    echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} FROZEN — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
+    sleep "$FROZEN_CAM_RETRY_SLEEP"
+  fi
+done
+if [ "$frozen_ok" -ne 1 ]; then
+  echo "    [frozen-camera-gate] FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365)"
+  exit 1
+fi
+
+echo "[4d/8] #405/#406 render-budget gate — with burns ON + Multiview open, BOTH boxes MUST hold the render frame budget (strih 60fps, stream 30fps)"
+# The 2026-07-02 regression: a measurement burn left ON dropped strih RENDER 60->27fps (36ms >
+# 16.6ms/60fps budget) while the encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
+# caught it, because the delivery verdict checks burn-id contiguity (which stays contiguous at
+# 27fps) not render fps. This gate snapshots OBS WS GetStats deltas on BOTH boxes in the exact
+# recording state (burns ON from [4b/8], Multiview open) and FAILS FAST if either misses its
+# frame-time budget — so a choked pipeline can never be recorded and then "pass" on delivery.
+# STRICT (strict-test mandate): no warn-only, no override. A fail = fix the root cause (an
+# expensive burn is #404's full-frame readback; a render regression is a real regression).
+# The decision lives ONLY in the Rust render-budget-gate bin (render_budget::classify) — single
+# source of truth, no threshold duplicated in python.
+RENDER_GATE_BIN="${RENDER_GATE_BIN:-$PROBE_BIN_DIR/render-budget-gate}"
+export RENDER_GATE_BIN
+# Pass the same OBS_PASSWORD to BOTH boxes: stream currently has no WS auth (empty works), but if it
+# is ever set to match strih (per the shared-password note) an empty here would fail auth → false abort.
+if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:-}" \
+    python3 "$HERE/render-budget-gate.py" \
+      --box "strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-60}" \
+      --box "stream=${STREAM}:${RENDER_TARGET_FPS_STREAM:-30}" \
+      --window-s "${RENDER_GATE_WINDOW_S:-6}"; then
+  echo "    [render-budget-gate] a box missed the render frame budget with burns ON — aborting BEFORE recording (#405)." >&2
+  echo "    A recording made in this state would judder (encoder duplicates frames) yet pass delivery-contiguity." >&2
+  echo "    Root cause is almost always the expensive measurement burn (#404 full-frame readback) or a render regression." >&2
+  echo "    Clear burns with scripts/rig-mode.sh event; see EPIC #406." >&2
+  exit 1
+fi
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
@@ -592,8 +673,12 @@ if [ "$ALL_CAMBOX" = "1" ]; then
     > "$SWITCH_SCHEDULE_JSON"
   echo "    wrote switch schedule -> $SWITCH_SCHEDULE_JSON"
 else
-  echo "[6/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
-  sleep "$DURATION"
+  # #11/#373 RECORD_PAD: the verdict trims the recording's lead/tail edge frames, so a window of
+  # exactly DURATION can NEVER satisfy the --min-secs DURATION floor (run 7020001: analyzed span
+  # 299.9 s < 300.0). Record DURATION + RECORD_PAD so the ANALYZED span reaches the floor.
+  RECORD_PAD="${RECORD_PAD:-10}"
+  echo "[6/8] steady-state run: ${DURATION}s + ${RECORD_PAD}s pad (run_id=$RUN_ID)"
+  sleep "$(( DURATION + RECORD_PAD ))"
 fi
 
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"

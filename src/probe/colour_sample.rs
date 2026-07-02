@@ -228,15 +228,41 @@ fn bgra_to_rgb(bgra: &[u8], canvas_w: u32, canvas_h: u32) -> RgbImage {
     img
 }
 
-/// The two dual-QR halves located in a frame: `(left payload, right payload, 8 corners)` — the
-/// corners are left-half then right-half, each TL,TR,BR,BL.
-type DualQr = (Payload, Payload, Vec<(f64, f64)>);
+/// The dual-QR fiducial anchor located in a frame (#364/#400). BOTH halves when both decode —
+/// the preferred, best-conditioned 8-corner fit — or ONE decoded half. The single-half form
+/// exists because the Vernier paints ONE half per 60 Hz refresh (`painter::vernier_ids`), so a
+/// captured frame has ≥1 SHARP half and usually one mid-transition (blurred, undecodable) half;
+/// requiring the PAIR made 12/12 sampled frames unlocalizable on both real run-7020001
+/// recordings (#400).
+enum QrAnchor {
+    /// Both halves decoded: left payload, right payload, 8 corners (left then right, each
+    /// TL,TR,BR,BL).
+    Pair(Payload, Payload, Vec<(f64, f64)>),
+    /// Exactly one half decoded: its payload + its 4 corners (TL,TR,BR,BL). WHICH half it is
+    /// comes from the payload's Vernier tick PARITY (left = even, right = odd — `vernier_ids`,
+    /// locked by `vernier_parity_identifies_the_half_400`), NOT from its position: the camera's
+    /// framing of the monitor does not reveal where the canvas midline is.
+    Single(Payload, [(f64, f64); 4]),
+}
 
-/// Detect the two dual-QR halves in an RGB frame: returns their decoded payloads `(left, right)` and
-/// their 8 corners (left then right, each TL,TR,BR,BL). The halves are the two LARGEST top-half QR
-/// grids that DECODE — the four node burns are bottom-anchored (excluded by position). `None` when
-/// fewer than two such grids are found (frame cannot be localized → skipped).
-fn detect_dual_qr(img: &RgbImage) -> Option<DualQr> {
+/// Pick the single dual-QR half from candidate grids `(area, centroid_y, centroid_x)` when a
+/// PAIR is not available (#400): the LARGEST grid in the TOP half of the frame — the
+/// bottom-anchored node burns are excluded by position, exactly as in [`select_two_dual_qr`].
+/// `None` when no top-half candidate exists (the frame cannot be localized → it is skipped,
+/// fail-closed — never a fixed-coord fallback). Pure (no rqrr) — unit-tested.
+fn select_single_dual_qr(items: &[(f64, f64, f64)], frame_h: f64) -> Option<usize> {
+    (0..items.len())
+        .filter(|&i| items[i].1 < frame_h / 2.0)
+        .max_by(|&a, &b| items[a].0.total_cmp(&items[b].0))
+}
+
+/// Detect the dual-QR fiducials in an RGB frame. The candidates are the top-half QR grids that
+/// DECODE (the four node burns are bottom-anchored — excluded by position): the two LARGEST give
+/// [`QrAnchor::Pair`] (payloads left/right + 8 corners, left then right, each TL,TR,BR,BL);
+/// when only ONE decodes — the Vernier's normal captured-frame state through the optical hop
+/// (#400) — the largest gives [`QrAnchor::Single`]. `None` when NEITHER half decodes (the frame
+/// cannot be localized → skipped).
+fn detect_dual_qr(img: &RgbImage) -> Option<QrAnchor> {
     let luma = rgb_to_luma(img);
     let frame_h = luma.height() as f64;
     let mut prepared = rqrr::PreparedImage::prepare(luma);
@@ -262,11 +288,16 @@ fn detect_dual_qr(img: &RgbImage) -> Option<DualQr> {
             }
         }
     }
-    let [li, ri] = select_two_dual_qr(&items, frame_h)?;
-    let mut pts = Vec::with_capacity(8);
-    pts.extend_from_slice(&order_corners(corners[li]));
-    pts.extend_from_slice(&order_corners(corners[ri]));
-    Some((payloads[li], payloads[ri], pts))
+    if let Some([li, ri]) = select_two_dual_qr(&items, frame_h) {
+        let mut pts = Vec::with_capacity(8);
+        pts.extend_from_slice(&order_corners(corners[li]));
+        pts.extend_from_slice(&order_corners(corners[ri]));
+        return Some(QrAnchor::Pair(payloads[li], payloads[ri], pts));
+    }
+    // #400 fallback: ONE decoded top-half grid still anchors the fit (parity → half → 4-corner
+    // least squares). No decoded grid at all ⇒ None ⇒ the caller skips the frame (fail-closed).
+    let si = select_single_dual_qr(&items, frame_h)?;
+    Some(QrAnchor::Single(payloads[si], order_corners(corners[si])))
 }
 
 /// Sample + classify ONE recorded frame's colour scale, LOCALIZED to where the camera actually
@@ -275,14 +306,15 @@ fn detect_dual_qr(img: &RgbImage) -> Option<DualQr> {
 ///
 /// The canvas→recording affine is derived from the dual-QR fiducials WITHOUT coupling to the QR
 /// renderer's internals (quiet zone, integer-module rounding, sub-`qr_size` render): decode the
-/// recording's two dual-QR payloads, RE-RENDER the reference canvas from those exact payloads via the
+/// recording's dual-QR payload(s), RE-RENDER the reference canvas from those exact payloads via the
 /// same painter path (`render_qr_dual_bgra`), detect the reference's dual-QR corners (the true
 /// CANVAS-frame positions of the very same symbols), and fit reference-corners → recording-corners.
 /// Pairing like-with-like (symbol↔symbol of identical geometry) makes the fit the PURE camera
 /// transform, so sampling the colour column ([`crate::colour_scale::colour_scale_patches`], same
-/// canvas geometry the painter used) through it lands exactly where the camera put it. Returns
-/// `None` when the two
-/// dual-QRs can't be decoded/located or the fit is degenerate — the caller SKIPS the frame
+/// canvas geometry the painter used) through it lands exactly where the camera put it. Both halves
+/// decoded ⇒ the 8-corner fit; ONE half — the Vernier's normal captured-frame state (#400) ⇒ its
+/// tick parity identifies the half and its 4 corners fit the affine. Returns `None` only when
+/// NEITHER half decodes or the fit is degenerate — the caller SKIPS the frame
 /// (fail-closed; no fixed-coord fallback, since a mis-located sample is a false signal).
 pub fn colour_verdict_from_rgb_image_localized(
     img: &RgbImage,
@@ -309,14 +341,42 @@ fn localized_patch_means(
     top_margin: u32,
     exclusions: &[Rect],
 ) -> Option<Vec<Option<Rgb>>> {
-    let (left, right, rec_corners) = detect_dual_qr(img)?;
-    // Reference canvas: the SAME painter render for these exact payloads. Its detected dual-QR
+    // Reference canvas: the SAME painter render for the decoded payload(s). Its detected dual-QR
     // corners are the true canvas-frame positions of the identical symbols, so the fit is the pure
     // camera transform (no box-vs-symbol / quiet-zone mismatch).
-    let ref_bgra = qr::render_qr_dual_bgra(&left, &right, canvas_w, canvas_h, qr_size);
-    let ref_rgb = bgra_to_rgb(&ref_bgra, canvas_w, canvas_h);
-    let (_, _, ref_corners) = detect_dual_qr(&ref_rgb)?;
-    let affine = fit_affine(&ref_corners, &rec_corners)?;
+    let affine = match detect_dual_qr(img)? {
+        QrAnchor::Pair(left, right, rec_corners) => {
+            let ref_bgra = qr::render_qr_dual_bgra(&left, &right, canvas_w, canvas_h, qr_size);
+            let ref_rgb = bgra_to_rgb(&ref_bgra, canvas_w, canvas_h);
+            let QrAnchor::Pair(_, _, ref_corners) = detect_dual_qr(&ref_rgb)? else {
+                return None; // a clean render must yield the pair — anything else fails closed
+            };
+            fit_affine(&ref_corners, &rec_corners)?
+        }
+        // #400: ONE decoded half. Its Vernier tick PARITY says which half it is (left = even,
+        // right = odd — `painter::vernier_ids`, locked by `vernier_parity_identifies_the_half_400`),
+        // so render the reference with the payload in BOTH halves (the same pub painter path; the
+        // symbols are identical so each detection carries its half's true canvas geometry), keep
+        // the TRUE half's 4 corners, and fit 4 pairs — 8 equations for 6 dof, an adequate least
+        // squares ([`fit_affine`] accepts N ≥ 3; a degenerate fit still rejects ⇒ skip). Startup
+        // caveat: at Vernier tick 0 BOTH halves carry frame_id 0 (even), so a lone right half from
+        // the run's very first refresh would be taken as left — one 60 Hz refresh per run, and the
+        // per-patch majority across the sampled frames absorbs a single mis-localized frame.
+        QrAnchor::Single(p, rec_corners) => {
+            let right_half = p.frame_id % 2 == 1;
+            let ref_bgra = qr::render_qr_dual_bgra(&p, &p, canvas_w, canvas_h, qr_size);
+            let ref_rgb = bgra_to_rgb(&ref_bgra, canvas_w, canvas_h);
+            let QrAnchor::Pair(_, _, ref_corners) = detect_dual_qr(&ref_rgb)? else {
+                return None; // a clean render must yield the pair — anything else fails closed
+            };
+            let half = if right_half {
+                &ref_corners[4..8]
+            } else {
+                &ref_corners[..4]
+            };
+            fit_affine(half, &rec_corners)?
+        }
+    };
     Some(sample_patch_means_affine(
         img.as_raw(),
         img.width(),
@@ -537,8 +597,9 @@ pub fn extract_recording_colour_summary(
         // frame, which can be a partial teardown frame).
         let ts = duration * ((i as f64) + 0.5) / (samples as f64);
         if let Some(img) = decode_one_rgb_frame_at(path, ts, width, height)? {
-            // Localize via the frame's own dual-QR corners; a frame whose dual-QRs can't be located
-            // is SKIPPED (never sampled at the wrong canvas coords) rather than mis-measured.
+            // Localize via the frame's own dual-QR corners (both halves, or ONE decoded half via
+            // its tick parity, #400); a frame with NO decodable half is SKIPPED (never sampled at
+            // the wrong canvas coords) rather than mis-measured.
             match localized_patch_means(
                 &img,
                 PAINTER_CANVAS_W,
@@ -555,7 +616,7 @@ pub fn extract_recording_colour_summary(
     anyhow::ensure!(
         !frame_means.is_empty(),
         "colour gate: could not localize the dual-QR colour scale in ANY of {} sampled frames of \
-         {} ({} frames had no locatable dual-QR pair) — cannot verify colour",
+         {} ({} frames had no decodable dual-QR half) — cannot verify colour",
         samples,
         path.display(),
         localize_failures
@@ -728,6 +789,42 @@ mod tests {
     }
 
     #[test]
+    fn select_single_dual_qr_picks_the_largest_top_half_candidate() {
+        // #400 single-half fallback: one decodable top-half QR + a bottom burn (excluded by
+        // position) + top-half noise (excluded by area) ⇒ the QR is selected.
+        let items = vec![
+            (90_000.0, 889.0, 191.0), // bottom burn — centroid below mid-height ⇒ excluded
+            (490_000.0, 374.0, 480.0), // the one decodable dual-QR half
+            (400.0, 100.0, 910.0),    // top-half noise — smaller than the QR ⇒ not picked
+        ];
+        assert_eq!(select_single_dual_qr(&items, 1080.0), Some(1));
+        // No top-half candidate at all ⇒ None (the fail-closed skip is unchanged).
+        assert!(select_single_dual_qr(&[(9e4, 889.0, 191.0)], 1080.0).is_none());
+        assert!(select_single_dual_qr(&[], 1080.0).is_none());
+    }
+
+    // Linux-gated ONLY because `painter` is (#193 hardware glue); the parity rule itself is
+    // target-independent and the gate's inline `frame_id % 2` copy is cross-platform.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vernier_parity_identifies_the_half_400() {
+        // The single-half localization keys on the Vernier parity rule: LEFT carries the latest
+        // EVEN tick, RIGHT the latest ODD (`painter::vernier_ids`). Lock the coupling HERE so a
+        // painter-side change to the id scheme breaks this test loudly instead of silently
+        // mis-localizing the colour gate. Tick 0 is the documented startup exception (both halves
+        // carry 0 for one refresh).
+        use crate::probe::painter::vernier_ids;
+        for t in 0..1000u64 {
+            let (l, r) = vernier_ids(t);
+            assert_eq!(l % 2, 0, "left half id is EVEN (tick {t}, left {l})");
+            assert!(
+                r % 2 == 1 || (t == 0 && r == 0),
+                "right half id is ODD (tick-0 startup aside): tick {t}, right {r}"
+            );
+        }
+    }
+
+    #[test]
     fn localized_gate_passes_a_warped_correct_frame_and_fails_grayscale() {
         // Render the real monitor canvas, then WARP it (shift + scale + slight shear) as a camera
         // filming the monitor would. rqrr must find the two real dual-QRs, the affine must localize
@@ -783,6 +880,85 @@ mod tests {
         assert!(
             !vg.is_pass(),
             "a grayscale camera FAILS even when correctly localized"
+        );
+    }
+
+    /// Fill one dual-QR half's canvas rect with featureless mid-gray — no finder pattern
+    /// survives, so that half cannot decode (the mid-transition/blurred half the Vernier
+    /// produces on every real captured frame, #400).
+    fn destroy_half(img: &mut RgbImage, half: usize) {
+        let rects = crate::colour_scale::dual_qr_rects(W, H, QR, TM).expect("default layout");
+        let r = rects[half];
+        for y in r.y..r.y + r.h {
+            for x in r.x..r.x + r.w {
+                img.put_pixel(x, y, image::Rgb([128, 128, 128]));
+            }
+        }
+    }
+
+    #[test]
+    fn localized_gate_works_from_a_single_decoded_half_400() {
+        // #400: the Vernier paints ONE half per 60 Hz refresh (`painter::vernier_ids`), so a real
+        // captured frame has ≥1 SHARP half and usually one mid-transition (undecodable) half —
+        // frames where BOTH halves decode are rare-to-nonexistent through the optical hop (12/12
+        // sampled frames unlocalizable on both real run-7020001 recordings). The gate must
+        // localize from ONE decoded half: its tick parity says WHICH half it is (left = even,
+        // right = odd — `vernier_ids`), so its true canvas rect is known and a 4-corner fit
+        // (8 equations, 6 dof) localizes the column. Requiring the PAIR is the #400 bug.
+        let canvas = render_canvas_rgb(); // left frame_id 100 (even), right 101 (odd)
+        let ex = node_burn_exclusions(W, H);
+        // The same clean integer translation as the pair test (keeps QR modules pixel-aligned so
+        // rqrr detects reliably; the full scale/shear 4-corner fit is proven Tier-0 in
+        // colour_verify's `single_half_four_corner_fit_localizes_the_column_400`).
+        let a = Affine {
+            a: 1.0,
+            b: 0.0,
+            tx: 40.0,
+            c: 0.0,
+            d: 1.0,
+            ty: 30.0,
+        };
+
+        // Destroy the RIGHT half ⇒ only the LEFT (even 100) decodes; then the LEFT ⇒ only the
+        // RIGHT (odd 101) — BOTH parities must localize to their true half.
+        for destroyed in [1usize, 0usize] {
+            let mut img = canvas.clone();
+            destroy_half(&mut img, destroyed);
+            let warped = warp_rgb(&img, a);
+            let v = colour_verdict_from_rgb_image_localized(&warped, W, H, QR, TM, &ex)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ONE decoded half must still localize (destroyed half {destroyed}) — \
+                         requiring the dual-QR PAIR is the #400 real-rig failure"
+                    )
+                });
+            assert!(
+                v.is_pass(),
+                "a correct frame localized from one half PASSES (destroyed {destroyed}): {:?}",
+                v.failures().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                v.checked_count(),
+                PATCH_COLOURS.len(),
+                "every patch sampled after single-half localization (destroyed {destroyed})"
+            );
+        }
+
+        // Single-half localization must not weaken the verdict: grayscale the one-half frame
+        // (the QR stays black/white so it still decodes; the column collapses) — still FAILS.
+        let mut img = canvas.clone();
+        destroy_half(&mut img, 1);
+        let mut gray = warp_rgb(&img, a);
+        for px in gray.pixels_mut() {
+            let y =
+                (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32).round() as u8;
+            *px = image::Rgb([y, y, y]);
+        }
+        let vg = colour_verdict_from_rgb_image_localized(&gray, W, H, QR, TM, &ex)
+            .expect("grayscale one-half frame still localizes");
+        assert!(
+            !vg.is_pass(),
+            "a grayscale camera FAILS even when localized from a single half"
         );
     }
 }

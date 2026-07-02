@@ -330,6 +330,30 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # camera-box #404/#406: the compile-check above already LINKS a real distroav.dll against the
+      # genlock-patched OBS SDK (same as the full windows-genlock.yml — ENABLE_BROWSER=OFF only
+      # affects OBS core, not the plugin), so STAGE + UPLOAD it. This gives a minutes-fast
+      # deployable distroav.dll for a hot-swap — no 1-2.5h full build — mirroring the obs.dll fast
+      # path above, so a DistroAV change (e.g. the #404 burn overlay) can be verified on the rig
+      # quickly instead of blocking on the full bundle.
+      - name: Stage the compiled distroav.dll (#404)
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse vendor/distroav/build_x64 -Filter distroav.dll |
+                 Where-Object { $_.FullName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (!$dll) { Write-Error "distroav.dll not found after the plugin build (#404)"; exit 1 }
+          New-Item -ItemType Directory -Force -Path distroav-stage | Out-Null
+          Copy-Item $dll.FullName distroav-stage/
+          git rev-parse HEAD | Out-File distroav-stage/DISTROAV_BUILD_SHA.txt -Encoding ascii
+          Write-Output "staged distroav.dll from: $($dll.FullName)  size=$($dll.Length)"
+
+      - name: Upload distroav.dll (fast hot-swap, #404)
+        uses: actions/upload-artifact@v4
+        with:
+          name: distroav-fast-dll
+          path: distroav-stage/
+          if-no-files-found: error
+
       # #188: compile-check the A/V sync dock against the SAME installed OBS SDK (reuses the
       # OBS build above — no second full OBS build). Catches a dock C++/Qt/CMake error at the
       # pre-merge gate instead of after the 150-min full windows-genlock build.
