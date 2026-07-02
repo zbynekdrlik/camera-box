@@ -638,6 +638,16 @@ fi
 if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   GATE=0  # this mode owns the exit code (the normal [8/8] GATE assignment is skipped)
   AV_RESTART_RECORD_SECS="${AV_RESTART_RECORD_SECS:-150}"
+  # Validate the one env var used in bash arithmetic ($((AV_RESTART_RECORD_SECS + 30)))
+  # so a non-integer override fails with a CLEAR diagnostic instead of an opaque
+  # `set -euo pipefail` arithmetic error mid-ssh-command (a plausible operator typo,
+  # e.g. "150.0" or "2m", mirroring other duration-style env vars in this tooling).
+  case "$AV_RESTART_RECORD_SECS" in
+    '' | *[!0-9]*)
+      echo "ERROR: #137 AV_RESTART_RECORD_SECS='$AV_RESTART_RECORD_SECS' must be a positive integer (seconds)." >&2
+      exit 2
+      ;;
+  esac
   AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
   AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-180}"
   AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
@@ -683,7 +693,12 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
     python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
     sleep "$AV_RESTART_RECORD_SECS"
     local stream_host_path
-    stream_host_path=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) || true
+    # Log a WARNING with context on a non-zero StopRecord (mirrors the [7/8] pattern) —
+    # never swallow it silently: an empty stream_host_path then flows into the emitted
+    # decode plan, and a bare `|| true` would leave no trace to debug from (comprehensive-
+    # logging.md / script-failure-policy.md).
+    stream_host_path=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) \
+      || { echo "WARNING: [av-restart-sync/$label] stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2; stream_host_path=""; }
     sleep 10  # let frame-probe self-exit + flush its marker CSV
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
       "pkill -x frame-probe 2>/dev/null; true"
@@ -739,12 +754,25 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   echo "    run the strict gate (single source of truth: camera_box::av_restart_sync::classify):"
   printf '      %q %q %q %s\n' "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS"
   if [ -f "$BEFORE_JSON" ] && [ -f "$AFTER_JSON" ]; then
-    if ! "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS"; then
-      echo "ERROR: #137 A/V-sync drifted beyond tolerance across the OBS restart — lipsync broken." >&2
-      GATE=1
-    else
-      echo "    [av-restart-sync-gate] PASS — A/V offset held across the OBS restart within ${AV_RESTART_TOLERANCE_MS}ms"
-    fi
+    # The gate binary PRINTS its own accurate verdict (PASS / FAIL / UNKNOWN + reasons) to
+    # stdout; capture its exit code and surface an HONEST wrapper line per code. Do NOT
+    # overstate an UNKNOWN (an untrustworthy measurement — not proof of drift) or a
+    # bad/missing-JSON error (exit 2) as a confirmed A/V drift (no-overstatement).
+    av_rc=0
+    "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS" || av_rc=$?
+    case "$av_rc" in
+      0)
+        echo "    [av-restart-sync-gate] PASS — A/V offset held across the OBS restart within ${AV_RESTART_TOLERANCE_MS}ms"
+        ;;
+      2)
+        echo "ERROR: #137 av-restart-sync-gate could NOT evaluate (bad/missing measurement JSON — see its error above); NOT a PASS." >&2
+        GATE=1
+        ;;
+      *)
+        echo "ERROR: #137 av-restart-sync-gate did NOT pass — see its verdict above (FAIL = A/V offset drifted beyond ${AV_RESTART_TOLERANCE_MS}ms and lipsync would break; UNKNOWN = a measurement was untrustworthy, never a confirmed pass)." >&2
+        GATE=1
+        ;;
+    esac
   else
     echo "    [av-restart-sync-gate] both partial JSONs not yet on dev1 — the win-stream-snv holder"
     echo "    must run the two decode plans above, then run the gate command printed above by hand."

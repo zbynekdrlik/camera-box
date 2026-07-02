@@ -178,6 +178,31 @@ fn gate_binary_too_few_args_fails_closed() {
     );
 }
 
+/// A float-encoded non-negative integer `matched` (e.g. `32.0`) is accepted, not rejected
+/// as a "missing field" — a hand-edited / alternately-serialized partial JSON with an
+/// unambiguous value must still gate (robustness, not a spurious exit-2).
+#[test]
+fn gate_binary_accepts_float_encoded_matched() {
+    let bin = env!("CARGO_BIN_EXE_av-restart-sync-gate");
+    let before = write_json(
+        "before-floatmatched",
+        r#"{"av_offset_ms": -70.0, "matched": 32.0, "mad_ms": 8.0}"#,
+    );
+    let after = write_json(
+        "after-floatmatched",
+        r#"{"av_offset_ms": -66.0, "matched": 30.0, "mad_ms": 9.0}"#,
+    );
+    let (code, out) = run(bin, &[&before, &after]);
+    assert_eq!(
+        code, 0,
+        "float-encoded matched (32.0/30.0) must be accepted and PASS, got {code} ({out})"
+    );
+    assert!(
+        out.starts_with("PASS"),
+        "stdout should start with PASS, got {out:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // scripts/recording-e2e.sh wiring guards
 // ---------------------------------------------------------------------------------------
@@ -274,5 +299,36 @@ fn av_restart_confirmation_fails_loud_when_not_confirmable() {
         block.contains("not a TTY") && block.contains("exit 1"),
         "#137 confirmation must ABORT (exit 1) when stdin is not a TTY and the restart is \
          unconfirmed — never silently take a spurious 'after' measurement."
+    );
+}
+
+/// HONEST messaging (no-overstatement): the wrapper MUST distinguish the gate binary's
+/// exit codes and NOT report a bad-JSON error (exit 2) or an UNKNOWN verdict as a
+/// confirmed A/V drift. Locks the exit-code-distinguished branch so a future edit can't
+/// regress to the single "drifted ... lipsync broken" claim for every failure.
+#[test]
+fn av_restart_gate_wrapper_reports_verdict_honestly_per_exit_code() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate_pos = s
+        .find("AV_RESTART_GATE:-0")
+        .expect("#137 AV_RESTART_GATE block must exist");
+    let start_record_pos = s.find("[5/8] StartRecord").expect("[5/8] step must exist");
+    let block = &s[gate_pos..start_record_pos];
+    // Captures the gate's own exit code (not a single unconditional if!-branch)...
+    assert!(
+        block.contains("av_rc"),
+        "#137 wrapper must capture the gate binary's exit code to report per-code."
+    );
+    // ...distinguishes the bad/missing-JSON error (exit 2) from a real drift...
+    assert!(
+        block.contains("could NOT evaluate"),
+        "#137 wrapper must surface a bad/missing-JSON gate error (exit 2) as 'could NOT \
+         evaluate', never as a confirmed A/V drift (no-overstatement)."
+    );
+    // ...and acknowledges UNKNOWN is not a confirmed pass (never a silent PASS).
+    assert!(
+        block.contains("UNKNOWN"),
+        "#137 wrapper must acknowledge an UNKNOWN verdict (untrustworthy measurement) is \
+         never a confirmed pass."
     );
 }

@@ -32,9 +32,18 @@ fn load_measurement(path: &str) -> Result<AvSyncMeasurement, String> {
         .get("av_offset_ms")
         .and_then(|x| x.as_f64())
         .ok_or_else(|| format!("{path}: missing numeric field 'av_offset_ms'"))?;
+    // Accept a JSON integer OR a float-encoded non-negative integer (e.g. `"matched": 32.0`)
+    // so a hand-edited / alternately-serialized partial JSON is not spuriously rejected as a
+    // "missing field" when the value is unambiguous. A negative float still fails (invalid).
     let matched =
         v.get("matched")
-            .and_then(|x| x.as_u64())
+            .and_then(|x| {
+                x.as_u64().or_else(|| {
+                    x.as_f64()
+                        .filter(|f| f.is_finite() && *f >= 0.0)
+                        .map(|f| f as u64)
+                })
+            })
             .ok_or_else(|| format!("{path}: missing numeric field 'matched'"))? as usize;
     let mad_ms = v
         .get("mad_ms")
