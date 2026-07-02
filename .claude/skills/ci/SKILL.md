@@ -17,7 +17,9 @@ gh run download --repo zbynekdrlik/camera-box -n camera-box-linux-amd64 --dir ./
 # Probe tools — Linux (recording-verdict, frame-probe, camera-box-probe)
 gh run download --repo zbynekdrlik/camera-box -n probe-tools-linux-amd64 --dir ./probe-bins
 
-# Probe tools — Windows (recording-verdict.exe)
+# Probe tools — Windows (recording-verdict.exe, obs-watchdog-gate.exe, obs-self-heal-gate.exe —
+# the latter two are the #391/#411 OBS liveness-watchdog + self-heal gate binaries, needed on-box
+# by scripts/obs-self-heal-install.sh's Task Scheduler recovery script)
 gh run download --repo zbynekdrlik/camera-box -n probe-tools-windows-amd64 --dir ./probe-win
 ```
 

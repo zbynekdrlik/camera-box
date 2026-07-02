@@ -5,15 +5,23 @@
 //! `tests/launch_obs_genlock.rs`'s shape exactly. They source the script (never execute the real
 //! flow), call its pure `build_recovery_script` / `build_task_xml` builders, and assert:
 //!
-//! - the wedge verdict is REUSED via `obs-watchdog-gate.exe` (never a re-derived threshold — the
-//!   emitted PowerShell must NOT contain the magic numbers `obs_watchdog::classify` uses),
+//! - NEITHER decision the recovery script needs is reimplemented in PowerShell: the wedge
+//!   VERDICT is reused via `obs-watchdog-gate.exe` (never a re-derived threshold — the emitted
+//!   PowerShell must NOT contain the magic numbers `obs_watchdog::classify` uses), and the
+//!   RECOVERY decision (confirm/throttle/lock) is reused via `obs-self-heal-gate.exe`, which this
+//!   test suite ALSO invokes directly (via `CARGO_BIN_EXE_obs-self-heal-gate`) to prove the real
+//!   compiled binary's behavior — not just that the PowerShell text mentions it.
 //! - the AHK-race-safe step order is preserved verbatim in the generated PowerShell (StopAhk
 //!   before the obs64 kill, RestartAhk after the post-recovery verify),
 //! - the kill+relaunch step REUSES `launch-obs-genlock.sh`'s `build_launch_program` byte-for-byte
 //!   (never a second hand-rolled launch path),
-//! - the confirm/throttle/stale-lock numbers passed through match
-//!   `camera_box::obs_self_heal`'s own `DEFAULT_*` constants (true cross-language lock-step, since
-//!   this test file imports those constants directly rather than hardcoding a copy),
+//! - an OMITTED threshold/interval/stale-lock override becomes a JSON `null` in the generated
+//!   script, so `obs-self-heal-gate.exe`'s own `camera_box::obs_self_heal::DEFAULT_*` Rust
+//!   constants are the single actual source of default truth — verified both at the
+//!   `build_recovery_script` level AND through `main()`'s real `--box strih` CLI invocation (the
+//!   path an operator actually runs), closing the "bash default silently drifts from the Rust
+//!   kernel" gap a prior review found.
+//! - unexpected exit codes from EITHER gate binary fail loud (never silently read as healthy),
 //! - the Task Scheduler XML ships `Enabled=false`, uses `InteractiveToken` logon (obs64 is a GUI
 //!   app — a SYSTEM/Session-0 task could not launch it into the visible desktop) and
 //!   `IgnoreNew` multiple-instances policy (defense in depth alongside the script's own lock).
@@ -72,16 +80,14 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
 
 const OBS_DIR: &str = "C:\\Program Files\\obs-studio";
 
+/// `build_recovery_script` with NO threshold/interval/stale-lock override args — the default,
+/// mirroring what `main()`'s own (unset-by-default) CLI flags now produce.
 fn recovery_script_strih() -> String {
-    run_sourced(&format!(
-        "build_recovery_script strih '{OBS_DIR}' 60 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
-    ))
+    run_sourced(&format!("build_recovery_script strih '{OBS_DIR}' 60"))
 }
 
 fn recovery_script_stream() -> String {
-    run_sourced(&format!(
-        "build_recovery_script stream '{OBS_DIR}' 30 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
-    ))
+    run_sourced(&format!("build_recovery_script stream '{OBS_DIR}' 30"))
 }
 
 /// The launch-obs-genlock.sh planner's OWN force=1 program (the ground truth this module must
@@ -138,6 +144,38 @@ fn recovery_script_reuses_classify_via_gate_binary_never_reinvents_thresholds() 
         "#411: the LOCAL self-heal sample must come from process signals only (Get-Process), \
          never an OBS WebSocket GetStats round-trip (that's the #391 remote watchdog's job). \
          Program:\n{p}"
+    );
+}
+
+/// #411 (architectural fix): the RECOVERY decision (confirm/throttle/lock) must ALSO be reused
+/// via a gate binary — `obs-self-heal-gate.exe`, calling `camera_box::obs_self_heal::decide`
+/// directly — never a hand-rolled PowerShell re-derivation of that state machine. This is the
+/// same "reuse, don't reinvent" discipline the wedge verdict already had; a prior review found
+/// the confirm/throttle/lock policy was the ONE piece still being re-implemented inline.
+#[test]
+fn recovery_decision_reuses_self_heal_gate_binary_never_reimplements_state_machine() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("obs-self-heal-gate.exe"),
+        "#411: the recovery decision MUST pipe through obs-self-heal-gate.exe. Program:\n{p}"
+    );
+    assert!(
+        p.contains("& $SelfHealGateBin"),
+        "#411: the decision JSON must actually be piped INTO the self-heal gate binary. \
+         Program:\n{p}"
+    );
+    // The OLD hand-rolled confirm/throttle logic must be GONE — no manual increment/threshold
+    // comparison left duplicating decide()'s own branching.
+    assert!(
+        !p.contains("$state.confirm_count = $state.confirm_count + 1"),
+        "#411: the confirm-counter increment must live ONLY in camera_box::obs_self_heal::decide \
+         (via the gate binary) — a hand-rolled increment here would be exactly the duplicated \
+         state machine the reuse fix removes. Program:\n{p}"
+    );
+    assert!(
+        !p.contains("-lt $ConfirmThreshold") && !p.contains("-lt $MinIntervalS"),
+        "#411: no hand-rolled threshold/throttle COMPARISON may remain in PowerShell — that \
+         branching belongs ONLY to decide(). Program:\n{p}"
     );
 }
 
@@ -255,67 +293,134 @@ fn restart_ahk_runs_regardless_of_verify_outcome() {
     );
 }
 
-/// The confirm/throttle/stale-lock numbers must be threaded through into the generated script
-/// literally (true cross-language lock-step: this test imports the Rust DEFAULT_* constants).
+/// #411 (closes a prior review gap): an OMITTED override becomes a literal PowerShell `$null`,
+/// which `obs-self-heal-gate.exe` then defaults to its OWN `camera_box::obs_self_heal::
+/// DEFAULT_*` Rust constant — never a second hardcoded bash/PowerShell literal that could drift.
 #[test]
-fn confirm_throttle_stale_lock_constants_match_the_rust_kernel() {
+fn omitted_overrides_become_powershell_null_so_the_rust_kernel_defaults_apply() {
     let p = recovery_script_strih();
     assert!(
-        p.contains(&format!("$ConfirmThreshold = {DEFAULT_CONFIRM_THRESHOLD}")),
-        "#411: ConfirmThreshold must match camera_box::obs_self_heal::DEFAULT_CONFIRM_THRESHOLD \
-         ({DEFAULT_CONFIRM_THRESHOLD}). Program:\n{p}"
+        p.contains("$ConfirmThresholdOverride = $null"),
+        "#411: an omitted --confirm-threshold must emit $null (not a hardcoded number), so \
+         obs-self-heal-gate.exe applies DEFAULT_CONFIRM_THRESHOLD itself. Program:\n{p}"
     );
     assert!(
-        p.contains(&format!(
-            "$MinIntervalS     = {DEFAULT_MIN_RECOVERY_INTERVAL_S}"
-        )),
-        "#411: MinIntervalS must match camera_box::obs_self_heal::DEFAULT_MIN_RECOVERY_INTERVAL_S \
-         ({DEFAULT_MIN_RECOVERY_INTERVAL_S}). Program:\n{p}"
+        p.contains("$MinIntervalSOverride     = $null"),
+        "#411: an omitted --min-interval-s must emit $null. Program:\n{p}"
     );
     assert!(
-        p.contains(&format!("$StaleLockS       = {DEFAULT_STALE_LOCK_S}")),
-        "#411: StaleLockS must match camera_box::obs_self_heal::DEFAULT_STALE_LOCK_S \
-         ({DEFAULT_STALE_LOCK_S}). Program:\n{p}"
+        p.contains("$StaleLockSOverride       = $null"),
+        "#411: an omitted --stale-lock-s must emit $null. Program:\n{p}"
+    );
+    // And those override variables must actually be threaded into the JSON sent to the gate.
+    assert!(
+        p.contains("threshold            = $ConfirmThresholdOverride")
+            && p.contains("min_interval_s       = $MinIntervalSOverride")
+            && p.contains("stale_lock_s         = $StaleLockSOverride"),
+        "#411: the override variables must flow into the decision JSON payload. Program:\n{p}"
     );
 }
 
-/// The lock is set BEFORE obs64 is ever touched (fail-safe: a crash mid-recovery must leave the
-/// lock held, never silently cleared) and only cleared AFTER the full plan completes.
+/// An EXPLICIT override (e.g. a supervisor tuning the cadence at generation time) must flow
+/// through as a real number, not be silently dropped to null.
 #[test]
-fn recovery_lock_is_set_before_acting_and_cleared_after_plan_completes() {
+fn explicit_overrides_flow_through_as_numbers() {
+    let p = run_sourced(&format!(
+        "build_recovery_script strih '{OBS_DIR}' 60 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
+    ));
+    assert!(
+        p.contains(&format!(
+            "$ConfirmThresholdOverride = {DEFAULT_CONFIRM_THRESHOLD}"
+        )),
+        "an explicit confirm-threshold override must flow through as a literal number. \
+         Program:\n{p}"
+    );
+    assert!(
+        p.contains(&format!(
+            "$MinIntervalSOverride     = {DEFAULT_MIN_RECOVERY_INTERVAL_S}"
+        )),
+        "an explicit min-interval override must flow through as a literal number. Program:\n{p}"
+    );
+    assert!(
+        p.contains(&format!(
+            "$StaleLockSOverride       = {DEFAULT_STALE_LOCK_S}"
+        )),
+        "an explicit stale-lock override must flow through as a literal number. Program:\n{p}"
+    );
+}
+
+/// The lock-state MERGE (from the gate binary's `next_state`) happens BEFORE the recovery steps
+/// run (fail-safe: a crash mid-recovery must leave the lock HELD, never silently cleared), and
+/// the EXPLICIT clear only happens AFTER the full plan completes.
+#[test]
+fn recovery_lock_merge_precedes_steps_and_explicit_clear_follows_them() {
     let p = recovery_script_strih();
-    let lock_set_pos = p
-        .find("$state.recovery_in_progress = $true")
-        .expect("lock-set line must exist");
+    let merge_pos = p
+        .find("$state.recovery_in_progress = $decision.next_state.recovery_in_progress")
+        .expect("the next_state merge must exist");
     let stop_ahk_pos = p
         .find("Stop-Process -Name AutoHotkey64")
         .expect("StopAhk step must exist");
-    // NB: `$state.recovery_in_progress = $false` also appears earlier for the STALE-LOCK clear
-    // (a different code path) — rfind the LAST occurrence, which is the real post-recovery clear.
     let lock_clear_pos = p
-        .rfind("$state.recovery_in_progress = $false")
-        .expect("lock-clear line must exist");
+        .find("$state.recovery_in_progress = $false")
+        .expect("explicit lock-clear line must exist");
     let restart_ahk_pos = p
         .find("Start-Process -FilePath 'AutoHotkey64.exe'")
         .expect("RestartAhk step must exist");
     assert!(
-        lock_set_pos < stop_ahk_pos,
-        "the lock must be set BEFORE the recovery plan's first step (StopAhk)"
+        merge_pos < stop_ahk_pos,
+        "the next_state merge (which sets the lock when decide() returns Recover) must happen \
+         BEFORE the recovery plan's first step (StopAhk)"
     );
     assert!(
         restart_ahk_pos < lock_clear_pos,
-        "the lock must be cleared only AFTER the recovery plan's last step (RestartAhk)"
+        "the explicit lock-clear must happen only AFTER the recovery plan's last step \
+         (RestartAhk)"
     );
 }
 
-/// Fail-loud when the gate binary is missing — never silently guess a healthy/wedged verdict.
+/// Fail-loud when the wedge-verdict gate binary is missing — never silently guess a
+/// healthy/wedged verdict, and PERSIST state before exiting (a prior review found the exit-5
+/// path skipped saving, which could strand an in-memory stale-lock clear unpersisted).
 #[test]
-fn missing_gate_binary_fails_loud_never_guesses() {
+fn missing_gate_binary_fails_loud_and_saves_state_first() {
     let p = recovery_script_strih();
+    let missing_check_pos = p
+        .find("if (-not (Test-Path $GateBin))")
+        .expect("missing-binary check must exist");
+    let exit5_pos = p[missing_check_pos..]
+        .find("exit 5")
+        .map(|off| off + missing_check_pos)
+        .expect("must exit 5 on a missing gate binary");
+    let save_pos = p[missing_check_pos..exit5_pos]
+        .find("Save-SelfHealState")
+        .map(|off| off + missing_check_pos);
     assert!(
-        p.contains("if (-not (Test-Path $GateBin))") && p.contains("exit 5"),
-        "#411: a missing obs-watchdog-gate.exe must fail loud (non-zero exit), never silently \
-         assume a healthy or wedged verdict. Program:\n{p}"
+        save_pos.is_some() && save_pos.unwrap() < exit5_pos,
+        "#411: a missing obs-watchdog-gate.exe must Save-SelfHealState BEFORE exiting 5, never \
+         skip persisting whatever state was already computed this pass. Program:\n{p}"
+    );
+}
+
+/// Fail-loud when the RECOVERY-decision gate binary is missing — same discipline as the wedge
+/// gate: never guess, always persist state first.
+#[test]
+fn missing_self_heal_gate_binary_fails_loud_and_saves_state_first() {
+    let p = recovery_script_strih();
+    let missing_check_pos = p
+        .find("if (-not (Test-Path $SelfHealGateBin))")
+        .expect("missing self-heal-gate-binary check must exist");
+    let exit9_pos = p[missing_check_pos..]
+        .find("exit 9")
+        .map(|off| off + missing_check_pos)
+        .expect("must exit 9 on a missing self-heal gate binary");
+    let save_pos = p[missing_check_pos..exit9_pos]
+        .find("Save-SelfHealState")
+        .map(|off| off + missing_check_pos);
+    assert!(
+        save_pos.is_some() && save_pos.unwrap() < exit9_pos,
+        "#411: a missing obs-self-heal-gate.exe must Save-SelfHealState BEFORE exiting 9. \
+         Program:\n{p}"
     );
 }
 
@@ -335,6 +440,32 @@ fn gate_exit_two_is_a_tooling_error_never_treated_as_wedged() {
         p.contains("if ($gateExit -eq 2)") && p.contains("exit 6"),
         "#411: gate exit 2 must be handled as a distinct FATAL tooling-error path (skip the pass, \
          never act), not fall through into the wedge decision. Program:\n{p}"
+    );
+}
+
+/// #411 (fixes a review finding): an UNEXPECTED exit code from `obs-watchdog-gate.exe` (a
+/// crash/panic — e.g. 101 — is neither 0, 1, nor 2) must NEVER silently fall through to
+/// `$wedged = $false` (which would stop detecting a real wedge). It must fail loud instead.
+#[test]
+fn unexpected_watchdog_gate_exit_code_fails_loud_never_reads_as_healthy() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("if ($gateExit -ne 0 -and $gateExit -ne 1)") && p.contains("exit 8"),
+        "#411: an obs-watchdog-gate.exe exit code outside {{0,1,2}} (e.g. a panic) must be \
+         handled as a distinct FATAL path — never silently coerced to healthy via \
+         '$wedged = ($gateExit -eq 1)' evaluating false. Program:\n{p}"
+    );
+}
+
+/// Same discipline for the recovery-decision gate binary: an unexpected exit code must fail
+/// loud, never be silently treated as "no action needed".
+#[test]
+fn unexpected_self_heal_gate_exit_code_fails_loud() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("if ($decisionExit -ne 0 -and $decisionExit -ne 1)") && p.contains("exit 10"),
+        "#411: an obs-self-heal-gate.exe exit code outside {{0,1}} must fail loud, never be \
+         silently parsed as a decision. Program:\n{p}"
     );
 }
 
@@ -433,7 +564,7 @@ fn cli_box_selects_correct_mcp_and_target_fps() {
     assert_eq!(code, 0, "--box strih must print the plan (exit 0)");
     assert!(out.contains("win-strih") && out.contains("10.77.9.202"));
     assert!(
-        out.contains("$TargetFps        = 60"),
+        out.contains("$TargetFps       = 60"),
         "strih targets 60fps (final mixed 60+30 topology). out=\n{out}"
     );
     assert!(
@@ -445,8 +576,52 @@ fn cli_box_selects_correct_mcp_and_target_fps() {
     assert_eq!(code, 0, "--box stream must print the plan (exit 0)");
     assert!(out.contains("win-stream-snv") && out.contains("10.77.9.204"));
     assert!(
-        out.contains("$TargetFps        = 30"),
+        out.contains("$TargetFps       = 30"),
         "stream targets 30fps (final mixed 60+30 topology). out=\n{out}"
+    );
+}
+
+/// #411 (closes the top review finding, verified via the REAL `main()` invocation path — not
+/// just `build_recovery_script` called directly): with NO override flags, the plan an operator
+/// actually runs (`--box strih`, no `--confirm-threshold`/etc) must install `$null` overrides —
+/// i.e. obs-self-heal-gate.exe's own DEFAULT_* Rust constants apply, never a stale bash literal.
+#[test]
+fn main_cli_default_omits_overrides_so_rust_kernel_defaults_apply() {
+    let (code, out, _err) = run_script(&["--box", "strih"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("$ConfirmThresholdOverride = $null")
+            && out.contains("$MinIntervalSOverride     = $null")
+            && out.contains("$StaleLockSOverride       = $null"),
+        "#411: `scripts/obs-self-heal-install.sh --box strih` with NO override flags — the exact \
+         command the install plan tells the supervisor to run — must emit $null overrides so the \
+         Rust kernel's DEFAULT_* constants are authoritative. A stale hardcoded bash literal here \
+         would silently diverge from src/obs_self_heal.rs if the Rust consts are ever retuned. \
+         out=\n{out}"
+    );
+}
+
+/// An explicit `--confirm-threshold` (etc) flag on the REAL CLI invocation must flow through as
+/// a concrete override, not be silently dropped.
+#[test]
+fn main_cli_explicit_override_flows_through_the_real_invocation() {
+    let (code, out, _err) = run_script(&[
+        "--box",
+        "strih",
+        "--confirm-threshold",
+        "5",
+        "--min-interval-s",
+        "120",
+        "--stale-lock-s",
+        "600",
+    ]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("$ConfirmThresholdOverride = 5")
+            && out.contains("$MinIntervalSOverride     = 120")
+            && out.contains("$StaleLockSOverride       = 600"),
+        "#411: explicit override flags on the real CLI invocation must flow through as literal \
+         numbers, not silently drop back to $null. out=\n{out}"
     );
 }
 
@@ -479,5 +654,88 @@ fn plan_documents_mandatory_live_verify_before_enable() {
     assert!(
         out.contains("schtasks /Change") && out.contains("/ENABLE"),
         "enabling must be an explicit LAST step, never automatic. out=\n{out}"
+    );
+}
+
+/// STEP 0 of the install plan must mention deploying BOTH gate binaries — a supervisor following
+/// only the old wording would deploy obs-watchdog-gate.exe and miss obs-self-heal-gate.exe,
+/// leaving the recovery decision unable to run (fail-loud exit 9, per the missing-binary test).
+#[test]
+fn plan_step_zero_mentions_both_gate_binaries() {
+    let (_, out, _) = run_script(&["--box", "strih"]);
+    assert!(
+        out.contains("obs-watchdog-gate.exe") && out.contains("obs-self-heal-gate.exe"),
+        "STEP 0 must instruct the supervisor to deploy BOTH gate binaries. out=\n{out}"
+    );
+}
+
+// ─── behavioral cross-check: the REAL compiled obs-self-heal-gate binary ───────────────────────
+//
+// The tests above only prove the PowerShell TEXT calls obs-self-heal-gate.exe correctly. These
+// tests invoke the ACTUAL compiled binary (built as a normal cargo test dependency via
+// CARGO_BIN_EXE_*) with the exact JSON shape the PowerShell sends, proving the real end-to-end
+// contract works — not just that the two sides' textual claims agree.
+
+fn self_heal_gate_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_obs-self-heal-gate"))
+}
+
+fn run_self_heal_gate(json: &str) -> (i32, String) {
+    use std::io::Write;
+    let mut child = Command::new(self_heal_gate_bin())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn obs-self-heal-gate");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("failed to wait");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// The EXACT JSON shape `build_recovery_script`'s PowerShell sends (field names/order don't
+/// matter for JSON, but every field it emits must be accepted) — a healthy pass.
+#[test]
+fn real_binary_accepts_the_exact_powershell_payload_shape_healthy() {
+    let json = r#"{"confirm_count":0,"last_attempt_epoch_s":null,"recovery_in_progress":false,
+        "wedged":false,"now_epoch_s":1700000000,"threshold":null,"min_interval_s":null,
+        "stale_lock_s":null}"#;
+    let (code, out) = run_self_heal_gate(json);
+    assert_eq!(
+        code, 0,
+        "healthy pass must exit 0 to skip the recovery steps. out={out}"
+    );
+    assert!(out.contains("\"decision\":\"Healthy\""));
+    assert!(
+        out.contains("\"next_state\""),
+        "next_state must always be present so PowerShell can persist it. out={out}"
+    );
+}
+
+/// The EXACT JSON shape for a confirmed wedge — exit 1 tells PowerShell to actually run the
+/// switch's 'Recover' arm, and the returned `steps` array matches `recovery_plan()`'s order.
+#[test]
+fn real_binary_confirmed_wedge_returns_recover_with_the_ahk_safe_step_order() {
+    let json = r#"{"confirm_count":1,"last_attempt_epoch_s":null,"recovery_in_progress":false,
+        "wedged":true,"now_epoch_s":1700000000,"threshold":null,"min_interval_s":null,
+        "stale_lock_s":null}"#;
+    let (code, out) = run_self_heal_gate(json);
+    assert_eq!(
+        code, 1,
+        "a confirmed wedge must exit 1 so PowerShell's switch runs 'Recover'. out={out}"
+    );
+    assert!(out.contains("\"decision\":\"Recover\""));
+    assert!(
+        out.contains(r#""steps":["StopAhk","KillAndRelaunchObs","VerifyRecovered","RestartAhk"]"#),
+        "the returned step order must be the AHK-race-safe order PowerShell's switch depends on \
+         (StopAhk first, RestartAhk last). out={out}"
     );
 }

@@ -12,15 +12,22 @@
 # on the box itself — no ssh (denied), no MCP (agent-only), no agent session required.
 #
 # HOW THE PIECES FIT (mirrors scripts/launch-obs-genlock.sh's own model exactly):
-#   - `camera_box::obs_self_heal` (src/obs_self_heal.rs) is the canonical, Tier-0 unit-tested
-#     RECOVERY-decision policy (confirm-threshold / throttle / lock / AHK-race-safe step order /
-#     post-recovery verify rule). This script's `build_recovery_script` is a PowerShell
-#     re-expression of that SAME policy (PowerShell cannot call Rust directly), kept in lock-step
-#     by `tests/obs_self_heal_install.rs` asserting the constants + step order match.
-#   - The WEDGE VERDICT itself is NEVER reimplemented: the emitted recovery script pipes a LOCAL
-#     sample (Get-Process obs64: count / Responding / CPU%, no OBS WebSocket round-trip needed) to
-#     the EXISTING `obs-watchdog-gate.exe` binary, which runs the EXACT SAME
-#     `camera_box::obs_watchdog::classify` the #391 dev1 alert watchdog uses remotely.
+#   - NEITHER decision this script needs is reimplemented in PowerShell:
+#     - The WEDGE VERDICT: the emitted recovery script pipes a LOCAL sample (Get-Process obs64:
+#       count / Responding / CPU%, no OBS WebSocket round-trip needed) to the EXISTING
+#       `obs-watchdog-gate.exe` binary, which runs the EXACT SAME `camera_box::obs_watchdog::
+#       classify` the #391 dev1 alert watchdog uses remotely.
+#     - The RECOVERY decision (confirm-threshold / throttle / single-recovery lock / stale-lock
+#       detection): the emitted script pipes its persisted state + this pass's verdict to the
+#       EXISTING `obs-self-heal-gate.exe` binary, which calls `camera_box::obs_self_heal::decide`
+#       (src/obs_self_heal.rs) DIRECTLY — never a hand-rolled re-derivation. The step ORDER (the
+#       AHK-race fix) is asserted structurally by `tests/obs_self_heal_install.rs` against the
+#       SAME `RecoveryStep` enum `decide()` returns.
+#     Both gate binaries default their thresholds to `camera_box::obs_self_heal`'s own `DEFAULT_*`
+#     Rust constants when the caller passes `null` (the default here, unless `main()`'s
+#     `--confirm-threshold`/`--min-interval-s`/`--stale-lock-s` flags override it) — so those Rust
+#     constants are the SINGLE actual source of default truth, never a second hardcoded literal in
+#     this bash script that could silently drift from the kernel it claims to mirror.
 #   - The kill+relaunch step REUSES `launch-obs-genlock.sh`'s `build_launch_program` VERBATIM (this
 #     script sources that file) — there is ONE idempotent, self-verifying obs64 launch path in this
 #     whole repo, never a second hand-rolled one.
@@ -51,11 +58,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
-# build_recovery_script BOX OBS_DIR TARGET_FPS CONFIRM_THRESHOLD MIN_INTERVAL_S STALE_LOCK_S
+# ps_null_or_number VALUE -> "$null" (a literal PowerShell null token) when VALUE is empty, else
+# VALUE itself. Used so an UNSET threshold/interval/stale-lock override becomes an OMITTED JSON
+# field, which obs-self-heal-gate.exe defaults to its own camera_box::obs_self_heal::DEFAULT_*
+# Rust constant — the single source of default truth, never a second hardcoded bash literal.
+ps_null_or_number() {
+  if [ -n "$1" ]; then printf '%s' "$1"; else printf '$null'; fi
+}
+
+# build_recovery_script BOX OBS_DIR TARGET_FPS [CONFIRM_THRESHOLD] [MIN_INTERVAL_S] [STALE_LOCK_S]
 #   -> the full PowerShell recovery script Task Scheduler runs every ~2 min on BOX. Pure string
-#      builder: never touches the network/MCP/Windows itself.
+#      builder: never touches the network/MCP/Windows itself. The last three args are OPTIONAL —
+#      pass an empty string (or omit) to let obs-self-heal-gate.exe apply its own DEFAULT_* Rust
+#      constant; pass a number to install an explicit override.
 build_recovery_script() {
-  local box="$1" obs_dir="$2" target_fps="$3" confirm_threshold="$4" min_interval_s="$5" stale_lock_s="$6"
+  local box="$1" obs_dir="$2" target_fps="$3"
+  local confirm_threshold="${4:-}" min_interval_s="${5:-}" stale_lock_s="${6:-}"
+  local threshold_ps min_interval_ps stale_lock_ps
+  threshold_ps="$(ps_null_or_number "$confirm_threshold")"
+  min_interval_ps="$(ps_null_or_number "$min_interval_s")"
+  stale_lock_ps="$(ps_null_or_number "$stale_lock_s")"
 
   # REUSE launch-obs-genlock.sh's own planner for the kill+relaunch+log-verify step — force=1
   # (self-heal only ever acts on a CONFIRMED wedge, so it always force-kills). This is the ONE
@@ -85,21 +107,25 @@ PS1
 
   cat <<PS
 # ===== #411 obs-self-heal recovery script — box=${box} (Task Scheduler action, ~2 min cadence) =====
-# Runs ENTIRELY on this box — no ssh, no MCP, no agent session. Reuses camera_box::obs_watchdog::
-# classify (via obs-watchdog-gate.exe, LOCAL process signals only — no OBS WebSocket round-trip)
-# for the wedge verdict, and launch-obs-genlock.sh's own kill+relaunch+verify program for recovery.
-# The confirm/throttle/lock policy mirrors camera_box::obs_self_heal::decide() (src/obs_self_heal.rs)
-# — kept in lock-step by tests/obs_self_heal_install.rs.
+# Runs ENTIRELY on this box — no ssh, no MCP, no agent session. NEITHER decision this script needs
+# is reimplemented here: the wedge VERDICT is obs-watchdog-gate.exe (camera_box::obs_watchdog::
+# classify, LOCAL process signals only — no OBS WebSocket round-trip); the RECOVERY decision
+# (confirm/throttle/lock) is obs-self-heal-gate.exe (camera_box::obs_self_heal::decide DIRECTLY —
+# see src/obs_self_heal.rs). The kill+relaunch step reuses launch-obs-genlock.sh's own program.
 \$ErrorActionPreference = 'Stop'
 
-\$InstallDir       = 'C:\\ProgramData\\camera-box'
-\$StateFile        = Join-Path \$InstallDir 'obs-self-heal-state.json'
-\$LogFile          = Join-Path \$InstallDir 'obs-self-heal.log'
-\$GateBin          = Join-Path \$InstallDir 'obs-watchdog-gate.exe'
-\$TargetFps        = ${target_fps}
-\$ConfirmThreshold = ${confirm_threshold}
-\$MinIntervalS     = ${min_interval_s}
-\$StaleLockS       = ${stale_lock_s}
+\$InstallDir      = 'C:\\ProgramData\\camera-box'
+\$StateFile       = Join-Path \$InstallDir 'obs-self-heal-state.json'
+\$LogFile         = Join-Path \$InstallDir 'obs-self-heal.log'
+\$GateBin         = Join-Path \$InstallDir 'obs-watchdog-gate.exe'
+\$SelfHealGateBin = Join-Path \$InstallDir 'obs-self-heal-gate.exe'
+\$TargetFps       = ${target_fps}
+# \$null here means "use obs-self-heal-gate.exe's own camera_box::obs_self_heal::DEFAULT_* Rust
+# constant" — only a real number (from --confirm-threshold/--min-interval-s/--stale-lock-s at
+# generation time) installs an explicit override. Never a second hardcoded default here.
+\$ConfirmThresholdOverride = ${threshold_ps}
+\$MinIntervalSOverride     = ${min_interval_ps}
+\$StaleLockSOverride       = ${stale_lock_ps}
 
 function Write-SelfHealLog(\$msg) {
   \$ts = Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'
@@ -113,6 +139,9 @@ function Save-SelfHealState(\$s) {
 New-Item -ItemType Directory -Path \$InstallDir -Force | Out-Null
 
 # ---- load persisted state (fail-safe defaults if missing/corrupt — never GUESSES a healthy prior) ----
+# last_cpu_s / last_sample_epoch_s are LOCAL CPU-sampling continuity bookkeeping (Windows
+# process-telemetry plumbing, not part of camera_box::obs_self_heal::SelfHealState — decide() only
+# ever sees confirm_count / last_attempt_epoch_s / recovery_in_progress).
 \$state = [pscustomobject]@{
   confirm_count        = 0
   last_attempt_epoch_s = \$null
@@ -132,13 +161,6 @@ if (Test-Path \$StateFile) {
 }
 
 \$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-
-# ---- stale-lock check (obs_self_heal::lock_is_stale) — a crashed prior run must not permanently ----
-# ---- disable self-heal for this box.                                                            ----
-if (\$state.recovery_in_progress -and \$state.last_attempt_epoch_s -and ((\$now - \$state.last_attempt_epoch_s) -gt \$StaleLockS)) {
-  Write-SelfHealLog "lock held \$(\$now - \$state.last_attempt_epoch_s)s (> \${StaleLockS}s stale budget) — treating as ABANDONED, clearing (obs_self_heal::lock_is_stale)"
-  \$state.recovery_in_progress = \$false
-}
 
 # ---- gather the LOCAL sample — process signals ONLY, no OBS WebSocket round-trip ----
 \$procs      = Get-Process obs64 -ErrorAction SilentlyContinue
@@ -179,15 +201,17 @@ if (\$obs64Count -ge 1) {
 \$payload = @{ '${box}' = \$sample } | ConvertTo-Json -Depth 5 -Compress
 if (-not (Test-Path \$GateBin)) {
   Write-SelfHealLog "FATAL: obs-watchdog-gate.exe not found at \$GateBin — cannot verify, refusing to guess. Install it before enabling this task."
+  Save-SelfHealState \$state
   exit 5
 }
 \$verdictLine = \$payload | & \$GateBin
 \$gateExit    = \$LASTEXITCODE
 Write-SelfHealLog "sample obs64_count=\$obs64Count responding=\$responding cpu%=\$cpuPercent -> \$verdictLine (gate exit \$gateExit)"
 
-# gate exit 0 = HEALTHY, 1 = a real classify verdict says unhealthy (wedged=true is correct), but
-# 2 = a TOOLING error in the payload WE built (bad JSON, wrong field type) — that is OUR bug, not
-# evidence the box is wedged, and must NEVER itself trigger a force-kill of a possibly-healthy box.
+# gate exit 0 = HEALTHY, 1 = a real classify verdict says unhealthy (wedged=true is correct). 2 =
+# a TOOLING error in the payload WE built (bad JSON, wrong field type) — OUR bug, never evidence
+# of a wedge. ANY OTHER exit code (a crash/panic/AV interference/corrupted install) is UNKNOWN and
+# must NEVER silently fall through to "healthy" — that would SILENTLY STOP detecting a real wedge.
 if (\$gateExit -eq 2) {
   Write-SelfHealLog "FATAL: obs-watchdog-gate.exe reported a payload error (exit 2) — this is a \
 self-heal tooling bug, NOT a wedge verdict. Skipping this pass without acting; state left \
@@ -195,62 +219,90 @@ untouched so the next pass tries fresh."
   Save-SelfHealState \$state
   exit 6
 }
+if (\$gateExit -ne 0 -and \$gateExit -ne 1) {
+  Write-SelfHealLog "FATAL: obs-watchdog-gate.exe returned an UNEXPECTED exit code \$gateExit \
+(expected 0/1/2 — possible crash/panic/AV interference). Refusing to guess healthy or wedged; \
+skipping this pass without acting."
+  Save-SelfHealState \$state
+  exit 8
+}
 \$wedged = (\$gateExit -eq 1)
 
-# ---- confirm / throttle / lock decision (mirrors camera_box::obs_self_heal::decide()) ----
-if (\$state.recovery_in_progress) {
-  Write-SelfHealLog "AlreadyRecovering: lock held since \$(\$state.last_attempt_epoch_s) — skipping this pass"
-} elseif (-not \$wedged) {
-  if (\$state.confirm_count -ne 0) { Write-SelfHealLog "Healthy: resetting confirm_count from \$(\$state.confirm_count) to 0" }
-  \$state.confirm_count = 0
-} else {
-  \$state.confirm_count = \$state.confirm_count + 1
-  if (\$state.confirm_count -lt \$ConfirmThreshold) {
-    Write-SelfHealLog "Confirming: wedged pass \$(\$state.confirm_count)/\$ConfirmThreshold — not yet acting"
-  } else {
-    \$elapsed = if (\$state.last_attempt_epoch_s) { \$now - \$state.last_attempt_epoch_s } else { [double]::PositiveInfinity }
-    if (\$elapsed -lt \$MinIntervalS) {
-      Write-SelfHealLog "Throttled: confirmed wedged but only \${elapsed}s since last attempt (< \${MinIntervalS}s) — waiting"
-    } else {
-      # ---- ACT (obs_self_heal::SelfHealDecision::Recover) ----
-      # Set the lock IMMEDIATELY, before touching obs64 at all — a crash mid-recovery must leave
-      # the lock HELD (fail-safe), never silently cleared (obs_self_heal::decide() doc).
-      \$state.last_attempt_epoch_s = \$now
-      \$state.recovery_in_progress = \$true
-      Save-SelfHealState \$state
-      Write-SelfHealLog "RECOVER: confirmed wedged (\$(\$state.confirm_count)/\$ConfirmThreshold), not throttled — starting the 4-step recovery plan"
+# ---- RECOVERY decision: obs-self-heal-gate.exe calls camera_box::obs_self_heal::decide DIRECTLY ----
+# ---- (never a hand-rolled re-derivation of confirm/throttle/lock here).                          ----
+if (-not (Test-Path \$SelfHealGateBin)) {
+  Write-SelfHealLog "FATAL: obs-self-heal-gate.exe not found at \$SelfHealGateBin — cannot decide, refusing to guess. Install it before enabling this task."
+  Save-SelfHealState \$state
+  exit 9
+}
+\$decisionInput = @{
+  confirm_count        = \$state.confirm_count
+  last_attempt_epoch_s = \$state.last_attempt_epoch_s
+  recovery_in_progress = \$state.recovery_in_progress
+  wedged               = \$wedged
+  now_epoch_s          = \$now
+  threshold            = \$ConfirmThresholdOverride
+  min_interval_s       = \$MinIntervalSOverride
+  stale_lock_s         = \$StaleLockSOverride
+} | ConvertTo-Json -Compress
+\$decisionLine = \$decisionInput | & \$SelfHealGateBin
+\$decisionExit = \$LASTEXITCODE
+Write-SelfHealLog "decide: input=\$decisionInput -> \$decisionLine (exit \$decisionExit)"
 
-      # --- Step 1/4: StopAhk — MUST run before obs64 is ever touched (the AHK-race fix, #411) ---
-${ahk_stop_block}
-
-      # --- Step 2/4: KillAndRelaunchObs — the SAME launch-obs-genlock.sh program, --force ---
-      \$tmpPs1 = Join-Path \$env:TEMP "camera-box-self-heal-relaunch-\$PID.ps1"
-      @'
-${kill_relaunch_program}
-'@ | Set-Content -Path \$tmpPs1 -Encoding UTF8
-      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$tmpPs1
-      \$relaunchExit = \$LASTEXITCODE
-      Remove-Item \$tmpPs1 -ErrorAction SilentlyContinue
-      Write-SelfHealLog "KillAndRelaunchObs: launch-obs-genlock program exited \$relaunchExit"
-
-      # --- Step 3/4: VerifyRecovered — exactly one obs64 AND the launch program's own log-verify ---
-      # ---            passed (obs_self_heal::recovery_verified — the SAME rule both sides check) ---
-      Start-Sleep -Seconds 2
-      \$postCount = @(Get-Process obs64 -ErrorAction SilentlyContinue).Count
-      \$verified  = (\$postCount -eq 1) -and (\$relaunchExit -eq 0)
-      Write-SelfHealLog "VerifyRecovered: obs64_count=\$postCount relaunchExit=\$relaunchExit -> verified=\$verified"
-
-      # --- Step 4/4: RestartAhk — ALWAYS runs, regardless of \$verified (obs_self_heal.rs doc: ---
-      # ---           AHK's crash-respawn duty is more valuable always-on than conditional)      ---
-${ahk_start_block}
-
-      \$state.recovery_in_progress = \$false
-      Write-SelfHealLog "Recovery attempt complete (verified=\$verified) — lock cleared"
-    }
-  }
+if (\$decisionExit -ne 0 -and \$decisionExit -ne 1) {
+  Write-SelfHealLog "FATAL: obs-self-heal-gate.exe returned an UNEXPECTED exit code \$decisionExit \
+(expected 0/1 — possible crash/panic/bad payload). Refusing to guess; skipping this pass without acting."
+  Save-SelfHealState \$state
+  exit 10
 }
 
+\$decision = \$decisionLine | ConvertFrom-Json
+# next_state is persisted EVERY pass, regardless of decision — even Healthy resets confirm_count.
+# A Recover decision's next_state ALREADY has recovery_in_progress=true (the lock is set BEFORE
+# obs64 is ever touched, by decide() itself — fail-safe on a crash mid-recovery).
+\$state.confirm_count        = \$decision.next_state.confirm_count
+\$state.last_attempt_epoch_s = \$decision.next_state.last_attempt_epoch_s
+\$state.recovery_in_progress = \$decision.next_state.recovery_in_progress
 Save-SelfHealState \$state
+
+switch (\$decision.decision) {
+  'Healthy'           { Write-SelfHealLog "Healthy: no action" }
+  'AlreadyRecovering' { Write-SelfHealLog "AlreadyRecovering: lock held since \$(\$state.last_attempt_epoch_s) — skipping this pass" }
+  'Confirming'        { Write-SelfHealLog "Confirming: wedged pass \$(\$decision.confirm_count)/\$(\$decision.threshold) — not yet acting" }
+  'Throttled'         { Write-SelfHealLog "Throttled: confirmed wedged but \$(\$decision.seconds_remaining)s remain before the next attempt is allowed — waiting" }
+  'Recover' {
+    Write-SelfHealLog "RECOVER: obs-self-heal-gate.exe says ACT — starting the 4-step recovery plan (\$(\$decision.steps -join ' -> '))"
+
+    # --- Step 1/4: StopAhk — MUST run before obs64 is ever touched (the AHK-race fix, #411) ---
+${ahk_stop_block}
+
+    # --- Step 2/4: KillAndRelaunchObs — the SAME launch-obs-genlock.sh program, --force ---
+    \$tmpPs1 = Join-Path \$env:TEMP "camera-box-self-heal-relaunch-\$PID.ps1"
+    @'
+${kill_relaunch_program}
+'@ | Set-Content -Path \$tmpPs1 -Encoding UTF8
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$tmpPs1
+    \$relaunchExit = \$LASTEXITCODE
+    Remove-Item \$tmpPs1 -ErrorAction SilentlyContinue
+    Write-SelfHealLog "KillAndRelaunchObs: launch-obs-genlock program exited \$relaunchExit"
+
+    # --- Step 3/4: VerifyRecovered — exactly one obs64 AND the launch program's own log-verify ---
+    # ---            passed (obs_self_heal::recovery_verified — the SAME rule both sides check) ---
+    Start-Sleep -Seconds 2
+    \$postCount = @(Get-Process obs64 -ErrorAction SilentlyContinue).Count
+    \$verified  = (\$postCount -eq 1) -and (\$relaunchExit -eq 0)
+    Write-SelfHealLog "VerifyRecovered: obs64_count=\$postCount relaunchExit=\$relaunchExit -> verified=\$verified"
+
+    # --- Step 4/4: RestartAhk — ALWAYS runs, regardless of \$verified (obs_self_heal.rs doc: ---
+    # ---           AHK's crash-respawn duty is more valuable always-on than conditional)      ---
+${ahk_start_block}
+
+    \$state.recovery_in_progress = \$false
+    Save-SelfHealState \$state
+    Write-SelfHealLog "Recovery attempt complete (verified=\$verified) — lock cleared"
+  }
+  default { Write-SelfHealLog "FATAL: obs-self-heal-gate.exe returned an unrecognized decision '\$(\$decision.decision)' — treating as no-op, never acting on an unrecognized signal." }
+}
 PS
 }
 
@@ -338,7 +390,9 @@ EOF
 
 main() {
   local box="" obs_dir='C:\Program Files\obs-studio'
-  local confirm_threshold=2 min_interval_s=600 stale_lock_s=900 interval_min=2
+  # Empty by default — obs-self-heal-gate.exe applies its own camera_box::obs_self_heal::
+  # DEFAULT_* Rust constant when these are unset. Only an explicit flag installs an override.
+  local confirm_threshold="" min_interval_s="" stale_lock_s="" interval_min=2
   need_val() { [ "$#" -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; usage >&2; exit 2; }; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -364,6 +418,11 @@ main() {
   local ps1_path="C:\\ProgramData\\camera-box\\obs-self-heal.ps1"
   local xml_path="C:\\ProgramData\\camera-box\\obs-self-heal-task.xml"
 
+  # Display string for STEP 3's live-verify note — shows the EFFECTIVE threshold whether it's an
+  # explicit override or the gate binary's own DEFAULT_CONFIRM_THRESHOLD (never displays a stale
+  # bash-hardcoded literal that could drift from the Rust constant).
+  local confirm_threshold_display="${confirm_threshold:-obs-self-heal-gate.exe default (2)}"
+
   local RECOVERY_SCRIPT TASK_XML
   RECOVERY_SCRIPT="$(build_recovery_script "$box" "$obs_dir" "$target_fps" "$confirm_threshold" "$min_interval_s" "$stale_lock_s")"
   TASK_XML="$(build_task_xml "$task_name" "$ps1_path" "$interval_min")"
@@ -372,8 +431,9 @@ main() {
 # ===== #411 obs-self-heal install plan — box=${box} (${mcp}, ${box_ip}) =====
 # scp/ssh to Windows is DENIED — the agent/supervisor runs this via the ${mcp} MCP Shell.
 #
-# STEP 0: deploy the obs-watchdog-gate.exe CI artifact (probe-tools-windows-amd64) to
-#         C:\\ProgramData\\camera-box\\obs-watchdog-gate.exe on this box (FileUpload via ${mcp}).
+# STEP 0: deploy the obs-watchdog-gate.exe AND obs-self-heal-gate.exe CI artifacts (both ship in
+#         probe-tools-windows-amd64) to C:\\ProgramData\\camera-box\\ on this box (FileUpload via
+#         ${mcp}). The recovery script below fails loud (does not act) if either is missing.
 #
 # STEP 1: write the recovery script to ${ps1_path} — paste via ${mcp} Shell (Set-Content, or
 #         FileWrite) with the content between the dashed lines:
@@ -398,7 +458,7 @@ ${TASK_XML}
 #      (schtasks /Run /TN "${task_name}"), tail C:\\ProgramData\\camera-box\\obs-self-heal.log —
 #      MUST log "HEALTHY"/no action, NEVER force-kill a healthy box.
 #   b) Simulated-wedge run: force-kill obs64 WITHOUT relaunching (or otherwise make it
-#      unresponsive), run the task manually TWICE (confirm-threshold=${confirm_threshold}) — the
+#      unresponsive), run the task manually TWICE (confirm-threshold=${confirm_threshold_display}) — the
 #      SECOND run must force-kill+relaunch, log tick=ENABLED, and (on strih) show AHK stopped then
 #      restarted with never more than one obs64 process at any point.
 #   c) Only after BOTH (a) and (b) pass: schtasks /Change /TN "${task_name}" /ENABLE

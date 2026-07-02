@@ -76,9 +76,10 @@ pub fn recovery_plan() -> Vec<RecoveryStep> {
     ]
 }
 
-/// Consecutive wedged passes required before acting. Mirrors
-/// `OBS_WATCHDOG_CONFIRM_THRESHOLD` (2, the #391 alert watchdog's own default) so the self-heal
-/// job never force-kills a healthy box off one transient process-sampling blip.
+/// Consecutive wedged passes required before acting. Chosen to match
+/// `OBS_WATCHDOG_CONFIRM_THRESHOLD`'s own default (2, the #391 alert watchdog's bash env var —
+/// a SEPARATE, independently-tunable literal, not mechanically linked to this constant) so the
+/// self-heal job never force-kills a healthy box off one transient process-sampling blip.
 pub const DEFAULT_CONFIRM_THRESHOLD: u32 = 2;
 
 /// Minimum seconds between two recovery ATTEMPTS on the same box. A structural wedge a restart
@@ -222,8 +223,14 @@ pub fn lock_is_stale(state: &SelfHealState, now_epoch_s: u64, stale_lock_s: u64)
 
 /// Post-recovery success rule (#411 spec): recovery is VERIFIED only when there is exactly one
 /// obs64 process AND the freshly-relaunched OBS log shows the genlock render tick ENABLED (the
-/// SAME proof `launch-obs-genlock.sh`'s own verify step checks). Stated once here so the Rust
-/// tests and the emitted PowerShell agree on exactly what "recovered" means.
+/// SAME proof `launch-obs-genlock.sh`'s own verify step checks). Unlike the confirm/throttle/lock
+/// decision (bridged into PowerShell via the `obs-self-heal-gate` binary, since it is genuinely
+/// stateful branching logic worth reusing), this check is a TRIVIAL boolean the PowerShell-side
+/// `VerifyRecovered` step re-derives directly from process state it already has in hand
+/// (`$postCount -eq 1 -and $relaunchExit -eq 0`) — this function states the SAME rule for the
+/// Rust unit tests, and `tests/obs_self_heal_install.rs` pins the matching PowerShell condition
+/// string, so a change to one side without the other is caught by an explicit test assertion,
+/// not by a shared runtime call.
 pub fn recovery_verified(obs64_count: u32, render_tick_enabled: bool) -> bool {
     obs64_count == 1 && render_tick_enabled
 }
