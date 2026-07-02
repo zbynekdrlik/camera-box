@@ -175,8 +175,11 @@ fn av_restart_painter_calls_the_shared_self_check_before_recording_starts() {
     let launch_pos = block
         .find("--audio-marker-device $AV_RESTART_MARKER_DEVICE")
         .expect("#421: expected the existing AV_RESTART_GATE painter launch with --audio-marker");
-    let check_pos = block.find("audio_marker_check_cmds").expect(
-        "#421: av_restart_record_and_emit_plan() must call the shared audio_marker_check_cmds \
+    // Search for the actual CALL syntax `$(audio_marker_check_cmds` (a command substitution),
+    // not the bare function name — a prose comment mentioning the helper by name must not
+    // false-satisfy this guard.
+    let check_pos = block.find("$(audio_marker_check_cmds").expect(
+        "#421: av_restart_record_and_emit_plan() must CALL the shared audio_marker_check_cmds \
          self-check (same risk class as #420 — a dropped/mistyped flag or a busy ALSA device \
          must abort the AV_RESTART_GATE run, never silently record an unmeasured pair)",
     );

@@ -84,6 +84,11 @@ set -euo pipefail
 RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
+# #420/#421: SINGLE SOURCE OF TRUTH for the QPSK audio-marker AUDIBLE self-check (ALSA CARD/DEV
+# parsing + the `state: RUNNING` poll + fail-loud diagnostic), shared with recording-e2e.sh's
+# AV_RESTART_GATE painter (#421) so both launches can never drift on what "audible" means.
+# shellcheck source=scripts/lib/audio-marker-check.sh
+. "$RIG_MODE_DIR/lib/audio-marker-check.sh"
 # #281 Fix#3: the rig-active heartbeat. TEST mode SETS it (deliberate "rig is in a test state"
 # marker); EVENT mode CLEARS it. Unlike recording-e2e.sh this is a one-shot write (rig-mode exits),
 # so the marker goes STALE after RIG_HEARTBEAT_STALE_SEC (default 10 min) — an idle TEST rig with a
@@ -144,12 +149,9 @@ painter_launch_remote() {
   local audio_dev="${9:-${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}}"
   local audio_cadence="${10:-${AUDIO_MARKER_CADENCE_TICKS:-180}}"
   local marker_log="${11:-${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}}"
-  # Parse CARD=<id> / DEV=<n> out of "hw:CARD=<id>,DEV=<n>" with plain bash parameter expansion
-  # (LOCALLY, not on the remote box) so the audible self-check below can bake a literal
-  # /proc/asound/<id>/pcm<n>p/sub0/status path straight into the remote heredoc.
-  local audio_card="${audio_dev#*CARD=}"; audio_card="${audio_card%%,*}"
-  local audio_devnum="${audio_dev#*DEV=}"; audio_devnum="${audio_devnum%%,*}"
-  local audio_status="/proc/asound/$audio_card/pcm${audio_devnum}p/sub0/status"
+  # #420/#421: the ALSA CARD/DEV parsing + the audible RUNNING-poll self-check are DRY-extracted
+  # into scripts/lib/audio-marker-check.sh (sourced above) — shared with recording-e2e.sh's
+  # AV_RESTART_GATE painter so the two launches can never drift on what "audible" means.
   cat <<REMOTE
 set -e
 # (0) idempotency: stop any painter from a previous TEST run so re-running never stacks two painters on
@@ -234,17 +236,9 @@ echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, $
 #     passed --audio-marker), so this is a REAL kernel-reported signal that catches exactly that
 #     failure class — never a stub that always passes. FAIL LOUD + kill the just-verified painter:
 #     a silent marker means this whole TEST-mode switch produced an unmeasured, wasted run.
-i=0; while [ \$i -lt 20 ]; do
-  if [ -f "$audio_status" ] && grep -q '^state: RUNNING' "$audio_status" 2>/dev/null; then break; fi
-  sleep 0.5; i=\$((i+1))
-done
-if [ ! -f "$audio_status" ] || ! grep -q '^state: RUNNING' "$audio_status" 2>/dev/null; then
-  echo "FAIL: #420 QPSK audio marker ($audio_dev -> $audio_status) is NOT RUNNING — no marker audio is being emitted (silent, unmeasured run)." >&2
-  echo "      status file: \$(cat "$audio_status" 2>/dev/null || echo '<missing>')" >&2
-  kill "\$PAINTER_PID" 2>/dev/null || true
-  exit 1
-fi
-echo "PASS: #420 QPSK audio marker RUNNING on $audio_dev ($audio_status state=RUNNING, cadence=${audio_cadence} ticks, log=$marker_log)"
+#     (#421: this poll+fail-loud logic now lives in scripts/lib/audio-marker-check.sh, shared with
+#     recording-e2e.sh's AV_RESTART_GATE painter — the DRY extraction of this exact block.)
+$(audio_marker_check_cmds "$audio_dev" 'kill "$PAINTER_PID" 2>/dev/null || true' "cadence=${audio_cadence} ticks, log=$marker_log")
 REMOTE
 }
 

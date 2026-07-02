@@ -51,6 +51,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # rig-mode.sh) — cleanup() clears any leftover drop-in before restoring cam2's camera-box.
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$HERE/lib/rig-test-dropin.sh"
+# #420/#421: SINGLE SOURCE OF TRUTH for the QPSK audio-marker AUDIBLE self-check (ALSA CARD/DEV
+# parsing + the `state: RUNNING` poll + fail-loud diagnostic), shared with rig-mode.sh's TEST-mode
+# painter launch (#420) so both launches can never drift on what "audible" means.
+# shellcheck source=scripts/lib/audio-marker-check.sh
+. "$HERE/lib/audio-marker-check.sh"
 # #281 Fix#3: the rig-active heartbeat — tells the rig-restore watchdog "a legit E2E is running, do
 # NOT auto-restore prod". Started after the cleanup trap is armed (below); cleanup() stops it on
 # EXIT/HUP/INT/TERM, so a clean exit OR a mid-flight death clears/lapses the heartbeat and the
@@ -662,6 +667,16 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   # this recording (bash cannot scp/exec on Windows — #208/#193). The [3/8] plain
   # dual-QR painter (no audio marker) is replaced here by the audio-marker painter the
   # A/V measurement needs — the earlier launch is wasted in this mode, harmless.
+  #
+  # #421 (same risk class as #420): a dropped/mistyped --audio-marker flag or a busy ALSA device
+  # would otherwise let this launch silently proceed with NO marker audio, producing an
+  # unmeasured before/after pair that av-restart-sync-gate could either fall closed to Unknown on
+  # (safe) or, worse, false-pair on spurious CRC-4 program-noise decodes. The shared
+  # audio_marker_check_cmds self-check (scripts/lib/audio-marker-check.sh) is appended INSIDE the
+  # SAME ssh command, right after backgrounding the painter and BEFORE this function starts OBS
+  # recording — a silent marker makes the remote command exit 1, which (no `|| true` guards this
+  # ssh call) aborts the whole AV_RESTART_GATE run under `set -euo pipefail` at the top of this
+  # script, never wasting a recording on an unmeasured run.
   av_restart_record_and_emit_plan() {
     local label="$1"
     local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
@@ -680,7 +695,8 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
           --duration-secs $((AV_RESTART_RECORD_SECS + 30)) --audio-marker \
           --audio-marker-device $AV_RESTART_MARKER_DEVICE \
           --audio-marker-cadence-ticks $AV_RESTART_MARKER_CADENCE \
-          --marker-log /tmp/av-restart-markers.csv >/tmp/av-restart-painter.log 2>&1 &)"
+          --marker-log /tmp/av-restart-markers.csv >/tmp/av-restart-painter.log 2>&1 &); \
+       $(audio_marker_check_cmds "$AV_RESTART_MARKER_DEVICE" 'pkill -x frame-probe 2>/dev/null || true' "cadence=$AV_RESTART_MARKER_CADENCE ticks, label=$label")"
     sleep 3
     python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
     sleep "$AV_RESTART_RECORD_SECS"
