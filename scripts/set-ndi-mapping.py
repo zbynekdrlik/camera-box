@@ -38,10 +38,16 @@ DEFAULT_MAP = [
     ("NDI cam2", "CAM2 (usb)"),
 ]
 
-try:
-    from websocket import WebSocketTimeoutException, create_connection
-except ImportError:
-    sys.exit("missing dep: pip install websocket-client")
+# websocket-client is imported LAZILY (inside the WS helpers), not at module top: the pure helpers
+# (parse_map_args / duplicates / DEFAULT_MAP) must be importable + unit-testable WITHOUT the WS
+# dependency (a top-level import here made harness_rig_ndi_mapping.rs fail on a CI runner that has no
+# websocket-client). Only the actual OBS-WS connect needs it.
+def _ws():
+    try:
+        from websocket import WebSocketTimeoutException, create_connection
+        return WebSocketTimeoutException, create_connection
+    except ImportError:
+        sys.exit("missing dep: pip install websocket-client")
 
 
 # ─── pure helpers (unit-testable without OBS) ────────────────────────────────
@@ -70,6 +76,7 @@ def duplicates(bindings):
 # ─── OBS WebSocket helpers (same _conn/_rpc pattern as obs_burn_filter.py) ────
 
 def _conn(host, password=""):
+    _, create_connection = _ws()
     ws = create_connection(f"ws://{host}:{PORT}", timeout=10)
     hello = json.loads(ws.recv())
     ident = {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0}}
@@ -88,6 +95,7 @@ def _conn(host, password=""):
 
 
 def _rpc(ws, rtype, rdata=None):
+    ws_timeout_exc, _ = _ws()
     ws.send(json.dumps({"op": 6, "d": {
         "requestType": rtype, "requestId": rtype, "requestData": rdata or {}}}))
     t0 = time.monotonic()
@@ -96,7 +104,7 @@ def _rpc(ws, rtype, rdata=None):
             raise TimeoutError(f"obs-websocket request {rtype!r} timed out")
         try:
             m = json.loads(ws.recv())
-        except WebSocketTimeoutException:
+        except ws_timeout_exc:
             continue
         if m["op"] == 7 and m["d"]["requestId"] == rtype:
             st = m["d"]["requestStatus"]
