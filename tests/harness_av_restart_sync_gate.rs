@@ -65,8 +65,14 @@ fn gate_binary_passes_a_healthy_restart() {
         r#"{"av_offset_ms": -64.5, "matched": 30, "mad_ms": 9.5}"#,
     );
     let (code, out) = run(bin, &[&before, &after]);
-    assert_eq!(code, 0, "healthy in-tolerance restart MUST exit 0, got {code} ({out})");
-    assert!(out.starts_with("PASS"), "stdout should start with PASS, got {out:?}");
+    assert_eq!(
+        code, 0,
+        "healthy in-tolerance restart MUST exit 0, got {code} ({out})"
+    );
+    assert!(
+        out.starts_with("PASS"),
+        "stdout should start with PASS, got {out:?}"
+    );
 }
 
 /// The exact #137 user-reported failure — a 200-300ms drift across the restart — MUST
@@ -83,8 +89,14 @@ fn gate_binary_fails_the_reported_200ms_drift() {
         r#"{"av_offset_ms": -270.0, "matched": 32, "mad_ms": 8.0}"#,
     );
     let (code, out) = run(bin, &[&before, &after]);
-    assert_eq!(code, 1, "200ms restart drift MUST exit 1 (FAIL), got {code} ({out})");
-    assert!(out.starts_with("FAIL"), "stdout should start with FAIL, got {out:?}");
+    assert_eq!(
+        code, 1,
+        "200ms restart drift MUST exit 1 (FAIL), got {code} ({out})"
+    );
+    assert!(
+        out.starts_with("FAIL"),
+        "stdout should start with FAIL, got {out:?}"
+    );
 }
 
 /// An untrustworthy measurement (too few clustered markers) MUST exit 1 (never 0 PASS),
@@ -101,8 +113,14 @@ fn gate_binary_never_passes_an_untrustworthy_measurement() {
         r#"{"av_offset_ms": -70.0, "matched": 32, "mad_ms": 8.0}"#,
     );
     let (code, out) = run(bin, &[&before, &after]);
-    assert_eq!(code, 1, "untrustworthy measurement must never exit 0, got {code} ({out})");
-    assert!(out.starts_with("UNKNOWN"), "stdout should start with UNKNOWN, got {out:?}");
+    assert_eq!(
+        code, 1,
+        "untrustworthy measurement must never exit 0, got {code} ({out})"
+    );
+    assert!(
+        out.starts_with("UNKNOWN"),
+        "stdout should start with UNKNOWN, got {out:?}"
+    );
 }
 
 /// An explicit tolerance override (3rd positional arg) is honoured.
@@ -119,11 +137,18 @@ fn gate_binary_honours_explicit_tolerance_override() {
     );
     // Default tolerance (50ms) would PASS a 40ms delta; an explicit 10ms override must FAIL it.
     let out = Command::new(bin)
-        .args([before.as_os_str(), after.as_os_str(), std::ffi::OsStr::new("10")])
+        .args([
+            before.as_os_str(),
+            after.as_os_str(),
+            std::ffi::OsStr::new("10"),
+        ])
         .output()
         .expect("spawn av-restart-sync-gate");
     let code = out.status.code().expect("exit code");
-    assert_eq!(code, 1, "40ms delta with a 10ms override MUST FAIL, got {code}");
+    assert_eq!(
+        code, 1,
+        "40ms delta with a 10ms override MUST FAIL, got {code}"
+    );
 }
 
 /// Missing file / malformed JSON fails closed (exit 2), never silently passes.
@@ -136,7 +161,10 @@ fn gate_binary_missing_file_fails_closed() {
         r#"{"av_offset_ms": 0.0, "matched": 32, "mad_ms": 8.0}"#,
     );
     let (code, _) = run(bin, &[&missing, &after]);
-    assert_eq!(code, 2, "a missing input file must exit 2 (fail closed), got {code}");
+    assert_eq!(
+        code, 2,
+        "a missing input file must exit 2 (fail closed), got {code}"
+    );
 }
 
 #[test]

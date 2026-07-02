@@ -994,4 +994,110 @@ if [ -f "$REPORT_JSON" ]; then
 fi
 
 echo "artifacts in $OUTDIR (verdict json: $REPORT_JSON, report: $REPORT_PNG)"
+
+# ============================================================================
+# #137 OPTIONAL — OBS-restart A/V-sync SURVIVAL gate. OFF by default.
+# ============================================================================
+# Reopened issue #137: an OBS stop->start SOMETIMES drifts the video<->audio offset by
+# ~200-300ms and destroys lipsync ("niekedy sa nam rozsišiel o 200-300ms uplne
+# zlikvidovalo lipsync"), with nothing automatic to catch it. This step measures the
+# #188 A/V offset (cam2 QPSK audio marker vs its dual-QR video tick, via
+# `recording-verdict --av-sync`) BEFORE and AFTER a real OBS stop->start on the stream
+# box, then runs the strict av-restart-sync-gate (single source of truth:
+# camera_box::av_restart_sync::classify) on the two measurements — FAIL if the offset
+# drifted beyond tolerance. Mirrors the [4d/8] render-budget-gate SHAPE: announced,
+# strict, one decision binary, no threshold duplicated in bash.
+#
+# OFF by default (mirrors --colour-gate/COLOUR_GATE's env-flag shape) so a normal
+# zero-loss run is COMPLETELY UNCHANGED — set AV_RESTART_GATE=1 to opt in. The OBS
+# restart itself is an OPERATOR/SUPERVISOR ACTION: this script PRINTS the instruction
+# and waits for confirmation — it NEVER stops/starts OBS itself (#137 scope: this PR
+# ships the gate + wiring; the live two-recording rig proof with a REAL OBS restart is
+# supervisor-driven).
+#
+# Because scp/exec to the Windows boxes is DENIED to bash (same #208/#193 constraint as
+# the main verdict above), the recording-verdict --av-sync DECODE step is EMITTED as a
+# plan for the win-stream-snv MCP holder to run — exactly like the [8/8a-c] per-box
+# decode-in-place plan. Only the final av-restart-sync-gate decision (on the two small
+# JSONs, once pulled back to dev1) runs directly here.
+if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
+  AV_RESTART_RECORD_SECS="${AV_RESTART_RECORD_SECS:-150}"
+  AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+  AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-180}"
+  AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
+  AV_RESTART_TOLERANCE_MS="${AV_RESTART_TOLERANCE_MS:-50}"
+  AV_RESTART_GATE_BIN="${AV_RESTART_GATE_BIN:-$PROBE_BIN_DIR/av-restart-sync-gate}"
+  VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
+  OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
+
+  # $1 = label ("before" | "after"). Records cam2's QPSK-marked stream program for
+  # AV_RESTART_RECORD_SECS, pulls the cam2 marker CSV to dev1 (cam2 is Linux — scp
+  # works, unlike the Windows boxes), and EMITS the win-stream-snv decode plan for
+  # this recording (bash cannot scp/exec on Windows — #208/#193).
+  av_restart_record_and_emit_plan() {
+    local label="$1"
+    local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
+    echo "    [av-restart-sync/$label] cam2 painter: dual-QR + QPSK audio marker on $AV_RESTART_MARKER_DEVICE"
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+      "systemctl stop cam2-painter 2>/dev/null || true; pkill -x frame-probe 2>/dev/null || true; \
+       rm -f /tmp/av-restart-markers.csv; \
+       (nohup /tmp/frame-probe --paint-only --dual-qr --paint-fps $PAINT_FPS --qr-size $QR_SIZE \
+          --duration-secs $((AV_RESTART_RECORD_SECS + 30)) --audio-marker \
+          --audio-marker-device $AV_RESTART_MARKER_DEVICE \
+          --audio-marker-cadence-ticks $AV_RESTART_MARKER_CADENCE \
+          --marker-log /tmp/av-restart-markers.csv >/tmp/av-restart-painter.log 2>&1 &)"
+    sleep 3
+    python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
+    sleep "$AV_RESTART_RECORD_SECS"
+    local stream_host_path
+    stream_host_path=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) || true
+    sleep 10  # let frame-probe self-exit + flush its marker CSV
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+      "pkill -x frame-probe 2>/dev/null; true"
+    sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
+      root@"$PAINTER_IP":/tmp/av-restart-markers.csv "$marker_csv" || \
+      { echo "ERROR: could not fetch $label QPSK marker log" >&2; exit 1; }
+    echo "    [av-restart-sync/$label] recording: ${stream_host_path:-<unknown>} (on stream box)"
+    echo "    [av-restart-sync/$label] marker log pulled to dev1: $marker_csv"
+    local partial_win="$OUT_DIR_WIN\\av-restart-${label}-${RUN_ID}.json"
+    echo "    --- win-stream-snv decode plan for '$label' (bash cannot scp/exec on Windows) ---"
+    printf '      %s --av-sync %q --av-marker-log %q --av-audio-track %s > %s\n' \
+      "$VERDICT_EXE_WIN" "${stream_host_path:-<the ${label} recording on stream>}" \
+      "<upload ${marker_csv} to stream first>" "$AV_RESTART_AUDIO_TRACK" "$partial_win"
+    echo "    win-stream-snv: FileUpload $marker_csv -> the stream box, run the command above,"
+    echo "                    then FileDownload $partial_win -> $OUTDIR/av-restart-${label}-${RUN_ID}.json"
+  }
+
+  echo "[R1/R3] #137 baseline A/V-sync measurement (BEFORE the OBS restart)"
+  av_restart_record_and_emit_plan before
+
+  echo "[R2/R3] #137 OBS restart — OPERATOR/SUPERVISOR ACTION (this script does NOT execute it)"
+  echo "    Manually STOP then START OBS on stream ($STREAM) now — the real-world restart #137"
+  echo "    gates on. This script never stops/starts OBS itself; the restart is always driven by"
+  echo "    the operator/supervisor holding the rig, never automated inside recording-e2e.sh."
+  if [ -t 0 ] && [ "${AV_RESTART_CONFIRM:-}" != "1" ]; then
+    read -r -p "    Press ENTER once OBS on stream has been manually restarted... " _
+  fi
+
+  echo "[R3/R3] #137 post-restart A/V-sync measurement (AFTER the OBS restart) + gate"
+  av_restart_record_and_emit_plan after
+
+  BEFORE_JSON="$OUTDIR/av-restart-before-${RUN_ID}.json"
+  AFTER_JSON="$OUTDIR/av-restart-after-${RUN_ID}.json"
+  echo "    Once both partial JSONs are pulled back to dev1 (see the win-stream-snv plans above),"
+  echo "    run the strict gate (single source of truth: camera_box::av_restart_sync::classify):"
+  printf '      %q %q %q %s\n' "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS"
+  if [ -f "$BEFORE_JSON" ] && [ -f "$AFTER_JSON" ]; then
+    if ! "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS"; then
+      echo "ERROR: #137 A/V-sync drifted beyond tolerance across the OBS restart — lipsync broken." >&2
+      GATE=1
+    else
+      echo "    [av-restart-sync-gate] PASS — A/V offset held across the OBS restart within ${AV_RESTART_TOLERANCE_MS}ms"
+    fi
+  else
+    echo "    [av-restart-sync-gate] both partial JSONs not yet on dev1 — the win-stream-snv holder"
+    echo "    must run the two decode plans above, then run the gate command printed above by hand."
+  fi
+fi
+
 exit "$GATE"

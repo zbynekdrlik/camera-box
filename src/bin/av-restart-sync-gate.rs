@@ -32,11 +32,10 @@ fn load_measurement(path: &str) -> Result<AvSyncMeasurement, String> {
         .get("av_offset_ms")
         .and_then(|x| x.as_f64())
         .ok_or_else(|| format!("{path}: missing numeric field 'av_offset_ms'"))?;
-    let matched = v
-        .get("matched")
-        .and_then(|x| x.as_u64())
-        .ok_or_else(|| format!("{path}: missing numeric field 'matched'"))?
-        as usize;
+    let matched =
+        v.get("matched")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| format!("{path}: missing numeric field 'matched'"))? as usize;
     let mad_ms = v
         .get("mad_ms")
         .and_then(|x| x.as_f64())
@@ -51,9 +50,7 @@ fn load_measurement(path: &str) -> Result<AvSyncMeasurement, String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
-        eprintln!(
-            "ERROR: usage: av-restart-sync-gate <before.json> <after.json> [tolerance_ms]"
-        );
+        eprintln!("ERROR: usage: av-restart-sync-gate <before.json> <after.json> [tolerance_ms]");
         std::process::exit(2);
     }
 
