@@ -17,6 +17,7 @@
 //! `docs/superpowers/plans/2026-07-01-av-sync-norihiro-dock-port.md`.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::f64::consts::PI;
 
 /// Audio sample rate (Hz) — norihiro `--ar` default.
@@ -519,6 +520,56 @@ pub fn frame_id_to_index(frame_id: u32) -> u8 {
     (frame_id & 0xFF) as u8
 }
 
+/// Number of slots in the live camera-box video↔audio ring (`cb_video_ts_ns` in
+/// `vendor/av-sync-dock/src/sync-test-output.cpp`), keyed on `frame_id_to_index`.
+pub const AV_SYNC_RING_SLOTS: u64 = 256;
+/// Fixed camera-box painter rate the ring's slot count is defined against — NOT the dock's own
+/// capture fps, which can differ (see the final-mixed-60-30 topology).
+pub const AV_SYNC_SOURCE_FPS: u64 = 60;
+/// One full lap of the ring at [`AV_SYNC_SOURCE_FPS`], in nanoseconds (floor; the sub-nanosecond
+/// remainder is irrelevant at millisecond A/V-sync precision). ≈ 4266.667 ms.
+pub const AV_SYNC_RING_CYCLE_NS: u64 = AV_SYNC_RING_SLOTS * 1_000_000_000 / AV_SYNC_SOURCE_FPS;
+
+/// #398 review HIGH finding: the live ring keeps only the LATEST video write for a low byte, so by
+/// the time a matching audio marker decodes, the stored value can be either the TRUE match (if its
+/// video already arrived) or the PREVIOUS lap's write, one whole `cycle_ns` earlier — the expected
+/// production regime, since the OBS program VIDEO track carries extra genlock A/V-alignment
+/// latency (up to 2000 ms, the genlock `latency_ms` knob) the near-zero-latency QPSK AUDIO track
+/// does not. A real A/V offset is always far smaller than half a cycle, so reducing the raw
+/// difference modulo `cycle_ns` into `(-cycle_ns/2, +cycle_ns/2]` recovers the true offset
+/// regardless of which side leads — no assumption about direction. Mirrors
+/// `resolve_ring_lap_offset_ns` (same name) in
+/// `vendor/av-sync-dock/src/sync-test-output.cpp::st_raw_audio_decode_data` — keep both in sync if
+/// the ring size or source fps ever change.
+// TODO(#398 RED): naive lookup, no lap disambiguation — reproduces the live-dock aliasing bug the
+// review found (a stale previous-lap ring value is off by a whole cycle, ~4.267 s).
+pub fn resolve_ring_lap_offset_ns(
+    audio_ts_ns: u64,
+    stored_video_ts_ns: u64,
+    _cycle_ns: u64,
+) -> i64 {
+    audio_ts_ns as i64 - stored_video_ts_ns as i64
+}
+
+/// #398 review MEDIUM finding: CRC-4 is only 4 bits, so on real program audio a false accept is
+/// roughly 1 in 16 decode attempts (the offline path guards against exactly this with
+/// `cluster_offset_ms` above); the live dock previously displayed every raw pass, real or false.
+/// Smooth by taking the MEDIAN of resolved offsets within `window_ns` of the latest sample
+/// (dropping older ones first) — a single false blip cannot move a multi-sample median far, while
+/// the real markers (sharing one near-constant pipeline delay) dominate. Mirrors
+/// `cb_smooth_offset_ns` in `vendor/av-sync-dock/src/sync-test-output.cpp` — keep both in sync.
+// TODO(#398 RED): passthrough, no smoothing — reproduces the live-dock garbage-on-false-accept bug
+// the review found.
+pub fn smoothed_offset_ns(
+    history: &mut VecDeque<(u64, i64)>,
+    sample_ts_ns: u64,
+    sample_offset_ns: i64,
+    _window_ns: u64,
+) -> i64 {
+    history.push_back((sample_ts_ns, sample_offset_ns));
+    sample_offset_ns
+}
+
 /// `start_time` of a stream as reported by ffprobe (`-show_entries stream=start_time`), seconds.
 /// A missing/`N/A`/unparsable value is 0.0 (streams starting at the container origin). Used to put
 /// the recording's video and audio timelines on a COMMON origin before pairing — a non-zero
@@ -836,5 +887,85 @@ mod tests {
         assert_eq!(found.len(), 1, "got {found:?}");
         assert_eq!(found[0].1, idx);
         assert!((found[0].0 - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn ring_cycle_ns_matches_256_frames_at_60fps() {
+        // #398: pin the constant used in production — a future edit to the ring size or the
+        // assumed source fps must be caught here, not live on the rig.
+        assert_eq!(AV_SYNC_RING_SLOTS, 256);
+        assert_eq!(AV_SYNC_SOURCE_FPS, 60);
+        assert_eq!(AV_SYNC_RING_CYCLE_NS, 256 * 1_000_000_000 / 60);
+    }
+
+    #[test]
+    fn resolve_ring_lap_offset_recovers_true_offset_when_audio_leads_video_by_one_lap() {
+        // #398 review-found bug: the ring only ever holds the LATEST write for a low byte. Once
+        // the OBS program VIDEO carries more genlock A/V-align latency than the near-zero-latency
+        // QPSK AUDIO (the expected production regime — audio decodes BEFORE its own matching video
+        // reaches the dock), the stored slot value is the PREVIOUS lap's frame: one whole
+        // 256-frame/60fps cycle (~4266.667 ms) earlier than the true match. A naive
+        // `audio_ts - stored_video_ts` lookup then reports an offset off by a full cycle instead of
+        // the true, small (sub-2-second) offset.
+        let cycle_ns = AV_SYNC_RING_CYCLE_NS;
+        let video_ts_true_ns: u64 = 10_000_000_000; // 10s into the recording
+        let audio_ts_ns: u64 = video_ts_true_ns - 1_000_000_000; // audio arrives 1s BEFORE its video
+        let stored_video_ts_ns = video_ts_true_ns - cycle_ns; // stale: previous lap's write
+        let true_offset_ns: i64 = audio_ts_ns as i64 - video_ts_true_ns as i64; // -1_000_000_000
+
+        // Sanity: confirm this scenario actually reproduces the aliasing (naive lookup is off by
+        // more than half a cycle) — otherwise the test wouldn't be exercising the bug at all.
+        let naive = audio_ts_ns as i64 - stored_video_ts_ns as i64;
+        assert!(
+            (naive - true_offset_ns).abs() > (cycle_ns as i64) / 2,
+            "test setup should reproduce the aliasing: naive={naive} true={true_offset_ns}"
+        );
+
+        let resolved = resolve_ring_lap_offset_ns(audio_ts_ns, stored_video_ts_ns, cycle_ns);
+        assert_eq!(resolved, true_offset_ns);
+    }
+
+    #[test]
+    fn resolve_ring_lap_offset_handles_video_leading_audio_too() {
+        // The general case cuts both ways: when video arrives BEFORE its audio (the originally
+        // assumed regime), the ring already holds the correct, same-lap value — no wrap needed.
+        let cycle_ns = AV_SYNC_RING_CYCLE_NS;
+        let video_ts_ns: u64 = 5_000_000_000;
+        let audio_ts_ns: u64 = video_ts_ns + 300_000_000; // audio 300ms AFTER video (video leads)
+        let resolved = resolve_ring_lap_offset_ns(audio_ts_ns, video_ts_ns, cycle_ns);
+        assert_eq!(resolved, 300_000_000);
+    }
+
+    #[test]
+    fn smoothed_offset_ns_rejects_a_single_false_crc4_blip() {
+        // #398 review MEDIUM finding: a lone false CRC-4 accept must not move the displayed number
+        // to garbage. Feed a tight cluster of "real" samples around +300ms, then one wild false
+        // blip; the median must stay near the real cluster, not jump to the blip.
+        let mut history = VecDeque::new();
+        let window_ns = 1_000_000_000; // 1s
+        let mut last = 0i64;
+        for i in 0..9u64 {
+            last = smoothed_offset_ns(&mut history, i * 100_000_000, 300_000_000, window_ns);
+        }
+        assert_eq!(last, 300_000_000, "clean cluster should be exact");
+
+        // One wild false decode arrives amid the real cluster.
+        last = smoothed_offset_ns(&mut history, 900_000_000, -3_000_000_000, window_ns);
+        assert!(
+            (last - 300_000_000).abs() < 50_000_000,
+            "a single false blip moved the smoothed offset to {last}, expected near +300ms"
+        );
+    }
+
+    #[test]
+    fn smoothed_offset_ns_prunes_samples_outside_the_window() {
+        let mut history = VecDeque::new();
+        let window_ns = 1_000_000_000; // 1s
+        smoothed_offset_ns(&mut history, 0, 1_000_000_000, window_ns); // ancient false blip
+        let last = smoothed_offset_ns(&mut history, 2_000_000_000, 300_000_000, window_ns);
+        // The ancient sample (2s old, outside the 1s window) must be pruned before the median is
+        // taken, else a stale value could keep polluting the display forever.
+        assert_eq!(last, 300_000_000);
+        assert_eq!(history.len(), 1, "stale sample should have been pruned");
     }
 }
