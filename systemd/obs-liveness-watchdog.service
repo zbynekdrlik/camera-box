@@ -1,0 +1,17 @@
+[Unit]
+# broadcast-OBS liveness/wedge watchdog (#391). ONE measure -> decide -> alert pass.
+# SHIPS DISABLED — installed/enabled/live-verified by the supervisor only. See the README.
+Description=camera-box broadcast-OBS liveness watchdog (#391) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/obs-liveness-watchdog.sh
+# The watchdog opens OBS WebSocket connections on both boxes; give it room but never hang the timer.
+TimeoutStartSec=60
+# Credentials (strih OBS WS pw; stream is no-auth) come from the user environment, NOT this unit —
+# set them in ~/.config/environment.d/ or an EnvironmentFile if needed:
+#   Environment=OBS_PASSWORD_STRIH=...   (NOT committed)
+# Locate the obs-watchdog-gate Rust binary (built by CI, default features, no probe deps):
+#   Environment=PROBE_BIN_DIR=/path/to/downloaded/probe-tools-linux-amd64

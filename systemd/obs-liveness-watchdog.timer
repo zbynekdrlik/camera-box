@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #391 broadcast-OBS liveness watchdog every ~2 min. The 2-consecutive-confirmation
+# logic in the watchdog means a wedge is alerted ~2-4 min after it starts — closing the gap that
+# let the real incident (stream OBS wedged, obs64 pegged ~168% CPU) go undetected for ~25 HOURS.
+# SHIPS DISABLED — enabled/live-verified by the supervisor only. See the README.
+Description=Run the camera-box broadcast-OBS liveness watchdog every ~2 min (#391)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
