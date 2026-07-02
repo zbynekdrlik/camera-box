@@ -4932,6 +4932,129 @@ mod tests {
         );
     }
 
+    /// #376 — build a synthetic optical-window recording of `total` frames where frame 0 and frame
+    /// `total-1` are ALWAYS optical (so the optical span is exactly [0, total-1], `span_frames ==
+    /// total`), every interior frame index in `undecodable` carries NO payload at all (excluded from
+    /// the burn window, counted as OPTICAL-UNDECODABLE), and every other frame carries BOTH the cam2
+    /// optical paint and a strictly-increasing strih burn id (so the burn-id contiguity is trivially
+    /// clean under the PerRenderTick gap-ignore rule — see `node_verdict_colour_fail_is_a_hard_fail_364`
+    /// for the same increasing-id-with-gaps pattern). This isolates the [`OPTICAL_UNDECODABLE_RATE_MAX`]
+    /// gate: contiguity is always TRUE here, so `is_zero()` differences come ONLY from the optical rate.
+    fn optical_run_with_undecodable(
+        total: usize,
+        undecodable: &std::collections::HashSet<usize>,
+    ) -> Vec<RecordingFrame> {
+        (0..total)
+            .map(|i| {
+                if i != 0 && i != total - 1 && undecodable.contains(&i) {
+                    frame(i as u64, &[])
+                } else {
+                    frame(
+                        i as u64,
+                        &[(CAM2, 100 + i as u32), (STRIH, 2000 + i as u32)],
+                    )
+                }
+            })
+            .collect()
+    }
+
+    fn node_verdict_for_optical_run(stream: &[RecordingFrame]) -> super::NodeVerdict {
+        let tmp = tempfile::tempdir().unwrap();
+        node_verdict(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0),
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn optical_undecodable_within_the_moire_floor_passes_the_gate_376() {
+        // #376 — the real measured residual (run 354003, post-#363 decoder fix): 22/8999 = 0.2445%
+        // of the optical span still fails the cam2 dual-QR read (a soft/mottled RIGHT QR half with
+        // heavy diagonal moiré — a rig optical-physics floor, not a decoder or chain defect; the
+        // user's explicit call — see the [`OPTICAL_UNDECODABLE_RATE_MAX`] doc). Mirror it at scale:
+        // 9000 total frames, 22 interior frames with no optical paint (undecodable), the rest clean.
+        let undecodable: std::collections::HashSet<usize> = (1..=22).collect();
+        let stream = optical_run_with_undecodable(9000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 22, "{:?}", v.contiguity);
+        assert_eq!(v.optical_span_frames, 9000, "{:?}", v.contiguity);
+        assert!(
+            v.contiguity.is_contiguous(),
+            "the burn-id sequence is unaffected by the excluded optical holes (gap-ignore): {:?}",
+            v.contiguity
+        );
+        // BEFORE #376 this asserted false (the old `optical_undecodable == 0` hard gate FAILED any
+        // non-zero count). The calibrated floor now PASSES a residual within the rig's proven moiré
+        // physics — this is the RED→GREEN line: it fails against the pre-#376 `== 0` gate and passes
+        // against the calibrated rate gate.
+        assert!(
+            v.is_zero(),
+            "a 0.244% optical-undecodable residual is within the calibrated moiré floor and must \
+             PASS the #376 gate: {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn optical_undecodable_at_the_calibrated_ceiling_still_passes_376() {
+        // #376 boundary: a rate EXACTLY at OPTICAL_UNDECODABLE_RATE_MAX (0.5%) must still pass — the
+        // gate is `<=`, not `<`. 5 undecodable / 1000 total = exactly 0.005.
+        let undecodable: std::collections::HashSet<usize> = (1..=5).collect();
+        let stream = optical_run_with_undecodable(1000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 5, "{:?}", v.contiguity);
+        assert_eq!(v.optical_span_frames, 1000, "{:?}", v.contiguity);
+        assert!(
+            v.is_zero(),
+            "a rate exactly AT the calibrated ceiling (0.5%) must still pass (<=, not <): {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn optical_undecodable_just_above_the_calibrated_ceiling_fails_376() {
+        // #376 boundary: one frame past the ceiling (6/1000 = 0.6%) must FAIL — the calibration
+        // tolerates the measured moiré floor, never a rate genuinely above it.
+        let undecodable: std::collections::HashSet<usize> = (1..=6).collect();
+        let stream = optical_run_with_undecodable(1000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 6, "{:?}", v.contiguity);
+        assert_eq!(v.optical_span_frames, 1000, "{:?}", v.contiguity);
+        assert!(
+            !v.is_zero(),
+            "a rate just above the calibrated ceiling (0.6%) must still FAIL: {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn optical_undecodable_materially_above_the_floor_still_fails_376() {
+        // #376 strict-gate stance (the user's explicit condition on the calibration): a REAL optical
+        // dropout — qualitatively different from the moiré floor, e.g. the #216 slow-shutter ~175 s
+        // gap — is far above the calibrated ceiling and MUST still fail. 200/1000 = 20%, two orders
+        // of magnitude above the 0.5% floor.
+        let undecodable: std::collections::HashSet<usize> = (1..=200).collect();
+        let stream = optical_run_with_undecodable(1000, &undecodable);
+        let v = node_verdict_for_optical_run(&stream);
+        assert_eq!(v.optical_undecodable, 200, "{:?}", v.contiguity);
+        assert!(
+            !v.is_zero(),
+            "a real optical dropout (20%) must FAIL — the calibration never masks genuine loss: {:?}",
+            v.contiguity
+        );
+    }
+
     #[test]
     fn collapsed_optical_span_fails_the_headline_duration_gate_373() {
         // #373 — the live failure shape: the cam2 optical read decoded only a SMALL early cluster
