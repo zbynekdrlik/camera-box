@@ -1458,6 +1458,10 @@ impl ReleaseCadence {
     /// capture stamps, OLDEST FIRST (single NDI source ⇒ monotonic); presented/dropped stamps
     /// are removed from it. `reserve_ms` is the per-source held latency; `interval_ns` the
     /// shared frame interval; `wall_now_ns` this tick's DanteSync wall instant.
+    ///
+    /// The wall clock is consulted ONLY to acquire the lock and to detect drift beyond
+    /// [`Self::relock_drift_ns`]; the steady-state release keys on the LOCKED boundary, so the
+    /// ±2 ms render-tick slew has no threshold to race (the pre-#401 churn source).
     pub fn tick(
         &mut self,
         wall_now_ns: u64,
@@ -1465,31 +1469,90 @@ impl ReleaseCadence {
         interval_ns: u64,
         queue: &mut std::collections::VecDeque<u64>,
     ) -> CadenceOutcome {
-        // PRE-#401 SEMANTICS (the stub the RED tests fail against): re-derive the deadline
-        // from the wall clock this tick and present the newest due frame, silently dropping
-        // the older due ones — a faithful model of the C release this mirror replaces.
-        let _ = interval_ns;
-        let present_ts = genlock_present_ts_reserve(wall_now_ns, reserve_ms);
-        let due = queue.iter().take_while(|&&ts| ts <= present_ts).count();
-        if due == 0 {
+        let deadline = genlock_present_ts_reserve(wall_now_ns, reserve_ms);
+        let hold = |late: bool| CadenceOutcome {
+            presented: None,
+            dropped: Vec::new(),
+            late_hold: late,
+            relocked: false,
+        };
+
+        let Some(boundary) = self.locked_next_boundary_ns else {
+            // ACQUIRE: first frame due by the wall deadline locks the cadence. Jump to the
+            // newest due (startup backlog is stale by definition), counting the older ones.
+            let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
+            if due == 0 {
+                return hold(false);
+            }
+            let mut dropped = Vec::with_capacity(due - 1);
+            for _ in 0..due - 1 {
+                dropped.push(queue.pop_front().expect("due prefix"));
+            }
+            let presented = queue.pop_front().expect("due frame");
+            self.locked_next_boundary_ns = Some(presented + interval_ns);
             return CadenceOutcome {
-                presented: None,
-                dropped: Vec::new(),
+                presented: Some(presented),
+                dropped,
                 late_hold: false,
                 relocked: false,
             };
+        };
+
+        // DRIFT GUARD: the cadence lags the live edge past the relock threshold (a stall's
+        // backlog just landed, or the stream jumped). Re-lock to the newest due frame,
+        // counting every jumped frame — the catch-up keeps the IMAG latency contract and the
+        // drop is VISIBLE (the pre-#401 release erased silently).
+        if deadline > boundary.saturating_add(Self::relock_drift_ns(interval_ns)) {
+            let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
+            if due == 0 {
+                // Long-overdue but nothing arrived to jump to — upstream is silent. Hold at
+                // the frozen boundary (late) until frames return, then this branch re-locks.
+                return hold(true);
+            }
+            let mut dropped = Vec::with_capacity(due - 1);
+            for _ in 0..due - 1 {
+                dropped.push(queue.pop_front().expect("due prefix"));
+            }
+            let presented = queue.pop_front().expect("due frame");
+            self.locked_next_boundary_ns = Some(presented + interval_ns);
+            return CadenceOutcome {
+                presented: Some(presented),
+                dropped,
+                late_hold: false,
+                relocked: true,
+            };
         }
-        let mut dropped = Vec::with_capacity(due - 1);
-        for _ in 0..due - 1 {
-            dropped.push(queue.pop_front().expect("due prefix"));
+
+        // STEADY: release the newest frame matured by the LOCKED boundary (exactly one in
+        // steady state). An older matured frame here is a late arrival whose slot already
+        // passed — dropped and COUNTED (never silent). The boundary re-anchors to the
+        // presented stamp so small stamp jitter cannot accumulate.
+        let matured = queue.iter().take_while(|&&ts| ts <= boundary).count();
+        if matured == 0 {
+            // Not yet arrived. Late only if the wall says it should have been here (its
+            // boundary aged past the reserve); early otherwise (benign).
+            return hold(deadline >= boundary);
         }
-        let presented = queue.pop_front();
+        let mut dropped = Vec::with_capacity(matured - 1);
+        for _ in 0..matured - 1 {
+            dropped.push(queue.pop_front().expect("matured prefix"));
+        }
+        let presented = queue.pop_front().expect("matured frame");
+        self.locked_next_boundary_ns = Some(presented + interval_ns);
         CadenceOutcome {
-            presented,
+            presented: Some(presented),
             dropped,
             late_hold: false,
             relocked: false,
         }
+    }
+
+    /// Drift beyond which the cadence re-locks to the live edge: two intervals plus a
+    /// quarter-interval margin. Small enough that a genuine stall catches up within ~2
+    /// frames of latency; large enough that the steady-state offset (`2·interval −
+    /// reserve ± slew` at lock, ≈32.6 ms worst-case at the 3 ms floor) never trips it.
+    fn relock_drift_ns(interval_ns: u64) -> u64 {
+        2 * interval_ns + interval_ns / 4
     }
 }
 
@@ -1522,8 +1585,15 @@ mod tests {
         for k in 0..n_ticks {
             let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
             let wall = (BASE + k * I).saturating_add_signed(slew);
-            // Frames whose arrival instant (stamp + skew) has passed enter the queue.
-            while next_arrival < n_frames && BASE + next_arrival * I + skew_ns <= wall {
+            // Frames whose arrival instant (stamp + skew + per-frame jitter) has passed
+            // enter the queue. The deterministic ±4 ms jitter models real NDI delivery —
+            // WITHOUT it the pre-#401 release only churns at grid-aligned reserves; with
+            // it the live curve reproduces (17–50% silent loss at 3/8/16/33 ms).
+            while next_arrival < n_frames
+                && BASE + next_arrival * I + skew_ns + ((next_arrival * 2_654_435_761) % 8_000_001)
+                    - 4_000_000
+                    <= wall
+            {
                 queue.push_back(BASE + next_arrival * I);
                 next_arrival += 1;
             }
