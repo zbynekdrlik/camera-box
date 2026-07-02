@@ -7,15 +7,22 @@
 # was observed on the #411 merge, likely a probe thread/sync_channel
 # deadlock in the --all-features suite).
 #
-# period = "60s", terminate-after = 5 -> a single test is killed after 5
-# minutes. The slowest real sleep/wait in this suite is low hundreds of
-# milliseconds (see thread::sleep call sites across src/**/*.rs and
-# tests/*.rs), and the whole --all-features suite baseline is ~10.5 minutes
-# total across many tests — so 5 minutes for ONE test is generous headroom
-# against a false-kill of a legitimately slow test, while still catching a
-# real hang in well under the job's 25min timeout-minutes cap.
+# period = "60s", terminate-after = 18 -> a single test is killed after 18
+# minutes. CALIBRATION NOTE (#423): the earlier 5-min bound FALSE-KILLED a
+# legitimately CPU-heavy test — `probe::recording::tests::
+# parallel_decode_matches_single_threaded_result_exactly` genuinely runs
+# >300s (parallel-vs-single-threaded QR decode of real 1080p fixtures; the
+# `burn_fixture_decode` / `genlock_manifest` / `recording_latency_decode`
+# real-fixture tests are the other >60s SLOW ones). These are heavy CPU, NOT
+# a sleep/hang, so the bound must clear them. The whole --all-features
+# baseline job is ~10.5 min, so no single legit test exceeds ~10 min; 18 min
+# gives comfortable headroom against a false-kill while still NAMING a true
+# runaway (the observed 44-min hang) well under the job's 25-min
+# `timeout-minutes` cap (which is itself the hard backstop). The real fix —
+# making `parallel_decode` fast/bounded — is tracked in #423; this bound
+# stops it blocking CI meanwhile.
 [profile.default]
-slow-timeout = { period = "60s", terminate-after = 5 }
+slow-timeout = { period = "60s", terminate-after = 18 }
 
 # #416 follow-up (see #423): unlike `cargo test` (which runs one test BINARY at a
 # time, parallelizing only the tests within it), nextest schedules tests from ALL
