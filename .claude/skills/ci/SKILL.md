@@ -154,6 +154,22 @@ commits), so two things bite here repeatedly:
    Bare `[no-test]` (no reason) is rejected outright. Every bypass is logged to
    `~/devel/airuleset/audits/no-test-skips.log`.
 
+## dev→main PRs can get auto-opened + auto-merged by something OTHER than you (#423 observation)
+
+While working #423, PRs #424 and #425 (dev→main, "Closes #N", auto-merged within seconds of the
+triggering `dev` CI run going green) appeared WITHOUT any `gh pr create`/`gh pr merge` call from
+that work session. No `.github/workflows/*` file creates or merges cross-branch PRs (checked —
+`release.yml` only triggers on tag pushes), and no crontab/systemd-timer on dev1 was found either.
+The mechanism is real but its source is unidentified — something (an external service, another
+concurrent session/automation using the same `zbynekdrlik` GitHub auth) watches `dev`'s CI and
+auto-merges when green, sometimes within ~15-30s of the run finishing, sometimes not at all (a
+docs-only follow-up commit sat unmerged for 3+ minutes with no PR before this session opened one
+manually). **Before assuming you must create the dev→main PR yourself: `gh pr list --state open`
+and `gh pr list --state all --limit 5` first** — you may already be looking at a PR (or a just-merged
+one) you didn't create. If none exists after a short wait, open and merge it yourself as normal
+(`pr-merge-policy.md` default auto-merge still applies either way — this is not a workflow file to
+edit, just a "check before you duplicate" gotcha).
+
 ## Adding a default-features binary that needs `serde_json` (#365 gotcha)
 
 `serde_json` was originally optional (probe-only). If you add a `[[bin]]` entry that must run on
