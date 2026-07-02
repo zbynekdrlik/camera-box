@@ -28,6 +28,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "quirc.h"
 #include "sync-test-output.hpp"
 #include "peak-finder.hpp"
+#include "camera-box-qr.hpp"
 
 #include "plugin-macros.generated.h"
 
@@ -131,6 +132,18 @@ struct sync_test_output
 
 	uint32_t f_last = 0;
 	uint32_t c_last = 0;
+
+	/* #398 Option A: camera-box's own dual-QR video path. Decoupled from norihiro's
+	 * `sync_indices` list (that mechanism assumes a video report per DETECTED marker cycle,
+	 * roughly every `q_ms*3` — our QR reports every SINGLE painted frame, 60/s, which would fill
+	 * and evict the 128-entry list long before a ~3-5 s-cadence audio marker arrives). Instead: a
+	 * direct ring indexed by the frame_id low byte (the SAME value the audio index carries, see
+	 * `frame_id_to_index` in src/qpsk_marker.rs), overwritten every ~4.3 s (256 frames @ 60 fps) —
+	 * safe because the round-trip from "frame painted" to "matching audio decoded" is far under a
+	 * second, so a slot is never stale by the time its audio marker arrives. */
+	uint64_t cb_video_ts_ns[256] = {0};
+	bool cb_video_valid[256] = {false};
+	bool cb_mode_active = false;
 
 	~sync_test_output()
 	{
@@ -395,6 +408,48 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video
 			continue;
 
 		data.payload[QUIRC_MAX_PAYLOAD - 1] = 0;
+
+		/* #398 Option A: try camera-box's own dual-QR format FIRST. It carries frame identity
+		 * (frame_id), not audio params, so on success we record the video timestamp directly by
+		 * frame_id low byte and set the FIXED rig audio params — then move to the next QR code
+		 * without touching norihiro's own decode/marker-window state at all (his phone-based
+		 * method, still fully supported below, is untouched). */
+		CameraBoxQrData cb;
+		if (decode_camera_box_qr((char *)data.payload, &cb)) {
+			for (int j = 0; j < 4; j++) {
+				st->qr_corners[j].x = code.corners[j].x * st->qr_step;
+				st->qr_corners[j].y = code.corners[j].y * st->qr_step;
+			}
+			signal_qrcode_found(st->context, frame->timestamp - st->start_ts, st->qr_corners);
+
+			uint8_t low = (uint8_t)(cb.frame_id & 0xFFu);
+			uint64_t video_ts = frame->timestamp - st->start_ts;
+			{
+				// Same mutex the audio thread locks to READ these — the video ring + f/c/q_ms
+				// are written here (video thread) and read on the audio thread; both sides must
+				// take the lock or the read is a data race.
+				std::unique_lock<std::mutex> lock(st->mutex);
+				st->cb_video_ts_ns[low] = video_ts;
+				st->cb_video_valid[low] = true;
+				st->cb_mode_active = true;
+				st->f = CAMERA_BOX_AUDIO_F_HZ;
+				st->c = CAMERA_BOX_AUDIO_C;
+				st->q_ms = CAMERA_BOX_AUDIO_Q_MS;
+			}
+
+			// Reuse the existing dock-UI plumbing (video index / missed% / frequency labels) —
+			// `frame_id & 0xFF` increments by exactly 1 every frame, same shape the existing
+			// `missed_markers()` UI logic already expects from norihiro's own `i=` field.
+			st->qr_data.f = CAMERA_BOX_AUDIO_F_HZ;
+			st->qr_data.c = CAMERA_BOX_AUDIO_C;
+			st->qr_data.q_ms = CAMERA_BOX_AUDIO_Q_MS;
+			st->qr_data.index = low;
+			st->qr_data.index_max = 256;
+			st->qr_data.valid = true;
+			video_marker_found(st, frame->timestamp, 1.0f);
+			continue;
+		}
+
 		if (!st->qr_data.decode((char *)data.payload))
 			continue;
 
@@ -635,21 +690,47 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 		return;
 	}
 
+	const uint8_t idx8 = (uint8_t)(index >> 4);
+	const uint64_t audio_ts = ts - st->start_ts;
+
 	uint8_t stack[64];
 	struct calldata cd;
 	calldata_init_fixed(&cd, stack, sizeof(stack));
 	auto *sh = obs_output_get_signal_handler(st->context);
 
 	struct audio_marker_found_s data;
-	data.timestamp = ts - st->start_ts;
-	data.index = index >> 4;
+	data.timestamp = audio_ts;
+	data.index = idx8;
 	data.score = 0.0f;
-	data.index_max = identify_audio_index_max(st, index >> 4);
+	data.index_max = identify_audio_index_max(st, idx8);
 
 	calldata_set_ptr(&cd, "data", &data);
 	signal_handler_signal(sh, "audio_marker_found", &cd);
 
-	sync_index_found(st, index >> 4, ts - st->start_ts, false, data.index_max);
+	sync_index_found(st, idx8, audio_ts, false, data.index_max);
+
+	/* #398 Option A: direct camera-box video-ring lookup, independent of the list-based
+	 * `sync_index_found` above (which also gets fed our index — see `video_marker_found` — but
+	 * per the digest in the struct comment its 128-entry window isn't the RELIABLE path at our
+	 * frame's reporting rate). `idx8` is exactly the frame_id low byte the emitter encoded
+	 * (`frame_id_to_index` in src/qpsk_marker.rs) — a direct hit means we know which video frame
+	 * was on screen when this marker sounded. */
+	bool cb_active, cb_valid;
+	uint64_t cb_video_ts;
+	{
+		std::unique_lock<std::mutex> lock(st->mutex);
+		cb_active = st->cb_mode_active;
+		cb_valid = st->cb_video_valid[idx8];
+		cb_video_ts = st->cb_video_ts_ns[idx8];
+	}
+	if (cb_active && cb_valid) {
+		struct sync_index si;
+		si.index = idx8;
+		si.video_ts = cb_video_ts;
+		si.audio_ts = audio_ts;
+		si.index_max = 256;
+		signal_sync_found(st->context, &si);
+	}
 }
 
 static inline void st_raw_audio_test_preamble(struct sync_test_output *st, uint64_t ts, float v0)
