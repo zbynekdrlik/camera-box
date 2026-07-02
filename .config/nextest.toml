@@ -16,3 +16,27 @@
 # real hang in well under the job's 25min timeout-minutes cap.
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# #416 follow-up (see #423): unlike `cargo test` (which runs one test BINARY at a
+# time, parallelizing only the tests within it), nextest schedules tests from ALL
+# binaries concurrently against one global thread-pool. This crate's
+# probe::recording::tests::parallel_decode_matches_single_threaded_result_exactly
+# spawns its OWN internal worker-thread pool (up to 4 OS threads, decode_stream_parallel)
+# to do CPU-heavy QR-image decode work. Under nextest's cross-binary concurrency it was
+# OBSERVED (2/2 PR CI runs for #416, both terminated at exactly the 300s slow-timeout
+# while genlock_manifest + recording_latency_decode's other CPU-heavy tests were ALSO
+# running concurrently) to be starved by CPU oversubscription on the runner, not
+# necessarily deadlocked — under plain `cargo test`'s per-binary-serial model this
+# contention pattern could not occur, which is consistent with the original issue's
+# "did not reproduce on rerun" observation.
+#
+# `threads-required = "num-cpus"` reserves the ENTIRE thread pool for this test's
+# duration, so nextest will not schedule other CPU-heavy tests to run at the same
+# time as this one — removing the oversubscription without loosening the 5-minute
+# slow-timeout (a genuine deadlock in this test is still caught and named just as
+# fast, now running in isolation). See #423 for the follow-up to confirm this
+# resolves it and to root-cause whether a real race also exists independent of
+# scheduling contention.
+[[profile.default.overrides]]
+filter = 'test(parallel_decode_matches_single_threaded_result_exactly)'
+threads-required = "num-cpus"
