@@ -507,6 +507,18 @@ pub fn playout_frame_id(
     fid.saturating_add(adv as u32)
 }
 
+/// #398 LIVE dock pairing: the QPSK marker's 8-bit `index` IS the dual-QR `frame_id`'s low byte at
+/// playout time — no side channel needed. Offline (`recording-verdict --av-sync`) pairs via the
+/// emit-log CSV's own `(index, frame_id)` rows (`av_offset_candidates`, index-derivation-agnostic —
+/// unaffected by this choice); a LIVE receiver (the OBS dock) has no CSV, so the audio index must be
+/// a value the video side can independently reproduce. Emitting `frame_id & 0xFF` lets the dock's
+/// video decode (our dual-QR carries `frame_id` directly) look up "which recent frame had this low
+/// byte" with zero extra plumbing. Safe against wrap because 256 low-byte values ≈ 4.3 s @ 60 fps
+/// vastly exceeds the video→decode round-trip (~hundreds of ms).
+pub fn frame_id_to_index(_frame_id: u32) -> u8 {
+    todo!("#398: derive the QPSK index from the dual-QR frame_id's low byte")
+}
+
 /// `start_time` of a stream as reported by ffprobe (`-show_entries stream=start_time`), seconds.
 /// A missing/`N/A`/unparsable value is 0.0 (streams starting at the container origin). Used to put
 /// the recording's video and audio timelines on a COMMON origin before pairing — a non-zero
@@ -629,6 +641,18 @@ mod tests {
             playout_frame_id(u32::MAX - 2, 48_000, 48_000, 60, 1),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn frame_id_to_index_is_the_low_byte() {
+        // #398: the LIVE dock derives "which video frame" purely from the audio index, so the
+        // mapping must be the trivial, receiver-reproducible one — no hidden rounding/scaling.
+        assert_eq!(frame_id_to_index(0), 0);
+        assert_eq!(frame_id_to_index(255), 255);
+        assert_eq!(frame_id_to_index(256), 0); // wraps exactly at 256
+        assert_eq!(frame_id_to_index(0x1FF), 0xFF);
+        assert_eq!(frame_id_to_index(0x100), 0);
+        assert_eq!(frame_id_to_index(u32::MAX), 0xFF);
     }
 
     #[test]
