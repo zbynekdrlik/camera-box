@@ -1402,9 +1402,278 @@ impl BufferPool {
     }
 }
 
+// ---- #401 phase-locked release cadence (mirror of the C ts-align fix) -----------------
+
+/// One render tick's outcome from [`ReleaseCadence::tick`] — what the FIFO did, with every
+/// discarded frame VISIBLE (the pre-#401 release silently erased stale due frames with no
+/// counter, which is how run 7020001 lost 8,510 ids without a single audit signal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CadenceOutcome {
+    /// The capture stamp presented this tick (`None` ⇒ HOLD: repeat the current frame).
+    pub presented: Option<u64>,
+    /// Frames discarded this tick (stale catch-up at lock/relock) — the honest `dropped_due`.
+    pub dropped: Vec<u64>,
+    /// HOLD because the matured boundary's frame has not ARRIVED yet (late/lost upstream) —
+    /// distinct from the benign not-yet-due hold so the audit can separate them.
+    pub late_hold: bool,
+    /// This tick re-locked the cadence (stall/step recovery jump) — counts a relock event.
+    pub relocked: bool,
+}
+
+/// #401 — per-source PHASE-LOCKED release cadence for the ts-align genlock FIFO.
+///
+/// WHY: the pre-#401 release re-derived the deadline from the wall clock EVERY tick
+/// (`present_ts = wall_now − reserve`) and presented the NEWEST due frame, silently erasing
+/// the older due ones. With render ticks and capture stamps on the same DanteSync 60 Hz grid,
+/// a reserve near a multiple of the frame interval puts the deadline ON a stamp: the ±2 ms
+/// render-tick slew then flips that frame due/not-due tick-to-tick — alternating HOLD +
+/// silent DROP. Measured live (2026-07-02, `NDI cam5`): 43.9 distinct fps at 16/33 ms,
+/// 57.7 at best-case 25 ms — no reserve value reaches 60, and no counter showed the loss.
+///
+/// FIX: derive the deadline from a LOCKED boundary that advances exactly one interval per
+/// render tick — slew-immune by construction (no per-tick wall comparison to race). The wall
+/// clock is consulted only to (a) acquire the initial lock and (b) detect DRIFT beyond
+/// `interval + slack`, where the cadence re-locks (stall catch-up keeps the IMAG latency
+/// contract) and counts the jumped frames HONESTLY in [`CadenceOutcome::dropped`].
+///
+/// SYNC (#136): every source stamps on the same shared grid, so locked boundary sequences
+/// are grid-aligned across sources; steady-state multi-source in-sync is preserved.
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseCadence {
+    /// The boundary (capture-stamp instant) the NEXT tick will mature. `None` ⇒ unlocked.
+    locked_next_boundary_ns: Option<u64>,
+}
+
+impl ReleaseCadence {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True while the cadence has a lock (diagnostic).
+    pub fn is_locked(&self) -> bool {
+        self.locked_next_boundary_ns.is_some()
+    }
+
+    /// Decide one render tick. `queue` holds the source's arrived-but-unpresented frames'
+    /// capture stamps, OLDEST FIRST (single NDI source ⇒ monotonic); presented/dropped stamps
+    /// are removed from it. `reserve_ms` is the per-source held latency; `interval_ns` the
+    /// shared frame interval; `wall_now_ns` this tick's DanteSync wall instant.
+    pub fn tick(
+        &mut self,
+        wall_now_ns: u64,
+        reserve_ms: u32,
+        interval_ns: u64,
+        queue: &mut std::collections::VecDeque<u64>,
+    ) -> CadenceOutcome {
+        // PRE-#401 SEMANTICS (the stub the RED tests fail against): re-derive the deadline
+        // from the wall clock this tick and present the newest due frame, silently dropping
+        // the older due ones — a faithful model of the C release this mirror replaces.
+        let _ = interval_ns;
+        let present_ts = genlock_present_ts_reserve(wall_now_ns, reserve_ms);
+        let due = queue.iter().take_while(|&&ts| ts <= present_ts).count();
+        if due == 0 {
+            return CadenceOutcome {
+                presented: None,
+                dropped: Vec::new(),
+                late_hold: false,
+                relocked: false,
+            };
+        }
+        let mut dropped = Vec::with_capacity(due - 1);
+        for _ in 0..due - 1 {
+            dropped.push(queue.pop_front().expect("due prefix"));
+        }
+        let presented = queue.pop_front();
+        CadenceOutcome {
+            presented,
+            dropped,
+            late_hold: false,
+            relocked: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #401 phase-locked release cadence ---------------------------------
+
+    /// Drive a [`ReleaseCadence`] through a deterministic rig model: render ticks and
+    /// capture stamps share one 60 Hz grid (DanteSync); the render tick wall time slews
+    /// ±2 ms tick-to-tick (the live slew cap); every frame ARRIVES `skew_ns` after its
+    /// stamp (the measured ~20 ms stamp→arrival pipeline). Returns
+    /// `(presented_stamps, dropped_stamps, late_holds)`.
+    fn run_cadence_sim(
+        reserve_ms: u32,
+        skew_ns: u64,
+        n_frames: u64,
+    ) -> (Vec<u64>, Vec<u64>, usize) {
+        const I: u64 = 16_666_667; // 60 Hz interval
+        const BASE: u64 = 1_000_000_000_000; // arbitrary epoch offset
+        let mut cadence = ReleaseCadence::new();
+        let mut queue: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut next_arrival: u64 = 0; // next frame index to enqueue
+        let mut presented = Vec::new();
+        let mut dropped = Vec::new();
+        let mut late_holds = 0usize;
+        // Enough ticks for every frame to be released well past its arrival.
+        let n_ticks = n_frames + 20;
+        for k in 0..n_ticks {
+            let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
+            let wall = (BASE + k * I).saturating_add_signed(slew);
+            // Frames whose arrival instant (stamp + skew) has passed enter the queue.
+            while next_arrival < n_frames && BASE + next_arrival * I + skew_ns <= wall {
+                queue.push_back(BASE + next_arrival * I);
+                next_arrival += 1;
+            }
+            let out = cadence.tick(wall, reserve_ms, I, &mut queue);
+            if let Some(ts) = out.presented {
+                presented.push(ts);
+            }
+            dropped.extend(out.dropped);
+            if out.late_hold {
+                late_holds += 1;
+            }
+        }
+        (presented, dropped, late_holds)
+    }
+
+    /// #401 REGRESSION LOCK — the measured live failure: at a grid-aligned reserve
+    /// (16 ms ≈ one 60 Hz interval) the pre-#401 per-tick wall-compare release churned
+    /// hold↔drop and delivered only ~44 of 60 distinct fps on `NDI cam5` (and 43.8 at
+    /// 33 ms), silently. The cadence must release EVERY frame EXACTLY ONCE with nothing
+    /// silently dropped, at every reserve the operator can pick.
+    #[test]
+    fn cadence_releases_every_frame_once_at_grid_aligned_reserve() {
+        for reserve_ms in [3u32, 8, 16, 25, 33] {
+            let (presented, dropped, _late) = run_cadence_sim(reserve_ms, 20_000_000, 600);
+            assert_eq!(
+                dropped,
+                Vec::<u64>::new(),
+                "reserve {reserve_ms} ms: steady 60→60 flow must drop NOTHING (pre-#401 \
+                 dropped ~16/s at 16/33 ms — the run-7020001 loss)"
+            );
+            let mut uniq = presented.clone();
+            uniq.dedup();
+            assert_eq!(
+                uniq.len(),
+                600,
+                "reserve {reserve_ms} ms: every one of 600 frames must be presented \
+                 exactly once (got {} distinct of {} presents)",
+                uniq.len(),
+                presented.len()
+            );
+            // Order preserved (a cadence never goes backward).
+            let mut sorted = uniq.clone();
+            sorted.sort_unstable();
+            assert_eq!(uniq, sorted, "reserve {reserve_ms} ms: presentation order");
+        }
+    }
+
+    /// #401 — a genuine upstream STALL must still catch up (the IMAG latency contract):
+    /// after a 30-frame arrival gap the cadence re-locks near the live edge and counts the
+    /// jumped frames HONESTLY in `dropped` (never silently).
+    #[test]
+    fn cadence_relocks_after_stall_and_counts_dropped() {
+        const I: u64 = 16_666_667;
+        const BASE: u64 = 1_000_000_000_000;
+        let mut cadence = ReleaseCadence::new();
+        let mut queue: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut dropped_total = 0usize;
+        let mut relocked = false;
+        // 100 steady frames, then a stall: frames 100..130 all arrive AT ONCE (burst) at
+        // tick 135, then steady again to 200.
+        let mut presented_after_burst = Vec::new();
+        for k in 0..240u64 {
+            let wall = BASE + k * I;
+            let arrive_upto = if k < 100 {
+                k.saturating_sub(1) // steady: frame k-1 arrived (skew ~1 tick)
+            } else if k < 135 {
+                99 // stall — nothing new arrives
+            } else {
+                (k - 1).min(199) // burst at 135 delivers 100..=134-1 at once, then steady
+            };
+            while queue.len() < 200 {
+                let next = queue.back().map(|&t| (t - BASE) / I + 1).unwrap_or(0);
+                if next > arrive_upto {
+                    break;
+                }
+                queue.push_back(BASE + next * I);
+            }
+            let out = cadence.tick(wall, 25, I, &mut queue);
+            dropped_total += out.dropped.len();
+            relocked |= out.relocked;
+            if k >= 135 {
+                if let Some(ts) = out.presented {
+                    presented_after_burst.push(ts);
+                }
+            }
+        }
+        assert!(relocked, "a 35-tick stall+burst must trigger a re-lock");
+        assert!(
+            dropped_total > 0,
+            "catch-up must drop the stale backlog — and COUNT it (silent drops are the \
+             pre-#401 bug)"
+        );
+        // After the burst the cadence rides the live edge again: the last steady frames
+        // present in order.
+        let tail: Vec<u64> = presented_after_burst
+            .iter()
+            .rev()
+            .take(20)
+            .cloned()
+            .collect();
+        let mut tail_sorted = tail.clone();
+        tail_sorted.sort_unstable();
+        tail_sorted.reverse();
+        assert_eq!(tail, tail_sorted, "post-relock presentation stays ordered");
+    }
+
+    /// #401/#136 — two sources locked at DIFFERENT ticks must present the SAME stamp
+    /// sequence afterward (multi-camera in-sync): the lock phase comes from the shared
+    /// stamp grid, not from the lock instant.
+    #[test]
+    fn cadence_multi_source_presents_identical_boundaries() {
+        const I: u64 = 16_666_667;
+        const BASE: u64 = 1_000_000_000_000;
+        let mut a = ReleaseCadence::new();
+        let mut b = ReleaseCadence::new();
+        let mut qa: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut qb: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut pa = Vec::new();
+        let mut pb = Vec::new();
+        for k in 0..200u64 {
+            let wall = BASE + k * I;
+            // Source A delivers from the start; source B's frames only start arriving at
+            // tick 50 (activated later) — same grid, same 20 ms skew.
+            if k >= 1 {
+                qa.push_back(BASE + (k - 1) * I);
+            }
+            if k >= 50 {
+                qb.push_back(BASE + (k - 1) * I);
+            }
+            if let Some(ts) = a.tick(wall, 25, I, &mut qa).presented {
+                pa.push((k, ts));
+            }
+            if let Some(ts) = b.tick(wall, 25, I, &mut qb).presented {
+                pb.push((k, ts));
+            }
+        }
+        // On every tick where BOTH presented, the stamps must be IDENTICAL (in-sync).
+        let map_a: std::collections::HashMap<u64, u64> = pa.into_iter().collect();
+        let mut both = 0;
+        for (k, ts_b) in pb {
+            if let Some(&ts_a) = map_a.get(&k) {
+                assert_eq!(ts_a, ts_b, "tick {k}: sources must present the same stamp");
+                both += 1;
+            }
+        }
+        assert!(
+            both > 100,
+            "expected a long overlapping steady window, got {both}"
+        );
+    }
 
     // ---- #278 multiview ADAPTIVE budget-based skip --------------------------
     //
