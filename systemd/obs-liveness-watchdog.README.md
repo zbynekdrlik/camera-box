@@ -29,8 +29,7 @@ So this watchdog:
    would be the FIRST unattended-control mechanism on these boxes and interacts with the existing
    AHK auto-respawn watcher on strih (see `.claude/skills/obs-ops` "AHK on strih" — a naive second
    watcher can race a DLL hot-swap or double-launch obs64). That option was intentionally NOT built
-   here; it is a separate, bigger, precedent-setting decision left for the user (see the #391 PR /
-   issue for the tracked follow-up).
+   here; it is a separate, bigger, precedent-setting decision left for the user — tracked as #411.
 
 ## It ships DISABLED by default — on purpose
 
