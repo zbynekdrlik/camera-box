@@ -374,7 +374,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
   if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
     cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
   fi
-  for b in camera-box frame-probe recording-verdict frozen-camera-gate; do
+  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate; do
     if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
       echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
       echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
@@ -388,8 +388,8 @@ else
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
   cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
-  # #365: build the frozen-camera-gate binary (default features — no probe deps, no disk balloon).
-  cargo build --release --bin frozen-camera-gate  # airuleset:build-ok
+  # #365/#405: build the default-feature gate binaries (no probe deps, no disk balloon).
+  cargo build --release --bin frozen-camera-gate --bin render-budget-gate  # airuleset:build-ok
 fi
 
 echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
@@ -590,7 +590,9 @@ echo "[4d/8] #405/#406 render-budget gate — with burns ON + Multiview open, BO
 # source of truth, no threshold duplicated in python.
 RENDER_GATE_BIN="${RENDER_GATE_BIN:-$PROBE_BIN_DIR/render-budget-gate}"
 export RENDER_GATE_BIN
-if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="" \
+# Pass the same OBS_PASSWORD to BOTH boxes: stream currently has no WS auth (empty works), but if it
+# is ever set to match strih (per the shared-password note) an empty here would fail auth → false abort.
+if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:-}" \
     python3 "$HERE/render-budget-gate.py" \
       --box "strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-60}" \
       --box "stream=${STREAM}:${RENDER_TARGET_FPS_STREAM:-30}" \
