@@ -1714,10 +1714,15 @@ mod vendored_source {
         // Anchor on the unique reserve-deadline call; the holds++ must be within the same
         // ts-align block (it follows the present_ts/due computation, before the present path).
         // #269 widened the window: the [3] max-ts scan + the [0]/[2] comments grew the block.
+        // #401 widened it again: the phase-locked release cadence (backward-step branch
+        // inverted to early-return + the UNLOCKED/DRIFT/STEADY cadence with its rationale
+        // comments) moved the benign source-early holds++ deeper into the block — same
+        // counter, same #148 classification, same ts-align block (guarded GREEN by
+        // tests/genlock_release_cadence.rs on default features).
         let anchor = raw
             .find("genlock_present_ts_reserve(wall_now, reserve_ms)")
             .expect("#148/#269 [3]: the ts-align reserve deadline (from hoisted wall_now) is gone — re-locate");
-        let window_end = (anchor + 4000).min(raw.len());
+        let window_end = (anchor + 10000).min(raw.len());
         assert!(
             raw[anchor..window_end].contains("source->genlock_holds++"),
             "{OBS_SOURCE}: #148 — genlock_holds++ is not in the ts-align decision block \
