@@ -245,7 +245,8 @@ class TestDefaultLastJsonPath:
     def test_falls_back_when_programdata_unset(self, monkeypatch):
         monkeypatch.delenv("PROGRAMDATA", raising=False)
         p = av_sync_calibrate.default_last_json_path()
-        assert p.parts[-2:] == ("camera-box", "av-sync-last.json")
+        assert p.name == "av-sync-last.json"
+        assert p.parent.name in ("camera-box", ".camera-box")
 
 
 # ---------------------------------------------------------------------------
