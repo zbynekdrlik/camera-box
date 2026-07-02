@@ -281,6 +281,21 @@ toggle_burn() {
   return $rc
 }
 
+# enforce_strih_ndi_mapping -> set + VERIFY the strih NDI-input→camera mapping (#399) over OBS WS.
+# The mapping is fixed + Claude-owned (never a user question): NDI cam5→CAM1, cam1→CAM3, cam3→CAM4,
+# cam2→CAM2 (the pins in set-ndi-mapping.py). It drifts (recurring bug: two inputs both on CAM4 → a
+# camera shows twice, another missing), and a hot WS rebind does not survive a force-kill relaunch —
+# so rig activation ENFORCES it every time here instead of the operator/agent re-doing it by hand.
+# Fail-loud (non-zero) if it cannot make all 4 distinct.
+enforce_strih_ndi_mapping() {
+  local here rc=0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (4 distinct) over WebSocket:"
+  python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
+    2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
+  return $rc
+}
+
 # print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — ssh to Windows is
 # DENIED so OBS launch goes via the win-* MCP). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
@@ -350,6 +365,9 @@ do_test() {
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
   echo
+  echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct):"
+  enforce_strih_ndi_mapping
+  echo
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
@@ -374,6 +392,9 @@ do_event() {
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
   toggle_burn event
+  echo
+  echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct — correct for broadcast too):"
+  enforce_strih_ndi_mapping
   echo
   print_genlock_relaunch_note event
   echo
