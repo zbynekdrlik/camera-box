@@ -77,5 +77,15 @@ pub mod burn_reconcile;
 // `scripts/frozen-camera-gate.py`; the thin CLI binary lives in `src/bin/frozen-camera-gate.rs`.
 pub mod frozen_camera;
 
+// #391 — broadcast-OBS liveness/wedge verdict (pure decision). Stream OBS was hung
+// "(Not Responding)" ~25h (obs64 pegged ~168% CPU, 16.0% render-lag) with nothing
+// detecting it. This is the strict Tier-0 kernel: GetStats (always available from a
+// dev1 timer over OBS WS) + optional agent/MCP-only process signals (obs64 count /
+// Responding / CPU%) -> HEALTHY / WEDGED-RENDER-LAG / WS-DEAD / FPS-ZERO /
+// OBS-COUNT-WRONG. No probe deps, so it unit-tests Tier-0; the OBS I/O lives in
+// `scripts/obs-liveness-probe.py`; the thin CLI binary lives in
+// `src/bin/obs-watchdog-gate.rs`.
+pub mod obs_watchdog;
+
 #[cfg(feature = "probe")]
 pub mod probe;
