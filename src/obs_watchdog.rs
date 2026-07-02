@@ -119,10 +119,77 @@ const FPS_ZERO_THRESHOLD: f64 = 1.0;
 /// be sampled even when WS is fully dead), then WS reachability, then the wedge signals,
 /// then the fps-stall signal. Non-finite optional numeric inputs are treated as absent
 /// (never silently coerced to a passing value).
-pub fn classify(_sample: ObsHealthSample, _target_fps: f64) -> ObsHealthVerdict {
-    // TODO(#391 RED): real classification not implemented yet — this stub exists only
-    // to prove the test suite below actually exercises the decision (RED before GREEN
-    // per regression-test-first.md's TDD discipline).
+pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
+    // 1. The exactly-one-obs64 invariant — decisive on its own, checked first because it
+    //    can be known even when the WS side is completely dead (0 processes).
+    if let Some(count) = sample.obs64_count {
+        if count != 1 {
+            return ObsHealthVerdict::ObsCountWrong(format!(
+                "obs64 process count = {count} (expected exactly 1)"
+            ));
+        }
+    }
+
+    // 2. WS unreachable this pass — no render telemetry at all.
+    if !sample.ws_reachable {
+        return ObsHealthVerdict::WsDead(
+            "OBS WebSocket unreachable / GetStats did not respond this pass".to_string(),
+        );
+    }
+
+    // 3. Process-level + render-loop wedge signals. Collected together because they are
+    //    all evidence of the SAME underlying condition (the #391 incident showed all
+    //    three at once: Responding=False + pegged CPU + a render-skip spike).
+    let mut wedge_reasons = Vec::new();
+
+    if sample.responding == Some(false) {
+        wedge_reasons.push("obs64 Responding=False (UI/render thread wedged)".to_string());
+    }
+
+    if let Some(cpu) = sample.cpu_percent {
+        if cpu.is_finite() && cpu >= CPU_PEGGED_PERCENT {
+            wedge_reasons.push(format!(
+                "obs64 CPU {cpu:.0}% >= {CPU_PEGGED_PERCENT:.0}% pegged threshold"
+            ));
+        }
+    }
+
+    if let Some(frac) = sample.render_skipped_frac {
+        if frac.is_finite() && frac > RENDER_SKIP_TOLERANCE {
+            wedge_reasons.push(format!(
+                "render skipped {:.1}% of frames in window (> {:.0}% tolerance)",
+                frac * 100.0,
+                RENDER_SKIP_TOLERANCE * 100.0
+            ));
+        }
+    }
+
+    if let Some(ms) = sample.avg_render_time_ms {
+        if target_fps.is_finite() && target_fps > 0.0 && ms.is_finite() {
+            let budget_ms = 1000.0 / target_fps;
+            let hard_budget_ms = budget_ms * RENDER_TIME_BUDGET_MULTIPLIER;
+            if ms > hard_budget_ms {
+                wedge_reasons.push(format!(
+                    "avg render time {ms:.1}ms > {hard_budget_ms:.1}ms ({RENDER_TIME_BUDGET_MULTIPLIER:.0}x frame budget @ {target_fps:.0}fps)"
+                ));
+            }
+        }
+    }
+
+    if !wedge_reasons.is_empty() {
+        return ObsHealthVerdict::WedgedRenderLag(wedge_reasons);
+    }
+
+    // 4. FPS stalled while WS is still answering — a distinct wedge mode (the render
+    //    loop stopped producing frames but the websocket thread is alive).
+    if let Some(fps) = sample.active_fps {
+        if fps.is_finite() && fps < FPS_ZERO_THRESHOLD {
+            return ObsHealthVerdict::FpsZero(format!(
+                "activeFps {fps:.2} < {FPS_ZERO_THRESHOLD:.1} while WS reachable"
+            ));
+        }
+    }
+
     ObsHealthVerdict::Healthy
 }
 
@@ -130,7 +197,11 @@ pub fn classify(_sample: ObsHealthSample, _target_fps: f64) -> ObsHealthVerdict 
 mod tests {
     use super::*;
 
-    fn healthy_ws_only(active_fps: f64, avg_render_time_ms: f64, render_skipped_frac: f64) -> ObsHealthSample {
+    fn healthy_ws_only(
+        active_fps: f64,
+        avg_render_time_ms: f64,
+        render_skipped_frac: f64,
+    ) -> ObsHealthSample {
         ObsHealthSample {
             ws_reachable: true,
             active_fps: Some(active_fps),
@@ -146,14 +217,20 @@ mod tests {
     fn healthy_ws_only_sample_passes() {
         // A dev1 timer with NO process-level (agent/MCP) signals — only GetStats.
         let v = classify(healthy_ws_only(60.0, 11.3, 0.003), 60.0);
-        assert!(v.is_healthy(), "healthy 60fps WS-only sample should pass, got {v:?}");
+        assert!(
+            v.is_healthy(),
+            "healthy 60fps WS-only sample should pass, got {v:?}"
+        );
         assert_eq!(v.label(), "HEALTHY");
     }
 
     #[test]
     fn healthy_30fps_stream_target_passes() {
         let v = classify(healthy_ws_only(30.0, 1.4, 0.0), 30.0);
-        assert!(v.is_healthy(), "healthy 30fps sample should pass, got {v:?}");
+        assert!(
+            v.is_healthy(),
+            "healthy 30fps sample should pass, got {v:?}"
+        );
     }
 
     #[test]
@@ -177,7 +254,9 @@ mod tests {
                 assert!(reasons.iter().any(|r| r.contains("CPU")));
                 assert!(reasons.iter().any(|r| r.contains("render skipped")));
             }
-            other => panic!("real #391 incident sample MUST classify WEDGED-RENDER-LAG, got {other:?}"),
+            other => {
+                panic!("real #391 incident sample MUST classify WEDGED-RENDER-LAG, got {other:?}")
+            }
         }
         assert_eq!(v.label(), "WEDGED-RENDER-LAG");
     }
@@ -261,24 +340,42 @@ mod tests {
     #[test]
     fn cpu_just_under_threshold_passes_and_just_over_fails() {
         let under = classify(
-            ObsHealthSample { cpu_percent: Some(119.9), ..healthy_ws_only(60.0, 10.0, 0.0) },
+            ObsHealthSample {
+                cpu_percent: Some(119.9),
+                ..healthy_ws_only(60.0, 10.0, 0.0)
+            },
             60.0,
         );
-        assert!(under.is_healthy(), "119.9% CPU (< 120% threshold) should pass, got {under:?}");
+        assert!(
+            under.is_healthy(),
+            "119.9% CPU (< 120% threshold) should pass, got {under:?}"
+        );
 
         let over = classify(
-            ObsHealthSample { cpu_percent: Some(120.1), ..healthy_ws_only(60.0, 10.0, 0.0) },
+            ObsHealthSample {
+                cpu_percent: Some(120.1),
+                ..healthy_ws_only(60.0, 10.0, 0.0)
+            },
             60.0,
         );
-        assert!(!over.is_healthy(), "120.1% CPU (>= 120% threshold) must fail");
+        assert!(
+            !over.is_healthy(),
+            "120.1% CPU (>= 120% threshold) must fail"
+        );
     }
 
     #[test]
     fn render_skip_just_over_tolerance_fails_and_just_under_passes() {
         let over = classify(healthy_ws_only(60.0, 10.0, 0.06), 60.0);
-        assert!(!over.is_healthy(), "6% render-skip (> 5% tolerance) must fail");
+        assert!(
+            !over.is_healthy(),
+            "6% render-skip (> 5% tolerance) must fail"
+        );
         let under = classify(healthy_ws_only(60.0, 10.0, 0.04), 60.0);
-        assert!(under.is_healthy(), "4% render-skip (< 5% tolerance) should pass");
+        assert!(
+            under.is_healthy(),
+            "4% render-skip (< 5% tolerance) should pass"
+        );
     }
 
     #[test]
@@ -291,7 +388,10 @@ mod tests {
     #[test]
     fn render_time_under_2x_budget_passes() {
         let v = classify(healthy_ws_only(60.0, 20.0, 0.0), 60.0);
-        assert!(v.is_healthy(), "20ms (< 2x 16.6ms budget @ 60fps) should pass, got {v:?}");
+        assert!(
+            v.is_healthy(),
+            "20ms (< 2x 16.6ms budget @ 60fps) should pass, got {v:?}"
+        );
     }
 
     #[test]
@@ -305,7 +405,10 @@ mod tests {
             ..healthy_ws_only(60.0, 10.0, 0.0)
         };
         let v = classify(sample, 60.0);
-        assert!(v.is_healthy(), "a NaN gauge alongside otherwise-clean stats should pass, got {v:?}");
+        assert!(
+            v.is_healthy(),
+            "a NaN gauge alongside otherwise-clean stats should pass, got {v:?}"
+        );
     }
 
     #[test]
@@ -314,6 +417,10 @@ mod tests {
         // exception: an all-absent sample must be treated as WS-DEAD, never HEALTHY —
         // "no data" is not "known healthy".
         let v = classify(ObsHealthSample::default(), 60.0);
-        assert_eq!(v.label(), "WS-DEAD", "an empty/no-signal sample must never read as HEALTHY");
+        assert_eq!(
+            v.label(),
+            "WS-DEAD",
+            "an empty/no-signal sample must never read as HEALTHY"
+        );
     }
 }
