@@ -646,8 +646,12 @@ if [ "$ALL_CAMBOX" = "1" ]; then
     > "$SWITCH_SCHEDULE_JSON"
   echo "    wrote switch schedule -> $SWITCH_SCHEDULE_JSON"
 else
-  echo "[6/8] steady-state run: ${DURATION}s (run_id=$RUN_ID)"
-  sleep "$DURATION"
+  # #11/#373 RECORD_PAD: the verdict trims the recording's lead/tail edge frames, so a window of
+  # exactly DURATION can NEVER satisfy the --min-secs DURATION floor (run 7020001: analyzed span
+  # 299.9 s < 300.0). Record DURATION + RECORD_PAD so the ANALYZED span reaches the floor.
+  RECORD_PAD="${RECORD_PAD:-10}"
+  echo "[6/8] steady-state run: ${DURATION}s + ${RECORD_PAD}s pad (run_id=$RUN_ID)"
+  sleep "$(( DURATION + RECORD_PAD ))"
 fi
 
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"

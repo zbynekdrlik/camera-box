@@ -1677,9 +1677,11 @@ fn main() -> Result<()> {
 /// 300.7 s @30), with `expected_step` 60/60=1 instead of 60/30=2. Seconds and step must both
 /// come from the STREAM rate.
 fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConfig {
-    // Pre-fix semantics: the base cfg passes through unchanged.
-    let _ = stream_capture_fps;
-    base.clone()
+    let mut cfg = base.clone();
+    if stream_capture_fps > 0.0 {
+        cfg.capture_fps = stream_capture_fps;
+    }
+    cfg
 }
 
 fn build_and_print_verdict(
@@ -1755,7 +1757,11 @@ fn build_and_print_verdict(
     if let Some(d) = stream {
         let stream_frames = d.frames;
         let stream_ticks = FrameTick::from_recording_frames(&stream_frames);
-        let stream_v = verdict(&stream_ticks, &cfg);
+        // #11/#282: the stream recording runs at stream_capture_fps (30) — seconds AND the
+        // expected tick step must come from ITS rate, not the cam/strih 60 (run 7020001:
+        // the leaked 60 halved analyzed_secs and mis-set expected_step to 1).
+        let stream_cfg = stream_diag_cfg(&cfg, args.stream_capture_fps);
+        let stream_v = verdict(&stream_ticks, &stream_cfg);
         // Diagnostic (not a gate): surface undecodable + span. The #186 burn-contiguity
         // verdict is authoritative for loss.
         report_recording_diag(
