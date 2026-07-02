@@ -92,7 +92,11 @@ mod tests {
     #[test]
     fn healthy_60fps_passes() {
         let v = classify(
-            RenderSample { active_fps: 60.0, avg_render_time_ms: 11.3, render_skipped_frac: 0.0 },
+            RenderSample {
+                active_fps: 60.0,
+                avg_render_time_ms: 11.3,
+                render_skipped_frac: 0.0,
+            },
             60.0,
         );
         assert!(v.is_pass(), "healthy 60fps/11ms should pass, got {v:?}");
@@ -102,7 +106,11 @@ mod tests {
     fn choked_27fps_fails() {
         // the 2026-07-02 strih regression: burn ON → 27fps / 36ms / 55% skip.
         let v = classify(
-            RenderSample { active_fps: 27.5, avg_render_time_ms: 36.0, render_skipped_frac: 0.55 },
+            RenderSample {
+                active_fps: 27.5,
+                avg_render_time_ms: 36.0,
+                render_skipped_frac: 0.55,
+            },
             60.0,
         );
         assert!(!v.is_pass(), "27fps/36ms choke MUST fail the render budget");
@@ -111,7 +119,11 @@ mod tests {
     #[test]
     fn healthy_30fps_stream_passes() {
         let v = classify(
-            RenderSample { active_fps: 30.0, avg_render_time_ms: 1.4, render_skipped_frac: 0.0 },
+            RenderSample {
+                active_fps: 30.0,
+                avg_render_time_ms: 1.4,
+                render_skipped_frac: 0.0,
+            },
             30.0,
         );
         assert!(v.is_pass(), "healthy 30fps stream should pass, got {v:?}");
@@ -121,16 +133,27 @@ mod tests {
     fn render_time_over_budget_fails_even_if_fps_ok() {
         // The encoder can show target fps while render time exceeds the deadline → still a fail.
         let v = classify(
-            RenderSample { active_fps: 60.0, avg_render_time_ms: 20.0, render_skipped_frac: 0.0 },
+            RenderSample {
+                active_fps: 60.0,
+                avg_render_time_ms: 20.0,
+                render_skipped_frac: 0.0,
+            },
             60.0,
         );
-        assert!(!v.is_pass(), "20ms > 16.6ms budget must fail even at 60 activeFps");
+        assert!(
+            !v.is_pass(),
+            "20ms > 16.6ms budget must fail even at 60 activeFps"
+        );
     }
 
     #[test]
     fn any_render_skip_fails() {
         let v = classify(
-            RenderSample { active_fps: 60.0, avg_render_time_ms: 10.0, render_skipped_frac: 0.01 },
+            RenderSample {
+                active_fps: 60.0,
+                avg_render_time_ms: 10.0,
+                render_skipped_frac: 0.01,
+            },
             60.0,
         );
         assert!(!v.is_pass(), "any render skip in the window must fail");
