@@ -17,7 +17,7 @@
 use camera_box::probe::luma::bgra_to_luma;
 use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{render_qr_bgra, render_qr_dual_bgra};
-use camera_box::probe::recording::decode_recording_frame;
+use camera_box::probe::recording::{decode_recording_frame, decode_recording_frame_with_burns};
 use camera_box::probe::recording_latency::{
     cam_strih_samples, hop_latency, per_frame_latency_csv_rows, split_payloads,
     strih_stream_samples, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
@@ -87,7 +87,14 @@ fn decoded_frame_yields_cam_strih_latency_from_real_pixels() {
             gen_ts_ns: cam_g + off_ns,
         };
         let luma = frame_with_cam2_and_node(&cam2, &node, w, half_h, qr);
-        let rf = decode_recording_frame(i, luma);
+        // #423: this frame carries ONLY the strih node burn (never cam1/stream), so
+        // `decode_recording_frame`'s default full-`NODE_BURN_RUN_IDS` gate could never
+        // be satisfied and every frame gratuitously ran the ~10×-cost robust tile
+        // recovery chasing burns that structurally cannot be here — the dominant cost
+        // behind this test's multi-second-per-frame runtime. Passing the burn this
+        // frame ACTUALLY carries (mirroring what a real strih recording passes in
+        // production, `analyze_recording_with_burns`) lets the cheap fast path fire.
+        let rf = decode_recording_frame_with_burns(i, luma, &[BURN_RUN_ID_STRIH]);
         // Both QRs must decode out of the real pixels.
         assert!(
             rf.payloads.len() >= 2,
@@ -181,7 +188,10 @@ fn dual_vernier_cam2_real_pixels_canonical_tick_and_both_hops() {
         // strih records the dual halves LEFT-then-RIGHT.
         let strih_luma =
             frame_with_dual_cam2_and_node(&cam2_even, &cam2_odd, &strih_node, w, half_h, qr);
-        let srf = decode_recording_frame(i, strih_luma);
+        // #423: only the strih burn is actually rendered here — see the note on the
+        // decode call below (mirrors the fast-gate fix for the parallel_decode CI
+        // slow-timeout, module doc-comment in src/probe/recording.rs).
+        let srf = decode_recording_frame_with_burns(i, strih_luma, &[BURN_RUN_ID_STRIH]);
         // Both cam2 halves + the node burn must decode (≥3 payloads).
         assert!(
             srf.payloads.len() >= 3,
@@ -199,7 +209,9 @@ fn dual_vernier_cam2_real_pixels_canonical_tick_and_both_hops() {
         strih_frames.push(srf);
 
         // stream records the SAME cam2 halves but in SWAPPED order (RIGHT-then-LEFT) and
-        // renders 35 ms after strih. The forwarded strih burn is present too (foreign).
+        // renders 35 ms after strih. Only the stream node burn is rendered into this
+        // frame (`frame_with_dual_cam2_and_node` takes one `node` payload) — no strih
+        // burn is actually present here.
         let stream_node = Payload {
             run_id: BURN_RUN_ID_STREAM,
             frame_id: 9000 + i as u32,
@@ -208,7 +220,11 @@ fn dual_vernier_cam2_real_pixels_canonical_tick_and_both_hops() {
         // swap halves to simulate non-identical rqrr grid order across the two MKVs.
         let stream_luma =
             frame_with_dual_cam2_and_node(&cam2_odd, &cam2_even, &stream_node, w, half_h, qr);
-        let strf = decode_recording_frame(i + 7, stream_luma);
+        // #423: only the stream burn is actually rendered here (see the strih call
+        // above) — `decode_recording_frame`'s full-`NODE_BURN_RUN_IDS` default gate
+        // could never be satisfied by a frame carrying just one node burn, so this
+        // test paid the ~10×-cost robust tile recovery on every frame for nothing.
+        let strf = decode_recording_frame_with_burns(i + 7, stream_luma, &[BURN_RUN_ID_STREAM]);
         assert!(
             strf.payloads.len() >= 3,
             "stream frame {i}: expected 2 cam2 halves + node, got {:?}",
