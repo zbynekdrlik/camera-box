@@ -168,11 +168,29 @@ fully stuck. `scripts/obs-liveness-watchdog.sh` (+ `scripts/lib/obs-watchdog-dec
 `camera_box::obs_watchdog::classify`) polls `GetStats` on both boxes from a dev1 systemd timer and
 fires a Discord alert once a wedge is confirmed over 2 consecutive passes — see
 `systemd/obs-liveness-watchdog.README.md` for the install/live-verify procedure. **Detection is
-fully automatic from dev1 (no ssh/MCP needed for `GetStats`); recovery is agent-driven** — the
-alert embeds the exact `scripts/launch-obs-genlock.sh --box <box> --force` command, because ssh to
-these boxes is denied and the win-* MCP is agent-only (a dev1 timer cannot itself force-kill or
-relaunch obs64.exe). When you (the agent) see that alert, just run the embedded recovery command —
-do NOT ask before recovering (same "recover it, don't ask" rule as the rest of this file).
+fully automatic from dev1 (no ssh/MCP needed for `GetStats`); recovery from THIS dev1 timer is
+agent-driven** — the alert embeds the exact `scripts/launch-obs-genlock.sh --box <box> --force`
+command, because ssh to these boxes is denied and the win-* MCP is agent-only (a dev1 timer cannot
+itself force-kill or relaunch obs64.exe). When you (the agent) see that alert, just run the
+embedded recovery command — do NOT ask before recovering (same "recover it, don't ask" rule as the
+rest of this file).
+
+## #411 — Windows-local unattended self-heal (ships disabled)
+
+Recovery from the #391 alert above still needs an agent watching Discord — it fails the exact
+overnight/unattended case the watchdog exists to cover. `scripts/obs-self-heal-install.sh` (+
+`camera_box::obs_self_heal`) emits a per-box Windows Task Scheduler job (~2 min cadence) that runs
+ENTIRELY on the box itself: no ssh, no MCP, no agent session. It gathers a LOCAL sample
+(`Get-Process obs64`: count / `Responding` / CPU% — no OBS WebSocket round-trip), pipes it through
+the SAME `obs-watchdog-gate.exe` binary (reusing `obs_watchdog::classify` unchanged — never a
+re-derived threshold), and on a CONFIRMED wedge force-kills + relaunches obs64 via
+`launch-obs-genlock.sh`'s own program (one launch path, reused verbatim). The AHK race documented
+above is solved structurally: `Stop-Process AutoHotkey64` runs FIRST (before obs64 is ever
+touched), and AHK is restarted only LAST, after the relaunch is verified — a double-launch is
+impossible by construction, not just by convention. Ships DISABLED (`<Enabled>false</Enabled>` in
+the generated Task Scheduler XML); run `scripts/obs-self-heal-install.sh --box strih|stream --help`
+for the full install + mandatory live-verify (healthy-box dry run + simulated-wedge run) procedure
+before enabling on either box.
 
 ## WebSocket Credentials
 
