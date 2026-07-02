@@ -223,3 +223,56 @@ fn obs_restart_is_documented_as_operator_action_never_executed() {
         "the #137 step must explicitly state the script never executes the OBS restart itself."
     );
 }
+
+/// REACHABILITY: the AV_RESTART_GATE mode MUST appear BEFORE the main `[5/8] StartRecord`
+/// step (and thus before the `VERDICT_ON_STREAM=1` `exit 0` inside [8/8], which fires on
+/// the DEFAULT path). Placing it after that early exit — as the first cut of this PR did —
+/// makes the whole gate silently unreachable when a user runs `AV_RESTART_GATE=1` without
+/// also flipping the legacy `VERDICT_ON_STREAM=0`. Lock the ordering so it can't regress.
+#[test]
+fn av_restart_gate_mode_is_reachable_before_the_main_record_step() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate_pos = s
+        .find("AV_RESTART_GATE:-0")
+        .expect("#137 AV_RESTART_GATE block must exist");
+    let start_record_pos = s
+        .find("[5/8] StartRecord")
+        .expect("[5/8] StartRecord step must exist");
+    assert!(
+        gate_pos < start_record_pos,
+        "#137 AV_RESTART_GATE mode must be positioned BEFORE [5/8] StartRecord (and thus \
+         before the VERDICT_ON_STREAM=1 `exit 0`) or it is unreachable on the default path."
+    );
+    // It is an early-exit MODE: the block must exit on its own so it never falls through
+    // into the normal single-recording zero-loss verdict.
+    let block = &s[gate_pos..start_record_pos];
+    assert!(
+        block.contains("exit \"$GATE\""),
+        "#137 AV_RESTART_GATE block must be an early-exit mode (exit \"$GATE\" before [5/8])."
+    );
+}
+
+/// FAIL-LOUD confirmation: the restart-confirmation gate MUST abort (never silently
+/// proceed) when it cannot confirm the OBS restart happened. A non-interactive run with
+/// no AV_RESTART_CONFIRM=1 must hard-fail — otherwise the 'after' measurement is taken
+/// with no real restart and the gate reports a SPURIOUS PASS, masking the #137 regression.
+#[test]
+fn av_restart_confirmation_fails_loud_when_not_confirmable() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate_pos = s
+        .find("AV_RESTART_GATE:-0")
+        .expect("#137 AV_RESTART_GATE block must exist");
+    let start_record_pos = s.find("[5/8] StartRecord").expect("[5/8] step must exist");
+    let block = &s[gate_pos..start_record_pos];
+    // Honours an explicit out-of-band confirmation for non-interactive supervisor runs...
+    assert!(
+        block.contains("AV_RESTART_CONFIRM"),
+        "#137 must honour AV_RESTART_CONFIRM for non-interactive confirmation."
+    );
+    // ...but a non-TTY run WITHOUT that confirmation must ABORT, not silently continue.
+    assert!(
+        block.contains("not a TTY") && block.contains("exit 1"),
+        "#137 confirmation must ABORT (exit 1) when stdin is not a TTY and the restart is \
+         unconfirmed — never silently take a spurious 'after' measurement."
+    );
+}
