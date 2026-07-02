@@ -5,8 +5,8 @@
 //! "no dock-side patch — if one is ever added, add the lock-step Linux-guard + pwsh-assert pair
 //! (the #269 pattern)" — Option A (the user's 2026-07-01-evening decision) IS that patch: the
 //! dock's video reader now decodes the rig's OWN dual-QR (`P{run_id}.{frame_id}.{gen_ts_ns}.
-//! {crc32}`, see src/payload.rs) instead of norihiro's `q=,i=,f=,c=` QR, so the guarded zero-loss
-//! dual-QR gate stays untouched. This is a SOURCE-presence guard (same convention as
+//! {crc32}`, see src/probe/payload.rs) instead of norihiro's `q=,i=,f=,c=` QR, so the guarded
+//! zero-loss dual-QR gate stays untouched. This is a SOURCE-presence guard (same convention as
 //! tests/genlock_release_cadence.rs / tests/distroav_genlock_lockdown.rs): runs on default
 //! features, reads the vendored C++ as text, fails loudly if a future `git subtree pull` of
 //! av-sync-dock silently drops the patch — the dock would then silently revert to phone-only
@@ -36,7 +36,7 @@ fn camera_box_qr_header_exists_and_matches_payload_rs() {
     for marker in [
         "struct CameraBoxQrData",
         "decode_camera_box_qr",
-        "0xEDB88320", // the CRC-32/ISO-HDLC reflected polynomial — matches src/payload.rs's
+        "0xEDB88320", // the CRC-32/ISO-HDLC reflected polynomial — matches src/probe/payload.rs's
         // `crc::CRC_32_ISO_HDLC` (the same standard algorithm the Rust `crc` crate and
         // Python's `zlib.crc32` both implement).
         "CAMERA_BOX_AUDIO_F_HZ",

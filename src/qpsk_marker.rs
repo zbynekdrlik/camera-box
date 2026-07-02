@@ -541,14 +541,18 @@ pub const AV_SYNC_RING_CYCLE_NS: u64 = AV_SYNC_RING_SLOTS * 1_000_000_000 / AV_S
 /// `resolve_ring_lap_offset_ns` (same name) in
 /// `vendor/av-sync-dock/src/sync-test-output.cpp::st_raw_audio_decode_data` — keep both in sync if
 /// the ring size or source fps ever change.
-// TODO(#398 RED): naive lookup, no lap disambiguation — reproduces the live-dock aliasing bug the
-// review found (a stale previous-lap ring value is off by a whole cycle, ~4.267 s).
-pub fn resolve_ring_lap_offset_ns(
-    audio_ts_ns: u64,
-    stored_video_ts_ns: u64,
-    _cycle_ns: u64,
-) -> i64 {
-    audio_ts_ns as i64 - stored_video_ts_ns as i64
+pub fn resolve_ring_lap_offset_ns(audio_ts_ns: u64, stored_video_ts_ns: u64, cycle_ns: u64) -> i64 {
+    debug_assert!(cycle_ns > 0);
+    let cycle = cycle_ns as i64;
+    let half = cycle / 2;
+    let raw = audio_ts_ns as i64 - stored_video_ts_ns as i64;
+    // Euclidean modulo always lands in [0, cycle); shift the upper half negative so the result
+    // sits in (-half, +half] regardless of whether `raw` was already small or many cycles off.
+    let mut r = raw.rem_euclid(cycle);
+    if r > half {
+        r -= cycle;
+    }
+    r
 }
 
 /// #398 review MEDIUM finding: CRC-4 is only 4 bits, so on real program audio a false accept is
@@ -558,16 +562,22 @@ pub fn resolve_ring_lap_offset_ns(
 /// (dropping older ones first) — a single false blip cannot move a multi-sample median far, while
 /// the real markers (sharing one near-constant pipeline delay) dominate. Mirrors
 /// `cb_smooth_offset_ns` in `vendor/av-sync-dock/src/sync-test-output.cpp` — keep both in sync.
-// TODO(#398 RED): passthrough, no smoothing — reproduces the live-dock garbage-on-false-accept bug
-// the review found.
 pub fn smoothed_offset_ns(
     history: &mut VecDeque<(u64, i64)>,
     sample_ts_ns: u64,
     sample_offset_ns: i64,
-    _window_ns: u64,
+    window_ns: u64,
 ) -> i64 {
     history.push_back((sample_ts_ns, sample_offset_ns));
-    sample_offset_ns
+    while let Some(&(ts, _)) = history.front() {
+        if sample_ts_ns.saturating_sub(ts) > window_ns {
+            history.pop_front();
+        } else {
+            break;
+        }
+    }
+    let mut vals: Vec<f64> = history.iter().map(|&(_, o)| o as f64).collect();
+    median(&mut vals) as i64
 }
 
 /// `start_time` of a stream as reported by ffprobe (`-show_entries stream=start_time`), seconds.

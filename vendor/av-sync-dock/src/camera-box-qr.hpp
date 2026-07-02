@@ -8,8 +8,8 @@
  * paints ITS OWN dual-QR carrying frame identity: `P{run_id}.{frame_id}.{gen_ts_ns}.{crc32}`,
  * crc32 = the standard reflected CRC-32 (aka CRC-32/ISO-HDLC, poly 0xEDB88320, init/xorout
  * 0xFFFFFFFF — same algorithm as zlib/gzip/PKZIP) of the body `{run_id}.{frame_id}.{gen_ts_ns}`.
- * This header MIRRORS `src/payload.rs::Payload` exactly — keep both in sync if the wire format
- * ever changes.
+ * This header MIRRORS `src/probe/payload.rs::Payload` exactly — keep both in sync if the wire
+ * format ever changes.
  *
  * Golden vectors (independently cross-checked via `python3 -c "import zlib; zlib.crc32(b'...')"`,
  * the same standard CRC-32 algorithm as Rust's `crc::CRC_32_ISO_HDLC`):

@@ -25,6 +25,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <algorithm>
 #include <mutex>
 #include <complex>
+#include <vector>
+#include <utility>
 #include "quirc.h"
 #include "sync-test-output.hpp"
 #include "peak-finder.hpp"
@@ -36,6 +38,19 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define N_AUDIO_SYMBOLS 16
 #define N_SYMBOL_BUFFER 20
+
+/* #398 fix: the live camera-box video<->audio ring (`cb_video_ts_ns` below) is keyed on
+ * `frame_id_to_index` (the frame_id's low byte, see src/qpsk_marker.rs), so its natural cycle
+ * length is 256 frames at the FIXED camera-box painter rate (60 fps) -- independent of whatever
+ * fps the dock itself happens to capture at. Used by `resolve_ring_lap_offset_ns` below to
+ * disambiguate which lap of the ring a stored slot value belongs to. Mirrors
+ * `AV_SYNC_RING_CYCLE_NS` in src/qpsk_marker.rs -- keep both in sync. */
+#define CAMERA_BOX_RING_SLOTS 256ULL
+#define CAMERA_BOX_SOURCE_FPS 60ULL
+#define CAMERA_BOX_RING_CYCLE_NS (CAMERA_BOX_RING_SLOTS * 1000000000ULL / CAMERA_BOX_SOURCE_FPS)
+
+/* #398 fix: rolling window for the live-display median smoothing, see `cb_smooth_offset_ns`. */
+#define CAMERA_BOX_SMOOTH_WINDOW_NS 1000000000ULL
 
 /* There are several reason to limit the width and the height.
  * - Since a square of 3/8 QR-code-length is calculated using uint32_t,
@@ -138,12 +153,22 @@ struct sync_test_output
 	 * roughly every `q_ms*3` — our QR reports every SINGLE painted frame, 60/s, which would fill
 	 * and evict the 128-entry list long before a ~3-5 s-cadence audio marker arrives). Instead: a
 	 * direct ring indexed by the frame_id low byte (the SAME value the audio index carries, see
-	 * `frame_id_to_index` in src/qpsk_marker.rs), overwritten every ~4.3 s (256 frames @ 60 fps) —
-	 * safe because the round-trip from "frame painted" to "matching audio decoded" is far under a
-	 * second, so a slot is never stale by the time its audio marker arrives. */
+	 * `frame_id_to_index` in src/qpsk_marker.rs), overwritten every ~4.3 s (256 frames @ 60 fps).
+	 * The video and audio paths for the SAME frame can arrive up to ~2 s apart in EITHER
+	 * direction (the OBS program VIDEO track carries extra genlock A/V-alignment latency the
+	 * near-zero-latency QPSK AUDIO track does not — audio usually decodes FIRST in production), so
+	 * a stored slot can be stale by exactly one lap by the time its audio marker arrives;
+	 * `resolve_ring_lap_offset_ns` (#398 review fix) corrects for that. */
 	uint64_t cb_video_ts_ns[256] = {0};
 	bool cb_video_valid[256] = {false};
 	bool cb_mode_active = false;
+
+	/* #398 fix: rolling history of recently-resolved (audio_ts, offset_ns) samples for
+	 * `cb_smooth_offset_ns` — median-smooths the displayed offset so a single false CRC-4 accept
+	 * (~1/16 likely on real program audio) can't show garbage (review MEDIUM finding). Touched
+	 * only from the audio-decode thread; no cross-thread sharing, but guarded by the same mutex
+	 * as the other cb_* fields for consistency. */
+	std::deque<std::pair<uint64_t, int64_t>> cb_offset_history;
 
 	~sync_test_output()
 	{
@@ -610,7 +635,19 @@ static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, 
 	calldata_set_ptr(&cd, "data", &data);
 	signal_handler_signal(sh, "video_marker_found", &cd);
 
-	sync_index_found(st, data.qr_data.index, data.timestamp, true, data.qr_data.index_max);
+	/* #398 fix (review LOW finding): once camera-box mode is active, the direct video<->audio
+	 * ring in `st_raw_audio_decode_data` is the SOLE authoritative sync_found source (lap-resolved
+	 * + smoothed, see below). Feeding the SAME index into norihiro's legacy list-based
+	 * `sync_index_found` here too would let it emit a SECOND, uncorrected `sync_found` (no lap
+	 * fix, no smoothing) for the same marker — a duplicate signal path flashing a conflicting
+	 * number. Skip it while camera-box mode is active. */
+	bool cb_active;
+	{
+		std::unique_lock<std::mutex> lock(st->mutex);
+		cb_active = st->cb_mode_active;
+	}
+	if (!cb_active)
+		sync_index_found(st, data.qr_data.index, data.timestamp, true, data.qr_data.index_max);
 }
 
 static void st_raw_video(void *data, struct video_data *frame)
@@ -665,6 +702,62 @@ static uint32_t crc4_check(uint32_t data, uint32_t size)
 	return data;
 }
 
+/* #398 fix (review HIGH finding): the ring only keeps the LATEST video write for a low byte, so by
+ * the time a matching audio marker decodes, the stored value can be either the TRUE match (if its
+ * video already arrived) or the PREVIOUS lap's write, one whole `cycle_ns` earlier — the expected
+ * production regime, since the OBS program VIDEO track carries extra genlock A/V-alignment latency
+ * (up to 2000 ms) the near-zero-latency QPSK AUDIO track does not. A real A/V offset is always far
+ * smaller than half a cycle, so reducing the raw difference modulo `cycle_ns` into
+ * `(-cycle_ns/2, +cycle_ns/2]` recovers the true offset regardless of which side leads — no
+ * assumption about direction. Mirrors `resolve_ring_lap_offset_ns` (same name) in
+ * src/qpsk_marker.rs — keep both in sync. */
+static int64_t resolve_ring_lap_offset_ns(uint64_t audio_ts_ns, uint64_t stored_video_ts_ns, uint64_t cycle_ns)
+{
+	int64_t cycle = (int64_t)cycle_ns;
+	int64_t half = cycle / 2;
+	int64_t raw = (int64_t)audio_ts_ns - (int64_t)stored_video_ts_ns;
+	int64_t r = raw % cycle;
+	if (r < 0)
+		r += cycle; // Euclidean modulo: always land in [0, cycle)
+	if (r > half)
+		r -= cycle;
+	return r;
+}
+
+/* #398 fix (review MEDIUM finding): CRC-4 is only 4 bits, so on real program audio a false accept
+ * is roughly 1 in 16 decode attempts; the live dock previously showed every raw pass, real or
+ * false. Smooth by taking the MEDIAN of resolved offsets within `window_ns` of the latest sample
+ * (dropping older ones first) — a single false blip cannot move a multi-sample median far, while
+ * the real markers (sharing one near-constant pipeline delay) dominate. Mirrors
+ * `smoothed_offset_ns` in src/qpsk_marker.rs — keep both in sync. */
+static int64_t cb_smooth_offset_ns(std::deque<std::pair<uint64_t, int64_t>> &history, uint64_t sample_ts_ns,
+                                    int64_t sample_offset_ns, uint64_t window_ns)
+{
+	history.push_back(std::make_pair(sample_ts_ns, sample_offset_ns));
+	while (!history.empty()) {
+		uint64_t front_ts = history.front().first;
+		uint64_t age = (sample_ts_ns > front_ts) ? (sample_ts_ns - front_ts) : 0;
+		if (age > window_ns)
+			history.pop_front();
+		else
+			break;
+	}
+
+	std::vector<int64_t> vals;
+	vals.reserve(history.size());
+	for (auto &e : history)
+		vals.push_back(e.second);
+	std::sort(vals.begin(), vals.end());
+
+	size_t n = vals.size();
+	if (n == 0)
+		return sample_offset_ns;
+	if (n % 2 == 1)
+		return vals[n / 2];
+	// Even count: average the two middle values (matches src/qpsk_marker.rs's `median`).
+	return (vals[n / 2 - 1] + vals[n / 2]) / 2;
+}
+
 static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::complex<float> phase, uint64_t ts)
 {
 	uint32_t symbol_num = st->audio_sample_rate * st->c_last;
@@ -710,11 +803,13 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 	sync_index_found(st, idx8, audio_ts, false, data.index_max);
 
 	/* #398 Option A: direct camera-box video-ring lookup, independent of the list-based
-	 * `sync_index_found` above (which also gets fed our index — see `video_marker_found` — but
-	 * per the digest in the struct comment its 128-entry window isn't the RELIABLE path at our
-	 * frame's reporting rate). `idx8` is exactly the frame_id low byte the emitter encoded
+	 * `sync_index_found` above (which is now GATED OFF while camera-box mode is active — see the
+	 * #398 fix in `video_marker_found` — so THIS path is the sole authoritative sync_found source
+	 * for camera-box's own marker). `idx8` is exactly the frame_id low byte the emitter encoded
 	 * (`frame_id_to_index` in src/qpsk_marker.rs) — a direct hit means we know which video frame
-	 * was on screen when this marker sounded. */
+	 * was on screen when this marker sounded, MODULO the lap-aliasing `resolve_ring_lap_offset_ns`
+	 * corrects for (#398 review HIGH finding), and smoothed against CRC-4 false accepts by
+	 * `cb_smooth_offset_ns` (#398 review MEDIUM finding). */
 	bool cb_active, cb_valid;
 	uint64_t cb_video_ts;
 	{
@@ -724,9 +819,19 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 		cb_video_ts = st->cb_video_ts_ns[idx8];
 	}
 	if (cb_active && cb_valid) {
+		int64_t raw_offset_ns = resolve_ring_lap_offset_ns(audio_ts, cb_video_ts, CAMERA_BOX_RING_CYCLE_NS);
+
+		int64_t smoothed_ns;
+		{
+			std::unique_lock<std::mutex> lock(st->mutex);
+			smoothed_ns = cb_smooth_offset_ns(st->cb_offset_history, audio_ts, raw_offset_ns,
+			                                  CAMERA_BOX_SMOOTH_WINDOW_NS);
+		}
+
+		int64_t corrected_video_ts = (int64_t)audio_ts - smoothed_ns;
 		struct sync_index si;
 		si.index = idx8;
-		si.video_ts = cb_video_ts;
+		si.video_ts = corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0;
 		si.audio_ts = audio_ts;
 		si.index_max = 256;
 		signal_sync_found(st->context, &si);
