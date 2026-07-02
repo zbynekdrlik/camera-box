@@ -374,7 +374,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
   if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
     cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
   fi
-  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate; do
+  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate av-restart-sync-gate; do
     if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
       echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
       echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
@@ -388,8 +388,8 @@ else
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
   cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
-  # #365/#405: build the default-feature gate binaries (no probe deps, no disk balloon).
-  cargo build --release --bin frozen-camera-gate --bin render-budget-gate  # airuleset:build-ok
+  # #365/#405/#137: build the default-feature gate binaries (no probe deps, no disk balloon).
+  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate  # airuleset:build-ok
 fi
 
 echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
@@ -602,6 +602,178 @@ if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:
   echo "    Root cause is almost always the expensive measurement burn (#404 full-frame readback) or a render regression." >&2
   echo "    Clear burns with scripts/rig-mode.sh event; see EPIC #406." >&2
   exit 1
+fi
+
+# ============================================================================
+# #137 OPTIONAL MODE — OBS-restart A/V-sync SURVIVAL gate. OFF by default.
+# ============================================================================
+# Reopened issue #137: an OBS stop->start SOMETIMES drifts the video<->audio offset by
+# ~200-300ms and destroys lipsync ("niekedy sa nam rozsišiel o 200-300ms uplne
+# zlikvidovalo lipsync"), with nothing automatic to catch it. This DISTINCT MODE
+# measures the #188 A/V offset (cam2 QPSK audio marker vs its dual-QR video tick, via
+# `recording-verdict --av-sync`) BEFORE and AFTER a real OBS stop->start on the stream
+# box, then runs the strict av-restart-sync-gate (single source of truth:
+# camera_box::av_restart_sync::classify) on the two measurements — FAIL if the offset
+# drifted beyond tolerance.
+#
+# It is a MODE, not a sub-step: it reuses the rig set up by [0/8]..[4d/8] (cam2's QR
+# reaches the stream program, burns/frozen/render gates passed) and then runs its OWN
+# record->restart->record->gate flow INSTEAD of the normal [5/8]..[8/8] zero-loss
+# record+verdict, and EXITS. It MUST live here — before [5/8] and before the
+# VERDICT_ON_STREAM `exit 0` further down — or it would be unreachable on the default
+# VERDICT_ON_STREAM=1 path (which exits inside [8/8] long before the end of the file).
+#
+# OFF by default (mirrors --colour-gate/COLOUR_GATE's env-flag shape) so a normal
+# zero-loss run is COMPLETELY UNCHANGED — set AV_RESTART_GATE=1 to opt in. The OBS
+# restart itself is an OPERATOR/SUPERVISOR ACTION: this script PRINTS the instruction
+# and BLOCKS until the restart is confirmed — it NEVER stops/starts OBS itself (#137
+# scope: this PR ships the gate + wiring; the live two-recording rig proof with a REAL
+# OBS restart is supervisor-driven).
+#
+# Because scp/exec to the Windows boxes is DENIED to bash (same #208/#193 constraint as
+# the main verdict below), the recording-verdict --av-sync DECODE step is EMITTED as a
+# plan for the win-stream-snv MCP holder to run — exactly like the [8/8a-c] per-box
+# decode-in-place plan. Only the final av-restart-sync-gate decision (on the two small
+# JSONs, once pulled back to dev1) runs directly here.
+if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
+  GATE=0  # this mode owns the exit code (the normal [8/8] GATE assignment is skipped)
+  AV_RESTART_RECORD_SECS="${AV_RESTART_RECORD_SECS:-150}"
+  # Validate the one env var used in bash arithmetic ($((AV_RESTART_RECORD_SECS + 30)))
+  # so a non-integer override fails with a CLEAR diagnostic instead of an opaque
+  # `set -euo pipefail` arithmetic error mid-ssh-command (a plausible operator typo,
+  # e.g. "150.0" or "2m", mirroring other duration-style env vars in this tooling).
+  case "$AV_RESTART_RECORD_SECS" in
+    '' | *[!0-9]*)
+      echo "ERROR: #137 AV_RESTART_RECORD_SECS='$AV_RESTART_RECORD_SECS' must be a positive integer (seconds)." >&2
+      exit 2
+      ;;
+  esac
+  AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+  AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-180}"
+  AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
+  AV_RESTART_TOLERANCE_MS="${AV_RESTART_TOLERANCE_MS:-50}"
+  AV_RESTART_GATE_BIN="${AV_RESTART_GATE_BIN:-$PROBE_BIN_DIR/av-restart-sync-gate}"
+  VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
+  OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
+
+  # $1 = label ("before" | "after"). Records cam2's QPSK-marked stream program for
+  # AV_RESTART_RECORD_SECS, pulls the cam2 marker CSV to dev1 (cam2 is Linux — scp
+  # works, unlike the Windows boxes), and EMITS the win-stream-snv decode plan for
+  # this recording (bash cannot scp/exec on Windows — #208/#193). The [3/8] plain
+  # dual-QR painter (no audio marker) is replaced here by the audio-marker painter the
+  # A/V measurement needs — the earlier launch is wasted in this mode, harmless.
+  av_restart_record_and_emit_plan() {
+    local label="$1"
+    local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
+    echo "    [av-restart-sync/$label] cam2 painter: dual-QR + QPSK audio marker on $AV_RESTART_MARKER_DEVICE"
+    # Free /dev/fb0 the SAME way [3/8] does — stop cam2-painter AND camera-box (which can
+    # also hold fb0 via its --display path), kill any leftover frame-probe, then WAIT (bounded)
+    # for fb0 to actually release before relaunching. A partial copy that skipped the
+    # camera-box stop / the fuser wait would race the framebuffer and silently corrupt the
+    # QR + marker paint, degrading the very measurement this gate depends on.
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+      "systemctl stop cam2-painter 2>/dev/null || true; \
+       systemctl stop camera-box; pkill -x camera-box 2>/dev/null; pkill -x frame-probe 2>/dev/null || true; \
+       rm -f /tmp/av-restart-markers.csv; \
+       i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+       (nohup /tmp/frame-probe --paint-only --dual-qr --paint-fps $PAINT_FPS --qr-size $QR_SIZE \
+          --duration-secs $((AV_RESTART_RECORD_SECS + 30)) --audio-marker \
+          --audio-marker-device $AV_RESTART_MARKER_DEVICE \
+          --audio-marker-cadence-ticks $AV_RESTART_MARKER_CADENCE \
+          --marker-log /tmp/av-restart-markers.csv >/tmp/av-restart-painter.log 2>&1 &)"
+    sleep 3
+    python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
+    sleep "$AV_RESTART_RECORD_SECS"
+    local stream_host_path
+    # Log a WARNING with context on a non-zero StopRecord (mirrors the [7/8] pattern) —
+    # never swallow it silently: an empty stream_host_path then flows into the emitted
+    # decode plan, and a bare `|| true` would leave no trace to debug from (comprehensive-
+    # logging.md / script-failure-policy.md).
+    stream_host_path=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) \
+      || { echo "WARNING: [av-restart-sync/$label] stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2; stream_host_path=""; }
+    sleep 10  # let frame-probe self-exit + flush its marker CSV
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+      "pkill -x frame-probe 2>/dev/null; true"
+    sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
+      root@"$PAINTER_IP":/tmp/av-restart-markers.csv "$marker_csv" || \
+      { echo "ERROR: could not fetch $label QPSK marker log" >&2; exit 1; }
+    echo "    [av-restart-sync/$label] recording: ${stream_host_path:-<unknown>} (on stream box)"
+    echo "    [av-restart-sync/$label] marker log pulled to dev1: $marker_csv"
+    local rec_win="${stream_host_path:-<the ${label} recording, as it lives on the stream box>}"
+    local marker_win="$OUT_DIR_WIN\\av-restart-${label}-${RUN_ID}.csv"
+    local partial_win="$OUT_DIR_WIN\\av-restart-${label}-${RUN_ID}.json"
+    echo "    --- win-stream-snv decode plan for '$label' (bash cannot scp/exec on Windows) ---"
+    echo "    win-stream-snv FileUpload:   $marker_csv  ->  $marker_win"
+    echo "    win-stream-snv Shell (PowerShell):"
+    # Emit the PowerShell decode command. Each Windows path is wrapped in PowerShell DOUBLE
+    # quotes verbatim (%s) — the correct way to quote a single-backslash Windows path, the
+    # SAME technique the [8/8] on-box planner uses. NEVER bash `printf %q`, which doubles
+    # every backslash (`C:\x` -> `C:\\x`) and corrupts the path on the box. --av-sync writes
+    # its JSON to stdout, so redirect it into the partial the FileDownload below pulls back.
+    # shellcheck disable=SC2016  # $env:RUST_LOG is a PowerShell var for the Windows box — must NOT expand in bash
+    printf '      $env:RUST_LOG="info"; & "%s" "--av-sync" "%s" "--av-marker-log" "%s" "--av-audio-track" "%s" > "%s"\n' \
+      "$VERDICT_EXE_WIN" "$rec_win" "$marker_win" "$AV_RESTART_AUDIO_TRACK" "$partial_win"
+    echo "    win-stream-snv FileDownload: $partial_win  ->  $OUTDIR/av-restart-${label}-${RUN_ID}.json"
+  }
+
+  echo "[R1/R3] #137 baseline A/V-sync measurement (BEFORE the OBS restart)"
+  av_restart_record_and_emit_plan before
+
+  echo "[R2/R3] #137 OBS restart — OPERATOR/SUPERVISOR ACTION (this script does NOT execute it)"
+  echo "    Manually STOP then START OBS on stream ($STREAM) now — the real-world restart #137"
+  echo "    gates on. This script never stops/starts OBS itself; the restart is always driven by"
+  echo "    the operator/supervisor holding the rig, never automated inside recording-e2e.sh."
+  # The restart MUST be confirmed before the 'after' measurement — otherwise before/after
+  # are near-identical and the gate reports a SPURIOUS PASS, masking the very regression
+  # #137 exists to catch. So: an interactive TTY blocks on ENTER; a non-interactive run
+  # (agent/CI/nohup/piped) REQUIRES AV_RESTART_CONFIRM=1 (an explicit assertion that the
+  # operator already restarted OBS out-of-band) and otherwise ABORTS LOUD — it NEVER
+  # silently proceeds to a meaningless 'after' recording.
+  if [ "${AV_RESTART_CONFIRM:-}" = "1" ]; then
+    echo "    AV_RESTART_CONFIRM=1 — trusting that the operator/supervisor has ALREADY restarted OBS."
+  elif [ -t 0 ]; then
+    read -r -p "    Press ENTER once OBS on stream has been manually restarted... " _
+  else
+    echo "ERROR: #137 AV_RESTART_GATE cannot confirm the OBS restart happened — stdin is not a TTY" >&2
+    echo "       and AV_RESTART_CONFIRM=1 is not set. Refusing to take the 'after' measurement" >&2
+    echo "       without a real restart (that would spuriously PASS and mask the #137 regression)." >&2
+    echo "       Restart OBS on stream manually, then re-run interactively OR set AV_RESTART_CONFIRM=1." >&2
+    exit 1
+  fi
+
+  echo "[R3/R3] #137 post-restart A/V-sync measurement (AFTER the OBS restart) + gate"
+  av_restart_record_and_emit_plan after
+
+  BEFORE_JSON="$OUTDIR/av-restart-before-${RUN_ID}.json"
+  AFTER_JSON="$OUTDIR/av-restart-after-${RUN_ID}.json"
+  echo "    Once both partial JSONs are pulled back to dev1 (see the win-stream-snv plans above),"
+  echo "    run the strict gate (single source of truth: camera_box::av_restart_sync::classify):"
+  printf '      %q %q %q %s\n' "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS"
+  if [ -f "$BEFORE_JSON" ] && [ -f "$AFTER_JSON" ]; then
+    # The gate binary PRINTS its own accurate verdict (PASS / FAIL / UNKNOWN + reasons) to
+    # stdout; capture its exit code and surface an HONEST wrapper line per code. Do NOT
+    # overstate an UNKNOWN (an untrustworthy measurement — not proof of drift) or a
+    # bad/missing-JSON error (exit 2) as a confirmed A/V drift (no-overstatement).
+    av_rc=0
+    "$AV_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" "$AV_RESTART_TOLERANCE_MS" || av_rc=$?
+    case "$av_rc" in
+      0)
+        echo "    [av-restart-sync-gate] PASS — A/V offset held across the OBS restart within ${AV_RESTART_TOLERANCE_MS}ms"
+        ;;
+      2)
+        echo "ERROR: #137 av-restart-sync-gate could NOT evaluate (bad/missing measurement JSON — see its error above); NOT a PASS." >&2
+        GATE=1
+        ;;
+      *)
+        echo "ERROR: #137 av-restart-sync-gate did NOT pass — see its verdict above (FAIL = A/V offset drifted beyond ${AV_RESTART_TOLERANCE_MS}ms and lipsync would break; UNKNOWN = a measurement was untrustworthy, never a confirmed pass)." >&2
+        GATE=1
+        ;;
+    esac
+  else
+    echo "    [av-restart-sync-gate] both partial JSONs not yet on dev1 — the win-stream-snv holder"
+    echo "    must run the two decode plans above, then run the gate command printed above by hand."
+  fi
+  exit "$GATE"
 fi
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
@@ -994,4 +1166,5 @@ if [ -f "$REPORT_JSON" ]; then
 fi
 
 echo "artifacts in $OUTDIR (verdict json: $REPORT_JSON, report: $REPORT_PNG)"
+
 exit "$GATE"

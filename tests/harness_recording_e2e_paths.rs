@@ -1015,11 +1015,17 @@ fn recording_e2e_extracts_each_partial_on_its_own_box_and_merges() {
 #[test]
 fn recording_e2e_never_copies_a_recording_box_to_box() {
     let s = read("scripts/recording-e2e.sh");
+    // Anchor on the actual [8/8a]/[8/8b] planner INVOCATIONS — the line-continuation calls
+    // `"$HERE/recording-verdict-on-*.sh" \` — NOT the first textual mention of the filename.
+    // The #137 AV_RESTART_GATE mode legitimately SOURCES recording-verdict-on-stream.sh
+    // earlier (to reuse build_onbox_command for Windows-path quoting), so a plain
+    // `.find("recording-verdict-on-stream.sh")` would land on that source/comment, not the
+    // invocation. The `.sh" \` suffix uniquely identifies the executed planner call.
     let strih_call = s
-        .find("recording-verdict-on-strih.sh")
+        .find("recording-verdict-on-strih.sh\" \\")
         .expect("#208: the on-strih planner invocation must exist");
     let stream_call = s
-        .find("recording-verdict-on-stream.sh")
+        .find("recording-verdict-on-stream.sh\" \\")
         .expect("#208: the on-stream planner invocation must exist");
     // The strih recording is decoded ON the strih box: `--strih "$STRIH_REC_WIN"` belongs to the
     // on-STRIH extract block (between the on-strih call and the on-stream call), proving it is
@@ -1046,10 +1052,13 @@ fn recording_e2e_never_copies_a_recording_box_to_box() {
 #[test]
 fn recording_e2e_stream_extract_is_stream_only_never_strih() {
     let s = read("scripts/recording-e2e.sh");
-    // Find the on-stream planner invocation in the default path and confirm its forwarded args
-    // (after `--`) carry --extract-partial stream + --stream, and NO --strih recording.
+    // Find the on-stream planner INVOCATION in the default path and confirm its forwarded args
+    // (after `--`) carry --extract-partial stream + --stream, and NO --strih recording. Anchor
+    // on the invocation (`...on-stream.sh" \`), not the first filename mention: the #137
+    // AV_RESTART_GATE mode sources recording-verdict-on-stream.sh earlier for build_onbox_command
+    // reuse, so a bare `.find("recording-verdict-on-stream.sh")` would land on that source.
     let call = s
-        .find("recording-verdict-on-stream.sh")
+        .find("recording-verdict-on-stream.sh\" \\")
         .expect("#208: the on-stream planner invocation must exist");
     // Look at a generous window after the invocation (the forwarded args span several lines).
     let window = &s[call..(call + 800).min(s.len())];

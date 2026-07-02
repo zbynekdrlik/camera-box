@@ -87,5 +87,15 @@ pub mod frozen_camera;
 // `src/bin/obs-watchdog-gate.rs`.
 pub mod obs_watchdog;
 
+// #137 — OBS-restart A/V-sync SURVIVAL verdict (pure decision). An OBS stop→start
+// sometimes drifts the video↔audio offset by ~200-300ms and destroys lipsync, with
+// nothing automatic to catch it. This is the strict Tier-0 kernel: a BEFORE and AFTER
+// `recording-verdict --av-sync` measurement (#188) -> PASS / FAIL / UNKNOWN, fail-closed
+// on measurement quality so an untrustworthy decode can never manufacture a false PASS.
+// No probe deps, so it unit-tests Tier-0; the rig I/O (two bracketing recordings around
+// a real OBS restart) lives in `scripts/recording-e2e.sh`'s optional `AV_RESTART_GATE`
+// step; the thin CLI binary lives in `src/bin/av-restart-sync-gate.rs`.
+pub mod av_restart_sync;
+
 #[cfg(feature = "probe")]
 pub mod probe;

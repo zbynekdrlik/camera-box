@@ -57,3 +57,25 @@ live 0-paired failure). `--av-cluster-tol-ms` tunes the window.
   measurement. Target latency = current + `latency_adjust_ms`.
 - Emit params ride in the marker-log `#` header (`# qpsk-params sr=48000 carrier=442 c=1 q=2
   vr=60/1`); the decoder must demodulate with the same params (`AudioParams::rig60()`).
+
+## #137 restart-survival gate — reuses this measurement, doesn't re-derive it
+
+An OBS stop→start can drift the offset by ~200-300ms and destroy lipsync with nothing
+automatic catching it. `src/av_restart_sync.rs` (`classify(before, after, tolerance_ms)`)
+is the strict PASS/FAIL/UNKNOWN kernel: feed it TWO `AvSyncMeasurement`s (straight off two
+`recording-verdict --av-sync` JSON reports — `av_offset_ms`/`matched`/`mad_ms`), it
+fails-closed to `Unknown` if either is untrustworthy (`matched < 8` or `mad_ms > 20.0` —
+double/1.33x this skill's own healthy-run numbers above), else `Fail`s a
+`|after-before| > tolerance_ms` (default 50ms — an order of magnitude below the reported
+200-300ms failure). The thin CLI is `src/bin/av-restart-sync-gate.rs`
+(`av-restart-sync-gate before.json after.json [tolerance_ms]`, exit 0/1/2).
+
+`scripts/recording-e2e.sh` wires it as an OPT-IN step (`AV_RESTART_GATE=1`, default OFF —
+a normal zero-loss run is unchanged): records a baseline via this skill's recipe, PRINTS
+the OBS restart as an operator/supervisor action (never executes it), records again, then
+runs the gate. Because bash cannot scp/exec to the Windows boxes (#208/#193), the actual
+`recording-verdict --av-sync` decode of each recording is EMITTED as a win-stream-snv MCP
+plan (same shape as the `[8/8a-c]` per-box decode-in-place plan) — only the final gate
+binary call (on the two small pulled-back JSONs) runs directly in the script. The live
+two-recording rig proof (a real OBS stop→start bracketed by two measurements) is
+supervisor-driven, not exercised in CI.
