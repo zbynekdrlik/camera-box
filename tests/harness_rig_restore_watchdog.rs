@@ -1480,7 +1480,9 @@ rig_classify_restore 1 0 0 0
 /// Extract the body of restore_cam() from the watchdog source.
 fn restore_cam_block() -> String {
     let src = fs::read_to_string(watchdog()).expect("read watchdog");
-    let start = src.find("restore_cam() {").expect("restore_cam() must exist");
+    let start = src
+        .find("restore_cam() {")
+        .expect("restore_cam() must exist");
     let rest = &src[start..];
     let end = rest.find("\n}").expect("restore_cam block end");
     rest[..end].to_string()

@@ -23,8 +23,9 @@
 #                          scene-name scraping (robust to env-overridden/custom scene names, no
 #                          two-file scene-list to keep in sync). RIG_KNOWN_TEST_SCENES below stays as
 #                          a belt-and-suspenders fallback for runs with no marker (older harness /
-#                          manual testing). Cam restore is unaffected (the reliable down/probe
-#                          signals drive it — a healthy cam is never restored on the marker alone).
+#                          manual testing). A healthy cam is never restored on the marker alone —
+#                          its down/probe signals drive the cam restore, but (#396) those signals
+#                          in turn require the marker (or a known TEST scene) as corroboration.
 #   RIG_KNOWN_TEST_SCENES  space-separated list of program scene names that PROVE a TEST state
 #                          (fallback when no marker; default "PHASE2-PROBE":
 #                            PHASE2-PROBE — the canonical obs_phase2.py phase2 probe scene on strih).
@@ -39,6 +40,12 @@
 #   RIG_OBS                newline-separated observation records:
 #                            cam <name> down=<0|1> probe=<0|1>
 #                            obs <name> scene=<program scene name>
+#                          #396: a cam record's down/probe signal is actionable ONLY alongside a
+#                          POSITIVE test-state signal (RIG_E2E_MARKER=1, or an obs record on a
+#                          known TEST scene). An absent/stale heartbeat merely means "no E2E ran
+#                          recently" (normal idle), NOT "a worker died mid-test" — idle cams flap
+#                          down/stale-probe for reasons unrelated to a stranded harness, and acting
+#                          on them spammed false 'AUTO-RECOVERED' pings every ~2 min.
 #
 # Output (stdout, key=value lines):
 #   confirm=<n>      the NEW consecutive-stranded count (caller persists it for the next run).
@@ -51,6 +58,9 @@
 # Decision rules:
 #   1. RIG_HB_ACTIVE=1            -> confirm=0, act=0, alert=0  (legit E2E — the false-positive gate)
 #   2. no clear stranded signal   -> confirm=0, act=0, alert=0  (clean rig — reset the counter)
+#      #396: a cam signal WITHOUT a test-state signal (no marker, no known TEST scene) is rule 2 —
+#      observe/log only (reason=cam-signal-no-test-state-observe-only), counter reset so a flapping
+#      probe can never re-arm it toward an action idle cannot legitimize.
 #   3. a clear stranded signal:
 #        new_confirm = prev + 1
 #        new_confirm >= threshold -> act=1, alert=1, actions=<matched restores>  (confirmed)
@@ -71,8 +81,9 @@ rig_restore_decide() {
     return 0
   fi
 
-  # Gather the CLEAR stranded signals from the observations.
-  local actions=""
+  # Gather the CLEAR stranded signals from the observations. #396: cam signals and test-state OBS
+  # signals are collected SEPARATELY — a cam signal alone is not actionable (see below).
+  local cam_actions="" obs_actions=""
   local line kind name rest
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -88,7 +99,7 @@ rig_restore_decide() {
           esac
         done
         if [ "$down" = "1" ] || [ "$probe" = "1" ]; then
-          actions="$actions restore_cam:$name"
+          cam_actions="$cam_actions restore_cam:$name"
         fi
         ;;
       obs)
@@ -101,14 +112,14 @@ rig_restore_decide() {
         # RIG_KNOWN_TEST_SCENES match below remains a belt-and-suspenders fallback for runs with no
         # marker (older harness / manual testing).
         if [ "$marker" = "1" ]; then
-          actions="$actions restore_obs:$name"
+          obs_actions="$obs_actions restore_obs:$name"
         else
           # #352: scene names in $known must NOT contain spaces — this word-split is INTENTIONAL.
           # A spaced entry (e.g. "NDI 2ME PGM") splits into separate tokens, none of which equals
           # the full program scene name, so it would silently never match. Keep test scenes hyphenated.
           for ks in $known; do
             if [ "$scene" = "$ks" ]; then
-              actions="$actions restore_obs:$name"
+              obs_actions="$obs_actions restore_obs:$name"
               break
             fi
           done
@@ -119,12 +130,28 @@ rig_restore_decide() {
 ${RIG_OBS:-}
 EOF
 
+  # #396 (defects 1+3): a cam down/stale-probe signal is actionable ONLY alongside a POSITIVE
+  # test-state signal that an idle rig cannot produce — the #353 E2E marker, or an OBS box on a
+  # known TEST scene (both prove a harness entered a test state). An absent/stale heartbeat is NOT
+  # such a proof (it just means "no E2E ran recently"), and idle cams flap down/stale-probe for
+  # unrelated reasons — acting on them spammed false 'AUTO-RECOVERED' pings, re-armed by the
+  # flapping probe whenever it landed >=threshold consecutive passes.
+  local actions=""
+  if [ "$marker" = "1" ] || [ -n "$obs_actions" ]; then
+    actions="$cam_actions$obs_actions"
+  fi
   # collapse leading whitespace
   actions="${actions# }"
 
-  # Rule 2 — no clear stranded signal: clean rig, reset the counter.
+  # Rule 2 — no ACTIONABLE stranded signal: reset the counter. An uncorroborated cam signal gets a
+  # distinct observe-only reason (it IS logged by the caller) but never acts and never climbs the
+  # counter — a flapping probe (#396 defect 3) must not re-arm it.
   if [ -z "$actions" ]; then
-    _rig_decide_emit 0 0 0 "" "no-stranded-signal"
+    if [ -n "$cam_actions" ]; then
+      _rig_decide_emit 0 0 0 "" "cam-signal-no-test-state-observe-only"
+    else
+      _rig_decide_emit 0 0 0 "" "no-stranded-signal"
+    fi
     return 0
   fi
 
@@ -164,14 +191,18 @@ _rig_decide_emit() {
 
 # ── #370: alert classification + rate-limit (pure, unit-tested seam) ─────────
 
-# rig_classify_restore <act> <obs_unreadable> <obs_failed>
+# rig_classify_restore <act> <obs_unreadable> <obs_failed> [cam_failed]
 # -> stdout: kind=positive  (acted, 0 unreadable, 0 failed → full restore)
-#         or kind=partial   (acted but unreadable>0 or failed>0 → partial/KEPT)
+#         or kind=partial   (acted but unreadable>0 or ANY restore failed → partial/KEPT)
 # Pure integer args; any non-numeric or empty → conservatively kind=partial.
+# #396 (defect 2): cam_failed = count of cam restores that returned non-zero. Previously only the
+# OBS teardown results fed in, so a pass whose ssh cam-restore FAILED was classified positive and
+# the unthrottled alert lied "AUTO-RECOVERED" on every failed attempt. Optional 4th arg (default 0)
+# keeps the 3-arg call backward-compatible.
 rig_classify_restore() {
-  local act="${1:-0}" obs_unreadable="${2:-0}" obs_failed="${3:-0}"
-  case "$act$obs_unreadable$obs_failed" in *[!0-9]* | "") printf 'kind=partial\n'; return 0 ;; esac
-  if [ "$act" = "1" ] && [ "$obs_unreadable" -eq 0 ] && [ "$obs_failed" -eq 0 ]; then
+  local act="${1:-0}" obs_unreadable="${2:-0}" obs_failed="${3:-0}" cam_failed="${4:-0}"
+  case "$act$obs_unreadable$obs_failed$cam_failed" in *[!0-9]* | "") printf 'kind=partial\n'; return 0 ;; esac
+  if [ "$act" = "1" ] && [ "$obs_unreadable" -eq 0 ] && [ "$obs_failed" -eq 0 ] && [ "$cam_failed" -eq 0 ]; then
     printf 'kind=positive\n'
   else
     printf 'kind=partial\n'

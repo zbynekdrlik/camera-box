@@ -13,10 +13,13 @@
 #
 # CONSERVATIVE BY DESIGN (the #266 auto-watchdog was removed for false positives):
 #   - A FRESH heartbeat (scripts/lib/rig-heartbeat.sh, written by a live E2E) => NEVER act.
-#   - Acts ONLY on a CLEAR stranded signal: cam-box down, stale probe running, the #353 E2E MARKER
-#     (a harness left it behind on an unclean death => restore every observed OBS box regardless of
-#     scene), or — fallback — OBS program on a known TEST scene (default "PHASE2-PROBE";
-#     RIG_KNOWN_TEST_SCENES overrides). The marker replaces the fragile scene-name scraping.
+#   - Acts ONLY on a CLEAR stranded signal: the #353 E2E MARKER (a harness left it behind on an
+#     unclean death => restore every observed OBS box regardless of scene), or — fallback — OBS
+#     program on a known TEST scene (default "PHASE2-PROBE"; RIG_KNOWN_TEST_SCENES overrides). The
+#     marker replaces the fragile scene-name scraping. Cam-box down / stale-probe signals drive the
+#     cam restores, but (#396) ONLY alongside one of those test-state signals: an absent/stale
+#     heartbeat just means "no E2E ran recently" (normal idle), and idle cams flap down/stale-probe
+#     for unrelated reasons — a bare cam signal is observe/log only, never acted on.
 #   - Requires RIG_CONFIRM_THRESHOLD (default 2) CONSECUTIVE confirmations before acting.
 # ALL "should we act?" logic lives in the PURE scripts/lib/rig-restore-decision.sh (unit-tested);
 # this script only GATHERS observations and EXECUTES the decided restores.
@@ -139,12 +142,28 @@ restore_cam() {
     *) log "restore_cam: unknown cam '$name' — skipping"; return 0 ;;
   esac
   log "RESTORE cam $name ($ip): kill stale probes + restart prod camera-box"
-  _ssh_cam "$ip" "pkill -9 -f 'camera-box-burn-' 2>/dev/null; \
-                  pkill -f 'recording-verdict|frame-probe' 2>/dev/null; \
+  # #396: the pkill patterns (and the rm glob) use the same first-char-class trick as
+  # PROBE_PATTERNS above — the remote `sh -c '<cmd>'` wrapper's own argv CONTAINS this whole
+  # command string, so the previously-undisguised burn-painter pattern made the FIRST pkill -9 -f
+  # SIGKILL the wrapper itself before anything ran: ssh returned non-zero on every pass and prod
+  # camera-box was never restarted (the "restore always fails" root cause). No literal pkill'd
+  # substring may appear ANYWHERE in this function (comments included — the lock test scans the
+  # whole block so a literal can never migrate back into the command). The restore's REAL exit
+  # status (the systemctl restart) is returned so the caller counts a failed cam restore into the
+  # #370 classification (kind=partial, throttled) instead of alerting a positive "AUTO-RECOVERED"
+  # for a restore that failed.
+  local rc=0
+  _ssh_cam "$ip" "pkill -9 -f '[c]amera-box-burn-' 2>/dev/null; \
+                  pkill -f '[r]ecording-verdict|[f]rame-probe' 2>/dev/null; \
                   pkill -x camera-box 2>/dev/null; sleep 1; \
-                  rm -f /tmp/camera-box-probe /tmp/camera-box-burn-* 2>/dev/null; \
-                  systemctl restart camera-box 2>/dev/null; true" \
-    && log "RESTORE cam $name: done" || log "RESTORE cam $name: ssh restore returned non-zero"
+                  rm -f /tmp/camera-box-probe /tmp/camera-box-[b]urn-* 2>/dev/null; \
+                  systemctl restart camera-box 2>/dev/null" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "RESTORE cam $name: done"
+  else
+    log "RESTORE cam $name: ssh restore returned non-zero ($rc)"
+  fi
+  return "$rc"
 }
 
 restore_obs() {
@@ -166,6 +185,25 @@ restore_obs() {
     log "RESTORE obs $name: teardown returned non-zero ($rc)"
   fi
   return "$rc"
+}
+
+# ── observe: collect all records in the MAIN shell (#394 — journald-reliable) ─
+# Sets RIG_OBS to the newline-separated records of all five probes. The probes MUST run in this
+# long-lived shell with their record lines redirected to a temp file — NOT via per-call $(…)
+# command substitution: each $(…) forks a short-lived subshell, and journald intermittently LOSES
+# the log() stderr lines of those fast-exiting children under the systemd unit (0/5 strih, 2/5
+# stream across 5 timer-style passes). A redirection does not fork, so the observation log is
+# emitted by the main process and reliably reaches the journal.
+collect_observations() {
+  local obs_file
+  obs_file="$(mktemp "${TMPDIR:-/tmp}/camera-box-rig-watchdog-obs.XXXXXX")"
+  probe_cam cam1 "$CAM1_IP" >>"$obs_file"
+  probe_cam cam2 "$CAM2_IP" >>"$obs_file"
+  probe_cam cam4 "$CAM4_IP" >>"$obs_file"
+  probe_obs strih "$STRIH_HOST" >>"$obs_file"
+  probe_obs stream "$STREAM_HOST" >>"$obs_file"
+  RIG_OBS="$(cat "$obs_file")"
+  rm -f "$obs_file"
 }
 
 # ── read / write the persisted state (confirm counter + #370 alert throttle) ──
@@ -227,20 +265,16 @@ main() {
   fi
   export RIG_E2E_MARKER="$marker"
 
-  # Gather observations (each helper logs + emits 0/1 record lines).
-  local obs=""
-  obs+="$(probe_cam cam1 "$CAM1_IP")"$'\n'
-  obs+="$(probe_cam cam2 "$CAM2_IP")"$'\n'
-  obs+="$(probe_cam cam4 "$CAM4_IP")"$'\n'
-  obs+="$(probe_obs strih "$STRIH_HOST")"$'\n'
-  obs+="$(probe_obs stream "$STREAM_HOST")"$'\n'
-  export RIG_OBS="$obs"
+  # Gather observations (each helper logs + emits 0/1 record lines) — in THIS shell, never via
+  # $(…) subshells (#394, see collect_observations).
+  collect_observations
+  export RIG_OBS
 
   # #353 (review): how many of the 2 OBS boxes (strih, stream) were UNREADABLE this pass. probe_obs
   # emits an `obs ...` record only for a readable box, so unreadable = 2 - seen. An unreadable box may
   # hide a stranded scene, so the marker must NOT be cleared while any OBS probe failed (below).
   local obs_seen obs_unreadable
-  obs_seen="$(printf '%s\n' "$obs" | grep -c '^obs ')"
+  obs_seen="$(printf '%s\n' "$RIG_OBS" | grep -c '^obs ')"
   obs_unreadable=$(( 2 - obs_seen ))
   [ "$obs_unreadable" -lt 0 ] && obs_unreadable=0
 
@@ -279,11 +313,12 @@ main() {
   fi
 
   # Execute the decided restores. Count any OBS teardown that FAILED so the marker is kept (below)
-  # until every OBS box is positively restored.
-  local tok obs_failed=0
+  # until every OBS box is positively restored — and (#396) any CAM restore that FAILED so the
+  # classification can never call a failed pass a positive "AUTO-RECOVERED".
+  local tok obs_failed=0 cam_failed=0
   for tok in $actions; do
     case "$tok" in
-      restore_cam:*) restore_cam "${tok#restore_cam:}" ;;
+      restore_cam:*) restore_cam "${tok#restore_cam:}" || cam_failed=$(( cam_failed + 1 )) ;;
       restore_obs:*) restore_obs "${tok#restore_obs:}" || obs_failed=$(( obs_failed + 1 )) ;;
       *) log "unknown action token '$tok' — skipping" ;;
     esac
@@ -305,18 +340,19 @@ main() {
   # Names of OBS boxes that were unreadable this pass (missing from obs records → probe failed).
   local obs_unreadable_names=""
   for _box_name in strih stream; do
-    if ! printf '%s\n' "$obs" | grep -q "^obs $_box_name "; then
+    if ! printf '%s\n' "$RIG_OBS" | grep -q "^obs $_box_name "; then
       obs_unreadable_names="${obs_unreadable_names:+$obs_unreadable_names }$_box_name"
     fi
   done
 
-  # Pure classification: positive (full restore) or partial (KEPT — some OBS box unreadable/failed).
+  # Pure classification: positive (full restore) or partial (KEPT — some OBS box unreadable/failed,
+  # or (#396) a cam restore failed — a failed restore is never a positive "AUTO-RECOVERED").
   local classify_out restore_kind
-  classify_out="$(rig_classify_restore "${act:-0}" "$obs_unreadable" "$obs_failed")"
+  classify_out="$(rig_classify_restore "${act:-0}" "$obs_unreadable" "$obs_failed" "$cam_failed")"
   restore_kind="$(printf '%s\n' "$classify_out" | sed -n 's/^kind=//p')"
 
-  # Fingerprint the current alert condition for throttle dedup (kind + unreadable names + failed count).
-  local current_alert_sig="${restore_kind}:${obs_unreadable_names}:${obs_failed}"
+  # Fingerprint the current alert condition for throttle dedup (kind + unreadable names + failed counts).
+  local current_alert_sig="${restore_kind}:${obs_unreadable_names}:${obs_failed}:${cam_failed}"
 
   # Throttle decision: positive restores always alert; partial/KEPT condition only alerts on first
   # occurrence or signature change, then once per RIG_ALERT_THROTTLE_PASSES passes (default 5).
@@ -338,10 +374,11 @@ main() {
       # Full positive restore — use the existing AUTO-RECOVERED body (every occurrence pings).
       msg="🛟 #281 rig-restore-watchdog AUTO-RECOVERED a stranded rig ($REPO_SLUG). Reason: $reason. Restored: $actions. (No active E2E heartbeat; ${RIG_CONFIRM_THRESHOLD} consecutive confirmations.)"
     else
-      # PARTIAL restore — marker KEPT, one or more OBS boxes unreadable or teardown failed.
-      # Lower-urgency body; rate-limited to avoid repeated pings while the condition persists.
+      # PARTIAL restore — an OBS box unreadable, a teardown failed, or (#396) a cam restore failed.
+      # Lower-urgency body; rate-limited to avoid repeated pings while the condition persists. The
+      # body states what actually happened — it must never assert a recovery that failed.
       local unreadable_desc="${obs_unreadable_names:-none}"
-      msg="⚠️ #281 rig-restore-watchdog: PARTIAL restore — prod only partially recovered ($REPO_SLUG). OBS box(es) unreadable: ${unreadable_desc}. Failed teardowns: ${obs_failed}. Marker KEPT for retry. Reason: $reason."
+      msg="⚠️ #281 rig-restore-watchdog: PARTIAL restore — prod NOT fully recovered ($REPO_SLUG). OBS box(es) unreadable: ${unreadable_desc}. Failed teardowns: ${obs_failed}. Failed cam restores: ${cam_failed}. Will retry. Reason: $reason."
     fi
     log "ALERT: firing Discord notification (kind=$restore_kind)"
     python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
@@ -353,4 +390,8 @@ main() {
   log "pass end — acted on: $actions"
 }
 
-main
+# #394: run the pass only when EXECUTED (systemd/CLI). Sourcing the script (tests) only defines
+# the functions/config so collect_observations can be unit-tested with stubbed probes.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi
