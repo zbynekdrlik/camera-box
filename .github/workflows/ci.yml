@@ -364,7 +364,7 @@ jobs:
             target/release/av-restart-sync-gate
 
   windows-probe:
-    name: Windows probe build (recording-verdict.exe)
+    name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe)
     # #193: build recording-verdict for WINDOWS so the recording decode runs ON stream.lan
     # (10.77.9.204) where the multi-GB OBS recording already lives — never downloaded to slow
     # dev1 (the root of the slow transfers + the #187 OOM + the disk drain). recording-verdict
@@ -385,21 +385,36 @@ jobs:
         with:
           key: windows-probe
 
-      # Only the verdict bin is built — the other probe bins (frame-probe / camera-box) drive
-      # Linux hardware (/dev/fb0, v4l, NDI on Linux) and are NOT needed on the stream box, so
-      # they are deliberately excluded from this Windows build.
-      - name: Build recording-verdict.exe (probe-featured)
-        run: cargo build --release --features probe --bin recording-verdict
+      # Only the verdict bin is built with the probe feature — the other probe bins (frame-probe /
+      # camera-box) drive Linux hardware (/dev/fb0, v4l, NDI on Linux) and are NOT needed on the
+      # stream box, so they are deliberately excluded from this Windows build.
+      #
+      # #411: obs-watchdog-gate is ALSO built here (default features, no probe deps) — the new
+      # Windows-local self-heal Task Scheduler job (scripts/obs-self-heal-install.sh) needs it
+      # ON-BOX to reuse camera_box::obs_watchdog::classify for its LOCAL wedge verdict (never
+      # reimplementing those thresholds in PowerShell). Building it in the same `cargo build`
+      # invocation reuses the already-compiled dependency graph.
+      - name: Build recording-verdict.exe + obs-watchdog-gate.exe
+        run: cargo build --release --features probe --bin recording-verdict --bin obs-watchdog-gate
 
-      - name: Smoke-check the binary runs (--help)
+      - name: Smoke-check the binaries run (--help)
         run: |
           ./target/release/recording-verdict.exe --help
+          if ($LASTEXITCODE -ne 0) { throw "recording-verdict.exe --help failed: exit $LASTEXITCODE" }
+          '{}' | ./target/release/obs-watchdog-gate.exe
+          $gateExit = $LASTEXITCODE
+          if ($gateExit -ne 2) { throw "obs-watchdog-gate.exe: expected exit 2 on empty JSON (no boxes to gate), got $gateExit" }
+          # GH Actions fails a pwsh step on any lingering non-zero $LASTEXITCODE at script end —
+          # exit 2 above is the EXPECTED pass condition, so explicitly clear it here.
+          exit 0
 
       - name: Upload Windows probe tools
         uses: actions/upload-artifact@v4
         with:
           name: probe-tools-windows-amd64
-          path: target/release/recording-verdict.exe
+          path: |
+            target/release/recording-verdict.exe
+            target/release/obs-watchdog-gate.exe
 
   security:
     name: Security Audit

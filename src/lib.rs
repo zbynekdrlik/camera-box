@@ -87,6 +87,17 @@ pub mod frozen_camera;
 // `src/bin/obs-watchdog-gate.rs`.
 pub mod obs_watchdog;
 
+// #411 — Windows-local unattended self-heal for the #391 liveness watchdog (pure decision).
+// #391 shipped DETECT + ALERT only — recovery still needed an agent to see a Discord alert
+// and run launch-obs-genlock.sh via the win-* MCP, which fails the exact overnight/unattended
+// case the watchdog exists to cover. This is the RECOVERY-decision + AHK-sequencing kernel: a
+// confirm-threshold, a min-interval throttle, a single-recovery-in-flight lock, the ordered
+// step plan that makes an AHK double-launch impossible by construction, and the post-recovery
+// verify rule. Reuses `obs_watchdog::classify` unchanged as the wedge verdict — never
+// reimplements it. No probe deps, so it unit-tests Tier-0; the Windows-side mechanism (recovery
+// PowerShell + Task Scheduler XML) is emitted by `scripts/obs-self-heal-install.sh`.
+pub mod obs_self_heal;
+
 // #137 — OBS-restart A/V-sync SURVIVAL verdict (pure decision). An OBS stop→start
 // sometimes drifts the video↔audio offset by ~200-300ms and destroys lipsync, with
 // nothing automatic to catch it. This is the strict Tier-0 kernel: a BEFORE and AFTER

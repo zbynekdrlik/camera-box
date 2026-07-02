@@ -23,13 +23,18 @@ So this watchdog:
 2. **Alerts** the owner via Discord immediately, embedding the exact ready-to-run recovery
    command: `bash scripts/launch-obs-genlock.sh --box <box> --force` (paste the printed PowerShell
    program into the box's win-strih / win-stream-snv MCP Shell).
-3. **Recovery itself is agent-mediated** — consistent with 100% of existing Windows-recovery
-   precedent in this repo, and deliberately does NOT introduce a new unattended Windows-local
-   self-heal mechanism (a Task Scheduler script running independently of any agent), because that
-   would be the FIRST unattended-control mechanism on these boxes and interacts with the existing
-   AHK auto-respawn watcher on strih (see `.claude/skills/obs-ops` "AHK on strih" — a naive second
-   watcher can race a DLL hot-swap or double-launch obs64). That option was intentionally NOT built
-   here; it is a separate, bigger, precedent-setting decision left for the user — tracked as #411.
+3. **Recovery is agent-mediated from THIS dev1 timer** — consistent with 100% of existing
+   Windows-recovery precedent in this repo. **#411 additionally ships a Windows-LOCAL unattended
+   self-heal** (`scripts/obs-self-heal-install.sh` + `src/obs_self_heal.rs`) — a per-box Task
+   Scheduler job that runs the SAME `obs_watchdog::classify` verdict locally (via
+   `obs-watchdog-gate.exe` against local process signals) and force-kills + relaunches obs64
+   itself when a wedge is confirmed, closing the exact overnight/no-agent-watching gap this dev1
+   timer alone cannot close. It sequences around the existing AHK auto-respawn watcher on strih
+   (see `.claude/skills/obs-ops` "AHK on strih") by construction — AHK is stopped before obs64 is
+   ever touched and restarted only after the relaunch is verified, so the two mechanisms can never
+   race or double-launch obs64. Ships DISABLED; see `scripts/obs-self-heal-install.sh --help` for
+   the supervisor install + live-verify procedure. This dev1 timer's Discord alert stays in place
+   regardless — a human is still notified even when the local self-heal already recovered the box.
 
 ## It ships DISABLED by default — on purpose
 
