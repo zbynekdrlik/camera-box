@@ -551,3 +551,46 @@ RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr.rs`):
 / `optical-soft-f150.png`, run 354003): the plain pass returns NO run_id 354003; `decode_qr_luma_all`
 returns BOTH optical halves; the recording per-frame path surfaces it too. Reverting to the
 early-return makes `decode_qr_luma_all` return only the burns → the GREEN assert fails.
+
+## #376 — the residual 0.24% optical-undecodable is a CALIBRATED moiré floor, NOT chased further
+
+After #363's Otsu-union fix (above), the real run-354003 stream recording went from 86.9%
+optical-undecodable down to **22/8999 = 0.2445%**. Those 22 frames are the cam2 dual-QR's
+**RIGHT** half arriving soft/mottled with heavy diagonal moiré (a camera→monitor optical
+artifact — visually confirmed: the finder patterns and data modules on the right QR are visibly
+grayer/anti-aliased vs the crisp black/white left QR in the SAME frame), while the LEFT half of
+the same frame decodes clean every time.
+
+**THE DECISION (user, issue #376, 2026-07-01) — do NOT chase the decoder or the camera further.**
+This explicitly SUPERSEDES the ticket's original "recover via more decoder robustness, or prove
+it's a camera limit" plan. Same class of call as #364's bright-neutral cyan-cast calibration:
+*"akceptovateľný optický/moiré artefakt rigu (nakalibrujem prah vyššie)? Ano akceptovatelne!"* —
+accept the residual as the rig's real optical physics, calibrate the gate threshold, keep it
+strict above the floor.
+
+**THE FIX — a calibrated RATE ceiling, not a raw count.** `NodeVerdict::is_zero()`
+(`src/bin/recording-verdict.rs`) used to require `optical_undecodable == 0` (the #363 hard gate).
+It now requires `optical_undecodable_ok()`: `optical_undecodable / optical_span_frames <=
+OPTICAL_UNDECODABLE_RATE_MAX` (0.5%, ~2× the measured 0.2445% floor). A RATE (not an absolute
+count) scales correctly with recording length — a raw count ceiling would silently tighten on a
+long recording and loosen on a short one. The gate stays HARD above the floor: a genuine dropout
+(e.g. the #216 ~175 s slow-shutter gap) is two orders of magnitude above 0.5% and still FAILS —
+locked by `optical_undecodable_just_above_the_calibrated_ceiling_fails_376` and
+`optical_undecodable_materially_above_the_floor_still_fails_376`.
+
+**Single GLOBAL threshold, not per-node.** cam1 reads from the strih recording (one hop, likely a
+lower natural floor); strih/stream read from the stream recording (two hops, the measured 0.24%
+floor). One conservative constant calibrated to the WORST-observed node is used for all — a
+cleaner node just passes with headroom to spare, never masked. Don't invent per-node thresholds
+without a per-node measured floor to calibrate against.
+
+**Tests are SYNTHETIC, not real-PNG fixtures — this is a pure gate-arithmetic change.** Unlike
+the #363/burn-unreadable fixtures (which lock a DECODER improvement and need real degraded
+pixels), #376 only recalibrates a threshold on an already-computed count, so the RED→GREEN tests
+(`optical_undecodable_within_the_moire_floor_passes_the_gate_376` +
+`optical_undecodable_at_the_calibrated_ceiling_still_passes_376`, both RED against the pre-#376
+`== 0` gate) build synthetic `RecordingFrame`s via a small helper
+(`optical_run_with_undecodable`) — no PNG fixtures needed or committed. The two residual example
+frames (frame-1924.png / frame-3050.png from the stream box's
+`verdict-out\stream-redecode-354003-pixels`) were pulled and visually confirmed once for the
+decision, not embedded as test fixtures.
