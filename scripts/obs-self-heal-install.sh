@@ -151,7 +151,12 @@ if (\$obs64Count -ge 1) {
   \$cpuNow = \$p.TotalProcessorTime.TotalSeconds
   if ((\$null -ne \$state.last_cpu_s) -and (\$null -ne \$state.last_sample_epoch_s) -and ((\$now - \$state.last_sample_epoch_s) -gt 0)) {
     \$cores = [Environment]::ProcessorCount
-    \$cpuPercent = ((\$cpuNow - \$state.last_cpu_s) / (\$now - \$state.last_sample_epoch_s) / \$cores) * 100.0
+    \$computed = ((\$cpuNow - \$state.last_cpu_s) / (\$now - \$state.last_sample_epoch_s) / \$cores) * 100.0
+    # A negative delta (process restarted, PID reused with lower cumulative CPU time) or a
+    # non-finite result must never be sent as a number — ConvertTo-Json would emit invalid JSON
+    # (NaN/Infinity are not valid JSON tokens) and could poison the gate's parse. Treat it as
+    # "not sampled this pass" (null), never a guessed value.
+    if ([double]::IsFinite(\$computed) -and (\$computed -ge 0)) { \$cpuPercent = \$computed }
   }
   \$state.last_cpu_s          = \$cpuNow
   \$state.last_sample_epoch_s = \$now
@@ -178,8 +183,19 @@ if (-not (Test-Path \$GateBin)) {
 }
 \$verdictLine = \$payload | & \$GateBin
 \$gateExit    = \$LASTEXITCODE
-\$wedged      = (\$gateExit -ne 0)
 Write-SelfHealLog "sample obs64_count=\$obs64Count responding=\$responding cpu%=\$cpuPercent -> \$verdictLine (gate exit \$gateExit)"
+
+# gate exit 0 = HEALTHY, 1 = a real classify verdict says unhealthy (wedged=true is correct), but
+# 2 = a TOOLING error in the payload WE built (bad JSON, wrong field type) — that is OUR bug, not
+# evidence the box is wedged, and must NEVER itself trigger a force-kill of a possibly-healthy box.
+if (\$gateExit -eq 2) {
+  Write-SelfHealLog "FATAL: obs-watchdog-gate.exe reported a payload error (exit 2) — this is a \
+self-heal tooling bug, NOT a wedge verdict. Skipping this pass without acting; state left \
+untouched so the next pass tries fresh."
+  Save-SelfHealState \$state
+  exit 6
+}
+\$wedged = (\$gateExit -eq 1)
 
 # ---- confirm / throttle / lock decision (mirrors camera_box::obs_self_heal::decide()) ----
 if (\$state.recovery_in_progress) {

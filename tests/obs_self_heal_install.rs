@@ -319,6 +319,38 @@ fn missing_gate_binary_fails_loud_never_guesses() {
     );
 }
 
+/// #411: a gate exit code of 2 is a TOOLING error in the payload the self-heal script itself
+/// built (bad JSON, wrong field type) — that is a self-heal bug, NOT evidence of a wedge, and
+/// must NEVER be conflated with `wedged=true` (which would force-kill a possibly-healthy box off
+/// our OWN bug). Exit 1 (a real classify verdict) is the ONLY input that sets `$wedged = $true`.
+#[test]
+fn gate_exit_two_is_a_tooling_error_never_treated_as_wedged() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("$wedged = ($gateExit -eq 1)"),
+        "#411: wedged must be derived ONLY from gate exit == 1, never from \"!= 0\" (which would \
+         conflate a tooling error (exit 2) with a real wedge). Program:\n{p}"
+    );
+    assert!(
+        p.contains("if ($gateExit -eq 2)") && p.contains("exit 6"),
+        "#411: gate exit 2 must be handled as a distinct FATAL tooling-error path (skip the pass, \
+         never act), not fall through into the wedge decision. Program:\n{p}"
+    );
+}
+
+/// A non-finite or negative CPU-percent computation must never be sent to the gate as a number
+/// (NaN/Infinity are not valid JSON and could poison the parse) — it degrades to "not sampled".
+#[test]
+fn non_finite_or_negative_cpu_percent_is_never_sent_as_a_number() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("[double]::IsFinite($computed)") && p.contains("$computed -ge 0"),
+        "#411: the CPU% computation must be guarded finite+non-negative before being kept — a \
+         PID-reuse negative delta or a non-finite result must degrade to null, never be sent as \
+         a bogus number. Program:\n{p}"
+    );
+}
+
 /// Corrupt/missing state file must fall back to SAFE (all-zero/false) defaults, never crash and
 /// never silently assume a value that could suppress detection.
 #[test]
