@@ -39,11 +39,12 @@ slow-timeout = { period = "60s", terminate-after = 18 }
 #
 # `threads-required = "num-cpus"` reserves the ENTIRE thread pool for this test's
 # duration, so nextest will not schedule other CPU-heavy tests to run at the same
-# time as this one — removing the oversubscription without loosening the 5-minute
-# slow-timeout (a genuine deadlock in this test is still caught and named just as
-# fast, now running in isolation). See #423 for the follow-up to confirm this
-# resolves it and to root-cause whether a real race also exists independent of
-# scheduling contention.
+# time as this one — removing the oversubscription. Combined with the 18-minute
+# default slow-timeout above (belt-and-braces, in case this test is ALSO
+# legitimately slow even in isolation, not purely contention-bound), a genuine
+# deadlock is still caught and named well within the job's 25-min timeout-minutes
+# cap. See #423 for the follow-up to confirm which mitigation (or both) actually
+# resolves it, and to root-cause whether a scheduling-independent race also exists.
 [[profile.default.overrides]]
 filter = 'test(parallel_decode_matches_single_threaded_result_exactly)'
 threads-required = "num-cpus"
