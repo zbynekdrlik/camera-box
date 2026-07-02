@@ -457,15 +457,71 @@ fn unexpected_watchdog_gate_exit_code_fails_loud_never_reads_as_healthy() {
     );
 }
 
-/// Same discipline for the recovery-decision gate binary: an unexpected exit code must fail
-/// loud, never be silently treated as "no action needed".
+/// Same discipline for the recovery-decision gate binary: a truly unexpected exit code (neither
+/// 0, 1, nor the distinct tooling-error 2) must fail loud, never be silently treated as "no
+/// action needed".
 #[test]
 fn unexpected_self_heal_gate_exit_code_fails_loud() {
     let p = recovery_script_strih();
     assert!(
         p.contains("if ($decisionExit -ne 0 -and $decisionExit -ne 1)") && p.contains("exit 10"),
-        "#411: an obs-self-heal-gate.exe exit code outside {{0,1}} must fail loud, never be \
+        "#411: an obs-self-heal-gate.exe exit code outside {{0,1,2}} must fail loud, never be \
          silently parsed as a decision. Program:\n{p}"
+    );
+}
+
+/// #411 (review round 2): obs-self-heal-gate.exe's exit 2 is a TOOLING error in the payload
+/// THIS script built — the same distinction obs-watchdog-gate.exe's exit 2 already gets — and
+/// must be a DISTINCT FATAL path from a true crash/panic, so an operator's log line pinpoints
+/// "our own JSON was malformed" instead of the generic "possible crash" message.
+#[test]
+fn self_heal_gate_exit_two_is_a_distinct_tooling_error_path() {
+    let p = recovery_script_strih();
+    let exit2_pos = p
+        .find("if ($decisionExit -eq 2)")
+        .expect("obs-self-heal-gate.exe exit 2 must have its own distinct check");
+    let exit11_pos = p[exit2_pos..]
+        .find("exit 11")
+        .map(|off| off + exit2_pos)
+        .expect("the distinct tooling-error path must exit with its own code (11)");
+    let generic_pos = p
+        .find("if ($decisionExit -ne 0 -and $decisionExit -ne 1)")
+        .expect("the generic unexpected-exit-code check must still exist");
+    assert!(
+        exit2_pos < generic_pos && exit11_pos < generic_pos,
+        "the distinct exit-2 tooling-error check must run BEFORE the generic unexpected-exit-code \
+         check, so exit 2 never falls into the generic 'possible crash' path. Program:\n{p}"
+    );
+}
+
+/// #411 (review round 2): a cleared stale lock must be LOGGED distinctly — an operator
+/// diagnosing an incident needs to tell "fresh confirm cycle" apart from "recovering from an
+/// abandoned lock", a diagnostic signal a prior refactor silently dropped.
+#[test]
+fn stale_lock_cleared_is_logged_distinctly() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("$decision.stale_lock_cleared") && p.contains("STALE LOCK CLEARED"),
+        "#411: the recovery script must check obs-self-heal-gate.exe's stale_lock_cleared field \
+         and log it distinctly. Program:\n{p}"
+    );
+}
+
+/// #411 (review round 2): the live-verify display text must never hardcode the Rust kernel's
+/// default threshold as a bare number — that is exactly the second-literal drift risk this
+/// design otherwise eliminates.
+#[test]
+fn confirm_threshold_display_never_hardcodes_a_bare_default_number() {
+    let (_, out, _) = run_script(&["--box", "strih"]);
+    assert!(
+        !out.contains("confirm-threshold=obs-self-heal-gate.exe default (2)"),
+        "#411: the STEP 3 display text must not hardcode a bare default number — it must \
+         reference the Rust constant by name instead. out=\n{out}"
+    );
+    assert!(
+        out.contains("DEFAULT_CONFIRM_THRESHOLD"),
+        "#411: with no override, STEP 3 must point at DEFAULT_CONFIRM_THRESHOLD by name, never a \
+         duplicated literal. out=\n{out}"
     );
 }
 
@@ -717,6 +773,11 @@ fn real_binary_accepts_the_exact_powershell_payload_shape_healthy() {
     assert!(
         out.contains("\"next_state\""),
         "next_state must always be present so PowerShell can persist it. out={out}"
+    );
+    assert!(
+        out.contains("\"stale_lock_cleared\":false"),
+        "stale_lock_cleared must always be present (false here — nothing was abandoned) so the \
+         PowerShell side can log it distinctly when true. out={out}"
     );
 }
 

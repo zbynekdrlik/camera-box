@@ -44,6 +44,7 @@
 //!   "threshold": 2,
 //!   "seconds_remaining": 570,
 //!   "steps": ["StopAhk", "KillAndRelaunchObs", "VerifyRecovered", "RestartAhk"],
+//!   "stale_lock_cleared": false,
 //!   "next_state": {
 //!     "confirm_count": 2,
 //!     "last_attempt_epoch_s": 1751500000,
@@ -55,7 +56,10 @@
 //! `next_state` is ALWAYS present — the caller persists it verbatim, every pass, regardless
 //! of decision (even `Healthy` resets `confirm_count`, which must be saved). `confirm_count`
 //! (top-level) and `threshold` are populated for `Confirming`; `seconds_remaining` for
-//! `Throttled`; `steps` for `Recover` (empty array otherwise).
+//! `Throttled`; `steps` for `Recover` (empty array otherwise). `stale_lock_cleared` is ALWAYS
+//! present — `true` when a held lock was abandoned (past `stale_lock_s`) and cleared BEFORE
+//! this pass's decision; the caller should LOG this distinctly so an operator diagnosing an
+//! incident can tell "fresh confirm cycle" apart from "recovering from an abandoned lock".
 //!
 //! **Exit codes** (mirrors `obs-watchdog-gate`'s 0/1/2 contract exactly):
 //! - `0` — no action needed this pass (`Healthy` / `Confirming` / `Throttled` /
@@ -148,8 +152,11 @@ fn run(input: &str) -> Result<(serde_json::Value, i32), String> {
 
     // Caller-composition pattern documented in obs_self_heal.rs: a stale lock (the process
     // that set it almost certainly crashed) is cleared BEFORE deciding, so one abandoned run
-    // never permanently disables self-heal for the box.
-    if lock_is_stale(&state, now_epoch_s, stale_lock_s) {
+    // never permanently disables self-heal for the box. Reported back as `stale_lock_cleared`
+    // so the caller can LOG it — an operator diagnosing an incident needs to know whether a
+    // "Recover" decision followed a fresh confirm cycle or an abandoned-lock recovery.
+    let stale_lock_cleared = lock_is_stale(&state, now_epoch_s, stale_lock_s);
+    if stale_lock_cleared {
         state = clear_recovery_lock(state);
     }
 
@@ -178,6 +185,7 @@ fn run(input: &str) -> Result<(serde_json::Value, i32), String> {
     let mut out = serde_json::json!({
         "decision": decision_name,
         "next_state": state_to_json(&next_state),
+        "stale_lock_cleared": stale_lock_cleared,
     });
     if let serde_json::Value::Object(ref mut map) = out {
         if let serde_json::Value::Object(extra_map) = extra {
@@ -275,6 +283,19 @@ mod tests {
         let (out, code) = run(input).expect("should parse");
         assert_eq!(code, 1, "a stale lock must be clearable, not stuck forever");
         assert_eq!(out["decision"], "Recover");
+        assert_eq!(
+            out["stale_lock_cleared"], true,
+            "the caller must be told a stale lock was cleared, so it can log that distinctly \
+             from a fresh confirm cycle"
+        );
+    }
+
+    #[test]
+    fn stale_lock_cleared_is_false_when_no_lock_was_abandoned() {
+        let input = r#"{"confirm_count":0,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":false,"now_epoch_s":1000}"#;
+        let (out, _code) = run(input).expect("should parse");
+        assert_eq!(out["stale_lock_cleared"], false);
     }
 
     #[test]

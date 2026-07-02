@@ -249,14 +249,29 @@ if (-not (Test-Path \$SelfHealGateBin)) {
 \$decisionExit = \$LASTEXITCODE
 Write-SelfHealLog "decide: input=\$decisionInput -> \$decisionLine (exit \$decisionExit)"
 
+# exit 2 = a TOOLING error in the payload THIS script built (bad JSON, wrong field type) — OUR
+# bug, distinct from a real crash/panic (mirrors the same distinction obs-watchdog-gate's exit 2
+# gets above, so an operator gets the SAME clear "this is our bug" signal on both gate paths).
+if (\$decisionExit -eq 2) {
+  Write-SelfHealLog "FATAL: obs-self-heal-gate.exe reported a payload error (exit 2) — this is a \
+self-heal tooling bug (a malformed decision JSON THIS script built), NOT evidence about the box. \
+Skipping this pass without acting; state left untouched so the next pass tries fresh."
+  Save-SelfHealState \$state
+  exit 11
+}
 if (\$decisionExit -ne 0 -and \$decisionExit -ne 1) {
   Write-SelfHealLog "FATAL: obs-self-heal-gate.exe returned an UNEXPECTED exit code \$decisionExit \
-(expected 0/1 — possible crash/panic/bad payload). Refusing to guess; skipping this pass without acting."
+(expected 0/1/2 — possible crash/panic). Refusing to guess; skipping this pass without acting."
   Save-SelfHealState \$state
   exit 10
 }
 
 \$decision = \$decisionLine | ConvertFrom-Json
+if (\$decision.stale_lock_cleared) {
+  Write-SelfHealLog "STALE LOCK CLEARED: a prior recovery attempt's lock was held past the stale \
+budget and has been treated as ABANDONED (obs_self_heal::lock_is_stale) — this pass's decision \
+follows that clear, not necessarily a fresh confirm cycle."
+}
 # next_state is persisted EVERY pass, regardless of decision — even Healthy resets confirm_count.
 # A Recover decision's next_state ALREADY has recovery_in_progress=true (the lock is set BEFORE
 # obs64 is ever touched, by decide() itself — fail-safe on a crash mid-recovery).
@@ -419,9 +434,10 @@ main() {
   local xml_path="C:\\ProgramData\\camera-box\\obs-self-heal-task.xml"
 
   # Display string for STEP 3's live-verify note — shows the EFFECTIVE threshold whether it's an
-  # explicit override or the gate binary's own DEFAULT_CONFIRM_THRESHOLD (never displays a stale
-  # bash-hardcoded literal that could drift from the Rust constant).
-  local confirm_threshold_display="${confirm_threshold:-obs-self-heal-gate.exe default (2)}"
+  # explicit override or a reference to the gate binary's own DEFAULT_CONFIRM_THRESHOLD. NEVER a
+  # bare number here when unset — that would be exactly the second hardcoded literal (independent
+  # of src/obs_self_heal.rs's Rust constant) this design otherwise avoids.
+  local confirm_threshold_display="${confirm_threshold:-DEFAULT_CONFIRM_THRESHOLD in src/obs_self_heal.rs}"
 
   local RECOVERY_SCRIPT TASK_XML
   RECOVERY_SCRIPT="$(build_recovery_script "$box" "$obs_dir" "$target_fps" "$confirm_threshold" "$min_interval_s" "$stale_lock_s")"

@@ -364,7 +364,7 @@ jobs:
             target/release/av-restart-sync-gate
 
   windows-probe:
-    name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe)
+    name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe + obs-self-heal-gate.exe)
     # #193: build recording-verdict for WINDOWS so the recording decode runs ON stream.lan
     # (10.77.9.204) where the multi-GB OBS recording already lives — never downloaded to slow
     # dev1 (the root of the slow transfers + the #187 OOM + the disk drain). recording-verdict
