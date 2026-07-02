@@ -102,6 +102,10 @@ name = "obs-watchdog-gate"
 path = "src/bin/obs-watchdog-gate.rs"
 
 [[bin]]
+name = "obs-self-heal-gate"
+path = "src/bin/obs-self-heal-gate.rs"
+
+[[bin]]
 name = "av-restart-sync-gate"
 path = "src/bin/av-restart-sync-gate.rs"
 
