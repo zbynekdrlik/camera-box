@@ -38,6 +38,14 @@ if [ "$ASSUME_YES" -ne 1 ]; then
     [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
 fi
 
+# Pre-flight: curl + CA certs BEFORE first use (the cam5/#450 lesson — a base image without
+# curl makes every download step fail silently mid-run; ensure it up-front, fail loud).
+if ! command -v curl >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates >/dev/null \
+        || fail "cannot install curl — network/apt broken"
+fi
+
 # =============================================================================
 step 1 "Static IP ${STATIC_IP}/${PREFIX} (NetworkManager — desktop Ubuntu)"
 # =============================================================================

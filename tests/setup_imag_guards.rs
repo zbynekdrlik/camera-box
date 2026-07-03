@@ -35,6 +35,21 @@ fn setup_imag_fails_loud() {
     );
 }
 
+/// curl must be ENSURED before any download step — the cam5/#450 lesson: base images ship
+/// without curl and every fetch silently fails mid-provision (hit AGAIN live on imag-nb).
+#[test]
+fn setup_imag_ensures_curl_up_front() {
+    let body = read(SETUP);
+    let curl_ensure = body.find("apt-get install -y curl ca-certificates")
+        .expect("setup-imag.sh must install curl+ca-certificates up-front (cam5/#450 lesson)");
+    let first_curl_use = body.find("curl -fsSL")
+        .expect("setup-imag.sh downloads via curl -fsSL");
+    assert!(
+        curl_ensure < first_curl_use,
+        "{SETUP}: the curl-ensure preflight must come BEFORE the first curl use"
+    );
+}
+
 /// USB autosuspend must be forced OFF: the box's ONLY rig link is a USB-ethernet dongle
 /// (enx…), and a suspended USB NIC silently stalls all 6 NDI streams.
 #[test]
