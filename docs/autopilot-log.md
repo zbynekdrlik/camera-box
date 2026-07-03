@@ -1364,3 +1364,29 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   (commit `7ba1f58fa` on `dev`, not yet in a main PR) so it is not rediscovered.
 - Version bumped to `1.7.0-dev.220` on `dev` (not yet merged to main) alongside the `CLAUDE.md`
   gotcha doc — will ride along in the next PR.
+- **#460**: new `.github/workflows/linux-genlock.yml` — builds the vendored genlock OBS 32.1.2 +
+  DistroAV for LINUX (ubuntu-24.04, imag-nb's own distro). Two jobs: `linux-distroav-compile-check`
+  (narrowed ENABLE_FRONTEND/PLUGINS=OFF fast lane, proves the vendored C++ compiles with gcc/g++ —
+  the thing ci.yml's Rust-only `test` job cannot do; uploads `distroav-linux-fast-so`) and
+  `linux-genlock-build` (`needs:` the compile-check; full production bundle — real Qt frontend +
+  default plugins + DistroAV, `--component Development` #392 trick, staged rundir + distroav.so +
+  data, #120 `BUNDLE_MANIFEST.json` generate+check via the SAME `scripts/genlock-manifest.sh`
+  unchanged, uploads `obs-genlock-linux-x86_64`). Deliberately does NOT duplicate the Windows
+  workflows' pwsh vendored-source-token guards — those already run as real Rust tests on every
+  push via `ci.yml`'s `test` job. `tests/linux_genlock_workflow_gate.rs` (9 tests, structural —
+  mirrors `vendored_cpp_compile_gate.rs`) locks the workflow's shape. ENABLE_BROWSER=OFF in both
+  jobs (no CEF download at all on Linux — imag-nb needs no browser source), so unlike the 150-min
+  Windows `windows-genlock.yml` this workflow fires on every push to dev touching
+  `vendor/obs-studio/**`/`vendor/distroav/**` (not workflow_dispatch-only). Deploying the artifact
+  to imag-nb (`/opt/obs-genlock`) is #458's remaining scope, not this PR's.
+- **GOTCHA (repeat of the 7ba1f58fa/26749cf8a incident)**: the pre-push `Gate 2`
+  (bug-fix-before-test) heuristic matches ANY `closes|fixes|resolves #N` text — including inside
+  PROSE quoting a past incident, not just real commit-closing syntax — and re-walks the WHOLE
+  `origin/main..HEAD` range on every push. Two already-pushed ancestor commits on `dev`
+  (`7ba1f58fa`, `26749cf8a`) quote "Closes #459/Closes #461" as explanatory prose, so every push
+  from this point until the batch merges to main needs a `[no-test: ...]` bypass on the LATEST
+  commit (which short-circuits Gate 1/2/3 entirely) regardless of that commit's own content —
+  confirmed by adding a genuine new test file in a commit and still needing the bypass. The
+  bypass's bracket **must be a SINGLE LINE** — `grep -E` matches line-by-line, so a bypass reason
+  that wraps across multiple lines (as this session's first attempt did) silently fails to match
+  and the push stays blocked with no diagnostic beyond the generic harness "No stderr output".
