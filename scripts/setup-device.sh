@@ -62,6 +62,29 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 # =============================================================================
+# Pre-flight: ensure curl + CA certificates BEFORE first use
+# =============================================================================
+# STEP 3 (binary) and STEP 17 (dantesync) download via curl, but the minimal
+# create-usb base image ships WITHOUT curl — and STEP 16 (which installs packages)
+# runs AFTER STEP 3. On cam5 this made the binary download silently fail. Install
+# curl up-front, fail loud if it can't be obtained, and stay idempotent (skip when
+# already present).
+echo ""
+echo -e "${GREEN}[pre-flight] Ensuring curl + CA certificates...${NC}"
+if command -v curl >/dev/null 2>&1; then
+    echo "  curl already present"
+else
+    echo "  curl missing — installing (base image ships without it)"
+    apt-get update -qq
+    apt-get install -y -qq curl ca-certificates
+    command -v curl >/dev/null 2>&1 || {
+        echo -e "  ${RED}Error: curl still missing after install — cannot download binary/dantesync${NC}"
+        exit 1
+    }
+    echo "  curl installed"
+fi
+
+# =============================================================================
 # STEP 1: Set hostname
 # =============================================================================
 echo ""
@@ -250,9 +273,36 @@ SupplementaryGroups=video
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# #289 + #11 systemd drop-ins: the realtime CPU-isolation + genlock emit-rate
+# overrides live in drop-ins (not the base unit) so they can be re-applied / tuned
+# without rewriting the whole unit. Today NO script created these — every box has
+# been a manual SSH edit that drifted (30<->60 across boxes; a reinstall came up
+# free-running/uncapped and with the grab NOT pinned to the isolated core). Writing
+# them here makes a fresh box match the fleet in one run. Idempotent: re-running
+# overwrites with identical content, and the daemon-reload below picks them up.
+mkdir -p /etc/systemd/system/camera-box.service.d
+# #289 — pin the SCHED_FIFO grab onto the isolcpus=3 reserved core. Soft (inherited)
+# CPUAffinity mask, NOT a hard cpuset: the per-thread sched_setaffinity calls in the
+# binary still move painter / --display / intercom threads OFF onto the general cores
+# and re-pin capture+emit to the /sys-derived isolated core (src/affinity.rs, the
+# authoritative path). This static value just matches the fleet's isolcpus=3.
+cat > /etc/systemd/system/camera-box.service.d/cpu-affinity.conf << 'EOF'
+[Service]
+# #289: pin grab to the isolated core (isolcpus=3) so box load never starves capture/emit
+CPUAffinity=3
+EOF
+# #11 — NDI emit rate. Program-feeding cams emit 60fps (the stream box decimates
+# 60->30 downstream); matches the live cam1/cam2/cam4 genlock.conf drop-in.
+cat > /etc/systemd/system/camera-box.service.d/genlock.conf << 'EOF'
+[Service]
+Environment=CAMERA_BOX_GENLOCK_FPS=60
+EOF
+
 systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
+echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=60)"
 
 # =============================================================================
 # STEP 8: Configure auto-login on tty1
@@ -294,6 +344,25 @@ if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
     sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
 else
     echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
+fi
+# #289: reserve core 3 for the SCHED_FIFO capture/emit path — add isolcpus=3 to the
+# kernel cmdline IDEMPOTENTLY (never duplicated). ONLY isolcpus: the live fleet cmdline
+# carries no nohz_full/rcu_nocbs/irqaffinity= (those stay deferred to #303). This edit
+# lives INSIDE this #295 initrd-guaranteed grub step (the update-grub + abort-if-no-initrd
+# guard below) so the cmdline change can never strand a box on an initrd-less kernel the
+# way an ad-hoc grub edit did.
+if ! grep -qE '^GRUB_CMDLINE_LINUX=.*isolcpus=3([" ]|$)' /etc/default/grub; then
+    if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
+        # Append inside the existing double-quoted value.
+        sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 isolcpus=3"/' /etc/default/grub
+        # Normalise a leading space when GRUB_CMDLINE_LINUX was previously empty ("" -> " isolcpus=3").
+        sed -i 's/^GRUB_CMDLINE_LINUX="  */GRUB_CMDLINE_LINUX="/' /etc/default/grub
+    else
+        echo 'GRUB_CMDLINE_LINUX="isolcpus=3"' >> /etc/default/grub
+    fi
+    echo "  Kernel cmdline: isolcpus=3 added to GRUB_CMDLINE_LINUX [#289]"
+else
+    echo "  Kernel cmdline: isolcpus=3 already present [#289]"
 fi
 # #295: GUARANTEE every installed kernel has an initrd BEFORE regenerating grub. A kernel without an
 # initrd that becomes the grub default cannot mount root — that bricked CAM3 + CAM4.
@@ -502,9 +571,9 @@ apt-get update -qq
 # #362: include the FULL NDI/audio runtime dep set so a fresh box can RUN camera-box (the CAM3
 # clone crash-looped on missing libndi deps): libasound2t64 (ALSA, intercom), libavahi-common3
 # (libndi links it alongside libavahi-client3), and avahi-utils (avahi-browse for diagnosis).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool"
+echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'
@@ -637,6 +706,8 @@ echo "  - Network wait: 5s"
 echo "  - Power button: mute toggle (not shutdown)"
 echo "  - Sleep/suspend: disabled"
 echo "  - CPU governor: performance"
+echo "  - CPU isolation: core 3 reserved (isolcpus=3) for the realtime grab [#289]"
+echo "  - Realtime pin: CPUAffinity=3 drop-in; NDI emit 60fps (genlock.conf) [#289/#11]"
 echo "  - Network: optimized for streaming"
 echo "  - Unnecessary services: disabled"
 echo "  - Root filesystem: read-only (with tmpfs overlays)"

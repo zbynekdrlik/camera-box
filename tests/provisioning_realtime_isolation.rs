@@ -1,10 +1,11 @@
 //! #450 / #289 — `setup-device.sh` must provision the fleet's realtime CPU-isolation +
 //! genlock config in ONE idempotent run, closing the gaps that forced manual steps on cam5.
 //!
-//! The live fleet known-good target (verified against cam1/cam2/cam4) is:
-//!   - kernel cmdline `isolcpus=3` (core 3 reserved for the SCHED_FIFO capture/emit path, #289),
-//!   - drop-in `camera-box.service.d/cpu-affinity.conf` → `CPUAffinity=3`,
-//!   - drop-in `camera-box.service.d/genlock.conf` → `Environment=CAMERA_BOX_GENLOCK_FPS=60`.
+//! The live fleet known-good target (verified against cam1/cam2/cam4) is `isolcpus=3` on the kernel
+//! cmdline (core 3 reserved for the SCHED_FIFO capture/emit path, #289), the drop-in
+//! `camera-box.service.d/cpu-affinity.conf` → `CPUAffinity=3`, and the drop-in
+//! `camera-box.service.d/genlock.conf` → `Environment=CAMERA_BOX_GENLOCK_FPS=60`.
+//!
 //! Today `setup-device.sh` writes NONE of these (each was a manual SSH edit that drifted across
 //! the fleet), and it downloads the binary + dantesync with `curl` while the minimal create-usb
 //! base image ships WITHOUT curl — so those downloads silently failed on cam5.
