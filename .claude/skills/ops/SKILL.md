@@ -101,6 +101,12 @@ The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbl
 - USB capture IRQ routed onto the isolated core via `/proc/irq/<n>/smp_affinity`, discovered from
   `/proc/interrupts` — run by `camera-box --setup-irq-affinity` from the unit's `ExecStartPre`.
 - `systemd/camera-box.service` carries `CPUAffinity=3` (soft belt-and-braces; the binary refines).
+- **Provisioned by `scripts/setup-device.sh`** (#450): STEP 10 adds `isolcpus=3` to `GRUB_CMDLINE_LINUX`
+  (idempotent, INSIDE the #295 initrd-guaranteed grub block — that block is the ONE safe place to touch
+  grub, so this does NOT contradict the "never ad-hoc edit grub" rule below); STEP 7 writes the
+  `cpu-affinity.conf` (`CPUAffinity=3`) + `genlock.conf` (`CAMERA_BOX_GENLOCK_FPS=60`) drop-ins. The
+  capture core is AUTO-DERIVED from `isolcpus` — the live fleet sets NO `CAMERA_BOX_CAPTURE_CORE` (only
+  `CAMERA_BOX_GENLOCK_FPS=60`, confirmed on cam1). Guard: `tests/provisioning_realtime_isolation.rs`.
 - Verify on a box: `taskset -acp $(pidof camera-box)` (capture threads on the isolated core),
   `journalctl -u camera-box | grep '#289'` (pin + IRQ log lines), `grep . /proc/irq/*/smp_affinity`.
 - **Kernel-cmdline tuning is DEFERRED** (`nohz_full`/`rcu_nocbs`/`irqaffinity=`, #303) — it needs the

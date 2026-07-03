@@ -101,6 +101,10 @@ struct audio_marker_found_s
 	int index;
 	float score;
 	uint32_t index_max;
+	/* #398: camera-box's audio index is the frame_id LOW BYTE, sampled sparsely (~one marker every
+	 * few seconds), NOT a +1-per-marker counter — so the `missed_markers()` percentage is
+	 * meaningless for it. When true, the dock shows the locked index alone (no bogus missed%). */
+	bool sparse_index = false;
 };
 
 struct sync_index

@@ -200,6 +200,15 @@ void SyncTestDock::on_video_marker_found(struct video_marker_found_s data)
 void SyncTestDock::on_audio_marker_found(struct audio_marker_found_s data)
 {
 	const int index = data.index;
+	// #398: camera-box's audio index is the sparse frame_id low byte (not a +1 counter), so the
+	// missed% is meaningless — show the locked index alone. `audio_marker_found` is emitted only for
+	// a marker whose offset agrees with the locked cluster, so this index is a genuine one.
+	if (data.sparse_index) {
+		received_audio_ix++;
+		last_audio_ix = index;
+		audioIndexDisplay->setText(QStringLiteral("%1").arg(index));
+		return;
+	}
 	missed_audio_ix += missed_markers(index, last_audio_ix, received_audio_index_max);
 	last_audio_ix = index;
 	received_audio_index_max = data.index_max;

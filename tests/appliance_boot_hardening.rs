@@ -667,3 +667,289 @@ fn disk_guard_threshold_decision_correct() {
         "cam_disk_alert_needed(100, 80) must return 0 (alert) — full /var/cache must alert"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #448 — create-usb-linux.sh must be a TRUE one-shot cam-box installer: a fresh box installs →
+// boots → is SSH-reachable with NO manual post-install patching. Three things bit us live on
+// cam5 AND cam6 (2026-07-03) and are pinned here:
+//
+//   17. FAIL-LOUD dep check BEFORE any disk write. The script copies sibling files into the
+//       target (lib/install-grub-efi.sh, lib/camera-box-grow-root.sh,
+//       ../systemd/camera-box-grow-root.service). On cam6 camera-box-grow-root.sh was ABSENT
+//       when the script ran from a copied dir → the `install` failed mid-way AFTER partitioning,
+//       leaving a broken install. The script must verify ALL required siblings exist in
+//       check_requirements and `error` out with the exact missing path — BEFORE partition_drive.
+//   18. Mask systemd-networkd-wait-online in the chroot. The base debootstrap enables it with no
+//       bound → the installed OS stalls after networking, before multi-user, so sshd never
+//       started (cam5 + cam6 pinged but :22 was dead). Mask it (ln -sf /dev/null) idempotently.
+//   19. Create a NAMED NVRAM UEFI boot entry for the installed disk. grub-install --removable
+//       writes only \EFI\BOOT\BOOTX64.EFI and NO NVRAM entry, so firmware may boot the live-USB
+//       or a stale Windows entry. Guarded on efivars present + intended disk, from the HOST.
+//   20. Mask the ro-root grub units (grub-common + grub-initrd-fallback) so they don't land in
+//       FAILED state on boot.
+//
+// Style mirrors the #295/#307/#362/#369 guards above: read the REAL script and assert the REAL
+// contract; the behavioural dep-check tests actually SOURCE the script and run check_required_files.
+
+/// Source create-usb-linux.sh in library-only mode (CREATE_USB_SOURCE_ONLY=1 → the installer's
+/// `main` is NOT run), passing `source_args` to the arg parser, then evaluate `snippet` in the
+/// same shell. Returns the process output so a test can assert on exit status + stdout/stderr.
+fn run_in_sourced_create_usb(source_args: &str, snippet: &str) -> std::process::Output {
+    let script = manifest_dir().join("scripts/create-usb-linux.sh");
+    let cmd = format!(
+        "CREATE_USB_SOURCE_ONLY=1 source '{script}' {args}\n{snippet}",
+        script = script.display(),
+        args = source_args,
+        snippet = snippet,
+    );
+    std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&cmd)
+        .output()
+        .expect("bash available")
+}
+
+/// The three sibling files create-usb-linux.sh copies into the target — every one MUST exist
+/// before the first destructive disk op or the install breaks mid-way (the cam6 failure).
+const REQUIRED_SIBLINGS: [&str; 3] = [
+    "lib/install-grub-efi.sh",
+    "lib/camera-box-grow-root.sh",
+    "../systemd/camera-box-grow-root.service",
+];
+
+/// 17a. Behavioural: with a SCRIPT_DIR whose `lib/camera-box-grow-root.sh` is MISSING (the exact
+///      cam6 condition), check_required_files must `error` out (non-zero) and name the missing
+///      path — WITHOUT reaching any disk op.
+#[test]
+fn create_usb_dep_check_fails_loud_on_missing_sibling() {
+    let fixture = tempfile::tempdir().expect("tempdir");
+    let scripts = fixture.path().join("scripts");
+    // Present: lib/install-grub-efi.sh. Absent: camera-box-grow-root.sh + the systemd unit.
+    std::fs::create_dir_all(scripts.join("lib")).unwrap();
+    std::fs::write(scripts.join("lib/install-grub-efi.sh"), "# stub\n").unwrap();
+
+    let out = run_in_sourced_create_usb(
+        "",
+        &format!(
+            "SCRIPT_DIR='{}'\ncheck_required_files\necho SHOULD_NOT_REACH",
+            scripts.display()
+        ),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "check_required_files must EXIT NON-ZERO when a required sibling is missing (cam6: \
+         camera-box-grow-root.sh absent → install broke mid-way AFTER partitioning, #448). \
+         Output was: {combined}"
+    );
+    assert!(
+        combined.contains("camera-box-grow-root.sh"),
+        "check_required_files must name the exact MISSING path (camera-box-grow-root.sh) so the \
+         operator knows what to fix (#448). Output was: {combined}"
+    );
+    assert!(
+        !combined.contains("SHOULD_NOT_REACH"),
+        "check_required_files must abort (not fall through) when a sibling is missing (#448)"
+    );
+}
+
+/// 17b. Behavioural: with the REAL scripts dir (all three siblings present), check_required_files
+///      must succeed (exit 0). Proves the guard does not spuriously block a correct checkout.
+#[test]
+fn create_usb_dep_check_passes_when_all_siblings_present() {
+    let scripts = manifest_dir().join("scripts");
+    // Sanity: the real repo genuinely has all three siblings.
+    for rel in REQUIRED_SIBLINGS {
+        let p = scripts.join(rel);
+        assert!(
+            p.exists(),
+            "repo is missing required sibling {}",
+            p.display()
+        );
+    }
+    let out = run_in_sourced_create_usb(
+        "",
+        &format!("SCRIPT_DIR='{}'\ncheck_required_files", scripts.display()),
+    );
+    assert!(
+        out.status.success(),
+        "check_required_files must SUCCEED when all required siblings exist (#448). stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// 17c. Structural: check_requirements must INVOKE check_required_files, and check_requirements
+///      must run BEFORE partition_drive in main — so no disk is ever partitioned with a required
+///      file missing. Scope to function bodies so a mention elsewhere cannot false-pass.
+#[test]
+fn create_usb_dep_check_runs_before_partitioning() {
+    let body = read("scripts/create-usb-linux.sh");
+
+    // The check function exists, names all three siblings, and fails loud (error).
+    let func = extract_shell_function(&body, "check_required_files")
+        .expect("create-usb-linux.sh must define a check_required_files function (#448)");
+    for rel in REQUIRED_SIBLINGS {
+        let leaf = rel.rsplit('/').next().unwrap();
+        assert!(
+            func.contains(leaf),
+            "check_required_files must check for the required sibling `{leaf}` (#448)"
+        );
+    }
+    assert!(
+        func.contains("error "),
+        "check_required_files must `error` out (fail loud) when a sibling is missing (#448)"
+    );
+
+    // check_requirements invokes it.
+    let reqs = extract_shell_function(&body, "check_requirements")
+        .expect("check_requirements function present");
+    assert!(
+        reqs.contains("check_required_files"),
+        "check_requirements must INVOKE check_required_files so the dep-check runs before any \
+         disk write (#448)"
+    );
+
+    // In main(), check_requirements runs before partition_drive (the first destructive op).
+    let main = extract_shell_function(&body, "main").expect("main function present");
+    let check_idx = main
+        .find("check_requirements")
+        .expect("main calls check_requirements");
+    let part_idx = main
+        .find("partition_drive")
+        .expect("main calls partition_drive");
+    assert!(
+        check_idx < part_idx,
+        "main must call check_requirements (which runs the dep-check) BEFORE partition_drive — \
+         never partition a disk when a later required file is missing (#448)"
+    );
+}
+
+/// 18. The chroot setup must MASK systemd-networkd-wait-online so the installed OS never stalls
+///     waiting for all interfaces before multi-user.target — the cam5 + cam6 boot hang that left
+///     :22 dead. Idempotent `ln -sf /dev/null`.
+#[test]
+fn create_usb_masks_networkd_wait_online() {
+    let body = read("scripts/create-usb-linux.sh");
+    let masked = body.lines().any(|l| {
+        !l.trim_start().starts_with('#')
+            && l.contains("ln -sf /dev/null")
+            && l.contains("systemd-networkd-wait-online.service")
+    });
+    assert!(
+        masked,
+        "create-usb-linux.sh must mask systemd-networkd-wait-online.service \
+         (`ln -sf /dev/null /etc/systemd/system/systemd-networkd-wait-online.service`) in the \
+         chroot — unbounded, it stalled boot before multi-user so sshd never started on cam5/cam6 \
+         (#448)"
+    );
+}
+
+/// 20. The chroot setup must MASK the ro-root grub units (grub-common + grub-initrd-fallback) so
+///     they don't land in FAILED state on boot. Idempotent `ln -sf /dev/null`.
+#[test]
+fn create_usb_masks_ro_root_grub_units() {
+    let body = read("scripts/create-usb-linux.sh");
+    for unit in ["grub-common.service", "grub-initrd-fallback.service"] {
+        let masked = body.lines().any(|l| {
+            !l.trim_start().starts_with('#') && l.contains("ln -sf /dev/null") && l.contains(unit)
+        });
+        assert!(
+            masked,
+            "create-usb-linux.sh must mask {unit} (`ln -sf /dev/null …/{unit}`) so it does not \
+             land in FAILED state on boot (#448)"
+        );
+    }
+}
+
+/// 19. The script must create a NAMED NVRAM UEFI boot entry for the installed disk so firmware
+///     boots the fresh install, not the live-USB or a stale Windows entry. It must:
+///       - be GUARDED on /sys/firmware/efi/efivars (only when the host booted UEFI),
+///       - call efibootmgr -c with label `cam-box` pointing at \EFI\BOOT\BOOTX64.EFI (the real
+///         file --removable + #344 wrote — the \EFI\ubuntu\grubx64.efi path does NOT exist),
+///       - run from main() (host side), after configure_system lays grub down.
+#[test]
+fn create_usb_creates_named_efi_boot_entry() {
+    let body = read("scripts/create-usb-linux.sh");
+
+    let func = extract_shell_function(&body, "create_efi_boot_entry")
+        .expect("create-usb-linux.sh must define create_efi_boot_entry (#448)");
+
+    // Guarded on efivars presence.
+    assert!(
+        func.contains("/sys/firmware/efi/efivars"),
+        "create_efi_boot_entry must GUARD on /sys/firmware/efi/efivars so it only runs when the \
+         host booted UEFI (#448)"
+    );
+    // Creates a named entry pointing at the removable core.
+    let creates = func.lines().any(|l| {
+        !l.trim_start().starts_with('#') && l.contains("efibootmgr") && l.contains("cam-box")
+    });
+    assert!(
+        creates,
+        "create_efi_boot_entry must run efibootmgr with the `cam-box` label to create the NVRAM \
+         entry (#448)"
+    );
+    assert!(
+        func.contains(r"\EFI\BOOT\BOOTX64.EFI"),
+        "create_efi_boot_entry must point the entry at \\EFI\\BOOT\\BOOTX64.EFI (the real file \
+         grub-install --removable + #344 wrote — \\EFI\\ubuntu\\grubx64.efi does NOT exist with \
+         --removable) (#448)"
+    );
+    // Wired into main() (host side), after configure_system.
+    let main = extract_shell_function(&body, "main").expect("main function present");
+    let cfg_idx = main
+        .find("configure_system")
+        .expect("main calls configure_system");
+    let efi_idx = main
+        .find("create_efi_boot_entry")
+        .expect("main must call create_efi_boot_entry (host side, #448)");
+    assert!(
+        cfg_idx < efi_idx,
+        "main must call create_efi_boot_entry AFTER configure_system (grub must be laid down \
+         first) (#448)"
+    );
+}
+
+/// 21. Arg parsing (the #448 --target-disk / --yes contract) must survive: `--target-disk /dev/X`
+///     sets DEVICE + FORCE_TARGET=1 (allows /dev/sda), `--yes` sets ASSUME_YES=1, and an unknown
+///     flag fails loud. Behavioural — source with args and inspect the parsed vars.
+#[test]
+fn create_usb_arg_parsing_contract() {
+    // --target-disk sets DEVICE + FORCE_TARGET; --yes sets ASSUME_YES.
+    let out = run_in_sourced_create_usb(
+        "--target-disk /dev/sdz --yes",
+        r#"printf '%s|%s|%s' "$DEVICE" "$FORCE_TARGET" "$ASSUME_YES""#,
+    );
+    assert!(
+        out.status.success(),
+        "sourcing with valid args must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "/dev/sdz|1|1",
+        "--target-disk /dev/sdz --yes must set DEVICE=/dev/sdz FORCE_TARGET=1 ASSUME_YES=1 (#448)"
+    );
+
+    // Positional device sets DEVICE but leaves FORCE_TARGET=0 (the /dev/sda guard stays armed).
+    let out = run_in_sourced_create_usb("/dev/sdz", r#"printf '%s|%s' "$DEVICE" "$FORCE_TARGET""#);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "/dev/sdz|0",
+        "a positional device must set DEVICE and keep FORCE_TARGET=0 (guard armed) (#448)"
+    );
+
+    // Unknown flag fails loud (non-zero) before any snippet runs.
+    let out = run_in_sourced_create_usb("--bogus-flag", "echo SHOULD_NOT_REACH");
+    assert!(
+        !out.status.success(),
+        "an unknown flag must fail loud (non-zero) (#448)"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("SHOULD_NOT_REACH"),
+        "an unknown flag must abort arg parsing before anything else runs (#448)"
+    );
+}

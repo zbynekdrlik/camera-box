@@ -41,6 +41,15 @@ pub mod colour_scale;
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
 pub mod qpsk_marker;
 
+// #398 — the LIVE OBS A/V-sync dock decode logic, pure Tier-0 so the vendored C++ dock
+// (`vendor/av-sync-dock/src/camera-box-*.hpp`) can MIRROR it and a committed C++ self-test can
+// cross-check the mirror against these Rust results. Holds the streaming QPSK marker detector
+// (rolling `decode_markers` window + dedup), the rolling densest-cluster offset estimator (robust to
+// the CRC-4 false-decode flood the offline path also fights), the live video-QR top-band decode
+// geometry, and the Otsu threshold — all with NO probe deps, so it compiles + unit-tests on DEFAULT
+// features. The dock's OBS/quirc GLUE stays in `sync-test-output.cpp`; every DECISION lives here.
+pub mod av_sync_dock;
+
 // #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
 // `colour_scale` table/geometry, samples each reference patch's mean colour from a frame
 // (dodging the burn columns), and decides per-patch + per-camera PASS/FAIL (grayscale collapse,

@@ -1,11 +1,40 @@
 #!/bin/bash
 set -euo pipefail
 
-# Simple Ubuntu 24.04 USB installer
-# Creates bootable USB with SSH + DHCP only
-# User: newlevel, Password: newlevel, Root SSH enabled
+# Ubuntu 24.04 (noble) one-shot cam-box installer.
+# Debootstraps a fresh appliance rootfs to the target disk with SSH + DHCP only.
+# User: newlevel, Password: newlevel, Root SSH enabled.
+#
+# ONE-SHOT CONTRACT (#448): a fresh box installs → boots → is SSH-reachable with NO manual
+# post-install patching. The boot-critical steps that make this true (all of which bit us live
+# on cam5 + cam6, 2026-07-03):
+#   * FAIL-LOUD dep check (check_required_files) BEFORE any disk write — the script copies sibling
+#     files (lib/install-grub-efi.sh, lib/camera-box-grow-root.sh, ../systemd/…grow-root.service)
+#     into the target; a MISSING sibling once broke the install mid-way AFTER partitioning (cam6).
+#   * MASK systemd-networkd-wait-online in the chroot — unbounded, it stalled boot before
+#     multi-user.target so sshd never started (cam5/cam6 pinged but :22 was dead).
+#   * NAMED NVRAM UEFI boot entry (create_efi_boot_entry, host side) — grub-install --removable
+#     writes only \EFI\BOOT\BOOTX64.EFI and NO NVRAM entry, so firmware could boot the live-USB or
+#     a stale Windows entry instead of the fresh install.
+#   * MASK the ro-root grub units (grub-common + grub-initrd-fallback) so they don't land FAILED.
 
-DEVICE="${1:-}"
+# Args:
+#   /dev/sdX                positional target (refuses /dev/sda for safety)
+#   --target-disk /dev/sdX  EXPLICIT target, ALLOWED even for /dev/sda — safe when run
+#                           ON a box's live-USB where /dev/sda is the internal target disk
+#                           (removes the per-install guard-patch hack; #448 unified method)
+#   --yes | -y              non-interactive: skip the 'type yes' confirmation
+DEVICE=""
+FORCE_TARGET=0
+ASSUME_YES=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target-disk) DEVICE="${2:-}"; FORCE_TARGET=1; shift 2 ;;
+        --yes|-y)      ASSUME_YES=1; shift ;;
+        -*)            echo "Unknown option: $1" >&2; exit 1 ;;
+        *)             DEVICE="$1"; shift ;;
+    esac
+done
 MOUNT_ROOT="/mnt/usb-root"
 MOUNT_EFI="/mnt/usb-efi"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -28,13 +57,41 @@ check_requirements() {
     [[ -n "$DEVICE" ]] || error "Usage: $0 /dev/sdX"
     [[ -b "$DEVICE" ]] || error "$DEVICE is not a block device"
 
-    # Safety check - don't allow sda
-    [[ "$DEVICE" != "/dev/sda" ]] || error "Refusing to write to /dev/sda (system disk)"
+    # Safety: refuse /dev/sda UNLESS explicitly targeted via --target-disk (see arg parsing)
+    if [[ "$DEVICE" == "/dev/sda" && "$FORCE_TARGET" -ne 1 ]]; then
+        error "Refusing to write to /dev/sda (system disk). Use --target-disk /dev/sda if that IS the intended target (e.g. running on a box's live-USB where the internal disk is /dev/sda)."
+    fi
 
     # Check required tools
     for cmd in debootstrap parted mkfs.vfat mkfs.ext4 mount chroot; do
         command -v $cmd &>/dev/null || error "Missing required tool: $cmd"
     done
+
+    # #448: FAIL LOUD if any required sibling file is missing — BEFORE any disk write. Never
+    # partition a disk when a file a LATER step needs is absent (see check_required_files).
+    check_required_files
+}
+
+# #448: verify every sibling file this script copies into the target rootfs exists, BEFORE the
+# first destructive disk op. On cam6, lib/camera-box-grow-root.sh was ABSENT when the script ran
+# from a copied dir → the `install` of that file failed mid-way AFTER partition_drive had already
+# wiped + partitioned the disk, leaving a half-installed, unbootable box. This guard turns that
+# into an early, safe, loud failure that never touches the disk.
+# Referenced (kept in sync with configure_system's copies):
+#   $SCRIPT_DIR/lib/install-grub-efi.sh              (sourced in the chroot, #344)
+#   $SCRIPT_DIR/lib/camera-box-grow-root.sh          (installed to /usr/local/sbin, #369)
+#   $SCRIPT_DIR/../systemd/camera-box-grow-root.service (installed as a systemd unit, #369)
+check_required_files() {
+    log "Checking required sibling files..."
+    local f
+    for f in \
+        "$SCRIPT_DIR/lib/install-grub-efi.sh" \
+        "$SCRIPT_DIR/lib/camera-box-grow-root.sh" \
+        "$SCRIPT_DIR/../systemd/camera-box-grow-root.service"; do
+        [[ -f "$f" ]] || error "Missing required file: $f — refusing to partition. Run \
+create-usb-linux.sh from a full repo checkout (its lib/ and systemd/ siblings MUST be present)."
+    done
+    log "All required sibling files present."
 }
 
 # Confirm with user
@@ -43,8 +100,12 @@ confirm_device() {
     lsblk "$DEVICE" -o NAME,SIZE,MODEL,MOUNTPOINT
     echo ""
     warn "ALL DATA ON $DEVICE WILL BE DESTROYED!"
-    read -p "Type 'yes' to continue: " confirm
-    [[ "$confirm" == "yes" ]] || error "Aborted by user"
+    if [[ "$ASSUME_YES" -eq 1 ]]; then
+        log "Non-interactive (--yes): proceeding."
+    else
+        read -rp "Type 'yes' to continue: " confirm
+        [[ "$confirm" == "yes" ]] || error "Aborted by user"
+    fi
 }
 
 # Unmount any existing partitions
@@ -264,6 +325,14 @@ netplan generate
 systemctl enable systemd-networkd
 systemctl enable systemd-resolved
 
+# #448: MASK systemd-networkd-wait-online. The base debootstrap pulls it in with NO
+# `--interface`/`--any` bound, so on first boot it waits for EVERY interface to be fully
+# configured; ordered before network-online.target it stalls the boot BEFORE multi-user.target,
+# so sshd never starts — cam5 AND cam6 pinged (link up) but :22 was dead and needed a console
+# `systemctl restart ssh` to recover. A cam box needs DHCP-when-it-arrives, not a boot-blocking
+# wait. Masking removes the wait entirely. Idempotent (ln -sf overwrites any prior link).
+ln -sf /dev/null /etc/systemd/system/systemd-networkd-wait-online.service
+
 # Link resolv.conf to systemd-resolved
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
@@ -296,6 +365,15 @@ update-grub
 grub-set-default 0
 # #344: replace the broken removable core with a clean, bootable one.
 build_grub_efi_core /boot/efi "$(grub-probe --target=fs_uuid /)"
+
+# #448: MASK the two grub systemd units that assume a package-managed rw-root grub install.
+# On the appliance image they land in FAILED state on every boot (grub-initrd-fallback tries a
+# fallback initrd the pinned image doesn't use; grub-common expects an apt-driven grub upgrade
+# path) — noise in `systemctl --failed` and a false "degraded" boot state. The bootloader is
+# already installed + pinned by hand above (grub-install + build_grub_efi_core + grub-set-default),
+# so these units have no job to do. Mask them for a clean boot. Idempotent (ln -sf).
+ln -sf /dev/null /etc/systemd/system/grub-common.service
+ln -sf /dev/null /etc/systemd/system/grub-initrd-fallback.service
 
 # Clean up
 apt-get clean
@@ -374,6 +452,52 @@ SETUP_EOF
     chroot "$MOUNT_ROOT" systemctl enable camera-box-grow-root.service
 }
 
+# #448: create a NAMED NVRAM UEFI boot entry for the freshly-installed disk so firmware boots the
+# INSTALL, not the live-USB or a stale Windows entry. This MUST run on the HOST (efivars are not
+# mounted inside the debootstrap chroot), so it lives here, called from main() after grub is laid
+# down. grub-install --removable wrote ONLY \EFI\BOOT\BOOTX64.EFI and NO NVRAM entry — on cam5 the
+# box re-booted the installer/dead-Windows entry until an efibootmgr entry was added by hand.
+#
+# GUARDED: only acts when the host booted UEFI (/sys/firmware/efi/efivars present). If efivars are
+# absent (BIOS/CSM boot, or not mounted) it logs that the operator must REMOVE the live-USB so
+# firmware falls back to the internal disk's \EFI\BOOT\BOOTX64.EFI, and does nothing else.
+# Idempotent: removes any prior `cam-box` entries before creating a fresh one. Non-fatal — the
+# --removable BOOTX64.EFI fallback still boots if this can't write NVRAM.
+create_efi_boot_entry() {
+    if [[ ! -d /sys/firmware/efi/efivars ]]; then
+        warn "Host has no EFI vars (/sys/firmware/efi/efivars absent) — booted in BIOS/CSM mode or"
+        warn "efivars not mounted. NOT creating an NVRAM boot entry. After install completes, REMOVE"
+        warn "the live-USB so firmware boots the internal disk's \\EFI\\BOOT\\BOOTX64.EFI fallback."
+        return 0
+    fi
+    if ! command -v efibootmgr &>/dev/null; then
+        warn "efibootmgr not installed on the host live-USB — skipping the NVRAM boot entry. REMOVE"
+        warn "the live-USB after install so firmware boots \\EFI\\BOOT\\BOOTX64.EFI on $DEVICE."
+        return 0
+    fi
+
+    log "Creating named UEFI boot entry 'cam-box' for $DEVICE (ESP = partition 1)..."
+
+    # Idempotent: delete any existing cam-box entries so re-runs don't stack duplicates.
+    local existing bn
+    # NB: [0-9A-Fa-f]+ (not {4}) — portable across mawk (Ubuntu default) which lacks interval exprs.
+    existing=$(efibootmgr 2>/dev/null | awk \
+        '$2=="cam-box" && $1 ~ /^Boot[0-9A-Fa-f]+\*?$/ {n=$1; sub(/^Boot/,"",n); sub(/\*$/,"",n); print n}') || true
+    for bn in $existing; do
+        efibootmgr -b "$bn" -B >/dev/null 2>&1 || true
+    done
+
+    # Create the entry pointing at the REAL removable core (grub-install --removable + #344 wrote
+    # \EFI\BOOT\BOOTX64.EFI; the \EFI\ubuntu\grubx64.efi path does NOT exist with --removable).
+    # efibootmgr -c PREPENDS the new entry to BootOrder, so it becomes first automatically.
+    if efibootmgr -c -d "$DEVICE" -p 1 -L cam-box -l '\EFI\BOOT\BOOTX64.EFI' >/dev/null; then
+        log "UEFI boot entry 'cam-box' created and set first in BootOrder for $DEVICE."
+    else
+        warn "efibootmgr failed to write the NVRAM entry — REMOVE the live-USB after install so"
+        warn "firmware boots the internal disk's \\EFI\\BOOT\\BOOTX64.EFI fallback."
+    fi
+}
+
 # Cleanup and unmount
 cleanup() {
     log "Cleaning up..."
@@ -391,13 +515,14 @@ cleanup() {
 
 # Main
 main() {
-    check_requirements
+    check_requirements       # incl. check_required_files — fail loud BEFORE any disk write (#448)
     confirm_device
     cleanup_mounts
     partition_drive
     mount_filesystems
     install_base
-    configure_system
+    configure_system         # lays down grub + masks networkd-wait-online / ro-root grub units (#448)
+    create_efi_boot_entry    # host-side named NVRAM UEFI entry, guarded on efivars (#448)
     cleanup
 
     echo ""
@@ -408,10 +533,21 @@ main() {
     log "Password: newlevel"
     log "Root SSH: enabled (password: newlevel)"
     log "Network: DHCP on all ethernet interfaces"
+    log "Boot: sshd starts on first boot (networkd-wait-online masked #448)"
+    if [[ -d /sys/firmware/efi/efivars ]]; then
+        log "Boot: named 'cam-box' UEFI entry created — this box will boot the internal disk."
+    else
+        warn "Boot: host has no EFI vars — REMOVE the USB so firmware boots the internal disk's"
+        warn "      \\EFI\\BOOT\\BOOTX64.EFI (no NVRAM entry could be created)."
+    fi
     log ""
     log "You can now remove the USB and boot from it."
 }
 
-# Run with cleanup on error
-trap cleanup EXIT
-main
+# Run with cleanup on error — UNLESS sourced for unit tests (CREATE_USB_SOURCE_ONLY=1), which
+# loads the functions (check_required_files, create_efi_boot_entry, arg parsing) WITHOUT executing
+# the installer. Normal invocation (env var unset) runs exactly as before.
+if [[ "${CREATE_USB_SOURCE_ONLY:-0}" != "1" ]]; then
+    trap cleanup EXIT
+    main
+fi
