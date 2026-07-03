@@ -279,6 +279,67 @@ pub fn cam_strih_samples(strih: &[RecordingFrame], ids: &RunIds) -> Vec<LatencyS
     out
 }
 
+/// #286 4-camera MUTUAL phase-sync: per-camera cam→strih latency, reusing
+/// [`cam_strih_samples`] UNCHANGED — only feeding it a DIFFERENT `ids.cam2` pin per call.
+///
+/// Each camera stamps its OWN capture-time burn onto the frame it emits during a calibration
+/// window (mirrors the #174 cam1 capture burn [`BURN_RUN_ID_CAM1`], extended to a distinct
+/// deploy-time `CAMERA_BOX_BURN_RUN_ID` per camera); that burn rides through NDI to strih
+/// exactly like cam2's optical QR does. Pinning `ids.cam2` to a given camera's capture-burn
+/// run_id therefore makes [`cam_strih_samples`] pair THAT camera's capture instant against
+/// strih's own burn (`strih_burn.gen_ts_ns − camera_burn.gen_ts_ns`) — the same cam→strih
+/// latency #286 needs, with zero new decode primitive.
+///
+/// `strih` = ONE strih recording spanning the calibration window (all requested cameras'
+/// capture burns present); `strih_burn` = strih's own burn run_id; `camera_burn_ids` = each
+/// camera's distinct capture-burn run_id, in the order the caller wants results back. A
+/// camera's own pin is an EXACT match (`RunIds::is_cam2` with `Some`), so another requested
+/// camera's burn present in the same frame can never be mistaken for this one — `other_burns`
+/// is populated anyway for defensiveness/clarity, matching the [`RunIds`] contract.
+///
+/// Returns one `Vec<LatencySample>` per requested camera burn id, in the SAME order as
+/// `camera_burn_ids` — a camera whose burn never decoded in this recording gets an empty
+/// `Vec` (never a wrong number). Does NOT alter [`cam_strih_samples`] or any existing
+/// cam1-only caller — purely an ADDITIVE n-camera wrapper.
+pub fn n_camera_strih_samples(
+    strih: &[RecordingFrame],
+    strih_burn: u32,
+    camera_burn_ids: &[u32],
+) -> Vec<Vec<LatencySample>> {
+    camera_burn_ids
+        .iter()
+        .map(|&cam_id| {
+            let other_burns: Vec<u32> = camera_burn_ids
+                .iter()
+                .copied()
+                .filter(|&id| id != cam_id)
+                .collect();
+            let ids = RunIds {
+                node_burn: strih_burn,
+                cam2: Some(cam_id),
+                other_burns,
+            };
+            cam_strih_samples(strih, &ids)
+        })
+        .collect()
+}
+
+/// Per-camera MEDIAN cam→strih latency (ms) from [`n_camera_strih_samples`] — the #286
+/// phase-sync measurement input to [`crate::phase_sync::compute_phase_sync_offsets`]. Reuses
+/// [`hop_latency`]'s `p50_ms` (no parallel median implementation). `None` for a camera with
+/// zero decoded samples in this recording (never a fabricated number — the caller must not
+/// feed a guessed latency into the phase-sync offset kernel). Order matches `camera_burn_ids`.
+pub fn n_camera_median_latency_ms(
+    strih: &[RecordingFrame],
+    strih_burn: u32,
+    camera_burn_ids: &[u32],
+) -> Vec<Option<f64>> {
+    n_camera_strih_samples(strih, strih_burn, camera_burn_ids)
+        .iter()
+        .map(|samples| hop_latency("cam→strih", samples).map(|h| h.stats.p50_ms))
+        .collect()
+}
+
 /// cam2→cam1 OPTICAL+GRAB latency samples (#105 node 2) — REAL, available WITHOUT
 /// the #111 burn.
 ///
@@ -1123,6 +1184,90 @@ mod tests {
             cam2: Some(CAM2),
             other_burns: vec![BURN_RUN_ID_STRIH],
         }
+    }
+
+    // ---- #286 4-camera phase-sync: n_camera_strih_samples / n_camera_median_latency_ms ----
+
+    #[test]
+    fn n_camera_strih_samples_pairs_each_camera_by_its_own_burn_id_independently() {
+        // 3 cameras' capture burns ride the SAME strih frames alongside strih's own burn.
+        // Each camera keeps a CONSTANT latency across both frames so the per-camera result is
+        // trivially checkable, and pairing must never cross-contaminate cameras.
+        const CAM_A: u32 = BURN_RUN_ID_CAM1; // 911001
+        const CAM_B: u32 = 911005;
+        const CAM_C: u32 = 911006;
+        let base = 1_700_000_000_000_000_000i64;
+        let frames: Vec<RecordingFrame> = (0..2u64)
+            .map(|i| {
+                let t = base + i as i64 * 1_000_000_000; // 1s apart
+                multi(
+                    i,
+                    &[
+                        (CAM_A, 100 + i as u32, t),
+                        (CAM_B, 200 + i as u32, t + 10_000_000), // 10ms after CAM_A's capture
+                        (CAM_C, 300 + i as u32, t + 20_000_000), // 20ms after CAM_A's capture
+                        (BURN_RUN_ID_STRIH, 400 + i as u32, t + 100_000_000), // strih +100ms of t
+                    ],
+                )
+            })
+            .collect();
+        // Request B then A then C — output order must follow the REQUEST order, not any
+        // internal/declaration ordering.
+        let out = n_camera_strih_samples(&frames, BURN_RUN_ID_STRIH, &[CAM_B, CAM_A, CAM_C]);
+        assert_eq!(out.len(), 3);
+        // CAM_B latency = strih(t+100ms) - CAM_B(t+10ms) = 90ms, constant across both frames.
+        assert_eq!(out[0].len(), 2, "CAM_B samples {:?}", out[0]);
+        for s in &out[0] {
+            assert!((s.latency_ms - 90.0).abs() < 1e-6, "CAM_B {:?}", out[0]);
+        }
+        // CAM_A latency = 100ms constant.
+        assert_eq!(out[1].len(), 2, "CAM_A samples {:?}", out[1]);
+        for s in &out[1] {
+            assert!((s.latency_ms - 100.0).abs() < 1e-6, "CAM_A {:?}", out[1]);
+        }
+        // CAM_C latency = 80ms constant.
+        assert_eq!(out[2].len(), 2, "CAM_C samples {:?}", out[2]);
+        for s in &out[2] {
+            assert!((s.latency_ms - 80.0).abs() < 1e-6, "CAM_C {:?}", out[2]);
+        }
+    }
+
+    #[test]
+    fn n_camera_median_latency_ms_reports_median_per_camera_and_none_for_absent_camera() {
+        const CAM_A: u32 = BURN_RUN_ID_CAM1;
+        const CAM_B: u32 = 911005;
+        const CAM_ABSENT: u32 = 911099; // never decoded in this recording
+        let base = 1_700_000_000_000_000_000i64;
+        let frames: Vec<RecordingFrame> = (0..3u64)
+            .map(|i| {
+                let t = base + i as i64 * 1_000_000_000;
+                multi(
+                    i,
+                    &[
+                        (CAM_A, 100 + i as u32, t),
+                        (CAM_B, 200 + i as u32, t + 30_000_000),
+                        (BURN_RUN_ID_STRIH, 400 + i as u32, t + 100_000_000),
+                    ],
+                )
+            })
+            .collect();
+        let medians =
+            n_camera_median_latency_ms(&frames, BURN_RUN_ID_STRIH, &[CAM_A, CAM_B, CAM_ABSENT]);
+        assert_eq!(medians.len(), 3);
+        assert!(
+            (medians[0].unwrap() - 100.0).abs() < 1e-6,
+            "CAM_A {:?}",
+            medians[0]
+        );
+        assert!(
+            (medians[1].unwrap() - 70.0).abs() < 1e-6,
+            "CAM_B {:?}",
+            medians[1]
+        );
+        assert_eq!(
+            medians[2], None,
+            "a camera that never decoded must report None, not a fabricated number"
+        );
     }
 
     #[test]
