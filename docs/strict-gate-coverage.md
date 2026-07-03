@@ -35,7 +35,7 @@ what the code implies.
 | Analyzed-span duration floor — #373 | `src/recording_span_gate.rs:29/41/60` | 6 (`:69`) | ✅ `test`+`coverage` jobs | called from `src/bin/recording-verdict.rs:476-483,2384-2421` (ANDed into the headline so a collapsed optical read can't vacuously pass) | same as above |
 | Zero-loss restart survival — #109 | `src/zero_loss_restart_survival.rs:128 classify` | 11 (`:162`) | ✅ `test`+`coverage` jobs | `src/bin/zero-loss-restart-gate.rs` ← `recording-e2e.sh` optional `ZERO_LOSS_RESTART_GATE=1` step (OFF by default — opt-in, brackets a real OBS/PC restart) | manual rig E2E dispatch with the env flag set |
 | A/V-sync restart survival — #137 | `src/av_restart_sync.rs:139 classify` | 13 (`:170`) | ✅ `test`+`coverage` jobs | `src/bin/av-restart-sync-gate.rs` ← `recording-e2e.sh` optional `AV_RESTART_GATE=1` step (OFF by default, brackets a real OBS restart) | manual rig E2E dispatch with the env flag set |
-| 4-camera mutual phase-sync offsets — #286 | `src/phase_sync.rs:69 compute_phase_sync_offsets` | 9 (`:100`) | ✅ `test`+`coverage` jobs | **no Rust CLI wrapper / no production Rust caller.** Production consumer is `scripts/phase_sync_calibrate.py`, which *reimplements* the same math in Python (own test suite `tests/python/test_phase_sync_calibrate.py`) rather than calling a compiled binary | operator-run `phase_sync_calibrate.py --apply`; **the two implementations can silently drift — filed as #438** |
+| 4-camera mutual phase-sync offsets — #286 | `src/phase_sync.rs:69 compute_phase_sync_offsets` | 9 (`:100`) | ✅ `test`+`coverage` jobs | `src/bin/phase-sync-gate.rs` ← `scripts/phase_sync_calibrate.py` (`compute_phase_sync_offsets` shells out via stdin/stdout JSON, #438) — single source of truth, same shape as `render-budget-gate.rs` | operator-run `phase_sync_calibrate.py --apply` |
 | Genlock arrival-jitter audit report — #272 | `src/jitter_audit.rs` (parser + summarizer, not a PASS/FAIL verdict) | 10 (`:243`) | ✅ `test`+`coverage` jobs | `src/bin/genlock-jitter-report.rs`, run ad hoc by an operator investigating reserve/loss trade-offs | N/A — this is a diagnostic/report tool, not a gate; no PASS/FAIL semantics to automate |
 | Cam1 cross-recording loss reconciliation — #356 | `src/burn_reconcile.rs:39 cam1_real_drops_proven_delivered_downstream` | 4 (`:53`) | ✅ `test`+`coverage` jobs | called from `src/bin/recording-verdict.rs:2361` (re-classifies a proven-delivered cam1 "loss" as burn-unreadable rather than a real drop) | manual rig E2E dispatch, or ad-hoc verdict merge |
 | Broadcast-OBS liveness/wedge — #391 | `src/obs_watchdog.rs:122 classify` | 15 (`:197`) | ✅ `test`+`coverage` jobs | `src/bin/obs-watchdog-gate.rs` ← `scripts/obs-liveness-probe.py`; independently scheduled/standing watchdog (NOT part of `recording-e2e.sh`) | runs continuously as its own scheduled watchdog, not gated to a push/E2E |
@@ -50,8 +50,11 @@ already pass. Confirmed directly against a real CI run's log
 `<kernel>::tests::*` case and every `harness_<gate>_gate` integration-test binary that
 invokes the real compiled `*-gate` CLI (`harness_render_budget_gate`,
 `harness_frozen_camera_gate`, `harness_av_restart_sync_gate`,
-`harness_zero_loss_restart_gate`, `harness_obs_liveness_watchdog`, …) and asserts
-`scripts/recording-e2e.sh` still wires each one.
+`harness_zero_loss_restart_gate`, `harness_obs_liveness_watchdog`,
+`harness_phase_sync_gate`, …) and asserts `scripts/recording-e2e.sh` still wires each one
+(`phase-sync-gate` is the one exception — `phase_sync_calibrate.py` is a standalone
+operator-run calibration tool, not part of the `recording-e2e.sh` E2E chain, so its
+harness test proves CLI-boundary parity with the kernel instead of a wiring guard).
 
 **Conclusion: Tier A is complete.** No kernel named in the EPIC has unit tests excluded
 from CI, no gate binary is unbuilt or unwired, and no wiring-guard test is missing. There
@@ -80,14 +83,17 @@ told to be cautious about (`no new blocking CI gate that could break the pipelin
 everyone`), and it is supervisor/operator-driven work per the project's existing
 decision (`full-path-e2e.yml`'s own header: "operator is the guard").
 
-## Findings filed as follow-up work
+## Findings filed as follow-up work — now closed
 
-- **#438** — `phase_sync.rs` / `phase_sync_calibrate.py` are two independent
-  implementations of the same math with no shared golden-vector test and no CLI
-  wrapper tying them together (unlike every other kernel in the table, which has a thin
-  `*-gate` Rust binary as the single source of truth). Filed rather than fixed in this
-  pass: the fix is a design choice (rewrite the Python to shell out vs. add a parity
-  fixture) that touches the live rig calibration script.
+- **#438 (closed)** — `phase_sync.rs` / `phase_sync_calibrate.py` were two independent
+  implementations of the same math with no shared golden-vector test and no CLI wrapper
+  tying them together (the one kernel in the table above without a thin `*-gate` Rust
+  binary as the single source of truth). Fixed by adding `src/bin/phase-sync-gate.rs`
+  (mirroring `render-budget-gate.rs`'s stdin/stdout-JSON shape) and changing
+  `phase_sync_calibrate.compute_phase_sync_offsets` to shell out to it instead of
+  reimplementing the formula — there is now exactly ONE implementation, so the two can
+  never silently drift. `tests/harness_phase_sync_gate.rs` proves the compiled binary
+  reproduces the kernel's own unit-test vectors exactly.
 
 ## Why no code gate was wired in this pass
 

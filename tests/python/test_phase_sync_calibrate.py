@@ -3,10 +3,13 @@ auto-set controller: measured per-camera cam->strih latencies -> per-camera genl
 over OBS WS + persisted phase-sync-last.json.
 
 Covers, with NO live OBS:
-  a. compute_phase_sync_offsets() -- MUST mirror
-     camera_box::phase_sync::compute_phase_sync_offsets (src/phase_sync.rs) EXACTLY: slowest
-     maps to the floor, faster cameras get floor+deficit, clamp rails, degenerate cases (1
-     camera, all-equal, tie at the max), same as the Rust kernel's own unit tests.
+  a. compute_phase_sync_offsets() / _find_gate_bin() / _run_gate_bin() -- #438: the offset
+     MATH is no longer duplicated here. compute_phase_sync_offsets() DELEGATES to the compiled
+     `phase-sync-gate` Rust binary (the SAME camera_box::phase_sync::compute_phase_sync_offsets
+     kernel src/phase_sync.rs's 9 unit tests lock, proven identical at the CLI boundary by
+     tests/harness_phase_sync_gate.rs) -- these tests cover the I/O WIRING (binary located
+     correctly, correct JSON piped in, correct JSON parsed out, failures surfaced loudly),
+     never re-derive the formula in Python.
   b. load_measured_json() -- reads the {source: latency_ms} measurement input; fails loud on
      an empty/malformed/missing file, never guesses a camera's latency.
   c. read_current_latency() -- reads genlock_latency_ms_src via GetInputSettings.
@@ -36,45 +39,117 @@ import phase_sync_calibrate  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# (a) compute_phase_sync_offsets -- MUST mirror src/phase_sync.rs exactly
+# (a) compute_phase_sync_offsets / _find_gate_bin / _run_gate_bin -- #438: I/O wiring to the
+# compiled phase-sync-gate Rust binary. The FORMULA itself is proven only in Rust (9 kernel
+# unit tests in src/phase_sync.rs + tests/harness_phase_sync_gate.rs's CLI-boundary parity
+# checks against those same kernel test vectors) -- these tests never re-derive it.
 # ---------------------------------------------------------------------------
 
 class TestComputePhaseSyncOffsets:
-    def test_slowest_camera_maps_to_the_floor(self):
-        # Rust: compute_phase_sync_offsets(&[(1, 50.0), (2, 80.0)]) -> cam1=33, cam2=3(floor).
-        out = phase_sync_calibrate.compute_phase_sync_offsets({"cam1": 50.0, "cam2": 80.0})
-        assert out == {"cam1": 33, "cam2": 3}
-
-    def test_faster_camera_gets_floor_plus_the_deficit(self):
-        out = phase_sync_calibrate.compute_phase_sync_offsets(
-            {"cam10": 100.0, "cam20": 90.0, "cam30": 80.0}
+    def test_empty_input_yields_empty_output_without_invoking_the_binary(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin", lambda *a, **k: calls.append((a, k))
         )
-        assert out == {"cam10": 3, "cam20": 13, "cam30": 23}
-
-    def test_tie_at_the_max_maps_every_tied_camera_to_the_floor(self):
-        out = phase_sync_calibrate.compute_phase_sync_offsets(
-            {"cam1": 80.0, "cam2": 80.0, "cam3": 50.0}
-        )
-        assert out == {"cam1": 3, "cam2": 3, "cam3": 33}
-
-    def test_clamps_low(self):
-        # A camera far faster than the slowest would need an offset above the 2000ms cap.
-        out = phase_sync_calibrate.compute_phase_sync_offsets({"fast": 5000.0, "slow": 0.0})
-        assert out["slow"] == phase_sync_calibrate.PHASE_SYNC_CAP_MS
-        assert out["fast"] == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
-
-    def test_single_camera_is_its_own_slowest_and_gets_the_floor(self):
-        out = phase_sync_calibrate.compute_phase_sync_offsets({"only": 123.4})
-        assert out == {"only": phase_sync_calibrate.PHASE_SYNC_FLOOR_MS}
-
-    def test_all_equal_latencies_all_map_to_the_floor(self):
-        out = phase_sync_calibrate.compute_phase_sync_offsets(
-            {"a": 42.0, "b": 42.0, "c": 42.0}
-        )
-        assert all(v == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS for v in out.values())
-
-    def test_empty_input_yields_empty_output(self):
         assert phase_sync_calibrate.compute_phase_sync_offsets({}) == {}
+        assert calls == [], "empty input must never invoke the gate binary"
+
+    def test_delegates_to_run_gate_bin_and_returns_its_result(self, monkeypatch):
+        seen = {}
+
+        def fake_run_gate_bin(measured, gate_bin=None):
+            seen["measured"] = measured
+            seen["gate_bin"] = gate_bin
+            return {"cam1": 33, "cam2": 3}
+
+        monkeypatch.setattr(phase_sync_calibrate, "_run_gate_bin", fake_run_gate_bin)
+        out = phase_sync_calibrate.compute_phase_sync_offsets(
+            {"cam1": 50.0, "cam2": 80.0}, gate_bin="/custom/phase-sync-gate"
+        )
+        assert out == {"cam1": 33, "cam2": 3}
+        assert seen["measured"] == {"cam1": 50.0, "cam2": 80.0}
+        assert seen["gate_bin"] == "/custom/phase-sync-gate"
+
+
+class TestFindGateBin:
+    def test_prefers_explicit_arg(self, tmp_path):
+        fake_bin = tmp_path / "phase-sync-gate"
+        fake_bin.write_text("#!/bin/sh\n")
+        assert phase_sync_calibrate._find_gate_bin(str(fake_bin)) == str(fake_bin)
+
+    def test_uses_env_var_when_no_explicit_arg(self, tmp_path, monkeypatch):
+        fake_bin = tmp_path / "phase-sync-gate"
+        fake_bin.write_text("#!/bin/sh\n")
+        monkeypatch.setenv("PHASE_SYNC_GATE_BIN", str(fake_bin))
+        assert phase_sync_calibrate._find_gate_bin(None) == str(fake_bin)
+
+    def test_uses_probe_bin_dir_when_no_env_var(self, tmp_path, monkeypatch):
+        (tmp_path / "phase-sync-gate").write_text("#!/bin/sh\n")
+        monkeypatch.delenv("PHASE_SYNC_GATE_BIN", raising=False)
+        monkeypatch.setenv("PROBE_BIN_DIR", str(tmp_path))
+        found = phase_sync_calibrate._find_gate_bin(None)
+        assert found == str(tmp_path / "phase-sync-gate")
+
+    def test_exits_when_not_found_anywhere(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("PHASE_SYNC_GATE_BIN", raising=False)
+        monkeypatch.setenv("PROBE_BIN_DIR", str(tmp_path))  # empty dir, binary absent
+        with pytest.raises(SystemExit):
+            phase_sync_calibrate._find_gate_bin(None)
+
+
+class TestRunGateBin:
+    def test_pipes_measured_json_on_stdin_and_parses_stdout(self, monkeypatch, tmp_path):
+        fake_bin = str(tmp_path / "phase-sync-gate")
+        seen = {}
+
+        def fake_subprocess_run(cmd, input=None, capture_output=None):
+            seen["cmd"] = cmd
+            seen["stdin"] = json.loads(input.decode())
+
+            class FakeResult:
+                returncode = 0
+                stdout = b'{"cam1": 33, "cam2": 3}'
+                stderr = b""
+
+            return FakeResult()
+
+        monkeypatch.setattr(phase_sync_calibrate, "_find_gate_bin", lambda explicit: fake_bin)
+        monkeypatch.setattr(phase_sync_calibrate.subprocess, "run", fake_subprocess_run)
+
+        out = phase_sync_calibrate._run_gate_bin({"cam1": 50.0, "cam2": 80.0})
+        assert out == {"cam1": 33, "cam2": 3}
+        assert seen["cmd"] == [fake_bin]
+        assert seen["stdin"] == {"cam1": 50.0, "cam2": 80.0}
+
+    def test_nonzero_exit_raises_systemexit_with_stderr(self, monkeypatch):
+        def fake_subprocess_run(cmd, input=None, capture_output=None):
+            class FakeResult:
+                returncode = 2
+                stdout = b""
+                stderr = b"ERROR: source 'cam1': latency value is missing or not a number"
+
+            return FakeResult()
+
+        monkeypatch.setattr(phase_sync_calibrate, "_find_gate_bin", lambda explicit: "/x")
+        monkeypatch.setattr(phase_sync_calibrate.subprocess, "run", fake_subprocess_run)
+
+        with pytest.raises(SystemExit, match="latency value is missing"):
+            phase_sync_calibrate._run_gate_bin({"cam1": None})
+
+    def test_malformed_stdout_json_raises_systemexit(self, monkeypatch):
+        def fake_subprocess_run(cmd, input=None, capture_output=None):
+            class FakeResult:
+                returncode = 0
+                stdout = b"not json"
+                stderr = b""
+
+            return FakeResult()
+
+        monkeypatch.setattr(phase_sync_calibrate, "_find_gate_bin", lambda explicit: "/x")
+        monkeypatch.setattr(phase_sync_calibrate.subprocess, "run", fake_subprocess_run)
+
+        with pytest.raises(SystemExit, match="invalid JSON"):
+            phase_sync_calibrate._run_gate_bin({"cam1": 50.0})
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +363,14 @@ class TestCLI:
         fake = FakeObs(latencies={"NDI cam5": 450, "NDI cam1": 450})
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
         monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        # #438: the offset math is delegated to the compiled phase-sync-gate binary, not
+        # reimplemented here -- mock the I/O boundary with the SAME values the Rust kernel's
+        # own unit tests prove for this input (src/phase_sync.rs's
+        # slowest_camera_maps_to_the_floor).
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {"NDI cam5": 3, "NDI cam1": 13},
+        )
         measured_path = tmp_path / "measured.json"
         measured_path.write_text(json.dumps({"NDI cam5": 100.0, "NDI cam1": 90.0}))
         monkeypatch.setattr(
@@ -302,8 +385,13 @@ class TestCLI:
         fake = FakeObs(latencies={"NDI cam5": 450, "NDI cam1": 450, "NDI cam3": 450})
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
         monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        # slowest = cam5 (100ms) -> floor(3). cam1 (90ms) -> 3+10=13. cam3 (80ms) -> 3+20=23
+        # (same vectors as src/phase_sync.rs's faster_camera_gets_floor_plus_the_deficit).
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {"NDI cam5": 3, "NDI cam1": 13, "NDI cam3": 23},
+        )
         measured_path = tmp_path / "measured.json"
-        # slowest = cam5 (100ms) -> floor(3). cam1 (90ms) -> 3+10=13. cam3 (80ms) -> 3+20=23.
         measured_path.write_text(json.dumps(
             {"NDI cam5": 100.0, "NDI cam1": 90.0, "NDI cam3": 80.0}
         ))
