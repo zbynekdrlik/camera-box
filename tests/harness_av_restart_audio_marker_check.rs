@@ -24,8 +24,21 @@
 //! Same PURE-STRING model as `tests/rig_mode.rs` / `tests/harness_rig_test_dropin_cleanup.rs` /
 //! `tests/harness_av_restart_sync_gate.rs`: source the real helper and inspect its emitted text,
 //! or read the real orchestration scripts and assert on their source — no ssh to a live rig.
+//!
+//! ## #431 hardening — RUNNING is not audible
+//!
+//! The QPSK emitter (`src/probe/qpsk_emit.rs`) is a CONTINUOUS-FEED design: it ALWAYS writes to
+//! the ALSA ring — silence between markers, marker samples when one is due — precisely so the PCM
+//! never underruns. So the `#420` check above (`state: RUNNING`) is satisfied by the silence
+//! carrier ALONE, even if the painter's refresh tick stalls and ZERO discrete markers ever fire.
+//! `audio_marker_emission_check_cmds` closes that gap by polling the marker-log CSV the emitter
+//! now appends to PER EMITTED MARKER (not just on shutdown) and failing loud if it never grows.
+//! Unlike the RUNNING check (which needs a real `/proc/asound` path this harness can't fake), the
+//! emission check depends on nothing but a file — so its tests EXECUTE the generated snippet for
+//! real against a controlled fixture, proving it can actually FAIL and PASS on the same mechanism.
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -199,5 +212,201 @@ fn av_restart_painter_calls_the_shared_self_check_before_recording_starts() {
         "#421: the self-check must run BEFORE the gate starts OBS recording — a check that \
          fires after recording already started is too late to prevent an unmeasured run. \
          Got block:\n{block}"
+    );
+}
+
+// -------------------------------------------------------------------------------------------
+// #431 — emission-assert tests (see the module doc for why these EXECUTE the real snippet)
+// -------------------------------------------------------------------------------------------
+
+fn emission_scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "audio-marker-emit-431-{}-{}",
+        std::process::id(),
+        name
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Source the shared helper, build the `audio_marker_emission_check_cmds LOG ON_FAIL EXTRA`
+/// snippet, then `eval` it in the SAME bash process — with the poll interval/attempts shrunk via
+/// env vars (the production defaults are ~3s x 3 ≈ 9s) so the test runs in a couple of seconds.
+/// Returns (exit_code, stdout, stderr).
+fn exec_emission_check(
+    log: &PathBuf,
+    on_fail_cmd: &str,
+    extra: &str,
+    interval_secs: u64,
+    attempts: u64,
+) -> (i32, String, String) {
+    let lib = manifest_dir().join(LIB_REL);
+    let script = format!(
+        r#"set -uo pipefail
+. "{lib}"
+snippet="$(audio_marker_emission_check_cmds "{log}" '{on_fail_cmd}' "{extra}")"
+eval "$snippet"
+"#,
+        lib = lib.display(),
+        log = log.display(),
+        on_fail_cmd = on_fail_cmd,
+        extra = extra,
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env(
+            "AUDIO_MARKER_EMIT_POLL_INTERVAL_SECS",
+            interval_secs.to_string(),
+        )
+        .env("AUDIO_MARKER_EMIT_POLL_ATTEMPTS", attempts.to_string())
+        .output()
+        .expect("#431: failed to run the emission-check harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// HEADLINE (#431): a marker log whose row count NEVER GROWS across the whole poll window must
+/// FAIL LOUD (non-zero exit), identify itself as #431, explain that RUNNING-but-silent is not
+/// audible, and run the caller-supplied cleanup (`on_fail_cmd`) before exiting — the same
+/// fail-fast contract the #420 RUNNING check already has, now extended to real emission. This
+/// EXECUTES the generated snippet against a real static fixture file — not a string-content
+/// check — so it proves the assertion can genuinely fail on a silent/stalled emitter.
+#[test]
+fn emission_check_fails_loud_when_marker_log_never_grows() {
+    let dir = emission_scratch("stall");
+    let log = dir.join("markers.csv");
+    let sentinel = dir.join("cleaned-up");
+    fs::write(
+        &log,
+        "# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\nindex,frame_id,emit_ts_ns\n0,100,1000\n",
+    )
+    .unwrap();
+
+    let (code, _out, err) = exec_emission_check(
+        &log,
+        &format!("touch {}", sentinel.display()),
+        "test=stall",
+        1,
+        2,
+    );
+
+    assert_eq!(
+        code, 1,
+        "#431: a marker log that never grows must FAIL LOUD (exit 1). stderr:\n{err}"
+    );
+    assert!(
+        err.contains("#431") && err.to_lowercase().contains("not grown"),
+        "#431: the failure must identify itself and explain the emission is stalled. stderr:\n{err}"
+    );
+    assert!(
+        sentinel.exists(),
+        "#431: the caller-supplied cleanup (on_fail_cmd) must run when emission is stalled — a \
+         silent painter must not be left running unmeasured"
+    );
+}
+
+/// HEADLINE (#431): the moment the marker log's row count grows (a real marker fired), the check
+/// must PASS (exit 0) — proving this is a REAL assertion that can both fail AND succeed on the
+/// same underlying mechanism, never a tautology. A background thread appends a row shortly after
+/// polling starts so the check's next poll observes growth.
+#[test]
+fn emission_check_passes_once_marker_log_grows() {
+    let dir = emission_scratch("grow");
+    let log = dir.join("markers.csv");
+    fs::write(
+        &log,
+        "# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\nindex,frame_id,emit_ts_ns\n0,100,1000\n",
+    )
+    .unwrap();
+
+    let log_for_writer = log.clone();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_for_writer)
+            .expect("#431: append fixture marker row");
+        writeln!(f, "1,101,2000000").unwrap();
+    });
+
+    let (code, out, err) = exec_emission_check(&log, "true", "test=grow", 1, 4);
+    writer.join().unwrap();
+
+    assert_eq!(
+        code, 0,
+        "#431: a marker log that grows mid-poll must PASS (exit 0). stdout={out:?} stderr={err:?}"
+    );
+    assert!(
+        out.contains("PASS") && out.contains("#431"),
+        "#431: a successful emission check must print a PASS line identifying itself. stdout:\n{out}"
+    );
+}
+
+/// `audio_marker_check_cmds` (the combined #420 RUNNING + #431 emission check) must APPEND the
+/// emission-check block ONLY when given a 4th MARKER_LOG_PATH argument — a 3-arg call (existing
+/// callers, and the string-content tests above) must see byte-identical output to before #431.
+#[test]
+fn combined_check_cmds_appends_emission_block_only_when_marker_log_given() {
+    let without_log =
+        run_sourced(r#"audio_marker_check_cmds "hw:CARD=PCH,DEV=3" 'true' "ctx""#);
+    assert!(
+        !without_log.contains("#431"),
+        "#431: with no marker-log argument, the emission check must be skipped entirely. Got:\n{without_log}"
+    );
+
+    let with_log = run_sourced(
+        r#"audio_marker_check_cmds "hw:CARD=PCH,DEV=3" 'true' "ctx" "/tmp/markers.csv""#,
+    );
+    assert!(
+        with_log.contains("#431") && with_log.contains("/tmp/markers.csv"),
+        "#431: with a marker-log argument, the emission-check block must be appended, keyed on \
+         that exact path. Got:\n{with_log}"
+    );
+    // The emission check must come AFTER the RUNNING PASS line (it only makes sense once the PCM
+    // is confirmed RUNNING).
+    let running_pass = with_log
+        .find("PASS: #420")
+        .expect("#431: expected the existing #420 RUNNING PASS line to still be present");
+    let emission_pos = with_log
+        .find("#431")
+        .expect("#431: expected the emission-check block");
+    assert!(
+        emission_pos > running_pass,
+        "#431: the emission check must run AFTER the RUNNING check passes. Got:\n{with_log}"
+    );
+}
+
+/// Both real call sites must pass their known marker-log path as the 4th positional argument, so
+/// the #431 hardening actually applies in production — not merely available-but-unused.
+#[test]
+fn rig_mode_and_recording_e2e_pass_marker_log_to_the_check() {
+    let rig_mode = read("scripts/rig-mode.sh");
+    let check_line = rig_mode
+        .lines()
+        .find(|l| l.contains("$(audio_marker_check_cmds"))
+        .expect("#431: expected the audio_marker_check_cmds call in rig-mode.sh");
+    assert!(
+        check_line.contains("\"$marker_log\""),
+        "#431: rig-mode.sh's call must pass $marker_log as the 4th arg so the emission check has \
+         a real path to poll. Got:\n{check_line}"
+    );
+
+    let recording_e2e = read("scripts/recording-e2e.sh");
+    let block_pos = recording_e2e
+        .find("AV_RESTART_GATE:-0")
+        .expect("#137 AV_RESTART_GATE block must exist");
+    let check_pos = recording_e2e[block_pos..]
+        .find("$(audio_marker_check_cmds")
+        .map(|i| i + block_pos)
+        .expect("#431: expected the audio_marker_check_cmds call in the AV_RESTART_GATE block");
+    let check_line_e2e = recording_e2e[check_pos..].lines().next().unwrap_or_default();
+    assert!(
+        check_line_e2e.contains("av-restart-markers.csv"),
+        "#431: recording-e2e.sh's AV_RESTART_GATE call must pass the painter's own \
+         /tmp/av-restart-markers.csv as the 4th arg. Got:\n{check_line_e2e}"
     );
 }
