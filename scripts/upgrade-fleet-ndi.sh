@@ -12,14 +12,18 @@
 # Swapping a shared library a running service depends on is genuinely risky on this hardware (no
 # easy physical recovery), so this script is deliberately conservative:
 #   - refuses to touch anything until the candidate .so's OWN "NDI SDK LINUX ... X.Y.Z.W" banner
-#     parses cleanly (never installs an unverified/unrecognised blob)
+#     parses cleanly (never installs an unverified/unrecognised blob) — reads it via `strings`,
+#     falling back to `grep -a` when `strings` isn't installed on the box (#445: cam3 has none)
 #   - refuses a downgrade (candidate <= currently-active version) unless --force
 #   - upgrades ONE canary camera first; the rest of the fleet is NEVER touched if the canary fails
-#   - always backs up the previous runtime file before repointing symlinks, and NEVER deletes it
-#     (mirrors the manual `libndi.so.6.2.1.bak` convention already used on dev1) — rollback just
-#     re-points the symlinks back, it never has to restore from the backup
-#   - verifies each camera after the swap: camera-box must still emit its genlock report ("fps
-#     emitted .* fps captured" — the exact signal scripts/deploy-fleet.sh already uses) with no
+#   - detects the ACTUAL runtime layout before touching anything: most cams have `libndi.so.6`
+#     as a symlink to a versioned `.so` (repoint + backup the target); cam3 (#445) ships
+#     `libndi.so.6`/`libndi.so` as REAL FILES (back up the file itself, then overwrite both names)
+#   - always backs up the previous runtime before swapping, and NEVER deletes the backup — rollback
+#     just re-points the symlinks (symlink layout) or restores the `.bak` copy (real-file layout)
+#   - verifies each camera after the swap: camera-box must still emit an NDI-alive signal ("fps
+#     emitted .* fps captured" — the exact genlock-report signal scripts/deploy-fleet.sh uses —
+#     OR the older "Streaming: X.Y fps" shape cam3's build logs, OR "NDI sender ready") with no
 #     FATAL/panic lines, AND the active runtime version must read back as the candidate. Any
 #     verification failure triggers an automatic rollback + restart, then the camera is recorded
 #     as failed (the fleet loop continues to the next camera — one bad box doesn't abort the run)
@@ -56,12 +60,28 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- PURE functions (no network/ssh — unit-tested from tests/upgrade_fleet_ndi.rs) ----------
 
-# ndi_version_from_strings_output TEXT -> the trailing "X.Y.Z.W" token out of the exact
-# `strings libndi.so.6 | grep 'NDI SDK LINUX'` banner (e.g. "NDI SDK LINUX 12:51:52 Apr 13 2026
-# 6.3.2.0"). Empty ("") on no match — NEVER guesses a version from unrelated text. Always exits
-# 0 (callers gate explicitly on emptiness).
+# ndi_version_from_strings_output TEXT -> the trailing "X.Y.Z.W" token out of an "NDI SDK LINUX
+# ... X.Y.Z.W" banner (e.g. "NDI SDK LINUX 12:51:52 Apr 13 2026 6.3.2.0"), whether TEXT came from
+# `strings` or the ndi_read_banner_local `grep -a` fallback below — both feed compatible text
+# into this function. Empty ("") on no match — NEVER guesses a version from unrelated text.
+# Always exits 0 (callers gate explicitly on emptiness).
 ndi_version_from_strings_output() {
   printf '%s\n' "$1" | { grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true; } | tail -1
+}
+
+# ndi_read_banner_local PATH -> the "NDI SDK LINUX ... X.Y.Z.W" banner text out of the .so at
+# PATH. Prefers `strings` (the historical path, works everywhere it's installed); falls back to
+# `grep -a` when `strings` is unavailable OR yields no match (#445: cam3 has no `strings` binary
+# at all, which made the tool refuse it with an "unknown baseline" error). Feed the result to
+# ndi_version_from_strings_output for the bare X.Y.Z.W. Empty ("") on total failure — never a
+# guess.
+ndi_read_banner_local() {
+  local path="$1" out=""
+  out="$(strings "$path" 2>/dev/null | grep -m1 'NDI SDK LINUX' || true)"
+  if [ -z "$out" ]; then
+    out="$(grep -a -m1 -oE 'NDI SDK LINUX[^\n]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$path" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$out"
 }
 
 # ndi_version_status CURRENT CANDIDATE -> NEWER | SAME | OLDER | UNKNOWN.
@@ -121,15 +141,45 @@ remaining_after_canary() {
   printf '%s\n' "${out# }"
 }
 
-# ndi_swap_remote DEST_DIR NEW_BASENAME -> the remote bash that backs up the CURRENTLY ACTIVE
-# runtime (resolved via readlink -f, so it backs up the real file, not the symlink), re-points
-# BOTH `libndi.so` and `libndi.so.6` at NEW_BASENAME (already scp'd into DEST_DIR by the
-# caller), ldconfig's, prints "OLD_BASE=<name>" so the caller can roll back, then restarts
-# camera-box to load the new runtime. NEW_BASENAME is never inlined into a remote string that
-# could be re-interpreted — it flows in as a literal argument to this pure builder.
+# ndi_link_kind_remote DEST_DIR -> the remote one-liner that echoes "symlink" when
+# DEST_DIR/libndi.so.6 is a symbolic link (the layout on cam1/cam2/cam4 — a versioned .so with
+# libndi.so.6 -> it), "regular" when it is a real file (#445: cam3's layout — libndi.so.6 and
+# libndi.so ship as real files, not symlinks), or "missing" when neither exists. Callers must
+# query this BEFORE building the swap/rollback script — a real file must be overwritten in
+# place, while a symlink must be re-pointed; guessing either way corrupts the other layout.
+ndi_link_kind_remote() {
+  local dest="$1"
+  printf '%s\n' "if [ -L \"$dest/libndi.so.6\" ]; then echo symlink; elif [ -f \"$dest/libndi.so.6\" ]; then echo regular; else echo missing; fi"
+}
+
+# ndi_swap_remote DEST_DIR NEW_BASENAME [LINK_KIND] -> the remote bash that installs the new
+# runtime (already scp'd into DEST_DIR by the caller as NEW_BASENAME), ldconfig's, prints
+# "OLD_BASE=<name>" so the caller can roll back, then restarts camera-box to load it.
+# LINK_KIND (from ndi_link_kind_remote; defaults to "symlink" for backward compatibility with
+# the fleet's existing layout) selects HOW:
+#   symlink (cam1/cam2/cam4) -> backs up the CURRENTLY ACTIVE runtime (resolved via readlink -f,
+#     so it backs up the real file, not the symlink), then re-points BOTH `libndi.so` and
+#     `libndi.so.6` at NEW_BASENAME.
+#   regular (#445, cam3)     -> libndi.so.6/libndi.so are real files, not symlinks — backs up
+#     the active libndi.so.6 to a .bak file, then COPIES the new candidate content over both
+#     names (a symlink repoint would not apply).
+# NEW_BASENAME is never inlined into a remote string that could be re-interpreted — it flows in
+# as a literal argument to this pure builder.
 ndi_swap_remote() {
-  local dest="$1" new_base="$2"
-  cat <<EOF
+  local dest="$1" new_base="$2" kind="${3:-symlink}"
+  if [ "$kind" = "regular" ]; then
+    cat <<EOF
+set -e
+cp -a "$dest/libndi.so.6" "$dest/libndi.so.6.bak"
+chmod +x "$dest/$new_base"
+cp -a "$dest/$new_base" "$dest/libndi.so.6"
+cp -a "$dest/$new_base" "$dest/libndi.so"
+ldconfig
+echo "OLD_BASE=libndi.so.6.bak"
+systemctl restart camera-box
+EOF
+  else
+    cat <<EOF
 set -e
 dest="$dest"
 OLD_REAL="\$(readlink -f "$dest/libndi.so.6")"
@@ -142,14 +192,29 @@ ldconfig
 echo "OLD_BASE=\$OLD_BASE"
 systemctl restart camera-box
 EOF
+  fi
 }
 
-# ndi_rollback_remote DEST_DIR OLD_BASENAME -> the remote bash that re-points both symlinks
-# back at OLD_BASENAME (the pre-swap runtime — ndi_swap_remote never deletes it) and restarts
-# camera-box. The exact inverse of ndi_swap_remote; never touches the backup .bak file.
+# ndi_rollback_remote DEST_DIR OLD_BASENAME [LINK_KIND] -> the exact inverse of ndi_swap_remote
+# for the same LINK_KIND (defaults to "symlink"):
+#   symlink -> re-points both symlinks back at OLD_BASENAME (the pre-swap runtime —
+#     ndi_swap_remote never deletes it).
+#   regular (#445, cam3) -> restores libndi.so.6 and libndi.so from the .bak file
+#     ndi_swap_remote created (OLD_BASENAME is "libndi.so.6.bak" in this case — there is no
+#     symlink to repoint).
+# Either way, restarts camera-box and never touches/deletes the backup.
 ndi_rollback_remote() {
-  local dest="$1" old_base="$2"
-  cat <<EOF
+  local dest="$1" old_base="$2" kind="${3:-symlink}"
+  if [ "$kind" = "regular" ]; then
+    cat <<EOF
+set -e
+cp -a "$dest/$old_base" "$dest/libndi.so.6"
+cp -a "$dest/$old_base" "$dest/libndi.so"
+ldconfig
+systemctl restart camera-box
+EOF
+  else
+    cat <<EOF
 set -e
 dest="$dest"
 ln -sf $old_base "\$dest/libndi.so.6"
@@ -157,19 +222,33 @@ ln -sf $old_base "\$dest/libndi.so"
 ldconfig
 systemctl restart camera-box
 EOF
+  fi
 }
 
-# ndi_active_version_remote DEST_DIR -> the remote one-liner that prints the "NDI SDK LINUX ..."
-# banner for whichever .so DEST_DIR/libndi.so.6 currently resolves to. Feed its output to
-# ndi_version_from_strings_output to get the bare X.Y.Z.W.
+# ndi_active_version_remote DEST_DIR -> the remote script that prints the "NDI SDK LINUX ..."
+# banner for whichever .so DEST_DIR/libndi.so.6 currently resolves to. Tries `strings` first,
+# falling back to `grep -a` when `strings` isn't installed on the camera (#445: confirmed on
+# cam3, which has no `strings` binary) — the SAME fallback ndi_read_banner_local uses for the
+# local candidate read, so the current and candidate versions are always read with identical
+# logic. Feed its output to ndi_version_from_strings_output to get the bare X.Y.Z.W.
 ndi_active_version_remote() {
-  printf 'strings "$(readlink -f %s/libndi.so.6)" | grep -m1 "NDI SDK LINUX"' "$1"
+  local dest="$1"
+  cat <<EOF
+f="\$(readlink -f "$dest/libndi.so.6")"
+out="\$(strings "\$f" 2>/dev/null | grep -m1 'NDI SDK LINUX' || true)"
+if [ -z "\$out" ]; then
+  out="\$(grep -a -m1 -oE 'NDI SDK LINUX[^\n]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "\$f" 2>/dev/null || true)"
+fi
+printf '%s\n' "\$out"
+EOF
 }
 
-# emit_ok_grep_pattern -> the exact journalctl grep proving camera-box's NDI capture->emit path
-# survived the restart — IDENTICAL signal to deploy-fleet.sh's post-deploy check, so the fleet
-# tooling has one consistent definition of "this camera is genlocking/emitting", not two.
-emit_ok_grep_pattern() { echo 'fps emitted .* fps captured'; }
+# emit_ok_grep_pattern -> the journalctl grep proving camera-box's NDI capture->emit path
+# survived the restart. Built on the SAME "fps emitted .* fps captured" signal deploy-fleet.sh's
+# post-deploy check uses, BROADENED (#445) to also accept an older camera-box build's log shape
+# ("Streaming: X.Y fps" — cam3's build predates the genlock report and was false-verify-failed,
+# triggering an automatic rollback of a perfectly-good upgrade) and a generic sender-ready line.
+emit_ok_grep_pattern() { echo 'fps emitted .* fps captured|Streaming: [0-9.]+ fps|NDI sender ready'; }
 
 # fatal_grep_pattern -> the exact crash signatures deploy-fleet.sh scans for after a restart.
 fatal_grep_pattern() { echo "panic|thread '.*' panicked|SIGSEGV|SIGABRT|core dumped|FATAL"; }
@@ -181,7 +260,7 @@ fi
 
 # --- network + mutating flow (executed only when run directly) -----------------------------
 
-usage() { sed -n '2,32p' "$0"; }
+usage() { sed -n '2,45p' "$0"; }
 
 SSH_PASS="${SSH_PASS:-newlevel}"
 NDI_DEST_DIR="${NDI_DEST_DIR:-/usr/lib/ndi}"
@@ -228,7 +307,7 @@ ssh_box()  { sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTi
 scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
 
 NEW_BASE="$(basename "$SO_PATH")"
-NEW_BANNER="$(strings "$SO_PATH" | grep -m1 'NDI SDK LINUX' || true)"
+NEW_BANNER="$(ndi_read_banner_local "$SO_PATH")"
 NEW_VER="$(ndi_version_from_strings_output "$NEW_BANNER")"
 if [ -z "$NEW_VER" ]; then
   err "could not read an 'NDI SDK LINUX ... X.Y.Z.W' banner out of $SO_PATH — refusing to \
@@ -339,11 +418,20 @@ upgrade_one_camera() {
     return 1
   fi
 
+  local link_kind
+  link_kind="$(ssh_box "$ip" "$(ndi_link_kind_remote "$NDI_DEST_DIR")" || echo "missing")"
+  if [ "$link_kind" = "missing" ]; then
+    err "[$cam] $NDI_DEST_DIR/libndi.so.6 does not exist — refusing (cannot determine layout)"
+    FAILED+=("$cam(missing-runtime)")
+    return 1
+  fi
+  info "[$cam] runtime layout: $link_kind"
+
   info "[$cam] swapping runtime + restarting camera-box..."
   local swap_out old_base
-  if ! swap_out="$(ssh_box "$ip" "$(ndi_swap_remote "$NDI_DEST_DIR" "$NEW_BASE")")"; then
+  if ! swap_out="$(ssh_box "$ip" "$(ndi_swap_remote "$NDI_DEST_DIR" "$NEW_BASE" "$link_kind")")"; then
     err "[$cam] swap command failed — the previous runtime is never deleted, so the active \
-symlink should still be intact"
+symlink/file should still be intact"
     FAILED+=("$cam(swap-failed)")
     return 1
   fi
@@ -353,11 +441,11 @@ symlink should still be intact"
     FAILED+=("$cam(no-old-base)")
     return 1
   fi
-  info "[$cam] previous runtime backed up as ${old_base}.bak; symlinks now -> $NEW_BASE"
+  info "[$cam] previous runtime backed up as ${old_base}; runtime now -> $NEW_BASE"
 
   if ! verify_camera_after_swap "$cam" "$ip"; then
     warn "[$cam] verification FAILED — rolling back to $old_base"
-    if ssh_box "$ip" "$(ndi_rollback_remote "$NDI_DEST_DIR" "$old_base")" >/dev/null \
+    if ssh_box "$ip" "$(ndi_rollback_remote "$NDI_DEST_DIR" "$old_base" "$link_kind")" >/dev/null \
        && verify_camera_after_swap "$cam" "$ip"; then
       log "[$cam] rollback verified healthy on $old_base"
     else
@@ -372,7 +460,7 @@ attention immediately"
     info "[$cam] running loopback E2E burn-decode verification..."
     if ! CAM="$cam" "$HERE/loopback-e2e.sh"; then
       warn "[$cam] E2E burn-decode FAILED after upgrade — rolling back to $old_base"
-      ssh_box "$ip" "$(ndi_rollback_remote "$NDI_DEST_DIR" "$old_base")" >/dev/null || true
+      ssh_box "$ip" "$(ndi_rollback_remote "$NDI_DEST_DIR" "$old_base" "$link_kind")" >/dev/null || true
       FAILED+=("$cam(e2e-failed-rolled-back)")
       return 1
     fi

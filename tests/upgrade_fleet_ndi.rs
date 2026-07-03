@@ -389,7 +389,7 @@ fn emit_ok_grep_pattern_still_matches_original_genlock_report_line() {
     let out = Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "printf '%s\\n' 'genlock: 60.02 fps emitted, 60.01 fps captured' | grep -E -- '{pattern}'"
+            "printf '%s\\n' 'genlock: 60.02 fps emitted 60.01 fps captured' | grep -E -- '{pattern}'"
         ))
         .output()
         .expect("failed to run grep");
@@ -457,10 +457,7 @@ fn ndi_read_banner_local_uses_strings_when_available() {
     )
     .expect("write fake .so");
 
-    let out = run_sourced(&format!(
-        "ndi_read_banner_local {}",
-        so_path.display()
-    ));
+    let out = run_sourced(&format!("ndi_read_banner_local {}", so_path.display()));
     assert!(
         out.contains("NDI SDK LINUX") && out.contains("6.2.1.0"),
         "#445: expected the banner to be read via `strings`. Got:\n{out}"
@@ -610,20 +607,28 @@ fn ndi_link_kind_remote_detects_symlink_vs_regular_vs_missing() {
 fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
     let p = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 regular");
     assert!(
-        p.contains("cp -a") && p.contains("libndi.so.6.bak"),
-        "#445: the regular-file layout must back up the active libndi.so.6 to a .bak file before \
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.bak\""),
+        "#445: the regular-file layout must back up the active libndi.so.6 to a .bak file BEFORE \
          overwriting it. Got:\n{p}"
     );
     assert!(
-        p.contains("cp -a \"$dest/libndi.so.6.3.2\" \"$dest/libndi.so.6\"")
-            || p.contains("cp -a \"$dest/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\""),
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\""),
         "#445: must COPY the new candidate content over libndi.so.6 (never a symlink) when the \
          layout is a real file. Got:\n{p}"
     );
     assert!(
-        p.contains("cp -a \"$dest/libndi.so.6.3.2\" \"$dest/libndi.so\"")
-            || p.contains("cp -a \"$dest/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so\""),
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so\""),
         "#445: must COPY the new candidate content over libndi.so too. Got:\n{p}"
+    );
+    let backup_pos = p
+        .find("libndi.so.6.bak")
+        .expect("#445: expected a backup reference");
+    let overwrite_pos = p
+        .find("libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\"")
+        .expect("#445: expected the overwrite of libndi.so.6");
+    assert!(
+        backup_pos < overwrite_pos,
+        "#445: must back up the OLD real-file runtime BEFORE overwriting it. Got:\n{p}"
     );
     assert!(
         !p.contains("ln -sf"),
@@ -635,10 +640,7 @@ fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
         "#445: must still print an OLD_BASE marker so the caller's parse never comes up empty. \
          Got:\n{p}"
     );
-    assert!(
-        p.contains("systemctl restart camera-box"),
-        "Got:\n{p}"
-    );
+    assert!(p.contains("systemctl restart camera-box"), "Got:\n{p}");
 }
 
 /// ndi_swap_remote with NO third argument (existing callers/tests) must default to the symlink
@@ -662,20 +664,21 @@ fn ndi_swap_remote_defaults_to_symlink_layout_when_kind_omitted() {
 fn ndi_rollback_remote_regular_layout_restores_from_backup_file() {
     let p = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.bak regular");
     assert!(
-        p.contains("cp -a \"$dest/libndi.so.6.bak\" \"$dest/libndi.so.6\"")
-            || p.contains("cp -a \"$dest/libndi.so.6.bak\" \"/usr/lib/ndi/libndi.so.6\""),
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.bak\" \"/usr/lib/ndi/libndi.so.6\""),
         "#445: regular-layout rollback must restore libndi.so.6 from the .bak file. Got:\n{p}"
     );
     assert!(
-        p.contains("cp -a \"$dest/libndi.so.6.bak\" \"$dest/libndi.so\"")
-            || p.contains("cp -a \"$dest/libndi.so.6.bak\" \"/usr/lib/ndi/libndi.so\""),
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.bak\" \"/usr/lib/ndi/libndi.so\""),
         "#445: regular-layout rollback must restore libndi.so from the .bak file too. Got:\n{p}"
     );
     assert!(
         !p.contains("ln -sf"),
         "#445: regular-layout rollback must never symlink-repoint. Got:\n{p}"
     );
-    assert!(p.contains("ldconfig") && p.contains("systemctl restart camera-box"), "Got:\n{p}");
+    assert!(
+        p.contains("ldconfig") && p.contains("systemctl restart camera-box"),
+        "Got:\n{p}"
+    );
 }
 
 /// ndi_rollback_remote with NO third argument must default to the symlink layout — same
@@ -684,7 +687,10 @@ fn ndi_rollback_remote_regular_layout_restores_from_backup_file() {
 fn ndi_rollback_remote_defaults_to_symlink_layout_when_kind_omitted() {
     let with_default = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.2.1");
     let explicit_symlink = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.2.1 symlink");
-    assert_eq!(with_default, explicit_symlink, "#445: default must equal explicit 'symlink'");
+    assert_eq!(
+        with_default, explicit_symlink,
+        "#445: default must equal explicit 'symlink'"
+    );
 }
 
 /// Static ordering guard: upgrade_one_camera must determine the actual remote layout
