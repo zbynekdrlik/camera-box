@@ -132,6 +132,10 @@ echo "$NDI_DIR" > /etc/ld.so.conf.d/ndi.conf
 ldconfig
 # no `grep -q` on a pipe under pipefail — -q's early close SIGPIPEs ldconfig and fails the pipeline
 ldconfig -p | grep libndi >/dev/null || fail "libndi not in linker cache"
+# DistroAV's Linux loader (plugin-main.cpp load_ndilib) scans ONLY /usr/lib, /usr/lib64,
+# /usr/local/lib (non-recursive — NOT the multiarch dir, NOT the ld cache) for libndi.so.<N>.
+# Live-proven on imag-nb: without this symlink DistroAV logs ERR-404 despite a valid ld cache.
+ln -sf "$(readlink -f "$NDI_DIR"/libndi.so.6)" /usr/local/lib/libndi.so.6
 apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 

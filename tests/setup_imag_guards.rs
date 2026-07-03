@@ -79,6 +79,20 @@ fn setup_imag_masks_sleep_and_lid() {
     );
 }
 
+/// DistroAV's Linux NDI loader scans ONLY /usr/lib, /usr/lib64 and /usr/local/lib
+/// (non-recursive; NOT the multiarch dir, NOT the ld.so cache — vendor/distroav
+/// src/plugin-main.cpp load_ndilib). Live-proven on imag-nb: without a libndi.so.<N>
+/// symlink in a scanned dir the plugin loads UI-only with ERR-404.
+#[test]
+fn setup_imag_symlinks_ndi_into_distroav_scan_path() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/usr/local/lib/libndi.so.6"),
+        "{SETUP} must symlink libndi.so.6 into /usr/local/lib — the only fleet-convention dir \
+         DistroAV's own Linux loader actually scans (ERR-404 otherwise, hit live on imag-nb)"
+    );
+}
+
 /// The OBS WebSocket must come up on the fleet-convention port with no auth (stream-box
 /// convention) — every rig WS tool (imag_scenes.py, render-budget gate, burn tooling) keys on it.
 #[test]
