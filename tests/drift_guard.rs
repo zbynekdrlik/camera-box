@@ -400,6 +400,53 @@ fn check_pins_fails_loudly_on_incomplete_manifest() {
 }
 
 #[test]
+fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp() {
+    // #390: the `range:MIN-MAX` bounds embedded in the manifest text and the
+    // GENLOCK_LATENCY_MS_MIN/_MAX constants in drift-guard.sh are two independent copies (markdown
+    // vs bash) — a manifest typo (here `range:3-200`, missing a zero) must NOT silently narrow the
+    // sane backstop. check-pins must catch the disagreement loudly, exit 1, and name both values.
+    let dir = std::env::temp_dir().join(format!("dg_range_mismatch_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("distroav")).unwrap();
+    let readme = dir.join("README.md");
+    std::fs::write(
+        &readme,
+        "\
+| `vendor/obs-studio` | x | **32.1.2** (commit `a`) | git subtree --squash |
+| `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
+| NDI | x | requires **NDI ≥ 6.3.0** | tree |
+| `output_fps_strih` | `60` | log |
+| `output_fps_stream` | `30` | log |
+| `genlock_wall_clock` | `1` | env |
+| `ndi_input_latency` | `0` | obs-websocket |
+| `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=range:3-200` | OBS log |
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("distroav/buildspec.json"),
+        "{\n    \"version\": \"6.2.1\"\n}\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) =
+        run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        code, 1,
+        "a range pin disagreeing with the code's clamp must exit 1. stdout={stdout:?} stderr={stderr:?}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("3-200") && all.contains("3-2000") && all.to_uppercase().contains("MALFORMED"),
+        "must name both the pinned range and the code's clamp loudly. stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
 fn compare_clean_when_observed_matches_the_pinned_set() {
     // The real known-good values verified live on strih 2026-06-14 + the broadcast-path NDI
     // inputs all at the pinned Normal(0) latency (the #84 certified low-latency re-pin verified
@@ -1704,17 +1751,29 @@ fn real_manifest_pins_genlock_source_latency_per_box() {
     );
 
     let stream = setting("genlock_source_latency_stream");
+    // #390: the stream A/V-align source is NOT a fixed constant any more — it is calibration-
+    // tracked (a `range:MIN-MAX` sane backstop, not a hand-guessed ms value that goes stale the
+    // next time the operator re-calibrates #188). The exact bound values are asserted below.
     assert!(
-        stream.contains("NDI 2ME PGM=450"),
-        "real manifest must pin NDI 2ME PGM=450 on stream (deliberate A/V-align latency, #357): {stream:?}"
+        stream.contains("NDI 2ME PGM=range:"),
+        "real manifest must pin NDI 2ME PGM as calibration-tracked (range:MIN-MAX, #390), not a \
+         hardcoded ms constant: {stream:?}"
+    );
+    assert!(
+        !stream.contains("NDI 2ME PGM=450") && !stream.contains("NDI 2ME PGM=1000"),
+        "must NOT be re-hardcoded to another fixed constant (450 or 1000) — that just re-goes-stale \
+         the next time the A/V-align is re-calibrated (#390 root cause): {stream:?}"
     );
 }
 
 #[test]
-fn compare_fails_when_per_source_genlock_latency_drifted() {
-    // RED: `genlock_source_latency=` is not yet a recognised key → ignored with WARN → exit 0, but
-    // we expect exit 20.
-    // GREEN: the per-source latency facet detects `NDI 2ME PGM` at 900ms vs pinned 450ms → DRIFT.
+fn compare_fails_when_per_source_genlock_latency_egregiously_out_of_range() {
+    // #390: the stream `NDI 2ME PGM` pin is now calibration-tracked (a `range:3-2000` sane
+    // backstop — the DistroAV per-source genlock-latency clamp — instead of a hardcoded ms
+    // constant), so a plausible calibrated value (e.g. 900ms or 1000ms) is no longer drift by
+    // itself (see `compare_does_not_false_alarm_...` below — that IS the #390 bug this PR fixes).
+    // The range check must still catch a value the DistroAV UI/WS could never legitimately hold:
+    // here 5000ms, which exceeds the clamp max (2000ms).
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=stream",
@@ -1725,11 +1784,11 @@ fn compare_fails_when_per_source_genlock_latency_drifted() {
         "genlock_wall_clock=1",
         "ndi_input_latency=NDI 2ME PGM=0",
         r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
-        "genlock_source_latency=NDI 2ME PGM=900", // drifted: pinned=450, observed=900
+        "genlock_source_latency=NDI 2ME PGM=5000", // egregiously out of range (clamp max=2000)
     ]);
     assert_eq!(
         code, 20,
-        "drifted per-source latency must exit 20. stdout={stdout:?} stderr={stderr:?}"
+        "egregiously out-of-range per-source latency must still exit 20. stdout={stdout:?} stderr={stderr:?}"
     );
     assert!(
         stdout.contains("NDI 2ME PGM") && stdout.contains("DRIFT"),
@@ -1739,4 +1798,282 @@ fn compare_fails_when_per_source_genlock_latency_drifted() {
         stderr.contains("DRIFT DETECTED"),
         "must fail loudly on stderr. stderr={stderr:?}"
     );
+}
+
+#[test]
+fn compare_does_not_false_alarm_when_live_av_align_diverges_from_stale_pin() {
+    // #390 REGRESSION: this is the exact false-alarm the issue reports. The stream A/V-align
+    // latency is whatever the #188 calibration last measured (NOT a fixed constant) — the pin was
+    // hand-guessed at 450ms, but the genuinely-delivered, correctly-working live value was
+    // verified at 1000ms (2026-07-01, via OBS WS + genlock-fifo audit: src_latency_ms=1000
+    // latency_ms=1000 reserve_ms=1000, head_skew ~1s, underruns=0). A `--compare` against that
+    // live value must NOT drift merely because it differs from any single previously-pinned
+    // constant — it only fails when it is out of the sane DistroAV clamp range, or (separately)
+    // when it has drifted from the last #427-persisted calibration. Neither applies here: no
+    // `av_sync_calibrated_ms=` was supplied (best-effort facet dormant) and 1000ms is well inside
+    // the [3, 2000] clamp range.
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_source_latency=NDI 2ME PGM=1000", // live, genuinely-delivered A/V-align value
+    ]);
+    assert_eq!(
+        code, 0,
+        "the live calibrated 1000ms value must NOT false-alarm as drift (#390). \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("NDI 2ME PGM") && stdout.contains("OK"),
+        "must report the source as OK (range-checked, within the sane clamp). stdout={stdout:?}"
+    );
+    assert!(
+        stdout.to_lowercase().contains("calibrat"),
+        "must surface that the calibrated value was not supplied (range-checked only), per #390's \
+         graceful-degradation contract: stdout={stdout:?}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "clean compare must not write to stderr. stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn compare_catches_genuine_drift_from_last_calibrated_value_when_supplied() {
+    // #390 best-effort tracking: when the operator/agent supplies `av_sync_calibrated_ms=` (the
+    // #427-persisted `applied_latency_ms` read from av-sync-last.json on the OBS box), the guard
+    // cross-checks the LIVE value against that calibration — catching a genuine drift (e.g. a
+    // hand-nudge in the OBS UI since the last calibration run) that the sane-range backstop alone
+    // would miss (900ms is well inside [3, 2000], so range-only would report it clean).
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_source_latency=NDI 2ME PGM=900", // live value
+        "av_sync_calibrated_ms=1000",             // last-calibrated value (#427 persisted)
+    ]);
+    assert_eq!(
+        code, 20,
+        "a live value that drifted 100ms from the last calibration must exit 20. \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.to_lowercase().contains("calibrat") && stdout.contains("DRIFT"),
+        "must name the calibration-drift check in stdout. stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("DRIFT DETECTED"),
+        "must fail loudly on stderr. stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn compare_passes_when_live_value_matches_last_calibrated_value() {
+    // The counterpart to the drift case above: when the live value matches the last-calibrated
+    // value (within the small rounding tolerance), the calibration cross-check must report clean.
+    let (code, stdout, stderr) = run_script(&[
+        "--compare",
+        "host=stream",
+        "obs_version=32.1.2",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI 2ME PGM=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_source_latency=NDI 2ME PGM=1000",
+        "av_sync_calibrated_ms=1000",
+    ]);
+    assert_eq!(
+        code, 0,
+        "a live value matching the last calibration must pass. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.to_lowercase().contains("calibrat") && stdout.contains("OK"),
+        "must report the calibration check as OK. stdout={stdout:?}"
+    );
+}
+
+// --- #390: `drift_check_source_latency` range mode (calibration-tracked pins) -------------------
+
+#[test]
+fn drift_check_source_latency_range_mode_accepts_any_value_in_the_sane_clamp() {
+    // RED: `drift_check_source_latency` has no `range:MIN-MAX` mode yet — it would try an exact
+    // string compare of "1000" against "range:3-2000" and always report DRIFT.
+    // GREEN: an expected pin shaped `NAME=range:MIN-MAX` checks the observed value falls within
+    // [MIN, MAX] inclusive, rather than requiring an exact match.
+    let case = |observed: &str| -> String {
+        run_sourced(
+            r#"rc=0; drift_check_source_latency "$EXP" "$OBS" || rc=$?; echo "RC=$rc""#,
+            &[("EXP", "NDI 2ME PGM=range:3-2000"), ("OBS", observed)],
+        )
+    };
+
+    // any value inside the range → OK, regardless of the exact number (this is the whole point —
+    // no single hardcoded constant to go stale).
+    for v in ["3", "450", "1000", "2000"] {
+        let out = case(&format!("NDI 2ME PGM={v}"));
+        assert!(
+            out.contains("RC=0") && out.contains("OK"),
+            "{v}ms is inside [3,2000] -> must be OK: {out:?}"
+        );
+    }
+
+    // below the DistroAV clamp minimum → DRIFT
+    let below = case("NDI 2ME PGM=2");
+    assert!(
+        below.contains("RC=2") && below.contains("DRIFT"),
+        "2ms is below the sane clamp minimum (3) -> must be DRIFT: {below:?}"
+    );
+
+    // above the DistroAV clamp maximum → DRIFT
+    let above = case("NDI 2ME PGM=2001");
+    assert!(
+        above.contains("RC=2") && above.contains("DRIFT"),
+        "2001ms is above the sane clamp maximum (2000) -> must be DRIFT: {above:?}"
+    );
+
+    // unread → still UNKNOWN, same as the exact-match mode
+    let unknown = case("");
+    assert!(
+        unknown.contains("RC=3") && unknown.contains("UNKNOWN"),
+        "empty observed must still return rc 3 (UNKNOWN): {unknown:?}"
+    );
+}
+
+#[test]
+fn drift_check_source_latency_exact_mode_unaffected_by_range_mode() {
+    // The strih camera-floor pins (`NDI cam5=3,NDI cam1=3,NDI cam3=3`) are STRUCTURAL, not
+    // calibration-tracked — they must keep the strict exact-match behavior #357 already proved
+    // (see `drift_check_source_latency_catches_drift_and_passes_on_match` above). This asserts a
+    // mixed expected CSV (one exact pin, one range pin) evaluates each entry by its OWN mode.
+    let out = run_sourced(
+        r#"rc=0; drift_check_source_latency "$EXP" "$OBS" || rc=$?; echo "RC=$rc""#,
+        &[
+            ("EXP", "NDI cam5=3,NDI 2ME PGM=range:3-2000"),
+            ("OBS", "NDI cam5=9,NDI 2ME PGM=1000"), // cam5 drifted off the exact floor; PGM in-range
+        ],
+    );
+    assert!(
+        out.contains("RC=2"),
+        "the exact-mode cam5 entry must still drift on a mismatch: {out:?}"
+    );
+    assert!(
+        out.contains("NDI cam5") && out.contains("DRIFT"),
+        "must name the drifted exact-mode source: {out:?}"
+    );
+    assert!(
+        out.contains("NDI 2ME PGM") && out.contains("OK"),
+        "the in-range range-mode source must still report OK: {out:?}"
+    );
+}
+
+// --- #390: best-effort cross-check against the #427-persisted calibrated value ------------------
+
+#[test]
+fn drift_check_calibrated_source_latency_skips_gracefully_when_not_supplied() {
+    // RED: `drift_check_calibrated_source_latency` does not exist yet → sourced harness exits
+    // non-zero.
+    // GREEN: an empty calibrated value (the operator/agent could not read av-sync-last.json off
+    // the OBS box — drift-guard itself runs on dev1, not on the box) is a graceful SKIP, never a
+    // failure — #390's explicit "do NOT fail the whole drift-guard on its absence" contract.
+    let out = run_sourced(
+        r#"rc=0; drift_check_calibrated_source_latency "NDI 2ME PGM" "NDI 2ME PGM=1000" "" 10 || rc=$?; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "no calibrated value supplied must be a graceful pass, not a failure: {out:?}"
+    );
+    assert!(
+        out.to_lowercase().contains("skip") || out.to_lowercase().contains("not available"),
+        "must say the calibrated value was not available (range-checked only): {out:?}"
+    );
+}
+
+#[test]
+fn drift_check_calibrated_source_latency_catches_drift_beyond_tolerance() {
+    // GREEN: a live value 100ms off the last-calibrated value (tolerance 10ms) is genuine drift.
+    let out = run_sourced(
+        r#"rc=0; drift_check_calibrated_source_latency "NDI 2ME PGM" "NDI 2ME PGM=900" "1000" 10 || rc=$?; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=2"),
+        "100ms off calibration -> DRIFT: {out:?}"
+    );
+    assert!(
+        out.contains("DRIFT"),
+        "must print DRIFT status line: {out:?}"
+    );
+}
+
+#[test]
+fn drift_check_calibrated_source_latency_passes_within_tolerance() {
+    // GREEN: a live value within the rounding tolerance of the last-calibrated value is clean.
+    let exact = run_sourced(
+        r#"rc=0; drift_check_calibrated_source_latency "NDI 2ME PGM" "NDI 2ME PGM=1000" "1000" 10 || rc=$?; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        exact.contains("RC=0") && exact.contains("OK"),
+        "exact match -> OK: {exact:?}"
+    );
+
+    let within = run_sourced(
+        r#"rc=0; drift_check_calibrated_source_latency "NDI 2ME PGM" "NDI 2ME PGM=1005" "1000" 10 || rc=$?; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        within.contains("RC=0") && within.contains("OK"),
+        "5ms off, within +/-10ms tolerance -> OK: {within:?}"
+    );
+}
+
+#[test]
+fn drift_check_calibrated_source_latency_unknown_when_source_unobserved() {
+    // A calibrated value WAS supplied but the live per-source latency for that source was not
+    // read — this is a genuine UNKNOWN (we meant to check but couldn't), never a silent pass.
+    let out = run_sourced(
+        r#"rc=0; drift_check_calibrated_source_latency "NDI 2ME PGM" "NDI cam5=3" "1000" 10 || rc=$?; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=3"),
+        "unobserved source -> UNKNOWN: {out:?}"
+    );
+    assert!(
+        out.contains("UNKNOWN"),
+        "must print UNKNOWN status line: {out:?}"
+    );
+}
+
+#[test]
+fn range_tracked_source_name_finds_the_calibration_tracked_pin() {
+    // RED: `range_tracked_source_name` does not exist yet → sourced harness exits non-zero.
+    // GREEN: picks out the (first) source pinned as `range:MIN-MAX` from a mixed expected CSV;
+    // "" when none of the pinned sources use range mode (the strih camera-floor pins).
+    let mixed = run_sourced(
+        r#"range_tracked_source_name "$EXP""#,
+        &[("EXP", "NDI cam5=3,NDI cam1=3,NDI 2ME PGM=range:3-2000")],
+    );
+    assert_eq!(mixed.trim(), "NDI 2ME PGM");
+
+    let none = run_sourced(
+        r#"range_tracked_source_name "$EXP""#,
+        &[("EXP", "NDI cam5=3,NDI cam1=3,NDI cam3=3")],
+    );
+    assert_eq!(none.trim(), "");
 }

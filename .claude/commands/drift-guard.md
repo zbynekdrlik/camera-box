@@ -128,6 +128,26 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    layout — flat `obs.dll` or nested `bin/64bit/obs.dll` — resolves). If OBS is not running or a DLL is
    missing, omit that key so the engine reports UNKNOWN rather than a false clean.
 
+1e. **Gather the per-source genlock FIFO held-latency (#357) + (stream only) the last-calibrated
+   A/V-align value (#390).** The effective held-latency per source comes from the SAME `genlock-fifo
+   audit` log lines used for burns/health — filter the newest OBS log and build a comma-separated
+   `SOURCE=latency_ms` list:
+
+   ```powershell
+   $d="$env:APPDATA\obs-studio\logs"
+   $f=Get-ChildItem $d -Filter *.txt | Sort-Object LastWriteTime -Desc | Select-Object -First 1
+   $pairs = (Get-Content $f.FullName) | ForEach-Object { if ($_ -match "genlock-fifo audit '([^']+)':.* latency_ms=(\d+)") { "$($Matches[1])=$($Matches[2])" } }
+   "genlock_source_latency=$($pairs -join ',')"
+   ```
+
+   On **stream** ONLY, also try to read the #427-persisted last-calibrated value (OPTIONAL —
+   best-effort; omit the key entirely if the file is missing, the facet degrades gracefully):
+
+   ```powershell
+   $j = "C:\ProgramData\camera-box\av-sync-last.json"
+   if (Test-Path $j) { $v = (Get-Content $j | ConvertFrom-Json).applied_latency_ms; "av_sync_calibrated_ms=$v" }
+   ```
+
 2. **Compare against the pinned set** — feed every observed value to the engine, INCLUDING the #122
    per-component BUILD SHA + capability keys (supply `manifest=` to activate that facet):
 
@@ -140,7 +160,10 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
      obs_dll_sha256=<live Get-FileHash of obs.dll> \
      distroav_dll_sha256=<live Get-FileHash of distroav.dll> \
      genlock_capability="<the live genlock marker text>" \
-     burn_env="<none, or the NAME=VALUE list from the burn-env gather>"   # stream: ndi_input_latency="NDI 2ME PGM=<n>"
+     burn_env="<none, or the NAME=VALUE list from the burn-env gather>" \
+     genlock_source_latency="<SOURCE=latency_ms list from step 1e>" \
+     av_sync_calibrated_ms=<applied_latency_ms from av-sync-last.json, stream only, if reachable>
+     # stream: ndi_input_latency="NDI 2ME PGM=<n>"
    ```
 
    - Exit `0` → **NO DRIFT**, the box matches the pinned zero-loss set AND the per-component BUILD SHAs
