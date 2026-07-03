@@ -80,23 +80,29 @@ if [ "$DURATION" -lt 300 ]; then
   exit 1
 fi
 QR_SIZE="${QR_SIZE:-700}"
-# #11 60fps rollout: the chain runs at 60fps end-to-end (cam1 emits 60, both OBS canvas/output
-# at 60). PAINT_FPS is moot under KMS (the painter is vblank-paced at the monitor's 60 Hz, one
-# dual-QR id per flip, --paint-fps ignored), but defaulting it to 60 keeps the non-KMS fallback
-# correct. GENLOCK_FPS is cam1's CAMERA_BOX_GENLOCK_FPS — the NDI emit rate the genlock gate
-# wall-paces the 60 fps capture onto (60 = 1:1 pass-through onto the 60 fps wall boundaries).
+# Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
+# low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
+# is now cut-to-stream ONLY, at 30fps. Cam boxes still emit 60fps NDI (cam1 still films cam2's
+# 60Hz-painted monitor at 60fps for the optical proof) — the 60→30 beat that used to sit at
+# strih→stream now sits INSIDE strih's own ingest (cam→strih). PAINT_FPS stays 60 (cam2's monitor
+# refresh is unaffected by strih's fps; moot under KMS anyway — the painter is vblank-paced at the
+# monitor's 60 Hz, one dual-QR id per flip, --paint-fps ignored, but defaulting it to 60 keeps the
+# non-KMS fallback correct). GENLOCK_FPS is cam1's CAMERA_BOX_GENLOCK_FPS — the NDI emit rate the
+# genlock gate wall-paces the 60 fps capture onto (60 = 1:1 pass-through onto the 60 fps wall
+# boundaries) — cameras are UNCHANGED by this topology move.
 PAINT_FPS="${PAINT_FPS:-60}"
 GENLOCK_FPS="${GENLOCK_FPS:-60}"
-# #11 mixed 60/30 topology: the recorded OBS program fps is now PER BOX — the strih recording is
-# 60fps (strih renders the 60fps LED-wall IMAG program) and the stream recording is 30fps (the
-# stream box decimates 60→30 for the restreamer). Each feeds ITS recording's DIAGNOSTIC span
-# (analyzed_secs = frames / capture_fps) and optical expected-step (refresh_hz / capture_fps), so
-# the strih extract gets 60 and the stream extract gets 30 — a single shared 60 would mis-report
-# the stream recording's span + optical beat (the #1c shadow). The decimation LOSS step (the 60fps
-# strih burn read from the 30fps stream recording steps by 2) is a RIG-PINNED topology constant,
-# threaded as --strih-emit-fps / --stream-capture-fps below and DECOUPLED from these diagnostic
-# rates so it is always correct regardless of which recording's --capture-fps is in effect.
-STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-60}"
+# #459: the recorded OBS program fps is now 30 on BOTH boxes — strih records its own 30fps
+# cut-to-stream canvas (the 60→30 camera-feed decimation happens on strih's OWN ingest now, not on
+# the strih→stream hop) and stream records the same 30fps feed, plain pass-through, no further
+# decimation. Each feeds ITS recording's DIAGNOSTIC span (analyzed_secs = frames / capture_fps) and
+# optical expected-step (refresh_hz / capture_fps) — kept as TWO separate knobs (rather than one
+# shared constant) so a future topology change can re-diverge them without another rename. The
+# decimation LOSS step is gap-ignore for every node regardless of these rates (#360 —
+# node_render_step always returns 1); --strih-emit-fps / --stream-capture-fps below are RETAINED on
+# recording-verdict's CLI for provenance, decoupled from these diagnostic rates so they are always
+# correct regardless of which recording's --capture-fps is in effect.
+STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
 # #174 cam1-capture render-time burn run_id (the value CAMERA_BOX_BURN_RUN_ID is set to on
 # cam1). Mirrors the verdict's BURN_RUN_ID_CAM1 default (911001). Distinct from the strih
@@ -582,9 +588,10 @@ if [ "$frozen_ok" -ne 1 ]; then
   exit 1
 fi
 
-echo "[4d/8] #405/#406 render-budget gate — with burns ON + Multiview open, BOTH boxes MUST hold the render frame budget (strih 60fps, stream 30fps)"
-# The 2026-07-02 regression: a measurement burn left ON dropped strih RENDER 60->27fps (36ms >
-# 16.6ms/60fps budget) while the encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
+echo "[4d/8] #405/#406 render-budget gate — with burns ON + Multiview open, BOTH boxes MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb)"
+# The 2026-07-02 regression (found when strih was STILL the 60fps LED-wall IMAG box, pre-#459): a
+# measurement burn left ON dropped strih RENDER 60->27fps (36ms > 16.6ms/60fps budget) while the
+# encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
 # caught it, because the delivery verdict checks burn-id contiguity (which stays contiguous at
 # 27fps) not render fps. This gate snapshots OBS WS GetStats deltas on BOTH boxes in the exact
 # recording state (burns ON from [4b/8], Multiview open) and FAILS FAST if either misses its
@@ -599,7 +606,7 @@ export RENDER_GATE_BIN
 # is ever set to match strih (per the shared-password note) an empty here would fail auth → false abort.
 if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:-}" \
     python3 "$HERE/render-budget-gate.py" \
-      --box "strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-60}" \
+      --box "strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-30}" \
       --box "stream=${STREAM}:${RENDER_TARGET_FPS_STREAM:-30}" \
       --window-s "${RENDER_GATE_WINDOW_S:-6}"; then
   echo "    [render-budget-gate] a box missed the render frame budget with burns ON — aborting BEFORE recording (#405)." >&2

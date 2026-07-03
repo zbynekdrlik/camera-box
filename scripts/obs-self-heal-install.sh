@@ -422,9 +422,11 @@ main() {
     esac
   done
 
+  # Topology v2 (#459, EPIC #466, was 60 pre-#459): strih is now cut-to-stream only at 30fps --
+  # the 60fps LED-wall IMAG role moved to the new imag-nb box (#458/#463).
   local mcp box_ip target_fps
   case "$box" in
-    strih)  mcp="win-strih";      box_ip="10.77.9.202"; target_fps=60 ;;
+    strih)  mcp="win-strih";      box_ip="10.77.9.202"; target_fps=30 ;;
     stream) mcp="win-stream-snv"; box_ip="10.77.9.204"; target_fps=30 ;;
     *) echo "ERROR: --box must be 'strih' or 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac

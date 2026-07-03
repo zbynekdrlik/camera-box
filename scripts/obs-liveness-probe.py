@@ -15,9 +15,10 @@ A box whose WS connection fails entirely (unreachable, wedged hard enough that
 even the WS thread is gone) is reported as `ws_reachable: false` rather than
 raising — the watchdog must still gate the OTHER box.
 
-Usage (both boxes, WS-only pass — what a dev1 systemd timer runs):
+Usage (both boxes, WS-only pass — what a dev1 systemd timer runs; Topology v2, #459: strih is
+now cut-to-stream only at 30fps, the 60fps IMAG role moved to imag-nb):
   python3 scripts/obs-liveness-probe.py \\
-    --box strih=10.77.9.202:60 --box stream=10.77.9.204:30 --window-s 4
+    --box strih=10.77.9.202:30 --box stream=10.77.9.204:30 --window-s 4
 
 With agent/MCP-sampled process state layered in (repeatable, one per box):
   python3 scripts/obs-liveness-probe.py --box stream=10.77.9.204:30 \\

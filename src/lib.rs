@@ -71,6 +71,13 @@ pub mod render_budget;
 // frame count here to gate the headline alongside contiguity + the optical + colour gates.
 pub mod recording_span_gate;
 
+// #461 — burn-less optical zero-loss gate (pure kernel) for a node with NO digital burn (imag-nb,
+// EPIC #466 Topology v2). First..=last integer contiguity over the cam2 painted OPTICAL tick,
+// deliberately a sibling of (not reused from) `probe::burn_contiguity` so it stays Tier-0
+// testable outside the probe feature. No probe deps; the probe-gated `bin/recording-verdict`
+// extracts `RecordingFrame::tick` for imag's recording and feeds it here.
+pub mod imag_tick_gate;
+
 // #356 — cross-recording cam1 loss reconciliation (pure kernel). In the recording-verdict MERGE,
 // a cam1 REAL DROP read from the clean upstream strih recording that IS decoded in the downstream
 // stream recording was proven delivered → re-classify it BURN-UNREADABLE (a strih-recording

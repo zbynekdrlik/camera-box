@@ -3,18 +3,20 @@
 
 Snapshots OBS WS `GetStats` twice (a delta window) on each broadcast box while
 burns are ON and the Multiview is open — the exact state that choked strih
-60→27fps on 2026-07-02 — computes the REAL render-loop health per box
-(activeFps + averageFrameRenderTime + renderSkipped delta, NOT the encoder
-outputFps which duplicates to target and stays green while render chokes), and
+60→27fps on 2026-07-02 (back when strih was still the 60fps LED-wall IMAG
+box, pre-#459) — computes the REAL render-loop health per box (activeFps +
+averageFrameRenderTime + renderSkipped delta, NOT the encoder outputFps
+which duplicates to target and stays green while render chokes), and
 feeds it to the `render-budget-gate` Rust binary for the strict verdict.
 
 The decision (frame-deadline budget) lives ONLY in the Rust binary
 (`render_budget::classify`) — this front just measures and pipes, so there is a
 single source of truth for the threshold.
 
-Usage (both boxes in one call):
+Usage (both boxes in one call — Topology v2, #459: strih is now cut-to-stream
+only at 30fps, the 60fps IMAG role moved to imag-nb):
   python3 scripts/render-budget-gate.py \
-    --box strih=10.77.9.202:60 --box stream=10.77.9.204:30 --window-s 6
+    --box strih=10.77.9.202:30 --box stream=10.77.9.204:30 --window-s 6
 
   `--box LABEL=HOST[:TARGET_FPS]` (repeatable). TARGET_FPS defaults 60.
 

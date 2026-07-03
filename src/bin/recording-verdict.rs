@@ -75,6 +75,13 @@ struct Args {
     /// stream OBS-program recording — the headline endpoint. Enables strih→stream.
     #[arg(long)]
     stream: Option<PathBuf>,
+    /// #461 imag-nb OBS-program recording (EPIC #466 Topology v2, the new 60fps low-latency
+    /// IMAG box). imag has NO digital node-burn yet (911003 is reserved for it, #463) — its
+    /// zero-loss proof is instead the cam2 OPTICAL tick's own first..=last contiguity (no
+    /// 60→30 beat: imag captures the 60Hz painter 1:1 at 60fps). Independent of --strih/--stream;
+    /// may be supplied alone or alongside them.
+    #[arg(long)]
+    imag: Option<PathBuf>,
     /// cam1 GRAB recording (#105 node 2) — the camera-box `--record-grab` mkv of
     /// cam1's filmed frames. Enables the STRICT cam1→strih hop verdict and the HONEST
     /// cam2→cam1 optical assessment (and, with --cam1-grab-ts, the cam2→cam1 latency).
@@ -116,7 +123,10 @@ struct Args {
     /// 60/30 = 2), but #360 found the strih burn is a FREE-RUNNING render tick with an IRREGULAR
     /// per-frame step (NOT a clean 2), so its forward gaps are jitter, not loss — strih now uses
     /// gap-ignore (see `node_render_step`). This flag is RETAINED on the CLI for provenance/
-    /// back-compat; it no longer drives the strih loss step. Default 60 (the LED-wall IMAG rate).
+    /// back-compat; it no longer drives the strih loss step. The struct default here is unused in
+    /// practice — the harness (recording-e2e.sh) always threads an explicit value from
+    /// STRIH_CAPTURE_FPS, which since Topology v2 (#459) is 30 (strih's own cut-to-stream canvas
+    /// rate, not the pre-#459 60fps LED-wall IMAG rate this default historically mirrored).
     #[arg(long, default_value_t = 60.0)]
     strih_emit_fps: f64,
     /// #11 mixed 60/30: the fps the STREAM recording was captured at — the stream OBS output rate
@@ -129,6 +139,12 @@ struct Args {
     /// is emitted AND recorded by the same stream OBS, so its own step is always 1. Default 30.
     #[arg(long, default_value_t = 30.0)]
     stream_capture_fps: f64,
+    /// #461: the fps imag-nb's OWN recording was captured at (EPIC #466 Topology v2) — imag's
+    /// #373 analyzed-span duration floor is computed against ITS OWN rate, never strih's/
+    /// stream's (`recording_span_gate::node_capture_fps`'s third rate slot). RIG-PINNED, never
+    /// user-tuned. Default 60 (imag-nb is a 60fps low-latency IMAG box).
+    #[arg(long, default_value_t = 60.0)]
+    imag_capture_fps: f64,
     /// #108 per-hop ABSOLUTE latency: the strih node's burn-QR run_id (the reserved per-box
     /// constant the burn filter derives from the host role, #257; default mirrors the #111 filter).
     /// When present in the strih recording, cam→strih latency is computed
@@ -185,12 +201,13 @@ struct Args {
     #[arg(long)]
     latency_csv: Option<PathBuf>,
     /// #208 PER-BOX decode-in-place. Decode the ONE LOCAL recording on THIS box (passed via
-    /// `--strih` for `strih`, `--stream` for `stream`) and write a small PARTIAL JSON (`--out`)
-    /// of what the cross-box merge needs — the box's burn-id sequence(s) with per-frame ids +
-    /// timestamps + the cam2 ticks it can see (ids + timestamps, NEVER frames/pixels). The strih
-    /// recording is decoded ON the strih box, the stream recording ON the stream box; a recording
-    /// is NEVER copied box-to-box (nor to dev1) — only this small JSON moves. dev1 then runs
-    /// `--merge-partials` to combine them. `<box>` is `strih` or `stream`.
+    /// `--strih` for `strih`, `--stream` for `stream`, `--imag` for `imag`, #461) and write a
+    /// small PARTIAL JSON (`--out`) of what the cross-box merge needs — the box's burn-id
+    /// sequence(s) (empty for imag, which has none) with per-frame ids + timestamps + the cam2
+    /// ticks it can see (ids + timestamps, NEVER frames/pixels). The strih recording is decoded ON
+    /// the strih box, the stream recording ON the stream box, the imag recording ON the imag-nb
+    /// box; a recording is NEVER copied box-to-box (nor to dev1) — only this small JSON moves.
+    /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, or `imag`.
     #[arg(long, value_name = "BOX")]
     extract_partial: Option<String>,
     /// #208: where `--extract-partial` writes the partial JSON. Default: `partial-<box>.json`.
@@ -950,6 +967,45 @@ fn node_verdict_with_optical(
         colour_fail: 0,
         optical_span_frames,
     })
+}
+
+/// #461 — build imag-nb's verdict from its OWN recording (EPIC #466 Topology v2). imag has no
+/// digital node-burn yet (911003 is reserved for a later ticket, #463), so its zero-loss proof
+/// is the cam2 OPTICAL tick's own first..=last contiguity instead: imag captures the 60Hz
+/// painter 1:1 at 60fps with NO 60→30 beat, so a missing tick VALUE in the analyzed span means
+/// imag's camera failed to capture that instant — the digital-burn equivalent of a candidate
+/// dropped frame, applied to the optical tick.
+///
+/// Sibling of [`node_verdict_with_optical`] but structurally simpler: imag has no [`NodeSpec`]
+/// (no `burn_run_id`), no pixel-proof extraction (out of scope for this ticket — the frame
+/// indices ARE known via [`RecordingFrame::frame_index`], a future ticket can wire it the same
+/// way [`node_verdict_with_optical`] does), and no colour gate (not wired for imag yet). The
+/// tick-contiguity ARITHMETIC itself is the Tier-0 pure [`camera_box::imag_tick_gate::
+/// tick_contiguity`] — this function is the thin probe-gated glue that extracts
+/// [`RecordingFrame::tick`] and converts the result into the SAME [`NodeContiguity`] /
+/// [`NodeVerdict`] shape every other node uses, so `is_zero()` / `print_node_verdict` /
+/// `node_verdict_json` all work UNCHANGED for a node with no burn.
+fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) -> NodeVerdict {
+    // imag carries NO node burn at all, so every CRC-valid non-burn payload is cam2's optical
+    // paint — mirrors `frame_is_delivered_optical`'s "no burns to exclude" with an empty set.
+    let optical = optical_span_facts(frames, &[], cam2_run_id);
+    let ticks: Vec<u32> = frames.iter().filter_map(|f| f.tick).collect();
+    let tc = camera_box::imag_tick_gate::tick_contiguity(&ticks);
+    NodeVerdict {
+        contiguity: NodeContiguity {
+            node: "imag".to_string(),
+            first_id: tc.first_tick,
+            last_id: tc.last_tick,
+            present_count: tc.present_count,
+            expected_count: tc.expected_count,
+            missing_ids: tc.missing_ticks,
+        },
+        classified: Vec::new(),
+        optical_undecodable: optical.undecodable_in_span,
+        // #461: the colour gate is not wired for imag in this ticket.
+        colour_fail: 0,
+        optical_span_frames: optical.span_frames,
+    }
 }
 
 /// #364 — the colour-gate I/O glue. Returns 0 when `--colour-gate` is off; otherwise samples this
@@ -1728,6 +1784,9 @@ fn main() -> Result<()> {
             args.burn_stream_run_id,
         ],
     )?;
+    // #461: the imag recording carries NO node burn (911003 is reserved for a later ticket,
+    // #463) — its zero-loss proof is the cam2 optical tick's own contiguity instead.
+    let imag = decode_for(args.imag.as_deref(), &[])?;
     // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run, and the
     // failure is recorded in nodes.cam1 (never silent). The grab is OPTIONAL (#179).
     let cam1 = match args.cam1.as_deref() {
@@ -1742,7 +1801,8 @@ fn main() -> Result<()> {
     };
 
     // Fused path: no carried colour — `build_node_colour_fail` samples each node's recording directly.
-    let (_report, all_pass) = build_and_print_verdict(&args, strih, stream, cam1, None, None)?;
+    let (_report, all_pass) =
+        build_and_print_verdict(&args, strih, stream, cam1, None, None, imag)?;
     if !all_pass {
         std::process::exit(1);
     }
@@ -1781,6 +1841,9 @@ fn build_and_print_verdict(
     // Both `None` on the fused path, where colour is sampled directly from each node's `rec_path`.
     strih_colour: Option<camera_box::colour_verify::NodeColourSummary>,
     stream_colour: Option<camera_box::colour_verify::NodeColourSummary>,
+    // #461: imag-nb's OWN recording (EPIC #466 Topology v2) — independent of strih/stream, no
+    // burn, gated by the cam2 optical tick's own contiguity (see `node_verdict_for_imag`).
+    imag: Option<DecodedRec>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -2390,6 +2453,7 @@ fn build_and_print_verdict(
                     spec.node,
                     args.capture_fps,
                     args.stream_capture_fps,
+                    args.imag_capture_fps,
                 );
                 let span_secs = nv.analyzed_span_secs(node_fps);
                 let span_ok = nv.span_ok(node_fps, cfg.min_secs);
@@ -2422,6 +2486,7 @@ fn build_and_print_verdict(
                             &nv.contiguity.node,
                             args.capture_fps,
                             args.stream_capture_fps,
+                            args.imag_capture_fps,
                         ),
                         cfg.min_secs,
                     )
@@ -2730,6 +2795,41 @@ fn build_and_print_verdict(
         });
     }
 
+    // #461 — imag-nb (EPIC #466 Topology v2) has no digital node-burn yet (911003 is reserved
+    // for a later ticket, #463); its zero-loss proof is the cam2 OPTICAL tick's own first..=last
+    // contiguity instead (imag captures the 60Hz painter 1:1 at 60fps — no 60→30 beat). Run at
+    // TOP LEVEL (like the cam2→cam1 capture-stats gate above): --imag is INDEPENDENT of
+    // --strih/--stream and must be gated whether or not either is supplied.
+    //
+    // NOTE: the #312 ALL-CAMBOX --switch-schedule sweep below does NOT yet cover imag frames —
+    // extending it needs its own anchor mode (imag has no burn to anchor a schedule window on,
+    // unlike the strih/stream burns `segment_frames_from_recording` uses today) and is tracked
+    // as a follow-up, not blocking the standard (non-sweep) zero-loss verdict this ticket adds.
+    if let Some(d) = imag {
+        let imag_frames = d.frames;
+        let nv = node_verdict_for_imag(&imag_frames, args.cam2_pin());
+        let node_fps = camera_box::recording_span_gate::node_capture_fps(
+            "imag",
+            args.capture_fps,
+            args.stream_capture_fps,
+            args.imag_capture_fps,
+        );
+        let span_secs = nv.analyzed_span_secs(node_fps);
+        let span_ok = nv.span_ok(node_fps, cfg.min_secs);
+        print_node_verdict(&nv, span_ok);
+        if !span_ok {
+            println!(
+                "  [imag] NOT zero — analyzed optical span {:.1}s < {:.1}s floor: the cam2 \
+                 dual-QR read COLLAPSED to {} frame(s); a contiguous tick window over so few \
+                 frames proves nothing (#373).",
+                span_secs, cfg.min_secs, nv.optical_span_frames
+            );
+        }
+        all_pass &= nv.is_zero() && span_ok;
+        report["full_chain"]["loss"]["imag"] =
+            node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs);
+    }
+
     // #312 Phase-1 — ALL-CAMBOX per-segment continuity (the all-active splitter proof). When a
     // switch schedule is supplied, partition the SINGLE continuous stream recording into the per-
     // cambox program windows (by burn gen_ts_ns, minus the transition guard on each boundary) and
@@ -2962,10 +3062,12 @@ fn extract_partial_flagged_frames(
 
 /// The node-burn run_ids a per-box partial is expected to carry, derived from the box name + the
 /// `--burn-*-run-id` args: the strih recording carries cam1 (forwarded) + strih; the stream
-/// recording (the chain endpoint) carries all three. `None` for an unknown box. SINGLE source of
-/// truth for BOTH `--extract-partial` (what it decodes for) and the `--merge-partials` consistency
-/// check — so a manual `--burn-*-run-id` mismatch between extract and merge cannot silently
-/// misverdict (run_merge warns when a loaded partial's `expected_burns` disagree with this).
+/// recording (the chain endpoint) carries all three; the imag recording carries NONE (#461 —
+/// imag-nb has no digital burn yet, its zero-loss proof is the cam2 optical tick's own
+/// contiguity). `None` for an unknown box. SINGLE source of truth for BOTH `--extract-partial`
+/// (what it decodes for) and the `--merge-partials` consistency check — so a manual
+/// `--burn-*-run-id` mismatch between extract and merge cannot silently misverdict (run_merge
+/// warns when a loaded partial's `expected_burns` disagree with this).
 fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
     match box_name {
         "strih" => Some(vec![args.burn_cam1_run_id, args.burn_strih_run_id]),
@@ -2974,6 +3076,7 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
             args.burn_strih_run_id,
             args.burn_stream_run_id,
         ]),
+        "imag" => Some(vec![]),
         _ => None,
     }
 }
@@ -2987,7 +3090,7 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
 fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     let expected_burns = args_expected_burns_for(box_name, args).ok_or_else(|| {
         anyhow::anyhow!(
-            "--extract-partial: unknown box {box_name:?} (expected `strih` or `stream`)"
+            "--extract-partial: unknown box {box_name:?} (expected `strih`, `stream`, or `imag`)"
         )
     })?;
     let rec_path: &Path = match box_name {
@@ -3001,6 +3104,11 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
             .stream
             .as_deref()
             .context("--extract-partial stream needs --stream <recording on the stream box>")?,
+        // #461: the imag recording carries NO burns — its expected_burns is Some(vec![]) above.
+        "imag" => args
+            .imag
+            .as_deref()
+            .context("--extract-partial imag needs --imag <recording on the imag-nb box>")?,
         // args_expected_burns_for already returned None (→ bailed) for any other box.
         _ => unreachable!("unknown box rejected by args_expected_burns_for above"),
     };
@@ -3092,6 +3200,10 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
 fn run_merge(args: &Args) -> Result<()> {
     let mut strih: Option<DecodedRec> = None;
     let mut stream: Option<DecodedRec> = None;
+    // #461: imag has no burn slot to reconcile against `--burn-*-run-id` (its expected_burns is
+    // always the empty set), so it needs no colour-carry either (colour-gate is not wired for
+    // imag in this ticket).
+    let mut imag: Option<DecodedRec> = None;
     // #377 — the per-recording colour summaries carried in each partial (Some only when the box
     // extracted with --colour-gate). Threaded into the verdict so the colour gate works through the
     // split decode path (the gate is fused/on-host — the recording is only on the box).
@@ -3150,13 +3262,17 @@ fn run_merge(args: &Args) -> Result<()> {
                 stream = Some(rec);
                 stream_colour = colour;
             }
+            // #461: imag carries no burns, so there is no colour to carry either in this ticket.
+            "imag" => {
+                imag = Some(rec);
+            }
             other => anyhow::bail!(
-                "--merge-partials: unknown box {other:?} (expected `strih` or `stream`)"
+                "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, or `imag`)"
             ),
         }
     }
     anyhow::ensure!(
-        strih.is_some() || stream.is_some(),
+        strih.is_some() || stream.is_some() || imag.is_some(),
         "--merge-partials needs at least one BOX=JSON partial"
     );
     // #186 note: cam1's pixel proof comes from the STRIH box (cam1's burn is crispest in the clean
@@ -3188,6 +3304,7 @@ fn run_merge(args: &Args) -> Result<()> {
         Cam1Source::Absent,
         strih_colour,
         stream_colour,
+        imag,
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -3392,6 +3509,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict");
 
@@ -3444,6 +3562,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict");
 
@@ -3505,6 +3624,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict");
 
@@ -3584,6 +3704,7 @@ mod tests {
                 Cam1Source::Absent,
                 strih_colour,
                 stream_colour,
+                None, // #461: no imag frames in this test
             )
             .expect("verdict")
         };
@@ -3669,6 +3790,7 @@ mod tests {
                 Cam1Source::Absent,
                 None,
                 None,
+                None, // #461: no imag frames in this test
             )
             .expect("fused verdict");
 
@@ -3700,6 +3822,7 @@ mod tests {
                 Cam1Source::Absent,
                 None,
                 None,
+                None, // #461: no imag frames in this test
             )
             .expect("merged verdict");
 
@@ -3812,6 +3935,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict");
         // The node still FAILs (the id IS missing from the strih recording — a real burn-readability
@@ -3860,6 +3984,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict");
         assert!(!pass, "#356: a genuine cam1 loss ⇒ overall FAIL");
@@ -3910,6 +4035,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict");
         assert!(
@@ -4005,6 +4131,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("fused verdict");
 
@@ -4027,6 +4154,7 @@ mod tests {
             Cam1Source::Absent,
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("merged verdict");
 
@@ -4232,6 +4360,7 @@ mod tests {
             Cam1Source::DecodeFailed("cam1 grab decode failed: boom".to_string()),
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict with a failed cam1 grab");
         assert_eq!(
@@ -4259,6 +4388,7 @@ mod tests {
             }),
             None,
             None,
+            None, // #461: no imag frames in this test
         )
         .expect("verdict with a decoded cam1 grab");
         assert_eq!(
@@ -5880,5 +6010,216 @@ mod tests {
             parse_grab_ts(f.path()).is_err(),
             "a non-empty non-integer ts cell is corruption -> error"
         );
+    }
+
+    // ---- #461 imag-nb burn-less optical zero-loss gate (EPIC #466 Topology v2) ----
+
+    /// Build N imag-nb recorded frames, each carrying ONLY a cam2-style optical payload (no
+    /// burn — imag has none, 911003 is reserved for a later ticket, #463). Contiguous ticks
+    /// 100..100+n by default; `gap_at` (if given) removes ONE tick to simulate a dropped frame.
+    fn imag_window(n: u32, gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..n)
+            .filter(|&i| gap_at != Some(i))
+            .map(|i| frame(i as u64, &[(CAM2, 100 + i)]))
+            .collect()
+    }
+
+    #[test]
+    fn node_verdict_for_imag_reports_zero_loss_when_ticks_are_contiguous_461() {
+        use super::node_verdict_for_imag;
+        let frames = imag_window(60, None);
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.is_zero(),
+            "60 contiguous optical ticks with no gap must be zero loss"
+        );
+        assert_eq!(nv.contiguity.node, "imag");
+        assert_eq!(nv.contiguity.first_id, Some(100));
+        assert_eq!(nv.contiguity.last_id, Some(159));
+        assert!(nv.contiguity.missing_ids.is_empty());
+        assert_eq!(nv.optical_span_frames, 60);
+        assert_eq!(nv.colour_fail, 0, "colour gate is not wired for imag yet");
+    }
+
+    #[test]
+    fn node_verdict_for_imag_fails_when_a_tick_is_missing_461() {
+        use super::node_verdict_for_imag;
+        // Drop frame index 30 (painted tick 130) -> imag's camera failed to capture that instant.
+        let frames = imag_window(60, Some(30));
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            !nv.is_zero(),
+            "a missing optical tick in the analyzed span must FAIL"
+        );
+        assert_eq!(
+            nv.contiguity.missing_ids,
+            vec![130],
+            "the exact missing painted tick must be reported"
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_fails_when_no_ticks_decoded_at_all_461() {
+        use super::node_verdict_for_imag;
+        let nv = node_verdict_for_imag(&[], None);
+        assert!(
+            !nv.is_zero(),
+            "no optical tick at all must never read as a zero-loss pass (nothing proven)"
+        );
+        assert_eq!(nv.contiguity.first_id, None);
+        assert_eq!(nv.optical_span_frames, 0);
+    }
+
+    #[test]
+    fn args_expected_burns_for_imag_returns_the_empty_burn_set_461() {
+        use super::Args;
+        use clap::Parser;
+        let args = Args::parse_from(["recording-verdict"]);
+        assert_eq!(
+            super::args_expected_burns_for("imag", &args),
+            Some(vec![]),
+            "imag has no digital node-burn yet (911003 is reserved for a later ticket, #463)"
+        );
+    }
+
+    #[test]
+    fn build_and_print_verdict_computes_the_imag_node_independently_of_strih_stream_461() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        // --min-secs 1 so the 60-frame @60fps window (1s) trivially clears the #373 floor.
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let imag_frames = imag_window(60, None);
+
+        // NEITHER --strih NOR --stream supplied — imag must still be gated on its own.
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            None,
+            None,
+            Cam1Source::Absent,
+            None,
+            None,
+            Some(DecodedRec {
+                frames: imag_frames,
+                rec_path: None,
+            }),
+        )
+        .expect("verdict");
+
+        assert!(
+            pass,
+            "#461: a contiguous imag recording alone (no strih/stream) must PASS: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["zero_loss"],
+            serde_json::json!(true),
+            "imag's tick-contiguity zero-loss must be reported: {}",
+            v["full_chain"]["loss"]["imag"]
+        );
+    }
+
+    #[test]
+    fn build_and_print_verdict_fails_when_imag_has_a_missing_tick_461() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let imag_frames = imag_window(60, Some(15));
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            None,
+            None,
+            Cam1Source::Absent,
+            None,
+            None,
+            Some(DecodedRec {
+                frames: imag_frames,
+                rec_path: None,
+            }),
+        )
+        .expect("verdict");
+
+        assert!(!pass, "#461: a missing imag optical tick must FAIL: {v}");
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["zero_loss"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["missing_ids"],
+            serde_json::json!([115])
+        );
+    }
+
+    #[test]
+    fn run_merge_accepts_an_imag_partial_461() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let imag_frames = imag_window(60, None);
+        let imag_p =
+            RecordingPartial::from_frames("imag", &PathBuf::from("imag.mkv"), &[], imag_frames);
+        let imag_path = dir.path().join("imag-partial.json");
+        imag_p.save(&imag_path).unwrap();
+        let spec = format!("imag={}", imag_path.display());
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            spec.as_str(),
+        ]);
+        // run_merge exits the PROCESS on a FAIL verdict (std::process::exit) — a contiguous imag
+        // partial must PASS so this call returns normally instead of aborting the test binary.
+        run_merge(&args).expect("a contiguous imag-only merge must not error");
+    }
+
+    #[test]
+    fn run_merge_rejects_an_unknown_box_name_including_non_imag_461() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let weird_p = RecordingPartial::from_frames("weird", &PathBuf::from("x.mkv"), &[], vec![]);
+        let weird_path = dir.path().join("weird-partial.json");
+        weird_p.save(&weird_path).unwrap();
+        let spec = format!("weird={}", weird_path.display());
+        let args =
+            super::Args::parse_from(["recording-verdict", "--merge-partials", spec.as_str()]);
+        let err = run_merge(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unknown box") && msg.contains("imag"),
+            "#461: the unknown-box error must mention imag as a valid option: {msg}"
+        );
+    }
+
+    #[test]
+    fn cli_parses_the_imag_flag_and_its_capture_fps_461() {
+        use super::Args;
+        use clap::Parser;
+        let args = Args::parse_from([
+            "recording-verdict",
+            "--imag",
+            "/tmp/imag-1234.mkv",
+            "--imag-capture-fps",
+            "45",
+        ]);
+        assert_eq!(
+            args.imag,
+            Some(std::path::PathBuf::from("/tmp/imag-1234.mkv"))
+        );
+        assert_eq!(args.imag_capture_fps, 45.0);
+
+        // Default imag_capture_fps is 60 (imag-nb is a 60fps low-latency IMAG box) when omitted.
+        let defaults = Args::parse_from(["recording-verdict"]);
+        assert_eq!(defaults.imag, None);
+        assert_eq!(defaults.imag_capture_fps, 60.0);
     }
 }

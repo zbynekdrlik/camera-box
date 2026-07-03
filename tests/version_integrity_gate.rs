@@ -73,19 +73,23 @@ fn write_state(name: &str, json: &str) -> PathBuf {
 
 /// A strih state JSON that MATCHES the pinned set in vendor/README.md (the known-good zero-loss
 /// state verified live). The flat object carries the drift-guard `--compare` observed keys.
+/// Topology v2 (#459, EPIC #466, was #11 mixed 60/30): strih is now cut-to-stream-only at 30fps
+/// (the 60fps IMAG role moved to imag-nb, #458/#463) -- its observed output_fps must match the
+/// re-pinned `output_fps_strih=30`.
 const STRIH_PINNED: &str = "{\
 \"obs_version\":\"32.1.2\",\
 \"distroav_version\":\"6.2.1\",\
 \"ndi_runtime\":\"6.3.2.0\",\
-\"output_fps\":\"60\",\
+\"output_fps\":\"30\",\
 \"genlock_wall_clock\":\"1\",\
 \"ndi_input_latency\":\"NDI cam5=0,NDI cam1=0,NDI cam3=0\",\
 \"distroav_dll_paths\":\"C:\\\\ProgramData\\\\obs-studio\\\\plugins\\\\distroav\\\\bin\\\\64bit\\\\distroav.dll\"\
 }";
 
 /// A stream state JSON that MATCHES the pinned set (the stream box's broadcast input is NDI 2ME PGM).
-/// #11 mixed 60/30: the stream box DECIMATES the 60fps strih feed to 30fps output, so its observed
-/// output_fps is 30 (matches the host-keyed `output_fps_stream` pin).
+/// #459 (was #11 mixed 60/30): stream now receives an ALREADY-30fps feed from strih (plain
+/// pass-through, no further decimation), so its observed output_fps is 30 (matches the
+/// host-keyed `output_fps_stream` pin, unchanged by this topology move).
 const STREAM_PINNED: &str = "{\
 \"obs_version\":\"32.1.2\",\
 \"distroav_version\":\"6.2.1\",\
@@ -236,7 +240,7 @@ fn gate_uses_a_custom_readme_for_the_pinned_set() {
 | `vendor/obs-studio` | x | **99.9.9** (commit `a`) | git subtree --squash |
 | `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
 | NDI | x | requires **NDI ≥ 6.3.0** | tree |
-| `output_fps_strih` | `60` | log |
+| `output_fps_strih` | `30` | log |
 | `output_fps_stream` | `30` | log |
 | `genlock_wall_clock` | `1` | env |
 | `ndi_input_latency` | `0` | obs-websocket |
