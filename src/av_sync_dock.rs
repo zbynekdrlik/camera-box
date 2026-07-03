@@ -1,0 +1,466 @@
+//! #398 — pure Tier-0 decision logic for the LIVE OBS A/V-sync dock.
+//!
+//! The vendored norihiro dock (`vendor/av-sync-dock/`) is the LIVE receiver: it captures the stream
+//! program video+audio, decodes camera-box's dual-QR (frame identity) from the video and the QPSK
+//! marker from the audio, pairs them, and displays the video↔audio offset ("Latency"). Everything
+//! that DECIDES a value lives here, in Rust that compiles on DEFAULT features and is unit-tested at
+//! Tier-0; the dock's C++ (`camera-box-audio.hpp` / `camera-box-video.hpp`) MIRRORS these functions
+//! byte-for-byte and a committed C++ self-test (`vendor/av-sync-dock/test/camera-box-selftest.cpp`)
+//! cross-checks the mirror against this module's results. The OBS/quirc GLUE (frame gather, ALSA
+//! callback, ring, Qt labels) is the only C++-only part.
+//!
+//! WHY this module exists (the #398 bug it fixes): the deployed dock never locks the audio index or
+//! the offset. Two root causes, both here-fixable by mirroring proven camera-box logic instead of
+//! norihiro's:
+//!   1. AUDIO — norihiro's `st_raw_audio_test_preamble` computes its half-symbol resolution as
+//!      `c1 = c/2`, which is 0 at the rig's `c = auto_c(2,442,60/1) = 1` (60 fps), collapsing the
+//!      preamble finder (`buffer_length`/`symbol_ns` → 0) so no marker is EVER detected; and its
+//!      decode reads only 6 symbols with a bit-mapping that can't recover the full 8-bit index. The
+//!      "norihiro's demod applies with no code change" assumption is FALSE at c=1. Fix: drive the
+//!      dock's audio decode from [`crate::qpsk_marker::decode_markers`] — camera-box's OWN QPSK demod
+//!      that is round-trip tested for all 256 indices AT c=1 — via the streaming wrapper here.
+//!   2. VIDEO — the dock downscales the WHOLE (4K-rescaled) frame by `qr_step` (8 at 4K) with nearest
+//!      sampling, shrinking each ~700 px dual-QR half to ~87 px → ~98 % miss. Fix: decode only the
+//!      TOP band (where the top-anchored dual-QR lives), AREA-averaged to a scale that keeps each QR
+//!      large, with an Otsu-binarized retry — the same techniques `src/probe/qr.rs` proved on the
+//!      real soft optical frames (#202/#363). The geometry is [`top_band_decode_plan`].
+
+use crate::qpsk_marker::{cluster_offset_ms, decode_markers, AudioParams, AvOffset};
+
+/// QPSK preamble-screen threshold for the live decode — MATCHES the proven offline
+/// `recording-verdict --av-sync` default (`av_threshold`). Low enough to catch a marker buried in
+/// the music-laden mbc mix; the CRC-4 false decodes it lets through are rejected downstream by the
+/// densest-cluster estimator, exactly as offline.
+pub const DOCK_QPSK_THRESHOLD: f64 = 0.35;
+
+/// Half-width (ms) of the offset cluster window — MATCHES the offline `av_cluster_tol_ms` default.
+/// Candidate `video − audio` offsets within ±this of the densest band are the real markers.
+pub const DOCK_CLUSTER_TOL_MS: f64 = 60.0;
+
+/// Minimum tightly-clustered offset candidates before the dock trusts (and displays) a Latency.
+/// Higher than the offline `av_min_matched` (4) because the LIVE dock must not flash a number from a
+/// transient false-only band: it waits until enough real markers pile into one tight cluster.
+pub const DOCK_CLUSTER_MIN_MATCHED: usize = 8;
+
+/// Maximum MAD (ms) the densest cluster may have to be TRUSTED. Real markers share one near-constant
+/// pipeline delay → a tight cluster (MAD ≈ 5–15 ms). A band that is merely the densest slice of the
+/// uniformly-scattered CRC-4 false decodes is DIFFUSE (MAD → ~half the window). Gating on a small MAD
+/// is what prevents the dock from ever locking onto a false-only band — it shows "measuring" until a
+/// genuinely tight real cluster forms. This is the LIVE analog of the offline whole-recording
+/// clustering: same estimator, plus an honesty gate so no wrong number is ever displayed.
+pub const DOCK_CLUSTER_MAX_MAD_MS: f64 = 25.0;
+
+/// Rolling window (ns) of recent offset candidates the cluster is computed over. ~3 min: long enough
+/// to accumulate many real markers (≥ one per ~3 s cadence) so the real cluster dominates the
+/// scattered false decodes, short enough that a genuine A/V-offset CHANGE (e.g. an OBS restart, #137)
+/// re-converges within a few minutes.
+pub const DOCK_CLUSTER_WINDOW_NS: u64 = 180 * 1_000_000_000;
+
+/// Fraction of the frame HEIGHT (from the top) the video-QR decode band covers. The camera-box
+/// dual-QR is TOP-anchored (`render_qr_dual_bgra` → `VAnchor::Top`): its top row sits ~24 px below
+/// the frame top and it is ≤ ~700 px tall in a 1080-native frame (≈ 0.67 h), the SAME fraction after
+/// any uniform rescale to 4K. 0.72 covers the whole dual-QR with margin at ANY output resolution
+/// while excluding the bottom-corner burns — so the band is tall enough to contain each SQUARE QR
+/// whole (a full-width wide band downscaled to a wide-aspect strip would clip the square QR).
+pub const TOP_BAND_FRAC_NUM: u32 = 72;
+pub const TOP_BAND_FRAC_DEN: u32 = 100;
+
+/// Long-side cap (px) the top band is AREA-downscaled to before quirc. Chosen so each ~700-px-native
+/// (≈1400 px at 4K) dual-QR half stays ≈ 500 px after downscale — comfortably ≥ the ~3 px/module
+/// quirc needs even on a soft, NDI-recompressed optical capture — while keeping the quirc image small
+/// enough (≤ ~760 px long side) that a 30 fps monitoring decode stays real-time.
+pub const TOP_BAND_DECODE_CAP: u32 = 760;
+
+/// The pixel plan for the live video-QR top-band decode: crop `[0, band_h)` rows of a `frame_w ×
+/// frame_h` luma frame, then AREA-average-downscale that crop to `dst_w × dst_h` before quirc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopBandPlan {
+    /// Height (px) of the top crop taken from the source frame.
+    pub band_h: u32,
+    /// Downscaled width fed to quirc.
+    pub dst_w: u32,
+    /// Downscaled height fed to quirc.
+    pub dst_h: u32,
+}
+
+/// Compute the [`TopBandPlan`] for a `frame_w × frame_h` frame. The crop is the top
+/// [`TOP_BAND_FRAC_NUM`]/[`TOP_BAND_FRAC_DEN`] of the height; it is then downscaled preserving aspect
+/// so its LONG side is at most [`TOP_BAND_DECODE_CAP`] (never UPscaled — a small source stays 1:1).
+/// Every dimension is clamped ≥ 1 so a degenerate tiny frame never yields a zero-sized quirc image.
+/// Pure geometry, so the C++ mirror's dimension math is Tier-0 locked.
+pub fn top_band_decode_plan(frame_w: u32, frame_h: u32) -> TopBandPlan {
+    let band_h = (frame_h * TOP_BAND_FRAC_NUM / TOP_BAND_FRAC_DEN).clamp(1, frame_h.max(1));
+    let src_w = frame_w.max(1);
+    let long = src_w.max(band_h);
+    let (dst_w, dst_h) = if long > TOP_BAND_DECODE_CAP {
+        (
+            (src_w * TOP_BAND_DECODE_CAP / long).max(1),
+            (band_h * TOP_BAND_DECODE_CAP / long).max(1),
+        )
+    } else {
+        (src_w, band_h)
+    };
+    TopBandPlan {
+        band_h,
+        dst_w,
+        dst_h,
+    }
+}
+
+/// Otsu's global threshold (0..=255) maximizing between-class variance of a gray histogram, with the
+/// standard plateau-midpoint refinement (a clean black/white capture cuts BETWEEN the two peaks, not
+/// at the dark peak). PURE + total: an empty/flat histogram returns 128 (a neutral mid-gray cut).
+/// The C++ dual-QR decode binarizes the downscaled band at this threshold as a retry when quirc's own
+/// adaptive prepare misses the SOFT optical capture — the exact recovery `src/probe/qr.rs` (#363)
+/// proved essential on the real stream frames. Mirrored in `camera-box-video.hpp`.
+pub fn otsu_threshold(hist: &[u64; 256]) -> u8 {
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        return 128;
+    }
+    let sum_all: f64 = hist
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| i as f64 * c as f64)
+        .sum();
+    let (mut w_bg, mut sum_bg) = (0u64, 0.0f64);
+    let (mut best_var, mut plateau_lo, mut plateau_hi) = (-1.0f64, 128usize, 128usize);
+    for (t, &count) in hist.iter().enumerate() {
+        w_bg += count;
+        if w_bg == 0 {
+            continue;
+        }
+        let w_fg = total - w_bg;
+        if w_fg == 0 {
+            break;
+        }
+        sum_bg += t as f64 * count as f64;
+        let m_bg = sum_bg / w_bg as f64;
+        let m_fg = (sum_all - sum_bg) / w_fg as f64;
+        let between = w_bg as f64 * w_fg as f64 * (m_bg - m_fg) * (m_bg - m_fg);
+        if between > best_var + f64::EPSILON {
+            best_var = between;
+            plateau_lo = t;
+            plateau_hi = t;
+        } else if (between - best_var).abs() <= f64::EPSILON {
+            plateau_hi = t;
+        }
+    }
+    ((plateau_lo + plateau_hi) / 2) as u8
+}
+
+/// Streaming QPSK marker detector for the LIVE audio path: keeps a rolling window of the most recent
+/// raw mono samples, runs the proven [`decode_markers`] over it each `push`, and returns each NEWLY
+/// detected marker as `(absolute_sample_index_from_stream_start, index)`.
+///
+/// WHY a rolling window over the batched `decode_markers` (rather than a bespoke incremental demod):
+/// `decode_markers` is round-trip tested for every one of the 256 indices AT the rig's c=1 and under
+/// noise+gain — it is the ONE audio demod known to decode exactly what cam2 emits. Re-running it over
+/// a small window each audio callback reuses that tested code verbatim. The window is a few marker
+/// lengths so any marker is wholly present in some call; dedup by absolute position (a marker seen in
+/// two overlapping windows lands at the SAME absolute index) reports each marker exactly once.
+///
+/// The absolute sample index is stream-relative and monotone; the caller maps it to an OBS timestamp
+/// using the callback clock (kept in the C++ glue, drift-anchored per callback). The false CRC-4
+/// decodes this admits — inescapable on a music-laden mix, CRC-4 is 4 bits — are NOT filtered here;
+/// they are rejected downstream by [`RollingOffsetCluster`], exactly as the offline path clusters.
+pub struct StreamingMarkerDecoder {
+    params: AudioParams,
+    threshold: f64,
+    /// Rolling raw mono samples (most recent `capacity` at most).
+    buf: Vec<f32>,
+    /// Max samples retained — must exceed one marker's `signal_len` so a marker is wholly present.
+    capacity: usize,
+    /// Absolute index (from stream start) of `buf[0]`; grows as the front is trimmed.
+    origin: u64,
+    /// Absolute index of the last reported marker's start (dedup anchor), or `None`.
+    last_reported: Option<u64>,
+    /// Minimum absolute-index gap for a detection to count as a NEW marker (dedup width).
+    min_gap: u64,
+}
+
+impl StreamingMarkerDecoder {
+    /// `capacity` samples retained (≥ `2 × signal_len` recommended so every marker is wholly present
+    /// in some window); `min_gap` samples of separation for a detection to count as new (a fraction
+    /// of the marker cadence — one `signal_len` is ample since real markers are seconds apart).
+    pub fn new(params: AudioParams, threshold: f64, capacity: usize, min_gap: u64) -> Self {
+        Self {
+            params,
+            threshold,
+            buf: Vec::with_capacity(capacity.max(1)),
+            capacity: capacity.max(1),
+            origin: 0,
+            last_reported: None,
+            min_gap: min_gap.max(1),
+        }
+    }
+
+    /// Append `samples`, trim to `capacity`, decode the window, and return the ABSOLUTE start index
+    /// and `index` of each newly detected marker (in ascending absolute order).
+    pub fn push(&mut self, samples: &[f32]) -> Vec<(u64, u8)> {
+        self.buf.extend_from_slice(samples);
+        if self.buf.len() > self.capacity {
+            let drop = self.buf.len() - self.capacity;
+            self.buf.drain(0..drop);
+            self.origin += drop as u64;
+        }
+        let mut out = Vec::new();
+        let sr = self.params.sample_rate as f64;
+        for (ts_s, idx) in decode_markers(&self.buf, &self.params, self.threshold) {
+            // decode_markers reports the marker start in seconds within the window; convert to an
+            // absolute stream index. Round to the nearest sample so the same marker seen in two
+            // overlapping windows maps to an identical absolute index (stable dedup).
+            let abs = self.origin + (ts_s * sr).round() as u64;
+            let is_new = match self.last_reported {
+                None => true,
+                Some(prev) => abs > prev.saturating_add(self.min_gap),
+            };
+            if is_new {
+                self.last_reported = Some(abs);
+                out.push((abs, idx));
+            }
+        }
+        out
+    }
+}
+
+/// Rolling densest-cluster A/V-offset estimator for the LIVE dock — the robust replacement for the
+/// deployed dock's 1 s median (`cb_smooth_offset_ns`), which a burst of CRC-4 false decodes on the
+/// music mix would drag off the real value.
+///
+/// Each real marker contributes one `video − audio` offset near a constant pipeline delay; each false
+/// CRC-4 decode contributes a random index → a random ring slot → an offset scattered ~uniformly over
+/// ±half the ring cycle. So the real markers form ONE tight cluster while the false decodes spread
+/// thinly. [`push`](Self::push) keeps the last [`window_ns`](Self::window_ns) of `(ts, offset)`
+/// samples and returns [`cluster_offset_ms`] over them — BUT only when the densest cluster is both big
+/// enough (`min_matched`) AND tight enough (`max_mad_ms`); a diffuse, false-only band fails the MAD
+/// gate, so the dock shows "measuring" rather than ever locking a wrong number. This mirrors the
+/// offline whole-recording cluster, sized to a rolling window and honesty-gated for a live display.
+pub struct RollingOffsetCluster {
+    window_ns: u64,
+    tol_ms: f64,
+    min_matched: usize,
+    max_mad_ms: f64,
+    samples: std::collections::VecDeque<(u64, f64)>,
+}
+
+impl RollingOffsetCluster {
+    pub fn new(window_ns: u64, tol_ms: f64, min_matched: usize, max_mad_ms: f64) -> Self {
+        Self {
+            window_ns,
+            tol_ms,
+            min_matched,
+            max_mad_ms,
+            samples: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// The dock's standing configuration (all the `DOCK_*` constants).
+    pub fn dock() -> Self {
+        Self::new(
+            DOCK_CLUSTER_WINDOW_NS,
+            DOCK_CLUSTER_TOL_MS,
+            DOCK_CLUSTER_MIN_MATCHED,
+            DOCK_CLUSTER_MAX_MAD_MS,
+        )
+    }
+
+    /// Add one `(sample_ts_ns, offset_ms)` candidate (offset already lap-resolved), prune samples
+    /// older than the window, and return the TRUSTED cluster offset if the densest band now clears
+    /// both the size and MAD gates — else `None` ("still measuring / no trustworthy lock").
+    pub fn push(&mut self, sample_ts_ns: u64, offset_ms: f64) -> Option<AvOffset> {
+        self.samples.push_back((sample_ts_ns, offset_ms));
+        while let Some(&(ts, _)) = self.samples.front() {
+            if sample_ts_ns.saturating_sub(ts) > self.window_ns {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+        let offsets: Vec<f64> = self.samples.iter().map(|&(_, o)| o).collect();
+        match cluster_offset_ms(&offsets, self.min_matched, self.tol_ms) {
+            Some(est) if est.matched >= self.min_matched && est.mad_ms <= self.max_mad_ms => {
+                Some(est)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::qpsk_marker::{frame_id_to_index, marker_signal, signal_len, AV_SYNC_RING_CYCLE_NS};
+
+    #[test]
+    fn top_band_plan_4k_keeps_qr_large_and_within_cap() {
+        // A 4K program frame: the top 72 % (1555 px) crop, downscaled so the long side (3840) hits
+        // the 760 cap. The ~1400 px dual-QR half then lands at 1400*760/3840 ≈ 277 px... but the
+        // decode band is only the TOP portion; what matters is the long-side cap holds and the band
+        // stays tall enough to contain a square QR whole.
+        let p = top_band_decode_plan(3840, 2160);
+        assert_eq!(p.band_h, 2160 * 72 / 100); // 1555
+        assert_eq!(p.dst_w, 760); // long side capped
+        assert_eq!(p.dst_h, 1555 * 760 / 3840); // aspect preserved, ~307
+        assert!(
+            p.dst_h >= 256,
+            "band must stay tall enough for a square QR: {p:?}"
+        );
+    }
+
+    #[test]
+    fn top_band_plan_1080p_downscales_modestly() {
+        let p = top_band_decode_plan(1920, 1080);
+        assert_eq!(p.band_h, 1080 * 72 / 100); // 777
+        assert_eq!(p.dst_w, 760);
+        assert_eq!(p.dst_h, 777 * 760 / 1920);
+    }
+
+    #[test]
+    fn top_band_plan_small_frame_is_not_upscaled_and_never_zero() {
+        // A tiny frame stays 1:1 (no upscale) and every dimension is ≥ 1 (no zero-sized quirc image).
+        let p = top_band_decode_plan(320, 200);
+        assert_eq!(p.band_h, 200 * 72 / 100); // 144
+        assert_eq!(p.dst_w, 320);
+        assert_eq!(p.dst_h, 144);
+        let d = top_band_decode_plan(1, 1);
+        assert!(d.band_h >= 1 && d.dst_w >= 1 && d.dst_h >= 1, "{d:?}");
+    }
+
+    #[test]
+    fn otsu_matches_the_probe_reference_behaviour() {
+        // Same contract as src/probe/qr.rs::otsu_threshold (the mirror source): bimodal cuts between
+        // the peaks; empty → 128.
+        let mut hist = [0u64; 256];
+        hist[20] = 1000;
+        hist[230] = 1000;
+        let t = otsu_threshold(&hist);
+        assert!(t > 20 && t < 230, "cut between peaks, got {t}");
+        assert_eq!(otsu_threshold(&[0u64; 256]), 128);
+    }
+
+    #[test]
+    fn streaming_decoder_reports_each_marker_once_across_overlapping_windows() {
+        // Feed a long silence with two markers embedded, in SMALL chunks (so each marker straddles
+        // several push() windows), and assert each is reported EXACTLY once with the right index.
+        let p = AudioParams::rig60();
+        let sr = p.sample_rate as usize;
+        let sig = signal_len(&p);
+        let mut stream = vec![0.0f32; sr * 8]; // 8 s
+                                               // frame_ids → indices via the emitter's own mapping (index = frame_id & 0xFF).
+        let m0 = (sr, 2000u32); // marker at 1.0 s, frame_id 2000 → idx 208
+        let m1 = (sr * 5, 2431u32); // marker at 5.0 s, frame_id 2431 → idx 127
+        for &(start, fid) in &[m0, m1] {
+            let s = marker_signal(frame_id_to_index(fid), &p);
+            stream[start..start + s.len()].copy_from_slice(&s);
+        }
+        // capacity 2 markers wide; min_gap one signal_len; feed in 480-sample chunks.
+        let mut dec = StreamingMarkerDecoder::new(p, DOCK_QPSK_THRESHOLD, sig * 3, sig as u64);
+        let mut found: Vec<(u64, u8)> = Vec::new();
+        for chunk in stream.chunks(480) {
+            found.extend(dec.push(chunk));
+        }
+        assert_eq!(found.len(), 2, "each marker exactly once: {found:?}");
+        // Absolute indices ≈ the true starts; indices == frame_id & 0xFF.
+        assert!(
+            (found[0].0 as i64 - sr as i64).abs() < 8,
+            "m0 pos {found:?}"
+        );
+        assert_eq!(found[0].1, frame_id_to_index(2000));
+        assert!(
+            (found[1].0 as i64 - 5 * sr as i64).abs() < 8,
+            "m1 pos {found:?}"
+        );
+        assert_eq!(found[1].1, frame_id_to_index(2431));
+    }
+
+    #[test]
+    fn rolling_cluster_locks_the_real_offset_and_rejects_a_false_only_burst() {
+        // The live-dock analog of the offline false-flood test: ~12 real markers at a constant
+        // +40 ms offset, plus a heavy scatter of false decodes spread across ±half the ring cycle.
+        // The rolling cluster must LOCK +40 ms (tight), not a false-only band.
+        let cycle_ms = AV_SYNC_RING_CYCLE_NS as f64 / 1_000_000.0; // ~4266 ms
+        let mut c = RollingOffsetCluster::dock();
+        let mut locked: Option<AvOffset> = None;
+        // False decodes arrive ~10×/s scattered across the whole ±cycle/2 range; real markers every
+        // ~3 s at +40 ms. Interleave over 60 s.
+        let mut t_ns: u64 = 0;
+        let step_ns: u64 = 100_000_000; // 0.1 s between false decodes
+        let mut n_real = 0;
+        for k in 0..600u64 {
+            t_ns += step_ns;
+            // deterministic pseudo-random false offset in (-cycle/2, +cycle/2]
+            let r = ((k.wrapping_mul(2_654_435_761) >> 8) % 100_000) as f64 / 100_000.0; // 0..1
+            let false_off = (r - 0.5) * cycle_ms;
+            if let Some(est) = c.push(t_ns, false_off) {
+                locked = Some(est);
+            }
+            // a real marker every 3 s (every 30 false steps), tight around +40 ms
+            if k % 30 == 0 {
+                n_real += 1;
+                let jitter = ((k % 7) as f64 - 3.0) * 2.0; // ±6 ms
+                if let Some(est) = c.push(t_ns, 40.0 + jitter) {
+                    locked = Some(est);
+                }
+            }
+        }
+        assert!(
+            n_real >= DOCK_CLUSTER_MIN_MATCHED,
+            "test needs enough real markers: {n_real}"
+        );
+        let est = locked.expect("the rolling cluster must eventually LOCK a trustworthy offset");
+        assert!(
+            (est.offset_ms - 40.0).abs() < DOCK_CLUSTER_TOL_MS,
+            "locked offset {} should be the real +40 ms cluster (matched {}, mad {})",
+            est.offset_ms,
+            est.matched,
+            est.mad_ms
+        );
+        assert!(
+            est.mad_ms <= DOCK_CLUSTER_MAX_MAD_MS,
+            "locked cluster must be tight: {est:?}"
+        );
+    }
+
+    #[test]
+    fn rolling_cluster_shows_nothing_until_enough_tight_markers() {
+        // Below min_matched real markers → no lock (None), even with some scattered false decodes:
+        // the dock must display "measuring", never a premature/false number.
+        let mut c = RollingOffsetCluster::dock();
+        let mut any_lock = false;
+        for k in 0..(DOCK_CLUSTER_MIN_MATCHED as u64 - 1) {
+            // a few tight real markers, but fewer than min_matched
+            if c.push(k * 100_000_000, 40.0).is_some() {
+                any_lock = true;
+            }
+        }
+        assert!(
+            !any_lock,
+            "must not lock before min_matched tight markers arrive"
+        );
+    }
+
+    #[test]
+    fn rolling_cluster_rejects_a_wide_band_via_the_mad_gate() {
+        // The MAD gate's job: even when the cluster has ENOUGH members (≥ min_matched), a band that
+        // is WIDE (spread across the whole tol window, MAD ≫ 25 ms — the signature of a loose/
+        // false-only band, never a real constant-delay cluster) must NOT lock. Feed exactly
+        // min_matched candidates evenly spread across the full ±tol window: matched == min_matched
+        // but MAD ≈ 30 ms > 25 ms → no lock. (Because there are only min_matched points total, no
+        // TIGHT sub-cluster of min_matched can form — this isolates the MAD gate cleanly.)
+        let mut c = RollingOffsetCluster::dock();
+        let n = DOCK_CLUSTER_MIN_MATCHED as u64;
+        let mut locked = false;
+        for k in 0..n {
+            let off =
+                -DOCK_CLUSTER_TOL_MS + (k as f64) * (2.0 * DOCK_CLUSTER_TOL_MS / (n - 1) as f64);
+            if c.push(k * 100_000_000, off).is_some() {
+                locked = true;
+            }
+        }
+        assert!(
+            !locked,
+            "a wide (high-MAD) band must be rejected by the MAD gate"
+        );
+    }
+}

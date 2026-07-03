@@ -31,6 +31,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "sync-test-output.hpp"
 #include "peak-finder.hpp"
 #include "camera-box-qr.hpp"
+#include "camera-box-audio.hpp"
+#include "camera-box-video.hpp"
 
 #include "plugin-macros.generated.h"
 
@@ -170,10 +172,27 @@ struct sync_test_output
 	 * as the other cb_* fields for consistency. */
 	std::deque<std::pair<uint64_t, int64_t>> cb_offset_history;
 
+	/* #398 fix (audio index never locked): norihiro's own audio demod is broken at the rig's c=1
+	 * (its `c1 = c/2` half-symbol resolution is 0, collapsing the preamble finder; and it decodes
+	 * only 6 symbols). These drive camera-box's OWN proven demod instead — the streaming
+	 * `decode_markers` (round-trip tested for all 256 indices at c=1) + the robust rolling
+	 * densest-cluster estimator (survives the CRC-4 false-decode flood the offline path also fights,
+	 * where a plain 1 s median would not). Mirrors `src/av_sync_dock.rs`; touched only on the audio
+	 * thread. `cb_qr` is a SECOND quirc context sized to the better-scaled top-band decode (below).
+	 * `cb_src_buf` is a reused top-band gather buffer (no per-frame alloc). */
+	struct quirc *cb_qr = nullptr;
+	camerabox::StreamingMarkerDecoder *cb_audio_dec = nullptr;
+	camerabox::RollingOffsetCluster cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
+	uint64_t cb_audio_pushed = 0;
+	std::vector<uint8_t> cb_src_buf;
+
 	~sync_test_output()
 	{
 		if (qr)
 			quirc_destroy(qr);
+		if (cb_qr)
+			quirc_destroy(cb_qr);
+		delete cb_audio_dec;
 	}
 };
 
@@ -382,6 +401,34 @@ static void signal_qrcode_found(obs_output_t *ctx, uint64_t timestamp, const str
 	signal_handler_signal(sh, "qrcode_found", &cd);
 }
 
+/* #398 Option A: record a decoded camera-box dual-QR into the direct video<->audio ring keyed on the
+ * frame_id low byte (the SAME value the audio index carries) and set the FIXED rig audio params +
+ * dock-UI qr_data. The SINGLE source of truth for that update, called by BOTH the norihiro
+ * whole-frame decode (kept for the phone method) and the #398 better-scaled top-band decode below.
+ * `video_ts` is already frame-relative (`frame->timestamp - start_ts`). */
+static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)
+{
+	uint8_t low = (uint8_t)(frame_id & 0xFFu);
+	{
+		// Same mutex the audio thread locks to READ these — the video ring + f/c/q_ms are written
+		// here (video thread) and read on the audio thread; both sides must take the lock.
+		std::unique_lock<std::mutex> lock(st->mutex);
+		st->cb_video_ts_ns[low] = video_ts;
+		st->cb_video_valid[low] = true;
+		st->cb_mode_active = true;
+		st->f = CAMERA_BOX_AUDIO_F_HZ;
+		st->c = CAMERA_BOX_AUDIO_C;
+		st->q_ms = CAMERA_BOX_AUDIO_Q_MS;
+	}
+	// Reuse the existing dock-UI plumbing (video index / missed% / frequency labels).
+	st->qr_data.f = CAMERA_BOX_AUDIO_F_HZ;
+	st->qr_data.c = CAMERA_BOX_AUDIO_C;
+	st->qr_data.q_ms = CAMERA_BOX_AUDIO_Q_MS;
+	st->qr_data.index = low;
+	st->qr_data.index_max = 256;
+	st->qr_data.valid = true;
+}
+
 static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video_data *frame)
 {
 	int w, h;
@@ -446,31 +493,7 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video
 				st->qr_corners[j].y = code.corners[j].y * st->qr_step;
 			}
 			signal_qrcode_found(st->context, frame->timestamp - st->start_ts, st->qr_corners);
-
-			uint8_t low = (uint8_t)(cb.frame_id & 0xFFu);
-			uint64_t video_ts = frame->timestamp - st->start_ts;
-			{
-				// Same mutex the audio thread locks to READ these — the video ring + f/c/q_ms
-				// are written here (video thread) and read on the audio thread; both sides must
-				// take the lock or the read is a data race.
-				std::unique_lock<std::mutex> lock(st->mutex);
-				st->cb_video_ts_ns[low] = video_ts;
-				st->cb_video_valid[low] = true;
-				st->cb_mode_active = true;
-				st->f = CAMERA_BOX_AUDIO_F_HZ;
-				st->c = CAMERA_BOX_AUDIO_C;
-				st->q_ms = CAMERA_BOX_AUDIO_Q_MS;
-			}
-
-			// Reuse the existing dock-UI plumbing (video index / missed% / frequency labels) —
-			// `frame_id & 0xFF` increments by exactly 1 every frame, same shape the existing
-			// `missed_markers()` UI logic already expects from norihiro's own `i=` field.
-			st->qr_data.f = CAMERA_BOX_AUDIO_F_HZ;
-			st->qr_data.c = CAMERA_BOX_AUDIO_C;
-			st->qr_data.q_ms = CAMERA_BOX_AUDIO_Q_MS;
-			st->qr_data.index = low;
-			st->qr_data.index_max = 256;
-			st->qr_data.valid = true;
+			cb_video_qr_record(st, cb.frame_id, frame->timestamp - st->start_ts);
 			video_marker_found(st, frame->timestamp, 1.0f);
 			continue;
 		}
@@ -650,6 +673,100 @@ static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, 
 		sync_index_found(st, data.qr_data.index, data.timestamp, true, data.qr_data.index_max);
 }
 
+/* #398 fix (video index 98% missed): norihiro's whole-frame decode subsamples the WHOLE frame by
+ * `qr_step` (÷8 at a 4K program output) with NEAREST sampling, shrinking each ~700 px dual-QR half to
+ * ~87 px so quirc misses ~98 % of frames and the ring is almost never populated. This gives quirc a
+ * fair look: decode only the TOP band (where the top-anchored dual-QR lives), AREA-averaged (not
+ * nearest) to a scale that keeps each QR large, with an Otsu-binarized retry — the techniques
+ * `src/probe/qr.rs` proved on the real soft optical stream frames. The plan geometry + downscale +
+ * Otsu are the Tier-0-tested `camera-box-video.hpp` mirror; only the quirc driving is here. Returns
+ * true if any camera-box QR decoded (and records it into the ring). */
+static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct video_data *frame)
+{
+	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
+	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
+		return false;
+
+	// Gather the TOP band (rows 0..band_h) into a tight full-res luma buffer (reused, no per-frame
+	// alloc), honoring the pixel format's stride / offset / intensity extractor.
+	const size_t need = (size_t)st->video_width * plan.band_h;
+	if (st->cb_src_buf.size() < need)
+		st->cb_src_buf.resize(need);
+	uint8_t *src = st->cb_src_buf.data();
+	const uint32_t pixelsize = st->video_pixelsize;
+	for (uint32_t y = 0; y < plan.band_h; y++) {
+		const uint8_t *line = frame->data[0] + (size_t)frame->linesize[0] * y + st->video_pixeloffset;
+		uint8_t *dstrow = src + (size_t)y * st->video_width;
+		if (!st->video_get_intensity) {
+			const uint8_t *d = line;
+			for (uint32_t x = 0; x < st->video_width; x++) {
+				dstrow[x] = *d;
+				d += pixelsize;
+			}
+		} else {
+			const uint8_t *d = line;
+			for (uint32_t x = 0; x < st->video_width; x++) {
+				dstrow[x] = st->video_get_intensity(d);
+				d += pixelsize;
+			}
+		}
+	}
+
+	if (!st->cb_qr)
+		st->cb_qr = quirc_new();
+	if (!st->cb_qr)
+		return false;
+	if (quirc_resize(st->cb_qr, plan.dst_w, plan.dst_h) < 0)
+		return false;
+
+	bool found_any = false;
+	// Pass 0: plain area-downscale + quirc's own adaptive threshold. Pass 1 (only if our QR was not
+	// found): Otsu-binarize the same downscaled band — the hard black/white cut that locks quirc's
+	// finder on a soft optical capture (#363).
+	for (int pass = 0; pass < 2 && !found_any; pass++) {
+		int w = 0, h = 0;
+		uint8_t *qbuf = quirc_begin(st->cb_qr, &w, &h);
+		camerabox::cb_box_downscale_luma(src, st->video_width, plan.band_h, qbuf, (uint32_t)w,
+		                                 (uint32_t)h);
+		if (pass == 1)
+			camerabox::cb_binarize_otsu(qbuf, (size_t)w * (size_t)h);
+		quirc_end(st->cb_qr);
+
+		int num_codes = quirc_count(st->cb_qr);
+		for (int i = 0; i < num_codes; i++) {
+			struct quirc_code code;
+			struct quirc_data data;
+			quirc_extract(st->cb_qr, i, &code);
+			auto err = quirc_decode(&code, &data);
+			if (err == QUIRC_ERROR_DATA_ECC) {
+				quirc_flip(&code);
+				err = quirc_decode(&code, &data);
+			}
+			if (err)
+				continue;
+			data.payload[QUIRC_MAX_PAYLOAD - 1] = 0;
+
+			CameraBoxQrData cb;
+			if (!decode_camera_box_qr((char *)data.payload, &cb))
+				continue;
+
+			// Map quirc corners (downscaled top-band coords) back to FRAME coords (the band is
+			// top-anchored at y=0). Cosmetic — the ring/marker use frame_id, not the corners.
+			for (int j = 0; j < 4; j++) {
+				st->qr_corners[j].x =
+					(uint32_t)((uint64_t)code.corners[j].x * st->video_width / (w > 0 ? w : 1));
+				st->qr_corners[j].y =
+					(uint32_t)((uint64_t)code.corners[j].y * plan.band_h / (h > 0 ? h : 1));
+			}
+			signal_qrcode_found(st->context, frame->timestamp - st->start_ts, st->qr_corners);
+			cb_video_qr_record(st, cb.frame_id, frame->timestamp - st->start_ts);
+			video_marker_found(st, frame->timestamp, 1.0f);
+			found_any = true;
+		}
+	}
+	return found_any;
+}
+
 static void st_raw_video(void *data, struct video_data *frame)
 {
 	auto *st = (struct sync_test_output *)data;
@@ -659,6 +776,19 @@ static void st_raw_video(void *data, struct video_data *frame)
 
 	if (!st->start_ts)
 		st->start_ts = frame->timestamp;
+
+	// #398: camera-box's own better-scaled top-band decode first. Once camera-box mode is active it
+	// is the SOLE video-QR source (norihiro's ÷qr_step whole-frame pass misses our big top QR), so
+	// skip norihiro's decode + marker-window logic — those are kept only for the phone-based method
+	// when NOT in camera-box mode.
+	st_raw_video_camera_box_decode(st, frame);
+	bool cb_active;
+	{
+		std::unique_lock<std::mutex> lock(st->mutex);
+		cb_active = st->cb_mode_active;
+	}
+	if (cb_active)
+		return;
 
 	st_raw_video_qrcode_decode(st, frame);
 	st_raw_video_find_marker(st, frame);
@@ -873,12 +1003,122 @@ static inline void st_raw_audio_test_preamble(struct sync_test_output *st, uint6
 	}
 }
 
+/* #398 fix (Audio Index + Latency never locked): camera-box's OWN audio decode path, used once the
+ * video QR has put us in camera-box mode. norihiro's `st_raw_audio*` demod cannot decode our marker
+ * at c=1 (its `c1 = c/2` = 0 collapses the preamble finder; its 6-symbol read can't recover the
+ * 8-bit index) — so this drives the streaming `decode_markers` mirror (round-trip tested for all 256
+ * indices at c=1) and the rolling densest-cluster estimator (robust to the CRC-4 false-decode flood
+ * that a plain median cannot survive) from `camera-box-audio.hpp`. Every decoded marker's index is
+ * the frame_id low byte; the ring lookup + `resolve_ring_lap_offset_ns` give its A/V offset, the
+ * cluster locks the trustworthy value, and only THEN is `sync_found` (Latency) / `audio_marker_found`
+ * (Audio Index) emitted — so the dock shows a number only when it is real, never a false blip. */
+static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)
+{
+	if (!st->cb_audio_dec) {
+		size_t sig = camerabox::cb_signal_len(st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ,
+		                                      CAMERA_BOX_AUDIO_C);
+		if (sig == 0)
+			return;
+		// window ≥ 3 marker lengths so any marker is wholly present; dedup gap one marker length.
+		st->cb_audio_dec = new camerabox::StreamingMarkerDecoder(
+			st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C,
+			camerabox::CB_QPSK_THRESHOLD, sig * 3, (uint64_t)sig);
+	}
+
+	// Mix all channels to mono (the marker survives the mix; the QPSK decode is amplitude-tolerant),
+	// matching the offline `recording-verdict --av-sync` `-ac 1` extraction.
+	size_t nf = frames->frames;
+	std::vector<float> mono(nf, 0.0f);
+	size_t ch = st->audio_channels;
+	for (size_t i = 0; i < nf; i++) {
+		float acc = 0.0f;
+		for (size_t cix = 0; cix < ch; cix++)
+			acc += ((float *)frames->data[cix])[i];
+		mono[i] = ch ? acc / (float)ch : 0.0f;
+	}
+
+	const uint64_t base = st->cb_audio_pushed; // absolute index of this callback's first sample
+	std::vector<std::pair<uint64_t, uint8_t>> markers = st->cb_audio_dec->push(mono.data(), nf);
+	st->cb_audio_pushed += (uint64_t)nf;
+
+	const double sr = (double)st->audio_sample_rate;
+	for (size_t k = 0; k < markers.size(); k++) {
+		const uint64_t abs = markers[k].first;
+		const uint8_t idx8 = markers[k].second;
+		// OBS timestamp of the marker: this callback's first sample is at `frames->timestamp`, so a
+		// marker at absolute index `abs` is (abs - base) samples from it (may be negative — a marker
+		// that entered on a prior callback and is still in the window).
+		const int64_t rel = (int64_t)abs - (int64_t)base;
+		const int64_t marker_ts_i =
+			(int64_t)frames->timestamp + (int64_t)std::llround((double)rel * 1000000000.0 / sr);
+		if (marker_ts_i < (int64_t)st->start_ts)
+			continue;
+		const uint64_t audio_ts = (uint64_t)marker_ts_i - st->start_ts;
+
+		bool valid;
+		uint64_t video_ts;
+		{
+			std::unique_lock<std::mutex> lock(st->mutex);
+			valid = st->cb_video_valid[idx8];
+			video_ts = st->cb_video_ts_ns[idx8];
+		}
+		if (!valid)
+			continue;
+
+		const int64_t offset_ns =
+			resolve_ring_lap_offset_ns(audio_ts, video_ts, CAMERA_BOX_RING_CYCLE_NS);
+		const double offset_ms = (double)offset_ns / 1000000.0;
+		camerabox::CbAvOffset est = st->cb_offset_cluster.push(audio_ts, offset_ms);
+		if (!est.ok)
+			continue; // still measuring — never display an untrustworthy number
+
+		// Latency (sync_found): the locked cluster offset, as audio_ts - video_ts (dock convention).
+		const int64_t locked_ns = (int64_t)std::llround(est.offset_ms * 1000000.0);
+		struct sync_index si;
+		si.index = idx8;
+		const int64_t corrected_video_ts = (int64_t)audio_ts - locked_ns;
+		si.video_ts = corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0;
+		si.audio_ts = audio_ts;
+		si.index_max = 256;
+		signal_sync_found(st->context, &si);
+
+		// Audio Index (audio_marker_found): only for a marker whose own offset agrees with the lock
+		// — a believed-REAL marker — so the displayed index is a genuine one, not a false blip.
+		if (std::fabs(offset_ms - est.offset_ms) <= camerabox::CB_CLUSTER_TOL_MS) {
+			uint8_t stack[64];
+			struct calldata cd;
+			calldata_init_fixed(&cd, stack, sizeof(stack));
+			auto *sh = obs_output_get_signal_handler(st->context);
+			struct audio_marker_found_s data;
+			data.timestamp = audio_ts;
+			data.index = idx8;
+			data.score = 0.0f;
+			data.index_max = 256;
+			data.sparse_index = true; // frame_id low byte, sampled sparsely — no +1 missed% math
+			calldata_set_ptr(&cd, "data", &data);
+			signal_handler_signal(sh, "audio_marker_found", &cd);
+		}
+	}
+}
+
 static void st_raw_audio(void *data, struct audio_data *frames)
 {
 	auto *st = (struct sync_test_output *)data;
 
 	if (!st->start_ts)
 		return;
+
+	// #398: once the video QR has activated camera-box mode, decode the audio with camera-box's own
+	// proven demod (norihiro's is broken at c=1). Skip norihiro's audio path entirely then.
+	bool cb_active;
+	{
+		std::unique_lock<std::mutex> lock(st->mutex);
+		cb_active = st->cb_mode_active;
+	}
+	if (cb_active) {
+		st_raw_audio_camera_box(st, frames);
+		return;
+	}
 
 	std::unique_lock<std::mutex> lock(st->mutex);
 	uint32_t f = st->f;
