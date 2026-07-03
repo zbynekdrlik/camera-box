@@ -116,13 +116,14 @@ if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
     mkdir -p "$NDI_DIR"
     sshpass -p "$CAM_PW" scp -O -o StrictHostKeyChecking=no \
-        "${DESKTOP_USER}@${NDI_PEER}:/usr/lib/ndi/libndi.so.*" "$NDI_DIR/" \
+        "${DESKTOP_USER}@${NDI_PEER}:/usr/lib/ndi/libndi.so.*.*.*" "$NDI_DIR/" \
         || fail "NDI copy from cam1 failed"
     ( cd "$NDI_DIR" && REAL=$(ls libndi.so.*.*.* | head -1) && ln -sf "$REAL" libndi.so.6 && ln -sf libndi.so.6 libndi.so )
 fi
 echo "$NDI_DIR" > /etc/ld.so.conf.d/ndi.conf
 ldconfig
-ldconfig -p | grep -q libndi || fail "libndi not in linker cache"
+# no `grep -q` on a pipe under pipefail — -q's early close SIGPIPEs ldconfig and fails the pipeline
+ldconfig -p | grep libndi >/dev/null || fail "libndi not in linker cache"
 apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
