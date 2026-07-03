@@ -23,8 +23,15 @@
 | CAM3 | 10.77.9.63 | Active | SSH: root/newlevel |
 | CAM4 | 10.77.9.64 | Active | SSH: root/newlevel |
 
+## Linux OBS Targets (camera-box, #458)
+
+| Host | IP Address | Status | Notes |
+|------|------------|--------|-------|
+| imag-nb | 10.77.9.182 | Active | SSH: newlevel/newlevel (sudo needs pw); 60fps IMAG OBS box, genlock hot-swap over PPA base (#460) |
+
 ## Important Notes
 
 - **Always use IP addresses**, not `.lan` hostnames (DNS may not resolve)
 - Camera devices use `mount -o remount,rw /` (not `rw-mode` command)
 - Windows targets use `newlevel` user (not `root`)
+- imag-nb (Linux OBS) also uses `newlevel` user (live-verified SSH login), same as most Windows targets

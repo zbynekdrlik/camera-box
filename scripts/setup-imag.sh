@@ -7,10 +7,15 @@
 # WebSocket (and later `imag_scenes.py --projector` once the HDMI monitor is connected).
 #
 # Usage (on the box):
-#   sudo CAM_PW=<fleet-pw> ./setup-imag.sh [--yes]
+#   sudo CAM_PW=<fleet-pw> GH_TOKEN=<gh-pat-with-repo-scope> ./setup-imag.sh [--yes]
+#
+# GH_TOKEN (repo-read scope) is required for step 6: imag-nb runs the CUSTOMIZED genlock
+# OBS+DistroAV build (#460), hot-swapped over the PPA base — the artifacts are GitHub Actions
+# workflow artifacts on this PRIVATE repo, which `gh run download` needs auth to fetch.
 #
 # Topology (spec docs/superpowers/specs/2026-07-03-imag-nb-topology-design.md):
-#   6× cam box NDI 1080p60 -> imag-nb OBS (1080p60 low-latency IMAG) -> HDMI program projector
+#   6× cam box NDI 1080p60 -> imag-nb OBS (1080p60 low-latency IMAG, genlock build #460) ->
+#   HDMI program projector
 #
 set -euo pipefail
 
@@ -140,7 +145,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 5 "OBS Studio (official PPA, 32.x) — same major as the genlock base"
+step 5 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -150,15 +155,136 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 6 "DistroAV NDI plugin (stock bootstrap — the genlock Linux build #460 swaps in later)"
+step 6 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
-if [ ! -e /usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so ] && [ ! -e /usr/lib/obs-plugins/distroav.so ]; then
-    DEB_URL=$(curl -fsSL https://api.github.com/repos/DistroAV/DistroAV/releases/latest \
-        | grep -oE '"browser_download_url": *"[^"]*x86_64-linux[^"]*\.deb"' | grep -oE 'https[^"]*' | head -1)
-    [ -n "$DEB_URL" ] || fail "no DistroAV linux .deb asset found on latest release"
-    curl -fsSL -o /tmp/distroav.deb "$DEB_URL"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/distroav.deb >/dev/null \
-        || dpkg -i /tmp/distroav.deb || fail "DistroAV install failed"
+# imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
+# #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
+# obs-studio package installed in step 5 ships libobs.so.30 with SONAME "libobs.so.30"
+# (live-verified on imag-nb) — IDENTICAL to the genlock build's own SONAME — so the genlock
+# libobs.so.30 hot-swaps cleanly over it, exactly mirroring the Windows obs.dll hot-swap (see
+# .claude/skills/genlock). Only libobs.so.30 (the genlock render-tick/ts-align patches live in
+# obs-source.c/obs-video.c, both inside libobs core) and distroav.so are swapped —
+# obs-frontend-api/obs-opengl/obs-scripting are untouched by the genlock patches and stay
+# PPA-stock. No stock DistroAV .deb is installed any more — the genlock-built distroav.so IS
+# the plugin.
+GENLOCK_REPO="zbynekdrlik/camera-box"
+GENLOCK_WORKFLOW="linux-genlock.yml"
+GENLOCK_MARKER_DIR="/opt/obs-genlock"
+GENLOCK_BACKUP_ROOT="/opt/obs-backup"
+LIBOBS_REAL="/usr/lib/x86_64-linux-gnu/libobs.so.30"
+DISTROAV_REAL="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+
+command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
+
+# #120 bundle-manifest self-consistency check, INLINE (jq): setup-imag.sh is copied to the box
+# standalone (no sibling scripts/genlock-manifest.sh checked out here), so it cannot shell out to
+# the repo's own manifest tool the way the CI build does — this re-implements the SAME per-file
+# sha256 check jq-side. A `<<<` here-string (never a `| while` pipe) keeps the loop in THIS shell
+# so fail()'s `exit 1` actually aborts the script — the same pipefail subshell trap already
+# documented for the ldconfig check in step 4 (a piped subshell's exit would NOT abort the script).
+verify_bundle_manifest() {
+    local manifest="$1" stage="$2" entries relpath want_sha got_sha f
+    entries="$(jq -r '.files[] | "\(.path)\t\(.sha256)"' "$manifest")" || fail "cannot parse $manifest"
+    [ -n "$entries" ] || fail "$manifest lists zero files — refuse to trust an empty #460 manifest"
+    while IFS=$'\t' read -r relpath want_sha; do
+        [ -n "$relpath" ] || continue
+        f="$stage/$relpath"
+        [ -f "$f" ] || fail "#460 manifest lists $relpath but it is missing from the downloaded bundle"
+        got_sha="$(sha256sum "$f" | awk '{print $1}')"
+        [ "$got_sha" = "$want_sha" ] || \
+            fail "#460 manifest sha mismatch for $relpath (want $want_sha got $got_sha) — corrupted/tampered artifact"
+    done <<< "$entries"
+}
+
+DEPLOYED_SHA=""
+[ -f "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" ] && DEPLOYED_SHA="$(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt")"
+
+if ! command -v gh >/dev/null 2>&1; then
+    GH_DEB_URL=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
+        | grep -oE '"browser_download_url": *"[^"]*linux_amd64\.deb"' | grep -oE 'https[^"]*' | head -1)
+    [ -n "$GH_DEB_URL" ] || fail "no gh CLI linux_amd64 .deb asset found on latest cli/cli release"
+    curl -fsSL -o /tmp/gh-cli.deb "$GH_DEB_URL"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/gh-cli.deb >/dev/null \
+        || dpkg -i /tmp/gh-cli.deb || fail "gh CLI install failed"
+fi
+command -v gh >/dev/null 2>&1 || fail "gh CLI still missing after install attempt"
+[ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN env required (repo-read scope) to download the private #460 CI artifact"
+
+# GENLOCK_RUN_ID overrides run resolution (pin a specific build). Default: the latest SUCCESSFUL
+# linux-genlock.yml run on ANY branch — the workflow triggers ONLY on push to dev (never main;
+# `gh run list -w linux-genlock.yml -b main` is EMPTY, live-verified), so branch-filtering to
+# main would find nothing — the newest successful dev run IS the current genlock source state.
+RUN_ID="${GENLOCK_RUN_ID:-}"
+if [ -z "$RUN_ID" ]; then
+    RUN_ID="$(gh run list --repo "$GENLOCK_REPO" --workflow "$GENLOCK_WORKFLOW" \
+        --status success --limit 1 --json databaseId -q '.[0].databaseId')"
+    [ -n "$RUN_ID" ] || fail "no successful $GENLOCK_WORKFLOW run found on $GENLOCK_REPO"
+fi
+
+GENLOCK_TMP="$(mktemp -d)"
+trap 'rm -rf "$GENLOCK_TMP"' EXIT
+
+gh run download "$RUN_ID" --repo "$GENLOCK_REPO" -n obs-genlock-linux-x86_64 --dir "$GENLOCK_TMP/bundle" \
+    || fail "download of obs-genlock-linux-x86_64 failed (run $RUN_ID)"
+gh run download "$RUN_ID" --repo "$GENLOCK_REPO" -n distroav-linux-fast-so --dir "$GENLOCK_TMP/fast" \
+    || fail "download of distroav-linux-fast-so failed (run $RUN_ID)"
+
+[ -f "$GENLOCK_TMP/bundle/GENLOCK_BUILD_SHA.txt" ] || fail "bundle missing GENLOCK_BUILD_SHA.txt"
+NEW_SHA="$(cat "$GENLOCK_TMP/bundle/GENLOCK_BUILD_SHA.txt")"
+[ -f "$GENLOCK_TMP/fast/DISTROAV_BUILD_SHA.txt" ] || fail "distroav-linux-fast-so missing DISTROAV_BUILD_SHA.txt"
+FAST_SHA="$(cat "$GENLOCK_TMP/fast/DISTROAV_BUILD_SHA.txt")"
+[ "$NEW_SHA" = "$FAST_SHA" ] || \
+    fail "bundle build SHA ($NEW_SHA) != distroav-linux-fast-so build SHA ($FAST_SHA) — mismatched artifacts from different runs, refuse to deploy"
+
+BUNDLE_LIBOBS="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs.so.30"
+[ -f "$BUNDLE_LIBOBS" ] || fail "bundle missing lib/x86_64-linux-gnu/libobs.so.30"
+FAST_DISTROAV="$GENLOCK_TMP/fast/distroav.so"
+[ -f "$FAST_DISTROAV" ] || fail "distroav-linux-fast-so missing distroav.so"
+[ -f "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" ] || fail "bundle missing BUNDLE_MANIFEST.json (#120)"
+
+verify_bundle_manifest "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" "$GENLOCK_TMP/bundle"
+
+if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ]; then
+    echo "  genlock build $NEW_SHA already deployed — no-op"
+else
+    mkdir -p "$GENLOCK_MARKER_DIR"
+    BACKUP_DIR="$GENLOCK_BACKUP_ROOT/$(date +%Y-%m-%d-%H%M%S)-458"
+    mkdir -p "$BACKUP_DIR"
+    [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$BACKUP_DIR/libobs.so.30"
+    [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$BACKUP_DIR/distroav.so"
+    # ONE permanent stock-PPA backup, created once and never overwritten again — the forever
+    # rollback-to-stock path (mirrors the Windows C:\obs-backup\pre-<N> convention).
+    if [ ! -f "${LIBOBS_REAL}.bak" ] && [ -f "$LIBOBS_REAL" ]; then cp -a "$LIBOBS_REAL" "${LIBOBS_REAL}.bak"; fi
+    if [ ! -f "${DISTROAV_REAL}.bak" ] && [ -f "$DISTROAV_REAL" ]; then cp -a "$DISTROAV_REAL" "${DISTROAV_REAL}.bak"; fi
+
+    install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL" || fail "libobs.so.30 hot-swap install failed"
+    install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL" || fail "distroav.so hot-swap install failed"
+    ldconfig
+
+    # SONAME sanity check (no `-q` on a piped external command under pipefail — same early-close
+    # SIGPIPE footgun documented for the step-4 ldconfig check; read the full small output instead).
+    readelf -d "$LIBOBS_REAL" 2>/dev/null | grep 'SONAME.*\[libobs\.so\.30\]' >/dev/null \
+        || fail "post-swap libobs.so.30 SONAME check failed — refuse a mismatched ABI"
+
+    echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt"
+    echo "$FAST_SHA" > "$GENLOCK_MARKER_DIR/DISTROAV_BUILD_SHA.txt"
+    cp -a "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" "$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json"
+    date -Is > "$GENLOCK_MARKER_DIR/DEPLOYED_AT"
+
+    # Prevent an unattended `apt upgrade` from silently reverting the hot-swap back to PPA/stock
+    # bytes (dpkg still tracks these two files under obs-studio/distroav) — drift must be a
+    # deliberate re-run of this script, never a background package update.
+    apt-mark hold obs-studio distroav >/dev/null 2>&1 || true
+
+    # A swap while OBS is already running (a later re-run onto a NEWER build) needs OBS to
+    # relaunch to pick up the new .so — mirrors the Windows force-kill-then-relaunch convention.
+    # On the FIRST provisioning run OBS is not up yet (step 9 launches it fresh); step 9's own
+    # `pgrep` guard would otherwise skip (re)launching an already-running, stale-lib OBS.
+    if pgrep -x obs >/dev/null 2>&1; then
+        pkill -x obs || true
+        sleep 2
+    fi
+    echo "  genlock build $NEW_SHA deployed (was: ${DEPLOYED_SHA:-none, PPA stock})"
 fi
 
 # =============================================================================
@@ -214,7 +340,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 10 "Verify: WebSocket :4455 reachable"
+step 10 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
@@ -222,8 +348,29 @@ for i in $(seq 1 15); do
     sleep 2
 done
 
+# Genlock log verify — the Linux equivalent of scripts/launch-obs-genlock.sh's Windows
+# log-verify (#257 proof): the OBS log is the AUTHORITATIVE runtime signal a stock/wrong build
+# cannot fake. Same regex family as scripts/drift-guard.sh genlock_capability_from_log.
+OBS_LOG_DIR="$OBS_CFG/logs"
+LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1)"
+[ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
+LOG_TEXT="$(cat "$LATEST_LOG")"
+echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
+    || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap in step 6)"
+echo "  genlock render tick ENABLED (#460 build proof)"
+if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
+    echo "  DistroAV plugin loaded"
+else
+    echo "  WARNING: no '[distroav] plugin loaded' line yet (may log lazily on first NDI activation)"
+fi
+if echo "$LOG_TEXT" | grep -i 'NDI library initialized' >/dev/null; then
+    echo "  NDI runtime loaded"
+else
+    echo "  WARNING: no 'NDI library initialized' line yet"
+fi
+
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}imag-nb base provisioning DONE${NC}"
+echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"
 echo -e "${GREEN}NEXT (from dev1): scripts/imag_scenes.py --host ${STATIC_IP}   # profile+scenes${NC}"
 echo -e "${GREEN}       then:      scripts/imag_scenes.py --host ${STATIC_IP} --projector   # once HDMI monitor connected${NC}"
 echo -e "${GREEN}========================================${NC}"
