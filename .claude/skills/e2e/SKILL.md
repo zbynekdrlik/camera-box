@@ -665,3 +665,18 @@ idempotent — the same planner call is safe to issue twice.
 
 Pass it BEFORE other flags. When the file is absent, the flag is silently consumed and the plan
 emits normally. 5 tests in `tests/harness_verdict_done_marker.rs`.
+
+---
+
+## "Is gate X CI-automatic or rig-manual?" — read `docs/strict-gate-coverage.md` first (EPIC #406)
+
+Before answering any question about whether a strict gate (render budget, colour, frozen-camera,
+delivery contiguity, restart-survival, phase-sync, …) runs automatically vs needs a manual rig
+E2E dispatch, read `docs/strict-gate-coverage.md` — it is a verified-against-a-real-CI-log table of
+every gate kernel, its unit tests, its CI job, and its rig wiring. Re-deriving this from scratch
+duplicates a full audit that has already been done. The short version: every kernel's DECISION
+LOGIC is Tier-0 unit-tested and runs on every push (Tier A) — but `full-path-e2e.yml` (the real
+full-flow rig gate that exercises the ACTUAL system, not just the decision logic) is
+`workflow_dispatch`-only, so a regression in the system itself (not the gate logic) is only caught
+by a manual dispatch. That remaining automation gap is infra/operator-scheduling work, not a code
+fix — see the doc for why.
