@@ -117,5 +117,15 @@ pub mod av_restart_sync;
 // controller is `scripts/phase_sync_calibrate.py` (mirrors this module's math in Python).
 pub mod phase_sync;
 
+// #109 — restart-survival ZERO-LOSS verdict (pure decision), the exact sibling of
+// `av_restart_sync` for the #186 delivery signal instead of the #188 A/V-sync signal. A BEFORE
+// and AFTER `recording-verdict --json` report -> PASS / FAIL / UNKNOWN, fail-closed on any
+// internally-inconsistent report so a corrupt/mismatched JSON can never manufacture a false
+// PASS. No probe deps, so it unit-tests Tier-0; the rig I/O (two bracketing recordings around a
+// real OBS restart AND a real PC reboot of strih+stream) lives in `scripts/recording-e2e.sh`'s
+// optional `ZERO_LOSS_RESTART_GATE` step; the thin CLI binary lives in
+// `src/bin/zero-loss-restart-gate.rs`.
+pub mod zero_loss_restart_survival;
+
 #[cfg(feature = "probe")]
 pub mod probe;
