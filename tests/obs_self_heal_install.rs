@@ -81,9 +81,10 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
 const OBS_DIR: &str = "C:\\Program Files\\obs-studio";
 
 /// `build_recovery_script` with NO threshold/interval/stale-lock override args — the default,
-/// mirroring what `main()`'s own (unset-by-default) CLI flags now produce.
+/// mirroring what `main()`'s own (unset-by-default) CLI flags now produce. `30` is strih's real
+/// target fps since Topology v2 (#459, was 60 pre-#459 -- the 60fps IMAG role moved to imag-nb).
 fn recovery_script_strih() -> String {
-    run_sourced(&format!("build_recovery_script strih '{OBS_DIR}' 60"))
+    run_sourced(&format!("build_recovery_script strih '{OBS_DIR}' 30"))
 }
 
 fn recovery_script_stream() -> String {
@@ -326,7 +327,7 @@ fn omitted_overrides_become_powershell_null_so_the_rust_kernel_defaults_apply() 
 #[test]
 fn explicit_overrides_flow_through_as_numbers() {
     let p = run_sourced(&format!(
-        "build_recovery_script strih '{OBS_DIR}' 60 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
+        "build_recovery_script strih '{OBS_DIR}' 30 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
     ));
     assert!(
         p.contains(&format!(
@@ -620,8 +621,9 @@ fn cli_box_selects_correct_mcp_and_target_fps() {
     assert_eq!(code, 0, "--box strih must print the plan (exit 0)");
     assert!(out.contains("win-strih") && out.contains("10.77.9.202"));
     assert!(
-        out.contains("$TargetFps       = 60"),
-        "strih targets 60fps (final mixed 60+30 topology). out=\n{out}"
+        out.contains("$TargetFps       = 30"),
+        "strih targets 30fps (Topology v2, #459 -- cut-to-stream only; the 60fps IMAG role \
+         moved to imag-nb, #458/#463). out=\n{out}"
     );
     assert!(
         out.contains("schtasks /Create"),

@@ -53,8 +53,10 @@ esac
 # ── config (all env-overridable) ─────────────────────────────────────────────
 STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
 STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
-# Final mixed 60+30 topology: strih runs 60fps (low-latency IMAG), stream runs 30fps.
-STRIH_TARGET_FPS="${STRIH_TARGET_FPS:-60}"
+# Topology v2 (#459, EPIC #466, was 60 pre-#459 -- final mixed 60+30 topology, #11): strih is now
+# cut-to-stream only at 30fps; the 60fps low-latency IMAG role moved to the new imag-nb box
+# (#458/#463). stream is unaffected, still 30fps.
+STRIH_TARGET_FPS="${STRIH_TARGET_FPS:-30}"
 STREAM_TARGET_FPS="${STREAM_TARGET_FPS:-30}"
 WINDOW_S="${OBS_WATCHDOG_WINDOW_S:-4}"
 CONFIRM_THRESHOLD="${OBS_WATCHDOG_CONFIRM_THRESHOLD:-2}"
