@@ -42,16 +42,23 @@ pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool
     analyzed_span_secs >= min_secs
 }
 
+/// #373 — the node labels whose burn is read from the CLEAN strih recording (#133) at
+/// `capture_fps`, rather than from the stream recording at `stream_capture_fps`. cam1 is the
+/// original "camera under test"; #24 extends the SAME role to cam3/cam4 (mutually exclusive in
+/// any real run — see `recording-verdict.rs`'s `CAMERA_UNDER_TEST_NODES`, which this mirrors).
+const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
+
 /// #373 — the CAPTURE rate to divide a node's `optical_span_frames` by, when converting to the
-/// analyzed-span SECONDS the duration floor gates on. The nodes do NOT share one rate: cam1's burn
-/// (and its optical span) is read from the CLEAN strih recording (#133), captured at `capture_fps`
-/// (60 on the rig); strih and stream are read from the stream recording, captured at
-/// `stream_capture_fps` (30). Dividing every node by ONE rate mis-scales the others: with the rig's
-/// `--capture-fps 60`, a real 300 s strih/stream span (9000 frames @ 30 fps) would read 150 s and
-/// FALSE-FAIL the >=300 s floor — failing exactly the genuine zero-loss runs the floor must pass.
-/// So cam1 uses `capture_fps`; every other node uses `stream_capture_fps`.
+/// analyzed-span SECONDS the duration floor gates on. The nodes do NOT share one rate: the
+/// camera-under-test's burn (and its optical span) is read from the CLEAN strih recording (#133),
+/// captured at `capture_fps` (60 on the rig); strih and stream are read from the stream recording,
+/// captured at `stream_capture_fps` (30). Dividing every node by ONE rate mis-scales the others:
+/// with the rig's `--capture-fps 60`, a real 300 s strih/stream span (9000 frames @ 30 fps) would
+/// read 150 s and FALSE-FAIL the >=300 s floor — failing exactly the genuine zero-loss runs the
+/// floor must pass. So the camera-under-test (cam1/cam3/cam4, #24) uses `capture_fps`; strih and
+/// stream use `stream_capture_fps`.
 pub fn node_capture_fps(node: &str, capture_fps: f64, stream_capture_fps: f64) -> f64 {
-    if node == "cam1" {
+    if CAMERA_UNDER_TEST_NODES.contains(&node) {
         capture_fps
     } else {
         stream_capture_fps
@@ -141,6 +148,28 @@ mod tests {
                 MIN
             ),
             "the per-recording rate passes the real 300 s strih run"
+        );
+    }
+
+    #[test]
+    fn node_capture_fps_treats_cam3_and_cam4_like_cam1_24() {
+        // #24 — cam3/cam4 extend the #186 digital-burn contiguity check and occupy the SAME
+        // "camera under test" role as cam1 (recording-verdict.rs's `CAMERA_UNDER_TEST_NODES`):
+        // their burn is ALSO read from the clean strih recording (#133), captured at
+        // `capture_fps` — never the 30 fps stream recording strih/stream read from. Before this
+        // fix only the literal "cam1" got the right rate; cam3/cam4 fell through to
+        // `stream_capture_fps`, mis-scaling their #373 analyzed-span floor exactly like the
+        // single-shared-rate bug this module's headline doc describes for strih/stream.
+        let (cap, stream_cap) = (60.0, 30.0);
+        assert_eq!(
+            node_capture_fps("cam3", cap, stream_cap),
+            60.0,
+            "cam3's optical span ALSO comes from the 60 fps strih recording, like cam1"
+        );
+        assert_eq!(
+            node_capture_fps("cam4", cap, stream_cap),
+            60.0,
+            "cam4's optical span ALSO comes from the 60 fps strih recording, like cam1"
         );
     }
 

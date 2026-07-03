@@ -85,6 +85,15 @@ pub const BURN_RUN_ID_STREAM: u32 = 911004;
 /// this clean digital id. Distinct from the strih/stream burn ids so all marks are told
 /// apart by run_id. The binary lets the operator override it to match the cam1 env.
 pub const BURN_RUN_ID_CAM1: u32 = 911001;
+/// #24 — cam3's capture-burn run_id, extending the #174 mechanism to a THIRD source camera.
+/// cam1/cam3/cam4 occupy the SAME "camera under test" role (the `CAMERA_BOX_BURN_RUN_ID` capture
+/// burn is the same feature on every camera-box binary — only the deployed run_id differs) and
+/// are mutually exclusive in any real run: only the ONE camera actually deployed with the burn
+/// enabled produces a non-empty id set. Distinct from every other reserved id (911001 cam1 /
+/// 911002 strih / 911004 stream) so all marks are told apart by run_id alone.
+pub const BURN_RUN_ID_CAM3: u32 = 911003;
+/// #24 — cam4's capture-burn run_id. See [`BURN_RUN_ID_CAM3`].
+pub const BURN_RUN_ID_CAM4: u32 = 911007;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.

@@ -49,7 +49,8 @@ use camera_box::probe::recording_latency::{
     burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip,
     cam_strih_samples, chain_hop_samples_from_stream, hop_latency, painter_internal_gen_to_flip,
     per_frame_latency_csv_rows, strih_stream_samples, strih_stream_samples_from_stream,
-    write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -147,6 +148,17 @@ struct Args {
     /// samples (never a wrong number). Default mirrors the cam1 burn's reserved id.
     #[arg(long, default_value_t = BURN_RUN_ID_CAM1)]
     burn_cam1_run_id: u32,
+    /// #24: cam3's capture-burn run_id — mirrors `--burn-cam1-run-id` exactly (the SAME #174
+    /// capture-burn mechanism, running on cam3 instead of cam1). cam1/cam3/cam4 occupy the SAME
+    /// "camera under test" role and are mutually exclusive in any real run (only the camera
+    /// actually deployed with `CAMERA_BOX_BURN_RUN_ID` set produces a non-empty id set) — when
+    /// absent, cam3 is silently skipped exactly like cam1 is today when its burn is off. Default
+    /// mirrors cam3's reserved id.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM3)]
+    burn_cam3_run_id: u32,
+    /// #24: cam4's capture-burn run_id. See `--burn-cam3-run-id`.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM4)]
+    burn_cam4_run_id: u32,
     /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
     /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
     /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
@@ -389,6 +401,13 @@ fn frame_is_delivered_optical(
 /// **NEVER raise this without new measured evidence** (mirrors `colour_verify`'s calibration
 /// discipline) — it tolerates the rig's proven moiré floor, never a genuine read failure.
 const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
+
+/// #24 — the node labels that occupy the "camera under test" role: whichever ONE of the four
+/// physical source cameras is deployed with `CAMERA_BOX_BURN_RUN_ID` set this run (mutually
+/// exclusive — a real run only ever has ONE producing a non-empty id set). Both the clean-source
+/// selection (#133, `cam1_source`/`cam1_rec_path`) and the #356 cross-recording reconciliation
+/// apply identically to any of them; strih/stream never do.
+const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
 /// contiguous, every missing id classified from the pixels.
@@ -2087,38 +2106,54 @@ fn build_and_print_verdict(
             ),
         };
         let cam1_ids = burn_ids_in(cam1_source, args.burn_cam1_run_id);
+        // #24 — cam3/cam4 occupy the SAME "camera under test" role as cam1 (mutually exclusive in
+        // any real run: only the ONE camera actually deployed with CAMERA_BOX_BURN_RUN_ID set
+        // produces a non-empty id set here), so they read from the SAME clean source
+        // (`cam1_source`, #133) with their OWN reserved burn run_id.
+        let cam3_ids = burn_ids_in(cam1_source, args.burn_cam3_run_id);
+        let cam4_ids = burn_ids_in(cam1_source, args.burn_cam4_run_id);
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
-        let any_burn =
-            !cam1_ids.is_empty() || !strih_ids_seq.is_empty() || !stream_ids_seq.is_empty();
+        let any_burn = !cam1_ids.is_empty()
+            || !cam3_ids.is_empty()
+            || !cam4_ids.is_empty()
+            || !strih_ids_seq.is_empty()
+            || !stream_ids_seq.is_empty();
         if any_burn {
             println!();
             println!(
-                "=== #174 FULL-CHAIN per-hop verdict (cam1 from the {cam1_source_label}; strih/stream from the stream recording) ==="
+                "=== #174 FULL-CHAIN per-hop verdict (camera-under-test from the {cam1_source_label}; strih/stream from the stream recording) ==="
             );
             println!(
-                "  burn ids: cam1={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
+                "  burn ids: cam1={} cam3={} cam4={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
                 cam1_ids.len(),
+                cam3_ids.len(),
+                cam4_ids.len(),
                 strih_ids_seq.len(),
                 stream_ids_seq.len()
             );
             report["full_chain"]["burn_ids_present"] = serde_json::json!({
-                "cam1": cam1_ids.len(), "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
+                "cam1": cam1_ids.len(), "cam3": cam3_ids.len(), "cam4": cam4_ids.len(),
+                "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
             report["full_chain"]["cam1_source"] = serde_json::json!(cam1_source_label);
-            // #133 (review): if --strih was supplied (so cam1's source IS the strih recording)
-            // but cam1 carried NO burn there, cam1 is silently SKIPPED below and an all-zero
-            // headline could stand WITHOUT cam1 having been measured. The cam1-capture burn
-            // (CAMERA_BOX_BURN_RUN_ID on cam1) rides into strih's program, so its absence in a
-            // --strih run means the burn was OFF or never reached strih — loudly WARN so a
-            // "ZERO loss" headline is never read as a cam1→strih proof when cam1 was unmeasured.
-            // (No hard fail: a deliberate burn-off / cam1-only diagnostic run is still valid.)
-            if strih_data.is_some() && cam1_ids.is_empty() {
+            // #133 (review, #24 generalized): if --strih was supplied (so the camera-under-test's
+            // source IS the strih recording) but NONE of cam1/cam3/cam4 carried a burn there, the
+            // camera leg is silently SKIPPED below and an all-zero headline could stand WITHOUT the
+            // camera having been measured. The capture burn (CAMERA_BOX_BURN_RUN_ID on whichever
+            // camera is under test) rides into strih's program, so its absence in a --strih run
+            // means the burn was OFF or never reached strih — loudly WARN so a "ZERO loss" headline
+            // is never read as a camera→strih proof when the camera was unmeasured. (No hard fail:
+            // a deliberate burn-off / strih+stream-only diagnostic run is still valid.)
+            let camera_under_test_measured =
+                !cam1_ids.is_empty() || !cam3_ids.is_empty() || !cam4_ids.is_empty();
+            if strih_data.is_some() && !camera_under_test_measured {
                 eprintln!(
-                    "WARNING: --strih supplied but NO cam1 burn (run_id {}) found in the strih \
-                     recording — cam1→strih is UNMEASURED this run (cam1 burn OFF or not reaching \
-                     strih). A ZERO-loss headline below covers strih/stream ONLY, not cam1→strih.",
-                    args.burn_cam1_run_id
+                    "WARNING: --strih supplied but NO camera-under-test burn found in the strih \
+                     recording (checked cam1={}, cam3={}, cam4={}) — the camera→strih hop is \
+                     UNMEASURED this run (burn OFF or not reaching strih). A ZERO-loss headline \
+                     below covers strih/stream ONLY.",
+                    args.burn_cam1_run_id, args.burn_cam3_run_id, args.burn_cam4_run_id
                 );
                 report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
             }
@@ -2135,6 +2170,8 @@ fn build_and_print_verdict(
             // ===========================================================================
             let all_burns = [
                 args.burn_cam1_run_id,
+                args.burn_cam3_run_id,
+                args.burn_cam4_run_id,
                 args.burn_strih_run_id,
                 args.burn_stream_run_id,
             ];
@@ -2190,6 +2227,47 @@ fn build_and_print_verdict(
                         ),
                     },
                     !cam1_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
+                    // #24 — cam3 occupies the SAME camera-under-test role as cam1 (see the
+                    // `CAMERA_UNDER_TEST_NODES` doc comment): same clean source, same optical
+                    // facts, same carried colour. `present` (`!cam3_ids.is_empty()`) is false in
+                    // every existing cam1-only run, so this is purely additive.
+                    NodeSpec {
+                        node: "cam3",
+                        burn_run_id: args.burn_cam3_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam3",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                        ),
+                    },
+                    !cam3_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
+                    // #24 — cam4, see the cam3 comment above.
+                    NodeSpec {
+                        node: "cam4",
+                        burn_run_id: args.burn_cam4_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam4",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                        ),
+                    },
+                    !cam4_ids.is_empty(),
                     cam1_optical,
                     cam1_carried_colour,
                 ),
@@ -2251,24 +2329,26 @@ fn build_and_print_verdict(
                 // `colour_verify` module.
                 nv.colour_fail =
                     build_node_colour_fail(&spec, carried_colour, args, &mut colour_fail_cache)?;
-                // #356 — cross-recording cam1 reconciliation. cam1's contiguity is read from the
-                // CLEAN upstream strih recording (#133); at the high-latency 60→30 hop the small
-                // cam1 burn QR softens and some ids go UNREADABLE in the strih recording even though
-                // the frame was DELIVERED. A cam1 REAL-DROP id that IS decoded in the DOWNSTREAM
-                // stream recording was proven delivered → re-classify it BURN-UNREADABLE (a
-                // strih-recording readability gap), NOT a chain loss — honest headline accounting
-                // (the #226 spirit, reconciled ACROSS recordings). Applied ONLY to cam1, ONLY when a
-                // distinct downstream stream recording backs the claim (strih_data.is_some() ⇒ cam1
+                // #356 — cross-recording camera-under-test reconciliation (#24: generalized from
+                // cam1-only to any of cam1/cam3/cam4 — see [`CAMERA_UNDER_TEST_NODES`]). The
+                // camera-under-test's contiguity is read from the CLEAN upstream strih recording
+                // (#133); at the high-latency 60→30 hop its small burn QR softens and some ids go
+                // UNREADABLE in the strih recording even though the frame was DELIVERED. A
+                // REAL-DROP id that IS decoded in the DOWNSTREAM stream recording was proven
+                // delivered → re-classify it BURN-UNREADABLE (a strih-recording readability gap),
+                // NOT a chain loss — honest headline accounting (the #226 spirit, reconciled ACROSS
+                // recordings). Applied ONLY to the camera-under-test node, ONLY when a distinct
+                // downstream stream recording backs the claim (strih_data.is_some() ⇒ the camera
                 // reads from the strih recording and `stream_frames` is the genuine downstream
-                // recording; NEVER when cam1 already falls back to the stream recording itself, where
+                // recording; NEVER when it already falls back to the stream recording itself, where
                 // "present in stream" would be vacuously true for every id). SAFETY: an id ABSENT
                 // from the stream recording (a genuine loss, OR a 30 fps-decimated id we cannot
                 // prove) is NEVER downgraded — it stays REAL DROP. This only moves the CLASSIFICATION
                 // bucket; it never touches `missing_ids`, so a downgraded id still makes the sequence
                 // non-contiguous — `is_zero()` is unchanged and NO false ZERO can ever be created.
-                if spec.node == "cam1" && strih_data.is_some() {
-                    let downstream_cam1: std::collections::BTreeSet<u32> =
-                        burn_ids_in(stream_frames, args.burn_cam1_run_id)
+                if CAMERA_UNDER_TEST_NODES.contains(&spec.node) && strih_data.is_some() {
+                    let downstream_camera: std::collections::BTreeSet<u32> =
+                        burn_ids_in(stream_frames, spec.burn_run_id)
                             .into_iter()
                             .collect();
                     let real_drop_ids: Vec<u32> = nv
@@ -2280,7 +2360,7 @@ fn build_and_print_verdict(
                     let downgrade =
                         camera_box::burn_reconcile::cam1_real_drops_proven_delivered_downstream(
                             real_drop_ids,
-                            &downstream_cam1,
+                            &downstream_camera,
                         );
                     if !downgrade.is_empty() {
                         for c in nv.classified.iter_mut() {
@@ -2289,9 +2369,10 @@ fn build_and_print_verdict(
                             }
                         }
                         println!(
-                            "  [cam1] #356 cross-recording reconcile: {} REAL-DROP id(s) present in \
+                            "  [{}] #356 cross-recording reconcile: {} REAL-DROP id(s) present in \
                              the downstream stream recording were DELIVERED → re-classified \
                              BURN-UNREADABLE (strih-recording readability gap, not a chain loss).",
+                            spec.node,
                             downgrade.len()
                         );
                     }
@@ -3256,6 +3337,202 @@ mod tests {
                 frame(i as u64, &ps)
             })
             .collect()
+    }
+
+    // ---- #24 — extend the #186 per-node digital-burn contiguity check to cam3/cam4 ----
+
+    const CAM3B: u32 = 911003; // #24 cam3 per-EMIT capture burn run_id
+
+    /// Build a window of N delivered frames like [`window`], but for CAM3 as the "camera under
+    /// test" instead of cam1 (mirrors the #174 cam1 capture-burn mechanism running on cam3). In
+    /// any real run only ONE of cam1/cam3/cam4 is ever burned (mutually exclusive), so this omits
+    /// the cam1 burn entirely and stamps [`CAM3B`] instead.
+    fn window_cam3(n: u32, with_stream: bool, cam3_gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i)];
+                let cam3_id = match cam3_gap_at {
+                    Some(g) if i >= g => 6000 + i + 1, // from `g` on, ids jump by 1 → id (6000+g) missing
+                    _ => 6000 + i,
+                };
+                ps.push((CAM3B, cam3_id));
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 9000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #24 — extends the #186 per-node digital-burn contiguity check (previously cam1-only) to
+    /// CAM3. A contiguous cam3 burn end-to-end ⇒ the fused verdict reports node "cam3" ZERO loss,
+    /// exactly like cam1 today; cam1 itself was never emitted this run and must NOT appear in the
+    /// loss report at all (cam1/cam3/cam4 are mutually-exclusive camera-under-test roles).
+    #[test]
+    fn cam3_digital_burn_extends_the_186_contiguity_check_24() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        // --min-secs 1 so the small contiguous window trivially clears the #373 span floor.
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam3(60, false, None);
+        let stream_frames = window_cam3(60, true, None);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        assert!(pass, "#24: contiguous cam3 burn ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        assert_eq!(
+            loss["cam3"]["zero_loss"],
+            serde_json::json!(true),
+            "#24: cam3 must be verdicted ZERO loss when its burn is contiguous: {loss}"
+        );
+        assert!(
+            loss.get("cam1").is_none(),
+            "#24: cam1 never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+        );
+        assert!(
+            loss.get("cam4").is_none(),
+            "#24: cam4 never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+        );
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam3"],
+            serde_json::json!(60),
+            "#24: all 60 cam3 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+    }
+
+    /// #24 — a REAL gap in cam3's digital burn sequence (absent from BOTH the strih and stream
+    /// recordings, so it can never be reconciled as delivered-downstream) is classified a REAL
+    /// DROP and FAILS the headline, exactly like a cam1 gap does today — the #186 gate is a
+    /// genuine HARD gate for cam3, not a vacuous always-pass.
+    #[test]
+    fn cam3_digital_burn_gap_is_a_real_drop_and_fails_24() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam3(60, false, Some(30));
+        let stream_frames = window_cam3(60, true, Some(30));
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        assert!(!pass, "#24: a cam3 burn gap must FAIL the headline: {v}");
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["zero_loss"],
+            serde_json::json!(false),
+            "#24: cam3 must be NOT zero when its burn sequence has a gap: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+        assert!(
+            v["full_chain"]["loss"]["cam3"]["real_drops"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1,
+            "#24: the gap (absent from both recordings) must be classified a REAL DROP: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+    }
+
+    /// #24 — the #356 cross-recording reconciliation (previously cam1-only) generalizes to cam3:
+    /// a cam3 id classified REAL DROP from the (clean, upstream) strih recording but PROVEN
+    /// delivered in the downstream stream recording is re-classified BURN-UNREADABLE, not REAL
+    /// DROP — exactly as cam1 already does. Locks that generalizing the reconciliation condition
+    /// did not silently drop this behaviour for a non-cam1 camera-under-test node.
+    ///
+    /// Mirrors `cam1_real_drop_present_downstream_is_burn_unreadable_not_real_drop_356` exactly:
+    /// the reconciliation only ever MOVES an id between loss BUCKETS (REAL DROP →
+    /// BURN-UNREADABLE) for honest accounting — it never touches `missing_ids`, so the id is
+    /// STILL missing from the burn-id sequence and `NodeVerdict::is_zero()` (see its doc comment:
+    /// "a BURN-UNREADABLE missing id is a real DEFECT and still makes the node NOT-zero, never
+    /// silently excluded") correctly keeps the node — and therefore the overall headline — NOT
+    /// zero / FAIL. Asserting an overall PASS here would contradict that invariant and would mask
+    /// a real (if reclassified) defect. This test's earlier `assert!(pass, ...)` was simply wrong
+    /// about what the reconciliation guarantees; the reclassification itself (real_drops=0,
+    /// burn_unreadable=1) was already correct and unchanged.
+    #[test]
+    fn cam3_real_drop_present_downstream_is_burn_unreadable_not_real_drop_24() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        const N: u32 = 600;
+        // strih (cam3's source, #133): cam3 id 6005 MISSING (unreadable through the deep buffer).
+        let strih = window_cam3(N, false, Some(5));
+        // stream (downstream): cam3 CONTIGUOUS — 6005 IS present ⇒ that frame WAS delivered.
+        let stream = window_cam3(N, true, None);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        // The node still FAILs (6005 IS still missing from the strih recording — a real
+        // burn-readability defect to fix), but it is charged BURN-UNREADABLE, not REAL DROP: no
+        // false ZERO, honest bucket. Exactly mirrors the cam1 #356 test's `!pass` expectation.
+        assert!(
+            !pass,
+            "#24: a still-missing cam3 id keeps the run NOT zero (never a false ZERO): {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["zero_loss"],
+            serde_json::json!(false),
+            "#24: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["real_drops"],
+            serde_json::json!(0),
+            "#24: proven-delivered downstream must NOT be counted a REAL DROP: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["burn_unreadable"],
+            serde_json::json!(1),
+            "#24: the delivered-but-strih-unreadable cam3 id must be charged BURN-UNREADABLE: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
     }
 
     /// #377 — the carried per-recording COLOUR summary flows through the merge path to the RIGHT
