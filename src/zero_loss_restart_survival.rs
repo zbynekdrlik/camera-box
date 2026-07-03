@@ -125,13 +125,36 @@ fn trust_reasons(label: &str, m: &ZeroLossMeasurement) -> Vec<String> {
 ///    measurements. Otherwise `Fail`, naming every measurement that was not zero-loss (a
 ///    baseline that was never clean fails the same way a restart-broken "after" does — restart
 ///    survival can only be claimed from a clean baseline).
-pub fn classify(
-    before: ZeroLossMeasurement,
-    after: ZeroLossMeasurement,
-) -> ZeroLossRestartVerdict {
-    // #109 RED placeholder: always claims PASS, no trust check, no zero-loss check at all.
-    // Replaced by the real fail-closed comparison in the GREEN commit.
-    let _ = (before, after);
+pub fn classify(before: ZeroLossMeasurement, after: ZeroLossMeasurement) -> ZeroLossRestartVerdict {
+    let mut untrusted = trust_reasons("before", &before);
+    untrusted.extend(trust_reasons("after", &after));
+    if !untrusted.is_empty() {
+        return ZeroLossRestartVerdict::Unknown(untrusted);
+    }
+
+    let mut fail_reasons = Vec::new();
+    if !(before.overall_pass && before.full_chain_zero_loss) {
+        fail_reasons.push(format!(
+            "before measurement was NOT zero-loss (overall_pass={}, full_chain.zero_loss={}, \
+             real_drops={}, burn_unreadable={}) — the baseline itself must be clean before a \
+             restart can be judged to survive it",
+            before.overall_pass,
+            before.full_chain_zero_loss,
+            before.real_drops,
+            before.burn_unreadable
+        ));
+    }
+    if !(after.overall_pass && after.full_chain_zero_loss) {
+        fail_reasons.push(format!(
+            "after measurement was NOT zero-loss (overall_pass={}, full_chain.zero_loss={}, \
+             real_drops={}, burn_unreadable={}) — the restart broke zero-loss delivery (#109)",
+            after.overall_pass, after.full_chain_zero_loss, after.real_drops, after.burn_unreadable
+        ));
+    }
+    if !fail_reasons.is_empty() {
+        return ZeroLossRestartVerdict::Fail(fail_reasons);
+    }
+
     ZeroLossRestartVerdict::Pass
 }
 

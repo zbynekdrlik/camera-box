@@ -110,6 +110,10 @@ name = "av-restart-sync-gate"
 path = "src/bin/av-restart-sync-gate.rs"
 
 [[bin]]
+name = "zero-loss-restart-gate"
+path = "src/bin/zero-loss-restart-gate.rs"
+
+[[bin]]
 name = "frame-probe"
 path = "src/bin/frame-probe.rs"
 required-features = ["probe"]
