@@ -67,13 +67,31 @@ pub struct CameraOffset {
 /// Empty input → empty output (no cameras, nothing to align). A single camera → that camera
 /// alone is "the slowest" → floor (there is nothing else to phase against).
 pub fn compute_phase_sync_offsets(measured: &[(u32, f64)]) -> Vec<CameraOffset> {
-    // #286 RED placeholder: every camera pinned at the floor, no offset math, no NaN
-    // filtering. Replaced by the real slowest-relative computation in the GREEN commit.
-    measured
+    let finite: Vec<(u32, f64)> = measured
         .iter()
-        .map(|&(camera_id, _)| CameraOffset {
-            camera_id,
-            offset_ms: PHASE_SYNC_FLOOR_MS,
+        .copied()
+        .filter(|(_, ms)| ms.is_finite())
+        .collect();
+    let Some(slowest) =
+        finite
+            .iter()
+            .map(|(_, ms)| *ms)
+            .fold(None, |acc: Option<f64>, v| match acc {
+                Some(a) if a >= v => Some(a),
+                _ => Some(v),
+            })
+    else {
+        return Vec::new();
+    };
+    finite
+        .into_iter()
+        .map(|(camera_id, latency_ms)| {
+            let raw = (PHASE_SYNC_FLOOR_MS as f64 + (slowest - latency_ms)).round();
+            let offset_ms = raw.clamp(PHASE_SYNC_FLOOR_MS as f64, PHASE_SYNC_CAP_MS as f64) as u32;
+            CameraOffset {
+                camera_id,
+                offset_ms,
+            }
         })
         .collect()
 }
