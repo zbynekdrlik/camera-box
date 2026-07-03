@@ -24,9 +24,15 @@ more** — the old env knobs were removed in #257. The current model:
   internal/auto (no `OBS_GENLOCK_PRELOAD_FRAMES`).
   - **#292 — the drop-cap MUST budget the held depth at the SOURCE ARRIVAL fps, NOT the canvas
     output fps.** The ts-align deadline (`present_ts = wall_now − latency_ms`) holds every queued
-    frame younger than `latency_ms`, so the FIFO fills at the source ARRIVAL rate. The stream box
-    receives a **60 fps** NDI feed from strih into a **30 fps** canvas (the 60→30 strih→stream
-    topology), so 1000 ms parks ≈60 frames, not the 30 the canvas rate implies. The old
+    frame younger than `latency_ms`, so the FIFO fills at the source ARRIVAL rate. **At the time
+    #292 was fixed (pre-#459), the stream box received a 60 fps NDI feed from strih into a 30 fps
+    canvas** (the #11 60→30 strih→stream topology) — that was the concrete 60-into-30 case in play.
+    **Topology v2 (#459) moved this same shape onto STRIH itself:** strih is now cut-to-stream only
+    at 30fps, but its OWN camera ingests (`NDI cam5`/`NDI cam1`/`NDI cam3`) are still 60fps NDI
+    feeds arriving into strih's 30fps canvas — so the identical 60-into-30 case the #292 fix guards
+    now applies to strih's camera ingests instead of stream's `NDI 2ME PGM`. The fix (below) is
+    UNCHANGED and still correct either way: 1000 ms parks ≈60 frames, not the 30 the canvas rate
+    implies. The old
     `genlock_source_drop_cap` budgeted `latency_frames` at `genlock_video_fps()` (= canvas fps),
     undercounting ~2x → the overrun force-drain capped the delay at **~450 ms** (≈27-29 frames near
     the `MAX_ASYNC_FRAMES=30` floor at 60 fps) — the operator could not delay the stream the ~1 s
@@ -436,13 +442,17 @@ is captured here. Do NOT copy or commit changes to them for new work.
 OBS 32.1.2, DistroAV 6.2.1, NDI runtime 6.3.2.0, genlock_wall_clock=1, and the per-box output fps.
 `--check-pins` in CI, `--compare` read-only live. Both boxes verified NO DRIFT (2026-06-14).
 
-**#11 mixed 60/30 — output_fps is HOST-KEYED.** The single `output_fps` pin is gone; the manifest
-pins `output_fps_strih=60` AND `output_fps_stream=30` (strih renders the 60fps LED-wall IMAG program;
-stream DECIMATES 60→30 every other frame for the restreamer). So `--compare` now REQUIRES `host=` and
-resolves `output_fps_${host}` — it **FAILS LOUDLY (exit 1)** on an unknown/empty host (so no future box
-silently defaults to the wrong fps). `--check-pins` validates BOTH host pins present. The OBSERVED
-`output_fps=<n>` key (read from the live OBS log) is unchanged — only the PINNED side is host-keyed.
-`version-integrity-gate.sh` already adds `host=<box>` per `--win-state` box, so it works unchanged.
+**output_fps is HOST-KEYED.** The single `output_fps` pin is gone; the manifest pins
+`output_fps_strih=30` AND `output_fps_stream=30` — **Topology v2 (#459, EPIC #466, SUPERSEDES the
+#11 mixed-60/30 framing this section used to describe):** strih dropped from the 60fps LED-wall
+IMAG role to a 30fps cut-to-stream-only box (the 60fps IMAG role moved to the new imag-nb box,
+#458/#463); strih→stream is now a plain 30→30 pass-through (the decimation that used to sit on
+this hop now happens on strih's OWN camera ingest instead). So `--compare` still REQUIRES `host=`
+and resolves `output_fps_${host}` — it **FAILS LOUDLY (exit 1)** on an unknown/empty host (so no
+future box silently defaults to the wrong fps). `--check-pins` validates BOTH host pins present.
+The OBSERVED `output_fps=<n>` key (read from the live OBS log) is unchanged — only the PINNED side
+is host-keyed. `version-integrity-gate.sh` already adds `host=<box>` per `--win-state` box, so it
+works unchanged.
 
 ## strih NDI Input → Camera Mapping (INVERTED)
 
