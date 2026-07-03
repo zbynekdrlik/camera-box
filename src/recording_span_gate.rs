@@ -48,17 +48,33 @@ pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool
 /// any real run — see `recording-verdict.rs`'s `CAMERA_UNDER_TEST_NODES`, which this mirrors).
 const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
 
+/// #461 — the imag-nb node label (EPIC #466 Topology v2). imag records ON ITS OWN recording at
+/// its own rate (60fps, low-latency IMAG) — neither the camera-under-test's `capture_fps` (read
+/// from the strih recording) nor the stream box's `stream_capture_fps` (30). A third named rate
+/// slot, mirroring the same "nodes do NOT share one rate" reasoning `node_capture_fps` already
+/// applies to cam1/cam3/cam4 vs strih/stream.
+const IMAG_NODE: &str = "imag";
+
 /// #373 — the CAPTURE rate to divide a node's `optical_span_frames` by, when converting to the
 /// analyzed-span SECONDS the duration floor gates on. The nodes do NOT share one rate: the
 /// camera-under-test's burn (and its optical span) is read from the CLEAN strih recording (#133),
 /// captured at `capture_fps` (60 on the rig); strih and stream are read from the stream recording,
-/// captured at `stream_capture_fps` (30). Dividing every node by ONE rate mis-scales the others:
-/// with the rig's `--capture-fps 60`, a real 300 s strih/stream span (9000 frames @ 30 fps) would
-/// read 150 s and FALSE-FAIL the >=300 s floor — failing exactly the genuine zero-loss runs the
-/// floor must pass. So the camera-under-test (cam1/cam3/cam4, #24) uses `capture_fps`; strih and
-/// stream use `stream_capture_fps`.
-pub fn node_capture_fps(node: &str, capture_fps: f64, stream_capture_fps: f64) -> f64 {
-    if CAMERA_UNDER_TEST_NODES.contains(&node) {
+/// captured at `stream_capture_fps` (30); imag (#461) is read from its OWN recording, captured at
+/// `imag_capture_fps` (60, low-latency IMAG — its own box, its own rate, never the stream box's).
+/// Dividing every node by ONE rate mis-scales the others: with the rig's `--capture-fps 60`, a
+/// real 300 s strih/stream span (9000 frames @ 30 fps) would read 150 s and FALSE-FAIL the
+/// 300-second-minimum floor — failing exactly the genuine zero-loss runs the floor must pass. So
+/// the camera-under-test (cam1/cam3/cam4, #24) uses `capture_fps`; strih and stream use
+/// `stream_capture_fps`; imag (#461) uses `imag_capture_fps`.
+pub fn node_capture_fps(
+    node: &str,
+    capture_fps: f64,
+    stream_capture_fps: f64,
+    imag_capture_fps: f64,
+) -> f64 {
+    if node == IMAG_NODE {
+        imag_capture_fps
+    } else if CAMERA_UNDER_TEST_NODES.contains(&node) {
         capture_fps
     } else {
         stream_capture_fps
@@ -71,6 +87,7 @@ mod tests {
 
     const FPS: f64 = 30.0;
     const MIN: f64 = 300.0; // the user's hard >= 300 s zero-loss floor
+    const IMAG_FPS: f64 = 60.0; // #461 imag-nb's own recording rate
 
     #[test]
     fn span_secs_is_frames_over_fps_with_a_zero_fps_guard() {
@@ -117,17 +134,17 @@ mod tests {
         // rate for all nodes false-fails strih/stream.
         let (cap, stream_cap) = (60.0, 30.0);
         assert_eq!(
-            node_capture_fps("cam1", cap, stream_cap),
+            node_capture_fps("cam1", cap, stream_cap, IMAG_FPS),
             60.0,
             "cam1's optical span comes from the 60 fps strih recording"
         );
         assert_eq!(
-            node_capture_fps("strih", cap, stream_cap),
+            node_capture_fps("strih", cap, stream_cap, IMAG_FPS),
             30.0,
             "strih is read from the 30 fps stream recording"
         );
         assert_eq!(
-            node_capture_fps("stream", cap, stream_cap),
+            node_capture_fps("stream", cap, stream_cap, IMAG_FPS),
             30.0,
             "stream is read from the 30 fps stream recording"
         );
@@ -137,14 +154,17 @@ mod tests {
         let strih_frames = 9000;
         assert!(
             !analyzed_span_long_enough(
-                span_secs(strih_frames, node_capture_fps("strih", cap, cap)), // WRONG: 60
+                span_secs(strih_frames, node_capture_fps("strih", cap, cap, IMAG_FPS)), // WRONG: 60
                 MIN
             ),
             "wrong shared rate would false-fail a real 300 s strih run"
         );
         assert!(
             analyzed_span_long_enough(
-                span_secs(strih_frames, node_capture_fps("strih", cap, stream_cap)), // RIGHT: 30
+                span_secs(
+                    strih_frames,
+                    node_capture_fps("strih", cap, stream_cap, IMAG_FPS)
+                ), // RIGHT: 30
                 MIN
             ),
             "the per-recording rate passes the real 300 s strih run"
@@ -162,14 +182,35 @@ mod tests {
         // single-shared-rate bug this module's headline doc describes for strih/stream.
         let (cap, stream_cap) = (60.0, 30.0);
         assert_eq!(
-            node_capture_fps("cam3", cap, stream_cap),
+            node_capture_fps("cam3", cap, stream_cap, IMAG_FPS),
             60.0,
             "cam3's optical span ALSO comes from the 60 fps strih recording, like cam1"
         );
         assert_eq!(
-            node_capture_fps("cam4", cap, stream_cap),
+            node_capture_fps("cam4", cap, stream_cap, IMAG_FPS),
             60.0,
             "cam4's optical span ALSO comes from the 60 fps strih recording, like cam1"
+        );
+    }
+
+    #[test]
+    fn node_capture_fps_returns_imags_own_rate_461() {
+        // #461 — imag-nb (EPIC #466 Topology v2) records ON ITS OWN box at ITS OWN rate: neither
+        // the camera-under-test's `capture_fps` (60, but read from the STRIH recording) nor the
+        // stream box's `stream_capture_fps` (30). Using either would mis-scale imag's #373
+        // analyzed-span floor exactly like the single-shared-rate bug this module exists to fix.
+        let (cap, stream_cap, imag_cap) = (60.0, 30.0, 60.0);
+        assert_eq!(
+            node_capture_fps("imag", cap, stream_cap, imag_cap),
+            60.0,
+            "imag's optical span comes from ITS OWN 60 fps recording, not strih's or stream's"
+        );
+        // Even when capture_fps/stream_capture_fps are set to something else entirely, imag must
+        // resolve to imag_capture_fps — never fall through to either other rate.
+        assert_eq!(
+            node_capture_fps("imag", 15.0, 7.5, 60.0),
+            60.0,
+            "imag must resolve to imag_capture_fps regardless of the other two rates"
         );
     }
 
