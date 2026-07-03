@@ -454,6 +454,17 @@ The OBSERVED `output_fps=<n>` key (read from the live OBS log) is unchanged — 
 is host-keyed. `version-integrity-gate.sh` already adds `host=<box>` per `--win-state` box, so it
 works unchanged.
 
+**GOTCHA (#459) — re-pinning ANY `vendor/README.md` value breaks every test that reads the REAL
+committed file, silently.** `tests/drift_guard.rs`'s `host=strih`/`host=stream` `--compare` fixtures
+(14+ call sites, e.g. `compare_clean_when_observed_matches_the_pinned_set`) supply an OBSERVED
+`output_fps=N` that must match the REAL manifest's pin — they do NOT use a synthetic `--readme`, so
+they silently start reporting DRIFT the moment you change the real pin, with no compile error to
+flag it (only a test failure). Same for `tests/harness_recording_e2e_paths.rs` (asserts literal
+script text), `tests/version_integrity_gate.rs`'s `STRIH_PINNED`/`STREAM_PINNED` fixtures, and
+`tests/harness_genlock_sender_env.rs`. Before re-pinning a manifest value: `grep -n 'host=strih\|
+host=stream\|output_fps=' tests/drift_guard.rs` (and grep the OLD value across `tests/`) to find
+every affected test FIRST, not after a surprise CI failure.
+
 ## strih NDI Input → Camera Mapping (INVERTED)
 
 strih OBS NDI input labels are INVERTED vs the real cameras. Always resolve by the

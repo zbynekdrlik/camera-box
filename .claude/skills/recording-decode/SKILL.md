@@ -608,3 +608,27 @@ pixels), #376 only recalibrates a threshold on an already-computed count, so the
 frames (frame-1924.png / frame-3050.png from the stream box's
 `verdict-out\stream-redecode-354003-pixels`) were pulled and visually confirmed once for the
 decision, not embedded as test fixtures.
+
+## #461 — adding a BURN-LESS node (imag-nb) — reuse NodeContiguity's SHAPE, not `burn_contiguity`
+
+imag-nb has no digital node-burn yet (911003 reserved for a later ticket, #463); its zero-loss
+proof is the cam2 OPTICAL tick's own first..=last integer contiguity instead. The clean way to
+add a node whose proof mechanism is DIFFERENT from every other node's (burn id vs optical tick):
+
+1. Write the ALGORITHM as a brand-new pure module OUTSIDE `probe::` (`src/imag_tick_gate.rs`),
+   even though it duplicates `probe::burn_contiguity::burn_contiguity`'s exact first..=last logic.
+   The whole `probe` module is `#[cfg(feature = "probe")]` (CI-only) — a pure decision that lives
+   there can never be RED→GREEN-verified locally, so the duplication buys real Tier-0
+   testability, not laziness.
+2. In the probe-gated glue (`node_verdict_for_imag`), construct `NodeContiguity` DIRECTLY from
+   your own computed values (`first_id`/`last_id`/`missing_ids`/`present_count`/`expected_count`
+   — the struct's fields are `pub`) instead of calling `burn_contiguity()`. Since `NodeContiguity`
+   is just a data shape, not burn-specific, feeding it tick-derived values makes `is_zero()` /
+   `print_node_verdict` / `node_verdict_json` all work UNCHANGED for a node with no burn — zero
+   changes needed to any of that shared machinery.
+3. Gate the new node at TOP LEVEL in `build_and_print_verdict` (like the existing `--cam1-capture-
+   stats` block), NOT nested inside `if let Some(stream_frames) = &stream_frames_opt` — a node
+   whose recording is independent of strih/stream (imag has its own box) must work standalone.
+4. `optical_span_facts(frames, &[], cam2_run_id)` (empty `all_burn_run_ids`) is the right call for
+   a burn-less node's #373 duration-floor span — every non-burn payload counts as optical when
+   there is nothing to exclude.
