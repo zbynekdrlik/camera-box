@@ -337,6 +337,28 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
     out
 }
 
+/// The marker-log CSV header: a `#`-comment recording the emit `AudioParams` (the decoder MUST
+/// demodulate with the same params, and persisting them makes a silent emitter/decoder drift
+/// visible — the two sides otherwise hardcode `rig60()` independently) followed by the column
+/// header row. Split out of `serialize_qpsk_marker_log` (#431) so the probe-gated incremental
+/// writer (`src/probe/qpsk_emit.rs`) can write this ONCE up front, then append
+/// [`qpsk_marker_log_row`] per emitted marker, without duplicating the format string.
+pub fn qpsk_marker_log_header(p: &AudioParams) -> String {
+    format!(
+        "# qpsk-params sr={} carrier={} c={} q={} vr={}/{}\nindex,frame_id,emit_ts_ns\n",
+        p.sample_rate, p.carrier_hz, p.c, p.q, p.vr_num, p.vr_den
+    )
+}
+
+/// One marker-log CSV data row `index,frame_id,emit_ts_ns\n`. Split out of
+/// `serialize_qpsk_marker_log` (#431) — the SAME row format used both by the final full-log write
+/// (`run.rs`, on shutdown) and the probe-gated incremental per-emit append
+/// (`src/probe/qpsk_emit.rs`), so the two paths can never drift on the row shape
+/// `recording-verdict --av-sync` parses.
+pub fn qpsk_marker_log_row(idx: u8, fid: u32, ts: i64) -> String {
+    format!("{idx},{fid},{ts}\n")
+}
+
 /// Serialize the emitter's marker log as CSV `index,frame_id,emit_ts_ns`, one row per marker,
 /// prefixed with a `#`-comment recording the emit `AudioParams` — the decoder MUST demodulate with
 /// the same params, and persisting them in the log makes a silent emitter/decoder drift visible
@@ -344,12 +366,9 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
 /// a decoded audio `index` → the dual-QR `frame_id` shown when it played, then to that frame's
 /// video time. Pure so the round-trip is Tier-0 tested.
 pub fn serialize_qpsk_marker_log(markers: &[(u8, u32, i64)], p: &AudioParams) -> String {
-    let mut s = format!(
-        "# qpsk-params sr={} carrier={} c={} q={} vr={}/{}\nindex,frame_id,emit_ts_ns\n",
-        p.sample_rate, p.carrier_hz, p.c, p.q, p.vr_num, p.vr_den
-    );
+    let mut s = qpsk_marker_log_header(p);
     for (idx, fid, ts) in markers {
-        s.push_str(&format!("{idx},{fid},{ts}\n"));
+        s.push_str(&qpsk_marker_log_row(*idx, *fid, *ts));
     }
     s
 }
@@ -774,6 +793,20 @@ mod tests {
         assert_eq!(parsed, log);
         // header-only / blank input → empty, no panic
         assert!(parse_qpsk_marker_log("index,frame_id,emit_ts_ns\n\n").is_empty());
+    }
+
+    /// #431: `qpsk_marker_log_header` + `qpsk_marker_log_row` (used by the probe-gated incremental
+    /// per-emit writer) must reassemble to EXACTLY the same bytes as `serialize_qpsk_marker_log` —
+    /// the two writers (incremental during the run, full on shutdown) must never drift on format.
+    #[test]
+    fn header_plus_rows_reassembles_to_full_serialization() {
+        let log = vec![(0u8, 123u32, 1_000_000i64), (7, 42, -1)];
+        let params = AudioParams::rig60();
+        let mut reassembled = qpsk_marker_log_header(&params);
+        for (idx, fid, ts) in &log {
+            reassembled.push_str(&qpsk_marker_log_row(*idx, *fid, *ts));
+        }
+        assert_eq!(reassembled, serialize_qpsk_marker_log(&log, &params));
     }
 
     #[test]

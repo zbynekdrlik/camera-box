@@ -677,6 +677,11 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   # recording — a silent marker makes the remote command exit 1, which (no `|| true` guards this
   # ssh call) aborts the whole AV_RESTART_GATE run under `set -euo pipefail` at the top of this
   # script, never wasting a recording on an unmeasured run.
+  #
+  # #431: RUNNING alone is not proof of emission (the continuous-feed emitter keeps the ALSA PCM
+  # RUNNING on its silence carrier even if the painter tick stalls and zero markers ever fire) — so
+  # the 4th arg below passes the SAME /tmp/av-restart-markers.csv path the launch above writes,
+  # which also gates on that log's row count actually growing.
   av_restart_record_and_emit_plan() {
     local label="$1"
     local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
@@ -696,7 +701,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
           --audio-marker-device $AV_RESTART_MARKER_DEVICE \
           --audio-marker-cadence-ticks $AV_RESTART_MARKER_CADENCE \
           --marker-log /tmp/av-restart-markers.csv >/tmp/av-restart-painter.log 2>&1 &); \
-       $(audio_marker_check_cmds "$AV_RESTART_MARKER_DEVICE" 'pkill -x frame-probe 2>/dev/null || true' "cadence=$AV_RESTART_MARKER_CADENCE ticks, label=$label")"
+       $(audio_marker_check_cmds "$AV_RESTART_MARKER_DEVICE" 'pkill -x frame-probe 2>/dev/null || true' "cadence=$AV_RESTART_MARKER_CADENCE ticks, label=$label" "/tmp/av-restart-markers.csv")"
     sleep 3
     python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
     sleep "$AV_RESTART_RECORD_SECS"

@@ -263,6 +263,10 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
 
     // #188: spawn the QPSK A/V-sync marker thread when enabled (norihiro-compatible QR-based audio,
     // continuous-feed — supersedes the chirp). Rig 60fps params (48 kHz / 442 Hz / c=1).
+    // #431: pass cfg.marker_log through so the emitter appends each fired marker's row to it
+    // INCREMENTALLY (not just on shutdown, below) — the hardened `#420` audible self-check
+    // (scripts/lib/audio-marker-check.sh) polls that growth to prove real emission, not just an
+    // ALSA PCM held RUNNING by the continuous-feed silence carrier alone.
     let audio_emitter = if cfg.audio_marker {
         let params = crate::qpsk_marker::AudioParams::rig60();
         Some(
@@ -275,6 +279,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
                 start,
                 cfg.wall_clock,
                 cfg.audio_marker_cadence_ticks,
+                cfg.marker_log.clone(),
             )
             .with_context(|| format!("open audio-marker device {}", cfg.audio_marker_device))?,
         )

@@ -39,7 +39,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
@@ -234,7 +234,7 @@ fn emission_scratch(name: &str) -> PathBuf {
 /// env vars (the production defaults are ~3s x 3 ≈ 9s) so the test runs in a couple of seconds.
 /// Returns (exit_code, stdout, stderr).
 fn exec_emission_check(
-    log: &PathBuf,
+    log: &Path,
     on_fail_cmd: &str,
     extra: &str,
     interval_secs: u64,
@@ -351,8 +351,7 @@ fn emission_check_passes_once_marker_log_grows() {
 /// callers, and the string-content tests above) must see byte-identical output to before #431.
 #[test]
 fn combined_check_cmds_appends_emission_block_only_when_marker_log_given() {
-    let without_log =
-        run_sourced(r#"audio_marker_check_cmds "hw:CARD=PCH,DEV=3" 'true' "ctx""#);
+    let without_log = run_sourced(r#"audio_marker_check_cmds "hw:CARD=PCH,DEV=3" 'true' "ctx""#);
     assert!(
         !without_log.contains("#431"),
         "#431: with no marker-log argument, the emission check must be skipped entirely. Got:\n{without_log}"
@@ -403,7 +402,10 @@ fn rig_mode_and_recording_e2e_pass_marker_log_to_the_check() {
         .find("$(audio_marker_check_cmds")
         .map(|i| i + block_pos)
         .expect("#431: expected the audio_marker_check_cmds call in the AV_RESTART_GATE block");
-    let check_line_e2e = recording_e2e[check_pos..].lines().next().unwrap_or_default();
+    let check_line_e2e = recording_e2e[check_pos..]
+        .lines()
+        .next()
+        .unwrap_or_default();
     assert!(
         check_line_e2e.contains("av-restart-markers.csv"),
         "#431: recording-e2e.sh's AV_RESTART_GATE call must pass the painter's own \

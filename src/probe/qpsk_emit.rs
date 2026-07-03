@@ -7,12 +7,25 @@
 //! write XRUN-freezes (observed on HDMI after the first chirp). Here the thread ALWAYS writes —
 //! silence between markers, the marker samples when one is due — so the stream never underruns. The
 //! encode is the pure norihiro-compatible QPSK from `crate::qpsk_marker`.
+//!
+//! #431: that same continuous-feed design means ALSA `state: RUNNING` (the `#420`
+//! `scripts/lib/audio-marker-check.sh` self-check) is satisfied by the silence carrier ALONE, even
+//! if this loop's `tick >= last_fired + cadence` condition never fires (a stalled painter refresh
+//! tick, or broken `current_id`/`refresh` wiring) — RUNNING-but-silent is not audible. So this
+//! module also writes each emitted marker's CSV row to an optional `marker_log_path` file
+//! INCREMENTALLY, as it fires (not just via `QpskEmitter::join()`'s full log on shutdown), so an
+//! external poller can observe actual emission mid-run — the hardened check's whole mechanism.
 #![cfg(target_os = "linux")]
 
-use crate::qpsk_marker::{marker_signal, to_stereo_i16, AudioParams};
+use crate::qpsk_marker::{
+    marker_signal, qpsk_marker_log_header, qpsk_marker_log_row, to_stereo_i16, AudioParams,
+};
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result};
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -39,11 +52,27 @@ impl QpskEmitter {
         start: Instant,
         wall_clock: bool,
         cadence_ticks: u64,
+        marker_log_path: Option<PathBuf>,
     ) -> Result<QpskEmitter> {
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_thread = log.clone();
         // Open before the thread so a bad device fails the run loudly (not silently in a thread).
         let pcm = open_playback(&device, params.sample_rate)?;
+        // #431: create/truncate the incremental marker-log file (header only) NOW, synchronously,
+        // before the emit thread starts — so a self-check polling this path the instant the
+        // emitter is up sees a real (if still header-only) file rather than racing its creation on
+        // the first marker. A failure to create it fails the run loudly, same as a bad ALSA device
+        // above (never silently skip the hardening this file exists for).
+        let log_file = match &marker_log_path {
+            Some(p) => {
+                let mut f = File::create(p)
+                    .with_context(|| format!("create incremental marker log {}", p.display()))?;
+                f.write_all(qpsk_marker_log_header(&params).as_bytes())
+                    .with_context(|| format!("write marker log header {}", p.display()))?;
+                Some(f)
+            }
+            None => None,
+        };
         let handle = std::thread::spawn(move || {
             crate::affinity::pin_off_capture_core("qpsk-marker");
             if let Err(e) = run_emit(
@@ -56,6 +85,7 @@ impl QpskEmitter {
                 wall_clock,
                 cadence_ticks,
                 &log_thread,
+                log_file,
             ) {
                 eprintln!("[qpsk-marker] emit thread error: {e:#}");
             }
@@ -82,6 +112,7 @@ fn run_emit(
     wall_clock: bool,
     cadence_ticks: u64,
     log: &Mutex<QpskMarkerLog>,
+    mut log_file: Option<File>,
 ) -> Result<()> {
     let io = pcm.io_i16()?;
     let sr = params.sample_rate as i64;
@@ -123,6 +154,17 @@ fn run_emit(
             // logged), so this is a no-op change for the already-calibrated recording-verdict path.
             let index = crate::qpsk_marker::frame_id_to_index(fid);
             log.lock().unwrap().push((index, fid, ts));
+            // #431: append+flush this row NOW (best-effort — a log-write hiccup must never break
+            // audio emission, the primary job of this thread) so an external poller sees the row
+            // count grow within one cadence of this marker actually firing.
+            if let Some(f) = log_file.as_mut() {
+                let row = qpsk_marker_log_row(index, fid, ts);
+                if let Err(e) = f.write_all(row.as_bytes()) {
+                    eprintln!("[qpsk-marker] incremental marker log write failed: {e:#}");
+                } else if let Err(e) = f.flush() {
+                    eprintln!("[qpsk-marker] incremental marker log flush failed: {e:#}");
+                }
+            }
             write_all(&pcm, &io, &markers[index as usize])?;
         } else {
             // Keep the stream alive & self-paced (blocking write) — never let the ring drain.
