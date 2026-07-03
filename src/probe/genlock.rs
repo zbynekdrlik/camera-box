@@ -1640,6 +1640,61 @@ mod tests {
         (presented, dropped, late_holds)
     }
 
+    /// #402 — drives [`ReleaseCadence::tick`] through a DEEP reserve, then a backward
+    /// DanteSync wall-clock step (Δ > one frame interval — the #147 trigger) applied to
+    /// BOTH the wall clock and every subsequent capture stamp (a real backward step
+    /// regresses the SAME shared clock that stamps captures). Arrival is gated on REAL
+    /// elapsed ticks — never on comparing a (possibly stepped) stamp against a (possibly
+    /// stepped) wall — because a logical clock correction changes what a frame's STAMP
+    /// reads and what `wall_now` reads, it does NOT un-deliver frames already in flight
+    /// over the network. Returns, for every presented frame, `(render_tick,
+    /// held_latency_ns)` where `held_latency_ns = wall_now − presented_ts` — the actual
+    /// delay between capture and presentation — so a test can assert it stays ≈
+    /// `reserve_ms` straight through the seam instead of collapsing toward the live edge.
+    fn run_cadence_sim_backward_step(
+        reserve_ms: u32,
+        skew_ns: u64,
+        step_frame_idx: u64,
+        step_ns: u64,
+        n_frames: u64,
+    ) -> Vec<(u64, i64)> {
+        const I: u64 = 16_666_667; // 60 Hz interval
+        const BASE: u64 = 10_000_000_000_000; // large epoch, well clear of the step
+        let mut cadence = ReleaseCadence::new();
+        let mut queue: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut next_arrival: u64 = 0;
+        let mut results = Vec::new();
+        let lag_ticks = skew_ns.div_ceil(I);
+        let n_ticks = n_frames + lag_ticks + 60;
+        for k in 0..n_ticks {
+            // The LOGICAL (DanteSync) wall clock steps BACKWARD by `step_ns` once `k`
+            // passes `step_frame_idx` — the SAME instant capture stamps below step, since
+            // both derive from the one shared clock — and runs normally from there.
+            let wall = if k < step_frame_idx {
+                BASE + k * I
+            } else {
+                BASE + k * I - step_ns
+            };
+            // Physical arrival is gated on elapsed ticks, not on the (steppable) wall —
+            // frames already in flight over the network are not un-delivered by a logical
+            // clock correction; only their STAMP value (below) reflects the step.
+            while next_arrival < n_frames && next_arrival + lag_ticks <= k {
+                let stamp = if next_arrival < step_frame_idx {
+                    BASE + next_arrival * I
+                } else {
+                    BASE + next_arrival * I - step_ns
+                };
+                queue.push_back(stamp);
+                next_arrival += 1;
+            }
+            let out = cadence.tick(wall, reserve_ms, I, &mut queue);
+            if let Some(ts) = out.presented {
+                results.push((k, wall as i64 - ts as i64));
+            }
+        }
+        results
+    }
+
     /// #401 REGRESSION LOCK — the measured live failure: at a grid-aligned reserve
     /// (16 ms ≈ one 60 Hz interval) the pre-#401 per-tick wall-compare release churned
     /// hold↔drop and delivered only ~44 of 60 distinct fps on `NDI cam5` (and 43.8 at
@@ -1816,6 +1871,84 @@ mod tests {
             both > 100,
             "expected a long overlapping steady window, got {both}"
         );
+    }
+
+    /// #402 REGRESSION LOCK — "ts-align cadence: large backward clock step under a deep
+    /// reserve collapses held latency at the pre/post-step seam". As filed, the trace
+    /// described cadence v1's STEADY path: once the pre-step (high-stamped) backlog is
+    /// drained by the #147 re-anchor, the newly-queued post-step (low-stamped) frames all
+    /// satisfy `ts ≤ boundary` against the still-HIGH locked boundary, so v1 presented the
+    /// NEWEST of that set and dropped the rest (`matured − 1` into `dropped_due`) —
+    /// collapsing the held reserve straight to the live edge with nothing to restore it.
+    /// v2 (cc815e73e, landed ~30 min after this issue was filed) rewrote STEADY to release
+    /// the OLDEST matured frame — exactly ONE per tick — regardless of how many satisfy
+    /// `ts ≤ boundary`. That means the seam drains the DEEP backlog that built up while the
+    /// pre-step tail was still presenting (one frame per tick, same as always), not the
+    /// live edge. This test proves it: fill a 450 ms reserve (~27 buffered frames), step
+    /// the clock backward by 500 ms (> one interval — the #147 trigger) mid-stream, and
+    /// assert every presented frame's held latency (`wall_now − presented_ts`) stays within
+    /// a few frame intervals of the 450 ms reserve on BOTH sides of the seam — it must
+    /// never collapse toward the ~skew-only live edge.
+    #[test]
+    fn cadence_holds_reserve_latency_across_a_backward_clock_step() {
+        const I_NS: i64 = 16_666_667;
+        const RESERVE_MS: u32 = 450;
+        const RESERVE_NS: i64 = RESERVE_MS as i64 * 1_000_000;
+        const STEP_FRAME_IDX: u64 = 250; // deep into steady state (locks by ~tick 27)
+        const STEP_NS: u64 = 500_000_000; // 500 ms > one interval — the #147 trigger
+        const N_FRAMES: u64 = 400;
+
+        let results = run_cadence_sim_backward_step(
+            RESERVE_MS,
+            20_000_000,
+            STEP_FRAME_IDX,
+            STEP_NS,
+            N_FRAMES,
+        );
+
+        // Sanity: PRE-step steady state actually holds ≈ reserve — proves the harness
+        // built a genuinely deep buffered backlog before asserting anything about the
+        // step (ticks 50..200 are well past ACQUIRE's settle-in and well before the step
+        // at tick 250).
+        let pre_step: Vec<i64> = results
+            .iter()
+            .filter(|&&(k, _)| (50..200).contains(&k))
+            .map(|&(_, held)| held)
+            .collect();
+        assert!(
+            pre_step.len() > 100,
+            "expected a long pre-step steady window, got {}",
+            pre_step.len()
+        );
+        for &held in &pre_step {
+            assert!(
+                (held - RESERVE_NS).abs() <= 3 * I_NS,
+                "pre-step steady held latency {held} ns should be ≈ reserve {RESERVE_NS} ns \
+                 (harness sanity check, BEFORE the step)"
+            );
+        }
+
+        // The #402 claim: held latency must stay ≈ reserve on the far side of the seam
+        // too — never collapse toward the live edge (tens-of-ms arrival skew). Ticks
+        // ≥340 are well past the seam (pre-step backlog drains by ~tick 277) and well
+        // clear of the run's tail-off (frames exhaust around tick 426).
+        let post_step: Vec<i64> = results
+            .iter()
+            .filter(|&&(k, _)| k >= N_FRAMES.saturating_sub(60))
+            .map(|&(_, held)| held)
+            .collect();
+        assert!(
+            post_step.len() > 30,
+            "expected a long post-step steady window, got {}",
+            post_step.len()
+        );
+        for &held in &post_step {
+            assert!(
+                (held - RESERVE_NS).abs() <= 3 * I_NS,
+                "post-step held latency {held} ns collapsed away from the {RESERVE_NS} ns \
+                 reserve (#402: the seam must not throw the buffered depth away)"
+            );
+        }
     }
 
     // ---- #278 multiview ADAPTIVE budget-based skip --------------------------
