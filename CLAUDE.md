@@ -23,6 +23,28 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 
 **NEVER delete `targets.md`** — it contains IP addresses for all deployment targets (Windows and cameras). This file has been accidentally deleted multiple times during PR cleanup. DO NOT remove it.
 
+## GOTCHA — `fix: #N ...` commit prefixes auto-close #N on ANY merge it rides along in
+
+This repo's convention tags commits with `fix: #N <description>` / `feat: #N <description>` as a
+plain topic reference. A **regular (non-squash) merge** makes GitHub scan **every individual
+commit** in the merged range for closing keywords — not just the merging PR's own body. GitHub's
+keyword matcher accepts `fix`/`close`/`resolve` immediately followed by `#N` **even across a bare
+colon** (`fix: #458` matches), so a `fix: #458 ...` commit that has been sitting on `dev`,
+UNMERGED, for a prior ticket will silently auto-close `#458` the moment it finally rides along in
+ANY later PR's merge — even one whose own body only says `Closes #459`/`Closes #461` for
+completely different issues. **Incident (2026-07-03):** PR #468 (bundling #459+#461) merged and
+GitHub auto-closed **#458** too, even though #458 carried an explicit "stays OPEN until the rework
+lands — do not let a PR merge auto-close it early" comment; three earlier `fix: #458 ...` commits
+from a prior session's WIP were still unmerged on `dev` and rode along. Reopened + explained in
+`gh issue comment 458`.
+
+**Mitigation:** when a `fix:`/`feat:` commit message must NOT auto-close its referenced issue on a
+future merge (the work is genuinely partial / multi-PR), phrase it so the keyword and `#N` are NOT
+adjacent — `fix(#458): ...`, `fix — #458: ...`, or drop the leading verb entirely (`#458:
+description`). Before merging any PR, `git log origin/main..HEAD --oneline` and grep for
+`^(fix|close|resolve)[a-z]*:\s*#` to catch a stray reference-only commit that would trigger an
+unwanted auto-close.
+
 ## Local Build Policy
 
 **Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**
