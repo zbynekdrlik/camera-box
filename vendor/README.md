@@ -16,9 +16,14 @@ an unpinned/stock build.
 The NDI **runtime** (`libndi.so` / `Processing.NDI.Lib.x64.dll`) is NOT committed —
 licensing forbids redistribution (see the License Agreement PDF in `lib/ndi/`). Each
 machine gets it via the NDI installer / `vendor/distroav/CI/libndi-get.sh`.
-**Note:** dev1 + cam2 currently run NDI runtime 6.2.1 — DistroAV 6.2.1 needs ≥ 6.3.0, so
-the runtime upgrade is part of the rollout. The production OBS boxes strih + stream already
-run NDI runtime **6.3.2.0** (≥ 6.3.0 ✓, verified 2026-06-14).
+**Note (updated 2026-07-03, #132):** dev1 has since been bumped to NDI runtime **6.3.2.0**
+(`/usr/lib/ndi/libndi.so.6` -> `libndi.so.6.3.2`, the old `6.2.1` kept as `.bak`) — DistroAV
+needs ≥ 6.3.0. The production OBS boxes strih + stream also run **6.3.2.0** (≥ 6.3.0 ✓,
+verified 2026-06-14). **The cameras (cam1-4) still run 6.2.1.0** (live-verified on cam2,
+2026-07-03) — cross-version NDI interop with the 6.3.2.0 boxes works fine today, so this is
+version hygiene, not a live-breaking bug. `scripts/upgrade-fleet-ndi.sh` (#132) is the
+canary-first tool that rolls a candidate `libndi.so.6.x.y.z` (fetched via `libndi-get.sh`,
+same as dev1's own copy) onto the fleet once an operator runs it against the live rig.
 
 ## Pinned production settings — drift guard (#45)
 
