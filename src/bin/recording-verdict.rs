@@ -3258,6 +3258,182 @@ mod tests {
             .collect()
     }
 
+    // ---- #24 — extend the #186 per-node digital-burn contiguity check to cam3/cam4 ----
+
+    const CAM3B: u32 = 911003; // #24 cam3 per-EMIT capture burn run_id
+
+    /// Build a window of N delivered frames like [`window`], but for CAM3 as the "camera under
+    /// test" instead of cam1 (mirrors the #174 cam1 capture-burn mechanism running on cam3). In
+    /// any real run only ONE of cam1/cam3/cam4 is ever burned (mutually exclusive), so this omits
+    /// the cam1 burn entirely and stamps [`CAM3B`] instead.
+    fn window_cam3(n: u32, with_stream: bool, cam3_gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i)];
+                let cam3_id = match cam3_gap_at {
+                    Some(g) if i >= g => 6000 + i + 1, // from `g` on, ids jump by 1 → id (6000+g) missing
+                    _ => 6000 + i,
+                };
+                ps.push((CAM3B, cam3_id));
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 9000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #24 — extends the #186 per-node digital-burn contiguity check (previously cam1-only) to
+    /// CAM3. A contiguous cam3 burn end-to-end ⇒ the fused verdict reports node "cam3" ZERO loss,
+    /// exactly like cam1 today; cam1 itself was never emitted this run and must NOT appear in the
+    /// loss report at all (cam1/cam3/cam4 are mutually-exclusive camera-under-test roles).
+    #[test]
+    fn cam3_digital_burn_extends_the_186_contiguity_check_24() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        // --min-secs 1 so the small contiguous window trivially clears the #373 span floor.
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam3(60, false, None);
+        let stream_frames = window_cam3(60, true, None);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        assert!(pass, "#24: contiguous cam3 burn ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        assert_eq!(
+            loss["cam3"]["zero_loss"],
+            serde_json::json!(true),
+            "#24: cam3 must be verdicted ZERO loss when its burn is contiguous: {loss}"
+        );
+        assert!(
+            loss.get("cam1").is_none(),
+            "#24: cam1 never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+        );
+        assert!(
+            loss.get("cam4").is_none(),
+            "#24: cam4 never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+        );
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam3"],
+            serde_json::json!(60),
+            "#24: all 60 cam3 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+    }
+
+    /// #24 — a REAL gap in cam3's digital burn sequence (absent from BOTH the strih and stream
+    /// recordings, so it can never be reconciled as delivered-downstream) is classified a REAL
+    /// DROP and FAILS the headline, exactly like a cam1 gap does today — the #186 gate is a
+    /// genuine HARD gate for cam3, not a vacuous always-pass.
+    #[test]
+    fn cam3_digital_burn_gap_is_a_real_drop_and_fails_24() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam3(60, false, Some(30));
+        let stream_frames = window_cam3(60, true, Some(30));
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        assert!(!pass, "#24: a cam3 burn gap must FAIL the headline: {v}");
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["zero_loss"],
+            serde_json::json!(false),
+            "#24: cam3 must be NOT zero when its burn sequence has a gap: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+        assert!(
+            v["full_chain"]["loss"]["cam3"]["real_drops"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1,
+            "#24: the gap (absent from both recordings) must be classified a REAL DROP: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+    }
+
+    /// #24 — the #356 cross-recording reconciliation (previously cam1-only) generalizes to cam3:
+    /// a cam3 id classified REAL DROP from the (clean, upstream) strih recording but PROVEN
+    /// delivered in the downstream stream recording is re-classified BURN-UNREADABLE, not REAL
+    /// DROP — exactly as cam1 already does. Locks that generalizing the reconciliation condition
+    /// did not silently drop this behaviour for a non-cam1 camera-under-test node.
+    #[test]
+    fn cam3_real_drop_present_downstream_is_burn_unreadable_not_real_drop_24() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        const N: u32 = 600;
+        // strih (cam3's source, #133): cam3 id 6005 MISSING (unreadable through the deep buffer).
+        let strih = window_cam3(N, false, Some(5));
+        // stream (downstream): cam3 CONTIGUOUS — 6005 IS present ⇒ that frame WAS delivered.
+        let stream = window_cam3(N, true, None);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        assert!(
+            pass,
+            "#24: proven-delivered downstream ⇒ BURN-UNREADABLE not a real drop ⇒ still PASS: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["real_drops"],
+            serde_json::json!(0),
+            "#24: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["burn_unreadable"],
+            serde_json::json!(1),
+            "#24: {}",
+            v["full_chain"]["loss"]["cam3"]
+        );
+    }
+
     /// #377 — the carried per-recording COLOUR summary flows through the merge path to the RIGHT
     /// nodes and FAILS the headline on a colour fault even when delivery + optical are clean. The
     /// node→recording mapping mirrors the fused path: the strih recording's colour → cam1 (#133),
