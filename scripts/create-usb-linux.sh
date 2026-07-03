@@ -5,7 +5,23 @@ set -euo pipefail
 # Creates bootable USB with SSH + DHCP only
 # User: newlevel, Password: newlevel, Root SSH enabled
 
-DEVICE="${1:-}"
+# Args:
+#   /dev/sdX                positional target (refuses /dev/sda for safety)
+#   --target-disk /dev/sdX  EXPLICIT target, ALLOWED even for /dev/sda — safe when run
+#                           ON a box's live-USB where /dev/sda is the internal target disk
+#                           (removes the per-install guard-patch hack; #448 unified method)
+#   --yes | -y              non-interactive: skip the 'type yes' confirmation
+DEVICE=""
+FORCE_TARGET=0
+ASSUME_YES=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target-disk) DEVICE="${2:-}"; FORCE_TARGET=1; shift 2 ;;
+        --yes|-y)      ASSUME_YES=1; shift ;;
+        -*)            echo "Unknown option: $1" >&2; exit 1 ;;
+        *)             DEVICE="$1"; shift ;;
+    esac
+done
 MOUNT_ROOT="/mnt/usb-root"
 MOUNT_EFI="/mnt/usb-efi"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -28,8 +44,10 @@ check_requirements() {
     [[ -n "$DEVICE" ]] || error "Usage: $0 /dev/sdX"
     [[ -b "$DEVICE" ]] || error "$DEVICE is not a block device"
 
-    # Safety check - don't allow sda
-    [[ "$DEVICE" != "/dev/sda" ]] || error "Refusing to write to /dev/sda (system disk)"
+    # Safety: refuse /dev/sda UNLESS explicitly targeted via --target-disk (see arg parsing)
+    if [[ "$DEVICE" == "/dev/sda" && "$FORCE_TARGET" -ne 1 ]]; then
+        error "Refusing to write to /dev/sda (system disk). Use --target-disk /dev/sda if that IS the intended target (e.g. running on a box's live-USB where the internal disk is /dev/sda)."
+    fi
 
     # Check required tools
     for cmd in debootstrap parted mkfs.vfat mkfs.ext4 mount chroot; do
@@ -43,8 +61,12 @@ confirm_device() {
     lsblk "$DEVICE" -o NAME,SIZE,MODEL,MOUNTPOINT
     echo ""
     warn "ALL DATA ON $DEVICE WILL BE DESTROYED!"
-    read -p "Type 'yes' to continue: " confirm
-    [[ "$confirm" == "yes" ]] || error "Aborted by user"
+    if [[ "$ASSUME_YES" -eq 1 ]]; then
+        log "Non-interactive (--yes): proceeding."
+    else
+        read -p "Type 'yes' to continue: " confirm
+        [[ "$confirm" == "yes" ]] || error "Aborted by user"
+    fi
 }
 
 # Unmount any existing partitions
