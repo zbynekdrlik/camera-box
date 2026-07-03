@@ -108,5 +108,14 @@ pub mod obs_self_heal;
 // step; the thin CLI binary lives in `src/bin/av-restart-sync-gate.rs`.
 pub mod av_restart_sync;
 
+// #286 — 4-camera MUTUAL phase-sync offset kernel (pure decision). Given each camera's
+// measured cam→strih latency, computes the per-source genlock-latency offset that makes all
+// cameras release the SAME captured instant at the SAME wall-clock time: the slowest camera at
+// the floor, every faster camera held back by its deficit. No probe deps, so it unit-tests
+// Tier-0; the probe-gated measurement lives in `probe::recording_latency`'s
+// `n_camera_strih_samples` / `n_camera_median_latency_ms`, and the OBS-WS apply + persist
+// controller is `scripts/phase_sync_calibrate.py` (mirrors this module's math in Python).
+pub mod phase_sync;
+
 #[cfg(feature = "probe")]
 pub mod probe;
