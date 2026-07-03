@@ -145,6 +145,28 @@ mod tests {
     }
 
     #[test]
+    fn node_capture_fps_treats_cam3_and_cam4_like_cam1_24() {
+        // #24 — cam3/cam4 extend the #186 digital-burn contiguity check and occupy the SAME
+        // "camera under test" role as cam1 (recording-verdict.rs's `CAMERA_UNDER_TEST_NODES`):
+        // their burn is ALSO read from the clean strih recording (#133), captured at
+        // `capture_fps` — never the 30 fps stream recording strih/stream read from. Before this
+        // fix only the literal "cam1" got the right rate; cam3/cam4 fell through to
+        // `stream_capture_fps`, mis-scaling their #373 analyzed-span floor exactly like the
+        // single-shared-rate bug this module's headline doc describes for strih/stream.
+        let (cap, stream_cap) = (60.0, 30.0);
+        assert_eq!(
+            node_capture_fps("cam3", cap, stream_cap),
+            60.0,
+            "cam3's optical span ALSO comes from the 60 fps strih recording, like cam1"
+        );
+        assert_eq!(
+            node_capture_fps("cam4", cap, stream_cap),
+            60.0,
+            "cam4's optical span ALSO comes from the 60 fps strih recording, like cam1"
+        );
+    }
+
+    #[test]
     fn a_real_full_length_run_still_passes_the_floor() {
         // A genuine >= 300 s run must NOT be failed by the duration floor (the reconciliation: the
         // floor only rejects a COLLAPSED span, never a real run).
