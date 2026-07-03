@@ -73,9 +73,73 @@ pub struct AuditSample {
 /// timestamp/level prefix before the marker is ignored, so this works whether the line
 /// came straight from OBS's `blog()` or through an SSH-captured/journald-wrapped log.
 ///
-/// STUB (RED): always returns `None`. See `feat:[green]` follow-up commit.
-pub fn parse_audit_line(_line: &str) -> Option<AuditSample> {
-    None
+/// The scan is whitespace-token-based: every `key=value` token in the line (in any order,
+/// wherever it sits) is matched against the known field names and parsed; unrecognized
+/// tokens (the `'%s':` name-quote fragments, the `(≈N frames @ F fps)` / `(=N ms)` /
+/// `(re-arm@N)` / `(#70/#97/...)` decorations from `genlock_audit_log`'s format string)
+/// contain no `=` — or an `=` that matches no known key — and are simply skipped. This
+/// means the parser never needs to hand-model the exact decoration syntax: it just reads
+/// the `key=value` tokens the log line actually carries.
+pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
+    const MARK: &str = "genlock-fifo audit '";
+    let mark_at = line.find(MARK)?;
+    let after_mark = &line[mark_at + MARK.len()..];
+    let quote_end = after_mark.find('\'')?;
+    let source = after_mark[..quote_end].to_string();
+
+    let mut s = AuditSample {
+        source,
+        ..AuditSample::default()
+    };
+    let mut saw_any_field = false;
+
+    for tok in line[mark_at..].split_whitespace() {
+        let Some(eq) = tok.find('=') else {
+            continue;
+        };
+        let key = &tok[..eq];
+        let val = &tok[eq + 1..];
+        macro_rules! set {
+            ($field:ident) => {
+                if let Ok(v) = val.parse() {
+                    s.$field = v;
+                    saw_any_field = true;
+                }
+            };
+        }
+        match key {
+            "received" => set!(received),
+            "consumed" => set!(consumed),
+            "underruns" => set!(underruns),
+            "holds" => set!(holds),
+            "overruns" => set!(overruns),
+            "backward_steps" => set!(backward_steps),
+            "dropped_due" => set!(dropped_due),
+            "relocks" => set!(relocks),
+            "late_holds" => set!(late_holds),
+            "locked" => {
+                if let Ok(v) = val.parse::<i32>() {
+                    s.locked = v != 0;
+                    saw_any_field = true;
+                }
+            }
+            "depth" => set!(depth),
+            "peak" => set!(peak),
+            "latency_ms" => set!(latency_ms),
+            "src_latency_ms" => set!(src_latency_ms),
+            "global_latency_ms" => set!(global_latency_ms),
+            "preload" => set!(preload),
+            "reserve_ms" => set!(reserve_ms),
+            "cap" => set!(cap),
+            "empty_run" => set!(empty_run),
+            "ts_present" => set!(ts_present),
+            "ts_due" => set!(ts_due),
+            "ts_head_skew_ms" => set!(ts_head_skew_ms),
+            _ => {}
+        }
+    }
+
+    saw_any_field.then_some(s)
 }
 
 /// Parse every `genlock-fifo audit` line found in `text` (one call per `\n`-separated
@@ -86,8 +150,25 @@ pub fn parse_audit_lines(text: &str) -> Vec<AuditSample> {
 
 /// Group samples by source name, preserving each source's first-seen order (both across
 /// groups and within a group — the samples stay in their original chronological order).
-pub fn group_by_source(_samples: &[AuditSample]) -> Vec<(String, Vec<AuditSample>)> {
-    Vec::new()
+pub fn group_by_source(samples: &[AuditSample]) -> Vec<(String, Vec<AuditSample>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<AuditSample>> = HashMap::new();
+    for sample in samples {
+        if !groups.contains_key(&sample.source) {
+            order.push(sample.source.clone());
+        }
+        groups
+            .entry(sample.source.clone())
+            .or_default()
+            .push(sample.clone());
+    }
+    order
+        .into_iter()
+        .map(|name| {
+            let group = groups.remove(&name).unwrap_or_default();
+            (name, group)
+        })
+        .collect()
 }
 
 /// The per-run answer for one source's captured window: DELTA loss/backpressure counters
@@ -118,10 +199,35 @@ pub struct AuditSummary {
 
 /// Summarize one source's chronologically-ordered sample window into an [`AuditSummary`].
 /// Returns `None` for an empty slice (nothing to summarize).
-///
-/// STUB (RED): always returns `None`. See `feat:[green]` follow-up commit.
-pub fn summarize(_samples: &[AuditSample]) -> Option<AuditSummary> {
-    None
+pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
+    let first = samples.first()?;
+    let last = samples.last()?;
+
+    let abs_skews: Vec<i64> = samples.iter().map(|s| s.ts_head_skew_ms.abs()).collect();
+    let max_abs_head_skew_ms = abs_skews.iter().copied().max().unwrap_or(0);
+    let mean_abs_head_skew_ms = abs_skews.iter().sum::<i64>() as f64 / samples.len() as f64;
+    let peak_depth = samples
+        .iter()
+        .map(|s| s.peak as u64)
+        .chain(samples.iter().map(|s| s.depth))
+        .max()
+        .unwrap_or(0);
+
+    Some(AuditSummary {
+        source: last.source.clone(),
+        samples: samples.len(),
+        latency_ms: last.latency_ms,
+        delta_underruns: last.underruns.saturating_sub(first.underruns),
+        delta_holds: last.holds.saturating_sub(first.holds),
+        delta_overruns: last.overruns.saturating_sub(first.overruns),
+        delta_backward_steps: last.backward_steps.saturating_sub(first.backward_steps),
+        delta_dropped_due: last.dropped_due.saturating_sub(first.dropped_due),
+        delta_relocks: last.relocks.saturating_sub(first.relocks),
+        delta_late_holds: last.late_holds.saturating_sub(first.late_holds),
+        max_abs_head_skew_ms,
+        mean_abs_head_skew_ms,
+        peak_depth,
+    })
 }
 
 /// Convenience: group `samples` by source, then [`summarize`] each group. One
@@ -131,13 +237,6 @@ pub fn summarize_all(samples: &[AuditSample]) -> Vec<AuditSummary> {
         .into_iter()
         .filter_map(|(_source, group)| summarize(&group))
         .collect()
-}
-
-// Silence "unused import" for HashMap until the GREEN commit wires it into
-// `group_by_source`'s real implementation.
-#[allow(dead_code)]
-fn _uses_hashmap() -> HashMap<String, u32> {
-    HashMap::new()
 }
 
 #[cfg(test)]
