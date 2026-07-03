@@ -1283,3 +1283,39 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   generated Task Scheduler XML). Live rig install + verify on strih + stream is SUPERVISOR-driven,
   not part of this work — no rig/MCP access needed to verify the pure planner + Rust harness tests.
   No web dashboard (camera-box has none — CI-built artifacts + a Windows Task Scheduler mechanism).
+
+## #272 genlock 3ms latency-floor rationale + jitter-audit tooling (PR #437, v1.7.0-dev.209, worker)
+
+- **Issue**: #272 (why does the 3ms `GENLOCK_LATENCY_MS_MIN` floor make sense given DanteSync is
+  µs-precision?). Re-validated STILL_VALID/OPEN via the issue's own 3 prior comments (2026-06-29
+  through 2026-07-03): retracted its earlier "needs a user decision" framing — this is a technical
+  investigation the worker owns, not a design choice. Conceptual half already answered in-tree;
+  remaining deliverable = the documented root-cause note + measurement tooling for a future
+  empirical sweep (the sweep itself needs floor-varied OBS builds — out of scope for a clean PR).
+- **Version**: 1.7.0-dev.208 → 1.7.0-dev.209 (Cargo.toml, commit `b48e4290a`, first commit).
+- **RED→GREEN kernel** (`src/jitter_audit.rs`, Tier-0 pure): `test:[red]` `8d9b145d1` (parses/
+  groups/summarizes the periodic `genlock-fifo audit` log line — stubbed, 8/10 tests FAIL,
+  observed via `cargo test --lib jitter_audit # airuleset:build-ok`) → `feat:[green]` `623ce3445`
+  (real whitespace-token `key=value` scan + HashMap grouping + first/last-delta summarizer, 10/10
+  PASS). Thin CLI `feat:[green]` `904f233dc` — `src/bin/genlock-jitter-report.rs` (stdin/`--file`,
+  exit 2 fail-closed on no audit lines) + `tests/harness_genlock_jitter_report.rs` (4/4 pass,
+  drives the ACTUAL compiled binary).
+- **Docs**: `badf2ab35` — `docs/genlock-latency-floor-rationale.md`. Root cause: the reserve
+  absorbs frame-**arrival** jitter (NDI receive + render-tick + CPU scheduling), not clock
+  inaccuracy. Proof: cam1→strih measures 8.1ms jitter (`obs-source.c:4674`) on the SAME
+  DanteSync-disciplined clock as strih→stream's 1.6ms — same clock, 5× different jitter, so the
+  clock is not the bottleneck. `reserve_ms=3` was empirically validated zero-loss (#184/PR #224,
+  2026-06-24), not picked arbitrarily; the worst spike (28ms head-skew) was root-caused to
+  CPU-scheduling contention and fixed by core pinning (#289/PR #304), again not the clock. `e0fa88d26`
+  — playbook pointer added to `.claude/skills/genlock/SKILL.md`.
+- **PR #437** (`docs/tooling: #272 …`, `dev`→`main`, `Refs #272` not `Closes` — deliberately, see
+  below). CI pending at push time, not foreground-waited per dispatch instruction (this worker's
+  scope explicitly stops at "pushed + PR opened"). No merge, no rig touch.
+  `cargo fmt/check/clippy --all-targets` + `cargo test --no-run --workspace` all clean (default
+  features, Tier-0); `cargo test --lib jitter_audit` and `cargo test --test
+  harness_genlock_jitter_report` both observed green locally via the `# airuleset:build-ok` bypass.
+- **#272 stays OPEN**: this PR does NOT touch the 3 mirrored floor consts (`obs-source.c`,
+  `ndi-source.cpp`, `src/probe/genlock.rs`) or the #390 drift-guard pin — lowering the floor needs
+  a floor-varied OBS build + a live rig recording, a build-matrix change out of scope for a clean
+  code PR. The concrete runbook (build → deploy → record → `genlock-jitter-report` → decide) is
+  §7 of the rationale doc; it is supervisor/user-driven, not this worker's to run unasked.
