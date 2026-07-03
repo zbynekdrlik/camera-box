@@ -67,14 +67,34 @@ pub struct ResolvedPresenter {
 /// access — so both `open_presenter` (fed the real KMS-open result) and a unit test (fed a
 /// synthetic bool) drive it identically.
 ///
-/// #464 RED: this stub mirrors the historical bug — it never looks at `kms_open_ok` and always
-/// reports `touches_fb0: true`, exactly like the old `fuser -s /dev/fb0`-only gate assumed. The
-/// GREEN commit fixes this to actually resolve Auto against `kms_open_ok`.
+/// `Kms`/`Fbdev` are forced choices — `kms_open_ok` is irrelevant to them (a forced `Kms` that
+/// fails to open is an error in `open_presenter`, never a fallback; a forced `Fbdev` never
+/// attempts KMS at all). Only `Auto` actually branches on `kms_open_ok` (#79/#464): a successful
+/// KMS open resolves to `Kms` (never touches `/dev/fb0` — the exact fact the #464 liveness gate
+/// got wrong), a failed one falls back to `Fbdev` (the unchanged #68 path, which DOES touch it).
 pub fn resolve_presenter_kind(requested: PresenterKind, kms_open_ok: bool) -> ResolvedPresenter {
-    let _ = kms_open_ok;
-    ResolvedPresenter {
-        kind: requested,
-        touches_fb0: true,
+    match requested {
+        PresenterKind::Kms => ResolvedPresenter {
+            kind: PresenterKind::Kms,
+            touches_fb0: false,
+        },
+        PresenterKind::Fbdev => ResolvedPresenter {
+            kind: PresenterKind::Fbdev,
+            touches_fb0: true,
+        },
+        PresenterKind::Auto => {
+            if kms_open_ok {
+                ResolvedPresenter {
+                    kind: PresenterKind::Kms,
+                    touches_fb0: false,
+                }
+            } else {
+                ResolvedPresenter {
+                    kind: PresenterKind::Fbdev,
+                    touches_fb0: true,
+                }
+            }
+        }
     }
 }
 

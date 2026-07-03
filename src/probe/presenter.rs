@@ -11,29 +11,12 @@
 use crate::probe::fb::VsyncFb;
 use anyhow::Result;
 
-/// How the painter should obtain a presenter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresenterKind {
-    /// Try KMS first; fall back to fbdev if DRM master can't be taken (#79).
-    Auto,
-    /// Force the DRM/KMS page-flip presenter (error if it can't be opened).
-    Kms,
-    /// Force the fbdev `/dev/fb0` presenter (the #68 path).
-    Fbdev,
-}
-
-impl PresenterKind {
-    /// Parse the `--presenter` CLI value. Unknown values error so a typo does
-    /// not silently fall back to a different presenter than the operator asked.
-    pub fn parse(s: &str) -> Result<Self> {
-        match s {
-            "auto" => Ok(PresenterKind::Auto),
-            "kms" => Ok(PresenterKind::Kms),
-            "fbdev" => Ok(PresenterKind::Fbdev),
-            other => anyhow::bail!("unknown --presenter '{}' (use auto|kms|fbdev)", other),
-        }
-    }
-}
+// #464: `PresenterKind` (+ its `parse`) and the pure Auto-fallback decision
+// `resolve_presenter_kind` now live at the crate root (`crate::presenter_kind`) — a Tier-0
+// module with no probe deps, so `scripts/rig-mode.sh`'s presenter-aware liveness gate has one
+// documented, unit-tested answer to "will this run ever touch /dev/fb0?" — re-exported here so
+// every existing `crate::probe::presenter::PresenterKind` reference keeps compiling unchanged.
+pub use crate::presenter_kind::{resolve_presenter_kind, PresenterKind, ResolvedPresenter};
 
 /// A frame presenter: writes a full BGRA frame to the HDMI output, tear-free.
 ///
@@ -102,20 +85,38 @@ pub fn open_presenter(
         PresenterKind::Kms => Ok(Box::new(KmsPresenter::open(
             drm_device, canvas_w, canvas_h,
         )?)),
-        PresenterKind::Auto => match KmsPresenter::open(drm_device, canvas_w, canvas_h) {
-            Ok(p) => {
-                tracing::info!("presenter: using DRM/KMS page-flip ({})", drm_device);
-                Ok(Box::new(p))
+        PresenterKind::Auto => {
+            // #464: the actual KMS-open ATTEMPT stays here (it's the I/O); which presenter is
+            // ACTUALLY in play — and whether it will ever touch /dev/fb0 — is decided by the
+            // single pure `resolve_presenter_kind`, the same fn scripts/rig-mode.sh's
+            // presenter-aware liveness gate documents its expectations against. Matched as a
+            // (decision, result) pair rather than `.expect()`/`.expect_err()` so this compiles
+            // without requiring `KmsPresenter`/its error to be `Debug`.
+            let kms_result = KmsPresenter::open(drm_device, canvas_w, canvas_h);
+            let resolved = resolve_presenter_kind(kind, kms_result.is_ok());
+            match (resolved.kind, kms_result) {
+                (PresenterKind::Kms, Ok(p)) => {
+                    tracing::info!("presenter: using DRM/KMS page-flip ({})", drm_device);
+                    Ok(Box::new(p))
+                }
+                (PresenterKind::Fbdev, Err(e)) => {
+                    tracing::warn!(
+                        "presenter: DRM/KMS unavailable ({:#}), falling back to fbdev ({})",
+                        e,
+                        fb_device
+                    );
+                    Ok(Box::new(VsyncFb::open(fb_device)?))
+                }
+                // resolve_presenter_kind(Auto, kms_open_ok) always mirrors kms_result.is_ok()
+                // (locked by its own unit tests in src/presenter_kind.rs) — unreachable by
+                // construction.
+                _ => unreachable!(
+                    "resolve_presenter_kind({:?}, kms_open_ok) desynced from the actual KMS \
+                     open result",
+                    kind
+                ),
             }
-            Err(e) => {
-                tracing::warn!(
-                    "presenter: DRM/KMS unavailable ({:#}), falling back to fbdev ({})",
-                    e,
-                    fb_device
-                );
-                Ok(Box::new(VsyncFb::open(fb_device)?))
-            }
-        },
+        }
     }
 }
 
@@ -134,20 +135,6 @@ pub fn open_presenter(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_known_kinds() {
-        assert_eq!(PresenterKind::parse("auto").unwrap(), PresenterKind::Auto);
-        assert_eq!(PresenterKind::parse("kms").unwrap(), PresenterKind::Kms);
-        assert_eq!(PresenterKind::parse("fbdev").unwrap(), PresenterKind::Fbdev);
-    }
-
-    #[test]
-    fn parse_rejects_unknown() {
-        let err = PresenterKind::parse("vsync").unwrap_err();
-        assert!(err.to_string().contains("unknown --presenter"), "{err}");
-    }
-}
+// #464: PresenterKind::parse + resolve_presenter_kind's unit tests moved to
+// src/presenter_kind.rs (Tier-0, default features) — see that module's tests for
+// parse_known_kinds / parse_rejects_unknown / the Auto-fallback resolution tests.
