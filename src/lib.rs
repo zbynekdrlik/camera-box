@@ -127,5 +127,14 @@ pub mod phase_sync;
 // `src/bin/zero-loss-restart-gate.rs`.
 pub mod zero_loss_restart_survival;
 
+// #272 — genlock arrival-jitter audit-log parser + per-run reserve→loss summarizer. Turns
+// the #148 periodic `genlock-fifo audit` log line into, per source, the DELTA loss/
+// backpressure counters over a captured window plus the head-skew jitter distribution —
+// the "did lowering the reserve introduce loss, how big is the real arrival jitter"
+// answer the #272 investigation needs. No probe deps, so it unit-tests Tier-0; the thin
+// CLI binary lives in `src/bin/genlock-jitter-report.rs`. See
+// `docs/genlock-latency-floor-rationale.md`.
+pub mod jitter_audit;
+
 #[cfg(feature = "probe")]
 pub mod probe;

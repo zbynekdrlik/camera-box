@@ -133,6 +133,33 @@ is admin). strih→stream SMB works (net use \\10.77.9.204\C$); strih's own C$ D
 may OVER-COUNT real_drops (#133/#216) — supply BOTH `--strih` + `--stream` for the STRICT cam1
 verdict (the both-hops #184 run: softened stream-only = 37 cam1 drops, strict = 0).
 
+## #272 — why the 3ms floor is real (not the DanteSync clock), + jitter-log tooling
+
+Full decision record: `docs/genlock-latency-floor-rationale.md`. One-line answer: the reserve
+absorbs frame-**arrival** jitter (NDI receive + render-tick + CPU scheduling), NOT clock
+inaccuracy — a µs-disciplined shared clock does not touch any of those three. Proof: cam1→strih
+measures **8.1ms** jitter (`obs-source.c:4674`) on the SAME DanteSync clock as strih→stream's
+**1.6ms** — same clock, 5× different jitter, so the clock is not the bottleneck. `reserve_ms=3`
+was empirically validated at zero-loss (#184/PR #224), not picked arbitrarily; the worst spike
+(28ms head-skew) was root-caused to CPU-scheduling contention, not the clock (#289/PR #304, fixed
+by core pinning).
+
+**New tooling to analyze a `genlock-fifo audit` log window (any future latency investigation,
+not just #272):** `camera_box::jitter_audit` (Tier-0 pure, `src/jitter_audit.rs`) parses the
+periodic audit line into an `AuditSample`, groups by source, and `summarize`s a captured window
+into DELTA loss counters (`underruns`/`holds`/`dropped_due`/`late_holds`/...) + the
+`ts_head_skew_ms` jitter distribution. Thin CLI: `genlock-jitter-report --file <obs.log>` (or
+stdin) — prints one row per source, exits 2 (fail closed) if no audit lines are found. The
+parser is whitespace-token-based (`key=value` tokens matched by exact key name); it does NOT
+need to model the log's decorative `(≈N frames @ Ffps)` / `(=N ms)` / `(re-arm@N)` /
+`(#70/#97/...)` fragments — none of those contain a RECOGNIZED `key=`, so they're silently
+skipped. Reuse this parser for any future "read the audit log and compute a delta" need instead
+of re-deriving a sed/regex one-off.
+
+**Still open (empirical, not this ticket):** going BELOW 3ms needs a floor-varied OBS *build*
+(the const can't vary at runtime post-#257) + a live recording + `genlock-jitter-report` on the
+captured log — a build-matrix change, supervisor/user-driven runbook in the doc's §7.
+
 ## Deployed State (strih + stream, since 2026-06-13)
 
 Both production broadcast OBS boxes upgraded in-place to the camera-box genlock build.
