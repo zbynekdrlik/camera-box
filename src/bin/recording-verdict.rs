@@ -123,7 +123,10 @@ struct Args {
     /// 60/30 = 2), but #360 found the strih burn is a FREE-RUNNING render tick with an IRREGULAR
     /// per-frame step (NOT a clean 2), so its forward gaps are jitter, not loss — strih now uses
     /// gap-ignore (see `node_render_step`). This flag is RETAINED on the CLI for provenance/
-    /// back-compat; it no longer drives the strih loss step. Default 60 (the LED-wall IMAG rate).
+    /// back-compat; it no longer drives the strih loss step. The struct default here is unused in
+    /// practice — the harness (recording-e2e.sh) always threads an explicit value from
+    /// STRIH_CAPTURE_FPS, which since Topology v2 (#459) is 30 (strih's own cut-to-stream canvas
+    /// rate, not the pre-#459 60fps LED-wall IMAG rate this default historically mirrored).
     #[arg(long, default_value_t = 60.0)]
     strih_emit_fps: f64,
     /// #11 mixed 60/30: the fps the STREAM recording was captured at — the stream OBS output rate
