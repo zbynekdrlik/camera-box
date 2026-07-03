@@ -23,6 +23,7 @@
 //! exact remote command text — directly. NO test here ever ssh's a real camera.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -347,13 +348,56 @@ fn ndi_active_version_remote_resolves_symlink_then_reads_banner() {
     );
 }
 
-/// The post-swap emit check must key on the EXACT same genlock-report signal deploy-fleet.sh
-/// already uses ('fps emitted .* fps captured') — one established "NDI is alive" signal across
-/// the fleet tooling, not a second, possibly-inconsistent one.
+/// The post-swap emit check must key on the deploy-fleet.sh genlock-report signal
+/// ('fps emitted .* fps captured') BROADENED to also accept the older per-camera log shape
+/// ("Streaming: X.Y fps") and the sender-ready line — #445: cam3 runs an older camera-box build
+/// that logs "Streaming: 60.0 fps" instead of the genlock report, and the narrow pattern
+/// false-verify-failed a perfectly-good upgrade, triggering an automatic rollback.
 #[test]
 fn emit_ok_grep_pattern_matches_deploy_fleet_signal() {
     let out = run_sourced("emit_ok_grep_pattern");
-    assert_eq!(out.trim(), "fps emitted .* fps captured");
+    assert_eq!(
+        out.trim(),
+        "fps emitted .* fps captured|Streaming: [0-9.]+ fps|NDI sender ready"
+    );
+}
+
+/// #445: the broadened pattern must ACTUALLY match cam3's older log line via a real `grep -E`
+/// invocation — not just contain the substring in the exact-value test above.
+#[test]
+fn emit_ok_grep_pattern_also_matches_older_streaming_fps_log_line() {
+    let pattern = run_sourced("emit_ok_grep_pattern").trim().to_string();
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "printf '%s\\n' 'Streaming: 60.0 fps' | grep -E -- '{pattern}'"
+        ))
+        .output()
+        .expect("failed to run grep");
+    assert!(
+        out.status.success(),
+        "#445: emit_ok_grep_pattern must match cam3's older 'Streaming: 60.0 fps' log line so a \
+         good upgrade is not false-verify-failed. Pattern: {pattern}"
+    );
+}
+
+/// #445: the broadened pattern must still match the original genlock report line — broadening
+/// must never regress the signal deploy-fleet.sh already relies on.
+#[test]
+fn emit_ok_grep_pattern_still_matches_original_genlock_report_line() {
+    let pattern = run_sourced("emit_ok_grep_pattern").trim().to_string();
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "printf '%s\\n' 'genlock: 60.02 fps emitted 60.01 fps captured' | grep -E -- '{pattern}'"
+        ))
+        .output()
+        .expect("failed to run grep");
+    assert!(
+        out.status.success(),
+        "#445: broadening emit_ok_grep_pattern must not regress the original genlock signal. \
+         Pattern: {pattern}"
+    );
 }
 
 /// The post-swap crash scan must key on the EXACT same signatures deploy-fleet.sh uses.
@@ -391,5 +435,279 @@ fn script_source_treats_same_version_as_noop() {
     assert!(
         s.contains("SAME") && s.contains("nothing to do"),
         "#132: the SAME-version case must be a documented no-op, not a needless re-swap"
+    );
+}
+
+// --- #445: cam3 robustness gaps -------------------------------------------------------------
+//
+// Found while running the #132 tool live: cam3 (a) has no `strings` binary, causing an "unknown
+// baseline" refusal; (b) runs an older camera-box build whose log line the emit-OK pattern above
+// already covers; and (c) ships `libndi.so.6` + `libndi.so` as REAL FILES, not the symlink layout
+// every other camera uses. These tests cover (a) and (c).
+
+/// ndi_read_banner_local must extract the "NDI SDK LINUX ... X.Y.Z.W" banner via `strings` when
+/// it is available (the historical, still-default path on cam1/2/4).
+#[test]
+fn ndi_read_banner_local_uses_strings_when_available() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let so_path = tmp.path().join("libndi.so.6.2.1.0");
+    fs::write(
+        &so_path,
+        b"garbage\x00\x01NDI SDK LINUX 10:24:11 Aug 21 2025 6.2.1.0\x00\x02moregarbage",
+    )
+    .expect("write fake .so");
+
+    let out = run_sourced(&format!("ndi_read_banner_local {}", so_path.display()));
+    assert!(
+        out.contains("NDI SDK LINUX") && out.contains("6.2.1.0"),
+        "#445: expected the banner to be read via `strings`. Got:\n{out}"
+    );
+}
+
+/// ndi_read_banner_local must fall back to `grep -a` and still extract the version when
+/// `strings` is unavailable — confirmed necessary on cam3, which has no `strings` binary.
+#[test]
+fn ndi_read_banner_local_falls_back_to_grep_a_when_strings_absent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).expect("mkdir fake bin");
+    let fake_strings = fake_bin.join("strings");
+    fs::write(&fake_strings, "#!/bin/sh\nexit 127\n").expect("write fake strings");
+    let mut perms = fs::metadata(&fake_strings)
+        .expect("stat fake strings")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_strings, perms).expect("chmod fake strings");
+
+    let so_path = tmp.path().join("libndi.so.6.2.1.0");
+    fs::write(
+        &so_path,
+        b"garbage\x00\x01NDI SDK LINUX 10:24:11 Aug 21 2025 6.2.1.0\x00\x02moregarbage",
+    )
+    .expect("write fake .so");
+
+    // Shadow PATH with the fake (always-failing) `strings` ahead of the real one, so
+    // ndi_read_banner_local cannot rely on the real `strings` binary being present or absent on
+    // whatever machine runs this test — it must exercise the fallback deterministically.
+    let harness = format!(
+        "set -uo pipefail\n. \"$SCRIPT\"\nPATH=\"{}:$PATH\"\nndi_read_banner_local {}",
+        fake_bin.display(),
+        so_path.display()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "sourced harness exited non-zero.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("6.2.1.0"),
+        "#445: with `strings` unavailable, ndi_read_banner_local must fall back to `grep -a` and \
+         still extract the version. Got stdout:\n{stdout}"
+    );
+
+    // The extracted banner must still feed cleanly into ndi_version_from_strings_output.
+    let ver_harness = format!(
+        "set -uo pipefail\n. \"$SCRIPT\"\nPATH=\"{}:$PATH\"\nbanner=\"$(ndi_read_banner_local {})\"\nndi_version_from_strings_output \"$banner\"",
+        fake_bin.display(),
+        so_path.display()
+    );
+    let ver_out = Command::new("bash")
+        .arg("-c")
+        .arg(&ver_harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    assert_eq!(
+        String::from_utf8_lossy(&ver_out.stdout).trim(),
+        "6.2.1.0",
+        "#445: the grep -a fallback banner must still parse to the bare version"
+    );
+}
+
+/// ndi_read_banner_local yields empty ("") on a file with no NDI banner at all — never a guess,
+/// under EITHER the strings path or the grep -a fallback.
+#[test]
+fn ndi_read_banner_local_empty_on_no_banner() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let so_path = tmp.path().join("not_an_ndi_lib.so");
+    fs::write(&so_path, b"totally unrelated binary content\x00\x01\x02")
+        .expect("write unrelated file");
+
+    let out = run_sourced(&format!("ndi_read_banner_local {}", so_path.display()));
+    assert!(
+        out.trim().is_empty(),
+        "#445: a file with no NDI banner must yield empty, not a guess. Got:\n{out}"
+    );
+}
+
+/// ndi_link_kind_remote's generated remote check must correctly distinguish the symlink layout
+/// (cam1/2/4: `libndi.so.6` -> `libndi.so.X.Y.Z.W`) from the real-file layout (cam3: `libndi.so.6`
+/// is a regular file) and a missing runtime — executed here against real local temp files/links,
+/// since the underlying `[ -L ... ]` / `[ -f ... ]` test is identical whether run locally or (as
+/// it will be in production) over ssh on a camera.
+#[test]
+fn ndi_link_kind_remote_detects_symlink_vs_regular_vs_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dest = tmp.path();
+    let link_path = dest.join("libndi.so.6");
+
+    // missing: neither a symlink nor a regular file exists yet.
+    let missing_out = run_sourced(&format!(
+        "cmd=\"$(ndi_link_kind_remote {})\"\nbash -c \"$cmd\"",
+        dest.display()
+    ));
+    assert_eq!(
+        missing_out.trim(),
+        "missing",
+        "#445: no libndi.so.6 at all must report 'missing'"
+    );
+
+    // symlink layout (cam1/2/4).
+    let target = dest.join("libndi.so.6.3.2.0");
+    fs::write(&target, b"fake-so").expect("write fake target");
+    std::os::unix::fs::symlink(&target, &link_path).expect("create symlink");
+    let symlink_out = run_sourced(&format!(
+        "cmd=\"$(ndi_link_kind_remote {})\"\nbash -c \"$cmd\"",
+        dest.display()
+    ));
+    assert_eq!(
+        symlink_out.trim(),
+        "symlink",
+        "#445: libndi.so.6 as a symlink must report 'symlink'"
+    );
+    fs::remove_file(&link_path).expect("remove symlink");
+
+    // real-file layout (cam3, #445).
+    fs::write(&link_path, b"fake-real-so").expect("write real file");
+    let regular_out = run_sourced(&format!(
+        "cmd=\"$(ndi_link_kind_remote {})\"\nbash -c \"$cmd\"",
+        dest.display()
+    ));
+    assert_eq!(
+        regular_out.trim(),
+        "regular",
+        "#445: libndi.so.6 as a REAL FILE (cam3's layout) must report 'regular', not fail or \
+         misidentify it as a symlink"
+    );
+}
+
+/// ndi_swap_remote given the "regular" link kind (cam3, #445) must back up the currently active
+/// `libndi.so.6` file itself, then OVERWRITE (copy, not symlink) both `libndi.so.6` and
+/// `libndi.so` with the new candidate content — the symlink repoint used for every other camera
+/// does not apply when the runtime file is a real file, not a symlink.
+#[test]
+fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
+    let p = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 regular");
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.bak\""),
+        "#445: the regular-file layout must back up the active libndi.so.6 to a .bak file BEFORE \
+         overwriting it. Got:\n{p}"
+    );
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\""),
+        "#445: must COPY the new candidate content over libndi.so.6 (never a symlink) when the \
+         layout is a real file. Got:\n{p}"
+    );
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so\""),
+        "#445: must COPY the new candidate content over libndi.so too. Got:\n{p}"
+    );
+    let backup_pos = p
+        .find("libndi.so.6.bak")
+        .expect("#445: expected a backup reference");
+    let overwrite_pos = p
+        .find("libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\"")
+        .expect("#445: expected the overwrite of libndi.so.6");
+    assert!(
+        backup_pos < overwrite_pos,
+        "#445: must back up the OLD real-file runtime BEFORE overwriting it. Got:\n{p}"
+    );
+    assert!(
+        !p.contains("ln -sf"),
+        "#445: the real-file layout must never use a symlink repoint. Got:\n{p}"
+    );
+    assert!(p.contains("ldconfig"), "Got:\n{p}");
+    assert!(
+        p.contains("OLD_BASE="),
+        "#445: must still print an OLD_BASE marker so the caller's parse never comes up empty. \
+         Got:\n{p}"
+    );
+    assert!(p.contains("systemctl restart camera-box"), "Got:\n{p}");
+}
+
+/// ndi_swap_remote with NO third argument (existing callers/tests) must default to the symlink
+/// layout — the #445 real-file branch is strictly additive, never a behavior change for the
+/// fleet's existing symlink-layout cameras.
+#[test]
+fn ndi_swap_remote_defaults_to_symlink_layout_when_kind_omitted() {
+    let with_default = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2");
+    let explicit_symlink = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 symlink");
+    assert_eq!(
+        with_default, explicit_symlink,
+        "#445: omitting the link-kind argument must be identical to passing 'symlink' explicitly \
+         (backward compatibility for the existing symlink-layout cameras)"
+    );
+}
+
+/// ndi_rollback_remote given the "regular" link kind must restore `libndi.so.6` and `libndi.so`
+/// from the `.bak` file ndi_swap_remote created — never a symlink repoint, since there is no
+/// symlink to repoint on cam3's layout.
+#[test]
+fn ndi_rollback_remote_regular_layout_restores_from_backup_file() {
+    let p = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.bak regular");
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.bak\" \"/usr/lib/ndi/libndi.so.6\""),
+        "#445: regular-layout rollback must restore libndi.so.6 from the .bak file. Got:\n{p}"
+    );
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.bak\" \"/usr/lib/ndi/libndi.so\""),
+        "#445: regular-layout rollback must restore libndi.so from the .bak file too. Got:\n{p}"
+    );
+    assert!(
+        !p.contains("ln -sf"),
+        "#445: regular-layout rollback must never symlink-repoint. Got:\n{p}"
+    );
+    assert!(
+        p.contains("ldconfig") && p.contains("systemctl restart camera-box"),
+        "Got:\n{p}"
+    );
+}
+
+/// ndi_rollback_remote with NO third argument must default to the symlink layout — same
+/// backward-compatibility guarantee as the swap side.
+#[test]
+fn ndi_rollback_remote_defaults_to_symlink_layout_when_kind_omitted() {
+    let with_default = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.2.1");
+    let explicit_symlink = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.2.1 symlink");
+    assert_eq!(
+        with_default, explicit_symlink,
+        "#445: default must equal explicit 'symlink'"
+    );
+}
+
+/// Static ordering guard: upgrade_one_camera must determine the actual remote layout
+/// (ndi_link_kind_remote) BEFORE calling ndi_swap_remote — the swap needs to know which branch
+/// to generate, so guessing or hard-coding "symlink" would silently corrupt cam3 again.
+#[test]
+fn upgrade_one_camera_determines_link_kind_before_swapping() {
+    let s = fs::read_to_string(script()).expect("read upgrade-fleet-ndi.sh");
+    let kind_pos = s.find("ndi_link_kind_remote").expect(
+        "#445: expected upgrade_one_camera to query the real remote layout via ndi_link_kind_remote",
+    );
+    let swap_call_pos = s
+        .find("ndi_swap_remote \"$NDI_DEST_DIR\"")
+        .expect("#445: expected the swap call in upgrade_one_camera");
+    assert!(
+        kind_pos < swap_call_pos,
+        "#445: the link kind must be determined BEFORE ndi_swap_remote is called, so the swap \
+         script is built for the camera's ACTUAL layout, not an assumed one"
     );
 }
