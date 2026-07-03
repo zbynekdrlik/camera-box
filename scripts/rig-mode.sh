@@ -12,22 +12,30 @@
 # the env-free genlock relaunch (no --mode) is PRINTED to run via the win-*
 # MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
 #
-#   TEST  : cam2 — free /dev/fb0 WITHOUT killing capture+emit (#291: switch camera-box to a TRANSIENT
-#                  no-display systemd drop-in instead of stopping it — display output is the ONLY thing
-#                  that grabs fb0; /dev/video0 capture + NDI emit do not), so cam2 stays a MEASURABLE
-#                  camera during the test. Then launch the PINNED dual-QR vernier painter
-#                  (frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs N
-#                  — #290: 60fps to match the 60fps capture so 60 distinct ticks/s resolve) WITH the
-#                  QPSK A/V-sync audio marker (--audio-marker --audio-marker-device hw:CARD=PCH,DEV=3
-#                  — #420: TEST mode used to launch the painter WITHOUT this, so the A/V-sync
-#                  measurement was silently unmeasured — no marker ever reached the recording), verify
-#                  it is up + writing /dev/fb0 AND camera-box is still active + capturing/emitting AND
-#                  the marker's ALSA PCM is actually RUNNING (#420: fail loud + kill the painter if
-#                  silent). Then PRINT the OBS test step (burns ON, run_id strih 911002 / stream 911004).
+#   TEST  : cam2 — stop the PERMANENT cam2-painter.service if installed (#440: it and this script's
+#                  transient emitter-painter both write /dev/fb0 — left running it made the displayed
+#                  QR alternate between the two painters' run_ids, breaking --av-sync frame_id
+#                  pairing), guarded so a box without the unit is unaffected. Then free /dev/fb0
+#                  WITHOUT killing capture+emit (#291: switch camera-box to a TRANSIENT no-display
+#                  systemd drop-in instead of stopping it — display output is the ONLY thing that
+#                  grabs fb0; /dev/video0 capture + NDI emit do not), so cam2 stays a MEASURABLE
+#                  camera during the test. Verify the deployed painter binary is present, WARN
+#                  (never fail) if it looks stale (#440: mtime printed — a pre-#431 build silently
+#                  fails the #431 emission check below), then launch the PINNED dual-QR vernier
+#                  painter (frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60
+#                  --duration-secs N — #290: 60fps to match the 60fps capture so 60 distinct ticks/s
+#                  resolve) WITH the QPSK A/V-sync audio marker (--audio-marker
+#                  --audio-marker-device hw:CARD=PCH,DEV=3 — #420: TEST mode used to launch the
+#                  painter WITHOUT this, so the A/V-sync measurement was silently unmeasured — no
+#                  marker ever reached the recording), verify it is up + writing /dev/fb0 AND
+#                  camera-box is still active + capturing/emitting AND the marker's ALSA PCM is
+#                  actually RUNNING (#420: fail loud + kill the painter if silent). Then PRINT the
+#                  OBS test step (burns ON, run_id strih 911002 / stream 911004).
 #   EVENT : cam2 — stop the painter cleanly (via its PID file — NOT a naive `pkill -f frame-probe`,
 #                  which would self-kill a shell whose cmdline contains "frame-probe"); the QPSK audio
 #                  marker is a THREAD inside that same process (#420: no separate stop needed), so this
-#                  also stops the marker. REMOVE the transient no-display drop-in TEST mode installed
+#                  also stops the marker. RESTORE the permanent cam2-painter.service stopped above
+#                  (#440: symmetric guard). REMOVE the transient no-display drop-in TEST mode installed
 #                  (#291), then reload + restart camera-box and verify the service is active +
 #                  --display restored. Then PRINT the OBS event step (burns OFF: the #246 guard; the
 #                  wrapper refuses to launch otherwise).
@@ -123,6 +131,40 @@ AUDIO_MARKER_LOG="${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}"      # emitted
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
+# cam2_painter_service_stop_cmds -> the REMOTE bash (#440) that stops the PERMANENT
+# `cam2-painter.service` (systemd, always-on dual-QR painter) if it is installed on this box,
+# guarded so a box without the unit is unaffected. WHY (#440, live evidence from the #420 A/V-sync
+# measurement): `cam2-painter.service` and the TRANSIENT emitter-painter this script launches below
+# (`frame-probe --audio-marker`) are SEPARATE processes that BOTH write /dev/fb0 — during a
+# measurement the displayed QR alternated between the two painters' run_ids, so the QPSK audio
+# marker's frame_id could not reliably match the displayed video QR, breaking --av-sync pairing.
+# TEST mode must be the SOLE painter of fb0, so the permanent painter is stopped first.
+cam2_painter_service_stop_cmds() {
+  cat <<'REMOTE'
+if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
+  echo "[#440] cam2-painter.service present -> stopping (avoids racing /dev/fb0 with the TEST-mode emitter-painter)"
+  systemctl stop cam2-painter.service 2>/dev/null || true
+else
+  echo "[#440] cam2-painter.service not installed on this box -> nothing to stop"
+fi
+REMOTE
+}
+
+# cam2_painter_service_start_cmds -> the REMOTE bash (#440) that RESTORES the PERMANENT
+# `cam2-painter.service` stopped by cam2_painter_service_stop_cmds above (symmetric guard) — so
+# EVENT mode leaves the permanent dual-QR painter running as it was before TEST mode, on a box
+# where the unit is installed; a box without it is unaffected.
+cam2_painter_service_start_cmds() {
+  cat <<'REMOTE'
+if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
+  echo "[#440] cam2-painter.service present -> restarting (restore the permanent dual-QR painter for EVENT mode)"
+  systemctl start cam2-painter.service 2>/dev/null || true
+else
+  echo "[#440] cam2-painter.service not installed on this box -> nothing to restore"
+fi
+REMOTE
+}
+
 # painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [FPS] [CBBIN] [DROPIN] [AUDIO_DEV] [AUDIO_CADENCE]
 #   [MARKER_LOG] -> the REMOTE bash run on cam2 (over ssh) to enter TEST mode: stop any prior
 # painter, free /dev/fb0 WITHOUT killing capture+emit (#291: switch camera-box to a no-display
@@ -162,6 +204,11 @@ if [ -f "$pidfile" ]; then
   [ -n "\$OLD" ] && kill "\$OLD" 2>/dev/null || true
 fi
 pkill -x frame-probe 2>/dev/null || true
+# (0.5) #440: stop the PERMANENT cam2-painter.service (a DIFFERENT, always-on dual-QR painter) if
+#       present — it would otherwise race /dev/fb0 with the emitter-painter launched below (see the
+#       cam2_painter_service_stop_cmds header comment for the full #440 story). Guarded: a box
+#       without the unit is unaffected.
+$(cam2_painter_service_stop_cmds)
 # (1) free /dev/fb0 WITHOUT killing capture+emit (#291). cam2 does THREE independent things: DISPLAY
 #     (--display -> /dev/fb0/HDMI), CAPTURE (/dev/video0) and EMIT (NDI to strih). ONLY display grabs
 #     fb0; capture+emit do not. The old switch fully STOPPED the whole service, which killed all three
@@ -206,6 +253,13 @@ if [ ! -x "$bin" ]; then
   echo "        scp frame-probe root@$PAINTER_IP:$bin   # then chmod +x" >&2
   exit 1
 fi
+# (3b) #440: freshness WARNING (advisory only — never fails the run). Live evidence: cam2's
+#      deployed frame-probe was a pre-#431 build, which writes the marker-log CSV only on
+#      shutdown, so the #431 emission self-check below FAILED even though the marker was actually
+#      running. Auto-deploying the fresh CI artifact is OUT OF SCOPE here (#440) — a clear operator
+#      warning, printed BEFORE the #431 check runs, is the deliverable.
+BIN_MTIME=\$(stat -c '%y' "$bin" 2>/dev/null || echo unknown)
+echo "WARNING: [#440] painter binary $bin build/deploy mtime=\$BIN_MTIME -- if the #431 marker-log-growth check below FAILS, this binary may be a STALE pre-#431 deploy; redeploy the fresh CI artifact: gh run download <latest CI run> -n probe-tools-linux-amd64 && scp frame-probe root@$PAINTER_IP:$bin"
 # (4) launch the PINNED dual-QR vernier painter WITH the QPSK A/V-sync audio marker (#420: both on
 #     the SAME process — the marker is a thread inside frame-probe, in lock-step with the painter's
 #     frame_id via the shared refresh tick, src/probe/qpsk_emit.rs); record its PID for a clean
@@ -264,6 +318,10 @@ fi
 # (2) belt-and-suspenders: pkill -x matches the process NAME only (comm), so it can NEVER match the
 #     remote shell's own cmdline — immune to the self-match that strands cleanups (NOT pkill -f).
 pkill -x frame-probe 2>/dev/null || true
+# (2.5) #440: restore the PERMANENT cam2-painter.service that TEST mode stopped above (symmetric
+#       guard — a box without the unit is unaffected), so normal broadcast operation resumes with
+#       the permanent dual-QR painter running again.
+$(cam2_painter_service_start_cmds)
 # (3) wait until /dev/fb0 is released by the painter, then RESTORE the deployed --display camera-box
 #     (#291): remove the transient no-display drop-in TEST mode installed, reload, and RESTART so the
 #     unit's ExecStart reverts to --display and camera-box re-grabs /dev/fb0 for the interkom return.

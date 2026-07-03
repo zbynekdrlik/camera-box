@@ -451,6 +451,110 @@ fn event_mode_stopping_painter_process_stops_the_audio_marker_too() {
     );
 }
 
+/// #440: TEST mode must stop the PERMANENT `cam2-painter.service` (systemd, always-on dual-QR
+/// painter) BEFORE launching its own transient emitter-painter — otherwise BOTH processes write
+/// /dev/fb0 and the displayed QR alternates between the two painters' run_ids, so the QPSK audio
+/// marker's frame_id can't reliably match the displayed video QR (the #440 root cause: the #420
+/// A/V-sync measurement was broken this way live, requiring a manual `systemctl stop
+/// cam2-painter.service`). Guarded — a box without the unit installed must not fail the switch.
+#[test]
+fn test_mode_stops_cam2_painter_service_before_launching_emitter() {
+    let p = painter_launch();
+    assert!(
+        p.contains("systemctl list-unit-files cam2-painter.service"),
+        "#440: TEST mode must GUARD the cam2-painter.service stop (only act if the unit exists) so \
+         a box without the unit is unaffected. Got:\n{p}"
+    );
+    assert!(
+        p.contains("systemctl stop cam2-painter.service"),
+        "#440: TEST mode must stop the permanent cam2-painter.service (avoids racing /dev/fb0 with \
+         the transient emitter-painter). Got:\n{p}"
+    );
+    assert!(
+        p.contains("[#440]"),
+        "#440: the cam2-painter.service stop must be logged clearly. Got:\n{p}"
+    );
+    // Must happen BEFORE the emitter-painter's own nohup launch line — it is the whole point.
+    let stop_pos = p
+        .find("systemctl stop cam2-painter.service")
+        .expect("#440: expected the guarded cam2-painter.service stop");
+    let launch_pos = p
+        .find("nohup")
+        .expect("#440: expected the emitter-painter's nohup launch line");
+    assert!(
+        stop_pos < launch_pos,
+        "#440: cam2-painter.service must be stopped BEFORE the emitter-painter launches (nohup). \
+         Got:\n{p}"
+    );
+}
+
+/// #440: EVENT mode must restore the PERMANENT `cam2-painter.service` that TEST mode stopped above
+/// — symmetric guard, so a box without the unit is unaffected and normal broadcast operation
+/// resumes with the permanent painter running again.
+#[test]
+fn event_mode_restores_cam2_painter_service() {
+    let p = painter_stop();
+    assert!(
+        p.contains("systemctl list-unit-files cam2-painter.service"),
+        "#440: EVENT mode must GUARD the cam2-painter.service restore (only act if the unit \
+         exists). Got:\n{p}"
+    );
+    assert!(
+        p.contains("systemctl start cam2-painter.service"),
+        "#440: EVENT mode must restore (start) the permanent cam2-painter.service. Got:\n{p}"
+    );
+    assert!(
+        p.contains("[#440]"),
+        "#440: the cam2-painter.service restore must be logged clearly. Got:\n{p}"
+    );
+}
+
+/// #440: TEST mode must WARN (never fail loud) when the deployed painter binary looks stale — live
+/// evidence: cam2's `/usr/local/bin/frame-probe` was a pre-#431 build, which writes the marker-log
+/// CSV only on shutdown, so the #431 emission self-check FAILED even though the marker was actually
+/// running. Auto-deploying the fresh CI artifact is out of scope here — the deliverable is a clear
+/// operator warning pointing at the redeploy command, printed BEFORE the #431 emission check runs
+/// (so the operator sees the "may be stale" hint before, not just after, a confusing failure).
+#[test]
+fn test_mode_warns_on_stale_painter_binary_freshness() {
+    let p = painter_launch();
+    assert!(
+        p.contains("WARNING") && p.contains("[#440]"),
+        "#440: TEST mode must print a WARNING (not a hard fail) about painter-binary freshness. \
+         Got:\n{p}"
+    );
+    assert!(
+        p.contains("mtime"),
+        "#440: the freshness warning must include the deployed binary's build/deploy date (mtime). \
+         Got:\n{p}"
+    );
+    assert!(
+        p.contains("#431") && p.contains("probe-tools-linux-amd64"),
+        "#440: the freshness warning must reference the #431 emission check + tell the operator to \
+         redeploy the fresh CI probe-tools-linux-amd64 artifact. Got:\n{p}"
+    );
+    // WARN only — must never be wired to an `exit 1` (that would turn an advisory into a hard gate,
+    // which the issue explicitly scopes OUT: "Do NOT try to auto-download ... a clear operator
+    // warning is the deliverable").
+    let warn_pos = p
+        .find("WARNING: [#440]")
+        .expect("#440: expected the exact WARNING: [#440] prefix");
+    let warn_line = p[warn_pos..].lines().next().unwrap_or("");
+    assert!(
+        !warn_line.contains("exit 1"),
+        "#440: the freshness warning must be advisory only, never exit 1 on its own line. Got:\n{warn_line}"
+    );
+    // Must appear BEFORE the #431 emission self-check (the marker-log growth poll) so the operator
+    // sees the "may be stale" hint before a confusing failure, not buried after it.
+    let emission_check_pos = p
+        .find("marker log")
+        .expect("#440: expected the #431 marker-log emission check to still be present");
+    assert!(
+        warn_pos < emission_check_pos,
+        "#440: the freshness WARNING must print before the #431 emission self-check runs. Got:\n{p}"
+    );
+}
+
 /// The `pkill -f` self-match footgun (a remote shell whose own cmdline contains the pattern gets
 /// killed, stranding the rest of the cleanup — see tests/harness_remote_kill_safety.rs) must never
 /// appear on an EXECUTABLE line of rig-mode.sh. Comment lines that EXPLAIN the footgun are allowed;
