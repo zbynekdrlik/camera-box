@@ -42,6 +42,23 @@ set -euo pipefail
 
 DEFAULT_README="vendor/README.md"
 
+# #390: the DistroAV per-source genlock-latency clamp (PROP_GENLOCK_LATENCY_MS_MIN /
+# PROP_GENLOCK_SOURCE_LATENCY_MS_MAX in the vendored ndi-source.cpp fork) — the sane BACKSTOP range
+# for a calibration-tracked source-latency pin (see drift_check_source_latency's `range:MIN-MAX`
+# mode below). Any per-source held-latency the DistroAV UI/WS can even accept lies inside
+# [MIN, MAX]; a value outside it is impossible from a correct apply. Mirror
+# scripts/av_sync_calibrate.py's LATENCY_MIN/LATENCY_MAX — keep both in lock-step (same convention
+# as required_delay_ms: Bash/Python can't share a literal across the WS boundary, so both copies
+# must be updated together if the DistroAV clamp ever changes).
+GENLOCK_LATENCY_MS_MIN=3
+GENLOCK_LATENCY_MS_MAX=2000
+
+# #390: best-effort tolerance (ms) for the live-vs-last-calibrated cross-check
+# (drift_check_calibrated_source_latency below). Accounts for rounding noise between the Python
+# controller's `round()` and the live OBS-read integer; a genuine drift (e.g. a hand-nudge in the
+# OBS UI since the last calibration run) is normally far larger than this.
+AV_SYNC_CALIBRATION_TOLERANCE_MS=10
+
 # --- PURE functions (no network, no MCP, no git mutation — unit-tested) --------------------
 
 # pinned_subtree_version README PREFIX -> the **bold** version on PREFIX's subtree table row
@@ -310,6 +327,46 @@ genlock_source_latency_from_log() {
   printf '%s' "$result"
 }
 
+# genlock_src_latency_for NAME CSV -> the observed latency_ms for source NAME out of a
+# "NAME=ms,NAME=ms,…" CSV (the same shape drift_check_source_latency parses), "" if absent (never
+# observed). Factored out so the #390 calibration cross-check below can look up a single source's
+# live value without duplicating the split/trim loop already in drift_check_source_latency.
+genlock_src_latency_for() {
+  local want="$1" csv="$2" entry name lat
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    [ -z "$entry" ] && continue
+    name="${entry%%=*}"; lat="${entry#*=}"
+    name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+    lat="${lat#"${lat%%[![:space:]]*}"}"; lat="${lat%"${lat##*[![:space:]]}"}"
+    if [ "$name" = "$want" ]; then printf '%s' "$lat"; return 0; fi
+  done
+}
+
+# range_tracked_source_name EXPECTED_CSV -> the NAME of the (first) source in a mixed
+# "NAME=ms,…" / "NAME=range:MIN-MAX,…" expected CSV that is pinned as `range:` (calibration-
+# tracked), "" if none. #390: the stream A/V-align source (`NDI 2ME PGM`) is pinned this way; the
+# strih camera-floor sources stay plain exact-ms pins (structural, not calibrated).
+range_tracked_source_name() {
+  local csv="$1" entry name val
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    [ -z "$entry" ] && continue
+    name="${entry%%=*}"; val="${entry#*=}"
+    name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+    case "$val" in
+      range:*) printf '%s' "$name"; return 0 ;;
+    esac
+  done
+}
+
 # drift_check LABEL MODE EXPECTED OBSERVED -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. MODE is "exact" (string equality) or "min" (observed semver >= expected, sort -V).
 # An empty OBSERVED is UNKNOWN, never OK — a value we could not read must never look clean.
@@ -386,11 +443,18 @@ drift_check_inputs() {
 }
 
 # drift_check_source_latency EXPECTED_CSV OBSERVED_CSV -> per-source genlock FIFO held-latency gate
-# (#357). EXPECTED_CSV is the pinned "NAME=ms,…" list from the manifest (host-keyed:
-# genlock_source_latency_strih or _stream). OBSERVED_CSV is the live "NAME=ms,…" read from the OBS
-# log via genlock_source_latency_from_log. Each source in EXPECTED is checked against OBSERVED;
-# a source present in EXPECTED but absent in OBSERVED is UNKNOWN (never silently OK). Returns
-# 0 OK / 2 DRIFT / 3 UNKNOWN. Prints one status line per expected source.
+# (#357, range mode added #390). EXPECTED_CSV is the pinned "NAME=ms,…" list from the manifest
+# (host-keyed: genlock_source_latency_strih or _stream); an entry's VALUE may be either a plain
+# ms number (exact-match mode — the strih camera-floor pins, which are structural, not calibrated)
+# or `range:MIN-MAX` (#390 calibration-tracked mode — the stream A/V-align source, whose correct
+# value changes every time the operator re-calibrates #188 and so cannot be a single hardcoded
+# constant without going stale; only an egregiously out-of-range value is flagged). OBSERVED_CSV is
+# the live "NAME=ms,…" read from the OBS log via genlock_source_latency_from_log. Each source in
+# EXPECTED is checked against OBSERVED; a source present in EXPECTED but absent in OBSERVED is
+# UNKNOWN (never silently OK). Returns 0 OK / 2 DRIFT / 3 UNKNOWN. Prints one status line per
+# expected source. (The SEPARATE best-effort check against the #427-persisted last-calibrated
+# value lives in drift_check_calibrated_source_latency below — this function only enforces the
+# sane backstop range / the structural exact pins.)
 drift_check_source_latency() {
   local expected_csv="$1" observed_csv="$2" drift=0 unknown=0 n=0
   if [ -z "$observed_csv" ]; then
@@ -401,6 +465,7 @@ drift_check_source_latency() {
   local OLDIFS="$IFS"; IFS=','
   # shellcheck disable=SC2206
   local -a obs_entries=($observed_csv)
+  # shellcheck disable=SC2206
   local -a exp_entries=($expected_csv)
   IFS="$OLDIFS"
   local exp_entry obs_entry exp_name exp_lat obs_name obs_val obs_lat
@@ -425,11 +490,32 @@ drift_check_source_latency() {
     if [ -z "$obs_lat" ]; then
       printf '  source %-20s UNKNOWN  (pinned latency_ms=%s, source not in log)\n' "$exp_name" "$exp_lat"
       unknown=$((unknown + 1))
-    elif [ "$obs_lat" = "$exp_lat" ]; then
-      printf '  source %-20s OK       (latency_ms=%s)\n' "$exp_name" "$obs_lat"
     else
-      printf '  source %-20s DRIFT    (pinned latency_ms=%s, observed %s)\n' "$exp_name" "$exp_lat" "$obs_lat"
-      drift=$((drift + 1))
+      case "$exp_lat" in
+        range:*)
+          # #390 calibration-tracked mode: any value inside the sane [MIN, MAX] backstop is OK —
+          # there is no single correct constant (it changes with every A/V-sync re-calibration).
+          local rng rmin rmax
+          rng="${exp_lat#range:}"; rmin="${rng%-*}"; rmax="${rng#*-}"
+          if printf '%s' "$obs_lat" | grep -qE '^[0-9]+$' \
+             && [ "$obs_lat" -ge "$rmin" ] && [ "$obs_lat" -le "$rmax" ]; then
+            printf '  source %-20s OK       (latency_ms=%s, within calibration-tracked range %s-%s)\n' \
+              "$exp_name" "$obs_lat" "$rmin" "$rmax"
+          else
+            printf '  source %-20s DRIFT    (latency_ms=%s outside the sane calibration-tracked range %s-%s)\n' \
+              "$exp_name" "$obs_lat" "$rmin" "$rmax"
+            drift=$((drift + 1))
+          fi
+          ;;
+        *)
+          if [ "$obs_lat" = "$exp_lat" ]; then
+            printf '  source %-20s OK       (latency_ms=%s)\n' "$exp_name" "$obs_lat"
+          else
+            printf '  source %-20s DRIFT    (pinned latency_ms=%s, observed %s)\n' "$exp_name" "$exp_lat" "$obs_lat"
+            drift=$((drift + 1))
+          fi
+          ;;
+      esac
     fi
   done
   if [ "$n" -eq 0 ]; then
@@ -443,6 +529,47 @@ drift_check_source_latency() {
   [ "$drift" -gt 0 ] && return 2
   [ "$unknown" -gt 0 ] && return 3
   return 0
+}
+
+# drift_check_calibrated_source_latency SOURCE OBSERVED_CSV CALIBRATED_MS TOLERANCE_MS -> #390
+# best-effort cross-check of the LIVE per-source genlock latency against the #427-persisted
+# last-calibrated value (av-sync-last.json's `applied_latency_ms`, read off the OBS box's
+# ProgramData and passed in by the operator/agent — drift-guard itself runs on dev1 and cannot
+# reach that path directly). This is IN ADDITION to the sane-range backstop in
+# drift_check_source_latency above: the range check alone would miss a genuine drift (e.g. someone
+# hand-nudges the OBS UI slider to a still-in-range but wrong value) — this check catches that IF
+# the calibrated value was supplied.
+#
+# CALIBRATED_MS="" (not supplied — the file was unreachable, or the operator/agent skipped the
+# gather) is NEVER a failure: prints an informational SKIPPED line and returns 0 — the #390
+# graceful-degradation contract ("do NOT fail the whole drift-guard on its absence"). A missing
+# SOURCE in OBSERVED_CSV while CALIBRATED_MS IS supplied is a genuine UNKNOWN (we meant to check
+# but the live value was not read) — never a silent pass. Returns 0 OK(/skipped) / 2 DRIFT /
+# 3 UNKNOWN. TOLERANCE_MS defaults to 10 (rounding-noise allowance, see AV_SYNC_CALIBRATION_TOLERANCE_MS).
+drift_check_calibrated_source_latency() {
+  local source="$1" observed_csv="$2" calibrated_ms="$3" tolerance_ms="${4:-10}"
+  local obs_lat diff
+  if [ -z "$calibrated_ms" ]; then
+    printf '  %-20s SKIPPED  (last-calibrated value not available for %s — av-sync-last.json not supplied; range-checked only)\n' \
+      "genlock_calibration" "$source"
+    return 0
+  fi
+  obs_lat="$(genlock_src_latency_for "$source" "$observed_csv")"
+  if [ -z "$obs_lat" ]; then
+    printf '  %-20s UNKNOWN  (last-calibrated=%sms for %s, but source not in observed latency set)\n' \
+      "genlock_calibration" "$calibrated_ms" "$source"
+    return 3
+  fi
+  diff=$((obs_lat - calibrated_ms))
+  [ "$diff" -lt 0 ] && diff=$((-diff))
+  if [ "$diff" -le "$tolerance_ms" ]; then
+    printf '  %-20s OK       (%s latency_ms=%s matches last-calibrated %sms, within +/-%sms)\n' \
+      "genlock_calibration" "$source" "$obs_lat" "$calibrated_ms" "$tolerance_ms"
+    return 0
+  fi
+  printf '  %-20s DRIFT    (%s latency_ms=%s has drifted %sms from last-calibrated %sms, tolerance +/-%sms)\n' \
+    "genlock_calibration" "$source" "$obs_lat" "$diff" "$calibrated_ms" "$tolerance_ms"
+  return 2
 }
 
 # drift_check_plugin_paths CANONICAL OBSERVED_CSV -> single-canonical OBS plugin-load path guard
@@ -596,6 +723,35 @@ validate_nonempty() {
   echo "  ok        $name = $val"; return 0
 }
 
+# validate_source_latency_range NAME CSV -> 0 if every `range:MIN-MAX` entry in a
+# genlock_source_latency_* pin's CSV matches the CURRENT DistroAV clamp EXACTLY
+# (GENLOCK_LATENCY_MS_MIN/_MAX above), else 1 (loud). #390: the pin text and the code's clamp are
+# two independent copies (bash constant vs markdown table) — a manifest typo (e.g. `range:3-200`
+# instead of `range:3-2000`) would silently narrow the backstop range (weakening the gate) or widen
+# it (letting a genuinely bad value through) without CI ever noticing. This closes that gap. Entries
+# that are plain exact-ms values (the structural strih pins) are not this function's concern.
+validate_source_latency_range() {
+  local name="$1" csv="$2" entry val rng rmin rmax errs=0
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  for entry in "${entries[@]}"; do
+    [ -z "$entry" ] && continue
+    val="${entry#*=}"
+    case "$val" in
+      range:*)
+        rng="${val#range:}"; rmin="${rng%-*}"; rmax="${rng#*-}"
+        if [ "$rmin" != "$GENLOCK_LATENCY_MS_MIN" ] || [ "$rmax" != "$GENLOCK_LATENCY_MS_MAX" ]; then
+          echo "  MALFORMED $name: '$entry' pins range $rmin-$rmax but the code's DistroAV clamp is $GENLOCK_LATENCY_MS_MIN-$GENLOCK_LATENCY_MS_MAX (they must match)" >&2
+          errs=$((errs + 1))
+        fi
+        ;;
+    esac
+  done
+  [ "$errs" -eq 0 ]
+}
+
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -656,6 +812,24 @@ Usage:
     (every historic --compare call is unchanged); the /drift-guard command always feeds it. (The key
     name `burn_env` is kept for --compare back-compat; the value is now the genlock_burn state.)
 
+--compare per-source genlock latency keys (#357, calibration-tracking added #390, opt-in — supply
+`genlock_source_latency` to activate):
+  genlock_source_latency (a comma-separated "SOURCE NAME=latency_ms" list of every genlocked
+    source's LIVE effective held-latency, read from the OBS log `genlock-fifo audit 'SOURCE': …
+    latency_ms=N …` lines — see genlock_source_latency_from_log). The pinned side is HOST-KEYED
+    (genlock_source_latency_strih / _stream): the strih camera-floor sources are pinned as plain
+    exact ms values (structural — a drift is a real regression); the stream A/V-align source
+    (`NDI 2ME PGM`) is pinned as `range:MIN-MAX` (calibration-tracked, #390 — its correct value
+    changes every time the operator re-calibrates #188, so a single hardcoded ms constant goes
+    stale; only an egregiously out-of-range value is DRIFT).
+  av_sync_calibrated_ms (OPTIONAL, #390 best-effort — the #427-persisted `applied_latency_ms` read
+    from `av-sync-last.json` on the OBS box's ProgramData, gathered by the operator/agent since
+    drift-guard runs on dev1 and cannot reach that path itself). When supplied, cross-checks the
+    LIVE `NDI 2ME PGM` latency against this last-calibrated value (+/-10ms) and flags GENUINE drift
+    (e.g. a hand-nudge in the OBS UI since the last calibration) that the sane-range check alone
+    would miss. Dormant (range-checked only, no failure) when omitted or the file is unreachable —
+    never fails the whole guard on its absence.
+
 --status keys: host, genlock_wall_clock, genlock_capability, burn_env — a read-only ONE-PLACE dump
   of the genlock gate + build marker + burn state (always exit 0; --compare is the fail-loud gate;
   the rich live OBS dock is the separate #188).
@@ -682,6 +856,11 @@ check_pins() {
   # #357 per-source genlock FIFO held-latency: both host-keyed pins MUST be present.
   validate_nonempty "genlock_source_latency_strih"   "$p_src_lat_strih"   || errs=$((errs + 1))
   validate_nonempty "genlock_source_latency_stream"  "$p_src_lat_stream"  || errs=$((errs + 1))
+  # #390: any `range:MIN-MAX` calibration-tracked entry in either pin must match the code's
+  # current DistroAV clamp EXACTLY — catches a manifest range typo silently narrowing/widening
+  # the backstop, independent of the plain non-empty checks above.
+  validate_source_latency_range "genlock_source_latency_strih"  "$p_src_lat_strih"  || errs=$((errs + 1))
+  validate_source_latency_range "genlock_source_latency_stream" "$p_src_lat_stream" || errs=$((errs + 1))
   if [ "$errs" -gt 0 ]; then
     echo >&2
     echo "!! $errs pinned value(s) missing or malformed in $readme." >&2
@@ -729,6 +908,9 @@ compare_observed() {
   local o_burn="${21:-}"
   # #357 per-source genlock FIFO held-latency (opt-in when genlock_source_latency= is supplied):
   local p_src_lat_strih="${22:-}" p_src_lat_stream="${23:-}" o_src_latency="${24:-}"
+  # #390 best-effort cross-check against the #427-persisted last-calibrated value (opt-in when
+  # av_sync_calibrated_ms= is supplied; dormant otherwise — see drift_check_calibrated_source_latency):
+  local o_av_sync_calibrated_ms="${25:-}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -857,13 +1039,14 @@ compare_observed() {
     [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
   fi
 
-  # Per-source genlock FIFO held-latency (#357): the effective latency each OBS source holds in the
-  # genlock FIFO must match its pinned value. OPT-IN: runs only when genlock_source_latency= is
-  # supplied (preserving backward compat for all historic --compare calls). The pin is HOST-KEYED
-  # (genlock_source_latency_strih vs _stream) because stream deliberately holds NDI 2ME PGM at 450ms
-  # (A/V-align latency) while strih holds all camera inputs at the 3ms global floor.
+  # Per-source genlock FIFO held-latency (#357, calibration-tracked range mode added #390): the
+  # effective latency each OBS source holds in the genlock FIFO must match its pinned value. OPT-IN:
+  # runs only when genlock_source_latency= is supplied (preserving backward compat for all historic
+  # --compare calls). The pin is HOST-KEYED (genlock_source_latency_strih vs _stream) because stream
+  # deliberately holds NDI 2ME PGM at a deliberate A/V-align latency (calibration-tracked, #390 —
+  # NOT a fixed constant) while strih holds all camera inputs at the 3ms global floor (structural).
   if [ -n "$o_src_latency" ]; then
-    local p_src_lat
+    local p_src_lat range_source
     case "$host" in
       strih)  p_src_lat="$p_src_lat_strih" ;;
       stream) p_src_lat="$p_src_lat_stream" ;;
@@ -877,6 +1060,20 @@ compare_observed() {
       drift_check_source_latency "$p_src_lat" "$o_src_latency" || rc=$?
       [ "$rc" -eq 2 ] && drift=$((drift + 1))
       [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+
+      # #390 best-effort cross-check against the #427-persisted last-calibrated value. Only
+      # meaningful when this host actually has a calibration-tracked (range:) source pinned
+      # (today: stream's `NDI 2ME PGM`) — dormant on strih (no range-tracked source) and dormant
+      # when the caller did not supply av_sync_calibrated_ms= (never fails the guard on its
+      # absence; see drift_check_calibrated_source_latency).
+      range_source="$(range_tracked_source_name "$p_src_lat")"
+      if [ -n "$range_source" ]; then
+        rc=0
+        drift_check_calibrated_source_latency "$range_source" "$o_src_latency" \
+          "$o_av_sync_calibrated_ms" "$AV_SYNC_CALIBRATION_TOLERANCE_MS" || rc=$?
+        [ "$rc" -eq 2 ] && drift=$((drift + 1))
+        [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+      fi
     fi
   fi
 
@@ -987,6 +1184,7 @@ main() {
   # --compare / --status: collect observed key=val pairs (both facets read the same inputs).
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
   local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn="" o_src_latency=""
+  local o_av_sync_calibrated_ms=""
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -1005,6 +1203,7 @@ main() {
       bundle_hashes)      o_bundle_hashes="$v" ;; # #121: live `relpath=sha256,…` of every deployed bundle file
       burn_env)              o_burn="$v" ;;         # #246: prod burn-env state ("none" or NAME=VALUE,…)
       genlock_source_latency) o_src_latency="$v" ;; # #357: per-source genlock held-latency CSV
+      av_sync_calibrated_ms) o_av_sync_calibrated_ms="$v" ;; # #390: #427-persisted applied_latency_ms
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
@@ -1029,7 +1228,7 @@ main() {
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
     "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \
-    "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency"
+    "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency" "$o_av_sync_calibrated_ms"
 }
 
 main "$@"
