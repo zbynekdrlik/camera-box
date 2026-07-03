@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.205"
+version = "1.7.0-dev.206"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -108,6 +108,10 @@ path = "src/bin/obs-self-heal-gate.rs"
 [[bin]]
 name = "av-restart-sync-gate"
 path = "src/bin/av-restart-sync-gate.rs"
+
+[[bin]]
+name = "zero-loss-restart-gate"
+path = "src/bin/zero-loss-restart-gate.rs"
 
 [[bin]]
 name = "frame-probe"
