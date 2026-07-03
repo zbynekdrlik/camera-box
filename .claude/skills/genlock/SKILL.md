@@ -316,12 +316,25 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   underscores). Pattern: `sed -n 's/.* latency_ms=\([0-9][0-9]*\).*/\1/p'`.
   OPT-IN `genlock_source_latency=NAME=N,NAME2=M` key in `--compare`; dormant without it
   (historic calls unchanged). Pins are HOST-KEYED: strih = `NDI cam5=3,NDI cam1=3,NDI cam3=3`
-  (follows global 3ms floor); stream = `NDI 2ME PGM=450` (deliberate A/V-align — slows video
-  to sync with ~1s-late mastered audio; re-pin ONLY on deliberate A/V-align rollout, NOT on drift).
-  `drift_check_source_latency` (tested in `tests/drift_guard.rs`). **RC priority**: DRIFT (rc=2)
-  MUST come before UNKNOWN (rc=3) in the return chain — same as all sibling checkers
-  (`drift_check_all_files`, `drift_check_inputs`); inverted order silently turns a mixed
-  DRIFT+UNKNOWN case into exit 11 instead of exit 20.
+  (follows global 3ms floor, structural exact-match). `drift_check_source_latency` (tested in
+  `tests/drift_guard.rs`). **RC priority**: DRIFT (rc=2) MUST come before UNKNOWN (rc=3) in the
+  return chain — same as all sibling checkers (`drift_check_all_files`, `drift_check_inputs`);
+  inverted order silently turns a mixed DRIFT+UNKNOWN case into exit 11 instead of exit 20.
+- **stream A/V-align pin is CALIBRATION-TRACKED, not a constant (#390, DONE — supersedes the
+  "stream = `NDI 2ME PGM=450`" framing above and the "re-pin ONLY on deliberate rollout" note
+  at the bottom of this file).** The A/V-align latency on `NDI 2ME PGM` is whatever the #188
+  calibration (`scripts/av_sync_calibrate.py`, #427) last measured and applied — it changes
+  EVERY re-calibration, so a hardcoded ms pin goes stale (proven live 2026-07-01: pin said
+  `450`, genuinely-delivered live value was `1000` — a false DRIFT). The pin is now
+  `NDI 2ME PGM=range:3-2000` (`drift_check_source_latency`'s new `range:MIN-MAX` mode — any
+  value inside the DistroAV clamp is OK, `GENLOCK_LATENCY_MS_MIN`/`_MAX` in drift-guard.sh,
+  mirrored from `av_sync_calibrate.py`'s `LATENCY_MIN`/`LATENCY_MAX`). A SEPARATE opt-in
+  `av_sync_calibrated_ms=<applied_latency_ms>` key (read from `av-sync-last.json` on the OBS
+  box's ProgramData, best-effort — drift-guard runs on dev1 and can't reach that path) cross-
+  checks the live value against the #427-persisted calibration (±10ms) to still catch a genuine
+  hand-nudge drift the range check alone would miss. **Never re-pin the RANGE for a
+  re-calibration — only the calibrated ms value changes, which is tracked live, not in the
+  manifest.**
 
 GOTCHA: the 150-min `windows-genlock.yml` is `workflow_dispatch`-only (can't run
 per-PR), so manifest LOGIC is proven on the Linux `test` job; editing
@@ -659,7 +672,9 @@ In `scripts/obs_phase2.py`. Returns `delivered_ms >= set_ms - tolerance_ms`.
 The #292 bug force-drained the FIFO to ~3-50ms even at 1000ms setting → threshold 1000-100=900ms
 clearly catches it. This pure function is Tier-0 testable (no OBS calls).
 CI proves the code; the SUPERVISOR runs the live rig verify (set 1000ms on prod `NDI 2ME PGM`,
-measure actual delivery, restore 450ms A/V-align).
+measure actual delivery, restore the LAST-CALIBRATED A/V-align value — post-#390 this is whatever
+`av-sync-last.json`'s `applied_latency_ms` says, NOT a fixed constant; re-run
+`scripts/av_sync_calibrate.py --apply` if the calibrated value itself is unknown/stale).
 
 **Snapshot+restore pattern (mirrors `_TEST_PRELOAD_STATE_KEY`):**
 `_TEST_LATENCY_STATE_KEY = "test_latency_saved"` in `scripts/obs_phase2.py`.
@@ -668,9 +683,13 @@ Save BEFORE changing (crash-safe), restore in `teardown()` BEFORE `_restore_test
 CLI env: `GENLOCK_TEST_LATENCY_SOURCE` / `GENLOCK_TEST_LATENCY_MS` (default 1000);
 wired into `recording-e2e.sh`.
 
-**prod A/V-align on stream:** `NDI 2ME PGM` runs 450ms `genlock_latency_ms_src`. Must be restored
-EXACTLY after any test window. Re-pin drift-guard `genlock_source_latency=NDI 2ME PGM=450` ONLY
-on deliberate A/V-align rollout, NOT on drift.
+**prod A/V-align on stream (#390: value is CALIBRATION-TRACKED, not a fixed 450 any more):**
+`NDI 2ME PGM` runs whatever `scripts/av_sync_calibrate.py` last applied — restore that value
+(read `av-sync-last.json`'s `applied_latency_ms`, or re-calibrate) after any test window, NOT a
+hardcoded number. The drift-guard MANIFEST pin (`vendor/README.md`) is
+`genlock_source_latency_stream = NDI 2ME PGM=range:3-2000` — re-pin the RANGE only if the
+DistroAV clamp itself ever changes; NEVER re-pin it to a specific ms value for a re-calibration
+(that is the exact stale-constant bug #390 fixed).
 
 **Audit line disambiguation (see also #357):** `latency_ms=N` (space before) = effective held
 value; `src_latency_ms=M` (underscore prefix) = per-source setting. The regex
