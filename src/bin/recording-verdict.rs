@@ -3469,6 +3469,17 @@ mod tests {
     /// delivered in the downstream stream recording is re-classified BURN-UNREADABLE, not REAL
     /// DROP — exactly as cam1 already does. Locks that generalizing the reconciliation condition
     /// did not silently drop this behaviour for a non-cam1 camera-under-test node.
+    ///
+    /// Mirrors `cam1_real_drop_present_downstream_is_burn_unreadable_not_real_drop_356` exactly:
+    /// the reconciliation only ever MOVES an id between loss BUCKETS (REAL DROP →
+    /// BURN-UNREADABLE) for honest accounting — it never touches `missing_ids`, so the id is
+    /// STILL missing from the burn-id sequence and `NodeVerdict::is_zero()` (see its doc comment:
+    /// "a BURN-UNREADABLE missing id is a real DEFECT and still makes the node NOT-zero, never
+    /// silently excluded") correctly keeps the node — and therefore the overall headline — NOT
+    /// zero / FAIL. Asserting an overall PASS here would contradict that invariant and would mask
+    /// a real (if reclassified) defect. This test's earlier `assert!(pass, ...)` was simply wrong
+    /// about what the reconciliation guarantees; the reclassification itself (real_drops=0,
+    /// burn_unreadable=1) was already correct and unchanged.
     #[test]
     fn cam3_real_drop_present_downstream_is_burn_unreadable_not_real_drop_24() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -3497,20 +3508,29 @@ mod tests {
         )
         .expect("verdict");
 
+        // The node still FAILs (6005 IS still missing from the strih recording — a real
+        // burn-readability defect to fix), but it is charged BURN-UNREADABLE, not REAL DROP: no
+        // false ZERO, honest bucket. Exactly mirrors the cam1 #356 test's `!pass` expectation.
         assert!(
-            pass,
-            "#24: proven-delivered downstream ⇒ BURN-UNREADABLE not a real drop ⇒ still PASS: {v}"
+            !pass,
+            "#24: a still-missing cam3 id keeps the run NOT zero (never a false ZERO): {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["zero_loss"],
+            serde_json::json!(false),
+            "#24: {}",
+            v["full_chain"]["loss"]["cam3"]
         );
         assert_eq!(
             v["full_chain"]["loss"]["cam3"]["real_drops"],
             serde_json::json!(0),
-            "#24: {}",
+            "#24: proven-delivered downstream must NOT be counted a REAL DROP: {}",
             v["full_chain"]["loss"]["cam3"]
         );
         assert_eq!(
             v["full_chain"]["loss"]["cam3"]["burn_unreadable"],
             serde_json::json!(1),
-            "#24: {}",
+            "#24: the delivered-but-strih-unreadable cam3 id must be charged BURN-UNREADABLE: {}",
             v["full_chain"]["loss"]["cam3"]
         );
     }
