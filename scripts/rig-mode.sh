@@ -238,7 +238,10 @@ echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, $
 #     a silent marker means this whole TEST-mode switch produced an unmeasured, wasted run.
 #     (#421: this poll+fail-loud logic now lives in scripts/lib/audio-marker-check.sh, shared with
 #     recording-e2e.sh's AV_RESTART_GATE painter — the DRY extraction of this exact block.)
-$(audio_marker_check_cmds "$audio_dev" 'kill "$PAINTER_PID" 2>/dev/null || true' "cadence=${audio_cadence} ticks, log=$marker_log")
+#     (#431: RUNNING alone is satisfied by the continuous-feed silence carrier even if the painter
+#     tick stalls and zero markers ever fire — passing $marker_log as the 4th arg below also gates
+#     on the marker-log CSV row count actually GROWING, i.e. real emission, not just an open PCM.)
+$(audio_marker_check_cmds "$audio_dev" 'kill "$PAINTER_PID" 2>/dev/null || true' "cadence=${audio_cadence} ticks, log=$marker_log" "$marker_log")
 REMOTE
 }
 
