@@ -797,6 +797,201 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   exit "$GATE"
 fi
 
+# ============================================================================
+# #109 OPTIONAL MODE — ZERO-LOSS restart-survival gate. OFF by default.
+# ============================================================================
+# #105 Step 4: the zero-loss + stable-latency proof is not trustworthy until it survives BOTH
+# an OBS restart and a PC restart of strih+stream. `recording-verdict --json` already computes
+# the run's single trustworthy binary delivery verdict (#186) — `overall_pass` +
+# `full_chain.zero_loss`/`real_drops`/`burn_unreadable`. This mode runs the SAME per-box
+# decode-in-place + merge pipeline [8/8a]..[8/8c] use (recording-verdict-on-strih.sh /
+# recording-verdict-on-stream.sh) TWICE — once as a BEFORE baseline, once as an AFTER
+# measurement bracketing a real restart — then gates the pair via the strict Tier-0 kernel
+# (single source of truth: camera_box::zero_loss_restart_survival::classify) run by the thin
+# `zero-loss-restart-gate` CLI. PASS iff BOTH measurements are a genuine zero-loss
+# recording-verdict PASS; FAIL if either is not; UNKNOWN (fail-closed) on any
+# internally-inconsistent JSON — never a false PASS.
+#
+# It is a MODE, not a sub-step — like #137's AV_RESTART_GATE it reuses the rig set up by
+# [0/8]..[4d/8], runs its OWN record->restart->record->gate flow INSTEAD of the normal
+# [5/8]..[8/8] single-pass verdict, and EXITS. Must live here (before [5/8] / the
+# VERDICT_ON_STREAM=1 early exit inside [8/8]) for the same reachability reason as #137.
+#
+# OFF by default (mirrors AV_RESTART_GATE) so a normal zero-loss run is COMPLETELY UNCHANGED.
+# Set ZERO_LOSS_RESTART_GATE=1 to opt in.
+#
+# SCOPE: this gate covers the #186 DELIVERY signal only (frame-drop zero-loss) — the exact
+# "final test" #105 Step 4 names. Colour (#364) and A/V-sync (#137, its OWN restart-survival
+# gate above) have their own dedicated gates; this step's per-box extract omits --colour-gate
+# and the painter/cam1-capture-stats sidecars to keep the restart-survival pair minimal and
+# fast — add them by hand (mirroring [8/8a]/[8/8b]) if a fuller pair is wanted.
+#
+# The restart(s) themselves are OPERATOR/SUPERVISOR ACTIONS: this script PRINTS the exact
+# steps — an OBS restart (stop/start via scripts/launch-obs-genlock.sh) and, per #109's "PC
+# restart" requirement, a host reboot of strih+stream — and BLOCKS until confirmed; it NEVER
+# stops/starts OBS or reboots a host itself (#109 scope: this PR ships the gate + wiring; the
+# live restart-survival rig proof, including the approval-gated PC reboot, is
+# supervisor-driven — see the #109 2026-07-02 comment: rebooting THIS dev rig is
+# standing-approved work the supervisor performs directly, this unattended script simply never
+# triggers it on its own).
+#
+# ONE invocation brackets ONE restart window (whatever the operator performs inside it — an
+# OBS restart, a PC reboot, or both back-to-back all count as "the restart" for this pair).
+# #109's full 3-pass protocol (baseline -> post-OBS-restart -> post-PC-restart) runs this SAME
+# opt-in step TWICE in sequence: once with an OBS restart in the confirmation window, once more
+# — reusing this run's just-produced 'after' JSON as the second pass's baseline via
+# ZERO_LOSS_RESTART_BEFORE_JSON (skips re-recording an already-clean baseline) — with a PC
+# reboot in the second window. Never re-implemented per-restart-type in this script.
+if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
+  GATE=0  # this mode owns the exit code (the normal [8/8] GATE assignment is skipped)
+  ZERO_LOSS_RESTART_RECORD_SECS="${ZERO_LOSS_RESTART_RECORD_SECS:-360}"
+  # Validate the one env var used in bash arithmetic-adjacent sleeps, mirroring #137's
+  # AV_RESTART_RECORD_SECS guard — a non-integer override fails with a CLEAR diagnostic
+  # instead of an opaque `set -euo pipefail` error mid-run.
+  case "$ZERO_LOSS_RESTART_RECORD_SECS" in
+    '' | *[!0-9]*)
+      echo "ERROR: #109 ZERO_LOSS_RESTART_RECORD_SECS='$ZERO_LOSS_RESTART_RECORD_SECS' must be a positive integer (seconds)." >&2
+      exit 2
+      ;;
+  esac
+  # 360s clears recording-verdict's --min-secs 300 analyzed-span floor (#373) with margin for
+  # start/stop settling — the SAME floor the normal [8/8c] merge uses below.
+  ZERO_LOSS_RESTART_GATE_BIN="${ZERO_LOSS_RESTART_GATE_BIN:-$PROBE_BIN_DIR/zero-loss-restart-gate}"
+  VERDICT_EXE_WIN="${VERDICT_EXE_WIN:-C:\\camera-box\\recording-verdict.exe}"
+  OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
+  ZL_BURN_STRIH_RUN_ID="${BURN_STRIH_RUN_ID:-911002}"
+  ZL_BURN_STREAM_RUN_ID="${BURN_STREAM_RUN_ID:-911004}"
+
+  # $1 = label ("before" | "after"). Records strih+stream for ZERO_LOSS_RESTART_RECORD_SECS,
+  # then emits the SAME per-box decode-in-place + merge plan [8/8a]..[8/8c] use (bash cannot
+  # scp/exec on Windows — #208/#193), writing this pass's zero-loss verdict JSON to
+  # $OUTDIR/zero-loss-restart-<label>-<RUN_ID>.json instead of the normal $REPORT_JSON path.
+  zero_loss_record_and_emit_plan() {
+    local label="$1"
+    echo "    [zero-loss-restart/$label] recording ${ZERO_LOSS_RESTART_RECORD_SECS}s on strih+stream (program = certified prod scene)"
+    python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
+    python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
+    sleep "$ZERO_LOSS_RESTART_RECORD_SECS"
+    local strih_host_path stream_host_path
+    strih_host_path=$(python3 "$HERE/obs_phase2.py" record --host "$STRIH" --action stop) \
+      || { echo "WARNING: [zero-loss-restart/$label] strih StopRecord returned non-zero (continuing; recording may already be stopped)" >&2; strih_host_path=""; }
+    stream_host_path=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) \
+      || { echo "WARNING: [zero-loss-restart/$label] stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2; stream_host_path=""; }
+    echo "    [zero-loss-restart/$label] strih recording:  ${strih_host_path:-<unknown>} (on strih box)"
+    echo "    [zero-loss-restart/$label] stream recording: ${stream_host_path:-<unknown>} (on stream box)"
+
+    local strih_rec_win="${strih_host_path:-<the ${label} strih recording, as it lives on the strih box>}"
+    local stream_rec_win="${stream_host_path:-<the ${label} stream recording, as it lives on the stream box>}"
+    local strih_partial_win="$OUT_DIR_WIN\\zero-loss-restart-${label}-strih-partial-${RUN_ID}.json"
+    local stream_partial_win="$OUT_DIR_WIN\\zero-loss-restart-${label}-stream-partial-${RUN_ID}.json"
+    local strih_partial="$OUTDIR/zero-loss-restart-${label}-strih-partial-${RUN_ID}.json"
+    local stream_partial="$OUTDIR/zero-loss-restart-${label}-stream-partial-${RUN_ID}.json"
+
+    # NOTE on `.sh"` continuation style: unlike the normal [8/8a]/[8/8b] planner calls below,
+    # these two calls put the first flag on the SAME line as the script path (no bare
+    # `.sh" \` line-continuation right after the filename) — a deliberate style difference so
+    # `harness_recording_e2e_paths.rs`'s `.find("recording-verdict-on-strih.sh\" \\")` anchor
+    # keeps landing on the NORMAL [8/8a] invocation (the one it actually guards), not this
+    # earlier restart-survival-mode call to the same planner.
+    echo "    --- [$label 8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
+    "$HERE/recording-verdict-on-strih.sh" --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" \
+      --strih-rec "$strih_rec_win" \
+      -- --extract-partial strih --strih "$strih_rec_win" --capture-fps "$STRIH_CAPTURE_FPS" \
+         --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$ZL_BURN_STRIH_RUN_ID" \
+         --out "$strih_partial_win"
+    echo "    pull back to dev1: $strih_partial  (win-strih FileDownload $strih_partial_win -> $strih_partial)"
+
+    echo "    --- [$label 8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
+    "$HERE/recording-verdict-on-stream.sh" --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" \
+      --stream-rec "$stream_rec_win" \
+      -- --extract-partial stream --stream "$stream_rec_win" --capture-fps "$STREAM_CAPTURE_FPS" \
+         --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
+         --cam2-run-id "$RUN_ID" \
+         --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$ZL_BURN_STRIH_RUN_ID" \
+         --burn-stream-run-id "$ZL_BURN_STREAM_RUN_ID" \
+         --out "$stream_partial_win"
+    echo "    pull back to dev1: $stream_partial  (win-stream-snv FileDownload $stream_partial_win -> $stream_partial)"
+
+    local out_json="$OUTDIR/zero-loss-restart-${label}-${RUN_ID}.json"
+    local merge_bin
+    merge_bin="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
+    echo "    --- [$label 8c] MERGE the two small partials ON dev1 -> the '$label' zero-loss verdict JSON ---"
+    printf '      %q --merge-partials %q --merge-partials %q --min-secs 300 --capture-fps %q --strih-emit-fps %q --stream-capture-fps %q --cam2-run-id %q --burn-cam1-run-id %q --burn-strih-run-id %q --burn-stream-run-id %q --json %q\n' \
+      "$merge_bin" "strih=$strih_partial" "stream=$stream_partial" "$STRIH_CAPTURE_FPS" \
+      "$STRIH_CAPTURE_FPS" "$STREAM_CAPTURE_FPS" "$RUN_ID" \
+      "$BURN_CAM1_RUN_ID" "$ZL_BURN_STRIH_RUN_ID" "$ZL_BURN_STREAM_RUN_ID" "$out_json"
+    echo "    -> once pulled back + merged, writes the '$label' zero-loss verdict JSON: $out_json"
+  }
+
+  echo "[Z1/Z3] #109 baseline zero-loss measurement (BEFORE the restart)"
+  if [ -n "${ZERO_LOSS_RESTART_BEFORE_JSON:-}" ] && [ -f "${ZERO_LOSS_RESTART_BEFORE_JSON}" ]; then
+    echo "    ZERO_LOSS_RESTART_BEFORE_JSON=$ZERO_LOSS_RESTART_BEFORE_JSON — reusing an already-measured"
+    echo "    baseline (e.g. a previous pass's 'after' JSON) instead of re-recording."
+    BEFORE_JSON="$ZERO_LOSS_RESTART_BEFORE_JSON"
+  else
+    zero_loss_record_and_emit_plan before
+    BEFORE_JSON="$OUTDIR/zero-loss-restart-before-${RUN_ID}.json"
+  fi
+
+  echo "[Z2/Z3] #109 restart — OPERATOR/SUPERVISOR ACTION (this script does NOT execute it)"
+  echo "    Perform the restart under test now:"
+  echo "      OBS restart: stop then start OBS on strih AND stream (scripts/launch-obs-genlock.sh),"
+  echo "      PC restart:  reboot the strih/stream host(s) (approval-gated — get the user's explicit"
+  echo "                   go-ahead first; this dev rig's reboot is standing-approved WORK, never"
+  echo "                   auto-executed by this unattended script) — then relaunch OBS the same way."
+  echo "    After either/both, verify re-lock from primary sources BEFORE continuing: dantesync LOCK"
+  echo "    (scripts/dantesync-gate.sh log, not timedatectl), genlock render-tick ENABLED, NDI"
+  echo "    re-bound, program on the probe scene."
+  # The restart MUST be confirmed before the 'after' measurement — otherwise before/after are
+  # near-identical and the gate reports a SPURIOUS PASS, masking the very regression this step
+  # exists to catch. Same interactive-TTY-or-explicit-confirm shape as #137's AV_RESTART_GATE.
+  if [ "${ZERO_LOSS_RESTART_CONFIRM:-}" = "1" ]; then
+    echo "    ZERO_LOSS_RESTART_CONFIRM=1 — trusting that the operator/supervisor already restarted + re-verified."
+  elif [ -t 0 ]; then
+    read -r -p "    Press ENTER once the restart is done and re-lock is verified... " _
+  else
+    echo "ERROR: #109 ZERO_LOSS_RESTART_GATE cannot confirm the restart happened — stdin is not a TTY" >&2
+    echo "       and ZERO_LOSS_RESTART_CONFIRM=1 is not set. Refusing to take the 'after' measurement" >&2
+    echo "       without a real restart (that would spuriously PASS and mask a real #109 regression)." >&2
+    echo "       Perform the restart manually, then re-run interactively OR set ZERO_LOSS_RESTART_CONFIRM=1." >&2
+    exit 1
+  fi
+
+  echo "[Z3/Z3] #109 post-restart zero-loss measurement (AFTER the restart) + gate"
+  zero_loss_record_and_emit_plan after
+  AFTER_JSON="$OUTDIR/zero-loss-restart-after-${RUN_ID}.json"
+
+  echo "    Once both verdict JSONs are pulled back + merged on dev1, run the strict gate"
+  echo "    (single source of truth: camera_box::zero_loss_restart_survival::classify):"
+  printf '      %q %q %q\n' "$ZERO_LOSS_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON"
+  if [ -f "$BEFORE_JSON" ] && [ -f "$AFTER_JSON" ]; then
+    # The gate binary PRINTS its own accurate verdict (PASS / FAIL / UNKNOWN + reasons) to
+    # stdout; capture its exit code and surface an HONEST wrapper line per code — never
+    # overstate an UNKNOWN (an inconsistent measurement — not proof of a regression) or a
+    # bad/missing-JSON error (exit 2) as a confirmed zero-loss regression (no-overstatement).
+    zl_rc=0
+    "$ZERO_LOSS_RESTART_GATE_BIN" "$BEFORE_JSON" "$AFTER_JSON" || zl_rc=$?
+    case "$zl_rc" in
+      0)
+        echo "    [zero-loss-restart-gate] PASS — zero-loss delivery held across the restart"
+        ;;
+      2)
+        echo "ERROR: #109 zero-loss-restart-gate could NOT evaluate (bad/missing measurement JSON — see its error above); NOT a PASS." >&2
+        GATE=1
+        ;;
+      *)
+        echo "ERROR: #109 zero-loss-restart-gate did NOT pass — see its verdict above (FAIL = the restart broke zero-loss delivery, or the baseline itself was never clean; UNKNOWN = a measurement was internally inconsistent, never a confirmed pass)." >&2
+        GATE=1
+        ;;
+    esac
+  else
+    echo "    [zero-loss-restart-gate] both verdict JSONs not yet on dev1 — the win-strih/win-stream-snv"
+    echo "    holder must run the decode+merge plans above for BOTH passes, then run the gate command"
+    echo "    printed above by hand."
+  fi
+  exit "$GATE"
+fi
+
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
