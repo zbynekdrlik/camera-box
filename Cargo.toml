@@ -114,6 +114,10 @@ name = "zero-loss-restart-gate"
 path = "src/bin/zero-loss-restart-gate.rs"
 
 [[bin]]
+name = "phase-sync-gate"
+path = "src/bin/phase-sync-gate.rs"
+
+[[bin]]
 name = "genlock-jitter-report"
 path = "src/bin/genlock-jitter-report.rs"
 
