@@ -40,9 +40,11 @@ fn setup_imag_fails_loud() {
 #[test]
 fn setup_imag_ensures_curl_up_front() {
     let body = read(SETUP);
-    let curl_ensure = body.find("apt-get install -y curl ca-certificates")
+    let curl_ensure = body
+        .find("apt-get install -y curl ca-certificates")
         .expect("setup-imag.sh must install curl+ca-certificates up-front (cam5/#450 lesson)");
-    let first_curl_use = body.find("curl -fsSL")
+    let first_curl_use = body
+        .find("curl -fsSL")
         .expect("setup-imag.sh downloads via curl -fsSL");
     assert!(
         curl_ensure < first_curl_use,
@@ -82,7 +84,11 @@ fn setup_imag_masks_sleep_and_lid() {
 #[test]
 fn setup_imag_seeds_websocket_4455() {
     let body = read(SETUP);
-    for needle in ["ServerEnabled=true", "ServerPort=4455", "AuthRequired=false"] {
+    for needle in [
+        "ServerEnabled=true",
+        "ServerPort=4455",
+        "AuthRequired=false",
+    ] {
         assert!(
             body.contains(needle),
             "{SETUP} must pre-seed the OBS WebSocket config with `{needle}` — without it no rig \
