@@ -42,16 +42,23 @@ pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool
     analyzed_span_secs >= min_secs
 }
 
+/// #373 — the node labels whose burn is read from the CLEAN strih recording (#133) at
+/// `capture_fps`, rather than from the stream recording at `stream_capture_fps`. cam1 is the
+/// original "camera under test"; #24 extends the SAME role to cam3/cam4 (mutually exclusive in
+/// any real run — see `recording-verdict.rs`'s `CAMERA_UNDER_TEST_NODES`, which this mirrors).
+const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
+
 /// #373 — the CAPTURE rate to divide a node's `optical_span_frames` by, when converting to the
-/// analyzed-span SECONDS the duration floor gates on. The nodes do NOT share one rate: cam1's burn
-/// (and its optical span) is read from the CLEAN strih recording (#133), captured at `capture_fps`
-/// (60 on the rig); strih and stream are read from the stream recording, captured at
-/// `stream_capture_fps` (30). Dividing every node by ONE rate mis-scales the others: with the rig's
-/// `--capture-fps 60`, a real 300 s strih/stream span (9000 frames @ 30 fps) would read 150 s and
-/// FALSE-FAIL the >=300 s floor — failing exactly the genuine zero-loss runs the floor must pass.
-/// So cam1 uses `capture_fps`; every other node uses `stream_capture_fps`.
+/// analyzed-span SECONDS the duration floor gates on. The nodes do NOT share one rate: the
+/// camera-under-test's burn (and its optical span) is read from the CLEAN strih recording (#133),
+/// captured at `capture_fps` (60 on the rig); strih and stream are read from the stream recording,
+/// captured at `stream_capture_fps` (30). Dividing every node by ONE rate mis-scales the others:
+/// with the rig's `--capture-fps 60`, a real 300 s strih/stream span (9000 frames @ 30 fps) would
+/// read 150 s and FALSE-FAIL the >=300 s floor — failing exactly the genuine zero-loss runs the
+/// floor must pass. So the camera-under-test (cam1/cam3/cam4, #24) uses `capture_fps`; strih and
+/// stream use `stream_capture_fps`.
 pub fn node_capture_fps(node: &str, capture_fps: f64, stream_capture_fps: f64) -> f64 {
-    if node == "cam1" {
+    if CAMERA_UNDER_TEST_NODES.contains(&node) {
         capture_fps
     } else {
         stream_capture_fps
