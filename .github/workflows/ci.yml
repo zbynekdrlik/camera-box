@@ -353,17 +353,18 @@ jobs:
       #                         burn (deployed to cam1; the clean prod camera-box above
       #                         has NO burn). Named camera-box-probe in the artifact so
       #                         it is never confused with the production binary.
-      #   frozen-camera-gate    — #365 freshness gate (default features, no probe deps).
-      #   obs-watchdog-gate     — #391 broadcast-OBS liveness/wedge gate (default features).
-      #   av-restart-sync-gate  — #137 OBS-restart A/V-sync-survival gate (default features).
+      #   frozen-camera-gate      — #365 freshness gate (default features, no probe deps).
+      #   obs-watchdog-gate       — #391 broadcast-OBS liveness/wedge gate (default features).
+      #   av-restart-sync-gate    — #137 OBS-restart A/V-sync-survival gate (default features).
+      #   zero-loss-restart-gate  — #109 restart-survival ZERO-LOSS gate (default features).
       - name: Build probe tools (verdict + frame-probe + probe camera-box)
         run: |
           cargo build --release --features probe \
             --bin recording-verdict --bin frame-probe --bin camera-box
           cp target/release/camera-box target/release/camera-box-probe
 
-      - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405, obs-watchdog-gate #391, av-restart-sync-gate #137)
-        run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin obs-watchdog-gate --bin av-restart-sync-gate
+      - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405, obs-watchdog-gate #391, av-restart-sync-gate #137, zero-loss-restart-gate #109)
+        run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin obs-watchdog-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate
 
       - name: Upload probe tools
         uses: actions/upload-artifact@v4
@@ -377,6 +378,7 @@ jobs:
             target/release/render-budget-gate
             target/release/obs-watchdog-gate
             target/release/av-restart-sync-gate
+            target/release/zero-loss-restart-gate
 
   windows-probe:
     name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe + obs-self-heal-gate.exe)

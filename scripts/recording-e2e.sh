@@ -379,7 +379,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
   if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
     cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
   fi
-  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate av-restart-sync-gate; do
+  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate av-restart-sync-gate zero-loss-restart-gate; do
     if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
       echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
       echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
@@ -393,8 +393,8 @@ else
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
   cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
-  # #365/#405/#137: build the default-feature gate binaries (no probe deps, no disk balloon).
-  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate  # airuleset:build-ok
+  # #365/#405/#137/#109: build the default-feature gate binaries (no probe deps, no disk balloon).
+  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate  # airuleset:build-ok
 fi
 
 echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
