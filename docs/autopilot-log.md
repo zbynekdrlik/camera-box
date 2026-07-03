@@ -1319,3 +1319,48 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   a floor-varied OBS build + a live rig recording, a build-matrix change out of scope for a clean
   code PR. The concrete runbook (build → deploy → record → `genlock-jitter-report` → decide) is
   §7 of the rationale doc; it is supervisor/user-driven, not this worker's to run unasked.
+
+## 2026-07-03 — #459 (strih -> 30fps) + #461 (recording-verdict --imag), PR #468 (v1.7.0-dev.219)
+
+- **#459**: `output_fps_strih` re-pinned 60->30 in `vendor/README.md` (strih's 60fps LED-wall
+  IMAG role moved to the new imag-nb box, #458/#463; strih is now cut-to-stream only).
+  Cascaded through `drift-guard.sh`, `recording-e2e.sh` (`STRIH_CAPTURE_FPS` 60->30),
+  `obs-self-heal-install.sh`/`obs-liveness-watchdog.sh` (strih target-fps decision payload,
+  a real functional fix, not just docs), `render-budget-gate.py`/`obs-liveness-probe.py`
+  docstrings, and every test reading the REAL committed manifest/scripts
+  (`tests/drift_guard.rs`, `tests/harness_recording_e2e_paths.rs`,
+  `tests/version_integrity_gate.rs`, `tests/obs_self_heal_install.rs`,
+  `tests/harness_genlock_sender_env.rs`). No commit-by-commit RED/GREEN pair (a re-pin, not a
+  bug fix) but every test asserting the real committed value was updated in the SAME commit as
+  the pin change so CI would catch a mismatch immediately. Cam1/cam2's own 60fps rates
+  (GENLOCK_FPS, PAINT_FPS) deliberately left untouched — cameras are unaffected.
+- **#461**: new Tier-0 pure module `src/imag_tick_gate.rs` (RED->GREEN via 8 inline tests,
+  `# airuleset:build-ok` local bypass) — first..=last contiguity over the cam2 optical tick,
+  a sibling of `probe::burn_contiguity::burn_contiguity` kept OUTSIDE the probe feature.
+  `node_capture_fps` gained a 3rd `imag_capture_fps` rate slot. `recording-verdict` gained
+  `--imag`/`--imag-capture-fps`, a `node_verdict_for_imag()` glue fn converting tick_contiguity
+  into the existing `NodeContiguity`/`NodeVerdict` shape (zero changes to `is_zero()` itself),
+  gated at TOP LEVEL (independent of --strih/--stream) alongside the `--cam1-capture-stats`
+  block. `--extract-partial imag` / `--merge-partials imag=<json>` accepted (empty burn set).
+  9 new recording-verdict tests. Deferred: extending the `#312` ALL-CAMBOX `--switch-schedule`
+  sweep + wiring `--imag` into `recording-e2e.sh`'s real invocations -> filed as #467 (imag has
+  no burn to anchor a schedule window on; needs its own anchor-mode design).
+- **PR #468**: dev->main, `Closes #459` + `Closes #461`. CI green (dev run 28683182493, main
+  run 28683817507). Merge `d966782628926a8a3c69b32ad9601c1e7fd78821`.
+- **INCIDENT — a `fork` subagent dispatched for a narrow "/review only" pass instead inherited
+  the full autopilot-worker context and autonomously drove the review through merge + the live
+  strih WS fps switch + post-deploy verification + playbook-review + Discord cards** (matches
+  the pre-existing `fork-review-agent-drives-to-merge` memory gotcha — use `general-purpose`/
+  `Explore` for review fan-out, reserve `fork` for genuine task-continuation). Everything the
+  fork did was independently RE-VERIFIED (live WS read of strih's `GetVideoSettings`/`GetStats`,
+  stream box health + screenshot, main CI conclusion, PR merge state) and found correct.
+- **INCIDENT — the merge auto-closed #458 too**, even though #458 carries an explicit "stays
+  OPEN until the #460 rework lands — do not let a PR merge auto-close it early" comment. Root
+  cause: PR #468's own body only listed `Closes #459`/`Closes #461`, but a REGULAR (non-squash)
+  merge makes GitHub scan every individual commit that rides along — three already-committed,
+  still-unmerged `fix: #458 ...` commits from a PRIOR session matched GitHub's closing-keyword
+  regex (`fix:` immediately followed by `#N`, even across the colon). Reopened #458 with an
+  explanation (`gh issue comment 458`); documented the general gotcha in the project `CLAUDE.md`
+  (commit `7ba1f58fa` on `dev`, not yet in a main PR) so it is not rediscovered.
+- Version bumped to `1.7.0-dev.220` on `dev` (not yet merged to main) alongside the `CLAUDE.md`
+  gotcha doc — will ride along in the next PR.
