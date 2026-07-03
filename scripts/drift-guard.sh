@@ -30,7 +30,7 @@
 # Usage:
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
 #   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
-#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=60 genlock_wall_clock=1 \   # host=strih→60, host=stream→30 (#11)
+#       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1 \   # host=strih→30, host=stream→30 (#459, was strih→60/#11)
 #       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" \
 #       distroav_dll_paths="C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"
 #   scripts/drift-guard.sh --help
@@ -847,7 +847,9 @@ check_pins() {
   validate_semver   "obs_version"                    "$p_obs"             || errs=$((errs + 1))
   validate_semver   "distroav_version"               "$p_distroav"        || errs=$((errs + 1))
   validate_semver   "ndi_runtime_min"                "$p_ndi"             || errs=$((errs + 1))
-  # #11 mixed 60/30: both host-keyed output_fps pins MUST be present (strih=60, stream=30).
+  # #459 (Topology v2, was #11 mixed 60/30): both host-keyed output_fps pins MUST be present
+  # (strih=30 cut-to-stream-only, stream=30 plain pass-through — the 60fps IMAG role moved to
+  # the separate imag-nb box, #458/#463).
   validate_nonempty "output_fps_strih"               "$p_fps_strih"       || errs=$((errs + 1))
   validate_nonempty "output_fps_stream"              "$p_fps_stream"      || errs=$((errs + 1))
   validate_nonempty "genlock_wall_clock"             "$p_genlock"         || errs=$((errs + 1))
@@ -1163,9 +1165,10 @@ main() {
     p_obs="$(pinned_obs_version "$readme")"
     p_distroav="$(pinned_distroav_version "$readme")"
     p_ndi="$(pinned_ndi_min "$readme")"
-    # #11 mixed 60/30: output_fps is HOST-KEYED (strih renders 60, stream decimates to 30). The
-    # per-host pin is resolved from the `host` arg in --compare (below); --check-pins validates
-    # BOTH are present so no future box silently defaults to the wrong fps.
+    # #459 (was #11 mixed 60/30): output_fps is HOST-KEYED (strih=30 cut-to-stream-only,
+    # stream=30 plain pass-through). The per-host pin is resolved from the `host` arg in
+    # --compare (below); --check-pins validates BOTH are present so no future box silently
+    # defaults to the wrong fps.
     p_fps_strih="$(pinned_setting "$readme" output_fps_strih)"
     p_fps_stream="$(pinned_setting "$readme" output_fps_stream)"
     p_genlock="$(pinned_setting "$readme" genlock_wall_clock)"
@@ -1213,8 +1216,9 @@ main() {
     exit $?
   fi
 
-  # #11 mixed 60/30: output_fps is HOST-KEYED — resolve the pin for THIS box. An unknown/empty host
-  # has no pin → FAIL LOUDLY so no future box silently defaults to the wrong fps (strih=60/stream=30).
+  # #459 (was #11 mixed 60/30): output_fps is HOST-KEYED — resolve the pin for THIS box. An
+  # unknown/empty host has no pin → FAIL LOUDLY so no future box silently defaults to the wrong
+  # fps (strih=30 cut-to-stream-only, stream=30 plain pass-through).
   if [ -z "$host" ]; then
     echo "ERROR: --compare requires host= (output_fps is host-keyed: output_fps_strih / output_fps_stream)." >&2
     exit 1
