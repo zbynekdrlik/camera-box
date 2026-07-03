@@ -1313,11 +1313,14 @@ fn recording_e2e_all_cambox_sweep_runs_on_stream_box() {
     );
 }
 
-/// #333: the all-cambox DEFAULT sweep must EXCLUDE the dual-QR painter box (CAM2 / .62, scene
-/// "Cam 3"). While painting the monitor, the painter does NOT capture/emit its own camera NDI
-/// (#179 "cam2 paints, NO grab"), so switching strih program to its scene shows nothing →
-/// frames=0 → a guaranteed FAIL that also inflates frames_without_anchor. The default must sweep
-/// only the non-painter capture boxes (CAM1/.61 + CAM4/.64), still overridable via $CAMBOX_SWEEP.
+/// #333/#399: the all-cambox DEFAULT sweep must EXCLUDE the dual-QR painter box (CAM2 / .62). While
+/// painting the monitor, the painter does NOT capture/emit its own camera NDI (#179 "cam2 paints,
+/// NO grab"), so switching strih program to its scene shows nothing → frames=0 → a guaranteed FAIL
+/// that also inflates frames_without_anchor. Under the #399 canonical NDI mapping (NDI cam5→CAM1,
+/// cam1→CAM3, cam3→CAM4, cam2→CAM2; scene names follow the input labels), the painter is CAM2 at
+/// scene "Cam 2"; scene "Cam 3" is now CAM4 — a real capture box, no longer the painter. So the
+/// default sweeps the three non-painter capture boxes CAM1 (scene "Cam 5") + CAM3 (scene "Cam 1") +
+/// CAM4 (scene "Cam 3"), excluding only CAM2 (scene "Cam 2"), still overridable via $CAMBOX_SWEEP.
 #[test]
 fn recording_e2e_default_sweep_excludes_the_painter_box() {
     let s = read("scripts/recording-e2e.sh");
@@ -1326,13 +1329,14 @@ fn recording_e2e_default_sweep_excludes_the_painter_box() {
         .find(|l| l.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-"))
         .expect("#333: recording-e2e.sh must define a default CAMBOX_SWEEP");
     assert!(
-        !line.contains("CAM2") && !line.contains("Cam 3"),
-        "#333: the default CAMBOX_SWEEP must NOT include the painter box (CAM2 / scene 'Cam 3') — \
-         it never emits its own NDI while painting, so its window is empty by construction: {line}"
+        !line.contains("CAM2") && !line.contains("Cam 2"),
+        "#333/#399: the default CAMBOX_SWEEP must NOT include the painter box (CAM2 / scene 'Cam 2') \
+         — it never emits its own NDI while painting, so its window is empty by construction: {line}"
     );
     assert!(
-        line.contains("CAM1") && line.contains("CAM4"),
-        "#333: the default sweep must still cover the non-painter capture boxes CAM1 + CAM4: {line}"
+        line.contains("CAM1") && line.contains("CAM3") && line.contains("CAM4"),
+        "#333/#399: the default sweep must cover all three non-painter capture boxes CAM1 + CAM3 + \
+         CAM4 (scenes 'Cam 5' / 'Cam 1' / 'Cam 3' under the #399 mapping): {line}"
     );
     assert!(
         line.contains("${CAMBOX_SWEEP:-"),
