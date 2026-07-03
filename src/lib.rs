@@ -27,6 +27,12 @@ pub mod ndi;
 pub mod ndi_display;
 pub mod vban;
 
+// #464 — the pure Auto-fallback PRESENTER decision (`resolve_presenter_kind`), extracted out of
+// `probe::presenter::open_presenter`'s hardware I/O. No probe deps, so it unit-tests Tier-0;
+// `probe::presenter` re-exports `PresenterKind` from here so every existing
+// `probe::presenter::PresenterKind` reference keeps compiling unchanged.
+pub mod presenter_kind;
+
 // #297 — NDI sender re-announce trigger (pure decision + network signature). Cross-platform
 // (no v4l/libc) so it unit-tests Tier-0; the Linux-only IO (interface read + sender re-create)
 // lives in `ndi`.

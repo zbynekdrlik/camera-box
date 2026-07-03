@@ -97,6 +97,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AV_RESTART_GATE painter (#421) so both launches can never drift on what "audible" means.
 # shellcheck source=scripts/lib/audio-marker-check.sh
 . "$RIG_MODE_DIR/lib/audio-marker-check.sh"
+# #464: SINGLE SOURCE OF TRUTH for the presenter-aware painter-liveness check (KMS page-flip vs
+# fbdev) — see scripts/lib/presenter-liveness-check.sh for the full #464 story. Mirrors
+# src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
+# shellcheck source=scripts/lib/presenter-liveness-check.sh
+. "$RIG_MODE_DIR/lib/presenter-liveness-check.sh"
 # #281 Fix#3: the rig-active heartbeat. TEST mode SETS it (deliberate "rig is in a test state"
 # marker); EVENT mode CLEARS it. Unlike recording-e2e.sh this is a one-shot write (rig-mode exits),
 # so the marker goes STALE after RIG_HEARTBEAT_STALE_SEC (default 10 min) — an idle TEST rig with a
@@ -274,15 +279,20 @@ nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps
 echo \$! > "$pidfile"
 PAINTER_PID=\$(cat "$pidfile")
 sleep 3
-# (5) verify the painter is UP and actually writing /dev/fb0.
+# (5) verify the painter is UP and ACTUALLY PAINTING — presenter-aware (#464). --presenter auto
+#     (the default here) may land on the KMS page-flip presenter, which by design NEVER opens
+#     /dev/fb0 (see src/presenter_kind.rs::resolve_presenter_kind) — a bare `fuser -s /dev/fb0`
+#     reported a healthy, correctly-painting KMS run as FAIL (confirmed live on cam2, #464).
+#     scripts/lib/presenter-liveness-check.sh reads the painter's own log to know which presenter
+#     actually came up and asserts the matching signal (KMS: the DRM device held + vblank-locked;
+#     fbdev: the original /dev/fb0 check, unchanged).
 if ! kill -0 "\$PAINTER_PID" 2>/dev/null; then
   echo "FAIL: painter PID \$PAINTER_PID not alive (see /tmp/rig-painter.log on cam2):" >&2
   tail -n 20 /tmp/rig-painter.log >&2 2>/dev/null || true
   exit 1
 fi
-i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-if ! fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: painter PID \$PAINTER_PID alive but NOT writing /dev/fb0" >&2; exit 1; fi
-echo "PASS: painter PID \$PAINTER_PID up + painting /dev/fb0 (dual-QR ${qr}px, ${fps}fps, ${dur}s)"
+$(painter_liveness_check_cmds "/tmp/rig-painter.log" "/dev/fb0")
+echo "PASS: painter PID \$PAINTER_PID up + painting (dual-QR ${qr}px, ${fps}fps, ${dur}s)"
 # (6) #420: verify the QPSK audio marker is ACTUALLY producing audio, not just that the process is
 #     alive. The emitter is a CONTINUOUS-FEED writer (silence between markers, tone when due — it
 #     never lets the ALSA ring drain), so a healthy run means the PCM backing $audio_dev is OPEN and
