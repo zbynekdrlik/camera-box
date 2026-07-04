@@ -1613,3 +1613,51 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   `obs-genlock-linux-x86_64` bundle (main run 28704655280) to imag-nb and live-measure the
   multiview render dropping from ~24ms to <14ms with the program holding 60fps while the
   multiview is open. #501 stays OPEN until that live verification lands.
+
+## 2026-07-04/05 — #456 range-aware V4L2 capture controls (cam5 dark-image fix; PR #509+#510+#511, v1.7.0-dev.237)
+
+- Root cause: `color_production_controls()`/`certified_cam1_controls()` applied literal V4L2
+  values (saturation=50/contrast=50, contrast=75/saturation=0) calibrated against the ShadowCast
+  cards' native 0-100 range. cam5's grab card has a 0-255 range (default 128) -- the literal 50
+  landed at ~20% of ITS range = dark/washed-out image.
+- Fix (PR #509): `ControlIo` gained `query_range(id) -> ControlRange{minimum,maximum,default_value}`
+  (VIDIOC_QUERY_EXT_CTRL via `Device::query_controls()`, implemented for the real `Device` + test
+  `FakeDevice`). `CaptureControl.value: i64` became `CaptureControl.target: ControlTarget` --
+  `Literal(i64)` (explicit `CAMERA_BOX_CAPTURE_CONTROLS=name=value` overrides, never scaled) or
+  `RangeScaled{reference_pct}` (both certified sets, resolved via `resolve_control_target` +
+  `scale_to_range` against the device's ACTUAL queried range). RED `f49bb7ffa` (2/4 new tests fail:
+  the cam5-style 0-255 midpoint + sharp-set scaling), GREEN `9b19b121a`. Version bump `e400f34a1`
+  (1.7.0-dev.233->234) was the first commit, per convention.
+- Dispatched a nested async `general-purpose` review agent (mirroring `requesting-code-review`)
+  in parallel with the merge decision -- it correctly re-invoked this worker on completion (a
+  live confirmation that an async `Agent` dispatch from WITHIN an autopilot-worker subagent is
+  safe and re-invokes the caller, unlike a `Bash run_in_background` CI poll which is NOT). It
+  came back AFTER PR #509 had already merged (`0b7a53db8`) with 2 🟡 + 2 🔵: (1) `ControlRange
+  .default_value` was queried but never used -- `scale_to_range` was pure proportional-midpoint
+  math, which only happened to be correct for both known cards because their manufacturer default
+  equals their numeric midpoint; a future card whose default ISN'T its midpoint would silently
+  miss its true neutral; (2) missing test coverage for the SHARP set resolved on a 0-100
+  ShadowCast-shaped range; (3) the degenerate-range (`minimum>=maximum`) fallback was silent, no
+  log; (4) `query_range` re-enumerates all controls per call (O(n) per call, bounded to 2 calls at
+  device open -- documented as a deliberate non-fix rather than wrapping the external `v4l::Device`
+  type).
+- Rather than revert the already-merged PR, shipped a same-day fast-follow (repo's own established
+  pattern, e.g. #501's `9bfaaabfb` post-review commit): PR #510 -- `scale_to_range` now prefers the
+  queried `default_value` directly when `reference_pct==50` (sanity-checked inside
+  `[minimum,maximum]`), falling back to proportional midpoint only if the default is
+  missing/out-of-range; degenerate-range fallback now `tracing::warn!`s; `query_range`'s doc
+  comment records the bounded-scope trade-off explicitly. RED `a4318b22d` (a synthetic 0-200/
+  default-140 card resolves to the midpoint 100 instead of the queried default 140), GREEN
+  `2a59d3c8b`. PR #511 (docs-only) updated `.claude/skills/capture/SKILL.md` with the range-aware
+  resolution mechanism + the two-PR lesson.
+- All three PRs merged clean (`mergeable:true`, `mergeStateStatus:CLEAN`), main CI green on every
+  merge (runs 28721198678, 28721654829, 28722012849). Issue #456 auto-closed via PR #509's `Closes
+  #456` (confirmed `gh issue view 456` state=CLOSED). 415 lib tests pass on the final state (57 in
+  `capture::tests`).
+- NOT done by this worker: live deployment to cam5 + visual verification, and removal of the
+  interim systemd drop-in workaround (`/etc/systemd/system/camera-box.service.d/capture-controls.conf`
+  -> `CAMERA_BOX_CAPTURE_CONTROLS=contrast=128,saturation=128`) on cam5 itself. cam5 (10.77.9.65) is
+  reachable on :22 but this worker has no `DEVICE_ROOT_PW` credential and key-based SSH is refused
+  (`Permission denied (publickey,password)`) -- per this repo's own "drive rig steps in supervisor"
+  convention (physical rig work belongs to the supervisor/user, not a death-prone worker), left for
+  the supervisor/user to deploy + confirm cam5 is no longer dark, then remove the workaround.
