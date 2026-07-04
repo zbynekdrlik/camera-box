@@ -13,10 +13,11 @@ The decision (frame-deadline budget) lives ONLY in the Rust binary
 (`render_budget::classify`) — this front just measures and pipes, so there is a
 single source of truth for the threshold.
 
-Usage (both boxes in one call — Topology v2, #459: strih is now cut-to-stream
-only at 30fps, the 60fps IMAG role moved to imag-nb):
+Usage (all three boxes in one call — Topology v2, #459/#462: strih is now
+cut-to-stream only at 30fps, the 60fps IMAG role moved to the new imag-nb box):
   python3 scripts/render-budget-gate.py \
-    --box strih=10.77.9.202:30 --box stream=10.77.9.204:30 --window-s 6
+    --box strih=10.77.9.202:30 --box stream=10.77.9.204:30 \
+    --box imag=10.77.9.182:60 --window-s 6
 
   `--box LABEL=HOST[:TARGET_FPS]` (repeatable). TARGET_FPS defaults 60.
 

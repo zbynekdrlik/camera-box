@@ -597,6 +597,101 @@ fn burn_targets_cover_both_boxes() {
     );
 }
 
+/// #462 (EPIC #466 Topology v2): `obs_burn_targets` must ALSO cover imag-nb — the third box the
+/// #252 design comment anticipated ("a third box ... can never green-light a set the cleanup does
+/// not clear"). This is the SAME array the [4b/8]-equivalent pre-record gate and the #246 cleanup
+/// burn-clear loop in recording-e2e.sh iterate (see tests/harness_imag_topology.rs for that side).
+#[test]
+fn burn_targets_cover_imag_too() {
+    let targets = run_sourced("obs_burn_targets");
+    assert!(
+        targets.contains("10.77.9.182") && targets.contains("imag"),
+        "#462: obs_burn_targets must include imag-nb. got=\n{targets}"
+    );
+}
+
+/// #462: imag-nb's program-feeding NDI source (the burn target) is a named, overridable constant
+/// — mirroring STRIH_PROG_SOURCE/STREAM_PROG_SOURCE exactly. Default 'NDI CAM1' (the Phase-1 1:1
+/// mapping pins cam1, the SOURCE camera, to 'NDI CAM1' on imag).
+#[test]
+fn imag_prog_source_constant_defaults_to_ndi_cam1() {
+    let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    assert!(
+        s.contains("IMAG_IP=\"${IMAG_IP:-10.77.9.182}\""),
+        "#462: rig-mode.sh must define IMAG_IP (default 10.77.9.182)."
+    );
+    assert!(
+        s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
+        "#462: rig-mode.sh must define IMAG_PROG_SOURCE (default 'NDI CAM1' — cam1's 1:1-mapped \
+         imag input, Phase 1 #458)."
+    );
+    assert!(
+        s.contains("IMAG_PROG_SCENE=\"${IMAG_PROG_SCENE:-Cam 1}\""),
+        "#462: rig-mode.sh must define IMAG_PROG_SCENE (default 'Cam 1' — the scene showing cam1)."
+    );
+}
+
+/// #462: TEST mode must route imag-nb's PROGRAM to the cam1 scene (`set_imag_test_program`) — the
+/// camera that also proves cam→imag zero-loss — via the SAME `obs_phase2.py switch` action the
+/// all-cambox sweep uses (SetCurrentProgramScene + its non-black self-check). Must be CALLED from
+/// do_test (not just defined).
+#[test]
+fn test_mode_routes_imag_program_to_cam1_scene() {
+    let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    assert!(
+        s.contains("set_imag_test_program"),
+        "#462: rig-mode.sh must define + call the set_imag_test_program helper."
+    );
+    let do_test = s
+        .split("do_test()")
+        .nth(1)
+        .unwrap_or("")
+        .split("do_event()")
+        .next()
+        .unwrap_or("");
+    assert!(
+        do_test.contains("set_imag_test_program"),
+        "#462: do_test must call set_imag_test_program. Got:\n{do_test}"
+    );
+
+    // The helper itself must use the `switch` action (not `setup`/`prod-scene` — those are the
+    // heavier strih/stream-specific mechanisms) against imag's IP + program scene. Static check
+    // only (like enforce_strih_ndi_mapping's sibling tests in harness_rig_ndi_mapping.rs) — this
+    // function makes a LIVE OBS-websocket call, so it must never be EXECUTED by a unit test.
+    let def = s
+        .find("set_imag_test_program()")
+        .expect("set_imag_test_program must be defined");
+    let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
+    let body = &s[def..body_end];
+    assert!(
+        body.contains(
+            "obs_phase2.py\" switch --host \"$IMAG_IP\" --program-scene \"$IMAG_PROG_SCENE\""
+        ),
+        "#462: set_imag_test_program must invoke `obs_phase2.py switch --host $IMAG_IP \
+         --program-scene $IMAG_PROG_SCENE`. Got:\n{body}"
+    );
+}
+
+/// #462: EVENT mode must NOT force any imag scene switch (mirrors strih/stream — rig-mode never
+/// scene-switches those in EVENT mode either); only the burn toggle (already covered by
+/// `burn_targets_cover_imag_too` + `toggle_burn`) turns imag's measurement burn OFF.
+#[test]
+fn event_mode_does_not_scene_switch_imag() {
+    let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    let do_event = s
+        .split("do_event()")
+        .nth(1)
+        .unwrap_or("")
+        .split("\nmain()")
+        .next()
+        .unwrap_or("");
+    assert!(
+        !do_event.contains("set_imag_test_program"),
+        "#462: do_event must NOT call set_imag_test_program (EVENT mode never scene-switches, \
+         mirroring strih/stream). Got:\n{do_event}"
+    );
+}
+
 #[test]
 fn burn_action_maps_mode_to_add_or_remove() {
     let (code, out) = run_sourced_status("burn_action_for_mode test");

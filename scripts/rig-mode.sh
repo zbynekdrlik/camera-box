@@ -375,12 +375,19 @@ STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"      # strih program input (#246 burn target)
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (#246 burn target)
+# #462 (EPIC #466 Topology v2): imag-nb — the new 60fps low-latency IMAG cutter. Its scene->camera
+# mapping is the Phase 1 1:1 pin (setup-imag.sh, #458): 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)'
+# 1:1, so cam1 (the SOURCE camera that films cam2's monitor) rides 'NDI CAM1' / scene 'Cam 1'.
+IMAG_IP="${IMAG_IP:-10.77.9.182}"
+IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"        # imag input showing cam1 (#462 burn target)
+IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-Cam 1}"             # imag scene showing cam1 — routed to PROGRAM in TEST mode
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
 
 # obs_burn_targets -> the host=ip=source burn triples, one per line "ip|source|box".
 obs_burn_targets() {
   printf '%s|%s|%s\n' "$STRIH_IP" "$STRIH_PROG_SOURCE" strih
   printf '%s|%s|%s\n' "$STREAM_IP" "$STREAM_PROG_SOURCE" stream
+  printf '%s|%s|%s\n' "$IMAG_IP" "$IMAG_PROG_SOURCE" imag
 }
 
 # burn_action_for_mode MODE -> the obs_burn_filter.py action (test=add/on, event=remove/off).
@@ -420,6 +427,22 @@ enforce_strih_ndi_mapping() {
   echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (4 distinct) over WebSocket:"
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
+  return $rc
+}
+
+# set_imag_test_program -> route imag-nb's PROGRAM to the scene showing cam1 (#462, EPIC #466) —
+# the same camera whose feed also proves cam→imag zero-loss (cam1 films cam2's dual-QR monitor).
+# TEST-mode ONLY (EVENT mode does not touch imag's scene, mirroring strih/stream — rig-mode never
+# scene-switches those either). Reuses obs_phase2.py's `switch` action (SetCurrentProgramScene +
+# its shared non-black self-check, #163/#111) — the SAME lightweight mechanism the all-cambox
+# sweep uses — so a dead/misconfigured/not-yet-seeded imag scene fails LOUD here (never a silent
+# black recording later in recording-e2e.sh).
+set_imag_test_program() {
+  local here rc=0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows cam1 via '${IMAG_PROG_SOURCE}')"
+  python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
+    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?
   return $rc
 }
 
@@ -495,6 +518,9 @@ do_test() {
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct):"
   enforce_strih_ndi_mapping
   echo
+  echo "[obs] #462 ensure imag-nb's PROGRAM shows cam1 (EPIC #466 Topology v2 — cam→imag proof):"
+  set_imag_test_program
+  echo
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
@@ -502,7 +528,8 @@ do_test() {
   echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${AUDIO_MARKER_DEVICE} (#420: cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
   echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
-  echo "ACHIEVED (obs side): genlock_burn=true on strih + stream program inputs (WebSocket, no relaunch)."
+  echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
+  echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (cam1, #462)."
   echo "NEXT: confirm the PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> TEST mode."
   echo "RESULT: TEST mode — cam side PASS, burns ON."
 }
@@ -527,7 +554,7 @@ do_event() {
   print_genlock_relaunch_note event
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + --display interkom restored."
-  echo "ACHIEVED (obs side): genlock_burn=false on strih + stream program inputs (WebSocket, no relaunch)."
+  echo "ACHIEVED (obs side): genlock_burn=false on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "NEXT: confirm the prod scene per the obs-ops skill -> rig in clean EVENT mode (no burn on broadcast)."
   echo "RESULT: EVENT mode — cam side PASS, burns OFF."
 }

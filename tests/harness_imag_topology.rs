@@ -1,0 +1,320 @@
+//! #462 (EPIC #466 Topology v2, Phase 4 script integration) — imag-nb as a THIRD recorded+decoded
+//! node in `scripts/recording-e2e.sh` + `scripts/render-budget-gate.py`'s docstring example.
+//!
+//! The recording-verdict SIDE (`--imag`, the 6th NodeSpec, `imag_capture_fps`, the optical-AND-burn
+//! gate) was already wired by #461/#463 — these guards lock the SCRIPT wiring that was genuinely
+//! missing: the [0/8] reachability preflight, the [4d/8] render-budget-gate call site, the
+//! [5/8]..[8/8] record→decode→merge pipeline, and the shared BURN_TARGETS safety array. Pure static
+//! (`fs::read_to_string` + substring/ordering asserts) — mirrors harness_recording_e2e_paths.rs and
+//! harness_render_budget_gate.rs's style; no OBS, no ssh, no live rig.
+
+use std::fs;
+use std::process::Command;
+
+fn read(p: &str) -> String {
+    let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// [0/8] reachability preflight + host lists (recording-e2e.sh:144, per the issue text).
+// ---------------------------------------------------------------------------
+
+/// imag-nb must be a named topology constant (10.77.9.182) and must appear in the [0/8]
+/// reachability preflight's host list alongside cam1/cam2/strih/stream.
+#[test]
+fn recording_e2e_defines_imag_ip_and_checks_it_reachable() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("IMAG_IP=\"${IMAG_IP:-10.77.9.182}\""),
+        "#462: recording-e2e.sh must define IMAG_IP (default 10.77.9.182, the Linux OBS target)."
+    );
+    let preflight = s
+        .find("reachability preflight")
+        .expect("#462: recording-e2e.sh must have a [0/8] reachability preflight banner");
+    // Scope to the preflight `for` loop line itself.
+    let loop_end = preflight
+        + s[preflight..]
+            .find("done")
+            .expect("preflight loop must close with `done`");
+    let region = &s[preflight..loop_end];
+    assert!(
+        region.contains("imag=$IMAG_IP"),
+        "#462: the [0/8] reachability preflight must include imag alongside cam1/cam2/strih/stream. \
+         Got:\n{region}"
+    );
+}
+
+/// #462: imag-nb's OWN capture rate (60fps, its own low-latency IMAG box — never strih's/stream's)
+/// must be a named, env-overridable constant feeding `--imag-capture-fps`, mirroring
+/// STRIH_CAPTURE_FPS/STREAM_CAPTURE_FPS exactly.
+#[test]
+fn recording_e2e_defines_imag_capture_fps_default_60() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("IMAG_CAPTURE_FPS=\"${IMAG_CAPTURE_FPS:-60}\""),
+        "#462/#461: IMAG_CAPTURE_FPS must default to 60 (imag-nb's own low-latency rate)."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [4d/8] render-budget-gate call site — `--box imag=10.77.9.182:60` (issue text point 3).
+// ---------------------------------------------------------------------------
+
+/// The render-budget-gate call MUST include imag at its 60fps target, alongside strih/stream at
+/// 30fps — the exact `--box imag=…:60` the issue asks for. The generic Python tool needs NO logic
+/// change (per the issue text) — only this call site.
+#[test]
+fn render_budget_gate_call_site_includes_imag_at_60fps() {
+    let s = read("scripts/recording-e2e.sh");
+    let call = s
+        .find("render-budget-gate.py")
+        .expect("recording-e2e.sh must invoke render-budget-gate.py");
+    // Scope to the actual invocation block (a handful of lines after the binary name).
+    let window = &s[call..(call + 500).min(s.len())];
+    assert!(
+        window.contains("--box \"strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-30}\""),
+        "render-budget-gate call must keep the strih=…:30 box. Got:\n{window}"
+    );
+    assert!(
+        window.contains("--box \"stream=${STREAM}:${RENDER_TARGET_FPS_STREAM:-30}\""),
+        "render-budget-gate call must keep the stream=…:30 box. Got:\n{window}"
+    );
+    assert!(
+        window.contains("--box \"imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}\""),
+        "#462: render-budget-gate call must add imag=…:60 (imag-nb's own low-latency rate). \
+         Got:\n{window}"
+    );
+}
+
+/// The render-budget-gate.py docstring's usage example must show all THREE boxes (imag at 60fps),
+/// not just strih+stream — the doc must not silently drift from what the harness actually calls.
+#[test]
+fn render_budget_gate_docstring_example_includes_imag() {
+    let s = read("scripts/render-budget-gate.py");
+    let doc_end = s.find("\"\"\"\nimport").unwrap_or(s.len().min(2000));
+    let doc = &s[..doc_end];
+    assert!(
+        doc.contains("--box imag=10.77.9.182:60"),
+        "#462: render-budget-gate.py's docstring usage example must include the imag box \
+         (--box imag=10.77.9.182:60). Got:\n{doc}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [5/8]..[7/8] — StartRecord / StopRecord on imag alongside strih + stream.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recording_e2e_starts_and_stops_recording_on_imag() {
+    let s = read("scripts/recording-e2e.sh");
+    let start = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must StartRecord on strih+stream");
+    let stop = s
+        .find("StopRecord + download")
+        .expect("recording-e2e.sh must have a [7/8] StopRecord step");
+    let start_region = &s[start..stop];
+    assert!(
+        start_region.contains("record --host \"$IMAG_IP\" --action start"),
+        "#462: [5/8] must StartRecord on imag alongside strih+stream. Got:\n{start_region}"
+    );
+    let stop_region_end = s[stop..].find("[8/8]").map(|i| stop + i).unwrap_or(s.len());
+    let stop_region = &s[stop..stop_region_end];
+    assert!(
+        stop_region.contains("IMAG_HOST_PATH=$(python3 \"$HERE/obs_phase2.py\" record --host \"$IMAG_IP\" --action stop)"),
+        "#462: [7/8] must StopRecord on imag and capture its host path (IMAG_HOST_PATH). Got:\n{stop_region}"
+    );
+}
+
+/// cleanup() must ALSO stop any leftover imag recording (the same safety net strih/stream get) so
+/// an aborted mid-flight run never leaves an un-finalized recording on imag.
+#[test]
+fn recording_e2e_cleanup_stops_imag_recording_too() {
+    let s = read("scripts/recording-e2e.sh");
+    let cleanup = s
+        .find("cleanup()")
+        .expect("recording-e2e.sh must define cleanup()");
+    let end = s[cleanup..]
+        .find("\ntrap ")
+        .map(|i| cleanup + i)
+        .unwrap_or(s.len());
+    let body = &s[cleanup..end];
+    assert!(
+        body.contains("record --host \"$IMAG_IP\" --action stop"),
+        "#462: cleanup() must StopRecord on imag as a safety net (mirrors strih+stream). Got:\n{body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #462: imag joins the shared BURN_TARGETS array (#252's "a third box" — anticipated by the
+// existing design comment) — the [4b/8] pre-record burn-ON gate and the #246 cleanup() burn-clear
+// loop both iterate it, so imag's 911003 burn can never be left ON after a run/abort.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn burn_targets_array_includes_imag() {
+    let s = read("scripts/recording-e2e.sh");
+    let def = s
+        .find("BURN_TARGETS=(")
+        .expect("recording-e2e.sh must define BURN_TARGETS");
+    let decl_end = def + s[def..].find(')').expect("BURN_TARGETS=( must close");
+    let decl = &s[def..decl_end];
+    assert!(
+        decl.contains("$STRIH=") && decl.contains("$STREAM=") && decl.contains("$IMAG_IP="),
+        "#462: BURN_TARGETS must cover strih, stream, AND imag (the third box the #252 design \
+         comment anticipated). Got: {decl}"
+    );
+    // Still defined exactly once, and still BEFORE the cleanup trap (the #252 set -u safety).
+    assert_eq!(
+        s.matches("BURN_TARGETS=(").count(),
+        1,
+        "BURN_TARGETS must remain defined exactly once."
+    );
+    let trap = s
+        .find("trap cleanup")
+        .expect("recording-e2e.sh must install the cleanup trap");
+    assert!(
+        def < trap,
+        "#462: BURN_TARGETS (now including imag) must still be defined BEFORE `trap cleanup`."
+    );
+}
+
+/// The imag program-feeding NDI source used as the burn target must be a named, overridable
+/// constant (the #399-style 1:1 Phase-1 mapping: 'NDI CAM1' shows cam1 on imag).
+#[test]
+fn imag_prog_source_constant_is_defined() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
+        "#462: IMAG_PROG_SOURCE must default to 'NDI CAM1' (cam1's 1:1-mapped imag input)."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [8/8] per-box decode-in-place: imag is extracted DIRECTLY (ssh/scp — no MCP plan needed) and
+// folded into the printed dev1 merge command as a THIRD partial.
+// ---------------------------------------------------------------------------
+
+/// The on-imag helper must exist, be executable, and be invoked from the default per-box path —
+/// UNLIKE the strih/stream planners, its invocation is not merely printed: recording-e2e.sh runs
+/// it directly (imag is a plain-ssh Linux box), so $IMAG_PARTIAL is real by the time the merge
+/// command is printed.
+#[test]
+fn recording_e2e_extracts_the_imag_partial_via_the_on_imag_helper() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("\"$HERE/recording-verdict-on-imag.sh\""),
+        "#462: the default per-box path must invoke scripts/recording-verdict-on-imag.sh."
+    );
+    assert!(
+        s.contains("--extract-partial imag --imag \"$IMAG_HOST_PATH\""),
+        "#462: the on-imag invocation must extract-partial imag against its own recording."
+    );
+    assert!(
+        s.contains("--imag-capture-fps \"$IMAG_CAPTURE_FPS\""),
+        "#462: the on-imag extract must pass --imag-capture-fps (the #373 span-floor rate)."
+    );
+}
+
+/// The final MERGE_ARGS (the command the win-* MCP holder runs after pulling strih+stream
+/// partials) must fold in `--merge-partials imag=$IMAG_PARTIAL` — but only WHEN the imag extract
+/// actually produced a partial (an `if [ -f ]` guard, #178 resilience: a failed/skipped imag leg
+/// must never abort the merge of the other two nodes).
+#[test]
+fn merge_args_includes_imag_partial_conditionally() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("MERGE_ARGS+=(--merge-partials \"imag=$IMAG_PARTIAL\")"),
+        "#462: the merge command must fold in the imag partial when present."
+    );
+    // It must be `if [ -f "$IMAG_PARTIAL" ]` — never an unguarded append (which would print a
+    // dangling --merge-partials imag=<nonexistent> when the imag leg failed/was skipped).
+    let fold = s
+        .find("MERGE_ARGS+=(--merge-partials \"imag=$IMAG_PARTIAL\")")
+        .unwrap();
+    let head = &s[..fold];
+    let guard = head
+        .rfind("if [ -f \"$IMAG_PARTIAL\" ]")
+        .expect("#462: the imag merge-arg fold must be guarded by `if [ -f \"$IMAG_PARTIAL\" ]`");
+    // No unrelated `fi` between the guard and the fold (i.e. it's the SAME if-block).
+    let between = &s[guard..fold];
+    assert!(
+        !between.contains("\nfi\n"),
+        "#462: the guard and the fold must be in the SAME if-block. Got:\n{between}"
+    );
+}
+
+/// `--imag-capture-fps` must ALSO be threaded into the dev1 merge's own arguments (the #373
+/// duration-floor rate applies at merge time too, not just at per-box extract time).
+#[test]
+fn merge_args_threads_imag_capture_fps() {
+    let s = read("scripts/recording-e2e.sh");
+    let merge_args_def = s
+        .find("MERGE_ARGS=(--merge-partials")
+        .expect("recording-e2e.sh must build MERGE_ARGS");
+    let merge_args_end = merge_args_def
+        + s[merge_args_def..]
+            .find(")\n")
+            .expect("MERGE_ARGS=( ... ) must close");
+    let region = &s[merge_args_def..merge_args_end];
+    assert!(
+        region.contains("--imag-capture-fps \"$IMAG_CAPTURE_FPS\""),
+        "#462: MERGE_ARGS must pass --imag-capture-fps. Got:\n{region}"
+    );
+}
+
+/// #462/#178: the [8/8c] imag extract call MUST be resilient — this region runs under `set -e`
+/// (re-enabled at the top of the VERDICT_ON_STREAM=1 branch), so an UNGUARDED failing invocation
+/// of recording-verdict-on-imag.sh (imag unreachable, a stale binary, a transient ssh hiccup)
+/// would set -e-abort the WHOLE script, including the strih/stream plan the operator still needs
+/// to run below. Locks the exact `#178`-style resilient pattern this region's own fix uses,
+/// mirroring `stoprecord_to_verdict_reaches_verdict_despite_a_failing_step`'s isolated-snippet
+/// behavioral proof for the StopRecord→verdict region.
+#[test]
+fn imag_extract_failure_never_aborts_the_rest_of_the_per_box_plan() {
+    let s = read("scripts/recording-e2e.sh");
+    // Static: the invocation is followed by `|| echo "WARNING...` (or an equivalent guard) on the
+    // SAME statement, not a bare command that a `set -e` fires on.
+    let call = s
+        .find("\"$HERE/recording-verdict-on-imag.sh\"")
+        .expect("#462: recording-e2e.sh must invoke recording-verdict-on-imag.sh");
+    let window = &s[call..(call + 900).min(s.len())];
+    assert!(
+        window.contains("|| echo \"WARNING"),
+        "#462/#178: the recording-verdict-on-imag.sh invocation must be guarded with `|| echo \
+         \"WARNING...\"` (or equivalent) so a failure degrades gracefully instead of set -e-aborting \
+         the whole per-box plan. Got:\n{window}"
+    );
+
+    // Behavioral: the EXACT resilient pattern the fix uses (`cmd && echo ... || echo WARNING`),
+    // isolated in a bash snippet under `set -euo pipefail`, must reach a marker AFTER a failing
+    // command instead of aborting — proving the guard actually works, not just that its text
+    // happens to be present.
+    let script = r#"
+set -euo pipefail
+REACHED=no
+false \
+&& echo "would only print on success" \
+|| echo "WARNING: simulated imag failure (non-fatal)" >&2
+REACHED=yes
+echo "REACHED_MERGE_STEP reached=${REACHED}"
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run the resilient imag-extract pattern");
+    assert!(
+        out.status.success(),
+        "#462/#178: the resilient `cmd && ok || WARNING` pattern must exit 0 despite the \
+         simulated failure; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("REACHED_MERGE_STEP reached=yes"),
+        "#462/#178: the step AFTER the guarded failing command must still be reached (never \
+         set -e-aborted). stdout={stdout:?}"
+    );
+}
