@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=13
+TOTAL_STEPS=16
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -288,7 +288,138 @@ gs org.gnome.desktop.screensaver lock-enabled false
 gs org.gnome.desktop.screensaver idle-activation-enabled false
 
 # =============================================================================
-step 6 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unattended-upgrade lockdown"
+# =============================================================================
+# Ports setup-device.sh's #295 brick-prevention stack onto imag-nb, run BEFORE the lowlatency
+# kernel (#482) and CPU-isolation (#483) grub.d drops below so both are safe to apply: a kernel
+# that silently gains a new image via unattended-upgrades, or one whose initrd never got generated
+# before grub picked it as the default, is exactly what bricked CAM3/CAM4 (#295). Unlike the cam
+# fleet's appliance policy (setup-device.sh STEP 15 fully disables unattended-upgrades), imag does
+# NOT disable it wholesale — step 13 below deliberately keeps security updates flowing (only their
+# schedule is pinned, #485). So here we pin the KERNEL specifically (apt-mark hold + an
+# Unattended-Upgrade package-blacklist entry) and lock Automatic-Reboot to false, rather than
+# masking the whole service.
+apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 \
+    linux-generic-hwe-24.04 "linux-headers-$(uname -r)" "linux-image-$(uname -r)" \
+    >/dev/null 2>&1 || echo "  WARNING: apt-mark hold of the generic kernel packages failed"
+cat > /etc/apt/apt.conf.d/51imag-kernel-lockdown <<'EOF'
+// #487: the kernel is pinned (apt-mark hold) -- never let unattended-upgrades touch it, and never
+// let it reboot the box unattended. Automatic-Reboot is already Ubuntu's default (false); pinning
+// it here explicitly means a future distro/package default change can never silently flip it.
+Unattended-Upgrade::Package-Blacklist {
+    "linux-image";
+    "linux-headers";
+    "linux-generic";
+    "linux-lowlatency";
+    "lowlatency-kernel";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+# #295: any FUTURE kernel install must always get an initrd. This /etc/kernel/postinst.d hook sorts
+# before grub's own `zz-update-grub` hook, so a missing initrd is regenerated BEFORE grub is
+# updated -- identical mechanism to setup-device.sh STEP 15/16, ported here verbatim.
+mkdir -p /etc/kernel/postinst.d
+cat > /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee << 'EOF'
+#!/bin/sh
+# #295/#487: guarantee every installed kernel has an initrd (a kernel without one bricked
+# CAM3/CAM4 on the fleet -- the same class of failure this hook prevents on imag-nb).
+set -e
+version="$1"
+[ -n "$version" ] || exit 0
+if [ ! -e "/boot/initrd.img-${version}" ]; then
+    update-initramfs -c -k "${version}"
+fi
+EOF
+chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee
+echo "  #487: kernel pinned (apt-mark hold), unattended-upgrades kernel-blacklisted + Automatic-Reboot=false, initrd hook installed"
+
+# safe_grub_regen -- the #295 safe-grub mechanism (side-effecting: root + filesystem, so this
+# does NOT belong in the pure-functions section at the top of this file). GUARANTEES every
+# installed kernel has an initrd BEFORE update-grub runs (a kernel without one bricked CAM3/CAM4,
+# #295), then refuses to trust the regenerated grub.cfg if its default menu entry lacks a kernel
+# image or an initrd -- never a raw ad-hoc grub edit. Reused by BOTH the #482 (lowlatency/
+# preempt=full) and #483 (CPU isolation) grub.d drops below, called ONCE after both are written so
+# update-grub only runs a single time for this pair of changes. Mirrors setup-device.sh STEP 10's
+# initrd-guarantee + post-update-grub validation.
+safe_grub_regen() {
+    for vmlinuz in /boot/vmlinuz-*; do
+        [ -e "$vmlinuz" ] || continue
+        kver="${vmlinuz#/boot/vmlinuz-}"
+        if [ ! -e "/boot/initrd.img-${kver}" ]; then
+            echo -e "  ${YELLOW}#295: kernel ${kver} has no initrd — generating before grub${NC}"
+            update-initramfs -c -k "${kver}"
+        fi
+    done
+    update-grub
+    local grub_cfg="/boot/grub/grub.cfg"
+    if [ -f "$grub_cfg" ]; then
+        local default_entry
+        default_entry="$(awk '/^[[:space:]]*menuentry /{c++} c==1{print} c==2{exit}' "$grub_cfg")"
+        if ! echo "$default_entry" | grep -qE '(vmlinuz|[[:space:]]linux )' \
+            || ! echo "$default_entry" | grep -q 'initrd'; then
+            fail "#295: grub default entry lacks a kernel image or initrd — aborting to avoid a brick"
+        fi
+    fi
+}
+
+# =============================================================================
+step 7 "Low-latency kernel (#482): preempt=full via lowlatency-kernel config — zero downgrade"
+# =============================================================================
+# LIVE-VERIFIED FINDING (#482): there is NO lowlatency kernel IMAGE at the 6.17 line (the newest
+# lowlatency images are 6.8/6.11 -- installing one would be a DOWNGRADE, losing 13th-gen
+# CPU/iGPU/USB-NIC support). But the 6.17 generic kernel already IS PREEMPT_DYNAMIC, so
+# linux-lowlatency-hwe-24.04 on 24.04 is a META package: it keeps the generic kernel image and
+# only pulls in the `lowlatency-kernel` CONFIG package, which drops
+# /etc/default/grub.d/99-lowlatency.cfg = GRUB_CMDLINE_LINUX_DEFAULT="... preempt=full
+# rcu_nocbs=all" -- full preemption on the NEWEST kernel, zero downgrade. This is a plain apt
+# install (not a hand-authored grub.d file), so it needs no idempotent-append logic of its own --
+# `apt-get install` on an already-installed package is already a no-op.
+if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y linux-lowlatency-hwe-24.04 >/dev/null \
+        || fail "linux-lowlatency-hwe-24.04 install failed"
+fi
+[ -f /etc/default/grub.d/99-lowlatency.cfg ] \
+    || fail "#482: lowlatency-kernel config package installed but /etc/default/grub.d/99-lowlatency.cfg is missing"
+grep -q 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg \
+    || fail "#482: 99-lowlatency.cfg does not carry preempt=full — refuse to trust the config package"
+# #487: never a raw ad-hoc grub edit -- hold the newly-installed kernel-config packages too, same
+# as the generic kernel packages held in step 6, so an upgrade can't silently swap this config out.
+apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04 >/dev/null 2>&1 \
+    || echo "  WARNING: apt-mark hold of the lowlatency-kernel config packages failed"
+echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 generic kernel, no downgrade)"
+echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
+# =============================================================================
+# imag's OBS is a ~106-thread ~3-core consumer (6x NDI decode + render + genlock + audio), NOT the
+# cam-box's single lean thread -- isolate the whole P-core BLOCK cpu2-11 (10 threads) for OBS, keep
+# P-core0 (cpu0,1) for GNOME/Xorg + sshd/MCP housekeeping, and park default IRQs there too.
+# nohz_full is scoped to ONLY the one core pair (10,11) that will host the future SCHED_FIFO
+# genlock render-tick thread (#484) -- spreading it across the whole block would remove
+# load-balancing signal (#303). rcu_nocbs=all already comes from 99-lowlatency.cfg above (covers
+# 10,11). irqaffinity= is a BOOT-TIME default (not a runtime /proc/irq write) -- the USB-ethernet
+# NDI IRQ is managed-MSI and rejects runtime affinity changes (#303). HT pairs verified LIVE via
+# thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7, cpu8=8-9,
+# cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
+cat > /etc/default/grub.d/98-imag-isolation.cfg <<'EOF'
+# camera-box #483: reserve the P-core block cpu2-11 for the OBS thread pool (keep P-core0=cpu0,1
+# + the E-cores cpu12-15 for GNOME/sshd/MCP/housekeeping); nohz_full only on cpu10,11 (the future
+# genlock render-tick core, #484). rcu_nocbs=all is already set by 99-lowlatency.cfg (covers 10,11,
+# which nohz_full requires). irqaffinity keeps IRQs off the isolated block.
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15"
+EOF
+# #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
+# grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd. ONE
+# call covers BOTH this drop-in and #482's 99-lowlatency.cfg above (they are only ever picked up
+# by grub-mkconfig, which runs once here).
+safe_grub_regen
+echo "  #483: isolcpus=2-11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15 written + grub regenerated"
+echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 9 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -311,7 +442,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 7 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 10 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -321,7 +452,7 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 8 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 11 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
@@ -532,7 +663,7 @@ else
 fi
 
 # =============================================================================
-step 9 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 12 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -560,7 +691,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 10 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+step 13 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
 # imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
 # masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
@@ -622,7 +753,7 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 11 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 14 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -630,13 +761,18 @@ if [ -n "$APP_DESKTOP" ]; then
     cp -f "$APP_DESKTOP" "$USER_HOME/.config/autostart/obs.desktop"
     cp -f "$APP_DESKTOP" "$USER_HOME/Desktop/obs.desktop"
     chmod +x "$USER_HOME/Desktop/obs.desktop"
+    # #483: pin the AUTOSTART launch to the OBS P-core block -- WITHOUT this, isolcpus (once the
+    # #483 grub change takes effect on the next boot) would STARVE OBS onto cpu0,1,12-15 (the
+    # block reserved for GNOME/housekeeping/E-cores). The Desktop icon (double-click launch) is
+    # deliberately left plain `Exec=obs` -- only the autostart path is pinned (live-verified).
+    sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/.config/autostart/obs.desktop"
     sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
         gio set "$USER_HOME/Desktop/obs.desktop" metadata::trusted true 2>/dev/null || true
 fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 12 "Launch OBS on the desktop session (X11 :0)"
+step 15 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -647,14 +783,20 @@ step 12 "Launch OBS on the desktop session (X11 :0)"
 # (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
 rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
 if ! pgrep -x obs >/dev/null; then
+    # #483: pin this provisioning-time launch to the P-core block too, matching the autostart
+    # entry above -- without taskset here, a provisioning launch (before the isolcpus grub change
+    # is active, i.e. before the first post-provision reboot) still lands unpinned; after reboot,
+    # an un-pinned `obs` would be STARVED onto the tiny cpu0,1,12-15 remainder once isolcpus takes
+    # effect. `nice -n -5` was deliberately NOT added -- the desktop user lacks CAP_SYS_NICE
+    # (live-confirmed, #483 comment).
     sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-        nohup obs >/tmp/obs-launch.log 2>&1 &
+        nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
     sleep 8
 fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 13 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 16 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi

@@ -675,8 +675,8 @@ fn setup_imag_clears_obs_crash_sentinel_before_launch() {
         .find("rm -rf \"${OBS_CFG}/.sentinel\"")
         .expect("sentinel-clear line must exist");
     let obs_launch = body
-        .find("nohup obs >/tmp/obs-launch.log")
-        .expect("{SETUP} must launch obs via nohup");
+        .find("nohup taskset -c 2-11 obs >/tmp/obs-launch.log")
+        .expect("{SETUP} must launch obs via nohup (pinned to the #483 P-core block)");
     assert!(
         sentinel_clear < obs_launch,
         "{SETUP}: the crash-sentinel clear must happen BEFORE the obs launch line — a stale \
@@ -1015,5 +1015,382 @@ fn setup_imag_network_tuning_step_lands_between_step1_and_governor_step() {
         step1 < network_step && network_step < governor_step,
         "{SETUP}: the #486 network-performance step must land strictly between step 1 (static \
          IP / NIC discovery) and the governor step — per the issue's explicit placement"
+    );
+}
+
+// ============================================================================================
+// #482/#483/#487 — codify the imag-nb kernel/isolation/boot-safety hardening that was already
+// applied + LIVE-VERIFIED on imag-nb (2026-07-04): preempt=full via linux-lowlatency-hwe-24.04
+// (zero kernel downgrade), a P-core-block CPU isolation for OBS (isolcpus/nohz_full/irqaffinity)
+// + an OBS taskset pin on both launch paths, and the #295 boot-safety net (kernel apt-hold +
+// initrd-guarantee hook + unattended-upgrade kernel lockdown) that underpins both grub changes.
+// This is PURE codification — the box itself is already hardened; these tests pin that a
+// from-scratch re-provision reproduces the exact same live state.
+// ============================================================================================
+
+/// The step order must be: #487 (boot safety net) BEFORE #482 (lowlatency kernel) BEFORE #483
+/// (CPU isolation) — the boot-safety net's kernel-hold + initrd-guarantee underpins both grub
+/// changes that follow it, so it must land first.
+#[test]
+fn setup_imag_boot_safety_net_precedes_lowlatency_and_isolation_steps() {
+    let body = read(SETUP);
+    let safety_step = body
+        .find("Boot safety net (#487)")
+        .expect("the #487 boot-safety-net step must exist");
+    let lowlatency_step = body
+        .find("Low-latency kernel (#482)")
+        .expect("the #482 lowlatency-kernel step must exist");
+    let isolation_step = body
+        .find("CPU isolation (#483)")
+        .expect("the #483 CPU-isolation step must exist");
+    assert!(
+        safety_step < lowlatency_step && lowlatency_step < isolation_step,
+        "{SETUP}: order must be #487 (boot safety net) -> #482 (lowlatency kernel) -> #483 (CPU \
+         isolation) — the boot-safety net's kernel-hold + initrd-guarantee underpins the grub \
+         changes both later steps make"
+    );
+}
+
+/// #487: the generic kernel packages must be pinned (apt-mark hold) so an upgrade can never
+/// silently swap the boot kernel — the same class of failure that bricked CAM3/CAM4 (#295).
+#[test]
+fn setup_imag_holds_generic_kernel_packages_487() {
+    let body = read(SETUP);
+    const HOLD_CMD: &str =
+        "apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04";
+    assert!(
+        body.contains(HOLD_CMD),
+        "{SETUP} must run `{HOLD_CMD}` (imag runs the HWE kernel line, not the plain -generic \
+         names the cam fleet's setup-device.sh uses) so a surprise kernel can never be installed \
+         (#487, extends #295)"
+    );
+}
+
+/// #487: unattended-upgrades must NOT be masked/disabled wholesale on imag — #485 already made
+/// the deliberate choice to keep security updates flowing (only their schedule pinned). #487
+/// instead blacklists the kernel packages specifically and pins Automatic-Reboot=false.
+#[test]
+fn setup_imag_kernel_lockdown_487_does_not_disable_unattended_upgrades_wholesale() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/apt/apt.conf.d/51imag-kernel-lockdown"),
+        "{SETUP} must write /etc/apt/apt.conf.d/51imag-kernel-lockdown (#487)"
+    );
+    for needle in [
+        "Unattended-Upgrade::Package-Blacklist",
+        "\"linux-image\";",
+        "\"linux-headers\";",
+        "\"linux-generic\";",
+        "\"linux-lowlatency\";",
+        "\"lowlatency-kernel\";",
+        "Unattended-Upgrade::Automatic-Reboot \"false\";",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} #487 kernel-lockdown drop-in must contain `{needle}`"
+        );
+    }
+    assert!(
+        !body.contains("mask unattended-upgrades")
+            && !body.contains("disable --now unattended-upgrades"),
+        "{SETUP}: #487 must NOT mask/disable unattended-upgrades wholesale on imag — #485 already \
+         made the deliberate choice to keep security updates flowing on this box (only the \
+         SCHEDULE is pinned); #487 blacklists just the kernel packages instead"
+    );
+}
+
+/// #487/#295: the initrd-guarantee postinst hook must be installed so any FUTURE kernel install
+/// (even one that slips past the apt-mark hold) always gets an initrd before grub can default to
+/// it — the exact mechanism that would have prevented CAM3/CAM4's brick.
+#[test]
+fn setup_imag_installs_initrd_guarantee_postinst_hook_487() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/kernel/postinst.d/zz-camera-box-initrd-guarantee"),
+        "{SETUP} must install the /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee hook (#487, \
+         ported verbatim from setup-device.sh's #295 fix)"
+    );
+    assert!(
+        body.contains("chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee"),
+        "{SETUP} must make the initrd-guarantee hook executable"
+    );
+}
+
+/// #487: the safe-grub mechanism must be a REUSABLE helper function (never a raw ad-hoc grub
+/// edit) that (a) guarantees every installed kernel has an initrd before update-grub runs, and
+/// (b) refuses to trust the regenerated grub.cfg if the default entry lacks a kernel image or an
+/// initrd. This is the SAME contract as setup-device.sh's inline STEP 10, factored into a
+/// function so it is reused by both #482 and #483 below instead of duplicated.
+#[test]
+fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
+    let body = read(SETUP);
+    let func_start = body
+        .find("safe_grub_regen() {")
+        .expect("{SETUP} must define a safe_grub_regen() helper function (#487)");
+    let func_end = body[func_start..]
+        .find("\n}\n")
+        .map(|off| func_start + off)
+        .expect("safe_grub_regen function body must close with a bare `}` line");
+    let func_body = &body[func_start..func_end];
+    assert!(
+        func_body.contains("/boot/vmlinuz-*") && func_body.contains("update-initramfs -c -k"),
+        "safe_grub_regen must guarantee every installed kernel has an initrd before update-grub \
+         (#295/#487)"
+    );
+    assert!(
+        func_body.contains("update-grub"),
+        "safe_grub_regen must actually call update-grub"
+    );
+    assert!(
+        func_body.contains("menuentry ") && func_body.contains("grub.cfg"),
+        "safe_grub_regen must read the generated grub.cfg and extract its default menuentry"
+    );
+    let validates_initrd = func_body
+        .lines()
+        .any(|l| l.contains("grep") && l.contains("initrd"));
+    assert!(
+        validates_initrd,
+        "safe_grub_regen must grep the extracted default entry for an initrd line and fail loud \
+         if absent — without it grub could still default-boot an initrd-less kernel (#295)"
+    );
+    assert!(
+        func_body.contains("fail \"#295:"),
+        "safe_grub_regen must fail loud (via the script's own fail()) when the default entry is \
+         unsafe, not just warn"
+    );
+}
+
+/// #482: imag must install `linux-lowlatency-hwe-24.04` (the CONFIG package that drops
+/// preempt=full onto the EXISTING 6.17 generic kernel) — never a real lowlatency kernel IMAGE,
+/// which at the 6.17 line would be a DOWNGRADE (live-verified finding, #482 comment).
+#[test]
+fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("apt-get install -y linux-lowlatency-hwe-24.04"),
+        "{SETUP} must install linux-lowlatency-hwe-24.04 (#482) — the meta/config package that \
+         pulls in `lowlatency-kernel` without swapping the kernel image"
+    );
+    assert!(
+        body.contains("dpkg -s lowlatency-kernel"),
+        "{SETUP} must check for the `lowlatency-kernel` config package (idempotent guard against \
+         re-running apt-get on every re-provision)"
+    );
+    // No `apt-get install` line may target a BARE lowlatency kernel IMAGE package (e.g.
+    // `linux-image-lowlatency` or a bare `linux-lowlatency` metapackage without the `-hwe-24.04`
+    // config-package suffix) — that would be the live-verified DOWNGRADE (newest lowlatency
+    // images are 6.8/6.11 vs the 6.17 generic kernel already running). Scoped to install COMMAND
+    // lines only, so this does not false-trip on the unrelated `"linux-lowlatency";`
+    // Unattended-Upgrade::Package-Blacklist entry the #487 step also writes.
+    let bad_install = body.lines().any(|l| {
+        let t = l.trim_start();
+        t.contains("apt-get install")
+            && (t.contains("linux-image-lowlatency")
+                || t.contains(" linux-lowlatency ")
+                || t.contains(" linux-lowlatency\""))
+            && !t.contains("linux-lowlatency-hwe-24.04")
+    });
+    assert!(
+        !bad_install,
+        "{SETUP} must NEVER `apt-get install` a bare lowlatency KERNEL IMAGE package — at the \
+         6.17 line the newest lowlatency images are 6.8/6.11, a DOWNGRADE that loses 13th-gen \
+         CPU/iGPU/USB-NIC support (live-verified finding, #482)"
+    );
+}
+
+/// #482: the script must VERIFY (post-install, without rebooting) that the lowlatency-kernel
+/// config package actually dropped a grub.d file carrying preempt=full — never just trust that
+/// the apt install succeeded silently.
+#[test]
+fn setup_imag_verifies_preempt_full_present_after_lowlatency_install_482() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("[ -f /etc/default/grub.d/99-lowlatency.cfg ]"),
+        "{SETUP} must verify /etc/default/grub.d/99-lowlatency.cfg exists after installing the \
+         lowlatency-kernel config package (#482)"
+    );
+    assert!(
+        body.contains("grep -q 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg"),
+        "{SETUP} must grep 99-lowlatency.cfg for `preempt=full` and fail loud if absent — refuse \
+         to trust the config package silently (#482)"
+    );
+    assert!(
+        body.contains("takes effect on the NEXT boot"),
+        "{SETUP} must note that preempt=full only takes effect on the NEXT boot — this \
+         provisioning script does not reboot the box itself (#482)"
+    );
+}
+
+/// #482/#487: the newly-installed lowlatency-kernel config packages must ALSO be held (apt-mark
+/// hold), same discipline as the pre-existing generic kernel packages — an unattended upgrade
+/// must never be able to silently swap this config out from under the deployed preempt=full.
+#[test]
+fn setup_imag_holds_lowlatency_config_packages_after_install_482() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04"),
+        "{SETUP} must `apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04` right after \
+         installing them (#482/#487) — otherwise an unattended upgrade could silently revert the \
+         preempt=full config"
+    );
+}
+
+/// #483: the CPU-isolation grub.d drop-in must carry the EXACT live-verified cmdline — the P-core
+/// block cpu2-11 isolated for OBS, nohz_full scoped ONLY to the future genlock render-tick pair
+/// (10,11 — not the whole block, per #303's load-balancing-signal caveat), and IRQs parked off
+/// the isolated block.
+#[test]
+fn setup_imag_writes_isolation_grub_dropin_with_exact_cmdline_483() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/default/grub.d/98-imag-isolation.cfg"),
+        "{SETUP} must write /etc/default/grub.d/98-imag-isolation.cfg (#483)"
+    );
+    assert!(
+        body.contains(
+            r#"GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15""#
+        ),
+        "{SETUP} 98-imag-isolation.cfg must carry the EXACT live-verified cmdline: \
+         isolcpus=2-11 (whole P-core block for OBS), nohz_full=10,11 ONLY (the future genlock \
+         render-tick core pair, not the whole block — #303), irqaffinity=0,1,12,13,14,15 (#483)"
+    );
+    assert!(
+        !body.contains("rcu_nocbs=10,11") && !body.contains("rcu_nocbs=2,3,4,5,6,7,8,9,10,11"),
+        "{SETUP}: 98-imag-isolation.cfg must NOT duplicate rcu_nocbs — #482's 99-lowlatency.cfg \
+         already sets rcu_nocbs=all (which covers 10,11), reconciled per the #482 LIVE-DONE \
+         comment"
+    );
+}
+
+/// #483: the isolation drop-in write must be followed by a CALL to safe_grub_regen (not merely
+/// its definition) so grub.cfg is actually regenerated with the initrd-guarantee + validation —
+/// never a raw `update-grub` bypassing the #295 safety net.
+#[test]
+fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
+    let body = read(SETUP);
+    let isolation_write = body
+        .find("/etc/default/grub.d/98-imag-isolation.cfg")
+        .expect("the isolation grub.d write must exist");
+    // The LAST occurrence of "safe_grub_regen" in the file must be a bare CALL (not the `() {`
+    // definition) — i.e. step 8 actually invokes the helper after writing its own drop-in.
+    let last_mention = body
+        .rfind("safe_grub_regen")
+        .expect("safe_grub_regen must be mentioned (defined + called)");
+    let trailing = &body[last_mention..];
+    assert!(
+        trailing.starts_with("safe_grub_regen\n"),
+        "{SETUP}: the LAST occurrence of `safe_grub_regen` must be a bare call on its own line \
+         (step 8 invoking the helper), not the `() {{` definition — a defined-but-never-called \
+         helper would leave 98-imag-isolation.cfg (and 99-lowlatency.cfg) never picked up by \
+         grub-mkconfig"
+    );
+    assert!(
+        isolation_write < last_mention,
+        "{SETUP}: safe_grub_regen must be CALLED after the 98-imag-isolation.cfg drop-in is \
+         written (#483)"
+    );
+    // Never a raw ad-hoc `update-grub` call OUTSIDE the safe_grub_regen helper itself — the whole
+    // point of #487/#295 is that grub is NEVER regenerated without the initrd-guarantee first.
+    let raw_update_grub_calls = body
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t == "update-grub" && !t.starts_with('#')
+        })
+        .count();
+    assert_eq!(
+        raw_update_grub_calls, 1,
+        "{SETUP}: `update-grub` must be invoked EXACTLY once, inside safe_grub_regen — any other \
+         bare `update-grub` call would be a raw ad-hoc grub edit bypassing the #295 initrd \
+         guarantee"
+    );
+}
+
+/// #483: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths — the
+/// autostart .desktop entry AND the script's own provisioning-time launcher. Without this,
+/// isolcpus (once active after the next boot) would STARVE OBS onto cpu0,1,12-15 — the tiny
+/// remainder reserved for GNOME/housekeeping/E-cores (live-verified finding, #483 comment).
+#[test]
+fn setup_imag_pins_obs_to_pcore_block_on_both_launch_paths_483() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/'"),
+        "{SETUP} must sed-patch the copied autostart .desktop's `Exec=obs` line to \
+         `Exec=taskset -c 2-11 obs` (#483) — without it, isolcpus would starve the autostart-\
+         launched OBS onto cpu0,1,12-15"
+    );
+    assert!(
+        body.contains("nohup taskset -c 2-11 obs >/tmp/obs-launch.log"),
+        "{SETUP} must launch OBS via `taskset -c 2-11 obs` in the provisioning-time launcher \
+         (#483), matching the autostart entry"
+    );
+}
+
+/// #483: `nice -n -5` must NOT be added to either OBS launch path — live-confirmed the desktop
+/// user lacks CAP_SYS_NICE, so a nice call would either fail loud (breaking the launch) or be a
+/// silently-ignored no-op; the #483 comment explicitly records this was dropped on the real box.
+#[test]
+fn setup_imag_does_not_add_nice_to_obs_launchers_483() {
+    let body = read(SETUP);
+    assert!(
+        !body.contains("nice -n -5 obs") && !body.contains("nice -n -5 taskset"),
+        "{SETUP} must NOT add `nice -n -5` to either OBS launch path — the desktop user lacks \
+         CAP_SYS_NICE (live-confirmed, #483 comment); only the taskset P-core-block pin applies"
+    );
+}
+
+/// #483: the Desktop icon (double-click launch) must be left UNPINNED (`Exec=obs`, no taskset) —
+/// only the autostart path is pinned. Matches the live box exactly (only
+/// ~/.config/autostart/obs.desktop was patched; ~/Desktop/obs.desktop was left plain).
+#[test]
+fn setup_imag_leaves_desktop_icon_unpinned_483() {
+    let body = read(SETUP);
+    // The sed patch must target ONLY the autostart copy's path, never the Desktop copy's.
+    assert!(
+        body.contains(r#"sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/.config/autostart/obs.desktop""#),
+        "{SETUP}: the taskset sed-patch must target ONLY \
+         \"$USER_HOME/.config/autostart/obs.desktop\" — the Desktop icon copy \
+         (\"$USER_HOME/Desktop/obs.desktop\") must stay plain `Exec=obs`, matching the live box"
+    );
+    assert!(
+        !body.contains(
+            r#"sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/Desktop/obs.desktop""#
+        ),
+        "{SETUP}: must NOT taskset-patch the Desktop icon copy — only the autostart entry is \
+         pinned on the live box (#483)"
+    );
+}
+
+/// TOTAL_STEPS must match the actual number of `step()` calls in the script — a drift here means
+/// either a step was added without bumping the counter (progress display under-counts) or the
+/// counter was bumped without adding a step (display over-counts). This is a general invariant,
+/// re-verified here because #482/#483/#487 added three new steps (13 -> 16).
+#[test]
+fn setup_imag_total_steps_matches_actual_step_calls() {
+    let body = read(SETUP);
+    let declared: usize = body
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("TOTAL_STEPS="))
+        .and_then(|s| s.trim().parse().ok())
+        .expect("TOTAL_STEPS=<N> must be declared");
+    // Count actual `step N "..."` INVOCATIONS (not the `step() { ... }` function definition
+    // itself, and not any comment/prose mentioning the word).
+    let actual = body
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("step ")
+                && !t.starts_with("step() {")
+                && t.chars().nth(5).is_some_and(|c| c.is_ascii_digit())
+        })
+        .count();
+    assert_eq!(
+        declared, 16,
+        "TOTAL_STEPS must be 16 after #482/#483/#487 added three new steps to the original 13"
+    );
+    assert_eq!(
+        actual, declared,
+        "{SETUP}: TOTAL_STEPS ({declared}) must match the actual number of `step N \"...\"` \
+         invocations ({actual}) — a mismatch means the progress display under/over-counts"
     );
 }
