@@ -791,3 +791,121 @@ fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
         );
     }
 }
+
+// ============================================================================================
+// #485 — imag-nb desktop de-jitter: mask GNOME/Ubuntu background jitter sources on the
+// single-app OBS kiosk + OBS-native ProcessPriority=High. All reversible, security updates stay
+// fully enabled (only their schedule is pinned).
+// ============================================================================================
+
+/// systemd-oomd, the file indexer, the groupware factories, and apport/whoopsie must all be
+/// masked — none of them provide value on a kiosk box that no human ever browses/mails on, and
+/// oomd specifically is known to kill whole GNOME sessions (incl. OBS) on transient PSI spikes.
+#[test]
+fn setup_imag_masks_oomd_tracker_evolution_apport_whoopsie() {
+    let body = read(SETUP);
+    for needle in [
+        "systemctl mask systemd-oomd.service systemd-oomd.socket",
+        "tracker-miner-fs-3.service",
+        "tracker3 reset -s",
+        "evolution-source-registry.service",
+        "systemctl mask apport.service whoopsie.service",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} desktop de-jitter step must reference `{needle}` — none of these background \
+             services provide value on a single-app kiosk, and systemd-oomd is known to kill \
+             whole GNOME sessions (incl. OBS) on transient PSI memory-pressure spikes"
+        );
+    }
+}
+
+/// snapd auto-refresh must be held forever (unused firefox/snap-store snaps) — a mid-service
+/// "restart to update" banner popping over the fullscreen program output is the failure this
+/// avoids. Hold-only: snapd itself must never be removed or disabled.
+#[test]
+fn setup_imag_holds_snap_refresh_forever() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("snap refresh --hold=forever"),
+        "{SETUP} must `snap refresh --hold=forever` — an unattended snap refresh can pop a \
+         \"restart to update\" banner over the fullscreen program output"
+    );
+}
+
+/// apt-daily-upgrade.timer must be pinned to a fixed off-hours OnCalendar via a drop-in — but
+/// security updates themselves must stay fully enabled (never masked/disabled here). Only the
+/// SCHEDULE is pinned so an update can never land mid-service.
+#[test]
+fn setup_imag_pins_apt_daily_upgrade_offhours_without_disabling_security_updates() {
+    let body = read(SETUP);
+    for needle in [
+        "/etc/systemd/system/apt-daily-upgrade.timer.d/imag-offhours.conf",
+        "OnCalendar=*-*-* 04:00",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must pin apt-daily-upgrade.timer's schedule via `{needle}`"
+        );
+    }
+    assert!(
+        !body.contains("mask apt-daily-upgrade")
+            && !body.contains("disable --now apt-daily-upgrade")
+            && !body.contains("mask unattended-upgrades"),
+        "{SETUP}: apt-daily-upgrade/unattended-upgrades must NEVER be masked or disabled here — \
+         only the SCHEDULE is pinned, security updates stay fully enabled (#485 explicit \
+         instruction: do NOT disable security updates)"
+    );
+}
+
+/// GNOME compositor animations must be turned off — one less compositor cost on the fullscreen
+/// program output, applied the same way the existing sleep/screensaver gsettings calls are.
+#[test]
+fn setup_imag_turns_off_gnome_animations() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("gs org.gnome.desktop.interface enable-animations false"),
+        "{SETUP} must turn off GNOME animations via the existing `gs` gsettings helper"
+    );
+}
+
+/// OBS's own ProcessPriority render-starvation knob must be forced to High. global.ini already
+/// exists with ProcessPriority=Normal by the time this step runs (OBS writes it on first launch,
+/// and a re-provision runs against an already-launched box) — so the step must flip an EXISTING
+/// value in place, not just append a key that would leave the real Normal value in effect.
+#[test]
+fn setup_imag_seeds_obs_process_priority_high() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(
+            "sed -i 's/^ProcessPriority=.*/ProcessPriority=High/' \"$OBS_CFG/global.ini\""
+        ),
+        "{SETUP} must sed-replace an EXISTING ProcessPriority= line in global.ini to High — \
+         appending a new key alone would leave a pre-existing `ProcessPriority=Normal` in effect \
+         (Qt's ini backend keeps the first-seen value on a straight duplicate KEY, unlike a \
+         duplicate SECTION header)"
+    );
+    assert!(
+        body.contains("printf '\\n[General]\\nProcessPriority=High\\n' >> \"$OBS_CFG/global.ini\""),
+        "{SETUP} must also cover the fresh-box case (no ProcessPriority key yet) by appending a \
+         [General] section, mirroring seed_ini's own duplicate-section convention for LastVersion"
+    );
+}
+
+/// The ProcessPriority edit must run AFTER global.ini is seeded (step 8), never before — editing
+/// a file before `touch`/seed_ini creates it would silently no-op the sed branch every time.
+#[test]
+fn setup_imag_process_priority_edit_runs_after_global_ini_seed() {
+    let body = read(SETUP);
+    let seed = body
+        .find("seed_ini \"$OBS_CFG/global.ini\"")
+        .expect("global.ini must be seeded via seed_ini");
+    let priority_edit = body
+        .find("ProcessPriority=High")
+        .expect("the ProcessPriority=High edit must exist");
+    assert!(
+        seed < priority_edit,
+        "{SETUP}: the ProcessPriority=High edit must run AFTER global.ini is seeded — editing \
+         before the file is created/seeded would leave the sed branch permanently a no-op"
+    );
+}

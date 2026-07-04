@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -497,7 +497,69 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 9 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 9 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+# =============================================================================
+# imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
+# masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
+# pinned, Automatic-Reboot is already false by Ubuntu default and is deliberately left untouched).
+
+# systemd-oomd: known to kill WHOLE GNOME sessions (incl. OBS) on transient PSI memory-pressure
+# spikes even with GB of RAM free — kernel OOM remains the real backstop.
+systemctl disable --now systemd-oomd.service systemd-oomd.socket >/dev/null 2>&1 || true
+systemctl mask systemd-oomd.service systemd-oomd.socket >/dev/null 2>&1 || true
+
+# File indexer + groupware factories: no files worth indexing, no mail/calendar account, ever.
+DESKTOP_UID="$(id -u "$DESKTOP_USER")"
+u_systemctl() {
+    sudo -u "$DESKTOP_USER" \
+        XDG_RUNTIME_DIR="/run/user/${DESKTOP_UID}" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${DESKTOP_UID}/bus" \
+        systemctl --user "$@" >/dev/null 2>&1 || true
+}
+u_systemctl mask tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
+    tracker-writeback-3.service tracker-xdg-portal-3.service
+sudo -u "$DESKTOP_USER" tracker3 reset -s >/dev/null 2>&1 || true
+u_systemctl mask evolution-source-registry.service evolution-calendar-factory.service \
+    evolution-addressbook-factory.service evolution-user-prompter.service evolution-alarm-notify.service
+
+# apport/whoopsie: apport writes multi-GB core dumps right when OBS already crashed (worst-time
+# disk spike); whoopsie phones crash reports home — neither has value on a kiosk appliance.
+systemctl disable --now apport.service whoopsie.service >/dev/null 2>&1 || true
+systemctl mask apport.service whoopsie.service >/dev/null 2>&1 || true
+
+# snapd: hold auto-refresh forever (unused firefox/snap-store snaps) — a mid-service "restart to
+# update" banner popping over the fullscreen program output is the failure mode this avoids.
+snap refresh --hold=forever >/dev/null 2>&1 || true
+
+# apt-daily-upgrade.timer: pin the SCHEDULE to a fixed off-hours time via a drop-in — security
+# updates themselves stay fully enabled, never disabled here.
+mkdir -p /etc/systemd/system/apt-daily-upgrade.timer.d
+cat > /etc/systemd/system/apt-daily-upgrade.timer.d/imag-offhours.conf <<'EOF'
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=30min
+EOF
+systemctl daemon-reload
+systemctl restart apt-daily-upgrade.timer >/dev/null 2>&1 || true
+
+# GNOME animations off — one less compositor cost on the fullscreen program output.
+gs org.gnome.desktop.interface enable-animations false
+
+# OBS-native: ProcessPriority=High is OBS's own render-starvation knob (zero cost; ships Normal
+# by default). global.ini was just seeded above — flip the value in place if present, else
+# append a [General] section (same duplicate-section convention seed_ini already uses for
+# LastVersion; Qt's ini backend merges duplicate group headers).
+if grep -q '^ProcessPriority=' "$OBS_CFG/global.ini" 2>/dev/null; then
+    sed -i 's/^ProcessPriority=.*/ProcessPriority=High/' "$OBS_CFG/global.ini"
+else
+    printf '\n[General]\nProcessPriority=High\n' >> "$OBS_CFG/global.ini"
+fi
+chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
+echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
+
+# =============================================================================
+step 10 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -511,7 +573,7 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 10 "Launch OBS on the desktop session (X11 :0)"
+step 11 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -529,7 +591,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 11 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 12 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
