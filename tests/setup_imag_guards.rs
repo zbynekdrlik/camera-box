@@ -1017,3 +1017,120 @@ fn setup_imag_network_tuning_step_lands_between_step1_and_governor_step() {
          IP / NIC discovery) and the governor step — per the issue's explicit placement"
     );
 }
+// ============================================================================================
+// #487 — port setup-device.sh's #295 brick-prevention stack onto imag-nb: kernel apt-hold,
+// initrd-guarantee postinst hook, and an unattended-upgrade kernel lockdown, PLUS a reusable
+// safe_grub_regen() helper (never a raw ad-hoc grub edit). This is the safety net the upcoming
+// #482 (lowlatency kernel) and #483 (CPU isolation) grub.d changes are built on. Already
+// LIVE-APPLIED groundwork on imag-nb (2026-07-04) — this codifies it into setup-imag.sh so a
+// from-scratch re-provision reproduces the same boot-safety posture.
+// ============================================================================================
+
+/// #487: the generic kernel packages must be pinned (apt-mark hold) so an upgrade can never
+/// silently swap the boot kernel — the same class of failure that bricked CAM3/CAM4 (#295).
+#[test]
+fn setup_imag_holds_generic_kernel_packages_487() {
+    let body = read(SETUP);
+    const HOLD_CMD: &str =
+        "apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04";
+    assert!(
+        body.contains(HOLD_CMD),
+        "{SETUP} must run `{HOLD_CMD}` (imag runs the HWE kernel line, not the plain -generic \
+         names the cam fleet's setup-device.sh uses) so a surprise kernel can never be installed \
+         (#487, extends #295)"
+    );
+}
+
+/// #487: unattended-upgrades must NOT be masked/disabled wholesale on imag — #485 already made
+/// the deliberate choice to keep security updates flowing (only their schedule pinned). #487
+/// instead blacklists the kernel packages specifically and pins Automatic-Reboot=false.
+#[test]
+fn setup_imag_kernel_lockdown_487_does_not_disable_unattended_upgrades_wholesale() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/apt/apt.conf.d/51imag-kernel-lockdown"),
+        "{SETUP} must write /etc/apt/apt.conf.d/51imag-kernel-lockdown (#487)"
+    );
+    for needle in [
+        "Unattended-Upgrade::Package-Blacklist",
+        "\"linux-image\";",
+        "\"linux-headers\";",
+        "\"linux-generic\";",
+        "\"linux-lowlatency\";",
+        "\"lowlatency-kernel\";",
+        "Unattended-Upgrade::Automatic-Reboot \"false\";",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} #487 kernel-lockdown drop-in must contain `{needle}`"
+        );
+    }
+    assert!(
+        !body.contains("mask unattended-upgrades")
+            && !body.contains("disable --now unattended-upgrades"),
+        "{SETUP}: #487 must NOT mask/disable unattended-upgrades wholesale on imag — #485 already \
+         made the deliberate choice to keep security updates flowing on this box (only the \
+         SCHEDULE is pinned); #487 blacklists just the kernel packages instead"
+    );
+}
+
+/// #487/#295: the initrd-guarantee postinst hook must be installed so any FUTURE kernel install
+/// (even one that slips past the apt-mark hold) always gets an initrd before grub can default to
+/// it — the exact mechanism that would have prevented CAM3/CAM4's brick.
+#[test]
+fn setup_imag_installs_initrd_guarantee_postinst_hook_487() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/kernel/postinst.d/zz-camera-box-initrd-guarantee"),
+        "{SETUP} must install the /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee hook (#487, \
+         ported verbatim from setup-device.sh's #295 fix)"
+    );
+    assert!(
+        body.contains("chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee"),
+        "{SETUP} must make the initrd-guarantee hook executable"
+    );
+}
+
+/// #487: the safe-grub mechanism must be a REUSABLE helper function (never a raw ad-hoc grub
+/// edit) that (a) guarantees every installed kernel has an initrd before update-grub runs, and
+/// (b) refuses to trust the regenerated grub.cfg if the default entry lacks a kernel image or an
+/// initrd. This is the SAME contract as setup-device.sh's inline STEP 10, factored into a
+/// function so it is reused by both #482 and #483 below instead of duplicated.
+#[test]
+fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
+    let body = read(SETUP);
+    let func_start = body
+        .find("safe_grub_regen() {")
+        .expect("{SETUP} must define a safe_grub_regen() helper function (#487)");
+    let func_end = body[func_start..]
+        .find("\n}\n")
+        .map(|off| func_start + off)
+        .expect("safe_grub_regen function body must close with a bare `}` line");
+    let func_body = &body[func_start..func_end];
+    assert!(
+        func_body.contains("/boot/vmlinuz-*") && func_body.contains("update-initramfs -c -k"),
+        "safe_grub_regen must guarantee every installed kernel has an initrd before update-grub \
+         (#295/#487)"
+    );
+    assert!(
+        func_body.contains("update-grub"),
+        "safe_grub_regen must actually call update-grub"
+    );
+    assert!(
+        func_body.contains("menuentry ") && func_body.contains("grub.cfg"),
+        "safe_grub_regen must read the generated grub.cfg and extract its default menuentry"
+    );
+    let validates_initrd = func_body
+        .lines()
+        .any(|l| l.contains("grep") && l.contains("initrd"));
+    assert!(
+        validates_initrd,
+        "safe_grub_regen must grep the extracted default entry for an initrd line and fail loud \
+         if absent — without it grub could still default-boot an initrd-less kernel (#295)"
+    );
+    assert!(
+        func_body.contains("fail \"#295:"),
+        "safe_grub_regen must fail loud (via the script's own fail()) when the default entry is \
+         unsafe, not just warn"
+    );
+}
