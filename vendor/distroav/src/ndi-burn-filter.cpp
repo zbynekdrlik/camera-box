@@ -13,20 +13,24 @@
 	  1. gs_texrender the filter target (the source this filter is attached to).
 	  2. gs_stage_texture + gs_stagesurface_map -> a CPU BGRA copy of the rendered frame.
 	  3. CPU-draw the QR (burn_qr::render, qrcodegen EC-High, white quiet zone) into the
-	     copy at THIS node's BOTTOM CORNER (strih=bottom-left, stream=bottom-right) at
-	     ~300px (burn_geom::corner_placement) — fully clear of the camera dual-QR (top
-	     band) and of the other node's burn, so one stream recording carries all four
-	     readable QRs (camera L/R + strih burn + stream burn), none overlapping (#111
-	     4-corner layout — replaces the old center-bottom ~700px burn that overlapped both
-	     the camera QR and the other node's burn → strih→stream 0 paired frames).
+	     copy at THIS node's BOTTOM CORNER (strih=bottom-left, stream=bottom-right,
+	     imag=bottom-center-left, #463) at ~300px (burn_geom::corner_placement) — fully
+	     clear of the camera dual-QR (top band) and of every other node's burn, so one
+	     stream recording carries every node's readable QR (camera L/R + strih + stream +
+	     imag burns), none overlapping (#111 4-corner layout, extended by #463 — replaces
+	     the old center-bottom ~700px burn that overlapped both the camera QR and the
+	     other node's burn → strih→stream 0 paired frames).
 	  4. Re-upload the composited buffer to a dynamic texture and gs_draw_sprite it as the
 	     filter's output, so the burn flows downstream into the recording.
 	NO libobs core change — this is purely a DistroAV plugin filter.
 
-	Identity / gating (#257 — no env):
+	Identity / gating (#257 — no env; #463 adds imag):
 	  - run_id: reserved per-node constant DERIVED FROM THE HOST ROLE (no OBS_BURN_RUN_ID env):
-	    stream box (hostname contains "stream") = 911004, strih (and any other) = 911002. Both
-	    sit OUTSIDE cam2's normal run_id range so #108 distinguishes node-stamp from cam2-stamp.
+	    stream box (hostname contains "stream") = 911004, imag box (hostname contains "imag") =
+	    911003 (#463 — Topology v2 IMAG box, freed from the deferred cam3 camera-capture role,
+	    see `BURN_RUN_ID_IMAG` in camera-box's `src/probe/recording_latency.rs`), any other
+	    (default, incl. strih) = 911002. All three sit OUTSIDE cam2's normal run_id range so
+	    #108 distinguishes node-stamp from cam2-stamp.
 	  - frame_id: this filter's own per-render monotonic counter.
 	  - gen_ts_ns: RAW render-instant wall-clock (burn_clock::gen_ts_ns, NOT boundary-
 	    snapped) — shares the camera-box painter's RAW basis so cam→strih is bias-free (#108
@@ -73,6 +77,11 @@
 // keeps working. Mirror of src/probe/recording_latency.rs BURN_RUN_ID_STRIH / _STREAM.
 #define BURN_RUN_ID_DEFAULT_STRIH 911002u
 #define BURN_RUN_ID_DEFAULT_STREAM 911004u
+// camera-box #463: imag-nb's (Topology v2 IMAG box) reserved burn run_id — freed from the
+// deferred cam3 camera-capture role (that mechanism is unrelated: `CAMERA_BOX_BURN_RUN_ID` on
+// a source camera, not this OBS filter). Mirror of `BURN_RUN_ID_IMAG` in
+// src/probe/recording_latency.rs (renamed from `BURN_RUN_ID_CAM3` — see #463 / issue #24).
+#define BURN_RUN_ID_DEFAULT_IMAG 911003u
 
 struct burn_filter {
 	obs_source_t *context;
@@ -98,7 +107,7 @@ struct burn_filter {
 	// the parent source's per-source genlock_burn flag, read LIVE each render (#257).
 	uint32_t run_id;
 	uint32_t qr_px;
-	burn_geom::Corner corner; // this node's bottom corner (strih=left, stream=right)
+	burn_geom::Corner corner; // this node's bottom corner (strih=left, stream=right, imag=BCL)
 
 	// Per-render monotonic frame counter.
 	uint32_t frame_id;
@@ -168,19 +177,62 @@ static bool burn_host_is_stream()
 	return strstr(name, "stream") != nullptr;
 }
 
-// camera-box #257: this box's reserved burn run_id from the host role (no OBS_BURN_RUN_ID env).
+// camera-box #463: is THIS box the imag node (Topology v2 IMAG box, imag-nb)? Same
+// hostname-substring style as burn_host_is_stream, kept as its OWN predicate (checked FIRST by
+// resolve_run_id, below) so an imag host never falls through into burn_host_is_stream's
+// stream/strih-only WARN — an "imag" hostname legitimately matches neither of those substrings
+// and must NOT be treated as a host-rename anomaly.
+static bool burn_host_is_imag()
+{
+	char name[256] = {0};
+#ifdef _WIN32
+	DWORD n = (DWORD)sizeof(name);
+	if (!GetComputerNameA(name, &n))
+		name[0] = '\0';
+#else
+	if (gethostname(name, sizeof(name) - 1) != 0)
+		name[0] = '\0';
+#endif
+	for (char *p = name; *p; ++p)
+		*p = (char)tolower((unsigned char)*p);
+	return strstr(name, "imag") != nullptr;
+}
+
+// camera-box #257/#463: this box's reserved burn run_id from the host role (no OBS_BURN_RUN_ID
+// env). imag is checked FIRST and returns early so burn_host_is_stream() (unchanged) is only
+// ever consulted for a non-imag host, exactly its original strih/stream/anomaly-WARN behaviour.
 static uint32_t resolve_run_id()
 {
+	if (burn_host_is_imag())
+		return BURN_RUN_ID_DEFAULT_IMAG;
 	return burn_host_is_stream() ? BURN_RUN_ID_DEFAULT_STREAM : BURN_RUN_ID_DEFAULT_STRIH;
 }
 
-// This node's bottom corner, derived FROM the run_id (stream → bottom-right, strih → bottom-left)
-// so one stream recording carries all four QRs (camera L/R + strih burn + stream burn) with no
-// overlap (#111 4-corner layout). #257 removed the OBS_BURN_CORNER env.
+// This node's bottom corner, derived FROM the run_id (stream → bottom-right, strih →
+// bottom-left, imag → bottom-center-left, #463) so one stream recording carries every node's QR
+// (camera L/R + strih + stream + imag burns) with no overlap (#111 4-corner layout, extended by
+// #463). #257 removed the OBS_BURN_CORNER env.
 static burn_geom::Corner resolve_corner(uint32_t run_id)
 {
-	return (run_id == BURN_RUN_ID_DEFAULT_STREAM) ? burn_geom::Corner::BottomRight
-						      : burn_geom::Corner::BottomLeft;
+	if (run_id == BURN_RUN_ID_DEFAULT_STREAM)
+		return burn_geom::Corner::BottomRight;
+	if (run_id == BURN_RUN_ID_DEFAULT_IMAG)
+		return burn_geom::Corner::BottomCenterLeft;
+	return burn_geom::Corner::BottomLeft;
+}
+
+// Human-readable tag for `corner`, shared by the create-log and the throttled per-frame
+// draw-log (#463 — extended from a strih/stream-only ternary to the three-way case).
+static const char *corner_tag(burn_geom::Corner corner)
+{
+	switch (corner) {
+	case burn_geom::Corner::BottomRight:
+		return "bottom-right";
+	case burn_geom::Corner::BottomCenterLeft:
+		return "bottom-center-left";
+	default:
+		return "bottom-left";
+	}
 }
 
 static const char *burn_filter_getname(void *)
@@ -207,9 +259,9 @@ static void *burn_filter_create(obs_data_t *, obs_source_t *source)
 	obs_log(LOG_INFO,
 		"[burn] filter created: run_id=%u (host role) corner=%s qr_px=auto — burn is gated LIVE "
 		"by the parent source's per-source genlock_burn flag (#257, no env, no restart). "
-		"run_ids %u/%u strih/stream → bottom-left/bottom-right",
-		f->run_id, f->corner == burn_geom::Corner::BottomRight ? "bottom-right" : "bottom-left",
-		BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM);
+		"run_ids %u/%u/%u strih/stream/imag → bottom-left/bottom-right/bottom-center-left (#463)",
+		f->run_id, corner_tag(f->corner), BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM,
+		BURN_RUN_ID_DEFAULT_IMAG);
 	return f;
 }
 
@@ -326,8 +378,7 @@ static void burn_draw_qr(burn_filter *f, uint8_t *buf, uint32_t side,
 		obs_log(LOG_INFO,
 			"[burn] burned QR run_id=%u frame_id=%u gen_ts_ns=%lld corner=%s "
 			"band_x=%u band_cy=%u px=%u overlay (%.3f fps)",
-			f->run_id, fid, (long long)gen_ts_ns,
-			f->corner == burn_geom::Corner::BottomRight ? "BR" : "BL", pl.band_x,
+			f->run_id, fid, (long long)gen_ts_ns, corner_tag(f->corner), pl.band_x,
 			pl.band_cy, pl.square_px, fps);
 }
 

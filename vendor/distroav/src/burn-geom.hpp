@@ -1,10 +1,16 @@
 /******************************************************************************
 	#111 — burn QR corner-placement geometry (the 4-corner no-overlap layout).
+	#463 — extended with a THIRD corner (BottomCenterLeft) for imag-nb (Topology v2).
 
-	The decided layout (one stream recording carries all four QRs, none overlapping):
+	The decided layout (one stream recording carries all the node QRs, none overlapping):
 	  - camera dual-QR (cam2 painter): TOP band — left + right.
 	  - strih burn:  BOTTOM-LEFT corner.
 	  - stream burn: BOTTOM-RIGHT corner.
+	  - imag burn:   BOTTOM-CENTER-LEFT (#463) — sits one `margin` clear of the BottomLeft
+	    burn's trailing edge, well short of the canvas center (where the SEPARATE Rust-side
+	    cam1 capture burn is horizontally centered, `qr::cam1_burn_origin` — a different
+	    render path this header does not know about, but the gap is sized to clear it on
+	    the production 1920×1080 canvas — see `src/probe/colour_sample.rs`).
 	  - each burn ~300px (smaller than the camera QR), fully clear of the camera QRs
 	    and of each other.
 
@@ -66,9 +72,11 @@ inline uint32_t burn_margin_for_canvas(uint32_t frame_h)
 	return m < 8u ? 8u : m;
 }
 
-// Which corner this node burns into. strih = bottom-left, stream = bottom-right (the
-// decided per-node assignment); the env OBS_BURN_CORNER selects it (see resolve_corner).
-enum class Corner { BottomLeft, BottomRight };
+// Which corner this node burns into. strih = bottom-left, stream = bottom-right, imag =
+// bottom-center-left (#463 — the decided per-node assignment); the env OBS_BURN_CORNER
+// selected it for strih/stream historically (see resolve_corner; #257 removed the env for the
+// host-role-derived nodes, so BottomCenterLeft is only ever reached via the host-role path).
+enum class Corner { BottomLeft, BottomRight, BottomCenterLeft };
 
 // Case-insensitive substring search (ASCII only, no <cctype> locale dependence).
 inline bool ci_contains(const char *hay, const char *needle)
@@ -125,9 +133,12 @@ struct Placement {
 
 // Compute the bottom-corner placement for a `qr_px`-sized burn QR with `margin` px of
 // clearance from the frame edges. The band is exactly `qr_px` wide and sits hard against
-// the chosen corner: left edge `margin` (bottom-left) or right edge `frame_w - margin`
-// (bottom-right); the QR's vertical center is `frame_h - margin - qr_px/2` (bottom edge at
-// `frame_h - margin`). Defensive clamps keep everything in-frame for any frame size.
+// the chosen corner: left edge `margin` (bottom-left), right edge `frame_w - margin`
+// (bottom-right), or one `margin` clear of the bottom-left burn's trailing edge
+// (bottom-center-left, #463 — imag's slot); the QR's vertical center is
+// `frame_h - margin - qr_px/2` (bottom edge at `frame_h - margin`) for EVERY corner —
+// only the horizontal band position differs. Defensive clamps keep everything in-frame
+// for any frame size.
 inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner corner,
 				  uint32_t qr_px, uint32_t margin)
 {
@@ -152,8 +163,16 @@ inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner cor
 	// makes the "in-frame for any frame size" contract genuinely true.
 	if (corner == Corner::BottomLeft) {
 		p.band_x = margin;
-	} else {
+	} else if (corner == Corner::BottomRight) {
 		p.band_x = (frame_w > margin + side) ? (frame_w - margin - side) : 0;
+	} else { // BottomCenterLeft (#463): one `margin` clear of the BottomLeft burn's right
+		 // edge (`margin + side`), so imag never collides with strih's corner burn. On the
+		 // production 1920×1080 canvas (margin=40, side=302) this lands at x=[382,684) —
+		 // 116px clear of the SEPARATE Rust-side cam1 center burn at x=[800,1120)
+		 // (`qr::cam1_burn_origin`, this header does not compute that rect but the gap is
+		 // sized to clear it; see `src/probe/colour_sample.rs::node_burn_exclusions`).
+		uint32_t x = margin + side + margin;
+		p.band_x = (x + side <= frame_w) ? x : (frame_w > side ? frame_w - side : 0);
 	}
 	// Vertical center so the bottom edge sits at frame_h - margin.
 	const uint32_t half = side / 2;
