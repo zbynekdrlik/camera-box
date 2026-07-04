@@ -251,11 +251,50 @@ pub const V4L2_CID_SATURATION: u32 = 0x0098_0902;
 /// each card keeps its own neutral default.
 pub const V4L2_CID_HUE: u32 = 0x0098_0903;
 
-/// One certified V4L2 capture control (`id`, `value`) to apply at device open.
+/// The V4L2-queried min/max/default range for one integer picture control
+/// (`VIDIOC_QUERY_EXT_CTRL`), so a [`ControlTarget::RangeScaled`] target can be
+/// resolved against the ACTUAL device range instead of a literal calibrated for
+/// one specific card (#456: a 0-255 card's neutral is ~128, not the ShadowCast
+/// literal 50 that darkened cam5's image).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlRange {
+    /// Minimum value, inclusive.
+    pub minimum: i64,
+    /// Maximum value, inclusive.
+    pub maximum: i64,
+    /// The driver's own reported default (the manufacturer's neutral setting).
+    pub default_value: i64,
+}
+
+/// How to resolve a [`CaptureControl`]'s value at apply time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlTarget {
+    /// Apply this V4L2 value verbatim, bypassing range-scaling entirely. Used
+    /// for explicit numeric `CAMERA_BOX_CAPTURE_CONTROLS=name=value` operator
+    /// overrides — the operator already picked an absolute value for THIS
+    /// specific card, so it must never be reinterpreted (#456 requirement: env
+    /// overrides bypass range-scaling).
+    Literal(i64),
+    /// Resolve to `reference_pct` percent of the device's OWN queried
+    /// `[minimum,maximum]` range (`VIDIOC_QUERY_EXT_CTRL`), where `reference_pct`
+    /// was calibrated against the ShadowCast card's native 0-100 range (#456).
+    /// `50` lands on the range's midpoint, which is ALSO each known card's own
+    /// manufacturer default (50 on ShadowCast's 0-100 range, ~128 on cam5's
+    /// 0-255 range) — so the certified COLOUR set's "neutral" (reference_pct=50)
+    /// now lands on the correct neutral on ANY card, and the SHARP set's tuned
+    /// values (75/0) scale the same way. Falls back to applying `reference_pct`
+    /// as a literal if the device's range can't be queried (e.g. a driver
+    /// without `VIDIOC_QUERY_EXT_CTRL` support) — a possibly-wrong value beats
+    /// silently skipping the control, and matches the pre-#456 behaviour.
+    RangeScaled { reference_pct: i64 },
+}
+
+/// One certified V4L2 capture control (`id` + how to resolve its value) to
+/// apply at device open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureControl {
     pub id: u32,
-    pub value: i64,
+    pub target: ControlTarget,
 }
 
 /// The CERTIFIED cam1 capture controls for a sharp, decodable optical grab
@@ -269,11 +308,11 @@ pub fn certified_cam1_controls() -> Vec<CaptureControl> {
     vec![
         CaptureControl {
             id: V4L2_CID_CONTRAST,
-            value: 75,
+            target: ControlTarget::RangeScaled { reference_pct: 75 },
         },
         CaptureControl {
             id: V4L2_CID_SATURATION,
-            value: 0,
+            target: ControlTarget::RangeScaled { reference_pct: 0 },
         },
     ]
 }
@@ -316,7 +355,10 @@ pub fn parse_capture_controls(spec: &str) -> Vec<CaptureControl> {
             }
         };
         match val.trim().parse::<i64>() {
-            Ok(value) => out.push(CaptureControl { id, value }),
+            Ok(value) => out.push(CaptureControl {
+                id,
+                target: ControlTarget::Literal(value),
+            }),
             Err(_) => {
                 tracing::warn!("CAMERA_BOX_CAPTURE_CONTROLS: {name:?} value {val:?} not an integer")
             }
@@ -356,11 +398,11 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
     vec![
         CaptureControl {
             id: V4L2_CID_SATURATION,
-            value: 50,
+            target: ControlTarget::RangeScaled { reference_pct: 50 },
         },
         CaptureControl {
             id: V4L2_CID_CONTRAST,
-            value: 50,
+            target: ControlTarget::RangeScaled { reference_pct: 50 },
         },
     ]
 }
@@ -415,12 +457,17 @@ pub struct ControlReport {
 /// real `/dev/video*` node. Implemented for the live [`Device`]; tests inject a fake
 /// device (incl. one that supports NO controls — the NZXT CAM4 card).
 pub trait ControlIo {
-    /// Error type surfaced when a get/set fails (only ever logged — never fatal).
+    /// Error type surfaced when a get/set/query fails (only ever logged — never fatal).
     type Err: std::fmt::Display;
     /// Set integer control `id` to `value`.
     fn set_ctrl(&self, id: u32, value: i64) -> std::result::Result<(), Self::Err>;
     /// Read integer control `id` back.
     fn get_ctrl(&self, id: u32) -> std::result::Result<i64, Self::Err>;
+    /// Query control `id`'s min/max/default range (`VIDIOC_QUERY_EXT_CTRL`), so a
+    /// [`ControlTarget::RangeScaled`] target can be resolved against the ACTUAL
+    /// device range rather than a literal calibrated for one specific card
+    /// (#456).
+    fn query_range(&self, id: u32) -> std::result::Result<ControlRange, Self::Err>;
 }
 
 impl ControlIo for Device {
@@ -442,6 +489,77 @@ impl ControlIo for Device {
             )),
         }
     }
+
+    fn query_range(&self, id: u32) -> std::result::Result<ControlRange, Self::Err> {
+        // `Device::query_controls()` enumerates every control the driver reports
+        // (VIDIOC_QUERY_EXT_CTRL with V4L2_CTRL_FLAG_NEXT_CTRL) — there is no
+        // narrower single-id query in the v4l crate's public API. This runs once
+        // per control at device open, never per-frame, so the extra enumeration
+        // cost is negligible.
+        let controls = self.query_controls()?;
+        controls
+            .into_iter()
+            .find(|desc| desc.id == id)
+            .map(|desc| ControlRange {
+                minimum: desc.minimum,
+                maximum: desc.maximum,
+                default_value: desc.default,
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("control id={id:#010x} not reported by VIDIOC_QUERY_EXT_CTRL"),
+                )
+            })
+    }
+}
+
+/// Resolve a [`CaptureControl`]'s [`ControlTarget`] to the literal V4L2 value to
+/// apply (#456). A [`ControlTarget::Literal`] never queries anything — explicit
+/// operator overrides always bypass range-scaling. A
+/// [`ControlTarget::RangeScaled`] queries the device's own `[minimum,maximum]`
+/// range and scales the reference percentage onto it; if the query fails (a
+/// driver without `VIDIOC_QUERY_EXT_CTRL` support), the reference percentage is
+/// applied as a literal instead — a possibly-wrong value beats silently
+/// skipping the control, and matches the pre-#456 behaviour.
+fn resolve_control_target<IO: ControlIo>(io: &IO, id: u32, target: ControlTarget) -> i64 {
+    match target {
+        ControlTarget::Literal(v) => v,
+        ControlTarget::RangeScaled { reference_pct } => match io.query_range(id) {
+            Ok(range) => scale_to_range(reference_pct, range),
+            Err(e) => {
+                tracing::warn!(
+                    "capture control id={:#010x} range query failed: {} \
+                     (falling back to reference value {} applied literally)",
+                    id,
+                    e,
+                    reference_pct
+                );
+                reference_pct
+            }
+        },
+    }
+}
+
+/// Scale a `reference_pct` (0-100, calibrated against the ShadowCast card's
+/// native 0-100 range) onto a device's ACTUAL queried `[minimum,maximum]`
+/// range. `reference_pct=50` — the certified COLOUR set's neutral — lands on
+/// `range`'s own midpoint, which is ALSO each known card's own manufacturer
+/// default (#456: 50 on ShadowCast's 0-100 range, ~128 on cam5's 0-255 range),
+/// so this single formula makes the SAME certified intent land correctly on
+/// any card's range, for the neutral colour set AND the tuned SHARP set alike
+/// (e.g. 75% -> ~191 on a 0-255 range, matching the ShadowCast literal 75 on a
+/// 0-100 range).
+fn scale_to_range(reference_pct: i64, range: ControlRange) -> i64 {
+    let span = range.maximum - range.minimum;
+    if span <= 0 {
+        // Degenerate/unreliable range query -- the reference percentage is the
+        // best remaining guess (matches the pre-#456 literal behaviour).
+        return reference_pct;
+    }
+    let fraction = reference_pct as f64 / 100.0;
+    let scaled = (range.minimum as f64 + fraction * span as f64).round() as i64;
+    scaled.clamp(range.minimum, range.maximum)
 }
 
 /// Apply `controls` through any [`ControlIo`], verifying each by read-back, and
@@ -454,14 +572,15 @@ impl ControlIo for Device {
 pub fn apply_controls_with<IO: ControlIo>(io: &IO, controls: &[CaptureControl]) -> ControlReport {
     let mut report = ControlReport::default();
     for c in controls {
-        match io.set_ctrl(c.id, c.value) {
+        let value = resolve_control_target(io, c.id, c.target);
+        match io.set_ctrl(c.id, value) {
             Ok(()) => match io.get_ctrl(c.id) {
-                Ok(got) if got == c.value => {
+                Ok(got) if got == value => {
                     report.applied += 1;
                     tracing::info!(
                         "capture control id={:#010x} set to {} (verified)",
                         c.id,
-                        c.value
+                        value
                     );
                 }
                 Ok(got) => {
@@ -470,7 +589,7 @@ pub fn apply_controls_with<IO: ControlIo>(io: &IO, controls: &[CaptureControl]) 
                         "capture control id={:#010x} requested {} but device reports {} \
                          (driver clamped/ignored)",
                         c.id,
-                        c.value,
+                        value,
                         got
                     );
                 }
@@ -479,7 +598,7 @@ pub fn apply_controls_with<IO: ControlIo>(io: &IO, controls: &[CaptureControl]) 
                     tracing::warn!(
                         "capture control id={:#010x} set to {} but read-back failed: {}",
                         c.id,
-                        c.value,
+                        value,
                         e
                     );
                 }
@@ -490,7 +609,7 @@ pub fn apply_controls_with<IO: ControlIo>(io: &IO, controls: &[CaptureControl]) 
                     "capture control id={:#010x} -> {} FAILED to apply: {} \
                      (capture continues; device may lack this control)",
                     c.id,
-                    c.value,
+                    value,
                     e
                 );
             }
@@ -1072,18 +1191,20 @@ mod tests {
 
     #[test]
     fn certified_controls_are_contrast75_saturation0() {
-        // #156: the certified sharp-grab set is exactly contrast=75 + saturation=0.
+        // #156: the certified sharp-grab set is exactly contrast=75 + saturation=0
+        // (as a PERCENTAGE of the device's queried range — #456: RangeScaled, not
+        // a literal, so it scales correctly on a card whose range isn't 0-100).
         let c = certified_cam1_controls();
         assert_eq!(
             c,
             vec![
                 CaptureControl {
                     id: V4L2_CID_CONTRAST,
-                    value: 75
+                    target: ControlTarget::RangeScaled { reference_pct: 75 },
                 },
                 CaptureControl {
                     id: V4L2_CID_SATURATION,
-                    value: 0
+                    target: ControlTarget::RangeScaled { reference_pct: 0 },
                 },
             ]
         );
@@ -1103,17 +1224,19 @@ mod tests {
 
     #[test]
     fn parse_capture_controls_explicit_pairs() {
+        // Explicit numeric operator overrides are LITERAL — never range-scaled
+        // (#456 requirement 4: the operator already picked the exact device value).
         let c = parse_capture_controls("contrast=75,saturation=0");
         assert_eq!(
             c,
             vec![
                 CaptureControl {
                     id: V4L2_CID_CONTRAST,
-                    value: 75
+                    target: ControlTarget::Literal(75),
                 },
                 CaptureControl {
                     id: V4L2_CID_SATURATION,
-                    value: 0
+                    target: ControlTarget::Literal(0),
                 },
             ]
         );
@@ -1137,15 +1260,15 @@ mod tests {
             vec![
                 CaptureControl {
                     id: V4L2_CID_SATURATION,
-                    value: 50
+                    target: ControlTarget::Literal(50),
                 },
                 CaptureControl {
                     id: V4L2_CID_CONTRAST,
-                    value: 50
+                    target: ControlTarget::Literal(50),
                 },
                 CaptureControl {
                     id: V4L2_CID_HUE,
-                    value: 0
+                    target: ControlTarget::Literal(0),
                 },
             ]
         );
@@ -1160,7 +1283,7 @@ mod tests {
             c,
             vec![CaptureControl {
                 id: V4L2_CID_CONTRAST,
-                value: 75
+                target: ControlTarget::Literal(75),
             }],
             "only the valid contrast pair survives"
         );
@@ -1180,11 +1303,11 @@ mod tests {
             vec![
                 CaptureControl {
                     id: V4L2_CID_SATURATION,
-                    value: 50
+                    target: ControlTarget::RangeScaled { reference_pct: 50 },
                 },
                 CaptureControl {
                     id: V4L2_CID_CONTRAST,
-                    value: 50
+                    target: ControlTarget::RangeScaled { reference_pct: 50 },
                 },
             ]
         );
@@ -1206,16 +1329,16 @@ mod tests {
         assert!(
             c.contains(&CaptureControl {
                 id: V4L2_CID_SATURATION,
-                value: 50
+                target: ControlTarget::RangeScaled { reference_pct: 50 },
             }),
-            "production must restore saturation=50 (colour) — got {c:?}"
+            "production must restore saturation=50% (colour) — got {c:?}"
         );
         assert!(
             c.contains(&CaptureControl {
                 id: V4L2_CID_CONTRAST,
-                value: 50
+                target: ControlTarget::RangeScaled { reference_pct: 50 },
             }),
-            "production must restore contrast=50 — got {c:?}"
+            "production must restore contrast=50% — got {c:?}"
         );
         // #338: production must NOT force hue (the old assertion required hue=0, which
         // is a pink tint on the ShadowCast card — that encoded the regression).
@@ -1275,10 +1398,15 @@ mod tests {
 
     /// Fake [`ControlIo`] device: supports only the listed control ids; any other id
     /// errors on set AND get — modelling a card (the NZXT CAM4 grab card) that
-    /// exposes NO v4l2 picture controls.
+    /// exposes NO v4l2 picture controls. Optionally carries a queried
+    /// [`ControlRange`] per id (`with_range`), modelling a real device's
+    /// `VIDIOC_QUERY_EXT_CTRL` response for the #456 range-aware resolution
+    /// tests; an id with no attached range models a driver whose range query
+    /// fails/is unsupported.
     struct FakeDevice {
         supported: std::collections::HashSet<u32>,
         values: std::cell::RefCell<std::collections::HashMap<u32, i64>>,
+        ranges: std::cell::RefCell<std::collections::HashMap<u32, ControlRange>>,
     }
 
     impl FakeDevice {
@@ -1286,7 +1414,15 @@ mod tests {
             Self {
                 supported: ids.iter().copied().collect(),
                 values: std::cell::RefCell::new(std::collections::HashMap::new()),
+                ranges: std::cell::RefCell::new(std::collections::HashMap::new()),
             }
+        }
+
+        /// Attach a queried [`ControlRange`] for `id`, as if `VIDIOC_QUERY_EXT_CTRL`
+        /// reported it (#456).
+        fn with_range(self, id: u32, range: ControlRange) -> Self {
+            self.ranges.borrow_mut().insert(id, range);
+            self
         }
     }
 
@@ -1310,6 +1446,14 @@ mod tests {
                 .get(&id)
                 .copied()
                 .ok_or_else(|| format!("control id={id:#010x} not supported by this device"))
+        }
+
+        fn query_range(&self, id: u32) -> std::result::Result<ControlRange, String> {
+            self.ranges
+                .borrow()
+                .get(&id)
+                .copied()
+                .ok_or_else(|| format!("no queried range for control id={id:#010x}"))
         }
     }
 
@@ -1385,6 +1529,9 @@ mod tests {
             fn get_ctrl(&self, _id: u32) -> std::result::Result<i64, String> {
                 Ok(999) // clamped to a value we never requested
             }
+            fn query_range(&self, _id: u32) -> std::result::Result<ControlRange, String> {
+                Err("no range query support".to_string())
+            }
         }
         let report = apply_controls_with(&ClampDevice, &color_production_controls());
         assert_eq!(report.applied, 0);
@@ -1403,6 +1550,145 @@ mod tests {
             report,
             ControlReport::default(),
             "no controls -> empty report"
+        );
+    }
+
+    // ── #456 range-aware control resolution ─────────────────────────────────
+
+    #[test]
+    fn range_scaled_neutral_stays_50_on_a_shadowcast_0_100_card_456() {
+        // A ShadowCast-like card's queried range is 0-100 (default 50) — the
+        // certified COLOUR set's neutral (reference_pct=50) must resolve to
+        // exactly 50 here, unchanged from the pre-#456 literal behaviour on
+        // THIS specific card.
+        let shadowcast = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST])
+            .with_range(
+                V4L2_CID_SATURATION,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 100,
+                    default_value: 50,
+                },
+            )
+            .with_range(
+                V4L2_CID_CONTRAST,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 100,
+                    default_value: 50,
+                },
+            );
+        let report = apply_controls_with(&shadowcast, &color_production_controls());
+        assert_eq!(report.applied, 2);
+        assert_eq!(
+            *shadowcast
+                .values
+                .borrow()
+                .get(&V4L2_CID_SATURATION)
+                .unwrap(),
+            50
+        );
+        assert_eq!(
+            *shadowcast.values.borrow().get(&V4L2_CID_CONTRAST).unwrap(),
+            50
+        );
+    }
+
+    #[test]
+    fn range_scaled_neutral_resolves_to_range_midpoint_on_cam5_style_0_255_card_456() {
+        // #456 RED: cam5's grab card queries a 0-255 range (default 128). The
+        // certified COLOUR set's literal 50 (calibrated for the ShadowCast card's
+        // 0-100 range) previously landed at ~20% on a 0-255 card = dark/washed-out.
+        // Range-aware resolution must scale reference_pct=50 to THIS card's OWN
+        // midpoint (~128), not the ShadowCast literal 50. FAILS on the unfixed
+        // code (which applies reference_pct as a bare literal, landing on 50).
+        let cam5 = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST])
+            .with_range(
+                V4L2_CID_SATURATION,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 255,
+                    default_value: 128,
+                },
+            )
+            .with_range(
+                V4L2_CID_CONTRAST,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 255,
+                    default_value: 128,
+                },
+            );
+        let report = apply_controls_with(&cam5, &color_production_controls());
+        assert_eq!(report.applied, 2);
+        let sat = *cam5.values.borrow().get(&V4L2_CID_SATURATION).unwrap();
+        let con = *cam5.values.borrow().get(&V4L2_CID_CONTRAST).unwrap();
+        assert!(
+            (120..=136).contains(&sat),
+            "saturation should resolve near this card's own midpoint (~128), got {sat}"
+        );
+        assert!(
+            (120..=136).contains(&con),
+            "contrast should resolve near this card's own midpoint (~128), got {con}"
+        );
+        assert_ne!(
+            sat, 50,
+            "must NOT apply the ShadowCast literal 50 on a 0-255 card (the #456 dark-image bug)"
+        );
+        assert_ne!(con, 50, "same for contrast — the #456 dark-image bug");
+    }
+
+    #[test]
+    fn range_scaled_sharp_set_scales_proportionally_on_a_0_255_card_456() {
+        // certified_cam1_controls() (contrast=75%, saturation=0%) must scale the
+        // SAME way as the colour set on a differently-ranged card (issue #456:
+        // "The SHARP set should scale the same way").
+        let cam5 = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST])
+            .with_range(
+                V4L2_CID_CONTRAST,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 255,
+                    default_value: 128,
+                },
+            )
+            .with_range(
+                V4L2_CID_SATURATION,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 255,
+                    default_value: 128,
+                },
+            );
+        let report = apply_controls_with(&cam5, &certified_cam1_controls());
+        assert_eq!(report.applied, 2);
+        let con = *cam5.values.borrow().get(&V4L2_CID_CONTRAST).unwrap();
+        let sat = *cam5.values.borrow().get(&V4L2_CID_SATURATION).unwrap();
+        assert_eq!(
+            sat, 0,
+            "0% reference maps to the card's own minimum on any range"
+        );
+        assert!(
+            (185..=196).contains(&con),
+            "75% reference should scale to ~191 on a 0-255 range, got {con}"
+        );
+    }
+
+    #[test]
+    fn range_scaled_falls_back_to_literal_when_device_range_query_fails_456() {
+        // A card that supports the controls but whose range query fails/is
+        // unsupported (no `.with_range(...)` data attached) must still apply
+        // gracefully — falling back to the reference_pct as a literal value,
+        // exactly the pre-#456 ShadowCast-literal behaviour, never a hard failure.
+        let legacy = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST]);
+        let report = apply_controls_with(&legacy, &color_production_controls());
+        assert_eq!(
+            report.applied, 2,
+            "a range-query failure must still let the control apply (literal fallback)"
+        );
+        assert_eq!(
+            *legacy.values.borrow().get(&V4L2_CID_SATURATION).unwrap(),
+            50
         );
     }
 
@@ -1435,10 +1721,9 @@ mod tests {
         // certified_cam1_controls() with saturation=0).
         let grab = select_capture_controls(None, true);
         assert!(
-            !grab
-                .iter()
-                .any(|c| c.id == V4L2_CID_SATURATION && c.value == 0),
-            "grab selection must NOT desaturate (saturation=0 hurts QR decode) — got {grab:?}"
+            !grab.iter().any(|c| c.id == V4L2_CID_SATURATION
+                && c.target == ControlTarget::RangeScaled { reference_pct: 0 }),
+            "grab selection must NOT desaturate (saturation=0% hurts QR decode) — got {grab:?}"
         );
         assert_eq!(
             grab,
