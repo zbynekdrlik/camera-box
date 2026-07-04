@@ -335,6 +335,8 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
 | `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
 | `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log |
+| `output_fps_imag` | `60` | log |
+| `genlock_latency_ms_imag` | `3` | log |
 ",
     )
     .unwrap();
@@ -424,6 +426,8 @@ fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp(
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
 | `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
 | `genlock_source_latency_stream` | `NDI 2ME PGM=range:3-200` | OBS log |
+| `output_fps_imag` | `60` | log |
+| `genlock_latency_ms_imag` | `3` | log |
 ",
     )
     .unwrap();
@@ -445,6 +449,58 @@ fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp(
     assert!(
         all.contains("3-200") && all.contains("3-2000") && all.to_uppercase().contains("MALFORMED"),
         "must name both the pinned range and the code's clamp loudly. stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn check_pins_fails_loudly_on_a_missing_imag_pin_463() {
+    // #463 review: output_fps_imag / genlock_latency_ms_imag are real, always-pinned values
+    // (unlike genlock_build_sha_imag/distroav_so_sha256_imag, deliberately left unpinned until
+    // the first post-#463 live deploy) — before this fix, an otherwise-COMPLETE manifest missing
+    // one of these two imag pins passed --check-pins silently (they were never validated
+    // offline), so a malformed/blank imag pin would only ever surface via a LIVE --check-imag
+    // SSH run against imag-nb, never caught by CI. Manifest here has every OTHER required pin
+    // but omits `genlock_latency_ms_imag` entirely.
+    let dir = std::env::temp_dir().join(format!("dg_missing_imag_pin_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("distroav")).unwrap();
+    let readme = dir.join("README.md");
+    std::fs::write(
+        &readme,
+        "\
+| `vendor/obs-studio` | x | **32.1.2** (commit `a`) | git subtree --squash |
+| `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
+| NDI | x | requires **NDI ≥ 6.3.0** | tree |
+| `output_fps_strih` | `60` | log |
+| `output_fps_stream` | `30` | log |
+| `genlock_wall_clock` | `1` | env |
+| `ndi_input_latency` | `0` | obs-websocket |
+| `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log |
+| `output_fps_imag` | `60` | log |
+",
+        // genlock_latency_ms_imag row intentionally absent.
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("distroav/buildspec.json"),
+        "{\n    \"version\": \"6.2.1\"\n}\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) =
+        run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        code, 1,
+        "a missing imag pin must exit 1, not a silent pass. stdout={stdout:?} stderr={stderr:?}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("genlock_latency_ms_imag") && all.to_lowercase().contains("missing"),
+        "must name the missing imag pin loudly. stdout={stdout:?} stderr={stderr:?}"
     );
 }
 
@@ -2078,4 +2134,246 @@ fn range_tracked_source_name_finds_the_calibration_tracked_pin() {
         &[("EXP", "NDI cam5=3,NDI cam1=3,NDI cam3=3")],
     );
     assert_eq!(none.trim(), "");
+}
+
+// ---- #463 — imag-nb (Topology v2, EPIC #466) drift-guard host case, gathered over SSH ----
+
+#[test]
+fn genlock_latency_ms_from_log_extracts_the_235_single_knob_value() {
+    // The real #235 startup log line (also used by genlock_capability_parser_detects_the_235_
+    // single_knob_latency_line above) — this parser extracts the NUMBER, not just presence.
+    let line = "07:42:38.746: genlock: latency = 3 ms (\u{2248} 0 frames @ 29.970fps) (OBS_GENLOCK_LATENCY_MS) \u{2014} single user-facing latency knob, ts-align implied ON (#235)\n";
+    let out = run_sourced("genlock_latency_ms_from_log \"$LOG\"", &[("LOG", line)]);
+    assert_eq!(out.trim(), "3", "must extract the ms value: {out:?}");
+
+    // A different value (imag's own pin might differ from strih/stream's 3ms floor).
+    let line60 = "07:42:38.746: genlock: latency = 16 ms (\u{2248} 1 frames @ 60.000fps)\n";
+    let out60 = run_sourced("genlock_latency_ms_from_log \"$LOG\"", &[("LOG", line60)]);
+    assert_eq!(out60.trim(), "16");
+
+    // No genlock latency line at all -> "" (UNKNOWN/absent), never a wrong guess.
+    let stock = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n";
+    let out_stock = run_sourced("genlock_latency_ms_from_log \"$LOG\"", &[("LOG", stock)]);
+    assert_eq!(
+        out_stock.trim(),
+        "",
+        "no genlock line -> empty: {out_stock:?}"
+    );
+}
+
+#[test]
+fn or_list_exit_code_capture_survives_errexit_the_463_gather_and_check_imag_fix() {
+    // #463 review (2nd pass): drift-guard.sh runs under `set -euo pipefail` (line 47) — applied
+    // even when the script is SOURCED (the BASH_SOURCE guard only wraps the bottom-of-file
+    // dispatch call, not the top-of-file `set`), so `run_sourced`'s harness inherits real
+    // errexit the instant it sources the script, exactly like production. `gather_and_check_
+    // imag`'s SSH glue captures ssh/timeout's exit code (255 = connection failure, 124 =
+    // timeout) to tell "imag-nb is unreachable" apart from "the file is genuinely gone" (the
+    // check_imag_report UNKNOWN-vs-DRIFT tests below exercise that decision once the code is
+    // read). The FIRST shape of that capture — `var="$(cmd)"` on its own line, followed on the
+    // NEXT line by `local rc=$?` — CRASHES THE WHOLE SCRIPT under errexit the instant `cmd`
+    // returns nonzero: errexit fires on the failing assignment before the `rc=$?` line ever
+    // runs, so a transient network blip would abort drift-guard.sh entirely (exit 255) instead
+    // of reporting a graceful UNKNOWN. This test locks in the fix actually shipped:
+    // `rc=0; var="$(cmd)" || rc=$?` — an OR-list, the one shape `set -e` exempts (only the LAST
+    // command of an AND/OR list is errexit-checked) — survives AND captures the real code.
+    let out = run_sourced(
+        r#"
+        fails_255() { return 255; }
+        rc=0
+        captured="$(fails_255)" || rc=$?
+        echo "SURVIVED rc=$rc captured=[$captured]"
+        "#,
+        &[],
+    );
+    assert_eq!(
+        out.trim(),
+        "SURVIVED rc=255 captured=[]",
+        "#463: the OR-list exit-code capture must survive drift-guard.sh's inherited `set -e` \
+         and correctly report the failing command's exit code, output={out:?}"
+    );
+}
+
+/// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line (60fps,
+/// imag's low-latency IMAG role, EPIC #466 Topology v2).
+const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
+11:40:39.714: video settings reset:\n\
+11:40:39.714: \tfps:               60/1\n\
+07:42:38.746: genlock: latency = 3 ms (\u{2248} 0 frames @ 60.000fps) (OBS_GENLOCK_LATENCY_MS) \u{2014} single user-facing latency knob, ts-align implied ON (#235)\n";
+
+#[test]
+fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
+    // Full live facet, all six checks match the pin -> exit 0, every line OK, no DRIFT/UNKNOWN.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=0"),
+        "every value matches -> clean: {out:?}"
+    );
+    assert!(!out.contains("DRIFT"), "no drift line expected: {out:?}");
+    assert!(
+        !out.contains("UNKNOWN"),
+        "no unknown line expected: {out:?}"
+    );
+    // Every one of the 6 checks must print its own OK line (comprehensive-logging: values, not
+    // just a bare pass/fail).
+    for label in [
+        "genlock_build_sha",
+        "distroav_so_sha256",
+        "genlock_capability",
+        "output_fps_imag",
+        "genlock_latency_ms_imag",
+        "distroav_so_path",
+    ] {
+        assert!(out.contains(label), "must report {label}: {out:?}");
+    }
+}
+
+#[test]
+fn check_imag_report_flags_a_wrong_deployed_build_sha_463() {
+    // The deployed GENLOCK_BUILD_SHA.txt disagrees with the pin -> DRIFT, exit 20 (never a
+    // silent pass on the single most important identity check — did the RIGHT build land).
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_EXPECTED" "SHA_WRONG" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "build SHA mismatch -> DRIFT exit: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_build_sha") && out.contains("DRIFT"),
+        "must flag the build SHA line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_flags_an_fps_drift_down_from_60_463() {
+    // #463/#459: imag holds the 60fps low-latency IMAG role (Topology v2) — a drift DOWN to 30
+    // (strih's rate) is exactly the kind of silent regression this pin exists to catch.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "30" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=20"), "fps drift -> DRIFT exit: {out:?}");
+    assert!(
+        out.contains("output_fps_imag") && out.contains("DRIFT"),
+        "must flag the fps line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_flags_missing_genlock_capability_as_stock_build_drift_463() {
+    // A NON-EMPTY log (real header lines) that carries NO genlock marker at all -> the #119
+    // wrong-build case: DRIFT, never silently passed just because the build-SHA marker file
+    // happens to still be present. #463 review: the 9th param is the RAW log text (checked
+    // internally via genlock_capability_from_log), so this must be a log that WAS actually
+    // read -- an empty string means something different now (see the UNKNOWN test below).
+    let stock_log = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n11:40:39.714: video settings reset:\n11:40:39.714: \tfps:               60/1\n";
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", stock_log)]);
+    assert!(
+        out.contains("RC=20"),
+        "no capability marker in a non-empty log -> DRIFT exit: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_capability") && out.contains("DRIFT"),
+        "must flag the capability line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_capability_unknown_when_the_log_was_never_read_463() {
+    // #463 review: an EMPTY log text (SSH failed to reach imag-nb, or OBS has never launched
+    // there) must read as UNKNOWN, never the same DRIFT a genuine stock/wrong build gets --
+    // otherwise a mere connectivity hiccup prints a false "#119 wrong-build" alarm. Mirrors the
+    // sibling strih/stream `drift_check_capability`'s own empty-text guard.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "empty log text -> UNKNOWN exit (never the DRIFT a stock build gets): {out:?}"
+    );
+    let capability_line = out
+        .lines()
+        .find(|l| l.contains("genlock_capability"))
+        .unwrap_or_else(|| panic!("no genlock_capability line printed: {out:?}"));
+    assert!(
+        capability_line.contains("UNKNOWN"),
+        "the capability line must say UNKNOWN, never a false #119 wrong-build DRIFT for an \
+         unread log: {capability_line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_flags_the_plugin_path_missing_463() {
+    // distroav.so is not found at the canonical Linux plugin path -> DRIFT (mirrors the
+    // strih/stream canonical_plugin_path shadow-copy invariant, #124/#125).
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "0" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "missing plugin path -> DRIFT exit: {out:?}"
+    );
+    assert!(
+        out.contains("distroav_so_path") && out.contains("DRIFT"),
+        "must flag the plugin path line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_unknown_when_values_were_not_read_never_a_silent_pass_463() {
+    // Every observed value is empty (SSH failed / paths unreachable) -> UNKNOWN (exit 11), NEVER
+    // reported clean — the "we meant to check but couldn't" case must never read as a pass.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "" "DSHA_A" "" "60" "" "3" "" "" "/plugin/path" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11") || out.contains("RC=20"),
+        "unread values must never report clean (RC=0): {out:?}"
+    );
+    assert!(out.contains("UNKNOWN"), "must print UNKNOWN lines: {out:?}");
+}
+
+#[test]
+fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
+    // Parse a realistic imag-nb OBS log (IMAG_LOG_60FPS_3MS) through the real fps/latency
+    // *_from_log parsers, THEN feed the RAW log text (not a pre-extracted capability flag,
+    // #463 review) into check_imag_report — the same wiring `gather_and_check_imag` does,
+    // minus the actual `ssh` calls. check_imag_report derives the capability marker itself.
+    let body = r#"
+        fps="$(fps_from_log "$LOG")"
+        latency="$(genlock_latency_ms_from_log "$LOG")"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", IMAG_LOG_60FPS_3MS)]);
+    assert!(
+        out.contains("RC=0"),
+        "a real 60fps/3ms imag log parsed end-to-end must match a 60/3 pin cleanly: {out:?}"
+    );
 }

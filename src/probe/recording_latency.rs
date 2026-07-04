@@ -85,14 +85,24 @@ pub const BURN_RUN_ID_STREAM: u32 = 911004;
 /// this clean digital id. Distinct from the strih/stream burn ids so all marks are told
 /// apart by run_id. The binary lets the operator override it to match the cam1 env.
 pub const BURN_RUN_ID_CAM1: u32 = 911001;
-/// #24 — cam3's capture-burn run_id, extending the #174 mechanism to a THIRD source camera.
+/// imag-nb's (Topology v2 IMAG box, EPIC #466) OWN digital corner burn run_id — the OBS burn
+/// filter's `Corner::BottomCenterLeft` (#463, `vendor/distroav/src/burn-geom.hpp`). Distinct
+/// from every other reserved id (911001 cam1 / 911002 strih / 911004 stream) so all marks are
+/// told apart by run_id alone.
+///
+/// **Renamed from `BURN_RUN_ID_CAM3` (#463).** This constant used to be reserved for cam3's
+/// `CAMERA_BOX_BURN_RUN_ID` capture-burn (the #24 mechanism, extending #174 to a THIRD source
+/// camera) — but cam3 is down/deferred in Topology v2, so #463 claims the value for imag's own
+/// digital burn instead. cam3's capture-burn CLI flag (`--burn-cam3-run-id`) still defaults to
+/// this same numeric value (911003) for now — see its doc comment in `recording-verdict.rs` and
+/// issue #24 for the note that cam3, when its capture-burn work resumes, needs a FRESH id (this
+/// one is imag's now).
+pub const BURN_RUN_ID_IMAG: u32 = 911003;
+/// #24 — cam4's capture-burn run_id, extending the #174 mechanism to another source camera.
 /// cam1/cam3/cam4 occupy the SAME "camera under test" role (the `CAMERA_BOX_BURN_RUN_ID` capture
 /// burn is the same feature on every camera-box binary — only the deployed run_id differs) and
 /// are mutually exclusive in any real run: only the ONE camera actually deployed with the burn
-/// enabled produces a non-empty id set. Distinct from every other reserved id (911001 cam1 /
-/// 911002 strih / 911004 stream) so all marks are told apart by run_id alone.
-pub const BURN_RUN_ID_CAM3: u32 = 911003;
-/// #24 — cam4's capture-burn run_id. See [`BURN_RUN_ID_CAM3`].
+/// enabled produces a non-empty id set. See [`BURN_RUN_ID_IMAG`]'s doc for the cam3 id note.
 pub const BURN_RUN_ID_CAM4: u32 = 911007;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions

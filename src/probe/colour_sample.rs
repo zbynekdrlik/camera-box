@@ -11,15 +11,16 @@
 //! ## Why the burns are dodged (and why every patch survives)
 //!
 //! The #367 colour scale is a VERTICAL column in the central gap between the two dual-QR halves
-//! ([`crate::colour_scale`]), spanning the QR's vertical extent (y ≈ 24..724 on 1080). The four
-//! burns all sit at the BOTTOM (#111 4-corner layout): the cam1 capture burn CENTER-bottom
-//! ([`qr::cam1_burn_origin`], 320px, top row ≈ 736), strih bottom-LEFT and stream bottom-RIGHT
-//! (`burn_geom::corner_placement`, ~0.28·h ≈ 302px on 1080, top row ≈ 738). Because the column ends
-//! at the QR bottom (≈724) and every burn starts below it, the burns no longer overlap any patch
-//! at all — so the burn-exclusion rects ([`node_burn_exclusions`]) are now belt-and-braces: the
-//! sampler ([`crate::colour_verify::sample_patch_means`]) still dodges them, but no patch loses a
-//! pixel. Confirmed on the rig by the supervisor when the real fixture lands; the rects here match
-//! the writers' geometry exactly.
+//! ([`crate::colour_scale`]), spanning the QR's vertical extent (y ≈ 24..724 on 1080). All FOUR
+//! burns sit at the BOTTOM (#111 4-corner layout, extended by #463): the cam1 capture burn
+//! CENTER-bottom ([`qr::cam1_burn_origin`], 320px, top row ≈ 736), strih bottom-LEFT, stream
+//! bottom-RIGHT, and imag bottom-CENTER-LEFT (`burn_geom::corner_placement`, ~0.28·h ≈ 302px on
+//! 1080, top row ≈ 738 for all three corner burns). Because the column ends at the QR bottom
+//! (≈724) and every burn starts below it, the burns no longer overlap any patch at all — so the
+//! burn-exclusion rects ([`node_burn_exclusions`]) are now belt-and-braces: the sampler
+//! ([`crate::colour_verify::sample_patch_means`]) still dodges them, but no patch loses a pixel.
+//! Confirmed on the rig by the supervisor when the real fixture lands; the rects here match the
+//! writers' geometry exactly.
 
 use crate::colour_scale::{Rect, Rgb, PATCH_COLOURS};
 use crate::colour_verify::{
@@ -77,15 +78,15 @@ fn pad_rect(r: Rect, pad: u32, canvas_w: u32, canvas_h: u32) -> Rect {
 }
 
 /// The burn rectangles to DODGE when sampling the colour column on a `canvas_w`×`canvas_h` frame:
-/// the cam1 capture burn (center-bottom) and the strih/stream corner burns (bottom-left /
-/// bottom-right). Each is computed from the SAME geometry the writers use (`qr::cam1_burn_origin`
-/// and `burn_geom::corner_placement`), then padded by [`BURN_EXCLUSION_PAD_PX`]. Empty for a canvas
-/// too small to carry the burns.
+/// the cam1 capture burn (center-bottom) and the strih/stream/imag corner burns (bottom-left /
+/// bottom-right / bottom-center-left, #463). Each is computed from the SAME geometry the writers
+/// use (`qr::cam1_burn_origin` and `burn_geom::corner_placement`), then padded by
+/// [`BURN_EXCLUSION_PAD_PX`]. Empty for a canvas too small to carry the burns.
 pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
     if canvas_w == 0 || canvas_h == 0 {
         return Vec::new();
     }
-    let mut rects = Vec::with_capacity(3);
+    let mut rects = Vec::with_capacity(4);
 
     // cam1 capture burn — horizontally centered, bottom-anchored (qr::cam1_burn_origin geometry).
     let cam1_px = qr::CAM1_BURN_QR_PX.min(canvas_w).min(canvas_h);
@@ -97,7 +98,9 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
         h: cam1_px,
     });
 
-    // strih (bottom-left) + stream (bottom-right) corner burns — burn_geom::corner_placement.
+    // strih (bottom-left) + stream (bottom-right) + imag (bottom-center-left, #463) corner
+    // burns — burn_geom::corner_placement (vendor/distroav/src/burn-geom.hpp), mirrored exactly
+    // including its in-frame clamp fallback for a degenerate tiny canvas.
     let margin = ((CORNER_BURN_MARGIN_FRACTION * canvas_h as f64) as u32).max(8);
     let mut side = (CORNER_BURN_HEIGHT_FRACTION * canvas_h as f64) as u32;
     side = side.max(64);
@@ -106,17 +109,39 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
     side = side.min(max_w).min(max_h).max(1);
     // Bottom edge sits at canvas_h - margin; top = bottom - side.
     let top = canvas_h.saturating_sub(margin).saturating_sub(side);
-    // bottom-left
+    // bottom-left (strih)
     rects.push(Rect {
         x: margin,
         y: top,
         w: side,
         h: side,
     });
-    // bottom-right
+    // bottom-right (stream)
     let right_x = canvas_w.saturating_sub(margin).saturating_sub(side);
     rects.push(Rect {
         x: right_x,
+        y: top,
+        w: side,
+        h: side,
+    });
+    // bottom-center-left (imag, #463): one `margin` clear of the bottom-left burn's trailing
+    // edge (`margin + side`) — mirrors `burn_geom::Corner::BottomCenterLeft` exactly, INCLUDING
+    // its 2-tier fallback (review fix): flushing straight to the frame's right edge on a
+    // too-narrow canvas could land back inside the bottom-left rect itself (overlapping
+    // exclusion rects would leave a hole in the dodge). Tier 2 flushes against the bottom-left
+    // rect's own trailing edge instead (zero overlap, zero gap); only a canvas too small to
+    // hold even that falls through to the frame edge (tier 3, last resort).
+    let bcl_x_wanted = margin.saturating_add(side).saturating_add(margin);
+    let bcl_x_tier2 = margin.saturating_add(side); // flush against the bottom-left rect's edge
+    let bcl_x = if bcl_x_wanted.saturating_add(side) <= canvas_w {
+        bcl_x_wanted
+    } else if bcl_x_tier2.saturating_add(side) <= canvas_w {
+        bcl_x_tier2
+    } else {
+        canvas_w.saturating_sub(side)
+    };
+    rects.push(Rect {
+        x: bcl_x,
         y: top,
         w: side,
         h: side,
@@ -670,9 +695,9 @@ mod tests {
     }
 
     #[test]
-    fn burn_exclusions_cover_the_three_burns_yet_leave_every_patch_samplable() {
+    fn burn_exclusions_cover_the_four_burns_yet_leave_every_patch_samplable_463() {
         let ex = node_burn_exclusions(W, H);
-        assert_eq!(ex.len(), 3, "cam1 + strih + stream burns");
+        assert_eq!(ex.len(), 4, "cam1 + strih + stream + imag (#463) burns");
         // Each excluded rect is bottom-anchored and within the canvas.
         for r in &ex {
             assert!(r.x + r.w <= W && r.y + r.h <= H, "in canvas: {r:?}");
@@ -680,6 +705,19 @@ mod tests {
                 r.y + r.h <= H && r.y + r.h >= H - 80,
                 "bottom-anchored: {r:?}"
             );
+        }
+        // #463 — the four burn-exclusion rects must not overlap EACH OTHER (padding included):
+        // the new imag bottom-center-left rect must not collide with cam1's center burn or
+        // strih's bottom-left burn.
+        for i in 0..ex.len() {
+            for j in (i + 1)..ex.len() {
+                assert!(
+                    !ex[i].intersects(&ex[j]),
+                    "burn-exclusion rect {i} {:?} must not overlap rect {j} {:?}",
+                    ex[i],
+                    ex[j]
+                );
+            }
         }
         // Every colour patch must still have ≥1 samplable pixel after dodging — otherwise the gate
         // would lose that patch. (The burns leave a clear strip at the very bottom of the band.)

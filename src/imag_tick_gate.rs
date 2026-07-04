@@ -1,17 +1,25 @@
-//! #461 — burn-less optical zero-loss gate for a node that intentionally carries NO digital
-//! node-burn (imag-nb: the new 60fps low-latency IMAG box, EPIC #466 Topology v2).
+//! #461 — burn-less optical zero-loss gate for imag-nb (the 60fps low-latency IMAG box, EPIC
+//! #466 Topology v2), extended by #463 to AND-in imag's OWN digital corner burn now that it has
+//! one (run_id [`crate::probe::recording_latency::BURN_RUN_ID_IMAG`] = 911003, burned by the OBS
+//! filter's new `Corner::BottomCenterLeft` — `vendor/distroav/src/burn-geom.hpp`).
 //!
 //! Every OTHER node's zero-loss proof (`probe::burn_contiguity::burn_contiguity`) is a
-//! first..=last CONTIGUITY check over a DIGITAL burn id we inject at the OBS render tick. imag
-//! has no burn yet (911003 is RESERVED for it, wired in a later ticket, #463) — but it does NOT
-//! need one: imag records the cam2 painter's 60Hz dual-QR at 60fps, 1:1, with NO 60->30 beat (the
-//! beat that forces strih/stream to treat the optical read as diagnostic-only lives at the
-//! cam->strih / strih->stream hops, not here). So the cam2 OPTICAL tick's own first..=last
-//! contiguity (step=1) IS a genuine zero-loss proof for imag: every painted tick that imag's
-//! camera captured maps 1:1 onto a recorded frame, so a missing tick integer in the analyzed
-//! span means imag's camera FAILED to capture that instant — the same "any gap in the span is a
-//! candidate drop" logic `burn_contiguity` applies to a digital id, applied here to the optical
-//! tick instead.
+//! first..=last CONTIGUITY check over a DIGITAL burn id injected at the OBS render tick. Before
+//! #463, imag had no burn — but it did not strictly need one: imag records the cam2 painter's
+//! 60Hz dual-QR at 60fps, 1:1, with NO 60->30 beat (the beat that forces strih/stream to treat
+//! the optical read as diagnostic-only lives at the cam->strih / strih->stream hops, not here).
+//! So the cam2 OPTICAL tick's own first..=last contiguity (step=1) IS a genuine zero-loss proof
+//! for imag on its own: every painted tick that imag's camera captured maps 1:1 onto a recorded
+//! frame, so a missing tick integer in the analyzed span means imag's camera FAILED to capture
+//! that instant — the same "any gap in the span is a candidate drop" logic `burn_contiguity`
+//! applies to a digital id, applied here to the optical tick instead.
+//!
+//! **#463 — now imag ALSO carries a digital burn, so BOTH signals gate it (stricter, per the
+//! strict-test mandate — never accept a weaker proof once a stronger one is available):**
+//! [`ImagVerdict`] ANDs the optical tick contiguity with the burn's OWN first..=last contiguity
+//! WHEN the burn is present in the recording. A recording with NO burn decoded at all (an older
+//! recording, or a build not yet carrying the corner burn) falls back to the ORIGINAL
+//! optical-only proof — see [`ImagVerdict::is_zero_loss`].
 //!
 //! This is a SIBLING of `probe::burn_contiguity::burn_contiguity`, deliberately duplicated as a
 //! crate-root, non-probe module rather than reused from `probe::` — the WHOLE `probe` module is
@@ -19,7 +27,9 @@
 //! RED->GREEN-verified locally. Mirrors the `reannounce.rs` / `colour_scale.rs` /
 //! `recording_span_gate.rs` Tier-0 seam pattern: this module holds ONLY primitive-typed pure
 //! logic (`&[u32]` in, a plain result struct out) so it compiles + tests on DEFAULT features; the
-//! probe-gated `bin/recording-verdict` extracts `RecordingFrame::tick` and calls in.
+//! probe-gated `bin/recording-verdict` extracts `RecordingFrame::tick` (+ the burn ids via
+//! `probe::recording_latency::burn_ids_in` / `probe::burn_contiguity::burn_contiguity`) and
+//! calls in.
 
 /// The tick-contiguity verdict for imag's optical proof: first..=last integer contiguity over
 /// every distinct cam2 painted tick imag's recording decoded. Mirrors
@@ -46,6 +56,61 @@ impl TickContiguity {
     /// zero on, mirroring `NodeContiguity::is_contiguous`'s same "empty is not a pass" rule.
     pub fn is_contiguous(&self) -> bool {
         self.first_tick.is_some() && self.missing_ticks.is_empty()
+    }
+}
+
+/// #463 — imag's FULL zero-loss verdict: the optical tick contiguity ANDed with the digital
+/// corner-burn contiguity, WHEN the burn is present in the recording. Kept as a separate pure
+/// combinator (rather than folding the AND into the caller) so the "burn present but broken" vs
+/// "burn absent, fall back to optical-only" decision is unit-tested here, Tier-0, once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImagVerdict {
+    /// Whether the cam2 optical tick sequence was contiguous ([`TickContiguity::is_contiguous`]).
+    pub optical_contiguous: bool,
+    /// `None` ⇒ NO digital burn id was decoded anywhere in the recording at all — the pre-#463
+    /// state (an older recording, or a build not yet carrying imag's corner burn). The verdict
+    /// falls back to the optical proof alone, unchanged from pre-#463 behaviour.
+    /// `Some(contiguous)` ⇒ the burn WAS decoded; `contiguous` is whether ITS OWN first..=last
+    /// span was gap-free. #463's whole point: once a stronger (digital) proof exists, it must
+    /// ALSO hold — a present-but-gappy burn now fails the node even if the optical read is clean.
+    pub burn_contiguous: Option<bool>,
+}
+
+impl ImagVerdict {
+    /// ZERO loss ⇔ the optical tick is contiguous AND (no burn was present in this recording OR
+    /// the burn is ALSO contiguous). See the struct doc for the fallback rationale — this is
+    /// STRICTER than pre-#463 (never looser): a node with a decoded-but-gappy burn now fails even
+    /// though its optical read alone was clean, per the strict-test mandate.
+    pub fn is_zero_loss(&self) -> bool {
+        self.optical_contiguous && optional_signal_ok(self.burn_contiguous)
+    }
+}
+
+/// #463 — is an OPTIONAL second proof signal "not a problem"? `None` (the signal does not
+/// apply at all — e.g. no digital burn was decoded anywhere in the recording) is ALWAYS fine,
+/// nothing to fail on; `Some(false)` (the signal WAS present but broken) is the only failing
+/// case; `Some(true)` (present and clean) is fine. Shared by [`ImagVerdict::is_zero_loss`] and
+/// `NodeVerdict::imag_burn_ok` (`src/bin/recording-verdict.rs`) so the "absent is fine,
+/// present-but-broken fails" rule lives in exactly ONE place instead of being independently
+/// reimplemented at each call site (the #463 review caught the duplication).
+pub fn optional_signal_ok(present_and_contiguous: Option<bool>) -> bool {
+    present_and_contiguous.unwrap_or(true)
+}
+
+/// Build imag's [`ImagVerdict`] from its optical [`TickContiguity`] and, separately, whether ANY
+/// digital corner-burn id was decoded at all in the recording (`burn_present`) and — only when it
+/// was — whether that burn's OWN span was contiguous (`burn_contiguous_if_present`). Splitting the
+/// two burn booleans (rather than a single `Option<bool>` at the call site) keeps the caller
+/// honest: it cannot accidentally collapse "burn absent" and "burn present and contiguous" into
+/// the same `true`, which would silently hide a real burn from ever being checked.
+pub fn imag_verdict(
+    optical: &TickContiguity,
+    burn_present: bool,
+    burn_contiguous_if_present: bool,
+) -> ImagVerdict {
+    ImagVerdict {
+        optical_contiguous: optical.is_contiguous(),
+        burn_contiguous: burn_present.then_some(burn_contiguous_if_present),
     }
 }
 
@@ -194,6 +259,87 @@ mod tests {
             expected_count,
             u32::MAX,
             "saturates instead of overflowing to 0"
+        );
+    }
+
+    // ---- #463 — imag's optical+burn AND gate (ImagVerdict) ----
+
+    #[test]
+    fn no_burn_present_falls_back_to_optical_only_463() {
+        // Pre-#463 behaviour preserved: an older recording (or a build not yet carrying imag's
+        // corner burn) has NO burn id decoded at all — the verdict must fall back to the optical
+        // proof alone, in BOTH directions (optical clean passes; optical broken still fails).
+        let clean = tick_contiguity(&(100..=159).collect::<Vec<_>>());
+        let v = imag_verdict(&clean, false, false);
+        assert_eq!(
+            v.burn_contiguous, None,
+            "no burn decoded ⇒ None, not Some(false)"
+        );
+        assert!(
+            v.is_zero_loss(),
+            "optical contiguous + no burn present ⇒ zero loss (unchanged pre-#463 behaviour)"
+        );
+
+        let broken = tick_contiguity(&(100..=159).filter(|&t| t != 130).collect::<Vec<_>>());
+        let v2 = imag_verdict(&broken, false, false);
+        assert!(
+            !v2.is_zero_loss(),
+            "a missing optical tick still fails even with no burn present"
+        );
+    }
+
+    #[test]
+    fn burn_present_and_contiguous_plus_optical_contiguous_is_zero_loss_463() {
+        // #463: BOTH signals present and clean ⇒ zero loss — the stricter, doubly-proven pass.
+        let optical = tick_contiguity(&(100..=159).collect::<Vec<_>>());
+        let v = imag_verdict(&optical, true, true);
+        assert_eq!(v.burn_contiguous, Some(true));
+        assert!(
+            v.is_zero_loss(),
+            "optical + burn both contiguous ⇒ zero loss"
+        );
+    }
+
+    #[test]
+    fn burn_present_but_not_contiguous_fails_even_though_optical_is_clean_463() {
+        // #463's whole point: the optical tick alone is NOT enough once imag has a digital burn —
+        // a present-but-gappy burn must FAIL the node even though the optical read is perfect
+        // (never let a weaker proof override a stronger one that disagrees).
+        let optical = tick_contiguity(&(100..=159).collect::<Vec<_>>());
+        let v = imag_verdict(&optical, true, false);
+        assert!(optical.is_contiguous(), "sanity: optical alone is clean");
+        assert_eq!(v.burn_contiguous, Some(false));
+        assert!(
+            !v.is_zero_loss(),
+            "a present-but-non-contiguous burn FAILS the node even with a clean optical read (#463)"
+        );
+    }
+
+    #[test]
+    fn optical_broken_fails_even_when_burn_is_contiguous_463() {
+        // The optical read stays a HARD requirement (mirrors #363's stance for strih/stream): a
+        // contiguous digital burn can never paper over a broken optical proof.
+        let optical = tick_contiguity(&(100..=159).filter(|&t| t != 130).collect::<Vec<_>>());
+        let v = imag_verdict(&optical, true, true);
+        assert!(
+            !v.is_zero_loss(),
+            "a missing optical tick FAILS even when the digital burn is perfectly contiguous"
+        );
+    }
+
+    #[test]
+    fn optional_signal_ok_absent_is_fine_present_broken_fails_463() {
+        // The shared "second signal" rule NodeVerdict::imag_burn_ok (recording-verdict.rs)
+        // also uses: None (not applicable) and Some(true) (present, clean) are both fine;
+        // Some(false) (present but broken) is the ONLY failing case.
+        assert!(optional_signal_ok(None), "signal not applicable ⇒ fine");
+        assert!(
+            optional_signal_ok(Some(true)),
+            "signal present and clean ⇒ fine"
+        );
+        assert!(
+            !optional_signal_ok(Some(false)),
+            "signal present but broken ⇒ the only failing case"
         );
     }
 }

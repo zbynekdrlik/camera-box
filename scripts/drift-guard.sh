@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 #
-# drift-guard.sh — enforce the pinned zero-loss production set on strih + stream (#45).
+# drift-guard.sh — enforce the pinned zero-loss production set on strih + stream + imag-nb (#45, #463).
 #
 # User directive (2026-06-12): the production OBS boxes must be KEPT on the exact versions +
 # critical settings that guarantee permanent zero-loss functionality. This guard reads the
 # installed OBS / DistroAV / NDI versions and the critical runtime settings (output fps, genlock
 # master gate) and FAILS LOUDLY on any drift from the pinned set declared in vendor/README.md.
 #
-# Two facets, one engine:
+# Three facets, one engine:
 #   * --check-pins (default, CI): validates the manifest declares a complete, well-formed pinned
 #     set AND cross-checks the manifest's DistroAV pin against the vendored source
 #     (vendor/distroav/buildspec.json) — catches the "subtree bumped but manifest stale" drift
 #     class with no production access, so it runs on every CI run.
-#   * --compare KEY=VAL …: compares values OBSERVED on a live box (gathered read-only via the
-#     win-* MCP tools — see .claude/commands/drift-guard.md) against the pinned set and FAILS
-#     loudly on drift. A missing observed value is reported UNKNOWN (never a silent pass). When a
-#     `manifest=<BUNDLE_MANIFEST.json>` is supplied it ALSO checks each component's BUILD SHA (the
-#     live obs.dll/distroav.dll Get-FileHash vs the #120 manifest) + the genlock CAPABILITY markers
-#     only our build emits (#122) — so a STOCK/wrong build is drift even when the marketing version
-#     matches (the #119 wrong-build-right-version that silently shipped).
+#   * --compare KEY=VAL … (strih/stream, Windows): compares values OBSERVED on a live box
+#     (gathered read-only via the win-* MCP tools — see .claude/commands/drift-guard.md) against
+#     the pinned set and FAILS loudly on drift. A missing observed value is reported UNKNOWN
+#     (never a silent pass). When a `manifest=<BUNDLE_MANIFEST.json>` is supplied it ALSO checks
+#     each component's BUILD SHA (the live obs.dll/distroav.dll Get-FileHash vs the #120 manifest)
+#     + the genlock CAPABILITY markers only our build emits (#122) — so a STOCK/wrong build is
+#     drift even when the marketing version matches (the #119 wrong-build-right-version that
+#     silently shipped).
+#   * --check-imag [host=IP] [user=U] (imag-nb, Linux, #463): a plain Linux box reachable over
+#     SSH, so drift-guard gathers its OWN observed values directly (no win-* MCP round-trip) —
+#     the genlock build SHA marker, the deployed distroav.so hash, and the OBS log's genlock
+#     capability + fps + latency lines — and compares them against the imag-specific pins in
+#     vendor/README.md. Simpler than the Windows path by construction (SSH IS the gathering).
 #
 # Like scripts/update-av-stack.sh, the file is split into PURE functions (manifest/log parse,
 # version compare — unit-tested from tests/drift_guard.rs by sourcing this file) and a flow that
@@ -344,6 +350,207 @@ genlock_src_latency_for() {
     lat="${lat#"${lat%%[![:space:]]*}"}"; lat="${lat%"${lat##*[![:space:]]}"}"
     if [ "$name" = "$want" ]; then printf '%s' "$lat"; return 0; fi
   done
+}
+
+# genlock_latency_ms_from_log TEXT -> "3" (the configured genlock latency in ms) from the #235
+# single-knob log line "genlock: latency = N ms (...)" ("" if absent). #463: used by imag's
+# drift-guard host case to pin the deployed VALUE, not just its PRESENCE (which
+# genlock_capability_from_log already covers as one of its alternation branches). Drain-safe
+# (grep|sed|head, never grep -q) matching the sibling *_from_log parsers.
+genlock_latency_ms_from_log() {
+  printf '%s\n' "$1" \
+    | grep -iE 'genlock:.*latency = [0-9]+ ms' \
+    | sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
+}
+
+# check_imag_report EXP_BUILD_SHA OBS_BUILD_SHA EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
+#   EXP_LATENCY_MS OBS_LATENCY_MS OBS_LOG_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
+#   -> the #463 imag-nb (Topology v2, EPIC #466) host case. PURE — every value is already
+#   gathered (by [`gather_and_check_imag`], which does the actual SSH), so this function has NO
+#   I/O and is directly unit-testable, mirroring `compare_observed`'s pure-report-from-inputs
+#   shape. Prints one report line per check (OK / DRIFT / UNKNOWN, matching the strih/stream
+#   report style) and returns 0 = clean, 20 = DRIFT, 11 = at least one UNKNOWN (never a silent
+#   pass — same exit-code contract as the rest of the engine).
+#
+# OBS_LOG_TEXT is the RAW log text (not a pre-extracted capability flag) — the #463 review
+# caught that pre-extracting collapsed "the log was never read at all" (SSH failure / OBS never
+# launched) and "the log WAS read but carries no genlock marker" (a genuine stock/wrong build)
+# into the same empty string, which this function then reported as a false DRIFT for a mere
+# connectivity hiccup. check_imag_report derives the marker itself via
+# genlock_capability_from_log, mirroring the sibling strih/stream `drift_check_capability`'s
+# two-tier check (empty text -> UNKNOWN; non-empty text with no marker -> DRIFT).
+#
+# Simpler than the strih/stream `--compare` path (#463 research comment): imag is a plain Linux
+# box reachable over SSH, so drift-guard can gather its OWN observed values directly instead of
+# depending on an external win-* MCP round-trip.
+check_imag_report() {
+  local exp_build_sha="$1" obs_build_sha="$2" exp_distroav_sha="$3" obs_distroav_sha="$4"
+  local exp_fps="$5" obs_fps="$6" exp_latency="$7" obs_latency="$8"
+  local obs_log_text="$9" exp_plugin_path="${10}" plugin_present="${11}"
+  local drift=0 unknown=0
+
+  # 1. /opt/obs-genlock/GENLOCK_BUILD_SHA.txt — the deployed genlock build identity.
+  if [ -z "$obs_build_sha" ]; then
+    printf '  %-22s UNKNOWN  (GENLOCK_BUILD_SHA.txt not read on imag-nb)\n' "genlock_build_sha"
+    unknown=$((unknown + 1))
+  elif [ -z "$exp_build_sha" ]; then
+    printf '  %-22s UNKNOWN  (no pinned genlock_build_sha_imag in README)\n' "genlock_build_sha"
+    unknown=$((unknown + 1))
+  elif [ "$obs_build_sha" = "$exp_build_sha" ]; then
+    printf '  %-22s OK       (%s)\n' "genlock_build_sha" "$obs_build_sha"
+  else
+    printf '  %-22s DRIFT    (expected %s, observed %s)\n' "genlock_build_sha" "$exp_build_sha" "$obs_build_sha"
+    drift=$((drift + 1))
+  fi
+
+  # 2. distroav.so hash (the Linux plugin binary itself, not just the marker file).
+  if [ -z "$obs_distroav_sha" ]; then
+    printf '  %-22s UNKNOWN  (distroav.so hash not read on imag-nb)\n' "distroav_so_sha256"
+    unknown=$((unknown + 1))
+  elif [ -z "$exp_distroav_sha" ]; then
+    printf '  %-22s UNKNOWN  (no pinned distroav_so_sha256_imag in README)\n' "distroav_so_sha256"
+    unknown=$((unknown + 1))
+  elif [ "$obs_distroav_sha" = "$exp_distroav_sha" ]; then
+    printf '  %-22s OK       (%s)\n' "distroav_so_sha256" "$obs_distroav_sha"
+  else
+    printf '  %-22s DRIFT    (expected %s, observed %s)\n' "distroav_so_sha256" "$exp_distroav_sha" "$obs_distroav_sha"
+    drift=$((drift + 1))
+  fi
+
+  # 3. genlock render-tick capability marker present in the OBS log — the #119 wrong-build guard
+  # (a stock/wrong build emits no `genlock:` line at all, regardless of marketing version).
+  # Two-tier check (mirrors drift_check_capability's strih/stream logic): an EMPTY log text
+  # (SSH failed to reach imag-nb, or OBS has never been launched there) is UNKNOWN — nothing was
+  # read, never a false DRIFT for a connectivity hiccup. Only NON-EMPTY text with no marker line
+  # is the genuine #119 stock/wrong-build DRIFT.
+  if [ -z "$obs_log_text" ]; then
+    printf '  %-22s UNKNOWN  (OBS log not read on imag-nb)\n' "genlock_capability"
+    unknown=$((unknown + 1))
+  elif [ "$(genlock_capability_from_log "$obs_log_text")" = "1" ]; then
+    printf '  %-22s OK       (genlock build-unique marker present)\n' "genlock_capability"
+  else
+    printf '  %-22s DRIFT    (no genlock render-tick marker in the OBS log — stock/wrong build)\n' "genlock_capability"
+    drift=$((drift + 1))
+  fi
+
+  # 4. fps pin (imag is the 60fps low-latency IMAG role, Topology v2 — a drift DOWN to 30 is drift).
+  if [ -z "$obs_fps" ]; then
+    printf '  %-22s UNKNOWN  (fps not read on imag-nb)\n' "output_fps_imag"
+    unknown=$((unknown + 1))
+  elif [ -z "$exp_fps" ]; then
+    printf '  %-22s UNKNOWN  (no pinned output_fps_imag in README)\n' "output_fps_imag"
+    unknown=$((unknown + 1))
+  elif [ "$obs_fps" = "$exp_fps" ]; then
+    printf '  %-22s OK       (%s)\n' "output_fps_imag" "$obs_fps"
+  else
+    printf '  %-22s DRIFT    (expected %s, observed %s)\n' "output_fps_imag" "$exp_fps" "$obs_fps"
+    drift=$((drift + 1))
+  fi
+
+  # 5. genlock latency pin (the #235 single-knob ms value).
+  if [ -z "$obs_latency" ]; then
+    printf '  %-22s UNKNOWN  (latency not read on imag-nb)\n' "genlock_latency_ms_imag"
+    unknown=$((unknown + 1))
+  elif [ -z "$exp_latency" ]; then
+    printf '  %-22s UNKNOWN  (no pinned genlock_latency_ms_imag in README)\n' "genlock_latency_ms_imag"
+    unknown=$((unknown + 1))
+  elif [ "$obs_latency" = "$exp_latency" ]; then
+    printf '  %-22s OK       (%s)\n' "genlock_latency_ms_imag" "$obs_latency"
+  else
+    printf '  %-22s DRIFT    (expected %s, observed %s)\n' "genlock_latency_ms_imag" "$exp_latency" "$obs_latency"
+    drift=$((drift + 1))
+  fi
+
+  # 6. Linux plugin path — the SAME single-canonical-path invariant as `canonical_plugin_path`
+  # (#124/#125) on strih/stream, applied to imag's Linux plugin directory instead.
+  if [ "$plugin_present" = "1" ]; then
+    printf '  %-22s OK       (%s)\n' "distroav_so_path" "$exp_plugin_path"
+  elif [ -z "$plugin_present" ]; then
+    printf '  %-22s UNKNOWN  (path presence not read on imag-nb)\n' "distroav_so_path"
+    unknown=$((unknown + 1))
+  else
+    printf '  %-22s DRIFT    (%s not found on imag-nb)\n' "distroav_so_path" "$exp_plugin_path"
+    drift=$((drift + 1))
+  fi
+
+  [ "$drift" -gt 0 ] && return 20
+  [ "$unknown" -gt 0 ] && return 11
+  return 0
+}
+
+# gather_and_check_imag HOST USER README -> SSH-gathers the observed values from the LIVE
+# imag-nb box (#463) and runs [`check_imag_report`] against the pinned set in README. NOT unit
+# tested (it is pure I/O glue over `ssh` — same convention as the win-* MCP gathering for
+# strih/stream, which is also untested at this layer; the JUDGEMENT is in the pure function
+# above). Paths are the ones `scripts/setup-imag.sh` installs to (DESKTOP_USER=newlevel):
+#   - /opt/obs-genlock/GENLOCK_BUILD_SHA.txt   (genlock build identity marker)
+#   - /usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so   (the Linux plugin binary)
+#   - ~/.config/obs-studio/logs/*.log   (OBS log — the MOST RECENT file, same libobs log lines
+#     fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log already parse on
+#     Windows, since the log format is platform-independent libobs text)
+gather_and_check_imag() {
+  local host="$1" user="${2:-newlevel}" readme="$3"
+  # #463 review: `host=`/`user=` are operator-supplied CLI values. `--` marks the end of ssh's
+  # own option parsing so a value starting with `-` (e.g. a stray `-oProxyCommand=...`) can
+  # never be parsed as an ssh FLAG instead of the positional target (OpenSSH argument
+  # injection). `-o BatchMode=yes` refuses an interactive password prompt (fail fast instead of
+  # hanging waiting for input this non-interactive check can never supply). `timeout 15` bounds
+  # the WHOLE call — `-o ConnectTimeout=10` only bounds the TCP connect phase; a remote command
+  # that blocks AFTER connecting (a stalled mount, a wedged log directory) would otherwise hang
+  # this check forever.
+  local target="${user}@${host}"
+  local plugin_path="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+  local ssh_cmd=(timeout 15 ssh -o ConnectTimeout=10 -o BatchMode=yes -- "$target")
+
+  local exp_build_sha exp_distroav_sha exp_fps exp_latency
+  exp_build_sha="$(pinned_setting "$readme" genlock_build_sha_imag)"
+  exp_distroav_sha="$(pinned_setting "$readme" distroav_so_sha256_imag)"
+  exp_fps="$(pinned_setting "$readme" output_fps_imag)"
+  exp_latency="$(pinned_setting "$readme" genlock_latency_ms_imag)"
+
+  local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present
+  obs_build_sha="$("${ssh_cmd[@]}" \
+    'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
+  # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
+  # `test -f` round-trip (one fewer SSH connection), AND distinguish an SSH CONNECTION failure
+  # (OpenSSH's own reserved exit code 255, or 124 from the `timeout` wrapper firing) from the
+  # remote command genuinely finding no file: `sha256sum` on a missing file exits non-zero with
+  # empty stdout either way, so the ssh/timeout exit code is the ONLY way to tell "imag-nb was
+  # unreachable" apart from "the file is genuinely gone". Collapsing both into a bare 0/1 (the
+  # pre-review shape) reported a transient network hiccup as a false `distroav_so_path DRIFT
+  # (not found)` alarm — never a wrong-signal pass OR a false alarm.
+  # #463 review (2nd pass): this script runs under `set -euo pipefail` (top of file) — a bare
+  # `var="$(cmd)"` with NO `|| ...` guard triggers `errexit` and ABORTS THE WHOLE SCRIPT the
+  # instant ssh/timeout returns nonzero (255/124, precisely the case being handled here),
+  # so `local ssh_rc=$?` on the next line would never even run. `|| ssh_rc=$?` puts the
+  # assignment in an OR-list (the one `set -e` exemption that actually applies: only the LAST
+  # command of an AND/OR list is errexit-checked), which both captures the real exit code AND
+  # keeps the script alive to report UNKNOWN instead of crashing. Empirically confirmed: without
+  # this guard, `--check-imag` against an unreachable imag-nb crashes with a bare exit 255
+  # instead of printing a graceful UNKNOWN report.
+  local ssh_rc=0
+  obs_distroav_sha="$("${ssh_cmd[@]}" \
+    "sha256sum '$plugin_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null)" || ssh_rc=$?
+  if [ "$ssh_rc" -eq 255 ] || [ "$ssh_rc" -eq 124 ]; then
+    plugin_present=""  # connection failure / timeout -> UNKNOWN, never a false "missing" alarm
+  elif [ -n "$obs_distroav_sha" ]; then
+    plugin_present=1
+  else
+    plugin_present=0
+  fi
+  # Most-recently-modified OBS log file (OBS names logs by timestamp, no "latest" symlink).
+  obs_log="$("${ssh_cmd[@]}" \
+    'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.log 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
+    2>/dev/null || true)"
+  obs_fps="$(fps_from_log "$obs_log")"
+  obs_latency="$(genlock_latency_ms_from_log "$obs_log")"
+
+  echo "== drift-guard --check-imag  host=${host}  (SSH-gathered; FAILS loudly on drift) =="
+  # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see
+  # check_imag_report's doc comment for why pre-extracting collapsed "log unreadable" and "log
+  # read, no marker" into the same false-DRIFT signal.
+  check_imag_report "$exp_build_sha" "$obs_build_sha" "$exp_distroav_sha" "$obs_distroav_sha" \
+    "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present"
 }
 
 # range_tracked_source_name EXPECTED_CSV -> the NAME of the (first) source in a mixed
@@ -770,7 +977,17 @@ Usage:
   scripts/drift-guard.sh [--check-pins] [--readme PATH]   # validate the pin set (CI, default)
   scripts/drift-guard.sh --compare KEY=VAL ...            # compare live-observed values vs pins
   scripts/drift-guard.sh --status  KEY=VAL ...            # read-only genlock + burn state, one place
+  scripts/drift-guard.sh --check-imag [host=IP] [user=U]  # #463: imag-nb, gathered over SSH (no MCP)
   scripts/drift-guard.sh --help
+
+--check-imag (#463, EPIC #466 Topology v2): unlike strih/stream (Windows, needs the win-* MCP
+  tools to read logs/settings), imag-nb is a plain Linux box reachable over SSH, so drift-guard
+  gathers its OWN observed values directly: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` (the deployed
+  genlock build identity), a SHA256 of `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the
+  Linux plugin binary), and the OBS log (`~/.config/obs-studio/logs/*.log`, most recent file) for
+  the genlock capability marker + the fps + latency pins. Optional `host=` / `user=` override the
+  imag-nb defaults (`10.77.9.182` / `newlevel`). Pins live in vendor/README.md as
+  `genlock_build_sha_imag` / `distroav_so_sha256_imag` / `output_fps_imag` / `genlock_latency_ms_imag`.
 
 --compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock,
   ndi_input_latency (a comma-separated "input name=latency" list for the genlocked broadcast-path
@@ -842,6 +1059,13 @@ EOF
 check_pins() {
   local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps_strih="$5" p_fps_stream="$6" p_genlock="$7" p_latency="$8" p_plugin="$9"
   local p_src_lat_strih="${10}" p_src_lat_stream="${11}"
+  # #463 review: output_fps_imag / genlock_latency_ms_imag are the two imag-nb pins that ARE
+  # always backtick-pinned in vendor/README.md (unlike genlock_build_sha_imag/distroav_so_
+  # sha256_imag, deliberately left unpinned until the first post-#463 live deploy — those two
+  # stay OUT of this offline check for that reason). Without this, a malformed/missing imag fps
+  # or latency pin would only ever surface via a LIVE `--check-imag` SSH run against imag-nb,
+  # never in CI's manifest-only `--check-pins` pass.
+  local p_fps_imag="${12}" p_latency_imag="${13}"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
   validate_semver   "obs_version"                    "$p_obs"             || errs=$((errs + 1))
@@ -858,6 +1082,9 @@ check_pins() {
   # #357 per-source genlock FIFO held-latency: both host-keyed pins MUST be present.
   validate_nonempty "genlock_source_latency_strih"   "$p_src_lat_strih"   || errs=$((errs + 1))
   validate_nonempty "genlock_source_latency_stream"  "$p_src_lat_stream"  || errs=$((errs + 1))
+  # #463: imag-nb's own host-keyed fps + genlock-latency pins.
+  validate_nonempty "output_fps_imag"                "$p_fps_imag"        || errs=$((errs + 1))
+  validate_nonempty "genlock_latency_ms_imag"        "$p_latency_imag"    || errs=$((errs + 1))
   # #390: any `range:MIN-MAX` calibration-tracked entry in either pin must match the code's
   # current DistroAV clamp EXACTLY — catches a manifest range typo silently narrowing/widening
   # the backstop, independent of the plain non-empty checks above.
@@ -874,6 +1101,7 @@ check_pins() {
   echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps_strih=$p_fps_strih output_fps_stream=$p_fps_stream genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
   echo "  canonical_plugin_path=$p_plugin"
   echo "  genlock_source_latency_strih=$p_src_lat_strih  genlock_source_latency_stream=$p_src_lat_stream"
+  echo "  output_fps_imag=$p_fps_imag  genlock_latency_ms_imag=$p_latency_imag"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
   # This catches a `git subtree pull` that bumped vendor/distroav without updating the table
@@ -1148,18 +1376,38 @@ main() {
       --check-pins) mode="check-pins" ;;
       --compare)    mode="compare" ;;
       --status)     mode="status" ;;
+      --check-imag) mode="check-imag" ;;  # #463: SSH-gathered imag-nb host case
       --readme)     shift; readme="${1:-}" ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
-      *)            kv+=("$1") ;;   # key=val observed pairs for --compare
+      *)            kv+=("$1") ;;   # key=val observed pairs for --compare / --check-imag
     esac
     shift || true
   done
+
+  # #463 — --check-imag: imag is a plain Linux box, so drift-guard gathers its OWN observed
+  # values over SSH (no external MCP round-trip needed, unlike strih/stream). `host=` / `user=`
+  # override the imag-nb defaults (10.77.9.182 / newlevel, scripts/setup-imag.sh's DESKTOP_USER).
+  if [ "$mode" = "check-imag" ]; then
+    [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
+    local imag_host="10.77.9.182" imag_user="newlevel" pair k v
+    for pair in "${kv[@]+"${kv[@]}"}"; do
+      k="${pair%%=*}"; v="${pair#*=}"
+      case "$k" in
+        host) imag_host="$v" ;;
+        user) imag_user="$v" ;;
+        *)    echo "WARN: ignoring unknown --check-imag key '$k'" >&2 ;;
+      esac
+    done
+    gather_and_check_imag "$imag_host" "$imag_user" "$readme"
+    exit $?
+  fi
 
   # --status is a read-only dump of the live genlock + burn state — it needs NONE of the pinned
   # set, so skip the manifest requirement + pin load for it (it must work even without
   # vendor/README.md, e.g. a checkout that only ships the script). #246.
   local p_obs p_distroav p_ndi p_fps p_fps_strih p_fps_stream p_genlock p_latency p_plugin p_src_lat_strih p_src_lat_stream
+  local p_fps_imag p_latency_imag
   if [ "$mode" != "status" ]; then
     [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
     p_obs="$(pinned_obs_version "$readme")"
@@ -1177,9 +1425,13 @@ main() {
     # #357 host-keyed per-source genlock FIFO held-latency pins.
     p_src_lat_strih="$(pinned_setting "$readme" genlock_source_latency_strih)"
     p_src_lat_stream="$(pinned_setting "$readme" genlock_source_latency_stream)"
+    # #463 review: imag-nb's own fps + genlock-latency pins, validated here too (offline, in
+    # CI) so a malformed/missing value is caught before ever needing a live SSH run.
+    p_fps_imag="$(pinned_setting "$readme" output_fps_imag)"
+    p_latency_imag="$(pinned_setting "$readme" genlock_latency_ms_imag)"
     if [ "$mode" = "check-pins" ]; then
       check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps_strih" "$p_fps_stream" "$p_genlock" "$p_latency" "$p_plugin" \
-        "$p_src_lat_strih" "$p_src_lat_stream"
+        "$p_src_lat_strih" "$p_src_lat_stream" "$p_fps_imag" "$p_latency_imag"
       exit $?
     fi
   fi
