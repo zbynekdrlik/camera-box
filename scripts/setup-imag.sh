@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=16
+TOTAL_STEPS=17
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -295,7 +295,7 @@ step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unatte
 # that silently gains a new image via unattended-upgrades, or one whose initrd never got generated
 # before grub picked it as the default, is exactly what bricked CAM3/CAM4 (#295). Unlike the cam
 # fleet's appliance policy (setup-device.sh STEP 15 fully disables unattended-upgrades), imag does
-# NOT disable it wholesale — step 13 below deliberately keeps security updates flowing (only their
+# NOT disable it wholesale — step 14 below deliberately keeps security updates flowing (only their
 # schedule is pinned, #485). So here we pin the KERNEL specifically (apt-mark hold + an
 # Unattended-Upgrade package-blacklist entry) and lock Automatic-Reboot to false, rather than
 # masking the whole service.
@@ -429,7 +429,46 @@ echo "  #483: isolcpus=2-11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15 written 
 echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
 
 # =============================================================================
-step 9 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"
+# =============================================================================
+# imag-nb's HDMI program-projector output is physically wired through the NVIDIA dGPU (an RTX
+# 5050 Laptop / Blackwell, PCI 10de:2dd8), NOT the Intel iGPU -- live-verified: the HDMI connector
+# showed `disconnected` on every output until the dGPU was actually initialized. The PLAIN
+# proprietary `nvidia-driver-595` package does NOT init Blackwell (`NVRM: RmInitAdapter failed!
+# (0x22:0x56:1017)`, live-reproduced on imag-nb) -- it needs the OPEN kernel-modules flavor.
+# `ubuntu-drivers devices` (live-checked on imag-nb) recommends plain `nvidia-driver-595` for this
+# PCI id -- that recommendation is WRONG for this GPU; the `-open` variant is the deliberate,
+# verified-working choice. `apt-cache search nvidia-driver` (live-checked) lists nothing newer
+# than the 595 line as of this writing. Driver-upgrade freedom is explicitly wanted by the user
+# ("pravdaze drivere musia byt upgradovane... nikto netvrdi ze musis pouzivat nejake stare lts") --
+# re-check `ubuntu-drivers devices` / `apt-cache search nvidia-driver` for a newer `-open` release
+# before reusing this pin verbatim; prefer the newest available `-open` flavor over 595 if one has
+# since shipped.
+if ! dpkg -s nvidia-driver-595-open >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
+        || fail "nvidia-driver-595-open install failed"
+fi
+# PRIME nvidia-primary: on-demand PRIME mode left the HDMI dGPU output dead (live-verified) --
+# nvidia must be the PRIMARY renderer so BOTH the HDMI output and the laptop's own eDP panel run
+# on the RTX 5050.
+command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
+prime-select nvidia || fail "prime-select nvidia failed"
+# #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
+# that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above
+# (defined earlier in step 6): guarantee every kernel has an initrd, regenerate grub.cfg, and
+# refuse to trust it if the default entry lacks a kernel image or an initrd.
+safe_grub_regen
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    echo "  #500: nvidia-smi already enumerates: $(nvidia-smi -L | head -1)"
+else
+    echo "  #500: nvidia-smi not yet enumerating the GPU (expected pre-reboot on a fresh driver install)"
+fi
+echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
+echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 10 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -452,7 +491,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 10 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 11 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -462,7 +501,7 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 11 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 12 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
@@ -709,7 +748,7 @@ else
 fi
 
 # =============================================================================
-step 12 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 13 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -737,7 +776,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 13 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+step 14 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
 # imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
 # masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
@@ -799,7 +838,7 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 14 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 15 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -818,7 +857,7 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 15 "Launch OBS on the desktop session (X11 :0)"
+step 16 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -842,7 +881,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 16 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 17 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
