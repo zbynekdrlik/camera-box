@@ -9,7 +9,7 @@
 # Usage (on the box):
 #   sudo CAM_PW=<fleet-pw> GH_TOKEN=<gh-pat-with-repo-scope> ./setup-imag.sh [--yes]
 #
-# GH_TOKEN (repo-read scope) is required for step 6: imag-nb runs the CUSTOMIZED genlock
+# GH_TOKEN (repo-read scope) is required for the genlock hot-swap step: imag-nb runs the CUSTOMIZED genlock
 # OBS+DistroAV build (#460), hot-swapped over the PPA base — the artifacts are GitHub Actions
 # workflow artifacts on this PRIVATE repo, which `gh run download` needs auth to fetch.
 #
@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=10
+TOTAL_STEPS=13
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -108,7 +108,127 @@ else
 fi
 
 # =============================================================================
-step 2 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
+step 2 "Network performance tuning (#486): sysctl + EEE/flow-control off on the NDI NIC"
+# =============================================================================
+# imag aggregates 6x concurrent NDI 1080p60 streams over a single USB-ethernet NIC on stock
+# buffers/EEE — exactly the jitter the cam fleet already tuned away (setup-device.sh STEP 14).
+# Scoped to the ONE $NIC resolved in step 1 above — NOT a for-every-interface loop (imag also
+# carries Wi-Fi/other adapters that must stay untouched).
+cat > /etc/sysctl.d/99-network-performance.conf <<'EOF'
+# Network performance optimizations for low-latency streaming (mirrors setup-device.sh STEP 14)
+
+# Increase network buffer sizes
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 5000
+
+# TCP optimizations
+net.ipv4.tcp_rmem = 4096 1048576 134217728
+net.ipv4.tcp_wmem = 4096 1048576 134217728
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+
+# Reduce latency
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_nodelay = 1
+
+# Disable IPv6 if not needed
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOF
+sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
+
+# EEE (Green Ethernet) + flow-control off, scoped to $NIC only. Two mechanisms, belt-and-
+# suspenders (some USB-ethernet chipsets don't implement these ioctls at all — `|| true`
+# throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug events, and
+# (2) an immediate one-time apply now (re-applied at every boot via the governor step's rc.local).
+mkdir -p /etc/networkd-dispatcher/routable.d
+cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
+#!/bin/bash
+# Disable EEE (Green Ethernet) and flow control for low latency — scoped to imag's NDI NIC only.
+if [ "\$IFACE" = "${NIC}" ]; then
+    ethtool --set-eee "${NIC}" eee off 2>/dev/null || true
+    ethtool -A "${NIC}" rx off tx off 2>/dev/null || true
+fi
+NICEOF
+chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
+ethtool --set-eee "$NIC" eee off 2>/dev/null || true
+ethtool -A "$NIC" rx off tx off 2>/dev/null || true
+echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE/flow-control off on $NIC"
+
+# =============================================================================
+step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
+# =============================================================================
+# imag's genlock render tick + FIFO ts-align read clock_gettime(CLOCK_REALTIME) — the system
+# clock. Without cluster clock discipline, imag free-runs vs the dante-disciplined cameras and
+# the genlock FIFO ts_head_skew drifts unbounded (live-proven 2026-07-04: skew drifted
+# 474->541ms/80min, CAM underruns climbing). DanteSync OWNS the clock (ops skill hard rule) —
+# NEVER timesyncd/chrony/ptp4l alongside it. Pin the NIC ($NIC, resolved in step 1) since imag is
+# a notebook with other network interfaces that must not be mistaken for the rig link.
+DANTESYNC_REPO="zbynekdrlik/dantesync"
+if [ ! -x /usr/local/bin/dantesync ]; then
+    DANTESYNC_URL="$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null \
+        | grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' \
+        | grep -o 'https://[^"]*' | head -1 || true)"
+    if [ -n "$DANTESYNC_URL" ]; then
+        curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync || fail "dantesync download failed"
+    elif [ -n "${CAM_PW:-}" ]; then
+        command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
+        sshpass -p "$CAM_PW" scp -O -o StrictHostKeyChecking=no \
+            "${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync" /usr/local/bin/dantesync \
+            || fail "dantesync copy from cam1 fallback failed"
+    else
+        fail "dantesync: no GitHub release asset found and CAM_PW unset for the cam-box fallback copy"
+    fi
+    chmod +x /usr/local/bin/dantesync
+fi
+[ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
+
+cat > /etc/systemd/system/dantesync.service <<EOF
+[Unit]
+Description=Dante Time Sync (PTP/NTP Synchronization)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dantesync -i ${NIC} --ntp-server strih.lan
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# DanteSync OWNS the clock — MASK systemd-timesyncd so nothing else ever disciplines it (ops
+# skill hard rule: NEVER chrony/ptp4l/timesyncd alongside dantesync). Mask BEFORE enabling
+# dantesync so the two clock sources can never race even for one boot cycle.
+timedatectl set-ntp false 2>/dev/null || true
+systemctl disable --now systemd-timesyncd >/dev/null 2>&1 || true
+systemctl mask systemd-timesyncd >/dev/null 2>&1 || true
+
+systemctl daemon-reload
+systemctl enable --now dantesync
+
+# Verify PTP/NTP lock — the Linux equivalent of the ops-skill journalctl check. Accepts either
+# PTP LOCK/NANO or the NTP-fallback offset line (grandmaster may be transiently absent).
+DANTESYNC_LOCKED=0
+for i in $(seq 1 30); do
+    if journalctl -u dantesync --no-pager -n 50 2>/dev/null | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
+        DANTESYNC_LOCKED=1
+        break
+    fi
+    sleep 2
+done
+[ "$DANTESYNC_LOCKED" -eq 1 ] || fail "dantesync did not report PTP/NTP lock within budget — genlock clock discipline not established (check journalctl -u dantesync)"
+echo "  dantesync locked to strih.lan via $NIC (timesyncd masked)"
+
+# =============================================================================
+step 4 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
 # =============================================================================
 cat > /etc/systemd/system/cpu-performance.service <<'EOF'
 [Unit]
@@ -120,12 +240,16 @@ ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_gove
 [Install]
 WantedBy=multi-user.target
 EOF
-cat > /etc/rc.local <<'EOF'
+cat > /etc/rc.local <<EOF
 #!/bin/bash
 # imag-nb boot tuning (fleet parity): governor + USB autosuspend off (USB NIC!) + NIC powersave off
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done
-for u in /sys/bus/usb/devices/*/power/control; do echo on > "$u" 2>/dev/null; done
-for n in /sys/class/net/*/device/power/control; do echo on > "$n" 2>/dev/null; done
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "\$g"; done
+for u in /sys/bus/usb/devices/*/power/control; do echo on > "\$u" 2>/dev/null; done
+for n in /sys/class/net/*/device/power/control; do echo on > "\$n" 2>/dev/null; done
+# #486: EEE/flow-control off on the rig NDI NIC — reapplied every boot (belt-and-suspenders
+# alongside step 2's networkd-dispatcher hook; some USB-ethernet chipsets reset EEE state).
+ethtool --set-eee ${NIC} eee off 2>/dev/null || true
+ethtool -A ${NIC} rx off tx off 2>/dev/null || true
 exit 0
 EOF
 chmod +x /etc/rc.local
@@ -135,7 +259,7 @@ bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
 
 # =============================================================================
-step 3 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
+step 5 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
 # =============================================================================
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
@@ -156,7 +280,7 @@ gs org.gnome.desktop.screensaver lock-enabled false
 gs org.gnome.desktop.screensaver idle-activation-enabled false
 
 # =============================================================================
-step 4 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 6 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -179,7 +303,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 5 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 7 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -189,11 +313,11 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 6 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 8 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
-# obs-studio package installed in step 5 ships libobs.so.30 with SONAME "libobs.so.30"
+# obs-studio package installed in the prior step ships libobs.so.30 with SONAME "libobs.so.30"
 # (live-verified on imag-nb) — IDENTICAL to the genlock build's own SONAME — so the genlock
 # libobs.so.30 hot-swaps cleanly over it, exactly mirroring the Windows obs.dll hot-swap (see
 # .claude/skills/genlock). Only libobs.so.30 (the genlock render-tick/ts-align patches live in
@@ -228,7 +352,7 @@ if ! command -v gh >/dev/null 2>&1; then
     # shape ever changes), `grep` exits non-zero, and under pipefail that propagates to this bare
     # assignment — `set -e` would abort the script HERE, before the very next line's intended
     # `fail "no gh CLI ... asset found"` ever runs, with NO diagnostic at all. Same footgun class
-    # (and same fix) as the LATEST_LOG lookup in step 10 — found in review.
+    # (and same fix) as the LATEST_LOG lookup in the verify step — found in review.
     GH_DEB_URL="$(printf '%s' "$GH_RELEASE_JSON" \
         | grep -oE '"browser_download_url": *"[^"]*linux_amd64\.deb"' | grep -oE 'https[^"]*' | head -1 || true)"
     [ -n "$GH_DEB_URL" ] || fail "no gh CLI linux_amd64 .deb asset found on latest cli/cli release"
@@ -274,7 +398,7 @@ if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_
     # *existence* check above trusts the on-disk marker without re-verifying the installed
     # BYTES. If the deployed libobs.so.30/distroav.so were ever silently reverted (e.g. an
     # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
-    # re-run would wrongly report "already deployed" and skip re-swapping — step 10's runtime
+    # re-run would wrongly report "already deployed" and skip re-swapping — the verify step's runtime
     # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
     # the CURRENTLY INSTALLED files against the manifest cached locally on the LAST successful
     # swap (pure local sha256 compare, zero network cost, only paid on the already-rare re-run
@@ -400,7 +524,7 @@ else
 fi
 
 # =============================================================================
-step 7 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 9 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -428,7 +552,69 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 8 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 10 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+# =============================================================================
+# imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
+# masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
+# pinned, Automatic-Reboot is already false by Ubuntu default and is deliberately left untouched).
+
+# systemd-oomd: known to kill WHOLE GNOME sessions (incl. OBS) on transient PSI memory-pressure
+# spikes even with GB of RAM free — kernel OOM remains the real backstop.
+systemctl disable --now systemd-oomd.service systemd-oomd.socket >/dev/null 2>&1 || true
+systemctl mask systemd-oomd.service systemd-oomd.socket >/dev/null 2>&1 || true
+
+# File indexer + groupware factories: no files worth indexing, no mail/calendar account, ever.
+DESKTOP_UID="$(id -u "$DESKTOP_USER")"
+u_systemctl() {
+    sudo -u "$DESKTOP_USER" \
+        XDG_RUNTIME_DIR="/run/user/${DESKTOP_UID}" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${DESKTOP_UID}/bus" \
+        systemctl --user "$@" >/dev/null 2>&1 || true
+}
+u_systemctl mask tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
+    tracker-writeback-3.service tracker-xdg-portal-3.service
+sudo -u "$DESKTOP_USER" tracker3 reset -s >/dev/null 2>&1 || true
+u_systemctl mask evolution-source-registry.service evolution-calendar-factory.service \
+    evolution-addressbook-factory.service evolution-user-prompter.service evolution-alarm-notify.service
+
+# apport/whoopsie: apport writes multi-GB core dumps right when OBS already crashed (worst-time
+# disk spike); whoopsie phones crash reports home — neither has value on a kiosk appliance.
+systemctl disable --now apport.service whoopsie.service >/dev/null 2>&1 || true
+systemctl mask apport.service whoopsie.service >/dev/null 2>&1 || true
+
+# snapd: hold auto-refresh forever (unused firefox/snap-store snaps) — a mid-service "restart to
+# update" banner popping over the fullscreen program output is the failure mode this avoids.
+snap refresh --hold=forever >/dev/null 2>&1 || true
+
+# apt-daily-upgrade.timer: pin the SCHEDULE to a fixed off-hours time via a drop-in — security
+# updates themselves stay fully enabled, never disabled here.
+mkdir -p /etc/systemd/system/apt-daily-upgrade.timer.d
+cat > /etc/systemd/system/apt-daily-upgrade.timer.d/imag-offhours.conf <<'EOF'
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=30min
+EOF
+systemctl daemon-reload
+systemctl restart apt-daily-upgrade.timer >/dev/null 2>&1 || true
+
+# GNOME animations off — one less compositor cost on the fullscreen program output.
+gs org.gnome.desktop.interface enable-animations false
+
+# OBS-native: ProcessPriority=High is OBS's own render-starvation knob (zero cost; ships Normal
+# by default). global.ini was just seeded above — flip the value in place if present, else
+# append a [General] section (same duplicate-section convention seed_ini already uses for
+# LastVersion; Qt's ini backend merges duplicate group headers).
+if grep -q '^ProcessPriority=' "$OBS_CFG/global.ini" 2>/dev/null; then
+    sed -i 's/^ProcessPriority=.*/ProcessPriority=High/' "$OBS_CFG/global.ini"
+else
+    printf '\n[General]\nProcessPriority=High\n' >> "$OBS_CFG/global.ini"
+fi
+chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
+echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
+
+# =============================================================================
+step 11 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -442,14 +628,14 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 9 "Launch OBS on the desktop session (X11 :0)"
+step 12 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
-# genlock RE-deploy, step 6 force-restarts (SIGKILL) a running OBS to load the swapped
-# libobs.so.30/distroav.so; without clearing the sentinel here first, the relaunched OBS pops
-# the "Crash or unclean shutdown detected" recovery modal and hangs headless — WebSocket :4455
-# never comes up, and step 10 fails "not listening" even though the swap itself succeeded
+# genlock RE-deploy, the genlock hot-swap step force-restarts (SIGKILL) a running OBS to load the
+# swapped libobs.so.30/distroav.so; without clearing the sentinel here first, the relaunched OBS
+# pops the "Crash or unclean shutdown detected" recovery modal and hangs headless — WebSocket
+# :4455 never comes up, and the verify step fails "not listening" even though the swap succeeded
 # (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
 rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
 if ! pgrep -x obs >/dev/null; then
@@ -460,7 +646,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 10 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 13 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
@@ -475,13 +661,13 @@ OBS_LOG_DIR="$OBS_CFG/logs"
 # `|| true` is load-bearing: under `set -euo pipefail`, `ls` on a non-matching glob exits non-zero
 # even though `head` succeeds with empty output, and pipefail propagates that failure to the bare
 # assignment — `set -e` would abort the script HERE, before the very next line's intended
-# `fail "no OBS log found..."` ever runs (same convention already used for step 8's
+# `fail "no OBS log found..."` ever runs (same convention already used for the desktop-icon step's
 # `APP_DESKTOP=$(ls ... 2>/dev/null || true)`).
 LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1 || true)"
 [ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
 LOG_TEXT="$(cat "$LATEST_LOG")"
 echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
-    || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap in step 6)"
+    || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap step)"
 echo "  genlock render tick ENABLED (#460 build proof)"
 if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
     echo "  DistroAV plugin loaded"

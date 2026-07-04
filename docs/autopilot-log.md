@@ -1474,3 +1474,48 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   happy-path number.
 - NOT done by this worker (supervisor's job per dispatch): live re-deploy of the new genlock
   build to imag-nb (`10.77.9.182`) and post-deploy verification of the live 4th corner burn.
+
+## 2026-07-04 — #462 recording-e2e/render-budget/rig-mode script integration (PR #478, v1.7.0-dev.225)
+
+- EPIC #466 Topology v2, Phase 4 capstone. Dependency work (#461/#463: recording-verdict `--imag`
+  flag, 6th NodeSpec, `imag_capture_fps`, the optical-AND-burn zero-loss gate) already merged +
+  deployed; this ticket was purely the SCRIPT integration, the 4 points named in the issue:
+  1. `scripts/recording-e2e.sh` — imag-nb as a 3rd recorded+decoded node (StartRecord/StopRecord
+     over OBS WS, decode via a NEW `scripts/recording-verdict-on-imag.sh` helper, merged as a
+     third `--merge-partials imag=...`).
+  2. `[0/8]` reachability preflight + host list add imag.
+  3. `[4d/8]` render-budget-gate call site adds `--box imag=10.77.9.182:60`; docstring updated.
+  4. `scripts/rig-mode.sh` — new imag branch (`IMAG_IP`/`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE`,
+     `set_imag_test_program`, `obs_burn_targets` extended to a 3rd box).
+- `scripts/recording-verdict-on-imag.sh` deliberately EXECUTES ssh/scp itself (unlike
+  `recording-verdict-on-strih.sh`/`-on-stream.sh`, which only PRINT a plan because ssh to the
+  Windows boxes is denied) — imag-nb is a plain-ssh-reachable Linux box, same class as cam1/cam2.
+- Self-review (before the deep code-review pass) caught a real bug: the on-imag extract call at
+  `[8/8c]` ran unguarded inside the `VERDICT_ON_STREAM=1` branch (which re-enables `set -e`), so a
+  failing imag leg (unreachable box, stale binary, ssh hiccup) would `set -e`-abort the WHOLE
+  script — including the strih/stream plan printout the operator still needs. Fixed with the same
+  `cmd && ok || WARNING` compound-list pattern `#178` already uses for the StopRecord region;
+  locked with a new behavioral test (`imag_extract_failure_never_aborts_the_rest_of_the_per_box_plan`).
+- Tests: `tests/harness_imag_topology.rs` (new, 12 tests), `tests/harness_recording_verdict_on_imag.rs`
+  (new, 6 tests — proves quoting round-trips through real bash, `--skip-if-exists` short-circuits
+  before any network path, missing `--imag-rec` is a clean usage error before touching the
+  network), `tests/rig_mode.rs` (+4 tests: burn target, program-scene routing TEST-only, EVENT
+  does not scene-switch). Full `cargo test` (401+ lib tests + every integration binary) green
+  throughout; Tier-0 default-feature checks only (no `--features probe` locally).
+- 3 commits on `dev` (`bbdb8e6ff` version bump, `f5f819257` recording-e2e/render-budget,
+  `7cfd5e15a` rig-mode — `Closes #462`), 1 self-review fix (`c85c90e6a`). PR #478 merged
+  (`111bed8e1`) after a clean `/review` pass and a deep `requesting-code-review` subagent pass
+  (0 Critical, 0 Important, 2 Minor pre-existing-convention observations, "Ready to merge: Yes").
+  Main CI green (run 28696490189). Issue #462 auto-closed.
+- Playbook: `.claude/skills/e2e/SKILL.md` gained a new "imag-nb — the 3rd recorded node" section
+  (the on-imag-executes-vs-plans distinction, the set -e gotcha, imag's clean 1:1 camera mapping
+  vs strih's drift-corrected #399 mapping) — committed separately on `dev` (`0c1bdc5db`, CI green)
+  since the review pass ran after this PR had already merged; it will ride the next PR into main.
+- NOT done by this worker (supervisor's job per dispatch): the live full-topology rig E2E — record
+  all 3 nodes during a cam2 QR-painter run, decode, prove zero-loss cam→imag 60fps / cam→strih
+  60→30 / strih→stream 30→30 + restart-survival on all three boxes. Suggested invocation once the
+  rig is set to TEST mode (`scripts/rig-mode.sh test`):
+  `RUN_ID=<N> DURATION=1800 USE_PREBUILT_PROBE_DIR=<CI probe-tools-linux-amd64 dir> VERDICT_ON_STREAM=1 NDI_RUNTIME_DIR_V6=/usr/lib/ndi nohup bash scripts/recording-e2e.sh`
+  — imag is now wired in automatically (no extra flags needed); the on-imag partial is produced
+  directly by the script, only the strih/stream win-*-MCP plan (8/8a/8/8b) + the final 8/8d merge
+  need manual execution as before.

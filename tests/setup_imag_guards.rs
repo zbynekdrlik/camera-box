@@ -709,3 +709,292 @@ fn setup_imag_gh_deb_url_discovery_captures_curl_output_first() {
         "{SETUP}: GH_RELEASE_JSON must be captured before it is grepped"
     );
 }
+
+// ============================================================================================
+// #479 — provision DanteSync on imag-nb so genlock's system-clock read (CLOCK_REALTIME) stays
+// disciplined to the same cluster master as the cameras. A re-provision must reproduce the
+// 2026-07-04 by-hand fix (dantesync 1.8.17, NIC-pinned, timesyncd masked, PTP/NTP lock verified).
+// ============================================================================================
+
+/// The dantesync unit must pin BOTH the resolved NIC (imag is a notebook with other interfaces)
+/// and the cluster master strih.lan — a bare `dantesync` would fall back to the public NTP pool
+/// and silently desync imag's clock from the rest of the rig.
+#[test]
+fn setup_imag_installs_dantesync_pinned_to_nic_and_master() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("ExecStart=/usr/local/bin/dantesync -i ${NIC} --ntp-server strih.lan"),
+        "{SETUP} must write a dantesync ExecStart pinned to both the resolved NIC and the \
+         cluster master strih.lan (live-verified fix, 2026-07-04) — not a bare `dantesync` \
+         (public-pool default) and not an unpinned NIC (imag has other interfaces)"
+    );
+}
+
+/// DanteSync OWNS the clock (ops-skill hard rule) — systemd-timesyncd must be masked so nothing
+/// else can ever discipline imag's clock alongside it, and the mask must happen BEFORE dantesync
+/// is enabled so the two clock sources can never race even for a single boot cycle.
+#[test]
+fn setup_imag_masks_timesyncd_before_enabling_dantesync() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("systemctl mask systemd-timesyncd"),
+        "{SETUP} must mask systemd-timesyncd — dantesync OWNS the clock, per the ops skill hard \
+         rule (never timesyncd/chrony/ptp4l alongside it)"
+    );
+    let mask = body
+        .find("systemctl mask systemd-timesyncd")
+        .expect("timesyncd mask must exist");
+    let enable = body
+        .find("systemctl enable --now dantesync")
+        .expect("dantesync enable --now must exist");
+    assert!(
+        mask < enable,
+        "{SETUP}: systemd-timesyncd must be masked BEFORE dantesync is enabled — the two clock \
+         sources must never race, not even for one boot cycle"
+    );
+}
+
+/// The install must fail loud (never silently proceed unlocked) if PTP/NTP lock is not achieved
+/// within budget — a re-provision that "succeeds" without clock discipline is the exact
+/// FIFO-skew-drift regression #479 exists to prevent.
+#[test]
+fn setup_imag_verifies_dantesync_ptp_lock() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r"grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'"),
+        "{SETUP} must poll `journalctl -u dantesync` for a PTP LOCK/NANO or NTP offset line \
+         before declaring the step done"
+    );
+    assert!(
+        body.contains("did not report PTP/NTP lock within budget"),
+        "{SETUP} must fail loud when dantesync never reports PTP/NTP lock within budget — a \
+         silent pass here would let a re-provision ship with an undisciplined clock"
+    );
+}
+
+/// The dantesync binary install must have a fallback path (GitHub release OR a cam-box copy) so
+/// a re-provision cannot fail solely because GitHub is unreachable from imag's network.
+#[test]
+fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
+    let body = read(SETUP);
+    for needle in [
+        "api.github.com/repos/${DANTESYNC_REPO}/releases/latest",
+        "dantesync-linux-amd64",
+        "CAM_PW",
+        "dantesync copy from cam1 fallback failed",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} dantesync install must reference `{needle}` — GitHub release fetch with a \
+             cam-box scp fallback, mirroring the step-6/NDI-runtime fallback pattern already in \
+             this script"
+        );
+    }
+}
+
+// ============================================================================================
+// #485 — imag-nb desktop de-jitter: mask GNOME/Ubuntu background jitter sources on the
+// single-app OBS kiosk + OBS-native ProcessPriority=High. All reversible, security updates stay
+// fully enabled (only their schedule is pinned).
+// ============================================================================================
+
+/// systemd-oomd, the file indexer, the groupware factories, and apport/whoopsie must all be
+/// masked — none of them provide value on a kiosk box that no human ever browses/mails on, and
+/// oomd specifically is known to kill whole GNOME sessions (incl. OBS) on transient PSI spikes.
+#[test]
+fn setup_imag_masks_oomd_tracker_evolution_apport_whoopsie() {
+    let body = read(SETUP);
+    for needle in [
+        "systemctl mask systemd-oomd.service systemd-oomd.socket",
+        "tracker-miner-fs-3.service",
+        "tracker3 reset -s",
+        "evolution-source-registry.service",
+        "systemctl mask apport.service whoopsie.service",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} desktop de-jitter step must reference `{needle}` — none of these background \
+             services provide value on a single-app kiosk, and systemd-oomd is known to kill \
+             whole GNOME sessions (incl. OBS) on transient PSI memory-pressure spikes"
+        );
+    }
+}
+
+/// snapd auto-refresh must be held forever (unused firefox/snap-store snaps) — a mid-service
+/// "restart to update" banner popping over the fullscreen program output is the failure this
+/// avoids. Hold-only: snapd itself must never be removed or disabled.
+#[test]
+fn setup_imag_holds_snap_refresh_forever() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("snap refresh --hold=forever"),
+        "{SETUP} must `snap refresh --hold=forever` — an unattended snap refresh can pop a \
+         \"restart to update\" banner over the fullscreen program output"
+    );
+}
+
+/// apt-daily-upgrade.timer must be pinned to a fixed off-hours OnCalendar via a drop-in — but
+/// security updates themselves must stay fully enabled (never masked/disabled here). Only the
+/// SCHEDULE is pinned so an update can never land mid-service.
+#[test]
+fn setup_imag_pins_apt_daily_upgrade_offhours_without_disabling_security_updates() {
+    let body = read(SETUP);
+    for needle in [
+        "/etc/systemd/system/apt-daily-upgrade.timer.d/imag-offhours.conf",
+        "OnCalendar=*-*-* 04:00",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must pin apt-daily-upgrade.timer's schedule via `{needle}`"
+        );
+    }
+    assert!(
+        !body.contains("mask apt-daily-upgrade")
+            && !body.contains("disable --now apt-daily-upgrade")
+            && !body.contains("mask unattended-upgrades"),
+        "{SETUP}: apt-daily-upgrade/unattended-upgrades must NEVER be masked or disabled here — \
+         only the SCHEDULE is pinned, security updates stay fully enabled (#485 explicit \
+         instruction: do NOT disable security updates)"
+    );
+}
+
+/// GNOME compositor animations must be turned off — one less compositor cost on the fullscreen
+/// program output, applied the same way the existing sleep/screensaver gsettings calls are.
+#[test]
+fn setup_imag_turns_off_gnome_animations() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("gs org.gnome.desktop.interface enable-animations false"),
+        "{SETUP} must turn off GNOME animations via the existing `gs` gsettings helper"
+    );
+}
+
+/// OBS's own ProcessPriority render-starvation knob must be forced to High. global.ini already
+/// exists with ProcessPriority=Normal by the time this step runs (OBS writes it on first launch,
+/// and a re-provision runs against an already-launched box) — so the step must flip an EXISTING
+/// value in place, not just append a key that would leave the real Normal value in effect.
+#[test]
+fn setup_imag_seeds_obs_process_priority_high() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(
+            "sed -i 's/^ProcessPriority=.*/ProcessPriority=High/' \"$OBS_CFG/global.ini\""
+        ),
+        "{SETUP} must sed-replace an EXISTING ProcessPriority= line in global.ini to High — \
+         appending a new key alone would leave a pre-existing `ProcessPriority=Normal` in effect \
+         (Qt's ini backend keeps the first-seen value on a straight duplicate KEY, unlike a \
+         duplicate SECTION header)"
+    );
+    assert!(
+        body.contains("printf '\\n[General]\\nProcessPriority=High\\n' >> \"$OBS_CFG/global.ini\""),
+        "{SETUP} must also cover the fresh-box case (no ProcessPriority key yet) by appending a \
+         [General] section, mirroring seed_ini's own duplicate-section convention for LastVersion"
+    );
+}
+
+/// The ProcessPriority edit must run AFTER global.ini is seeded (step 8), never before — editing
+/// a file before `touch`/seed_ini creates it would silently no-op the sed branch every time.
+#[test]
+fn setup_imag_process_priority_edit_runs_after_global_ini_seed() {
+    let body = read(SETUP);
+    let seed = body
+        .find("seed_ini \"$OBS_CFG/global.ini\"")
+        .expect("global.ini must be seeded via seed_ini");
+    let priority_edit = body
+        .find("ProcessPriority=High")
+        .expect("the ProcessPriority=High edit must exist");
+    assert!(
+        seed < priority_edit,
+        "{SETUP}: the ProcessPriority=High edit must run AFTER global.ini is seeded — editing \
+         before the file is created/seeded would leave the sed branch permanently a no-op"
+    );
+}
+
+// ============================================================================================
+// #486 — network performance tuning (sysctl + EEE/flow-control), scoped to the ONE NDI NIC
+// resolved in step 1. Mirrors setup-device.sh STEP 14, but NEVER a for-every-interface loop —
+// imag also carries Wi-Fi/other adapters that must stay untouched.
+// ============================================================================================
+
+/// The sysctl drop-in must carry the same core low-latency knobs as the fleet's STEP 14 —
+/// larger buffers, BBR congestion control, tcp_nodelay/low_latency, IPv6 off.
+#[test]
+fn setup_imag_writes_scoped_network_performance_sysctl() {
+    let body = read(SETUP);
+    for needle in [
+        "/etc/sysctl.d/99-network-performance.conf",
+        "net.core.rmem_max = 134217728",
+        "net.core.wmem_max = 134217728",
+        "net.ipv4.tcp_congestion_control = bbr",
+        "net.ipv4.tcp_nodelay = 1",
+        "net.ipv6.conf.all.disable_ipv6 = 1",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must write `{needle}` into the network-performance sysctl drop-in \
+             (mirrors setup-device.sh STEP 14)"
+        );
+    }
+}
+
+/// #486's whole point is to scope the EEE/flow-control tuning to the ONE resolved NDI NIC — a
+/// for-every-interface loop (the setup-device.sh STEP 14 shape) would also hit imag's Wi-Fi/other
+/// adapters, which must stay untouched (imag is a notebook, unlike the single-NIC cam appliances).
+#[test]
+fn setup_imag_scopes_eee_flowcontrol_to_ndi_nic_not_every_interface() {
+    let body = read(SETUP);
+    for needle in [
+        "ethtool --set-eee \"$NIC\" eee off",
+        "ethtool -A \"$NIC\" rx off tx off",
+        "if [ \"\\$IFACE\" = \"${NIC}\" ]; then",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must scope the EEE/flow-control tuning to `{needle}` — the ONE NDI NIC \
+             resolved in step 1, not every interface"
+        );
+    }
+    assert!(
+        !body.contains("for iface in /sys/class/net/*/device"),
+        "{SETUP} must NOT loop over every interface for EEE/flow-control tuning (that is the \
+         setup-device.sh STEP 14 shape) — imag also carries Wi-Fi/other adapters that a \
+         for-every-interface loop would wrongly touch"
+    );
+}
+
+/// A networkd-dispatcher hook alone would miss a NIC that never re-fires the routable event
+/// (e.g. it was already up before the script ran) — the fix must ALSO apply immediately once at
+/// provision time AND persist across reboots via rc.local (belt-and-suspenders, some USB-ethernet
+/// chipsets reset EEE state on power cycle).
+#[test]
+fn setup_imag_reapplies_eee_off_in_rc_local_for_boot_persistence() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("ethtool --set-eee ${NIC} eee off")
+            && body.contains("ethtool -A ${NIC} rx off tx off"),
+        "{SETUP}: rc.local (re-run on every boot) must also carry the EEE/flow-control-off calls \
+         for the resolved NIC — a networkd-dispatcher hook alone is not guaranteed to re-fire on \
+         every boot"
+    );
+}
+
+/// #486 must be inserted as a NEW step strictly between step 1 (static IP / NIC discovery) and
+/// the original step 2 (governor) — per the issue's explicit instruction.
+#[test]
+fn setup_imag_network_tuning_step_lands_between_step1_and_governor_step() {
+    let body = read(SETUP);
+    let step1 = body
+        .find("Static IP ${STATIC_IP}")
+        .expect("step 1 (static IP) must exist");
+    let network_step = body
+        .find("Network performance tuning (#486)")
+        .expect("the #486 network-performance step must exist");
+    let governor_step = body
+        .find("Max performance: governor")
+        .expect("the governor step must exist");
+    assert!(
+        step1 < network_step && network_step < governor_step,
+        "{SETUP}: the #486 network-performance step must land strictly between step 1 (static \
+         IP / NIC discovery) and the governor step — per the issue's explicit placement"
+    );
+}
