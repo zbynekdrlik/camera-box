@@ -19,14 +19,16 @@ lockdown (#150/#257).
 
 ## Two certified control sets — do not confuse them
 
-| Set | fn | Values | When |
+| Set | fn | Values (reference %, #456) | When |
 |---|---|---|---|
-| COLOUR (default — production AND grab) | `color_production_controls()` (#296/#338) | saturation=50, contrast=50 (no hue) | ANY no-env open: production OR grab |
-| SHARP (on demand only) | `certified_cam1_controls()` (#156) | contrast=75, saturation=0 | ONLY `CAMERA_BOX_CAPTURE_CONTROLS=certified` |
+| COLOUR (default — production AND grab) | `color_production_controls()` (#296/#338) | saturation=50%, contrast=50% (no hue) | ANY no-env open: production OR grab |
+| SHARP (on demand only) | `certified_cam1_controls()` (#156) | contrast=75%, saturation=0% | ONLY `CAMERA_BOX_CAPTURE_CONTROLS=certified` |
 
-`saturation=50` / `contrast=50` = the ShadowCast factory defaults, normal colour,
-proven on the rig (channel_diff ≈ 35). This is the device-default set; both
-production and grab now use it.
+`saturation=50%` / `contrast=50%` = the ShadowCast factory defaults, normal
+colour, proven on the rig (channel_diff ≈ 35). This is the device-default set;
+both production and grab now use it. **These are PERCENTAGES, not literal V4L2
+values** — see the #456 range-aware resolution section below; on the ShadowCast
+card 50%/75%/0% happen to equal the literal values 50/75/0.
 
 **#338 — NEVER force hue, and `hue=0` is NOT neutral.** The ShadowCast V4L2 hue is
 `min=0 max=100 default=50`, so forcing `hue=0` is a MAX shift = a PINK/magenta tint
@@ -94,13 +96,46 @@ Cost is bounded by `CHROMA_SAMPLE_STRIDE = 64` macropixels/row (~16 k samples at
 
 ## Unit-testing the apply path without /dev/video
 
-The `ControlIo` trait abstracts the v4l2 hardware boundary (`set_ctrl`/`get_ctrl`,
-implemented for v4l `Device`). `apply_controls_with::<IO: ControlIo>` runs the real
-warn-and-continue policy against any device, so tests inject a `FakeDevice`
-(supporting an arbitrary control subset — incl. the empty NZXT case) and assert the
-tally. This is the allowed external-hardware mock, not internal-logic mocking. Note
-the trait method names are `set_ctrl`/`get_ctrl` (NOT `set_control`/`control`) to
-avoid colliding with — and recursing into — the v4l inherent methods.
+The `ControlIo` trait abstracts the v4l2 hardware boundary (`set_ctrl`/`get_ctrl`/
+`query_range`, implemented for v4l `Device`). `apply_controls_with::<IO: ControlIo>`
+runs the real warn-and-continue policy against any device, so tests inject a
+`FakeDevice` (supporting an arbitrary control subset — incl. the empty NZXT case,
+plus `.with_range(id, range)` to model a `VIDIOC_QUERY_EXT_CTRL` response) and
+assert the tally. This is the allowed external-hardware mock, not internal-logic
+mocking. Note the trait method names are `set_ctrl`/`get_ctrl`/`query_range` (NOT
+`set_control`/`control`/`query_controls`) to avoid colliding with — and recursing
+into — the v4l inherent methods.
+
+## #456 range-aware control resolution — a literal 50 is NOT the same "neutral" on every card
+
+The certified sets above are calibrated against the ShadowCast card's native
+0-100 range. **cam5's grab card has a 0-255 range (default 128)** — applying the
+literal `50` verbatim landed at ~20% of ITS range = a dark/washed-out image
+(#456). `CaptureControl.target` is now a `ControlTarget` enum, not a bare `i64`:
+
+- `ControlTarget::Literal(v)` — an explicit `CAMERA_BOX_CAPTURE_CONTROLS=name=value`
+  operator override. Applied verbatim, NEVER range-scaled (the operator already
+  picked the exact device value for THAT card).
+- `ControlTarget::RangeScaled { reference_pct }` — what BOTH certified sets use.
+  Resolved at apply time (`resolve_control_target` → `scale_to_range`) against the
+  device's OWN `VIDIOC_QUERY_EXT_CTRL` range (`ControlIo::query_range`):
+  - `reference_pct == 50` (the COLOUR set's neutral) → prefers the device's
+    queried `default_value` directly (the true manufacturer neutral — not
+    necessarily the numeric midpoint on every card, only on the two known ones).
+  - Any other `reference_pct` (the SHARP set's 75/0) → pure proportional scaling
+    onto `[minimum,maximum]`.
+  - Range query fails (old/quirky driver) → falls back to `reference_pct` applied
+    literally, same as the pre-#456 behaviour — never a hard failure.
+
+**Gotcha — this ran in TWO PRs** (#509 the fix, #510 a same-day follow-up): the
+dispatched deep-review pass caught that the first cut queried `default_value` but
+never USED it (pure proportional midpoint math only), which happens to be correct
+for ShadowCast (default 50 == midpoint 50) and cam5 (default 128 == midpoint 128)
+but would silently miss the true neutral on a THIRD card whose default isn't its
+numeric midpoint. Lesson: when a queried "default" field is added to a struct,
+either wire it into the logic or don't carry it — an unused-but-plausible-looking
+field is exactly the kind of thing a second review pass catches and a first
+self-review misses.
 
 ## Controls apply AFTER set_format/set_params
 
