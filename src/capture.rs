@@ -493,9 +493,16 @@ impl ControlIo for Device {
     fn query_range(&self, id: u32) -> std::result::Result<ControlRange, Self::Err> {
         // `Device::query_controls()` enumerates every control the driver reports
         // (VIDIOC_QUERY_EXT_CTRL with V4L2_CTRL_FLAG_NEXT_CTRL) — there is no
-        // narrower single-id query in the v4l crate's public API. This runs once
-        // per control at device open, never per-frame, so the extra enumeration
-        // cost is negligible.
+        // narrower single-id query in the v4l crate's public API, so this
+        // re-enumerates the full control list PER CALL (#456 deep-review note).
+        // Deliberately NOT cached: it runs at most twice per device open (the
+        // certified sets are always 2 controls) — never per-frame — so the O(n)
+        // enumeration cost per call is negligible in absolute terms, and adding a
+        // caching layer around the external `v4l::Device` type (which this crate
+        // does not own, so it can't gain a cache field) would be a bigger
+        // architectural change than this bounded, open-time-only call pattern
+        // warrants. Revisit if the certified control sets ever grow beyond a
+        // couple of controls.
         let controls = self.query_controls()?;
         controls
             .into_iter()
@@ -543,18 +550,37 @@ fn resolve_control_target<IO: ControlIo>(io: &IO, id: u32, target: ControlTarget
 
 /// Scale a `reference_pct` (0-100, calibrated against the ShadowCast card's
 /// native 0-100 range) onto a device's ACTUAL queried `[minimum,maximum]`
-/// range. `reference_pct=50` — the certified COLOUR set's neutral — lands on
-/// `range`'s own midpoint, which is ALSO each known card's own manufacturer
-/// default (#456: 50 on ShadowCast's 0-100 range, ~128 on cam5's 0-255 range),
-/// so this single formula makes the SAME certified intent land correctly on
-/// any card's range, for the neutral colour set AND the tuned SHARP set alike
-/// (e.g. 75% -> ~191 on a 0-255 range, matching the ShadowCast literal 75 on a
-/// 0-100 range).
+/// range. `reference_pct=50` — the certified COLOUR set's neutral — IS, by
+/// definition, the manufacturer's own default (#456 follow-up: prefer the
+/// queried `default_value` directly for the neutral case, rather than only its
+/// numeric midpoint — both known cards happen to have a default equal to their
+/// midpoint (50 on ShadowCast's 0-100 range, 128 on cam5's 0-255 range), but a
+/// future card whose default ISN'T its midpoint must still resolve to its own
+/// default, not a value the manufacturer never calls "neutral"). Any other
+/// `reference_pct` (the tuned SHARP set's 75/0) has no such correspondence and
+/// always uses proportional scaling (e.g. 75% -> ~191 on a 0-255 range,
+/// matching the ShadowCast literal 75 on a 0-100 range).
 fn scale_to_range(reference_pct: i64, range: ControlRange) -> i64 {
+    if reference_pct == 50
+        && range.default_value >= range.minimum
+        && range.default_value <= range.maximum
+    {
+        return range.default_value;
+    }
     let span = range.maximum - range.minimum;
     if span <= 0 {
         // Degenerate/unreliable range query -- the reference percentage is the
-        // best remaining guess (matches the pre-#456 literal behaviour).
+        // best remaining guess (matches the pre-#456 literal behaviour). Logged
+        // (unlike a normal successful scale) since a broken range query is worth
+        // the operator's attention.
+        tracing::warn!(
+            "capture control range query returned a degenerate range \
+             (minimum={} >= maximum={}) -- falling back to reference value {} \
+             applied literally",
+            range.minimum,
+            range.maximum,
+            reference_pct
+        );
         return reference_pct;
     }
     let fraction = reference_pct as f64 / 100.0;
