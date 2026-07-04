@@ -72,6 +72,11 @@ CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor,
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films
 STRIH=10.77.9.202
 STREAM=10.77.9.204
+# #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
+# cameras (Linux, own recorded program). A THIRD recorded+decoded node alongside strih+stream —
+# its zero-loss proof is the cam2 OPTICAL tick's own contiguity (60fps, no beat) ANDed with its
+# own 911003 digital corner burn (#463) when present.
+IMAG_IP="${IMAG_IP:-10.77.9.182}"
 CAM_PW=newlevel
 RUN_ID="${RUN_ID:-$(( (RANDOM << 16) | RANDOM ))}"
 DURATION="${DURATION:-1800}"
@@ -104,6 +109,10 @@ GENLOCK_FPS="${GENLOCK_FPS:-60}"
 # correct regardless of which recording's --capture-fps is in effect.
 STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
+# #462/#461: imag-nb's OWN recording rate (its own box, its own low-latency 60fps rate — never
+# strih's/stream's). Feeds recording-verdict's --imag-capture-fps (recording_span_gate's third
+# rate slot, #373 duration-floor computed against imag's own rate).
+IMAG_CAPTURE_FPS="${IMAG_CAPTURE_FPS:-60}"
 # #174 cam1-capture render-time burn run_id (the value CAMERA_BOX_BURN_RUN_ID is set to on
 # cam1). Mirrors the verdict's BURN_RUN_ID_CAM1 default (911001). Distinct from the strih
 # (911002) / stream (911004) burn ids so all four marks are told apart by run_id. This burn
@@ -146,8 +155,8 @@ echo "   [ ] EXPOSURE: FIXED / manual gain (no auto-exposure drift)"
 echo " A 1/60 shutter caused the #216 ~175s optical-read gap. Fix the camera, THEN run."
 echo "=================================================================================="
 
-echo "[0/8] reachability preflight (cam1 source, cam2 painter, strih, stream)"
-for hp in "cam1=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM"; do
+echo "[0/8] reachability preflight (cam1 source, cam2 painter, strih, stream, imag — #462)"
+for hp in "cam1=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
@@ -310,6 +319,10 @@ systemctl start cam2-painter 2>/dev/null || true"
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop >/dev/null 2>&1
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
+  # #462: imag never had its program scene routed by THIS harness (rig-mode.sh test owns that), so
+  # there is no scene state to restore — only a StopRecord safety net (a leftover recording must
+  # finalize even if the run aborted mid-flight).
+  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop >/dev/null 2>&1
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
@@ -349,13 +362,21 @@ STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"          # #343: record the ALREADY-ACTIVE prod scene (NDI 2ME PGM already warm) — no cold re-activation
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
+# (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1, so cam1 (the SOURCE camera that
+# films cam2's monitor) rides 'NDI CAM1'. rig-mode.sh TEST mode is what actually routes imag's
+# PROGRAM onto that scene + toggles this burn ON; this harness defensively ensures/verifies it too
+# (the SAME "single source of truth" BURN_TARGETS array, extended below).
+IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"
 # #252: single source of truth for the host=ip=source burn triples. The #195 pre-record burn-ON
 # gate and the #246 cleanup() burn-clear loop iterate the SAME set; keeping it in one array means a
 # third box (or a triple-structure change) can never green-light a set the cleanup does not clear
 # (the #246 linger-onto-live-broadcast hazard). Defined HERE — after the *_PROG_SOURCE vars and
 # BEFORE the cleanup trap is armed — so cleanup()'s array expansion is never an unbound `set -u`
-# var on an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap).
-BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE")
+# var on an early abort (same ordering reason the *_PROG_SOURCE vars precede the trap). #462: imag
+# is now a THIRD burn target (its own 911003 digital corner burn, #463) — the exact extension this
+# array's design already anticipated.
+BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
 trap cleanup EXIT HUP INT TERM
 # #281 Fix#3: start the rig-active heartbeat NOW (trap is armed, so cleanup() will stop it on any
 # exit). The background refresher keeps it fresh for the whole long run; the rig-restore watchdog
@@ -588,7 +609,7 @@ if [ "$frozen_ok" -ne 1 ]; then
   exit 1
 fi
 
-echo "[4d/8] #405/#406 render-budget gate — with burns ON + Multiview open, BOTH boxes MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb)"
+echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, ALL THREE boxes MUST hold the render frame budget (strih 30fps, stream 30fps, imag 60fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too)"
 # The 2026-07-02 regression (found when strih was STILL the 60fps LED-wall IMAG box, pre-#459): a
 # measurement burn left ON dropped strih RENDER 60->27fps (36ms > 16.6ms/60fps budget) while the
 # encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
@@ -608,6 +629,7 @@ if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:
     python3 "$HERE/render-budget-gate.py" \
       --box "strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-30}" \
       --box "stream=${STREAM}:${RENDER_TARGET_FPS_STREAM:-30}" \
+      --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
       --window-s "${RENDER_GATE_WINDOW_S:-6}"; then
   echo "    [render-budget-gate] a box missed the render frame budget with burns ON — aborting BEFORE recording (#405)." >&2
   echo "    A recording made in this state would judder (encoder duplicates frames) yet pass delivery-contiguity." >&2
@@ -999,9 +1021,10 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
   exit "$GATE"
 fi
 
-echo "[5/8] StartRecord on strih + stream (program = certified prod scene)"
+echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program set by rig-mode.sh test beforehand)"
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
+python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start
 
 # #312 Phase-2 ALL-CAMBOX SWEEP (opt-in via ALL_CAMBOX=1). Instead of one steady-state hold on a
 # single cambox, sequentially cut EACH active cambox into strih PROGRAM for ~SEGMENT_SECS, cycling
@@ -1097,8 +1120,11 @@ STRIH_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action
   || echo "WARNING: strih StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
 STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) \
   || echo "WARNING: stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
+IMAG_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop) \
+  || echo "WARNING: imag StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
+echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
 # #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
 # --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
 # fired at ~DURATION, BEFORE the painter's DURATION+60 self-exit, so it never wrote a fresh CSV and
@@ -1247,6 +1273,9 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # VERDICT_ARGS — see the #364/#377 comment there. Each box's extract samples its OWN recording's
   # colour and carries the summary in its partial; the dev1 merge applies it (strih rec → cam1,
   # stream rec → strih+stream) and FAILS the headline on any wrong colour.
+  # #462: resolved HERE (before the imag deploy step below needs it too) — the SAME Linux binary
+  # this dev1 process would otherwise merge with; imag-nb (x86_64 Ubuntu) runs it unmodified.
+  VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
   STREAM_REC_WIN="${STREAM_REC_WIN:-<the stream recording AS IT LIVES ON THE STREAM BOX>}"
   STRIH_REC_WIN="${STRIH_REC_WIN:-<the strih recording AS IT LIVES ON THE STRIH BOX>}"
   STRIH_PARTIAL_WIN="$OUT_DIR_WIN\\strih-partial-${RUN_ID}.json"
@@ -1290,16 +1319,44 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
   echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
 
-  echo "    --- [8/8c] MERGE the two small partials ON dev1 (no recording on dev1) ---"
+  # #462 (EPIC #466): extract the IMAG partial ON imag-nb — UNLIKE 8/8a/8/8b above, this step
+  # ACTUALLY RUNS NOW (imag-nb is a plain Linux box reachable over ssh/scp, same access class as
+  # cam1/cam2 — no win-* MCP "paste this" dance needed, per the #462 issue text). By the time this
+  # returns, $IMAG_PARTIAL already exists on dev1 — ready for the merge command printed below.
+  IMAG_PARTIAL="$OUTDIR/imag-partial-${RUN_ID}.json"          # pulled back to dev1 (already, by now)
+  IMAG_PIXELS="$OUTDIR/imag-partial-${RUN_ID}-pixels"          # #186 pixel proofs (absent on a clean run)
+  IMAG_REMOTE_OUT_DIR="${IMAG_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
+  IMAG_REMOTE_PARTIAL="$IMAG_REMOTE_OUT_DIR/imag-partial-${RUN_ID}.json"
+  echo "    --- [8/8c] extract the IMAG partial ON imag-nb (${IMAG_IP}, plain ssh — #462) ---"
+  if [ -n "${IMAG_HOST_PATH:-}" ]; then
+    "$HERE/recording-verdict-on-imag.sh" \
+      --verdict-bin "$VERDICT_BIN" --out-dir "$IMAG_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
+      --imag-rec "$IMAG_HOST_PATH" \
+      -- --extract-partial imag --imag "$IMAG_HOST_PATH" --imag-capture-fps "$IMAG_CAPTURE_FPS" \
+         --out "$IMAG_REMOTE_PARTIAL"
+    echo "    pulled back to dev1: $IMAG_PARTIAL  (+ the #186 pixel-proof dir $IMAG_PIXELS, if any)"
+  else
+    echo "WARNING: #462 no imag recording path (StopRecord returned none) — imag partial NOT produced;" >&2
+    echo "         the merge below will run WITHOUT --merge-partials imag=... (cam→imag proof skipped)." >&2
+  fi
+
+  echo "    --- [8/8d] MERGE the small partials ON dev1 (no recording on dev1) ---"
   echo "    After pulling both partials (+ their <partial>-pixels dirs) to dev1, run the merge:"
   # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
   # and produces the SAME full-chain verdict the fused path would — equivalent fields + PASS.
   MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \
     --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
-    --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
+    --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
+    --imag-capture-fps "$IMAG_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
     --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
     --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
+  # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
+  # merely printed) — `if`-form so a missing/failed imag extract never `set -e`-aborts the merge of
+  # the other two nodes (#178 resilience — degrade gracefully, never abort the whole proof).
+  if [ -f "$IMAG_PARTIAL" ]; then
+    MERGE_ARGS+=(--merge-partials "imag=$IMAG_PARTIAL")
+  fi
   # #377 — pass --colour-gate to the merge too (defense in depth): with it set, a partial that
   # LACKS its carried colour summary ERRORS LOUDLY ("re-run extract with --colour-gate") instead of
   # silently skipping a requested gate. The carried summary is honored regardless; this just catches
@@ -1318,12 +1375,12 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     MERGE_ARGS+=(--switch-schedule "$SWITCH_SCHEDULE_JSON")
     echo "    #332 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON (per-cambox continuity in the merge, ON the stream box)"
   fi
-  VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
   printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
-  echo "    The win-* MCP holder runs 8/8a + 8/8b on each box, pulls both small partials (+ their"
-  echo "    <partial>-pixels #186 proof dirs) to dev1, then runs the 8/8c merge above on dev1. A"
-  echo "    recording is NEVER copied box-to-box nor to dev1 — only the small partial JSONs (+ the"
-  echo "    painter CSV + the handful of flagged-frame PNGs) move (#208/#186)."
+  echo "    The win-* MCP holder runs 8/8a + 8/8b on strih+stream (imag's 8/8c ALREADY ran above —"
+  echo "    #462, plain ssh, no MCP needed), pulls the strih+stream partials (+ their <partial>-pixels"
+  echo "    #186 proof dirs) to dev1, then runs the 8/8d merge above on dev1. A recording is NEVER"
+  echo "    copied box-to-box nor to dev1 — only the small partial JSONs (+ the painter CSV + the"
+  echo "    handful of flagged-frame PNGs) move (#208/#186/#462)."
   echo "    ============================================================================"
   echo "    NOTE: this exit code is NOT the zero-loss verdict. In per-box mode the harness only"
   echo "          EMITS the plan (scp/ssh to Windows is denied, so bash cannot run it itself). The"
