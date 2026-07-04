@@ -96,10 +96,13 @@ fn pixel_unpack_buffer_size_is_a_single_helper_shared_by_create_and_map() {
          create_pixel_unpack_buffer() and gs_texture_map() must compute the PBO byte size from \
          exactly one place so they cannot drift apart."
     );
-    assert_eq!(
-        src.matches("pixel_unpack_buffer_size(").count(),
-        3, // 1 definition + create_pixel_unpack_buffer() call-site + gs_texture_map() call-site
-        "{GL_TEXTURE2D}: #505 — expected exactly one definition and two call-sites of \
+    assert!(
+        src.matches("pixel_unpack_buffer_size(").count() >= 3,
+        // 1 definition + create_pixel_unpack_buffer() call-site + gs_texture_map() call-site.
+        // >= (not ==) so an incidental future doc-comment mentioning the function name with a
+        // literal "(" can't spuriously fail this test — only a REGRESSION (a call-site removed
+        // or the size recomputed inline again) can.
+        "{GL_TEXTURE2D}: #505 — expected at least one definition and two call-sites of \
          pixel_unpack_buffer_size() (create_pixel_unpack_buffer + gs_texture_map)."
     );
 }
