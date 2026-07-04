@@ -1535,6 +1535,21 @@ fn setup_imag_verifies_frontend_render_divisor_symbol_postswap_499() {
         body.contains("refuse a stock/wrong frontend binary"),
         "{SETUP} must fail loud (not warn) when the render-divisor symbol check fails"
     );
+    // Found in review: `nm -D -u` on this binary emits ~2900 lines (~170KB, live-measured) and
+    // the target symbol sits at line ~286 -- a `grep -q` would exit right after that early match,
+    // SIGPIPE-ing `nm` mid-write, and under `set -euo pipefail` that would wrongly fail() a
+    // CORRECT build (same footgun class the SONAME check above already documents/avoids).
+    let symbol_check_line = body
+        .lines()
+        .find(|l| l.contains("nm -D -u \"$OBS_FRONTEND_REAL\""))
+        .expect("the nm -D -u pipeline line must exist");
+    assert!(
+        !symbol_check_line.contains("grep -q"),
+        "{SETUP}: the nm -D -u | grep check for obs_display_set_render_divisor must NOT use \
+         `grep -q` — an early match closes the pipe before `nm` finishes writing its ~170KB of \
+         output, SIGPIPEs `nm`, and under pipefail wrongly fails a CORRECT build. Use a plain \
+         `grep 'pattern' >/dev/null` instead (matches the SONAME check's own convention)"
+    );
 }
 
 /// The idempotency no-op check (#472 defense-in-depth) must ALSO cover the frontend binary — a

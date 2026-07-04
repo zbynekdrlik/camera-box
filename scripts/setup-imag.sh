@@ -710,7 +710,12 @@ else
     # obs_display_set_render_divisor (the #276/#278/#293 multiview render-budget decouple symbol)
     # — live-verified `nm -D -u` shows it as an UNDEFINED (U) symbol only on the genlock-built
     # frontend. A missing reference here means the wrong/stock binary got installed.
-    nm -D -u "$OBS_FRONTEND_REAL" 2>/dev/null | grep -q 'obs_display_set_render_divisor' \
+    # No `-q` on a piped external command under pipefail (same early-close SIGPIPE footgun as the
+    # SONAME check above): `nm -D -u` on this binary emits ~2900 lines (~170KB, live-measured) and
+    # the target symbol sits at line ~286 — `grep -q` would exit right after that early match,
+    # SIGPIPE-ing `nm` mid-write, and under `set -euo pipefail` that would wrongly `fail()` a
+    # CORRECT build. Read the full output instead.
+    nm -D -u "$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_divisor' >/dev/null \
         || fail "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor — refuse a stock/wrong frontend binary (#499: multiview render-budget decouple would be missing)"
 
     echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt"
