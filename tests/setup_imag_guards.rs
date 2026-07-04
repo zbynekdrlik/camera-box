@@ -1134,3 +1134,86 @@ fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
          unsafe, not just warn"
     );
 }
+
+// ============================================================================================
+// #482 — preempt=full via linux-lowlatency-hwe-24.04, with ZERO kernel downgrade. LIVE-VERIFIED
+// finding: there is no lowlatency kernel IMAGE at the 6.17 line (newest are 6.8/6.11 — a
+// downgrade); the 6.17 generic kernel is already PREEMPT_DYNAMIC, so the lowlatency-kernel CONFIG
+// package alone drops preempt=full onto it. Already LIVE-APPLIED on imag-nb (2026-07-04); this
+// codifies it into setup-imag.sh.
+// ============================================================================================
+
+/// #482: imag must install `linux-lowlatency-hwe-24.04` (the CONFIG package that drops
+/// preempt=full onto the EXISTING 6.17 generic kernel) — never a real lowlatency kernel IMAGE,
+/// which at the 6.17 line would be a DOWNGRADE (live-verified finding, #482 comment).
+#[test]
+fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("apt-get install -y linux-lowlatency-hwe-24.04"),
+        "{SETUP} must install linux-lowlatency-hwe-24.04 (#482) — the meta/config package that \
+         pulls in `lowlatency-kernel` without swapping the kernel image"
+    );
+    assert!(
+        body.contains("dpkg -s lowlatency-kernel"),
+        "{SETUP} must check for the `lowlatency-kernel` config package (idempotent guard against \
+         re-running apt-get on every re-provision)"
+    );
+    // No `apt-get install` line may target a BARE lowlatency kernel IMAGE package (e.g.
+    // `linux-image-lowlatency` or a bare `linux-lowlatency` metapackage without the `-hwe-24.04`
+    // config-package suffix) — that would be the live-verified DOWNGRADE (newest lowlatency
+    // images are 6.8/6.11 vs the 6.17 generic kernel already running). Scoped to install COMMAND
+    // lines only, so this does not false-trip on the unrelated `"linux-lowlatency";`
+    // Unattended-Upgrade::Package-Blacklist entry the #487 step also writes.
+    let bad_install = body.lines().any(|l| {
+        let t = l.trim_start();
+        t.contains("apt-get install")
+            && (t.contains("linux-image-lowlatency")
+                || t.contains(" linux-lowlatency ")
+                || t.contains(" linux-lowlatency\""))
+            && !t.contains("linux-lowlatency-hwe-24.04")
+    });
+    assert!(
+        !bad_install,
+        "{SETUP} must NEVER `apt-get install` a bare lowlatency KERNEL IMAGE package — at the \
+         6.17 line the newest lowlatency images are 6.8/6.11, a DOWNGRADE that loses 13th-gen \
+         CPU/iGPU/USB-NIC support (live-verified finding, #482)"
+    );
+}
+
+/// #482: the script must VERIFY (post-install, without rebooting) that the lowlatency-kernel
+/// config package actually dropped a grub.d file carrying preempt=full — never just trust that
+/// the apt install succeeded silently.
+#[test]
+fn setup_imag_verifies_preempt_full_present_after_lowlatency_install_482() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("[ -f /etc/default/grub.d/99-lowlatency.cfg ]"),
+        "{SETUP} must verify /etc/default/grub.d/99-lowlatency.cfg exists after installing the \
+         lowlatency-kernel config package (#482)"
+    );
+    assert!(
+        body.contains("grep -q 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg"),
+        "{SETUP} must grep 99-lowlatency.cfg for `preempt=full` and fail loud if absent — refuse \
+         to trust the config package silently (#482)"
+    );
+    assert!(
+        body.contains("takes effect on the NEXT boot"),
+        "{SETUP} must note that preempt=full only takes effect on the NEXT boot — this \
+         provisioning script does not reboot the box itself (#482)"
+    );
+}
+
+/// #482/#487: the newly-installed lowlatency-kernel config packages must ALSO be held (apt-mark
+/// hold), same discipline as the pre-existing generic kernel packages — an unattended upgrade
+/// must never be able to silently swap this config out from under the deployed preempt=full.
+#[test]
+fn setup_imag_holds_lowlatency_config_packages_after_install_482() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04"),
+        "{SETUP} must `apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04` right after \
+         installing them (#482/#487) — otherwise an unattended upgrade could silently revert the \
+         preempt=full config"
+    );
+}

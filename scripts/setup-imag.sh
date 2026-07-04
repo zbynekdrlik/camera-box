@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=14
+TOTAL_STEPS=15
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -363,7 +363,35 @@ safe_grub_regen() {
 }
 
 # =============================================================================
-step 7 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 7 "Low-latency kernel (#482): preempt=full via lowlatency-kernel config — zero downgrade"
+# =============================================================================
+# LIVE-VERIFIED FINDING (#482): there is NO lowlatency kernel IMAGE at the 6.17 line (the newest
+# lowlatency images are 6.8/6.11 -- installing one would be a DOWNGRADE, losing 13th-gen
+# CPU/iGPU/USB-NIC support). But the 6.17 generic kernel already IS PREEMPT_DYNAMIC, so
+# linux-lowlatency-hwe-24.04 on 24.04 is a META package: it keeps the generic kernel image and
+# only pulls in the `lowlatency-kernel` CONFIG package, which drops
+# /etc/default/grub.d/99-lowlatency.cfg = GRUB_CMDLINE_LINUX_DEFAULT="... preempt=full
+# rcu_nocbs=all" -- full preemption on the NEWEST kernel, zero downgrade. This is a plain apt
+# install (not a hand-authored grub.d file), so it needs no idempotent-append logic of its own --
+# `apt-get install` on an already-installed package is already a no-op.
+if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y linux-lowlatency-hwe-24.04 >/dev/null \
+        || fail "linux-lowlatency-hwe-24.04 install failed"
+fi
+[ -f /etc/default/grub.d/99-lowlatency.cfg ] \
+    || fail "#482: lowlatency-kernel config package installed but /etc/default/grub.d/99-lowlatency.cfg is missing"
+grep -q 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg \
+    || fail "#482: 99-lowlatency.cfg does not carry preempt=full — refuse to trust the config package"
+# #487: never a raw ad-hoc grub edit -- hold the newly-installed kernel-config packages too, same
+# as the generic kernel packages held in step 6, so an upgrade can't silently swap this config out.
+apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04 >/dev/null 2>&1 \
+    || echo "  WARNING: apt-mark hold of the lowlatency-kernel config packages failed"
+echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 generic kernel, no downgrade)"
+echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 8 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -386,7 +414,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 8 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 9 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -396,7 +424,7 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 9 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 10 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
@@ -607,7 +635,7 @@ else
 fi
 
 # =============================================================================
-step 10 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 11 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -635,7 +663,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 11 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+step 12 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
 # imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
 # masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
@@ -697,7 +725,7 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 12 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 13 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -711,7 +739,7 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 13 "Launch OBS on the desktop session (X11 :0)"
+step 14 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -729,7 +757,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 14 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 15 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
