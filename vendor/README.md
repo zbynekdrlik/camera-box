@@ -216,6 +216,27 @@ DistroAV:
   Scope: this is the BURN only — decoding the burned stamps + computing per-hop latency is
   #108 (post-event).
 
+- **#505 Linux GL PBO-orphan fix (root-causes #501's imag-nb multiview CPU stall)**
+  (`libobs-opengl/gl-texture2d.c`): `gs_texture_map()` mapped the persistent, per-texture
+  Pixel Unpack Buffer with a bare `glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY)`. That
+  PBO is allocated ONCE per dynamic texture and reused every frame with no
+  re-specification, so the driver must guarantee the GPU has finished consuming the
+  PREVIOUS frame's upload before handing back a CPU-writable pointer — an implicit
+  CPU↔GPU sync/fence. Measured live on imag-nb: a 6-source OBS multiview (each source
+  re-uploads its async texture every render) cost ~24ms/frame with the CPU pinned at 101%
+  of one core and the GPU idle 7-9% — the D3D11/Windows backend never pays this because it
+  maps with `D3D11_MAP_WRITE_DISCARD`, which never blocks (why strih's multiview is
+  11.5ms). Fix: map with `glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size,
+  GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)` instead — the same idiom already used
+  by this file's neighbour `gl-helpers.c`'s `update_buffer()` for vertex/index buffer
+  streaming — plus a shared `pixel_unpack_buffer_size()` helper so the map-time size and
+  the allocation size can't drift apart. `gl-texture3d.c`'s mirrored PBO was NOT patched:
+  this vendored OBS has no `gs_texture_map`/`gs_voltexture_map` path for `GS_TEXTURE_3D`
+  on the GL backend at all, so there is no live instance of the anti-pattern there today.
+  Guarded by `tests/gl_pbo_orphan.rs` (pure vendored-source-text assertions, no probe
+  feature / GPU needed) so a `git subtree pull` can't silently revert it — including a
+  guard that fails loudly if a future change ever adds a 3D map path without the same fix.
+
 ### POST-EVENT deploy + enable (#111) — USER-TIMED, do NOT run before the live event
 
 The #111 code ships in the genlock distroav.dll. Deploying it is the **same in-place
