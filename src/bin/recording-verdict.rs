@@ -6115,23 +6115,25 @@ mod tests {
             .collect()
     }
 
-    /// #463 — like [`imag_window`], but every kept frame ALSO carries imag's own digital corner
-    /// burn (run_id [`super::BURN_RUN_ID_IMAG`], ids 500..500+n so they never collide with the
-    /// cam2 tick range and `frame()`'s `tick = max(frame_id)` picks the cam2 id correctly).
-    /// `tick_gap_at` drops a WHOLE frame (an optical miss); `burn_gap_at` keeps the frame (cam2
-    /// tick present) but omits JUST the burn payload on it (a burn-only miss) — the two gaps are
-    /// independent so a test can exercise either signal alone.
-    fn imag_window_with_burn(
-        n: u32,
-        tick_gap_at: Option<u32>,
-        burn_gap_at: Option<u32>,
-    ) -> Vec<RecordingFrame> {
+    /// #463 — like [`imag_window`], but every frame ALSO carries imag's own digital corner burn
+    /// (run_id [`super::BURN_RUN_ID_IMAG`], ids 10..10+n). The burn ids are kept BELOW the cam2
+    /// tick range (100..100+n) — `frame()`'s `tick = max(frame_id)` over ALL payloads on the
+    /// frame, so if the burn id were ever the LARGER of the two (a real bug caught by CI: an
+    /// earlier draft used ids 500..500+n, ABOVE the cam2 range, which made `.tick` silently
+    /// resolve to the BURN id instead of the cam2 tick on every frame) `nv.contiguity` would
+    /// stop reflecting the optical signal at all. With burn ids always < cam2 ids, `.tick` is
+    /// always the cam2 id regardless of whether the burn is present. `burn_gap_at` (when given)
+    /// omits JUST the burn payload on that one frame index (the cam2 tick stays present) — a
+    /// burn-only miss. (An "optical-only miss" needs a DIFFERENT construction — a frame with NO
+    /// cam2 payload at all has `tick: None` in real decode output, which this payload-max-based
+    /// helper cannot represent; see `node_verdict_for_imag_fails_when_optical_is_broken_even_
+    /// with_a_clean_digital_burn_463`'s direct `RecordingFrame` construction for that case.)
+    fn imag_window_with_burn(n: u32, burn_gap_at: Option<u32>) -> Vec<RecordingFrame> {
         (0..n)
-            .filter(|&i| tick_gap_at != Some(i))
             .map(|i| {
                 let mut payloads = vec![(CAM2, 100 + i)];
                 if burn_gap_at != Some(i) {
-                    payloads.push((super::BURN_RUN_ID_IMAG, 500 + i));
+                    payloads.push((super::BURN_RUN_ID_IMAG, 10 + i));
                 }
                 frame(i as u64, &payloads)
             })
@@ -6174,15 +6176,15 @@ mod tests {
         use super::node_verdict_for_imag;
         // Every frame carries BOTH the cam2 optical tick AND imag's own digital corner burn,
         // both clean — the doubly-proven #463 pass.
-        let frames = imag_window_with_burn(60, None, None);
+        let frames = imag_window_with_burn(60, None);
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             nv.is_zero(),
             "optical contiguous AND digital burn contiguous ⇒ zero loss (#463)"
         );
         let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
-        assert_eq!(burn.first_id, Some(500));
-        assert_eq!(burn.last_id, Some(559));
+        assert_eq!(burn.first_id, Some(10));
+        assert_eq!(burn.last_id, Some(69));
         assert!(burn.missing_ids.is_empty());
     }
 
@@ -6191,7 +6193,7 @@ mod tests {
         use super::node_verdict_for_imag;
         // The cam2 optical tick stays perfectly contiguous (every frame is present); only the
         // BURN payload is missing on frame index 30 — imag's second, independent proof disagrees.
-        let frames = imag_window_with_burn(60, None, Some(30));
+        let frames = imag_window_with_burn(60, Some(30));
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             nv.contiguity.is_contiguous(),
@@ -6206,7 +6208,7 @@ mod tests {
         let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
         assert_eq!(
             burn.missing_ids,
-            vec![530],
+            vec![40],
             "the exact missing digital burn id must be reported"
         );
     }
@@ -6214,13 +6216,43 @@ mod tests {
     #[test]
     fn node_verdict_for_imag_fails_when_optical_is_broken_even_with_a_clean_digital_burn_463() {
         use super::node_verdict_for_imag;
-        // The digital burn stays perfectly contiguous; the cam2 OPTICAL tick has a gap (a whole
-        // frame missing) — the optical read stays the HARD gate, never overridable by the burn.
-        let frames = imag_window_with_burn(60, Some(30), None);
+        // Built via DIRECT RecordingFrame construction (not `imag_window_with_burn`, which has
+        // no way to drop JUST the cam2 payload while keeping the burn — see its doc comment).
+        // Frame 30 decodes ONLY the digital burn (no
+        // cam2 payload at all) -> `tick: None`, mirroring production's REAL exclusion semantics
+        // exactly (`decode_recording_frame_with_burns` filters node burns out of the tick
+        // computation, #463's `NODE_BURN_RUN_IDS` fix) -- a frame whose only payload is a
+        // digital burn correctly has NO optical tick, not the burn's frame_id. Its burn payload
+        // is still present, so the digital-burn sequence itself stays perfectly contiguous.
+        let frames: Vec<RecordingFrame> = (0..60u32)
+            .map(|i| {
+                if i == 30 {
+                    RecordingFrame {
+                        frame_index: i as u64,
+                        payloads: vec![Payload {
+                            run_id: super::BURN_RUN_ID_IMAG,
+                            frame_id: 10 + i,
+                            gen_ts_ns: 1,
+                        }],
+                        tick: None,
+                    }
+                } else {
+                    frame(
+                        i as u64,
+                        &[(CAM2, 100 + i), (super::BURN_RUN_ID_IMAG, 10 + i)],
+                    )
+                }
+            })
+            .collect();
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             !nv.contiguity.is_contiguous(),
-            "sanity: the optical tick has the injected gap"
+            "sanity: the optical tick has a real gap (frame 30 decoded no cam2 payload)"
+        );
+        let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
+        assert!(
+            burn.is_contiguous(),
+            "sanity: the digital burn itself stays perfectly contiguous: {burn:?}"
         );
         assert!(
             !nv.is_zero(),

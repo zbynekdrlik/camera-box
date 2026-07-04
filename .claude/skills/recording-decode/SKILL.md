@@ -611,9 +611,18 @@ decision, not embedded as test fixtures.
 
 ## #461 — adding a BURN-LESS node (imag-nb) — reuse NodeContiguity's SHAPE, not `burn_contiguity`
 
-imag-nb has no digital node-burn yet (911003 reserved for a later ticket, #463); its zero-loss
-proof is the cam2 OPTICAL tick's own first..=last integer contiguity instead. The clean way to
-add a node whose proof mechanism is DIFFERENT from every other node's (burn id vs optical tick):
+**#463 update: imag is NO LONGER burn-less.** It now carries its own digital corner burn
+(`BURN_RUN_ID_IMAG` = 911003, `Corner::BottomCenterLeft`), ANDed with the optical tick
+contiguity via `imag_tick_gate::ImagVerdict` — see "#463 — adding a Nth burn corner" below for
+the geometry side, and `NodeVerdict::imag_burn_ok()` / `node_verdict_for_imag` in
+`recording-verdict.rs` for the AND-gate. The section below (steps 1-4) still describes the
+CORRECT pattern for a genuinely burn-less proof (imag's optical fallback still uses it when no
+burn is decoded in a recording) — read it for that shape; just don't assume imag has no burn any
+more.
+
+imag-nb originally had no digital node-burn; its zero-loss proof was the cam2 OPTICAL tick's own
+first..=last integer contiguity instead. The clean way to add a node whose proof mechanism is
+DIFFERENT from every other node's (burn id vs optical tick):
 
 1. Write the ALGORITHM as a brand-new pure module OUTSIDE `probe::` (`src/imag_tick_gate.rs`),
    even though it duplicates `probe::burn_contiguity::burn_contiguity`'s exact first..=last logic.
@@ -632,3 +641,47 @@ add a node whose proof mechanism is DIFFERENT from every other node's (burn id v
 4. `optical_span_facts(frames, &[], cam2_run_id)` (empty `all_burn_run_ids`) is the right call for
    a burn-less node's #373 duration-floor span — every non-burn payload counts as optical when
    there is nothing to exclude.
+
+## #463 — adding a Nth burn corner: FOUR independent places have to agree
+
+Adding imag's `Corner::BottomCenterLeft` (a 4th burn corner, after cam1-center + strih-BL +
+stream-BR) touches FOUR separate implementations of "where does this burn sit" — miss one and
+you get a silent geometry mismatch that only a real recording (or the C++ parity test) would
+catch:
+
+1. **`vendor/distroav/src/burn-geom.hpp`** (C++, the ACTUAL render geometry) — `Corner` enum +
+   `corner_placement()`'s per-corner `if`/`else` branch. This is ground truth; everything else
+   below is a MIRROR of it.
+2. **`src/probe/colour_sample.rs::node_burn_exclusions`** (Rust, probe-gated) — the colour gate's
+   dodge rects. Must reproduce the SAME formula (margin/side/band_x) as step 1, by hand, in Rust —
+   there is no shared code between the C++ render path and this Rust dodge path.
+3. **`src/colour_scale.rs` test module** (Rust, Tier-0) — a THIRD hand-written mirror of the same
+   formula, as `const` test fixtures, used to prove (locally, RED→GREEN, no `--features probe`
+   needed) that the new corner doesn't collide with any colour patch or any other burn.
+4. **`tests/burn_payload_parity.rs`** (Rust, probe-gated, but embeds a C++ harness that calls the
+   REAL `burn_geom::corner_placement` from step 1 directly) — extend `four_qr_rects`-style helpers
+   + the vendored-source string-presence guards (`flt.contains("911003")` etc.) to cover the new
+   corner.
+
+**Do the arithmetic ONCE by hand** (e.g. `margin + side + margin` for "one margin clear of the
+previous burn's trailing edge") and paste the SAME numbers into all four — do not let each mirror
+independently "derive" a slightly different formula. Cross-check by computing the expected
+`band_x` for the production canvas (1920×1080) and asserting the SAME number shows up in the C++
+compile-check, the Rust Tier-0 test, and the probe-gated exclusion rects.
+
+## Verifying a freestanding vendored C++ header LOCALLY without `--features probe`
+
+`burn-geom.hpp` is explicitly "header-only, freestanding (no OBS, no chrono)" — you do NOT need
+the OBS SDK or the `probe` feature to compile-check it. Write a throwaway `.cpp` in `/tmp` that
+`#include`s the header by ABSOLUTE path and exercises the function you changed, then:
+
+```bash
+g++ -std=c++17 -O2 -Wall -Wextra -Werror /tmp/check.cpp -o /tmp/check && /tmp/check
+```
+
+This gave REAL RED→GREEN evidence for the C++ corner-placement change in this ticket (a
+deliberately-wrong `band_x` failed an assertion, then the correct formula passed) even though the
+actual `tests/burn_payload_parity.rs` harness that also exercises this header requires
+`--features probe` (CI-only, banned locally per this repo's Tier-0 policy). Do this for ANY
+freestanding vendored header (`burn-geom.hpp`, `burn-payload.hpp`, `burn-clock.hpp`, `burn-qr.hpp`
+all qualify — none pull OBS SDK headers) before trusting a C++ logic change to CI alone.

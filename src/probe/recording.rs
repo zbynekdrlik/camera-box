@@ -125,24 +125,32 @@ pub struct RecordingFrame {
     /// Effective Vernier tick = the highest `frame_id` among the decoded OPTICAL (cam2
     /// dual-QR) payloads — left QR carries the latest even tick, right the latest odd, the
     /// freshest sharp region wins (matches `decode_capture_dual`'s `max_by_key(frame_id)` and
-    /// `recording_latency::split_payloads`). The node BURNS (cam1/strih/stream, run_ids
+    /// `recording_latency::split_payloads`). The node BURNS (cam1/strih/stream/imag, run_ids
     /// [`NODE_BURN_RUN_IDS`]) are EXCLUDED: their per-node counters are independent of the
     /// optical tick and can exceed it, so a recovered burn must not hijack the Vernier tick
     /// (the #202 robust decode now recovers burns on most frames — without this exclusion the
     /// max would routinely be a burn's id, corrupting the tick-based diagnostics). `None` when
     /// no optical QR decoded.
+    ///
+    /// **#463 GOTCHA (caught by CI, not locally — this list gates the ACTUAL production tick,
+    /// not just a test fixture):** when imag's own digital corner burn (`BURN_RUN_ID_IMAG`) was
+    /// added, it was NOT initially added here — its burn payload's `frame_id` then legitimately
+    /// competed with the cam2 optical tick in this `max()`, silently corrupting `imag`'s
+    /// contiguity check whenever the burn's frame_id happened to exceed cam2's on a frame. ANY
+    /// future node-burn run_id MUST be added here too, or its `.tick` silently corrupts.
     pub tick: Option<u32>,
 }
 
-/// The node-burn run_ids (cam1 capture / strih / stream) — the digitally-generated marks our
-/// own code burns into the feed (`recording_latency::BURN_RUN_ID_*`). They are NOT the cam2
+/// The node-burn run_ids (cam1 capture / strih / stream / imag) — the digitally-generated marks
+/// our own code burns into the feed (`recording_latency::BURN_RUN_ID_*`). They are NOT the cam2
 /// optical Vernier tick and are excluded from [`RecordingFrame::tick`]. Mirrored here as a
 /// small const so `tick` selection doesn't pull the whole `RunIds` machinery into the
 /// per-frame hot path.
-pub const NODE_BURN_RUN_IDS: [u32; 3] = [
+pub const NODE_BURN_RUN_IDS: [u32; 4] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
     crate::probe::recording_latency::BURN_RUN_ID_STRIH,
     crate::probe::recording_latency::BURN_RUN_ID_STREAM,
+    crate::probe::recording_latency::BURN_RUN_ID_IMAG,
 ];
 
 /// Decode one native-resolution luma frame into a `RecordingFrame`, requiring the FULL set of
@@ -793,6 +801,24 @@ mod tests {
             Some(201),
             "tick must be the optical Vernier tick (201), NOT the burn id 9999: {:?}",
             f.payloads
+        );
+    }
+
+    #[test]
+    fn node_burn_run_ids_includes_imag_463() {
+        // #463 GOTCHA (caught by CI, not locally): imag's OWN digital corner burn
+        // (BURN_RUN_ID_IMAG) must be excluded from the Vernier tick computation exactly like
+        // cam1/strih/stream — otherwise a decoded imag burn payload competes with the cam2
+        // optical tick in decode_recording_frame_with_burns's max(), silently corrupting
+        // imag's zero-loss contiguity check whenever the burn's frame_id exceeds cam2's on a
+        // frame. A unit test with artificially large fixture ids first caught this end-to-end
+        // in CI (a burn id of 500+ hijacked the "optical" tick every frame); this direct
+        // assertion locks the fix so it can never silently regress again.
+        assert!(
+            NODE_BURN_RUN_IDS.contains(&crate::probe::recording_latency::BURN_RUN_ID_IMAG),
+            "BURN_RUN_ID_IMAG must be in NODE_BURN_RUN_IDS so its frame_id never hijacks the \
+             Vernier tick (mirrors tick_excludes_node_burns_even_when_a_burn_id_exceeds_the_\
+             optical_tick's proof for cam1)"
         );
     }
 

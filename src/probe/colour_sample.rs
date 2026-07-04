@@ -129,10 +129,8 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
     let bcl_x_wanted = margin.saturating_add(side).saturating_add(margin);
     let bcl_x = if bcl_x_wanted.saturating_add(side) <= canvas_w {
         bcl_x_wanted
-    } else if canvas_w > side {
-        canvas_w - side
     } else {
-        0
+        canvas_w.saturating_sub(side)
     };
     rects.push(Rect {
         x: bcl_x,
