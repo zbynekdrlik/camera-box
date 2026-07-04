@@ -1429,3 +1429,159 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
          invocations ({actual}) — a mismatch means the progress display under/over-counts"
     );
 }
+
+// ============================================================================================
+// #499 — the genlock hot-swap must ALSO swap the OBS FRONTEND binary /usr/bin/obs. Codifies a
+// fix already applied + LIVE-VERIFIED on imag-nb (2026-07-04): the multiview render-budget
+// decouple (#276/#278/#293) and the "newlevel.media" window title live in the frontend EXE
+// (vendor/obs-studio/frontend/), NOT libobs.so.30 — a genlock deploy that skips /usr/bin/obs
+// leaves a half-stock box (multiview choked the program render to 16fps/59ms on the stock
+// frontend vs 60fps/1.7ms after the swap).
+// ============================================================================================
+
+/// The hot-swap must overwrite the REAL frontend executable path, not just the two libraries.
+#[test]
+fn setup_imag_hotswaps_frontend_binary_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"OBS_FRONTEND_REAL="/usr/bin/obs""#),
+        "{SETUP} must define OBS_FRONTEND_REAL=/usr/bin/obs — the genlock hot-swap must ALSO \
+         swap the frontend executable, not just libobs.so.30/distroav.so (#499)"
+    );
+    assert!(
+        body.contains(r#"BUNDLE_OBS="$GENLOCK_TMP/bundle/bin/obs""#),
+        "{SETUP} must resolve the bundle's bin/obs path — the genlock bundle (obs-genlock-linux-\
+         x86_64) already carries the built frontend executable at bin/obs"
+    );
+}
+
+/// #499's frontend sha must be looked up via manifest_sha_for_path and actually verify_file_sha'd
+/// — the same integrity discipline already applied to libobs.so.30/distroav.so. A frontend binary
+/// installed without a sha check would have zero integrity guarantee.
+#[test]
+fn setup_imag_verifies_frontend_bin_obs_via_bundle_manifest() {
+    let body = read(SETUP);
+    let want_obs = body
+        .find("WANT_OBS_SHA=\"$(manifest_sha_for_path")
+        .expect("frontend bin/obs expected sha must be looked up via manifest_sha_for_path");
+    let verify_obs = body
+        .find("verify_file_sha \"$BUNDLE_OBS\" \"$WANT_OBS_SHA\"")
+        .expect("bundle bin/obs must actually be verify_file_sha'd against its looked-up sha");
+    assert!(
+        want_obs < verify_obs,
+        "{SETUP}: WANT_OBS_SHA must be resolved BEFORE the verify_file_sha call for bin/obs"
+    );
+    assert!(
+        body.contains("'bin/obs'"),
+        "{SETUP}: the manifest lookups for the frontend binary must use the literal manifest \
+         relpath 'bin/obs' (matches the #120 BUNDLE_MANIFEST.json entry, live-confirmed on \
+         imag-nb: sha b53294a9...)"
+    );
+}
+
+/// The stock PPA frontend must be backed up ONCE, before the first-ever swap, at the SAME
+/// live-verified path already hand-created on imag-nb (/opt/obs-backup/obs.stock) — never a
+/// per-run accumulating name (same #185 discipline as the libobs/distroav stock backup).
+#[test]
+fn setup_imag_backs_up_stock_frontend_once_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"OBS_FRONTEND_STOCK_BACKUP="$GENLOCK_BACKUP_ROOT/obs.stock""#),
+        "{SETUP} must back up the stock frontend to $GENLOCK_BACKUP_ROOT/obs.stock — the exact \
+         path already hand-verified live on imag-nb (sha 9898bf32... == the stock PPA /usr/bin/obs)"
+    );
+    let guard = body
+        .find(r#"if [ ! -f "$OBS_FRONTEND_STOCK_BACKUP" ]; then"#)
+        .expect(
+            "the stock frontend backup must be guarded to happen ONLY ONCE (never on a re-swap)",
+        );
+    let install = body
+        .find(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#)
+        .expect("the frontend install call must exist");
+    assert!(
+        guard < install,
+        "{SETUP}: the stock frontend backup must happen BEFORE the frontend is overwritten"
+    );
+}
+
+/// The frontend install must preserve EXECUTE permissions (0755) — unlike the two libraries
+/// (0644) — since /usr/bin/obs is invoked directly as a program, not dlopen'd.
+#[test]
+fn setup_imag_installs_frontend_with_exec_perms_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#),
+        "{SETUP} must `install -m 0755` the frontend binary to /usr/bin/obs — it is an \
+         executable, not a shared library (which get 0644 like libobs.so.30/distroav.so)"
+    );
+}
+
+/// A post-swap build-proof for the frontend, mirroring the SONAME check already done for
+/// libobs.so.30: the installed /usr/bin/obs must actually reference the multiview render-budget
+/// decouple symbol (obs_display_set_render_divisor, #276/#278/#293) — live-verified via
+/// `nm -D -u` on imag-nb after the hand-swap. A stock/wrong binary must never be silently
+/// accepted as "swapped".
+#[test]
+fn setup_imag_verifies_frontend_render_divisor_symbol_postswap_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("nm -D -u \"$OBS_FRONTEND_REAL\"")
+            && body.contains("obs_display_set_render_divisor"),
+        "{SETUP} must `nm -D -u` the swapped /usr/bin/obs and grep for \
+         obs_display_set_render_divisor — the stock PPA frontend never references this symbol \
+         (live-confirmed); its absence means a stock/wrong binary was installed"
+    );
+    assert!(
+        body.contains("refuse a stock/wrong frontend binary"),
+        "{SETUP} must fail loud (not warn) when the render-divisor symbol check fails"
+    );
+}
+
+/// The idempotency no-op check (#472 defense-in-depth) must ALSO cover the frontend binary — a
+/// re-run that only checks libobs.so.30/distroav.so bytes could wrongly report "already deployed"
+/// while the frontend silently reverted to stock (e.g. an unattended apt reinstall of obs-studio,
+/// which owns /usr/bin/obs via dpkg).
+#[test]
+fn setup_imag_frontend_included_in_idempotency_reverify_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(
+            r#"[ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ]"#
+        ),
+        "{SETUP}: the NOOP_VALID existence check must require the frontend binary too, not just \
+         libobs.so.30/distroav.so"
+    );
+    assert!(
+        body.contains("WANT_OBS_SHA_CACHED") && body.contains("GOT_OBS_SHA_CACHED"),
+        "{SETUP}: the cached-manifest re-verify (#472) must ALSO compare the frontend binary's \
+         installed bytes against the cached manifest, not just libobs.so.30/distroav.so"
+    );
+}
+
+/// All three swapped files (libobs.so.30, distroav.so, and the frontend) must be installed
+/// together in the SAME deploy block, before the SAME GENLOCK_BUILD_SHA.txt marker is written —
+/// they version together under one build SHA, never independently.
+#[test]
+fn setup_imag_frontend_versions_together_with_libobs_and_distroav_499() {
+    let body = read(SETUP);
+    let install_libobs = body
+        .find(r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL""#)
+        .expect("libobs install must exist");
+    let install_distroav = body
+        .find(r#"install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL""#)
+        .expect("distroav install must exist");
+    let install_frontend = body
+        .find(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#)
+        .expect("frontend install must exist");
+    let marker_write = body
+        .find(r#"echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt""#)
+        .expect("the build-SHA marker write must exist");
+    assert!(
+        install_libobs < install_distroav
+            && install_distroav < install_frontend
+            && install_frontend < marker_write,
+        "{SETUP}: libobs, distroav, and the frontend must ALL be installed before the single \
+         GENLOCK_BUILD_SHA.txt marker is written — all three files version together under one \
+         build SHA"
+    );
+}
