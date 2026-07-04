@@ -666,6 +666,56 @@ idempotent — the same planner call is safe to issue twice.
 Pass it BEFORE other flags. When the file is absent, the flag is silently consumed and the plan
 emits normally. 5 tests in `tests/harness_verdict_done_marker.rs`.
 
+`scripts/recording-verdict-on-imag.sh` (#462) shares the exact same `--skip-if-exists` contract.
+
+---
+
+## imag-nb — the 3rd recorded node (EPIC #466 Topology v2, #461/#462/#463)
+
+`recording-e2e.sh` now records+decodes imag-nb (10.77.9.182, the 60fps low-latency IMAG box)
+alongside strih+stream: `[0/8]` reachability, `[4d/8]` render-budget (`--box imag=…:60`),
+`[5/8]`-`[7/8]` StartRecord/StopRecord over OBS WS, `[8/8c]` decode+merge as a third
+`--merge-partials imag=...` partial. imag's zero-loss proof is the cam2 OPTICAL tick's own
+first..=last contiguity (60fps captures the 60Hz painter 1:1, no 60→30 beat) ANDed with its OWN
+911003 digital corner burn's contiguity when present (`recording-verdict --imag`, #463).
+
+**`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
+strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS
+because ssh/scp to the Windows boxes is DENIED on this rig (the win-* MCP is the only path). imag-nb
+is a plain Ubuntu box, same access class as cam1/cam2 (`targets.md`'s "Linux OBS Targets" row, SSH
+`newlevel`/`newlevel`) — bash CAN ssh/scp it directly, so the on-imag helper deploys the verdict
+binary (skip if already present+executable), runs `--extract-partial imag` over ssh, and scp's the
+small partial (+ `#186` pixel-proof dir) back to dev1 itself, in the SAME script invocation. Don't
+be misled by the on-strih/on-stream "printed plan" pattern when writing a similar helper for a
+Linux/ssh-reachable box — check the access class first.
+
+**Gotcha — a NEW call site inside the `VERDICT_ON_STREAM=1` per-box branch runs under `set -e`
+(re-enabled at the top of that branch).** A bare (unguarded) command there — like the on-imag
+extract call — `set -e`-ABORTS THE WHOLE SCRIPT on any failure (imag unreachable, a stale/missing
+deployed binary, a transient ssh hiccup), including the strih/stream plan printout the operator
+still needs below it. Caught in self-review on #462 (commit message: "[8/8c] imag extract must not
+set -e-abort the per-box plan"). Fix pattern (matches the `#178` StopRecord-region discipline
+elsewhere in this same script): `cmd && echo ok || echo "WARNING: ..." >&2` — the compound `&&`/`||`
+list is exempt from `set -e`, so a failure degrades gracefully (the optional artifact — here
+`$IMAG_PARTIAL` — simply stays absent, and a downstream `if [ -f "$IMAG_PARTIAL" ]` guard omits it
+from the merge). Apply this to ANY new fallible call added inside that branch, not just imag's.
+
+**imag's camera mapping is a CLEAN 1:1, unlike strih's drift-corrected `#399` mapping.** strih's
+program input showing cam1 is `NDI cam5` (a historical drift-correction — see `#399` in this file's
+sibling sections / `.claude/skills/genlock`). imag's Phase-1 provisioning (`setup-imag.sh`, #458)
+pins `NDI CAM1`..`NDI CAM6` → `CAMx (usb)` 1:1 fresh, so imag's input showing cam1 (the SOURCE
+camera that films cam2's monitor) is simply `NDI CAM1` / scene `Cam 1`
+(`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE` in both `recording-e2e.sh` and `rig-mode.sh`). Don't assume
+the two boxes' camera→input naming matches — they're maintained independently.
+
+**`rig-mode.sh` extends `obs_burn_targets()`/`toggle_burn` to imag for free** — the array's own
+`#252` design comment explicitly anticipated "a third box", so TEST mode turning imag's 911003 burn
+ON and EVENT mode turning it OFF needed no new toggle logic, only a third `printf` line. TEST mode
+additionally calls a NEW `set_imag_test_program()` (reuses `obs_phase2.py switch` — the same
+lightweight `SetCurrentProgramScene` + non-black self-check the all-cambox sweep uses) to route
+imag's PROGRAM onto the cam1 scene; EVENT mode does NOT scene-switch imag (mirrors strih/stream —
+rig-mode never scene-switches those either).
+
 ---
 
 ## "Is gate X CI-automatic or rig-manual?" — read `docs/strict-gate-coverage.md` first (EPIC #406)
