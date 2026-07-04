@@ -45,6 +45,61 @@ description`). Before merging any PR, `git log origin/main..HEAD --oneline` and 
 `^(fix|close|resolve)[a-z]*:\s*#` to catch a stray reference-only commit that would trigger an
 unwanted auto-close.
 
+## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
+
+`~/devel/camera-box` is a single shared clone with **no git worktree isolation** — every worker's
+`git commit`/`git push` operates on the SAME local checkout, the SAME git index, and the SAME
+local `dev` branch ref, not just the same remote branch. If the supervisor ever dispatches two
+workers into this repo at once (violates `two-branch-workflow.md`'s "dispatch serially — one
+active worker per repo", but has happened), their commits interleave on one linear history with
+no isolation and no conflict warning.
+
+**Incident (2026-07-04):** worker A (#499+#500, `setup-imag.sh`) and worker B (#505, a GL
+PBO-orphan fix) both committed to `dev` concurrently. Worker A protected its pushes by pushing an
+exact commit SHA (`git push origin <own-sha>:refs/heads/dev`, never a bare `git push origin dev`)
+so B's not-yet-pushed commits weren't dragged to `origin` prematurely — but a `git commit` A ran ON
+TOP of B's already-advanced local HEAD unavoidably included B's ancestry on the next push (a push
+always carries a commit's full ancestor chain; excluding mid-branch commits needs a banned
+force-push). Net result: A's PR ended up also shipping B's fully-complete #505 work, auto-closing
+it via B's own `fix: #505 ...` commit title. Harmless here (B's work was genuinely finished +
+TDD'd), but in a worse timing it could ship a STILL-IN-PROGRESS body of foreign work through the
+wrong PR with no review of it.
+
+**Consequences + mitigations, confirmed live:**
+
+- **A stray untracked/modified file you didn't create can appear in `git status`.** NEVER
+  `git add -A`/`git commit -a` — stage and commit ONLY the exact paths you touched, in the same
+  breath: `git commit -m "..." -- <path>` (the pathspec form commits ONLY that path's
+  working-tree content, ignoring anything else staged, and leaves the other worker's staged
+  changes untouched). If a sweep still happens (`git show --stat HEAD` shows a file you never
+  edited), `git rm --cached <path>` in a follow-up commit restores it to untracked — never `git
+  rm`/delete it from disk, it's someone else's live work.
+- **Before every `git commit`, `git log --oneline -3`** to confirm HEAD is still what you expect
+  — if it shows commits you didn't write, the other worker advanced the shared branch under you.
+- **A push by EITHER worker pushes the local `dev` ref as it stands**, including the other
+  worker's already-made local commits (both share one ref). There is no way to "un-push" someone
+  else's commits without a banned force-push/history-rewrite; NEVER `git reset`/force-push to try
+  — you'd be mutating a ref the other process may still be relying on mid-operation. If it
+  happens, check `gh issue view <N>` for whether it changed which issue(s) a shared PR
+  auto-closes (see the GOTCHA above) and adapt the PR body / commit wording rather than fighting
+  the git state.
+- **GitHub allows only ONE open PR per (head, base) branch pair.** If another worker's `dev`→`main`
+  PR is already open when you're ready to push, you CANNOT open a second one — wait for theirs to
+  reach a terminal state (poll `gh pr view <N> --json state,mergedAt`) before pushing, or your
+  commits just fold into their PR's diff.
+- **A later push cancels an in-flight `linux-genlock.yml` run via its
+  `linux-genlock-${{ github.ref }}` concurrency group — even if the later push doesn't itself
+  touch `vendor/**`** (the group keys on the ref, not the paths). A cancelled run is NOT a build
+  proof — re-trigger manually once the ref is stable: `gh workflow run "Linux genlock build
+  (vendored OBS + DistroAV, imag-nb parity)" --ref dev`.
+- **`linux-genlock.yml` only triggers on push to `dev`, never `main`** (`on.push.branches` is
+  `[dev]` only) — after a dev→main merge, main never automatically gets a genlock build. If you
+  need proof the exact merged main state compiles, trigger it explicitly with `--ref main`.
+- Note the collision plainly in your evidence block/autopilot-log entry, and if a foreign commit
+  auto-closed an issue that wasn't yours, explain it via `gh issue comment <N>` for traceability.
+  The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
+  repo going forward.
+
 ## Local Build Policy
 
 **Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**

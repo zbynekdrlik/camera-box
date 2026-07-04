@@ -1519,3 +1519,97 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   — imag is now wired in automatically (no extra flags needed); the on-imag partial is produced
   directly by the script, only the strih/stream win-*-MCP plan (8/8a/8/8b) + the final 8/8d merge
   need manual execution as before.
+
+## 2026-07-04 — #499 + #500 setup-imag.sh frontend-swap + nvidia-driver-595-open (PR #506, v1.7.0-dev.232)
+
+- Both issues codify fixes ALREADY hand-applied + live-verified on imag-nb (10.77.9.182) on
+  2026-07-04; validated against the live box read-only (SSH) before + after implementing —
+  no deploy/reboot performed (issue text explicitly said not to).
+- **#499** — genlock hot-swap (step 12) now ALSO swaps `/usr/bin/obs` (the frontend executable,
+  not just libobs.so.30/distroav.so): sha256-verified via the #120 BUNDLE_MANIFEST.json `bin/obs`
+  entry, backed up once to `/opt/obs-backup/obs.stock`, installed 0755, post-swap proven via
+  `nm -D -u` referencing `obs_display_set_render_divisor` (the #276/#278/#293 multiview
+  render-budget symbol that only exists in the genlock-built frontend). RED `7f9c4dfa7`
+  (7 failed), GREEN `7a72d0150` (69 passed).
+- **#500** — new step 9 installs `nvidia-driver-595-open` (idempotent via dpkg Status-field
+  check) + `prime-select nvidia`, then re-runs the existing `safe_grub_regen` helper (#295/#487
+  discipline). TOTAL_STEPS 16→17, all later steps renumbered. RED `64403108b` (7 failed), GREEN
+  `f645de5ac` (75 passed).
+- Two self-review fixes found via a dispatched fresh-eyes review agent + my own diff read:
+  (1) `nm -D -u | grep -q` would SIGPIPE `nm` mid-write (live-reproduced: 5/5 runs exit 141 with
+  `-q`, 0/5 without — the binary emits ~170KB/2949 lines and the target symbol sits at line 286)
+  — fixed to plain `grep 'pattern' >/dev/null`, matching the SONAME check's own documented
+  convention (`bd2ef8f41`). (2) `dpkg -s nvidia-driver-595-open >/dev/null 2>&1` alone is not a
+  reliable "installed" check (dpkg -s exits 0 even for `deinstall ok config-files` state,
+  live-verified via `alsa-base`) — fixed to grep the `Status:` field (`393e5f228`).
+- **Gotcha for future workers: this repo's shared dev1 checkout had a SECOND autopilot worker
+  (issue #505) committing directly to `dev` concurrently while this one ran** — violates
+  "dispatch serially, one active worker per repo" (two-branch-workflow.md). Handled by pushing
+  only through this worker's own last commit each time (`git push origin <own-sha>:dev`, never
+  the local `dev` ref, which kept advancing with the other worker's commits) — but a later
+  same-directory `git commit` landed on top of their already-advanced HEAD, and pushing that
+  commit necessarily carried their ancestry along too (git push always includes ancestors; no
+  way to exclude mid-branch commits without a banned force-push). Net effect: PR #506 ended up
+  also containing #505's fully-complete, already-TDD'd work (test → fix → docs, 3 commits),
+  which auto-closed #505 on merge via its own `fix: #505 ...` commit title (not something this
+  worker wrote) — explained on `gh issue comment 505`. #501 stayed OPEN as intended (the #505
+  fix says "root-causes #501", not "fixes"). No stray-close of #499/#500's OUT-of-scope
+  neighbors occurred. **If dispatching two workers into the same repo/checkout concurrently,
+  either use `git worktree` isolation per worker, or serialize dispatch — this collision cost
+  real time untangling and could have shipped one worker's unreviewed code through the other's
+  PR in a worse case (no auto-close and no CI trigger to catch it).**
+- PR #506 merged `511c1ed39`. Main CI green (run 28704634195). The unrelated
+  `linux-genlock.yml` build (triggered only by #505's `vendor/**` changes riding along) is not a
+  required/blocking check and doesn't run on `main` under normal single-issue pushes — not
+  waited on to terminal (still running at report time; unrelated to #499/#500's correctness).
+
+## 2026-07-04 — #505 orphan the Linux GL PBO (root-causes #501 imag-nb multiview CPU stall)
+
+(See the #499/#500 entry above + `gh issue comment 505` for the shared-checkout collision story
+— this entry covers the fix's own substance and the CI verification completed after the merge.)
+
+- Root cause (#501): imag-nb's 6-source OBS multiview cost ~24ms/frame, CPU 101% of one core,
+  GPU idle 7-9%. Traced to `gs_texture_map()` (vendor/obs-studio/libobs-opengl/gl-texture2d.c)
+  mapping a persistent per-texture Pixel Unpack Buffer with a bare
+  `glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY)` every frame -> implicit CPU<->GPU
+  sync/fence (driver must wait for the GPU to finish the PREVIOUS frame's upload before handing
+  back a CPU pointer, since the buffer is never re-specified). Windows/D3D11 never pays this
+  (`D3D11_MAP_WRITE_DISCARD` never blocks) -- why strih's multiview is 11.5ms.
+- Fix: `glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size, GL_MAP_WRITE_BIT |
+  GL_MAP_INVALIDATE_BUFFER_BIT)` instead -- the same idiom `gl-helpers.c`'s `update_buffer()`
+  already uses for vertex/index buffer streaming in this exact codebase. Extracted the PBO
+  byte-size formula into a shared `pixel_unpack_buffer_size()` helper (used by both
+  `create_pixel_unpack_buffer()` and `gs_texture_map()`) so allocation-time and map-time size
+  can't drift apart.
+- Investigation finding: `gl-texture3d.c`'s mirrored PBO was deliberately NOT patched -- this
+  vendored OBS has no `gs_texture_map`/`gs_voltexture_map` path for `GS_TEXTURE_3D` on the GL
+  backend at all (`gs_texture_map` hard-checks `is_texture_2d()`), and the only real
+  `gs_voltexture_create` call sites (color-grade-filter.c LUTs) never request `GS_DYNAMIC` --
+  confirmed independently by the deep-review subagent via a whole-repo grep, not just asserted.
+  So there is no live instance of the anti-pattern there today; a guard test pins this so a
+  future 3D map addition is forced to apply the same fix.
+- RED `76ed47012` (`tests/gl_pbo_orphan.rs`, 3/5 assertions fail against the unfixed vendored
+  source -- verified by temporarily `git stash`-ing just the C file), GREEN `af02f9bc3`
+  (message-only amended, still fully local + unpushed at the time, to reword the title from
+  `fix #501` to `root-causes #501` -- avoids the repo's documented stray-auto-close GOTCHA,
+  since #501 needs live-rig verification before it's truly done). Docs `a76d490cf`
+  (vendor/README.md "Our patches" entry). Post-review robustness fix `9bfaaabfb` (relaxed an
+  exact-count assertion to `>=`, per the deep-review subagent's one actionable Minor finding).
+- Deep review (`superpowers:requesting-code-review`, general-purpose subagent): 0 Critical,
+  0 Important, 3 Minor (1 fixed above; 2 are pre-existing "pin-exact-tokens" convention
+  trade-offs already used repo-wide, not new problems). Independently re-derived the extracted
+  helper's arithmetic identity, grepped the whole repo for `gs_voltexture_map` (zero hits) and
+  for live `GS_DYNAMIC` 3D-texture callers (zero), and ran `tests/gl_pbo_orphan.rs` itself.
+  "Ready to merge: Yes."
+- `linux-genlock.yml` completed to terminal on BOTH branches after the merge (the other
+  worker's entry above left this "not waited on"): manually `workflow_dispatch`'d because (a)
+  the push-triggered `dev` run got CANCELLED by the `linux-genlock-${{ github.ref }}`
+  concurrency group when a later commit landed on `dev` before it finished, and (b) the
+  workflow only trigger-fires on push to `dev`, never `main`, so main never gets one
+  automatically. `dev` run 28704498351 green, `main` run 28704655280 green — both produced
+  `obs-genlock-linux-x86_64` (~91MB) + `distroav-linux-fast-so` artifacts, confirming the fix
+  compiles clean on the exact merged main-branch state, not just dev.
+- NOT done by this worker (supervisor's job per dispatch): deploy the rebuilt
+  `obs-genlock-linux-x86_64` bundle (main run 28704655280) to imag-nb and live-measure the
+  multiview render dropping from ~24ms to <14ms with the program holding 60fps while the
+  multiview is open. #501 stays OPEN until that live verification lands.
