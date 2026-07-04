@@ -669,6 +669,18 @@ independently "derive" a slightly different formula. Cross-check by computing th
 `band_x` for the production canvas (1920×1080) and asserting the SAME number shows up in the C++
 compile-check, the Rust Tier-0 test, and the probe-gated exclusion rects.
 
+**When the formula gets a FALLBACK tier (a narrow-canvas clamp), the fallback is part of the
+formula too — sync it across all four, not just the happy-path number.** #463's initial
+BottomCenterLeft clamp (single-tier: wanted position, else flush to the frame's right edge) could
+overlap BottomLeft on a narrow canvas — fixed with a 2-tier fallback (flush against BottomLeft's
+own trailing edge first). The fix landed in mirror 1 (`burn-geom.hpp`) and mirror 2
+(`colour_sample.rs`) in the SAME review pass, but mirror 4 (`tests/burn_payload_parity.rs`'s
+`imag_burn_rect` test helper) was missed until a SECOND review pass caught it — because its
+existing multi-resolution test only exercised 16:9 canvases (720p/1080p/1440p/4K), all of which
+stay on tier 1 and never exercise the fallback at all. **Whenever you add a fallback tier to the
+geometry, add a narrow-canvas test THAT SPECIFIC MIRROR too** — a multi-resolution sweep over
+real aspect ratios is not enough if none of those resolutions are narrow enough to reach tier 2/3.
+
 ## Verifying a freestanding vendored C++ header LOCALLY without `--features probe`
 
 `burn-geom.hpp` is explicitly "header-only, freestanding (no OBS, no chrono)" — you do NOT need

@@ -427,6 +427,18 @@ restore) but WILL recur in any future `setup-*.sh`/provisioning script unless wa
    `"null"`, not an empty string** (jq semantics: indexing a nonexistent element yields `null`,
    and `-r`/`gh -q` renders it as text). A bare `[ -n "$VAR" ]` guard wrongly treats `"null"` as a
    valid value. **Fix: `-q '.[0].someField // empty'`.**
+4. **(#463, `drift-guard.sh gather_and_check_imag`) You need the EXIT CODE of a `$(cmd)` that can
+   itself legitimately fail (an `ssh`/`timeout` call whose 255/124 means "unreachable", not just
+   pipe-exit-status like point 1) — capturing it on the NEXT line crashes instead.**
+   `var="$(ssh ... cmd)"` then `local rc=$?` on the FOLLOWING line looks reasonable, but under
+   `set -e` the FAILING ASSIGNMENT ITSELF aborts the whole script the instant `cmd` returns
+   nonzero — `rc=$?` never even runs (empirically verified: `bash -c 'set -e; f(){ return 255;
+   }; x="$(f)"; echo after'` prints nothing and exits 255). **Fix: put the assignment in an
+   OR-list** — `rc=0; var="$(cmd)" || rc=$?` — the one shape `set -e` exempts (only the LAST
+   command of an AND/OR list is errexit-checked), so it survives AND captures the real code.
+   Different failure shape from point 2 above (that one is about `fail()`/`exit` INSIDE a
+   function losing propagation through `$(...)`; this one is about a command that returns a
+   plain nonzero you need to READ, not propagate).
 
 **Test-quality corollary (found 3× in `tests/setup_imag_guards.rs` across both review passes):** a
 purely textual `body.contains("some string")` guard can pass even when the real check is gutted,

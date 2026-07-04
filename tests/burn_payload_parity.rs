@@ -492,24 +492,45 @@ fn cam_px_for_canvas(h: i64) -> i64 {
 /// tier 3 = flush against the frame's right edge (last resort, may overlap BottomRight on a
 /// canvas too narrow for two burns — same last-resort semantics as the C++/colour_sample.rs
 /// mirrors).
-fn imag_burn_rect(w: i64, h: i64, burn_px: i64, burn_margin: i64) -> Rect {
-    let burn_y = h - burn_margin - burn_px;
-    let wanted_x = burn_margin + burn_px + burn_margin;
-    let tier2_x = burn_margin + burn_px;
-    let x = if wanted_x + burn_px <= w {
+///
+/// #463 review round 2: `corner_placement` ALSO re-clamps its `qr_px` argument itself, BEFORE
+/// computing any tier — `side = min(qr_px, frame_w - 2*margin, frame_h - 2*margin)` (floor 1) —
+/// so a canvas too narrow (or too short) even for ONE corner burn at the wanted size shrinks the
+/// burn's own SIDE, not just its position. `burn_px` (the caller's `wanted_side`) is mirrored
+/// through this SAME clamp here so this helper stays byte-identical to the C++ ground truth even
+/// on a canvas narrow enough to trigger it. No current call site actually reaches this branch
+/// (the four production-relevant 16:9 resolutions and the 650×1080 narrow-canvas fixture above
+/// all keep the wanted side unclamped), but a future narrow-width test must not silently diverge
+/// from the real geometry by skipping this re-clamp.
+fn imag_burn_rect(w: i64, h: i64, wanted_side: i64, burn_margin: i64) -> Rect {
+    let max_w = if w > 2 * burn_margin {
+        w - 2 * burn_margin
+    } else {
+        1
+    };
+    let max_h = if h > 2 * burn_margin {
+        h - 2 * burn_margin
+    } else {
+        1
+    };
+    let side = wanted_side.min(max_w).min(max_h).max(1);
+    let burn_y = h - burn_margin - side;
+    let wanted_x = burn_margin + side + burn_margin;
+    let tier2_x = burn_margin + side;
+    let x = if wanted_x + side <= w {
         wanted_x
-    } else if tier2_x + burn_px <= w {
+    } else if tier2_x + side <= w {
         tier2_x
-    } else if w > burn_px {
-        w - burn_px
+    } else if w > side {
+        w - side
     } else {
         0
     };
     Rect {
         x,
         y: burn_y,
-        w: burn_px,
-        h: burn_px,
+        w: side,
+        h: side,
     }
 }
 

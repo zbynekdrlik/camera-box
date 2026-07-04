@@ -6428,10 +6428,16 @@ mod tests {
         use std::path::PathBuf;
 
         let dir = tempfile::tempdir().unwrap();
-        // #463: no digital burn in THIS fixture (the optical-only fallback) — expected_burns
-        // matches that shape ([]) so `run_merge`'s consistency-check doesn't WARN about a
-        // mismatch against the CURRENT `args_expected_burns_for("imag", ..)` (which now
-        // defaults to `[BURN_RUN_ID_IMAG]`); a genuinely burn-carrying partial is covered by
+        // #463 review round 2: this fixture is the optical-only fallback — no digital burn was
+        // decoded, so the partial is saved with `expected_burns=[]`. That DOES now disagree with
+        // `args_expected_burns_for("imag", &default_args)`, which returns `Some(vec![
+        // BURN_RUN_ID_IMAG])` by default (imag's own corner burn) — so `run_merge`'s consistency
+        // check (the `partial.expected_burns != expected` WARN) genuinely FIRES on this call,
+        // same as it would for any strih/stream partial re-extracted under a changed --burn-*-
+        // run-id. That WARN is non-fatal (a bare `eprintln!`, not an error), so it does not
+        // affect this test's actual assertion (`run_merge` must accept the partial and NOT
+        // error) — but it is real observed output on this call, not silence. A genuinely
+        // burn-carrying partial (no WARN expected) is covered by
         // `node_verdict_for_imag_passes_with_a_contiguous_digital_burn_present_463` above.
         let imag_frames = imag_window(None);
         let imag_p =

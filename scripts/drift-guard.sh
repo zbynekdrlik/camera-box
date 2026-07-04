@@ -1059,6 +1059,13 @@ EOF
 check_pins() {
   local readme="$1" p_obs="$2" p_distroav="$3" p_ndi="$4" p_fps_strih="$5" p_fps_stream="$6" p_genlock="$7" p_latency="$8" p_plugin="$9"
   local p_src_lat_strih="${10}" p_src_lat_stream="${11}"
+  # #463 review: output_fps_imag / genlock_latency_ms_imag are the two imag-nb pins that ARE
+  # always backtick-pinned in vendor/README.md (unlike genlock_build_sha_imag/distroav_so_
+  # sha256_imag, deliberately left unpinned until the first post-#463 live deploy — those two
+  # stay OUT of this offline check for that reason). Without this, a malformed/missing imag fps
+  # or latency pin would only ever surface via a LIVE `--check-imag` SSH run against imag-nb,
+  # never in CI's manifest-only `--check-pins` pass.
+  local p_fps_imag="${12}" p_latency_imag="${13}"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
   validate_semver   "obs_version"                    "$p_obs"             || errs=$((errs + 1))
@@ -1075,6 +1082,9 @@ check_pins() {
   # #357 per-source genlock FIFO held-latency: both host-keyed pins MUST be present.
   validate_nonempty "genlock_source_latency_strih"   "$p_src_lat_strih"   || errs=$((errs + 1))
   validate_nonempty "genlock_source_latency_stream"  "$p_src_lat_stream"  || errs=$((errs + 1))
+  # #463: imag-nb's own host-keyed fps + genlock-latency pins.
+  validate_nonempty "output_fps_imag"                "$p_fps_imag"        || errs=$((errs + 1))
+  validate_nonempty "genlock_latency_ms_imag"        "$p_latency_imag"    || errs=$((errs + 1))
   # #390: any `range:MIN-MAX` calibration-tracked entry in either pin must match the code's
   # current DistroAV clamp EXACTLY — catches a manifest range typo silently narrowing/widening
   # the backstop, independent of the plain non-empty checks above.
@@ -1091,6 +1101,7 @@ check_pins() {
   echo "  obs=$p_obs distroav=$p_distroav ndi_min=$p_ndi output_fps_strih=$p_fps_strih output_fps_stream=$p_fps_stream genlock_wall_clock=$p_genlock ndi_input_latency=$p_latency"
   echo "  canonical_plugin_path=$p_plugin"
   echo "  genlock_source_latency_strih=$p_src_lat_strih  genlock_source_latency_stream=$p_src_lat_stream"
+  echo "  output_fps_imag=$p_fps_imag  genlock_latency_ms_imag=$p_latency_imag"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
   # This catches a `git subtree pull` that bumped vendor/distroav without updating the table
@@ -1396,6 +1407,7 @@ main() {
   # set, so skip the manifest requirement + pin load for it (it must work even without
   # vendor/README.md, e.g. a checkout that only ships the script). #246.
   local p_obs p_distroav p_ndi p_fps p_fps_strih p_fps_stream p_genlock p_latency p_plugin p_src_lat_strih p_src_lat_stream
+  local p_fps_imag p_latency_imag
   if [ "$mode" != "status" ]; then
     [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
     p_obs="$(pinned_obs_version "$readme")"
@@ -1413,9 +1425,13 @@ main() {
     # #357 host-keyed per-source genlock FIFO held-latency pins.
     p_src_lat_strih="$(pinned_setting "$readme" genlock_source_latency_strih)"
     p_src_lat_stream="$(pinned_setting "$readme" genlock_source_latency_stream)"
+    # #463 review: imag-nb's own fps + genlock-latency pins, validated here too (offline, in
+    # CI) so a malformed/missing value is caught before ever needing a live SSH run.
+    p_fps_imag="$(pinned_setting "$readme" output_fps_imag)"
+    p_latency_imag="$(pinned_setting "$readme" genlock_latency_ms_imag)"
     if [ "$mode" = "check-pins" ]; then
       check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps_strih" "$p_fps_stream" "$p_genlock" "$p_latency" "$p_plugin" \
-        "$p_src_lat_strih" "$p_src_lat_stream"
+        "$p_src_lat_strih" "$p_src_lat_stream" "$p_fps_imag" "$p_latency_imag"
       exit $?
     fi
   fi

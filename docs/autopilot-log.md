@@ -1414,3 +1414,63 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   post-deploy verification is the supervisor's next step. Filed #472 (defense-in-depth follow-up:
   re-verify installed bytes against the cached manifest on an idempotency no-op — backstopped
   today by step 10's independent runtime check, not urgent).
+
+## 2026-07-04 — #463 imag burn 911003 + drift-guard imag pins (PR #474, v1.7.0-dev.223)
+
+- feat `88de10a6d`: C++ burn identity for imag (`vendor/distroav/src/ndi-burn-filter.cpp`,
+  `burn-geom.hpp`) — a third host role ("imag") resolves to run_id 911003 and a new
+  `Corner::BottomCenterLeft`, one `margin` clear of strih's bottom-left burn. 911003 was
+  previously `BURN_RUN_ID_CAM3` (reserved for cam3's deferred capture-burn, #24) — renamed to
+  `BURN_RUN_ID_IMAG`; keyword-free note filed on #24 (still open) so the collision is documented
+  when cam3 work resumes.
+- RED `4b7c92c8c` → GREEN `fd8113740`/`b30b19ae9`: colour-gate burn-dodge
+  (`src/colour_scale.rs`, `src/probe/colour_sample.rs`) excludes the new corner from the
+  colour-column sampler with a pairwise non-overlap test across all 4 burns + every colour
+  patch; `scripts/drift-guard.sh` gains a `--check-imag` mode that SSHes to imag-nb directly
+  (simpler than the Windows MCP round-trip strih/stream use) checking deployed genlock build
+  SHA, distroav.so hash, OBS-log genlock capability/fps/latency, and the Linux plugin path;
+  `src/imag_tick_gate.rs` + `src/bin/recording-verdict.rs` AND the cam2 optical tick with imag's
+  own digital-burn contiguity, falling back to the pre-#463 optical-only proof when no burn is
+  decoded (backward compatible with older recordings).
+- fix `d1cf3964a`: CI caught `NODE_BURN_RUN_IDS` not excluding imag's own burn from the Vernier
+  tick's `max()` — a decoded imag burn payload could silently hijack `RecordingFrame::tick`.
+  Fixed + direct regression test; also fixed the imag test-fixture burn ids (were above cam2's
+  tick range, inverting which id `max()` picked).
+- fix `8b745c0b1`: `clippy::unnecessary_unwrap` on the imag-burn-broken printer branch.
+- fix `80dac4329` (2 code-review passes — 7-agent parallel finder/verify + 2 independent sweep
+  passes, all pre-merge on this same PR): (1) `ImagVerdict`/`NodeVerdict` independently
+  reimplemented the "absent-is-fine, present-but-broken-fails" rule — extracted
+  `imag_tick_gate::optional_signal_ok` as the ONE shared rule, both call sites now delegate;
+  (2) `analyze_recording()` (the function `forensic-dump`/`recording-probe`/
+  `av_sync_recording` actually call) was still gating the #207 fast-vs-robust QR decode path on
+  the 4-element `NODE_BURN_RUN_IDS` (which now includes imag's burn, impossible on any
+  recording this generic path ever sees) — a real ~10x decode slowdown for zero accuracy gain;
+  switched to the new 3-element `GENERIC_DIAGNOSTIC_BURN_IDS` (`decode_recording_frame` already
+  used it; `analyze_recording` was the one caller left behind); (3) `BottomCenterLeft`'s
+  single-tier narrow-canvas fallback could land back inside `BottomLeft`'s own rect —added a
+  2-tier fallback (flush against `BottomLeft`'s trailing edge first) to ALL FOUR geometry
+  mirrors (`burn-geom.hpp`, `colour_sample.rs`, `colour_scale.rs`, `tests/burn_payload_parity.rs`
+  — the 4th was missed in the first review pass, caught in the second) with a new narrow-canvas
+  (650×1080) regression test per mirror, since the existing multi-resolution sweep only used
+  16:9 canvases that never reach tier 2/3; (4) `gather_and_check_imag`'s SSH exit-code capture
+  (`var="$(cmd)"` then `local rc=$?` on the NEXT line) crashed the WHOLE script under this
+  script's own `set -euo pipefail` instead of reporting a graceful UNKNOWN — fixed to the
+  `rc=0; var="$(cmd)" || rc=$?` OR-list form, locked in with a new test proving both the crash
+  (reverted form) and the survival (fixed form) via `bash -c`; (5) `check_imag_report`'s
+  capability check collapsed "SSH never reached imag-nb" and "reached it, log has no genlock
+  marker" into the same empty string, misreporting a connectivity hiccup as a stock-build
+  DRIFT — now takes the raw OBS log text and derives the marker itself (mirrors
+  `drift_check_capability`'s existing two-tier UNKNOWN-vs-DRIFT logic).
+- PR #474 (`Closes #463`). Local Tier-0 gates (fmt/check/clippy/test --no-run) + 401 lib tests +
+  68 `tests/drift_guard.rs` tests green throughout (no `--features probe` locally, per this
+  repo's Tier-0 policy); probe-gated code (`recording.rs`, `recording-verdict.rs`,
+  `burn_payload_parity.rs`) compiled + tested via CI only. All 3 CI workflows green (main CI,
+  Linux genlock bundle rebuild, Windows genlock FAST) on the final commit; PR `mergeable: true` /
+  `mergeStateStatus: CLEAN`.
+- Playbook: `ops/SKILL.md` #458 section gained a 4th `set -e` footgun shape (a bare `$(cmd)`
+  assignment whose OWN command — not a pipe — can return nonzero, needs an OR-list to capture);
+  `recording-decode/SKILL.md`'s "#463 — Nth burn corner" section gained a note that a fallback
+  TIER is part of the formula too and needs its own narrow-canvas test per mirror, not just the
+  happy-path number.
+- NOT done by this worker (supervisor's job per dispatch): live re-deploy of the new genlock
+  build to imag-nb (`10.77.9.182`) and post-deploy verification of the live 4th corner burn.

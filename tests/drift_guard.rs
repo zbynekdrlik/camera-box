@@ -335,6 +335,8 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
 | `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
 | `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log |
+| `output_fps_imag` | `60` | log |
+| `genlock_latency_ms_imag` | `3` | log |
 ",
     )
     .unwrap();
@@ -424,6 +426,8 @@ fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp(
 | `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
 | `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
 | `genlock_source_latency_stream` | `NDI 2ME PGM=range:3-200` | OBS log |
+| `output_fps_imag` | `60` | log |
+| `genlock_latency_ms_imag` | `3` | log |
 ",
     )
     .unwrap();
@@ -445,6 +449,58 @@ fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp(
     assert!(
         all.contains("3-200") && all.contains("3-2000") && all.to_uppercase().contains("MALFORMED"),
         "must name both the pinned range and the code's clamp loudly. stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn check_pins_fails_loudly_on_a_missing_imag_pin_463() {
+    // #463 review: output_fps_imag / genlock_latency_ms_imag are real, always-pinned values
+    // (unlike genlock_build_sha_imag/distroav_so_sha256_imag, deliberately left unpinned until
+    // the first post-#463 live deploy) — before this fix, an otherwise-COMPLETE manifest missing
+    // one of these two imag pins passed --check-pins silently (they were never validated
+    // offline), so a malformed/blank imag pin would only ever surface via a LIVE --check-imag
+    // SSH run against imag-nb, never caught by CI. Manifest here has every OTHER required pin
+    // but omits `genlock_latency_ms_imag` entirely.
+    let dir = std::env::temp_dir().join(format!("dg_missing_imag_pin_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("distroav")).unwrap();
+    let readme = dir.join("README.md");
+    std::fs::write(
+        &readme,
+        "\
+| `vendor/obs-studio` | x | **32.1.2** (commit `a`) | git subtree --squash |
+| `vendor/distroav` | x | **6.2.1** (commit `b`) | git subtree --squash |
+| NDI | x | requires **NDI ≥ 6.3.0** | tree |
+| `output_fps_strih` | `60` | log |
+| `output_fps_stream` | `30` | log |
+| `genlock_wall_clock` | `1` | env |
+| `ndi_input_latency` | `0` | obs-websocket |
+| `canonical_plugin_path` | `C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit` | scan paths |
+| `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log |
+| `genlock_source_latency_stream` | `NDI 2ME PGM=450` | OBS log |
+| `output_fps_imag` | `60` | log |
+",
+        // genlock_latency_ms_imag row intentionally absent.
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("distroav/buildspec.json"),
+        "{\n    \"version\": \"6.2.1\"\n}\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) =
+        run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        code, 1,
+        "a missing imag pin must exit 1, not a silent pass. stdout={stdout:?} stderr={stderr:?}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("genlock_latency_ms_imag") && all.to_lowercase().contains("missing"),
+        "must name the missing imag pin loudly. stdout={stdout:?} stderr={stderr:?}"
     );
 }
 
