@@ -353,9 +353,11 @@ fn setup_imag_manifest_lookup_never_inlined_in_multi_arg_call() {
         );
     }
     assert_eq!(
-        call_lines, 2,
-        "{SETUP}: expected exactly 2 manifest_sha_for_path call sites (libobs.so.30 + distroav.so) \
-         — found {call_lines}; update this test if the call count genuinely changed"
+        call_lines, 4,
+        "{SETUP}: expected exactly 4 manifest_sha_for_path call sites — the original install-time \
+         verify (libobs.so.30 + distroav.so) PLUS the #472 no-op re-verify (same two files, \
+         looked up again from the CACHED manifest) — found {call_lines}; update this test if the \
+         call count genuinely changed"
     );
 }
 
