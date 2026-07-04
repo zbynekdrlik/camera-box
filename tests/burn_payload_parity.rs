@@ -417,7 +417,7 @@ impl Rect {
 /// the REAL geometry functions (the painter top-anchor + the C++ burn corner placement,
 /// mirrored), the #111 4-corner layout. The camera dual-QR halves render at ~`cam_px`
 /// (forced square by min/max_dimensions); the burns at `burn_px` in the two bottom corners.
-fn four_qr_rects(w: i64, h: i64, cam_px: i64, burn_px: i64, burn_margin: i64) -> [Rect; 4] {
+fn four_qr_rects(w: i64, h: i64, cam_px: i64, wanted_burn_px: i64, burn_margin: i64) -> [Rect; 4] {
     let half = w / 2;
     // Camera dual-QR: each half centered horizontally in its half, TOP-anchored.
     let cam_oy = camera_box::probe::qr::qr_origin_y(
@@ -439,6 +439,26 @@ fn four_qr_rects(w: i64, h: i64, cam_px: i64, burn_px: i64, burn_margin: i64) ->
         w: cam_px,
         h: cam_px,
     };
+    // #475: mirror burn_geom::corner_placement's OWN width/height re-clamp of qr_px — BEFORE
+    // computing any corner position — `side = min(qr_px, frame_w - 2*margin, frame_h - 2*margin)`
+    // (floor 1). Missing this made the pre-#463 helper a latent test-fidelity gap: it took
+    // burn_px as an already height-derived-only value, so a canvas narrow enough to trigger the
+    // real clamp would silently diverge from what corner_placement actually draws (it could even
+    // compute an out-of-frame negative x — see the #475 regression test). Same pattern already
+    // applied to `imag_burn_rect` in the #463 review-round-2 fix; no production-relevant 16:9
+    // canvas (720p/1080p/1440p/4K) or the existing 650x1080 narrow fixture actually reaches this
+    // branch, so this is a pure fidelity fix with zero behavior change there.
+    let max_w = if w > 2 * burn_margin {
+        w - 2 * burn_margin
+    } else {
+        1
+    };
+    let max_h = if h > 2 * burn_margin {
+        h - 2 * burn_margin
+    } else {
+        1
+    };
+    let burn_px = wanted_burn_px.min(max_w).min(max_h).max(1);
     // Burns: bottom-left + bottom-right corners (mirror burn_geom::corner_placement: band is
     // exactly burn_px wide, flush to the corner with burn_margin clearance; bottom edge at
     // h - burn_margin).
