@@ -1167,16 +1167,16 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     // independent proof exists and disagrees with the (possibly clean) optical read — FAIL,
     // never silently overridden by the weaker optical-only proof (strict-test mandate).
     if let Some(nc) = &v.imag_burn_contiguity {
-        if nc.first_id.is_some() && !nc.is_contiguous() {
+        if let (Some(first), Some(last), false) =
+            (nc.first_id, nc.last_id, nc.missing_ids.is_empty())
+        {
             lines.push(format!(
-                "  [{}] NOT zero — imag's OWN digital corner burn (run_id {BURN_RUN_ID_IMAG}) is \
-                 present but NOT contiguous: {} missing id(s) in {}..={} ({} present of {} \
-                 expected). The optical tick may be clean, but the digital burn is a SECOND \
-                 independent zero-loss proof and BOTH must hold (#463).",
+                "  [{}] NOT zero — imag's OWN digital corner burn (run_id {BURN_RUN_ID_IMAG}) \
+                 is present but NOT contiguous: {} missing id(s) in {first}..={last} ({} \
+                 present of {} expected). The optical tick may be clean, but the digital burn \
+                 is a SECOND independent zero-loss proof and BOTH must hold (#463).",
                 c.node,
                 nc.missing_ids.len(),
-                nc.first_id.unwrap(),
-                nc.last_id.unwrap(),
                 nc.present_count,
                 nc.expected_count,
             ));
