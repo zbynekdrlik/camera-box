@@ -424,7 +424,8 @@ fn setup_imag_reverifies_installed_bytes_on_idempotent_noop() {
          (not reinvent a second jq lookup) — same discipline as the #120 install-time verify"
     );
     assert!(
-        body.contains("sha256sum \"$LIBOBS_REAL\"") && body.contains("sha256sum \"$DISTROAV_REAL\""),
+        body.contains("sha256sum \"$LIBOBS_REAL\"")
+            && body.contains("sha256sum \"$DISTROAV_REAL\""),
         "{SETUP}: the no-op re-verify must sha256 the CURRENTLY INSTALLED files (not the \
          about-to-be-downloaded bundle) — that is the whole point of the #472 defense-in-depth \
          check"
