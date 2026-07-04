@@ -154,6 +154,129 @@ pub fn tick_contiguity(ticks: &[u32]) -> TickContiguity {
     }
 }
 
+/// #480 — confirmed live root cause of imag's digital corner burn (run_id 911003) reading
+/// as ~50% "missing" under the OLD strict-1:1 [`tick_contiguity`]-style check: imag's OBS runs
+/// Studio Mode ON (`studio-mode-always-on.md`), and the Studio-Mode "Program" monitor widget
+/// re-renders the ACTIVE (on-air) scene as a SEPARATE `obs_display_t` draw pass, independent of
+/// the main output render that actually reaches the encoder/recording (a well-known OBS
+/// filter-authoring caveat: `obs_source_video_render` on a filter fires once per VIEW that
+/// composites the source, not once per emitted output frame). The DistroAV burn filter's
+/// `frame_id` counter (`vendor/distroav/src/ndi-burn-filter.cpp:370`,
+/// `burn_filter_videorender`) increments on EVERY `video_render` call, so it advances EXACTLY
+/// TWICE per recorded output frame — once for the Program monitor's own draw, once for the
+/// actual output render that lands in the recording. Only ONE of the two lands on disk, so the
+/// recorded burn-id sequence is a clean, DETERMINISTIC every-other-integer alternation (evens
+/// present / odds absent, confirmed on a live 300s rig recording, run_id 911003: 18596 of 37191
+/// ids present, ALL missing ids odd) — a much CLEANER signal than strih's own free-running burn
+/// (#360), which measured an IRREGULAR per-frame step (mean ~4, range 0-10) and was therefore
+/// modeled with unconditional gap-ignore. imag's clean, reproducible step=2 is a strictly
+/// STRONGER case: it supports the full decimation-aware EXCESS-GAP charging model
+/// (`probe::burn_contiguity::burn_contiguity_in_window_with_step`'s doc, mirrored here) instead
+/// of blanket gap-ignore, so a genuine dropped output frame (a forward gap LARGER than the
+/// double-render step) is STILL caught as a real loss — never silently waved through.
+///
+/// This is a Rust-only fix: it does NOT touch the vendored `vendor/distroav` C++ filter (that
+/// would rebuild `distroav.so` and require a fresh live pin of `genlock_build_sha_imag` +
+/// on-rig re-verification, out of scope for this bug-fix PR — see `vendor/README.md`). The
+/// alternative "gate the counter to the program render pass only" fix from the C++ side may be
+/// revisited separately if the vendored filter can cheaply distinguish the two render passes;
+/// this Rust-side model already restores a correctly-modeled, still-strict gate today.
+pub const IMAG_BURN_RENDER_STEP: u32 = 2;
+
+/// The step-aware contiguity verdict for imag's OWN digital corner burn (run_id 911003, #463) —
+/// the second, independently-proven signal ANDed with the optical [`TickContiguity`] in
+/// [`ImagVerdict`]. Same field shape as [`TickContiguity`] (and the probe-gated
+/// `NodeContiguity` the caller converts this into) so the existing reporting/JSON machinery is
+/// unchanged; only HOW `missing_ids` is computed differs (step-aware, not strict 1:1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurnStepContiguity {
+    /// First burn id seen (the start of the analyzed span). `None` ⇒ no burn at all.
+    pub first_id: Option<u32>,
+    /// Last burn id seen (the end of the analyzed span). `None` ⇒ no burn at all.
+    pub last_id: Option<u32>,
+    /// How many DISTINCT burn ids were decoded (diagnostic only — NOT part of the pass/fail
+    /// decision, which is `first_id.is_some() && missing_ids.is_empty()`).
+    pub present_count: u32,
+    /// How many step-grid points (`first, first+step, .., last`) the contiguous span should
+    /// contain — the step-aware analogue of [`TickContiguity::expected_count`].
+    pub expected_count: u32,
+    /// Every step-grid id genuinely missing (a forward gap LARGER than `step` between two
+    /// present ids charges the excess — `gap / step - 1`, integer division so beat jitter of
+    /// `step ± 1` charges zero, mirroring `burn_contiguity_in_window_with_step`'s excess-gap
+    /// math). A clean `step`-spaced run has this empty. Sorted ascending.
+    pub missing_ids: Vec<u32>,
+}
+
+impl BurnStepContiguity {
+    /// ZERO loss for this signal ⇔ the step-grid sequence is contiguous (no missing id). A burn
+    /// with NO id decoded at all (`first_id == None`) is NOT a pass — mirrors
+    /// [`TickContiguity::is_contiguous`] / `NodeContiguity::is_contiguous`.
+    pub fn is_contiguous(&self) -> bool {
+        self.first_id.is_some() && self.missing_ids.is_empty()
+    }
+}
+
+/// THE pure step-aware check (#480): given every burn id decoded for imag's digital corner burn
+/// (duplicates and any order allowed — a set-membership check over the sorted present ids, same
+/// as [`tick_contiguity`]/`burn_contiguity`), report whether the sequence is contiguous ON THE
+/// `step`-SPACED GRID and, if not, every step-grid id genuinely missing.
+///
+/// `step == 1` degenerates to the exact same strict first..=last contiguity as
+/// [`tick_contiguity`] (every present id is its own grid point, so ANY gap is charged in full) —
+/// this function is a strict superset, not a separate weaker path.
+///
+/// A forward gap of EXACTLY `step` between two consecutive present ids is the expected
+/// free-running decimation (imag's Studio-Mode double-render, [`IMAG_BURN_RENDER_STEP`]) and is
+/// NOT loss. A gap LARGER than `step` means one or more real output frames never reached the
+/// recording between them — the excess (`gap / step - 1`, integer division so a beat-jitter gap
+/// of `step ± 1` charges zero — the SAME tolerance `burn_contiguity_in_window_with_step` uses)
+/// is reported as genuinely missing step-grid ids.
+///
+/// An empty input ⇒ `first_id == None` ⇒ NOT contiguous (nothing proven). A single-id input is
+/// trivially contiguous (a span of one; nothing can be missing inside it).
+pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
+    use std::collections::BTreeSet;
+    let step: i64 = step.max(1).into();
+    let present: BTreeSet<u32> = ids.iter().copied().collect();
+    let first_id = present.iter().next().copied();
+    let last_id = present.iter().next_back().copied();
+    let (first, last) = match (first_id, last_id) {
+        (Some(f), Some(l)) => (f, l),
+        _ => {
+            return BurnStepContiguity {
+                first_id: None,
+                last_id: None,
+                present_count: 0,
+                expected_count: 0,
+                missing_ids: Vec::new(),
+            };
+        }
+    };
+    // expected = the number of step-grid points from first to last inclusive. Diagnostic only
+    // (mirrors `TickContiguity::expected_count`'s role); i64 math avoids an underflow panic if
+    // `step` were ever 0 (guarded above by `.max(1)`) or first==last (span of one ⇒ exactly 1).
+    let expected_count = ((last as i64 - first as i64) / step + 1).max(1) as u32;
+    let mut missing_ids: Vec<u32> = Vec::new();
+    let mut prev = first;
+    for &id in present.iter().skip(1) {
+        let gap = id as i64 - prev as i64;
+        if gap > step {
+            let excess = gap / step - 1;
+            for k in 1..=excess {
+                missing_ids.push((prev as i64 + k * step) as u32);
+            }
+        }
+        prev = id;
+    }
+    BurnStepContiguity {
+        first_id: Some(first),
+        last_id: Some(last),
+        present_count: present.len() as u32,
+        expected_count,
+        missing_ids,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +464,122 @@ mod tests {
             !optional_signal_ok(Some(false)),
             "signal present but broken ⇒ the only failing case"
         );
+    }
+
+    // ============================================================================
+    // #480 — the live rig bug: imag's digital corner burn free-runs at 2x the recorded
+    // capture rate (Studio-Mode double-render, see `IMAG_BURN_RENDER_STEP`'s doc), so the OLD
+    // strict-1:1 check (`tick_contiguity` — the SAME algorithm `probe::burn_contiguity::
+    // burn_contiguity` uses in production) reads every odd-parity gap as "missing" and
+    // FALSE-FAILS a recording that dropped zero real frames. `burn_step_contiguity` fixes this
+    // by modeling the free-running step, while still catching a GENUINE dropped frame.
+    // ============================================================================
+
+    /// The exact live-rig failure signature (2026-07-04, run_id 911003, scaled down): burn ids
+    /// present are ALL EVEN (0, 2, 4, .., 190), ALL ODD ids absent — the deterministic
+    /// double-render alternation, not scattered/random loss.
+    fn free_running_step2_burn_ids() -> Vec<u32> {
+        (0..=190).step_by(2).collect()
+    }
+
+    #[test]
+    fn reproduces_the_480_bug_the_old_strict_check_false_fails_a_free_running_step2_burn() {
+        let ids = free_running_step2_burn_ids();
+        // The OLD model (imag's burn was gated with the SAME strict first..=last algorithm as
+        // `tick_contiguity`/`probe::burn_contiguity::burn_contiguity` before this fix) declares
+        // every odd id "missing" — 95 phantom drops on a recording that lost ZERO real frames.
+        let old_strict = tick_contiguity(&ids);
+        assert!(
+            !old_strict.is_contiguous(),
+            "the reproduced #480 bug: the OLD strict-1:1 check FALSE-FAILS the free-running \
+             step-2 burn: {old_strict:?}"
+        );
+        assert_eq!(
+            old_strict.missing_ticks.len(),
+            95,
+            "every one of the 95 odd ids in 0..=190 reads as a phantom drop under strict 1:1"
+        );
+    }
+
+    #[test]
+    fn burn_step_contiguity_fixes_480_a_clean_free_running_step2_burn_is_zero_loss() {
+        let ids = free_running_step2_burn_ids();
+        let sc = burn_step_contiguity(&ids, IMAG_BURN_RENDER_STEP);
+        assert!(
+            sc.is_contiguous(),
+            "the SAME ids the strict check false-fails must be ZERO loss once modeled at the \
+             correct step: {sc:?}"
+        );
+        assert!(sc.missing_ids.is_empty());
+        assert_eq!(sc.first_id, Some(0));
+        assert_eq!(sc.last_id, Some(190));
+        assert_eq!(sc.present_count, 96);
+    }
+
+    #[test]
+    fn burn_step_contiguity_step_of_1_is_identical_to_strict_contiguity() {
+        // step==1 must degenerate to the exact same strict behaviour as `tick_contiguity` — this
+        // is a strict SUPERSET, not a separate weaker path.
+        let ids: Vec<u32> = (100..=160).filter(|&t| t != 130).collect();
+        let sc = burn_step_contiguity(&ids, 1);
+        let strict = tick_contiguity(&ids);
+        assert_eq!(sc.first_id, strict.first_tick);
+        assert_eq!(sc.last_id, strict.last_tick);
+        assert_eq!(sc.missing_ids, strict.missing_ticks);
+        assert!(!sc.is_contiguous(), "sanity: still catches the real gap");
+    }
+
+    #[test]
+    fn burn_step_contiguity_still_catches_a_genuine_dropped_frame_inside_the_step2_grid() {
+        // A REAL dropped output frame removes an ENTIRE step-2 slot (both its would-be renders),
+        // opening a gap of 2*step between the surviving present ids — this must still FAIL.
+        let mut ids = free_running_step2_burn_ids();
+        ids.retain(|&id| id != 100); // the step-grid id 100 never reached the recording at all
+        let sc = burn_step_contiguity(&ids, IMAG_BURN_RENDER_STEP);
+        assert!(
+            !sc.is_contiguous(),
+            "a genuinely missing step-grid slot must still fail: {sc:?}"
+        );
+        assert_eq!(
+            sc.missing_ids,
+            vec![100],
+            "the exact missing step-grid id must be reported, not the whole odd/even span"
+        );
+    }
+
+    #[test]
+    fn burn_step_contiguity_tolerates_one_step_of_beat_jitter() {
+        // A gap of step+1 (a genlock beat wobble, same tolerance
+        // `burn_contiguity_in_window_with_step` grants strih/stream) must NOT be charged —
+        // integer division absorbs it exactly like the production in-window model.
+        let ids = [0u32, 2, 4, 7, 9, 11]; // 4->7 is a gap of 3 (step+1), not a real drop
+        let sc = burn_step_contiguity(&ids, 2);
+        assert!(
+            sc.is_contiguous(),
+            "a single step+1 jitter gap must be tolerated, not charged: {sc:?}"
+        );
+    }
+
+    #[test]
+    fn burn_step_contiguity_empty_input_is_not_a_pass() {
+        let sc = burn_step_contiguity(&[], IMAG_BURN_RENDER_STEP);
+        assert_eq!(sc.first_id, None);
+        assert_eq!(sc.last_id, None);
+        assert_eq!(sc.present_count, 0);
+        assert_eq!(sc.expected_count, 0);
+        assert!(sc.missing_ids.is_empty());
+        assert!(
+            !sc.is_contiguous(),
+            "no burn decoded at all must never pass"
+        );
+    }
+
+    #[test]
+    fn burn_step_contiguity_single_id_is_trivially_contiguous() {
+        let sc = burn_step_contiguity(&[42], IMAG_BURN_RENDER_STEP);
+        assert!(sc.is_contiguous());
+        assert_eq!(sc.first_id, Some(42));
+        assert_eq!(sc.last_id, Some(42));
+        assert_eq!(sc.expected_count, 1);
     }
 }
