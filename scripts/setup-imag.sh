@@ -212,19 +212,27 @@ systemctl disable --now systemd-timesyncd >/dev/null 2>&1 || true
 systemctl mask systemd-timesyncd >/dev/null 2>&1 || true
 
 systemctl daemon-reload
-systemctl enable --now dantesync
+systemctl enable dantesync >/dev/null 2>&1 || true
+# #491: stamp the restart instant, then FORCE a restart so the running daemon matches the
+# just-(re)installed binary+unit, and verify a FRESH post-restart lock. A re-provision restarts an
+# already-locked dantesync; PTP re-acquisition then takes 30-70s while the pre-restart LOCK lines
+# scroll out of a `-n 50` window — the old 60s / `-n 50` check false-failed even though dantesync
+# re-locked fine. The journal read is ANCHORED to the restart instant (--since) so a stale
+# pre-restart LOCK can't satisfy it and a fresh one can't be scrolled out; budget is 150s.
+DANTESYNC_RESTART_EPOCH="$(date +%s)"
+systemctl restart dantesync
 
 # Verify PTP/NTP lock — the Linux equivalent of the ops-skill journalctl check. Accepts either
 # PTP LOCK/NANO or the NTP-fallback offset line (grandmaster may be transiently absent).
 DANTESYNC_LOCKED=0
-for i in $(seq 1 30); do
-    if journalctl -u dantesync --no-pager -n 50 2>/dev/null | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
+for i in $(seq 1 75); do
+    if journalctl -u dantesync --no-pager --since "@$DANTESYNC_RESTART_EPOCH" 2>/dev/null | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
         DANTESYNC_LOCKED=1
         break
     fi
     sleep 2
 done
-[ "$DANTESYNC_LOCKED" -eq 1 ] || fail "dantesync did not report PTP/NTP lock within budget — genlock clock discipline not established (check journalctl -u dantesync)"
+[ "$DANTESYNC_LOCKED" -eq 1 ] || fail "dantesync did not report PTP/NTP lock within 150s of restart — genlock clock discipline not established (check journalctl -u dantesync)"
 echo "  dantesync locked to strih.lan via $NIC (timesyncd masked)"
 
 # =============================================================================
