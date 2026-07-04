@@ -1399,7 +1399,7 @@ fn setup_imag_leaves_desktop_icon_unpinned_483() {
 /// TOTAL_STEPS must match the actual number of `step()` calls in the script — a drift here means
 /// either a step was added without bumping the counter (progress display under-counts) or the
 /// counter was bumped without adding a step (display over-counts). This is a general invariant,
-/// re-verified here because #482/#483/#487 added three new steps (13 -> 16).
+/// re-verified here because #500 added a new NVIDIA driver step (16 -> 17).
 #[test]
 fn setup_imag_total_steps_matches_actual_step_calls() {
     let body = read(SETUP);
@@ -1420,8 +1420,8 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 16,
-        "TOTAL_STEPS must be 16 after #482/#483/#487 added three new steps to the original 13"
+        declared, 17,
+        "TOTAL_STEPS must be 17 after #500 added the NVIDIA driver step to the prior 16"
     );
     assert_eq!(
         actual, declared,
@@ -1583,5 +1583,138 @@ fn setup_imag_frontend_versions_together_with_libobs_and_distroav_499() {
         "{SETUP}: libobs, distroav, and the frontend must ALL be installed before the single \
          GENLOCK_BUILD_SHA.txt marker is written — all three files version together under one \
          build SHA"
+    );
+}
+
+// ============================================================================================
+// #500 — setup-imag.sh must install nvidia-driver-595-open + PRIME nvidia-primary. Codifies a
+// fix already applied + LIVE-VERIFIED on imag-nb (2026-07-04): the HDMI program-projector output
+// is wired through the NVIDIA dGPU (RTX 5050 Laptop / Blackwell), which the plain proprietary
+// nvidia-driver-595 package fails to initialize (RmInitAdapter failed 0x22:0x56:1017) — only the
+// -open kernel-modules flavor brings it up.
+// ============================================================================================
+
+/// The -open flavor must be installed — plain nvidia-driver-595 does NOT init this Blackwell dGPU
+/// (live-reproduced), even though `ubuntu-drivers devices` recommends the plain package.
+#[test]
+fn setup_imag_installs_nvidia_driver_595_open_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("nvidia-driver-595-open"),
+        "{SETUP} must install nvidia-driver-595-open — the OPEN kernel-modules flavor is required \
+         to initialize the RTX 5050 Laptop (Blackwell) dGPU; plain nvidia-driver-595 fails with \
+         RmInitAdapter failed 0x22:0x56:1017 (live-reproduced on imag-nb)"
+    );
+    let install_check = body.find("dpkg -s nvidia-driver-595-open").expect(
+        "{SETUP} must check dpkg -s nvidia-driver-595-open before (re-)installing — idempotency",
+    );
+    let apt_install = body
+        .find("apt-get install -y nvidia-driver-595-open")
+        .expect("{SETUP} must apt-get install -y nvidia-driver-595-open");
+    assert!(
+        install_check < apt_install,
+        "{SETUP}: the dpkg -s idempotency check must come BEFORE the apt-get install call"
+    );
+}
+
+/// PRIME must be set to nvidia (not on-demand) — on-demand mode left the HDMI dGPU output dead
+/// (live-verified); nvidia-primary brings up BOTH the HDMI output and the laptop's own eDP panel.
+#[test]
+fn setup_imag_prime_select_nvidia_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("prime-select nvidia"),
+        "{SETUP} must `prime-select nvidia` — on-demand PRIME mode left the HDMI dGPU output dead \
+         (live-verified on imag-nb); nvidia-primary is required for both HDMI and eDP to run on \
+         the RTX 5050"
+    );
+    assert!(
+        body.contains("prime-select missing after nvidia-driver-595-open install"),
+        "{SETUP} must fail loud if prime-select is missing after the driver install"
+    );
+}
+
+/// A DKMS driver install regenerates initramfs for the running kernel — the #295/#487 safe-grub
+/// discipline must be re-applied (never trust an initrd/grub change blindly), reusing the SAME
+/// safe_grub_regen helper the #482/#483 grub.d drops already call, not a fresh ad-hoc grub edit.
+#[test]
+fn setup_imag_nvidia_step_reuses_safe_grub_regen_500() {
+    let body = read(SETUP);
+    // There must be exactly two CALL sites of safe_grub_regen (never a bare function definition
+    // counted as a call): the #482/#483 CPU-isolation step, and this NVIDIA step.
+    let call_sites = body
+        .lines()
+        .filter(|l| l.trim() == "safe_grub_regen")
+        .count();
+    assert_eq!(
+        call_sites, 2,
+        "{SETUP}: safe_grub_regen must be called exactly twice — once after the #482/#483 grub.d \
+         drops, and once after the #500 nvidia driver install"
+    );
+    let prime = body
+        .find("prime-select nvidia")
+        .expect("prime-select nvidia must exist");
+    let nvidia_step_regen = body[prime..]
+        .find("safe_grub_regen")
+        .map(|off| prime + off)
+        .expect("safe_grub_regen must be called AFTER prime-select nvidia in the #500 step");
+    let marker = body
+        .find("nvidia-smi already enumerates")
+        .expect("the post-driver nvidia-smi check must exist");
+    assert!(
+        nvidia_step_regen < marker,
+        "{SETUP}: safe_grub_regen must run BEFORE the nvidia-smi liveness echo in the #500 step \
+         (never trust initrd/grub state without re-verifying it first)"
+    );
+}
+
+/// The #500 step must land AFTER CPU isolation (#483, so safe_grub_regen is already defined and
+/// has already run once) and BEFORE the NDI runtime step — grouping all boot-level system config
+/// (kernel, CPU isolation, GPU driver) ahead of the app-level installs (NDI, OBS).
+#[test]
+fn setup_imag_nvidia_step_lands_between_cpu_isolation_and_ndi_runtime_500() {
+    let body = read(SETUP);
+    let cpu_isolation = body
+        .find("CPU isolation (#483)")
+        .expect("the #483 CPU isolation step must exist");
+    let nvidia_step = body
+        .find("NVIDIA dGPU driver (#500)")
+        .expect("the #500 NVIDIA driver step must exist");
+    let ndi_step = body
+        .find("NDI runtime 6.3.2 from cam1")
+        .expect("the NDI runtime step must exist");
+    assert!(
+        cpu_isolation < nvidia_step && nvidia_step < ndi_step,
+        "{SETUP}: the #500 NVIDIA driver step must land strictly between the #483 CPU isolation \
+         step and the NDI runtime step"
+    );
+}
+
+/// A grub/initrd-touching change must never claim to take effect immediately — the same "NOTE:
+/// takes effect on the NEXT boot" convention already used by the #482 lowlatency kernel and the
+/// #483 CPU isolation steps (this script never reboots the box).
+#[test]
+fn setup_imag_nvidia_step_notes_next_boot_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot")
+            && body.contains("this script does not reboot the box"),
+        "{SETUP}: the #500 nvidia step must note that the PRIME mode + DKMS module take effect on \
+         the NEXT boot, matching the convention already used by the #482/#483 grub-touching steps"
+    );
+}
+
+/// Driver-upgrade freedom is explicitly wanted by the user — this pin must not be silently
+/// treated as an immovable LTS choice; the comment must document that a newer -open flavor should
+/// be preferred if one becomes available.
+#[test]
+fn setup_imag_nvidia_step_documents_driver_upgrade_freedom_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("prefer the newest available `-open` flavor over 595 if one has")
+            || body.contains("prefer the newest available -open flavor"),
+        "{SETUP}: the #500 nvidia step must document that a newer -open driver flavor should be \
+         preferred over the 595 pin if one becomes available (user's explicit driver-upgrade-\
+         freedom directive)"
     );
 }
