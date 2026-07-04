@@ -111,6 +111,53 @@ The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbl
   `journalctl -u camera-box | grep '#289'` (pin + IRQ log lines), `grep . /proc/irq/*/smp_affinity`.
 - **Kernel-cmdline tuning is DEFERRED** (`nohz_full`/`rcu_nocbs`/`irqaffinity=`, #303) — it needs the
   #295 safe-grub work first. **NEVER edit `/etc/default/grub` + `update-grub`** (bricked 2 boxes, #295/#301).
+  This deferral is CAM-FLEET-ONLY — imag-nb (below) already has the full kernel-cmdline tuning.
+
+## imag-nb kernel/CPU hardening (#482/#483/#487) — preempt=full + P-core isolation
+
+imag-nb (10.77.9.182) runs 6× NDI decode + render + genlock + audio in OBS (~106 threads) on a
+13th-gen-class notebook (10 P-core HT threads cpu0-11 + 4 E-cores cpu12-15). Fully codified in
+`scripts/setup-imag.sh` (steps 6-8); a from-scratch provision reproduces this exactly.
+
+**Gotcha (will recur on any modern-kernel low-latency tuning job): there is often NO lowlatency
+kernel IMAGE at the current kernel line.** On imag's 6.17.0-35, the newest `linux-image-*-lowlatency`
+builds are 6.8/6.11 — installing one would be a DOWNGRADE (loses 13th-gen CPU/iGPU/USB-NIC
+support). Check first: **the generic kernel may already be `PREEMPT_DYNAMIC`** — if so,
+`apt-get install linux-lowlatency-hwe-24.04` pulls ONLY the `lowlatency-kernel` CONFIG package
+(no image change), which drops `/etc/default/grub.d/99-lowlatency.cfg` =
+`GRUB_CMDLINE_LINUX_DEFAULT="... preempt=full rcu_nocbs=all"` — full preemption on the kernel
+already running, zero downgrade.
+
+**Grub convention for imag differs from the cam-fleet #295 mechanism**: instead of editing
+`/etc/default/grub`'s `GRUB_CMDLINE_LINUX(_DEFAULT)` in place, imag writes standalone
+`/etc/default/grub.d/*.cfg` drop-ins (`98-imag-isolation.cfg`, `99-lowlatency.cfg` — sourced in
+lexical order by `grub-mkconfig`, each appending to `$GRUB_CMDLINE_LINUX_DEFAULT`). A whole-file
+`cat > file <<'EOF'` write is trivially idempotent (no grep-before-append needed) — but it is
+STILL routed through the shared `safe_grub_regen()` bash function (defined in setup-imag.sh step
+6, #487) before trusting it: initrd-guarantee loop → `update-grub` → validate the generated
+default menuentry has both a kernel image and an initrd, `fail()` otherwise. Call it ONCE after
+ALL grub.d drops for a batch of changes are written — not once per file.
+
+**CPU layout** (HT pairs confirmed via `thread_siblings_list`, NOT `lscpu`'s flat count):
+cpu0-1 = P-core0 (kept for GNOME/Xorg/sshd/MCP), cpu2-11 = the OTHER 5 P-cores (isolated, reserved
+for OBS's whole thread pool via `isolcpus=2-11`), cpu12-15 = E-cores (no HT, also housekeeping).
+`nohz_full`/`rcu_nocbs` are scoped to ONLY cpu10,11 — the single core pair reserved for the future
+#484 SCHED_FIFO genlock render-tick thread — never the whole isolated block (spreading it wider
+removes load-balancing signal for everything else on the block, per #303's cam-fleet caveat).
+
+**OBS must be `taskset -c 2-11`-pinned on EVERY launch path** or `isolcpus` starves it onto the
+tiny cpu0,1,12-15 remainder. Two launch paths exist in setup-imag.sh: the autostart
+`~/.config/autostart/obs.desktop` (`sed`-patch `Exec=obs` → `Exec=taskset -c 2-11 obs` — the file
+is copied FRESH from `/usr/share/applications/...` every run so the sed always finds its target,
+which makes this idempotent for free) and the script's own provisioning-time launcher. The
+Desktop *icon* (double-click) is deliberately left unpinned on the live box — don't "fix" that.
+`nice -n -5` was tried and dropped: the desktop user lacks `CAP_SYS_NICE`.
+
+**Live status (2026-07-04): only the grub/isolcpus/preempt changes were hand-applied on the box —
+the #487 boot-safety net (apt-mark hold, the postinst initrd hook, the Unattended-Upgrade
+kernel-blacklist) was NEVER live-applied, only codified.** `apt-mark showhold` on imag currently
+shows only `obs-studio`. Don't assume "codified in setup-imag.sh" means "already protecting the
+live box" — check `apt-mark showhold` / `systemctl is-enabled unattended-upgrades` if it matters.
 
 ## Rig Recovery Policy
 
