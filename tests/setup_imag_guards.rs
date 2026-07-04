@@ -744,12 +744,12 @@ fn setup_imag_masks_timesyncd_before_enabling_dantesync() {
     let mask = body
         .find("systemctl mask systemd-timesyncd")
         .expect("timesyncd mask must exist");
-    let enable = body
-        .find("systemctl enable --now dantesync")
-        .expect("dantesync enable --now must exist");
+    let start = body
+        .find("systemctl restart dantesync")
+        .expect("dantesync (re)start must exist");
     assert!(
-        mask < enable,
-        "{SETUP}: systemd-timesyncd must be masked BEFORE dantesync is enabled — the two clock \
+        mask < start,
+        "{SETUP}: systemd-timesyncd must be masked BEFORE dantesync is (re)started — the two clock \
          sources must never race, not even for one boot cycle"
     );
 }
@@ -766,9 +766,28 @@ fn setup_imag_verifies_dantesync_ptp_lock() {
          before declaring the step done"
     );
     assert!(
-        body.contains("did not report PTP/NTP lock within budget"),
-        "{SETUP} must fail loud when dantesync never reports PTP/NTP lock within budget — a \
-         silent pass here would let a re-provision ship with an undisciplined clock"
+        body.contains("did not report PTP/NTP lock within 150s of restart"),
+        "{SETUP} must fail loud when dantesync never reports PTP/NTP lock — a silent pass here \
+         would let a re-provision ship with an undisciplined clock"
+    );
+    // #491: the lock check must be RESTART-ANCHORED (--since the restart instant), never a bare
+    // `-n 50` line window — on a re-provision the pre-restart LOCK scrolls out of a 50-line window
+    // and a fresh post-restart LOCK (30-70s later) is missed, false-failing a healthy re-lock.
+    assert!(
+        body.contains(r#"journalctl -u dantesync --no-pager --since "@$DANTESYNC_RESTART_EPOCH""#),
+        "{SETUP}: the dantesync lock check must anchor journalctl to the restart instant \
+         (--since @$DANTESYNC_RESTART_EPOCH), not a bare `-n 50` window (#491 false-fail fix)"
+    );
+    assert!(
+        !body.contains("journalctl -u dantesync --no-pager -n 50"),
+        "{SETUP}: the dantesync lock check must NOT use the bare `-n 50` window that #491 fixed"
+    );
+    // #491: the re-lock budget must be generous (~150s) — a restart's PTP re-acquisition is
+    // legitimately slower than a cold start; the old 60s (seq 1 30) budget false-failed.
+    assert!(
+        body.contains("for i in $(seq 1 75)"),
+        "{SETUP}: the dantesync lock-verify budget must be ~150s (seq 1 75 x 2s) — the old 60s \
+         budget false-failed a valid re-lock (#491)"
     );
 }
 
