@@ -1693,6 +1693,92 @@ mod tests {
     }
 
     #[test]
+    fn range_scaled_neutral_prefers_queried_default_over_numeric_midpoint_456() {
+        // #456 follow-up (deep-review finding): the certified COLOUR set's neutral
+        // (reference_pct=50) is BY DEFINITION the manufacturer's own default. Both
+        // known cards (ShadowCast 50/100, cam5 128/255) happen to have a default
+        // that equals their numeric midpoint, so pure proportional scaling and
+        // "prefer the queried default" agree for them. A card whose default is NOT
+        // its numeric midpoint must still resolve to its OWN default, not a
+        // midpoint the manufacturer never calls "neutral". FAILS before this fix
+        // (proportional midpoint = 0 + 0.5*200 = 100), PASSES after (queried
+        // default = 140 is used directly).
+        let weird_card = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST])
+            .with_range(
+                V4L2_CID_SATURATION,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 200,
+                    default_value: 140,
+                },
+            )
+            .with_range(
+                V4L2_CID_CONTRAST,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 200,
+                    default_value: 140,
+                },
+            );
+        let report = apply_controls_with(&weird_card, &color_production_controls());
+        assert_eq!(report.applied, 2);
+        assert_eq!(
+            *weird_card
+                .values
+                .borrow()
+                .get(&V4L2_CID_SATURATION)
+                .unwrap(),
+            140,
+            "must use the queried default (140), not the numeric midpoint (100)"
+        );
+        assert_eq!(
+            *weird_card.values.borrow().get(&V4L2_CID_CONTRAST).unwrap(),
+            140,
+            "must use the queried default (140), not the numeric midpoint (100)"
+        );
+    }
+
+    #[test]
+    fn range_scaled_sharp_set_stays_75_and_0_on_a_shadowcast_0_100_card_456() {
+        // #456 follow-up (deep-review finding: missing coverage): the SHARP set
+        // (certified_cam1_controls, 75%/0%) resolved on a real ShadowCast-shaped
+        // 0-100 range must reproduce the exact pre-#456 literal values (75/0) —
+        // the regression concern already covered for the COLOUR set was untested
+        // for the SHARP set.
+        let shadowcast = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST])
+            .with_range(
+                V4L2_CID_CONTRAST,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 100,
+                    default_value: 50,
+                },
+            )
+            .with_range(
+                V4L2_CID_SATURATION,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 100,
+                    default_value: 50,
+                },
+            );
+        let report = apply_controls_with(&shadowcast, &certified_cam1_controls());
+        assert_eq!(report.applied, 2);
+        assert_eq!(
+            *shadowcast.values.borrow().get(&V4L2_CID_CONTRAST).unwrap(),
+            75
+        );
+        assert_eq!(
+            *shadowcast
+                .values
+                .borrow()
+                .get(&V4L2_CID_SATURATION)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn production_controls_must_not_force_hue_338() {
         // #338 REGRESSION GUARD: color_production_controls() must NOT force HUE.
         // Production previously forced hue=0 (doc-claimed "neutral"), but the
