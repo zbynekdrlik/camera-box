@@ -45,6 +45,40 @@ description`). Before merging any PR, `git log origin/main..HEAD --oneline` and 
 `^(fix|close|resolve)[a-z]*:\s*#` to catch a stray reference-only commit that would trigger an
 unwanted auto-close.
 
+## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
+
+This repo's autopilot workers run directly in `~/devel/camera-box` on dev1 with **no git
+worktree isolation** — every worker's `git commit`/`git push` operates on the SAME local
+checkout and the SAME local `dev` branch ref. If the supervisor ever dispatches two workers into
+this repo at once (violates `two-branch-workflow.md`'s "dispatch serially — one active worker per
+repo", but has happened), their commits land on the SAME linear `dev` history, interleaved by
+whichever process commits first — there is no isolation and no conflict warning.
+
+**Incident (2026-07-04):** worker A (#499+#500, `setup-imag.sh`) and worker B (#505, a GL PBO-orphan
+fix) both committed to `dev` concurrently. Worker A protected its own pushes by pushing an exact
+commit SHA (`git push origin <own-sha>:refs/heads/dev`, never a bare `git push origin dev`) so
+worker B's not-yet-pushed commits weren't dragged to `origin` prematurely — but a `git commit` run
+by A ON TOP of B's already-advanced local HEAD unavoidably included B's ancestry on the next push
+(a git push always carries a commit's full ancestor chain; there is no way to exclude mid-branch
+commits without a force-push, which is banned). Net result: worker A's PR ended up also shipping
+worker B's fully-complete #505 work, auto-closing it via B's own `fix: #505 ...` commit title.
+Harmless here (B's work was genuinely finished + TDD'd), but in a worse timing it could ship a
+STILL-IN-PROGRESS body of foreign work through the wrong PR with no review of it.
+
+**Mitigation for a worker that detects this mid-flight** (`git log --oneline -5` shows commits you
+didn't write, or `git status` shows files you never touched): (1) NEVER `git push origin dev`
+bare — always push your own exact last commit SHA (`git push origin <sha>:refs/heads/dev`) so you
+never ship more than you intend; (2) before every `git commit`, `git log --oneline -3` to confirm
+HEAD is still what you expect; (3) if a stray untracked/modified file you didn't create shows up in
+`git status`, NEVER `git add -A` — stage only the exact paths you touched; if one still gets swept
+in by a shared-index race, `git rm --cached <path>` in a follow-up commit (never delete the file
+from disk — it's someone else's live work); (4) NEVER `git reset`/force-push to "undo" another
+session's commits from the shared local branch — you'd be mutating a ref the other process may
+still be relying on mid-operation; (5) note the collision plainly in your evidence block/autopilot
+log and, if a foreign commit auto-closed an issue that wasn't yours, explain it via
+`gh issue comment <N>` for traceability. The supervisor should prefer serial dispatch or
+per-worker `git worktree` isolation for this repo going forward.
+
 ## GOTCHA — two autopilot workers in the SAME checkout share one git index/branch ref
 
 `/home/newlevel/devel/camera-box` is a single shared clone. If two autopilot workers are ever
