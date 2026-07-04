@@ -146,6 +146,19 @@ pub struct RecordingFrame {
 /// optical Vernier tick and are excluded from [`RecordingFrame::tick`]. Mirrored here as a
 /// small const so `tick` selection doesn't pull the whole `RunIds` machinery into the
 /// per-frame hot path.
+///
+/// **#463 — this list is for the TICK EXCLUSION filter ONLY, never for a decode's `#207`
+/// fast-path GATE** (see [`GENERIC_DIAGNOSTIC_BURN_IDS`] for that). The two purposes look
+/// similar but must NOT share one list: excluding a burn from the Vernier tick is
+/// correctness-critical and must include EVERY node burn that could ever appear (imag
+/// included), but REQUIRING every one of them before the fast path can fire is a strictly
+/// PER-RECORDING question — imag's own corner burn is emitted ONLY on imag-nb's own OBS
+/// program output, so it can NEVER appear on a strih/stream/cam1-grab recording. Folding it
+/// into the generic diagnostic tools' "MAXIMALLY-ROBUST" gate made `all_burns_present`
+/// permanently false for every non-imag recording (a real ~10× decode slowdown for
+/// `forensic-dump`/`recording-probe`/the A/V-sync tool with ZERO accuracy benefit, since
+/// those tools never decode imag's own recording through this generic path) — caught in
+/// review, not by a test (the existing suite has no timing assertion for this gate).
 pub const NODE_BURN_RUN_IDS: [u32; 4] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
     crate::probe::recording_latency::BURN_RUN_ID_STRIH,
@@ -153,18 +166,34 @@ pub const NODE_BURN_RUN_IDS: [u32; 4] = [
     crate::probe::recording_latency::BURN_RUN_ID_IMAG,
 ];
 
-/// Decode one native-resolution luma frame into a `RecordingFrame`, requiring the FULL set of
-/// node burns ([`NODE_BURN_RUN_IDS`]) before the fast path may skip the robust tiles.
+/// The node-burn run_ids the GENERIC diagnostic tools ([`decode_recording_frame`] /
+/// [`analyze_recording`] — `forensic-dump`, `recording-probe`, `probe::av_sync_recording`)
+/// require before the #207 fast path may skip the robust tiles. Deliberately NOT
+/// [`NODE_BURN_RUN_IDS`] (#463): these generic, box-agnostic tools only ever decode a
+/// strih/stream/cam1-grab recording (never imag's own recording, which has its own dedicated
+/// `--imag` path in `recording-verdict`), and none of those recordings can EVER carry imag's
+/// corner burn — requiring it here would make the fast path permanently unreachable for a
+/// real recording, forcing the ~10× robust tiles on every frame for no accuracy gain.
+const GENERIC_DIAGNOSTIC_BURN_IDS: [u32; 3] = [
+    crate::probe::recording_latency::BURN_RUN_ID_CAM1,
+    crate::probe::recording_latency::BURN_RUN_ID_STRIH,
+    crate::probe::recording_latency::BURN_RUN_ID_STREAM,
+];
+
+/// Decode one native-resolution luma frame into a `RecordingFrame`, requiring the full
+/// [`GENERIC_DIAGNOSTIC_BURN_IDS`] set before the fast path may skip the robust tiles.
 ///
-/// This is the MAXIMALLY-ROBUST default: requiring all three node burns means the #207 fast
-/// gate only fires on a frame that already carries cam1 + strih + stream, so any recording
-/// missing a burn (e.g. a strih recording, which never carries the stream burn) always runs
-/// the full robust recovery — exactly what the diagnostic tools (forensic-dump,
-/// recording-probe) want. The verdict (the perf-critical 30-min 4K path) instead calls
-/// [`decode_recording_frame_with_burns`] with the burns that recording is KNOWN to carry, so
-/// the fast path fires on its ~99 %+ clean frames. See [`decode_recording_frame_with_burns`].
+/// This is the MAXIMALLY-ROBUST default FOR THE RECORDINGS THIS GENERIC PATH ACTUALLY SEES
+/// (strih / stream / cam1-grab — never imag's own recording, #463): requiring all three node
+/// burns means the #207 fast gate only fires on a frame that already carries cam1 + strih +
+/// stream, so any recording missing a burn (e.g. a strih recording, which never carries the
+/// stream burn) always runs the full robust recovery — exactly what the diagnostic tools
+/// (forensic-dump, recording-probe) want. The verdict (the perf-critical 30-min 4K path)
+/// instead calls [`decode_recording_frame_with_burns`] with the burns that recording is KNOWN
+/// to carry, so the fast path fires on its ~99 %+ clean frames. See
+/// [`decode_recording_frame_with_burns`].
 pub fn decode_recording_frame(frame_index: u64, luma: GrayImage) -> RecordingFrame {
-    decode_recording_frame_with_burns(frame_index, luma, &NODE_BURN_RUN_IDS)
+    decode_recording_frame_with_burns(frame_index, luma, &GENERIC_DIAGNOSTIC_BURN_IDS)
 }
 
 /// Decode one native-resolution luma frame into a `RecordingFrame`, with the #207 fast gate
@@ -512,12 +541,19 @@ fn decode_stream_parallel(
 /// previously took >1 h single-threaded now decodes in minutes; the output order
 /// is identical to the prior serial loop (results are re-sorted by frame_index).
 ///
-/// Uses the MAXIMALLY-ROBUST gate (requires the full [`NODE_BURN_RUN_IDS`] before the #207
-/// fast path may skip the tiles) — the right default for the diagnostic dump tools. The
-/// verdict's perf-critical path calls [`analyze_recording_with_burns`] with the burns the
-/// recording actually carries to unlock the #207 speedup.
+/// Uses the MAXIMALLY-ROBUST gate for the recordings this GENERIC path actually sees
+/// (strih / stream / cam1-grab — never imag's own recording, #463): requires the full
+/// [`GENERIC_DIAGNOSTIC_BURN_IDS`] set before the #207 fast path may skip the tiles — the
+/// right default for the diagnostic dump tools. Deliberately NOT [`NODE_BURN_RUN_IDS`]: that
+/// 4-element list includes imag's corner burn, which can never appear on a recording this
+/// generic path decodes, so requiring it here would make the fast path permanently
+/// unreachable (see the [`GENERIC_DIAGNOSTIC_BURN_IDS`] doc comment for the full ~10× slowdown
+/// this caused when `analyze_recording` and `decode_recording_frame` disagreed on which list
+/// to use — caught in review, #463). The verdict's perf-critical path calls
+/// [`analyze_recording_with_burns`] with the burns the recording actually carries to unlock
+/// the #207 speedup.
 pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
-    analyze_recording_with_burns(path, &NODE_BURN_RUN_IDS)
+    analyze_recording_with_burns(path, &GENERIC_DIAGNOSTIC_BURN_IDS)
 }
 
 /// [`analyze_recording`] with the #207 fast gate keyed on `expected_node_burns` — the node

@@ -171,8 +171,26 @@ inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner cor
 		 // 116px clear of the SEPARATE Rust-side cam1 center burn at x=[800,1120)
 		 // (`qr::cam1_burn_origin`, this header does not compute that rect but the gap is
 		 // sized to clear it; see `src/probe/colour_sample.rs::node_burn_exclusions`).
+		//
+		// #463 review: a 2-tier fallback, NEVER a single "flush against the frame's right
+		// edge" clamp — on a canvas narrower than ~margin+2*side (never production's
+		// 1920x1080, but genuinely possible on an unusual aspect ratio) flushing against
+		// the RIGHT EDGE could land BACK INSIDE the BottomLeft burn's own rectangle (e.g.
+		// a 500px-wide canvas at production margin/side clamps to x=198, which is inside
+		// BottomLeft's [40,342) — the two burns would overlap and corrupt each other's
+		// decodability, silently breaking the "everything in-frame" contract's unstated
+		// but load-bearing "and non-overlapping" half). Tier 1: the full one-margin gap.
+		// Tier 2: flush immediately against BottomLeft's own trailing edge (zero overlap
+		// by construction, zero gap) when the full gap does not fit. Tier 3 (only when the
+		// canvas cannot even hold ONE margin-to-margin burn) falls back to the frame's
+		// right edge as a last resort — genuinely no collision-free placement exists there.
 		uint32_t x = margin + side + margin;
-		p.band_x = (x + side <= frame_w) ? x : (frame_w > side ? frame_w - side : 0);
+		if (x + side > frame_w) {
+			x = margin + side; // tier 2: flush against BottomLeft's trailing edge
+			if (x + side > frame_w)
+				x = (frame_w > side) ? (frame_w - side) : 0; // tier 3: last resort
+		}
+		p.band_x = x;
 	}
 	// Vertical center so the bottom edge sits at frame_h - margin.
 	const uint32_t half = side / 2;

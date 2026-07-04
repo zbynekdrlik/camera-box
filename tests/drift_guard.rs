@@ -2105,6 +2105,39 @@ fn genlock_latency_ms_from_log_extracts_the_235_single_knob_value() {
     );
 }
 
+#[test]
+fn or_list_exit_code_capture_survives_errexit_the_463_gather_and_check_imag_fix() {
+    // #463 review (2nd pass): drift-guard.sh runs under `set -euo pipefail` (line 47) — applied
+    // even when the script is SOURCED (the BASH_SOURCE guard only wraps the bottom-of-file
+    // dispatch call, not the top-of-file `set`), so `run_sourced`'s harness inherits real
+    // errexit the instant it sources the script, exactly like production. `gather_and_check_
+    // imag`'s SSH glue captures ssh/timeout's exit code (255 = connection failure, 124 =
+    // timeout) to tell "imag-nb is unreachable" apart from "the file is genuinely gone" (the
+    // check_imag_report UNKNOWN-vs-DRIFT tests below exercise that decision once the code is
+    // read). The FIRST shape of that capture — `var="$(cmd)"` on its own line, followed on the
+    // NEXT line by `local rc=$?` — CRASHES THE WHOLE SCRIPT under errexit the instant `cmd`
+    // returns nonzero: errexit fires on the failing assignment before the `rc=$?` line ever
+    // runs, so a transient network blip would abort drift-guard.sh entirely (exit 255) instead
+    // of reporting a graceful UNKNOWN. This test locks in the fix actually shipped:
+    // `rc=0; var="$(cmd)" || rc=$?` — an OR-list, the one shape `set -e` exempts (only the LAST
+    // command of an AND/OR list is errexit-checked) — survives AND captures the real code.
+    let out = run_sourced(
+        r#"
+        fails_255() { return 255; }
+        rc=0
+        captured="$(fails_255)" || rc=$?
+        echo "SURVIVED rc=$rc captured=[$captured]"
+        "#,
+        &[],
+    );
+    assert_eq!(
+        out.trim(),
+        "SURVIVED rc=255 captured=[]",
+        "#463: the OR-list exit-code capture must survive drift-guard.sh's inherited `set -e` \
+         and correctly report the failing command's exit code, output={out:?}"
+    );
+}
+
 /// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line (60fps,
 /// imag's low-latency IMAG role, EPIC #466 Topology v2).
 const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
@@ -2183,8 +2216,34 @@ fn check_imag_report_flags_an_fps_drift_down_from_60_463() {
 
 #[test]
 fn check_imag_report_flags_missing_genlock_capability_as_stock_build_drift_463() {
-    // No genlock marker in the log at all -> the #119 wrong-build case: DRIFT, never silently
-    // passed just because the build-SHA marker file happens to still be present.
+    // A NON-EMPTY log (real header lines) that carries NO genlock marker at all -> the #119
+    // wrong-build case: DRIFT, never silently passed just because the build-SHA marker file
+    // happens to still be present. #463 review: the 9th param is the RAW log text (checked
+    // internally via genlock_capability_from_log), so this must be a log that WAS actually
+    // read -- an empty string means something different now (see the UNKNOWN test below).
+    let stock_log = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n11:40:39.714: video settings reset:\n11:40:39.714: \tfps:               60/1\n";
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", stock_log)]);
+    assert!(
+        out.contains("RC=20"),
+        "no capability marker in a non-empty log -> DRIFT exit: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_capability") && out.contains("DRIFT"),
+        "must flag the capability line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_capability_unknown_when_the_log_was_never_read_463() {
+    // #463 review: an EMPTY log text (SSH failed to reach imag-nb, or OBS has never launched
+    // there) must read as UNKNOWN, never the same DRIFT a genuine stock/wrong build gets --
+    // otherwise a mere connectivity hiccup prints a false "#119 wrong-build" alarm. Mirrors the
+    // sibling strih/stream `drift_check_capability`'s own empty-text guard.
     let body = r#"
         rc=0
         check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "" "/plugin/path" "1" || rc=$?
@@ -2192,12 +2251,17 @@ fn check_imag_report_flags_missing_genlock_capability_as_stock_build_drift_463()
     "#;
     let out = run_sourced(body, &[]);
     assert!(
-        out.contains("RC=20"),
-        "no capability marker -> DRIFT exit: {out:?}"
+        out.contains("RC=11"),
+        "empty log text -> UNKNOWN exit (never the DRIFT a stock build gets): {out:?}"
     );
+    let capability_line = out
+        .lines()
+        .find(|l| l.contains("genlock_capability"))
+        .unwrap_or_else(|| panic!("no genlock_capability line printed: {out:?}"));
     assert!(
-        out.contains("genlock_capability") && out.contains("DRIFT"),
-        "must flag the capability line as DRIFT: {out:?}"
+        capability_line.contains("UNKNOWN"),
+        "the capability line must say UNKNOWN, never a false #119 wrong-build DRIFT for an \
+         unread log: {capability_line:?}"
     );
 }
 
@@ -2240,15 +2304,15 @@ fn check_imag_report_unknown_when_values_were_not_read_never_a_silent_pass_463()
 
 #[test]
 fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
-    // Parse a realistic imag-nb OBS log (IMAG_LOG_60FPS_3MS) through the real *_from_log parsers
-    // first, THEN feed the results into check_imag_report — the same wiring
-    // `gather_and_check_imag` does, minus the actual `ssh` calls.
+    // Parse a realistic imag-nb OBS log (IMAG_LOG_60FPS_3MS) through the real fps/latency
+    // *_from_log parsers, THEN feed the RAW log text (not a pre-extracted capability flag,
+    // #463 review) into check_imag_report — the same wiring `gather_and_check_imag` does,
+    // minus the actual `ssh` calls. check_imag_report derives the capability marker itself.
     let body = r#"
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
-        cap="$(genlock_capability_from_log "$LOG")"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$cap" "/plugin/path" "1" || rc=$?
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("LOG", IMAG_LOG_60FPS_3MS)]);

@@ -82,8 +82,19 @@ impl ImagVerdict {
     /// STRICTER than pre-#463 (never looser): a node with a decoded-but-gappy burn now fails even
     /// though its optical read alone was clean, per the strict-test mandate.
     pub fn is_zero_loss(&self) -> bool {
-        self.optical_contiguous && self.burn_contiguous.unwrap_or(true)
+        self.optical_contiguous && optional_signal_ok(self.burn_contiguous)
     }
+}
+
+/// #463 — is an OPTIONAL second proof signal "not a problem"? `None` (the signal does not
+/// apply at all — e.g. no digital burn was decoded anywhere in the recording) is ALWAYS fine,
+/// nothing to fail on; `Some(false)` (the signal WAS present but broken) is the only failing
+/// case; `Some(true)` (present and clean) is fine. Shared by [`ImagVerdict::is_zero_loss`] and
+/// `NodeVerdict::imag_burn_ok` (`src/bin/recording-verdict.rs`) so the "absent is fine,
+/// present-but-broken fails" rule lives in exactly ONE place instead of being independently
+/// reimplemented at each call site (the #463 review caught the duplication).
+pub fn optional_signal_ok(present_and_contiguous: Option<bool>) -> bool {
+    present_and_contiguous.unwrap_or(true)
 }
 
 /// Build imag's [`ImagVerdict`] from its optical [`TickContiguity`] and, separately, whether ANY
@@ -313,6 +324,22 @@ mod tests {
         assert!(
             !v.is_zero_loss(),
             "a missing optical tick FAILS even when the digital burn is perfectly contiguous"
+        );
+    }
+
+    #[test]
+    fn optional_signal_ok_absent_is_fine_present_broken_fails_463() {
+        // The shared "second signal" rule NodeVerdict::imag_burn_ok (recording-verdict.rs)
+        // also uses: None (not applicable) and Some(true) (present, clean) are both fine;
+        // Some(false) (present but broken) is the ONLY failing case.
+        assert!(optional_signal_ok(None), "signal not applicable ⇒ fine");
+        assert!(
+            optional_signal_ok(Some(true)),
+            "signal present and clean ⇒ fine"
+        );
+        assert!(
+            !optional_signal_ok(Some(false)),
+            "signal present but broken ⇒ the only failing case"
         );
     }
 }

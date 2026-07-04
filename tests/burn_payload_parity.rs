@@ -482,16 +482,24 @@ fn cam_px_for_canvas(h: i64) -> i64 {
 }
 
 /// #463 — imag's bottom-CENTER-LEFT corner burn rect, mirroring
-/// `burn_geom::corner_placement`'s new `Corner::BottomCenterLeft` case EXACTLY: one
-/// `burn_margin` clear of the bottom-left (strih) burn's trailing edge
-/// (`burn_margin + burn_px + burn_margin`), same row as the other two corner burns
-/// (`burn_y = h - burn_margin - burn_px`). Clamped in-frame the same way the C++ does for a
-/// degenerate tiny canvas.
+/// `burn_geom::corner_placement`'s new `Corner::BottomCenterLeft` case EXACTLY (this is one of
+/// the FOUR independent geometry mirrors that must agree — see `.claude/skills/recording-decode`
+/// "#463 — adding a Nth burn corner"): one `burn_margin` clear of the bottom-left (strih) burn's
+/// trailing edge (`burn_margin + burn_px + burn_margin`), same row as the other two corner
+/// burns (`burn_y = h - burn_margin - burn_px`). THREE-tier fallback for a narrow canvas where
+/// the wanted position would run off the right edge: tier 1 = wanted position; tier 2 = flush
+/// against BottomLeft's own trailing edge (`burn_margin + burn_px`, zero gap but zero overlap);
+/// tier 3 = flush against the frame's right edge (last resort, may overlap BottomRight on a
+/// canvas too narrow for two burns — same last-resort semantics as the C++/colour_sample.rs
+/// mirrors).
 fn imag_burn_rect(w: i64, h: i64, burn_px: i64, burn_margin: i64) -> Rect {
     let burn_y = h - burn_margin - burn_px;
     let wanted_x = burn_margin + burn_px + burn_margin;
+    let tier2_x = burn_margin + burn_px;
     let x = if wanted_x + burn_px <= w {
         wanted_x
+    } else if tier2_x + burn_px <= w {
+        tier2_x
     } else if w > burn_px {
         w - burn_px
     } else {
@@ -602,6 +610,42 @@ fn imag_burn_does_not_overlap_the_four_existing_qrs_or_cam1_center_burn_463() {
             }
         }
     }
+}
+
+#[test]
+fn imag_burn_rect_falls_back_to_tier_2_flush_against_strih_on_a_narrow_canvas_463() {
+    // #463 REGRESSION GUARD: the multi-resolution test above only exercises 16:9 canvases
+    // (720p/1080p/1440p/4K), where imag's WANTED position always fits and tier 2/3 of the
+    // fallback are never reached. This test targets tier 2 directly, mirroring the
+    // burn-geom.hpp mid-canvas (650×1080) C++ regression check (`burn_geom_corner_from_string_
+    // and_tiny_frame_clamp`): at production burn_px=302/burn_margin=40, a 650px-wide canvas is
+    // too narrow for the WANTED position (margin+side+margin+side = 40+302+40+302 = 684 > 650)
+    // but wide enough for tier 2 — flush against strih's (BottomLeft's) own trailing edge
+    // (margin+side+side = 40+302+302 = 644 <= 650). Confirms this Rust test-mirror picks the
+    // SAME tier-2 fallback as burn-geom.hpp and colour_sample.rs (the #463 "four independent
+    // geometry mirrors must agree" set), never overlapping strih's own [40, 342) span — the
+    // single-tier fallback this function shipped with initially could have overlapped it.
+    let (w, h, burn_px, burn_margin) = (650i64, 1080i64, 302i64, 40i64);
+    let strih = Rect {
+        x: burn_margin,
+        y: h - burn_margin - burn_px,
+        w: burn_px,
+        h: burn_px,
+    };
+    let imag = imag_burn_rect(w, h, burn_px, burn_margin);
+    assert_eq!(
+        imag.x,
+        burn_margin + burn_px,
+        "#463 expected tier-2 (flush against strih's trailing edge): imag={imag:?}"
+    );
+    assert!(
+        !imag.overlaps(&strih),
+        "#463 tier-2 fallback must not overlap strih: imag={imag:?} strih={strih:?}"
+    );
+    assert!(
+        imag.x + imag.w <= w,
+        "#463 tier-2 fallback must stay in-frame: imag={imag:?} w={w}"
+    );
 }
 
 #[test]
@@ -1033,6 +1077,23 @@ int main() {{
     }}
     if (tiny_bcl.band_cy > 30) {{
         printf("FAIL tiny BCL: band_cy=%u underflowed\n", tiny_bcl.band_cy);
+        ++fails;
+    }}
+    // #463 review: a canvas too narrow for BCL's full one-margin gap but wide enough for the
+    // tier-2 "flush against BottomLeft's trailing edge" fallback must NOT overlap BottomLeft —
+    // the single-tier "flush to the frame's right edge" fallback this replaces COULD land back
+    // inside BottomLeft's own rect on such a canvas (margin=40, side=302: BL=[40,342); a
+    // 650px-wide canvas can't fit the full gap (needs 684) but CAN fit tier 2 flush at 342).
+    auto mid_bcl = corner_placement(650, 1080, Corner::BottomCenterLeft, 302, 40);
+    auto mid_bl = corner_placement(650, 1080, Corner::BottomLeft, 302, 40);
+    if (mid_bcl.band_x < mid_bl.band_x + mid_bl.square_px) {{
+        printf("FAIL mid-canvas BCL band_x=%u overlaps BottomLeft's right edge=%u\n",
+               mid_bcl.band_x, mid_bl.band_x + mid_bl.square_px);
+        ++fails;
+    }}
+    if (mid_bcl.band_x + mid_bcl.square_px > 650) {{
+        printf("FAIL mid-canvas BCL band_x=%u+square_px=%u exceeds the 650px frame\n",
+               mid_bcl.band_x, mid_bcl.square_px);
         ++fails;
     }}
 

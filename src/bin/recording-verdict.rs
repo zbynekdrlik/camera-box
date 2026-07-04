@@ -465,11 +465,17 @@ struct NodeVerdict {
     optical_span_frames: usize,
     /// #463 — imag's SECOND independent zero-loss signal: the contiguity of its OWN digital
     /// corner burn (run_id [`BURN_RUN_ID_IMAG`]), separate from `contiguity` (which for imag
-    /// carries the cam2 OPTICAL tick contiguity — see [`node_verdict_for_imag`]). `None` for
-    /// every OTHER node (cam1/strih/stream never populate this — they have no "second" burn
-    /// signal beyond `contiguity` itself) AND for an imag recording with NO burn decoded at all
-    /// (fallback to optical-only, unchanged pre-#463 behaviour). `Some(nc)` ⇒ the burn WAS
-    /// decoded; `nc.is_contiguous()` decides whether it also passes — see [`Self::imag_burn_ok`].
+    /// carries the cam2 OPTICAL tick contiguity — see [`node_verdict_for_imag`]).
+    ///
+    /// `None` at the OUTER `Option` level means "this field does not apply to this node at
+    /// all" — set for every NON-imag node (cam1/strih/stream never populate this; they have no
+    /// "second" burn signal beyond `contiguity` itself). For imag SPECIFICALLY this outer
+    /// `Option` is ALWAYS `Some` (`node_verdict_for_imag` always computes it); the "no burn
+    /// decoded in this recording at all" case (the pre-#463 optical-only fallback) is
+    /// represented ONE LEVEL DEEPER, as `Some(nc)` where `nc.first_id.is_none()` — NOT as the
+    /// outer `None`. See [`Self::imag_burn_ok`] for the exact decision and
+    /// [`camera_box::imag_tick_gate::optional_signal_ok`] for the shared "absent is fine,
+    /// present-but-broken fails" rule this delegates to.
     imag_burn_contiguity: Option<NodeContiguity>,
 }
 
@@ -496,10 +502,34 @@ impl NodeVerdict {
     /// DECODED-but-gappy imag burn returns `false`, per the strict-test mandate: once a
     /// stronger digital proof exists it must ALSO hold, never silently ignored in favour of the
     /// weaker optical read alone.
+    ///
+    /// Delegates the "absent is fine, present-but-broken fails" decision to
+    /// [`camera_box::imag_tick_gate::optional_signal_ok`] — the SAME shared rule
+    /// [`camera_box::imag_tick_gate::ImagVerdict::is_zero_loss`] uses for its own burn term, so
+    /// the rule lives in exactly one place instead of two independent reimplementations.
     fn imag_burn_ok(&self) -> bool {
-        match &self.imag_burn_contiguity {
-            None => true,
-            Some(nc) => nc.first_id.is_none() || nc.is_contiguous(),
+        camera_box::imag_tick_gate::optional_signal_ok(self.imag_burn_signal())
+    }
+    /// #463 — the raw `Option<bool>` signal [`Self::imag_burn_ok`] feeds to the shared
+    /// `optional_signal_ok` rule: `None` when the field doesn't apply (non-imag node) or the
+    /// burn wasn't decoded at all (the optical-only fallback); `Some(bool)` = the burn WAS
+    /// decoded, is it contiguous. Factored out so `node_verdict_lines`'s printer can reuse the
+    /// EXACT same "is the burn present-but-broken" decision instead of re-deriving it a third
+    /// time (the #463 review caught two independent copies of this decision).
+    fn imag_burn_signal(&self) -> Option<bool> {
+        self.imag_burn_contiguity
+            .as_ref()
+            .and_then(|nc| nc.first_id.is_some().then(|| nc.is_contiguous()))
+    }
+    /// #463 — imag's digital corner burn IS present in this recording but NOT itself
+    /// contiguous (the ONE case [`Self::imag_burn_ok`] returns `false` for). Returns the
+    /// burn's own [`NodeContiguity`] only in that specific case (`None` when not applicable, or
+    /// present-and-clean) — lets `node_verdict_lines` print the exact missing-id detail without
+    /// re-deriving the three-way match itself.
+    fn imag_burn_broken(&self) -> Option<&NodeContiguity> {
+        match self.imag_burn_signal() {
+            Some(false) => self.imag_burn_contiguity.as_ref(),
+            _ => None,
         }
     }
     /// #376 — is this node's cam2 OPTICAL undecodable RATE within the calibrated moiré floor?
@@ -1152,10 +1182,18 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     // headline's COLLAPSED line stands as the sole verdict.
     if v.is_zero() && span_ok {
         // #463 — imag: when the recording ALSO carried a decoded digital corner burn, say so —
-        // two independent zero-loss proofs, not just the optical one.
-        let burn_note = match &v.imag_burn_contiguity {
-            Some(nc) if nc.first_id.is_some() => " AND digital corner burn CONTIGUOUS (#463)",
-            _ => "",
+        // two independent zero-loss proofs, not just the optical one. Includes the burn's own
+        // id range + present count (comprehensive-logging: values, not just a bare label) —
+        // matches the detail level the FAILURE branch below already prints for this same field.
+        let burn_note = match v
+            .imag_burn_contiguity
+            .as_ref()
+            .and_then(|nc| Some((nc.first_id?, nc.last_id?, nc.present_count)))
+        {
+            Some((first, last, present)) => {
+                format!(" AND digital corner burn CONTIGUOUS (ids {first}..={last}, {present} present, #463)")
+            }
+            None => String::new(),
         };
         lines.push(format!(
             "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}) AND cam2 optical read complete{burn_note}.",
@@ -1165,22 +1203,24 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     }
     // #463 — imag's digital corner burn WAS decoded but is NOT itself contiguous: a second,
     // independent proof exists and disagrees with the (possibly clean) optical read — FAIL,
-    // never silently overridden by the weaker optical-only proof (strict-test mandate).
-    if let Some(nc) = &v.imag_burn_contiguity {
-        if let (Some(first), Some(last), false) =
-            (nc.first_id, nc.last_id, nc.missing_ids.is_empty())
-        {
-            lines.push(format!(
-                "  [{}] NOT zero — imag's OWN digital corner burn (run_id {BURN_RUN_ID_IMAG}) \
-                 is present but NOT contiguous: {} missing id(s) in {first}..={last} ({} \
-                 present of {} expected). The optical tick may be clean, but the digital burn \
-                 is a SECOND independent zero-loss proof and BOTH must hold (#463).",
-                c.node,
-                nc.missing_ids.len(),
-                nc.present_count,
-                nc.expected_count,
-            ));
-        }
+    // never silently overridden by the weaker optical-only proof (strict-test mandate). Reuses
+    // `imag_burn_broken()` (the SAME decision `imag_burn_ok()`/`is_zero()` use) instead of
+    // re-deriving the "present but not contiguous" condition a third time (the #463 review
+    // caught two independent re-derivations of one rule).
+    if let Some((nc, first, last)) = v
+        .imag_burn_broken()
+        .and_then(|nc| Some((nc, nc.first_id?, nc.last_id?)))
+    {
+        lines.push(format!(
+            "  [{}] NOT zero — imag's OWN digital corner burn (run_id {BURN_RUN_ID_IMAG}) \
+             is present but NOT contiguous: {} missing id(s) in {first}..={last} ({} \
+             present of {} expected). The optical tick may be clean, but the digital burn \
+             is a SECOND independent zero-loss proof and BOTH must hold (#463).",
+            c.node,
+            nc.missing_ids.len(),
+            nc.present_count,
+            nc.expected_count,
+        ));
     }
     // #374 nit 2 — whether a SPECIFIC fault line (colour / optical) already explained the failure.
     let mut explained = false;
@@ -3290,9 +3330,11 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
 fn run_merge(args: &Args) -> Result<()> {
     let mut strih: Option<DecodedRec> = None;
     let mut stream: Option<DecodedRec> = None;
-    // #461: imag has no burn slot to reconcile against `--burn-*-run-id` (its expected_burns is
-    // always the empty set), so it needs no colour-carry either (colour-gate is not wired for
-    // imag in this ticket).
+    // #461/#463: imag now HAS a burn slot to reconcile too (`BURN_RUN_ID_IMAG`,
+    // `args_expected_burns_for("imag", ..)` returns `Some(vec![BURN_RUN_ID_IMAG])` — the same
+    // `partial.expected_burns != expected` WARN path below applies to an imag partial extracted
+    // with a mismatched `--burn-*-run-id` set, exactly like strih/stream). It still needs no
+    // colour-carry (colour-gate is not wired for imag in this ticket).
     let mut imag: Option<DecodedRec> = None;
     // #377 — the per-recording colour summaries carried in each partial (Some only when the box
     // extracted with --colour-gate). Threaded into the verdict so the colour gate works through the
@@ -6104,32 +6146,39 @@ mod tests {
 
     // ---- #461/#463 imag-nb optical (+ digital corner burn) zero-loss gate (EPIC #466 Topology v2) ----
 
-    /// Build N imag-nb recorded frames, each carrying ONLY a cam2-style optical payload (no
-    /// digital burn — the pre-#463 shape, and still the shape of an older recording / a build
-    /// not yet carrying imag's corner burn). Contiguous ticks 100..100+n by default; `gap_at`
-    /// (if given) removes ONE tick to simulate a dropped frame.
-    fn imag_window(n: u32, gap_at: Option<u32>) -> Vec<RecordingFrame> {
-        (0..n)
+    /// #463 review: every `imag_window`/`imag_window_with_burn` call site used the same frame
+    /// count — the parameter was never actually varied, just repeated at each call. Hardcoded
+    /// here instead of threading an unused-in-practice `n: u32` through both helpers.
+    const IMAG_WINDOW_FRAMES: u32 = 60;
+
+    /// Build [`IMAG_WINDOW_FRAMES`] imag-nb recorded frames, each carrying ONLY a cam2-style
+    /// optical payload (no digital burn — the pre-#463 shape, and still the shape of an older
+    /// recording / a build not yet carrying imag's corner burn). Contiguous ticks
+    /// 100..100+[`IMAG_WINDOW_FRAMES`] by default; `gap_at` (if given) removes ONE tick to
+    /// simulate a dropped frame.
+    fn imag_window(gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..IMAG_WINDOW_FRAMES)
             .filter(|&i| gap_at != Some(i))
             .map(|i| frame(i as u64, &[(CAM2, 100 + i)]))
             .collect()
     }
 
     /// #463 — like [`imag_window`], but every frame ALSO carries imag's own digital corner burn
-    /// (run_id [`super::BURN_RUN_ID_IMAG`], ids 10..10+n). The burn ids are kept BELOW the cam2
-    /// tick range (100..100+n) — `frame()`'s `tick = max(frame_id)` over ALL payloads on the
-    /// frame, so if the burn id were ever the LARGER of the two (a real bug caught by CI: an
-    /// earlier draft used ids 500..500+n, ABOVE the cam2 range, which made `.tick` silently
-    /// resolve to the BURN id instead of the cam2 tick on every frame) `nv.contiguity` would
-    /// stop reflecting the optical signal at all. With burn ids always < cam2 ids, `.tick` is
-    /// always the cam2 id regardless of whether the burn is present. `burn_gap_at` (when given)
-    /// omits JUST the burn payload on that one frame index (the cam2 tick stays present) — a
-    /// burn-only miss. (An "optical-only miss" needs a DIFFERENT construction — a frame with NO
-    /// cam2 payload at all has `tick: None` in real decode output, which this payload-max-based
-    /// helper cannot represent; see `node_verdict_for_imag_fails_when_optical_is_broken_even_
-    /// with_a_clean_digital_burn_463`'s direct `RecordingFrame` construction for that case.)
-    fn imag_window_with_burn(n: u32, burn_gap_at: Option<u32>) -> Vec<RecordingFrame> {
-        (0..n)
+    /// (run_id [`super::BURN_RUN_ID_IMAG`], ids 10..10+[`IMAG_WINDOW_FRAMES`]). The burn ids are
+    /// kept BELOW the cam2 tick range (100..100+n) — `frame()`'s `tick = max(frame_id)` over ALL
+    /// payloads on the frame, so if the burn id were ever the LARGER of the two (a real bug
+    /// caught by CI: an earlier draft used ids 500..500+n, ABOVE the cam2 range, which made
+    /// `.tick` silently resolve to the BURN id instead of the cam2 tick on every frame)
+    /// `nv.contiguity` would stop reflecting the optical signal at all. With burn ids always <
+    /// cam2 ids, `.tick` is always the cam2 id regardless of whether the burn is present.
+    /// `burn_gap_at` (when given) omits JUST the burn payload on that one frame index (the cam2
+    /// tick stays present) — a burn-only miss. (An "optical-only miss" needs a DIFFERENT
+    /// construction — a frame with NO cam2 payload at all has `tick: None` in real decode
+    /// output, which this payload-max-based helper cannot represent; see
+    /// `node_verdict_for_imag_fails_when_optical_is_broken_even_with_a_clean_digital_burn_463`'s
+    /// direct `RecordingFrame` construction for that case.)
+    fn imag_window_with_burn(burn_gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..IMAG_WINDOW_FRAMES)
             .map(|i| {
                 let mut payloads = vec![(CAM2, 100 + i)];
                 if burn_gap_at != Some(i) {
@@ -6143,7 +6192,7 @@ mod tests {
     #[test]
     fn node_verdict_for_imag_reports_zero_loss_when_ticks_are_contiguous_461() {
         use super::node_verdict_for_imag;
-        let frames = imag_window(60, None);
+        let frames = imag_window(None);
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             nv.is_zero(),
@@ -6176,7 +6225,7 @@ mod tests {
         use super::node_verdict_for_imag;
         // Every frame carries BOTH the cam2 optical tick AND imag's own digital corner burn,
         // both clean — the doubly-proven #463 pass.
-        let frames = imag_window_with_burn(60, None);
+        let frames = imag_window_with_burn(None);
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             nv.is_zero(),
@@ -6193,7 +6242,7 @@ mod tests {
         use super::node_verdict_for_imag;
         // The cam2 optical tick stays perfectly contiguous (every frame is present); only the
         // BURN payload is missing on frame index 30 — imag's second, independent proof disagrees.
-        let frames = imag_window_with_burn(60, Some(30));
+        let frames = imag_window_with_burn(Some(30));
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             nv.contiguity.is_contiguous(),
@@ -6264,7 +6313,7 @@ mod tests {
     fn node_verdict_for_imag_fails_when_a_tick_is_missing_461() {
         use super::node_verdict_for_imag;
         // Drop frame index 30 (painted tick 130) -> imag's camera failed to capture that instant.
-        let frames = imag_window(60, Some(30));
+        let frames = imag_window(Some(30));
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             !nv.is_zero(),
@@ -6309,7 +6358,7 @@ mod tests {
 
         // --min-secs 1 so the 60-frame @60fps window (1s) trivially clears the #373 floor.
         let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
-        let imag_frames = imag_window(60, None);
+        let imag_frames = imag_window(None);
 
         // NEITHER --strih NOR --stream supplied — imag must still be gated on its own.
         let (v, pass) = build_and_print_verdict(
@@ -6344,7 +6393,7 @@ mod tests {
         use clap::Parser;
 
         let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
-        let imag_frames = imag_window(60, Some(15));
+        let imag_frames = imag_window(Some(15));
 
         let (v, pass) = build_and_print_verdict(
             &args,
@@ -6384,7 +6433,7 @@ mod tests {
         // mismatch against the CURRENT `args_expected_burns_for("imag", ..)` (which now
         // defaults to `[BURN_RUN_ID_IMAG]`); a genuinely burn-carrying partial is covered by
         // `node_verdict_for_imag_passes_with_a_contiguous_digital_burn_present_463` above.
-        let imag_frames = imag_window(60, None);
+        let imag_frames = imag_window(None);
         let imag_p =
             RecordingPartial::from_frames("imag", &PathBuf::from("imag.mkv"), &[], imag_frames);
         let imag_path = dir.path().join("imag-partial.json");

@@ -125,10 +125,18 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
         h: side,
     });
     // bottom-center-left (imag, #463): one `margin` clear of the bottom-left burn's trailing
-    // edge (`margin + side`) — mirrors `burn_geom::Corner::BottomCenterLeft` exactly.
+    // edge (`margin + side`) — mirrors `burn_geom::Corner::BottomCenterLeft` exactly, INCLUDING
+    // its 2-tier fallback (review fix): flushing straight to the frame's right edge on a
+    // too-narrow canvas could land back inside the bottom-left rect itself (overlapping
+    // exclusion rects would leave a hole in the dodge). Tier 2 flushes against the bottom-left
+    // rect's own trailing edge instead (zero overlap, zero gap); only a canvas too small to
+    // hold even that falls through to the frame edge (tier 3, last resort).
     let bcl_x_wanted = margin.saturating_add(side).saturating_add(margin);
+    let bcl_x_tier2 = margin.saturating_add(side); // flush against the bottom-left rect's edge
     let bcl_x = if bcl_x_wanted.saturating_add(side) <= canvas_w {
         bcl_x_wanted
+    } else if bcl_x_tier2.saturating_add(side) <= canvas_w {
+        bcl_x_tier2
     } else {
         canvas_w.saturating_sub(side)
     };

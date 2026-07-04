@@ -364,7 +364,7 @@ genlock_latency_ms_from_log() {
 }
 
 # check_imag_report EXP_BUILD_SHA OBS_BUILD_SHA EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
-#   EXP_LATENCY_MS OBS_LATENCY_MS CAPABILITY_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
+#   EXP_LATENCY_MS OBS_LATENCY_MS OBS_LOG_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
 #   -> the #463 imag-nb (Topology v2, EPIC #466) host case. PURE — every value is already
 #   gathered (by [`gather_and_check_imag`], which does the actual SSH), so this function has NO
 #   I/O and is directly unit-testable, mirroring `compare_observed`'s pure-report-from-inputs
@@ -372,13 +372,21 @@ genlock_latency_ms_from_log() {
 #   report style) and returns 0 = clean, 20 = DRIFT, 11 = at least one UNKNOWN (never a silent
 #   pass — same exit-code contract as the rest of the engine).
 #
+# OBS_LOG_TEXT is the RAW log text (not a pre-extracted capability flag) — the #463 review
+# caught that pre-extracting collapsed "the log was never read at all" (SSH failure / OBS never
+# launched) and "the log WAS read but carries no genlock marker" (a genuine stock/wrong build)
+# into the same empty string, which this function then reported as a false DRIFT for a mere
+# connectivity hiccup. check_imag_report derives the marker itself via
+# genlock_capability_from_log, mirroring the sibling strih/stream `drift_check_capability`'s
+# two-tier check (empty text -> UNKNOWN; non-empty text with no marker -> DRIFT).
+#
 # Simpler than the strih/stream `--compare` path (#463 research comment): imag is a plain Linux
 # box reachable over SSH, so drift-guard can gather its OWN observed values directly instead of
 # depending on an external win-* MCP round-trip.
 check_imag_report() {
   local exp_build_sha="$1" obs_build_sha="$2" exp_distroav_sha="$3" obs_distroav_sha="$4"
   local exp_fps="$5" obs_fps="$6" exp_latency="$7" obs_latency="$8"
-  local capability_text="$9" exp_plugin_path="${10}" plugin_present="${11}"
+  local obs_log_text="$9" exp_plugin_path="${10}" plugin_present="${11}"
   local drift=0 unknown=0
 
   # 1. /opt/obs-genlock/GENLOCK_BUILD_SHA.txt — the deployed genlock build identity.
@@ -411,8 +419,15 @@ check_imag_report() {
 
   # 3. genlock render-tick capability marker present in the OBS log — the #119 wrong-build guard
   # (a stock/wrong build emits no `genlock:` line at all, regardless of marketing version).
-  if [ -n "$capability_text" ]; then
-    printf '  %-22s OK       (%s)\n' "genlock_capability" "$capability_text"
+  # Two-tier check (mirrors drift_check_capability's strih/stream logic): an EMPTY log text
+  # (SSH failed to reach imag-nb, or OBS has never been launched there) is UNKNOWN — nothing was
+  # read, never a false DRIFT for a connectivity hiccup. Only NON-EMPTY text with no marker line
+  # is the genuine #119 stock/wrong-build DRIFT.
+  if [ -z "$obs_log_text" ]; then
+    printf '  %-22s UNKNOWN  (OBS log not read on imag-nb)\n' "genlock_capability"
+    unknown=$((unknown + 1))
+  elif [ "$(genlock_capability_from_log "$obs_log_text")" = "1" ]; then
+    printf '  %-22s OK       (genlock build-unique marker present)\n' "genlock_capability"
   else
     printf '  %-22s DRIFT    (no genlock render-tick marker in the OBS log — stock/wrong build)\n' "genlock_capability"
     drift=$((drift + 1))
@@ -475,8 +490,17 @@ check_imag_report() {
 #     Windows, since the log format is platform-independent libobs text)
 gather_and_check_imag() {
   local host="$1" user="${2:-newlevel}" readme="$3"
+  # #463 review: `host=`/`user=` are operator-supplied CLI values. `--` marks the end of ssh's
+  # own option parsing so a value starting with `-` (e.g. a stray `-oProxyCommand=...`) can
+  # never be parsed as an ssh FLAG instead of the positional target (OpenSSH argument
+  # injection). `-o BatchMode=yes` refuses an interactive password prompt (fail fast instead of
+  # hanging waiting for input this non-interactive check can never supply). `timeout 15` bounds
+  # the WHOLE call — `-o ConnectTimeout=10` only bounds the TCP connect phase; a remote command
+  # that blocks AFTER connecting (a stalled mount, a wedged log directory) would otherwise hang
+  # this check forever.
   local target="${user}@${host}"
   local plugin_path="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+  local ssh_cmd=(timeout 15 ssh -o ConnectTimeout=10 -o BatchMode=yes -- "$target")
 
   local exp_build_sha exp_distroav_sha exp_fps exp_latency
   exp_build_sha="$(pinned_setting "$readme" genlock_build_sha_imag)"
@@ -484,27 +508,49 @@ gather_and_check_imag() {
   exp_fps="$(pinned_setting "$readme" output_fps_imag)"
   exp_latency="$(pinned_setting "$readme" genlock_latency_ms_imag)"
 
-  local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency capability plugin_present
-  obs_build_sha="$(ssh -o ConnectTimeout=10 "$target" \
+  local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present
+  obs_build_sha="$("${ssh_cmd[@]}" \
     'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
-  obs_distroav_sha="$(ssh -o ConnectTimeout=10 "$target" \
-    "sha256sum '$plugin_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
-  if ssh -o ConnectTimeout=10 "$target" "test -f '$plugin_path'" 2>/dev/null; then
+  # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
+  # `test -f` round-trip (one fewer SSH connection), AND distinguish an SSH CONNECTION failure
+  # (OpenSSH's own reserved exit code 255, or 124 from the `timeout` wrapper firing) from the
+  # remote command genuinely finding no file: `sha256sum` on a missing file exits non-zero with
+  # empty stdout either way, so the ssh/timeout exit code is the ONLY way to tell "imag-nb was
+  # unreachable" apart from "the file is genuinely gone". Collapsing both into a bare 0/1 (the
+  # pre-review shape) reported a transient network hiccup as a false `distroav_so_path DRIFT
+  # (not found)` alarm — never a wrong-signal pass OR a false alarm.
+  # #463 review (2nd pass): this script runs under `set -euo pipefail` (top of file) — a bare
+  # `var="$(cmd)"` with NO `|| ...` guard triggers `errexit` and ABORTS THE WHOLE SCRIPT the
+  # instant ssh/timeout returns nonzero (255/124, precisely the case being handled here),
+  # so `local ssh_rc=$?` on the next line would never even run. `|| ssh_rc=$?` puts the
+  # assignment in an OR-list (the one `set -e` exemption that actually applies: only the LAST
+  # command of an AND/OR list is errexit-checked), which both captures the real exit code AND
+  # keeps the script alive to report UNKNOWN instead of crashing. Empirically confirmed: without
+  # this guard, `--check-imag` against an unreachable imag-nb crashes with a bare exit 255
+  # instead of printing a graceful UNKNOWN report.
+  local ssh_rc=0
+  obs_distroav_sha="$("${ssh_cmd[@]}" \
+    "sha256sum '$plugin_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null)" || ssh_rc=$?
+  if [ "$ssh_rc" -eq 255 ] || [ "$ssh_rc" -eq 124 ]; then
+    plugin_present=""  # connection failure / timeout -> UNKNOWN, never a false "missing" alarm
+  elif [ -n "$obs_distroav_sha" ]; then
     plugin_present=1
   else
     plugin_present=0
   fi
   # Most-recently-modified OBS log file (OBS names logs by timestamp, no "latest" symlink).
-  obs_log="$(ssh -o ConnectTimeout=10 "$target" \
+  obs_log="$("${ssh_cmd[@]}" \
     'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.log 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
     2>/dev/null || true)"
   obs_fps="$(fps_from_log "$obs_log")"
   obs_latency="$(genlock_latency_ms_from_log "$obs_log")"
-  capability="$(genlock_capability_from_log "$obs_log")"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered; FAILS loudly on drift) =="
+  # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see
+  # check_imag_report's doc comment for why pre-extracting collapsed "log unreadable" and "log
+  # read, no marker" into the same false-DRIFT signal.
   check_imag_report "$exp_build_sha" "$obs_build_sha" "$exp_distroav_sha" "$obs_distroav_sha" \
-    "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$capability" "$plugin_path" "$plugin_present"
+    "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present"
 }
 
 # range_tracked_source_name EXPECTED_CSV -> the NAME of the (first) source in a mixed
