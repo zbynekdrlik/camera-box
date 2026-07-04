@@ -33,6 +33,40 @@ TOTAL_STEPS=10
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
+# --- PURE functions (no network, no root, no side effects — sourced + unit-tested from
+# tests/setup_imag_pure_functions.rs against synthetic fixtures; the BASH_SOURCE guard below
+# skips the destructive provisioning flow when sourced) ---------------------------------------
+
+# manifest_sha_for_path MANIFEST RELPATH -> the #120 manifest's recorded sha256 for RELPATH, or
+# fails loud if RELPATH isn't listed. Narrow, single-purpose lookup (NOT a full bundle-completeness
+# walk like scripts/genlock-manifest.sh --check) — setup-imag.sh only ever needs TWO specific
+# files verified (libobs.so.30 + distroav.so), never all ~1600 bundle files, so hashing everything
+# would be pure waste (the bundle also carries the Qt frontend + locale data + default plugins,
+# none of which this script installs). setup-imag.sh is copied to the box standalone (no sibling
+# scripts/genlock-manifest.sh checked out there), so this cannot shell out to the repo's own tool.
+manifest_sha_for_path() {
+    local manifest="$1" relpath="$2" sha
+    sha="$(jq -r --arg p "$relpath" '.files[] | select(.path == $p) | .sha256' "$manifest")" \
+        || fail "cannot parse $manifest"
+    [ -n "$sha" ] || fail "#460 manifest lists no entry for $relpath — refuse to trust an unverifiable file"
+    printf '%s\n' "$sha"
+}
+
+# verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
+verify_file_sha() {
+    local f="$1" want="$2" label="$3" got
+    [ -f "$f" ] || fail "$label: file missing at $f"
+    got="$(sha256sum "$f" | awk '{print $1}')"
+    [ "$got" = "$want" ] || fail "$label: sha256 mismatch (want $want got $got) — corrupted/tampered artifact"
+}
+
+# --- source-guard: when sourced (the unit tests), stop here — never run the destructive
+# provisioning flow below. Same convention as scripts/launch-obs-genlock.sh /
+# scripts/genlock-manifest.sh / scripts/drift-guard.sh. -----------------------------------------
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    return 0
+fi
+
 [ "$EUID" -eq 0 ] || fail "run as root (sudo)"
 id "$DESKTOP_USER" >/dev/null 2>&1 || fail "user $DESKTOP_USER missing"
 
@@ -176,28 +210,10 @@ DISTROAV_REAL="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
 
 command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
 
-# manifest_sha_for_path MANIFEST RELPATH -> the #120 manifest's recorded sha256 for RELPATH, or
-# fails loud if RELPATH isn't listed. Narrow, single-purpose lookup (NOT a full bundle-completeness
-# walk like scripts/genlock-manifest.sh --check) — setup-imag.sh only ever needs TWO specific
-# files verified (libobs.so.30 + distroav.so), never all ~1600 bundle files, so hashing everything
-# would be pure waste (the bundle also carries the Qt frontend + locale data + default plugins,
-# none of which this script installs). setup-imag.sh is copied to the box standalone (no sibling
-# scripts/genlock-manifest.sh checked out there), so this cannot shell out to the repo's own tool.
-manifest_sha_for_path() {
-    local manifest="$1" relpath="$2" sha
-    sha="$(jq -r --arg p "$relpath" '.files[] | select(.path == $p) | .sha256' "$manifest")" \
-        || fail "cannot parse $manifest"
-    [ -n "$sha" ] || fail "#460 manifest lists no entry for $relpath — refuse to trust an unverifiable file"
-    printf '%s\n' "$sha"
-}
-
-# verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
-verify_file_sha() {
-    local f="$1" want="$2" label="$3" got
-    [ -f "$f" ] || fail "$label: file missing at $f"
-    got="$(sha256sum "$f" | awk '{print $1}')"
-    [ "$got" = "$want" ] || fail "$label: sha256 mismatch (want $want got $got) — corrupted/tampered artifact"
-}
+# manifest_sha_for_path() and verify_file_sha() are defined at the TOP of this file (pure
+# functions, no root/network needed) — see the source-guard block near the top for why: they are
+# sourced + unit-tested directly against synthetic fixtures from
+# tests/setup_imag_pure_functions.rs, which needs the destructive flow below to be skippable.
 
 DEPLOYED_SHA=""
 [ -f "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" ] && DEPLOYED_SHA="$(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt")"
@@ -208,8 +224,13 @@ if ! command -v gh >/dev/null 2>&1; then
     # materialised string can't truncate a still-writing upstream process under pipefail).
     GH_RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest)" \
         || fail "could not reach api.github.com/repos/cli/cli/releases/latest"
+    # `|| true` is load-bearing: if BOTH greps find zero matches (e.g. the GitHub API response
+    # shape ever changes), `grep` exits non-zero, and under pipefail that propagates to this bare
+    # assignment — `set -e` would abort the script HERE, before the very next line's intended
+    # `fail "no gh CLI ... asset found"` ever runs, with NO diagnostic at all. Same footgun class
+    # (and same fix) as the LATEST_LOG lookup in step 10 — found in review.
     GH_DEB_URL="$(printf '%s' "$GH_RELEASE_JSON" \
-        | grep -oE '"browser_download_url": *"[^"]*linux_amd64\.deb"' | grep -oE 'https[^"]*' | head -1)"
+        | grep -oE '"browser_download_url": *"[^"]*linux_amd64\.deb"' | grep -oE 'https[^"]*' | head -1 || true)"
     [ -n "$GH_DEB_URL" ] || fail "no gh CLI linux_amd64 .deb asset found on latest cli/cli release"
     curl -fsSL -o /tmp/gh-cli.deb "$GH_DEB_URL"
     DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/gh-cli.deb >/dev/null \

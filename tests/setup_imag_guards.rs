@@ -487,19 +487,23 @@ fn setup_imag_still_keeps_ndi_symlink_after_genlock_rework() {
 /// Step 10's verify must be extended with the Linux equivalent of launch-obs-genlock.sh's
 /// Windows log-verify: the OBS log is the authoritative proof a stock/wrong build cannot fake.
 ///
-/// PRECISION NOTE (found in review): checking `body.contains("[distroav] plugin loaded")` alone
-/// is a WEAK test — the script's WARNING fallback text ALSO contains that exact unescaped
-/// substring (`echo "  WARNING: no '[distroav] plugin loaded' line yet..."`), while the actual
-/// functional check greps for the REGEX-escaped `\[distroav\] plugin loaded`. A loose substring
-/// check would keep passing even if the real `grep`/`if` structure were gutted and only the
-/// warning prose survived — it wouldn't be pinning the check at all, only the prose. This test
-/// asserts on the literal `grep -i` invocation text, not just "the words appear somewhere".
+/// PRECISION NOTE (found in review, TWICE — once for distroav/NDI, then again for this render-tick
+/// assertion in a later deep-review pass): checking `body.contains("render tick ENABLED")` alone
+/// is a WEAK test — that exact substring ALSO appears in the unconditional success echo
+/// (`echo "  genlock render tick ENABLED (#460 build proof)"`), which prints regardless of what
+/// the actual `grep -iE 'genlock:.*(render tick ENABLED|...)'` check found. A loose substring
+/// check would keep passing even if the real grep/fail() structure were gutted and only that
+/// success line survived. This test asserts on the literal `grep -iE` invocation text, matching
+/// the same discriminator already correctly used for the distroav/NDI asserts below.
 #[test]
 fn setup_imag_step10_verifies_genlock_log_markers() {
     let body = read(SETUP);
     assert!(
-        body.contains("render tick ENABLED") && body.contains("$OBS_CFG/logs"),
-        "{SETUP} step 10 must log-verify the genlock render-tick marker from $OBS_CFG/logs"
+        body.contains("grep -iE 'genlock:.*(render tick ENABLED") && body.contains("$OBS_CFG/logs"),
+        "{SETUP} step 10 must grep the OBS log for the literal `genlock:.*(render tick ENABLED` \
+         regex — a plain substring check on the unescaped success-echo text would incidentally \
+         match the unconditional 'genlock render tick ENABLED (#460 build proof)' print, not the \
+         actual functional check"
     );
     assert!(
         body.contains("grep -i '\\[distroav\\] plugin loaded'"),
