@@ -363,8 +363,30 @@ genlock_latency_ms_from_log() {
     | sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
 }
 
+# dantesync_locked_from_log DANTESYNC_JOURNAL_TEXT -> "locked" if a PTP LOCK/NANO or NTP-offset
+# line is present -- the SAME markers `scripts/setup-imag.sh`'s own provisioning-time dantesync
+# restart check keys on (setup-imag.sh:230, `\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset`).
+# "unlocked" when the text is NON-EMPTY (journalctl was read; dantesync is up) but carries no lock
+# marker at all -- the genuine drift case (clock never disciplined). "" when the text itself is
+# EMPTY (journalctl was never read -- SSH failure, or dantesync was never started) -- UNKNOWN,
+# never a false "unlocked" DRIFT for a mere connectivity hiccup. PURE -- no I/O -- mirrors
+# fps_from_log / genlock_latency_ms_from_log's two-tier shape. #489, spun out of #479.
+dantesync_locked_from_log() {
+  local log_text="$1"
+  if [ -z "$log_text" ]; then
+    printf '\n'
+    return
+  fi
+  if printf '%s\n' "$log_text" | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
+    printf 'locked\n'
+  else
+    printf 'unlocked\n'
+  fi
+}
+
 # check_imag_report EXP_BUILD_SHA OBS_BUILD_SHA EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
 #   EXP_LATENCY_MS OBS_LATENCY_MS OBS_LOG_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
+#   EXP_DANTESYNC_LOCKED OBS_DANTESYNC_LOG_TEXT
 #   -> the #463 imag-nb (Topology v2, EPIC #466) host case. PURE — every value is already
 #   gathered (by [`gather_and_check_imag`], which does the actual SSH), so this function has NO
 #   I/O and is directly unit-testable, mirroring `compare_observed`'s pure-report-from-inputs
@@ -380,6 +402,11 @@ genlock_latency_ms_from_log() {
 # genlock_capability_from_log, mirroring the sibling strih/stream `drift_check_capability`'s
 # two-tier check (empty text -> UNKNOWN; non-empty text with no marker -> DRIFT).
 #
+# OBS_DANTESYNC_LOG_TEXT (#489, spun out of #479) is likewise the RAW `journalctl -u dantesync`
+# text, for the same reason: check_imag_report derives the lock state itself via
+# dantesync_locked_from_log, so "journalctl never read" (empty text -> UNKNOWN) and "dantesync
+# running but never locked" (non-empty text, no marker -> DRIFT) stay distinguishable.
+#
 # Simpler than the strih/stream `--compare` path (#463 research comment): imag is a plain Linux
 # box reachable over SSH, so drift-guard can gather its OWN observed values directly instead of
 # depending on an external win-* MCP round-trip.
@@ -387,6 +414,11 @@ check_imag_report() {
   local exp_build_sha="$1" obs_build_sha="$2" exp_distroav_sha="$3" obs_distroav_sha="$4"
   local exp_fps="$5" obs_fps="$6" exp_latency="$7" obs_latency="$8"
   local obs_log_text="$9" exp_plugin_path="${10}" plugin_present="${11}"
+  # #489: optional trailing pair (older call sites pass only 11 args) — default-empty so a
+  # caller that hasn't been updated yet still gets a graceful UNKNOWN row, never an `unbound
+  # variable` crash under this script's `set -u` (mirrors compare_observed's own optional
+  # trailing params, e.g. `av_sync_calibrated_ms`).
+  local exp_dantesync_locked="${12:-}" obs_dantesync_log_text="${13:-}"
   local drift=0 unknown=0
 
   # 1. /opt/obs-genlock/GENLOCK_BUILD_SHA.txt — the deployed genlock build identity.
@@ -473,6 +505,29 @@ check_imag_report() {
     drift=$((drift + 1))
   fi
 
+  # 7. dantesync PTP/NTP clock lock (#489, spun out of #479's setup-imag.sh provisioning check) —
+  # imag-nb's OWN wall-clock discipline, the basis genlock's `wall-clock-slaved render tick`
+  # (genlock_wall_clock above) depends on. Mirrors the SAME journalctl markers setup-imag.sh's
+  # own provisioning-time restart check keys on (setup-imag.sh:230). Two-tier check via
+  # dantesync_locked_from_log, same shape as genlock_capability above: an EMPTY journal read (SSH
+  # failure, or the journal was never read) is UNKNOWN; a NON-EMPTY journal with no lock marker
+  # at all is a genuine DRIFT (dantesync is running but the clock never locked — genlock's timing
+  # basis is compromised even though every OTHER pin can still look clean).
+  local obs_dantesync_locked
+  obs_dantesync_locked="$(dantesync_locked_from_log "$obs_dantesync_log_text")"
+  if [ -z "$obs_dantesync_locked" ]; then
+    printf '  %-22s UNKNOWN  (journalctl -u dantesync not read on imag-nb)\n' "dantesync_locked"
+    unknown=$((unknown + 1))
+  elif [ -z "$exp_dantesync_locked" ]; then
+    printf '  %-22s UNKNOWN  (no pinned dantesync_locked_imag in README)\n' "dantesync_locked"
+    unknown=$((unknown + 1))
+  elif [ "$obs_dantesync_locked" = "$exp_dantesync_locked" ]; then
+    printf '  %-22s OK       (%s)\n' "dantesync_locked" "$obs_dantesync_locked"
+  else
+    printf '  %-22s DRIFT    (expected %s, observed %s)\n' "dantesync_locked" "$exp_dantesync_locked" "$obs_dantesync_locked"
+    drift=$((drift + 1))
+  fi
+
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
   return 0
@@ -488,6 +543,8 @@ check_imag_report() {
 #   - ~/.config/obs-studio/logs/*.log   (OBS log — the MOST RECENT file, same libobs log lines
 #     fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log already parse on
 #     Windows, since the log format is platform-independent libobs text)
+#   - `journalctl -u dantesync` (#489, spun out of #479) — the SAME PTP LOCK/NANO or NTP-offset
+#     markers scripts/setup-imag.sh's own provisioning-time restart check keys on (setup-imag.sh:230)
 gather_and_check_imag() {
   local host="$1" user="${2:-newlevel}" readme="$3"
   # #463 review: `host=`/`user=` are operator-supplied CLI values. `--` marks the end of ssh's
@@ -502,13 +559,14 @@ gather_and_check_imag() {
   local plugin_path="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
   local ssh_cmd=(timeout 15 ssh -o ConnectTimeout=10 -o BatchMode=yes -- "$target")
 
-  local exp_build_sha exp_distroav_sha exp_fps exp_latency
+  local exp_build_sha exp_distroav_sha exp_fps exp_latency exp_dantesync_locked
   exp_build_sha="$(pinned_setting "$readme" genlock_build_sha_imag)"
   exp_distroav_sha="$(pinned_setting "$readme" distroav_so_sha256_imag)"
   exp_fps="$(pinned_setting "$readme" output_fps_imag)"
   exp_latency="$(pinned_setting "$readme" genlock_latency_ms_imag)"
+  exp_dantesync_locked="$(pinned_setting "$readme" dantesync_locked_imag)"
 
-  local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present
+  local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present obs_dantesync_log
   obs_build_sha="$("${ssh_cmd[@]}" \
     'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
   # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
@@ -544,13 +602,20 @@ gather_and_check_imag() {
     2>/dev/null || true)"
   obs_fps="$(fps_from_log "$obs_log")"
   obs_latency="$(genlock_latency_ms_from_log "$obs_log")"
+  # #489: a bounded one-shot journal read (no `--since`/polling loop — this is a read-only drift
+  # snapshot, not setup-imag.sh's post-restart wait). -n 100 is generous vs. the lock lines'
+  # periodic cadence; a genuinely-locked dantesync always has one well within the last 100 lines.
+  obs_dantesync_log="$("${ssh_cmd[@]}" \
+    'journalctl -u dantesync --no-pager -n 100 2>/dev/null' 2>/dev/null || true)"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered; FAILS loudly on drift) =="
   # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see
   # check_imag_report's doc comment for why pre-extracting collapsed "log unreadable" and "log
-  # read, no marker" into the same false-DRIFT signal.
+  # read, no marker" into the same false-DRIFT signal. #489: `$obs_dantesync_log` is passed RAW
+  # for the identical reason.
   check_imag_report "$exp_build_sha" "$obs_build_sha" "$exp_distroav_sha" "$obs_distroav_sha" \
-    "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present"
+    "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present" \
+    "$exp_dantesync_locked" "$obs_dantesync_log"
 }
 
 # range_tracked_source_name EXPECTED_CSV -> the NAME of the (first) source in a mixed
@@ -984,10 +1049,12 @@ Usage:
   tools to read logs/settings), imag-nb is a plain Linux box reachable over SSH, so drift-guard
   gathers its OWN observed values directly: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` (the deployed
   genlock build identity), a SHA256 of `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the
-  Linux plugin binary), and the OBS log (`~/.config/obs-studio/logs/*.log`, most recent file) for
-  the genlock capability marker + the fps + latency pins. Optional `host=` / `user=` override the
+  Linux plugin binary), the OBS log (`~/.config/obs-studio/logs/*.log`, most recent file) for
+  the genlock capability marker + the fps + latency pins, and `journalctl -u dantesync` (#489) for
+  the DanteSync PTP/NTP clock-lock pin. Optional `host=` / `user=` override the
   imag-nb defaults (`10.77.9.182` / `newlevel`). Pins live in vendor/README.md as
-  `genlock_build_sha_imag` / `distroav_so_sha256_imag` / `output_fps_imag` / `genlock_latency_ms_imag`.
+  `genlock_build_sha_imag` / `distroav_so_sha256_imag` / `output_fps_imag` / `genlock_latency_ms_imag`
+  / `dantesync_locked_imag`.
 
 --compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock,
   ndi_input_latency (a comma-separated "input name=latency" list for the genlocked broadcast-path
