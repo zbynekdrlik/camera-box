@@ -909,3 +909,92 @@ fn setup_imag_process_priority_edit_runs_after_global_ini_seed() {
          before the file is created/seeded would leave the sed branch permanently a no-op"
     );
 }
+
+// ============================================================================================
+// #486 — network performance tuning (sysctl + EEE/flow-control), scoped to the ONE NDI NIC
+// resolved in step 1. Mirrors setup-device.sh STEP 14, but NEVER a for-every-interface loop —
+// imag also carries Wi-Fi/other adapters that must stay untouched.
+// ============================================================================================
+
+/// The sysctl drop-in must carry the same core low-latency knobs as the fleet's STEP 14 —
+/// larger buffers, BBR congestion control, tcp_nodelay/low_latency, IPv6 off.
+#[test]
+fn setup_imag_writes_scoped_network_performance_sysctl() {
+    let body = read(SETUP);
+    for needle in [
+        "/etc/sysctl.d/99-network-performance.conf",
+        "net.core.rmem_max = 134217728",
+        "net.core.wmem_max = 134217728",
+        "net.ipv4.tcp_congestion_control = bbr",
+        "net.ipv4.tcp_nodelay = 1",
+        "net.ipv6.conf.all.disable_ipv6 = 1",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must write `{needle}` into the network-performance sysctl drop-in \
+             (mirrors setup-device.sh STEP 14)"
+        );
+    }
+}
+
+/// #486's whole point is to scope the EEE/flow-control tuning to the ONE resolved NDI NIC — a
+/// for-every-interface loop (the setup-device.sh STEP 14 shape) would also hit imag's Wi-Fi/other
+/// adapters, which must stay untouched (imag is a notebook, unlike the single-NIC cam appliances).
+#[test]
+fn setup_imag_scopes_eee_flowcontrol_to_ndi_nic_not_every_interface() {
+    let body = read(SETUP);
+    for needle in [
+        "ethtool --set-eee \"$NIC\" eee off",
+        "ethtool -A \"$NIC\" rx off tx off",
+        "if [ \"\\$IFACE\" = \"${NIC}\" ]; then",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must scope the EEE/flow-control tuning to `{needle}` — the ONE NDI NIC \
+             resolved in step 1, not every interface"
+        );
+    }
+    assert!(
+        !body.contains("for iface in /sys/class/net/*/device"),
+        "{SETUP} must NOT loop over every interface for EEE/flow-control tuning (that is the \
+         setup-device.sh STEP 14 shape) — imag also carries Wi-Fi/other adapters that a \
+         for-every-interface loop would wrongly touch"
+    );
+}
+
+/// A networkd-dispatcher hook alone would miss a NIC that never re-fires the routable event
+/// (e.g. it was already up before the script ran) — the fix must ALSO apply immediately once at
+/// provision time AND persist across reboots via rc.local (belt-and-suspenders, some USB-ethernet
+/// chipsets reset EEE state on power cycle).
+#[test]
+fn setup_imag_reapplies_eee_off_in_rc_local_for_boot_persistence() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("ethtool --set-eee ${NIC} eee off")
+            && body.contains("ethtool -A ${NIC} rx off tx off"),
+        "{SETUP}: rc.local (re-run on every boot) must also carry the EEE/flow-control-off calls \
+         for the resolved NIC — a networkd-dispatcher hook alone is not guaranteed to re-fire on \
+         every boot"
+    );
+}
+
+/// #486 must be inserted as a NEW step strictly between step 1 (static IP / NIC discovery) and
+/// the original step 2 (governor) — per the issue's explicit instruction.
+#[test]
+fn setup_imag_network_tuning_step_lands_between_step1_and_governor_step() {
+    let body = read(SETUP);
+    let step1 = body
+        .find("Static IP ${STATIC_IP}")
+        .expect("step 1 (static IP) must exist");
+    let network_step = body
+        .find("Network performance tuning (#486)")
+        .expect("the #486 network-performance step must exist");
+    let governor_step = body
+        .find("Max performance: governor")
+        .expect("the governor step must exist");
+    assert!(
+        step1 < network_step && network_step < governor_step,
+        "{SETUP}: the #486 network-performance step must land strictly between step 1 (static \
+         IP / NIC discovery) and the governor step — per the issue's explicit placement"
+    );
+}

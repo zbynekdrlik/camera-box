@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=12
+TOTAL_STEPS=13
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -108,7 +108,58 @@ else
 fi
 
 # =============================================================================
-step 2 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
+step 2 "Network performance tuning (#486): sysctl + EEE/flow-control off on the NDI NIC"
+# =============================================================================
+# imag aggregates 6x concurrent NDI 1080p60 streams over a single USB-ethernet NIC on stock
+# buffers/EEE — exactly the jitter the cam fleet already tuned away (setup-device.sh STEP 14).
+# Scoped to the ONE $NIC resolved in step 1 above — NOT a for-every-interface loop (imag also
+# carries Wi-Fi/other adapters that must stay untouched).
+cat > /etc/sysctl.d/99-network-performance.conf <<'EOF'
+# Network performance optimizations for low-latency streaming (mirrors setup-device.sh STEP 14)
+
+# Increase network buffer sizes
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 5000
+
+# TCP optimizations
+net.ipv4.tcp_rmem = 4096 1048576 134217728
+net.ipv4.tcp_wmem = 4096 1048576 134217728
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+
+# Reduce latency
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_nodelay = 1
+
+# Disable IPv6 if not needed
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOF
+sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
+
+# EEE (Green Ethernet) + flow-control off, scoped to $NIC only. Two mechanisms, belt-and-
+# suspenders (some USB-ethernet chipsets don't implement these ioctls at all — `|| true`
+# throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug events, and
+# (2) an immediate one-time apply now (re-applied at every boot via the governor step's rc.local).
+mkdir -p /etc/networkd-dispatcher/routable.d
+cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
+#!/bin/bash
+# Disable EEE (Green Ethernet) and flow control for low latency — scoped to imag's NDI NIC only.
+if [ "\$IFACE" = "${NIC}" ]; then
+    ethtool --set-eee "${NIC}" eee off 2>/dev/null || true
+    ethtool -A "${NIC}" rx off tx off 2>/dev/null || true
+fi
+NICEOF
+chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
+ethtool --set-eee "$NIC" eee off 2>/dev/null || true
+ethtool -A "$NIC" rx off tx off 2>/dev/null || true
+echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE/flow-control off on $NIC"
+
+# =============================================================================
+step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
 # =============================================================================
 # imag's genlock render tick + FIFO ts-align read clock_gettime(CLOCK_REALTIME) — the system
 # clock. Without cluster clock discipline, imag free-runs vs the dante-disciplined cameras and
@@ -177,7 +228,7 @@ done
 echo "  dantesync locked to strih.lan via $NIC (timesyncd masked)"
 
 # =============================================================================
-step 3 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
+step 4 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
 # =============================================================================
 cat > /etc/systemd/system/cpu-performance.service <<'EOF'
 [Unit]
@@ -189,12 +240,16 @@ ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_gove
 [Install]
 WantedBy=multi-user.target
 EOF
-cat > /etc/rc.local <<'EOF'
+cat > /etc/rc.local <<EOF
 #!/bin/bash
 # imag-nb boot tuning (fleet parity): governor + USB autosuspend off (USB NIC!) + NIC powersave off
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done
-for u in /sys/bus/usb/devices/*/power/control; do echo on > "$u" 2>/dev/null; done
-for n in /sys/class/net/*/device/power/control; do echo on > "$n" 2>/dev/null; done
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "\$g"; done
+for u in /sys/bus/usb/devices/*/power/control; do echo on > "\$u" 2>/dev/null; done
+for n in /sys/class/net/*/device/power/control; do echo on > "\$n" 2>/dev/null; done
+# #486: EEE/flow-control off on the rig NDI NIC — reapplied every boot (belt-and-suspenders
+# alongside step 2's networkd-dispatcher hook; some USB-ethernet chipsets reset EEE state).
+ethtool --set-eee ${NIC} eee off 2>/dev/null || true
+ethtool -A ${NIC} rx off tx off 2>/dev/null || true
 exit 0
 EOF
 chmod +x /etc/rc.local
@@ -204,7 +259,7 @@ bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
 
 # =============================================================================
-step 4 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
+step 5 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
 # =============================================================================
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
@@ -225,7 +280,7 @@ gs org.gnome.desktop.screensaver lock-enabled false
 gs org.gnome.desktop.screensaver idle-activation-enabled false
 
 # =============================================================================
-step 5 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 6 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -248,7 +303,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 6 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 7 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -258,7 +313,7 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 7 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 8 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
@@ -469,7 +524,7 @@ else
 fi
 
 # =============================================================================
-step 8 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 9 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -497,7 +552,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 9 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+step 10 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
 # imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
 # masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
@@ -559,7 +614,7 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 10 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 11 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -573,7 +628,7 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 11 "Launch OBS on the desktop session (X11 :0)"
+step 12 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -591,7 +646,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 12 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 13 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
