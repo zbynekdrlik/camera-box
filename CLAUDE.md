@@ -47,70 +47,58 @@ unwanted auto-close.
 
 ## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
 
-This repo's autopilot workers run directly in `~/devel/camera-box` on dev1 with **no git
-worktree isolation** — every worker's `git commit`/`git push` operates on the SAME local
-checkout and the SAME local `dev` branch ref. If the supervisor ever dispatches two workers into
-this repo at once (violates `two-branch-workflow.md`'s "dispatch serially — one active worker per
-repo", but has happened), their commits land on the SAME linear `dev` history, interleaved by
-whichever process commits first — there is no isolation and no conflict warning.
+`~/devel/camera-box` is a single shared clone with **no git worktree isolation** — every worker's
+`git commit`/`git push` operates on the SAME local checkout, the SAME git index, and the SAME
+local `dev` branch ref, not just the same remote branch. If the supervisor ever dispatches two
+workers into this repo at once (violates `two-branch-workflow.md`'s "dispatch serially — one
+active worker per repo", but has happened), their commits interleave on one linear history with
+no isolation and no conflict warning.
 
-**Incident (2026-07-04):** worker A (#499+#500, `setup-imag.sh`) and worker B (#505, a GL PBO-orphan
-fix) both committed to `dev` concurrently. Worker A protected its own pushes by pushing an exact
-commit SHA (`git push origin <own-sha>:refs/heads/dev`, never a bare `git push origin dev`) so
-worker B's not-yet-pushed commits weren't dragged to `origin` prematurely — but a `git commit` run
-by A ON TOP of B's already-advanced local HEAD unavoidably included B's ancestry on the next push
-(a git push always carries a commit's full ancestor chain; there is no way to exclude mid-branch
-commits without a force-push, which is banned). Net result: worker A's PR ended up also shipping
-worker B's fully-complete #505 work, auto-closing it via B's own `fix: #505 ...` commit title.
-Harmless here (B's work was genuinely finished + TDD'd), but in a worse timing it could ship a
-STILL-IN-PROGRESS body of foreign work through the wrong PR with no review of it.
+**Incident (2026-07-04):** worker A (#499+#500, `setup-imag.sh`) and worker B (#505, a GL
+PBO-orphan fix) both committed to `dev` concurrently. Worker A protected its pushes by pushing an
+exact commit SHA (`git push origin <own-sha>:refs/heads/dev`, never a bare `git push origin dev`)
+so B's not-yet-pushed commits weren't dragged to `origin` prematurely — but a `git commit` A ran ON
+TOP of B's already-advanced local HEAD unavoidably included B's ancestry on the next push (a push
+always carries a commit's full ancestor chain; excluding mid-branch commits needs a banned
+force-push). Net result: A's PR ended up also shipping B's fully-complete #505 work, auto-closing
+it via B's own `fix: #505 ...` commit title. Harmless here (B's work was genuinely finished +
+TDD'd), but in a worse timing it could ship a STILL-IN-PROGRESS body of foreign work through the
+wrong PR with no review of it.
 
-**Mitigation for a worker that detects this mid-flight** (`git log --oneline -5` shows commits you
-didn't write, or `git status` shows files you never touched): (1) NEVER `git push origin dev`
-bare — always push your own exact last commit SHA (`git push origin <sha>:refs/heads/dev`) so you
-never ship more than you intend; (2) before every `git commit`, `git log --oneline -3` to confirm
-HEAD is still what you expect; (3) if a stray untracked/modified file you didn't create shows up in
-`git status`, NEVER `git add -A` — stage only the exact paths you touched; if one still gets swept
-in by a shared-index race, `git rm --cached <path>` in a follow-up commit (never delete the file
-from disk — it's someone else's live work); (4) NEVER `git reset`/force-push to "undo" another
-session's commits from the shared local branch — you'd be mutating a ref the other process may
-still be relying on mid-operation; (5) note the collision plainly in your evidence block/autopilot
-log and, if a foreign commit auto-closed an issue that wasn't yours, explain it via
-`gh issue comment <N>` for traceability. The supervisor should prefer serial dispatch or
-per-worker `git worktree` isolation for this repo going forward.
+**Consequences + mitigations, confirmed live:**
 
-## GOTCHA — two autopilot workers in the SAME checkout share one git index/branch ref
-
-`/home/newlevel/devel/camera-box` is a single shared clone. If two autopilot workers are ever
-dispatched concurrently (violates the intended "one active worker per repo" but has happened in
-practice — 2026-07-04, issues #499/#500 vs #505), they share the SAME working tree, index, and
-local `dev` ref, not just the same remote branch. Consequences + mitigations, confirmed live:
-
-- **`git add` + a later separate `git commit` leaves a race window** — the other worker's own
-  `git commit -a`-style commit can sweep up your staged-but-uncommitted file. **Stage and commit
-  in the same breath, and always pass an explicit pathspec:** `git commit -m "..." -- <path>`
-  (pathspec form defaults to `--only` — commits ONLY that path's working-tree content,
-  disregarding anything else staged, and leaves the other worker's staged changes untouched). If
-  a sweep still happens, `git rm --cached <path>` in a new commit restores the file to untracked
-  (don't `git rm` the file itself — the other worker's session may still need it on disk).
-- **A push by EITHER worker pushes the local `dev` ref as it stands** — including the OTHER
-  worker's already-made local commits, since both share one ref. There is no way to "un-push"
-  someone else's commits without a banned force-push/history-rewrite. If this happens, verify
-  with `gh issue view <N>` whether it changes which issue(s) a shared PR will auto-close (see the
-  GOTCHA above) and adapt the PR body / commit wording rather than fighting the git state.
-- **GitHub allows only ONE open PR per (head, base) branch pair.** If another worker's PR from
-  `dev`→`main` is already open when you're ready to push, you CANNOT open a second one — wait for
-  theirs to reach a terminal state (poll `gh pr view <N> --json state,mergedAt`, e.g. via
-  `Monitor`) before pushing, or your commits will just get folded into their PR's diff.
+- **A stray untracked/modified file you didn't create can appear in `git status`.** NEVER
+  `git add -A`/`git commit -a` — stage and commit ONLY the exact paths you touched, in the same
+  breath: `git commit -m "..." -- <path>` (the pathspec form commits ONLY that path's
+  working-tree content, ignoring anything else staged, and leaves the other worker's staged
+  changes untouched). If a sweep still happens (`git show --stat HEAD` shows a file you never
+  edited), `git rm --cached <path>` in a follow-up commit restores it to untracked — never `git
+  rm`/delete it from disk, it's someone else's live work.
+- **Before every `git commit`, `git log --oneline -3`** to confirm HEAD is still what you expect
+  — if it shows commits you didn't write, the other worker advanced the shared branch under you.
+- **A push by EITHER worker pushes the local `dev` ref as it stands**, including the other
+  worker's already-made local commits (both share one ref). There is no way to "un-push" someone
+  else's commits without a banned force-push/history-rewrite; NEVER `git reset`/force-push to try
+  — you'd be mutating a ref the other process may still be relying on mid-operation. If it
+  happens, check `gh issue view <N>` for whether it changed which issue(s) a shared PR
+  auto-closes (see the GOTCHA above) and adapt the PR body / commit wording rather than fighting
+  the git state.
+- **GitHub allows only ONE open PR per (head, base) branch pair.** If another worker's `dev`→`main`
+  PR is already open when you're ready to push, you CANNOT open a second one — wait for theirs to
+  reach a terminal state (poll `gh pr view <N> --json state,mergedAt`) before pushing, or your
+  commits just fold into their PR's diff.
 - **A later push cancels an in-flight `linux-genlock.yml` run via its
   `linux-genlock-${{ github.ref }}` concurrency group — even if the later push doesn't itself
-  touch `vendor/**`** (the group is keyed on the ref, not the specific paths). A cancelled run is
-  NOT a build proof. Re-trigger manually once the ref is stable:
-  `gh workflow run "Linux genlock build (vendored OBS + DistroAV, imag-nb parity)" --ref dev`.
-- **`linux-genlock.yml` only triggers on push to `dev`, never `main`** (its `on.push.branches` is
-  `[dev]` only). After a dev→main merge, main never automatically gets a genlock build — if you
-  need proof the exact merged main state compiles, `gh workflow run "Linux genlock build
-  (vendored OBS + DistroAV, imag-nb parity)" --ref main` explicitly.
+  touch `vendor/**`** (the group keys on the ref, not the paths). A cancelled run is NOT a build
+  proof — re-trigger manually once the ref is stable: `gh workflow run "Linux genlock build
+  (vendored OBS + DistroAV, imag-nb parity)" --ref dev`.
+- **`linux-genlock.yml` only triggers on push to `dev`, never `main`** (`on.push.branches` is
+  `[dev]` only) — after a dev→main merge, main never automatically gets a genlock build. If you
+  need proof the exact merged main state compiles, trigger it explicitly with `--ref main`.
+- Note the collision plainly in your evidence block/autopilot-log entry, and if a foreign commit
+  auto-closed an issue that wasn't yours, explain it via `gh issue comment <N>` for traceability.
+  The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
+  repo going forward.
 
 ## Local Build Policy
 
