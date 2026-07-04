@@ -236,10 +236,7 @@ impl BurnStepContiguity {
 /// trivially contiguous (a span of one; nothing can be missing inside it).
 pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
     use std::collections::BTreeSet;
-    // #480 RED: this is the OLD strict-1:1 behaviour, `step` accepted but NOT YET honored —
-    // reproduces the live bug (every odd id in the free-running pattern reads as "missing").
-    // The GREEN commit fixes this to the real step-aware excess-gap model.
-    let _ = step;
+    let step: i64 = step.max(1).into();
     let present: BTreeSet<u32> = ids.iter().copied().collect();
     let first_id = present.iter().next().copied();
     let last_id = present.iter().next_back().copied();
@@ -255,8 +252,22 @@ pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
             };
         }
     };
-    let expected_count = last.saturating_sub(first).saturating_add(1);
-    let missing_ids: Vec<u32> = (first..=last).filter(|id| !present.contains(id)).collect();
+    // expected = the number of step-grid points from first to last inclusive. Diagnostic only
+    // (mirrors `TickContiguity::expected_count`'s role); i64 math avoids an underflow panic if
+    // `step` were ever 0 (guarded above by `.max(1)`) or first==last (span of one ⇒ exactly 1).
+    let expected_count = ((last as i64 - first as i64) / step + 1).max(1) as u32;
+    let mut missing_ids: Vec<u32> = Vec::new();
+    let mut prev = first;
+    for &id in present.iter().skip(1) {
+        let gap = id as i64 - prev as i64;
+        if gap > step {
+            let excess = gap / step - 1;
+            for k in 1..=excess {
+                missing_ids.push((prev as i64 + k * step) as u32);
+            }
+        }
+        prev = id;
+    }
     BurnStepContiguity {
         first_id: Some(first),
         last_id: Some(last),

@@ -38,8 +38,8 @@
 
 use anyhow::{Context, Result};
 use camera_box::probe::burn_contiguity::{
-    burn_contiguity, burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind,
-    NodeContiguity, RecordedBurnFrame,
+    burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind, NodeContiguity,
+    RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
     analyze_recording_with_burns, extract_frames_png, select_frames_to_extract, RecordingFrame,
@@ -1042,19 +1042,29 @@ fn node_verdict_with_optical(
 ///
 /// **#463 — imag NOW ALSO carries its own digital corner burn** (run_id [`BURN_RUN_ID_IMAG`],
 /// the OBS filter's `Corner::BottomCenterLeft`). When the recording carries it, its OWN
-/// first..=last contiguity is ANDed with the optical proof above (stricter — see
+/// contiguity is ANDed with the optical proof above (stricter — see
 /// [`NodeVerdict::imag_burn_ok`]); a recording with NO burn decoded at all falls back to the
 /// optical-only proof, unchanged from pre-#463 behaviour.
+///
+/// **#480 — the burn's OWN contiguity is STEP-AWARE, not strict first..=last.** A live 300s rig
+/// recording proved imag's burn free-runs at EXACTLY 2x the recorded rate (Studio-Mode
+/// double-render — see [`camera_box::imag_tick_gate::IMAG_BURN_RENDER_STEP`]'s doc for the
+/// confirmed root cause): every odd burn id is absent BY DESIGN, which the old strict-1:1 check
+/// read as ~18600 phantom drops on a recording that lost ZERO real frames (the optical tick
+/// already proved 0 REAL DROP). [`camera_box::imag_tick_gate::burn_step_contiguity`] models the
+/// expected step so a forward gap of exactly the step is jitter/design, not loss, while a LARGER
+/// gap still charges the excess as a genuine drop — never weakening the gate, only correctly
+/// modeling it (`imag_tick_gate.rs`'s #480 test block reproduces the exact false-fail).
 ///
 /// Sibling of [`node_verdict_with_optical`] but structurally simpler: imag has no [`NodeSpec`],
 /// no pixel-proof extraction (out of scope for this ticket — the frame indices ARE known via
 /// [`RecordingFrame::frame_index`], a future ticket can wire it the same way
-/// [`node_verdict_with_optical`] does), and no colour gate (not wired for imag yet). The
-/// tick-contiguity ARITHMETIC itself is the Tier-0 pure [`camera_box::imag_tick_gate::
-/// tick_contiguity`] — this function is the thin probe-gated glue that extracts
-/// [`RecordingFrame::tick`] (+ the burn ids via [`burn_ids_in`] / [`burn_contiguity`]) and
-/// converts the result into the SAME [`NodeContiguity`] / [`NodeVerdict`] shape every other node
-/// uses, so `is_zero()` / `print_node_verdict` / `node_verdict_json` all work for imag too.
+/// [`node_verdict_with_optical`] does), and no colour gate (not wired for imag yet). Both the
+/// optical tick contiguity AND the step-aware burn contiguity are the Tier-0 pure
+/// [`camera_box::imag_tick_gate`] functions — this function is the thin probe-gated glue that
+/// extracts [`RecordingFrame::tick`] (+ the burn ids via [`burn_ids_in`]) and converts the result
+/// into the SAME [`NodeContiguity`] / [`NodeVerdict`] shape every other node uses, so `is_zero()`
+/// / `print_node_verdict` / `node_verdict_json` all work for imag too.
 fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) -> NodeVerdict {
     // #463: imag's OWN burn is now a known id — exclude it from "any non-burn payload is cam2's
     // optical paint" (mirrors `frame_is_delivered_optical`'s exclusion list for strih/stream), so
@@ -1063,12 +1073,25 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     let ticks: Vec<u32> = frames.iter().filter_map(|f| f.tick).collect();
     let tc = camera_box::imag_tick_gate::tick_contiguity(&ticks);
 
-    // #463: imag's OWN digital corner burn, decoded the same way every other node's burn is
-    // ([`burn_ids_in`] + [`burn_contiguity`]). `first_id.is_none()` (nothing decoded at all) is
-    // the "no burn in this recording" fallback case — the NodeVerdict::imag_burn_ok() consumer
-    // treats it as pass-through, so a pre-#463-build recording keeps working unchanged.
+    // #480: imag's OWN digital corner burn, decoded the same way every other node's burn is
+    // ([`burn_ids_in`]), but gated with the STEP-AWARE model (`burn_step_contiguity`), not the
+    // strict 1:1 `burn_contiguity` — see this function's doc comment for the confirmed root
+    // cause. `first_id.is_none()` (nothing decoded at all) is still the "no burn in this
+    // recording" fallback case — the NodeVerdict::imag_burn_ok() consumer treats it as
+    // pass-through, so a pre-#463-build recording keeps working unchanged.
     let imag_burn_ids = burn_ids_in(frames, BURN_RUN_ID_IMAG);
-    let imag_burn_contiguity = burn_contiguity("imag-burn", &imag_burn_ids);
+    let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(
+        &imag_burn_ids,
+        camera_box::imag_tick_gate::IMAG_BURN_RENDER_STEP,
+    );
+    let imag_burn_contiguity = NodeContiguity {
+        node: "imag-burn".to_string(),
+        first_id: burn_sc.first_id,
+        last_id: burn_sc.last_id,
+        present_count: burn_sc.present_count,
+        expected_count: burn_sc.expected_count,
+        missing_ids: burn_sc.missing_ids,
+    };
 
     NodeVerdict {
         contiguity: NodeContiguity {
@@ -6164,17 +6187,24 @@ mod tests {
     }
 
     /// #463 — like [`imag_window`], but every frame ALSO carries imag's own digital corner burn
-    /// (run_id [`super::BURN_RUN_ID_IMAG`], ids 10..10+[`IMAG_WINDOW_FRAMES`]). The burn ids are
-    /// kept BELOW the cam2 tick range (100..100+n) — `frame()`'s `tick = max(frame_id)` over ALL
+    /// (run_id [`super::BURN_RUN_ID_IMAG`]). **#480 update**: the burn id now steps by
+    /// [`camera_box::imag_tick_gate::IMAG_BURN_RENDER_STEP`] per recorded frame (`10 + 2*i`), NOT
+    /// 1 — the confirmed live behaviour (Studio-Mode double-render free-runs the counter at 2x
+    /// the recorded rate; see `node_verdict_for_imag`'s doc). A fixture stepping by 1 would no
+    /// longer be a REACHABLE recording shape and would silently exercise the OLD, now-wrong
+    /// model. The burn ids are kept BELOW the cam2 tick range (100..100+n) for every frame
+    /// (`10 + 2*59 = 128 < 100 + 59 = 159`) — `frame()`'s `tick = max(frame_id)` over ALL
     /// payloads on the frame, so if the burn id were ever the LARGER of the two (a real bug
     /// caught by CI: an earlier draft used ids 500..500+n, ABOVE the cam2 range, which made
     /// `.tick` silently resolve to the BURN id instead of the cam2 tick on every frame)
     /// `nv.contiguity` would stop reflecting the optical signal at all. With burn ids always <
     /// cam2 ids, `.tick` is always the cam2 id regardless of whether the burn is present.
     /// `burn_gap_at` (when given) omits JUST the burn payload on that one frame index (the cam2
-    /// tick stays present) — a burn-only miss. (An "optical-only miss" needs a DIFFERENT
-    /// construction — a frame with NO cam2 payload at all has `tick: None` in real decode
-    /// output, which this payload-max-based helper cannot represent; see
+    /// tick stays present) — a burn-only miss, modeling ONE entire recorded output frame whose
+    /// burn never reached the recording (a genuine dropped step-grid slot, not by-design
+    /// alternation). (An "optical-only miss" needs a DIFFERENT construction — a frame with NO
+    /// cam2 payload at all has `tick: None` in real decode output, which this payload-max-based
+    /// helper cannot represent; see
     /// `node_verdict_for_imag_fails_when_optical_is_broken_even_with_a_clean_digital_burn_463`'s
     /// direct `RecordingFrame` construction for that case.)
     fn imag_window_with_burn(burn_gap_at: Option<u32>) -> Vec<RecordingFrame> {
@@ -6182,7 +6212,7 @@ mod tests {
             .map(|i| {
                 let mut payloads = vec![(CAM2, 100 + i)];
                 if burn_gap_at != Some(i) {
-                    payloads.push((super::BURN_RUN_ID_IMAG, 10 + i));
+                    payloads.push((super::BURN_RUN_ID_IMAG, 10 + 2 * i));
                 }
                 frame(i as u64, &payloads)
             })
@@ -6233,8 +6263,13 @@ mod tests {
         );
         let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
         assert_eq!(burn.first_id, Some(10));
-        assert_eq!(burn.last_id, Some(69));
-        assert!(burn.missing_ids.is_empty());
+        // #480: the free-running burn steps by IMAG_BURN_RENDER_STEP (2) per recorded frame —
+        // last = 10 + 2*(IMAG_WINDOW_FRAMES-1) = 10 + 2*59 = 128, not the old step-1 69.
+        assert_eq!(burn.last_id, Some(128));
+        assert!(
+            burn.missing_ids.is_empty(),
+            "a clean step-2 free-running burn is zero loss once correctly modeled (#480): {burn:?}"
+        );
     }
 
     #[test]
@@ -6257,7 +6292,9 @@ mod tests {
         let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
         assert_eq!(
             burn.missing_ids,
-            vec![40],
+            // #480: frame 30's burn id under the step-2 model is 10 + 2*30 = 70, not the old
+            // step-1 40 — a genuinely missing step-grid slot is still caught, never masked.
+            vec![70],
             "the exact missing digital burn id must be reported"
         );
     }
