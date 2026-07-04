@@ -1562,3 +1562,54 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   `linux-genlock.yml` build (triggered only by #505's `vendor/**` changes riding along) is not a
   required/blocking check and doesn't run on `main` under normal single-issue pushes — not
   waited on to terminal (still running at report time; unrelated to #499/#500's correctness).
+
+## 2026-07-04 — #505 orphan the Linux GL PBO (root-causes #501 imag-nb multiview CPU stall)
+
+(See the #499/#500 entry above + `gh issue comment 505` for the shared-checkout collision story
+— this entry covers the fix's own substance and the CI verification completed after the merge.)
+
+- Root cause (#501): imag-nb's 6-source OBS multiview cost ~24ms/frame, CPU 101% of one core,
+  GPU idle 7-9%. Traced to `gs_texture_map()` (vendor/obs-studio/libobs-opengl/gl-texture2d.c)
+  mapping a persistent per-texture Pixel Unpack Buffer with a bare
+  `glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY)` every frame -> implicit CPU<->GPU
+  sync/fence (driver must wait for the GPU to finish the PREVIOUS frame's upload before handing
+  back a CPU pointer, since the buffer is never re-specified). Windows/D3D11 never pays this
+  (`D3D11_MAP_WRITE_DISCARD` never blocks) -- why strih's multiview is 11.5ms.
+- Fix: `glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size, GL_MAP_WRITE_BIT |
+  GL_MAP_INVALIDATE_BUFFER_BIT)` instead -- the same idiom `gl-helpers.c`'s `update_buffer()`
+  already uses for vertex/index buffer streaming in this exact codebase. Extracted the PBO
+  byte-size formula into a shared `pixel_unpack_buffer_size()` helper (used by both
+  `create_pixel_unpack_buffer()` and `gs_texture_map()`) so allocation-time and map-time size
+  can't drift apart.
+- Investigation finding: `gl-texture3d.c`'s mirrored PBO was deliberately NOT patched -- this
+  vendored OBS has no `gs_texture_map`/`gs_voltexture_map` path for `GS_TEXTURE_3D` on the GL
+  backend at all (`gs_texture_map` hard-checks `is_texture_2d()`), and the only real
+  `gs_voltexture_create` call sites (color-grade-filter.c LUTs) never request `GS_DYNAMIC` --
+  confirmed independently by the deep-review subagent via a whole-repo grep, not just asserted.
+  So there is no live instance of the anti-pattern there today; a guard test pins this so a
+  future 3D map addition is forced to apply the same fix.
+- RED `76ed47012` (`tests/gl_pbo_orphan.rs`, 3/5 assertions fail against the unfixed vendored
+  source -- verified by temporarily `git stash`-ing just the C file), GREEN `af02f9bc3`
+  (message-only amended, still fully local + unpushed at the time, to reword the title from
+  `fix #501` to `root-causes #501` -- avoids the repo's documented stray-auto-close GOTCHA,
+  since #501 needs live-rig verification before it's truly done). Docs `a76d490cf`
+  (vendor/README.md "Our patches" entry). Post-review robustness fix `9bfaaabfb` (relaxed an
+  exact-count assertion to `>=`, per the deep-review subagent's one actionable Minor finding).
+- Deep review (`superpowers:requesting-code-review`, general-purpose subagent): 0 Critical,
+  0 Important, 3 Minor (1 fixed above; 2 are pre-existing "pin-exact-tokens" convention
+  trade-offs already used repo-wide, not new problems). Independently re-derived the extracted
+  helper's arithmetic identity, grepped the whole repo for `gs_voltexture_map` (zero hits) and
+  for live `GS_DYNAMIC` 3D-texture callers (zero), and ran `tests/gl_pbo_orphan.rs` itself.
+  "Ready to merge: Yes."
+- `linux-genlock.yml` completed to terminal on BOTH branches after the merge (the other
+  worker's entry above left this "not waited on"): manually `workflow_dispatch`'d because (a)
+  the push-triggered `dev` run got CANCELLED by the `linux-genlock-${{ github.ref }}`
+  concurrency group when a later commit landed on `dev` before it finished, and (b) the
+  workflow only trigger-fires on push to `dev`, never `main`, so main never gets one
+  automatically. `dev` run 28704498351 green, `main` run 28704655280 green — both produced
+  `obs-genlock-linux-x86_64` (~91MB) + `distroav-linux-fast-so` artifacts, confirming the fix
+  compiles clean on the exact merged main-branch state, not just dev.
+- NOT done by this worker (supervisor's job per dispatch): deploy the rebuilt
+  `obs-genlock-linux-x86_64` bundle (main run 28704655280) to imag-nb and live-measure the
+  multiview render dropping from ~24ms to <14ms with the program holding 60fps while the
+  multiview is open. #501 stays OPEN until that live verification lands.
