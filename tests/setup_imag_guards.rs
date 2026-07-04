@@ -397,6 +397,58 @@ fn setup_imag_checks_idempotency_before_downloading_bundle() {
     );
 }
 
+/// #472 defense-in-depth (follow-up from PR #471 review, deliberately deferred): the no-op
+/// idempotency skip (`setup_imag_checks_idempotency_before_downloading_bundle`) trusts the
+/// on-disk SHA marker + file *existence* alone — it must ALSO re-verify the CURRENTLY INSTALLED
+/// libobs.so.30/distroav.so bytes against the manifest cached locally on the last successful
+/// swap, and fall through to a fresh re-install (never just warn) on any mismatch. Without this,
+/// a silently-reverted install (e.g. an unattended apt upgrade slipping past the apt-mark hold)
+/// would report "already deployed" forever — step 10's runtime log-verify would eventually catch
+/// it, but only after a confusing failure.
+#[test]
+fn setup_imag_reverifies_installed_bytes_on_idempotent_noop() {
+    let body = read(SETUP);
+    let cached_manifest = "$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json";
+    assert!(
+        body.contains(cached_manifest),
+        "{SETUP}: the no-op path must re-verify against the manifest CACHED at \
+         $GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json (copied there on the last successful swap) — \
+         re-verifying only ever against a freshly-downloaded bundle manifest would defeat the \
+         whole point of skipping the download on a no-op re-run"
+    );
+    assert!(
+        body.contains("manifest_sha_for_path \"$CACHED_MANIFEST\""),
+        "{SETUP}: the no-op re-verify must reuse the existing manifest_sha_for_path pure lookup \
+         (not reinvent a second jq lookup) — same discipline as the #120 install-time verify"
+    );
+    assert!(
+        body.contains("sha256sum \"$LIBOBS_REAL\"") && body.contains("sha256sum \"$DISTROAV_REAL\""),
+        "{SETUP}: the no-op re-verify must sha256 the CURRENTLY INSTALLED files (not the \
+         about-to-be-downloaded bundle) — that is the whole point of the #472 defense-in-depth \
+         check"
+    );
+    assert!(
+        body.contains("forcing re-install"),
+        "{SETUP}: a bytes mismatch on the no-op path must fall through to a fresh re-install — \
+         never just warn and keep trusting the stale on-disk marker"
+    );
+    let noop_check = body
+        .find("if [ \"$DEPLOYED_SHA\" = \"$NEW_SHA\" ]")
+        .expect("the idempotency SHA-marker check must exist");
+    let reverify = body
+        .find(cached_manifest)
+        .expect("cached manifest path must be referenced");
+    let bundle_download = body
+        .find("gh run download \"$RUN_ID\" --repo \"$GENLOCK_REPO\" -n obs-genlock-linux-x86_64")
+        .expect("the bundle download must still exist for the non-no-op path");
+    assert!(
+        noop_check < reverify && reverify < bundle_download,
+        "{SETUP}: order must be SHA-marker-check -> cached-manifest re-verify -> (only if still \
+         valid) skip, else (only then) download — the re-verify is pure local sha256, it must \
+         run BEFORE any network cost is paid"
+    );
+}
+
 /// `gh run list ... -q '.[0].databaseId'` on an EMPTY result list yields the literal text "null"
 /// (jq's normal behaviour indexing a nonexistent array element) — NOT an empty string — so a bare
 /// `[ -n "$RUN_ID" ]` guard would wrongly treat "null" as a valid id and proceed to
