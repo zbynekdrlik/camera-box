@@ -353,9 +353,11 @@ fn setup_imag_manifest_lookup_never_inlined_in_multi_arg_call() {
         );
     }
     assert_eq!(
-        call_lines, 2,
-        "{SETUP}: expected exactly 2 manifest_sha_for_path call sites (libobs.so.30 + distroav.so) \
-         — found {call_lines}; update this test if the call count genuinely changed"
+        call_lines, 4,
+        "{SETUP}: expected exactly 4 manifest_sha_for_path call sites — the original install-time \
+         verify (libobs.so.30 + distroav.so) PLUS the #472 no-op re-verify (same two files, \
+         looked up again from the CACHED manifest) — found {call_lines}; update this test if the \
+         call count genuinely changed"
     );
 }
 
@@ -394,6 +396,59 @@ fn setup_imag_checks_idempotency_before_downloading_bundle() {
         headsha_call < noop_check && noop_check < bundle_download,
         "{SETUP}: order must be resolve-headSha -> idempotency-check -> (only then) download — \
          a no-op re-run must never pay the bundle download cost"
+    );
+}
+
+/// #472 defense-in-depth (follow-up from PR #471 review, deliberately deferred): the no-op
+/// idempotency skip (`setup_imag_checks_idempotency_before_downloading_bundle`) trusts the
+/// on-disk SHA marker + file *existence* alone — it must ALSO re-verify the CURRENTLY INSTALLED
+/// libobs.so.30/distroav.so bytes against the manifest cached locally on the last successful
+/// swap, and fall through to a fresh re-install (never just warn) on any mismatch. Without this,
+/// a silently-reverted install (e.g. an unattended apt upgrade slipping past the apt-mark hold)
+/// would report "already deployed" forever — step 10's runtime log-verify would eventually catch
+/// it, but only after a confusing failure.
+#[test]
+fn setup_imag_reverifies_installed_bytes_on_idempotent_noop() {
+    let body = read(SETUP);
+    let cached_manifest = "$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json";
+    assert!(
+        body.contains(cached_manifest),
+        "{SETUP}: the no-op path must re-verify against the manifest CACHED at \
+         $GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json (copied there on the last successful swap) — \
+         re-verifying only ever against a freshly-downloaded bundle manifest would defeat the \
+         whole point of skipping the download on a no-op re-run"
+    );
+    assert!(
+        body.contains("manifest_sha_for_path \"$CACHED_MANIFEST\""),
+        "{SETUP}: the no-op re-verify must reuse the existing manifest_sha_for_path pure lookup \
+         (not reinvent a second jq lookup) — same discipline as the #120 install-time verify"
+    );
+    assert!(
+        body.contains("sha256sum \"$LIBOBS_REAL\"")
+            && body.contains("sha256sum \"$DISTROAV_REAL\""),
+        "{SETUP}: the no-op re-verify must sha256 the CURRENTLY INSTALLED files (not the \
+         about-to-be-downloaded bundle) — that is the whole point of the #472 defense-in-depth \
+         check"
+    );
+    assert!(
+        body.contains("forcing re-install"),
+        "{SETUP}: a bytes mismatch on the no-op path must fall through to a fresh re-install — \
+         never just warn and keep trusting the stale on-disk marker"
+    );
+    let noop_check = body
+        .find("if [ \"$DEPLOYED_SHA\" = \"$NEW_SHA\" ]")
+        .expect("the idempotency SHA-marker check must exist");
+    let reverify = body
+        .find(cached_manifest)
+        .expect("cached manifest path must be referenced");
+    let bundle_download = body
+        .find("gh run download \"$RUN_ID\" --repo \"$GENLOCK_REPO\" -n obs-genlock-linux-x86_64")
+        .expect("the bundle download must still exist for the non-no-op path");
+    assert!(
+        noop_check < reverify && reverify < bundle_download,
+        "{SETUP}: order must be SHA-marker-check -> cached-manifest re-verify -> (only if still \
+         valid) skip, else (only then) download — the re-verify is pure local sha256, it must \
+         run BEFORE any network cost is paid"
     );
 }
 
@@ -599,6 +654,33 @@ fn setup_imag_latest_log_lookup_survives_empty_glob_under_pipefail() {
         "{SETUP}: the LATEST_LOG lookup must end in `| head -1 || true` — without it, an empty \
          log directory (glob matches nothing) makes `ls` fail non-zero, and under pipefail that \
          silently aborts the whole script via set -e BEFORE the intended fail() check can run"
+    );
+}
+
+/// #476: a genlock RE-deploy (step 6) force-restarts OBS to load the swapped bytes. A leftover
+/// crash sentinel from that force-restart then makes the relaunched OBS pop the "Crash or
+/// unclean shutdown detected" recovery modal and hang headless — WebSocket :4455 never comes
+/// up (hit live 2026-07-04, recovered by hand). Step 9 must clear
+/// ~/.config/obs-studio/.sentinel/* BEFORE launching obs, mirroring the Windows
+/// launch-obs-genlock.sh sentinel-clear convention.
+#[test]
+fn setup_imag_clears_obs_crash_sentinel_before_launch() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("rm -rf \"${OBS_CFG}/.sentinel\""),
+        "{SETUP} must remove ${{OBS_CFG}}/.sentinel/* before launching OBS (mirrors the Windows \
+         launch-obs-genlock.sh `Remove-Item .sentinel\\*` convention, #476)"
+    );
+    let sentinel_clear = body
+        .find("rm -rf \"${OBS_CFG}/.sentinel\"")
+        .expect("sentinel-clear line must exist");
+    let obs_launch = body
+        .find("nohup obs >/tmp/obs-launch.log")
+        .expect("{SETUP} must launch obs via nohup");
+    assert!(
+        sentinel_clear < obs_launch,
+        "{SETUP}: the crash-sentinel clear must happen BEFORE the obs launch line — a stale \
+         sentinel from a force-restart otherwise pops the recovery modal and hangs OBS headless"
     );
 }
 

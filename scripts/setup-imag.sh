@@ -267,7 +267,34 @@ fi
 NEW_SHA="$(gh run view "$RUN_ID" --repo "$GENLOCK_REPO" --json headSha -q .headSha)"
 [ -n "$NEW_SHA" ] || fail "could not read headSha for run $RUN_ID"
 
+NOOP_VALID=0
 if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ]; then
+    NOOP_VALID=1
+    # #472 defense-in-depth (PR #471 review, deliberately deferred): the SHA-marker + file
+    # *existence* check above trusts the on-disk marker without re-verifying the installed
+    # BYTES. If the deployed libobs.so.30/distroav.so were ever silently reverted (e.g. an
+    # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
+    # re-run would wrongly report "already deployed" and skip re-swapping — step 10's runtime
+    # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
+    # the CURRENTLY INSTALLED files against the manifest cached locally on the LAST successful
+    # swap (pure local sha256 compare, zero network cost, only paid on the already-rare re-run
+    # path) and fall through to a fresh re-install on any mismatch.
+    CACHED_MANIFEST="$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json"
+    if [ -f "$CACHED_MANIFEST" ]; then
+        WANT_LIBOBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/libobs.so.30')"
+        GOT_LIBOBS_SHA_CACHED="$(sha256sum "$LIBOBS_REAL" | awk '{print $1}')"
+        WANT_DISTROAV_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/obs-plugins/distroav.so')"
+        GOT_DISTROAV_SHA_CACHED="$(sha256sum "$DISTROAV_REAL" | awk '{print $1}')"
+        if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ]; then
+            echo "  WARNING: installed genlock bytes do not match the cached manifest — forcing re-install"
+            NOOP_VALID=0
+        fi
+    else
+        echo "  WARNING: no cached $CACHED_MANIFEST to re-verify against — trusting the deployed-SHA marker"
+    fi
+fi
+
+if [ "$NOOP_VALID" -eq 1 ]; then
     echo "  genlock build $NEW_SHA already deployed — no-op (skipped download)"
 else
     GENLOCK_TMP="$(mktemp -d)"
@@ -417,6 +444,14 @@ chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOM
 # =============================================================================
 step 9 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
+# Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
+# launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
+# genlock RE-deploy, step 6 force-restarts (SIGKILL) a running OBS to load the swapped
+# libobs.so.30/distroav.so; without clearing the sentinel here first, the relaunched OBS pops
+# the "Crash or unclean shutdown detected" recovery modal and hangs headless — WebSocket :4455
+# never comes up, and step 10 fails "not listening" even though the swap itself succeeded
+# (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
+rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
 if ! pgrep -x obs >/dev/null; then
     sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
         nohup obs >/tmp/obs-launch.log 2>&1 &
