@@ -43,8 +43,24 @@ part of that change; an *unexpected* difference is drift and the guard fails lou
 | `genlock_source_latency_strih` | `NDI cam5=3,NDI cam1=3,NDI cam3=3` | OBS log `genlock-fifo audit 'SOURCE': … latency_ms=N …` lines on STRIH (#357). The three genlocked broadcast-path camera ingests (`NDI cam5`=CAM1, `NDI cam1`=CAM3, `NDI cam3`=CAM4) all carry no per-source override (`src_latency_ms=0`) so their effective held-latency equals the global 3 ms floor — pin at `3`. A drift on any camera input (e.g. a stale per-source override set via the OBS UI) is caught. Read-off: win-strih MCP `EventLog` filtered for `genlock-fifo audit` |
 | `genlock_source_latency_stream` | `NDI 2ME PGM=range:3-2000` | OBS log `genlock-fifo audit 'NDI 2ME PGM': … latency_ms=N …` on STREAM (#357, calibration-tracked #390). The `NDI 2ME PGM` source (the strih→stream program feed) carries a **deliberate per-source A/V-align override** that slows the video path to sync with the mastered audio — but that value is **NOT a fixed constant**: it is whatever the #188 A/V-sync calibration (`scripts/av_sync_calibrate.py`, #427) last measured and applied, and it changes every time the operator re-calibrates. Hard-pinning a single ms value (the pre-#390 `450`) goes stale the moment the align is re-calibrated — proven live 2026-07-01 (pin said `450`, live was `1000`, genuinely delivered: `src_latency_ms=1000 latency_ms=1000 reserve_ms=1000`, head_skew ~1 s, underruns=0 — a **false DRIFT**, #390). So the pin is now a **sane backstop range** (`range:MIN-MAX` = the DistroAV per-source genlock-latency clamp, `GENLOCK_LATENCY_MS_MIN=3`..`GENLOCK_LATENCY_MS_MAX=2000` in `scripts/drift-guard.sh`, mirrored from `LATENCY_MIN`/`LATENCY_MAX` in `scripts/av_sync_calibrate.py`) — only an egregiously out-of-range value (e.g. `5000`) FAILS the gate. **In addition**, when the operator/agent supplies `av_sync_calibrated_ms=` (the #427-persisted `applied_latency_ms` read from `%PROGRAMDATA%\camera-box\av-sync-last.json` on the stream box), `--compare` cross-checks the live value against THAT calibrated value (±10 ms) and flags genuine drift (e.g. a hand-nudge in the OBS UI since the last calibration) that the range check alone would miss — this facet is best-effort and degrades gracefully (range-checked only, no failure) when the file is not supplied/reachable (drift-guard itself runs on dev1, not on the OBS box). Re-pin the RANGE here only if the DistroAV clamp itself ever changes. Read-off: win-stream-snv MCP `EventLog` filtered for `genlock-fifo audit` (the live latency) + `FileRead` of `av-sync-last.json` (the calibrated value, best-effort) |
 
+### imag-nb (`10.77.9.182`, Linux, EPIC #466 Topology v2) — `--check-imag`, gathered over SSH (#463)
+
+imag-nb holds the 60fps low-latency IMAG role that strih dropped in #459 (see `output_fps_strih`
+above). Unlike strih/stream (Windows, needs the win-* MCP tools), imag is a plain Linux box —
+`scripts/drift-guard.sh --check-imag` SSHes to it directly and gathers these values itself; no
+external `--compare KEY=VAL` round-trip is needed. See `scripts/drift-guard.sh --help` for the
+gathering detail (paths, log location) and `check_imag_report`/`gather_and_check_imag` for the
+pure check / SSH-glue split.
+
+| setting | pinned value | live source (read-only, over SSH) |
+|---|---|---|
+| `output_fps_imag` | `60` | OBS log `video settings reset: … fps: <n>/1` on imag-nb — the 60fps low-latency IMAG role (Topology v2, #459/#463/EPIC #466). A drift DOWN to `30` (strih's rate) is drift |
+| `genlock_latency_ms_imag` | `3` | OBS log `genlock: latency = N ms` (the #235 single-knob line) on imag-nb — same build-const floor as strih/stream (`genlock_wall_clock` above); imag has no per-source override configured. Re-pin only on a deliberate calibration change |
+| `genlock_build_sha_imag` | *(pin after the first post-#463 live deploy)* | `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` on imag-nb (the marker `scripts/setup-imag.sh` writes on every hot-swap, #460). **Left unpinned here deliberately**: the #463 C++ burn-filter change (imag's `Corner::BottomCenterLeft`) means `distroav.so` REBUILDS, so any SHA guessed now would be stale the instant CI rebuilds it. The supervisor pins the real value here after deploying the #463 build and confirming it live (`--check-imag` reports the observed SHA either way — UNKNOWN, never a false DRIFT, until this row is filled in) |
+| `distroav_so_sha256_imag` | *(pin after the first post-#463 live deploy)* | SHA256 of `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` on imag-nb (the Linux plugin binary `scripts/setup-imag.sh` step 6 hot-swaps, #460). Same "pin after deploy" reasoning as `genlock_build_sha_imag` above — this file's bytes change with the #463 corner-burn code |
+
 The OBS/DistroAV **versions** come from the version table above (single source of truth); the NDI
-runtime is checked `≥` the `NDI ≥ 6.3.0` minimum stated there. The two facets:
+runtime is checked `≥` the `NDI ≥ 6.3.0` minimum stated there. The facets:
 
 ```bash
 ./scripts/drift-guard.sh --check-pins    # CI: validate the pin set + cross-check vs vendored source
