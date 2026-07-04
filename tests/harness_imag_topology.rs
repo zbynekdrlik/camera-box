@@ -9,6 +9,7 @@
 //! harness_render_budget_gate.rs's style; no OBS, no ssh, no live rig.
 
 use std::fs;
+use std::process::Command;
 
 fn read(p: &str) -> String {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);
@@ -260,5 +261,60 @@ fn merge_args_threads_imag_capture_fps() {
     assert!(
         region.contains("--imag-capture-fps \"$IMAG_CAPTURE_FPS\""),
         "#462: MERGE_ARGS must pass --imag-capture-fps. Got:\n{region}"
+    );
+}
+
+/// #462/#178: the [8/8c] imag extract call MUST be resilient — this region runs under `set -e`
+/// (re-enabled at the top of the VERDICT_ON_STREAM=1 branch), so an UNGUARDED failing invocation
+/// of recording-verdict-on-imag.sh (imag unreachable, a stale binary, a transient ssh hiccup)
+/// would set -e-abort the WHOLE script, including the strih/stream plan the operator still needs
+/// to run below. Locks the exact `#178`-style resilient pattern this region's own fix uses,
+/// mirroring `stoprecord_to_verdict_reaches_verdict_despite_a_failing_step`'s isolated-snippet
+/// behavioral proof for the StopRecord→verdict region.
+#[test]
+fn imag_extract_failure_never_aborts_the_rest_of_the_per_box_plan() {
+    let s = read("scripts/recording-e2e.sh");
+    // Static: the invocation is followed by `|| echo "WARNING...` (or an equivalent guard) on the
+    // SAME statement, not a bare command that a `set -e` fires on.
+    let call = s
+        .find("\"$HERE/recording-verdict-on-imag.sh\"")
+        .expect("#462: recording-e2e.sh must invoke recording-verdict-on-imag.sh");
+    let window = &s[call..(call + 900).min(s.len())];
+    assert!(
+        window.contains("|| echo \"WARNING"),
+        "#462/#178: the recording-verdict-on-imag.sh invocation must be guarded with `|| echo \
+         \"WARNING...\"` (or equivalent) so a failure degrades gracefully instead of set -e-aborting \
+         the whole per-box plan. Got:\n{window}"
+    );
+
+    // Behavioral: the EXACT resilient pattern the fix uses (`cmd && echo ... || echo WARNING`),
+    // isolated in a bash snippet under `set -euo pipefail`, must reach a marker AFTER a failing
+    // command instead of aborting — proving the guard actually works, not just that its text
+    // happens to be present.
+    let script = r#"
+set -euo pipefail
+REACHED=no
+false \
+&& echo "would only print on success" \
+|| echo "WARNING: simulated imag failure (non-fatal)" >&2
+REACHED=yes
+echo "REACHED_MERGE_STEP reached=${REACHED}"
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run the resilient imag-extract pattern");
+    assert!(
+        out.status.success(),
+        "#462/#178: the resilient `cmd && ok || WARNING` pattern must exit 0 despite the \
+         simulated failure; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("REACHED_MERGE_STEP reached=yes"),
+        "#462/#178: the step AFTER the guarded failing command must still be reached (never \
+         set -e-aborted). stdout={stdout:?}"
     );
 }

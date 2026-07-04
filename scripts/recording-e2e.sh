@@ -1328,13 +1328,21 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   IMAG_REMOTE_OUT_DIR="${IMAG_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
   IMAG_REMOTE_PARTIAL="$IMAG_REMOTE_OUT_DIR/imag-partial-${RUN_ID}.json"
   echo "    --- [8/8c] extract the IMAG partial ON imag-nb (${IMAG_IP}, plain ssh — #462) ---"
+  # #178 resilience (same discipline as the StopRecord→verdict region): this runs under `set -e`
+  # (re-enabled at the top of this VERDICT_ON_STREAM=1 branch), so an UNGUARDED failure here (imag
+  # unreachable, a stale/missing deployed binary, a transient ssh hiccup) would set -e-abort the
+  # WHOLE script — including the strih/stream plan the operator still needs to run below. `|| {
+  # WARNING; }` degrades gracefully instead: the imag leg is skipped, $IMAG_PARTIAL stays absent,
+  # and the merge command below (guarded by `if [ -f "$IMAG_PARTIAL" ]`) simply omits it.
   if [ -n "${IMAG_HOST_PATH:-}" ]; then
     "$HERE/recording-verdict-on-imag.sh" \
       --verdict-bin "$VERDICT_BIN" --out-dir "$IMAG_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
       --imag-rec "$IMAG_HOST_PATH" \
       -- --extract-partial imag --imag "$IMAG_HOST_PATH" --imag-capture-fps "$IMAG_CAPTURE_FPS" \
-         --out "$IMAG_REMOTE_PARTIAL"
-    echo "    pulled back to dev1: $IMAG_PARTIAL  (+ the #186 pixel-proof dir $IMAG_PIXELS, if any)"
+         --out "$IMAG_REMOTE_PARTIAL" \
+    && echo "    pulled back to dev1: $IMAG_PARTIAL  (+ the #186 pixel-proof dir $IMAG_PIXELS, if any)" \
+    || echo "WARNING: #462 recording-verdict-on-imag.sh failed (imag unreachable / stale binary / ssh hiccup) — \
+continuing WITHOUT the imag partial; the merge below will omit --merge-partials imag=... (cam→imag proof skipped this run)." >&2
   else
     echo "WARNING: #462 no imag recording path (StopRecord returned none) — imag partial NOT produced;" >&2
     echo "         the merge below will run WITHOUT --merge-partials imag=... (cam→imag proof skipped)." >&2
