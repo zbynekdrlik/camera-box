@@ -42,6 +42,24 @@ static bool upload_texture_2d(struct gs_texture_2d *tex, const uint8_t **data)
 	return success;
 }
 
+/* Shared by create_pixel_unpack_buffer (allocation) and gs_texture_map
+ * (glMapBufferRange, #505) so the byte-size formula for the persistent PBO
+ * lives in exactly one place. */
+static GLsizeiptr pixel_unpack_buffer_size(const struct gs_texture_2d *tex)
+{
+	GLsizeiptr size = tex->width * gs_get_format_bpp(tex->base.format);
+	if (!gs_is_compressed_format(tex->base.format)) {
+		size /= 8;
+		size = (size + 3) & 0xFFFFFFFC;
+		size *= tex->height;
+	} else {
+		size *= tex->height;
+		size /= 8;
+	}
+
+	return size;
+}
+
 static bool create_pixel_unpack_buffer(struct gs_texture_2d *tex)
 {
 	GLsizeiptr size;
@@ -53,15 +71,7 @@ static bool create_pixel_unpack_buffer(struct gs_texture_2d *tex)
 	if (!gl_bind_buffer(GL_PIXEL_UNPACK_BUFFER, tex->unpack_buffer))
 		return false;
 
-	size = tex->width * gs_get_format_bpp(tex->base.format);
-	if (!gs_is_compressed_format(tex->base.format)) {
-		size /= 8;
-		size = (size + 3) & 0xFFFFFFFC;
-		size *= tex->height;
-	} else {
-		size *= tex->height;
-		size /= 8;
-	}
+	size = pixel_unpack_buffer_size(tex);
 
 	glBufferData(GL_PIXEL_UNPACK_BUFFER, size, 0, GL_DYNAMIC_DRAW);
 	if (!gl_success("glBufferData"))
@@ -195,8 +205,20 @@ bool gs_texture_map(gs_texture_t *tex, uint8_t **ptr, uint32_t *linesize)
 	if (!gl_bind_buffer(GL_PIXEL_UNPACK_BUFFER, tex2d->unpack_buffer))
 		goto fail;
 
-	*ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-	if (!gl_success("glMapBuffer"))
+	/* #505: this PBO is a PERSISTENT buffer reused every frame. A bare
+	 * glMapBuffer(GL_WRITE_ONLY) forces the driver to guarantee the GPU
+	 * has finished consuming the PREVIOUS frame's upload before handing
+	 * back a CPU pointer -- an implicit CPU<->GPU sync/fence. On a
+	 * 6-source multiview (imag-nb) that stalled the CPU ~24ms/frame with
+	 * the GPU sitting idle. glMapBufferRange with INVALIDATE_BUFFER_BIT
+	 * tells the driver to discard the old backing store and hand back a
+	 * fresh one instead of waiting on it -- the same technique already
+	 * used by update_buffer() in gl-helpers.c for vertex/index buffers,
+	 * and the GL analog of D3D11_MAP_WRITE_DISCARD (see d3d11-subsystem.c)
+	 * which is why the Windows path never paid this cost. */
+	*ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, pixel_unpack_buffer_size(tex2d),
+				GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+	if (!gl_success("glMapBufferRange"))
 		goto fail;
 
 	gl_bind_buffer(GL_PIXEL_UNPACK_BUFFER, 0);

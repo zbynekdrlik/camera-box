@@ -353,11 +353,11 @@ fn setup_imag_manifest_lookup_never_inlined_in_multi_arg_call() {
         );
     }
     assert_eq!(
-        call_lines, 4,
-        "{SETUP}: expected exactly 4 manifest_sha_for_path call sites — the original install-time \
-         verify (libobs.so.30 + distroav.so) PLUS the #472 no-op re-verify (same two files, \
-         looked up again from the CACHED manifest) — found {call_lines}; update this test if the \
-         call count genuinely changed"
+        call_lines, 6,
+        "{SETUP}: expected exactly 6 manifest_sha_for_path call sites — the install-time verify \
+         (libobs.so.30 + distroav.so + #499 bin/obs) PLUS the #472 no-op re-verify (same three \
+         files, looked up again from the CACHED manifest) — found {call_lines}; update this test \
+         if the call count genuinely changed"
     );
 }
 
@@ -1399,7 +1399,7 @@ fn setup_imag_leaves_desktop_icon_unpinned_483() {
 /// TOTAL_STEPS must match the actual number of `step()` calls in the script — a drift here means
 /// either a step was added without bumping the counter (progress display under-counts) or the
 /// counter was bumped without adding a step (display over-counts). This is a general invariant,
-/// re-verified here because #482/#483/#487 added three new steps (13 -> 16).
+/// re-verified here because #500 added a new NVIDIA driver step (16 -> 17).
 #[test]
 fn setup_imag_total_steps_matches_actual_step_calls() {
     let body = read(SETUP);
@@ -1420,12 +1420,316 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 16,
-        "TOTAL_STEPS must be 16 after #482/#483/#487 added three new steps to the original 13"
+        declared, 17,
+        "TOTAL_STEPS must be 17 after #500 added the NVIDIA driver step to the prior 16"
     );
     assert_eq!(
         actual, declared,
         "{SETUP}: TOTAL_STEPS ({declared}) must match the actual number of `step N \"...\"` \
          invocations ({actual}) — a mismatch means the progress display under/over-counts"
+    );
+}
+
+// ============================================================================================
+// #499 — the genlock hot-swap must ALSO swap the OBS FRONTEND binary /usr/bin/obs. Codifies a
+// fix already applied + LIVE-VERIFIED on imag-nb (2026-07-04): the multiview render-budget
+// decouple (#276/#278/#293) and the "newlevel.media" window title live in the frontend EXE
+// (vendor/obs-studio/frontend/), NOT libobs.so.30 — a genlock deploy that skips /usr/bin/obs
+// leaves a half-stock box (multiview choked the program render to 16fps/59ms on the stock
+// frontend vs 60fps/1.7ms after the swap).
+// ============================================================================================
+
+/// The hot-swap must overwrite the REAL frontend executable path, not just the two libraries.
+#[test]
+fn setup_imag_hotswaps_frontend_binary_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"OBS_FRONTEND_REAL="/usr/bin/obs""#),
+        "{SETUP} must define OBS_FRONTEND_REAL=/usr/bin/obs — the genlock hot-swap must ALSO \
+         swap the frontend executable, not just libobs.so.30/distroav.so (#499)"
+    );
+    assert!(
+        body.contains(r#"BUNDLE_OBS="$GENLOCK_TMP/bundle/bin/obs""#),
+        "{SETUP} must resolve the bundle's bin/obs path — the genlock bundle (obs-genlock-linux-\
+         x86_64) already carries the built frontend executable at bin/obs"
+    );
+}
+
+/// #499's frontend sha must be looked up via manifest_sha_for_path and actually verify_file_sha'd
+/// — the same integrity discipline already applied to libobs.so.30/distroav.so. A frontend binary
+/// installed without a sha check would have zero integrity guarantee.
+#[test]
+fn setup_imag_verifies_frontend_bin_obs_via_bundle_manifest() {
+    let body = read(SETUP);
+    let want_obs = body
+        .find("WANT_OBS_SHA=\"$(manifest_sha_for_path")
+        .expect("frontend bin/obs expected sha must be looked up via manifest_sha_for_path");
+    let verify_obs = body
+        .find("verify_file_sha \"$BUNDLE_OBS\" \"$WANT_OBS_SHA\"")
+        .expect("bundle bin/obs must actually be verify_file_sha'd against its looked-up sha");
+    assert!(
+        want_obs < verify_obs,
+        "{SETUP}: WANT_OBS_SHA must be resolved BEFORE the verify_file_sha call for bin/obs"
+    );
+    assert!(
+        body.contains("'bin/obs'"),
+        "{SETUP}: the manifest lookups for the frontend binary must use the literal manifest \
+         relpath 'bin/obs' (matches the #120 BUNDLE_MANIFEST.json entry, live-confirmed on \
+         imag-nb: sha b53294a9...)"
+    );
+}
+
+/// The stock PPA frontend must be backed up ONCE, before the first-ever swap, at the SAME
+/// live-verified path already hand-created on imag-nb (/opt/obs-backup/obs.stock) — never a
+/// per-run accumulating name (same #185 discipline as the libobs/distroav stock backup).
+#[test]
+fn setup_imag_backs_up_stock_frontend_once_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"OBS_FRONTEND_STOCK_BACKUP="$GENLOCK_BACKUP_ROOT/obs.stock""#),
+        "{SETUP} must back up the stock frontend to $GENLOCK_BACKUP_ROOT/obs.stock — the exact \
+         path already hand-verified live on imag-nb (sha 9898bf32... == the stock PPA /usr/bin/obs)"
+    );
+    let guard = body
+        .find(r#"if [ ! -f "$OBS_FRONTEND_STOCK_BACKUP" ]; then"#)
+        .expect(
+            "the stock frontend backup must be guarded to happen ONLY ONCE (never on a re-swap)",
+        );
+    let install = body
+        .find(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#)
+        .expect("the frontend install call must exist");
+    assert!(
+        guard < install,
+        "{SETUP}: the stock frontend backup must happen BEFORE the frontend is overwritten"
+    );
+}
+
+/// The frontend install must preserve EXECUTE permissions (0755) — unlike the two libraries
+/// (0644) — since /usr/bin/obs is invoked directly as a program, not dlopen'd.
+#[test]
+fn setup_imag_installs_frontend_with_exec_perms_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#),
+        "{SETUP} must `install -m 0755` the frontend binary to /usr/bin/obs — it is an \
+         executable, not a shared library (which get 0644 like libobs.so.30/distroav.so)"
+    );
+}
+
+/// A post-swap build-proof for the frontend, mirroring the SONAME check already done for
+/// libobs.so.30: the installed /usr/bin/obs must actually reference the multiview render-budget
+/// decouple symbol (obs_display_set_render_divisor, #276/#278/#293) — live-verified via
+/// `nm -D -u` on imag-nb after the hand-swap. A stock/wrong binary must never be silently
+/// accepted as "swapped".
+#[test]
+fn setup_imag_verifies_frontend_render_divisor_symbol_postswap_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("nm -D -u \"$OBS_FRONTEND_REAL\"")
+            && body.contains("obs_display_set_render_divisor"),
+        "{SETUP} must `nm -D -u` the swapped /usr/bin/obs and grep for \
+         obs_display_set_render_divisor — the stock PPA frontend never references this symbol \
+         (live-confirmed); its absence means a stock/wrong binary was installed"
+    );
+    assert!(
+        body.contains("refuse a stock/wrong frontend binary"),
+        "{SETUP} must fail loud (not warn) when the render-divisor symbol check fails"
+    );
+    // Found in review: `nm -D -u` on this binary emits ~2900 lines (~170KB, live-measured) and
+    // the target symbol sits at line ~286 -- a `grep -q` would exit right after that early match,
+    // SIGPIPE-ing `nm` mid-write, and under `set -euo pipefail` that would wrongly fail() a
+    // CORRECT build (same footgun class the SONAME check above already documents/avoids).
+    let symbol_check_line = body
+        .lines()
+        .find(|l| l.contains("nm -D -u \"$OBS_FRONTEND_REAL\""))
+        .expect("the nm -D -u pipeline line must exist");
+    assert!(
+        !symbol_check_line.contains("grep -q"),
+        "{SETUP}: the nm -D -u | grep check for obs_display_set_render_divisor must NOT use \
+         `grep -q` — an early match closes the pipe before `nm` finishes writing its ~170KB of \
+         output, SIGPIPEs `nm`, and under pipefail wrongly fails a CORRECT build. Use a plain \
+         `grep 'pattern' >/dev/null` instead (matches the SONAME check's own convention)"
+    );
+}
+
+/// The idempotency no-op check (#472 defense-in-depth) must ALSO cover the frontend binary — a
+/// re-run that only checks libobs.so.30/distroav.so bytes could wrongly report "already deployed"
+/// while the frontend silently reverted to stock (e.g. an unattended apt reinstall of obs-studio,
+/// which owns /usr/bin/obs via dpkg).
+#[test]
+fn setup_imag_frontend_included_in_idempotency_reverify_499() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(
+            r#"[ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ]"#
+        ),
+        "{SETUP}: the NOOP_VALID existence check must require the frontend binary too, not just \
+         libobs.so.30/distroav.so"
+    );
+    assert!(
+        body.contains("WANT_OBS_SHA_CACHED") && body.contains("GOT_OBS_SHA_CACHED"),
+        "{SETUP}: the cached-manifest re-verify (#472) must ALSO compare the frontend binary's \
+         installed bytes against the cached manifest, not just libobs.so.30/distroav.so"
+    );
+}
+
+/// All three swapped files (libobs.so.30, distroav.so, and the frontend) must be installed
+/// together in the SAME deploy block, before the SAME GENLOCK_BUILD_SHA.txt marker is written —
+/// they version together under one build SHA, never independently.
+#[test]
+fn setup_imag_frontend_versions_together_with_libobs_and_distroav_499() {
+    let body = read(SETUP);
+    let install_libobs = body
+        .find(r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL""#)
+        .expect("libobs install must exist");
+    let install_distroav = body
+        .find(r#"install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL""#)
+        .expect("distroav install must exist");
+    let install_frontend = body
+        .find(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#)
+        .expect("frontend install must exist");
+    let marker_write = body
+        .find(r#"echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt""#)
+        .expect("the build-SHA marker write must exist");
+    assert!(
+        install_libobs < install_distroav
+            && install_distroav < install_frontend
+            && install_frontend < marker_write,
+        "{SETUP}: libobs, distroav, and the frontend must ALL be installed before the single \
+         GENLOCK_BUILD_SHA.txt marker is written — all three files version together under one \
+         build SHA"
+    );
+}
+
+// ============================================================================================
+// #500 — setup-imag.sh must install nvidia-driver-595-open + PRIME nvidia-primary. Codifies a
+// fix already applied + LIVE-VERIFIED on imag-nb (2026-07-04): the HDMI program-projector output
+// is wired through the NVIDIA dGPU (RTX 5050 Laptop / Blackwell), which the plain proprietary
+// nvidia-driver-595 package fails to initialize (RmInitAdapter failed 0x22:0x56:1017) — only the
+// -open kernel-modules flavor brings it up.
+// ============================================================================================
+
+/// The -open flavor must be installed — plain nvidia-driver-595 does NOT init this Blackwell dGPU
+/// (live-reproduced), even though `ubuntu-drivers devices` recommends the plain package.
+#[test]
+fn setup_imag_installs_nvidia_driver_595_open_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("nvidia-driver-595-open"),
+        "{SETUP} must install nvidia-driver-595-open — the OPEN kernel-modules flavor is required \
+         to initialize the RTX 5050 Laptop (Blackwell) dGPU; plain nvidia-driver-595 fails with \
+         RmInitAdapter failed 0x22:0x56:1017 (live-reproduced on imag-nb)"
+    );
+    let install_check = body.find("dpkg -s nvidia-driver-595-open").expect(
+        "{SETUP} must check dpkg -s nvidia-driver-595-open before (re-)installing — idempotency",
+    );
+    let apt_install = body
+        .find("apt-get install -y nvidia-driver-595-open")
+        .expect("{SETUP} must apt-get install -y nvidia-driver-595-open");
+    assert!(
+        install_check < apt_install,
+        "{SETUP}: the dpkg -s idempotency check must come BEFORE the apt-get install call"
+    );
+}
+
+/// PRIME must be set to nvidia (not on-demand) — on-demand mode left the HDMI dGPU output dead
+/// (live-verified); nvidia-primary brings up BOTH the HDMI output and the laptop's own eDP panel.
+#[test]
+fn setup_imag_prime_select_nvidia_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("prime-select nvidia"),
+        "{SETUP} must `prime-select nvidia` — on-demand PRIME mode left the HDMI dGPU output dead \
+         (live-verified on imag-nb); nvidia-primary is required for both HDMI and eDP to run on \
+         the RTX 5050"
+    );
+    assert!(
+        body.contains("prime-select missing after nvidia-driver-595-open install"),
+        "{SETUP} must fail loud if prime-select is missing after the driver install"
+    );
+}
+
+/// A DKMS driver install regenerates initramfs for the running kernel — the #295/#487 safe-grub
+/// discipline must be re-applied (never trust an initrd/grub change blindly), reusing the SAME
+/// safe_grub_regen helper the #482/#483 grub.d drops already call, not a fresh ad-hoc grub edit.
+#[test]
+fn setup_imag_nvidia_step_reuses_safe_grub_regen_500() {
+    let body = read(SETUP);
+    // There must be exactly two CALL sites of safe_grub_regen (never a bare function definition
+    // counted as a call): the #482/#483 CPU-isolation step, and this NVIDIA step.
+    let call_sites = body
+        .lines()
+        .filter(|l| l.trim() == "safe_grub_regen")
+        .count();
+    assert_eq!(
+        call_sites, 2,
+        "{SETUP}: safe_grub_regen must be called exactly twice — once after the #482/#483 grub.d \
+         drops, and once after the #500 nvidia driver install"
+    );
+    let prime = body
+        .find("prime-select nvidia")
+        .expect("prime-select nvidia must exist");
+    let nvidia_step_regen = body[prime..]
+        .find("safe_grub_regen")
+        .map(|off| prime + off)
+        .expect("safe_grub_regen must be called AFTER prime-select nvidia in the #500 step");
+    let marker = body
+        .find("nvidia-smi already enumerates")
+        .expect("the post-driver nvidia-smi check must exist");
+    assert!(
+        nvidia_step_regen < marker,
+        "{SETUP}: safe_grub_regen must run BEFORE the nvidia-smi liveness echo in the #500 step \
+         (never trust initrd/grub state without re-verifying it first)"
+    );
+}
+
+/// The #500 step must land AFTER CPU isolation (#483, so safe_grub_regen is already defined and
+/// has already run once) and BEFORE the NDI runtime step — grouping all boot-level system config
+/// (kernel, CPU isolation, GPU driver) ahead of the app-level installs (NDI, OBS).
+#[test]
+fn setup_imag_nvidia_step_lands_between_cpu_isolation_and_ndi_runtime_500() {
+    let body = read(SETUP);
+    let cpu_isolation = body
+        .find("CPU isolation (#483)")
+        .expect("the #483 CPU isolation step must exist");
+    let nvidia_step = body
+        .find("NVIDIA dGPU driver (#500)")
+        .expect("the #500 NVIDIA driver step must exist");
+    let ndi_step = body
+        .find("NDI runtime 6.3.2 from cam1")
+        .expect("the NDI runtime step must exist");
+    assert!(
+        cpu_isolation < nvidia_step && nvidia_step < ndi_step,
+        "{SETUP}: the #500 NVIDIA driver step must land strictly between the #483 CPU isolation \
+         step and the NDI runtime step"
+    );
+}
+
+/// A grub/initrd-touching change must never claim to take effect immediately — the same "NOTE:
+/// takes effect on the NEXT boot" convention already used by the #482 lowlatency kernel and the
+/// #483 CPU isolation steps (this script never reboots the box).
+#[test]
+fn setup_imag_nvidia_step_notes_next_boot_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot")
+            && body.contains("this script does not reboot the box"),
+        "{SETUP}: the #500 nvidia step must note that the PRIME mode + DKMS module take effect on \
+         the NEXT boot, matching the convention already used by the #482/#483 grub-touching steps"
+    );
+}
+
+/// Driver-upgrade freedom is explicitly wanted by the user — this pin must not be silently
+/// treated as an immovable LTS choice; the comment must document that a newer -open flavor should
+/// be preferred if one becomes available.
+#[test]
+fn setup_imag_nvidia_step_documents_driver_upgrade_freedom_500() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("prefer the newest available `-open` flavor over 595 if one has")
+            || body.contains("prefer the newest available -open flavor"),
+        "{SETUP}: the #500 nvidia step must document that a newer -open driver flavor should be \
+         preferred over the 595 pin if one becomes available (user's explicit driver-upgrade-\
+         freedom directive)"
     );
 }

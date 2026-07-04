@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=16
+TOTAL_STEPS=17
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -39,11 +39,12 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
 # manifest_sha_for_path MANIFEST RELPATH -> the #120 manifest's recorded sha256 for RELPATH, or
 # fails loud if RELPATH isn't listed. Narrow, single-purpose lookup (NOT a full bundle-completeness
-# walk like scripts/genlock-manifest.sh --check) — setup-imag.sh only ever needs TWO specific
-# files verified (libobs.so.30 + distroav.so), never all ~1600 bundle files, so hashing everything
-# would be pure waste (the bundle also carries the Qt frontend + locale data + default plugins,
-# none of which this script installs). setup-imag.sh is copied to the box standalone (no sibling
-# scripts/genlock-manifest.sh checked out there), so this cannot shell out to the repo's own tool.
+# walk like scripts/genlock-manifest.sh --check) — setup-imag.sh only ever needs THREE specific
+# files verified (libobs.so.30 + distroav.so + #499 bin/obs), never all ~1600 bundle files, so
+# hashing everything would be pure waste (the bundle also carries the Qt frontend + locale data +
+# default plugins, none of which this script installs). setup-imag.sh is copied to the box
+# standalone (no sibling scripts/genlock-manifest.sh checked out there), so this cannot shell out
+# to the repo's own tool.
 manifest_sha_for_path() {
     local manifest="$1" relpath="$2" sha
     sha="$(jq -r --arg p "$relpath" '.files[] | select(.path == $p) | .sha256' "$manifest")" \
@@ -295,7 +296,7 @@ step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unatte
 # that silently gains a new image via unattended-upgrades, or one whose initrd never got generated
 # before grub picked it as the default, is exactly what bricked CAM3/CAM4 (#295). Unlike the cam
 # fleet's appliance policy (setup-device.sh STEP 15 fully disables unattended-upgrades), imag does
-# NOT disable it wholesale — step 13 below deliberately keeps security updates flowing (only their
+# NOT disable it wholesale — step 14 below deliberately keeps security updates flowing (only their
 # schedule is pinned, #485). So here we pin the KERNEL specifically (apt-mark hold + an
 # Unattended-Upgrade package-blacklist entry) and lock Automatic-Reboot to false, rather than
 # masking the whole service.
@@ -429,7 +430,55 @@ echo "  #483: isolcpus=2-11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15 written 
 echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
 
 # =============================================================================
-step 9 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"
+# =============================================================================
+# imag-nb's HDMI program-projector output is physically wired through the NVIDIA dGPU (an RTX
+# 5050 Laptop / Blackwell, PCI 10de:2dd8), NOT the Intel iGPU -- live-verified: the HDMI connector
+# showed `disconnected` on every output until the dGPU was actually initialized. The PLAIN
+# proprietary `nvidia-driver-595` package does NOT init Blackwell (`NVRM: RmInitAdapter failed!
+# (0x22:0x56:1017)`, live-reproduced on imag-nb) -- it needs the OPEN kernel-modules flavor.
+# `ubuntu-drivers devices` (live-checked on imag-nb) recommends plain `nvidia-driver-595` for this
+# PCI id -- that recommendation is WRONG for this GPU; the `-open` variant is the deliberate,
+# verified-working choice. `apt-cache search nvidia-driver` (live-checked) lists nothing newer
+# than the 595 line as of this writing. Driver-upgrade freedom is explicitly wanted by the user
+# ("pravdaze drivere musia byt upgradovane... nikto netvrdi ze musis pouzivat nejake stare lts") --
+# re-check `ubuntu-drivers devices` / `apt-cache search nvidia-driver` for a newer `-open` release
+# before reusing this pin verbatim; prefer the newest available `-open` flavor over 595 if one has
+# since shipped.
+# Found in review: a bare `dpkg -s <pkg> >/dev/null 2>&1` exit code alone is NOT a reliable
+# "is it installed" check — dpkg -s exits 0 even for a package that was `apt remove`d (not purged)
+# and now sits in "deinstall ok config-files" state (live-verified on this box: `dpkg -s
+# alsa-base` exits 0 with `Status: deinstall ok config-files`). If the driver package were ever
+# removed-not-purged between provisioning runs, that bare exit-code check would wrongly conclude
+# "already installed", skip the apt-get install, and still run prime-select + safe_grub_regen on a
+# box with no actual driver files. Check the Status field content instead (no `-q` on the piped
+# grep — dpkg -s output is tiny, but this matches the same safe-read convention used elsewhere in
+# this script rather than mixing conventions).
+if ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
+        || fail "nvidia-driver-595-open install failed"
+fi
+# PRIME nvidia-primary: on-demand PRIME mode left the HDMI dGPU output dead (live-verified) --
+# nvidia must be the PRIMARY renderer so BOTH the HDMI output and the laptop's own eDP panel run
+# on the RTX 5050.
+command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
+prime-select nvidia || fail "prime-select nvidia failed"
+# #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
+# that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above
+# (defined earlier in step 6): guarantee every kernel has an initrd, regenerate grub.cfg, and
+# refuse to trust it if the default entry lacks a kernel image or an initrd.
+safe_grub_regen
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    echo "  #500: nvidia-smi already enumerates: $(nvidia-smi -L | head -1)"
+else
+    echo "  #500: nvidia-smi not yet enumerating the GPU (expected pre-reboot on a fresh driver install)"
+fi
+echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
+echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 10 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -452,7 +501,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 10 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 11 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -462,24 +511,35 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 11 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 12 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
 # obs-studio package installed in the prior step ships libobs.so.30 with SONAME "libobs.so.30"
 # (live-verified on imag-nb) — IDENTICAL to the genlock build's own SONAME — so the genlock
 # libobs.so.30 hot-swaps cleanly over it, exactly mirroring the Windows obs.dll hot-swap (see
-# .claude/skills/genlock). Only libobs.so.30 (the genlock render-tick/ts-align patches live in
-# obs-source.c/obs-video.c, both inside libobs core) and distroav.so are swapped —
-# obs-frontend-api/obs-opengl/obs-scripting are untouched by the genlock patches and stay
-# PPA-stock. No stock DistroAV .deb is installed any more — the genlock-built distroav.so IS
-# the plugin.
+# .claude/skills/genlock). libobs.so.30 (the genlock render-tick/ts-align patches live in
+# obs-source.c/obs-video.c, both inside libobs core), distroav.so, AND the FRONTEND executable
+# /usr/bin/obs are all swapped — obs-frontend-api/obs-opengl/obs-scripting (the shared LIBRARIES)
+# are untouched by the genlock patches and stay PPA-stock. No stock DistroAV .deb is installed any
+# more — the genlock-built distroav.so IS the plugin.
+#
+# #499: /usr/bin/obs (the frontend EXECUTABLE, compiled from vendor/obs-studio/frontend/) MUST
+# also be swapped — skipping it leaves a half-stock box. The multiview render-budget decouple
+# (#276 obs_display_set_render_divisor / #278 adaptive EWMA skip / #293 anti-starvation floor) AND
+# the "newlevel.media" window title both live in the frontend EXE, NOT in libobs.so.30 — exactly
+# the "frontend lives in the exe, not the DLL" gotcha already documented for Windows
+# (.claude/skills/genlock/SKILL.md). A genlock deploy that only swaps libobs.so.30/distroav.so
+# leaves the stock frontend running: the multiview code path that calls
+# obs_display_set_render_divisor() never runs, and multiview chokes the program render (live-
+# proven 2026-07-04: 16fps/59ms with the stock frontend vs 60fps/1.7ms once bin/obs was swapped).
 GENLOCK_REPO="zbynekdrlik/camera-box"
 GENLOCK_WORKFLOW="linux-genlock.yml"
 GENLOCK_MARKER_DIR="/opt/obs-genlock"
 GENLOCK_BACKUP_ROOT="/opt/obs-backup"
 LIBOBS_REAL="/usr/lib/x86_64-linux-gnu/libobs.so.30"
 DISTROAV_REAL="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+OBS_FRONTEND_REAL="/usr/bin/obs"
 
 command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
 
@@ -541,11 +601,11 @@ NEW_SHA="$(gh run view "$RUN_ID" --repo "$GENLOCK_REPO" --json headSha -q .headS
 [ -n "$NEW_SHA" ] || fail "could not read headSha for run $RUN_ID"
 
 NOOP_VALID=0
-if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ]; then
+if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ]; then
     NOOP_VALID=1
     # #472 defense-in-depth (PR #471 review, deliberately deferred): the SHA-marker + file
     # *existence* check above trusts the on-disk marker without re-verifying the installed
-    # BYTES. If the deployed libobs.so.30/distroav.so were ever silently reverted (e.g. an
+    # BYTES. If the deployed libobs.so.30/distroav.so/bin-obs were ever silently reverted (e.g. an
     # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
     # re-run would wrongly report "already deployed" and skip re-swapping — the verify step's runtime
     # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
@@ -558,7 +618,10 @@ if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_
         GOT_LIBOBS_SHA_CACHED="$(sha256sum "$LIBOBS_REAL" | awk '{print $1}')"
         WANT_DISTROAV_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/obs-plugins/distroav.so')"
         GOT_DISTROAV_SHA_CACHED="$(sha256sum "$DISTROAV_REAL" | awk '{print $1}')"
-        if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ]; then
+        WANT_OBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'bin/obs')"
+        GOT_OBS_SHA_CACHED="$(sha256sum "$OBS_FRONTEND_REAL" | awk '{print $1}')"
+        if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ] \
+            || [ "$GOT_OBS_SHA_CACHED" != "$WANT_OBS_SHA_CACHED" ]; then
             echo "  WARNING: installed genlock bytes do not match the cached manifest — forcing re-install"
             NOOP_VALID=0
         fi
@@ -589,7 +652,9 @@ else
 
     BUNDLE_LIBOBS="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs.so.30"
     FAST_DISTROAV="$GENLOCK_TMP/fast/distroav.so"
+    BUNDLE_OBS="$GENLOCK_TMP/bundle/bin/obs"
     [ -f "$FAST_DISTROAV" ] || fail "distroav-linux-fast-so missing distroav.so"
+    [ -f "$BUNDLE_OBS" ] || fail "bundle missing bin/obs (#499: the frontend executable)"
     [ -f "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" ] || fail "bundle missing BUNDLE_MANIFEST.json (#120)"
     MANIFEST="$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json"
 
@@ -610,33 +675,58 @@ else
     WANT_DISTROAV_SHA="$(manifest_sha_for_path "$MANIFEST" 'lib/x86_64-linux-gnu/obs-plugins/distroav.so')"
     verify_file_sha "$FAST_DISTROAV" "$WANT_DISTROAV_SHA" \
         "distroav-linux-fast-so distroav.so (cross-checked against bundle manifest)"
+    # #499: bin/obs (the frontend executable) ships IN the same bundle as libobs.so.30 (both are
+    # part of the staged OBS rundir), so it has its OWN manifest entry — verify it the same way.
+    WANT_OBS_SHA="$(manifest_sha_for_path "$MANIFEST" 'bin/obs')"
+    verify_file_sha "$BUNDLE_OBS" "$WANT_OBS_SHA" "bundle bin/obs (frontend)"
 
     mkdir -p "$GENLOCK_MARKER_DIR" "$GENLOCK_BACKUP_ROOT"
     # Exactly TWO bounded backup dirs (never accumulate one per re-run — #185's unbounded target/
     # growth is the cautionary precedent): a permanent STOCK backup made once on the very first
     # swap ever (the forever rollback-to-PPA-stock path) and a PREVIOUS backup overwritten on every
-    # swap (quick rollback to the immediately-prior deployed build).
+    # swap (quick rollback to the immediately-prior deployed build). #499: the frontend gets the
+    # SAME stock/previous treatment as libobs/distroav — a bare file under $GENLOCK_BACKUP_ROOT
+    # (live-verified path, hand-created 2026-07-04) rather than nested in stock-pre-genlock/, since
+    # it is a standalone executable, not a plugin library pair.
     STOCK_BACKUP="$GENLOCK_BACKUP_ROOT/stock-pre-genlock"
     PREV_BACKUP="$GENLOCK_BACKUP_ROOT/previous"
+    OBS_FRONTEND_STOCK_BACKUP="$GENLOCK_BACKUP_ROOT/obs.stock"
     if [ ! -d "$STOCK_BACKUP" ]; then
         mkdir -p "$STOCK_BACKUP"
         [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$STOCK_BACKUP/libobs.so.30"
         [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$STOCK_BACKUP/distroav.so"
     fi
+    if [ ! -f "$OBS_FRONTEND_STOCK_BACKUP" ]; then
+        [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$OBS_FRONTEND_STOCK_BACKUP"
+    fi
     rm -rf "$PREV_BACKUP"
     mkdir -p "$PREV_BACKUP"
     [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$PREV_BACKUP/libobs.so.30"
     [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$PREV_BACKUP/distroav.so"
+    [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$PREV_BACKUP/obs"
     [ -n "$DEPLOYED_SHA" ] && echo "$DEPLOYED_SHA" > "$PREV_BACKUP/GENLOCK_BUILD_SHA.txt"
 
     install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL" || fail "libobs.so.30 hot-swap install failed"
     install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL" || fail "distroav.so hot-swap install failed"
+    install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL" || fail "frontend obs hot-swap install failed (#499)"
     ldconfig
 
     # SONAME sanity check (no `-q` on a piped external command under pipefail — same early-close
     # SIGPIPE footgun documented for the step-4 ldconfig check; read the full small output instead).
     readelf -d "$LIBOBS_REAL" 2>/dev/null | grep 'SONAME.*\[libobs\.so\.30\]' >/dev/null \
         || fail "post-swap libobs.so.30 SONAME check failed — refuse a mismatched ABI"
+
+    # #499 post-swap build-proof: the stock PPA frontend never references
+    # obs_display_set_render_divisor (the #276/#278/#293 multiview render-budget decouple symbol)
+    # — live-verified `nm -D -u` shows it as an UNDEFINED (U) symbol only on the genlock-built
+    # frontend. A missing reference here means the wrong/stock binary got installed.
+    # No `-q` on a piped external command under pipefail (same early-close SIGPIPE footgun as the
+    # SONAME check above): `nm -D -u` on this binary emits ~2900 lines (~170KB, live-measured) and
+    # the target symbol sits at line ~286 — `grep -q` would exit right after that early match,
+    # SIGPIPE-ing `nm` mid-write, and under `set -euo pipefail` that would wrongly `fail()` a
+    # CORRECT build. Read the full output instead.
+    nm -D -u "$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_divisor' >/dev/null \
+        || fail "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor — refuse a stock/wrong frontend binary (#499: multiview render-budget decouple would be missing)"
 
     echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt"
     echo "$FAST_SHA" > "$GENLOCK_MARKER_DIR/DISTROAV_BUILD_SHA.txt"
@@ -657,7 +747,7 @@ else
     # A swap while OBS is already running (a later re-run onto a NEWER build) needs OBS to
     # relaunch to pick up the new .so — mirrors the Windows force-kill-then-relaunch convention
     # (launch-obs-genlock.sh's --force uses Stop-Process -Force = SIGKILL, never a bare SIGTERM).
-    # Step 9's own `if ! pgrep -x obs` relaunch guard would otherwise SKIP relaunching a
+    # The "Launch OBS" step's own `if ! pgrep -x obs` relaunch guard would otherwise SKIP relaunching a
     # still-exiting (SIGTERM'd but not yet dead) OBS, silently leaving the OLD build's process
     # resident even though the NEW build's bytes + marker are already on disk — so SIGKILL and
     # WAIT for actual death here, failing loud if it won't die within budget.
@@ -673,7 +763,7 @@ else
 fi
 
 # =============================================================================
-step 12 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 13 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -701,7 +791,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 13 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+step 14 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
 # imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
 # masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
@@ -763,7 +853,7 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 14 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 15 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -782,7 +872,7 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 15 "Launch OBS on the desktop session (X11 :0)"
+step 16 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -806,7 +896,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 16 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 17 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
