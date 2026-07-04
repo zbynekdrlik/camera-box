@@ -417,6 +417,14 @@ chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOM
 # =============================================================================
 step 9 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
+# Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
+# launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
+# genlock RE-deploy, step 6 force-restarts (SIGKILL) a running OBS to load the swapped
+# libobs.so.30/distroav.so; without clearing the sentinel here first, the relaunched OBS pops
+# the "Crash or unclean shutdown detected" recovery modal and hangs headless — WebSocket :4455
+# never comes up, and step 10 fails "not listening" even though the swap itself succeeded
+# (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
+rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
 if ! pgrep -x obs >/dev/null; then
     sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
         nohup obs >/tmp/obs-launch.log 2>&1 &
