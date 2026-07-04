@@ -396,6 +396,51 @@ mode-preserving from the source and silently propagates any unusual source mode.
 `install-grub-efi.sh`, `rig-heartbeat.sh`, `rig-restore-decision.sh`, `camera-box-grow-root.sh`,
 `disk-guard-thresholds.sh`.
 
+## #458 — `set -euo pipefail` footguns in one-shot provisioning scripts (setup-*.sh)
+
+Two review passes on `scripts/setup-imag.sh`'s genlock hot-swap step (#460 integrity check)
+found the SAME class of bug three separate times, in three different shapes. All three are now
+fixed there (and empirically spot-check-verified — revert the fix, confirm the test fails,
+restore) but WILL recur in any future `setup-*.sh`/provisioning script unless watched for:
+
+1. **`ls`/`grep`/`curl|grep|grep` piped into `| head -1`, assigned bare — aborts SILENTLY on an
+   empty match.** `VAR="$(ls -t DIR/*.txt 2>/dev/null | head -1)"` — if the glob matches nothing,
+   `ls` exits non-zero even though `head` succeeds (empty output is not an error for `head`).
+   Under `pipefail`, the pipeline's exit status is the RIGHTMOST non-zero command, so the bare
+   assignment inherits `ls`'s failure and `set -e` aborts the WHOLE SCRIPT right there — before
+   whatever `[ -n "$VAR" ] || fail "..."` check you wrote next ever runs, usually with **zero
+   diagnostic** (stderr is typically `2>/dev/null`'d). **Fix: append `|| true` to the whole
+   pipeline** (`... | head -1 || true`), then let the following `[ -n "$VAR" ] || fail ...` do its
+   job normally. Same fix applies to any `curl | grep | grep | head -1` URL-scraping pipeline.
+2. **A `fail()`-calling function invoked via `cmd "$(func)" other-arg` — its abort is silently
+   swallowed.** `$(...)` always forks a subshell. A BARE `VAR="$(func)"` assignment correctly
+   propagates that subshell's exit status to `set -e` (empirically verified — this DOES abort the
+   script). But `cmd "$(func_that_calls_fail)" other-arg` does NOT: the subshell's `exit` only
+   kills the command-substitution subshell, and `cmd` still runs with that argument silently
+   EMPTY. **Rule: any function that can call `fail()`/`exit` must ALWAYS be captured via a bare
+   `VAR="$(func ...)"` assignment on its own line — never embedded as one of several arguments to
+   another command.** This is the subtler sibling of the already-documented `| while read; do
+   fail; done` pipe-subshell trap (same root cause — a subshell's `exit` doesn't propagate through
+   an enclosing command the way `set -e` needs — different shape, easy to reintroduce while fixing
+   the first one).
+3. **`gh ... -q '.[0].someField'` on an EMPTY JSON array/result returns the literal 4-char text
+   `"null"`, not an empty string** (jq semantics: indexing a nonexistent element yields `null`,
+   and `-r`/`gh -q` renders it as text). A bare `[ -n "$VAR" ]` guard wrongly treats `"null"` as a
+   valid value. **Fix: `-q '.[0].someField // empty'`.**
+
+**Test-quality corollary (found 3× in `tests/setup_imag_guards.rs` across both review passes):** a
+purely textual `body.contains("some string")` guard can pass even when the real check is gutted,
+if that exact substring ALSO appears in unrelated prose (a WARNING fallback echo, a success
+banner). Anchor textual guards on the literal FUNCTIONAL invocation (`grep -iE 'the actual
+pattern'`), not just "the words appear somewhere" — and for anything with real comparison logic
+(not just presence/absence of a string), add a REAL execution test: give the script a
+`if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0; fi` guard (mirrors
+`scripts/launch-obs-genlock.sh`/`scripts/genlock-manifest.sh`/`scripts/drift-guard.sh`), define
+pure helper functions BEFORE it, and source it from a Rust test (`tests/genlock_manifest.rs::run_sourced`
+is the reference pattern; `tests/setup_imag_pure_functions.rs` is the new sibling for
+`setup-imag.sh`). A textual pin proves the code EXISTS; a sourced execution test proves it WORKS —
+neither substitutes for the other.
+
 **Fleet disk-space guard (SHIPS DISABLED):** `scripts/cam-disk-guard.sh` + `scripts/lib/disk-guard-thresholds.sh`
 + `systemd/cam-disk-guard.{service,timer}` are committed to the repo but NOT installed/enabled — same
 pattern as `systemd/rig-restore-watchdog.{service,timer}` (#281 Fix#3). Enable manually on dev1 when

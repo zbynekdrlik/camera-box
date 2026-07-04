@@ -1390,3 +1390,27 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   bypass's bracket **must be a SINGLE LINE** — `grep -E` matches line-by-line, so a bypass reason
   that wraps across multiple lines (as this session's first attempt did) silently fails to match
   and the push stays blocked with no diagnostic beyond the generic harness "No stderr output".
+- **#458 remaining scope SHIPPED (PR #471, merge `549193ed2`)**: `scripts/setup-imag.sh` steps 5-6
+  reworked from the stock-DistroAV bootstrap into a genlock (issue 460) hot-swap over the PPA
+  `obs-studio` base — `gh run download` pulls `obs-genlock-linux-x86_64` (libobs.so.30) +
+  `distroav-linux-fast-so` (distroav.so, byte-identical to the bundle's own copy, live-verified),
+  both sha256-verified against the bundle's `BUNDLE_MANIFEST.json` (#120) before install. Real
+  hot-swap paths live-verified on imag-nb via read-only `dpkg -L`/`readelf` (no write): SONAME ==
+  filename at `/usr/lib/x86_64-linux-gnu/libobs.so.30`, plugin at
+  `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so`. Idempotent (`/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`,
+  checked via one cheap `gh run view --json headSha` BEFORE any ~90MB download); bounded 2-dir
+  backup (`stock-pre-genlock` once, `previous` overwritten each swap); `apt-mark hold obs-studio`;
+  step 10 extended with a genlock log-verify (Linux equivalent of `launch-obs-genlock.sh`).
+  Two full review rounds (3-agent parallel `/review` + a deep `requesting-code-review` pass) each
+  found real, empirically-verified bash bugs — see the `ops` skill's new "#458 —
+  `set -euo pipefail` footguns" section for the reusable gotchas (pipefail-empty-glob-abort,
+  `fail()` swallowed by a `$(func)`-as-argument subshell, `gh -q` returning literal `"null"`, and
+  the textual-guard-test discriminator-collision class found 3×). Added
+  `tests/setup_imag_pure_functions.rs` — the first REAL execution test for a `setup-*.sh` script
+  (via a new `BASH_SOURCE[0] != $0` guard, mirroring `launch-obs-genlock.sh`/`genlock-manifest.sh`),
+  proving the sha-verification logic itself (not just its call sites) actually works. Every fix
+  spot-check-verified (revert -> confirm the guard fails -> restore). CODE + TESTS ONLY — no live
+  deploy in this PR; the actual imag-nb (`10.77.9.182`) genlock deploy + 6-camera-@60fps
+  post-deploy verification is the supervisor's next step. Filed #472 (defense-in-depth follow-up:
+  re-verify installed bytes against the cached manifest on an idempotency no-op — backstopped
+  today by step 10's independent runtime check, not urgent).
