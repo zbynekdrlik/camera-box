@@ -709,3 +709,85 @@ fn setup_imag_gh_deb_url_discovery_captures_curl_output_first() {
         "{SETUP}: GH_RELEASE_JSON must be captured before it is grepped"
     );
 }
+
+// ============================================================================================
+// #479 — provision DanteSync on imag-nb so genlock's system-clock read (CLOCK_REALTIME) stays
+// disciplined to the same cluster master as the cameras. A re-provision must reproduce the
+// 2026-07-04 by-hand fix (dantesync 1.8.17, NIC-pinned, timesyncd masked, PTP/NTP lock verified).
+// ============================================================================================
+
+/// The dantesync unit must pin BOTH the resolved NIC (imag is a notebook with other interfaces)
+/// and the cluster master strih.lan — a bare `dantesync` would fall back to the public NTP pool
+/// and silently desync imag's clock from the rest of the rig.
+#[test]
+fn setup_imag_installs_dantesync_pinned_to_nic_and_master() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("ExecStart=/usr/local/bin/dantesync -i ${NIC} --ntp-server strih.lan"),
+        "{SETUP} must write a dantesync ExecStart pinned to both the resolved NIC and the \
+         cluster master strih.lan (live-verified fix, 2026-07-04) — not a bare `dantesync` \
+         (public-pool default) and not an unpinned NIC (imag has other interfaces)"
+    );
+}
+
+/// DanteSync OWNS the clock (ops-skill hard rule) — systemd-timesyncd must be masked so nothing
+/// else can ever discipline imag's clock alongside it, and the mask must happen BEFORE dantesync
+/// is enabled so the two clock sources can never race even for a single boot cycle.
+#[test]
+fn setup_imag_masks_timesyncd_before_enabling_dantesync() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("systemctl mask systemd-timesyncd"),
+        "{SETUP} must mask systemd-timesyncd — dantesync OWNS the clock, per the ops skill hard \
+         rule (never timesyncd/chrony/ptp4l alongside it)"
+    );
+    let mask = body
+        .find("systemctl mask systemd-timesyncd")
+        .expect("timesyncd mask must exist");
+    let enable = body
+        .find("systemctl enable --now dantesync")
+        .expect("dantesync enable --now must exist");
+    assert!(
+        mask < enable,
+        "{SETUP}: systemd-timesyncd must be masked BEFORE dantesync is enabled — the two clock \
+         sources must never race, not even for one boot cycle"
+    );
+}
+
+/// The install must fail loud (never silently proceed unlocked) if PTP/NTP lock is not achieved
+/// within budget — a re-provision that "succeeds" without clock discipline is the exact
+/// FIFO-skew-drift regression #479 exists to prevent.
+#[test]
+fn setup_imag_verifies_dantesync_ptp_lock() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r"grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'"),
+        "{SETUP} must poll `journalctl -u dantesync` for a PTP LOCK/NANO or NTP offset line \
+         before declaring the step done"
+    );
+    assert!(
+        body.contains("did not report PTP/NTP lock within budget"),
+        "{SETUP} must fail loud when dantesync never reports PTP/NTP lock within budget — a \
+         silent pass here would let a re-provision ship with an undisciplined clock"
+    );
+}
+
+/// The dantesync binary install must have a fallback path (GitHub release OR a cam-box copy) so
+/// a re-provision cannot fail solely because GitHub is unreachable from imag's network.
+#[test]
+fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
+    let body = read(SETUP);
+    for needle in [
+        "api.github.com/repos/${DANTESYNC_REPO}/releases/latest",
+        "dantesync-linux-amd64",
+        "CAM_PW",
+        "dantesync copy from cam1 fallback failed",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} dantesync install must reference `{needle}` — GitHub release fetch with a \
+             cam-box scp fallback, mirroring the step-6/NDI-runtime fallback pattern already in \
+             this script"
+        );
+    }
+}

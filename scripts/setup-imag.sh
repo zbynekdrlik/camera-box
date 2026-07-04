@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=10
+TOTAL_STEPS=11
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -108,7 +108,76 @@ else
 fi
 
 # =============================================================================
-step 2 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
+step 2 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
+# =============================================================================
+# imag's genlock render tick + FIFO ts-align read clock_gettime(CLOCK_REALTIME) — the system
+# clock. Without cluster clock discipline, imag free-runs vs the dante-disciplined cameras and
+# the genlock FIFO ts_head_skew drifts unbounded (live-proven 2026-07-04: skew drifted
+# 474->541ms/80min, CAM underruns climbing). DanteSync OWNS the clock (ops skill hard rule) —
+# NEVER timesyncd/chrony/ptp4l alongside it. Pin the NIC ($NIC, resolved in step 1) since imag is
+# a notebook with other network interfaces that must not be mistaken for the rig link.
+DANTESYNC_REPO="zbynekdrlik/dantesync"
+if [ ! -x /usr/local/bin/dantesync ]; then
+    DANTESYNC_URL="$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null \
+        | grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' \
+        | grep -o 'https://[^"]*' | head -1 || true)"
+    if [ -n "$DANTESYNC_URL" ]; then
+        curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync || fail "dantesync download failed"
+    elif [ -n "${CAM_PW:-}" ]; then
+        command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
+        sshpass -p "$CAM_PW" scp -O -o StrictHostKeyChecking=no \
+            "${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync" /usr/local/bin/dantesync \
+            || fail "dantesync copy from cam1 fallback failed"
+    else
+        fail "dantesync: no GitHub release asset found and CAM_PW unset for the cam-box fallback copy"
+    fi
+    chmod +x /usr/local/bin/dantesync
+fi
+[ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
+
+cat > /etc/systemd/system/dantesync.service <<EOF
+[Unit]
+Description=Dante Time Sync (PTP/NTP Synchronization)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dantesync -i ${NIC} --ntp-server strih.lan
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# DanteSync OWNS the clock — MASK systemd-timesyncd so nothing else ever disciplines it (ops
+# skill hard rule: NEVER chrony/ptp4l/timesyncd alongside dantesync). Mask BEFORE enabling
+# dantesync so the two clock sources can never race even for one boot cycle.
+timedatectl set-ntp false 2>/dev/null || true
+systemctl disable --now systemd-timesyncd >/dev/null 2>&1 || true
+systemctl mask systemd-timesyncd >/dev/null 2>&1 || true
+
+systemctl daemon-reload
+systemctl enable --now dantesync
+
+# Verify PTP/NTP lock — the Linux equivalent of the ops-skill journalctl check. Accepts either
+# PTP LOCK/NANO or the NTP-fallback offset line (grandmaster may be transiently absent).
+DANTESYNC_LOCKED=0
+for i in $(seq 1 30); do
+    if journalctl -u dantesync --no-pager -n 50 2>/dev/null | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
+        DANTESYNC_LOCKED=1
+        break
+    fi
+    sleep 2
+done
+[ "$DANTESYNC_LOCKED" -eq 1 ] || fail "dantesync did not report PTP/NTP lock within budget — genlock clock discipline not established (check journalctl -u dantesync)"
+echo "  dantesync locked to strih.lan via $NIC (timesyncd masked)"
+
+# =============================================================================
+step 3 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
 # =============================================================================
 cat > /etc/systemd/system/cpu-performance.service <<'EOF'
 [Unit]
@@ -135,7 +204,7 @@ bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
 
 # =============================================================================
-step 3 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
+step 4 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
 # =============================================================================
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
@@ -156,7 +225,7 @@ gs org.gnome.desktop.screensaver lock-enabled false
 gs org.gnome.desktop.screensaver idle-activation-enabled false
 
 # =============================================================================
-step 4 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 5 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -179,7 +248,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 5 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 6 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -189,7 +258,7 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 6 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 7 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
@@ -400,7 +469,7 @@ else
 fi
 
 # =============================================================================
-step 7 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 8 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -428,7 +497,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 8 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 9 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -442,7 +511,7 @@ fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 9 "Launch OBS on the desktop session (X11 :0)"
+step 10 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -460,7 +529,7 @@ fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 10 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 11 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
