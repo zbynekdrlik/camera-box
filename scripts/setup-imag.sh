@@ -9,7 +9,7 @@
 # Usage (on the box):
 #   sudo CAM_PW=<fleet-pw> GH_TOKEN=<gh-pat-with-repo-scope> ./setup-imag.sh [--yes]
 #
-# GH_TOKEN (repo-read scope) is required for step 6: imag-nb runs the CUSTOMIZED genlock
+# GH_TOKEN (repo-read scope) is required for the genlock hot-swap step: imag-nb runs the CUSTOMIZED genlock
 # OBS+DistroAV build (#460), hot-swapped over the PPA base — the artifacts are GitHub Actions
 # workflow artifacts on this PRIVATE repo, which `gh run download` needs auth to fetch.
 #
@@ -317,7 +317,7 @@ step 8 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over 
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
-# obs-studio package installed in step 5 ships libobs.so.30 with SONAME "libobs.so.30"
+# obs-studio package installed in the prior step ships libobs.so.30 with SONAME "libobs.so.30"
 # (live-verified on imag-nb) — IDENTICAL to the genlock build's own SONAME — so the genlock
 # libobs.so.30 hot-swaps cleanly over it, exactly mirroring the Windows obs.dll hot-swap (see
 # .claude/skills/genlock). Only libobs.so.30 (the genlock render-tick/ts-align patches live in
@@ -352,7 +352,7 @@ if ! command -v gh >/dev/null 2>&1; then
     # shape ever changes), `grep` exits non-zero, and under pipefail that propagates to this bare
     # assignment — `set -e` would abort the script HERE, before the very next line's intended
     # `fail "no gh CLI ... asset found"` ever runs, with NO diagnostic at all. Same footgun class
-    # (and same fix) as the LATEST_LOG lookup in step 10 — found in review.
+    # (and same fix) as the LATEST_LOG lookup in the verify step — found in review.
     GH_DEB_URL="$(printf '%s' "$GH_RELEASE_JSON" \
         | grep -oE '"browser_download_url": *"[^"]*linux_amd64\.deb"' | grep -oE 'https[^"]*' | head -1 || true)"
     [ -n "$GH_DEB_URL" ] || fail "no gh CLI linux_amd64 .deb asset found on latest cli/cli release"
@@ -398,7 +398,7 @@ if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_
     # *existence* check above trusts the on-disk marker without re-verifying the installed
     # BYTES. If the deployed libobs.so.30/distroav.so were ever silently reverted (e.g. an
     # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
-    # re-run would wrongly report "already deployed" and skip re-swapping — step 10's runtime
+    # re-run would wrongly report "already deployed" and skip re-swapping — the verify step's runtime
     # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
     # the CURRENTLY INSTALLED files against the manifest cached locally on the LAST successful
     # swap (pure local sha256 compare, zero network cost, only paid on the already-rare re-run
@@ -632,10 +632,10 @@ step 12 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
-# genlock RE-deploy, step 6 force-restarts (SIGKILL) a running OBS to load the swapped
-# libobs.so.30/distroav.so; without clearing the sentinel here first, the relaunched OBS pops
-# the "Crash or unclean shutdown detected" recovery modal and hangs headless — WebSocket :4455
-# never comes up, and step 10 fails "not listening" even though the swap itself succeeded
+# genlock RE-deploy, the genlock hot-swap step force-restarts (SIGKILL) a running OBS to load the
+# swapped libobs.so.30/distroav.so; without clearing the sentinel here first, the relaunched OBS
+# pops the "Crash or unclean shutdown detected" recovery modal and hangs headless — WebSocket
+# :4455 never comes up, and the verify step fails "not listening" even though the swap succeeded
 # (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
 rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
 if ! pgrep -x obs >/dev/null; then
@@ -661,13 +661,13 @@ OBS_LOG_DIR="$OBS_CFG/logs"
 # `|| true` is load-bearing: under `set -euo pipefail`, `ls` on a non-matching glob exits non-zero
 # even though `head` succeeds with empty output, and pipefail propagates that failure to the bare
 # assignment — `set -e` would abort the script HERE, before the very next line's intended
-# `fail "no OBS log found..."` ever runs (same convention already used for step 8's
+# `fail "no OBS log found..."` ever runs (same convention already used for the desktop-icon step's
 # `APP_DESKTOP=$(ls ... 2>/dev/null || true)`).
 LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1 || true)"
 [ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
 LOG_TEXT="$(cat "$LATEST_LOG")"
 echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
-    || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap in step 6)"
+    || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap step)"
 echo "  genlock render tick ENABLED (#460 build proof)"
 if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
     echo "  DistroAV plugin loaded"
