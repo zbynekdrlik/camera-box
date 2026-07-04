@@ -45,6 +45,39 @@ description`). Before merging any PR, `git log origin/main..HEAD --oneline` and 
 `^(fix|close|resolve)[a-z]*:\s*#` to catch a stray reference-only commit that would trigger an
 unwanted auto-close.
 
+## GOTCHA — two autopilot workers in the SAME checkout share one git index/branch ref
+
+`/home/newlevel/devel/camera-box` is a single shared clone. If two autopilot workers are ever
+dispatched concurrently (violates the intended "one active worker per repo" but has happened in
+practice — 2026-07-04, issues #499/#500 vs #505), they share the SAME working tree, index, and
+local `dev` ref, not just the same remote branch. Consequences + mitigations, confirmed live:
+
+- **`git add` + a later separate `git commit` leaves a race window** — the other worker's own
+  `git commit -a`-style commit can sweep up your staged-but-uncommitted file. **Stage and commit
+  in the same breath, and always pass an explicit pathspec:** `git commit -m "..." -- <path>`
+  (pathspec form defaults to `--only` — commits ONLY that path's working-tree content,
+  disregarding anything else staged, and leaves the other worker's staged changes untouched). If
+  a sweep still happens, `git rm --cached <path>` in a new commit restores the file to untracked
+  (don't `git rm` the file itself — the other worker's session may still need it on disk).
+- **A push by EITHER worker pushes the local `dev` ref as it stands** — including the OTHER
+  worker's already-made local commits, since both share one ref. There is no way to "un-push"
+  someone else's commits without a banned force-push/history-rewrite. If this happens, verify
+  with `gh issue view <N>` whether it changes which issue(s) a shared PR will auto-close (see the
+  GOTCHA above) and adapt the PR body / commit wording rather than fighting the git state.
+- **GitHub allows only ONE open PR per (head, base) branch pair.** If another worker's PR from
+  `dev`→`main` is already open when you're ready to push, you CANNOT open a second one — wait for
+  theirs to reach a terminal state (poll `gh pr view <N> --json state,mergedAt`, e.g. via
+  `Monitor`) before pushing, or your commits will just get folded into their PR's diff.
+- **A later push cancels an in-flight `linux-genlock.yml` run via its
+  `linux-genlock-${{ github.ref }}` concurrency group — even if the later push doesn't itself
+  touch `vendor/**`** (the group is keyed on the ref, not the specific paths). A cancelled run is
+  NOT a build proof. Re-trigger manually once the ref is stable:
+  `gh workflow run "Linux genlock build (vendored OBS + DistroAV, imag-nb parity)" --ref dev`.
+- **`linux-genlock.yml` only triggers on push to `dev`, never `main`** (its `on.push.branches` is
+  `[dev]` only). After a dev→main merge, main never automatically gets a genlock build — if you
+  need proof the exact merged main state compiles, `gh workflow run "Linux genlock build
+  (vendored OBS + DistroAV, imag-nb parity)" --ref main` explicitly.
+
 ## Local Build Policy
 
 **Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**
