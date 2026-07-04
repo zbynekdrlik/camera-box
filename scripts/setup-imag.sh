@@ -39,11 +39,12 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
 # manifest_sha_for_path MANIFEST RELPATH -> the #120 manifest's recorded sha256 for RELPATH, or
 # fails loud if RELPATH isn't listed. Narrow, single-purpose lookup (NOT a full bundle-completeness
-# walk like scripts/genlock-manifest.sh --check) — setup-imag.sh only ever needs TWO specific
-# files verified (libobs.so.30 + distroav.so), never all ~1600 bundle files, so hashing everything
-# would be pure waste (the bundle also carries the Qt frontend + locale data + default plugins,
-# none of which this script installs). setup-imag.sh is copied to the box standalone (no sibling
-# scripts/genlock-manifest.sh checked out there), so this cannot shell out to the repo's own tool.
+# walk like scripts/genlock-manifest.sh --check) — setup-imag.sh only ever needs THREE specific
+# files verified (libobs.so.30 + distroav.so + #499 bin/obs), never all ~1600 bundle files, so
+# hashing everything would be pure waste (the bundle also carries the Qt frontend + locale data +
+# default plugins, none of which this script installs). setup-imag.sh is copied to the box
+# standalone (no sibling scripts/genlock-manifest.sh checked out there), so this cannot shell out
+# to the repo's own tool.
 manifest_sha_for_path() {
     local manifest="$1" relpath="$2" sha
     sha="$(jq -r --arg p "$relpath" '.files[] | select(.path == $p) | .sha256' "$manifest")" \
@@ -444,7 +445,16 @@ step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary
 # re-check `ubuntu-drivers devices` / `apt-cache search nvidia-driver` for a newer `-open` release
 # before reusing this pin verbatim; prefer the newest available `-open` flavor over 595 if one has
 # since shipped.
-if ! dpkg -s nvidia-driver-595-open >/dev/null 2>&1; then
+# Found in review: a bare `dpkg -s <pkg> >/dev/null 2>&1` exit code alone is NOT a reliable
+# "is it installed" check — dpkg -s exits 0 even for a package that was `apt remove`d (not purged)
+# and now sits in "deinstall ok config-files" state (live-verified on this box: `dpkg -s
+# alsa-base` exits 0 with `Status: deinstall ok config-files`). If the driver package were ever
+# removed-not-purged between provisioning runs, that bare exit-code check would wrongly conclude
+# "already installed", skip the apt-get install, and still run prime-select + safe_grub_regen on a
+# box with no actual driver files. Check the Status field content instead (no `-q` on the piped
+# grep — dpkg -s output is tiny, but this matches the same safe-read convention used elsewhere in
+# this script rather than mixing conventions).
+if ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
         || fail "nvidia-driver-595-open install failed"
