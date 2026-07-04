@@ -236,7 +236,7 @@ impl BurnStepContiguity {
 /// trivially contiguous (a span of one; nothing can be missing inside it).
 pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
     use std::collections::BTreeSet;
-    let step: i64 = step.max(1).into();
+    let step = step.max(1);
     let present: BTreeSet<u32> = ids.iter().copied().collect();
     let first_id = present.iter().next().copied();
     let last_id = present.iter().next_back().copied();
@@ -253,17 +253,22 @@ pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
         }
     };
     // expected = the number of step-grid points from first to last inclusive. Diagnostic only
-    // (mirrors `TickContiguity::expected_count`'s role); i64 math avoids an underflow panic if
-    // `step` were ever 0 (guarded above by `.max(1)`) or first==last (span of one ⇒ exactly 1).
-    let expected_count = ((last as i64 - first as i64) / step + 1).max(1) as u32;
+    // (mirrors `TickContiguity::expected_count`'s role); saturating math so a degenerate
+    // full-u32-range span can never wrap/panic — mirrors `tick_contiguity`'s own guard.
+    let expected_count = (last.saturating_sub(first) / step).saturating_add(1);
     let mut missing_ids: Vec<u32> = Vec::new();
     let mut prev = first;
     for &id in present.iter().skip(1) {
-        let gap = id as i64 - prev as i64;
+        // `present` (a BTreeSet) iterates in ascending order, so `id > prev` always — plain u32
+        // subtraction can never underflow here.
+        let gap = id - prev;
         if gap > step {
+            // `gap > step` ⇒ `gap / step >= 1` ⇒ `excess` can never underflow. Every
+            // `prev + k*step` for `k <= excess` stays `< id` (by construction, see the doc
+            // comment above) — never overflows past the next present id.
             let excess = gap / step - 1;
             for k in 1..=excess {
-                missing_ids.push((prev as i64 + k * step) as u32);
+                missing_ids.push(prev + k * step);
             }
         }
         prev = id;
@@ -581,5 +586,22 @@ mod tests {
         assert_eq!(sc.first_id, Some(42));
         assert_eq!(sc.last_id, Some(42));
         assert_eq!(sc.expected_count, 1);
+    }
+
+    #[test]
+    fn burn_step_contiguity_expected_count_saturates_instead_of_panicking_on_overflow() {
+        // Mirrors `expected_count_saturates_instead_of_panicking_on_overflow` above: checks ONLY
+        // the saturating ARITHMETIC in isolation — NOT the full `burn_step_contiguity` (which
+        // additionally walks the gap to enumerate missing step-grid ids; walking a genuine
+        // 4-billion-wide span is intentionally never exercised, same as `tick_contiguity`/
+        // `burn_contiguity` never test it end-to-end either — it would iterate ~4 billion times).
+        // A run-bounded burn counter never realistically reaches u32::MAX, so this is defensive.
+        let step: u32 = 1; // already `.max(1)`-guarded in `burn_step_contiguity` itself
+        let expected_count = (u32::MAX.saturating_sub(0) / step).saturating_add(1);
+        assert_eq!(
+            expected_count,
+            u32::MAX,
+            "saturates instead of wrapping to 0"
+        );
     }
 }
