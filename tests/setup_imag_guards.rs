@@ -602,6 +602,33 @@ fn setup_imag_latest_log_lookup_survives_empty_glob_under_pipefail() {
     );
 }
 
+/// #476: a genlock RE-deploy (step 6) force-restarts OBS to load the swapped bytes. A leftover
+/// crash sentinel from that force-restart then makes the relaunched OBS pop the "Crash or
+/// unclean shutdown detected" recovery modal and hang headless — WebSocket :4455 never comes
+/// up (hit live 2026-07-04, recovered by hand). Step 9 must clear
+/// ~/.config/obs-studio/.sentinel/* BEFORE launching obs, mirroring the Windows
+/// launch-obs-genlock.sh sentinel-clear convention.
+#[test]
+fn setup_imag_clears_obs_crash_sentinel_before_launch() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("rm -rf \"${OBS_CFG}/.sentinel\""),
+        "{SETUP} must remove ${{OBS_CFG}}/.sentinel/* before launching OBS (mirrors the Windows \
+         launch-obs-genlock.sh `Remove-Item .sentinel\\*` convention, #476)"
+    );
+    let sentinel_clear = body
+        .find("rm -rf \"${OBS_CFG}/.sentinel\"")
+        .expect("sentinel-clear line must exist");
+    let obs_launch = body
+        .find("nohup obs >/tmp/obs-launch.log")
+        .expect("{SETUP} must launch obs via nohup");
+    assert!(
+        sentinel_clear < obs_launch,
+        "{SETUP}: the crash-sentinel clear must happen BEFORE the obs launch line — a stale \
+         sentinel from a force-restart otherwise pops the recovery modal and hangs OBS headless"
+    );
+}
+
 /// The `gh` CLI bootstrap must capture curl's output into a variable BEFORE grepping it — never a
 /// live `curl | grep | head -1` pipe, which shares the same early-pipe-closure class the SONAME
 /// check documents (a downstream stage closing early can SIGPIPE an upstream writer under
