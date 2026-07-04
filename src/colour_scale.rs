@@ -290,6 +290,19 @@ mod tests {
         w: CORNER_SIDE,
         h: CORNER_SIDE,
     };
+    // #463 — imag's bottom-center-left corner burn: mirrors
+    // `burn_geom::corner_placement`'s new `Corner::BottomCenterLeft` case (vendor/distroav/src/
+    // burn-geom.hpp) — one `CORNER_MARGIN` clear of BURN_BL's trailing edge (40+302+40=382),
+    // same side/row as the other two corner burns. [382,684) x [738,1040): 78px clear of
+    // BURN_BL's right edge (342, after the 40px gap) and 116px clear of CAM1_BURN's left edge
+    // (800) — no overlap with either, and (being bottom-anchored, same row as BURN_BL/BURN_BR)
+    // no overlap with the colour column (which ends at QR_BOTTOM=724, well above row 738).
+    const BURN_IMAG: Rect = Rect {
+        x: CORNER_MARGIN + CORNER_SIDE + CORNER_MARGIN,
+        y: CANVAS_H - CORNER_MARGIN - CORNER_SIDE,
+        w: CORNER_SIDE,
+        h: CORNER_SIDE,
+    };
 
     fn default_patches() -> Vec<(Rect, Rgb)> {
         colour_scale_patches(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN)
@@ -356,7 +369,9 @@ mod tests {
     fn no_patch_intersects_a_qr_half_or_any_burn() {
         let patches = default_patches();
         assert!(!patches.is_empty());
-        let obstacles = [QR_LEFT, QR_RIGHT, CAM1_BURN, BURN_BL, BURN_BR];
+        // #463: BURN_IMAG (imag's new bottom-center-left corner burn) joins the obstacle set —
+        // every colour patch must stay samplable with FOUR burns now, not three.
+        let obstacles = [QR_LEFT, QR_RIGHT, CAM1_BURN, BURN_BL, BURN_BR, BURN_IMAG];
         for (rect, _) in &patches {
             for ob in &obstacles {
                 assert!(
@@ -364,6 +379,37 @@ mod tests {
                     "colour patch {rect:?} must not overlap obstacle {ob:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn four_burns_do_not_overlap_each_other_463() {
+        // #463 — imag's new bottom-center-left burn must not collide with EITHER of its bottom-row
+        // neighbours (BURN_BL / BURN_BR) NOR the horizontally-centered cam1 capture burn. This is
+        // the "third burn must not collide with the other 3 burns" requirement, checked pairwise
+        // across all four (not just vs the colour patches, which the test above already covers).
+        let burns = [
+            ("cam1", CAM1_BURN),
+            ("strih (BL)", BURN_BL),
+            ("stream (BR)", BURN_BR),
+            ("imag (BCL)", BURN_IMAG),
+        ];
+        for i in 0..burns.len() {
+            for j in (i + 1)..burns.len() {
+                let (name_a, rect_a) = burns[i];
+                let (name_b, rect_b) = burns[j];
+                assert!(
+                    !rect_a.intersects(&rect_b),
+                    "burn {name_a} {rect_a:?} must not overlap burn {name_b} {rect_b:?}"
+                );
+            }
+        }
+        // And every burn stays fully in-canvas.
+        for (name, r) in &burns {
+            assert!(
+                r.x + r.w <= CANVAS_W && r.y + r.h <= CANVAS_H,
+                "burn {name} {r:?} must stay within the {CANVAS_W}x{CANVAS_H} canvas"
+            );
         }
     }
 
