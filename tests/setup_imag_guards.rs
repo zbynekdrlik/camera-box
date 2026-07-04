@@ -165,3 +165,465 @@ fn imag_scenes_projector_targets_external_monitor_only() {
          projector on the external monitor"
     );
 }
+
+// ============================================================================================
+// #458 remaining scope: step 6 reworked from a stock-DistroAV bootstrap into a genlock (#460)
+// hot-swap over the PPA base. These guards pin that contract so a later edit cannot silently
+// regress back to the stock plugin or drop the fail-loud / idempotent / manifest-verify pieces.
+// ============================================================================================
+
+/// The stock DistroAV .deb bootstrap this step used to run MUST be gone — imag-nb runs the
+/// CUSTOMIZED genlock DistroAV, not the upstream release (user directive, #458 comment
+/// 2026-07-03: "the stock-DistroAV bootstrap path is dead").
+#[test]
+fn setup_imag_no_longer_installs_stock_distroav_deb() {
+    let body = read(SETUP);
+    assert!(
+        !body.contains("api.github.com/repos/DistroAV/DistroAV/releases/latest"),
+        "{SETUP} must NOT fetch the stock DistroAV release .deb any more — the genlock (#460) \
+         build's distroav.so is the plugin now"
+    );
+}
+
+/// Step 6 must pull the #460 genlock Linux artifacts (the full bundle for libobs.so.30 + the
+/// dedicated fast distroav.so) from the linux-genlock.yml workflow via `gh run download` — never
+/// re-invent a raw curl/API artifact fetch (private-repo Actions artifacts need `gh`'s auth).
+#[test]
+fn setup_imag_pulls_460_genlock_artifacts_via_gh_cli() {
+    let body = read(SETUP);
+    for needle in [
+        "linux-genlock.yml",
+        "obs-genlock-linux-x86_64",
+        "distroav-linux-fast-so",
+        "gh run download",
+        "gh run list",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} step 6 must reference `{needle}` — it deploys the #460 genlock Linux \
+             artifacts, not the stock DistroAV bootstrap"
+        );
+    }
+}
+
+/// A private-repo GitHub Actions artifact download needs authenticated `gh` — the step must
+/// fail loud (not silently proceed unauthenticated) when GH_TOKEN is missing.
+#[test]
+fn setup_imag_requires_gh_token_fail_loud() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("GH_TOKEN") && body.contains("GH_TOKEN env required"),
+        "{SETUP} must fail loud when GH_TOKEN is unset — it cannot download the private #460 \
+         CI artifact unauthenticated"
+    );
+}
+
+/// The hot-swap must overwrite the REAL dpkg-owned files at their live-verified imag-nb paths —
+/// `libobs.so.30` (SONAME == filename, confirmed live) and the DistroAV plugin `.so`. Swapping
+/// the wrong path silently leaves the box on stock bytes.
+#[test]
+fn setup_imag_hotswaps_real_libobs_and_distroav_paths() {
+    let body = read(SETUP);
+    for needle in [
+        "/usr/lib/x86_64-linux-gnu/libobs.so.30",
+        "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so",
+        "lib/x86_64-linux-gnu/libobs.so.30",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must reference `{needle}` — the genlock hot-swap targets the REAL, \
+             live-verified dpkg file paths on imag-nb"
+        );
+    }
+}
+
+/// A post-swap SONAME sanity check must exist — installing the wrong file (or a corrupted one)
+/// at the right path must not pass silently.
+#[test]
+fn setup_imag_verifies_soname_after_swap() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("readelf") && body.contains("SONAME"),
+        "{SETUP} must sanity-check the deployed libobs.so.30's SONAME after the hot-swap"
+    );
+}
+
+/// #120's per-file sha256 bundle manifest must be verified before anything is installed — a
+/// corrupted or tampered download must never be trusted onto the box. setup-imag.sh runs
+/// standalone on the box (no sibling scripts/genlock-manifest.sh checked out), so this must be
+/// an INLINE check, not a shell-out to the repo tool.
+#[test]
+fn setup_imag_verifies_bundle_manifest_before_install() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("BUNDLE_MANIFEST.json") && body.contains("manifest_sha_for_path"),
+        "{SETUP} must look up the #120 BUNDLE_MANIFEST.json's per-file sha256 before installing \
+         any downloaded genlock file"
+    );
+    assert!(
+        body.contains("sha256sum") && body.contains("sha256 mismatch"),
+        "{SETUP} manifest verify must sha256-compare every checked file and fail loud on mismatch"
+    );
+    let lookup_fn = body
+        .find("manifest_sha_for_path() {")
+        .expect("manifest_sha_for_path must be a real function definition");
+    let verify_fn = body
+        .find("verify_file_sha() {")
+        .expect("verify_file_sha must be a real function definition");
+    assert!(
+        lookup_fn < verify_fn,
+        "{SETUP}: manifest_sha_for_path must be defined before verify_file_sha (both before use)"
+    );
+}
+
+/// #120 sha256 verification must cover BOTH swapped files, not just libobs.so.30. distroav.so
+/// ships in a SEPARATE artifact (distroav-linux-fast-so) with no manifest of its own (only a
+/// commit-id text file, not a content hash) — the ONLY way to content-verify it is to cross-check
+/// it against the bundle's OWN manifest entry for the same relpath (live-verified byte-identical
+/// across both build jobs). Without this, the one file actually loaded into OBS as the
+/// NDI-carrying plugin had ZERO integrity check — found independently by 3 review passes.
+#[test]
+fn setup_imag_verifies_distroav_integrity_via_bundle_manifest_crosscheck() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("lib/x86_64-linux-gnu/obs-plugins/distroav.so")
+            && body.contains("cross-checked against bundle manifest"),
+        "{SETUP} must sha256-verify the downloaded distroav.so by cross-checking it against the \
+         bundle manifest's entry for lib/x86_64-linux-gnu/obs-plugins/distroav.so — a build-SHA \
+         text-equality check alone (DISTROAV_BUILD_SHA.txt) does not prove the BYTES are intact"
+    );
+    let want_libobs = body
+        .find("WANT_LIBOBS_SHA=\"$(manifest_sha_for_path")
+        .expect("libobs.so.30's expected sha must be looked up via manifest_sha_for_path");
+    let want_distroav = body
+        .find("WANT_DISTROAV_SHA=\"$(manifest_sha_for_path")
+        .expect("distroav.so's expected sha must ALSO be looked up via manifest_sha_for_path");
+    let verify_libobs = body
+        .find("verify_file_sha \"$BUNDLE_LIBOBS\" \"$WANT_LIBOBS_SHA\"")
+        .expect("libobs.so.30 must actually be verify_file_sha'd against its looked-up sha");
+    let verify_distroav = body
+        .find("verify_file_sha \"$FAST_DISTROAV\" \"$WANT_DISTROAV_SHA\"")
+        .expect("distroav.so must actually be verify_file_sha'd against its looked-up sha");
+    assert!(
+        want_libobs < verify_libobs && want_distroav < verify_distroav,
+        "{SETUP}: each expected sha must be resolved BEFORE the corresponding verify_file_sha call"
+    );
+}
+
+/// A `fail()`-capable function call MUST be captured via a BARE `VAR="$(func ...)"` assignment,
+/// never embedded as one of several arguments to another command. Empirically confirmed during
+/// review of this exact PR: `cmd "$(func_that_calls_fail)" other_arg` only kills the command-
+/// substitution SUBSHELL under `set -e` — `cmd` still runs with that argument silently EMPTY,
+/// silently defeating the fail-loud contract `manifest_sha_for_path` exists to provide. This is a
+/// DIFFERENT (subtler) footgun than the already-documented `| while` pipe-subshell one: a bare
+/// `VAR="$(func)"` assignment DOES correctly propagate the abort (verified too), so the fix is
+/// "resolve into a variable first, then pass the variable" — never inline the substitution.
+#[test]
+fn setup_imag_manifest_lookup_never_inlined_in_multi_arg_call() {
+    let body = read(SETUP);
+    // Every CALL site of manifest_sha_for_path (excluding its own `fn() {` definition line) must
+    // be a bare `IDENT="$(manifest_sha_for_path ...)"` assignment — i.e. the trimmed line starts
+    // with an identifier, `=`, then the substitution. A call embedded mid-line as one of several
+    // arguments to a DIFFERENT command (e.g. `verify_file_sha "$X" "$(manifest_sha_for_path ...)"`)
+    // would fail this shape check.
+    let mut call_lines = 0;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.contains("manifest_sha_for_path")
+            || trimmed.starts_with("manifest_sha_for_path()")
+        {
+            continue;
+        }
+        // Skip comment lines / doc prose mentioning the function name.
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        call_lines += 1;
+        let is_bare_assignment = trimmed
+            .split_once("=\"$(manifest_sha_for_path")
+            .is_some_and(|(ident, _)| {
+                !ident.is_empty() && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+        assert!(
+            is_bare_assignment,
+            "{SETUP}: line `{trimmed}` calls manifest_sha_for_path but is NOT a bare \
+             `IDENT=\"$(manifest_sha_for_path ...)\"` assignment on its own line — a fail() inside \
+             it would be silently swallowed by the command-substitution subshell if this call is \
+             embedded as an argument to another command instead"
+        );
+    }
+    assert_eq!(
+        call_lines, 2,
+        "{SETUP}: expected exactly 2 manifest_sha_for_path call sites (libobs.so.30 + distroav.so) \
+         — found {call_lines}; update this test if the call count genuinely changed"
+    );
+}
+
+/// The swap must be idempotent: re-running onto the SAME build SHA is a no-op, never a
+/// redundant re-download/re-swap.
+#[test]
+fn setup_imag_genlock_swap_is_idempotent() {
+    let body = read(SETUP);
+    for needle in ["GENLOCK_BUILD_SHA.txt", "already deployed", "DEPLOYED_SHA"] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must track the deployed build SHA in `{needle}` and skip re-swapping when \
+             it already matches (idempotent re-run)"
+        );
+    }
+}
+
+/// The idempotency short-circuit must happen BEFORE the ~90MB/~1600-file bundle is ever
+/// downloaded — resolving the run's headSha (one cheap `gh run view` API call, no download) is
+/// enough to know whether a no-op re-run needs to touch the network at all. Downloading first and
+/// only skipping the INSTALL step would pay full bandwidth + full manifest-hash cost on every
+/// re-run even when nothing changed (found in review).
+#[test]
+fn setup_imag_checks_idempotency_before_downloading_bundle() {
+    let body = read(SETUP);
+    let headsha_call = body
+        .find("gh run view \"$RUN_ID\" --repo \"$GENLOCK_REPO\" --json headSha")
+        .expect("NEW_SHA must be resolved via a cheap `gh run view --json headSha` call");
+    let noop_check = body
+        .find("if [ \"$DEPLOYED_SHA\" = \"$NEW_SHA\" ]")
+        .expect("the idempotency no-op check must exist");
+    let bundle_download = body
+        .find("gh run download \"$RUN_ID\" --repo \"$GENLOCK_REPO\" -n obs-genlock-linux-x86_64")
+        .expect("the bundle download must still exist for the non-no-op path");
+    assert!(
+        headsha_call < noop_check && noop_check < bundle_download,
+        "{SETUP}: order must be resolve-headSha -> idempotency-check -> (only then) download — \
+         a no-op re-run must never pay the bundle download cost"
+    );
+}
+
+/// `gh run list ... -q '.[0].databaseId'` on an EMPTY result list yields the literal text "null"
+/// (jq's normal behaviour indexing a nonexistent array element) — NOT an empty string — so a bare
+/// `[ -n "$RUN_ID" ]` guard would wrongly treat "null" as a valid id and proceed to
+/// `gh run download null ...`. Empirically verified during review. `// empty` is the fix.
+#[test]
+fn setup_imag_run_id_resolution_guards_against_jq_null_string() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("-q '.[0].databaseId // empty'"),
+        "{SETUP} must resolve RUN_ID with `// empty` (not a bare `.[0].databaseId`) — otherwise \
+         an empty successful-run list silently becomes the literal string \"null\", which passes \
+         `[ -n \"$RUN_ID\" ]` and proceeds to download a nonexistent run"
+    );
+}
+
+/// `gh run list` must filter to `--branch dev` — linux-genlock.yml carries a bare
+/// `workflow_dispatch:` with no branch restriction (in addition to push-to-dev), so an unfiltered
+/// "latest successful run" could pick up an experimental manual dispatch on some other branch.
+/// `--branch main` would be wrong for the opposite reason (the workflow never runs ON main).
+#[test]
+fn setup_imag_run_resolution_filters_to_dev_branch() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("--branch dev") && body.contains("--status success"),
+        "{SETUP} must resolve the genlock run via `--branch dev --status success` — never \
+         unfiltered (a stray workflow_dispatch on another branch could become \"latest\") and \
+         never `--branch main` (the workflow never runs on main)"
+    );
+}
+
+/// A deployed-build marker must be dropped where drift-guard (or a human) can read what's live —
+/// mirrors the Windows `ProgramData\obs-studio\DEPLOYED_GENLOCK.txt` convention.
+#[test]
+fn setup_imag_drops_deployed_genlock_marker() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/opt/obs-genlock") && body.contains("GENLOCK_BUILD_SHA.txt"),
+        "{SETUP} must drop a deployed-build marker under /opt/obs-genlock so drift-guard (or a \
+         human) can read what genlock build is live on the box"
+    );
+}
+
+/// The ORIGINAL PPA-stock bytes must be preserved before the first swap ever overwrites them —
+/// otherwise there is no way back to a known-good stock OBS if the genlock build is bad. Exactly
+/// TWO bounded backup dirs (stock, made once; previous, overwritten each swap) — never one
+/// unboundedly-accumulating timestamped dir per re-run (the #185 unbounded-target/-growth lesson).
+#[test]
+fn setup_imag_backs_up_stock_files_before_swap() {
+    let body = read(SETUP);
+    for needle in [
+        "/opt/obs-backup",
+        "stock-pre-genlock",
+        "\"$GENLOCK_BACKUP_ROOT/previous\"",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must back up the pre-swap PPA-stock libobs.so.30/distroav.so under `{needle}` \
+             — a permanent stock backup (made once) + a previous-build backup (overwritten each \
+             swap), so rollback is always possible without unbounded disk growth"
+        );
+    }
+    assert!(
+        !body.contains("date +%Y-%m-%d-%H%M%S"),
+        "{SETUP}: backups must NOT use a per-run timestamped directory name — that accumulates \
+         unboundedly across every re-run (every dev push touching vendor/** re-triggers \
+         linux-genlock.yml); use the bounded stock/previous pair instead"
+    );
+}
+
+/// The NDI runtime symlink from step 4 (the ERR-404 fix) must survive the step 5/6 rework
+/// untouched — it is a DIFFERENT plugin-scan-path concern from the genlock hot-swap.
+#[test]
+fn setup_imag_still_keeps_ndi_symlink_after_genlock_rework() {
+    let body = read(SETUP);
+    let ndi_symlink = body
+        .find("/usr/local/lib/libndi.so.6")
+        .expect("the step-4 NDI symlink must still be present after the step 5/6 rework");
+    let genlock_step = body
+        .find("Genlock hot-swap (#460)")
+        .expect("step 6 must be reworked into the genlock hot-swap");
+    assert!(
+        ndi_symlink < genlock_step,
+        "{SETUP}: the NDI symlink (step 4) must still come BEFORE the genlock hot-swap (step 6) \
+         — step ordering must not have been disturbed by the rework"
+    );
+}
+
+/// Step 10's verify must be extended with the Linux equivalent of launch-obs-genlock.sh's
+/// Windows log-verify: the OBS log is the authoritative proof a stock/wrong build cannot fake.
+///
+/// PRECISION NOTE (found in review, TWICE — once for distroav/NDI, then again for this render-tick
+/// assertion in a later deep-review pass): checking `body.contains("render tick ENABLED")` alone
+/// is a WEAK test — that exact substring ALSO appears in the unconditional success echo
+/// (`echo "  genlock render tick ENABLED (#460 build proof)"`), which prints regardless of what
+/// the actual `grep -iE 'genlock:.*(render tick ENABLED|...)'` check found. A loose substring
+/// check would keep passing even if the real grep/fail() structure were gutted and only that
+/// success line survived. This test asserts on the literal `grep -iE` invocation text, matching
+/// the same discriminator already correctly used for the distroav/NDI asserts below.
+#[test]
+fn setup_imag_step10_verifies_genlock_log_markers() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("grep -iE 'genlock:.*(render tick ENABLED") && body.contains("$OBS_CFG/logs"),
+        "{SETUP} step 10 must grep the OBS log for the literal `genlock:.*(render tick ENABLED` \
+         regex — a plain substring check on the unescaped success-echo text would incidentally \
+         match the unconditional 'genlock render tick ENABLED (#460 build proof)' print, not the \
+         actual functional check"
+    );
+    assert!(
+        body.contains("grep -i '\\[distroav\\] plugin loaded'"),
+        "{SETUP} step 10 must grep the OBS log for the REGEX-escaped `\\[distroav\\] plugin \
+         loaded` pattern — a plain substring check on the unescaped text would incidentally match \
+         only the WARNING fallback prose, not the actual functional check"
+    );
+    assert!(
+        body.contains("grep -i 'NDI library initialized'"),
+        "{SETUP} step 10 must grep the OBS log for the literal `NDI library initialized` pattern \
+         (the real DistroAV log line, live-verified on imag-nb)"
+    );
+}
+
+/// The genlock log verify must fail loud when the build proof is absent — a stock/wrong OBS
+/// must never be silently accepted as "provisioned".
+#[test]
+fn setup_imag_step10_fails_loud_on_missing_genlock_marker() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("NOT the genlock build"),
+        "{SETUP} step 10 must fail loud (not warn) when no genlock capability marker is found \
+         in the OBS log"
+    );
+}
+
+/// An unattended `apt upgrade` must not be able to silently revert libobs.so.30 back to PPA-stock
+/// bytes behind the operator's back — dpkg still tracks it under the obs-studio package. `distroav`
+/// must NOT be held: this rework removed the stock DistroAV .deb install entirely, so `distroav`
+/// is no longer a dpkg package at all (found in review — the old test asserted a hold that would
+/// be a silent no-op for a package that no longer exists). A hold failure must be LOGGED, never
+/// silently swallowed (`comprehensive-logging.md`) — it is a real drift-protection guarantee.
+#[test]
+fn setup_imag_holds_obs_studio_against_apt_upgrade_drift() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("apt-mark hold obs-studio"),
+        "{SETUP} must `apt-mark hold obs-studio` after the hot-swap so an unattended apt upgrade \
+         cannot silently revert the genlock libobs.so.30 deploy"
+    );
+    assert!(
+        !body.contains("apt-mark hold obs-studio distroav"),
+        "{SETUP}: must NOT try to hold `distroav` — this rework removed the stock .deb install, \
+         so distroav is not a dpkg package any more and holding it would be a misleading no-op"
+    );
+    assert!(
+        body.contains("WARNING: apt-mark hold"),
+        "{SETUP}: a failed apt-mark hold must be LOGGED (not silently `|| true`'d away) — it is a \
+         real drift-protection guarantee, not a cosmetic nicety"
+    );
+}
+
+/// A swap-time OBS kill must SIGKILL and WAIT for actual death, never a bare SIGTERM +
+/// fixed-sleep. Found in review: `pkill -x obs || true; sleep 2` (SIGTERM) can leave OBS still
+/// exiting after 2s; step 9's `if ! pgrep -x obs` relaunch guard would then SKIP relaunching,
+/// silently leaving the OLD build's process resident even though the NEW build's bytes + marker
+/// are already on disk. The Windows convention (`launch-obs-genlock.sh --force`) uses
+/// `Stop-Process -Force` = SIGKILL for exactly this reason.
+#[test]
+fn setup_imag_swap_kill_uses_sigkill_and_waits_for_death() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("pkill -9 -x obs"),
+        "{SETUP} must SIGKILL (`pkill -9`) obs on a swap-time relaunch, not a bare SIGTERM \
+         `pkill -x obs` — a slow-to-exit process would otherwise dodge step 9's relaunch guard"
+    );
+    let kill = body
+        .find("pkill -9 -x obs")
+        .expect("pkill -9 -x obs must be present");
+    let wait_loop = body
+        .find("pgrep -x obs >/dev/null 2>&1 || break")
+        .expect("the kill must be followed by a wait-for-death loop, not a fixed sleep alone");
+    let fail_if_undead = body
+        .find("would not die after SIGKILL")
+        .expect("must fail loud if obs is still alive after the wait budget");
+    assert!(
+        kill < wait_loop && wait_loop < fail_if_undead,
+        "{SETUP}: order must be SIGKILL -> wait-for-death loop -> fail-loud-if-still-alive"
+    );
+}
+
+/// `ls -t "$DIR"/*.txt | head -1` under `set -euo pipefail`: when the glob matches NOTHING, `ls`
+/// exits non-zero even though `head` succeeds with empty output, and pipefail propagates that
+/// failure to the bare assignment — `set -e` would abort the script THERE, before the intended
+/// `[ -n "$LATEST_LOG" ] || fail "no OBS log found..."` check ever runs, with no diagnostic at all
+/// (stderr redirected to /dev/null). Empirically verified during review. `|| true` on the whole
+/// pipeline is the fix — matches step 8's pre-existing `APP_DESKTOP=$(ls ... 2>/dev/null || true)`.
+#[test]
+fn setup_imag_latest_log_lookup_survives_empty_glob_under_pipefail() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("ls -t \"$OBS_LOG_DIR\"/*.txt 2>/dev/null | head -1 || true"),
+        "{SETUP}: the LATEST_LOG lookup must end in `| head -1 || true` — without it, an empty \
+         log directory (glob matches nothing) makes `ls` fail non-zero, and under pipefail that \
+         silently aborts the whole script via set -e BEFORE the intended fail() check can run"
+    );
+}
+
+/// The `gh` CLI bootstrap must capture curl's output into a variable BEFORE grepping it — never a
+/// live `curl | grep | head -1` pipe, which shares the same early-pipe-closure class the SONAME
+/// check documents (a downstream stage closing early can SIGPIPE an upstream writer under
+/// pipefail). Low real-world risk for a small JSON payload, but the codebase's own stated
+/// discipline (documented next to the SONAME check two steps later) should be applied consistently
+/// rather than duplicated as a live pipe in new code (found in review).
+#[test]
+fn setup_imag_gh_deb_url_discovery_captures_curl_output_first() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("GH_RELEASE_JSON=\"$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest)\""),
+        "{SETUP}: curl's output must be captured into a variable (GH_RELEASE_JSON) BEFORE any \
+         grep/head processing — not a live `curl | grep | head -1` pipe"
+    );
+    let capture = body
+        .find("GH_RELEASE_JSON=\"$(curl")
+        .expect("GH_RELEASE_JSON capture must exist");
+    let grep_from_var = body
+        .find("printf '%s' \"$GH_RELEASE_JSON\"")
+        .expect("the gh .deb URL must be grepped FROM the captured variable, not a live pipe");
+    assert!(
+        capture < grep_from_var,
+        "{SETUP}: GH_RELEASE_JSON must be captured before it is grepped"
+    );
+}
