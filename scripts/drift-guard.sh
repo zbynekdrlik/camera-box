@@ -371,13 +371,25 @@ genlock_latency_ms_from_log() {
 # EMPTY (journalctl was never read -- SSH failure, or dantesync was never started) -- UNKNOWN,
 # never a false "unlocked" DRIFT for a mere connectivity hiccup. PURE -- no I/O -- mirrors
 # fps_from_log / genlock_latency_ms_from_log's two-tier shape. #489, spun out of #479.
+#
+# Drain-safe (grep|head, never grep -q -- see genlock_from_log's note above): `grep -q` exits on
+# the FIRST match and closes its read end, so a `printf` still writing a large blob AFTER that
+# early match raises SIGPIPE on its next write. Confirmed empirically (#489 review): once the
+# whole call is captured via command substitution -- the EXACT shape `check_imag_report` uses
+# (`obs_dantesync_locked="$(dantesync_locked_from_log ...)"`)  -- a >64KB journal blob with an
+# early lock marker crashes the WHOLE CALLING SCRIPT with exit 141 under this file's own
+# `set -euo pipefail`, not merely a wrong "unlocked" answer. A real imag-nb journal line can be
+# long (stack traces, verbose diagnostics) and `-n 100` lines can comfortably exceed the pipe
+# buffer, so this is a real production risk, not a theoretical one.
 dantesync_locked_from_log() {
-  local log_text="$1"
+  local log_text="$1" line
   if [ -z "$log_text" ]; then
     printf '\n'
     return
   fi
-  if printf '%s\n' "$log_text" | grep -qE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset'; then
+  line="$(printf '%s\n' "$log_text" \
+    | grep -iE '\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset' | head -1 || true)"
+  if [ -n "$line" ]; then
     printf 'locked\n'
   else
     printf 'unlocked\n'
@@ -602,11 +614,15 @@ gather_and_check_imag() {
     2>/dev/null || true)"
   obs_fps="$(fps_from_log "$obs_log")"
   obs_latency="$(genlock_latency_ms_from_log "$obs_log")"
-  # #489: a bounded one-shot journal read (no `--since`/polling loop — this is a read-only drift
-  # snapshot, not setup-imag.sh's post-restart wait). -n 100 is generous vs. the lock lines'
-  # periodic cadence; a genuinely-locked dantesync always has one well within the last 100 lines.
+  # #489: a bounded one-shot journal read (no polling loop — this is a read-only drift snapshot,
+  # not setup-imag.sh's post-restart wait). `--since -10min` bounds by RECENCY (#489 review: a
+  # bare `-n 100` reads the last 100 lines EVER logged for this unit, however old -- if dantesync
+  # is fully stopped/masked, those 100 lines never change and a stale historic LOCK line would
+  # report false OK forever even though the daemon is dead) and `-n 100` caps volume as a
+  # secondary bound. 10 minutes is generous vs. the lock lines' periodic cadence; a genuinely-
+  # locked dantesync always logs one well within that window.
   obs_dantesync_log="$("${ssh_cmd[@]}" \
-    'journalctl -u dantesync --no-pager -n 100 2>/dev/null' 2>/dev/null || true)"
+    'journalctl -u dantesync --no-pager --since "-10min" -n 100 2>/dev/null' 2>/dev/null || true)"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered; FAILS loudly on drift) =="
   # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see

@@ -2548,6 +2548,54 @@ fn check_imag_report_dantesync_lock_unknown_when_no_pin_in_readme_489() {
 }
 
 #[test]
+fn dantesync_locked_from_log_finds_the_marker_amid_a_realistic_noisy_journal_489() {
+    // #489 review finding: a bare `grep -qE` INSIDE an `if` pipe (the original shape of this
+    // function) exits on the FIRST match and closes its read end -- a `printf` still writing
+    // trailing input can then raise SIGPIPE on its next write. Empirically confirmed dangerous
+    // for a high-throughput synthetic burst (`yes | head`); real `journalctl` output (unique,
+    // varied lines, already fully materialized by the time this parser runs -- never a live
+    // bursty producer) did not reproduce the crash even at realistic volume in testing, so a
+    // deterministic burst-based regression test would be CI-flaky rather than a reliable gate.
+    // This test instead locks in the drain-safe fix (`grep | head -1 || true`, matching this
+    // file's OWN documented convention for every sibling `_from_log` parser -- `genlock_from_log`,
+    // `genlock_capability_from_log`, `genlock_latency_ms_from_log`) against a REALISTIC-shaped
+    // multi-line journal: the lock marker interleaved among ~20 unrelated dantesync status lines,
+    // mirroring how `OBS_LOG_FIXTURE` above is a realistic multi-line snippet, not a toy.
+    // The deeper, environment-sensitive SIGPIPE/signal-race edge case for a PATHOLOGICALLY large
+    // burst is a pre-existing, cross-cutting risk shared by every `_from_log` parser in this file
+    // (confirmed to also affect the already-shipped `genlock_from_log` under the same synthetic
+    // burst) -- filed as its own follow-up issue rather than solved here (#489's scope is the new
+    // dantesync check, not a rewrite of this file's whole parsing convention).
+    let mut log = String::from(
+        "Jul 05 09:58:01 imag-nb dantesync[1234]: starting DanteSync -i eth0 --ntp-server strih.lan\n",
+    );
+    for i in 0..20 {
+        log.push_str(&format!(
+            "Jul 05 09:58:{:02} imag-nb dantesync[1234]: [NTP] offset: {}us\n",
+            i,
+            100 + i
+        ));
+    }
+    log.push_str(
+        "Jul 05 09:58:25 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns\n",
+    );
+    for i in 0..20 {
+        log.push_str(&format!(
+            "Jul 05 09:58:{:02} imag-nb dantesync[1234]: [PTP] LOCK Drift {} ns/s offset -{}ns\n",
+            26 + i,
+            10 + i,
+            300 + i
+        ));
+    }
+    let out = run_sourced("dantesync_locked_from_log \"$LOG\"", &[("LOG", &log)]);
+    assert_eq!(
+        out.trim(),
+        "locked",
+        "must find the lock marker amid ~40 realistic interleaved journal lines: {out:?}"
+    );
+}
+
+#[test]
 fn real_manifest_pins_dantesync_locked_imag_489() {
     // RED: vendor/README.md has no `dantesync_locked_imag` row yet -> pinned_setting returns
     // empty -> assertion fails. GREEN: the row is present and pins "locked" (#489, spun out of
