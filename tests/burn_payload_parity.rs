@@ -634,6 +634,37 @@ fn imag_burn_does_not_overlap_the_four_existing_qrs_or_cam1_center_burn_463() {
 }
 
 #[test]
+fn four_qr_rects_reclamps_burn_px_on_a_narrow_canvas_475() {
+    // #475 test-fidelity fix: `burn_geom::corner_placement` re-clamps its OWN `qr_px` argument
+    // by BOTH width and height BEFORE computing any corner position —
+    // `side = min(qr_px, frame_w - 2*margin, frame_h - 2*margin)` (floor 1). `four_qr_rects`
+    // mirrored the tier-1/tier-3 x-position fallback but, unlike `imag_burn_rect` after the #463
+    // review-round-2 fix, took `burn_px` as an already height-derived-only value — a canvas
+    // narrow enough to trigger the WIDTH clamp would silently diverge from the real geometry.
+    // No production-relevant 16:9 canvas (720p/1080p/1440p/4K) actually reaches this branch
+    // (found in review of PR #474) — this test manufactures a canvas narrow enough to force it.
+    let (w, h, cam_px, wanted_burn_px, burn_margin) = (300i64, 1080i64, 200i64, 302i64, 40i64);
+    let max_w = w - 2 * burn_margin; // 220 — narrower than wanted_burn_px (302), must clamp
+    let rects = four_qr_rects(w, h, cam_px, wanted_burn_px, burn_margin);
+    let strih = rects[2];
+    let stream = rects[3];
+    assert_eq!(
+        strih.w, max_w,
+        "strih (bottom-left) burn side must clamp to the width-derived max ({max_w}px), \
+         mirroring corner_placement's own re-clamp — got {strih:?}"
+    );
+    assert_eq!(
+        stream.w, max_w,
+        "stream (bottom-right) burn side must clamp to the width-derived max ({max_w}px), \
+         mirroring corner_placement's own re-clamp — got {stream:?}"
+    );
+    assert!(
+        strih.x >= 0 && strih.x + strih.w <= w && stream.x >= 0 && stream.x + stream.w <= w,
+        "clamped burns must stay in-frame: strih={strih:?} stream={stream:?} w={w}"
+    );
+}
+
+#[test]
 fn imag_burn_rect_falls_back_to_tier_2_flush_against_strih_on_a_narrow_canvas_463() {
     // #463 REGRESSION GUARD: the multi-resolution test above only exercises 16:9 canvases
     // (720p/1080p/1440p/4K), where imag's WANTED position always fits and tier 2/3 of the
