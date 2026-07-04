@@ -1661,3 +1661,27 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   (`Permission denied (publickey,password)`) -- per this repo's own "drive rig steps in supervisor"
   convention (physical rig work belongs to the supervisor/user, not a death-prone worker), left for
   the supervisor/user to deploy + confirm cam5 is no longer dark, then remove the workaround.
+
+## 2026-07-05 — #489 imag dantesync-lock check for drift-guard --check-imag (PR #513, v1.7.0-dev.238)
+
+- Spun out of #479 (setup-imag.sh now provisions DanteSync on imag-nb) — this ticket adds the
+  read-only drift check that #479 deliberately left out of its own scope. ticket-validator
+  confirmed the `--check-imag` framework already existed (#463/PR #478); this PR plugs into it.
+- New pure function `dantesync_locked_from_log` in `scripts/drift-guard.sh` mirrors
+  `scripts/setup-imag.sh:230`'s own provisioning-time restart check markers
+  (`\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset`) — "locked" / "unlocked" (non-empty journal, no
+  marker) / "" (empty journal -> UNKNOWN upstream), same two-tier shape as `genlock_capability`.
+  `check_imag_report` gained a 7th check row (`dantesync_locked`); `gather_and_check_imag` now
+  also SSHes `journalctl -u dantesync --no-pager -n 100` (bounded one-shot read). New pin
+  `dantesync_locked_imag=locked` in `vendor/README.md`'s imag pin table (a runtime steady-state
+  pin, not a build artifact — pinned from day one, unlike the two SHA pins that wait for a live
+  deploy). Deliberately did NOT wire the new pin into `check_pins()`'s offline validation — out of
+  the ticket's stated 4-item scope, matches the existing `genlock_build_sha_imag` precedent.
+- RED `634691bbb` (11 new/updated test failures: 5 pure-function tests, 4 `check_imag_report`
+  row tests, 1 real-manifest pin test, 1 "clean" test now expecting the 7th row), GREEN
+  `cd4cbb0bd`. Playbook `11a5c165a`: `.claude/skills/ops/SKILL.md` gained a `set -u` footgun note
+  (extending an optional trailing positional param without `${N:-}` crashes every older call site
+  with `unbound variable` — found while adding args 12/13 to `check_imag_report`).
+- PR #513, CI run 28722849368 green (all jobs incl. Drift Guard pin-set; Mutation Testing +
+  Notify-on-red correctly skipped — on-demand / failure-only). `mergeable:true`,
+  `mergeStateStatus:CLEAN`. Version bumped 1.7.0-dev.237 -> 1.7.0-dev.238.
