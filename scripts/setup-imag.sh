@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=15
+TOTAL_STEPS=16
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -391,7 +391,35 @@ echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 gener
 echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
 
 # =============================================================================
-step 8 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
+# =============================================================================
+# imag's OBS is a ~106-thread ~3-core consumer (6x NDI decode + render + genlock + audio), NOT the
+# cam-box's single lean thread -- isolate the whole P-core BLOCK cpu2-11 (10 threads) for OBS, keep
+# P-core0 (cpu0,1) for GNOME/Xorg + sshd/MCP housekeeping, and park default IRQs there too.
+# nohz_full is scoped to ONLY the one core pair (10,11) that will host the future SCHED_FIFO
+# genlock render-tick thread (#484) -- spreading it across the whole block would remove
+# load-balancing signal (#303). rcu_nocbs=all already comes from 99-lowlatency.cfg above (covers
+# 10,11). irqaffinity= is a BOOT-TIME default (not a runtime /proc/irq write) -- the USB-ethernet
+# NDI IRQ is managed-MSI and rejects runtime affinity changes (#303). HT pairs verified LIVE via
+# thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7, cpu8=8-9,
+# cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
+cat > /etc/default/grub.d/98-imag-isolation.cfg <<'EOF'
+# camera-box #483: reserve the P-core block cpu2-11 for the OBS thread pool (keep P-core0=cpu0,1
+# + the E-cores cpu12-15 for GNOME/sshd/MCP/housekeeping); nohz_full only on cpu10,11 (the future
+# genlock render-tick core, #484). rcu_nocbs=all is already set by 99-lowlatency.cfg (covers 10,11,
+# which nohz_full requires). irqaffinity keeps IRQs off the isolated block.
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15"
+EOF
+# #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
+# grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd. ONE
+# call covers BOTH this drop-in and #482's 99-lowlatency.cfg above (they are only ever picked up
+# by grub-mkconfig, which runs once here).
+safe_grub_regen
+echo "  #483: isolcpus=2-11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15 written + grub regenerated"
+echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 9 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -414,7 +442,7 @@ apt-get install -y avahi-daemon >/dev/null 2>&1 || true
 systemctl enable --now avahi-daemon >/dev/null 2>&1
 
 # =============================================================================
-step 9 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
+step 10 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
 if ! command -v obs >/dev/null 2>&1; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
@@ -424,7 +452,7 @@ fi
 obs --version 2>/dev/null || true
 
 # =============================================================================
-step 10 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
+step 11 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over the PPA base"
 # =============================================================================
 # imag-nb MUST run the CUSTOMIZED genlock OBS+DistroAV, not stock DistroAV (user directive,
 # #458 comment 2026-07-03) — the stock-bootstrap path this step used to run is dead. The PPA
@@ -635,7 +663,7 @@ else
 fi
 
 # =============================================================================
-step 11 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
+step 12 "OBS pre-seed: WebSocket :4455 no-auth + SaveProjectors + no first-run wizard"
 # =============================================================================
 mkdir -p "$OBS_CFG"
 seed_ini() {  # seed_ini FILE  — append our sections only if the file has no [OBSWebSocket] yet
@@ -663,7 +691,7 @@ seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
 # =============================================================================
-step 12 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
+step 13 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
 # imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
 # masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
@@ -725,7 +753,7 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 13 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 14 "Desktop icon + autostart (reboot lands cutting-ready)"
 # =============================================================================
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
@@ -733,13 +761,18 @@ if [ -n "$APP_DESKTOP" ]; then
     cp -f "$APP_DESKTOP" "$USER_HOME/.config/autostart/obs.desktop"
     cp -f "$APP_DESKTOP" "$USER_HOME/Desktop/obs.desktop"
     chmod +x "$USER_HOME/Desktop/obs.desktop"
+    # #483: pin the AUTOSTART launch to the OBS P-core block -- WITHOUT this, isolcpus (once the
+    # #483 grub change takes effect on the next boot) would STARVE OBS onto cpu0,1,12-15 (the
+    # block reserved for GNOME/housekeeping/E-cores). The Desktop icon (double-click launch) is
+    # deliberately left plain `Exec=obs` -- only the autostart path is pinned (live-verified).
+    sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/.config/autostart/obs.desktop"
     sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
         gio set "$USER_HOME/Desktop/obs.desktop" metadata::trusted true 2>/dev/null || true
 fi
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
 
 # =============================================================================
-step 14 "Launch OBS on the desktop session (X11 :0)"
+step 15 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -750,14 +783,20 @@ step 14 "Launch OBS on the desktop session (X11 :0)"
 # (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
 rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
 if ! pgrep -x obs >/dev/null; then
+    # #483: pin this provisioning-time launch to the P-core block too, matching the autostart
+    # entry above -- without taskset here, a provisioning launch (before the isolcpus grub change
+    # is active, i.e. before the first post-provision reboot) still lands unpinned; after reboot,
+    # an un-pinned `obs` would be STARVED onto the tiny cpu0,1,12-15 remainder once isolcpus takes
+    # effect. `nice -n -5` was deliberately NOT added -- the desktop user lacks CAP_SYS_NICE
+    # (live-confirmed, #483 comment).
     sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-        nohup obs >/tmp/obs-launch.log 2>&1 &
+        nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
     sleep 8
 fi
 pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 15 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 16 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
 for i in $(seq 1 15); do
     if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
