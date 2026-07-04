@@ -2203,10 +2203,12 @@ const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
 
 #[test]
 fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
-    // Full live facet, all six checks match the pin -> exit 0, every line OK, no DRIFT/UNKNOWN.
+    // Full live facet, all seven checks match the pin -> exit 0, every line OK, no DRIFT/UNKNOWN.
+    // #489: the 12th/13th args are the dantesync lock pin + a realistic locked journal line —
+    // must ALSO read clean, or this "everything matches" case would spuriously report DRIFT/UNKNOWN.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" || rc=$?
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2219,7 +2221,7 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         !out.contains("UNKNOWN"),
         "no unknown line expected: {out:?}"
     );
-    // Every one of the 6 checks must print its own OK line (comprehensive-logging: values, not
+    // Every one of the 7 checks must print its own OK line (comprehensive-logging: values, not
     // just a bare pass/fail).
     for label in [
         "genlock_build_sha",
@@ -2228,6 +2230,7 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         "output_fps_imag",
         "genlock_latency_ms_imag",
         "distroav_so_path",
+        "dantesync_locked",
     ] {
         assert!(out.contains(label), "must report {label}: {out:?}");
     }
@@ -2364,16 +2367,199 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
     // *_from_log parsers, THEN feed the RAW log text (not a pre-extracted capability flag,
     // #463 review) into check_imag_report — the same wiring `gather_and_check_imag` does,
     // minus the actual `ssh` calls. check_imag_report derives the capability marker itself.
+    // #489: also feed a realistic locked dantesync journal snippet through the real
+    // dantesync_locked_from_log parser, mirroring the same end-to-end wiring for the new pin.
     let body = r#"
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" || rc=$?
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("LOG", IMAG_LOG_60FPS_3MS)]);
+    let out = run_sourced(
+        body,
+        &[
+            ("LOG", IMAG_LOG_60FPS_3MS),
+            ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+        ],
+    );
     assert!(
         out.contains("RC=0"),
-        "a real 60fps/3ms imag log parsed end-to-end must match a 60/3 pin cleanly: {out:?}"
+        "a real 60fps/3ms imag log + a locked dantesync journal parsed end-to-end must match \
+         cleanly: {out:?}"
+    );
+}
+
+/// A realistic imag-nb `journalctl -u dantesync` snippet with the DanteSync PTP LOCK markers
+/// (the SAME markers `scripts/setup-imag.sh`'s own provisioning-time restart check keys on,
+/// setup-imag.sh:230). #489.
+const DANTESYNC_LOG_LOCKED_FIXTURE: &str = "\
+Jul 05 10:15:20 imag-nb dantesync[1234]: [PTP] LOCK Drift 14 ns/s offset -412ns\n\
+Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns\n";
+
+/// A realistic imag-nb `journalctl -u dantesync` snippet running but WITHOUT ever reporting a
+/// PTP/NTP lock (e.g. grandmaster unreachable, clock never disciplined) — the genuine #489 DRIFT
+/// case: the service IS up (non-empty journal) but the clock basis genlock depends on never
+/// locked.
+const DANTESYNC_LOG_UNLOCKED_FIXTURE: &str = "\
+Jul 05 10:15:20 imag-nb dantesync[1234]: starting DanteSync -i eth0 --ntp-server strih.lan\n\
+Jul 05 10:15:21 imag-nb dantesync[1234]: [PTP] searching for grandmaster...\n";
+
+#[test]
+fn dantesync_locked_from_log_reports_locked_on_a_ptp_lock_line_489() {
+    let out = run_sourced(
+        "dantesync_locked_from_log \"$LOG\"",
+        &[("LOG", DANTESYNC_LOG_LOCKED_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "locked",
+        "a PTP LOCK line must report locked: {out:?}"
+    );
+}
+
+#[test]
+fn dantesync_locked_from_log_reports_locked_on_a_ptp_nano_line_489() {
+    let nano_log = "Jul 05 10:15:20 imag-nb dantesync[1234]: [PTP] NANO Drift 2 ns/s offset -8ns\n";
+    let out = run_sourced("dantesync_locked_from_log \"$LOG\"", &[("LOG", nano_log)]);
+    assert_eq!(
+        out.trim(),
+        "locked",
+        "a PTP NANO line must ALSO report locked (the ops-skill NANO variant): {out:?}"
+    );
+}
+
+#[test]
+fn dantesync_locked_from_log_reports_locked_on_an_ntp_offset_line_489() {
+    let ntp_log = "Jul 05 10:15:20 imag-nb dantesync[1234]: [NTP] offset: 213us\n";
+    let out = run_sourced("dantesync_locked_from_log \"$LOG\"", &[("LOG", ntp_log)]);
+    assert_eq!(
+        out.trim(),
+        "locked",
+        "an NTP offset line (grandmaster-absent fallback) must ALSO report locked: {out:?}"
+    );
+}
+
+#[test]
+fn dantesync_locked_from_log_reports_unlocked_when_running_but_never_locked_489() {
+    // Non-empty journal (dantesync IS running / was read successfully) but NO lock marker at
+    // all -> "unlocked", the genuine drift case -- never confused with an unread/empty journal.
+    let out = run_sourced(
+        "dantesync_locked_from_log \"$LOG\"",
+        &[("LOG", DANTESYNC_LOG_UNLOCKED_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "unlocked",
+        "a non-empty journal with no lock marker must report unlocked: {out:?}"
+    );
+}
+
+#[test]
+fn dantesync_locked_from_log_empty_when_journal_never_read_489() {
+    // Empty log text (SSH failed, or dantesync was never read) -> "" (UNKNOWN upstream), never a
+    // false "unlocked" for a mere connectivity hiccup — mirrors genlock_capability_from_log's own
+    // empty-text handling.
+    let out = run_sourced("dantesync_locked_from_log \"$LOG\"", &[("LOG", "")]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "an unread journal must report empty (UNKNOWN), not unlocked: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
+    // Every OTHER value also clean, so the dantesync row is the only one exercised in isolation.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE)]);
+    assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
+    let line = out
+        .lines()
+        .find(|l| l.contains("dantesync_locked"))
+        .unwrap_or_else(|| panic!("no dantesync_locked line printed: {out:?}"));
+    assert!(line.contains("OK"), "must report OK: {line:?}");
+}
+
+#[test]
+fn check_imag_report_dantesync_lock_drift_when_running_but_not_locked_489() {
+    // dantesync IS reachable (non-empty journal) but never reports a lock -> DRIFT, exit 20 —
+    // genlock's wall-clock basis is compromised even if every other pin still looks clean.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_UNLOCKED_FIXTURE)]);
+    assert!(
+        out.contains("RC=20"),
+        "dantesync running but never locked -> DRIFT exit: {out:?}"
+    );
+    assert!(
+        out.contains("dantesync_locked") && out.contains("DRIFT"),
+        "must flag the dantesync_locked line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_dantesync_lock_unknown_when_journal_not_read_489() {
+    // Empty journal text (SSH failed to read journalctl on imag-nb) -> UNKNOWN, never a false
+    // "unlocked" DRIFT for a mere connectivity hiccup.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "unread journal -> UNKNOWN exit (never a false DRIFT): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("dantesync_locked"))
+        .unwrap_or_else(|| panic!("no dantesync_locked line printed: {out:?}"));
+    assert!(line.contains("UNKNOWN"), "must report UNKNOWN: {line:?}");
+}
+
+#[test]
+fn check_imag_report_dantesync_lock_unknown_when_no_pin_in_readme_489() {
+    // Journal WAS read and reports locked, but no `dantesync_locked_imag` pin exists in
+    // README yet -> UNKNOWN (nothing pinned to compare against), never a silent pass.
+    let body = r#"
+        rc=0
+        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "$DANTESYNC_LOG" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE)]);
+    assert!(
+        out.contains("RC=11"),
+        "no pinned dantesync_locked_imag -> UNKNOWN exit: {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("dantesync_locked"))
+        .unwrap_or_else(|| panic!("no dantesync_locked line printed: {out:?}"));
+    assert!(line.contains("UNKNOWN"), "must report UNKNOWN: {line:?}");
+}
+
+#[test]
+fn real_manifest_pins_dantesync_locked_imag_489() {
+    // RED: vendor/README.md has no `dantesync_locked_imag` row yet -> pinned_setting returns
+    // empty -> assertion fails. GREEN: the row is present and pins "locked" (#489, spun out of
+    // #479's setup-imag.sh provisioning-time dantesync check).
+    let readme = manifest_dir().join("vendor/README.md");
+    let env = [("README", readme.to_str().unwrap())];
+    let pin = run_sourced("pinned_setting \"$README\" dantesync_locked_imag", &env)
+        .trim()
+        .to_string();
+    assert_eq!(
+        pin, "locked",
+        "real manifest must pin dantesync_locked_imag=locked (imag-nb's DanteSync clock must \
+         stay PTP/NTP-locked -- genlock's wall-clock basis depends on it); got {pin:?}"
     );
 }
