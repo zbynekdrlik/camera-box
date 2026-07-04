@@ -167,6 +167,62 @@ fn imag_scenes_projector_targets_external_monitor_only() {
 }
 
 // ============================================================================================
+// #501 -- MV monitor-only twin scenes feed the built-in multiview from LOW-bandwidth NDI
+// receivers (genlock_monitor=true -> vendor/distroav's genlock lockdown MONITOR-SOURCE
+// exception, ~9x cheaper than the full-bw "Cam N" receivers) so the #276/#278/#293
+// render-budget decouple keeps the program at 60fps with the multiview open. Root cause
+// (runtime-proven with an eglSwapBuffers-counting shim, #501 comment 2026-07-04): a single
+// multiview render costs ~80ms CPU because its 6 cells render ALL 6 cameras' FULL-1080p NDI
+// sources, whose async texture uploads happen ONLY during the multiview's own render.
+// ============================================================================================
+
+/// The seeder must create a SEPARATE low-bandwidth "MV Cam N" twin scene per camera, bound to
+/// the SAME fleet NDI name but flagged genlock_monitor=true so the vendor/distroav lockdown
+/// forces low-bandwidth receive instead of the certified highest-bandwidth default.
+#[test]
+fn imag_scenes_seeds_six_low_bandwidth_mv_monitor_scenes() {
+    let body = read(SCENES);
+    assert!(
+        body.contains("f\"MV Cam {n}\""),
+        "{SCENES} must seed 6 \"MV Cam N\" monitor-only twin scenes (camera-box #501)"
+    );
+    assert!(
+        body.contains("\"genlock_monitor\": True"),
+        "{SCENES} must set genlock_monitor=true on the MV twin's NDI input settings -- this is \
+         the flag vendor/distroav's genlock lockdown reads to force LOW-bandwidth NDI receive \
+         instead of the certified HIGHEST (camera-box #501)"
+    );
+    let mv_block_start = body
+        .find("f\"MV Cam {n}\"")
+        .expect("MV scene block must exist");
+    assert!(
+        body[mv_block_start..].contains("ignore_err=True"),
+        "{SCENES}: MV twin seeding must be idempotent (ignore_err=True) -- the same self-healing \
+         convention already used by the real Cam scene loop"
+    );
+}
+
+/// The multiview must show ONLY the low-bw MV twins -- the real full-bw "Cam N" scenes (which the
+/// Stream Deck cuts) and any other scene must be hidden from it, via the obs-websocket
+/// `SetSourcePrivateSettings` per-scene `show_in_multiview` key (OBS frontend
+/// components/Multiview.cpp / widgets/OBSBasic_Scenes.cpp: default true, per-scene private
+/// setting).
+#[test]
+fn imag_scenes_configures_multiview_membership_via_private_settings() {
+    let body = read(SCENES);
+    assert!(
+        body.contains("SetSourcePrivateSettings") && body.contains("\"show_in_multiview\""),
+        "{SCENES} must set the per-scene `show_in_multiview` private setting via the \
+         obs-websocket `SetSourcePrivateSettings` request (camera-box #501)"
+    );
+    assert!(
+        body.contains("startswith(\"MV Cam \")"),
+        "{SCENES} must gate show_in_multiview on the MV-scene-name prefix -- true for the MV \
+         twins, false for the real Cam scenes and everything else (camera-box #501)"
+    );
+}
+
+// ============================================================================================
 // #458 remaining scope: step 6 reworked from a stock-DistroAV bootstrap into a genlock (#460)
 // hot-swap over the PPA base. These guards pin that contract so a later edit cannot silently
 // regress back to the stock plugin or drop the fail-loud / idempotent / manifest-verify pieces.

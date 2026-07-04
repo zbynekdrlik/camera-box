@@ -158,12 +158,13 @@ fn getproperties_is_the_hard_whitelist() {
         "{NDI_SOURCE}: #257 — apply_genlock_lockdown_visibility is BACK; the hard whitelist \
          REMOVES the forced knobs from the UI, it does not hide them."
     );
-    // getproperties adds EXACTLY the four whitelist props.
+    // getproperties adds EXACTLY the five whitelist props.
     for add in [
         "obs_properties_add_list(props, PROP_SOURCE",
         "obs_properties_add_bool(props, PROP_GENLOCK_FIFO",
         "obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC",
         "obs_properties_add_bool(props, PROP_BURN",
+        "obs_properties_add_bool(props, PROP_GENLOCK_MONITOR",
     ] {
         assert!(
             body.contains(add),
@@ -193,6 +194,55 @@ fn getproperties_is_the_hard_whitelist() {
              source/Genlock/Latency/burn (everything else is forced, not shown)."
         );
     }
+}
+
+/// #501: the built-in OBS multiview costs ~80ms/render on imag-nb's Linux/OpenGL build because
+/// EVERY cell's full-1080p NDI texture upload happens SYNCHRONOUSLY during the multiview's own
+/// render (those sources are otherwise idle — the async upload for a source only happens when
+/// something actually renders it). Feeding the multiview from LOW-bandwidth NDI receivers instead
+/// (~9x cheaper) fits the #276/#278/#293 render-budget decouple back inside the 16.6ms tick. A
+/// per-source `genlock_monitor` operator bool (same WHITELIST shape as `genlock_burn`) is the
+/// narrow escape hatch: ONLY for a source that will never feed program, force LOW bandwidth
+/// instead of the certified HIGHEST — every other certified forcing stays locked.
+#[test]
+fn force_genlock_certified_settings_has_monitor_source_bandwidth_exception() {
+    let src = vendor_file(NDI_SOURCE);
+    let squished = squish(&src);
+
+    assert!(
+        squished.contains("PROP_GENLOCK_MONITOR"),
+        "{NDI_SOURCE}: #501 — no PROP_GENLOCK_MONITOR constant found. Add a `genlock_monitor` \
+         per-source operator bool, mirroring the PROP_BURN whitelist pattern."
+    );
+    assert!(
+        squished.contains("PROP_BURN, PROP_GENLOCK_MONITOR,"),
+        "{NDI_SOURCE}: #501 — PROP_GENLOCK_MONITOR must be added to GENLOCK_WHITELIST_PROPS \
+         (right after PROP_BURN), or the hard-lock UI will never expose the monitor-source \
+         toggle to the operator/tooling."
+    );
+
+    // The certified forcer must OVERRIDE bandwidth to LOWEST when genlock_monitor is set —
+    // narrowly (bandwidth ONLY), never loosening any other certified value.
+    let body = squish(fn_body(&src, "static void force_genlock_certified_settings("));
+    assert!(
+        body.contains("obs_data_get_bool(settings, PROP_GENLOCK_MONITOR)"),
+        "{NDI_SOURCE}: #501 — force_genlock_certified_settings must read PROP_GENLOCK_MONITOR to \
+         decide whether this source is a monitoring-only receiver."
+    );
+    assert!(
+        body.contains("obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_LOWEST)"),
+        "{NDI_SOURCE}: #501 — when genlock_monitor is set, the forcer must set PROP_BANDWIDTH to \
+         PROP_BW_LOWEST (low-bandwidth NDI receive) instead of the certified HIGHEST — this is \
+         the whole #501 fix (6x full-1080p uploads during a multiview render → ~9x cheaper)."
+    );
+    // The DEFAULT certified forcing (highest bandwidth for every OTHER source) must remain — the
+    // exception must be ADDITIVE, never a replacement of the base certified table.
+    assert!(
+        squished.contains("{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}"),
+        "{NDI_SOURCE}: #501 — the base certified forcing (PROP_BW_HIGHEST for every non-monitor \
+         source) must remain in GENLOCK_FORCED_SETTINGS; the monitor exception narrowly OVERRIDES \
+         it afterward, it must not replace it."
+    );
 }
 
 /// Lock-step gate: the Windows production-build workflow re-asserts the #150/#257 hard-lock SOURCE
