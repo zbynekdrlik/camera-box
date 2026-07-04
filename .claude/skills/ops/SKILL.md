@@ -486,6 +486,20 @@ restore) but WILL recur in any future `setup-*.sh`/provisioning script unless wa
    Different failure shape from point 2 above (that one is about `fail()`/`exit` INSIDE a
    function losing propagation through `$(...)`; this one is about a command that returns a
    plain nonzero you need to READ, not propagate).
+5. **(#489, `drift-guard.sh check_imag_report`) A bare `${12}`/`${13}`-style reference to an
+   OPTIONAL trailing positional param crashes the whole script under `set -u` when an OLDER
+   caller doesn't pass that many args — it does NOT quietly become an empty string.** Adding a
+   new arg to a widely-called pure function (`check_imag_report` gained a 12th/13th param for the
+   dantesync-lock check) means every EXISTING call site that still passes only 11 args now
+   references an unset positional parameter — under `set -uo pipefail` (this file's own top-of-
+   file `set`, in effect for the whole test-harness `run_sourced` session too, #463's own
+   footgun-comment above) that is a hard `unbound variable` abort, not a graceful empty string
+   (verified: `bash -c 'set -u; f(){ local a="$1" c="$3"; }; f one'` → `3: unbound variable`,
+   exit 127). **Fix: default-empty expansion on the OPTIONAL trailing params —
+   `local exp="${12:-}" obs="${13:-}"`** — mirrors `compare_observed`'s existing
+   `o_av_sync_calibrated_ms="${25:-}"` pattern for its own optional trailing args. Whenever you
+   extend a pure function's positional-arg contract, grep every existing call site first; if any
+   don't pass the new args, the new params MUST use `${N:-}`, never a bare `${N}`.
 
 **Test-quality corollary (found 3× in `tests/setup_imag_guards.rs` across both review passes):** a
 purely textual `body.contains("some string")` guard can pass even when the real check is gutted,
