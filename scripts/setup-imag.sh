@@ -469,17 +469,28 @@ step 11 "Genlock hot-swap (#460): deploy patched libobs.so.30 + distroav.so over
 # obs-studio package installed in the prior step ships libobs.so.30 with SONAME "libobs.so.30"
 # (live-verified on imag-nb) — IDENTICAL to the genlock build's own SONAME — so the genlock
 # libobs.so.30 hot-swaps cleanly over it, exactly mirroring the Windows obs.dll hot-swap (see
-# .claude/skills/genlock). Only libobs.so.30 (the genlock render-tick/ts-align patches live in
-# obs-source.c/obs-video.c, both inside libobs core) and distroav.so are swapped —
-# obs-frontend-api/obs-opengl/obs-scripting are untouched by the genlock patches and stay
-# PPA-stock. No stock DistroAV .deb is installed any more — the genlock-built distroav.so IS
-# the plugin.
+# .claude/skills/genlock). libobs.so.30 (the genlock render-tick/ts-align patches live in
+# obs-source.c/obs-video.c, both inside libobs core), distroav.so, AND the FRONTEND executable
+# /usr/bin/obs are all swapped — obs-frontend-api/obs-opengl/obs-scripting (the shared LIBRARIES)
+# are untouched by the genlock patches and stay PPA-stock. No stock DistroAV .deb is installed any
+# more — the genlock-built distroav.so IS the plugin.
+#
+# #499: /usr/bin/obs (the frontend EXECUTABLE, compiled from vendor/obs-studio/frontend/) MUST
+# also be swapped — skipping it leaves a half-stock box. The multiview render-budget decouple
+# (#276 obs_display_set_render_divisor / #278 adaptive EWMA skip / #293 anti-starvation floor) AND
+# the "newlevel.media" window title both live in the frontend EXE, NOT in libobs.so.30 — exactly
+# the "frontend lives in the exe, not the DLL" gotcha already documented for Windows
+# (.claude/skills/genlock/SKILL.md). A genlock deploy that only swaps libobs.so.30/distroav.so
+# leaves the stock frontend running: the multiview code path that calls
+# obs_display_set_render_divisor() never runs, and multiview chokes the program render (live-
+# proven 2026-07-04: 16fps/59ms with the stock frontend vs 60fps/1.7ms once bin/obs was swapped).
 GENLOCK_REPO="zbynekdrlik/camera-box"
 GENLOCK_WORKFLOW="linux-genlock.yml"
 GENLOCK_MARKER_DIR="/opt/obs-genlock"
 GENLOCK_BACKUP_ROOT="/opt/obs-backup"
 LIBOBS_REAL="/usr/lib/x86_64-linux-gnu/libobs.so.30"
 DISTROAV_REAL="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+OBS_FRONTEND_REAL="/usr/bin/obs"
 
 command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
 
@@ -541,11 +552,11 @@ NEW_SHA="$(gh run view "$RUN_ID" --repo "$GENLOCK_REPO" --json headSha -q .headS
 [ -n "$NEW_SHA" ] || fail "could not read headSha for run $RUN_ID"
 
 NOOP_VALID=0
-if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ]; then
+if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ]; then
     NOOP_VALID=1
     # #472 defense-in-depth (PR #471 review, deliberately deferred): the SHA-marker + file
     # *existence* check above trusts the on-disk marker without re-verifying the installed
-    # BYTES. If the deployed libobs.so.30/distroav.so were ever silently reverted (e.g. an
+    # BYTES. If the deployed libobs.so.30/distroav.so/bin-obs were ever silently reverted (e.g. an
     # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
     # re-run would wrongly report "already deployed" and skip re-swapping — the verify step's runtime
     # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
@@ -558,7 +569,10 @@ if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_
         GOT_LIBOBS_SHA_CACHED="$(sha256sum "$LIBOBS_REAL" | awk '{print $1}')"
         WANT_DISTROAV_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/obs-plugins/distroav.so')"
         GOT_DISTROAV_SHA_CACHED="$(sha256sum "$DISTROAV_REAL" | awk '{print $1}')"
-        if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ]; then
+        WANT_OBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'bin/obs')"
+        GOT_OBS_SHA_CACHED="$(sha256sum "$OBS_FRONTEND_REAL" | awk '{print $1}')"
+        if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ] \
+            || [ "$GOT_OBS_SHA_CACHED" != "$WANT_OBS_SHA_CACHED" ]; then
             echo "  WARNING: installed genlock bytes do not match the cached manifest — forcing re-install"
             NOOP_VALID=0
         fi
@@ -589,7 +603,9 @@ else
 
     BUNDLE_LIBOBS="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs.so.30"
     FAST_DISTROAV="$GENLOCK_TMP/fast/distroav.so"
+    BUNDLE_OBS="$GENLOCK_TMP/bundle/bin/obs"
     [ -f "$FAST_DISTROAV" ] || fail "distroav-linux-fast-so missing distroav.so"
+    [ -f "$BUNDLE_OBS" ] || fail "bundle missing bin/obs (#499: the frontend executable)"
     [ -f "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" ] || fail "bundle missing BUNDLE_MANIFEST.json (#120)"
     MANIFEST="$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json"
 
@@ -610,33 +626,53 @@ else
     WANT_DISTROAV_SHA="$(manifest_sha_for_path "$MANIFEST" 'lib/x86_64-linux-gnu/obs-plugins/distroav.so')"
     verify_file_sha "$FAST_DISTROAV" "$WANT_DISTROAV_SHA" \
         "distroav-linux-fast-so distroav.so (cross-checked against bundle manifest)"
+    # #499: bin/obs (the frontend executable) ships IN the same bundle as libobs.so.30 (both are
+    # part of the staged OBS rundir), so it has its OWN manifest entry — verify it the same way.
+    WANT_OBS_SHA="$(manifest_sha_for_path "$MANIFEST" 'bin/obs')"
+    verify_file_sha "$BUNDLE_OBS" "$WANT_OBS_SHA" "bundle bin/obs (frontend)"
 
     mkdir -p "$GENLOCK_MARKER_DIR" "$GENLOCK_BACKUP_ROOT"
     # Exactly TWO bounded backup dirs (never accumulate one per re-run — #185's unbounded target/
     # growth is the cautionary precedent): a permanent STOCK backup made once on the very first
     # swap ever (the forever rollback-to-PPA-stock path) and a PREVIOUS backup overwritten on every
-    # swap (quick rollback to the immediately-prior deployed build).
+    # swap (quick rollback to the immediately-prior deployed build). #499: the frontend gets the
+    # SAME stock/previous treatment as libobs/distroav — a bare file under $GENLOCK_BACKUP_ROOT
+    # (live-verified path, hand-created 2026-07-04) rather than nested in stock-pre-genlock/, since
+    # it is a standalone executable, not a plugin library pair.
     STOCK_BACKUP="$GENLOCK_BACKUP_ROOT/stock-pre-genlock"
     PREV_BACKUP="$GENLOCK_BACKUP_ROOT/previous"
+    OBS_FRONTEND_STOCK_BACKUP="$GENLOCK_BACKUP_ROOT/obs.stock"
     if [ ! -d "$STOCK_BACKUP" ]; then
         mkdir -p "$STOCK_BACKUP"
         [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$STOCK_BACKUP/libobs.so.30"
         [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$STOCK_BACKUP/distroav.so"
     fi
+    if [ ! -f "$OBS_FRONTEND_STOCK_BACKUP" ]; then
+        [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$OBS_FRONTEND_STOCK_BACKUP"
+    fi
     rm -rf "$PREV_BACKUP"
     mkdir -p "$PREV_BACKUP"
     [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$PREV_BACKUP/libobs.so.30"
     [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$PREV_BACKUP/distroav.so"
+    [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$PREV_BACKUP/obs"
     [ -n "$DEPLOYED_SHA" ] && echo "$DEPLOYED_SHA" > "$PREV_BACKUP/GENLOCK_BUILD_SHA.txt"
 
     install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL" || fail "libobs.so.30 hot-swap install failed"
     install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL" || fail "distroav.so hot-swap install failed"
+    install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL" || fail "frontend obs hot-swap install failed (#499)"
     ldconfig
 
     # SONAME sanity check (no `-q` on a piped external command under pipefail — same early-close
     # SIGPIPE footgun documented for the step-4 ldconfig check; read the full small output instead).
     readelf -d "$LIBOBS_REAL" 2>/dev/null | grep 'SONAME.*\[libobs\.so\.30\]' >/dev/null \
         || fail "post-swap libobs.so.30 SONAME check failed — refuse a mismatched ABI"
+
+    # #499 post-swap build-proof: the stock PPA frontend never references
+    # obs_display_set_render_divisor (the #276/#278/#293 multiview render-budget decouple symbol)
+    # — live-verified `nm -D -u` shows it as an UNDEFINED (U) symbol only on the genlock-built
+    # frontend. A missing reference here means the wrong/stock binary got installed.
+    nm -D -u "$OBS_FRONTEND_REAL" 2>/dev/null | grep -q 'obs_display_set_render_divisor' \
+        || fail "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor — refuse a stock/wrong frontend binary (#499: multiview render-budget decouple would be missing)"
 
     echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt"
     echo "$FAST_SHA" > "$GENLOCK_MARKER_DIR/DISTROAV_BUILD_SHA.txt"
@@ -657,7 +693,7 @@ else
     # A swap while OBS is already running (a later re-run onto a NEWER build) needs OBS to
     # relaunch to pick up the new .so — mirrors the Windows force-kill-then-relaunch convention
     # (launch-obs-genlock.sh's --force uses Stop-Process -Force = SIGKILL, never a bare SIGTERM).
-    # Step 9's own `if ! pgrep -x obs` relaunch guard would otherwise SKIP relaunching a
+    # The "Launch OBS" step's own `if ! pgrep -x obs` relaunch guard would otherwise SKIP relaunching a
     # still-exiting (SIGTERM'd but not yet dead) OBS, silently leaving the OLD build's process
     # resident even though the NEW build's bytes + marker are already on disk — so SIGKILL and
     # WAIT for actual death here, failing loud if it won't die within budget.
