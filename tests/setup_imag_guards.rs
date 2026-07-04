@@ -1066,6 +1066,32 @@ fn setup_imag_holds_generic_kernel_packages_487() {
     );
 }
 
+/// #487: found in review -- a bare `apt-mark hold ... || echo WARNING` correctly does not abort
+/// the script on failure, but the step's closing summary echo must NOT unconditionally claim
+/// "kernel pinned" regardless of whether the hold actually succeeded. The outcome must be tracked
+/// in a variable and the summary wording must branch on it, so a genuine hold failure is never
+/// masked by an adjacent line asserting success.
+#[test]
+fn setup_imag_kernel_hold_summary_reflects_real_outcome_487() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("KERNEL_HOLD_OK=1"),
+        "{SETUP} must track the apt-mark hold outcome in a KERNEL_HOLD_OK variable (#487)"
+    );
+    assert!(
+        body.contains("KERNEL_HOLD_OK=0")
+            && body.contains("WARNING: apt-mark hold of the generic kernel packages failed"),
+        "{SETUP} must set KERNEL_HOLD_OK=0 in the SAME failure branch that prints the hold-failed \
+         WARNING (#487)"
+    );
+    assert!(
+        body.contains("if [ \"$KERNEL_HOLD_OK\" -eq 1 ]; then")
+            && body.contains("kernel apt-mark hold FAILED, see WARNING above"),
+        "{SETUP}: the step's closing summary echo must branch on KERNEL_HOLD_OK -- claiming \
+         \"kernel pinned\" unconditionally would misreport a real hold failure as success (#487)"
+    );
+}
+
 /// #487: unattended-upgrades must NOT be masked/disabled wholesale on imag — #485 already made
 /// the deliberate choice to keep security updates flowing (only their schedule pinned). #487
 /// instead blacklists the kernel packages specifically and pins Automatic-Reboot=false.
@@ -1214,8 +1240,13 @@ fn setup_imag_verifies_preempt_full_present_after_lowlatency_install_482() {
         "{SETUP} must grep 99-lowlatency.cfg for `preempt=full` and fail loud if absent — refuse \
          to trust the config package silently (#482)"
     );
+    // Found in review: a bare `"takes effect on the NEXT boot"` substring also matches the
+    // UNRELATED #483 CPU-isolation step's own reboot-caveat echo (scripts/setup-imag.sh's
+    // "CPU isolation takes effect on the NEXT boot..." line) — deleting the #482 line entirely
+    // would still leave this assertion passing. Anchor on the `preempt=full` prefix, which is
+    // unique to the #482 note, to actually pin the feature this test claims to verify.
     assert!(
-        body.contains("takes effect on the NEXT boot"),
+        body.contains("preempt=full takes effect on the NEXT boot"),
         "{SETUP} must note that preempt=full only takes effect on the NEXT boot — this \
          provisioning script does not reboot the box itself (#482)"
     );
@@ -1291,11 +1322,15 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
     );
     // Never a raw ad-hoc `update-grub` call OUTSIDE the safe_grub_regen helper itself — the whole
     // point of #487/#295 is that grub is NEVER regenerated without the initrd-guarantee first.
+    // Found in review: an exact `t == "update-grub"` match has a latent gap -- it would miss a
+    // future rogue call written as `update-grub 2>&1`, `update-grub --foo`, or with a trailing
+    // redirect/comment (the first-word-of-the-line IS the invoked command regardless of what
+    // follows it). Match on the first whitespace-separated token instead of the whole line.
     let raw_update_grub_calls = body
         .lines()
         .filter(|l| {
             let t = l.trim_start();
-            t == "update-grub" && !t.starts_with('#')
+            !t.starts_with('#') && t.split_whitespace().next() == Some("update-grub")
         })
         .count();
     assert_eq!(

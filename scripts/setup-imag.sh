@@ -299,9 +299,15 @@ step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unatte
 # schedule is pinned, #485). So here we pin the KERNEL specifically (apt-mark hold + an
 # Unattended-Upgrade package-blacklist entry) and lock Automatic-Reboot to false, rather than
 # masking the whole service.
+# Found in review: a bare `cmd || echo WARNING` is correctly non-fatal, but the step's closing
+# summary echo below must NOT unconditionally claim "kernel pinned" when the hold actually
+# failed -- track the real outcome so the summary line reflects reality instead of asserting
+# success next to (or instead of) the WARNING.
+KERNEL_HOLD_OK=1
 apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 \
     linux-generic-hwe-24.04 "linux-headers-$(uname -r)" "linux-image-$(uname -r)" \
-    >/dev/null 2>&1 || echo "  WARNING: apt-mark hold of the generic kernel packages failed"
+    >/dev/null 2>&1 \
+    || { KERNEL_HOLD_OK=0; echo "  WARNING: apt-mark hold of the generic kernel packages failed"; }
 cat > /etc/apt/apt.conf.d/51imag-kernel-lockdown <<'EOF'
 // #487: the kernel is pinned (apt-mark hold) -- never let unattended-upgrades touch it, and never
 // let it reboot the box unattended. Automatic-Reboot is already Ubuntu's default (false); pinning
@@ -331,7 +337,11 @@ if [ ! -e "/boot/initrd.img-${version}" ]; then
 fi
 EOF
 chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee
-echo "  #487: kernel pinned (apt-mark hold), unattended-upgrades kernel-blacklisted + Automatic-Reboot=false, initrd hook installed"
+if [ "$KERNEL_HOLD_OK" -eq 1 ]; then
+    echo "  #487: kernel pinned (apt-mark hold), unattended-upgrades kernel-blacklisted + Automatic-Reboot=false, initrd hook installed"
+else
+    echo "  #487: unattended-upgrades kernel-blacklisted + Automatic-Reboot=false, initrd hook installed -- kernel apt-mark hold FAILED, see WARNING above"
+fi
 
 # safe_grub_regen -- the #295 safe-grub mechanism (side-effecting: root + filesystem, so this
 # does NOT belong in the pure-functions section at the top of this file). GUARANTEES every
