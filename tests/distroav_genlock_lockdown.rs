@@ -223,7 +223,10 @@ fn force_genlock_certified_settings_has_monitor_source_bandwidth_exception() {
 
     // The certified forcer must OVERRIDE bandwidth to LOWEST when genlock_monitor is set —
     // narrowly (bandwidth ONLY), never loosening any other certified value.
-    let body = squish(fn_body(&src, "static void force_genlock_certified_settings("));
+    let body = squish(fn_body(
+        &src,
+        "static void force_genlock_certified_settings(",
+    ));
     assert!(
         body.contains("obs_data_get_bool(settings, PROP_GENLOCK_MONITOR)"),
         "{NDI_SOURCE}: #501 — force_genlock_certified_settings must read PROP_GENLOCK_MONITOR to \

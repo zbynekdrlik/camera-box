@@ -37,6 +37,7 @@
 #define PROP_GENLOCK_FIFO "genlock_fifo"            /* camera-box #42: WHITELIST — bool "Genlock", default ON */
 #define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src" /* camera-box #245: WHITELIST — per-source latency (ms), default 3, min 3 */
 #define PROP_BURN "genlock_burn"                    /* camera-box #257: WHITELIST — bool "Measurement burn (test only)", default OFF, runtime */
+#define PROP_GENLOCK_MONITOR "genlock_monitor"       /* camera-box #501: WHITELIST — bool "Monitor-only (low-bandwidth NDI)", default OFF */
 #define PROP_GENLOCK_SOURCE_LATENCY_MS_MAX 2000     /* mirrors libobs GENLOCK_SOURCE_LATENCY_MS_MAX (#245) */
 #define PROP_GENLOCK_LATENCY_MS_MIN 3               /* camera-box #257: latency floor (ms), mirrors libobs GENLOCK_LATENCY_MS_MIN */
 #define PROP_GENLOCK_LATENCY_MS_DEFAULT 3           /* camera-box #257: per-source latency default (ms) = the floor */
@@ -326,6 +327,7 @@ const char *ndi_source_getname(void *)
 	PROP_GENLOCK_FIFO,
 	PROP_GENLOCK_LATENCY_MS_SRC,
 	PROP_BURN,
+	PROP_GENLOCK_MONITOR,
 };
 
 /* camera-box #150/#257: the certified value FORCED into every non-whitelist (hidden) prop
@@ -378,6 +380,19 @@ static void force_genlock_certified_settings(obs_data_t *settings)
 		else
 			obs_data_set_int(settings, f.prop, f.ival);
 	}
+	/* camera-box #501: MONITOR-SOURCE bandwidth exception. A source flagged
+	 * genlock_monitor never feeds program (it only feeds the built-in OBS multiview,
+	 * which is view-only for the Stream Deck cutter workflow) — root-caused live on
+	 * imag-nb (issue #501): the multiview costs ~80ms/render because every cell
+	 * synchronously uploads ALL 6 cameras' FULL-1080p NDI textures (their async
+	 * upload otherwise only happens when something renders them). Feeding the
+	 * multiview from NDI LOW-bandwidth receivers instead (~9x cheaper) fits the
+	 * #276/#278/#293 render-budget decouple back inside the 16.6ms tick. This
+	 * NARROWLY overrides ONLY PROP_BANDWIDTH, applied AFTER the base certified table
+	 * above so every other certified value (sync/behavior/latency/timeout/yuv/
+	 * hw_accel/audio/framesync/alpha/ptz) stays locked exactly as before. */
+	if (obs_data_get_bool(settings, PROP_GENLOCK_MONITOR))
+		obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_LOWEST);
 }
 
 obs_properties_t *ndi_source_getproperties(void *data)
@@ -431,6 +446,12 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	 * the per-source flag each render. TEST-mode only. */
 	obs_properties_add_bool(props, PROP_BURN, "Measurement burn (test only)");
 
+	/* (5) PROP_GENLOCK_MONITOR — the monitor-only toggle (bool, default OFF). #501: when set,
+	 * force_genlock_certified_settings narrows PROP_BANDWIDTH to PROP_BW_LOWEST for this source
+	 * (every other certified value stays locked). Set true ONLY on a source that feeds the
+	 * built-in OBS multiview and never feeds program. */
+	obs_properties_add_bool(props, PROP_GENLOCK_MONITOR, "Monitor-only (low-bandwidth NDI, camera-box #501)");
+
 	obs_log(LOG_DEBUG, "-ndi_source_getproperties(…)");
 
 	return props;
@@ -455,6 +476,9 @@ void ndi_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, PROP_GENLOCK_LATENCY_MS_DEFAULT);
 	/* camera-box #257: measurement burn OFF by default (TEST mode turns it on at runtime). */
 	obs_data_set_default_bool(settings, PROP_BURN, false);
+	/* camera-box #501: monitor-only OFF by default — a source is full-bandwidth (feeds program)
+	 * unless explicitly flagged as a multiview-only monitoring receiver. */
+	obs_data_set_default_bool(settings, PROP_GENLOCK_MONITOR, false);
 	obs_log(LOG_DEBUG, "-ndi_source_getdefaults(…)");
 }
 
