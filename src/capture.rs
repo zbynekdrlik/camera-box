@@ -514,6 +514,54 @@ impl ControlIo for Device {
     }
 }
 
+/// Resolve a [`CaptureControl`]'s [`ControlTarget`] to the literal V4L2 value to
+/// apply (#456). A [`ControlTarget::Literal`] never queries anything — explicit
+/// operator overrides always bypass range-scaling. A
+/// [`ControlTarget::RangeScaled`] queries the device's own `[minimum,maximum]`
+/// range and scales the reference percentage onto it; if the query fails (a
+/// driver without `VIDIOC_QUERY_EXT_CTRL` support), the reference percentage is
+/// applied as a literal instead — a possibly-wrong value beats silently
+/// skipping the control, and matches the pre-#456 behaviour.
+fn resolve_control_target<IO: ControlIo>(io: &IO, id: u32, target: ControlTarget) -> i64 {
+    match target {
+        ControlTarget::Literal(v) => v,
+        ControlTarget::RangeScaled { reference_pct } => match io.query_range(id) {
+            Ok(range) => scale_to_range(reference_pct, range),
+            Err(e) => {
+                tracing::warn!(
+                    "capture control id={:#010x} range query failed: {} \
+                     (falling back to reference value {} applied literally)",
+                    id,
+                    e,
+                    reference_pct
+                );
+                reference_pct
+            }
+        },
+    }
+}
+
+/// Scale a `reference_pct` (0-100, calibrated against the ShadowCast card's
+/// native 0-100 range) onto a device's ACTUAL queried `[minimum,maximum]`
+/// range. `reference_pct=50` — the certified COLOUR set's neutral — lands on
+/// `range`'s own midpoint, which is ALSO each known card's own manufacturer
+/// default (#456: 50 on ShadowCast's 0-100 range, ~128 on cam5's 0-255 range),
+/// so this single formula makes the SAME certified intent land correctly on
+/// any card's range, for the neutral colour set AND the tuned SHARP set alike
+/// (e.g. 75% -> ~191 on a 0-255 range, matching the ShadowCast literal 75 on a
+/// 0-100 range).
+fn scale_to_range(reference_pct: i64, range: ControlRange) -> i64 {
+    let span = range.maximum - range.minimum;
+    if span <= 0 {
+        // Degenerate/unreliable range query -- the reference percentage is the
+        // best remaining guess (matches the pre-#456 literal behaviour).
+        return reference_pct;
+    }
+    let fraction = reference_pct as f64 / 100.0;
+    let scaled = (range.minimum as f64 + fraction * span as f64).round() as i64;
+    scaled.clamp(range.minimum, range.maximum)
+}
+
 /// Apply `controls` through any [`ControlIo`], verifying each by read-back, and
 /// return a [`ControlReport`]. A control that fails to SET (driver rejects it — the
 /// NZXT CAM4 card has no picture controls) or reads back DIFFERENT is logged loudly
@@ -524,15 +572,7 @@ impl ControlIo for Device {
 pub fn apply_controls_with<IO: ControlIo>(io: &IO, controls: &[CaptureControl]) -> ControlReport {
     let mut report = ControlReport::default();
     for c in controls {
-        // #456: a RangeScaled target is still resolved to its bare reference
-        // percentage here, UNSCALED by the device's queried range — this is the
-        // literal-value bug (a 0-100 ShadowCast-calibrated "50" applied verbatim
-        // to a 0-255 card lands at ~20%, not the neutral midpoint). Fixed by
-        // `scale_to_range` in the next commit.
-        let value = match c.target {
-            ControlTarget::Literal(v) => v,
-            ControlTarget::RangeScaled { reference_pct } => reference_pct,
-        };
+        let value = resolve_control_target(io, c.id, c.target);
         match io.set_ctrl(c.id, value) {
             Ok(()) => match io.get_ctrl(c.id) {
                 Ok(got) if got == value => {
