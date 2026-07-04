@@ -716,6 +716,24 @@ lightweight `SetCurrentProgramScene` + non-black self-check the all-cambox sweep
 imag's PROGRAM onto the cam1 scene; EVENT mode does NOT scene-switch imag (mirrors strih/stream —
 rig-mode never scene-switches those either).
 
+**imag's 911003 digital burn is FREE-RUNNING at exactly 2x the recorded rate — gate it with
+`imag_tick_gate::burn_step_contiguity`, never strict 1:1 (#480).** Confirmed on a live 300s rig
+recording: only EVEN burn ids were present (~50%), a clean deterministic alternation, not
+scattered loss. Root cause: imag's OBS runs Studio Mode ON, and the Studio-Mode "Program" monitor
+widget re-renders the active scene as a SEPARATE display draw, independent of the main output
+render that reaches the recording — so the DistroAV burn filter's `frame_id` counter
+(`vendor/distroav/src/ndi-burn-filter.cpp`, bumped every `video_render` call) advances TWICE per
+recorded output frame. This is DIFFERENT from strih's own free-running burn (#360, an IRREGULAR
+render-tick step gap-ignored entirely) — imag's step is a clean, reproducible 2, so
+`node_verdict_for_imag` (`src/bin/recording-verdict.rs`) models it with the decimation-aware
+excess-gap check (`camera_box::imag_tick_gate::burn_step_contiguity`, `IMAG_BURN_RENDER_STEP = 2`)
+instead: a forward gap of exactly 2 is expected, a LARGER gap still charges the excess as a real
+drop. The optical cam2 tick stays the unchanged hard 1:1 proof. This is a Rust-only fix — the
+vendored `distroav.so` filter itself was NOT touched (would need a rebuild + fresh
+`genlock_build_sha_imag` pin + live re-verification). If a future imag OBS change ever turns
+Studio Mode off, or the vendored filter starts gating the counter to the program pass only, this
+step model needs re-deriving from a fresh live recording, not assumed.
+
 ---
 
 ## "Is gate X CI-automatic or rig-manual?" — read `docs/strict-gate-coverage.md` first (EPIC #406)
