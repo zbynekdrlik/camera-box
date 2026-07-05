@@ -6,6 +6,11 @@
 //! `camera-box.service.d/cpu-affinity.conf` → `CPUAffinity=3`, and the drop-in
 //! `camera-box.service.d/genlock.conf` → `Environment=CAMERA_BOX_GENLOCK_FPS=60`.
 //!
+//! #450 rescope: the genlock.conf FPS is now READ from the per-cam `CAMERA_GENLOCK_FPS` table
+//! (`scripts/camera-set.sh`, resolved via `resolve_device_name`, #451) instead of a hardcoded
+//! literal `60` — every fleet camera resolves to 60 today, so the deployed value is unchanged,
+//! but the source is now a single per-cam table entry rather than a second hardcoded copy here.
+//!
 //! Today `setup-device.sh` writes NONE of these (each was a manual SSH edit that drifted across
 //! the fleet), and it downloads the binary + dantesync with `curl` while the minimal create-usb
 //! base image ships WITHOUT curl — so those downloads silently failed on cam5.
@@ -73,10 +78,22 @@ fn setup_device_writes_genlock_dropin() {
         "setup-device.sh must WRITE the drop-in .../genlock.conf so a reinstalled box emits at the \
          fleet-correct rate instead of free-running/uncapped (#450/#11)"
     );
+    // #450 rescope: the FPS is no longer a hardcoded literal — it is read from the per-cam
+    // CAMERA_GENLOCK_FPS table (scripts/camera-set.sh, #451) so a future per-camera divergence
+    // needs only a camera-set.sh edit, not a setup-device.sh edit too.
     assert!(
-        on_noncomment_line(&body, "CAMERA_BOX_GENLOCK_FPS=60"),
-        "the genlock.conf drop-in must set `CAMERA_BOX_GENLOCK_FPS=60` (program-feeding cams emit \
-         60fps; stream decimates 60->30 downstream) — matches the live cam1/cam2/cam4 drop-in (#11)"
+        on_noncomment_line(
+            &body,
+            "Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}"
+        ),
+        "the genlock.conf drop-in must set `CAMERA_BOX_GENLOCK_FPS` from the per-cam \
+         `CAMERA_GENLOCK_FPS` table (resolve_device_name / scripts/camera-set.sh, #450/#451) — \
+         not a hardcoded literal `60`"
+    );
+    assert!(
+        !on_noncomment_line(&body, "Environment=CAMERA_BOX_GENLOCK_FPS=60"),
+        "the genlock.conf drop-in must no longer hardcode `CAMERA_BOX_GENLOCK_FPS=60` — it must \
+         come from the per-cam table via CAMERA_GENLOCK_FPS (#450)"
     );
 }
 

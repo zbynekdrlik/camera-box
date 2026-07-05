@@ -1710,6 +1710,43 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
     already-shipped `genlock_from_log`, filed as follow-up #514, then DISPROVEN and CLOSED after
     re-testing with a properly materialized (non-`yes`) large input showed no crash at all (up to
     200,000 lines / 12.5MB). See the closing comment on #514 for the full correction.
+- **#450** (rescoped 2026-07-05, ticket-validator PARTIAL: #455/#457 already landed the peripheral
+  plumbing) — `scripts/setup-device.sh` reworked into a name-resolved, fail-loud one-shot
+  provisioner. `chore: version bump to 1.7.0-dev.241` (`2c68a067d`) ->
+  `test:[red] #450 pin name-resolved fail-loud setup-device.sh contract` (`e77cce562`,
+  `tests/setup_device_provisioner_hardening.rs` new, `tests/setup_device_pure_functions.rs` new,
+  `tests/provisioning_realtime_isolation.rs` updated) -> `feat:[green] #450 setup-device.sh --
+  name-resolved, fail-loud one-shot provisioner` (`525002d02`). Verified RED against the
+  pre-change script (all new/updated assertions failed), GREEN after.
+  - Sources `scripts/camera-set.sh`; a new pure `resolve_device_name()` function
+    (case-insensitive) resolves the sole `DEVICE_NAME` arg to `DEVICE_IP`/`VBAN_STREAM`/
+    `CAMERA_GENLOCK_FPS`, dropping the old free-text 3-positional-arg form — `setup-device.sh
+    CAM5` alone now works. Same convention as `setup-imag.sh`'s pure-function + `BASH_SOURCE`
+    source-guard: the destructive provisioning flow is skipped when the script is sourced, so
+    `tests/setup_device_pure_functions.rs` can source the REAL script and run
+    `resolve_device_name` against the REAL `camera-set.sh` fleet map (cam1-7) without root/network.
+  - Canonical PLAIN `ExecStart=/usr/local/bin/camera-box` (removed the baked
+    `--display "STRIH-SNV (interkom)"`).
+  - `set -euo pipefail` (was bare `set -e`) + a new `fail()` helper; binary/NDI/ALSA/dantesync
+    install failures now hard-exit instead of warn-and-continue. Adding `pipefail` exposed a
+    dormant footgun (`.claude/skills/ops` #458 footgun #1) in the ALSA USB-card detection
+    pipelines (`grep | head -1 | awk` on a no-match input) — fixed with `|| true` on the whole
+    pipeline.
+  - STEP 19 now accumulates a `MISSING` reason for the binary and the NDI library and `fail()`s
+    BEFORE printing "Setup Complete!" — never a false-positive success banner on a
+    half-configured box (was: print "ACTION REQUIRED" and `exit 0`).
+  - Idempotency guard on the STEP 18 fstab backup: `cp /etc/fstab /etc/fstab.bak` only runs when
+    `/etc/fstab.bak` doesn't already exist — a re-run can no longer clobber the true
+    pre-provisioning original (and the EFI entry read back out of it) with the already-rewritten
+    fstab.
+  - `genlock.conf`'s `CAMERA_BOX_GENLOCK_FPS` now comes from the per-cam `CAMERA_GENLOCK_FPS`
+    table (`camera-set.sh`, #451) instead of a hardcoded literal `60` — updated
+    `provisioning_realtime_isolation.rs`'s `setup_device_writes_genlock_dropin` test to match.
+  - `/review` + `requesting-code-review` not yet run at doc-append time (autopilot-worker
+    contract: version bump + TDD + implementation + local Tier-0 checks + push only; the
+    supervisor drives CI -> PR -> merge). Local `cargo fmt --all --check` / `cargo check` /
+    `cargo clippy --all-targets -- -D warnings` / `cargo test --no-run` all green (default
+    features only).
 - PR #513, final CI run green (all jobs incl. Drift Guard pin-set; Mutation Testing +
   Notify-on-red correctly skipped — on-demand / failure-only). `mergeable:true`,
   `mergeStateStatus:CLEAN`. Version bumped 1.7.0-dev.237 -> 1.7.0-dev.238.

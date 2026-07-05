@@ -104,9 +104,21 @@ The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbl
 - **Provisioned by `scripts/setup-device.sh`** (#450): STEP 10 adds `isolcpus=3` to `GRUB_CMDLINE_LINUX`
   (idempotent, INSIDE the #295 initrd-guaranteed grub block — that block is the ONE safe place to touch
   grub, so this does NOT contradict the "never ad-hoc edit grub" rule below); STEP 7 writes the
-  `cpu-affinity.conf` (`CPUAffinity=3`) + `genlock.conf` (`CAMERA_BOX_GENLOCK_FPS=60`) drop-ins. The
-  capture core is AUTO-DERIVED from `isolcpus` — the live fleet sets NO `CAMERA_BOX_CAPTURE_CORE` (only
-  `CAMERA_BOX_GENLOCK_FPS=60`, confirmed on cam1). Guard: `tests/provisioning_realtime_isolation.rs`.
+  `cpu-affinity.conf` (`CPUAffinity=3`) + `genlock.conf` (`CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}`,
+  per-cam table, #451) drop-ins. The capture core is AUTO-DERIVED from `isolcpus` — the live fleet sets
+  NO `CAMERA_BOX_CAPTURE_CORE` (only `CAMERA_BOX_GENLOCK_FPS=60`, confirmed on cam1). Guard:
+  `tests/provisioning_realtime_isolation.rs`.
+- **`setup-device.sh` invocation is now NAME-RESOLVED, single-arg (#450 rework, 2026-07-05):**
+  `sudo ./setup-device.sh CAM5` (case-insensitive) alone brings a booted box to full fleet parity —
+  the OLD 3-positional-arg form (`setup-device.sh CAM5 10.77.9.65 cam5`) is GONE. It sources
+  `scripts/camera-set.sh` and resolves `DEVICE_NAME -> DEVICE_IP / VBAN_STREAM / CAMERA_GENLOCK_FPS`
+  via a pure `resolve_device_name()` function (unit-tested against the real fleet map in
+  `tests/setup_device_pure_functions.rs`, sourced the same way as `setup-imag.sh`'s pure functions —
+  its `BASH_SOURCE` guard skips the destructive provisioning flow when sourced). The script is now
+  `set -euo pipefail` + fails loud (via a `fail()` helper) on binary/NDI/ALSA/dantesync install
+  failure instead of warn-and-continue, and STEP 19 hard-fails (never prints "Setup Complete!") if
+  the binary or `/usr/lib/ndi/libndi.so.6` is still missing. Guard:
+  `tests/setup_device_provisioner_hardening.rs`.
 - Verify on a box: `taskset -acp $(pidof camera-box)` (capture threads on the isolated core),
   `journalctl -u camera-box | grep '#289'` (pin + IRQ log lines), `grep . /proc/irq/*/smp_affinity`.
 - **Kernel-cmdline tuning is DEFERRED** (`nohz_full`/`rcu_nocbs`/`irqaffinity=`, #303) — it needs the

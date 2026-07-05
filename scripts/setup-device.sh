@@ -3,17 +3,34 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh DEVICE_NAME DEVICE_IP VBAN_STREAM
-# Example: ./setup-device.sh CAM2 10.77.9.62 cam2
+# Usage: ./setup-device.sh [--binary <url|path>] DEVICE_NAME
+# Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
+#
+# DEVICE_NAME is resolved via scripts/camera-set.sh (#24/#451 -- the single source of truth for
+# the cam1-7 fleet map): IP address / VBAN stream name / genlock emit-rate are all DERIVED from
+# it, never passed as free-text positional args (#450). An unknown name fails loudly through
+# camera-set.sh's fail-closed `case` -- never silently provisions the wrong box.
 #
 
-set -e
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# fail MSG -- print in red to stderr and exit non-zero. This is a ONE-SHOT provisioner
+# (script-failure-policy): every install step that could otherwise leave the box
+# half-configured (binary/NDI/ALSA/dantesync) fails loud here instead of warn-and-continue (#450).
+fail() {
+    echo -e "${RED}FAIL: $1${NC}" >&2
+    exit 1
+}
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/camera-set.sh
+. "$HERE/camera-set.sh"   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
 
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
@@ -25,14 +42,41 @@ CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-dev}"
 NDI_PEER="${CAMERA_BOX_NDI_PEER:-10.77.9.61}"
 NDI_PEER_PW="${CAM_PW:-newlevel}"
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Error: Please run as root${NC}"
-    exit 1
+# --- PURE functions (no root, no network, no side effects -- sourced + unit-tested from
+# tests/setup_device_pure_functions.rs; the BASH_SOURCE guard below skips the destructive
+# provisioning flow when sourced. Same convention as scripts/setup-imag.sh.) --------------------
+
+# resolve_device_name NAME -- resolves a single fleet camera name (case-insensitive: CAM5, cam5,
+# Cam5 all equivalent -- the historical hostname convention is uppercase) to DEVICE_NAME
+# (uppercase hostname, e.g. CAM5) / DEVICE_IP / VBAN_STREAM (lowercase stream name, e.g. cam5) /
+# CAMERA_GENLOCK_FPS (per-cam emit rate, #451), via scripts/camera-set.sh's camera_resolve().
+# Fails loud on an unknown/empty name: camera-set.sh's own fail-closed `case` already rejects it
+# and prints why; this just turns that nonzero return into a hard exit instead of letting a
+# careless caller ignore it and provision the wrong box.
+resolve_device_name() {
+    local raw="${1:-}"
+    local lc
+    lc="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+    camera_resolve "$lc" || exit 1
+    DEVICE_NAME="$(printf '%s' "$CAMERA_NAME" | tr '[:lower:]' '[:upper:]')"
+    DEVICE_IP="$CAMERA_IP"
+    VBAN_STREAM="$CAMERA_NAME"
+}
+
+# --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
+# provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    return 0
 fi
 
-# Parse arguments. --binary <url|path> may appear anywhere; DEVICE_NAME/DEVICE_IP/VBAN_STREAM
-# remain positional (#457).
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    fail "please run as root"
+fi
+
+# Parse arguments. --binary <url|path> may appear anywhere; DEVICE_NAME is the sole positional
+# argument (#450 -- name-resolved single-arg invocation; IP/stream/genlock-fps are all DERIVED
+# from it via camera-set.sh, replacing the old free-text 3-positional-arg form).
 BINARY_ARG=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
@@ -49,19 +93,20 @@ while [ $# -gt 0 ]; do
 done
 set -- "${POSITIONAL[@]}"
 
-DEVICE_NAME="${1:-}"
-DEVICE_IP="${2:-}"
-VBAN_STREAM="${3:-}"
+DEVICE_NAME_ARG="${1:-}"
 
-if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
-    echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME DEVICE_IP VBAN_STREAM${NC}"
+if [ -z "$DEVICE_NAME_ARG" ]; then
+    echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
+    echo ""
+    echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-7) -- case-insensitive."
     echo ""
     echo "Examples:"
-    echo "  $0 CAM1 10.77.9.61 cam1"
-    echo "  $0 CAM2 10.77.9.62 cam2"
-    echo "  $0 --binary ./dist/camera-box CAM2 10.77.9.62 cam2"
+    echo "  $0 CAM5"
+    echo "  $0 --binary ./dist/camera-box CAM2"
     exit 1
 fi
+
+resolve_device_name "$DEVICE_NAME_ARG"
 
 TOTAL_STEPS=19
 
@@ -164,35 +209,27 @@ if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif [ -n "$BINARY_SRC" ]; then
     echo "  Downloading binary from: $BINARY_SRC"
-    if curl -fsSL "$BINARY_SRC" -o /usr/local/bin/camera-box; then
-        chmod +x /usr/local/bin/camera-box
-        echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
-    else
-        echo -e "  ${YELLOW}Warning: Could not download binary from $BINARY_SRC${NC}"
-        echo "  Please install manually to /usr/local/bin/camera-box"
-    fi
+    curl -fsSL "$BINARY_SRC" -o /usr/local/bin/camera-box \
+        || fail "could not download binary from $BINARY_SRC"
+    chmod +x /usr/local/bin/camera-box
+    echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
     echo "  Fetching latest CI dev-build artifact (branch: $CI_BRANCH)..."
     RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
         --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-    if [ -n "$RUN_ID" ]; then
-        DIST_DIR="$(mktemp -d)"
-        if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
-            && [ -f "$DIST_DIR/camera-box" ]; then
-            install -m 0755 "$DIST_DIR/camera-box" /usr/local/bin/camera-box
-            echo "  Binary installed from CI run $RUN_ID: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
-        else
-            echo -e "  ${YELLOW}Warning: gh run download failed for run $RUN_ID${NC}"
-            echo "  Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
-        fi
-        rm -rf "$DIST_DIR"
+    [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+    DIST_DIR="$(mktemp -d)"
+    if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
+        && [ -f "$DIST_DIR/camera-box" ]; then
+        install -m 0755 "$DIST_DIR/camera-box" /usr/local/bin/camera-box
+        echo "  Binary installed from CI run $RUN_ID: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
     else
-        echo -e "  ${YELLOW}Warning: no successful CI run found on branch '$CI_BRANCH'${NC}"
-        echo "  Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+        rm -rf "$DIST_DIR"
+        fail "gh run download failed for run $RUN_ID -- install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
     fi
+    rm -rf "$DIST_DIR"
 else
-    echo -e "  ${YELLOW}Warning: gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch the fleet dev-build${NC}"
-    echo "  Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+    fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch the fleet dev-build. Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
 fi
 
 # =============================================================================
@@ -219,18 +256,13 @@ else
         && sshpass -p "$NDI_PEER_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             "root@${NDI_PEER}:/usr/lib/ndi/libndi.so.*.*.*" /usr/lib/ndi/ 2>/dev/null; then
         REAL="$(cd /usr/lib/ndi && ls libndi.so.*.*.* 2>/dev/null | head -1 || true)"
-        if [ -n "$REAL" ]; then
-            ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
-            ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
-            ldconfig
-            echo "  NDI library fetched from $NDI_PEER and configured ($REAL)"
-        else
-            echo -e "  ${YELLOW}NDI fetch from $NDI_PEER produced no file${NC}"
-            echo "  Copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
-        fi
+        [ -n "$REAL" ] || fail "NDI fetch from $NDI_PEER produced no file -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
+        ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
+        ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
+        ldconfig
+        echo "  NDI library fetched from $NDI_PEER and configured ($REAL)"
     else
-        echo -e "  ${YELLOW}Could not fetch NDI library from fleet peer $NDI_PEER${NC}"
-        echo "  Copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
+        fail "could not fetch NDI library from fleet peer $NDI_PEER -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
     fi
 fi
 
@@ -240,18 +272,19 @@ fi
 echo ""
 echo -e "${GREEN}[5/${TOTAL_STEPS}] Configuring ALSA audio...${NC}"
 
-# Auto-detect USB headset card (CSCTEK USB Audio and HID)
-USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -E 'HID.*USB Audio|USB Audio.*HID' | head -1 | awk '{print $1}')
+# Auto-detect USB headset card (CSCTEK USB Audio and HID). `|| true` on each pipeline guards
+# against `set -o pipefail` aborting the whole script on a no-match `grep` (#458 footgun #1) --
+# `head`/`awk` succeed on empty input, but pipefail takes the RIGHTMOST *failing* command's exit
+# code, which is `grep`'s nonzero when nothing matched.
+USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -E 'HID.*USB Audio|USB Audio.*HID' | head -1 | awk '{print $1}' || true)
 if [ -z "$USB_CARD" ]; then
     # Fallback: try to find any USB audio device
-    USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -i 'usb.*audio\|audio.*usb' | head -1 | awk '{print $1}')
+    USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -i 'usb.*audio\|audio.*usb' | head -1 | awk '{print $1}' || true)
 fi
-if [ -z "$USB_CARD" ]; then
-    USB_CARD=1  # Default fallback
-    echo -e "  ${YELLOW}Warning: Could not detect USB headset, using card $USB_CARD${NC}"
-else
-    echo "  Detected USB headset on card $USB_CARD"
-fi
+# #450: fail loud instead of silently defaulting to card 1 -- a wrong hardcoded card would
+# silently misconfigure the intercom on hardware whose USB audio device enumerates differently.
+[ -n "$USB_CARD" ] || fail "could not auto-detect a USB headset on /proc/asound/cards -- refusing to silently default to card 1"
+echo "  Detected USB headset on card $USB_CARD"
 
 cat > /etc/asound.conf << ALSAEOF
 # Asymmetric config: stereo output, mono input
@@ -321,7 +354,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)"
+ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
 
@@ -371,17 +404,19 @@ cat > /etc/systemd/system/camera-box.service.d/cpu-affinity.conf << 'EOF'
 # #289: pin grab to the isolated core (isolcpus=3) so box load never starves capture/emit
 CPUAffinity=3
 EOF
-# #11 — NDI emit rate. Program-feeding cams emit 60fps (the stream box decimates
-# 60->30 downstream); matches the live cam1/cam2/cam4 genlock.conf drop-in.
-cat > /etc/systemd/system/camera-box.service.d/genlock.conf << 'EOF'
+# #11/#450 — NDI emit rate, from the per-cam CAMERA_GENLOCK_FPS table (scripts/camera-set.sh,
+# #451) rather than a hardcoded literal. Every fleet camera emits 60fps today (the stream box
+# decimates 60->30 downstream), so this resolves to the same value as before -- but a future
+# per-camera divergence now needs only a camera-set.sh edit, not a setup-device.sh edit too.
+cat > /etc/systemd/system/camera-box.service.d/genlock.conf << EOF
 [Service]
-Environment=CAMERA_BOX_GENLOCK_FPS=60
+Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}
 EOF
 
 systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
-echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=60)"
+echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS})"
 
 # =============================================================================
 # STEP 8: Configure auto-login on tty1
@@ -687,17 +722,21 @@ echo -e "${GREEN}[17/${TOTAL_STEPS}] Installing dantesync...${NC}"
 
 DANTESYNC_INSTALLED=false
 
-# Get latest release URL from GitHub (fail-proof)
+# Get latest release URL from GitHub
 DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null | \
     grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' | \
     grep -o 'https://[^"]*' | head -1) || true
 
-if [ -n "$DANTESYNC_URL" ]; then
-    if curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync 2>/dev/null; then
-        chmod +x /usr/local/bin/dantesync
+# #450: fail loud -- dantesync disciplines the cluster wall-clock genlock depends on (#8); a box
+# provisioned without it silently free-runs its own clock instead of the fleet's shared reference.
+[ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub -- dantesync is required for cluster clock sync (#8), not optional"
 
-        # Create systemd service
-        cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
+curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync 2>/dev/null \
+    || fail "failed to download dantesync from $DANTESYNC_URL"
+chmod +x /usr/local/bin/dantesync
+
+# Create systemd service
+cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
 [Unit]
 Description=Dante Time Sync (PTP/NTP Synchronization)
 After=network.target
@@ -721,16 +760,10 @@ StandardError=journal
 WantedBy=multi-user.target
 DANTEEOF
 
-        systemctl daemon-reload
-        systemctl enable dantesync 2>/dev/null || true
-        DANTESYNC_INSTALLED=true
-        echo "  dantesync: installed and enabled"
-    else
-        echo -e "  ${YELLOW}Warning: Failed to download dantesync (non-critical)${NC}"
-    fi
-else
-    echo -e "  ${YELLOW}Warning: Could not get dantesync release URL (non-critical)${NC}"
-fi
+systemctl daemon-reload
+systemctl enable dantesync 2>/dev/null || true
+DANTESYNC_INSTALLED=true
+echo "  dantesync: installed and enabled"
 
 # =============================================================================
 # STEP 18: Configure read-only root filesystem
@@ -741,8 +774,16 @@ echo -e "${GREEN}[18/${TOTAL_STEPS}] Configuring read-only filesystem...${NC}"
 # Get the root partition UUID
 ROOT_UUID=$(findmnt -n -o UUID /)
 
-# Backup original fstab
-cp /etc/fstab /etc/fstab.bak
+# Backup original fstab -- IDEMPOTENCY GUARD (#450): only back up ONCE. An unconditional `cp`
+# here clobbers /etc/fstab.bak with the ALREADY-REWRITTEN (ro+tmpfs) fstab on a re-run,
+# permanently losing the true pre-provisioning original -- including the EFI entry this step
+# reads back out of it, below.
+if [ ! -f /etc/fstab.bak ]; then
+    cp /etc/fstab /etc/fstab.bak
+    echo "  Backed up original fstab to /etc/fstab.bak"
+else
+    echo "  /etc/fstab.bak already exists -- keeping the original backup (idempotent re-run)"
+fi
 
 # Create new fstab with read-only root and tmpfs mounts
 cat > /etc/fstab << FSTABEOF
@@ -767,17 +808,31 @@ echo "  tmpfs mounts: /tmp, /var/log, /var/tmp, /var/cache, /var/spool"
 echo "  To remount read-write: mount -o remount,rw /"
 
 # =============================================================================
-# STEP 19: Summary
+# STEP 19: Final verification + summary
 # =============================================================================
 echo ""
-echo -e "${GREEN}[19/${TOTAL_STEPS}] Setup Complete!${NC}"
+echo -e "${GREEN}[19/${TOTAL_STEPS}] Verifying installation...${NC}"
+
+# #450: NEVER print "Setup Complete!" on a half-configured box. Every failure path above already
+# fails loud at the point of failure, but this box being the fleet's own NDI source is a
+# legitimate NON-fatal branch in STEP 4 (it fetches from itself) -- so it alone can still reach
+# here without libndi.so.6 actually present. This is the belt-and-braces final gate.
+MISSING=""
+[ -f /usr/local/bin/camera-box ] || MISSING="${MISSING}camera-box binary (/usr/local/bin/camera-box) "
+[ -f /usr/lib/ndi/libndi.so.6 ] || MISSING="${MISSING}NDI library (/usr/lib/ndi/libndi.so.6) "
+if [ -n "$MISSING" ]; then
+    fail "half-configured box -- missing: ${MISSING}-- refusing to report Setup Complete"
+fi
+
+echo -e "${GREEN}Setup Complete!${NC}"
 echo "=========================================="
 echo ""
 echo "Configuration:"
-echo "  Hostname:    $DEVICE_NAME"
-echo "  IP Address:  $DEVICE_IP"
-echo "  VBAN Stream: $VBAN_STREAM"
-echo "  NDI Name:    usb"
+echo "  Hostname:     $DEVICE_NAME"
+echo "  IP Address:   $DEVICE_IP"
+echo "  VBAN Stream:  $VBAN_STREAM"
+echo "  Genlock FPS:  $CAMERA_GENLOCK_FPS"
+echo "  NDI Name:     usb"
 echo ""
 echo "Optimizations applied:"
 echo "  - GRUB timeout: 0s"
@@ -786,7 +841,7 @@ echo "  - Power button: mute toggle (not shutdown)"
 echo "  - Sleep/suspend: disabled"
 echo "  - CPU governor: performance"
 echo "  - CPU isolation: core 3 reserved (isolcpus=3) for the realtime grab [#289]"
-echo "  - Realtime pin: CPUAffinity=3 drop-in; NDI emit 60fps (genlock.conf) [#289/#11]"
+echo "  - Realtime pin: CPUAffinity=3 drop-in; NDI emit ${CAMERA_GENLOCK_FPS}fps (genlock.conf) [#289/#11/#451]"
 echo "  - Network: optimized for streaming"
 echo "  - Unnecessary services: disabled"
 echo "  - Root filesystem: read-only (with tmpfs overlays)"
@@ -794,11 +849,6 @@ if [ "$DANTESYNC_INSTALLED" = true ]; then
     echo "  - Dante time sync: installed (PTP synchronization)"
 fi
 echo ""
-if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
-    echo -e "${YELLOW}ACTION REQUIRED:${NC}"
-    echo "  NDI library still missing -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
-    echo ""
-fi
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Apply network config: netplan apply"
 echo "  2. Reboot: reboot"
