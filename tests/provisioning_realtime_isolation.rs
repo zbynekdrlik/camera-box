@@ -97,43 +97,55 @@ fn setup_device_writes_genlock_dropin() {
     );
 }
 
-/// 3. The provisioner must add `isolcpus=3` to the kernel cmdline (GRUB_CMDLINE_LINUX), and the edit
-///    must land BEFORE `update-grub` regenerates grub.cfg or the flag never takes effect. ONLY
-///    isolcpus — the live fleet cmdline carries no nohz_full/rcu_nocbs (deferred to #303). This edit
-///    lives inside the #295 initrd-guaranteed grub step so it can never strand a box on an
-///    initrd-less kernel the way an ad-hoc grub edit did.
+/// 3. The provisioner must add `isolcpus=3` AND the #303 quiet-core companions
+///    (`nohz_full=3 rcu_nocbs=3 irqaffinity=0-2`) to the kernel cmdline (GRUB_CMDLINE_LINUX), and
+///    every one of the edits must land BEFORE `update-grub` regenerates grub.cfg or the flags never
+///    take effect. #303 closes the gap #289 left open: nohz_full stops the periodic scheduler tick
+///    on the isolated core, rcu_nocbs offloads RCU callbacks off it, and irqaffinity=0-2 defaults ALL
+///    boot IRQs onto the general cores (the only lever that moves managed MSI xhci IRQs, which
+///    reject runtime smp_affinity writes). This edit lives inside the #295 initrd-guaranteed grub
+///    step so it can never strand a box on an initrd-less kernel the way an ad-hoc grub edit did.
 #[test]
 fn setup_device_adds_isolcpus_to_grub_cmdline_before_update_grub() {
     let body = read_script();
     assert!(
         on_noncomment_line(&body, "GRUB_CMDLINE_LINUX"),
-        "setup-device.sh must edit GRUB_CMDLINE_LINUX to add the realtime-isolation kernel flag \
-         (#450/#289)"
+        "setup-device.sh must edit GRUB_CMDLINE_LINUX to add the realtime-isolation kernel flags \
+         (#450/#289/#303)"
     );
-    assert!(
-        on_noncomment_line(&body, "isolcpus=3"),
-        "setup-device.sh must add `isolcpus=3` to the kernel cmdline so core 3 is reserved for the \
-         realtime capture/emit path — the live fleet cmdline carries exactly isolcpus=3 (#289). \
-         (ONLY isolcpus — nohz_full/rcu_nocbs stay deferred to #303.)"
-    );
+    const FLAGS: [&str; 4] = [
+        "isolcpus=3",
+        "nohz_full=3",
+        "rcu_nocbs=3",
+        "irqaffinity=0-2",
+    ];
+    for flag in FLAGS {
+        assert!(
+            on_noncomment_line(&body, flag),
+            "setup-device.sh must add `{flag}` to the kernel cmdline to quiet the isolated \
+             realtime capture/emit core (#289/#303)"
+        );
+    }
     let cmds: Vec<&str> = body
         .lines()
         .map(str::trim_start)
         .filter(|t| !t.starts_with('#'))
         .collect();
-    let isolcpus_idx = cmds
-        .iter()
-        .position(|t| t.contains("isolcpus=3"))
-        .expect("isolcpus=3 present on a command line");
     let grub_idx = cmds
         .iter()
         .position(|t| t.contains("update-grub"))
         .expect("update-grub present");
-    assert!(
-        isolcpus_idx < grub_idx,
-        "the isolcpus=3 GRUB_CMDLINE_LINUX edit must run BEFORE update-grub, or the regenerated \
-         grub.cfg won't carry the flag (#289)"
-    );
+    for flag in FLAGS {
+        let flag_idx = cmds
+            .iter()
+            .position(|t| t.contains(flag))
+            .unwrap_or_else(|| panic!("{flag} present on a command line"));
+        assert!(
+            flag_idx < grub_idx,
+            "the `{flag}` GRUB_CMDLINE_LINUX edit must run BEFORE update-grub, or the regenerated \
+             grub.cfg won't carry the flag (#289/#303)"
+        );
+    }
 }
 
 /// 4. curl must be ENSURED before its first use. STEP 3 downloads the binary and STEP 17 downloads
