@@ -1510,8 +1510,9 @@ fn setup_imag_does_not_add_nice_to_obs_launchers_483() {
 
 /// #483/#522: the Desktop icon (double-click launch) must stay UNPINNED (`Exec=obs`, no
 /// taskset) — only the boot-time openbox autostart script is pinned to the P-core block. #522
-/// removed the old `.config/autostart/obs.desktop` GNOME entry entirely (openbox never read it —
-/// dead code); this test now also guards against that dead path silently returning.
+/// removed the old `.config/autostart/obs.desktop` GNOME entry entirely; #526 additionally has
+/// setup-imag.sh `rm -f` any leftover of it (systemd --user double-launches OBS from it). So this
+/// test forbids WRITING that dead XDG entry — removing a leftover with `rm -f` is allowed.
 #[test]
 fn setup_imag_leaves_desktop_icon_unpinned_483() {
     let body = read(SETUP);
@@ -1527,10 +1528,10 @@ fn setup_imag_leaves_desktop_icon_unpinned_483() {
          taskset pin now lives in the openbox autostart script body, not a patched .desktop entry"
     );
     assert!(
-        !body.contains(r#"$USER_HOME/.config/autostart/obs.desktop"#),
-        "{SETUP}: must no longer write .config/autostart/obs.desktop — openbox (lightdm) never \
-         reads XDG autostart; .config/openbox/autostart is now the SOLE boot-durable authority \
-         (#522)"
+        !body.contains(r#"cp -f "$APP_DESKTOP" "$USER_HOME/.config/autostart/obs.desktop""#),
+        "{SETUP}: must no longer WRITE .config/autostart/obs.desktop — modern Ubuntu's systemd \
+         --user launches it as a second OBS; .config/openbox/autostart is the SOLE boot-durable \
+         authority (#522). (Removing a leftover of it with `rm -f` IS allowed — #526.)"
     );
 }
 
