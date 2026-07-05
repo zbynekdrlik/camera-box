@@ -1553,7 +1553,7 @@ fn setup_imag_leaves_desktop_icon_unpinned_483() {
 /// TOTAL_STEPS must match the actual number of `step()` calls in the script — a drift here means
 /// either a step was added without bumping the counter (progress display under-counts) or the
 /// counter was bumped without adding a step (display over-counts). This is a general invariant,
-/// re-verified here because #500 added a new NVIDIA driver step (16 -> 17).
+/// re-verified here because #541 added the dev1 drift-guard SSH-key step (18 -> 19).
 #[test]
 fn setup_imag_total_steps_matches_actual_step_calls() {
     let body = read(SETUP);
@@ -1574,9 +1574,8 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 18,
-        "TOTAL_STEPS must be 18 after #504 added the kiosk-environment step (openbox+lightdm+GNOME \
-         purge) to the prior 17"
+        declared, 19,
+        "TOTAL_STEPS must be 19 after #541 added the dev1 drift-guard SSH-key step to the prior 18"
     );
     assert_eq!(
         actual, declared,
@@ -2428,5 +2427,87 @@ fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
         iso_idx < rtprio_idx,
         "{SETUP}: the #484 rtprio grant must be written alongside/after the #483 CPU-isolation \
          reservation (the reserved cores + the rtprio grant are one appliance-hardening concern)"
+    );
+}
+
+// ============================================================================================
+// #541 -- the #531 drift-guard (`scripts/drift-guard.sh --check-imag`) SSHes from dev1 to imag-nb
+// with `-o BatchMode=yes` (never prompts for a password), which requires dev1's public key to
+// already be in imag-nb's `~/.ssh/authorized_keys`. Before #541 that key was never installed, so
+// the guard always reported UNKNOWN when run from dev1. The provisioner must install it so a
+// FRESH box (or a re-provisioned one) is headless-SSH-ready without a manual follow-up step.
+// ============================================================================================
+
+/// The provisioner must WRITE dev1's control-node public key into the desktop user's
+/// authorized_keys — idempotently (append-only-if-missing, never duplicate on re-run) — and must
+/// NEVER contain private key material.
+#[test]
+fn setup_imag_installs_dev1_driftguard_pubkey_541() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("DEV1_DRIFTGUARD_PUBKEY="),
+        "{SETUP} must declare the dev1 drift-guard control-node public key (#541) — without it \
+         `scripts/drift-guard.sh --check-imag` can never authenticate non-interactively from dev1"
+    );
+    assert!(
+        body.contains("ssh-ed25519 "),
+        "{SETUP}: the #541 key must be a real ssh-ed25519 PUBLIC key line"
+    );
+    assert!(
+        body.contains(r#"${USER_HOME}/.ssh"#) || body.contains("SSH_DIR="),
+        "{SETUP} must target the desktop user's ~/.ssh directory for the #541 key install"
+    );
+    assert!(
+        body.contains("authorized_keys"),
+        "{SETUP} must write into authorized_keys (#541)"
+    );
+    // Idempotent — must check for the key's presence before appending, never blind-append every run.
+    assert!(
+        body.contains("grep -qF \"$DEV1_DRIFTGUARD_PUBKEY\"")
+            || body.contains("grep -qF \"$DEV1_DRIFTGUARD_PUBKEY\" \"$AUTH_KEYS\""),
+        "{SETUP}: the #541 key install must be idempotent — grep for the key's presence before \
+         appending, so re-running the provisioner never duplicates the authorized_keys line"
+    );
+    // Correct perms: ~/.ssh must be 700, authorized_keys must be 600 — sshd refuses to honor
+    // group/world-writable authorized_keys or .ssh directories.
+    assert!(
+        body.contains("chmod 700 \"$SSH_DIR\""),
+        "{SETUP}: the #541 .ssh directory must be chmod 700 (sshd StrictModes refuses looser perms)"
+    );
+    assert!(
+        body.contains("chmod 600 \"$AUTH_KEYS\""),
+        "{SETUP}: the #541 authorized_keys file must be chmod 600 (sshd StrictModes refuses looser \
+         perms)"
+    );
+    // NEVER a private key. A committed private key is a full credential leak (#541's own scope
+    // note demands only the PUBLIC half ever appears in this repo).
+    assert!(
+        !body.contains("PRIVATE KEY"),
+        "{SETUP}: MUST NEVER contain private key material — only the public key line is safe to \
+         commit (#541)"
+    );
+}
+
+/// The #541 key install step must run as the desktop user (not leave root-owned files under the
+/// user's home) — mirrors the existing `sudo -u "$DESKTOP_USER"` convention used everywhere else
+/// in this script that writes under `$USER_HOME`.
+#[test]
+fn setup_imag_driftguard_pubkey_step_owned_by_desktop_user_541() {
+    let body = read(SETUP);
+    let step_idx = body
+        .find("dev1 drift-guard SSH access (#541)")
+        .expect("{SETUP} must have a #541 step");
+    let tail = &body[step_idx..];
+    // Only look within this step's block (up to the next `step ` invocation or EOF).
+    let end = tail[1..]
+        .find("\nstep ")
+        .map(|i| i + 1)
+        .unwrap_or(tail.len());
+    let block = &tail[..end];
+    assert!(
+        block.contains(r#"sudo -u "$DESKTOP_USER""#),
+        "{SETUP}: the #541 authorized_keys write must run as `sudo -u \"$DESKTOP_USER\"` — writing \
+         as root under $USER_HOME would leave root-owned files the desktop user's sshd session \
+         cannot trust (StrictModes)"
     );
 }
