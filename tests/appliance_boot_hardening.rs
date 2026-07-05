@@ -953,3 +953,53 @@ fn create_usb_arg_parsing_contract() {
         "an unknown flag must abort arg parsing before anything else runs (#448)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #449 — deprecate the dead image builders: `scripts/create-ubuntu-vm.sh` (old QEMU-manual
+// install-to-image flow), `scripts/write-image.sh` (dd a pre-built master image to a USB), and
+// `scripts/create-image.sh` (clone a running device's disk into an image) all pre-date the #448
+// one-shot `create-usb-linux.sh` installer and are unreachable dead code: none is sourced by any
+// other script or by `scripts/lib/*`, and no other script is their sole consumer. Five overlapping
+// builders with no single followed path was the root of the per-box provisioning drift the user
+// called out — this pins the single-canonical-live-installer state so a future revert (or a stray
+// re-add) is caught immediately.
+//
+// `scripts/build-image.sh` (the ro-root+overlay builder) is DELIBERATELY left alone here — it is
+// live, tested (`RO_IMAGE_BUILDER` / `IMAGE_BUILDERS` above), and its fate is a separate queued
+// user decision on #449 (fold into create-usb-linux.sh vs. keep as a sanctioned second builder).
+
+/// The three genuinely-dead builders removed by #449. None may exist in `scripts/` going forward.
+const REMOVED_DEAD_BUILDERS: [&str; 3] = [
+    "scripts/create-ubuntu-vm.sh",
+    "scripts/write-image.sh",
+    "scripts/create-image.sh",
+];
+
+#[test]
+fn dead_image_builders_are_removed() {
+    for rel in REMOVED_DEAD_BUILDERS {
+        let p = manifest_dir().join(rel);
+        assert!(
+            !p.exists(),
+            "{rel} must be removed — it is a dead pre-#448 image-flow script superseded by \
+             create-usb-linux.sh (#449)"
+        );
+    }
+}
+
+#[test]
+fn create_usb_linux_is_the_sole_live_install_builder() {
+    // The canonical one-shot USB/live-install builder must still exist...
+    let p = manifest_dir().join(BASE_IMAGE_BUILDER);
+    assert!(
+        p.exists(),
+        "{BASE_IMAGE_BUILDER} must exist — it is the sole canonical live-install builder (#448/#449)"
+    );
+    // ...and none of the dead builders it superseded may have crept back in.
+    for rel in REMOVED_DEAD_BUILDERS {
+        assert!(
+            !manifest_dir().join(rel).exists(),
+            "{rel} must stay removed — {BASE_IMAGE_BUILDER} is the sole live-install builder (#449)"
+        );
+    }
+}

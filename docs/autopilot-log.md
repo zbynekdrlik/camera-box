@@ -1794,3 +1794,36 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
     `cargo clippy --all-targets -- -D warnings` / `cargo test --no-run` all green (default
     features only). Script never run against real cameras (it swaps a live NDI runtime under a
     running service) — pure sourced-script unit tests only, per the existing #132/#445 pattern.
+
+## 2026-07-05 — #449 deprecate the dead image builders — mechanical part only (PR TBD, v1.7.0-dev.243)
+
+- **Scope split (issue comment #4884583068):** #449's own text flagged `scripts/build-image.sh`
+  as maybe-dead too, but it's actually the LIVE, tested ro-root+overlay builder
+  (`tests/appliance_boot_hardening.rs` `RO_IMAGE_BUILDER`/`IMAGE_BUILDERS[]`, `SETUP.md:375`, ops
+  SKILL.md). Its fate (fold into create-usb-linux.sh vs. keep as a sanctioned second builder) is
+  a QUEUED USER DECISION — NOT touched, deleted, or demoted by this worker. `#449` stays OPEN
+  after this PR for that decision; the PR body is `Refs #449`, not `Closes #449`.
+- Deleted the three genuinely-dead builders (confirmed via `git grep` — none sourced by any other
+  script or `scripts/lib/*`, no script is their sole consumer): `scripts/create-ubuntu-vm.sh`
+  (old QEMU-manual install-to-image flow), `scripts/write-image.sh` (dd a pre-built master image
+  to USB), `scripts/create-image.sh` (clone a running device's disk into an image).
+  `git rm`'d individually.
+- Fixed dangling references: `SETUP.md` Step 1 + Quick Reference rewritten from the retired
+  write-image.sh/master-image flow to the canonical `create-usb-linux.sh` one-shot install
+  (positional `/dev/sdX` for a USB stick, `--target-disk` when run from a box's own live-USB,
+  `--yes` for non-interactive); `.github/workflows/release.yml` no longer ships the dead
+  `create-image.sh` in release artifacts (2 lines removed).
+- RED `eedf87670` (new tests `dead_image_builders_are_removed` +
+  `create_usb_linux_is_the_sole_live_install_builder` in `tests/appliance_boot_hardening.rs`
+  fail while the three scripts still exist), GREEN `678057afa` (deletion + doc fixes). Both new
+  tests pin the single-canonical-live-installer state as a drift guard; existing 24 tests in the
+  same file still pass unchanged (`setup_md_documents_the_ro_root_overlay_target` still finds
+  `build-image.sh` referenced in SETUP.md, untouched).
+- `.github/workflows/build-image.yml` (a 5th, inline, script-less image path) is left alone —
+  noted as a follow-up, not retired in this PR (out of the named mechanical scope).
+- Local `cargo fmt --all --check` / `cargo check` / `cargo clippy --all-targets -- -D warnings`
+  (default features) / `cargo test --no-run` all green. Full `appliance_boot_hardening.rs` suite
+  (26 tests) + `version_integrity_gate.rs` (7 tests) run green locally. Autopilot-worker contract:
+  version bump + TDD + implementation + local Tier-0 checks + push only; the supervisor drives
+  CI -> PR -> merge, and will need to reopen the `needs-decision` conversation on #449 for the
+  build-image.sh fate after this PR merges.
