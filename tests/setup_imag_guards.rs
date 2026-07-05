@@ -2380,3 +2380,53 @@ fn setup_imag_504_verify_step_gated_on_obs_launched_this_run() {
          log-verify hard-fails, with the skip message in the else branch"
     );
 }
+
+// ============================================================================================
+// #484 -- the genlock render-tick thread pin (vendor/obs-studio/libobs/obs-video.c) calls
+// sched_setscheduler(SCHED_FIFO) on the ONE timing-critical graphics thread. OBS runs as the
+// unprivileged desktop user, so without an rtprio ulimit grant that syscall fails EPERM and the
+// pin silently degrades to SCHED_OTHER (the pin's warn-and-continue fallback). The provisioner
+// must write the limits.d drop-in that grants it, near the #483 CPU-isolation reservation.
+// ============================================================================================
+
+/// The provisioner must WRITE an idempotent /etc/security/limits.d/ drop-in granting the desktop
+/// user `rtprio`, so OBS's #484 genlock render-tick pin can actually enter SCHED_FIFO.
+#[test]
+fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/security/limits.d/95-imag-genlock-rtprio.conf"),
+        "{SETUP} must WRITE the limits.d drop-in \
+         /etc/security/limits.d/95-imag-genlock-rtprio.conf — without an rtprio ulimit grant, OBS \
+         (running as the unprivileged desktop user) cannot set SCHED_FIFO and the #484 genlock \
+         render-tick pin degrades to SCHED_OTHER"
+    );
+    // The actual grant line must give the desktop user `rtprio` headroom (20 > the ~10 the thread
+    // requests). It is a limits.conf content line (not a shell/file comment), so exclude `#` lines.
+    let has_grant = body.lines().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with('#')
+            && t.contains("rtprio")
+            && t.contains("${DESKTOP_USER}")
+            && t.contains("20")
+    });
+    assert!(
+        has_grant,
+        "{SETUP} the rtprio drop-in must grant `${{DESKTOP_USER}} - rtprio 20` (headroom above the \
+         ~10 the #484 render-tick thread requests) — the ulimit that lets a non-root user request \
+         SCHED_FIFO"
+    );
+    // It must be reserved together with the #483 CPU-isolation those cores exist for: the drop-in
+    // is written after the #483 grub-isolation step (they are one concern — reserve + grant).
+    let iso_idx = body
+        .find("isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11")
+        .expect("the #483 CPU-isolation cmdline must still be present");
+    let rtprio_idx = body
+        .find("/etc/security/limits.d/95-imag-genlock-rtprio.conf")
+        .expect("the #484 rtprio drop-in must be present");
+    assert!(
+        iso_idx < rtprio_idx,
+        "{SETUP}: the #484 rtprio grant must be written alongside/after the #483 CPU-isolation \
+         reservation (the reserved cores + the rtprio grant are one appliance-hardening concern)"
+    );
+}
