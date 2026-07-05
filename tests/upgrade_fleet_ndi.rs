@@ -704,9 +704,7 @@ fn ndi_link_kind_remote_detects_symlink_vs_regular_vs_missing() {
 fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
     let p = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 regular 6.2.1.0");
     assert!(
-        p.contains(
-            "cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.6.2.1.0.bak\""
-        ),
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.6.2.1.0.bak\""),
         "#452: the regular-file layout must back up the active libndi.so.6 to a \
          VERSION-SCOPED .bak file (named after the OLD version) BEFORE overwriting it. Got:\n{p}"
     );
@@ -753,10 +751,7 @@ fn ndi_swap_remote_regular_layout_falls_back_to_fixed_backup_name_when_old_versi
         "#452: omitting old_version must fall back to the fixed backup name, not an \
          empty-suffixed one. Got:\n{p}"
     );
-    assert!(
-        p.contains("OLD_BASE=libndi.so.6.bak"),
-        "Got:\n{p}"
-    );
+    assert!(p.contains("OLD_BASE=libndi.so.6.bak"), "Got:\n{p}");
 }
 
 /// ndi_swap_remote with NO third argument (existing callers/tests) must default to the symlink

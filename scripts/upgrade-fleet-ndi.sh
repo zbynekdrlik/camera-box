@@ -16,12 +16,16 @@
 #     parses cleanly (never installs an unverified/unrecognised blob) — reads it via `strings`,
 #     falling back to `grep -a` when `strings` isn't installed on the box (#445: cam3 has none)
 #   - refuses a downgrade (candidate <= currently-active version) unless --force
-#   - upgrades ONE canary camera first; the rest of the fleet is NEVER touched if the canary fails
+#   - upgrades a CANARY SET first — one representative per distinct NDI-runtime box-class present
+#     in the set (#452: a green canary on a symlink-layout box proves nothing about a
+#     real-file/no-strings box, the #132 history where cam3 needed a manual upgrade) — the rest
+#     of the fleet is NEVER touched if ANY canary fails
 #   - detects the ACTUAL runtime layout before touching anything: most cams have `libndi.so.6`
 #     as a symlink to a versioned `.so` (repoint + backup the target); cam3 (#445) ships
 #     `libndi.so.6`/`libndi.so` as REAL FILES (back up the file itself, then overwrite both names)
 #   - always backs up the previous runtime before swapping, and NEVER deletes the backup — rollback
-#     just re-points the symlinks (symlink layout) or restores the `.bak` copy (real-file layout)
+#     just re-points the symlinks (symlink layout) or restores the `.bak` copy (real-file layout,
+#     version-scoped since #452 so it gets the same multi-generation rollback depth)
 #   - verifies each camera after the swap: camera-box must still emit an NDI-alive signal ("fps
 #     emitted .* fps captured" — the exact genlock-report signal scripts/deploy-fleet.sh uses —
 #     OR the older "Streaming: X.Y fps" shape cam3's build logs, OR "NDI sender ready") with no
@@ -39,7 +43,10 @@
 # Options:
 #   --so-path PATH     the candidate NDI Linux runtime .so to roll out (required)
 #   --set "cam1 ..."    camera set to upgrade (default: cam1 cam2 cam3 cam4 cam5 cam6 cam7)
-#   --canary camN       pin the canary camera (default: the first camera in --set)
+#   --canary "camN ..." pin the canary camera SET (space-separated; default: one representative
+#                       per distinct NDI-runtime box-class present in --set — #452, so a
+#                       real-file/no-strings box like cam3 always gets its own canary proof
+#                       instead of riding on a symlink-layout box's green result)
 #   --force             allow a downgrade (candidate version <= currently-active version)
 #   --dry-run           read + compare versions on every camera, change nothing
 #   --e2e-verify         after a successful swap, also run scripts/loopback-e2e.sh per camera
@@ -50,9 +57,10 @@
 #   GENLOCK_WAIT_TRIES / GENLOCK_WAIT_SECS   post-restart emit-report poll (default: 12 / 5)
 #
 # Exit codes: 0 = every requested camera ended on the candidate version (or was already there)
-#   AND verified; 1 = usage/env error; 2 = unknown argument; 10 = the CANARY failed (rolled back,
-#   the rest of the fleet was NOT touched); 20 = the canary succeeded but at least one other
-#   camera failed (each individually rolled back — see the FLEET NDI UPGRADE INCOMPLETE summary).
+#   AND verified; 1 = usage/env error; 2 = unknown argument; 10 = one or more CANARIES in the
+#   canary set failed (each rolled back individually, the rest of the fleet was NOT touched);
+#   20 = every canary succeeded but at least one other camera failed (each individually rolled
+#   back — see the FLEET NDI UPGRADE INCOMPLETE summary).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,39 +115,85 @@ ndi_version_status() {
   fi
 }
 
-# resolve_canary SET OVERRIDE -> the canary camera name. OVERRIDE (if non-empty) must be a
-# member of SET or this fails loudly (never silently substitutes a different box). Empty
-# OVERRIDE defaults to the first camera in SET.
-resolve_canary() {
-  local set="$1" override="${2:-}" first="" cam
-  for cam in $set; do
-    if [ -z "$first" ]; then
-      first="$cam"
-    fi
-    if [ -n "$override" ] && [ "$cam" = "$override" ]; then
-      echo "$override"
-      return 0
-    fi
-  done
-  if [ -n "$override" ]; then
-    echo "resolve_canary: canary override '$override' is not a member of the set ($set)" >&2
-    return 1
-  fi
-  if [ -z "$first" ]; then
-    echo "resolve_canary: empty camera set" >&2
-    return 1
-  fi
-  echo "$first"
+# ndi_camera_class CAM -> the known NDI-runtime "class" of CAM — the {layout,
+# strings-availability, log-shape} combination #445 discovered varies across the fleet. A green
+# canary swap on one class proves NOTHING about another (#132 history: cam3 needed a manual
+# upgrade after cam1's canary passed) — resolve_canary_set() (below) uses this so the default
+# canary SET always covers every distinct class present before a full-fleet apply (#452).
+#   "cam3class" -> real-file libndi.so.6/libndi.so (not a symlink), no `strings` binary on the
+#     box, older "Streaming: X.Y fps" log shape. Today just cam3 (a user-owned box with an older
+#     manual provisioning history) — add any future box with the same quirks here.
+#   "standard"  -> the symlink layout, `strings` available, and the genlock-report log shape —
+#     every other camera in the fleet today.
+# This is a STATIC, KNOWN fleet fact (never probed live over ssh) so the canary set can be
+# resolved before any network call is made.
+ndi_camera_class() {
+  local cam="$1"
+  case "$cam" in
+    cam3) echo "cam3class" ;;
+    *) echo "standard" ;;
+  esac
 }
 
-# remaining_after_canary SET CANARY -> SET minus CANARY, preserving order.
-remaining_after_canary() {
-  local set="$1" canary="$2" cam out=""
+# resolve_canary_set SET OVERRIDE -> the canary camera SET (space-separated, SET order preserved,
+# printed on one line) to upgrade before the rest of the fleet. OVERRIDE (if non-empty) is a
+# space-separated list of one or more cameras; EVERY member must already be in SET or the whole
+# override is REJECTED (never silently drops/substitutes one). An empty OVERRIDE defaults to ONE
+# representative per DISTINCT ndi_camera_class() present in SET (the first SET member of each
+# newly-seen class) — #452: a green canary on a single symlink-layout box proves nothing about a
+# real-file/no-strings box (cam3-class); the default canary set must cover every class actually
+# present in SET before a full-fleet apply. A single-class SET still defaults to exactly one
+# canary (the first member) — unchanged from the original #132 behavior.
+resolve_canary_set() {
+  local set="$1" override="${2:-}" cam ccam ok class seen=" " out=""
+  if [ -n "$override" ]; then
+    for cam in $override; do
+      ok=0
+      for ccam in $set; do
+        if [ "$cam" = "$ccam" ]; then
+          ok=1
+          break
+        fi
+      done
+      if [ "$ok" -ne 1 ]; then
+        echo "resolve_canary_set: canary override '$cam' is not a member of the set ($set)" >&2
+        return 1
+      fi
+    done
+    printf '%s\n' "$override"
+    return 0
+  fi
+  if [ -z "$set" ]; then
+    echo "resolve_canary_set: empty camera set" >&2
+    return 1
+  fi
   for cam in $set; do
-    if [ "$cam" = "$canary" ]; then
-      continue
-    fi
+    class="$(ndi_camera_class "$cam")"
+    case "$seen" in
+      *" $class "*) continue ;;
+    esac
+    seen="$seen$class "
     out="$out $cam"
+  done
+  printf '%s\n' "${out# }"
+}
+
+# remaining_after_canary SET CANARY_SET -> SET minus every camera in CANARY_SET, preserving SET's
+# order. CANARY_SET may be a single camera (back-compat with the original #132 shape) or the
+# multi-member canary set resolve_canary_set() can now return (#452).
+remaining_after_canary() {
+  local set="$1" canary_set="$2" cam ccam skip out=""
+  for cam in $set; do
+    skip=0
+    for ccam in $canary_set; do
+      if [ "$cam" = "$ccam" ]; then
+        skip=1
+        break
+      fi
+    done
+    if [ "$skip" -eq 0 ]; then
+      out="$out $cam"
+    fi
   done
   printf '%s\n' "${out# }"
 }
@@ -155,30 +209,42 @@ ndi_link_kind_remote() {
   printf '%s\n' "if [ -L \"$dest/libndi.so.6\" ]; then echo symlink; elif [ -f \"$dest/libndi.so.6\" ]; then echo regular; else echo missing; fi"
 }
 
-# ndi_swap_remote DEST_DIR NEW_BASENAME [LINK_KIND] -> the remote bash that installs the new
-# runtime (already scp'd into DEST_DIR by the caller as NEW_BASENAME), ldconfig's, prints
-# "OLD_BASE=<name>" so the caller can roll back, then restarts camera-box to load it.
-# LINK_KIND (from ndi_link_kind_remote; defaults to "symlink" for backward compatibility with
-# the fleet's existing layout) selects HOW:
+# ndi_swap_remote DEST_DIR NEW_BASENAME [LINK_KIND] [OLD_VERSION] -> the remote bash that
+# installs the new runtime (already scp'd into DEST_DIR by the caller as NEW_BASENAME),
+# ldconfig's, prints "OLD_BASE=<name>" so the caller can roll back, then restarts camera-box to
+# load it. LINK_KIND (from ndi_link_kind_remote; defaults to "symlink" for backward compatibility
+# with the fleet's existing layout) selects HOW:
 #   symlink (cam1/cam2/cam4) -> backs up the CURRENTLY ACTIVE runtime (resolved via readlink -f,
 #     so it backs up the real file, not the symlink), then re-points BOTH `libndi.so` and
-#     `libndi.so.6` at NEW_BASENAME.
+#     `libndi.so.6` at NEW_BASENAME. Each backup's basename is the original versioned filename
+#     (e.g. "libndi.so.6.2.1.0.bak"), so every generation gets its own name for free.
 #   regular (#445, cam3)     -> libndi.so.6/libndi.so are real files, not symlinks — backs up
-#     the active libndi.so.6 to a .bak file, then COPIES the new candidate content over both
-#     names (a symlink repoint would not apply).
+#     the active libndi.so.6 to a VERSION-SCOPED .bak file ("libndi.so.6.<OLD_VERSION>.bak",
+#     #452 — was a single fixed "libndi.so.6.bak" name that every upgrade overwrote, giving this
+#     layout only ONE generation of rollback depth vs. the symlink layout's unlimited depth), then
+#     COPIES the new candidate content over both names (a symlink repoint would not apply).
+#     OLD_VERSION is the CURRENTLY active version the caller already read (before this swap runs)
+#     via ndi_active_version_remote + ndi_version_from_strings_output — passing it in avoids
+#     re-deriving it inside the remote heredoc. An empty/omitted OLD_VERSION (no real call site
+#     hits this — upgrade_one_camera always has a non-empty cur_ver by the time it swaps) falls
+#     back to the original fixed name rather than producing an ambiguous/empty-suffixed one.
 # NEW_BASENAME is never inlined into a remote string that could be re-interpreted — it flows in
 # as a literal argument to this pure builder.
 ndi_swap_remote() {
-  local dest="$1" new_base="$2" kind="${3:-symlink}"
+  local dest="$1" new_base="$2" kind="${3:-symlink}" old_version="${4:-}" bak_base
   if [ "$kind" = "regular" ]; then
+    bak_base="libndi.so.6.bak"
+    if [ -n "$old_version" ]; then
+      bak_base="libndi.so.6.${old_version}.bak"
+    fi
     cat <<EOF
 set -e
-cp -a "$dest/libndi.so.6" "$dest/libndi.so.6.bak"
+cp -a "$dest/libndi.so.6" "$dest/$bak_base"
 chmod +x "$dest/$new_base"
 cp -a "$dest/$new_base" "$dest/libndi.so.6"
 cp -a "$dest/$new_base" "$dest/libndi.so"
 ldconfig
-echo "OLD_BASE=libndi.so.6.bak"
+echo "OLD_BASE=$bak_base"
 systemctl restart camera-box
 EOF
   else
@@ -203,8 +269,11 @@ EOF
 #   symlink -> re-points both symlinks back at OLD_BASENAME (the pre-swap runtime —
 #     ndi_swap_remote never deletes it).
 #   regular (#445, cam3) -> restores libndi.so.6 and libndi.so from the .bak file
-#     ndi_swap_remote created (OLD_BASENAME is "libndi.so.6.bak" in this case — there is no
-#     symlink to repoint).
+#     ndi_swap_remote created. Since #452, OLD_BASENAME here is the VERSION-SCOPED
+#     "libndi.so.6.<old_version>.bak" ndi_swap_remote now prints (falling back to the original
+#     fixed "libndi.so.6.bak" only if no old_version was available) — this function needs no
+#     logic change for that: it already restores from whatever OLD_BASENAME string the caller
+#     passes, so a version-scoped name round-trips cleanly.
 # Either way, restarts camera-box and never touches/deletes the backup.
 ndi_rollback_remote() {
   local dest="$1" old_base="$2" kind="${3:-symlink}"
@@ -314,9 +383,9 @@ deploy an unverified/unrecognised blob"
 fi
 log "Candidate NDI runtime: $NEW_BASE ($NEW_VER)"
 
-CANARY="$(resolve_canary "$SET" "$CANARY_OVERRIDE")" || exit 1
-REST="$(remaining_after_canary "$SET" "$CANARY")"
-log "Canary: $CANARY   Remaining after canary: ${REST:-<none>}"
+CANARY_SET="$(resolve_canary_set "$SET" "$CANARY_OVERRIDE")" || exit 1
+REST="$(remaining_after_canary "$SET" "$CANARY_SET")"
+log "Canary set: $CANARY_SET   Remaining after canary: ${REST:-<none>}"
 echo ""
 
 declare -a FAILED=()
@@ -427,7 +496,7 @@ upgrade_one_camera() {
 
   info "[$cam] swapping runtime + restarting camera-box..."
   local swap_out old_base
-  if ! swap_out="$(ssh_box "$ip" "$(ndi_swap_remote "$NDI_DEST_DIR" "$NEW_BASE" "$link_kind")")"; then
+  if ! swap_out="$(ssh_box "$ip" "$(ndi_swap_remote "$NDI_DEST_DIR" "$NEW_BASE" "$link_kind" "$cur_ver")")"; then
     err "[$cam] swap command failed — the previous runtime is never deleted, so the active \
 symlink/file should still be intact"
     FAILED+=("$cam(swap-failed)")
@@ -470,9 +539,18 @@ attention immediately"
   return 0
 }
 
-# --- canary first: never touch the rest of the fleet on a canary failure -------------------
-if ! upgrade_one_camera "$CANARY"; then
-  err "CANARY $CANARY FAILED — the rest of the fleet (${REST:-<none>}) was NOT touched"
+# --- canary SET first: never touch the rest of the fleet on ANY canary failure -------------
+# #452: the canary is now a SET (one representative per distinct box-class present in $SET), not
+# a single camera — every member is tried (so a run surfaces ALL class failures at once, not just
+# the first) before deciding pass/fail; the rest of the fleet is untouched if ANY canary failed.
+CANARY_HAD_FAILURE=0
+for cam in $CANARY_SET; do
+  if ! upgrade_one_camera "$cam"; then
+    err "CANARY $cam FAILED — the rest of the fleet (${REST:-<none>}) was NOT touched"
+    CANARY_HAD_FAILURE=1
+  fi
+done
+if [ "$CANARY_HAD_FAILURE" -eq 1 ]; then
   echo "================================================================"
   exit 10
 fi
