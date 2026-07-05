@@ -787,15 +787,6 @@ EOF
         # state on top of the boot hook re-opening them fresh).
         printf '\n[BasicWindow]\nSaveProjectors=false\n' >> "$f"
     fi
-    # #525: force OBS docks UNLOCKED. OBS stores "Lock UI" in user.ini's [BasicWindow] DocksLocked;
-    # when true the operator CANNOT drag/rearrange/re-dock ANY dock at all (the #525 symptom — it
-    # has nothing to do with the WM or a compositor). Force false (replace-or-append) so a
-    # provisioned box never comes up locked, self-healing even a box that got locked.
-    if grep -q '^DocksLocked=' "$f"; then
-        sed -i 's/^DocksLocked=.*/DocksLocked=false/' "$f"
-    else
-        printf '\n[BasicWindow]\nDocksLocked=false\n' >> "$f"
-    fi
     if ! grep -q '^LastVersion=' "$f"; then
         printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
     fi
@@ -950,10 +941,6 @@ rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
   [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
 done
-# #525: force OBS docks UNLOCKED before launch. A locked UI (user.ini [BasicWindow]
-# DocksLocked=true) blocks the operator from dragging/rearranging/re-docking ANY dock at all --
-# nothing to do with the WM. Zero it every boot so the box never comes up with docks locked.
-U="$HOME/.config/obs-studio/user.ini"; [ -f "$U" ] && grep -q "^DocksLocked=" "$U" && sed -i "s/^DocksLocked=.*/DocksLocked=false/" "$U" || true
 taskset -c 2-11 obs &
 # wait for OBS WebSocket :4455, then seed scenes/#507 membership + open both projectors (self-heal every boot)
 for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null && { exec 3>&-; break; }; sleep 1; done
