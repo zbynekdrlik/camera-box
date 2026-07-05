@@ -697,3 +697,41 @@ actual `tests/burn_payload_parity.rs` harness that also exercises this header re
 `--features probe` (CI-only, banned locally per this repo's Tier-0 policy). Do this for ANY
 freestanding vendored header (`burn-geom.hpp`, `burn-payload.hpp`, `burn-clock.hpp`, `burn-qr.hpp`
 all qualify — none pull OBS SDK headers) before trusting a C++ logic change to CI alone.
+
+## #467 — extending the ALL-CAMBOX `--switch-schedule` sweep to a SECOND own-recording node
+
+The #312 sweep (`segment_frames_from_recording` + `segment_continuity`, both generic — they
+operate on any `Vec<SegmentFrame>` and any schedule, not stream-specific) was originally wired
+for the stream recording only. #467 added imag's OWN recording as a SECOND independent input to
+the SAME schedule/functions — imag never gets scene-switched by the harness (fixed on CAM1,
+#462), so this proves imag's OWN delivery stayed continuous across the WHOLE sweep, segmented at
+the SAME ~30s granularity, NOT "did imag show cambox X". The pattern for adding a THIRD such node
+later:
+
+1. **No new algorithm needed** — `segment_frames_from_recording`/`segment_continuity` are already
+   generic. Call them again with the new node's OWN frames + its OWN anchor burn run_id (falling
+   back to the cam2-optical anchor exactly like strih/stream already do) + the SAME schedule.
+2. **The by-design decimation step is rate-derived per node**, never assumed. Extracted into
+   `src/recording_span_gate.rs::painted_tick_step(refresh_hz, capture_fps)` — a Tier-0 pure
+   function (was previously computed INLINE in the probe-gated binary and thus untestable). Reuse
+   it for every new node at ITS OWN native capture rate (imag: 60Hz/60fps = step 1; stream:
+   60Hz/30fps = step 2).
+3. **Report under a NEW key inside `all_cambox_continuity`** (e.g. `all_cambox_continuity.imag`),
+   not folded into the existing `segments` array — that array's `cambox` field is the SCHEDULE's
+   per-window label (which cambox was live on strih), not the new node's identity; conflating them
+   would misattribute. Fold the new node's `overall_pass` into the run's `all_pass` — but ONLY when
+   that node's frames were actually supplied (optional signal: absent never fails the sweep,
+   present must pass — mirrors `imag_tick_gate::optional_signal_ok`'s "absent is fine, present
+   broken fails" rule elsewhere in this same imag machinery).
+4. **Ownership gotcha:** the node's `Option<DecodedRec>` parameter into `build_and_print_verdict`
+   is normally CONSUMED once by the existing top-level per-node check (`if let Some(d) = imag {
+   let imag_frames = d.frames; ... }`). To reuse the same frames later inside the sweep block,
+   capture into a local `Option<Vec<RecordingFrame>>` ONCE up front and borrow it (`&imag_frames_opt`)
+   at BOTH call sites instead of moving it — `if let Some(x) = &opt` twice, never `if let Some(x) = param`.
+5. **Testing:** the wiring itself only compiles under `--features probe` (recording-verdict.rs is
+   `required-features=["probe"]`), so its RED→GREEN can't be observed locally — write the
+   integration test (mirroring `merge_path_computes_all_cambox_continuity_like_the_fused_path`'s
+   shape: synthetic schedule + synthetic stream frames + synthetic new-node frames, asserting on
+   `v["all_cambox_continuity"]["<node>"]["overall_pass"]`) and trust CI to compile+run it. Pull the
+   genuinely NEW, rate-derived arithmetic (the step formula) out to a crate-root Tier-0 module
+   (mirrors `imag_tick_gate.rs`) so AT LEAST that piece is locally RED→GREEN-observable.
