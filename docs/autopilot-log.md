@@ -1827,3 +1827,48 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   version bump + TDD + implementation + local Tier-0 checks + push only; the supervisor drives
   CI -> PR -> merge, and will need to reopen the `needs-decision` conversation on #449 for the
   build-image.sh fate after this PR merges.
+
+## 2026-07-05 — #454 provision runbook skill + verify-device.sh acceptance gate (PR TBD, v1.7.0-dev.244)
+
+- Documents the now-stable provisioning method (create-usb-linux.sh #448, setup-device.sh
+  name-resolved #450, camera-set.sh cam1-7 #451, CI-artifact binary + NDI fetch #457, dead
+  builders removed #449) as ONE canonical runbook: `.claude/skills/provision/SKILL.md` (4 phases —
+  build USB → boot+reach → `setup-device.sh NAME` → `verify-device.sh NAME`), condensing the
+  cam5/cam6/cam7 bring-up gotchas from the `unified-cambox-provisioning` memory. CLAUDE.md
+  playbook router gained the `.claude/skills/provision` line.
+- New `scripts/verify-device.sh NAME` — a POST-REBOOT runtime acceptance gate, distinct from
+  `setup-device.sh` STEP 19's install-time (pre-reboot) file-presence check. Resolves NAME → IP
+  via `camera-set.sh`, SSHes into the box, and asserts (a) `camera-box --version` well-formed,
+  (b) `camera-box.service` active, (c) NDI emit alive + no FATAL (reuses
+  `scripts/lib/ndi-alive.sh`'s `emit_ok_grep_pattern()`/`fatal_grep_pattern()`), (d) dantesync PTP
+  LOCKED + clock offset within bound (reuses `scripts/clock-offset-guard.sh`'s
+  `ptp_locked_from_journal()`/`offset_us_from_journal()`/`offset_check()`), (e) `genlock.conf`
+  `CAMERA_BOX_GENLOCK_FPS` matches `camera-set.sh`'s per-cam table, (f) `cpu-affinity.conf`
+  present, (g) `/usr/lib/ndi/libndi.so.6` is a root-owned symlink chain to a root-owned regular
+  file (the #445 cam3-outlier real-file/user-owned layout FAILS this by design — the gate
+  certifies the canonical build, not a hand-patched outlier), (h) avahi mDNS sees the box's NDI
+  source, (i) the #299 capture-chroma metric reports "colour" not "grayscale". Exit non-zero on
+  any FAIL/UNREADABLE check (test-strictness — no silent pass).
+- Found + fixed two more `#458`-class `set -euo pipefail` footguns while implementing:
+  `genlock_dropin_fps()` / `cpu_affinity_dropin_value()` are called via a bare
+  `X="$(func ...)"` assignment in the live flow; without a trailing `|| true` inside each
+  function's own `grep | tail | cut` pipeline, a merely-missing drop-in value (grep no-match)
+  aborts the WHOLE script under pipefail instead of just yielding an empty string for the
+  caller's own `[ -z "$X" ]` FAIL branch to catch. Documented in `.claude/skills/ops` SKILL.md's
+  existing #458 gotcha list (same class as its point 1).
+- RED `218b69ea2` (`tests/verify_device_pure_functions.rs` — 22 tests, sources the not-yet-existing
+  script — and `tests/verify_device_provisioning_runbook.rs` — 10 content-assertion tests — all 32
+  fail: script + skill file don't exist), GREEN `422ff09e0` (implementation; all 32 new tests pass,
+  plus the 5+12+19+26 pre-existing tests in `setup_device_pure_functions.rs` /
+  `setup_device_provisioner_hardening.rs` / `clock_offset_guard.rs` / `appliance_boot_hardening.rs`
+  re-verified green, no regressions from the shared script sourcing).
+- Local `cargo fmt --all --check` / `cargo check` / `cargo clippy --all-targets -- -D warnings`
+  (default features) / `cargo test --no-run` (full workspace, all targets compile) all green.
+  Secret-scrubbed both new files before commit: the only `newlevel` literal is the established
+  `${CAM_PW:-newlevel}` fallback pattern already used by `deploy-fleet.sh` / `setup-device.sh` /
+  `clock-offset-guard.sh` — no committed credential.
+- **Not verified by this worker (no rig credential):** the live SSH flow in `verify-device.sh`
+  itself — only its pure decision functions are unit-tested offline. Autopilot-worker contract:
+  version bump + TDD + implementation + local Tier-0 checks + push only; the supervisor drives
+  CI → PR "Closes #454" → merge, then runs `verify-device.sh` against a live box (cam3) as the
+  #454 acceptance proof.
