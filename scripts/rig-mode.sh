@@ -415,6 +415,40 @@ stop_stray_recordings() {
   return $rc
 }
 
+# warn_imag_genlock_stale -> #531 pre-event NON-BLOCKING alert: is imag-nb's DEPLOYED genlock build
+# BEHIND origin/main? The #530 disaster was imag-nb running a STALE genlock build at a live event
+# (-> 45fps) because a merged genlock change had never been deployed there and NOTHING alerted. This
+# runs `scripts/drift-guard.sh --check-imag` (#531 made it a DYNAMIC box-vs-origin/main compare) and,
+# if it reports the box STALE, prints a LOUD warning banner so the operator sees it BEFORE going live.
+# ADVISORY ONLY — it NEVER hard-blocks the switch (blocking a live event on a drift check would be far
+# worse than the drift; the operator deploys the current build via setup-imag.sh step-12 at a safe
+# off-event moment). Same advisory shape as the #440 painter-freshness WARN. drift-guard is run as a
+# SUBPROCESS from the repo root (so its own set -e / exit never affect rig-mode, and its CWD-relative
+# vendor/README.md resolves); `|| rc=$?` is belt-and-suspenders. The STALE match is a plain bash glob
+# (no pipe -> no grep|head SIGPIPE hazard under rig-mode's set -euo pipefail).
+warn_imag_genlock_stale() {
+  local here out rc=0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  echo "[#531] pre-event drift check: is imag-nb's DEPLOYED genlock build current with origin/main?"
+  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag 2>&1 )" || rc=$?
+  printf '%s\n' "$out" | sed 's/^/    [imag drift] /'
+  case "$out" in
+    *"genlock STALE"*)
+      cat >&2 <<'BANNER'
+
+################################################################################
+## WARNING [#531]: imag-nb is running a STALE genlock build (BEHIND origin/main).
+## The last event ran at 45fps because of EXACTLY this. Deploy the current build
+## to imag-nb via `scripts/setup-imag.sh` step-12 at a safe off-event moment
+## BEFORE going live. (Advisory — NOT blocking; see the [imag drift] detail above.)
+################################################################################
+
+BANNER
+      ;;
+  esac
+  return 0   # advisory: a drift check must NEVER fail rig-mode / block a live event
+}
+
 # burn_action_for_mode MODE -> the obs_burn_filter.py action (test=add/on, event=remove/off).
 burn_action_for_mode() {
   case "${1:-}" in
@@ -534,6 +568,9 @@ do_test() {
     && echo "[#281] rig-active heartbeat SET ($(rig_heartbeat_path))" \
     || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
+  echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks the switch):"
+  warn_imag_genlock_stale
+  echo
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
   cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$CAMERA_BOX_BIN" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
   echo
@@ -567,6 +604,9 @@ do_event() {
     && echo "[#281] rig-active heartbeat CLEARED" \
     || true
   echo "===== rig-mode EVENT (#247/#257/#291) — stop QR, restore clean broadcast, genlock_burn OFF ====="
+  echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks going live):"
+  warn_imag_genlock_stale
+  echo
   echo "[obs] #524 pre-event guard: stop any stray recording left running on strih/stream (frees disk before going live):"
   stop_stray_recordings
   echo

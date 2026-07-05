@@ -244,6 +244,18 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
 
 ## Notes
 
+- **imag-nb (`10.77.9.182`, Linux) — `scripts/drift-guard.sh --check-imag`** (no win-* MCP needed;
+  drift-guard SSHes there itself from dev1). This is the MANUAL imag drift check. **#531: the genlock
+  BUILD-STALENESS check is now DYNAMIC** — `--check-imag` compares the box's deployed
+  `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` against **origin/main's vendored-genlock HEAD**
+  (`git fetch` + `git log <box>..origin/main -- vendor/obs-studio vendor/distroav`): a non-empty range
+  = the box is BEHIND merged genlock commits = **STALE = DRIFT (exit 20)**, the #530 recurrence guard
+  (imag-nb ran a stale genlock build at a live event -> 45fps). This replaced the pre-#531 inert
+  empty-static-pin compare (always UNKNOWN, could never FAIL). It is ALSO wired as a **pre-event LOUD
+  WARNING** in `scripts/rig-mode.sh` (both `test` and `event` paths, advisory — never blocks going
+  live). On a STALE report, the operator deploys the current build to imag-nb via
+  `scripts/setup-imag.sh` step-12 at a safe off-event moment (NEVER an auto-redeploy — genlock
+  deploys are user-timed). Run it read-only any time: `./scripts/drift-guard.sh --check-imag`.
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a
   running box, so it is guarded against the vendored source by `tests/obs_updater_disabled.rs`, not
   here. A box running stock OBS 32.1.2 instead of our genlock build USED to be indistinguishable by

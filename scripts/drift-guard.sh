@@ -399,10 +399,64 @@ dantesync_locked_from_log() {
   fi
 }
 
-# check_imag_report EXP_BUILD_SHA OBS_BUILD_SHA EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
+# imag_build_drift_report BOX_SHA GIT_RC RANGE_LOG -> the #531 DYNAMIC genlock-build staleness check
+# for imag-nb: is the box's DEPLOYED genlock build BEHIND origin/main's vendored-genlock HEAD? This
+# REPLACES the pre-#531 static empty-pin compare (the box GENLOCK_BUILD_SHA.txt vs an empty
+# genlock_build_sha_imag README pin), which was inert — always UNKNOWN, could never FAIL, so it never
+# caught the exact failure it should: a genlock change merged to main that NOBODY deployed to imag.
+# The #530 disaster: imag-nb ran a STALE genlock build at a live event -> 45fps. The authoritative
+# "what SHOULD be deployed" is origin/main's vendored-genlock HEAD, so the impure caller
+# ([`gather_and_check_imag`]) runs `git log <BOX_SHA>..origin/main -- vendor/obs-studio
+# vendor/distroav` and passes its output (RANGE_LOG) + exit status (GIT_RC) here; THIS pure function
+# decides. NO I/O — directly unit-testable (tests/drift_guard.rs) by mocking BOX_SHA / GIT_RC /
+# RANGE_LOG, no live box or real git repo needed.
+#
+#   BOX_SHA    the commit SHA read from /opt/obs-genlock/GENLOCK_BUILD_SHA.txt on imag-nb ("" = unread)
+#   GIT_RC     the `git log` range command's exit status ("0" = ran OK; non-zero = git failed, e.g.
+#              BOX_SHA is not a commit in this checkout, or a shallow clone / unreachable fetch)
+#   RANGE_LOG  the `git log --oneline BOX_SHA..origin/main -- vendor/obs-studio vendor/distroav`
+#              output — one `<short-sha> <subject>` line per genlock-touching commit the box is
+#              BEHIND ("" = none = the box is at/after origin/main's genlock HEAD = current)
+#
+# Two-tier, mirroring the rest of the engine (never a silent clean): BOX_SHA empty -> UNKNOWN (we
+# never read the box), GIT_RC != 0 -> UNKNOWN (we could not COMPUTE the drift — never a false OK for
+# a git error), RANGE_LOG empty -> OK (current), RANGE_LOG non-empty -> DRIFT (box is behind — FAIL
+# LOUD with the count + the stale-commit SHAs + the exact operator action). Returns 0 OK / 20 DRIFT /
+# 11 UNKNOWN (the engine's exit-code contract).
+imag_build_drift_report() {
+  local box_sha="$1" git_rc="$2" range_log="$3"
+  if [ -z "$box_sha" ]; then
+    printf '  %-22s UNKNOWN  (GENLOCK_BUILD_SHA.txt not read on imag-nb)\n' "genlock_build"
+    return 11
+  fi
+  if [ "$git_rc" != "0" ]; then
+    printf '  %-22s UNKNOWN  (could not compare box=%s to origin/main — git log rc=%s; is %s a commit in this checkout, and is the fetch reachable?)\n' \
+      "genlock_build" "$box_sha" "$git_rc" "$box_sha"
+    return 11
+  fi
+  if [ -z "$range_log" ]; then
+    printf '  %-22s OK       (box=%s is current with origin/main vendored-genlock HEAD)\n' \
+      "genlock_build" "$box_sha"
+    return 0
+  fi
+  # Behind: count the genlock-touching commits the box is missing + list their short SHAs. Drain-safe
+  # (grep/awk read the whole here-string, never grep -q; `|| true` keeps a no-match from tripping the
+  # caller's set -e/pipefail — though range_log is non-empty here by construction).
+  local n shas
+  n="$(printf '%s\n' "$range_log" | grep -c . || true)"
+  shas="$(printf '%s\n' "$range_log" | awk 'NF{print $1}' | paste -sd, - || true)"
+  printf '  %-22s DRIFT    (imag-nb genlock STALE: box=%s is %s genlock-commit(s) behind origin/main [%s]; deploy the latest build via setup-imag.sh step-12 at a safe off-event time)\n' \
+    "genlock_build" "$box_sha" "$n" "$shas"
+  return 20
+}
+
+# check_imag_report EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
 #   EXP_LATENCY_MS OBS_LATENCY_MS OBS_LOG_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
 #   EXP_DANTESYNC_LOCKED OBS_DANTESYNC_LOG_TEXT
-#   -> the #463 imag-nb (Topology v2, EPIC #466) host case. PURE — every value is already
+#   -> the #463 imag-nb (Topology v2, EPIC #466) host case. #531: the genlock BUILD-IDENTITY check
+#   (was check #1 here — the inert static empty-pin compare) moved OUT to imag_build_drift_report
+#   above, which [`gather_and_check_imag`] runs ALONGSIDE this report; so this function now covers the
+#   SSH-gathered LIVE-state pins only. PURE — every value is already
 #   gathered (by [`gather_and_check_imag`], which does the actual SSH), so this function has NO
 #   I/O and is directly unit-testable, mirroring `compare_observed`'s pure-report-from-inputs
 #   shape. Prints one report line per check (OK / DRIFT / UNKNOWN, matching the strih/stream
@@ -426,31 +480,20 @@ dantesync_locked_from_log() {
 # box reachable over SSH, so drift-guard can gather its OWN observed values directly instead of
 # depending on an external win-* MCP round-trip.
 check_imag_report() {
-  local exp_build_sha="$1" obs_build_sha="$2" exp_distroav_sha="$3" obs_distroav_sha="$4"
-  local exp_fps="$5" obs_fps="$6" exp_latency="$7" obs_latency="$8"
-  local obs_log_text="$9" exp_plugin_path="${10}" plugin_present="${11}"
-  # #489: optional trailing pair (older call sites pass only 11 args) — default-empty so a
+  # #531: exp_build_sha/obs_build_sha (the old static-pin build check, check #1 here) are GONE — the
+  # genlock build-identity check is now the DYNAMIC imag_build_drift_report, run alongside this by
+  # gather_and_check_imag. This function covers the SSH-gathered live-state pins only.
+  local exp_distroav_sha="$1" obs_distroav_sha="$2"
+  local exp_fps="$3" obs_fps="$4" exp_latency="$5" obs_latency="$6"
+  local obs_log_text="$7" exp_plugin_path="$8" plugin_present="$9"
+  # #489: optional trailing pair (older call sites pass only 9 args) — default-empty so a
   # caller that hasn't been updated yet still gets a graceful UNKNOWN row, never an `unbound
   # variable` crash under this script's `set -u` (mirrors compare_observed's own optional
   # trailing params, e.g. `av_sync_calibrated_ms`).
-  local exp_dantesync_locked="${12:-}" obs_dantesync_log_text="${13:-}"
+  local exp_dantesync_locked="${10:-}" obs_dantesync_log_text="${11:-}"
   local drift=0 unknown=0
 
-  # 1. /opt/obs-genlock/GENLOCK_BUILD_SHA.txt — the deployed genlock build identity.
-  if [ -z "$obs_build_sha" ]; then
-    printf '  %-22s UNKNOWN  (GENLOCK_BUILD_SHA.txt not read on imag-nb)\n' "genlock_build_sha"
-    unknown=$((unknown + 1))
-  elif [ -z "$exp_build_sha" ]; then
-    printf '  %-22s UNKNOWN  (no pinned genlock_build_sha_imag in README)\n' "genlock_build_sha"
-    unknown=$((unknown + 1))
-  elif [ "$obs_build_sha" = "$exp_build_sha" ]; then
-    printf '  %-22s OK       (%s)\n' "genlock_build_sha" "$obs_build_sha"
-  else
-    printf '  %-22s DRIFT    (expected %s, observed %s)\n' "genlock_build_sha" "$exp_build_sha" "$obs_build_sha"
-    drift=$((drift + 1))
-  fi
-
-  # 2. distroav.so hash (the Linux plugin binary itself, not just the marker file).
+  # 1. distroav.so hash (the Linux plugin binary itself, not just the marker file).
   if [ -z "$obs_distroav_sha" ]; then
     printf '  %-22s UNKNOWN  (distroav.so hash not read on imag-nb)\n' "distroav_so_sha256"
     unknown=$((unknown + 1))
@@ -464,7 +507,7 @@ check_imag_report() {
     drift=$((drift + 1))
   fi
 
-  # 3. genlock render-tick capability marker present in the OBS log — the #119 wrong-build guard
+  # 2. genlock render-tick capability marker present in the OBS log — the #119 wrong-build guard
   # (a stock/wrong build emits no `genlock:` line at all, regardless of marketing version).
   # Two-tier check (mirrors drift_check_capability's strih/stream logic): an EMPTY log text
   # (SSH failed to reach imag-nb, or OBS has never been launched there) is UNKNOWN — nothing was
@@ -480,7 +523,7 @@ check_imag_report() {
     drift=$((drift + 1))
   fi
 
-  # 4. fps pin (imag is the 60fps low-latency IMAG role, Topology v2 — a drift DOWN to 30 is drift).
+  # 3. fps pin (imag is the 60fps low-latency IMAG role, Topology v2 — a drift DOWN to 30 is drift).
   if [ -z "$obs_fps" ]; then
     printf '  %-22s UNKNOWN  (fps not read on imag-nb)\n' "output_fps_imag"
     unknown=$((unknown + 1))
@@ -494,7 +537,7 @@ check_imag_report() {
     drift=$((drift + 1))
   fi
 
-  # 5. genlock latency pin (the #235 single-knob ms value).
+  # 4. genlock latency pin (the #235 single-knob ms value).
   if [ -z "$obs_latency" ]; then
     printf '  %-22s UNKNOWN  (latency not read on imag-nb)\n' "genlock_latency_ms_imag"
     unknown=$((unknown + 1))
@@ -508,7 +551,7 @@ check_imag_report() {
     drift=$((drift + 1))
   fi
 
-  # 6. Linux plugin path — the SAME single-canonical-path invariant as `canonical_plugin_path`
+  # 5. Linux plugin path — the SAME single-canonical-path invariant as `canonical_plugin_path`
   # (#124/#125) on strih/stream, applied to imag's Linux plugin directory instead.
   if [ "$plugin_present" = "1" ]; then
     printf '  %-22s OK       (%s)\n' "distroav_so_path" "$exp_plugin_path"
@@ -520,7 +563,7 @@ check_imag_report() {
     drift=$((drift + 1))
   fi
 
-  # 7. dantesync PTP/NTP clock lock (#489, spun out of #479's setup-imag.sh provisioning check) —
+  # 6. dantesync PTP/NTP clock lock (#489, spun out of #479's setup-imag.sh provisioning check) —
   # imag-nb's OWN wall-clock discipline, the basis genlock's `wall-clock-slaved render tick`
   # (genlock_wall_clock above) depends on. Mirrors the SAME journalctl markers setup-imag.sh's
   # own provisioning-time restart check keys on (setup-imag.sh:230). Two-tier check via
@@ -574,8 +617,10 @@ gather_and_check_imag() {
   local plugin_path="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
   local ssh_cmd=(timeout 15 ssh -o ConnectTimeout=10 -o BatchMode=yes -- "$target")
 
-  local exp_build_sha exp_distroav_sha exp_fps exp_latency exp_dantesync_locked
-  exp_build_sha="$(pinned_setting "$readme" genlock_build_sha_imag)"
+  # #531: the genlock build IDENTITY is no longer a static README pin — it is compared DYNAMICALLY
+  # against origin/main's vendored-genlock HEAD below (imag_build_drift_report), so
+  # genlock_build_sha_imag is no longer read here.
+  local exp_distroav_sha exp_fps exp_latency exp_dantesync_locked
   exp_distroav_sha="$(pinned_setting "$readme" distroav_so_sha256_imag)"
   exp_fps="$(pinned_setting "$readme" output_fps_imag)"
   exp_latency="$(pinned_setting "$readme" genlock_latency_ms_imag)"
@@ -584,6 +629,24 @@ gather_and_check_imag() {
   local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present obs_dantesync_log
   obs_build_sha="$("${ssh_cmd[@]}" \
     'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
+  # #531: DYNAMIC genlock-build staleness — compare the box's deployed GENLOCK_BUILD_SHA.txt against
+  # origin/main's vendored-genlock HEAD (the authoritative "what SHOULD be deployed"). `git fetch`
+  # first so origin/main is fresh (best-effort: a fetch failure WARNS but still compares against
+  # whatever origin/main already is — a possibly-slightly-stale compare beats no compare); then
+  # `git log <box>..origin/main -- vendor/obs-studio vendor/distroav` lists the genlock commits the
+  # box is BEHIND. Anchored to the SCRIPT's own repo (`$(dirname BASH_SOURCE)/..`), not CWD, so it
+  # works however the guard is invoked (rig-mode.sh, the /drift-guard command, CI). The `|| git_rc=$?`
+  # OR-list keeps a bad-SHA / unreachable git error from aborting the whole script under set -e (the
+  # same #463 lesson as the ssh capture below) — a git error is reported UNKNOWN, never a false OK.
+  # The pure imag_build_drift_report (run below) turns (obs_build_sha, git_rc, git_range) into the verdict.
+  local repo_root git_range="" git_rc=0
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+  git -C "$repo_root" fetch origin --quiet 2>/dev/null \
+    || echo "WARN: git fetch origin failed — comparing imag build against a possibly-stale origin/main" >&2
+  if [ -n "$obs_build_sha" ]; then
+    git_range="$(git -C "$repo_root" log --oneline "${obs_build_sha}..origin/main" \
+      -- vendor/obs-studio vendor/distroav 2>/dev/null)" || git_rc=$?
+  fi
   # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
   # `test -f` round-trip (one fewer SSH connection), AND distinguish an SSH CONNECTION failure
   # (OpenSSH's own reserved exit code 255, or 124 from the `timeout` wrapper firing) from the
@@ -627,14 +690,24 @@ gather_and_check_imag() {
   obs_dantesync_log="$("${ssh_cmd[@]}" \
     'journalctl -u dantesync --no-pager --since "-10min" -n 100 2>/dev/null' 2>/dev/null || true)"
 
-  echo "== drift-guard --check-imag  host=${host}  (SSH-gathered; FAILS loudly on drift) =="
+  echo "== drift-guard --check-imag  host=${host}  (SSH-gathered + git-compared; FAILS loudly on drift) =="
+  # #531: the DYNAMIC genlock-build staleness check (box vs origin/main's vendored-genlock HEAD)
+  # runs FIRST — it is the #530 recurrence guard, the one check that can catch a merged-but-never-
+  # deployed genlock change. Then the SSH-gathered live-state pins.
+  local rc_build=0 rc_report=0
+  imag_build_drift_report "$obs_build_sha" "$git_rc" "$git_range" || rc_build=$?
   # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see
   # check_imag_report's doc comment for why pre-extracting collapsed "log unreadable" and "log
   # read, no marker" into the same false-DRIFT signal. #489: `$obs_dantesync_log` is passed RAW
   # for the identical reason.
-  check_imag_report "$exp_build_sha" "$obs_build_sha" "$exp_distroav_sha" "$obs_distroav_sha" \
+  check_imag_report "$exp_distroav_sha" "$obs_distroav_sha" \
     "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present" \
-    "$exp_dantesync_locked" "$obs_dantesync_log"
+    "$exp_dantesync_locked" "$obs_dantesync_log" || rc_report=$?
+  # Combine the two facets' exit codes into the engine's single contract: DRIFT (20) dominates, then
+  # UNKNOWN (11), else clean (0). A STALE build FAILS LOUD even when every live-state pin is clean.
+  if [ "$rc_build" -eq 20 ] || [ "$rc_report" -eq 20 ]; then return 20; fi
+  if [ "$rc_build" -eq 11 ] || [ "$rc_report" -eq 11 ]; then return 11; fi
+  return 0
 }
 
 # range_tracked_source_name EXPECTED_CSV -> the NAME of the (first) source in a mixed
@@ -1064,16 +1137,19 @@ Usage:
   scripts/drift-guard.sh --check-imag [host=IP] [user=U]  # #463: imag-nb, gathered over SSH (no MCP)
   scripts/drift-guard.sh --help
 
---check-imag (#463, EPIC #466 Topology v2): unlike strih/stream (Windows, needs the win-* MCP
-  tools to read logs/settings), imag-nb is a plain Linux box reachable over SSH, so drift-guard
-  gathers its OWN observed values directly: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` (the deployed
-  genlock build identity), a SHA256 of `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the
-  Linux plugin binary), the OBS log (`~/.config/obs-studio/logs/*.log`, most recent file) for
-  the genlock capability marker + the fps + latency pins, and `journalctl -u dantesync` (#489) for
-  the DanteSync PTP/NTP clock-lock pin. Optional `host=` / `user=` override the
-  imag-nb defaults (`10.77.9.182` / `newlevel`). Pins live in vendor/README.md as
-  `genlock_build_sha_imag` / `distroav_so_sha256_imag` / `output_fps_imag` / `genlock_latency_ms_imag`
-  / `dantesync_locked_imag`.
+--check-imag (#463, EPIC #466 Topology v2; #531 dynamic build-staleness): unlike strih/stream
+  (Windows, needs the win-* MCP tools to read logs/settings), imag-nb is a plain Linux box reachable
+  over SSH, so drift-guard gathers its OWN observed values directly: `/opt/obs-genlock/
+  GENLOCK_BUILD_SHA.txt` (the deployed genlock build identity — #531: compared DYNAMICALLY against
+  origin/main's vendored-genlock HEAD via `git fetch` + `git log <box>..origin/main -- vendor/
+  obs-studio vendor/distroav`; a non-empty range = the box is BEHIND merged genlock commits =
+  STALE = DRIFT, the #530 45fps recurrence guard — no static README pin any more), a SHA256 of
+  `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the Linux plugin binary), the OBS log
+  (`~/.config/obs-studio/logs/*.log`, most recent file) for the genlock capability marker + the fps +
+  latency pins, and `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.
+  Optional `host=` / `user=` override the imag-nb defaults (`10.77.9.182` / `newlevel`). The
+  remaining live-state pins live in vendor/README.md as `distroav_so_sha256_imag` (secondary) /
+  `output_fps_imag` / `genlock_latency_ms_imag` / `dantesync_locked_imag`.
 
 --compare keys: host, obs_version, distroav_version, ndi_runtime, output_fps, genlock_wall_clock,
   ndi_input_latency (a comma-separated "input name=latency" list for the genlocked broadcast-path
