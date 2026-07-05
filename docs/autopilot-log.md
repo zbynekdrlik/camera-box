@@ -1661,3 +1661,55 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   (`Permission denied (publickey,password)`) -- per this repo's own "drive rig steps in supervisor"
   convention (physical rig work belongs to the supervisor/user, not a death-prone worker), left for
   the supervisor/user to deploy + confirm cam5 is no longer dark, then remove the workaround.
+
+## 2026-07-05 — #489 imag dantesync-lock check for drift-guard --check-imag (PR #513, v1.7.0-dev.238)
+
+- Spun out of #479 (setup-imag.sh now provisions DanteSync on imag-nb) — this ticket adds the
+  read-only drift check that #479 deliberately left out of its own scope. ticket-validator
+  confirmed the `--check-imag` framework already existed (#463/PR #478); this PR plugs into it.
+- New pure function `dantesync_locked_from_log` in `scripts/drift-guard.sh` mirrors
+  `scripts/setup-imag.sh:230`'s own provisioning-time restart check markers
+  (`\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset`) — "locked" / "unlocked" (non-empty journal, no
+  marker) / "" (empty journal -> UNKNOWN upstream), same two-tier shape as `genlock_capability`.
+  `check_imag_report` gained a 7th check row (`dantesync_locked`); `gather_and_check_imag` now
+  also SSHes `journalctl -u dantesync --no-pager --since "-10min" -n 100` (bounded by BOTH
+  recency and count — see review fix below). New pin `dantesync_locked_imag=locked` in
+  `vendor/README.md`'s imag pin table (a runtime steady-state pin, not a build artifact — pinned
+  from day one, unlike the two SHA pins that wait for a live deploy) — wired into BOTH
+  `check_imag_report`/`gather_and_check_imag` (live SSH facet) AND `check_pins()` (offline CI
+  facet, see review fix below).
+- RED `634691bbb` (11 new/updated test failures: 5 pure-function tests, 4 `check_imag_report`
+  row tests, 1 real-manifest pin test, 1 "clean" test now expecting the 7th row), GREEN
+  `cd4cbb0bd`. Playbook `11a5c165a`: `.claude/skills/ops/SKILL.md` gained a `set -u` footgun note
+  (extending an optional trailing positional param without `${N:-}` crashes every older call site
+  with `unbound variable` — found while adding args 12/13 to `check_imag_report`).
+- `/review` fan-out (3 angles) + the deep `requesting-code-review` pass both ran before merge and
+  found real issues, fixed in follow-up commits on the same PR:
+  - `dantesync_locked_from_log` originally used `grep -qE` directly inside an `if` pipe — the
+    anti-pattern this file's sibling `_from_log` parsers already avoid via a drain-safe
+    `grep | head -1 || true` convention. Fixed (`d97a23ddb`) to match. The real failure mode
+    (re-verified properly after an initial mis-diagnosis — see below) is a SILENT WRONG ANSWER on
+    a large materialized log (the `if` survives `set -e`, just flips to the wrong branch), not a
+    crash — exactly what `genlock_from_log`'s own doc comment already describes. New regression
+    test `dantesync_locked_from_log_survives_a_large_journal_without_sigpipe_489` mirrors the
+    file's OWN existing large-log test convention (`genlock_parser_reads_running_state_from_log`,
+    build a >64KB blob as a plain string, write to a temp file, `cat` it in) — verified RED
+    (returns `unlocked`) against the pre-fix code, GREEN (`locked`) against the fix.
+  - The journal gather had no time bound (`-n 100` alone reads the last 100 lines EVER logged for
+    the unit, however old) — a fully-stopped/masked dantesync would report a stale historic lock
+    forever. Fixed by adding `--since "-10min"`.
+  - `dantesync_locked_imag` was NOT wired into `check_pins()`'s offline CI validation — the
+    original justification (matching `genlock_build_sha_imag`'s precedent) was the WRONG
+    precedent; this pin is always-populated from day one like `output_fps_imag`/
+    `genlock_latency_ms_imag` (which ARE validated there), not deploy-deferred like the SHA pins.
+    Fixed: added the 14th `check_pins()` param + a new
+    `check_pins_fails_loudly_on_a_missing_dantesync_locked_pin_489` test.
+  - Self-correction: an initial investigation of the SIGPIPE risk used a flawed repro (`yes | head
+    -n 3000` to build the test blob) that has its OWN unrelated SIGPIPE hazard between `yes` and
+    `head`, independent of any `_from_log` parser — this was mistaken for a crash in the
+    already-shipped `genlock_from_log`, filed as follow-up #514, then DISPROVEN and CLOSED after
+    re-testing with a properly materialized (non-`yes`) large input showed no crash at all (up to
+    200,000 lines / 12.5MB). See the closing comment on #514 for the full correction.
+- PR #513, final CI run green (all jobs incl. Drift Guard pin-set; Mutation Testing +
+  Notify-on-red correctly skipped — on-demand / failure-only). `mergeable:true`,
+  `mergeStateStatus:CLEAN`. Version bumped 1.7.0-dev.237 -> 1.7.0-dev.238.

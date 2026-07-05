@@ -486,6 +486,42 @@ restore) but WILL recur in any future `setup-*.sh`/provisioning script unless wa
    Different failure shape from point 2 above (that one is about `fail()`/`exit` INSIDE a
    function losing propagation through `$(...)`; this one is about a command that returns a
    plain nonzero you need to READ, not propagate).
+5. **(#489, `drift-guard.sh check_imag_report`) A bare `${12}`/`${13}`-style reference to an
+   OPTIONAL trailing positional param crashes the whole script under `set -u` when an OLDER
+   caller doesn't pass that many args — it does NOT quietly become an empty string.** Adding a
+   new arg to a widely-called pure function (`check_imag_report` gained a 12th/13th param for the
+   dantesync-lock check) means every EXISTING call site that still passes only 11 args now
+   references an unset positional parameter — under `set -uo pipefail` (this file's own top-of-
+   file `set`, in effect for the whole test-harness `run_sourced` session too, #463's own
+   footgun-comment above) that is a hard `unbound variable` abort, not a graceful empty string
+   (verified: `bash -c 'set -u; f(){ local a="$1" c="$3"; }; f one'` → `3: unbound variable`,
+   exit 127). **Fix: default-empty expansion on the OPTIONAL trailing params —
+   `local exp="${12:-}" obs="${13:-}"`** — mirrors `compare_observed`'s existing
+   `o_av_sync_calibrated_ms="${25:-}"` pattern for its own optional trailing args. Whenever you
+   extend a pure function's positional-arg contract, grep every existing call site first; if any
+   don't pass the new args, the new params MUST use `${N:-}`, never a bare `${N}`.
+6. **(#489 review, `tests/drift_guard.rs`) `big="$(yes "$line" | head -n N)"` to manufacture a
+   large test blob has its OWN unrelated SIGPIPE hazard — it can crash the WHOLE test harness
+   before the function under test is ever called, and is easy to misread as a bug in that
+   function.** `head -n N` closes its read end after N lines; `yes` (which never stops producing)
+   gets SIGPIPE on its next write; under `set -o pipefail` (this file's own top-of-file `set`,
+   inherited by `run_sourced`'s sourced-script session) that non-zero exit aborts the `$(...)`
+   assignment itself — verified: `bash -c 'set -euo pipefail; big="$(yes x | head -n 3000)"; echo
+   after'` prints nothing, exits 141, `after` never runs. A `_from_log` parser call placed AFTER
+   such a line looks like it crashed when in fact the crash happened one line earlier, unrelated
+   to anything the parser does. **Fix: build the large blob as a plain string (a Rust `for` loop
+   appending to a `String`, or a bash `for`/`printf` loop — never `yes | head`), then either pass
+   it directly or (to dodge `ARG_MAX` on a huge value) write it to a temp FILE and `cat` it inside
+   the bash body** — this is the file's OWN established, already-proven-correct pattern for
+   exactly this scenario: `tests/drift_guard.rs`'s `genlock_parser_reads_running_state_from_log`
+   (~line 200, builds via a `for i in 0..5000 { push_str(...) }` loop into a temp file, sourced
+   via `cat "$LOGFILE"`) and its #489 sibling `dantesync_locked_from_log_survives_a_large_journal_
+   without_sigpipe_489`. Before believing a "confirmed" large-input crash in a `_from_log` parser,
+   isolate the blob-construction line ALONE (no function call after it) and confirm it does NOT
+   also crash on its own — an incident here (#514, opened then corrected+closed) mistook the
+   `yes | head` artifact for a real crash in the already-shipped `genlock_from_log`, when the
+   function itself is safe (verified up to 200,000 lines / ~12.5MB via a properly materialized,
+   `cat`-read input) and the real underlying bug was a silent WRONG ANSWER, not a crash.
 
 **Test-quality corollary (found 3× in `tests/setup_imag_guards.rs` across both review passes):** a
 purely textual `body.contains("some string")` guard can pass even when the real check is gutted,
