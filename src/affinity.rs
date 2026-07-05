@@ -258,7 +258,9 @@ pub fn pin_off_capture_core(label: &str) {
 /// `ExecStartPre` (needs root to write `/proc/irq`). Idempotent and entirely
 /// best-effort: every failure is logged and swallowed so it can NEVER block the
 /// service from starting (managed MSI IRQs reject `smp_affinity` writes — the
-/// cmdline `irqaffinity=` path for those is deferred to #295's safe-grub work).
+/// cmdline `irqaffinity=0-2` path for those now ships via `setup-device.sh` STEP 10,
+/// #303, riding the #295 safe-grub mechanism; it still needs a box reboot onto the
+/// new cmdline to take effect).
 pub fn setup_irq_affinity() {
     let online = read_online_cores();
     let isolated = read_isolated_cores();
@@ -304,9 +306,10 @@ pub fn setup_irq_affinity() {
                 tracing::info!("#289 IRQ {irq}: smp_affinity {prev} -> {mask} (capture core {core})")
             }
             // Managed (kernel-affinity) MSI IRQs reject smp_affinity writes (EIO) — non-fatal:
-            // the cmdline irqaffinity= path that covers those is deferred to #295 (safe-grub).
+            // the cmdline irqaffinity=0-2 path that covers those ships via setup-device.sh STEP 10
+            // (#303, on the #295 safe-grub path); it takes effect after the box reboots onto it.
             Err(e) => tracing::warn!(
-                "#289 IRQ {irq}: could not set smp_affinity to {mask} ({e}) — likely a managed IRQ (needs cmdline irqaffinity=, #295)"
+                "#289 IRQ {irq}: could not set smp_affinity to {mask} ({e}) — likely a managed IRQ (needs cmdline irqaffinity=0-2, #303)"
             ),
         }
     }
