@@ -743,3 +743,38 @@ DistroAV clamp itself ever changes; NEVER re-pin it to a specific ms value for a
 value; `src_latency_ms=M` (underscore prefix) = per-source setting. The regex
 `r"genlock-fifo audit '([^']+)'.*? latency_ms=(\d+)"` (space before `latency_ms`) captures the
 effective, not the setting.
+
+## #484 — genlock render-tick thread pinned SCHED_FIFO to the isolated core (imag-nb, Linux-only)
+The libobs graphics thread (`obs_graphics_thread`, `vendor/obs-studio/libobs/obs-video.c`) drives
+the wall-clock-slaved genlock render tick (`video_sleep` → `genlock_next_deadline`). On imag-nb it
+is now pinned by `genlock_pin_render_tick_thread()` — called from `obs_graphics_thread` right after
+`os_set_thread_name`, `#if defined(__linux__) && !defined(_WIN32)` guarded (Windows/macOS builds are
+unaffected; imag-nb is the only Linux OBS box):
+- **Affinity** → the kernel-reserved cores, DERIVED from `/sys/devices/system/cpu/nohz_full`
+  (robust, like `src/affinity.rs`), hardcoded `{10,11}` fallback tied to #483's `nohz_full=10,11`
+  reservation, via `pthread_setaffinity_np(pthread_self(), ...)`.
+- **Scheduler** → `sched_setscheduler(0, SCHED_FIFO, &param)` with a **LOW** prio (`GENLOCK_RT_PRIORITY
+  10`). `pid 0` = the calling THREAD on Linux, so ONLY the render-tick thread goes FIFO (NOT the
+  ~106-thread process — that would hang the box).
+- **WARN-and-CONTINUE**: any failure logs `genlock: … — continuing SCHED_OTHER (#484)` at
+  `LOG_WARNING` and runs on. NEVER abort/retry/hang (a high-prio runaway FIFO thread hangs a headless
+  box). Mirror of `src/affinity.rs` (#289).
+- **rtprio grant dependency**: OBS runs as the unprivileged desktop user, so the SCHED_FIFO call
+  needs `setup-imag.sh`'s `/etc/security/limits.d/95-imag-genlock-rtprio.conf` (`${DESKTOP_USER} -
+  rtprio 20`, applied by PAM at next login). Without it the pin warn-degrades to SCHED_OTHER.
+- Guards: `tests/genlock_rt_pin.rs` (Tier-0 vendored-source, RED→GREEN locally) +
+  `tests/setup_imag_guards.rs` (rtprio drop-in). The C build proof is `linux-genlock.yml` SUCCESS.
+- **Live cyclictest/chrt verification (rig redeploy + before/after jitter, with rollback) is the
+  SUPERVISOR's post-merge step** — never rig-verified from the worker (a misbehaving SCHED_FIFO
+  thread can hang the headless box).
+
+**GOTCHA — `_GNU_SOURCE` in a vendored-OBS Linux patch that uses GNU syscalls.** `cpu_set_t` /
+`CPU_SET` / `pthread_setaffinity_np` / `CPU_COUNT` are GNU extensions gated on `_GNU_SOURCE`, which
+MUST be defined BEFORE the first libc header (`<time.h>` pulls `<features.h>`). Add
+`#ifndef _GNU_SOURCE / #define _GNU_SOURCE / #endif` at the TOP of the `.c` (the `#ifndef` guard is a
+no-op if the build already sets it globally — OBS does on Linux, but self-contained is bulletproof),
+then the Linux-guarded `#include <pthread.h> <sched.h> <errno.h>`. `sched_setscheduler`/`SCHED_FIFO`
+are POSIX (no `_GNU_SOURCE` needed) but the affinity side is GNU. De-risk the ~8-30 min
+`linux-genlock.yml` build FIRST by compiling the added helpers standalone: `cc -std=c11 -Wall -Wextra
+-D_GNU_SOURCE helpers.c -lpthread` with `blog`/`LOG_*` stubbed (caught 0 issues here, but the
+pattern turns a 30-min CI miss into a 2-second local one).
