@@ -2247,6 +2247,103 @@ fn or_list_exit_code_capture_survives_errexit_the_463_gather_and_check_imag_fix(
     );
 }
 
+// ---- #531 — imag_build_drift_report: DYNAMIC "is imag-nb's genlock build behind origin/main?" ----
+// The pre-#531 static empty-pin build check could ONLY ever report UNKNOWN (the genlock_build_sha_imag
+// README pin is deliberately empty) — it could NEVER fail, so a merged-but-never-deployed genlock
+// change silently reached a live event (#530, imag-nb ran a stale build -> 45fps). imag_build_drift_
+// report replaces it: the impure caller runs `git log <box_sha>..origin/main -- vendor/obs-studio
+// vendor/distroav` and this PURE function decides OK / DRIFT / UNKNOWN from (box_sha, git_rc,
+// range_log) — no live box, no real git repo, fully mockable. The check can now ACTUALLY FAIL.
+
+#[test]
+fn imag_build_drift_report_ok_when_box_is_current_with_main_531() {
+    // range_log EMPTY (no genlock-touching commit between the box and origin/main) + git ran OK ->
+    // the box already carries every genlock change on main -> OK, exit 0, never a DRIFT.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "80dac432" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=0"), "current box -> clean exit: {out:?}");
+    assert!(
+        out.contains("genlock_build") && out.contains("OK"),
+        "must report genlock_build OK: {out:?}"
+    );
+    assert!(!out.contains("DRIFT"), "no drift for a current box: {out:?}");
+}
+
+#[test]
+fn imag_build_drift_report_drift_and_fails_loud_when_box_behind_main_531() {
+    // range_log NON-EMPTY (genlock commits on main the box is missing) -> DRIFT, exit 20, with the
+    // STALE message + the count + the operator's exact next action. This is the whole point of #531:
+    // the guard can now ACTUALLY FAIL when imag-nb's deployed genlock build is behind main (the #530
+    // 45fps disaster) — a static empty-pin compare could only ever say UNKNOWN.
+    let body = r#"
+        rc=0
+        RANGE="cb64631fd feat:[green] #501 genlock_monitor low-bandwidth NDI exception
+af02f9bc3 feat:[green] #505 orphan the Linux GL PBO"
+        imag_build_drift_report "80dac432" "0" "$RANGE" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=20"), "box behind main -> DRIFT exit 20: {out:?}");
+    assert!(
+        out.contains("STALE") && out.contains("behind origin/main"),
+        "must FAIL LOUD with the STALE / behind-main message: {out:?}"
+    );
+    assert!(
+        out.contains("2 genlock-commit"),
+        "must report the count of missing genlock commits: {out:?}"
+    );
+    assert!(
+        out.contains("cb64631fd") && out.contains("af02f9bc3"),
+        "must list the stale commit SHAs so the operator sees WHAT is missing: {out:?}"
+    );
+    assert!(
+        out.contains("setup-imag.sh"),
+        "must name the operator's deploy action (setup-imag.sh step-12): {out:?}"
+    );
+}
+
+#[test]
+fn imag_build_drift_report_unknown_when_box_sha_unread_531() {
+    // box_sha EMPTY (GENLOCK_BUILD_SHA.txt could not be read — SSH failure / marker absent) ->
+    // UNKNOWN (exit 11), NEVER a false OK. A box we could not read is not proof it is current.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=11"), "unread box sha -> UNKNOWN exit 11: {out:?}");
+    assert!(
+        out.contains("UNKNOWN") && out.contains("not read"),
+        "must say UNKNOWN / not read, never OK: {out:?}"
+    );
+}
+
+#[test]
+fn imag_build_drift_report_unknown_when_git_failed_never_a_false_ok_531() {
+    // git_rc NON-ZERO (box_sha is not a commit in this checkout, or the fetch is unreachable) -> we
+    // could not COMPUTE the drift -> UNKNOWN (exit 11), never a false OK that would hide a real stale
+    // build behind a transient git error. Distinct from an empty-range OK.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "80dac432" "128" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "git error -> UNKNOWN exit 11, never a false OK: {out:?}"
+    );
+    assert!(
+        out.contains("UNKNOWN") && out.to_lowercase().contains("git"),
+        "must say UNKNOWN and name the git failure: {out:?}"
+    );
+}
+
 /// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line (60fps,
 /// imag's low-latency IMAG role, EPIC #466 Topology v2).
 const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
