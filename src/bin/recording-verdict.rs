@@ -2951,13 +2951,13 @@ fn build_and_print_verdict(
     // LEVEL (like the cam2→cam1 capture-stats gate above): --imag is INDEPENDENT of
     // --strih/--stream and must be gated whether or not either is supplied.
     //
-    // NOTE: the #312 ALL-CAMBOX --switch-schedule sweep below does NOT yet cover imag frames —
-    // extending it to use imag's new #463 digital burn as its anchor (mirroring the strih/stream
-    // burns `segment_frames_from_recording` uses today) is tracked in #467, not blocking the
-    // standard (non-sweep) zero-loss verdict this ticket adds.
-    if let Some(d) = imag {
-        let imag_frames = d.frames;
-        let nv = node_verdict_for_imag(&imag_frames, args.cam2_pin());
+    // #467: captured into `imag_frames_opt` (borrowed here) rather than consumed outright — the
+    // #312 ALL-CAMBOX --switch-schedule sweep below ALSO needs imag's frames, to place them onto
+    // the SAME schedule timeline (anchored on imag's #463 digital burn, falling back to the cam2
+    // optical paint) and gate imag's own per-segment continuity alongside the per-cambox windows.
+    let imag_frames_opt: Option<Vec<RecordingFrame>> = imag.map(|d| d.frames);
+    if let Some(imag_frames) = &imag_frames_opt {
+        let nv = node_verdict_for_imag(imag_frames, args.cam2_pin());
         let node_fps = camera_box::recording_span_gate::node_capture_fps(
             "imag",
             args.capture_fps,
@@ -2992,12 +2992,15 @@ fn build_and_print_verdict(
                 // The painted tick's by-design step in the stream recording = the decimation of the
                 // 60Hz painter at the recording rate (refresh_hz / stream_capture_fps = 2). Derived
                 // from the configured fps when --switch-expected-step is 0, else the explicit value.
+                // #467: the derivation is now the shared Tier-0 pure `painted_tick_step` (also used
+                // below for imag's OWN per-segment sweep, at imag's different native rate).
                 let expected_step = if args.switch_expected_step > 0 {
                     args.switch_expected_step
-                } else if args.stream_capture_fps > 0.0 {
-                    (args.refresh_hz / args.stream_capture_fps).round().max(1.0) as i64
                 } else {
-                    1
+                    camera_box::recording_span_gate::painted_tick_step(
+                        args.refresh_hz,
+                        args.stream_capture_fps,
+                    )
                 };
                 let anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
                 let all_burns = [
@@ -3066,6 +3069,83 @@ fn build_and_print_verdict(
                 }
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
+
+                // #467 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording: place
+                // its frames onto the SAME schedule timeline (anchored on imag's #463 digital
+                // corner burn, falling back to the cam2 optical paint — the same generic anchor
+                // priority `segment_frames_from_recording` already applies for strih/stream) and
+                // run the SAME per-window painted-tick continuity, at imag's OWN native rate (no
+                // 60->30 decimation, unlike the stream recording). imag never gets scene-switched
+                // by this harness (it stays fixed on CAM1, #462), so this proves imag's OWN
+                // delivery stayed continuous across the WHOLE sweep, segmented at the SAME ~30s
+                // granularity as the other camboxes — NOT "did imag show cambox X". Optional:
+                // absent (`--imag` not supplied) never fails the sweep; present, it must pass like
+                // every other window.
+                if let Some(imag_frames) = &imag_frames_opt {
+                    let imag_step = camera_box::recording_span_gate::painted_tick_step(
+                        args.refresh_hz,
+                        args.imag_capture_fps,
+                    );
+                    let (imag_seg_frames, imag_no_anchor) = segment_frames_from_recording(
+                        imag_frames,
+                        &[BURN_RUN_ID_IMAG],
+                        &[BURN_RUN_ID_IMAG],
+                        cam2_pin,
+                    );
+                    let imag_seg = segment_continuity(
+                        &imag_seg_frames,
+                        &schedule,
+                        args.switch_guard_ns,
+                        imag_step,
+                    );
+                    println!();
+                    println!(
+                        "=== #467 imag-nb per-segment continuity (its OWN recording, {} window(s), \
+                         painted-tick step {}) ===",
+                        imag_seg.segments.len(),
+                        imag_seg.expected_step
+                    );
+                    for s in &imag_seg.segments {
+                        println!(
+                            "  (during {} program) [{}..{}): frames={} undecodable={} copies={} gaps={} → {}",
+                            s.cambox,
+                            s.start_ns,
+                            s.end_ns,
+                            s.frames,
+                            s.undecodable,
+                            s.copies,
+                            s.gaps,
+                            if s.pass { "PASS" } else { "FAIL" }
+                        );
+                        if let Some(note) = &s.note {
+                            println!("      ⚠ {note}");
+                        }
+                    }
+                    if imag_no_anchor > 0 {
+                        println!(
+                            "  ({imag_no_anchor} imag recorded frame(s) had no burn/optical gen_ts \
+                             anchor — not placed)"
+                        );
+                    }
+                    println!(
+                        "  >>> imag: {}",
+                        if imag_seg.overall_pass {
+                            "CONTINUITY-CLEAN across every schedule window."
+                        } else {
+                            "NOT clean — see the per-window detail above."
+                        }
+                    );
+                    let mut imag_seg_json =
+                        serde_json::to_value(&imag_seg).unwrap_or(serde_json::Value::Null);
+                    if let Some(obj) = imag_seg_json.as_object_mut() {
+                        obj.insert(
+                            "frames_without_anchor".to_string(),
+                            serde_json::json!(imag_no_anchor),
+                        );
+                    }
+                    report["all_cambox_continuity"]["imag"] = imag_seg_json;
+                    all_pass &= imag_seg.overall_pass;
+                }
             }
             None => {
                 eprintln!(
@@ -4339,6 +4419,275 @@ mod tests {
             labels,
             vec!["CAM1", "CAM4"],
             "#332: both swept (non-painter) camboxes are attributed in the merge"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #467 — extend the #312 ALL-CAMBOX `--switch-schedule` sweep to ALSO gate imag-nb's OWN
+    /// per-segment continuity. imag's frames are placed onto the SAME schedule timeline (anchored
+    /// on its #463 digital corner burn, [`super::BURN_RUN_ID_IMAG`]) and its own painted-tick
+    /// continuity — at its OWN native rate (step 1, never the stream recording's 60->30 step 2) —
+    /// must ALSO pass, reported under `all_cambox_continuity.imag` and ANDed into `overall_pass`,
+    /// alongside (not instead of) the existing per-cambox windows.
+    #[test]
+    fn imag_own_segment_continuity_gates_the_all_cambox_sweep_467() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 2_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir =
+            std::env::temp_dir().join(format!("cb-467-imag-seg-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}},{{"cambox":"CAM4","start_ns":{b},"end_ns":{c}}}]"#,
+            a = base,
+            b = base + win,
+            c = base + 2 * win,
+        );
+        std::fs::write(&sched_path, &sched).unwrap();
+
+        // The single continuous stream recording — clean, per-cambox contiguous (the proven shape
+        // from `merge_path_computes_all_cambox_continuity_like_the_fused_path`).
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        for i in 0..80u64 {
+            let wi = (i / 40) as i64;
+            let j = (i % 40) as i64;
+            let wstart = base + wi * win;
+            let gen_ts = wstart + (j + 1) * (ONE_S / 10);
+            let optical = 1000u32 + 2 * i as u32;
+            stream_frames.push(RecordingFrame {
+                frame_index: i,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH,
+                        frame_id: 1670 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2,
+                        frame_id: optical,
+                        gen_ts_ns: gen_ts,
+                    },
+                ],
+                tick: Some(optical),
+            });
+        }
+
+        // imag's OWN recording: anchored on its #463 digital corner burn; its OWN optical tick is
+        // contiguous 2000..2019 across BOTH windows (step 1 — imag captures the 60Hz painter 1:1
+        // at its own 60fps, no 60->30 decimation).
+        let imag_frames: Vec<RecordingFrame> = (0..20u64)
+            .map(|i| {
+                let wi = (i / 10) as i64;
+                let j = (i % 10) as i64;
+                let wstart = base + wi * win;
+                let gen_ts = wstart + (j + 1) * (ONE_S / 10);
+                RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![Payload {
+                        run_id: super::BURN_RUN_ID_IMAG,
+                        frame_id: 5000 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    }],
+                    tick: Some(2000 + i as u32),
+                }
+            })
+            .collect();
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            Some(DecodedRec {
+                frames: imag_frames,
+                rec_path: None,
+            }),
+        )
+        .expect("verdict");
+
+        let imag_seg = &v["all_cambox_continuity"]["imag"];
+        assert!(
+            !imag_seg.is_null(),
+            "#467: imag's own segment continuity must be reported under all_cambox_continuity.imag: {v}"
+        );
+        assert_eq!(
+            imag_seg["overall_pass"],
+            serde_json::json!(true),
+            "#467: imag's own contiguous painted tick across both windows must PASS: {imag_seg}"
+        );
+        assert_eq!(
+            v["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "sanity: the existing per-cambox sweep itself still passes unchanged: {v}"
+        );
+        // The overall verdict `pass` is intentionally NOT asserted true here. The all_cambox
+        // switch-schedule sweep (imag included, #467) is clean — asserted above — but the
+        // overall verdict ALSO runs the full-chain zero-loss gate, which requires a >=300s
+        // recording span (min_secs=300). This synthetic fixture spans only seconds, so
+        // full_chain.span_ok is false and overall `pass` is false for a reason UNRELATED to
+        // #467. What #467 must guarantee — that a clean imag segment adds NO failure to the
+        // sweep and imag's own data is loss-free — is covered by the sweep assertions above
+        // plus this: imag's recording is loss-free (its span-gate failure is the only reason).
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["zero_loss"],
+            serde_json::json!(true),
+            "#467: imag's own recording must be loss-free (only the unrelated >=300s span gate fails overall): {v}"
+        );
+        let _ = pass;
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #467 — a genuine gap in imag's OWN painted-tick sequence (one recorded frame never reached
+    /// imag's recording) must FAIL the overall verdict even though the existing per-cambox
+    /// (stream) sweep stays completely clean — imag's segment gate is ADDITIONAL, not a
+    /// weaker/optional substitute for the per-cambox windows.
+    #[test]
+    fn imag_own_segment_gap_fails_the_all_cambox_sweep_even_when_stream_sweep_is_clean_467() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 3_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir =
+            std::env::temp_dir().join(format!("cb-467-imag-seg-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}},{{"cambox":"CAM4","start_ns":{b},"end_ns":{c}}}]"#,
+            a = base,
+            b = base + win,
+            c = base + 2 * win,
+        );
+        std::fs::write(&sched_path, &sched).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        for i in 0..80u64 {
+            let wi = (i / 40) as i64;
+            let j = (i % 40) as i64;
+            let wstart = base + wi * win;
+            let gen_ts = wstart + (j + 1) * (ONE_S / 10);
+            let optical = 1000u32 + 2 * i as u32;
+            stream_frames.push(RecordingFrame {
+                frame_index: i,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH,
+                        frame_id: 1670 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2,
+                        frame_id: optical,
+                        gen_ts_ns: gen_ts,
+                    },
+                ],
+                tick: Some(optical),
+            });
+        }
+
+        // imag's own recording — IDENTICAL to the clean test above, except recorded output frame
+        // i=15 (tick 2015, inside the SECOND [CAM4] window) never reached the recording at all: a
+        // genuine dropped frame, not a by-design decimation. The FIRST (CAM1) window is untouched.
+        let imag_frames: Vec<RecordingFrame> = (0..20u64)
+            .filter(|&i| i != 15)
+            .map(|i| {
+                let wi = (i / 10) as i64;
+                let j = (i % 10) as i64;
+                let wstart = base + wi * win;
+                let gen_ts = wstart + (j + 1) * (ONE_S / 10);
+                RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![Payload {
+                        run_id: super::BURN_RUN_ID_IMAG,
+                        frame_id: 5000 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    }],
+                    tick: Some(2000 + i as u32),
+                }
+            })
+            .collect();
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            Some(DecodedRec {
+                frames: imag_frames,
+                rec_path: None,
+            }),
+        )
+        .expect("verdict");
+
+        let imag_seg = &v["all_cambox_continuity"]["imag"];
+        let imag_segments = imag_seg["segments"]
+            .as_array()
+            .expect("imag segments array");
+        assert_eq!(
+            imag_segments[0]["pass"],
+            serde_json::json!(true),
+            "the FIRST (CAM1) window is untouched, still clean: {imag_seg}"
+        );
+        assert_eq!(
+            imag_segments[1]["pass"],
+            serde_json::json!(false),
+            "the SECOND (CAM4) window has the dropped frame → FAIL: {imag_seg}"
+        );
+        assert!(
+            imag_segments[1]["gaps"].as_u64().unwrap_or(0) >= 1,
+            "the dropped frame must be counted as a gap: {imag_seg}"
+        );
+        assert_eq!(
+            imag_seg["overall_pass"],
+            serde_json::json!(false),
+            "#467: a genuine gap in imag's OWN segment must FAIL imag's own verdict: {imag_seg}"
+        );
+        assert_eq!(
+            v["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "sanity: the existing per-cambox (stream) sweep is completely untouched and stays clean: {v}"
+        );
+        assert!(
+            !pass,
+            "#467: imag's own segment gap must fail the OVERALL verdict even though the stream \
+             sweep alone is clean — imag's gate is additional, never optional: {v}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1872,3 +1872,47 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   version bump + TDD + implementation + local Tier-0 checks + push only; the supervisor drives
   CI → PR "Closes #454" → merge, then runs `verify-device.sh` against a live box (cam3) as the
   #454 acceptance proof.
+
+## 2026-07-05 — #467 extend ALL-CAMBOX --switch-schedule sweep to imag frames (PR TBD, v1.7.0-dev.245)
+
+- Follow-up to #461/#463 (in-code note left at the #312 sweep site). imag-nb's own recording
+  (EPIC #466 Topology v2) was excluded from the ALL-CAMBOX `--switch-schedule` per-segment
+  continuity sweep even though imag now carries its own #463 digital corner burn
+  (`BURN_RUN_ID_IMAG`, 911003). Followed the CURRENT in-code design (anchor on imag's own burn +
+  the existing cam2-optical fallback), not the issue body's stale "imag has no burn" wording.
+- New Tier-0 pure `painted_tick_step(refresh_hz, capture_fps)` in `src/recording_span_gate.rs` —
+  the by-design painted-tick decimation step, extracted out of the previously INLINE (untestable
+  under the probe feature gate) formula in `recording-verdict.rs`'s stream sweep. Now used for
+  BOTH the stream sweep (60Hz/30fps = step 2) and imag's own sweep (60Hz/60fps = step 1).
+- `recording-verdict.rs`: imag's `Option<DecodedRec>` is now captured into a local
+  `imag_frames_opt: Option<Vec<RecordingFrame>>` (borrowed for the existing top-level
+  `node_verdict_for_imag` check, then reused inside the `--switch-schedule` block) instead of
+  being consumed once. Reused the EXISTING generic `segment_frames_from_recording` +
+  `segment_continuity` (no new algorithm needed — both already operate on any frame list + any
+  schedule) with imag's own frames, anchored on `BURN_RUN_ID_IMAG`. Reported under
+  `all_cambox_continuity.imag` (a NEW key, not folded into the existing per-cambox `segments`
+  array — that array's `cambox` field is the schedule's per-window label, not imag's identity) and
+  ANDed into the run's `overall_pass` — optional signal: absent `--imag` never fails the sweep,
+  present must pass like every other window.
+- Two new probe-gated integration tests (`imag_own_segment_continuity_gates_the_all_cambox_sweep_467`,
+  `imag_own_segment_gap_fails_the_all_cambox_sweep_even_when_stream_sweep_is_clean_467`) lock the
+  wiring end-to-end: a clean imag segment passes; a genuine gap in ONE of imag's windows fails the
+  overall verdict even though the existing per-cambox (stream) sweep stays completely clean.
+- Playbook: added a "adding a second/third own-recording node to the sweep" how-to to
+  `.claude/skills/recording-decode/SKILL.md` (the generic-function-reuse pattern, the ownership
+  restructure gotcha, and the report-under-a-new-key rule) for the next such extension.
+- RED `2eb945f6a` (`recording_span_gate.rs`'s 5 new `painted_tick_step` unit tests — function
+  stubbed to return 0 — all fail), GREEN `9aa1d2082` (real implementation + the full
+  `recording-verdict.rs` wiring + the 2 new probe-gated integration tests; the 5 pure-module tests
+  pass locally, default features, no probe feature needed).
+- Local `cargo fmt --all --check` / `cargo check` / `cargo clippy --all-targets -- -D warnings`
+  (default features) / `cargo test --no-run --workspace` all green. The probe-gated glue in
+  `recording-verdict.rs` and its 2 new integration tests compile + run on CI only
+  (`required-features = ["probe"]`) — not locally verifiable per this repo's Tier-0 policy; CI is
+  the compile gate for that half of the diff.
+- Harness side already wired (`recording-e2e.sh` already passes `--imag-capture-fps` and
+  `--switch-schedule` into the merge args, #462) — no script changes needed for this ticket.
+- **Not verified by this worker (no rig):** the live ALL_CAMBOX sweep with imag actually swept.
+  Autopilot-worker contract: version bump + TDD + implementation + local Tier-0 checks + push
+  only; the supervisor drives CI → PR "Closes #467" → merge, then runs the live ALL_CAMBOX rig
+  recording (with `--imag`) as the acceptance proof — this worker has no rig access.

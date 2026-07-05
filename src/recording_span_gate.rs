@@ -81,6 +81,28 @@ pub fn node_capture_fps(
     }
 }
 
+/// #467 — the painted (cam2 optical Vernier) tick's by-design STEP for a node's OWN recording,
+/// derived from that recording's native capture rate relative to the 60Hz painter (`refresh_hz`):
+/// `round(refresh_hz / capture_fps)`, floored at 1 — a `capture_fps >= refresh_hz` (or a
+/// non-positive rate) is never decimated, so full-rate is step 1.
+///
+/// This is the SAME formula `recording-verdict`'s #312 ALL-CAMBOX `--switch-schedule` sweep
+/// already computed INLINE (un-extracted, untestable under the probe feature gate) for the stream
+/// recording's step (60Hz painter -> 30fps stream capture = step 2); pulled out here so it is
+/// unit-tested ONCE, Tier-0, on default features, and reused for a SECOND node whose own
+/// recording runs at a DIFFERENT native rate — imag-nb (#467, EPIC #466 Topology v2), which
+/// records the SAME 60Hz painter at its own 60fps low-latency rate (`imag_capture_fps`), so its
+/// by-design step is 1 (no decimation), never the stream recording's 2. `recording-verdict` calls
+/// this for BOTH: the stream sweep (`painted_tick_step(refresh_hz, stream_capture_fps)`) and
+/// imag's own per-segment sweep (`painted_tick_step(refresh_hz, imag_capture_fps)`).
+pub fn painted_tick_step(refresh_hz: f64, capture_fps: f64) -> i64 {
+    if capture_fps > 0.0 {
+        (refresh_hz / capture_fps).round().max(1.0) as i64
+    } else {
+        1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +252,61 @@ mod tests {
             analyzed_span_long_enough(MIN, MIN),
             "exactly the floor passes (>=)"
         );
+    }
+
+    // ---- #467 painted_tick_step ----
+
+    #[test]
+    fn painted_tick_step_60_to_30_is_2_the_stream_recording_decimation() {
+        assert_eq!(
+            painted_tick_step(60.0, 30.0),
+            2,
+            "the stream recording captures the 60Hz painter at 30fps -> decimation step 2"
+        );
+    }
+
+    #[test]
+    fn painted_tick_step_60_to_60_is_1_imags_own_native_rate_467() {
+        // #467 — imag-nb records the SAME 60Hz painter at ITS OWN 60fps native rate: no
+        // decimation, step 1 (unlike the stream recording's step-2 above).
+        assert_eq!(
+            painted_tick_step(60.0, 60.0),
+            1,
+            "imag captures the 60Hz painter 1:1 at its own 60fps -> no decimation, step 1"
+        );
+    }
+
+    #[test]
+    fn painted_tick_step_non_positive_capture_fps_floors_to_1() {
+        assert_eq!(
+            painted_tick_step(60.0, 0.0),
+            1,
+            "zero capture_fps -> step 1"
+        );
+        assert_eq!(
+            painted_tick_step(60.0, -5.0),
+            1,
+            "negative capture_fps -> step 1"
+        );
+    }
+
+    #[test]
+    fn painted_tick_step_capture_faster_than_refresh_still_floors_to_1() {
+        // A capture rate AT OR ABOVE the painter's refresh (e.g. captured at 120 while the
+        // painter runs at 60) rounds to 0 or below -- must floor at 1, never 0 (a step of 0 would
+        // divide-by-zero-equivalent every gap in `segment_continuity`'s excess-gap math).
+        assert_eq!(
+            painted_tick_step(60.0, 120.0),
+            1,
+            "capture_fps >= refresh_hz must never floor below 1"
+        );
+    }
+
+    #[test]
+    fn painted_tick_step_rounds_to_nearest_not_truncates() {
+        // 60/45 = 1.333.. rounds to 1 (nearest), not truncated differently.
+        assert_eq!(painted_tick_step(60.0, 45.0), 1);
+        // 60/40 = 1.5 rounds to 2 (round-half-away-from-zero, Rust's f64::round default).
+        assert_eq!(painted_tick_step(60.0, 40.0), 2);
     }
 }
