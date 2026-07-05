@@ -1508,6 +1508,35 @@ fn setup_imag_does_not_add_nice_to_obs_launchers_483() {
     );
 }
 
+/// #525: OBS "Lock UI" (user.ini [BasicWindow] DocksLocked=true) blocks the operator from
+/// dragging / rearranging / re-docking ANY dock at all — the actual #525 cause (nothing to do with
+/// the WM or a compositor). setup-imag.sh must force DocksLocked=false both at provision (seed_ini,
+/// on global.ini + user.ini) and every boot (the openbox autostart, before OBS launches).
+#[test]
+fn setup_imag_forces_docks_unlocked_525() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("DocksLocked=false"),
+        "{SETUP} must force DocksLocked=false (#525) — a locked OBS UI blocks the operator from \
+         dragging/rearranging any dock at all"
+    );
+    assert!(
+        body.matches("s/^DocksLocked=.*/DocksLocked=false/").count() >= 2,
+        "{SETUP} must force-replace DocksLocked=false (self-heal a locked box) in BOTH seed_ini \
+         (provision) and the openbox autostart (every boot) — #525"
+    );
+    let last_force = body
+        .rfind("DocksLocked")
+        .expect("DocksLocked force present");
+    let autostart_launch = body
+        .find("taskset -c 2-11 obs &")
+        .expect("autostart OBS launch present");
+    assert!(
+        last_force < autostart_launch,
+        "the autostart DocksLocked=false force must run BEFORE the autostart launches OBS (#525)"
+    );
+}
+
 /// #483/#522: the Desktop icon (double-click launch) must stay UNPINNED (`Exec=obs`, no
 /// taskset) — only the boot-time openbox autostart script is pinned to the P-core block. #522
 /// removed the old `.config/autostart/obs.desktop` GNOME entry entirely; #526 additionally has
