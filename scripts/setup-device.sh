@@ -459,44 +459,31 @@ if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
 else
     echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
 fi
-# #289: reserve core 3 for the SCHED_FIFO capture/emit path — add isolcpus=3 to the
-# kernel cmdline IDEMPOTENTLY (never duplicated). This edit lives INSIDE this #295
-# initrd-guaranteed grub step (the update-grub + abort-if-no-initrd guard below) so the
-# cmdline change can never strand a box on an initrd-less kernel the way an ad-hoc grub
-# edit did.
-if ! grep -qE '^GRUB_CMDLINE_LINUX=.*isolcpus=3([" ]|$)' /etc/default/grub; then
-    if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
-        # Append inside the existing double-quoted value.
-        sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 isolcpus=3"/' /etc/default/grub
-        # Normalise a leading space when GRUB_CMDLINE_LINUX was previously empty ("" -> " isolcpus=3").
-        sed -i 's/^GRUB_CMDLINE_LINUX="  */GRUB_CMDLINE_LINUX="/' /etc/default/grub
-    else
-        echo 'GRUB_CMDLINE_LINUX="isolcpus=3"' >> /etc/default/grub
-    fi
-    echo "  Kernel cmdline: isolcpus=3 added to GRUB_CMDLINE_LINUX [#289]"
-else
-    echo "  Kernel cmdline: isolcpus=3 already present [#289]"
-fi
-# #303: quiet the isolcpus=3 core the rest of the way — nohz_full=3 stops the periodic
-# scheduler tick on it, rcu_nocbs=3 offloads RCU callbacks off it, and irqaffinity=0-2
-# defaults ALL boot IRQs onto the general cores (the only lever that moves managed MSI
-# xhci IRQs, which reject runtime /proc/irq/<n>/smp_affinity writes — #289's ExecStartPre
-# logs those as non-fatal and they stay put without this). Same idempotent
-# never-duplicated append pattern as isolcpus=3 above, inside the same #295
-# initrd-guaranteed grub step.
-for flag in nohz_full=3 rcu_nocbs=3 irqaffinity=0-2; do
+# #289/#303: reserve core 3 for the SCHED_FIFO capture/emit path (isolcpus=3) and quiet it
+# the rest of the way — nohz_full=3 stops the periodic scheduler tick on it, rcu_nocbs=3
+# offloads RCU callbacks off it, and irqaffinity=0-2 defaults ALL boot IRQs onto the general
+# cores (the only lever that moves managed MSI xhci IRQs, which reject runtime
+# /proc/irq/<n>/smp_affinity writes — #289's ExecStartPre logs those as non-fatal and they
+# stay put without this). Each flag is appended to GRUB_CMDLINE_LINUX IDEMPOTENTLY (never
+# duplicated), one shared loop for all four so there is exactly one append code path. This
+# edit lives INSIDE this #295 initrd-guaranteed grub step (the update-grub + abort-if-no-initrd
+# guard below) so the cmdline change can never strand a box on an initrd-less kernel the way
+# an ad-hoc grub edit did.
+for flag_tag in "isolcpus=3:#289" "nohz_full=3:#303" "rcu_nocbs=3:#303" "irqaffinity=0-2:#303"; do
+    flag="${flag_tag%%:*}"
+    tag="${flag_tag##*:}"
     if ! grep -qE "^GRUB_CMDLINE_LINUX=.*${flag}([\" ]|\$)" /etc/default/grub; then
         if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
             # Append inside the existing double-quoted value.
             sed -i "s/^\(GRUB_CMDLINE_LINUX=\"[^\"]*\)\"/\1 ${flag}\"/" /etc/default/grub
-            # Normalise a leading space when GRUB_CMDLINE_LINUX was previously empty.
+            # Normalise a leading space when GRUB_CMDLINE_LINUX was previously empty ("" -> " isolcpus=3").
             sed -i 's/^GRUB_CMDLINE_LINUX="  */GRUB_CMDLINE_LINUX="/' /etc/default/grub
         else
             echo "GRUB_CMDLINE_LINUX=\"${flag}\"" >> /etc/default/grub
         fi
-        echo "  Kernel cmdline: ${flag} added to GRUB_CMDLINE_LINUX [#303]"
+        echo "  Kernel cmdline: ${flag} added to GRUB_CMDLINE_LINUX [${tag}]"
     else
-        echo "  Kernel cmdline: ${flag} already present [#303]"
+        echo "  Kernel cmdline: ${flag} already present [${tag}]"
     fi
 done
 # #295: GUARANTEE every installed kernel has an initrd BEFORE regenerating grub. A kernel without an
