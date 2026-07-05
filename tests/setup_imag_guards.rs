@@ -2113,6 +2113,11 @@ fn setup_imag_504_switches_display_manager_symlink_to_lightdm() {
 
 /// Every desktop-bloat service on the owner's DISABLE list must be disabled — they waste resources
 /// on a production appliance. #504.
+///
+/// gdm3 is asserted SEPARATELY from the `--now` loop (review finding, 2026-07-05): on a genuine
+/// from-scratch GNOME box, gdm3 still owns the CURRENT `:0` session that the later OBS-launch step
+/// depends on — stopping it immediately (`--now`) would kill that session mid-provision. gdm3 must
+/// still be disabled (so it never starts again after the reboot to lightdm), just not stopped NOW.
 #[test]
 fn setup_imag_504_disables_bloat_services() {
     let body = read(SETUP);
@@ -2133,7 +2138,6 @@ fn setup_imag_504_disables_bloat_services() {
         "colord",
         "switcheroo-control",
         "gnome-remote-desktop",
-        "gdm3",
     ] {
         assert!(
             disable_list.split_whitespace().any(|w| w == svc),
@@ -2141,8 +2145,19 @@ fn setup_imag_504_disables_bloat_services() {
         );
     }
     assert!(
+        !disable_list.split_whitespace().any(|w| w == "gdm3"),
+        "{SETUP} (#504) gdm3 must NOT be in the `--now` (immediate-stop) loop — on a from-scratch \
+         box it may still own the live `:0` session the OBS-launch step needs; it gets a SEPARATE \
+         disable-without-`--now` call instead"
+    );
+    assert!(
         body.contains(r#"systemctl disable --now "$svc""#),
         "{SETUP} (#504) must `systemctl disable --now` each listed service (stop + disable)"
+    );
+    assert!(
+        body.contains("systemctl disable gdm3 >/dev/null 2>&1 || true"),
+        "{SETUP} (#504) must disable gdm3 (for the NEXT boot) WITHOUT `--now` — stopping it \
+         immediately could kill a live `:0` GNOME session mid-provision on a from-scratch box"
     );
 }
 
@@ -2198,10 +2213,24 @@ fn setup_imag_504_purges_gnome_explicit_never_autoremove() {
 #[test]
 fn setup_imag_504_never_disables_or_purges_the_keep_set() {
     let body = read(SETUP);
-    let d_start = body.find("for svc in ").unwrap() + "for svc in ".len();
-    let disable_list = &body[d_start..d_start + body[d_start..].find("; do").unwrap()];
-    let p_start = body.find(r#"GNOME_PURGE_PKGS=""#).unwrap() + r#"GNOME_PURGE_PKGS=""#.len();
-    let purge_list = &body[p_start..p_start + body[p_start..].find('"').unwrap()];
+    let d_start = body
+        .find("for svc in ")
+        .expect("{SETUP} (#504) must have a `for svc in …` service-disable loop")
+        + "for svc in ".len();
+    let d_end = d_start
+        + body[d_start..]
+            .find("; do")
+            .expect("{SETUP} (#504) the disable loop must be `for svc in …; do`");
+    let disable_list = &body[d_start..d_end];
+    let p_start = body
+        .find(r#"GNOME_PURGE_PKGS=""#)
+        .expect("{SETUP} (#504) must define an explicit GNOME_PURGE_PKGS package list")
+        + r#"GNOME_PURGE_PKGS=""#.len();
+    let p_end = p_start
+        + body[p_start..]
+            .find('"')
+            .expect("{SETUP} (#504) GNOME_PURGE_PKGS must be a quoted string");
+    let purge_list = &body[p_start..p_end];
     for keep in [
         "avahi",
         "avahi-daemon",
@@ -2248,5 +2277,106 @@ fn setup_imag_504_installs_and_switches_dm_before_purge() {
         symlink_idx < purge_idx,
         "{SETUP} (#504) the display-manager symlink must be switched to lightdm BEFORE gdm3 is \
          purged — otherwise the box boots with NO display manager (black wall)"
+    );
+    assert!(
+        install_idx < symlink_idx,
+        "{SETUP} (#504) openbox+lightdm must be INSTALLED before the DM symlink is switched — the \
+         script's own runtime guard refuses to switch the symlink until lightdm.service exists on \
+         disk, so the install must come first"
+    );
+}
+
+/// Defense-in-depth (review finding, 2026-07-05): the DM symlink must be RE-VERIFIED after the
+/// GNOME purge, not just set once before it — gdm3's dpkg postrm runs AFTER the symlink switch, and
+/// a postrm that silently re-pointed display-manager.service back would be exactly the black-wall
+/// failure mode this step exists to prevent. #504.
+#[test]
+fn setup_imag_504_reasserts_dm_symlink_after_purge() {
+    let body = read(SETUP);
+    let symlink_idx = body
+        .find("ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service")
+        .expect("DM symlink switch present");
+    let purge_idx = body.find("apt-get purge").expect("GNOME purge present");
+    let reassert_idx = body
+        .find(r#"[ "$(readlink -f /etc/systemd/system/display-manager.service)" = "/lib/systemd/system/lightdm.service" ]"#)
+        .expect(
+            "{SETUP} (#504) must re-verify the display-manager symlink AFTER the GNOME purge — a \
+             package postrm (gdm3) running after the initial switch could silently re-point it back",
+        );
+    assert!(
+        purge_idx < reassert_idx,
+        "{SETUP} (#504) the DM-symlink re-assert must run AFTER the GNOME purge, not before — \
+         otherwise it can't catch a postrm that re-points the symlink"
+    );
+    assert!(
+        symlink_idx < reassert_idx,
+        "{SETUP} (#504) the re-assert must come after the initial symlink switch"
+    );
+    assert!(
+        body.contains(
+            r##"fail "#504: display-manager.service no longer points at lightdm after the GNOME purge"##
+        ),
+        "{SETUP} (#504) the re-assert must FAIL LOUD (not warn) if the symlink drifted — leaving \
+         the box with an uncertain DM is the exact black-wall risk"
+    );
+}
+
+/// Root-cause extension of the gdm3-ordering fix (review finding, 2026-07-05): purging the gdm3
+/// PACKAGE runs its own maintainer scripts, which stop the service on removal REGARDLESS of the
+/// `disable` (no `--now`) call in step 15(d) — so on a genuine from-scratch box, gdm3's package
+/// purge can still tear down the CURRENT `:0` session the OBS-launch step (17) depends on. The
+/// launch step must detect a dead `:0` and degrade gracefully (defer to the next-boot autostart)
+/// instead of hard-failing the whole provisioning run over an EXPECTED intermediate state. #504.
+#[test]
+fn setup_imag_504_obs_launch_degrades_gracefully_when_x_session_is_dead() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("[ -S /tmp/.X11-unix/X0 ]"),
+        "{SETUP} (#504) the OBS-launch step must check whether :0's X11 socket is actually alive \
+         before attempting to launch OBS into it — step 15's GNOME purge can have torn it down"
+    );
+    let x_check_idx = body
+        .find("[ -S /tmp/.X11-unix/X0 ]")
+        .expect("X11 socket check present");
+    let old_hardfail_idx = body.find(r#"pgrep -x obs >/dev/null || fail "OBS did not start"#);
+    assert!(
+        old_hardfail_idx.is_some_and(|i| x_check_idx < i),
+        "{SETUP} (#504) the 'OBS did not start' hard-fail must be reachable ONLY behind the X11 \
+         socket check — a dead :0 (expected on a from-scratch box) must not hard-fail the whole run"
+    );
+    assert!(
+        body.contains("OBS_LAUNCHED_THIS_RUN=1") && body.contains("OBS_LAUNCHED_THIS_RUN=0"),
+        "{SETUP} (#504) must track whether OBS actually launched THIS run (both the success and \
+         the deferred-to-next-boot paths must set the flag) so step 18's verify can key off it"
+    );
+    assert!(
+        body.contains("auto-launch via the lightdm+openbox"),
+        "{SETUP} (#504) the deferred path must explain WHY (no live :0) and WHAT happens next \
+         (autostart on next boot) — a silent skip would look like an unexplained no-op"
+    );
+}
+
+/// Step 18's WebSocket/genlock/NDI verify must be GATED on OBS having actually launched this run —
+/// otherwise the same from-scratch dead-:0 state makes step 18 hard-fail on ":4455 not listening"
+/// for a fully-expected reason (step 17 correctly deferred the launch to next boot). #504.
+#[test]
+fn setup_imag_504_verify_step_gated_on_obs_launched_this_run() {
+    let body = read(SETUP);
+    let gate_idx = body
+        .find(r#"if [ "$OBS_LAUNCHED_THIS_RUN" -eq 1 ]; then"#)
+        .expect("{SETUP} (#504) step 18's verify body must be gated on OBS_LAUNCHED_THIS_RUN");
+    let ws_wait_idx = body
+        .find("OBS WebSocket :4455 not listening")
+        .expect("the WS :4455 hard-fail must still exist for the launched-this-run path");
+    let genlock_marker_idx = body
+        .find("NOT the genlock build (check the #460 hot-swap step)")
+        .expect("the genlock log-verify hard-fail must still exist for the launched-this-run path");
+    let skip_msg_idx = body
+        .find("skipping the WebSocket/genlock/NDI")
+        .expect("{SETUP} (#504) must explain that the verify was skipped, and why");
+    assert!(
+        gate_idx < ws_wait_idx && gate_idx < genlock_marker_idx && gate_idx < skip_msg_idx,
+        "{SETUP} (#504) the OBS_LAUNCHED_THIS_RUN gate must wrap BOTH the WS-wait and the genlock \
+         log-verify hard-fails, with the skip message in the else branch"
     );
 }
