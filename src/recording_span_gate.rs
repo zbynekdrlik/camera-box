@@ -95,9 +95,12 @@ pub fn node_capture_fps(
 /// by-design step is 1 (no decimation), never the stream recording's 2. `recording-verdict` calls
 /// this for BOTH: the stream sweep (`painted_tick_step(refresh_hz, stream_capture_fps)`) and
 /// imag's own per-segment sweep (`painted_tick_step(refresh_hz, imag_capture_fps)`).
-pub fn painted_tick_step(_refresh_hz: f64, _capture_fps: f64) -> i64 {
-    // #467 RED: not yet implemented — always returns a wrong constant so the new tests fail.
-    0
+pub fn painted_tick_step(refresh_hz: f64, capture_fps: f64) -> i64 {
+    if capture_fps > 0.0 {
+        (refresh_hz / capture_fps).round().max(1.0) as i64
+    } else {
+        1
+    }
 }
 
 #[cfg(test)]
@@ -275,7 +278,11 @@ mod tests {
 
     #[test]
     fn painted_tick_step_non_positive_capture_fps_floors_to_1() {
-        assert_eq!(painted_tick_step(60.0, 0.0), 1, "zero capture_fps -> step 1");
+        assert_eq!(
+            painted_tick_step(60.0, 0.0),
+            1,
+            "zero capture_fps -> step 1"
+        );
         assert_eq!(
             painted_tick_step(60.0, -5.0),
             1,
