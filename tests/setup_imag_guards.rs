@@ -2462,11 +2462,14 @@ fn setup_imag_installs_dev1_driftguard_pubkey_541() {
         "{SETUP} must write into authorized_keys (#541)"
     );
     // Idempotent — must check for the key's presence before appending, never blind-append every run.
+    // Matches on the type+base64 blob (not the full line incl. comment) so a differently-commented
+    // instance of the SAME key doesn't get duplicated (the trailing comment is cosmetic; sshd
+    // ignores it for auth).
     assert!(
-        body.contains("grep -qF \"$DEV1_DRIFTGUARD_PUBKEY\"")
-            || body.contains("grep -qF \"$DEV1_DRIFTGUARD_PUBKEY\" \"$AUTH_KEYS\""),
-        "{SETUP}: the #541 key install must be idempotent — grep for the key's presence before \
-         appending, so re-running the provisioner never duplicates the authorized_keys line"
+        body.contains("grep -qF \"$DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB\""),
+        "{SETUP}: the #541 key install must be idempotent — grep for the key's (type+blob, \
+         comment-independent) presence before appending, so re-running the provisioner never \
+         duplicates the authorized_keys line"
     );
     // Correct perms: ~/.ssh must be 700, authorized_keys must be 600 — sshd refuses to honor
     // group/world-writable authorized_keys or .ssh directories.
@@ -2494,20 +2497,29 @@ fn setup_imag_installs_dev1_driftguard_pubkey_541() {
 #[test]
 fn setup_imag_driftguard_pubkey_step_owned_by_desktop_user_541() {
     let body = read(SETUP);
-    let step_idx = body
-        .find("dev1 drift-guard SSH access (#541)")
-        .expect("{SETUP} must have a #541 step");
-    let tail = &body[step_idx..];
-    // Only look within this step's block (up to the next `step ` invocation or EOF).
-    let end = tail[1..]
-        .find("\nstep ")
-        .map(|i| i + 1)
-        .unwrap_or(tail.len());
-    let block = &tail[..end];
     assert!(
-        block.contains(r#"sudo -u "$DESKTOP_USER""#),
-        "{SETUP}: the #541 authorized_keys write must run as `sudo -u \"$DESKTOP_USER\"` — writing \
-         as root under $USER_HOME would leave root-owned files the desktop user's sshd session \
-         cannot trust (StrictModes)"
+        body.contains("dev1 drift-guard SSH access (#541)"),
+        "{SETUP} must have a #541 step"
+    );
+    // Every filesystem-mutating command for the #541 key install must run as the desktop user —
+    // check each exact combined invocation (not just "sudo -u ... appears somewhere in the file",
+    // which would pass even if these specific commands ran as root under $USER_HOME).
+    for needle in [
+        r#"sudo -u "$DESKTOP_USER" mkdir -p "$SSH_DIR""#,
+        r#"sudo -u "$DESKTOP_USER" chmod 700 "$SSH_DIR""#,
+        r#"sudo -u "$DESKTOP_USER" touch "$AUTH_KEYS""#,
+        r#"sudo -u "$DESKTOP_USER" chmod 600 "$AUTH_KEYS""#,
+    ] {
+        assert!(
+            body.contains(needle),
+            "{{SETUP}}: the #541 authorized_keys write must run `{needle}` as the desktop user — \
+             writing as root under $USER_HOME would leave root-owned files the desktop user's \
+             sshd session cannot trust (StrictModes)"
+        );
+    }
+    assert!(
+        body.contains(r#"sudo -u "$DESKTOP_USER" tee -a "$AUTH_KEYS""#),
+        "{SETUP}: the #541 key APPEND must also run as the desktop user (`sudo -u \"$DESKTOP_USER\" \
+         tee -a \"$AUTH_KEYS\"`), not as root"
     );
 }

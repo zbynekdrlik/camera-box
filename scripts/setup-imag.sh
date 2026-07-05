@@ -34,6 +34,11 @@ OBS_CFG="${USER_HOME}/.config/obs-studio"
 # half of dev1's existing ~/.ssh/id_ed25519 keypair — safe to commit (a public key grants nothing
 # without the matching private key, which never leaves dev1). NEVER put a private key here.
 DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQA2I8vu1a/kU9sx6SmUdA3lOf dev1-driftguard-control-541"
+# type+base64 only (the trailing comment is cosmetic and NOT used by sshd for auth) -- matching on
+# this instead of the full line makes the idempotency check in step 19 immune to a differently
+# commented instance of the SAME key already being present (e.g. installed by hand with the local
+# ~/.ssh/id_ed25519.pub file's own comment).
+DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
 TOTAL_STEPS=19
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
@@ -1169,7 +1174,7 @@ sudo -u "$DESKTOP_USER" mkdir -p "$SSH_DIR"
 sudo -u "$DESKTOP_USER" chmod 700 "$SSH_DIR"
 sudo -u "$DESKTOP_USER" touch "$AUTH_KEYS"
 sudo -u "$DESKTOP_USER" chmod 600 "$AUTH_KEYS"
-if grep -qF "$DEV1_DRIFTGUARD_PUBKEY" "$AUTH_KEYS" 2>/dev/null; then
+if grep -qF "$DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB" "$AUTH_KEYS" 2>/dev/null; then
     echo "  dev1 driftguard key already authorized"
 else
     echo "$DEV1_DRIFTGUARD_PUBKEY" | sudo -u "$DESKTOP_USER" tee -a "$AUTH_KEYS" >/dev/null
