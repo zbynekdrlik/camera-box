@@ -1939,3 +1939,4 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   `resolve` + `#N` substring anywhere in a PR, even negated. #504 remains OPEN — the live GNOME
   purge + reboot-verify on 10.77.9.182 is the supervisor's next step, not done by this worker
   (explicit scope boundary: code-only, no live purge/reboot).
+- 2026-07-05 #504 imag-nb strip GNOME → kiosk: code PR #539 (setup-imag.sh kiosk step15 + 13 guard tests, merged e7cd583a); live imag-nb GNOME purged (11 pkgs, KEEP services safe) + reboot-verified (fresh boot, autologin→openbox, single OBS, GNOME gone); v1.7.0-dev.253
