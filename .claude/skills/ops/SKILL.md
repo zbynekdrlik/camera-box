@@ -205,6 +205,20 @@ kernel-blacklist) was NEVER live-applied, only codified.** `apt-mark showhold` o
 shows only `obs-studio`. Don't assume "codified in setup-imag.sh" means "already protecting the
 live box" — check `apt-mark showhold` / `systemctl is-enabled unattended-upgrades` if it matters.
 
+**The same gap runs the OTHER direction on a REVERT (#536): fixing setup-imag.sh does NOT undo an
+effect the old script already baked into a live box's generated file.** `setup-imag.sh` writes
+`~/.config/openbox/autostart` and seeds `user.ini` from a template at provision/boot time — once
+written, those files are just static files; removing the writer from the script does nothing to a
+copy that already has the old line in it. #525 force-set `DocksLocked=false` at provision AND every
+boot; #536 reverted the *script*, but imag-nb's `~/.config/openbox/autostart` still had the every-
+boot `sed -i "s/^DocksLocked=.*/DocksLocked=false/"` line baked in from a prior boot and needed its
+own manual removal (`grep -n DocksLocked ~/.config/openbox/autostart` → delete that exact block).
+This is NOT the "hand-patch = drift" anti-pattern above — it's the mandatory second half of any
+revert that touches a generated/materialized file: fix the generator AND sync the artifact it
+already produced on every already-provisioned box. Leave anything the operator controls (e.g. the
+`user.ini` `DocksLocked` value itself) exactly as they set it — only remove the FORCE, never repin
+the value.
+
 ## Rig Recovery Policy
 
 The camera-box rig (cam1-4, strih.lan, stream.lan) is a **dev rig, not production**.
