@@ -215,6 +215,30 @@ fn imag_scenes_pins_verified_1to1_camera_mapping_526() {
     );
 }
 
+/// #502: imag must run on a named ADVANCED profile with a native-1080p60 NVENC h264 mkv recording,
+/// not the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which softens the E2E
+/// QR/burns). imag records its own program for the topology-v2 verdict, so the recording must be
+/// native-resolution + high quality. Verified live 2026-07-05: produces a 1920x1080@60 h264-NVENC
+/// .mkv. Guard the seed_profile() settings so a regression can't silently drop it.
+#[test]
+fn imag_scenes_seeds_advanced_nvenc_recording_profile_502() {
+    let s = read("scripts/imag_scenes.py");
+    for needle in [
+        r#""profileName": "imag-60fps""#,
+        r#"("Output", "Mode", "Advanced")"#,
+        r#"("AdvOut", "RecEncoder", "obs_nvenc_h264_tex")"#,
+        r#"("AdvOut", "RecRescale", "false")"#,
+        r#"("AdvOut", "RecFormat2", "mkv")"#,
+        "seed_profile(obs)",
+    ] {
+        assert!(
+            s.contains(needle),
+            "#502: imag_scenes.py must contain `{needle}` (Advanced NVENC native-1080p mkv \
+             recording profile, applied before the scene seed)"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // [8/8] per-box decode-in-place: imag is extracted DIRECTLY (ssh/scp — no MCP plan needed) and
 // folded into the printed dev1 merge command as a THIRD partial.
