@@ -588,3 +588,24 @@ pattern as `systemd/rig-restore-watchdog.{service,timer}` (#281 Fix#3). Enable m
 ready: `systemctl --user enable --now cam-disk-guard.timer`. Checks CAM1/CAM2/CAM4 only (cam3 excluded,
 #301). Alert threshold: `CAM_DISK_ALERT_THRESHOLD=80` (env-overridable; pure function in
 `scripts/lib/disk-guard-thresholds.sh` makes it Tier-0 unit-testable without SSH).
+
+## #449 — one canonical live-install builder (`scripts/create-usb-linux.sh`)
+
+`scripts/create-ubuntu-vm.sh` (old QEMU-manual install-to-image flow), `scripts/write-image.sh`
+(dd a pre-built master image to USB), and `scripts/create-image.sh` (clone a running device's
+disk into an image) were deleted (#449, mechanical part) — all three pre-dated the #448 one-shot
+`create-usb-linux.sh` installer and were unreachable dead code (confirmed via `git grep`: not
+sourced by any script or `scripts/lib/*`, not any script's sole consumer). `SETUP.md` and
+`.github/workflows/release.yml` were updated to stop referencing them. Pinned by
+`tests/appliance_boot_hardening.rs::dead_image_builders_are_removed` +
+`::create_usb_linux_is_the_sole_live_install_builder` — a revert or stray re-add fails CI.
+
+**`scripts/build-image.sh` is DELIBERATELY NOT part of this cleanup.** It is the live, tested
+ro-root+overlay builder (`RO_IMAGE_BUILDER`/`IMAGE_BUILDERS[]` in
+`tests/appliance_boot_hardening.rs`, `SETUP.md` ro-root section, the "Unified cam-box
+provisioning" section above). #449 stays OPEN for a queued user decision on its fate — fold it
+into `create-usb-linux.sh` as the sole builder, or keep it as a sanctioned second (RO-ROOT)
+builder alongside the live-install one. Do not delete/demote it without that decision.
+
+`.github/workflows/build-image.yml` (a 5th, inline, script-less image-build path) was NOT
+retired by #449 — noted as a follow-up.
