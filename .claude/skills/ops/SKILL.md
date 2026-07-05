@@ -90,37 +90,37 @@ predates the fix):
 Baked into `scripts/create-usb-linux.sh` (base image) + `setup.sh` + `setup-device.sh`; pinned by
 content-assertion tests in `tests/appliance_boot_hardening.rs`.
 
-## #531 — dev1 has NO SSH key on imag-nb; use the `linux-imag-nb` MCP as the read-access fallback
+## #541 (fixed, was #531) — dev1 has a real SSH key on imag-nb; `--check-imag` runs headless
 
 `scripts/drift-guard.sh --check-imag` SSHes from **dev1** straight to imag-nb
 (`newlevel@10.77.9.182`) with `-o BatchMode=yes` (deliberately refuses to prompt for a password —
-fail-fast, matching the doc comment on `gather_and_check_imag`'s `ssh_cmd`). Confirmed 2026-07-05:
-dev1's keys are NOT in imag-nb's `authorized_keys`, so `--check-imag` run from dev1 returns
-**all-UNKNOWN**, not because the check logic is wrong but because the SSH never authenticates:
+fail-fast, matching the doc comment on `gather_and_check_imag`'s `ssh_cmd`). Until #541, dev1's keys
+were NOT in imag-nb's `authorized_keys`, so `--check-imag` run from dev1 returned all-UNKNOWN — not
+because the check logic was wrong, but because the SSH never authenticated (documented workaround
+was reading imag-nb's live state via the `mcp__linux-imag-nb__Shell` MCP tool instead, a different
+transport).
+
+**Fixed 2026-07-06 (#541):** dev1's `~/.ssh/id_ed25519.pub` (comment relabeled
+`dev1-driftguard-control-541` on the authorized_keys line — same cryptographic key, cosmetic label
+only) is now in imag-nb's `~/.ssh/authorized_keys` for `newlevel`. `scripts/setup-imag.sh` step 19
+installs it idempotently on every (re-)provision, so a rebuilt box never regresses this. Verified
+live:
 
 ```
-$ ssh -o ConnectTimeout=10 -o BatchMode=yes -v -- newlevel@10.77.9.182 'echo CONNECTED'
-debug1: Offering public key: /home/newlevel/.ssh/id_rsa ...
-debug1: Offering public key: /home/newlevel/.ssh/id_ed25519 ...
-debug1: No more authentication methods to try.
-newlevel@10.77.9.182: Permission denied (publickey,password).
+$ ssh -o BatchMode=yes -o ConnectTimeout=5 newlevel@10.77.9.182 hostname
+imag-pc
+$ scripts/drift-guard.sh --check-imag
+== drift-guard --check-imag  host=10.77.9.182  (SSH-gathered + git-compared; FAILS loudly on drift) ==
+  genlock_build          DRIFT    (imag-nb genlock STALE: box=80dac432... is N genlock-commit(s) behind origin/main ...)
+  distroav_so_path       OK       (/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so)
+  dantesync_locked       OK       (locked)
 ```
 
-Unlike CAM1-4 (which take `sshpass -p "$DEVICE_ROOT_PW"` password auth, see Device Deployment
-above), imag-nb's password auth is NOT usable through dev1's plain `ssh` client either way here,
-because `--check-imag`'s `BatchMode=yes` refuses to even try it. **When you need to read imag-nb's
-live state from dev1 and drift-guard's own SSH can't reach it, use the `mcp__linux-imag-nb__Shell`
-MCP tool instead** — it's a different transport (not dev1's ssh client / keys) and DOES work today:
-
-```
-mcp__linux-imag-nb__Shell({command: "cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt"})
-```
-
-You can then feed the value straight into drift-guard's own PURE functions (`source
-scripts/drift-guard.sh`, call `imag_build_drift_report`/`imag_genlock_range_log` directly) to get a
-real verdict without needing `--check-imag`'s SSH to work. Tracked as #541 (add dev1's pubkey to
-imag-nb's `authorized_keys` for `newlevel`, matching how dev1 already has key access to CAM1-4) —
-not yet fixed, so `--check-imag` run bare from dev1 will keep reporting all-UNKNOWN until then.
+`--check-imag` now runs headless from dev1 (no MCP workaround needed) and correctly reports genlock
+build drift as an advisory — that DRIFT is expected until someone runs the #460 hot-swap
+(`setup-imag.sh` step 12) again at a safe off-event time; it is NOT a #541 regression. The
+`mcp__linux-imag-nb__Shell` fallback above still works and remains useful for anything outside
+drift-guard's own facets, but is no longer required for `--check-imag` itself.
 
 ## #132/#445/#452 — `scripts/upgrade-fleet-ndi.sh` canary set + version-scoped backup
 

@@ -30,7 +30,7 @@
 
 | Host | IP Address | Status | Notes |
 |------|------------|--------|-------|
-| imag-nb | 10.77.9.182 | Active | SSH: newlevel/newlevel (sudo needs pw); 60fps IMAG OBS box, genlock hot-swap over PPA base (#460) |
+| imag-nb | 10.77.9.182 | Active | SSH: newlevel/newlevel (sudo needs pw); 60fps IMAG OBS box, genlock hot-swap over PPA base (#460); dev1 also has headless key-based SSH (`~/.ssh/id_ed25519`) for `scripts/drift-guard.sh --check-imag` (#541), installed by `setup-imag.sh` step 19 |
 
 ## Important Notes
 
