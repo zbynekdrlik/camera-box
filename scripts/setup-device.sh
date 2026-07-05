@@ -15,9 +15,15 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# GitHub repo for downloading binary
+# GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
+# runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
 GITHUB_REPO="zbynekdrlik/camera-box"
-BINARY_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/camera-box-linux-amd64.tar.gz"
+CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-dev}"
+
+# Fleet NDI runtime source -- the licensed .so is never built by CI, so a fresh box fetches it
+# from a known-good fleet peer instead of requiring a manual per-box scp copy (STEP 4, #457).
+NDI_PEER="${CAMERA_BOX_NDI_PEER:-10.77.9.61}"
+NDI_PEER_PW="${CAM_PW:-newlevel}"
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -25,17 +31,35 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Parse arguments
+# Parse arguments. --binary <url|path> may appear anywhere; DEVICE_NAME/DEVICE_IP/VBAN_STREAM
+# remain positional (#457).
+BINARY_ARG=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary)
+            BINARY_ARG="${2:?--binary needs a URL or local path}"
+            shift 2
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
 DEVICE_NAME="${1:-}"
 DEVICE_IP="${2:-}"
 VBAN_STREAM="${3:-}"
 
 if [ -z "$DEVICE_NAME" ] || [ -z "$DEVICE_IP" ] || [ -z "$VBAN_STREAM" ]; then
-    echo -e "${RED}Usage: $0 DEVICE_NAME DEVICE_IP VBAN_STREAM${NC}"
+    echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME DEVICE_IP VBAN_STREAM${NC}"
     echo ""
     echo "Examples:"
     echo "  $0 CAM1 10.77.9.61 cam1"
     echo "  $0 CAM2 10.77.9.62 cam2"
+    echo "  $0 --binary ./dist/camera-box CAM2 10.77.9.62 cam2"
     exit 1
 fi
 
@@ -125,14 +149,50 @@ echo "  Static IP configured: $DEVICE_IP"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
-if curl -fsSL "$BINARY_URL" -o /tmp/camera-box.tar.gz; then
-    tar -xzf /tmp/camera-box.tar.gz -C /usr/local/bin/
-    chmod +x /usr/local/bin/camera-box
-    rm -f /tmp/camera-box.tar.gz
-    echo "  Binary installed from GitHub (v1.0.0)"
+# The fleet runs CI dev-builds (e.g. 1.7.0-dev.157), never a GitHub release -- installing from
+# releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). Resolution
+# order:
+#   1. --binary <local path>                  - use the file directly (already fetched elsewhere)
+#   2. --binary <url> / CAMERA_BOX_BINARY_URL  - curl this exact URL (a raw camera-box binary)
+#   3. default                                 - gh run download the latest successful CI
+#      artifact on $CI_BRANCH, mirroring scripts/deploy-fleet.sh's own mechanism, so a fresh box
+#      matches the fleet with no manual copy.
+BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
+if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
+    echo "  Using local binary: $BINARY_SRC"
+    install -m 0755 "$BINARY_SRC" /usr/local/bin/camera-box
+    echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
+elif [ -n "$BINARY_SRC" ]; then
+    echo "  Downloading binary from: $BINARY_SRC"
+    if curl -fsSL "$BINARY_SRC" -o /usr/local/bin/camera-box; then
+        chmod +x /usr/local/bin/camera-box
+        echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
+    else
+        echo -e "  ${YELLOW}Warning: Could not download binary from $BINARY_SRC${NC}"
+        echo "  Please install manually to /usr/local/bin/camera-box"
+    fi
+elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+    echo "  Fetching latest CI dev-build artifact (branch: $CI_BRANCH)..."
+    RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
+        --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
+    if [ -n "$RUN_ID" ]; then
+        DIST_DIR="$(mktemp -d)"
+        if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
+            && [ -f "$DIST_DIR/camera-box" ]; then
+            install -m 0755 "$DIST_DIR/camera-box" /usr/local/bin/camera-box
+            echo "  Binary installed from CI run $RUN_ID: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
+        else
+            echo -e "  ${YELLOW}Warning: gh run download failed for run $RUN_ID${NC}"
+            echo "  Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+        fi
+        rm -rf "$DIST_DIR"
+    else
+        echo -e "  ${YELLOW}Warning: no successful CI run found on branch '$CI_BRANCH'${NC}"
+        echo "  Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+    fi
 else
-    echo -e "  ${YELLOW}Warning: Could not download binary from GitHub${NC}"
-    echo "  Please install manually to /usr/local/bin/camera-box"
+    echo -e "  ${YELLOW}Warning: gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch the fleet dev-build${NC}"
+    echo "  Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
 fi
 
 # =============================================================================
@@ -143,16 +203,35 @@ echo -e "${GREEN}[4/${TOTAL_STEPS}] Setting up NDI library...${NC}"
 mkdir -p /usr/lib/ndi
 # Add NDI library path to ldconfig
 echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
-# NDI library must be copied from dev machine due to licensing
-# This is done separately before running this script:
-#   scp /usr/lib/ndi/* root@<DEVICE_IP>:/usr/lib/ndi/
 if [ -f /usr/lib/ndi/libndi.so.6 ]; then
     ldconfig
     echo "  NDI library: present and configured"
+elif [ "$DEVICE_IP" = "$NDI_PEER" ]; then
+    echo -e "  ${YELLOW}This box IS the fleet NDI source ($NDI_PEER) -- nothing to fetch${NC}"
+    echo "  Copy libndi.so.* onto it manually before re-running this script"
 else
-    echo -e "  ${YELLOW}NDI library not found${NC}"
-    echo "  Copy from dev machine BEFORE running this script:"
-    echo "  scp /usr/lib/ndi/* root@<DEVICE_IP>:/usr/lib/ndi/"
+    # NDI is a licensed runtime -- CI never builds it, so fetch it from a known-good fleet peer
+    # (cam1) instead of requiring a manual per-box scp copy (#457). Mirrors the already-proven
+    # setup-imag.sh step-10 dance: scp the versioned .so, then symlink libndi.so.6/libndi.so onto it.
+    echo "  NDI library not found locally -- fetching from fleet peer $NDI_PEER..."
+    command -v sshpass >/dev/null 2>&1 || apt-get install -y -qq sshpass >/dev/null 2>&1 || true
+    if command -v sshpass >/dev/null 2>&1 \
+        && sshpass -p "$NDI_PEER_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            "root@${NDI_PEER}:/usr/lib/ndi/libndi.so.*.*.*" /usr/lib/ndi/ 2>/dev/null; then
+        REAL="$(cd /usr/lib/ndi && ls libndi.so.*.*.* 2>/dev/null | head -1 || true)"
+        if [ -n "$REAL" ]; then
+            ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
+            ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
+            ldconfig
+            echo "  NDI library fetched from $NDI_PEER and configured ($REAL)"
+        else
+            echo -e "  ${YELLOW}NDI fetch from $NDI_PEER produced no file${NC}"
+            echo "  Copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
+        fi
+    else
+        echo -e "  ${YELLOW}Could not fetch NDI library from fleet peer $NDI_PEER${NC}"
+        echo "  Copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
+    fi
 fi
 
 # =============================================================================
@@ -717,7 +796,7 @@ fi
 echo ""
 if [ ! -f /usr/lib/ndi/libndi.so.6 ]; then
     echo -e "${YELLOW}ACTION REQUIRED:${NC}"
-    echo "  Copy NDI library: scp root@10.77.9.61:/usr/lib/ndi/* /usr/lib/ndi/"
+    echo "  NDI library still missing -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
     echo ""
 fi
 echo -e "${YELLOW}Next steps:${NC}"

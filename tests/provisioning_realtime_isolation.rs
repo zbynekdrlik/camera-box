@@ -133,11 +133,14 @@ fn setup_device_ensures_curl_before_first_download() {
     );
     let install_idx =
         first_noncomment_idx(&body, "curl ca-certificates").expect("curl install line present");
+    // #457: STEP 3's binary source resolution replaced the static $BINARY_URL release download
+    // with $BINARY_SRC (an explicit --binary/CAMERA_BOX_BINARY_URL override, curled when it's a
+    // URL) -- the curl-before-first-download invariant still holds, just against the new literal.
     let download_idx =
-        first_idx(&body, "curl -fsSL \"$BINARY_URL\"").expect("binary curl download present");
+        first_idx(&body, "curl -fsSL \"$BINARY_SRC\"").expect("binary curl download present");
     assert!(
         install_idx < download_idx,
-        "curl must be ensured BEFORE the first `curl -fsSL \"$BINARY_URL\"` download — otherwise the \
+        "curl must be ensured BEFORE the first `curl -fsSL \"$BINARY_SRC\"` download — otherwise the \
          download silently fails on a base image with no curl, as it did on cam5 (#450)"
     );
     // Belt-and-braces: the main package-install step (STEP 16) must ALSO list curl so a re-run
