@@ -438,6 +438,10 @@ warn_imag_genlock_stale() {
   echo "[#531] pre-event drift check: is imag-nb's DEPLOYED genlock build current with origin/main?"
   out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag 2>&1 )" || rc=$?
   printf '%s\n' "$out" | sed 's/^/    [imag drift] /'
+  # #531 review: log the actual exit code (comprehensive-logging: values, not just a bare pass/fail)
+  # instead of capturing it into `rc` and never reading it — 0=OK, 20=DRIFT, 11=UNKNOWN, anything
+  # else is the drift-guard subprocess itself failing to even run (e.g. bash/script not found).
+  echo "    [imag drift] drift-guard --check-imag exit=${rc}"
   case "$out" in
     *"genlock STALE"*)
       cat >&2 <<'BANNER'

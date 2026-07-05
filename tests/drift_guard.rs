@@ -2354,6 +2354,32 @@ fn imag_build_drift_report_unknown_when_git_failed_never_a_false_ok_531() {
     );
 }
 
+#[test]
+fn imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531() {
+    // #531 review: `imag_genlock_range_log` feeds an UNVALIDATED box_sha (read over SSH from
+    // imag-nb's GENLOCK_BUILD_SHA.txt) straight into `git log "<box_sha>..origin/main" ...`. A
+    // corrupted/truncated marker file could be shaped like a git long-option (e.g. "--grep=x").
+    // Empirically confirmed (this repo, git 2.43): WITHOUT `--end-of-options`, git log SILENTLY
+    // consumes such a value as a real flag and exits 0 with EMPTY output — exactly the "range is
+    // empty, box is current" OK verdict `imag_build_drift_report` would report, i.e. a FALSE OK,
+    // the precise failure mode #531 exists to eliminate. `--end-of-options` must turn this into a
+    // LOUD failure (non-zero exit) instead, so the caller reports UNKNOWN, never a false OK. This
+    // function needs no live SSH/box — it runs `git log` against THIS repo's own checkout (the test
+    // process's cwd is the crate root), which always has an `origin/main` to compare against.
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_range_log "$(pwd)" "--grep=x")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !(out.contains("RC=0") && out.contains("OUT=[]")),
+        "an option-shaped box_sha must NEVER silently succeed with an empty range (that reads as \
+         a false 'box is current' OK to the caller) — it must fail loud instead: {out:?}"
+    );
+}
+
 /// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line (60fps,
 /// imag's low-latency IMAG role, EPIC #466 Topology v2).
 const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\

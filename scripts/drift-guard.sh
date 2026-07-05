@@ -591,6 +591,28 @@ check_imag_report() {
   return 0
 }
 
+# imag_genlock_range_log REPO_ROOT BOX_SHA -> prints `git log --oneline BOX_SHA..origin/main --
+# vendor/obs-studio vendor/distroav` (one genlock-touching commit per line the box is BEHIND);
+# exit status mirrors that `git log` call. #531 review: BOX_SHA comes from a file READ OVER SSH
+# from imag-nb (`GENLOCK_BUILD_SHA.txt`) and is used UNVALIDATED — normally a clean 40-hex commit
+# SHA, but a truncated/corrupted write (a crash mid-write, disk corruption, a future setup-imag.sh
+# bug) could leave it shaped like a git long-option, e.g. `--grep=x`. WITHOUT `--end-of-options`,
+# `git log "${box_sha}..origin/main" ...` would silently CONSUME such a value as a real git FLAG
+# instead of a revision range, exiting 0 with EMPTY output — the exact "box is current, OK" verdict
+# in imag_build_drift_report, i.e. a FALSE OK, precisely the failure mode this whole #531 check
+# exists to eliminate. `--end-of-options` (git >= 2.24, well within this repo's toolchain) marks the
+# end of git's own option parsing so any value here is ALWAYS treated as a revision, never a flag —
+# a malformed value now fails LOUD (`fatal: bad revision`, non-zero exit) instead of silently
+# succeeding empty. Mirrors the SAME OpenSSH-argument-injection defense `gather_and_check_imag`
+# already applies to `$target` via ssh's own `--` below. Isolated into its own function (rather than
+# inlined in gather_and_check_imag) so it is independently testable against THIS repo's own local
+# checkout — no live SSH to imag-nb needed (tests/drift_guard.rs).
+imag_genlock_range_log() {
+  local repo_root="$1" box_sha="$2"
+  git -C "$repo_root" log --oneline --end-of-options "${box_sha}..origin/main" \
+    -- vendor/obs-studio vendor/distroav 2>/dev/null
+}
+
 # gather_and_check_imag HOST USER README -> SSH-gathers the observed values from the LIVE
 # imag-nb box (#463) and runs [`check_imag_report`] against the pinned set in README. NOT unit
 # tested (it is pure I/O glue over `ssh` — same convention as the win-* MCP gathering for
@@ -650,11 +672,14 @@ gather_and_check_imag() {
     git_rc=1
     echo "WARN: could not resolve drift-guard.sh's own repo root — skipping imag genlock-build compare" >&2
   else
-    git -C "$repo_root" fetch origin --quiet 2>/dev/null \
-      || echo "WARN: git fetch origin failed — comparing imag build against a possibly-stale origin/main" >&2
+    # #531 review: `timeout 15` bounds the fetch the SAME way the ssh calls in this function are
+    # bounded — `warn_imag_genlock_stale` (rig-mode.sh) advertises this whole check as "never blocks
+    # going live", and an unbounded `git fetch` against a host that silently drops packets (rather
+    # than refusing the connection) can hang well past any TCP-level default before failing.
+    timeout 15 git -C "$repo_root" fetch origin --quiet 2>/dev/null \
+      || echo "WARN: git fetch origin failed (or timed out) — comparing imag build against a possibly-stale origin/main" >&2
     if [ -n "$obs_build_sha" ]; then
-      git_range="$(git -C "$repo_root" log --oneline "${obs_build_sha}..origin/main" \
-        -- vendor/obs-studio vendor/distroav 2>/dev/null)" || git_rc=$?
+      git_range="$(imag_genlock_range_log "$repo_root" "$obs_build_sha")" || git_rc=$?
     fi
   fi
   # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
