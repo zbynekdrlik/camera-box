@@ -41,6 +41,14 @@ import sys
 
 from websocket import create_connection
 
+# #526: VERIFIED physical camera <-> NDI-name mapping (live-checked 2026-07-05, all 6 boxes up).
+# The fleet advertises a clean 1:1 by box number: box 10.77.9.61 -> "CAM1 (usb)", .62 -> "CAM2",
+# .63 -> "CAM3", .64 -> "CAM4", .65 -> "CAM5", .66 -> "CAM6". So the naive 1:1 below ("MV Cam n" /
+# "Cam n" bound to "CAMn (usb)") IS the intended physical order, and the built-in multiview tile
+# order (= scene list order MV Cam 1..6) matches the physical camera numbering the cutter expects.
+# This differs from strih's OBS-source LABEL offset (that offset is in strih's source naming, not
+# in the NDI sender names, which are 1:1 to box number on every box). Pinned by a guard test in
+# tests/harness_imag_topology.rs so a silent reorder can't drift it.
 CAMS = range(1, 7)
 CANVAS_W, CANVAS_H, FPS = 1920, 1080, 60
 
