@@ -1917,3 +1917,25 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   only; the supervisor drives CI → PR "Closes #467" → merge, then runs the live ALL_CAMBOX rig
   recording (with `--imag`) as the acceptance proof — this worker has no rig access.
 - 2026-07-05 #536 revert #525 DocksLocked hard-force → PR #537 merged 9983c09f (+ doc PR #538 c71a07b6); imag-nb provisioning no longer overrides operator Lock UI; live box autostart cleaned; main green; v1.7.0-dev.252
+- 2026-07-05 #504 (code portion) codified the hand-driven imag-nb openbox+lightdm kiosk into
+  `scripts/setup-imag.sh` (new step 15: openbox+lightdm install, lightdm autologin openbox conf,
+  explicit DM-symlink switch, owner DISABLE-list services, explicit GNOME purge with no
+  autoremove). Deep review found gdm3 could still tear down a from-scratch box's live `:0`
+  session (via `disable --now` AND via the package purge's own maintainer scripts) before the
+  OBS-launch step ran — fixed by disabling gdm3 without `--now`, re-asserting the DM symlink after
+  the purge, and making steps 17/18 (OBS launch + verify) detect a dead `:0`
+  (`/tmp/.X11-unix/X0`) and degrade gracefully to the next-boot autostart instead of hard-failing;
+  the already-openbox live box's path is byte-identical to before. 13 new/updated guard tests
+  (96 total in `tests/setup_imag_guards.rs`, all green, default features). Read-only
+  `apt-get -s purge` simulation on the live box (10.77.9.182): 11 GNOME packages removed, none of
+  the KEEP set (sshd/NetworkManager/lightdm/avahi/dantesync/remoteos-mcp). Commits `f064abba8`
+  (version bump 1.7.0-dev.253), `8f78ad25d` (codification), `82a8542e3` (review fixes) → PR #539
+  merged `e7cd583a4`, main CI green.
+  **GOTCHA (new incident): the PR body's own defensive sentence "it does NOT close #504" was
+  literal-substring-matched by GitHub's issue-closer regardless of the "NOT" — auto-closed #504 on
+  merge even though every commit message deliberately avoided the `fix:`/`close:` + `#N` adjacency.
+  Reopened + documented on the issue (issuecomment-4887235757).** Extends this repo's existing
+  `fix: #N` commit-message gotcha to PR titles/bodies too: never write a bare `close`/`fix`/
+  `resolve` + `#N` substring anywhere in a PR, even negated. #504 remains OPEN — the live GNOME
+  purge + reboot-verify on 10.77.9.182 is the supervisor's next step, not done by this worker
+  (explicit scope boundary: code-only, no live purge/reboot).
