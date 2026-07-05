@@ -374,13 +374,16 @@ genlock_latency_ms_from_log() {
 #
 # Drain-safe (grep|head, never grep -q -- see genlock_from_log's note above): `grep -q` exits on
 # the FIRST match and closes its read end, so a `printf` still writing a large blob AFTER that
-# early match raises SIGPIPE on its next write. Confirmed empirically (#489 review): once the
-# whole call is captured via command substitution -- the EXACT shape `check_imag_report` uses
-# (`obs_dantesync_locked="$(dantesync_locked_from_log ...)"`)  -- a >64KB journal blob with an
-# early lock marker crashes the WHOLE CALLING SCRIPT with exit 141 under this file's own
-# `set -euo pipefail`, not merely a wrong "unlocked" answer. A real imag-nb journal line can be
-# long (stack traces, verbose diagnostics) and `-n 100` lines can comfortably exceed the pipe
-# buffer, so this is a real production risk, not a theoretical one.
+# early match can raise SIGPIPE on its next write; under this file's `set -euo pipefail`, an `if`
+# testing that pipeline directly is exempt from errexit, so the SCRIPT SURVIVES but the pipeline's
+# non-zero exit status flips the `if` to its else branch -- a SILENT WRONG ANSWER ("unlocked" for
+# a genuinely-locked box), not a crash. Confirmed empirically (#489 review) against a properly
+# materialized ~15.6MB blob (a live SIGPIPE race needs the writer still producing when the reader
+# closes -- a synthetic `yes | head` *generator* has its OWN unrelated SIGPIPE hazard between
+# `yes` and `head` that can crash a script regardless of any downstream consumer, so any repro
+# MUST materialize the test input from a plain string/file, never mid-pipe from `yes`). This is
+# the exact drift-guard-goes-silently-wrong failure mode `genlock_from_log`'s own comment already
+# documents for the identical pattern -- see that function's note above.
 dantesync_locked_from_log() {
   local log_text="$1" line
   if [ -z "$log_text" ]; then
@@ -1149,6 +1152,11 @@ check_pins() {
   # or latency pin would only ever surface via a LIVE `--check-imag` SSH run against imag-nb,
   # never in CI's manifest-only `--check-pins` pass.
   local p_fps_imag="${12}" p_latency_imag="${13}"
+  # #489: dantesync_locked_imag is, like output_fps_imag/genlock_latency_ms_imag above, ALWAYS
+  # backtick-pinned from day one (a runtime steady-state pin, not a build-artifact SHA that waits
+  # for a live deploy) — so it belongs in this offline check, not the excluded genlock_build_sha_
+  # imag/distroav_so_sha256_imag category above.
+  local p_dantesync_locked_imag="${14}"
   local errs=0
   echo "== drift-guard --check-pins ($readme) =="
   validate_semver   "obs_version"                    "$p_obs"             || errs=$((errs + 1))
@@ -1168,6 +1176,8 @@ check_pins() {
   # #463: imag-nb's own host-keyed fps + genlock-latency pins.
   validate_nonempty "output_fps_imag"                "$p_fps_imag"        || errs=$((errs + 1))
   validate_nonempty "genlock_latency_ms_imag"        "$p_latency_imag"    || errs=$((errs + 1))
+  # #489: imag-nb's dantesync clock-lock pin (always-pinned steady state, see comment above).
+  validate_nonempty "dantesync_locked_imag"          "$p_dantesync_locked_imag" || errs=$((errs + 1))
   # #390: any `range:MIN-MAX` calibration-tracked entry in either pin must match the code's
   # current DistroAV clamp EXACTLY — catches a manifest range typo silently narrowing/widening
   # the backstop, independent of the plain non-empty checks above.
@@ -1185,6 +1195,7 @@ check_pins() {
   echo "  canonical_plugin_path=$p_plugin"
   echo "  genlock_source_latency_strih=$p_src_lat_strih  genlock_source_latency_stream=$p_src_lat_stream"
   echo "  output_fps_imag=$p_fps_imag  genlock_latency_ms_imag=$p_latency_imag"
+  echo "  dantesync_locked_imag=$p_dantesync_locked_imag"
 
   # Cross-check: the manifest's DistroAV pin must equal the vendored DistroAV source version.
   # This catches a `git subtree pull` that bumped vendor/distroav without updating the table
@@ -1490,7 +1501,7 @@ main() {
   # set, so skip the manifest requirement + pin load for it (it must work even without
   # vendor/README.md, e.g. a checkout that only ships the script). #246.
   local p_obs p_distroav p_ndi p_fps p_fps_strih p_fps_stream p_genlock p_latency p_plugin p_src_lat_strih p_src_lat_stream
-  local p_fps_imag p_latency_imag
+  local p_fps_imag p_latency_imag p_dantesync_locked_imag
   if [ "$mode" != "status" ]; then
     [ -f "$readme" ] || { echo "ERROR: manifest not found: $readme (run from repo root)" >&2; exit 1; }
     p_obs="$(pinned_obs_version "$readme")"
@@ -1512,9 +1523,12 @@ main() {
     # CI) so a malformed/missing value is caught before ever needing a live SSH run.
     p_fps_imag="$(pinned_setting "$readme" output_fps_imag)"
     p_latency_imag="$(pinned_setting "$readme" genlock_latency_ms_imag)"
+    # #489: imag-nb's dantesync clock-lock pin, validated here too (offline, in CI) for the same
+    # reason as the fps/latency pins above.
+    p_dantesync_locked_imag="$(pinned_setting "$readme" dantesync_locked_imag)"
     if [ "$mode" = "check-pins" ]; then
       check_pins "$readme" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps_strih" "$p_fps_stream" "$p_genlock" "$p_latency" "$p_plugin" \
-        "$p_src_lat_strih" "$p_src_lat_stream" "$p_fps_imag" "$p_latency_imag"
+        "$p_src_lat_strih" "$p_src_lat_stream" "$p_fps_imag" "$p_latency_imag" "$p_dantesync_locked_imag"
       exit $?
     fi
   fi
