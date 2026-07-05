@@ -1574,8 +1574,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 17,
-        "TOTAL_STEPS must be 17 after #500 added the NVIDIA driver step to the prior 16"
+        declared, 18,
+        "TOTAL_STEPS must be 18 after #504 added the kiosk-environment step (openbox+lightdm+GNOME \
+         purge) to the prior 17"
     );
     assert_eq!(
         actual, declared,
@@ -2030,5 +2031,222 @@ fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
     assert!(
         heredoc_write < sed_sub,
         "{SETUP}: the placeholder substitution must happen AFTER the heredoc is written"
+    );
+}
+
+// =============================================================================
+// #504 — imag-nb kiosk codification: GNOME desktop → openbox+lightdm appliance.
+//
+// imag-nb was hand-converted live to an openbox kiosk (owner comment 2026-07-04); these guards
+// pin that whole conversion into setup-imag.sh so a from-scratch provision lands in the kiosk, not
+// GNOME — and so a later edit cannot silently drop the DM switch (which, missing, black-walled the
+// box) or turn the bounded GNOME purge into a blind autoremove cascade (which could reach the
+// KEEP services the appliance depends on). The owner's KEEP / DISABLE / PURGE lists are the
+// authoritative contract (issue #504 body + comments); these tests assert the script honours them
+// verbatim. Style matches the guards above: read the REAL script, assert the REAL contract.
+// =============================================================================
+
+/// The kiosk needs the light WM + display manager actually installed (a from-scratch box ships
+/// only GNOME) — the owner's "convert to openbox+lightdm" directive is a no-op if they are never
+/// apt-installed. #504.
+#[test]
+fn setup_imag_504_installs_openbox_and_lightdm() {
+    let body = read(SETUP);
+    assert!(
+        body.lines().any(|l| {
+            l.contains("apt-get install") && l.contains("openbox") && l.contains("lightdm")
+        }),
+        "{SETUP} (#504) must `apt-get install` BOTH openbox and lightdm — a from-scratch box has \
+         neither, and the kiosk cannot exist without them"
+    );
+}
+
+/// lightdm must autologin the desktop user straight into an OPENBOX session — the headless box has
+/// no operator to type a password, and the session must be openbox (not GNOME) for the kiosk. #504.
+#[test]
+fn setup_imag_504_writes_lightdm_autologin_openbox_session() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/lightdm/lightdm.conf.d/50-imag-autologin.conf"),
+        "{SETUP} (#504) must write the lightdm autologin drop-in \
+         /etc/lightdm/lightdm.conf.d/50-imag-autologin.conf"
+    );
+    assert!(
+        body.contains("[Seat:*]"),
+        "{SETUP} (#504) the lightdm autologin conf must carry the [Seat:*] header"
+    );
+    assert!(
+        body.contains("autologin-user=${DESKTOP_USER}") && body.contains(r#"DESKTOP_USER="newlevel""#),
+        "{SETUP} (#504) must set autologin-user to ${{DESKTOP_USER}} (=newlevel) — the headless box \
+         has no one to log in by hand"
+    );
+    assert!(
+        body.contains("autologin-session=openbox"),
+        "{SETUP} (#504) must set autologin-session=openbox — the kiosk WM, NOT GNOME"
+    );
+}
+
+/// The display-manager MUST be switched to lightdm by an EXPLICIT symlink, never `systemctl enable
+/// lightdm` — the owner hit `systemctl enable`'s "instance name specified" failure which left
+/// /etc/systemd/system/display-manager.service absent → the box booted with NO DM (black wall +
+/// extra reboot, 2026-07-04). #504.
+#[test]
+fn setup_imag_504_switches_display_manager_symlink_to_lightdm() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(
+            "ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service"
+        ),
+        "{SETUP} (#504) must set the display-manager.service symlink to lightdm EXPLICITLY \
+         (`ln -sf …lightdm.service …display-manager.service`) — `systemctl enable lightdm` failed \
+         to create it and black-walled the box"
+    );
+    // A `systemctl enable lightdm` would be the exact anti-pattern the owner flagged — it must not
+    // be how the DM gets switched.
+    assert!(
+        !body.contains("systemctl enable lightdm")
+            && !body.contains("systemctl enable --now lightdm"),
+        "{SETUP} (#504) must NOT rely on `systemctl enable lightdm` to switch the DM — it fails \
+         'instance name specified' and does not create the display-manager symlink"
+    );
+}
+
+/// Every desktop-bloat service on the owner's DISABLE list must be disabled — they waste resources
+/// on a production appliance. #504.
+#[test]
+fn setup_imag_504_disables_bloat_services() {
+    let body = read(SETUP);
+    let list_start = body
+        .find("for svc in ")
+        .expect("{SETUP} (#504) must have a `for svc in …` service-disable loop")
+        + "for svc in ".len();
+    let list_end = list_start
+        + body[list_start..]
+            .find("; do")
+            .expect("{SETUP} (#504) the disable loop must be `for svc in …; do`");
+    let disable_list = &body[list_start..list_end];
+    for svc in [
+        "cups",
+        "cups-browsed",
+        "bluetooth",
+        "ModemManager",
+        "colord",
+        "switcheroo-control",
+        "gnome-remote-desktop",
+        "gdm3",
+    ] {
+        assert!(
+            disable_list.split_whitespace().any(|w| w == svc),
+            "{SETUP} (#504) the service-disable loop must include `{svc}` (owner DISABLE list)"
+        );
+    }
+    assert!(
+        body.contains(r#"systemctl disable --now "$svc""#),
+        "{SETUP} (#504) must `systemctl disable --now` each listed service (stop + disable)"
+    );
+}
+
+/// The GNOME purge must be an EXPLICIT owner-listed package set purged with `apt-get purge`, and
+/// must NEVER be a bare `apt-get autoremove` — a blind autoremove would sweep every now-orphaned
+/// forward-dependency (unbounded cascade, the exact hazard the owner called out). #504.
+#[test]
+fn setup_imag_504_purges_gnome_explicit_never_autoremove() {
+    let body = read(SETUP);
+    let p_start = body
+        .find(r#"GNOME_PURGE_PKGS=""#)
+        .expect("{SETUP} (#504) must define an explicit GNOME_PURGE_PKGS package list");
+    let p_rest = &body[p_start + r#"GNOME_PURGE_PKGS=""#.len()..];
+    let p_end = p_rest
+        .find('"')
+        .expect("{SETUP} (#504) GNOME_PURGE_PKGS must be a quoted string");
+    let purge_list = &p_rest[..p_end];
+    for pkg in [
+        "gnome-shell",
+        "gdm3",
+        "nautilus",
+        "firefox",
+        "gnome-remote-desktop",
+        "gnome-shell-extension-ubuntu-dock",
+        "gnome-shell-extension-ubuntu-tiling-assistant",
+        "gnome-shell-extension-appindicator",
+    ] {
+        assert!(
+            purge_list.split_whitespace().any(|w| w == pkg),
+            "{SETUP} (#504) GNOME_PURGE_PKGS must list `{pkg}` explicitly (owner PURGE list)"
+        );
+    }
+    assert!(
+        body.contains("apt-get purge"),
+        "{SETUP} (#504) must actually `apt-get purge` the GNOME package list"
+    );
+    // NO bare autoremove COMMAND anywhere (a comment explaining WHY not is allowed).
+    let autoremove_command = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .any(|l| l.contains("autoremove"));
+    assert!(
+        !autoremove_command,
+        "{SETUP} (#504) must NEVER run `apt-get autoremove` — an unbounded forward-dep sweep is the \
+         exact hazard the owner banned; purge the EXPLICIT list only"
+    );
+}
+
+/// The KEEP set (avahi/NDI, sshd, dantesync, remoteos-mcp/MCP agent, NetworkManager, lightdm,
+/// openbox) is what the appliance runs on — it must NEVER appear in the disable loop or the purge
+/// list. A regression that adds one there would knock the box off the network / kill NDI / lose the
+/// MCP agent, exactly the failure the reboot-recoverable directive guards against. #504.
+#[test]
+fn setup_imag_504_never_disables_or_purges_the_keep_set() {
+    let body = read(SETUP);
+    let d_start = body.find("for svc in ").unwrap() + "for svc in ".len();
+    let disable_list = &body[d_start..d_start + body[d_start..].find("; do").unwrap()];
+    let p_start = body.find(r#"GNOME_PURGE_PKGS=""#).unwrap() + r#"GNOME_PURGE_PKGS=""#.len();
+    let purge_list = &body[p_start..p_start + body[p_start..].find('"').unwrap()];
+    for keep in [
+        "avahi",
+        "avahi-daemon",
+        "sshd",
+        "ssh",
+        "openssh-server",
+        "dantesync",
+        "remoteos-mcp",
+        "NetworkManager",
+        "network-manager",
+        "lightdm",
+        "openbox",
+    ] {
+        assert!(
+            !disable_list.split_whitespace().any(|w| w == keep),
+            "{SETUP} (#504) KEEP service `{keep}` must NOT be in the disable loop"
+        );
+        assert!(
+            !purge_list.split_whitespace().any(|w| w == keep),
+            "{SETUP} (#504) KEEP package `{keep}` must NOT be in the GNOME purge list"
+        );
+    }
+}
+
+/// Owner's HARD ORDER (2026-07-04 incident): install openbox+lightdm AND switch the DM symlink to
+/// lightdm BEFORE the GNOME purge — purging gdm3 with no lightdm/DM-symlink yet left the box with
+/// NO display manager (black wall). #504.
+#[test]
+fn setup_imag_504_installs_and_switches_dm_before_purge() {
+    let body = read(SETUP);
+    let install_idx = body
+        .find("apt-get install -y openbox lightdm")
+        .expect("openbox+lightdm install present");
+    let symlink_idx = body
+        .find("ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service")
+        .expect("DM symlink present");
+    let purge_idx = body.find("apt-get purge").expect("GNOME purge present");
+    assert!(
+        install_idx < purge_idx,
+        "{SETUP} (#504) openbox+lightdm must be INSTALLED before the GNOME purge (owner's black-wall \
+         incident) — a box must never be left with no working WM/DM"
+    );
+    assert!(
+        symlink_idx < purge_idx,
+        "{SETUP} (#504) the display-manager symlink must be switched to lightdm BEFORE gdm3 is \
+         purged — otherwise the box boots with NO display manager (black wall)"
     );
 }
