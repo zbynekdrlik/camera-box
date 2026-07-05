@@ -916,15 +916,25 @@ static void genlock_parse_cpulist_into_set(const char *s, cpu_set_t *set)
 			p++;
 		if (*p < '0' || *p > '9')
 			break;
+		/* Cap digit accumulation at CPU_SETSIZE so a pathological/corrupted /sys read (an
+		 * implausibly long digit run) cannot integer-overflow `a`/`b` — once the value is
+		 * already out of CPU_SET's range, stop accumulating but keep consuming the digits so
+		 * parsing of the rest of the list is not thrown off. */
 		int a = 0;
-		while (*p >= '0' && *p <= '9')
-			a = a * 10 + (*p++ - '0');
+		while (*p >= '0' && *p <= '9') {
+			if (a < CPU_SETSIZE)
+				a = a * 10 + (*p - '0');
+			p++;
+		}
 		int b = a;
 		if (*p == '-') {
 			p++;
 			b = 0;
-			while (*p >= '0' && *p <= '9')
-				b = b * 10 + (*p++ - '0');
+			while (*p >= '0' && *p <= '9') {
+				if (b < CPU_SETSIZE)
+					b = b * 10 + (*p - '0');
+				p++;
+			}
 		}
 		for (int c = a; c <= b && c >= 0 && c < CPU_SETSIZE; c++)
 			CPU_SET(c, set);

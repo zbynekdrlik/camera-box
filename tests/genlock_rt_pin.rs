@@ -80,22 +80,45 @@ fn render_tick_fifo_priority_is_low() {
 /// WARN-and-CONTINUE: a failed affinity/scheduler call must log a WARNING and keep running
 /// SCHED_OTHER — never abort, never hang. This is the safety invariant that makes shipping the pin
 /// acceptable at all.
+///
+/// The abort-freedom check is scoped to the `genlock_pin_render_tick_thread` FUNCTION BODY, not the
+/// whole ~1400-line file — a file-wide `!src.contains("abort()")` would still pass even if the
+/// function itself grew an `exit()`/`assert()` escape hatch on a failure path (neither token is
+/// `abort()` specifically), and a naive `!A || !B` shape (A = the warning string present, B =
+/// `abort()` present) is VACUOUSLY true whenever `abort()` never appears anywhere in the file,
+/// silently not checking the intended condition at all — found in review (PR #542).
 #[test]
 fn render_tick_pin_is_warn_and_continue_never_aborts() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+    let raw = vendor_file(OBS_VIDEO);
 
-    // On failure it logs at WARNING level and states it continues SCHED_OTHER.
+    let fn_start = raw
+        .find("static void genlock_pin_render_tick_thread(void)")
+        .expect("genlock_pin_render_tick_thread must be defined");
+    let fn_end = raw[fn_start..]
+        .find("\n}\n")
+        .map(|rel| fn_start + rel)
+        .expect("genlock_pin_render_tick_thread must have a closing brace");
+    let body = squish(&raw[fn_start..fn_end]);
+
+    // On failure it logs at WARNING level and states it continues SCHED_OTHER — checked from BOTH
+    // failure branches (affinity AND scheduler), not just "appears somewhere in the function".
+    let warn_count = body.matches("continuing SCHED_OTHER").count();
     assert!(
-        src.contains("continuing SCHED_OTHER"),
-        "{OBS_VIDEO}: #484 pin must WARN-and-CONTINUE — on any syscall failure it must log that it \
-         is `continuing SCHED_OTHER`, never abort/retry-loop/hang (the ticket's CRITICAL SAFETY \
-         requirement, mirroring the robust fallback in src/affinity.rs #289)."
+        warn_count >= 2,
+        "{OBS_VIDEO}: #484 pin must WARN-and-CONTINUE — BOTH the affinity-pin failure branch and \
+         the SCHED_FIFO failure branch must log `continuing SCHED_OTHER` (found {warn_count} \
+         occurrence(s) inside genlock_pin_render_tick_thread), never abort/retry-loop/hang (the \
+         ticket's CRITICAL SAFETY requirement, mirroring the robust fallback in src/affinity.rs \
+         #289)."
     );
-    // No hard-abort path in the pin: it must not exit/abort the process on a pin failure.
-    assert!(
-        !src.contains("genlock: could NOT pin") || !src.contains("abort()"),
-        "{OBS_VIDEO}: #484 pin must never abort() on failure — a headless box must keep running."
-    );
+    // No hard-abort/exit/assert path anywhere INSIDE the pin function itself.
+    for banned in ["abort(", "exit(", "assert("] {
+        assert!(
+            !body.contains(banned),
+            "{OBS_VIDEO}: genlock_pin_render_tick_thread must never call `{banned}...)` on a \
+             failure path — a headless box must keep running SCHED_OTHER, never abort/exit/assert."
+        );
+    }
 }
 
 /// The pinned core set must be DERIVED from the kernel's reserved `nohz_full` cpulist (robust,
