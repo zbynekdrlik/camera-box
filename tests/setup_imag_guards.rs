@@ -134,6 +134,21 @@ fn setup_imag_disables_save_projectors_522() {
     );
 }
 
+/// #526: setup-imag.sh must DELETE any leftover ~/.config/autostart/obs.desktop from a pre-#530
+/// provision. Modern Ubuntu's systemd --user launches every ~/.config/autostart/*.desktop as an
+/// app-<id>@autostart.service once graphical-session.target is up, so a leftover obs.desktop
+/// starts a SECOND obs ~30s after boot (an "OBS is already running" modal stuck over the
+/// projector — live-hit 2026-07-05) on top of the openbox autostart's launch. Remove it.
+#[test]
+fn setup_imag_removes_leftover_xdg_autostart_526() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"rm -f "$USER_HOME/.config/autostart/obs.desktop""#),
+        "{SETUP} must remove the leftover XDG autostart obs.desktop (#526) — systemd --user \
+         double-launches OBS from it, producing a stuck 'OBS is already running' modal"
+    );
+}
+
 /// #522: the openbox autostart must ZERO saved_projectors in the scene-collection JSON BEFORE
 /// launching OBS. OBS restores a collection's saved_projectors on load INDEPENDENT of
 /// SaveProjectors=false (that flag only stops OBS SAVING new ones on exit); a stale entry — from
