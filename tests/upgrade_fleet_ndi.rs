@@ -57,7 +57,7 @@ fn run_sourced(body: &str) -> String {
 }
 
 /// Source + run `body` WITHOUT asserting success — for pure functions that intentionally return
-/// non-zero (e.g. resolve_canary on an override not in the set).
+/// non-zero (e.g. resolve_canary_set on an override not in the set).
 fn run_sourced_status(body: &str) -> (i32, String, String) {
     let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
     let out = Command::new("bash")
@@ -210,48 +210,113 @@ fn version_status_orders_dotted_quads_and_flags_unknown() {
     );
 }
 
-/// resolve_canary defaults to the FIRST camera in the set when no override is given.
+/// #452: ndi_camera_class distinguishes the cam3-class box (real-file layout, no `strings`,
+/// older log shape — #445's findings) from every other camera's "standard" symlink layout. This
+/// is a STATIC, KNOWN fleet fact resolve_canary_set() uses to pick class representatives —
+/// never probed live over ssh.
 #[test]
-fn resolve_canary_defaults_to_first_in_set() {
-    let out = run_sourced("resolve_canary 'cam1 cam2 cam3 cam4' ''");
+fn ndi_camera_class_distinguishes_cam3_from_standard_layout() {
+    assert_eq!(
+        run_sourced("ndi_camera_class cam3").trim(),
+        "cam3class",
+        "#452: cam3 must be classified distinctly from the standard symlink-layout cameras"
+    );
+    for cam in ["cam1", "cam2", "cam4", "cam5", "cam6", "cam7"] {
+        assert_eq!(
+            run_sourced(&format!("ndi_camera_class {cam}")).trim(),
+            "standard",
+            "#452: {cam} must be classified as the standard symlink layout"
+        );
+    }
+}
+
+/// resolve_canary_set defaults to a single canary (the first camera in the set) when every
+/// member of SET shares the same ndi_camera_class — unchanged from the original #132
+/// single-canary behavior for a homogeneous fleet/subset.
+#[test]
+fn resolve_canary_set_defaults_to_first_when_set_is_single_class() {
+    let out = run_sourced("resolve_canary_set 'cam1 cam2 cam4' ''");
     assert_eq!(
         out.trim(),
         "cam1",
-        "#132: default canary must be the first cam in the set"
+        "#452: a single-class SET must still default to exactly one canary (the first member)"
     );
 }
 
-/// An explicit --canary override is honoured when it IS a member of the set.
+/// #452: the canary blind spot — a green canary on a symlink-layout box (e.g. cam1) proves
+/// nothing about a real-file/no-strings box (cam3-class, the #132 history). When SET contains
+/// more than one distinct ndi_camera_class, the DEFAULT canary set must include one
+/// representative of EACH class present (first SET member of each newly-seen class), so a
+/// full-fleet apply is never gated on a canary that only proved the majority class.
 #[test]
-fn resolve_canary_honors_override_when_member_of_set() {
-    let out = run_sourced("resolve_canary 'cam1 cam2 cam3 cam4' cam3");
-    assert_eq!(out.trim(), "cam3");
+fn resolve_canary_set_default_covers_every_distinct_class_present() {
+    let out = run_sourced("resolve_canary_set 'cam1 cam2 cam3 cam4' ''");
+    assert_eq!(
+        out.trim(),
+        "cam1 cam3",
+        "#452: the default canary set must cover BOTH the standard class (cam1) and the \
+         cam3-class (cam3) present in the set. Got:\n{out}"
+    );
 }
 
-/// An override that is NOT a member of the set is REJECTED (never silently substituted) —
-/// the fleet upgrade must never guess which camera the operator meant.
+/// An explicit --canary override is honoured verbatim (space-separated, one or more names) when
+/// every member IS in the set — the operator's explicit choice always wins over the
+/// class-coverage default.
 #[test]
-fn resolve_canary_rejects_override_not_in_set() {
-    let (code, out, err) = run_sourced_status("resolve_canary 'cam1 cam2 cam3 cam4' cam9");
+fn resolve_canary_set_honors_multi_value_override_when_all_members_of_set() {
+    let out = run_sourced("resolve_canary_set 'cam1 cam2 cam3 cam4' 'cam2 cam3'");
+    assert_eq!(out.trim(), "cam2 cam3");
+
+    let single = run_sourced("resolve_canary_set 'cam1 cam2 cam3 cam4' cam3");
+    assert_eq!(single.trim(), "cam3");
+}
+
+/// An override containing a camera that is NOT a member of the set is REJECTED entirely (never
+/// silently drops just the bad one) — the fleet upgrade must never guess which camera the
+/// operator meant.
+#[test]
+fn resolve_canary_set_rejects_override_member_not_in_set() {
+    let (code, out, err) = run_sourced_status("resolve_canary_set 'cam1 cam2 cam3 cam4' cam9");
     assert_ne!(
         code, 0,
-        "#132: an unknown canary override must fail, not fall back silently"
+        "#452: an unknown canary override must fail, not fall back silently"
     );
     assert!(
         out.trim().is_empty(),
-        "#132: no camera name printed on failure. Got:\n{out}"
+        "#452: no camera names printed on failure. Got:\n{out}"
     );
     assert!(
         err.contains("cam9") && err.contains("not a member"),
-        "#132: the error must name the bad override. Got stderr: {err:?}"
+        "#452: the error must name the bad override. Got stderr: {err:?}"
+    );
+
+    let (code2, _out2, err2) =
+        run_sourced_status("resolve_canary_set 'cam1 cam2 cam3 cam4' 'cam2 cam9'");
+    assert_ne!(
+        code2, 0,
+        "#452: ANY unknown member in a multi-value override must fail the whole override"
+    );
+    assert!(
+        err2.contains("cam9") && err2.contains("not a member"),
+        "#452: the error must name the specific bad override. Got stderr: {err2:?}"
     );
 }
 
-/// remaining_after_canary returns SET minus CANARY, preserving order.
+/// remaining_after_canary returns SET minus CANARY, preserving order — single-value canary
+/// (back-compat with the original #132 shape).
 #[test]
 fn remaining_after_canary_excludes_canary_preserves_order() {
     let out = run_sourced("remaining_after_canary 'cam1 cam2 cam3 cam4' cam3");
     assert_eq!(out.trim(), "cam1 cam2 cam4", "Got:\n{out}");
+}
+
+/// #452: remaining_after_canary must also accept a multi-member canary SET (space-separated) —
+/// resolve_canary_set() can now return more than one canary when the fleet spans multiple
+/// ndi_camera_class values, and the fleet loop must exclude ALL of them, not just the first.
+#[test]
+fn remaining_after_canary_excludes_multiple_canaries_preserves_order() {
+    let out = run_sourced("remaining_after_canary 'cam1 cam2 cam3 cam4' 'cam1 cam3'");
+    assert_eq!(out.trim(), "cam2 cam4", "Got:\n{out}");
 }
 
 /// ndi_swap_remote's generated remote command: backs up the CURRENTLY ACTIVE runtime (by its
@@ -434,20 +499,23 @@ fn fatal_grep_pattern_matches_deploy_fleet_signatures() {
     );
 }
 
-/// Static ordering guard: the main flow must upgrade the CANARY strictly before iterating the
-/// REMAINING cameras — the whole point of "canary first, never touch the rest on failure".
+/// Static ordering guard: the main flow must upgrade every member of the CANARY SET strictly
+/// before iterating the REMAINING cameras — the whole point of "canary(-set) first, never touch
+/// the rest on failure". #452: the canary is now a SET (one per distinct box-class), not a
+/// single camera, so this guards the loop-over-$CANARY_SET shape instead of a single direct call.
 #[test]
 fn canary_is_upgraded_before_the_remaining_fleet() {
     let s = fs::read_to_string(script()).expect("read upgrade-fleet-ndi.sh");
-    let canary_pos = s
-        .find("upgrade_one_camera \"$CANARY\"")
-        .expect("#132: expected an explicit canary-first upgrade call");
+    let canary_loop_pos = s
+        .find("for cam in $CANARY_SET")
+        .expect("#452: expected a loop over the (possibly multi-member) canary set");
     let rest_loop_pos = s
         .find("for cam in $REST")
         .expect("#132: expected a loop over the remaining (non-canary) cameras");
     assert!(
-        canary_pos < rest_loop_pos,
-        "#132: the canary MUST be upgraded before the loop over the rest of the fleet"
+        canary_loop_pos < rest_loop_pos,
+        "#132/#452: the whole canary SET MUST be upgraded before the loop over the rest of the \
+         fleet"
     );
 }
 
@@ -627,13 +695,18 @@ fn ndi_link_kind_remote_detects_symlink_vs_regular_vs_missing() {
 /// `libndi.so.6` file itself, then OVERWRITE (copy, not symlink) both `libndi.so.6` and
 /// `libndi.so` with the new candidate content — the symlink repoint used for every other camera
 /// does not apply when the runtime file is a real file, not a symlink.
+///
+/// #452: the backup name must be VERSION-SCOPED (`libndi.so.6.<old_version>.bak`), not the fixed
+/// `libndi.so.6.bak` every prior upgrade overwrote — a cam3-class box needs the same
+/// multi-generation rollback depth the symlink layout already gets for free (each symlink
+/// backup's basename is the original versioned filename).
 #[test]
 fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
-    let p = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 regular");
+    let p = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 regular 6.2.1.0");
     assert!(
-        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.bak\""),
-        "#445: the regular-file layout must back up the active libndi.so.6 to a .bak file BEFORE \
-         overwriting it. Got:\n{p}"
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.6.2.1.0.bak\""),
+        "#452: the regular-file layout must back up the active libndi.so.6 to a \
+         VERSION-SCOPED .bak file (named after the OLD version) BEFORE overwriting it. Got:\n{p}"
     );
     assert!(
         p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\""),
@@ -645,8 +718,8 @@ fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
         "#445: must COPY the new candidate content over libndi.so too. Got:\n{p}"
     );
     let backup_pos = p
-        .find("libndi.so.6.bak")
-        .expect("#445: expected a backup reference");
+        .find("libndi.so.6.6.2.1.0.bak")
+        .expect("#452: expected a version-scoped backup reference");
     let overwrite_pos = p
         .find("libndi.so.6.3.2\" \"/usr/lib/ndi/libndi.so.6\"")
         .expect("#445: expected the overwrite of libndi.so.6");
@@ -660,11 +733,25 @@ fn ndi_swap_remote_regular_layout_backs_up_and_copies_both_names() {
     );
     assert!(p.contains("ldconfig"), "Got:\n{p}");
     assert!(
-        p.contains("OLD_BASE="),
-        "#445: must still print an OLD_BASE marker so the caller's parse never comes up empty. \
-         Got:\n{p}"
+        p.contains("OLD_BASE=libndi.so.6.6.2.1.0.bak"),
+        "#452: must print the VERSION-SCOPED OLD_BASE so the caller's rollback restores from the \
+         right generation. Got:\n{p}"
     );
     assert!(p.contains("systemctl restart camera-box"), "Got:\n{p}");
+}
+
+/// #452: when NO old-version is supplied (defensive fallback — the real call site always has one
+/// once the currently-active version was read), the regular-layout backup name falls back to the
+/// original fixed `libndi.so.6.bak` rather than producing an ambiguous/empty-suffixed filename.
+#[test]
+fn ndi_swap_remote_regular_layout_falls_back_to_fixed_backup_name_when_old_version_omitted() {
+    let p = run_sourced("ndi_swap_remote /usr/lib/ndi libndi.so.6.3.2 regular");
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6\" \"/usr/lib/ndi/libndi.so.6.bak\""),
+        "#452: omitting old_version must fall back to the fixed backup name, not an \
+         empty-suffixed one. Got:\n{p}"
+    );
+    assert!(p.contains("OLD_BASE=libndi.so.6.bak"), "Got:\n{p}");
 }
 
 /// ndi_swap_remote with NO third argument (existing callers/tests) must default to the symlink
@@ -702,6 +789,24 @@ fn ndi_rollback_remote_regular_layout_restores_from_backup_file() {
     assert!(
         p.contains("ldconfig") && p.contains("systemctl restart camera-box"),
         "Got:\n{p}"
+    );
+}
+
+/// #452: ndi_rollback_remote is the exact inverse of the version-scoped backup ndi_swap_remote
+/// now produces — it needs NO code change (it already restores from whatever OLD_BASE string the
+/// caller passes), but this proves the round-trip: a version-scoped backup name restores cleanly,
+/// giving the regular (cam3-class) layout the same multi-generation rollback depth the symlink
+/// layout already has (each of ITS backups is named after the original versioned filename).
+#[test]
+fn ndi_rollback_remote_regular_layout_restores_from_version_scoped_backup_name() {
+    let p = run_sourced("ndi_rollback_remote /usr/lib/ndi libndi.so.6.6.2.1.0.bak regular");
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.6.2.1.0.bak\" \"/usr/lib/ndi/libndi.so.6\""),
+        "#452: rollback must restore libndi.so.6 from the VERSION-SCOPED .bak file. Got:\n{p}"
+    );
+    assert!(
+        p.contains("cp -a \"/usr/lib/ndi/libndi.so.6.6.2.1.0.bak\" \"/usr/lib/ndi/libndi.so\""),
+        "#452: rollback must restore libndi.so from the VERSION-SCOPED .bak file too. Got:\n{p}"
     );
 }
 
