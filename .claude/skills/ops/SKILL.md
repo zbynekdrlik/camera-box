@@ -122,6 +122,15 @@ build drift as an advisory — that DRIFT is expected until someone runs the #46
 `mcp__linux-imag-nb__Shell` fallback above still works and remains useful for anything outside
 drift-guard's own facets, but is no longer required for `--check-imag` itself.
 
+**Reusable pattern for installing a NEW SSH key on a box whose sudo needs an interactive password**
+(applies to imag-nb, and any future non-cam-fleet Linux box with the same setup): writing to
+`~/.ssh/authorized_keys` needs only the UNPRIVILEGED user's own home directory, not root, so the
+`linux-imag-nb__Shell` MCP tool (which already runs as that user, no sudo) can create `~/.ssh`
+(700) + `authorized_keys` (600) and append the key directly — no interactive sudo password needed
+at all for THIS specific write. Only privileged changes elsewhere on the box (package installs,
+`/etc/*` edits) need the actual sudo password. Don't assume "sudo needs a password" blocks every
+kind of MCP-driven change — check whether the specific write is actually privileged first.
+
 ## #132/#445/#452 — `scripts/upgrade-fleet-ndi.sh` canary set + version-scoped backup
 
 Safe, canary-first NDI Linux runtime (`libndi.so.6`) upgrade across the fleet. The fleet is NOT
