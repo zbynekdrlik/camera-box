@@ -1508,32 +1508,18 @@ fn setup_imag_does_not_add_nice_to_obs_launchers_483() {
     );
 }
 
-/// #525: OBS "Lock UI" (user.ini [BasicWindow] DocksLocked=true) blocks the operator from
-/// dragging / rearranging / re-docking ANY dock at all — the actual #525 cause (nothing to do with
-/// the WM or a compositor). setup-imag.sh must force DocksLocked=false both at provision (seed_ini,
-/// on global.ini + user.ini) and every boot (the openbox autostart, before OBS launches).
+/// #536 (revert of #525): provisioning must NOT touch OBS's "Lock UI" setting (user.ini
+/// [BasicWindow] DocksLocked) at all — neither at provision (seed_ini) nor at boot (the openbox
+/// autostart). Locking the UI is a real, wanted OBS feature the operator controls; #525's actual
+/// cause was simply that the UI was locked, and the fix is telling the operator to unlock it once
+/// themselves, not silently overriding their choice on every boot.
 #[test]
-fn setup_imag_forces_docks_unlocked_525() {
+fn setup_imag_does_not_touch_docks_locked_536() {
     let body = read(SETUP);
     assert!(
-        body.contains("DocksLocked=false"),
-        "{SETUP} must force DocksLocked=false (#525) — a locked OBS UI blocks the operator from \
-         dragging/rearranging any dock at all"
-    );
-    assert!(
-        body.matches("s/^DocksLocked=.*/DocksLocked=false/").count() >= 2,
-        "{SETUP} must force-replace DocksLocked=false (self-heal a locked box) in BOTH seed_ini \
-         (provision) and the openbox autostart (every boot) — #525"
-    );
-    let last_force = body
-        .rfind("DocksLocked")
-        .expect("DocksLocked force present");
-    let autostart_launch = body
-        .find("taskset -c 2-11 obs &")
-        .expect("autostart OBS launch present");
-    assert!(
-        last_force < autostart_launch,
-        "the autostart DocksLocked=false force must run BEFORE the autostart launches OBS (#525)"
+        !body.contains("DocksLocked"),
+        "{SETUP} must NOT reference DocksLocked anywhere — provisioning leaves OBS's \"Lock UI\" \
+         setting entirely to the operator (#536 revert of the #525 hard-force)"
     );
 }
 
