@@ -258,23 +258,90 @@ bash -c "$cmd"
 
 const GENLOCK_LINE: &str =
     "INFO camera_box: Streaming: 30.0 fps emitted / 60.0 fps captured (150 sent, 300 captured)";
+// The older, non-decimating shape a box with no genlock decimation configured logs (src/main.rs
+// only emits the "fps emitted / fps captured" report when decimation is ACTIVE). #451 broadens
+// deploy-fleet.sh's alive-signal to accept this shape too (shared with upgrade-fleet-ndi.sh's
+// #445 broadening) — it is genuinely ALIVE, just not decimating, so it must NOT false-fail.
 const OLD_NON_GENLOCK_LINE: &str = "INFO camera_box: Streaming: 59.8 fps (299 frames)";
+// A line that matches NONE of the shared alive-signal alternatives at all — the real "box is
+// dead/never came up" case the no-genlock gate must still catch.
+const NO_ALIVE_SIGNAL_LINE: &str = "INFO camera_box: waiting for USB capture device to appear";
 
-/// no-false-green: a box whose journal has NO genlock report must make the run exit nonzero
-/// and be flagged `no-genlock`. Proves the genlock gate is wired into the exit status (the #73
-/// cam2-regression: an old build that deploys fine but never genlocks must NOT report success).
+/// no-false-green: a box whose journal has NO alive signal at all (no genlock report, no older
+/// "Streaming: X fps" shape, no "NDI sender ready") must make the run exit nonzero and be
+/// flagged `no-genlock`. Proves the alive gate is wired into the exit status (the #73
+/// cam2-regression: a box that deploys fine but never comes up streaming must NOT report
+/// success). #451: previously this test used the OLDER "Streaming: X fps" shape as its "not
+/// genlocking" fixture — that shape is now a RECOGNIZED alive signal (see
+/// `deploy_fleet_accepts_old_streaming_shape_as_alive` below), so this test was updated to a
+/// line that genuinely matches nothing, to keep guarding the real "box never came up" case.
 #[test]
-fn deploy_fleet_exits_nonzero_when_a_box_is_not_genlocking() {
-    let r = run_fleet("9.9.9-test", OLD_NON_GENLOCK_LINE, true);
+fn deploy_fleet_exits_nonzero_when_a_box_emits_no_alive_signal() {
+    let r = run_fleet("9.9.9-test", NO_ALIVE_SIGNAL_LINE, true);
     assert!(
         !r.success,
-        "exited 0 for a box that emits NO genlock report (no-false-green broken). output:\n{}",
+        "exited 0 for a box that emits NO alive signal at all (no-false-green broken). output:\n{}",
         r.output
     );
     assert!(
         r.output.contains("no-genlock") || r.output.contains("NO genlock"),
-        "failed, but not for the missing genlock report; output:\n{}",
+        "failed, but not for the missing alive signal; output:\n{}",
         r.output
+    );
+}
+
+/// #451: a box logging ONLY the older, non-decimating "Streaming: X.Y fps" shape (no genlock
+/// decimation configured on that box) is genuinely ALIVE and must NOT be false-verify-failed —
+/// deploy-fleet.sh must accept the SAME broadened alive-signal pattern upgrade-fleet-ndi.sh
+/// already tolerates (#445), by sourcing the shared scripts/lib/ndi-alive.sh.
+#[test]
+fn deploy_fleet_accepts_old_streaming_shape_as_alive() {
+    let r = run_fleet("9.9.9-test", OLD_NON_GENLOCK_LINE, true);
+    assert!(
+        r.success,
+        "exited nonzero for a box emitting the older 'Streaming: X fps' shape — deploy-fleet.sh \
+         must accept the shared broadened alive-signal (#445/#451). output:\n{}",
+        r.output
+    );
+    assert!(
+        r.output.contains("FLEET ALIGNED"),
+        "success but no FLEET ALIGNED line; output:\n{}",
+        r.output
+    );
+}
+
+/// #451: a box logging the generic "NDI sender ready" line (no fps report yet) must also be
+/// accepted as alive via the shared pattern.
+#[test]
+fn deploy_fleet_accepts_ndi_sender_ready_as_alive() {
+    let r = run_fleet(
+        "9.9.9-test",
+        "INFO camera_box: NDI sender ready, streaming as CAM1",
+        true,
+    );
+    assert!(
+        r.success,
+        "exited nonzero for a box emitting 'NDI sender ready' — deploy-fleet.sh must accept the \
+         shared broadened alive-signal (#445/#451). output:\n{}",
+        r.output
+    );
+}
+
+/// #451: deploy-fleet.sh must source the ONE shared scripts/lib/ndi-alive.sh instead of
+/// hard-coding its own narrower alive-signal pattern, so it can never again silently drift out
+/// of sync with upgrade-fleet-ndi.sh's broadening (the exact #445/#451 latent re-break).
+#[test]
+fn deploy_fleet_sources_shared_ndi_alive_lib() {
+    let s = read("scripts/deploy-fleet.sh");
+    assert!(
+        s.contains("lib/ndi-alive.sh"),
+        "#451: deploy-fleet.sh must source scripts/lib/ndi-alive.sh instead of hard-coding its \
+         own 'fps emitted .* fps captured' pattern."
+    );
+    assert!(
+        !s.contains("'fps emitted .* fps captured'"),
+        "#451: deploy-fleet.sh must not hard-code the narrow genlock-only pattern any more — it \
+         must call emit_ok_grep_pattern() from the shared lib."
     );
 }
 

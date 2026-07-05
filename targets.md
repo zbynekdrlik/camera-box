@@ -22,6 +22,9 @@
 | CAM2 | 10.77.9.62 | Active | SSH: root/newlevel |
 | CAM3 | 10.77.9.63 | Active | SSH: root/newlevel |
 | CAM4 | 10.77.9.64 | Active | SSH: root/newlevel |
+| CAM5 | 10.77.9.65 | Provisioning | SSH: root/newlevel; fleet growing 4->7 (#451) |
+| CAM6 | 10.77.9.66 | Provisioning | SSH: root/newlevel; fleet growing 4->7 (#451) |
+| CAM7 | 10.77.9.67 | Provisioning | SSH: root/newlevel; fleet growing 4->7 (#451) |
 
 ## Linux OBS Targets (camera-box, #458)
 

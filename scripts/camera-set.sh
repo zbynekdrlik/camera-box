@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Single source of truth for the cam1-4 set (#24).
+# Single source of truth for the cam1-7 set (#24; extended to cam5-7 by #451).
 #
 # The frame-loss orchestrators (scripts/loopback-e2e.sh, scripts/recording-e2e.sh) source
-# this and resolve a camera NAME (cam1..cam4) to its device IP and NDI source name, instead
+# this and resolve a camera NAME (cam1..cam7) to its device IP and NDI source name, instead
 # of baking cam2 in. The map is authoritative per CLAUDE.md / targets.md:
 #
 #   cam1 -> 10.77.9.61 / "CAM1 (usb)"
 #   cam2 -> 10.77.9.62 / "CAM2 (usb)"   (the off-air development rig; the default everywhere)
 #   cam3 -> 10.77.9.63 / "CAM3 (usb)"
 #   cam4 -> 10.77.9.64 / "CAM4 (usb)"
+#   cam5 -> 10.77.9.65 / "CAM5 (usb)"   (#451 — fleet growing 4->7)
+#   cam6 -> 10.77.9.66 / "CAM6 (usb)"
+#   cam7 -> 10.77.9.67 / "CAM7 (usb)"
 #
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
@@ -19,8 +22,8 @@
 # falls through to the `*)` reject arm and returns nonzero.
 
 # CAMERA_SET = the ordered list a "drive the whole set" loop iterates over. Override to run a
-# subset, e.g. `CAMERA_SET="cam1 cam3 cam4"`. Defaults to the four cameras.
-CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4}"
+# subset, e.g. `CAMERA_SET="cam1 cam3 cam4"`. Defaults to all seven cameras (#451).
+CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 
 # GENLOCK_FPS = the genlock/broadcast emit rate the harness starts the manual camera-box
 # sender at, so it wall-paces EXACTLY like the deployed camera-box service (#66). The deployed
@@ -34,23 +37,33 @@ CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4}"
 # free-runs / paces at the wrong rate and the downstream genlock FIFO in OBS (one frame
 # per render tick) drops frames or renders black. Single source of truth, env-overridable (set
 # GENLOCK_FPS to match the live drop-in if the emit rate ever changes). Default 60 = the pinned
-# camera emit rate (this is what deploy-fleet.sh re-pins cam1's emit to — a default of 30 would
-# shadow it back).
+# camera emit rate matching the deployed genlock.conf drop-in — deploy-fleet.sh does NOT write
+# that drop-in (it only ships the binary via scp + systemctl restart), so a default of 30 here
+# would only mismatch the HARNESS's own manually-launched sender against the rate actually
+# deployed on the box, not "shadow back" any config deploy-fleet.sh itself controls.
 GENLOCK_FPS="${GENLOCK_FPS:-60}"
 
 # camera_resolve <name>
-# On success: sets CAMERA_NAME / CAMERA_IP / CAMERA_SOURCE and returns 0.
+# On success: sets CAMERA_NAME / CAMERA_IP / CAMERA_SOURCE / CAMERA_GENLOCK_FPS and returns 0.
 # On an unknown/empty name: prints an error to stderr and returns 1 (fail loudly — never
 # silently fall back to cam2 and certify the wrong box).
+#
+# CAMERA_GENLOCK_FPS (#451) is the AUTHORITATIVE per-camera genlock emit rate table — distinct
+# from the global harness-only GENLOCK_FPS above. Every camera in the program-feeding fleet
+# emits at 60fps today; this per-name table is the single place a future per-camera divergence
+# would be recorded, and is what #450's provisioning drop-in generation is meant to read.
 camera_resolve() {
   local name="${1:-}"
   case "$name" in
-    cam1) CAMERA_IP=10.77.9.61; CAMERA_SOURCE="CAM1 (usb)" ;;
-    cam2) CAMERA_IP=10.77.9.62; CAMERA_SOURCE="CAM2 (usb)" ;;
-    cam3) CAMERA_IP=10.77.9.63; CAMERA_SOURCE="CAM3 (usb)" ;;
-    cam4) CAMERA_IP=10.77.9.64; CAMERA_SOURCE="CAM4 (usb)" ;;
+    cam1) CAMERA_IP=10.77.9.61; CAMERA_SOURCE="CAM1 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    cam2) CAMERA_IP=10.77.9.62; CAMERA_SOURCE="CAM2 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    cam3) CAMERA_IP=10.77.9.63; CAMERA_SOURCE="CAM3 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    cam4) CAMERA_IP=10.77.9.64; CAMERA_SOURCE="CAM4 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    cam5) CAMERA_IP=10.77.9.65; CAMERA_SOURCE="CAM5 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    cam6) CAMERA_IP=10.77.9.66; CAMERA_SOURCE="CAM6 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    cam7) CAMERA_IP=10.77.9.67; CAMERA_SOURCE="CAM7 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     *)
-      echo "camera-set: unknown camera '${name}' (expected one of: cam1 cam2 cam3 cam4)" >&2
+      echo "camera-set: unknown camera '${name}' (expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7)" >&2
       return 1
       ;;
   esac
@@ -66,5 +79,5 @@ CAMERA="${CAMERA:-cam2}"
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   camera_resolve "$CAMERA"
-  printf 'CAMERA=%s IP=%s SOURCE=%q\n' "$CAMERA_NAME" "$CAMERA_IP" "$CAMERA_SOURCE"
+  printf 'CAMERA=%s IP=%s SOURCE=%q FPS=%s\n' "$CAMERA_NAME" "$CAMERA_IP" "$CAMERA_SOURCE" "$CAMERA_GENLOCK_FPS"
 fi

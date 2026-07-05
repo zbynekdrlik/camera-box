@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# upgrade-fleet-ndi.sh — safe, canary-first NDI Linux runtime upgrade across cam1-4 (#132).
+# upgrade-fleet-ndi.sh — safe, canary-first NDI Linux runtime upgrade across the fleet (#132;
+# fleet grown cam1-4 -> cam1-7 by #451).
 #
 # WHY THIS SCRIPT EXISTS: the fleet's NDI Linux runtime (`/usr/lib/ndi/libndi.so.6`) is not
 # uniform — the cameras run 6.2.1.0 while the production OBS boxes strih + stream already run
@@ -37,7 +38,7 @@
 #
 # Options:
 #   --so-path PATH     the candidate NDI Linux runtime .so to roll out (required)
-#   --set "cam1 ..."    camera set to upgrade (default: cam1 cam2 cam3 cam4)
+#   --set "cam1 ..."    camera set to upgrade (default: cam1 cam2 cam3 cam4 cam5 cam6 cam7)
 #   --canary camN       pin the canary camera (default: the first camera in --set)
 #   --force             allow a downgrade (candidate version <= currently-active version)
 #   --dry-run           read + compare versions on every camera, change nothing
@@ -57,6 +58,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
+# shellcheck source=scripts/lib/ndi-alive.sh
+. "$HERE/lib/ndi-alive.sh"   # emit_ok_grep_pattern(), fatal_grep_pattern() (#451, shared with deploy-fleet.sh)
 
 # --- PURE functions (no network/ssh — unit-tested from tests/upgrade_fleet_ndi.rs) ----------
 
@@ -243,15 +246,10 @@ printf '%s\n' "\$out"
 EOF
 }
 
-# emit_ok_grep_pattern -> the journalctl grep proving camera-box's NDI capture->emit path
-# survived the restart. Built on the SAME "fps emitted .* fps captured" signal deploy-fleet.sh's
-# post-deploy check uses, BROADENED (#445) to also accept an older camera-box build's log shape
-# ("Streaming: X.Y fps" — cam3's build predates the genlock report and was false-verify-failed,
-# triggering an automatic rollback of a perfectly-good upgrade) and a generic sender-ready line.
-emit_ok_grep_pattern() { echo 'fps emitted .* fps captured|Streaming: [0-9.]+ fps|NDI sender ready'; }
-
-# fatal_grep_pattern -> the exact crash signatures deploy-fleet.sh scans for after a restart.
-fatal_grep_pattern() { echo "panic|thread '.*' panicked|SIGSEGV|SIGABRT|core dumped|FATAL"; }
+# emit_ok_grep_pattern() / fatal_grep_pattern() now live in the shared scripts/lib/ndi-alive.sh
+# (#451, sourced above) — deploy-fleet.sh sources the SAME file so the two scripts can never
+# again drift out of sync the way #445's broadening did (applied here only, leaving
+# deploy-fleet.sh's narrower copy behind until #451).
 
 # --- source-guard: stop here when sourced (the unit tests) ----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -272,7 +270,7 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 SO_PATH=""
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4}"
+SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 CANARY_OVERRIDE=""
 FORCE=0
 DRY_RUN=0
