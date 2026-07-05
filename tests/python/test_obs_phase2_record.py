@@ -34,7 +34,7 @@ def test_record_function_exists():
 
 
 def test_record_subcommand_parses_each_action(monkeypatch):
-    # `obs_phase2.py record --action {start,stop,status} --host H` must parse and
+    # `obs_phase2.py record --action {start,stop,status,guard} --host H` must parse and
     # dispatch to record() — never to setup/teardown. Patch record() to capture args.
     captured = {}
 
@@ -43,7 +43,7 @@ def test_record_subcommand_parses_each_action(monkeypatch):
         captured["action"] = a.action
 
     monkeypatch.setattr(obs_phase2, "record", fake_record)
-    for action in ("start", "stop", "status"):
+    for action in ("start", "stop", "status", "guard"):
         captured.clear()
         monkeypatch.setattr(
             sys, "argv",
@@ -320,3 +320,64 @@ def test_record_start_warns_loud_on_orphan(monkeypatch, capsys):
     assert "orphan" in err.lower(), f"the WARN must name it an orphan: {err!r}"
     assert "10.77.9.204" in err, f"the WARN must name the box: {err!r}"
     assert "05:27:13" in err, f"the WARN must include the orphan's timecode: {err!r}"
+
+
+# ---------------------------------------------------------------------------
+# #524: `record --action guard` — the pre-event stray-recording guard. strih's runaway
+# 265.9 GiB recording (~11h to full) filled the disk mid-event, and a SECOND stray
+# recording (18.57 GiB) started the SAME event day — both were only caught + stopped
+# manually. `rig-mode.sh event` now calls this guard on strih + stream BEFORE anything
+# else: GetRecordStatus -> if active, StopRecord (keeps the file) + a loud WARN naming
+# the host + the stray file, so recurrence is caught automatically instead of by luck.
+# ---------------------------------------------------------------------------
+
+
+def _guard_args(host="10.77.9.202"):
+    return argparse.Namespace(host=host, password="", action="guard")
+
+
+def test_record_guard_stops_active_recording_and_warns_with_path(monkeypatch, capsys):
+    calls = []
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        calls.append(rtype)
+        if rtype == "GetRecordStatus":
+            return {"outputActive": True, "outputTimecode": "11:24:07"}
+        if rtype == "StopRecord":
+            return {"outputPath": "C:\\Recordings\\strih-2026-07-05.mkv"}
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.record(_guard_args("10.77.9.202"))
+
+    assert calls == ["GetRecordStatus", "StopRecord"], (
+        f"guard must check status then StopRecord exactly once when active: {calls}"
+    )
+    err = capsys.readouterr().err
+    assert "WARN" in err, f"a stray recording must be logged LOUD (WARN): {err!r}"
+    assert "10.77.9.202" in err, f"the WARN must name the box: {err!r}"
+    assert "C:\\Recordings\\strih-2026-07-05.mkv" in err, (
+        f"the WARN must name the stray file that was left recording: {err!r}"
+    )
+    assert "11:24:07" in err, f"the WARN must include how long it had been recording: {err!r}"
+
+
+def test_record_guard_no_stray_does_not_stop_and_prints_clean(monkeypatch, capsys):
+    calls = []
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        calls.append(rtype)
+        if rtype == "GetRecordStatus":
+            return {"outputActive": False, "outputTimecode": "00:00:00"}
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.record(_guard_args("10.77.9.204"))
+
+    assert "StopRecord" not in calls, f"a clean box must NOT StopRecord: {calls}"
+    err = capsys.readouterr().err
+    assert "WARN" not in err, f"a clean box must not warn: {err!r}"

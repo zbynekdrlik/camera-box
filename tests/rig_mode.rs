@@ -735,6 +735,92 @@ fn genlock_relaunch_note_is_env_free_no_mode() {
     }
 }
 
+/// #524: EVENT mode must guard against a STRAY recording left running on strih/stream — a runaway
+/// recording filled ~266 GiB (~11h to full) during a live event, and a SECOND stray recording
+/// (18.57 GiB) started the SAME event day. Both were only caught + stopped manually. `do_event`
+/// must call the pre-event guard EARLY — before the painter-stop/broadcast-restore steps — so a
+/// stray recording is stopped (file KEPT) and disk is freed before anything else in EVENT mode
+/// proceeds.
+#[test]
+fn event_mode_calls_stop_stray_recordings_guard() {
+    let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    let do_event = s
+        .split("do_event()")
+        .nth(1)
+        .unwrap_or("")
+        .split("\nmain()")
+        .next()
+        .unwrap_or("");
+    assert!(
+        do_event.contains("stop_stray_recordings"),
+        "#524: do_event must call stop_stray_recordings (pre-event stray-recording guard). \
+         Got:\n{do_event}"
+    );
+    // Must run EARLY — before the painter-stop / broadcast-restore steps (stop the stray
+    // recording + free disk before anything else in EVENT mode proceeds).
+    let guard_pos = do_event
+        .find("stop_stray_recordings")
+        .expect("#524: expected the stop_stray_recordings call");
+    let painter_stop_pos = do_event
+        .find("painter_stop_remote")
+        .expect("#524: expected the existing painter-stop step to still be present");
+    assert!(
+        guard_pos < painter_stop_pos,
+        "#524: stop_stray_recordings must run BEFORE the painter-stop/broadcast-restore steps. \
+         Got:\n{do_event}"
+    );
+}
+
+/// #524: `stray_recording_targets` lists ONLY strih + stream (the two boxes named in the incident)
+/// — NOT imag-nb, which has no OBS recording output in this topology.
+#[test]
+fn stray_recording_targets_covers_strih_and_stream_only() {
+    let targets = run_sourced("stray_recording_targets");
+    assert!(
+        targets.contains("10.77.9.202") && targets.contains("strih"),
+        "#524: stray_recording_targets must include strih. got=\n{targets}"
+    );
+    assert!(
+        targets.contains("10.77.9.204") && targets.contains("stream"),
+        "#524: stray_recording_targets must include stream. got=\n{targets}"
+    );
+    assert!(
+        !targets.contains("10.77.9.182") && !targets.contains("imag"),
+        "#524: stray_recording_targets must NOT include imag-nb (no recording output there). \
+         got=\n{targets}"
+    );
+}
+
+/// #524: `stop_stray_recordings` must invoke the `obs_phase2.py record --action guard` WS helper
+/// (GetRecordStatus -> StopRecord-if-active) for each target — reusing the SAME recording-control
+/// script the harness already uses (`record --action start|stop|status`), extended with the new
+/// `guard` action. Static check only — this function makes a LIVE OBS-websocket call, so it must
+/// never be EXECUTED by a unit test (mirrors enforce_strih_ndi_mapping / set_imag_test_program).
+#[test]
+fn stop_stray_recordings_invokes_record_guard_action() {
+    let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    let def = s
+        .find("stop_stray_recordings()")
+        .expect("#524: stop_stray_recordings must be defined");
+    let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
+    let body = &s[def..body_end];
+    assert!(
+        body.contains("obs_phase2.py\" record --action guard"),
+        "#524: stop_stray_recordings must invoke `obs_phase2.py record --action guard`. \
+         Got:\n{body}"
+    );
+    assert!(
+        body.contains("stray_recording_targets"),
+        "#524: stop_stray_recordings must iterate stray_recording_targets (both boxes). \
+         Got:\n{body}"
+    );
+    assert!(
+        body.contains("OBS_WS_PASSWORD"),
+        "#524: stop_stray_recordings must pass the shared OBS_WS_PASSWORD (never hardcode a WS \
+         password). Got:\n{body}"
+    );
+}
+
 /// The script must be SOURCE-SAFE: sourcing it (the unit-test harness) must NOT execute main (the
 /// `BASH_SOURCE != $0` guard) — otherwise every source would try to act on a missing/invalid mode.
 #[test]
