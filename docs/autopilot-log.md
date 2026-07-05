@@ -1961,3 +1961,4 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   imag-nb is 2 genlock-commits behind origin/main (`cb64631fd` #501, `af02f9bc3` #505), exactly the
   #530 failure mode this guard exists to catch, proving the guard works correctly on live data.
   v1.7.0-dev.254.
+- 2026-07-05 #531 imag genlock drift-guard: PR #540 merged dc5710335 — drift-guard.sh imag facet now dynamic (box GENLOCK_BUILD_SHA vs main vendored-genlock HEAD, fail-loud) + pre-event alert in rig-mode + /drift-guard; alert-only (no auto-deploy); live-verified DRIFT (box 2 commits behind); filed #541 (dev1→imag SSH gap); v1.7.0-dev.254
