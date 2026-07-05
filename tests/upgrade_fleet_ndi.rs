@@ -348,6 +348,30 @@ fn ndi_active_version_remote_resolves_symlink_then_reads_banner() {
     );
 }
 
+/// #451: emit_ok_grep_pattern/fatal_grep_pattern must come from the ONE shared
+/// scripts/lib/ndi-alive.sh, not be defined locally here any more — so deploy-fleet.sh can
+/// source the exact same signal instead of keeping its own copy that silently drifts (the
+/// #445 broadening was applied here only, leaving deploy-fleet.sh's narrower copy behind).
+#[test]
+fn sources_shared_ndi_alive_lib() {
+    let s = fs::read_to_string(script()).expect("read upgrade-fleet-ndi.sh");
+    assert!(
+        s.contains("lib/ndi-alive.sh"),
+        "#451: upgrade-fleet-ndi.sh must source scripts/lib/ndi-alive.sh instead of defining \
+         emit_ok_grep_pattern/fatal_grep_pattern locally."
+    );
+    assert!(
+        !s.contains("emit_ok_grep_pattern() {"),
+        "#451: emit_ok_grep_pattern must no longer be DEFINED in upgrade-fleet-ndi.sh — it \
+         must come from the shared scripts/lib/ndi-alive.sh."
+    );
+    assert!(
+        !s.contains("fatal_grep_pattern() {"),
+        "#451: fatal_grep_pattern must no longer be DEFINED in upgrade-fleet-ndi.sh — it must \
+         come from the shared scripts/lib/ndi-alive.sh."
+    );
+}
+
 /// The post-swap emit check must key on the deploy-fleet.sh genlock-report signal
 /// ('fps emitted .* fps captured') BROADENED to also accept the older per-camera log shape
 /// ("Streaming: X.Y fps") and the sender-ready line — #445: cam3 runs an older camera-box build

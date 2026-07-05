@@ -152,3 +152,91 @@ fn loopback_e2e_routes_through_camera_set() {
          resolves its IP + NDI source from the single source of truth."
     );
 }
+
+// --- #451: fleet growing 4 -> 7 (cam5/cam6/cam7) + per-camera CAMERA_GENLOCK_FPS -------------
+
+#[test]
+fn camera_set_resolves_cam5_cam6_cam7() {
+    // The fleet is growing 4->7 (#451). A wrong/missing IP would deploy the probe to (and
+    // certify) the WRONG box, exactly like the original cam1-4 guard above.
+    let expected = [
+        ("cam5", "10.77.9.65", "CAM5 (usb)"),
+        ("cam6", "10.77.9.66", "CAM6 (usb)"),
+        ("cam7", "10.77.9.67", "CAM7 (usb)"),
+    ];
+
+    for (name, ip, source) in expected {
+        let (ok, got_ip, got_src) = resolve(name);
+        assert!(ok, "camera_resolve {name} should succeed (#451 fleet growth 4->7)");
+        assert_eq!(got_ip, ip, "camera_resolve {name} resolved the wrong IP");
+        assert_eq!(
+            got_src, source,
+            "camera_resolve {name} resolved the wrong NDI source"
+        );
+    }
+}
+
+#[test]
+fn camera_set_reject_message_lists_all_seven_cameras() {
+    // The reject message must stay in sync with the real accepted set, or a typo report
+    // misleads whoever reads it about which names are actually valid.
+    let s = read("scripts/camera-set.sh");
+    assert!(
+        s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
+        "#451: the unknown-camera reject message must list all seven cameras (cam1..cam7), \
+         not just the original four."
+    );
+}
+
+#[test]
+fn camera_set_default_includes_all_seven_cameras() {
+    // CAMERA_SET is the "drive the whole set" default the fleet-wide orchestrators
+    // (deploy-fleet.sh, upgrade-fleet-ndi.sh) fall back to when the operator doesn't override
+    // it. #451 grows the fleet 4->7, so the default must grow with it.
+    let s = read("scripts/camera-set.sh");
+    assert!(
+        s.contains("CAMERA_SET=\"${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""),
+        "#451: CAMERA_SET default must list all seven cameras (cam1..cam7)."
+    );
+}
+
+/// Source `camera-set.sh`, run `camera_resolve <name>`, and return the resolved
+/// `CAMERA_GENLOCK_FPS` value (or empty string on reject).
+fn resolve_genlock_fps(cam: &str) -> String {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+if camera_resolve "$CAM" 2>/dev/null; then
+  printf 'FPS\t%s\n' "$CAMERA_GENLOCK_FPS"
+fi
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("CAM", cam)
+        .output()
+        .expect("failed to run bash resolver harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("FPS\t"))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn camera_resolve_emits_per_camera_genlock_fps() {
+    // #451: camera_resolve() must ALSO set an authoritative per-camera CAMERA_GENLOCK_FPS
+    // (today uniformly 60 for the whole program-feeding fleet) — this is the table #450's
+    // provisioning drop-in generation is meant to read, distinct from the existing GLOBAL
+    // GENLOCK_FPS the harness uses for its own manually-launched cam1 sender.
+    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+        let fps = resolve_genlock_fps(cam);
+        assert_eq!(
+            fps, "60",
+            "camera_resolve {cam} must set CAMERA_GENLOCK_FPS=60 (#451); got '{fps}'"
+        );
+    }
+}
