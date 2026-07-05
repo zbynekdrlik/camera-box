@@ -390,6 +390,31 @@ obs_burn_targets() {
   printf '%s|%s|%s\n' "$IMAG_IP" "$IMAG_PROG_SOURCE" imag
 }
 
+# stray_recording_targets -> the "ip|box" pairs to guard for a stray OBS recording (#524): strih +
+# stream ONLY — the two broadcast boxes that have an OBS recording output in this topology. imag-nb
+# is excluded (no recording output there, so nothing to guard).
+stray_recording_targets() {
+  printf '%s|%s\n' "$STRIH_IP" strih
+  printf '%s|%s\n' "$STREAM_IP" stream
+}
+
+# stop_stray_recordings -> pre-event guard (#524): a stray OBS recording left running fills the
+# disk (strih's 265.9 GiB / ~11h-to-full runaway) and can crash OBS mid-broadcast — this happened
+# TWICE the same event day (a second 18.57 GiB stray, manually stopped). GetRecordStatus ->
+# StopRecord-if-active on BOTH boxes over WebSocket (no relaunch, file KEPT), fail-loud on any box,
+# loud WARN naming the box + the stray file (emitted by obs_phase2.py itself).
+stop_stray_recordings() {
+  local here rc=0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  while IFS='|' read -r ip box; do
+    [ -n "$ip" ] || continue
+    echo "[obs ${box} ${ip}] #524 pre-event guard: stop any stray recording (WebSocket)"
+    python3 "$here/obs_phase2.py" record --action guard --host "$ip" --password "$OBS_WS_PASSWORD" \
+      2>&1 | sed "s/^/    [${box} stray-rec] /" || rc=$?
+  done < <(stray_recording_targets)
+  return $rc
+}
+
 # burn_action_for_mode MODE -> the obs_burn_filter.py action (test=add/on, event=remove/off).
 burn_action_for_mode() {
   case "${1:-}" in
@@ -542,6 +567,9 @@ do_event() {
     && echo "[#281] rig-active heartbeat CLEARED" \
     || true
   echo "===== rig-mode EVENT (#247/#257/#291) — stop QR, restore clean broadcast, genlock_burn OFF ====="
+  echo "[obs] #524 pre-event guard: stop any stray recording left running on strih/stream (frees disk before going live):"
+  stop_stray_recordings
+  echo
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove no-display drop-in -> restart camera-box -> verify --display restored"
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
   echo

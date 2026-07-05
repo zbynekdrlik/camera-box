@@ -1350,6 +1350,10 @@ def record(a):
                      OBS host (StopRecord returns outputPath in obs-ws 5.1+). The
                      harness then downloads that file from the host to dev1.
     --action status: prints `active=<bool> path=<current>` (for diagnostics).
+    --action guard : #524 pre-event stray-recording guard. If a recording is active,
+                     StopRecord (KEEPS the file) + WARN loud naming the host, the
+                     stray file, and its timecode; prints `stray=<bool> path=<file>`.
+                     Never StartRecord's — this is a safety check, not a control op.
 
     Recording uses OBS's CONFIGURED recording output (format/encoder/dir set in
     OBS Settings > Output). The harness sets the program scene to the probe scene via
@@ -1391,6 +1395,26 @@ def record(a):
             s = _rpc(ws, "GetRecordStatus")
             print(f"active={s.get('outputActive', False)} "
                   f"path={s.get('outputPath', '')}")
+        elif a.action == "guard":
+            # #524: pre-event stray-recording guard. strih's runaway 265.9 GiB recording
+            # (~11h to full at 21 Mb/s) filled the disk mid-event, and a SECOND stray
+            # recording (18.57 GiB) started the SAME event day — both were only caught and
+            # stopped MANUALLY. rig-mode.sh's EVENT mode now calls this on every broadcast
+            # box FIRST: if a recording is active, StopRecord (KEEPS the file — the operator
+            # may still need it) and warn LOUD naming the host, the stray file, and how long
+            # it had been running, so recurrence is caught automatically, not by luck.
+            status = _rpc(ws, "GetRecordStatus")
+            if status.get("outputActive", False):
+                tc = status.get("outputTimecode", "?")
+                out = _rpc(ws, "StopRecord", ignore_err=True)
+                path = (out or {}).get("outputPath", "")
+                sys.stderr.write(
+                    f"WARN: {a.host} had a STRAY recording running (tc={tc}) — stopped it "
+                    f"(#524); file kept at {path or '<unknown path>'}\n"
+                )
+                print(f"stray=true path={path}")
+            else:
+                print("stray=false path=")
         else:
             raise SystemExit(f"unknown --action {a.action!r}")
     finally:
@@ -1456,7 +1480,8 @@ def main():
         p.add_argument("--password", default="")
         if name == "record":
             p.add_argument(
-                "--action", required=True, choices=("start", "stop", "status")
+                "--action", required=True,
+                choices=("start", "stop", "status", "guard"),
             )
         if name == "prod-scene":
             # #163: route program to a CERTIFIED PROD scene and record IT (no colliding
