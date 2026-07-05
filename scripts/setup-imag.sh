@@ -869,6 +869,15 @@ step 15 "Reboot-durable openbox autostart (#522/#488) + Desktop icon"
 # multiview-membership + projector self-heal. setup-imag.sh is now the SOLE writer of
 # ~/.config/openbox/autostart -- the old `.config/autostart/obs.desktop` copy + sed-patch is gone.
 
+# #526 self-heal: DELETE any leftover ~/.config/autostart/obs.desktop from a pre-#530 provision.
+# CORRECTION to the note above: modern Ubuntu's systemd --user DOES launch XDG autostart --
+# app-<id>@autostart.service fires for every ~/.config/autostart/*.desktop once
+# graphical-session.target is up. So a leftover obs.desktop launches a SECOND obs ~30 s after
+# boot (an "OBS is already running" modal stuck over the projector output -- live-hit 2026-07-05),
+# on top of the one the openbox autostart below launches. Remove it so OBS starts exactly once.
+rm -f "$USER_HOME/.config/autostart/obs.desktop"
+rmdir "$USER_HOME/.config/autostart" 2>/dev/null || true
+
 # Install imag_scenes.py + its websocket-client dependency onto the box at a FIXED path -- the
 # boot hook below runs the seeder LOCALLY (127.0.0.1) on every boot, so it cannot depend on a
 # hand-made venv or a checked-out copy of the repo (this script "is copied to the box standalone",

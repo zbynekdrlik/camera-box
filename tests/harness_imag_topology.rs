@@ -191,6 +191,30 @@ fn imag_prog_source_constant_is_defined() {
     );
 }
 
+/// #526: pin the VERIFIED physical camera <-> NDI-name mapping. Live-checked 2026-07-05 (all 6
+/// boxes up): box 10.77.9.61 -> "CAM1 (usb)" ... .66 -> "CAM6 (usb)" — a clean 1:1 by box number,
+/// so the multiview tile order (scene list MV Cam 1..6) matches the physical camera numbering the
+/// cutter expects. Guard the 1:1 binding in imag_scenes.py so a silent reorder can't drift it.
+#[test]
+fn imag_scenes_pins_verified_1to1_camera_mapping_526() {
+    let s = read("scripts/imag_scenes.py");
+    assert!(
+        s.contains(r#"f"CAM{n} (usb)""#),
+        "#526: imag_scenes.py must bind each scene 1:1 to \"CAM{{n}} (usb)\" (the verified \
+         physical box-number mapping)."
+    );
+    assert!(
+        s.contains(r#"f"MV Cam {n}""#),
+        "#526: the low-bw twin scenes must be named \"MV Cam {{n}}\" so the multiview tile order \
+         = physical camera order 1..6."
+    );
+    assert!(
+        s.contains("VERIFIED physical camera") && s.contains("10.77.9.61"),
+        "#526: the verified box<->NDI mapping must be documented in imag_scenes.py so the pin is \
+         auditable (not a bare magic 1:1)."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // [8/8] per-box decode-in-place: imag is extracted DIRECTLY (ssh/scp — no MCP plan needed) and
 // folded into the printed dev1 merge command as a THIRD partial.
