@@ -134,6 +134,32 @@ fn setup_imag_disables_save_projectors_522() {
     );
 }
 
+/// #522: the openbox autostart must ZERO saved_projectors in the scene-collection JSON BEFORE
+/// launching OBS. OBS restores a collection's saved_projectors on load INDEPENDENT of
+/// SaveProjectors=false (that flag only stops OBS SAVING new ones on exit); a stale entry — from
+/// before the fix — is still restored, stacking a DUPLICATE program projector on the HDMI output
+/// on top of the one the autostart opens. Stripping it every boot keeps the open idempotent (1+1).
+#[test]
+fn setup_imag_autostart_strips_saved_projectors_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("saved_projectors") && body.contains("json.dump"),
+        "{SETUP} openbox autostart must zero saved_projectors in the scene-collection JSON \
+         (#522) — OBS restores them independent of SaveProjectors=false, duplicating the HDMI \
+         program projector"
+    );
+    let strip = body
+        .find("saved_projectors")
+        .expect("saved_projectors strip must be present");
+    let open = body
+        .find("--projector")
+        .expect("the autostart --projector open must be present");
+    assert!(
+        strip < open,
+        "the saved_projectors strip must run BEFORE the autostart opens the projectors (#522)"
+    );
+}
+
 /// The scene seeder must create all six cameras, bind them 1:1 to the fleet NDI names, and
 /// run the canvas at 1080p60 — the whole point of the box.
 #[test]
