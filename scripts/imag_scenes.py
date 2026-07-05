@@ -86,6 +86,34 @@ class Obs:
                 return msg["d"].get("responseData", {})
 
 
+def seed_profile(obs: Obs) -> None:
+    """#502: put imag on a named ADVANCED profile with a native-1080p60 NVENC h264 mkv recording
+    encoder, instead of the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which
+    softens the E2E QR/burns). imag records its OWN OBS-program output for the topology-v2 zero-loss
+    verdict (recording-verdict-on-imag.sh extracts per-box partials from imag-REC.mkv), so a clean
+    native-resolution recording matters (the #225 lesson: never let the recording rescale/soften).
+    Applied over WebSocket (CreateProfile/SetCurrentProfile/SetProfileParameter) — verified to
+    persist on the box and produce a 1920x1080@60 h264-NVENC .mkv (2026-07-05). NVENC h264 is
+    available on imag's RTX 5050 (obs_nvenc_h264_tex); RecRescale=false keeps it native 1080p."""
+    obs.req("CreateProfile", {"profileName": "imag-60fps"}, ignore_err=True)
+    obs.req("SetCurrentProfile", {"profileName": "imag-60fps"}, ignore_err=True)
+    for cat, name, val in (
+        ("Output", "Mode", "Advanced"),
+        ("AdvOut", "RecType", "Standard"),
+        ("AdvOut", "RecEncoder", "obs_nvenc_h264_tex"),
+        ("AdvOut", "RecRescale", "false"),
+        ("AdvOut", "RecFormat2", "mkv"),
+        ("AdvOut", "RecFilePath", "/home/newlevel"),
+    ):
+        obs.req("SetProfileParameter", {
+            "parameterCategory": cat, "parameterName": name, "parameterValue": val,
+        }, ignore_err=True)
+    prof = obs.req("GetProfileList").get("currentProfileName")
+    mode = obs.req("GetProfileParameter", {
+        "parameterCategory": "Output", "parameterName": "Mode"}).get("parameterValue")
+    print(f"profile: {prof} (Mode={mode}, rec=NVENC h264 native-1080p mkv)")
+
+
 def seed(obs: Obs) -> None:
     obs.req("SetVideoSettings", {
         "baseWidth": CANVAS_W, "baseHeight": CANVAS_H,
@@ -235,6 +263,7 @@ def main() -> None:
     if args.projector:
         projector(obs)
     else:
+        seed_profile(obs)  # #502: Advanced NVENC native-1080p mkv profile BEFORE the video/scene seed
         seed(obs)
 
 
