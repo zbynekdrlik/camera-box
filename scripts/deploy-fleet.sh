@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Align the whole camera-box fleet (cam1-4) onto ONE pinned CI-built binary, in one command (#73).
+# Align the whole camera-box fleet (cam1-7, #451) onto ONE pinned CI-built binary, in one command (#73).
 #
 # The fleet drifts: cameras get deployed at different times and end up on different versions
 # (e.g. #73 found cam1/cam4=dev.29, cam3=dev.22, cam2=dev.19 — three builds, none current, cam2
@@ -18,10 +18,10 @@
 # off-air / is there a live event". The operator who runs it guards live timing.
 #
 # Usage:
-#   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-4
+#   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-7
 #   scripts/deploy-fleet.sh --run <run-id>        # pin a specific GitHub Actions run id
 #   scripts/deploy-fleet.sh --binary ./dist/camera-box   # deploy an already-downloaded CI binary
-#   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: cam1 cam2 cam3 cam4)
+#   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: cam1 cam2 cam3 cam4 cam5 cam6 cam7)
 #
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
@@ -36,12 +36,14 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"   # camera_resolve(), CAMERA_SET, GENLOCK_FPS
+# shellcheck source=scripts/lib/ndi-alive.sh
+. "$HERE/lib/ndi-alive.sh"   # emit_ok_grep_pattern(), fatal_grep_pattern() (#451, shared with upgrade-fleet-ndi.sh)
 
 SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
 BRANCH="${BRANCH:-main}"
 ARTIFACT="${ARTIFACT:-camera-box-linux-amd64}"
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4}"
+SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 
 RUN_ID=""
 BINARY=""
@@ -162,7 +164,7 @@ for cam in $SET; do
   genlock_line=""
   for _ in $(seq 1 "${GENLOCK_WAIT_TRIES:-12}"); do
     sleep "${GENLOCK_WAIT_SECS:-5}"
-    genlock_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E 'fps emitted .* fps captured' | tail -1" || true)"
+    genlock_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E '$(emit_ok_grep_pattern)' | tail -1" || true)"
     [ -n "$genlock_line" ] && break
   done
 
@@ -170,7 +172,7 @@ for cam in $SET; do
   # CURRENT boot of the just-restarted service. We deliberately do NOT trip on `error!`-level
   # lines — the app logs recoverable events at that level in normal operation (intercom restart,
   # NDI reconnect, capture retry), so greping for 'error' would false-fail a healthy, genlocking box.
-  fatal_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep -E \"panic|thread '.*' panicked|SIGSEGV|SIGABRT|core dumped|FATAL\" | tail -3" || true)"
+  fatal_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep -E \"$(fatal_grep_pattern)\" | tail -3" || true)"
 
   if [ -z "$genlock_line" ]; then
     err "[$cam] NO genlock report ('fps emitted / fps captured') seen — not genlocking"

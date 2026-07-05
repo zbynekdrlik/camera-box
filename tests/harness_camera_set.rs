@@ -167,7 +167,10 @@ fn camera_set_resolves_cam5_cam6_cam7() {
 
     for (name, ip, source) in expected {
         let (ok, got_ip, got_src) = resolve(name);
-        assert!(ok, "camera_resolve {name} should succeed (#451 fleet growth 4->7)");
+        assert!(
+            ok,
+            "camera_resolve {name} should succeed (#451 fleet growth 4->7)"
+        );
         assert_eq!(got_ip, ip, "camera_resolve {name} resolved the wrong IP");
         assert_eq!(
             got_src, source,
