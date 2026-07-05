@@ -9,10 +9,12 @@
 //! `tests/setup_device_pure_functions.rs` / `tests/clock_offset_guard.rs`.
 //!
 //! `verify-device.sh` REUSES rather than reinvents:
-//!   - `scripts/lib/ndi-alive.sh`      emit_ok_grep_pattern() / fatal_grep_pattern()
-//!   - `scripts/clock-offset-guard.sh` offset_us_from_journal() / offset_check() /
-//!                                     ptp_locked_from_journal()
-//!   - `scripts/camera-set.sh`         camera_resolve() (NAME -> IP / CAMERA_GENLOCK_FPS)
+//!
+//! - `scripts/lib/ndi-alive.sh`: `emit_ok_grep_pattern()` / `fatal_grep_pattern()`
+//! - `scripts/clock-offset-guard.sh`: `offset_us_from_journal()` / `offset_check()` /
+//!   `ptp_locked_from_journal()`
+//! - `scripts/camera-set.sh`: `camera_resolve()` (NAME -> IP / `CAMERA_GENLOCK_FPS`)
+//!
 //! so this file also proves the composition (`dantesync_locked_ok` / `dantesync_offset_ok` /
 //! `ndi_emit_ok` / `ndi_journal_has_fatal`) works against real fixture text, not just that the
 //! new script's OWN functions are correct in isolation.
@@ -61,7 +63,11 @@ fn version_is_valid_format_accepts_dev_and_release_forms() {
             r#"if version_is_valid_format "{v}"; then echo YES; else echo NO; fi"#
         ));
         assert_eq!(code, 0, "harness itself must not crash. stderr: {err}");
-        assert_eq!(out.trim(), "YES", "version_is_valid_format('{v}') should accept it");
+        assert_eq!(
+            out.trim(),
+            "YES",
+            "version_is_valid_format('{v}') should accept it"
+        );
     }
 }
 
@@ -72,7 +78,11 @@ fn version_is_valid_format_rejects_garbage() {
             r#"if version_is_valid_format "{v}"; then echo YES; else echo NO; fi"#
         ));
         assert_eq!(code, 0, "harness itself must not crash. stderr: {err}");
-        assert_eq!(out.trim(), "NO", "version_is_valid_format('{v}') should reject it");
+        assert_eq!(
+            out.trim(),
+            "NO",
+            "version_is_valid_format('{v}') should reject it"
+        );
     }
 }
 
@@ -111,7 +121,13 @@ fn active_state_is_active_true_only_for_exact_active() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["YES:active", "NO:inactive", "NO:failed", "NO:activating", "NO:"],
+        vec![
+            "YES:active",
+            "NO:inactive",
+            "NO:failed",
+            "NO:activating",
+            "NO:"
+        ],
         "active_state_is_active must accept ONLY the exact 'active' state"
     );
 }
@@ -177,16 +193,19 @@ fn chroma_state_from_journal_picks_the_last_sample() {
         CAMERA_BOX_JOURNAL_HEALTHY.replace('\'', "'\\''")
     ));
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out.trim(), "capture chroma: u_dev=13.9 v_dev=10.1 -> colour");
+    assert_eq!(
+        out.trim(),
+        "capture chroma: u_dev=13.9 v_dev=10.1 -> colour"
+    );
 }
 
 #[test]
 fn chroma_check_distinguishes_colour_grayscale_and_unknown() {
     let (code, out, err) = run_sourced(
         r#"
-        chroma_check "capture chroma: u_dev=1.0 v_dev=1.0 -> colour"; echo "colour=$?"
-        chroma_check "capture chroma: u_dev=0.1 v_dev=0.1 -> grayscale (source likely monochrome)"; echo "gray=$?"
-        chroma_check ""; echo "unknown=$?"
+        rc=0; chroma_check "capture chroma: u_dev=1.0 v_dev=1.0 -> colour" || rc=$?; echo "colour=$rc"
+        rc=0; chroma_check "capture chroma: u_dev=0.1 v_dev=0.1 -> grayscale (source likely monochrome)" || rc=$?; echo "gray=$rc"
+        rc=0; chroma_check "" || rc=$?; echo "unknown=$rc"
         "#,
     );
     assert_eq!(code, 0, "stderr: {err}");
