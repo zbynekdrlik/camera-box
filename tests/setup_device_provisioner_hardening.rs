@@ -250,10 +250,10 @@ fn setup_device_exits_nonzero_on_half_configured_box_before_reporting_complete()
     // ORDER: the missing-artifact gate must run BEFORE the "Setup Complete!" banner is printed --
     // otherwise a half-configured box could still see a false-positive success banner before the
     // process later exits non-zero (or, worse, never gets checked at all).
-    let missing_check_idx =
-        first_noncomment_idx(&body, "half-configured box").expect("half-configured box fail call present");
-    let complete_idx = first_noncomment_idx(&body, "Setup Complete!")
-        .expect("Setup Complete! banner present");
+    let missing_check_idx = first_noncomment_idx(&body, "half-configured box")
+        .expect("half-configured box fail call present");
+    let complete_idx =
+        first_noncomment_idx(&body, "Setup Complete!").expect("Setup Complete! banner present");
     assert!(
         missing_check_idx < complete_idx,
         "the half-configured-box check must run BEFORE the \"Setup Complete!\" banner is printed \

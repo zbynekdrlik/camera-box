@@ -53,7 +53,10 @@ fn resolve_device_name_resolves_uppercase_name() {
         r#"resolve_device_name CAM5
            printf 'NAME=%s IP=%s STREAM=%s FPS=%s\n' "$DEVICE_NAME" "$DEVICE_IP" "$VBAN_STREAM" "$CAMERA_GENLOCK_FPS""#,
     );
-    assert_eq!(code, 0, "resolve_device_name CAM5 should succeed. stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "resolve_device_name CAM5 should succeed. stderr: {err}"
+    );
     assert_eq!(
         out.trim(),
         "NAME=CAM5 IP=10.77.9.65 STREAM=cam5 FPS=60",
@@ -72,7 +75,10 @@ fn resolve_device_name_is_case_insensitive() {
             r#"resolve_device_name {input}
                printf 'NAME=%s IP=%s STREAM=%s\n' "$DEVICE_NAME" "$DEVICE_IP" "$VBAN_STREAM""#
         ));
-        assert_eq!(code, 0, "resolve_device_name {input} should succeed. stderr: {err}");
+        assert_eq!(
+            code, 0,
+            "resolve_device_name {input} should succeed. stderr: {err}"
+        );
         assert_eq!(
             out.trim(),
             "NAME=CAM3 IP=10.77.9.63 STREAM=cam3",
@@ -132,7 +138,10 @@ fn resolve_device_name_resolves_the_whole_fleet() {
             r#"resolve_device_name {input}
                printf '%s %s\n' "$DEVICE_NAME" "$DEVICE_IP""#
         ));
-        assert_eq!(code, 0, "resolve_device_name {input} should succeed. stderr: {err}");
+        assert_eq!(
+            code, 0,
+            "resolve_device_name {input} should succeed. stderr: {err}"
+        );
         assert_eq!(
             out.trim(),
             format!("{want_name} {want_ip}"),

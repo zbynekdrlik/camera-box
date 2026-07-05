@@ -82,7 +82,10 @@ fn setup_device_writes_genlock_dropin() {
     // CAMERA_GENLOCK_FPS table (scripts/camera-set.sh, #451) so a future per-camera divergence
     // needs only a camera-set.sh edit, not a setup-device.sh edit too.
     assert!(
-        on_noncomment_line(&body, "Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}"),
+        on_noncomment_line(
+            &body,
+            "Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}"
+        ),
         "the genlock.conf drop-in must set `CAMERA_BOX_GENLOCK_FPS` from the per-cam \
          `CAMERA_GENLOCK_FPS` table (resolve_device_name / scripts/camera-set.sh, #450/#451) — \
          not a hardcoded literal `60`"
