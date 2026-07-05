@@ -924,6 +924,14 @@ xset s off -dpms s noblank 2>/dev/null || true
 # there is no OBS CLI flag that suppresses this check -- verified against vendor/obs-studio
 # frontend/OBSApp.cpp, it is a Qt dialog gated on this sentinel file only).
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
+# #522: strip any saved projectors from the scene-collection JSON so OBS restores NONE on load.
+# OBS restores a scene collection's saved_projectors on launch INDEPENDENT of SaveProjectors=false
+# (that flag only stops OBS from SAVING new ones on exit -- a pre-existing entry, from before the
+# fix, is still restored). The autostart below is the SOLE projector opener, so a stale saved
+# projector would stack a DUPLICATE on the HDMI output. Zero it every boot -> idempotent 1+1.
+for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
+  [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
+done
 taskset -c 2-11 obs &
 # wait for OBS WebSocket :4455, then seed scenes/#507 membership + open both projectors (self-heal every boot)
 for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null && { exec 3>&-; break; }; sleep 1; done

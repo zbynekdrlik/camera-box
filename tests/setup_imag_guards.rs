@@ -151,12 +151,13 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
     let strip = body
         .find("saved_projectors")
         .expect("saved_projectors strip must be present");
-    let open = body
-        .find("--projector")
-        .expect("the autostart --projector open must be present");
+    // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
+    let launch = body
+        .find("taskset -c 2-11 obs &")
+        .expect("the autostart OBS launch must be present");
     assert!(
-        strip < open,
-        "the saved_projectors strip must run BEFORE the autostart opens the projectors (#522)"
+        strip < launch,
+        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522)"
     );
 }
 
