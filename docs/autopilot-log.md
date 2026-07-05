@@ -1940,3 +1940,24 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   purge + reboot-verify on 10.77.9.182 is the supervisor's next step, not done by this worker
   (explicit scope boundary: code-only, no live purge/reboot).
 - 2026-07-05 #504 imag-nb strip GNOME → kiosk: code PR #539 (setup-imag.sh kiosk step15 + 13 guard tests, merged e7cd583a); live imag-nb GNOME purged (11 pkgs, KEEP services safe) + reboot-verified (fresh boot, autologin→openbox, single OBS, GNOME gone); v1.7.0-dev.253
+- 2026-07-05 #531 imag-nb genlock drift-guard made DYNAMIC + wired a pre-event alert (the #530
+  45fps-at-event recurrence guard). RED 7e69a67c2 → GREEN 34ca07c26: `imag_build_drift_report`
+  replaces the pre-#531 inert static empty-pin compare with `git log <box>..origin/main --
+  vendor/obs-studio vendor/distroav` (non-empty range = STALE = DRIFT, exit 20); wired into
+  `rig-mode.sh` (`warn_imag_genlock_stale`, advisory-only on both test/event paths). Two review
+  rounds on PR #540 before merge: (1) two focused reviewers found no arity/removed-guard breakage
+  but a `superpowers:requesting-code-review` deep pass found a real gap — an unvalidated box_sha
+  fed straight into `git log` could be shaped like a git long-option (e.g. corrupted marker file
+  reading `--grep=x`) and silently produce a FALSE OK (exit 0, empty range) instead of failing
+  loud; fixed with `--end-of-options` (extracted into `imag_genlock_range_log`, RED→GREEN verified
+  manually: exit=0/empty before the flag, exit=128 after) + two errexit-guard hardening commits
+  (`d6e07674b`, `5f2887e77`). 86/86 drift_guard + 30/30 rig_mode green. PR #540 merged dc5710335,
+  main CI green, issue #531 auto-closed. Deploy-verify: dev1→imag-nb non-interactive SSH is NOT
+  configured (`BatchMode=yes` → `Permission denied (publickey,password)`) — filed as follow-up
+  #541 (does not block #531, the compare logic is unit-tested + independently proven). Worked
+  around it via the `linux-imag-nb` MCP (different transport) to read the live
+  `GENLOCK_BUILD_SHA.txt` (`80dac4329532dfe6d27a0f75a99750e34ebcb204`) and fed it through the real
+  merged `imag_build_drift_report`/`imag_genlock_range_log` functions: correctly reported DRIFT —
+  imag-nb is 2 genlock-commits behind origin/main (`cb64631fd` #501, `af02f9bc3` #505), exactly the
+  #530 failure mode this guard exists to catch, proving the guard works correctly on live data.
+  v1.7.0-dev.254.
