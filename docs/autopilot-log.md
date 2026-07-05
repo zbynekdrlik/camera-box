@@ -1916,3 +1916,4 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   Autopilot-worker contract: version bump + TDD + implementation + local Tier-0 checks + push
   only; the supervisor drives CI → PR "Closes #467" → merge, then runs the live ALL_CAMBOX rig
   recording (with `--imag`) as the acceptance proof — this worker has no rig access.
+- 2026-07-05 #536 revert #525 DocksLocked hard-force → PR #537 merged 9983c09f (+ doc PR #538 c71a07b6); imag-nb provisioning no longer overrides operator Lock UI; live box autostart cleaned; main green; v1.7.0-dev.252

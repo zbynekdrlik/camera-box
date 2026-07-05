@@ -28,7 +28,7 @@ NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
 OBS_CFG="${USER_HOME}/.config/obs-studio"
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -268,7 +268,7 @@ bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
 
 # =============================================================================
-step 5 "Never sleep: lid ignore + sleep masked + GNOME idle/blank/lock off"
+step 5 "Never sleep: lid ignore + sleep masked + idle/blank/lock off (openbox: xset in the step-16 autostart; the gsettings below apply while GNOME is still installed on THIS run — they become no-ops once step 15 purges it later in the same run, and on any subsequent re-run)"
 # =============================================================================
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
@@ -406,7 +406,7 @@ step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
 # =============================================================================
 # imag's OBS is a ~106-thread ~3-core consumer (6x NDI decode + render + genlock + audio), NOT the
 # cam-box's single lean thread -- isolate the whole P-core BLOCK cpu2-11 (10 threads) for OBS, keep
-# P-core0 (cpu0,1) for GNOME/Xorg + sshd/MCP housekeeping, and park default IRQs there too.
+# P-core0 (cpu0,1) for openbox/Xorg + sshd/MCP housekeeping, and park default IRQs there too.
 # nohz_full is scoped to ONLY the one core pair (10,11) that will host the future SCHED_FIFO
 # genlock render-tick thread (#484) -- spreading it across the whole block would remove
 # load-balancing signal (#303). rcu_nocbs=all already comes from 99-lowlatency.cfg above (covers
@@ -416,7 +416,7 @@ step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
 # cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
 cat > /etc/default/grub.d/98-imag-isolation.cfg <<'EOF'
 # camera-box #483: reserve the P-core block cpu2-11 for the OBS thread pool (keep P-core0=cpu0,1
-# + the E-cores cpu12-15 for GNOME/sshd/MCP/housekeeping); nohz_full only on cpu10,11 (the future
+# + the E-cores cpu12-15 for openbox/sshd/MCP/housekeeping); nohz_full only on cpu10,11 (the future
 # genlock render-tick core, #484). rcu_nocbs=all is already set by 99-lowlatency.cfg (covers 10,11,
 # which nohz_full requires). irqaffinity keeps IRQs off the isolated block.
 GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15"
@@ -780,7 +780,7 @@ FirstLoad=false
 EOF
     fi
     if ! grep -q '^SaveProjectors=' "$f"; then
-        # #522: false — the openbox autostart hook (step 15) is now the SOLE, authoritative
+        # #522: false — the openbox autostart hook (step 16) is now the SOLE, authoritative
         # opener of BOTH projectors (PROGRAM+MULTIVIEW) on every boot, self-healing monitor
         # assignment even if the box's monitor topology changes. Leaving OBS's own SaveProjectors
         # restore ON would double-open the projectors (OBS restoring its last-saved projector
@@ -858,7 +858,109 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 15 "Reboot-durable openbox autostart (#522/#488) + Desktop icon"
+step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disable+purge GNOME"
+# =============================================================================
+# imag-nb is a single-purpose OBS cutting appliance — it must boot straight into a bare,
+# non-compositing openbox kiosk (fullscreen OBS projectors on the full panel+HDMI), NOT the full
+# GNOME user desktop (owner directive #504, 2026-07-04): GNOME's dock/top-bar steal OBS's screen,
+# mutter's "application not responding / force quit?" modal pops over the live output, and the
+# desktop bloat/services waste resources on a production box. This step CODIFIES the hand-driven
+# live conversion so a from-scratch provision lands in the kiosk, not GNOME.
+#
+# HARD ORDER (owner incident 2026-07-04): install openbox+lightdm AND switch the display-manager to
+# lightdm BEFORE any GNOME purge, so the box ALWAYS has a working DM — purging gdm3 first with no
+# lightdm yet left the box with NO display manager on the next boot → black wall + an extra reboot.
+# The purge only takes over the SESSION on the NEXT boot; on the live box (already an openbox
+# session) it removes dormant packages without touching the running OBS/openbox.
+
+# (a) Install the light WM + display manager. Idempotent (apt-get install on an already-installed
+#     package is a no-op). lightdm's default-Recommends greeter (lightdm-gtk-greeter) comes along;
+#     the owner's list names no specific greeter, so none is pinned here.
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm \
+    || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
+
+# (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
+#     content). ${DESKTOP_USER} logs in headless and openbox launches the OBS kiosk (step 16
+#     autostart). autologin-user-timeout=0 + user-session=openbox mirror the live-proven config.
+mkdir -p /etc/lightdm/lightdm.conf.d
+cat > /etc/lightdm/lightdm.conf.d/50-imag-autologin.conf <<EOF
+[Seat:*]
+autologin-user=${DESKTOP_USER}
+autologin-user-timeout=0
+autologin-session=openbox
+user-session=openbox
+EOF
+
+# (c) Switch the display-manager to lightdm EXPLICITLY via the symlink — NOT `systemctl enable
+#     lightdm`, which fails "Failed to enable unit: Invalid unit name ... instance name specified"
+#     and, critically, does NOT (re)create /etc/systemd/system/display-manager.service (owner
+#     incident 2026-07-04: the missing symlink brought the box up with no DM → black wall). Guard:
+#     only after lightdm's unit file actually exists on disk (it was just installed in (a)).
+[ -f /lib/systemd/system/lightdm.service ] \
+    || fail "#504: lightdm.service unit missing after install — refuse to switch the DM symlink"
+ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service
+echo "  #504: display-manager.service → lightdm (openbox autologin for ${DESKTOP_USER})"
+
+# (d) Disable the desktop-bloat services still running on the appliance. KEEP, NEVER touched:
+#     avahi (NDI mDNS — CRITICAL), sshd, dantesync, remoteos-mcp (the MCP agent), NetworkManager,
+#     lightdm. `disable --now` also stops each; the per-service `|| true` keeps this idempotent and
+#     robust to a static/alias/absent unit (colord is `static`).
+for svc in cups cups-browsed bluetooth ModemManager colord switcheroo-control gnome-remote-desktop; do
+    systemctl disable --now "$svc" >/dev/null 2>&1 || true
+done
+# gdm3 is handled SEPARATELY and deliberately WITHOUT `--now` (review finding, 2026-07-05): on a
+# genuine from-scratch GNOME box (not this already-openbox live box) gdm3 still OWNS the current
+# :0 session that step 17 below launches OBS into (DISPLAY=:0, $UBUS captured back in step 5) —
+# stopping it immediately would kill that X server + D-Bus session mid-provision and fail step 17's
+# launch against a now-dead :0. `disable` alone (no `--now`) only stops gdm3 from starting again on
+# the NEXT boot, the same "takes effect on the next boot" convention already used by the kernel
+# (step 7) / CPU-isolation (step 8) / NVIDIA (step 9) changes above — the actual handover to
+# lightdm+openbox happens at the reboot this script deliberately does not perform.
+systemctl disable gdm3 >/dev/null 2>&1 || true
+echo "  #504: disabled cups/cups-browsed/bluetooth/ModemManager/colord/switcheroo-control/gnome-remote-desktop now; gdm3 disabled for next boot (avahi/sshd/dantesync/remoteos-mcp/NetworkManager/lightdm kept)"
+
+# (e) Purge the GNOME desktop bloat — the owner's EXPLICIT package list (#504). NEVER a bare
+#     `apt-get autoremove`: that would sweep every now-orphaned FORWARD dependency (an unbounded
+#     cascade — the exact hazard the owner called out; it could reach ssh/NetworkManager helpers).
+#     apt's own purge cascade removes only the REVERSE-deps that DEPEND on these listed packages
+#     (ubuntu-session, ubuntu-desktop-minimal, the desktop-icons-ng extension) — bounded and safe
+#     (SIMULATED 2026-07-05: 11 pkgs removed, NONE of sshd/NetworkManager/lightdm/avahi/dantesync/
+#     remoteos-mcp). Scope the purge to packages ACTUALLY installed so the command is idempotent and
+#     never aborts on an absent package (`firefox` may be a snap-only stub, `libreoffice` isn't on
+#     this box, a re-run has nothing left) — the explicit owner set stays literal in GNOME_PURGE_PKGS.
+GNOME_PURGE_PKGS="gnome-shell gdm3 nautilus firefox gnome-remote-desktop \
+    gnome-shell-extension-ubuntu-dock gnome-shell-extension-ubuntu-tiling-assistant \
+    gnome-shell-extension-appindicator libreoffice-core"
+GNOME_TO_PURGE=""
+for p in $GNOME_PURGE_PKGS; do
+    # Same install-status idiom as step 9's driver check: a bare `dpkg -s` exit code is NOT enough
+    # (it exits 0 for a removed-not-purged package in "deinstall ok config-files" state) — match the
+    # Status field content. `>/dev/null` (not `-q`) mirrors that step's convention.
+    if dpkg -s "$p" 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
+        GNOME_TO_PURGE="$GNOME_TO_PURGE $p"
+    fi
+done
+if [ -n "$GNOME_TO_PURGE" ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y $GNOME_TO_PURGE \
+        || fail "#504: GNOME desktop purge failed —$GNOME_TO_PURGE"
+    echo "  #504: purged GNOME desktop packages —$GNOME_TO_PURGE"
+else
+    echo "  #504: no GNOME desktop packages left to purge (already a clean kiosk)"
+fi
+
+# Defense-in-depth re-assert (review finding, 2026-07-05): gdm3's dpkg postrm runs AFTER the DM
+# symlink switch in (c) above — re-verify it still points at lightdm rather than trusting the
+# earlier switch blindly. A postrm that silently re-pointed display-manager.service back is exactly
+# the black-wall failure mode this whole step exists to prevent; refuse to leave the box in an
+# uncertain DM state rather than discover it only on the next reboot.
+[ "$(readlink -f /etc/systemd/system/display-manager.service)" = "/lib/systemd/system/lightdm.service" ] \
+    || fail "#504: display-manager.service no longer points at lightdm after the GNOME purge — refuse to leave the box with an uncertain display manager"
+
+echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
+
+# =============================================================================
+step 16 "Reboot-durable openbox autostart (#522/#488) + Desktop icon"
 # =============================================================================
 # ROOT CAUSE (#522/#488): the box's real reboot-durable state lived ONLY as a hand-edited
 # ~/.config/openbox/autostart on the box itself -- NOTHING in this script wrote it. This box runs
@@ -929,7 +1031,7 @@ fi
 xset s off -dpms s noblank 2>/dev/null || true
 # Clear stale OBS crash sentinels BEFORE launch -- a hard/unclean reboot is EXACTLY the case OBS's
 # own "Crash or unclean shutdown detected" modal fires on, which would hang the boot headless and
-# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 16;
+# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17;
 # there is no OBS CLI flag that suppresses this check -- verified against vendor/obs-studio
 # frontend/OBSApp.cpp, it is a Qt dialog gated on this sentinel file only).
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
@@ -954,7 +1056,7 @@ chmod +x "$USER_HOME/.config/openbox/autostart"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
 
 # =============================================================================
-step 16 "Launch OBS on the desktop session (X11 :0)"
+step 17 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
 # Clear stale OBS crash sentinels BEFORE relaunching — mirrors the Windows
 # launch-obs-genlock.sh convention (Remove-Item .sentinel\* before Start-Process obs64). On a
@@ -964,52 +1066,73 @@ step 16 "Launch OBS on the desktop session (X11 :0)"
 # :4455 never comes up, and the verify step fails "not listening" even though the swap succeeded
 # (hit live 2026-07-04 during a #463 re-deploy to imag-nb; recovered by hand).
 rm -rf "${OBS_CFG}/.sentinel"/* 2>/dev/null || true
-if ! pgrep -x obs >/dev/null; then
-    # #483: pin this provisioning-time launch to the P-core block too, matching the autostart
-    # entry above -- without taskset here, a provisioning launch (before the isolcpus grub change
-    # is active, i.e. before the first post-provision reboot) still lands unpinned; after reboot,
-    # an un-pinned `obs` would be STARVED onto the tiny cpu0,1,12-15 remainder once isolcpus takes
-    # effect. `nice -n -5` was deliberately NOT added -- the desktop user lacks CAP_SYS_NICE
-    # (live-confirmed, #483 comment).
-    sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-        nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
-    sleep 8
+# #504: on a genuine from-scratch box, step 15's GNOME purge removes the gdm3 PACKAGE — and
+# package removal invokes gdm3's own maintainer scripts, which stop the service as part of the
+# removal REGARDLESS of the `disable` (no `--now`) call in step 15(d). If gdm3 owned the CURRENT
+# :0 session, that teardown kills the X server this step would otherwise launch OBS into. Detect
+# whether :0 is actually alive (its Unix socket exists) BEFORE attempting the launch — same "takes
+# effect on the NEXT boot" convention as the kernel/CPU-isolation/NVIDIA-driver steps above: if :0
+# died, OBS launches fresh via the lightdm+openbox autostart (step 16) after the next boot instead.
+# On THIS (already-openbox) box :0 is alive throughout (openbox owns it, not gdm3) — unchanged path.
+OBS_LAUNCHED_THIS_RUN=0
+if [ -S /tmp/.X11-unix/X0 ]; then
+    if ! pgrep -x obs >/dev/null; then
+        # #483: pin this provisioning-time launch to the P-core block too, matching the autostart
+        # entry above -- without taskset here, a provisioning launch (before the isolcpus grub change
+        # is active, i.e. before the first post-provision reboot) still lands unpinned; after reboot,
+        # an un-pinned `obs` would be STARVED onto the tiny cpu0,1,12-15 remainder once isolcpus takes
+        # effect. `nice -n -5` was deliberately NOT added -- the desktop user lacks CAP_SYS_NICE
+        # (live-confirmed, #483 comment).
+        sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+            nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
+        sleep 8
+    fi
+    pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
+    OBS_LAUNCHED_THIS_RUN=1
+else
+    echo "  #504: DISPLAY=:0 is not alive this run (expected on a from-scratch box once step 15's \
+GNOME/gdm3 purge tears down the old session) — OBS will auto-launch via the lightdm+openbox \
+autostart (step 16) on the NEXT boot; this script does not reboot the box"
 fi
-pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
 
 # =============================================================================
-step 17 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
+step 18 "Verify: WebSocket :4455 + genlock render tick + DistroAV/NDI loaded"
 # =============================================================================
-for i in $(seq 1 15); do
-    if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
-    [ "$i" -eq 15 ] && fail "OBS WebSocket :4455 not listening"
-    sleep 2
-done
+if [ "$OBS_LAUNCHED_THIS_RUN" -eq 1 ]; then
+    for i in $(seq 1 15); do
+        if (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; then exec 3>&-; echo "  WS :4455 up"; break; fi
+        [ "$i" -eq 15 ] && fail "OBS WebSocket :4455 not listening"
+        sleep 2
+    done
 
-# Genlock log verify — the Linux equivalent of scripts/launch-obs-genlock.sh's Windows
-# log-verify (#257 proof): the OBS log is the AUTHORITATIVE runtime signal a stock/wrong build
-# cannot fake. Same regex family as scripts/drift-guard.sh genlock_capability_from_log.
-OBS_LOG_DIR="$OBS_CFG/logs"
-# `|| true` is load-bearing: under `set -euo pipefail`, `ls` on a non-matching glob exits non-zero
-# even though `head` succeeds with empty output, and pipefail propagates that failure to the bare
-# assignment — `set -e` would abort the script HERE, before the very next line's intended
-# `fail "no OBS log found..."` ever runs (same convention already used for the desktop-icon step's
-# `APP_DESKTOP=$(ls ... 2>/dev/null || true)`).
-LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1 || true)"
-[ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
-LOG_TEXT="$(cat "$LATEST_LOG")"
-echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
-    || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap step)"
-echo "  genlock render tick ENABLED (#460 build proof)"
-if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
-    echo "  DistroAV plugin loaded"
+    # Genlock log verify — the Linux equivalent of scripts/launch-obs-genlock.sh's Windows
+    # log-verify (#257 proof): the OBS log is the AUTHORITATIVE runtime signal a stock/wrong build
+    # cannot fake. Same regex family as scripts/drift-guard.sh genlock_capability_from_log.
+    OBS_LOG_DIR="$OBS_CFG/logs"
+    # `|| true` is load-bearing: under `set -euo pipefail`, `ls` on a non-matching glob exits non-zero
+    # even though `head` succeeds with empty output, and pipefail propagates that failure to the bare
+    # assignment — `set -e` would abort the script HERE, before the very next line's intended
+    # `fail "no OBS log found..."` ever runs (same convention already used for the desktop-icon step's
+    # `APP_DESKTOP=$(ls ... 2>/dev/null || true)`).
+    LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1 || true)"
+    [ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
+    LOG_TEXT="$(cat "$LATEST_LOG")"
+    echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
+        || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap step)"
+    echo "  genlock render tick ENABLED (#460 build proof)"
+    if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
+        echo "  DistroAV plugin loaded"
+    else
+        echo "  WARNING: no '[distroav] plugin loaded' line yet (may log lazily on first NDI activation)"
+    fi
+    if echo "$LOG_TEXT" | grep -i 'NDI library initialized' >/dev/null; then
+        echo "  NDI runtime loaded"
+    else
+        echo "  WARNING: no 'NDI library initialized' line yet"
+    fi
 else
-    echo "  WARNING: no '[distroav] plugin loaded' line yet (may log lazily on first NDI activation)"
-fi
-if echo "$LOG_TEXT" | grep -i 'NDI library initialized' >/dev/null; then
-    echo "  NDI runtime loaded"
-else
-    echo "  WARNING: no 'NDI library initialized' line yet"
+    echo "  #504: no live X session this run (see step 17) — skipping the WebSocket/genlock/NDI \
+runtime verify; re-run this script (or just scripts/imag_scenes.py) after the next reboot to verify"
 fi
 
 echo -e "${GREEN}========================================${NC}"
