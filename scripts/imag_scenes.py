@@ -26,7 +26,8 @@ Seeds (spec docs/superpowers/specs/2026-07-03-imag-nb-topology-design.md, Phase 
     cuts the real full-bw scenes to program, the built-in multiview only ever renders the
     cheap low-bw twins.
   - Studio Mode ON, program parked on "Cam 1"
-  --projector: fullscreen PROGRAM projector on the external (non-eDP/non-primary) monitor
+  --projector: fullscreen PROGRAM projector on the HDMI monitor + built-in MULTIVIEW projector
+    on the panel (#522/#488 — self-healed every boot by the openbox autostart hook)
 
 Usage:
   imag_scenes.py --host 10.77.9.182 [--password PW] [--projector]
@@ -178,17 +179,39 @@ def seed(obs: Obs) -> None:
 
 def projector(obs: Obs) -> None:
     mons = obs.req("GetMonitorList")["monitors"]
-    ext = [m for m in mons if "eDP" not in m.get("monitorName", "")]
-    if not ext:
-        sys.exit("FAIL: no external monitor detected — connect the HDMI monitor first "
+    # Robust monitor selection across BOTH known imag-nb GPU generations (#522/#488): the older
+    # Intel iGPU enumerated the built-in panel as "eDP-1"; this dGPU (RTX 5050 Laptop, PRIME
+    # nvidia-primary, #500) enumerates it as "DP-0(0)" instead — an "eDP not in name" filter is
+    # therefore AMBIGUOUS here (neither "DP-0(0)" nor "HDMI-0(1)" contains "eDP") and can wrongly
+    # open PROGRAM on the panel instead of the projector (root cause of #522/#488). The one name
+    # that stays STABLE across both generations is the connected monitor's own connector TYPE:
+    # the external projector is always HDMI-*, the panel never is. Select on "HDMI"
+    # presence/absence instead of "eDP" absence.
+    hdmi = [m for m in mons if "HDMI" in m.get("monitorName", "")]
+    if not hdmi:
+        sys.exit("FAIL: no HDMI projector monitor detected — connect the HDMI monitor first "
                  f"(monitors: {[m.get('monitorName') for m in mons]})")
-    target = ext[0]
     obs.req("OpenVideoMixProjector", {
         "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM",
-        "monitorIndex": target["monitorIndex"],
+        "monitorIndex": hdmi[0]["monitorIndex"],
     })
-    print(f"program projector -> monitor {target['monitorIndex']} "
-          f"({target.get('monitorName')}) — persisted via SaveProjectors")
+    print(f"PROGRAM projector -> monitor {hdmi[0]['monitorIndex']} "
+          f"({hdmi[0].get('monitorName')}) [HDMI]")
+
+    # #507/#522: the built-in MULTIVIEW projector belongs on the panel (same monitor that shows
+    # the OBS UI) so the cutter can see it without the HDMI projector output ever showing UI
+    # chrome. Not fatal if no panel is found (e.g. a headless/remote debug session) — warn only.
+    panel = [m for m in mons if "HDMI" not in m.get("monitorName", "")]
+    if panel:
+        obs.req("OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
+            "monitorIndex": panel[0]["monitorIndex"],
+        })
+        print(f"MULTIVIEW projector -> monitor {panel[0]['monitorIndex']} "
+              f"({panel[0].get('monitorName')}) [panel]")
+    else:
+        print("WARN: no panel monitor detected for the MULTIVIEW projector "
+              f"(monitors: {[m.get('monitorName') for m in mons]})")
 
 
 def main() -> None:
@@ -197,7 +220,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=4455)
     ap.add_argument("--password", default=None)
     ap.add_argument("--projector", action="store_true",
-                    help="only open the fullscreen PROGRAM projector on the external monitor")
+                    help="open the PROGRAM projector on the HDMI monitor AND the built-in "
+                         "MULTIVIEW projector on the panel")
     args = ap.parse_args()
     obs = Obs(args.host, args.port, args.password)
     if args.projector:

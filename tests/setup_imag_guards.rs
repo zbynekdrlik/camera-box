@@ -111,14 +111,53 @@ fn setup_imag_seeds_websocket_4455() {
     }
 }
 
-/// Projector persistence: SaveProjectors=true is what makes the fullscreen PROGRAM projector
-/// survive an OBS restart — without it every reboot loses the LED-wall output.
+/// #522: SaveProjectors must be FALSE — the openbox-autostart boot hook (step 15) is now the
+/// SOLE, authoritative opener of BOTH projectors (PROGRAM+MULTIVIEW) on every boot, self-healing
+/// monitor assignment even if the box's monitor topology changes. Leaving OBS's own
+/// SaveProjectors restore ON would double-open the projectors (OBS restoring its last-saved
+/// projector state on top of the boot hook re-opening them fresh). Supersedes the pre-#522
+/// SaveProjectors=true behaviour, which relied on OBS's own restore and never re-applied the
+/// #507 monitor-selection fix on a topology change.
 #[test]
-fn setup_imag_persists_projectors() {
+fn setup_imag_disables_save_projectors_522() {
     let body = read(SETUP);
     assert!(
-        body.contains("SaveProjectors=true"),
-        "{SETUP} must seed SaveProjectors=true so the program projector survives OBS restarts"
+        body.contains("SaveProjectors=false"),
+        "{SETUP} must seed SaveProjectors=false (#522) — the boot-hook openbox autostart script \
+         is now the sole authoritative projector opener; OBS's own save/restore would double-\
+         open them"
+    );
+    assert!(
+        !body.contains("SaveProjectors=true"),
+        "{SETUP} must NOT seed SaveProjectors=true anywhere — that was the pre-#522 behaviour \
+         this ticket replaces"
+    );
+}
+
+/// #522: the openbox autostart must ZERO saved_projectors in the scene-collection JSON BEFORE
+/// launching OBS. OBS restores a collection's saved_projectors on load INDEPENDENT of
+/// SaveProjectors=false (that flag only stops OBS SAVING new ones on exit); a stale entry — from
+/// before the fix — is still restored, stacking a DUPLICATE program projector on the HDMI output
+/// on top of the one the autostart opens. Stripping it every boot keeps the open idempotent (1+1).
+#[test]
+fn setup_imag_autostart_strips_saved_projectors_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("saved_projectors") && body.contains("json.dump"),
+        "{SETUP} openbox autostart must zero saved_projectors in the scene-collection JSON \
+         (#522) — OBS restores them independent of SaveProjectors=false, duplicating the HDMI \
+         program projector"
+    );
+    let strip = body
+        .find("saved_projectors")
+        .expect("saved_projectors strip must be present");
+    // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
+    let launch = body
+        .find("taskset -c 2-11 obs &")
+        .expect("the autostart OBS launch must be present");
+    assert!(
+        strip < launch,
+        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522)"
     );
 }
 
@@ -153,16 +192,38 @@ fn imag_scenes_pins_low_latency() {
     );
 }
 
-/// The projector subcommand must refuse to open on the built-in panel — the program projector
-/// belongs on the EXTERNAL (HDMI) monitor, and silently projecting onto eDP would look 'done'
-/// while the LED wall stays black.
+/// #522/#488: the projector subcommand must select monitors by connector TYPE (HDMI vs
+/// non-HDMI), never by the "eDP" substring — on imag-nb's dGPU (#500, RTX 5050 Laptop / PRIME
+/// nvidia-primary) the panel enumerates as "DP-0(0)", not "eDP-1" as on the older Intel-iGPU
+/// naming, so an "eDP not in name" filter is AMBIGUOUS (neither "DP-0(0)" nor "HDMI-0(1)"
+/// contains "eDP") and can wrongly open PROGRAM on the panel instead of the projector — the root
+/// cause of #522/#488.
 #[test]
-fn imag_scenes_projector_targets_external_monitor_only() {
+fn imag_scenes_projector_selects_by_hdmi_not_edp_522() {
     let body = read(SCENES);
     assert!(
-        body.contains("eDP") && body.contains("OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"),
-        "{SCENES} --projector must exclude the eDP built-in panel and open the PROGRAM mix \
-         projector on the external monitor"
+        !body.contains(r#""eDP" not in m.get("monitorName", "")"#),
+        "{SCENES}: projector() must NOT filter by 'eDP not in monitorName' any more — that \
+         filter is ambiguous on the dGPU box's DP-0/HDMI-0 naming and is the root cause of \
+         #522/#488"
+    );
+    assert!(
+        body.contains(r#""HDMI" in m.get("monitorName", "")"#),
+        "{SCENES}: projector() must select the PROGRAM projector's monitor via 'HDMI in \
+         monitorName' — the one connector-type string that stays stable across both the old \
+         Intel-iGPU (eDP-1) and the new dGPU (DP-0) panel namings"
+    );
+    assert!(
+        body.contains(r#""HDMI" not in m.get("monitorName", "")"#),
+        "{SCENES}: projector() must select the MULTIVIEW projector's monitor via 'HDMI not in \
+         monitorName' (the panel) — the complementary selection to the PROGRAM projector's HDMI \
+         monitor"
+    );
+    assert!(
+        body.contains("OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM")
+            && body.contains("OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW"),
+        "{SCENES}: --projector must open BOTH the PROGRAM projector (HDMI) and the built-in \
+         MULTIVIEW projector (panel) — the boot hook self-heals both every boot (#522/#507)"
     );
 }
 
@@ -1397,23 +1458,25 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
     );
 }
 
-/// #483: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths — the
-/// autostart .desktop entry AND the script's own provisioning-time launcher. Without this,
-/// isolcpus (once active after the next boot) would STARVE OBS onto cpu0,1,12-15 — the tiny
-/// remainder reserved for GNOME/housekeeping/E-cores (live-verified finding, #483 comment).
+/// #483/#522: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths — the
+/// boot-time openbox autostart script AND the script's own provisioning-time launcher. Without
+/// this, isolcpus (once active after the next boot) would STARVE OBS onto cpu0,1,12-15 — the
+/// tiny remainder reserved for GNOME/housekeeping/E-cores (live-verified finding, #483 comment).
+/// #522 replaced the old GNOME `.config/autostart/obs.desktop` sed-patch mechanism (dead code on
+/// this lightdm+openbox box, which never read XDG autostart) with a real openbox autostart
+/// script — the taskset pin now lives THERE instead of a sed-patched .desktop `Exec=` line.
 #[test]
 fn setup_imag_pins_obs_to_pcore_block_on_both_launch_paths_483() {
     let body = read(SETUP);
     assert!(
-        body.contains("sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/'"),
-        "{SETUP} must sed-patch the copied autostart .desktop's `Exec=obs` line to \
-         `Exec=taskset -c 2-11 obs` (#483) — without it, isolcpus would starve the autostart-\
-         launched OBS onto cpu0,1,12-15"
+        body.contains("taskset -c 2-11 obs &"),
+        "{SETUP}: the openbox autostart script (#522) must launch OBS via `taskset -c 2-11 obs` \
+         — without it, isolcpus would starve the boot-launched OBS onto cpu0,1,12-15"
     );
     assert!(
         body.contains("nohup taskset -c 2-11 obs >/tmp/obs-launch.log"),
         "{SETUP} must launch OBS via `taskset -c 2-11 obs` in the provisioning-time launcher \
-         (#483), matching the autostart entry"
+         (#483), matching the boot-time openbox autostart script"
     );
 }
 
@@ -1430,25 +1493,29 @@ fn setup_imag_does_not_add_nice_to_obs_launchers_483() {
     );
 }
 
-/// #483: the Desktop icon (double-click launch) must be left UNPINNED (`Exec=obs`, no taskset) —
-/// only the autostart path is pinned. Matches the live box exactly (only
-/// ~/.config/autostart/obs.desktop was patched; ~/Desktop/obs.desktop was left plain).
+/// #483/#522: the Desktop icon (double-click launch) must stay UNPINNED (`Exec=obs`, no
+/// taskset) — only the boot-time openbox autostart script is pinned to the P-core block. #522
+/// removed the old `.config/autostart/obs.desktop` GNOME entry entirely (openbox never read it —
+/// dead code); this test now also guards against that dead path silently returning.
 #[test]
 fn setup_imag_leaves_desktop_icon_unpinned_483() {
     let body = read(SETUP);
-    // The sed patch must target ONLY the autostart copy's path, never the Desktop copy's.
     assert!(
-        body.contains(r#"sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/.config/autostart/obs.desktop""#),
-        "{SETUP}: the taskset sed-patch must target ONLY \
-         \"$USER_HOME/.config/autostart/obs.desktop\" — the Desktop icon copy \
-         (\"$USER_HOME/Desktop/obs.desktop\") must stay plain `Exec=obs`, matching the live box"
+        body.contains(r#"cp -f "$APP_DESKTOP" "$USER_HOME/Desktop/obs.desktop""#),
+        "{SETUP}: the Desktop double-click icon must still be a byte-identical copy of the \
+         vendor .desktop (Exec=obs, unpinned) — only the boot-time openbox autostart script \
+         (#522) is pinned to the P-core block"
     );
     assert!(
-        !body.contains(
-            r#"sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/Desktop/obs.desktop""#
-        ),
-        "{SETUP}: must NOT taskset-patch the Desktop icon copy — only the autostart entry is \
-         pinned on the live box (#483)"
+        !body.contains("sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/'"),
+        "{SETUP}: must NOT sed-patch ANY .desktop file's Exec= line any more (#522) — the \
+         taskset pin now lives in the openbox autostart script body, not a patched .desktop entry"
+    );
+    assert!(
+        !body.contains(r#"$USER_HOME/.config/autostart/obs.desktop"#),
+        "{SETUP}: must no longer write .config/autostart/obs.desktop — openbox (lightdm) never \
+         reads XDG autostart; .config/openbox/autostart is now the SOLE boot-durable authority \
+         (#522)"
     );
 }
 
@@ -1787,5 +1854,150 @@ fn setup_imag_nvidia_step_documents_driver_upgrade_freedom_500() {
         "{SETUP}: the #500 nvidia step must document that a newer -open driver flavor should be \
          preferred over the 595 pin if one becomes available (user's explicit driver-upgrade-\
          freedom directive)"
+    );
+}
+
+// ============================================================================================
+// #522/#488 — imag-nb reboot-durable openbox autostart. Root cause: nothing in the repo wrote
+// the box's real boot-time state (~/.config/openbox/autostart, hand-edited on the box, NEVER
+// reproduced by setup-imag.sh) — a reboot silently regressed to the WRONG primary output (HDMI
+// instead of the panel) and dropped the #507 projector self-heal. setup-imag.sh is now the SOLE
+// writer of this file.
+// ============================================================================================
+
+/// setup-imag.sh must write an EXECUTABLE ~/.config/openbox/autostart — this is the file
+/// lightdm+openbox actually reads on login/boot (unlike the dead XDG .config/autostart/ dir).
+#[test]
+fn setup_imag_writes_openbox_autostart_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"$USER_HOME/.config/openbox/autostart"#),
+        "{SETUP} must generate ~/.config/openbox/autostart — the file openbox (lightdm session) \
+         actually reads on boot; unlike .config/autostart/*.desktop (GNOME/XDG only, dead on \
+         this box), this is the real reboot-durable authority (#522)"
+    );
+    assert!(
+        body.contains(r#"chmod +x "$USER_HOME/.config/openbox/autostart""#),
+        "{SETUP}: the generated openbox autostart script must be made executable (chmod +x) or \
+         openbox silently never runs it"
+    );
+}
+
+/// The autostart script must set the non-HDMI PANEL primary at 1920x1080@60 — and must NEVER
+/// apply --primary to the HDMI projector output (the exact #522/#488 regression: the
+/// hand-edited autostart wrongly primaried HDMI instead of the panel).
+#[test]
+fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"$1 !~ /^HDMI/"#) && body.contains(r#"$1 ~  /^HDMI/"#),
+        "{SETUP}: the autostart script must select PANEL as the connected non-HDMI output and \
+         PROJ as the connected HDMI output (xrandr awk filters) — matches imag_scenes.py's \
+         HDMI-vs-panel rule (#522)"
+    );
+    assert!(
+        body.contains(r#"xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60"#),
+        "{SETUP}: the autostart script must set the PANEL primary at 1920x1080@60 — the \
+         #522/#488 regression was the hand-edited autostart wrongly setting HDMI primary instead"
+    );
+    // The bug this ticket fixes: --primary must be scoped to $PANEL only, never to $PROJ/HDMI.
+    assert!(
+        !body.contains(r#"xrandr --output "$PROJ" --primary"#),
+        "{SETUP}: the autostart script must NEVER set --primary on $PROJ (the HDMI projector) — \
+         that was the exact #522/#488 hand-edited-box regression this ticket fixes"
+    );
+}
+
+/// The autostart script must launch OBS taskset-pinned to the isolated P-core block, exactly as
+/// the provisioning-time launcher does (#483) — a reboot must not silently starve OBS.
+#[test]
+fn setup_imag_autostart_launches_obs_pinned_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("taskset -c 2-11 obs &"),
+        "{SETUP}: the openbox autostart script must launch OBS via `taskset -c 2-11 obs` (#483) \
+         — without it, isolcpus would starve the boot-launched OBS onto cpu0,1,12-15"
+    );
+}
+
+/// The autostart script must wait for the OBS WebSocket (:4455) to come up BEFORE seeding — a
+/// race here would run imag_scenes.py against a not-yet-listening OBS and silently no-op.
+#[test]
+fn setup_imag_autostart_waits_for_websocket_before_seeding_522() {
+    let body = read(SETUP);
+    let wait_loop = body
+        .find("/dev/tcp/127.0.0.1/4455")
+        .expect("{SETUP}: the autostart script must wait on 127.0.0.1:4455 before seeding");
+    let obs_launch = body
+        .find("taskset -c 2-11 obs &")
+        .expect("obs launch must exist in the autostart script");
+    assert!(
+        obs_launch < wait_loop,
+        "{SETUP}: OBS must be launched BEFORE the autostart script waits for its WebSocket to \
+         come up"
+    );
+}
+
+/// The autostart script must self-heal BOTH the scene/#507-multiview-membership seed AND the
+/// projector layout on EVERY boot — a reboot must never require a human to re-run
+/// imag_scenes.py by hand.
+#[test]
+fn setup_imag_autostart_seeds_and_opens_projectors_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"--host 127.0.0.1"#),
+        "{SETUP}: the autostart script must invoke imag_scenes.py against the LOCAL OBS \
+         (127.0.0.1) — it runs ON the box, not remotely from dev1"
+    );
+    let seed_call = body
+        .find(r#""$PYBIN" "$SCN" --host 127.0.0.1 >"#)
+        .expect("{SETUP}: the autostart script must run the seed (no --projector) invocation");
+    let projector_call = body
+        .find(r#""$PYBIN" "$SCN" --host 127.0.0.1 --projector"#)
+        .expect("{SETUP}: the autostart script must ALSO run the --projector invocation");
+    assert!(
+        seed_call < projector_call,
+        "{SETUP}: the seed invocation (scenes/#507 multiview membership) must run BEFORE \
+         --projector, so the projectors open against a fully-seeded scene collection"
+    );
+}
+
+/// setup-imag.sh must actually INSTALL imag_scenes.py + a websocket-client dependency onto the
+/// box at a fixed path, and the __PYBIN__/__SCN__ placeholders left in the quoted heredoc must
+/// actually get substituted — a literal "__PYBIN__" left in the generated file would make the
+/// boot-time self-heal a permanent no-op. The boot hook cannot depend on a hand-made venv or a
+/// checked-out copy of the repo (setup-imag.sh runs standalone on the box, per its own step-12
+/// comment: "no sibling scripts/... checked out there").
+#[test]
+fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("python3-websocket"),
+        "{SETUP} must install the python3-websocket system package — the boot-hook \
+         imag_scenes.py imports `websocket` and cannot depend on a hand-made venv (#522)"
+    );
+    assert!(
+        body.contains(r#"SCN="/usr/local/bin/imag_scenes.py""#),
+        "{SETUP} must resolve SCN to a fixed on-box install path for imag_scenes.py (#522)"
+    );
+    assert!(
+        body.contains("scripts/imag_scenes.py")
+            && (body.contains("gh api") || body.contains("curl")),
+        "{SETUP} must actually fetch/install scripts/imag_scenes.py onto the box (via gh api or \
+         curl) — not just reference the path"
+    );
+    let sed_sub = body
+        .find(r#"sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#""#)
+        .expect(
+            "{SETUP} must sed-substitute the __PYBIN__/__SCN__ placeholders with the actual \
+             resolved paths right after writing the heredoc — a literal __PYBIN__ left in the \
+             generated file would make the boot-time self-heal a permanent no-op",
+        );
+    let heredoc_write = body
+        .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
+        .expect("the openbox autostart heredoc write must exist");
+    assert!(
+        heredoc_write < sed_sub,
+        "{SETUP}: the placeholder substitution must happen AFTER the heredoc is written"
     );
 }

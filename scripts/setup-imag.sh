@@ -780,7 +780,12 @@ FirstLoad=false
 EOF
     fi
     if ! grep -q '^SaveProjectors=' "$f"; then
-        printf '\n[BasicWindow]\nSaveProjectors=true\n' >> "$f"
+        # #522: false — the openbox autostart hook (step 15) is now the SOLE, authoritative
+        # opener of BOTH projectors (PROGRAM+MULTIVIEW) on every boot, self-healing monitor
+        # assignment even if the box's monitor topology changes. Leaving OBS's own SaveProjectors
+        # restore ON would double-open the projectors (OBS restoring its last-saved projector
+        # state on top of the boot hook re-opening them fresh).
+        printf '\n[BasicWindow]\nSaveProjectors=false\n' >> "$f"
     fi
     if ! grep -q '^LastVersion=' "$f"; then
         printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
@@ -853,23 +858,91 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 
 # =============================================================================
-step 15 "Desktop icon + autostart (reboot lands cutting-ready)"
+step 15 "Reboot-durable openbox autostart (#522/#488) + Desktop icon"
 # =============================================================================
+# ROOT CAUSE (#522/#488): the box's real reboot-durable state lived ONLY as a hand-edited
+# ~/.config/openbox/autostart on the box itself -- NOTHING in this script wrote it. This box runs
+# lightdm+openbox directly (no GNOME/systemd session manager), which NEVER reads XDG
+# ~/.config/autostart/*.desktop -- the old GNOME-style block this step used to write was dead code
+# from day one. A reboot therefore silently regressed to whatever the hand file said, which
+# wrongly primaried the HDMI projector output instead of the panel, and dropped the #507
+# multiview-membership + projector self-heal. setup-imag.sh is now the SOLE writer of
+# ~/.config/openbox/autostart -- the old `.config/autostart/obs.desktop` copy + sed-patch is gone.
+
+# Install imag_scenes.py + its websocket-client dependency onto the box at a FIXED path -- the
+# boot hook below runs the seeder LOCALLY (127.0.0.1) on every boot, so it cannot depend on a
+# hand-made venv or a checked-out copy of the repo (this script "is copied to the box standalone",
+# per the step-12 comment above -- no sibling scripts/ files exist here at runtime).
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3-websocket >/dev/null \
+    || fail "python3-websocket install failed — imag_scenes.py needs it for the boot-time self-heal (#522)"
+PYBIN="/usr/bin/python3"
+SCN="/usr/local/bin/imag_scenes.py"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag_scenes.py?ref=dev" \
+    > "$SCN" \
+    || fail "could not fetch scripts/imag_scenes.py from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$SCN"
+
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
-mkdir -p "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
+mkdir -p "$USER_HOME/Desktop"
 if [ -n "$APP_DESKTOP" ]; then
-    cp -f "$APP_DESKTOP" "$USER_HOME/.config/autostart/obs.desktop"
+    # Desktop double-click icon only -- kept as a harmless convenience. Deliberately left
+    # UNMODIFIED (plain `Exec=obs`, no taskset pin): a human double-clicking it is not the
+    # reboot-durable boot path, which is pinned inside the openbox autostart script below instead.
     cp -f "$APP_DESKTOP" "$USER_HOME/Desktop/obs.desktop"
     chmod +x "$USER_HOME/Desktop/obs.desktop"
-    # #483: pin the AUTOSTART launch to the OBS P-core block -- WITHOUT this, isolcpus (once the
-    # #483 grub change takes effect on the next boot) would STARVE OBS onto cpu0,1,12-15 (the
-    # block reserved for GNOME/housekeeping/E-cores). The Desktop icon (double-click launch) is
-    # deliberately left plain `Exec=obs` -- only the autostart path is pinned (live-verified).
-    sed -i 's/^Exec=obs$/Exec=taskset -c 2-11 obs/' "$USER_HOME/.config/autostart/obs.desktop"
     sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
         gio set "$USER_HOME/Desktop/obs.desktop" metadata::trusted true 2>/dev/null || true
 fi
-chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/autostart" "$USER_HOME/Desktop"
+chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/Desktop"
+
+# The openbox autostart script IS the boot-durable authority (lightdm+openbox reads this file on
+# every session start, unlike XDG .config/autostart/). Written with a QUOTED heredoc so every
+# $VAR inside stays LITERAL text in the generated file -- $PANEL/$PROJ/$i are meant to be
+# evaluated by openbox AT BOOT TIME, never expanded here at provisioning time. The __PYBIN__ /
+# __SCN__ placeholders are substituted with the actual resolved paths right after, via sed --
+# a quoted heredoc cannot both keep $PANEL/$PROJ literal AND interpolate $PYBIN/$SCN in the same
+# pass.
+mkdir -p "$USER_HOME/.config/openbox"
+cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'
+#!/bin/bash
+# imag-nb OBS cutting kiosk boot — WRITTEN BY setup-imag.sh (#522/#488). Do not hand-edit.
+# PANEL (DP-*/eDP-*, notebook screen) = PRIMARY = multiview + OBS UI. PROJ (HDMI-*) = PROGRAM projector.
+sleep 1
+PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
+PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
+[ -n "$PANEL" ] && xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null || true
+if [ -n "$PROJ" ]; then
+  { [ -n "$PANEL" ] && xrandr --output "$PROJ" --mode 1920x1080 --rate 60 --left-of "$PANEL" 2>/dev/null; } \
+    || xrandr --output "$PROJ" --mode 1920x1080 --rate 60 2>/dev/null || true
+fi
+xset s off -dpms s noblank 2>/dev/null || true
+# Clear stale OBS crash sentinels BEFORE launch -- a hard/unclean reboot is EXACTLY the case OBS's
+# own "Crash or unclean shutdown detected" modal fires on, which would hang the boot headless and
+# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 16;
+# there is no OBS CLI flag that suppresses this check -- verified against vendor/obs-studio
+# frontend/OBSApp.cpp, it is a Qt dialog gated on this sentinel file only).
+rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
+# #522: strip any saved projectors from the scene-collection JSON so OBS restores NONE on load.
+# OBS restores a scene collection's saved_projectors on launch INDEPENDENT of SaveProjectors=false
+# (that flag only stops OBS from SAVING new ones on exit -- a pre-existing entry, from before the
+# fix, is still restored). The autostart below is the SOLE projector opener, so a stale saved
+# projector would stack a DUPLICATE on the HDMI output. Zero it every boot -> idempotent 1+1.
+for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
+  [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
+done
+taskset -c 2-11 obs &
+# wait for OBS WebSocket :4455, then seed scenes/#507 membership + open both projectors (self-heal every boot)
+for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null && { exec 3>&-; break; }; sleep 1; done
+sleep 2
+PYBIN="__PYBIN__"; SCN="__SCN__"
+"$PYBIN" "$SCN" --host 127.0.0.1 >/tmp/imag-seed.log 2>&1 || true
+"$PYBIN" "$SCN" --host 127.0.0.1 --projector >>/tmp/imag-seed.log 2>&1 || true
+AUTOSTART_EOF
+sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#" "$USER_HOME/.config/openbox/autostart"
+chmod +x "$USER_HOME/.config/openbox/autostart"
+chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
 
 # =============================================================================
 step 16 "Launch OBS on the desktop session (X11 :0)"
