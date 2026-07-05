@@ -639,13 +639,23 @@ gather_and_check_imag() {
   # OR-list keeps a bad-SHA / unreachable git error from aborting the whole script under set -e (the
   # same #463 lesson as the ssh capture below) — a git error is reported UNKNOWN, never a false OK.
   # The pure imag_build_drift_report (run below) turns (obs_build_sha, git_rc, git_range) into the verdict.
+  # #531 review: the `cd` here is itself a fallible command under this file's `set -e` — an
+  # unguarded `repo_root="$(cd ... && pwd)"` would abort the WHOLE script (silently, no report line
+  # at all) on the essentially-never-but-possible case that the script's own parent directory can't
+  # be `cd`'d into. `|| repo_root=""` neutralizes errexit; an empty repo_root then short-circuits to
+  # UNKNOWN below instead of silently running `git` against the wrong (cwd) directory.
   local repo_root git_range="" git_rc=0
-  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
-  git -C "$repo_root" fetch origin --quiet 2>/dev/null \
-    || echo "WARN: git fetch origin failed — comparing imag build against a possibly-stale origin/main" >&2
-  if [ -n "$obs_build_sha" ]; then
-    git_range="$(git -C "$repo_root" log --oneline "${obs_build_sha}..origin/main" \
-      -- vendor/obs-studio vendor/distroav 2>/dev/null)" || git_rc=$?
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || repo_root=""
+  if [ -z "$repo_root" ]; then
+    git_rc=1
+    echo "WARN: could not resolve drift-guard.sh's own repo root — skipping imag genlock-build compare" >&2
+  else
+    git -C "$repo_root" fetch origin --quiet 2>/dev/null \
+      || echo "WARN: git fetch origin failed — comparing imag build against a possibly-stale origin/main" >&2
+    if [ -n "$obs_build_sha" ]; then
+      git_range="$(git -C "$repo_root" log --oneline "${obs_build_sha}..origin/main" \
+        -- vendor/obs-studio vendor/distroav 2>/dev/null)" || git_rc=$?
+    fi
   fi
   # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
   # `test -f` round-trip (one fewer SSH connection), AND distinguish an SSH CONNECTION failure

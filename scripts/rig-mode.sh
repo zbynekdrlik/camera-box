@@ -405,7 +405,7 @@ stray_recording_targets() {
 # loud WARN naming the box + the stray file (emitted by obs_phase2.py itself).
 stop_stray_recordings() {
   local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   while IFS='|' read -r ip box; do
     [ -n "$ip" ] || continue
     echo "[obs ${box} ${ip}] #524 pre-event guard: stop any stray recording (WebSocket)"
@@ -428,7 +428,13 @@ stop_stray_recordings() {
 # (no pipe -> no grep|head SIGPIPE hazard under rig-mode's set -euo pipefail).
 warn_imag_genlock_stale() {
   local here out rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # #531 review: guard the `cd` itself against this file's `set -e` — this function's whole contract
+  # is "never fail rig-mode" (see `return 0` below), so an unguarded assignment that aborts the
+  # function (and the calling do_test/do_event, and the whole script) on a `cd` failure would defeat
+  # that contract before even reaching drift-guard. `|| here=""` neutralizes errexit; an empty $here
+  # just makes the drift-guard subprocess call below fail gracefully (captured into $out, no banner,
+  # still returns 0) instead of crashing here.
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[#531] pre-event drift check: is imag-nb's DEPLOYED genlock build current with origin/main?"
   out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag 2>&1 )" || rc=$?
   printf '%s\n' "$out" | sed 's/^/    [imag drift] /'
@@ -464,7 +470,7 @@ burn_action_for_mode() {
 toggle_burn() {
   local mode="$1" action here rc=0
   action="$(burn_action_for_mode "$mode")"
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   while IFS='|' read -r ip src box; do
     [ -n "$ip" ] || continue
     echo "[obs ${box} ${ip}] genlock_burn ${action} on '${src}' (WebSocket, no relaunch)"
@@ -482,7 +488,7 @@ toggle_burn() {
 # Fail-loud (non-zero) if it cannot make all 4 distinct.
 enforce_strih_ndi_mapping() {
   local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (4 distinct) over WebSocket:"
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
@@ -498,7 +504,7 @@ enforce_strih_ndi_mapping() {
 # black recording later in recording-e2e.sh).
 set_imag_test_program() {
   local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows cam1 via '${IMAG_PROG_SOURCE}')"
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?
