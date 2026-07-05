@@ -200,13 +200,13 @@ fn imag_scenes_pins_verified_1to1_camera_mapping_526() {
     let s = read("scripts/imag_scenes.py");
     assert!(
         s.contains(r#"f"CAM{n} (usb)""#),
-        "#526: imag_scenes.py must bind each scene 1:1 to \"CAM{n} (usb)\" (the verified physical \
-         box-number mapping)."
+        "#526: imag_scenes.py must bind each scene 1:1 to \"CAM{{n}} (usb)\" (the verified \
+         physical box-number mapping)."
     );
     assert!(
         s.contains(r#"f"MV Cam {n}""#),
-        "#526: the low-bw twin scenes must be named \"MV Cam {n}\" so the multiview tile order = \
-         physical camera order 1..6."
+        "#526: the low-bw twin scenes must be named \"MV Cam {{n}}\" so the multiview tile order \
+         = physical camera order 1..6."
     );
     assert!(
         s.contains("VERIFIED physical camera") && s.contains("10.77.9.61"),
