@@ -46,6 +46,21 @@ description`). Before merging any PR, `git log origin/main..HEAD --oneline` and 
 `^(fix|close|resolve)[a-z]*:\s*#` to catch a stray reference-only commit that would trigger an
 unwanted auto-close.
 
+**Extension — the SAME trap fires from a PR title/body, and NEGATION DOES NOT PROTECT YOU
+(incident 2026-07-05, #504/PR #539):** GitHub's closing-keyword matcher scans the merging PR's
+OWN title and body too, not just commits — and it is a bare substring match with **no negation
+parsing**. A PR body written to explicitly scope a partial/code-only PR — *"...it does NOT close
+#504"* — still auto-closed **#504** on merge, because the literal substring `close #504` is
+present regardless of the preceding "does NOT". Every commit message that session had already been
+checked clean (`git log origin/main..HEAD | grep -iE '(fix|close|resolve)...#[0-9]'` → none), so
+the commit-message mitigation above is NOT sufficient by itself — the PR title AND body need the
+same check. **Before opening/editing a PR that must NOT close an issue it merely references, grep
+the PR title+body text itself** (not just commits) for `(close|closes|closed|fix|fixes|fixed|
+resolve|resolves|resolved)\s*#[0-9]` and rephrase any hit — including a NEGATED one — so the verb
+and `#N` are not adjacent (e.g. "the live purge for #504 is separate" instead of "does not close
+#504"). Recovery: `gh issue reopen <N>` + a `gh issue comment <N>` explaining the accidental
+auto-close (see issuecomment-4887235757 on #504 for the template).
+
 ## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
 
 `~/devel/camera-box` is a single shared clone with **no git worktree isolation** — every worker's

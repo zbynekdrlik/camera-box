@@ -405,7 +405,7 @@ stray_recording_targets() {
 # loud WARN naming the box + the stray file (emitted by obs_phase2.py itself).
 stop_stray_recordings() {
   local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   while IFS='|' read -r ip box; do
     [ -n "$ip" ] || continue
     echo "[obs ${box} ${ip}] #524 pre-event guard: stop any stray recording (WebSocket)"
@@ -413,6 +413,50 @@ stop_stray_recordings() {
       2>&1 | sed "s/^/    [${box} stray-rec] /" || rc=$?
   done < <(stray_recording_targets)
   return $rc
+}
+
+# warn_imag_genlock_stale -> #531 pre-event NON-BLOCKING alert: is imag-nb's DEPLOYED genlock build
+# BEHIND origin/main? The #530 disaster was imag-nb running a STALE genlock build at a live event
+# (-> 45fps) because a merged genlock change had never been deployed there and NOTHING alerted. This
+# runs `scripts/drift-guard.sh --check-imag` (#531 made it a DYNAMIC box-vs-origin/main compare) and,
+# if it reports the box STALE, prints a LOUD warning banner so the operator sees it BEFORE going live.
+# ADVISORY ONLY — it NEVER hard-blocks the switch (blocking a live event on a drift check would be far
+# worse than the drift; the operator deploys the current build via setup-imag.sh step-12 at a safe
+# off-event moment). Same advisory shape as the #440 painter-freshness WARN. drift-guard is run as a
+# SUBPROCESS from the repo root (so its own set -e / exit never affect rig-mode, and its CWD-relative
+# vendor/README.md resolves); `|| rc=$?` is belt-and-suspenders. The STALE match is a plain bash glob
+# (no pipe -> no grep|head SIGPIPE hazard under rig-mode's set -euo pipefail).
+warn_imag_genlock_stale() {
+  local here out rc=0
+  # #531 review: guard the `cd` itself against this file's `set -e` — this function's whole contract
+  # is "never fail rig-mode" (see `return 0` below), so an unguarded assignment that aborts the
+  # function (and the calling do_test/do_event, and the whole script) on a `cd` failure would defeat
+  # that contract before even reaching drift-guard. `|| here=""` neutralizes errexit; an empty $here
+  # just makes the drift-guard subprocess call below fail gracefully (captured into $out, no banner,
+  # still returns 0) instead of crashing here.
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[#531] pre-event drift check: is imag-nb's DEPLOYED genlock build current with origin/main?"
+  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag 2>&1 )" || rc=$?
+  printf '%s\n' "$out" | sed 's/^/    [imag drift] /'
+  # #531 review: log the actual exit code (comprehensive-logging: values, not just a bare pass/fail)
+  # instead of capturing it into `rc` and never reading it — 0=OK, 20=DRIFT, 11=UNKNOWN, anything
+  # else is the drift-guard subprocess itself failing to even run (e.g. bash/script not found).
+  echo "    [imag drift] drift-guard --check-imag exit=${rc}"
+  case "$out" in
+    *"genlock STALE"*)
+      cat >&2 <<'BANNER'
+
+################################################################################
+## WARNING [#531]: imag-nb is running a STALE genlock build (BEHIND origin/main).
+## The last event ran at 45fps because of EXACTLY this. Deploy the current build
+## to imag-nb via `scripts/setup-imag.sh` step-12 at a safe off-event moment
+## BEFORE going live. (Advisory — NOT blocking; see the [imag drift] detail above.)
+################################################################################
+
+BANNER
+      ;;
+  esac
+  return 0   # advisory: a drift check must NEVER fail rig-mode / block a live event
 }
 
 # burn_action_for_mode MODE -> the obs_burn_filter.py action (test=add/on, event=remove/off).
@@ -430,7 +474,7 @@ burn_action_for_mode() {
 toggle_burn() {
   local mode="$1" action here rc=0
   action="$(burn_action_for_mode "$mode")"
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   while IFS='|' read -r ip src box; do
     [ -n "$ip" ] || continue
     echo "[obs ${box} ${ip}] genlock_burn ${action} on '${src}' (WebSocket, no relaunch)"
@@ -448,7 +492,7 @@ toggle_burn() {
 # Fail-loud (non-zero) if it cannot make all 4 distinct.
 enforce_strih_ndi_mapping() {
   local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (4 distinct) over WebSocket:"
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
@@ -464,7 +508,7 @@ enforce_strih_ndi_mapping() {
 # black recording later in recording-e2e.sh).
 set_imag_test_program() {
   local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows cam1 via '${IMAG_PROG_SOURCE}')"
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?
@@ -534,6 +578,9 @@ do_test() {
     && echo "[#281] rig-active heartbeat SET ($(rig_heartbeat_path))" \
     || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
+  echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks the switch):"
+  warn_imag_genlock_stale
+  echo
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
   cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$CAMERA_BOX_BIN" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
   echo
@@ -567,6 +614,9 @@ do_event() {
     && echo "[#281] rig-active heartbeat CLEARED" \
     || true
   echo "===== rig-mode EVENT (#247/#257/#291) — stop QR, restore clean broadcast, genlock_burn OFF ====="
+  echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks going live):"
+  warn_imag_genlock_stale
+  echo
   echo "[obs] #524 pre-event guard: stop any stray recording left running on strih/stream (frees disk before going live):"
   stop_stray_recordings
   echo

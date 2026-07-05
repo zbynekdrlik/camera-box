@@ -2247,6 +2247,139 @@ fn or_list_exit_code_capture_survives_errexit_the_463_gather_and_check_imag_fix(
     );
 }
 
+// ---- #531 — imag_build_drift_report: DYNAMIC "is imag-nb's genlock build behind origin/main?" ----
+// The pre-#531 static empty-pin build check could ONLY ever report UNKNOWN (the genlock_build_sha_imag
+// README pin is deliberately empty) — it could NEVER fail, so a merged-but-never-deployed genlock
+// change silently reached a live event (#530, imag-nb ran a stale build -> 45fps). imag_build_drift_
+// report replaces it: the impure caller runs `git log <box_sha>..origin/main -- vendor/obs-studio
+// vendor/distroav` and this PURE function decides OK / DRIFT / UNKNOWN from (box_sha, git_rc,
+// range_log) — no live box, no real git repo, fully mockable. The check can now ACTUALLY FAIL.
+
+#[test]
+fn imag_build_drift_report_ok_when_box_is_current_with_main_531() {
+    // range_log EMPTY (no genlock-touching commit between the box and origin/main) + git ran OK ->
+    // the box already carries every genlock change on main -> OK, exit 0, never a DRIFT.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "80dac432" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=0"), "current box -> clean exit: {out:?}");
+    assert!(
+        out.contains("genlock_build") && out.contains("OK"),
+        "must report genlock_build OK: {out:?}"
+    );
+    assert!(
+        !out.contains("DRIFT"),
+        "no drift for a current box: {out:?}"
+    );
+}
+
+#[test]
+fn imag_build_drift_report_drift_and_fails_loud_when_box_behind_main_531() {
+    // range_log NON-EMPTY (genlock commits on main the box is missing) -> DRIFT, exit 20, with the
+    // STALE message + the count + the operator's exact next action. This is the whole point of #531:
+    // the guard can now ACTUALLY FAIL when imag-nb's deployed genlock build is behind main (the #530
+    // 45fps disaster) — a static empty-pin compare could only ever say UNKNOWN.
+    let body = r#"
+        rc=0
+        RANGE="cb64631fd feat:[green] #501 genlock_monitor low-bandwidth NDI exception
+af02f9bc3 feat:[green] #505 orphan the Linux GL PBO"
+        imag_build_drift_report "80dac432" "0" "$RANGE" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "box behind main -> DRIFT exit 20: {out:?}"
+    );
+    assert!(
+        out.contains("genlock STALE") && out.contains("behind origin/main"),
+        "must FAIL LOUD with the exact 'genlock STALE' / behind-main message (rig-mode.sh's \
+         pre-event banner keys on the 'genlock STALE' phrase — cross-script contract): {out:?}"
+    );
+    assert!(
+        out.contains("2 genlock-commit"),
+        "must report the count of missing genlock commits: {out:?}"
+    );
+    assert!(
+        out.contains("cb64631fd") && out.contains("af02f9bc3"),
+        "must list the stale commit SHAs so the operator sees WHAT is missing: {out:?}"
+    );
+    assert!(
+        out.contains("setup-imag.sh"),
+        "must name the operator's deploy action (setup-imag.sh step-12): {out:?}"
+    );
+}
+
+#[test]
+fn imag_build_drift_report_unknown_when_box_sha_unread_531() {
+    // box_sha EMPTY (GENLOCK_BUILD_SHA.txt could not be read — SSH failure / marker absent) ->
+    // UNKNOWN (exit 11), NEVER a false OK. A box we could not read is not proof it is current.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "unread box sha -> UNKNOWN exit 11: {out:?}"
+    );
+    assert!(
+        out.contains("UNKNOWN") && out.contains("not read"),
+        "must say UNKNOWN / not read, never OK: {out:?}"
+    );
+}
+
+#[test]
+fn imag_build_drift_report_unknown_when_git_failed_never_a_false_ok_531() {
+    // git_rc NON-ZERO (box_sha is not a commit in this checkout, or the fetch is unreachable) -> we
+    // could not COMPUTE the drift -> UNKNOWN (exit 11), never a false OK that would hide a real stale
+    // build behind a transient git error. Distinct from an empty-range OK.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "80dac432" "128" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "git error -> UNKNOWN exit 11, never a false OK: {out:?}"
+    );
+    assert!(
+        out.contains("UNKNOWN") && out.to_lowercase().contains("git"),
+        "must say UNKNOWN and name the git failure: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531() {
+    // #531 review: `imag_genlock_range_log` feeds an UNVALIDATED box_sha (read over SSH from
+    // imag-nb's GENLOCK_BUILD_SHA.txt) straight into `git log "<box_sha>..origin/main" ...`. A
+    // corrupted/truncated marker file could be shaped like a git long-option (e.g. "--grep=x").
+    // Empirically confirmed (this repo, git 2.43): WITHOUT `--end-of-options`, git log SILENTLY
+    // consumes such a value as a real flag and exits 0 with EMPTY output — exactly the "range is
+    // empty, box is current" OK verdict `imag_build_drift_report` would report, i.e. a FALSE OK,
+    // the precise failure mode #531 exists to eliminate. `--end-of-options` must turn this into a
+    // LOUD failure (non-zero exit) instead, so the caller reports UNKNOWN, never a false OK. This
+    // function needs no live SSH/box — it runs `git log` against THIS repo's own checkout (the test
+    // process's cwd is the crate root), which always has an `origin/main` to compare against.
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_range_log "$(pwd)" "--grep=x")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !(out.contains("RC=0") && out.contains("OUT=[]")),
+        "an option-shaped box_sha must NEVER silently succeed with an empty range (that reads as \
+         a false 'box is current' OK to the caller) — it must fail loud instead: {out:?}"
+    );
+}
+
 /// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line (60fps,
 /// imag's low-latency IMAG role, EPIC #466 Topology v2).
 const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
@@ -2256,12 +2389,13 @@ const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
 
 #[test]
 fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
-    // Full live facet, all seven checks match the pin -> exit 0, every line OK, no DRIFT/UNKNOWN.
-    // #489: the 12th/13th args are the dantesync lock pin + a realistic locked journal line —
+    // Full live facet, all six live-state checks match the pin -> exit 0, every line OK, no
+    // DRIFT/UNKNOWN. (#531: the build-identity check moved OUT to imag_build_drift_report.)
+    // #489: the 10th/11th args are the dantesync lock pin + a realistic locked journal line —
     // must ALSO read clean, or this "everything matches" case would spuriously report DRIFT/UNKNOWN.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2274,10 +2408,12 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         !out.contains("UNKNOWN"),
         "no unknown line expected: {out:?}"
     );
-    // Every one of the 7 checks must print its own OK line (comprehensive-logging: values, not
-    // just a bare pass/fail).
+    // Every one of the 6 live-state checks must print its own OK line (comprehensive-logging:
+    // values, not just a bare pass/fail).
+    // #531: `genlock_build_sha` (the retired static build check) is NO LONGER one of check_imag_
+    // report's lines — the DYNAMIC build-staleness now lives in imag_build_drift_report, run
+    // separately by gather_and_check_imag. So this function prints these 6 live-state lines.
     for label in [
-        "genlock_build_sha",
         "distroav_so_sha256",
         "genlock_capability",
         "output_fps_imag",
@@ -2289,25 +2425,11 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     }
 }
 
-#[test]
-fn check_imag_report_flags_a_wrong_deployed_build_sha_463() {
-    // The deployed GENLOCK_BUILD_SHA.txt disagrees with the pin -> DRIFT, exit 20 (never a
-    // silent pass on the single most important identity check — did the RIGHT build land).
-    let body = r#"
-        rc=0
-        check_imag_report "SHA_EXPECTED" "SHA_WRONG" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
-        echo "RC=$rc"
-    "#;
-    let out = run_sourced(body, &[]);
-    assert!(
-        out.contains("RC=20"),
-        "build SHA mismatch -> DRIFT exit: {out:?}"
-    );
-    assert!(
-        out.contains("genlock_build_sha") && out.contains("DRIFT"),
-        "must flag the build SHA line as DRIFT: {out:?}"
-    );
-}
+// #531: the old `check_imag_report_flags_a_wrong_deployed_build_sha_463` test lived here — it
+// exercised check_imag_report's static build-SHA compare (box GENLOCK_BUILD_SHA.txt == an empty
+// genlock_build_sha_imag README pin), which was inert (always UNKNOWN, never DRIFT). That static
+// check is RETIRED; the DYNAMIC build-staleness (box vs origin/main's vendored-genlock HEAD) is now
+// covered by the `imag_build_drift_report_*_531` tests above, which CAN actually fail.
 
 #[test]
 fn check_imag_report_flags_an_fps_drift_down_from_60_463() {
@@ -2315,7 +2437,7 @@ fn check_imag_report_flags_an_fps_drift_down_from_60_463() {
     // (strih's rate) is exactly the kind of silent regression this pin exists to catch.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "30" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "30" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2336,7 +2458,7 @@ fn check_imag_report_flags_missing_genlock_capability_as_stock_build_drift_463()
     let stock_log = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n11:40:39.714: video settings reset:\n11:40:39.714: \tfps:               60/1\n";
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("LOG", stock_log)]);
@@ -2358,7 +2480,7 @@ fn check_imag_report_capability_unknown_when_the_log_was_never_read_463() {
     // sibling strih/stream `drift_check_capability`'s own empty-text guard.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "" "/plugin/path" "1" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "" "/plugin/path" "1" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2383,7 +2505,7 @@ fn check_imag_report_flags_the_plugin_path_missing_463() {
     // strih/stream canonical_plugin_path shadow-copy invariant, #124/#125).
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "0" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "0" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2403,7 +2525,7 @@ fn check_imag_report_unknown_when_values_were_not_read_never_a_silent_pass_463()
     // reported clean — the "we meant to check but couldn't" case must never read as a pass.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "" "DSHA_A" "" "60" "" "3" "" "" "/plugin/path" "" || rc=$?
+        check_imag_report "DSHA_A" "" "60" "" "3" "" "" "/plugin/path" "" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2426,7 +2548,7 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(
@@ -2526,7 +2648,7 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     // Every OTHER value also clean, so the dantesync row is the only one exercised in isolation.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE)]);
@@ -2544,7 +2666,7 @@ fn check_imag_report_dantesync_lock_drift_when_running_but_not_locked_489() {
     // genlock's wall-clock basis is compromised even if every other pin still looks clean.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_UNLOCKED_FIXTURE)]);
@@ -2564,7 +2686,7 @@ fn check_imag_report_dantesync_lock_unknown_when_journal_not_read_489() {
     // "unlocked" DRIFT for a mere connectivity hiccup.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[]);
@@ -2585,7 +2707,7 @@ fn check_imag_report_dantesync_lock_unknown_when_no_pin_in_readme_489() {
     // README yet -> UNKNOWN (nothing pinned to compare against), never a silent pass.
     let body = r#"
         rc=0
-        check_imag_report "SHA_A" "SHA_A" "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "$DANTESYNC_LOG" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE)]);

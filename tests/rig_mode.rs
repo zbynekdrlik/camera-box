@@ -126,6 +126,41 @@ fn help_exits_zero() {
     );
 }
 
+/// #531: the pre-event imag-nb genlock-staleness alert must be WIRED on both the event and test
+/// paths, and be ADVISORY (never hard-blocks going live) keyed on drift-guard's exact "genlock
+/// STALE" DRIFT phrase. This is the recurrence guard for #530 (imag-nb ran a stale genlock build at
+/// a live event -> 45fps). Content-asserted (matching the harness_av_restart pattern) — the compute
+/// LOGIC itself is unit-tested deterministically in tests/drift_guard.rs (imag_build_drift_report_*).
+#[test]
+fn pre_event_genlock_staleness_check_wired_advisory_on_both_paths_531() {
+    let src = std::fs::read_to_string(script()).expect("read rig-mode.sh");
+    assert!(
+        src.contains("warn_imag_genlock_stale()"),
+        "#531: rig-mode.sh must define warn_imag_genlock_stale (the pre-event drift alert)"
+    );
+    assert!(
+        src.contains("drift-guard.sh --check-imag"),
+        "#531: the check must drive scripts/drift-guard.sh --check-imag (the dynamic box-vs-main compare)"
+    );
+    assert!(
+        src.contains("genlock STALE"),
+        "#531: the banner must key on drift-guard's 'genlock STALE' DRIFT phrase (cross-script contract)"
+    );
+    assert!(
+        src.contains("advisory: a drift check must NEVER fail rig-mode"),
+        "#531: the pre-event check must be ADVISORY — a drift check must NEVER hard-block a live event"
+    );
+    // Wired on BOTH mode entry points (the distinctive echo line I added in each).
+    assert!(
+        src.contains("never blocks going live"),
+        "#531: do_event (EVENT path) must run the pre-event genlock-staleness check"
+    );
+    assert!(
+        src.contains("never blocks the switch"),
+        "#531: do_test (TEST path) must run the pre-event genlock-staleness check"
+    );
+}
+
 /// TEST mode launches the EXACT pinned dual-QR vernier painter — `--paint-only --dual-qr
 /// --qr-size 700 --duration-secs <N>` — no improvisation (#247: the switch is deterministic, the
 /// 700px vernier is the validated size). The duration + binary are the resolved values.
