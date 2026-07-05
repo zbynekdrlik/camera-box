@@ -1750,3 +1750,47 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - PR #513, final CI run green (all jobs incl. Drift Guard pin-set; Mutation Testing +
   Notify-on-red correctly skipped — on-demand / failure-only). `mergeable:true`,
   `mergeStateStatus:CLEAN`. Version bumped 1.7.0-dev.237 -> 1.7.0-dev.238.
+
+## 2026-07-05 — #452 upgrade-fleet-ndi.sh canary set covers every box-class + version-scoped backup
+
+- **#452** (ticket-validator STILL_VALID: the #445 fixes — strings/grep-a fallback, broadened
+  emit pattern, symlink-vs-real-file swap/rollback — re-verified correct against the live fleet;
+  two real gaps remained) — `scripts/upgrade-fleet-ndi.sh` canary is now a SET covering every
+  distinct NDI-runtime box-class, and the real-file (cam3-class) backup is version-scoped.
+  `chore: version bump to 1.7.0-dev.242` (`d9d277768`) ->
+  `test:[red] #452 pin canary-class-set coverage + version-scoped real-file backup`
+  (`5d8a08077`) -> `feat:[green] #452 canary set covers every box-class + version-scoped real-file
+  backup` (`7a1ad4f3f`). Verified RED against the pre-change script (8 new/updated assertions
+  failed: `resolve_canary_set`/`ndi_camera_class` not found, `remaining_after_canary` didn't
+  accept a multi-value canary list, the `canary_is_upgraded_before_the_remaining_fleet` ordering
+  guard, and the version-scoped backup-name assertion), GREEN after — full suite 36/36 passed.
+  - New `ndi_camera_class(cam)` — a static, hardcoded table (cam3 -> `"cam3class"`, else
+    `"standard"`) — and `resolve_canary_set(SET, OVERRIDE)`, which supersedes the old single-value
+    `resolve_canary()` (removed; its 3 tests replaced with `resolve_canary_set` equivalents). An
+    empty OVERRIDE defaults to one representative per distinct class present in SET (first member
+    of each newly-seen class) — `cam1 cam2 cam3 cam4` now defaults to canary set `"cam1 cam3"`,
+    not just `"cam1"`. A single-class SET still defaults to exactly one canary (unchanged #132
+    behavior). `--canary` now accepts a space-separated LIST; an override with any non-member is
+    rejected whole.
+  - `remaining_after_canary(SET, CANARY_SET)` generalized to exclude a space-separated list
+    (back-compat: a single-value canary still works, existing test unchanged).
+  - Main flow: `CANARY="$(resolve_canary ...)"` / `upgrade_one_camera "$CANARY"` replaced with
+    `CANARY_SET="$(resolve_canary_set ...)"` / `for cam in $CANARY_SET; do upgrade_one_camera
+    "$cam" ...`. Every canary in the set is tried (not short-circuited) so one run surfaces every
+    class's result; the rest of the fleet (`$REST`) is skipped if ANY canary failed (exit 10).
+  - `ndi_swap_remote` gained a 4th arg `OLD_VERSION` (the caller's already-read `cur_ver`, passed
+    from `upgrade_one_camera` — never re-derived remotely); the regular/real-file branch now backs
+    up to `libndi.so.6.<OLD_VERSION>.bak` instead of the fixed `libndi.so.6.bak`, so a cam3-class
+    box keeps every generation of backup (mirrors the symlink layout's existing multi-generation
+    depth). Falls back to the fixed name if `OLD_VERSION` is empty (no real call site hits this).
+    `ndi_rollback_remote` needed NO code change — it already restores from whatever `OLD_BASE`
+    string the caller passes; added a round-trip test proving a version-scoped name restores
+    cleanly.
+  - Playbook updated: `.claude/skills/ops` gained a `#132/#445/#452` section documenting the
+    canary-class-set + version-scoped-backup design for future work on this script.
+  - `/review` + `requesting-code-review` not yet run at doc-append time (autopilot-worker
+    contract: version bump + TDD + implementation + local Tier-0 checks + push only; the
+    supervisor drives CI -> PR -> merge). Local `cargo fmt --all --check` / `cargo check` /
+    `cargo clippy --all-targets -- -D warnings` / `cargo test --no-run` all green (default
+    features only). Script never run against real cameras (it swaps a live NDI runtime under a
+    running service) — pure sourced-script unit tests only, per the existing #132/#445 pattern.

@@ -90,6 +90,40 @@ predates the fix):
 Baked into `scripts/create-usb-linux.sh` (base image) + `setup.sh` + `setup-device.sh`; pinned by
 content-assertion tests in `tests/appliance_boot_hardening.rs`.
 
+## #132/#445/#452 — `scripts/upgrade-fleet-ndi.sh` canary set + version-scoped backup
+
+Safe, canary-first NDI Linux runtime (`libndi.so.6`) upgrade across the fleet. The fleet is NOT
+uniform in HOW it hosts that runtime, discovered incrementally:
+
+- **#445 — cam3 is a distinct "class"**: real-file `libndi.so.6`/`libndi.so` (not symlinks), no
+  `strings` binary, and an older "Streaming: X.Y fps" log shape instead of the genlock-report
+  line. `ndi_link_kind_remote` detects symlink-vs-regular live; `ndi_read_banner_local` /
+  `ndi_active_version_remote` fall back to `grep -a` when `strings` is missing.
+- **#452 — a green canary on ONE box proves nothing about a DIFFERENT class.** cam1 (symlink
+  layout) passing tells you nothing about cam3 (real-file, no `strings`) — exactly the #132
+  history where cam3 needed a manual upgrade after the tool "succeeded". Fix: `ndi_camera_class`
+  is a STATIC, hardcoded table (cam3 -> `"cam3class"`, everything else -> `"standard"`) — add any
+  future box with cam3's quirks there. `resolve_canary_set(SET, OVERRIDE)` defaults the canary to
+  ONE representative per DISTINCT class present in `SET` (first member of each newly-seen class,
+  in SET order) — a single-class SET still gets exactly one canary (unchanged #132 behavior); a
+  mixed SET like `cam1 cam2 cam3 cam4` defaults to canary set `"cam1 cam3"`. `--canary` now takes
+  a space-separated LIST (same shape as `--set`); an override with any non-member is rejected
+  whole (never silently drops just the bad one). The main flow loops `for cam in $CANARY_SET`
+  BEFORE `for cam in $REST` — every canary is tried (surfacing every class's result in one run)
+  and the whole fleet is skipped if ANY canary failed.
+- **#452 — version-scoped real-file backup.** The regular/real-file swap branch used to `cp -a
+  libndi.so.6 libndi.so.6.bak` with a FIXED name — every upgrade overwrote the same `.bak`, one
+  generation of rollback only. Now `ndi_swap_remote` takes a 4th arg `OLD_VERSION` (the caller's
+  already-read `cur_ver`, from the SAME `ndi_active_version_remote` call `upgrade_one_camera`
+  makes before swapping — never re-derived) and names the backup
+  `libndi.so.6.<OLD_VERSION>.bak`, giving the real-file layout the same multi-generation depth the
+  symlink layout already has for free (each symlink backup keeps its original versioned
+  filename). `ndi_rollback_remote` needed NO code change — it already restores from whatever
+  `OLD_BASE` string the caller passes.
+- All of the above is pure-function unit-tested (`tests/upgrade_fleet_ndi.rs`, sourced-script
+  harness, no real ssh) — never verified by running the script against real cameras (it swaps a
+  live NDI runtime under a running service).
+
 ## Realtime CPU + IRQ isolation of the grab (#289)
 
 The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbles under box load
