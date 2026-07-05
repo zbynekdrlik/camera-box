@@ -90,6 +90,38 @@ predates the fix):
 Baked into `scripts/create-usb-linux.sh` (base image) + `setup.sh` + `setup-device.sh`; pinned by
 content-assertion tests in `tests/appliance_boot_hardening.rs`.
 
+## #531 — dev1 has NO SSH key on imag-nb; use the `linux-imag-nb` MCP as the read-access fallback
+
+`scripts/drift-guard.sh --check-imag` SSHes from **dev1** straight to imag-nb
+(`newlevel@10.77.9.182`) with `-o BatchMode=yes` (deliberately refuses to prompt for a password —
+fail-fast, matching the doc comment on `gather_and_check_imag`'s `ssh_cmd`). Confirmed 2026-07-05:
+dev1's keys are NOT in imag-nb's `authorized_keys`, so `--check-imag` run from dev1 returns
+**all-UNKNOWN**, not because the check logic is wrong but because the SSH never authenticates:
+
+```
+$ ssh -o ConnectTimeout=10 -o BatchMode=yes -v -- newlevel@10.77.9.182 'echo CONNECTED'
+debug1: Offering public key: /home/newlevel/.ssh/id_rsa ...
+debug1: Offering public key: /home/newlevel/.ssh/id_ed25519 ...
+debug1: No more authentication methods to try.
+newlevel@10.77.9.182: Permission denied (publickey,password).
+```
+
+Unlike CAM1-4 (which take `sshpass -p "$DEVICE_ROOT_PW"` password auth, see Device Deployment
+above), imag-nb's password auth is NOT usable through dev1's plain `ssh` client either way here,
+because `--check-imag`'s `BatchMode=yes` refuses to even try it. **When you need to read imag-nb's
+live state from dev1 and drift-guard's own SSH can't reach it, use the `mcp__linux-imag-nb__Shell`
+MCP tool instead** — it's a different transport (not dev1's ssh client / keys) and DOES work today:
+
+```
+mcp__linux-imag-nb__Shell({command: "cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt"})
+```
+
+You can then feed the value straight into drift-guard's own PURE functions (`source
+scripts/drift-guard.sh`, call `imag_build_drift_report`/`imag_genlock_range_log` directly) to get a
+real verdict without needing `--check-imag`'s SSH to work. Tracked as #541 (add dev1's pubkey to
+imag-nb's `authorized_keys` for `newlevel`, matching how dev1 already has key access to CAM1-4) —
+not yet fixed, so `--check-imag` run bare from dev1 will keep reporting all-UNKNOWN until then.
+
 ## #132/#445/#452 — `scripts/upgrade-fleet-ndi.sh` canary set + version-scoped backup
 
 Safe, canary-first NDI Linux runtime (`libndi.so.6`) upgrade across the fleet. The fleet is NOT
