@@ -6,7 +6,7 @@ This guide documents how to set up a new camera-box device (CAM1, CAM2, etc.).
 
 **Process for creating a new camera device:**
 
-1. Write clean Ubuntu master image to USB
+1. Install Ubuntu onto a USB drive (`scripts/create-usb-linux.sh`)
 2. Boot new device from USB
 3. SSH into device and run setup script
 4. Copy NDI library from CAM1
@@ -28,9 +28,11 @@ This guide documents how to set up a new camera-box device (CAM1, CAM2, etc.).
 
 ---
 
-## Step 1: Write Master Image to USB
+## Step 1: Install Ubuntu Onto a USB Drive
 
-The master image is a clean Ubuntu Server with only SSH configured.
+`scripts/create-usb-linux.sh` is the sole, canonical one-shot installer (#448) — it debootstraps
+a fresh Ubuntu 24.04 appliance rootfs (SSH + DHCP only) directly onto the target disk. There is
+no separate "master image" file to build first.
 
 ```bash
 # On dev machine, connect USB drive
@@ -39,20 +41,22 @@ cd /home/newlevel/devel/camera-box
 # Check USB device name
 lsblk -d -o NAME,SIZE,MODEL | grep -E '^sd'
 
-# Write image (replace /dev/sdX with your USB device)
-sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /dev/sdX
+# Install onto the USB drive (replace /dev/sdX with your USB device; refuses /dev/sda for safety)
+sudo ./scripts/create-usb-linux.sh /dev/sdX
 
-# Script automatically unmounts - safe to remove when done
+# Non-interactive (skip the 'type yes' confirmation): add --yes
+# Running FROM a box's own live-USB, targeting its internal disk (even /dev/sda): use
+# --target-disk /dev/sdX instead of the positional form.
 ```
 
 ## Step 2: Boot New Device
 
 1. Insert USB into new camera PC
 2. Power on and boot from USB (may need BIOS/UEFI boot menu)
-3. **Wait ~5 minutes for first boot** - the master image takes longer on first boot
+3. **Wait ~5 minutes for first boot** - the fresh install takes longer on first boot
 4. Device will get DHCP IP initially
 
-**SSH Connection Details (master image):**
+**SSH Connection Details (fresh install):**
 - Username: `root`
 - Password: `newlevel`
 
@@ -243,8 +247,8 @@ journalctl -u camera-box -f
 
 ### For CAM2 Setup:
 ```bash
-# 1. Write image (on dev machine)
-sudo ./scripts/write-image.sh /home/newlevel/Downloads/ubuntu-usb-master.img /dev/sdb
+# 1. Install onto USB (on dev machine)
+sudo ./scripts/create-usb-linux.sh /dev/sdb
 
 # 2. After boot, user provides IP (e.g., 10.77.8.164)
 
