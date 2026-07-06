@@ -93,10 +93,8 @@ pub const BURN_RUN_ID_CAM1: u32 = 911001;
 /// **Renamed from `BURN_RUN_ID_CAM3` (#463).** This constant used to be reserved for cam3's
 /// `CAMERA_BOX_BURN_RUN_ID` capture-burn (the #24 mechanism, extending #174 to a THIRD source
 /// camera) — but cam3 is down/deferred in Topology v2, so #463 claims the value for imag's own
-/// digital burn instead. cam3's capture-burn CLI flag (`--burn-cam3-run-id`) still defaults to
-/// this same numeric value (911003) for now — see its doc comment in `recording-verdict.rs` and
-/// issue #24 for the note that cam3, when its capture-burn work resumes, needs a FRESH id (this
-/// one is imag's now).
+/// digital burn instead. cam3's capture-burn now has its OWN fresh reserved id, [`BURN_RUN_ID_CAM3`]
+/// (#24) — the two mechanisms are numerically distinct again.
 pub const BURN_RUN_ID_IMAG: u32 = 911003;
 /// #24 — cam4's capture-burn run_id, extending the #174 mechanism to another source camera.
 /// cam1/cam3/cam4 occupy the SAME "camera under test" role (the `CAMERA_BOX_BURN_RUN_ID` capture
@@ -104,6 +102,13 @@ pub const BURN_RUN_ID_IMAG: u32 = 911003;
 /// are mutually exclusive in any real run: only the ONE camera actually deployed with the burn
 /// enabled produces a non-empty id set. See [`BURN_RUN_ID_IMAG`]'s doc for the cam3 id note.
 pub const BURN_RUN_ID_CAM4: u32 = 911007;
+/// #24 — cam3's OWN capture-burn run_id, fresh + unique. Before this fix `--burn-cam3-run-id`
+/// defaulted to [`BURN_RUN_ID_IMAG`] (911003), a latent collision left behind when #463 renamed
+/// the old `BURN_RUN_ID_CAM3` constant and repurposed 911003 for imag-nb's own digital corner
+/// burn (cam3's capture-burn was never actually deployed, so the collision was numerically
+/// harmless in practice, but real). Reserved outside every other used id
+/// (911001/911002/911003/911004/911007).
+pub const BURN_RUN_ID_CAM3: u32 = 911008;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.

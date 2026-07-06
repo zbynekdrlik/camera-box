@@ -38,6 +38,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/camera-set.sh"   # camera_resolve(), CAMERA_SET, GENLOCK_FPS
 # shellcheck source=scripts/lib/ndi-alive.sh
 . "$HERE/lib/ndi-alive.sh"   # emit_ok_grep_pattern(), fatal_grep_pattern() (#451, shared with upgrade-fleet-ndi.sh)
+# shellcheck source=scripts/lib/cli-log.sh
+. "$HERE/lib/cli-log.sh"   # log()/info()/warn()/err() (#559, shared with upgrade-fleet-ndi.sh + verify-fleet.sh)
 
 SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
@@ -56,12 +58,6 @@ while [ $# -gt 0 ]; do
     *) echo "deploy-fleet: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-log()  { echo -e "${GREEN}[+]${NC} $*"; }
-info() { echo -e "${BLUE}[*]${NC} $*"; }
-warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
 

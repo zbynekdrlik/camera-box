@@ -332,11 +332,8 @@ usage() { sed -n '2,45p' "$0"; }
 SSH_PASS="${SSH_PASS:-newlevel}"
 NDI_DEST_DIR="${NDI_DEST_DIR:-/usr/lib/ndi}"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-log()  { echo -e "${GREEN}[+]${NC} $*"; }
-info() { echo -e "${BLUE}[*]${NC} $*"; }
-warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+# shellcheck source=scripts/lib/cli-log.sh
+. "$HERE/lib/cli-log.sh"   # log()/info()/warn()/err() (#559, shared with deploy-fleet.sh + verify-fleet.sh)
 
 SO_PATH=""
 SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
