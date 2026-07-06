@@ -151,6 +151,42 @@ fn resolve_display_source_is_empty_and_non_fatal_for_an_unrecognized_hostname() 
     );
 }
 
+/// A FETCH failure (network blip, GitHub rate-limit, DNS not yet converged) is a genuine anomaly
+/// -- UNLIKE an unrecognized hostname, it must warn on stderr (matching the warn() convention
+/// every other network fetch in this script uses) so it isn't silently indistinguishable in the
+/// provisioning log from "this box legitimately has no preview" (#557-review finding).
+#[test]
+fn resolve_display_source_warns_and_returns_empty_on_fetch_failure() {
+    let harness = "set -uo pipefail\n. \"$SCRIPT\"\n\
+        CAMERA_SET_SOURCE=/definitely/does/not/exist/camera-set.sh\n\
+        resolve_display_source cam1\n\
+        echo \"<END>\"";
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", script())
+        // Deliberately do NOT set CAMERA_SET_SOURCE here -- the body overrides it to a bogus
+        // local path so fetch_camera_set's `cp` arm fails without touching the network.
+        .output()
+        .expect("failed to run bash harness");
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        code, 0,
+        "a fetch failure must not abort the caller. stderr: {stderr}"
+    );
+    assert_eq!(
+        stdout.trim(),
+        "<END>",
+        "a fetch failure must resolve to empty (no preview), same as an unrecognized hostname"
+    );
+    assert!(
+        stderr.contains("could not fetch"),
+        "a fetch failure must warn on stderr; stderr was: {stderr:?}"
+    );
+}
+
 /// Sweep the whole real fleet map -- only cam1 has a configured preview today.
 #[test]
 fn resolve_display_source_sweeps_the_whole_fleet() {
@@ -207,6 +243,93 @@ fn config_toml_display_section_emits_display_section_for_a_configured_source() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// strip_config_toml_display_section TEXT -- the idempotency half of the #557-review fix: a
+// re-run of install_camera_box's [display] reconciliation must never duplicate or leave a stale
+// section behind, regardless of what config.toml already contained.
+// ---------------------------------------------------------------------------------------------
+
+const CONFIG_WITH_DISPLAY: &str = "# Camera-Box Configuration - CAM1\n\nndi_name = \"usb\"\ndevice = \"auto\"\n\n[intercom]\nstream = \"cam1\"\ntarget = \"strih.lan\"\n\n# HDMI cameraman preview (#528/#557 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = \"STRIH-SNV (interkom)\"\n";
+
+const CONFIG_NO_DISPLAY: &str = "# Camera-Box Configuration - CAM2\n\nndi_name = \"usb\"\ndevice = \"auto\"\n\n[intercom]\nstream = \"cam2\"\ntarget = \"strih.lan\"\n";
+
+#[test]
+fn strip_config_toml_display_section_removes_an_existing_section() {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nstrip_config_toml_display_section \"$TEXT\"",
+        CONFIG_WITH_DISPLAY.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("[display]"),
+        "must strip the [display] header; got: {out:?}"
+    );
+    assert!(
+        !out.contains("source ="),
+        "must strip the source line; got: {out:?}"
+    );
+    assert!(
+        !out.contains("HDMI cameraman preview"),
+        "must strip the preceding comment; got: {out:?}"
+    );
+    assert!(
+        out.contains("[intercom]"),
+        "must NOT strip unrelated sections; got: {out:?}"
+    );
+    assert!(
+        out.contains(r#"stream = "cam1""#),
+        "must NOT strip unrelated content; got: {out:?}"
+    );
+}
+
+#[test]
+fn strip_config_toml_display_section_is_a_noop_when_no_display_section_present() {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nstrip_config_toml_display_section \"$TEXT\"",
+        CONFIG_NO_DISPLAY.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim_end(),
+        CONFIG_NO_DISPLAY.trim_end(),
+        "a config with no [display] section must be left byte-identical (modulo trailing \
+         newline); got: {out:?}"
+    );
+}
+
+/// Round-trip property: strip(append(strip(X))) == strip(X) -- stripping fully undoes a prior
+/// append, proving the strip-then-append reconciliation in install_camera_box never accumulates
+/// cruft (duplicate/stale [display] sections) no matter how many times it re-runs.
+#[test]
+fn strip_after_append_recovers_the_stripped_base_config() {
+    let harness = format!(
+        "set -uo pipefail\n. \"$SCRIPT\"\n\
+         TEXT='{}'\n\
+         BASE=\"$(strip_config_toml_display_section \"$TEXT\")\"\n\
+         APPENDED=\"$(printf '%s\\n' \"$BASE\"; config_toml_display_section 'STRIH-SNV (interkom)')\"\n\
+         RESTRIPPED=\"$(strip_config_toml_display_section \"$APPENDED\")\"\n\
+         if [ \"$BASE\" = \"$RESTRIPPED\" ]; then echo MATCH; else echo MISMATCH; fi",
+        CONFIG_NO_DISPLAY.replace('\'', "'\\''")
+    );
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .env("CAMERA_SET_SOURCE", camera_set_path())
+        .output()
+        .expect("failed to run bash harness");
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "MATCH",
+        "stripping after appending must recover the exact stripped base config, proving \
+         strip+append never accumulates cruft across repeated runs. stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // The systemd unit written by install_camera_box must carry a canonical PLAIN ExecStart on
 // EVERY box (#450) -- textual guard on the static heredoc, mirrors
 // setup_device_provisioner_hardening.rs::setup_device_execstart_is_canonical_plain.
@@ -227,19 +350,63 @@ fn setup_sh_execstart_is_canonical_plain() {
     );
 }
 
-/// The [display] config.toml section must actually be wired into install_camera_box's config
-/// generation -- a dead pure function that's never called would still pass every test above.
+/// The [display] config.toml section must actually be CALLED from install_camera_box's config
+/// generation -- a dead pure function that's never invoked would still pass every test above.
+/// Searches for the exact CALL-SITE substrings (function name + its real argument), not a bare
+/// `body.contains("config_toml_display_section")` -- that bare form is tautological, since it
+/// ALSO matches the function's own `config_toml_display_section() {` definition line and would
+/// keep passing even if install_camera_box's call to it were deleted entirely (the #557-review
+/// finding this test was rewritten to close; mirrors verify_device_pure_functions.rs's
+/// check_p_is_wired_into_the_live_flow_and_usage_doc, which slices past a marker for the same
+/// reason).
 #[test]
 fn setup_sh_wires_display_section_into_config_toml_generation() {
     let body = std::fs::read_to_string(script()).unwrap();
     assert!(
-        body.contains("config_toml_display_section"),
-        "install_camera_box must call config_toml_display_section to append the [display] \
-         section to config.toml (#557); got no reference in the script body"
+        body.contains(r#"config_toml_display_section "$display_source""#),
+        "install_camera_box must CALL config_toml_display_section with the resolved source to \
+         append the [display] section to config.toml (#557); got no call-site reference"
     );
     assert!(
-        body.contains("resolve_display_source"),
-        "install_camera_box must call resolve_display_source to look up this box's \
-         CAMERA_DISPLAY_SOURCE table entry (#557); got no reference in the script body"
+        body.contains(r#"resolve_display_source "$DEVICE_HOSTNAME""#),
+        "install_camera_box must CALL resolve_display_source to look up this box's \
+         CAMERA_DISPLAY_SOURCE table entry (#557); got no call-site reference"
+    );
+}
+
+/// The idempotency half of the #557-review fix: re-running install_camera_box on an
+/// already-provisioned box (config.toml already exists) must still reconcile the [display]
+/// section -- not skip it the way the base config.toml content above is skipped. Proven by
+/// checking the reconciliation call sites live OUTSIDE the `if [[ ! -f ... ]]` guard that gates
+/// the base config.toml generation.
+#[test]
+fn display_section_reconciliation_runs_outside_the_first_install_guard() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard = "if [[ ! -f \"$CONFIG_DIR/config.toml\" ]]; then";
+    let guard_pos = body
+        .find(guard)
+        .expect("the first-install config.toml guard must still be present");
+    // Find the matching `fi` that closes this guard block: the next line, at the SAME
+    // indentation (4 spaces) as the `if`, that is exactly "    fi".
+    let after_guard = &body[guard_pos..];
+    let fi_offset = after_guard
+        .find("\n    fi\n")
+        .expect("could not find the closing `fi` of the first-install guard");
+    let after_fi = &body[guard_pos + fi_offset..];
+
+    // The critical assertion: the reconciliation call sites must NOT be nested inside the
+    // first-install `if` block (i.e. they appear AFTER its closing `fi`, at the same or shallower
+    // indentation) -- if they were still inside the guard, a re-run on an already-provisioned box
+    // would skip them entirely, exactly reproducing the #557-review regression.
+    let inside_guard = &body[guard_pos..guard_pos + fi_offset];
+    assert!(
+        !inside_guard.contains("resolve_display_source"),
+        "the [display] reconciliation must NOT be nested inside the first-install-only guard -- \
+         a re-run on an already-provisioned box (config.toml already exists) would then silently \
+         skip it, permanently losing the HDMI preview (#557-review finding). Guard body was: {inside_guard:?}"
+    );
+    assert!(
+        after_fi.contains(r#"resolve_display_source "$DEVICE_HOSTNAME""#),
+        "expected the reconciliation call site AFTER the first-install guard's closing `fi`"
     );
 }

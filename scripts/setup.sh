@@ -81,8 +81,24 @@ resolve_display_source() {
             printf '%s' "$CAMERA_DISPLAY_SOURCE"
             return 0
         fi
+        # An unrecognized/empty hostname (e.g. the "camera-box" default) is NOT a warning case --
+        # see the function doc above: setup.sh's hostname argument is not required to be a fleet
+        # camN name, and this is the expected, silent "no preview configured" path.
     else
         rm -f "$tmp"
+        # Unlike an unrecognized hostname, a FAILED FETCH is a genuine anomaly (network blip,
+        # GitHub rate-limit, DNS not yet converged on a freshly-imaged box) -- matches the warn()
+        # convention every other network fetch in this script already uses (install_dantesync /
+        # install_camera_box's release lookups below) so it isn't silently indistinguishable from
+        # "this box legitimately has no preview" in the provisioning log (#557-review finding).
+        # MUST redirect to stderr (>&2): this function's own STDOUT is its return-value channel
+        # (callers do `display_source="$(resolve_display_source ...)"`) -- warn() itself writes to
+        # stdout (matching this script's normal console-message convention elsewhere), so an
+        # unredirected warn() call HERE would corrupt the captured return value with the warning
+        # text itself, then have config_toml_display_section wire that garbage into config.toml's
+        # [display] section as if it were a real NDI source. Caught by
+        # resolve_display_source_warns_and_returns_empty_on_fetch_failure before it ever shipped.
+        warn "could not fetch scripts/camera-set.sh from $CAMERA_SET_SOURCE -- HDMI preview table lookup skipped (no preview will be configured this run)" >&2
     fi
     printf ''
 }
@@ -99,6 +115,24 @@ config_toml_display_section() {
     local escaped="${source//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
     printf '\n# HDMI cameraman preview (#528/#557 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\n' "$escaped"
+}
+
+# strip_config_toml_display_section TEXT -> TEXT with any existing `[display]` section (and its
+# preceding "# HDMI cameraman preview" comment) entirely removed -- from that comment/header
+# through the next `[section]` header or EOF, whichever comes first. This is the idempotency half
+# of the #557-review fix: config_toml_display_section() (above) is called on EVERY run (not just
+# first-install, see install_camera_box below), so re-running it without first stripping the OLD
+# section would either duplicate it (two [display] blocks) or, worse, leave a STALE section behind
+# if CAMERA_DISPLAY_SOURCE ever changes for this box. Strip-then-append makes every run
+# self-correcting regardless of what the file already contained.
+strip_config_toml_display_section() {
+    awk '
+        /^# HDMI cameraman preview/ { skip = 1; next }
+        /^\[display\][[:space:]]*$/ { skip = 1; next }
+        /^\[/ && $0 !~ /^\[display\][[:space:]]*$/ { skip = 0 }
+        skip { next }
+        { print }
+    ' <<< "$1"
 }
 
 # Check if running as root
@@ -704,18 +738,26 @@ sidetone_gain = 100.0
 mic_gain = 12.0
 headphone_gain = 15.0
 EOF
-        # HDMI cameraman preview (#528/#557): a box with a CAMERA_DISPLAY_SOURCE table entry
-        # (scripts/camera-set.sh) gets an appended [display] section here -- the SAME mechanism
-        # setup-device.sh uses, resolved via the real camera-set.sh (never a hardcoded value, and
-        # never baked into ExecStart -- see the #450 canonical-plain-ExecStart guard above). A box
-        # with no table entry (every box except cam1 today) gets nothing appended.
-        local display_source
-        display_source="$(resolve_display_source "$DEVICE_HOSTNAME")"
-        printf '%s' "$(config_toml_display_section "$display_source")" >> "$CONFIG_DIR/config.toml"
-        if [[ -n "$display_source" ]]; then
-            info "HDMI preview: $display_source (persists across reboot/redeploy, #528/#557)"
-        fi
         log "Created config at $CONFIG_DIR/config.toml"
+    fi
+
+    # HDMI cameraman preview (#528/#557/#558): RECONCILED on EVERY run of this function, unlike the
+    # base config.toml content above (written ONCE, on first install, so an operator's hand-tuned
+    # intercom/gain settings survive a reinstall/binary-update re-run). The systemd unit's ExecStart
+    # is rewritten unconditionally above on every run too -- an earlier version of this fix put the
+    # [display] section ONLY inside the "doesn't exist yet" branch above, so re-running setup.sh on
+    # an already-provisioned box (e.g. to update the binary) silently ended up with NEITHER
+    # mechanism: a bare ExecStart AND no [display] section, permanently losing the preview
+    # (#557-review finding). Strip-then-append makes this self-correcting on every run regardless
+    # of what config.toml already contained (first install, a stale/wrong section, or none at all).
+    local display_source
+    display_source="$(resolve_display_source "$DEVICE_HOSTNAME")"
+    local stripped_config
+    stripped_config="$(strip_config_toml_display_section "$(cat "$CONFIG_DIR/config.toml")")"
+    printf '%s\n' "$stripped_config" > "$CONFIG_DIR/config.toml"
+    config_toml_display_section "$display_source" >> "$CONFIG_DIR/config.toml"
+    if [[ -n "$display_source" ]]; then
+        info "HDMI preview: $display_source (persists across reboot/redeploy, #528/#557)"
     fi
 
     # Create NDI directory
