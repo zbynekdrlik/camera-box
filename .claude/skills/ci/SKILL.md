@@ -258,3 +258,21 @@ A cleanly-loading plugin (the log line above) == the dock is registered in the O
 (norihiro's dock uses `obs_frontend_add_dock_by_id` at load); the live A/V-offset readout is the
 operator's self-service step (phone playing the norihiro QR-sync video + hand mic into the Dante
 path). Phase 2 (#188/#145) adds the rig-side cam2 QPSK audio marker so the phone is not needed.
+
+## Shellcheck gate (#545) — provisioning/ops scripts lint
+
+`ci.yml` job `shellcheck` (GitHub-hosted `ubuntu-latest`) runs
+`shellcheck -S warning scripts/*.sh scripts/lib/*.sh` as a **binary** gate: errors + warnings fail
+the build, the many style/info-level findings are advisory-only (a deliberate floor, not
+weakening). No `continue-on-error`; wired into the `notify-on-failure` red-alert fan-in like every
+other gate. Guard test: `tests/shellcheck_workflow_gate.rs` (job exists on GitHub-hosted runner,
+runs `-S warning scripts/*.sh scripts/lib/*.sh`, no continue-on-error, in the notify fan-in).
+
+**GOTCHA — the glob is NON-RECURSIVE**, so both `scripts/` AND `scripts/lib/` are listed
+EXPLICITLY. Most `scripts/lib/*.sh` are also covered transitively (shellcheck follows
+`# shellcheck source=…` directives from whatever top-level script sources them), but a STANDALONE
+lib script that nothing sources — e.g. `camera-box-grow-root.sh`, `install`'d and run directly as
+root on first boot — would be missed by `scripts/*.sh` alone, which is why `scripts/lib/*.sh` is in
+the command. **A NEW subdir under `scripts/` needs its own glob entry** or it silently escapes the
+gate. Before pushing a script change, run `shellcheck -S warning <file>` locally (shellcheck 0.9.0
+is on dev1) — a warning-level finding fails the gate.
