@@ -125,11 +125,22 @@ config_toml_display_section() {
 # section would either duplicate it (two [display] blocks) or, worse, leave a STALE section behind
 # if CAMERA_DISPLAY_SOURCE ever changes for this box. Strip-then-append makes every run
 # self-correcting regardless of what the file already contained.
+#
+# The header match is a PREFIX match (`/^\[display\]/`, no `[[:space:]]*$` end-anchor) -- not an
+# exact-whole-line match -- so a hand-edited config.toml with a trailing inline comment
+# (`[display]  # note`) is still recognized as the header and gets stripped. An exact-line match
+# would silently fail to recognize that variant, leaving the OLD section in place while the
+# unconditional append below writes a SECOND `[display]` table -- an invalid duplicate TOML table
+# that fails `toml::from_str` in src/config.rs and crash-loops camera-box indefinitely
+# (deep-review finding: a narrow trigger, but a far worse blast radius than the bug this whole
+# reconciliation exists to fix). The prefix match still cannot false-positive on an unrelated
+# section: `[displayfoo]` does not contain the literal substring "[display]" immediately followed
+# by "]" as its own bracket close, so it never matches.
 strip_config_toml_display_section() {
     awk '
         /^# HDMI cameraman preview/ { skip = 1; next }
-        /^\[display\][[:space:]]*$/ { skip = 1; next }
-        /^\[/ && $0 !~ /^\[display\][[:space:]]*$/ { skip = 0 }
+        /^\[display\]/ { skip = 1; next }
+        /^\[/ && $0 !~ /^\[display\]/ { skip = 0 }
         skip { next }
         { print }
     ' <<< "$1"

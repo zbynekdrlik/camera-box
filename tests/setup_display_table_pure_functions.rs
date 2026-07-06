@@ -281,6 +281,34 @@ fn strip_config_toml_display_section_removes_an_existing_section() {
     );
 }
 
+/// Deep-review finding: a hand-edited config.toml with a trailing inline comment on the
+/// `[display]` header (`[display]  # note`, valid TOML) must STILL be recognized and stripped --
+/// an exact-whole-line match would silently miss it, leaving the OLD section in place while the
+/// caller's subsequent unconditional append writes a SECOND `[display]` table. That duplicate
+/// table is invalid TOML and fails `toml::from_str` in src/config.rs, crash-looping camera-box
+/// (Restart=always/RestartSec=3) until someone SSHes in and hand-fixes the file.
+#[test]
+fn strip_config_toml_display_section_recognizes_a_header_with_a_trailing_comment() {
+    const CONFIG_WITH_COMMENTED_HEADER: &str = "# Camera-Box Configuration - CAM1\n\nndi_name = \"usb\"\n\n[intercom]\nstream = \"cam1\"\n\n[display]  # hand-edited note\nsource = \"STRIH-SNV (interkom)\"\n";
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nstrip_config_toml_display_section \"$TEXT\"",
+        CONFIG_WITH_COMMENTED_HEADER.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("[display]"),
+        "must strip a [display] header even with a trailing inline comment; got: {out:?}"
+    );
+    assert!(
+        !out.contains("source ="),
+        "must strip the source line under a commented header; got: {out:?}"
+    );
+    assert!(
+        out.contains("[intercom]") && out.contains(r#"stream = "cam1""#),
+        "must NOT strip unrelated content; got: {out:?}"
+    );
+}
+
 #[test]
 fn strip_config_toml_display_section_is_a_noop_when_no_display_section_present() {
     let (code, out, err) = run_sourced(&format!(
