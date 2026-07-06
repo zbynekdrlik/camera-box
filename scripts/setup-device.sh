@@ -63,6 +63,18 @@ resolve_device_name() {
     VBAN_STREAM="$CAMERA_NAME"
 }
 
+# config_toml_display_section SOURCE -- the optional `[display]` config.toml section for a box's
+# HDMI cameraman preview (#528, per-cam CAMERA_DISPLAY_SOURCE table in scripts/camera-set.sh).
+# Echoes nothing when SOURCE is empty -- a box with no table entry gets no [display] section and
+# camera-box runs with no preview, exactly as every box behaved before #528. #450's "canonical
+# PLAIN ExecStart" stays untouched by this -- the preview lives in config.toml (already per-box
+# variance today, e.g. VBAN_STREAM above), never baked into the systemd unit's ExecStart.
+config_toml_display_section() {
+    local source="${1:-}"
+    [ -n "$source" ] || return 0
+    printf '\n# HDMI cameraman preview (#528 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\nfb_device = "/dev/fb0"\n' "$source"
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
 # provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -338,7 +350,18 @@ target = "strih.lan"
 sample_rate = 48000
 channels = 1
 EOF
+# HDMI cameraman preview (#528): a box with a CAMERA_DISPLAY_SOURCE table entry (scripts/camera-set.sh)
+# gets an appended [display] section here -- persists across a re-provision, unlike the old
+# manual per-box SSH edit (cam2's --display was never provisioner-persistent before #528). A box
+# with no table entry gets nothing appended (config_toml_display_section returns empty).
+DISPLAY_SECTION="$(config_toml_display_section "${CAMERA_DISPLAY_SOURCE:-}")"
+if [ -n "$DISPLAY_SECTION" ]; then
+    printf '%s' "$DISPLAY_SECTION" >> /etc/camera-box/config.toml
+fi
 echo "  Config: /etc/camera-box/config.toml"
+if [ -n "${CAMERA_DISPLAY_SOURCE:-}" ]; then
+    echo "  HDMI preview: ${CAMERA_DISPLAY_SOURCE} (persists across reboot/redeploy, #528)"
+fi
 
 # =============================================================================
 # STEP 7: Create systemd service
