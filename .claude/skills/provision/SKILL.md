@@ -166,6 +166,22 @@ something `verify-device.sh` should be loosened to tolerate.
   update a kernel manually: `mount -o remount,rw /` → `TMPDIR=/root/.itmp dpkg --configure -a` (or
   the install) → confirm `/boot/initrd.img-<ver>` exists → `mount -o remount,ro /` / reboot. NEVER
   run `update-grub` without confirming every `/boot/vmlinuz-*` has a matching initrd first.
+- **Purging an OLD kernel goes apt-BROKEN via the held metapackages (#547, distinct from the
+  PREVENTION note above)** — `apt-mark hold linux-image-generic linux-headers-generic
+  linux-generic` (see "#295 brick-proofing" below) is applied BEFORE an upgrade to stop apt from
+  auto-installing a newer kernel. But once the fleet has TWO installed kernels (check (k) failed)
+  and you go to CLEAN UP the old one, `apt-get purge <old-kernel-pkgs>` fails: the three HELD
+  metapackages still depend on the kernel you're removing, so apt refuses and leaves itself
+  BROKEN (blocks ALL later `apt-get`/`apt` operations on the box, not just the kernel purge — this
+  blocked a live `avahi-utils` install on cam1/2/4 mid-session). Fix, in order:
+  1. `apt-mark unhold linux-image-generic linux-headers-generic linux-generic`
+  2. `apt-get purge -y --allow-change-held-packages linux-image-generic linux-headers-generic
+     linux-generic` — this ONLY removes the 3 metapackages (confirmed with `-s`/`--simulate`
+     first), never the running kernel itself.
+  3. `apt-get purge -y <old-kernel-image-and-headers-pkgs>` — now succeeds.
+  4. `apt-mark hold linux-image-<pinned>-generic linux-headers-<pinned>-generic` — re-pin the
+     CURRENT (surviving) kernel so a future `apt-get upgrade` can't silently pull in a new one
+     again. Never leave the box unheld after cleanup.
 - **No `curl` on the base image** silently failed the STEP 3 binary download and STEP 17 dantesync
   download. `create-usb-linux.sh` now ships `curl`; `setup-device.sh` also has a pre-flight
   curl-install step before either download runs.
@@ -215,6 +231,30 @@ cam4 -> 10.77.9.64 / "CAM4 (usb)"
 All seven emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `camera_resolve()`).
 Adding an 8th camera means editing `camera-set.sh` ONCE — every script downstream (including
 `verify-device.sh`) picks it up automatically.
+
+`camera_resolve()` also carries a per-cam `CAMERA_DISPLAY_SOURCE` table (#528) — the HDMI
+cameraman-preview NDI source (empty when a box has no preview configured). `setup-device.sh`
+STEP 6 wires it into `config.toml`'s optional `[display]` section (never baked into the
+canonical, always-plain `ExecStart`), so a box's preview survives a re-provision instead of
+being a manual, non-persistent SSH edit. cam1 and cam2 both resolve to `"STRIH-SNV (interkom)"`
+today; add a table entry (never a per-box `setup-device.sh` edit) when another box needs one.
+
+## Keeping the fleet converged — `scripts/verify-fleet.sh` (#552)
+
+`verify-device.sh` accepts (and certifies) ONE box at a time. `verify-fleet.sh` runs it across
+the WHOLE fleet in one pass — the fleet-wide drift-guard loop:
+
+```bash
+scripts/verify-fleet.sh                 # cam1..cam7 (or camera-set.sh's CAMERA_SET override)
+CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh   # a subset
+```
+
+Each box in the set is checked for SSH reachability FIRST — an offline box (cam7 was offline
+during the 2026-07-06 fleet convergence) is reported **SKIPPED**, never a hard FAIL; only a
+reachable box that fails `verify-device.sh`'s own acceptance gate counts as a fleet FAIL. Exit
+status is nonzero iff at least one reachable box FAILed (a fleet of all-SKIPPED/all-PASS boxes
+exits 0). Run it periodically (or after any fleet-wide change) to catch drift before it becomes
+a live-event surprise, instead of re-deriving each box's state by hand.
 
 ## After acceptance
 
