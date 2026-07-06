@@ -89,7 +89,10 @@ fn sourcing_setup_sh_does_not_run_main() {
 #[test]
 fn resolve_display_source_resolves_cam1_from_the_real_table() {
     let (code, out, err) = run_sourced(r#"resolve_display_source CAM1; echo"#);
-    assert_eq!(code, 0, "resolve_display_source CAM1 must succeed. stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "resolve_display_source CAM1 must succeed. stderr: {err}"
+    );
     assert_eq!(
         out.trim(),
         "STRIH-SNV (interkom)",
@@ -102,7 +105,10 @@ fn resolve_display_source_resolves_cam1_from_the_real_table() {
 #[test]
 fn resolve_display_source_is_empty_for_cam2() {
     let (code, out, err) = run_sourced(r#"resolve_display_source cam2; echo "<END>""#);
-    assert_eq!(code, 0, "resolve_display_source cam2 must succeed. stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "resolve_display_source cam2 must succeed. stderr: {err}"
+    );
     assert_eq!(
         out.trim(),
         "<END>",
@@ -115,7 +121,10 @@ fn resolve_display_source_is_empty_for_cam2() {
 fn resolve_display_source_is_case_insensitive() {
     for input in ["cam1", "Cam1", "CAM1", "cAm1"] {
         let (code, out, err) = run_sourced(&format!(r#"resolve_display_source {input}"#));
-        assert_eq!(code, 0, "resolve_display_source {input} must succeed. stderr: {err}");
+        assert_eq!(
+            code, 0,
+            "resolve_display_source {input} must succeed. stderr: {err}"
+        );
         assert_eq!(
             out.trim(),
             "STRIH-SNV (interkom)",
@@ -135,7 +144,11 @@ fn resolve_display_source_is_empty_and_non_fatal_for_an_unrecognized_hostname() 
         code, 0,
         "an unrecognized hostname must not abort the caller. stderr: {err}"
     );
-    assert_eq!(out.trim(), "<END>", "unrecognized hostname must resolve to empty");
+    assert_eq!(
+        out.trim(),
+        "<END>",
+        "unrecognized hostname must resolve to empty"
+    );
 }
 
 /// Sweep the whole real fleet map -- only cam1 has a configured preview today.
@@ -153,9 +166,15 @@ fn resolve_display_source_sweeps_the_whole_fleet() {
     for (input, want) in expected {
         let (code, out, err) =
             run_sourced(&format!(r#"resolve_display_source {input}; echo "<END>""#));
-        assert_eq!(code, 0, "resolve_display_source {input} must succeed. stderr: {err}");
-        let got = out.trim_end_matches("<END>");
-        assert_eq!(got, want, "resolve_display_source {input} resolved incorrectly");
+        assert_eq!(
+            code, 0,
+            "resolve_display_source {input} must succeed. stderr: {err}"
+        );
+        let got = out.trim().trim_end_matches("<END>");
+        assert_eq!(
+            got, want,
+            "resolve_display_source {input} resolved incorrectly"
+        );
     }
 }
 
@@ -167,14 +186,20 @@ fn resolve_display_source_sweeps_the_whole_fleet() {
 fn config_toml_display_section_is_empty_for_no_source() {
     let (code, out, err) = run_sourced(r#"config_toml_display_section """#);
     assert_eq!(code, 0, "must not fail. stderr: {err}");
-    assert_eq!(out, "", "must emit nothing for an empty source; got: {out:?}");
+    assert_eq!(
+        out, "",
+        "must emit nothing for an empty source; got: {out:?}"
+    );
 }
 
 #[test]
 fn config_toml_display_section_emits_display_section_for_a_configured_source() {
     let (code, out, err) = run_sourced(r#"config_toml_display_section "STRIH-SNV (interkom)""#);
     assert_eq!(code, 0, "must succeed. stderr: {err}");
-    assert!(out.contains("[display]"), "must emit a [display] header; got: {out:?}");
+    assert!(
+        out.contains("[display]"),
+        "must emit a [display] header; got: {out:?}"
+    );
     assert!(
         out.contains(r#"source = "STRIH-SNV (interkom)""#),
         "must wire the given source; got: {out:?}"
