@@ -61,9 +61,9 @@
 
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
-
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/cli-log.sh
+. "$HERE/lib/cli-log.sh"         # RED/GREEN/YELLOW/BLUE/NC + log()/info()/warn()/err() (#559/#568)
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"          # camera_resolve() -- NAME -> IP / CAMERA_GENLOCK_FPS (#24/#451)
 # shellcheck source=scripts/lib/ndi-alive.sh

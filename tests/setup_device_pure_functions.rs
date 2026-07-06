@@ -150,6 +150,45 @@ fn resolve_device_name_resolves_the_whole_fleet() {
     }
 }
 
+// --- #568: color block deduped onto scripts/lib/cli-log.sh --------------------------------------
+//
+// setup-device.sh used to declare its own RED/GREEN/YELLOW/NC block (no log()/info()/warn()/err()
+// functions -- it uses raw `echo -e "${COLOR}...${NC}"` everywhere, plus its own exit-on-call
+// `fail()`). #568 replaces that local block with a `. "$HERE/lib/cli-log.sh"` source, keeping
+// `fail()` itself untouched (different message shape / behavior from cli-log.sh's `err()`, so it
+// stays script-local per the issue's own guidance). These tests prove the color values -- and
+// therefore every existing `echo -e "${RED}...${NC}"` call site -- render EXACTLY the same bytes
+// as the old local declaration (RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
+// NC='\033[0m').
+
+#[test]
+fn color_vars_are_byte_identical_to_the_pre_568_local_declaration() {
+    // Route through `echo -e` (like every real call site in the script), NOT a raw `printf '%s'`
+    // -- RED/GREEN/YELLOW/NC hold LITERAL backslash-octal text (`'\033[0;31m'`, single-quoted, no
+    // ANSI-C `$'...'` quoting); only `echo -e`'s own escape processing turns that into the actual
+    // ESC byte at render time, exactly as fail() and every `echo -e "${RED}...${NC}"` line do.
+    let (code, out, err) = run_sourced(r#"echo -en "${RED}|${GREEN}|${YELLOW}|${NC}""#);
+    assert_eq!(
+        code, 0,
+        "sourcing setup-device.sh must succeed. stderr: {err}"
+    );
+    assert_eq!(
+        out, "\x1b[0;31m|\x1b[0;32m|\x1b[1;33m|\x1b[0m",
+        "RED/GREEN/YELLOW/NC must keep the exact escape codes setup-device.sh declared locally \
+         before #568, now sourced from scripts/lib/cli-log.sh instead"
+    );
+}
+
+#[test]
+fn fail_renders_the_exact_pre_568_bytes_after_sourcing_the_shared_lib() {
+    let (code, _out, err) = run_sourced("fail 'boom'");
+    assert_eq!(code, 1, "fail() must still exit 1");
+    assert_eq!(
+        err, "\x1b[0;31mFAIL: boom\x1b[0m\n",
+        "fail()'s rendered bytes must be unchanged by #568 (RED + 'FAIL: msg' + NC, to stderr)"
+    );
+}
+
 // --- #528: config_toml_display_section (per-cam HDMI cameraman preview) ------------------------
 //
 // setup-device.sh's `#450`-canonical ExecStart must stay PLAIN and identical on every box

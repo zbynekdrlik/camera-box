@@ -14,11 +14,12 @@
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/cli-log.sh
+. "$HERE/lib/cli-log.sh"  # RED/GREEN/YELLOW/BLUE/NC + log()/info()/warn()/err() (#559/#568) --
+                          # this script keeps its own fail() below (different shape/behavior:
+                          # a hard exit, "FAIL: msg" not "[ERROR] msg" -- so it stays local rather
+                          # than folding into cli-log.sh's err()).
 
 # fail MSG -- print in red to stderr and exit non-zero. This is a ONE-SHOT provisioner
 # (script-failure-policy): every install step that could otherwise leave the box
@@ -28,7 +29,6 @@ fail() {
     exit 1
 }
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
 
