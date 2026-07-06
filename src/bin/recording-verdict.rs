@@ -3603,6 +3603,34 @@ mod tests {
     use std::collections::HashSet;
     use std::io::Write;
 
+    /// #24 (BUG, regression-test-first): `--burn-cam3-run-id` defaulted to
+    /// [`BURN_RUN_ID_IMAG`] (911003) — a latent run-id COLLISION. #463 renamed the constant that
+    /// used to be cam3's own reserved id to `BURN_RUN_ID_IMAG` and repurposed it for imag-nb's
+    /// digital corner burn, but left cam3's CLI default numerically pointing at the SAME value
+    /// (harmless only because cam3's capture-burn was never actually deployed alongside imag's).
+    /// The two mechanisms must be told apart by run_id alone — the cam3 default must never equal
+    /// any OTHER reserved burn run_id, imag's included.
+    #[test]
+    fn burn_cam3_run_id_default_is_unique_among_reserved_burn_ids() {
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict"]);
+        let other_reserved = [
+            super::BURN_RUN_ID_CAM1,
+            super::BURN_RUN_ID_STRIH,
+            super::BURN_RUN_ID_STREAM,
+            super::BURN_RUN_ID_IMAG,
+            super::BURN_RUN_ID_CAM4,
+        ];
+        assert!(
+            !other_reserved.contains(&args.burn_cam3_run_id),
+            "--burn-cam3-run-id defaults to {}, which collides with another reserved burn \
+             run_id {other_reserved:?} (#24) — BURN_RUN_ID_IMAG=911003 is imag-nb's OWN digital \
+             corner burn (#463); reserve cam3 a FRESH, unique run_id instead of reusing it",
+            args.burn_cam3_run_id
+        );
+    }
+
     /// #11/#282: the stream node's tick DIAGNOSTIC must use the STREAM capture rate. Run
     /// 7020001: base capture_fps=60 leaked into the 30 fps stream recording's diagnostic —
     /// analyzed_secs halved (150.4 vs 300.7) and expected_step read 1 instead of 2.
