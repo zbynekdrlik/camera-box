@@ -619,7 +619,7 @@ chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
 
 # Apply to current interface
 for iface in /sys/class/net/*/device; do
-    IFACE=$(basename $(dirname $iface))
+    IFACE=$(basename "$(dirname "$iface")")
     ethtool --set-eee "$IFACE" eee off 2>/dev/null || true
     ethtool -A "$IFACE" rx off tx off 2>/dev/null || true
 done

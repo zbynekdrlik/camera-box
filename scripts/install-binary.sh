@@ -48,7 +48,9 @@ for iface in /sys/class/net/*/device/power/control; do
 done
 
 # Disable Wake-on-LAN power management via ethtool
-for iface in $(ls /sys/class/net/ | grep -v lo); do
+for iface_path in /sys/class/net/*; do
+    iface="$(basename "$iface_path")"
+    [[ "$iface" == "lo" ]] && continue
     if ethtool "$iface" 2>/dev/null | grep -q "Wake-on"; then
         ethtool -s "$iface" wol d 2>/dev/null || true
     fi

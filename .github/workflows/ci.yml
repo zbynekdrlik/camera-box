@@ -470,6 +470,30 @@ jobs:
       - name: Check pinned set (manifest + vendored source)
         run: ./scripts/drift-guard.sh --check-pins
 
+  shellcheck:
+    name: Shellcheck (provisioning/ops scripts)
+    runs-on: ubuntu-latest
+    # #545: the provisioning/ops shell scripts (setup-device.sh, setup-imag.sh, rig-mode.sh,
+    # drift-guard.sh, launch-obs-genlock.sh, purge-target.sh, ...) run as ROOT on fresh cam
+    # boxes + imag-nb during provisioning (#448-#454) and carry non-trivial logic (idempotent
+    # GRUB_CMDLINE flag loops, git-arg-injection guards, fail-closed abort guards). A silent
+    # shell bug (bad quoting in a cmdline edit, an unguarded rm) can brick a box. Lints both
+    # scripts/*.sh AND scripts/lib/*.sh -- lib/ holds standalone root-run helpers like
+    # camera-box-grow-root.sh (first-boot growpart/resize2fs) that NO top-level script sources,
+    # so the non-recursive glob would otherwise leave them uncovered. Gate at `-S warning`
+    # (errors + warnings fail the build); the many style/info-level findings are a DELIBERATE
+    # floor, not weakening -- advisory-only, no CI block. GitHub's
+    # ubuntu-latest ships shellcheck preinstalled, so no separate install step is needed; the
+    # apt-get fallback below is a cheap belt-and-suspenders in case that ever changes upstream.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure shellcheck is installed
+        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+
+      - name: Shellcheck (warning severity, binary gate)
+        run: shellcheck -S warning scripts/*.sh scripts/lib/*.sh
+
   notify-on-failure:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
@@ -480,7 +504,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard]
+    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard, shellcheck]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

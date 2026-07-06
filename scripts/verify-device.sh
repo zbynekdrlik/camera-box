@@ -53,15 +53,16 @@
 
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"          # camera_resolve() -- NAME -> IP / CAMERA_GENLOCK_FPS (#24/#451)
 # shellcheck source=scripts/lib/ndi-alive.sh
 . "$HERE/lib/ndi-alive.sh"       # emit_ok_grep_pattern() / fatal_grep_pattern() (#451)
-# shellcheck source=scripts/clock-offset-guard.sh -- sourced ONLY for its pure functions; its own
+# clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
+# shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"  # offset_us_from_journal() / offset_check() / ptp_locked_from_journal()
 
 SSH_USER="${SSH_USER:-root}"
