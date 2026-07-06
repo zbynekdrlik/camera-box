@@ -535,10 +535,16 @@ rc=0
 # second word to the captured state and break the exact-match checks below); a purged unit prints
 # nothing -> empty state, which fwupd_absent accepts.
 FWUPD_STATE="$(ssh_box "systemctl is-enabled fwupd 2>/dev/null || true")" || rc=$?
-if fwupd_absent "$FWUPD_STATE"; then
+if [ "$rc" -ne 0 ]; then
+  # fwupd_absent treats an EMPTY state as "purged" (pass) -- but a transient ssh failure on THIS
+  # call ALSO yields empty stdout. Unlike (j)/(k)/(m)/(n)/(o), where empty means FAIL, (l)'s empty
+  # means PASS, so an unreadable (l) must be an explicit FAIL (the file's "unreachable = FAIL"
+  # contract), never a silent green.
+  fail "fwupd state unreadable (ssh rc=$rc) -- unreachable check is a FAIL, never a silent pass"
+elif fwupd_absent "$FWUPD_STATE"; then
   ok "fwupd is not installed (purged)"
 else
-  fail "fwupd still present (state='${FWUPD_STATE}') -- purge it; it blocks the ro remount (ssh rc=$rc)"
+  fail "fwupd still present (state='${FWUPD_STATE}') -- purge it; it blocks the ro remount"
 fi
 
 # (m) systemd-networkd-wait-online masked (#547 -- avoids the 120s boot stall) -------------------
