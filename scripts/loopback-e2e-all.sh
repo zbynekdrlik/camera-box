@@ -10,10 +10,7 @@
 #   CAMERA_SET="cam1 cam3 cam4" scripts/loopback-e2e-all.sh
 #   CAMERA_SET="cam1 cam2 cam3 cam4" scripts/loopback-e2e-all.sh
 #
-# IMPORTANT (per the #24 acceptance criteria + approval-scope): cam1/cam3/cam4 are the LIVE
-# production cameras. Running the probe on a live camera takes it OFF-AIR briefly and needs
-# an explicit maintenance window + operator approval. This script does NOT enforce that —
-# the operator who names a live camera in CAMERA_SET is the guard. Per-run env (MODE,
+# NOTE: cam1/cam3/cam4 are the live production cameras (#24). Per-run env (MODE,
 # DURATION_SECS, the gate bounds, etc.) is passed straight through to loopback-e2e.sh.
 #
 # Artifacts are written per camera as <LOCAL_OUT_PREFIX>-<mode>-<cam>.json (default prefix
