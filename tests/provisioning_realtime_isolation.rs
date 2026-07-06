@@ -97,6 +97,32 @@ fn setup_device_writes_genlock_dropin() {
     );
 }
 
+/// #528 — the HDMI cameraman preview must be wired from the per-cam CAMERA_DISPLAY_SOURCE table
+/// (scripts/camera-set.sh) into config.toml's optional [display] section, NEVER baked into
+/// ExecStart (that stays canonical/plain everywhere per
+/// setup_device_provisioner_hardening::setup_device_execstart_is_canonical_plain, #450).
+#[test]
+fn setup_device_wires_display_source_table_into_config_toml() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, "config_toml_display_section \"${CAMERA_DISPLAY_SOURCE:-}\""),
+        "setup-device.sh STEP 6 must call config_toml_display_section with the per-cam \
+         CAMERA_DISPLAY_SOURCE table value (scripts/camera-set.sh, #528) — not a hardcoded source"
+    );
+    assert!(
+        on_noncomment_line(&body, ">> /etc/camera-box/config.toml"),
+        "setup-device.sh must APPEND the [display] section to the existing config.toml (not \
+         overwrite it) so the [intercom] section written earlier in STEP 6 survives (#528)"
+    );
+    // The #450 canonical-ExecStart guard must remain untouched by #528 — the preview never bakes
+    // into the systemd unit.
+    assert!(
+        !body.contains(r#"--display "STRIH-SNV"#),
+        "#528 must not reintroduce a hardcoded --display flag into ExecStart — the preview lives \
+         in config.toml's [display] section, not the systemd unit (#450)"
+    );
+}
+
 /// 3. The provisioner must add `isolcpus=3` AND the #303 quiet-core companions
 ///    (`nohz_full=3 rcu_nocbs=3 irqaffinity=0-2`) to the kernel cmdline (GRUB_CMDLINE_LINUX), and
 ///    every one of the edits must land BEFORE `update-grub` regenerates grub.cfg or the flags never

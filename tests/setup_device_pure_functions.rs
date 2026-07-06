@@ -149,3 +149,52 @@ fn resolve_device_name_resolves_the_whole_fleet() {
         );
     }
 }
+
+// --- #528: config_toml_display_section (per-cam HDMI cameraman preview) ------------------------
+//
+// setup-device.sh's `#450`-canonical ExecStart must stay PLAIN and identical on every box
+// (`tests/setup_device_provisioner_hardening.rs::setup_device_execstart_is_canonical_plain`) —
+// #528's preview source therefore does NOT bake into ExecStart. Instead it's an optional
+// `[display]` section appended to the per-box `config.toml` (the SAME file that already carries
+// per-box variance today, e.g. the VBAN stream name) via this pure, sourced-and-unit-tested
+// function — the same seam convention as `resolve_device_name` above.
+
+/// config_toml_display_section must be a no-op (empty stdout) for a box with NO configured
+/// preview (cam3-7 today) — camera-box then runs with no [display] section, i.e. no preview,
+/// exactly as every box behaved before #528.
+#[test]
+fn config_toml_display_section_is_empty_for_no_source() {
+    let (code, out, err) = run_sourced(r#"config_toml_display_section """#);
+    assert_eq!(
+        code, 0,
+        "config_toml_display_section '' must not fail. stderr: {err}"
+    );
+    assert_eq!(
+        out, "",
+        "config_toml_display_section '' must emit nothing (no [display] section) — a box with \
+         no CAMERA_DISPLAY_SOURCE table entry must not gain one; got: {out:?}"
+    );
+}
+
+/// config_toml_display_section must emit a `[display]` TOML section with the given source when
+/// one is configured (cam1/cam2 today, #528) — table-derived, not hardcoded.
+#[test]
+fn config_toml_display_section_emits_display_section_for_a_configured_source() {
+    let (code, out, err) = run_sourced(r#"config_toml_display_section "STRIH-SNV (interkom)""#);
+    assert_eq!(
+        code, 0,
+        "config_toml_display_section must succeed for a configured source. stderr: {err}"
+    );
+    assert!(
+        out.contains("[display]"),
+        "config_toml_display_section must emit a [display] TOML section header; got: {out:?}"
+    );
+    assert!(
+        out.contains(r#"source = "STRIH-SNV (interkom)""#),
+        "config_toml_display_section must wire the given source into `source = \"...\"`; got: {out:?}"
+    );
+    assert!(
+        out.contains("fb_device"),
+        "config_toml_display_section must set fb_device (config.rs::DisplayConfig field); got: {out:?}"
+    );
+}

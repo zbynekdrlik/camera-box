@@ -243,3 +243,72 @@ fn camera_resolve_emits_per_camera_genlock_fps() {
         );
     }
 }
+
+// --- #528: per-cam HDMI cameraman preview source table -----------------------------------------
+
+/// Source `camera-set.sh`, run `camera_resolve <name>`, and return the resolved
+/// `CAMERA_DISPLAY_SOURCE` value (empty string for a box with no configured preview, or on
+/// reject). Uses `set -u` deliberately — an unset (not merely empty) var is a real bug, and
+/// referencing it under `-u` fails loud rather than silently printing nothing.
+fn resolve_display_source(cam: &str) -> (bool, String) {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+if camera_resolve "$CAM" 2>/dev/null; then
+  printf 'OK\n'
+  printf 'DISPLAY\t%s\n' "$CAMERA_DISPLAY_SOURCE"
+else
+  printf 'REJECT\n'
+fi
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("CAM", cam)
+        .output()
+        .expect("failed to run bash resolver harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ok = out.status.success() && stdout.lines().next() == Some("OK");
+    let display = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("DISPLAY\t"))
+        .unwrap_or_default()
+        .to_string();
+    (ok, display)
+}
+
+#[test]
+fn camera_resolve_wires_cam1_and_cam2_to_the_interkom_return_monitor() {
+    // #528: cam1 had NO functional HDMI cameraman preview because setup-device.sh never wired a
+    // `--display` source at all. The fix is a per-cam table entry (not a free-text SSH edit) so a
+    // re-provision keeps the preview. cam1 mirrors cam2's existing (previously hand-set-only)
+    // interkom/return-monitor class — same preview source for both.
+    for cam in ["cam1", "cam2"] {
+        let (ok, display) = resolve_display_source(cam);
+        assert!(ok, "camera_resolve {cam} should succeed");
+        assert_eq!(
+            display, "STRIH-SNV (interkom)",
+            "camera_resolve {cam} must resolve CAMERA_DISPLAY_SOURCE to the interkom/return \
+             monitor (#528); got '{display}'"
+        );
+    }
+}
+
+#[test]
+fn camera_resolve_leaves_cam3_through_cam7_with_no_display_source() {
+    // A box with no configured cameraman preview must resolve to an EMPTY (never unset — `set -u`
+    // would trip on unset) CAMERA_DISPLAY_SOURCE, so the provisioner can tell "no table entry"
+    // apart from "table entry that happens to be empty" is not a distinction we need — empty
+    // means "no preview for this box today" either way.
+    for cam in ["cam3", "cam4", "cam5", "cam6", "cam7"] {
+        let (ok, display) = resolve_display_source(cam);
+        assert!(ok, "camera_resolve {cam} should succeed");
+        assert_eq!(
+            display, "",
+            "camera_resolve {cam} must resolve CAMERA_DISPLAY_SOURCE to empty (no preview \
+             configured, #528); got '{display}'"
+        );
+    }
+}
