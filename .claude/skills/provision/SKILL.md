@@ -126,6 +126,12 @@ It checks (all must pass, exit 0 only if every check is OK):
 | (g) | `/usr/lib/ndi/libndi.so.6` is a root-owned SYMLINK to a root-owned regular file | `ls -la /usr/lib/ndi` — the CANONICAL layout; the #445 cam3-outlier real-file/user-owned layout deliberately FAILS this check |
 | (h) | avahi mDNS sees this box's NDI source | `avahi-browse -tp _ndi._tcp` |
 | (i) | capture-chroma metric reports "colour", not "grayscale" | `journalctl -u camera-box`, the #299 regression signal (`src/main.rs`'s periodic `capture chroma: ... -> colour\|grayscale` line) |
+| (j) | root filesystem mounted **read-only** | `findmnt -no OPTIONS /` — the ro appliance (#547); a `rw` box FAILs |
+| (k) | exactly **ONE** installed kernel, equal to the running one | `ls -1 /boot/vmlinuz-*` vs `uname -r`; two kernels (the cam4 drift) or a mismatch FAILs (#547). Optional exact fleet pin via `KERNEL_PIN=6.8.0-134-generic` |
+| (l) | **fwupd purged** | `systemctl is-enabled fwupd` must be gone/not-found (#547 — fwupd holds a write handle that blocks the `ro` remount) |
+| (m) | `systemd-networkd-wait-online` **masked** | `systemctl is-enabled …` == `masked` (#547 — unmasked it stalled boot ~120s) |
+| (n) | core-isolation kernel cmdline | `/proc/cmdline` carries `isolcpus=3` (#289) + `nohz_full=3` + `rcu_nocbs=3` + `irqaffinity=0-2` (#303), each a whole token |
+| (o) | NDI runtime pinned to the fleet version | version of the `libndi.so.6` symlink target; `NDI_VERSION_PIN` (default `6.3.2`, #132/#547) |
 
 Every check is a hard FAIL on an unreachable/unreadable signal too (test-strictness — no silent
 pass on "couldn't tell"). `verify-device.sh`'s pure decision functions are unit-tested offline in
@@ -142,9 +148,24 @@ something `verify-device.sh` should be loosened to tolerate.
 ## Known gotchas (found bringing up cam5/cam6/cam7 — all fixed IN THE SCRIPTS, never hand-patched)
 
 - **Boot hangs with no console/SSH** was `systemd-networkd-wait-online.service` blocking
-  `multi-user.target` on a base debootstrap image with no bound timeout — masked/bounded by
-  `create-usb-linux.sh` + `setup-device.sh` STEP 11. If a fresh box pings but `:22` never comes
-  up, this is the first thing to suspect, not dead hardware.
+  `network-online.target` on a base image with no bound timeout — `setup-device.sh` STEP 11 now
+  **masks** the unit outright (#547; the box has a static IP, so camera-box never needs to wait for
+  "online"). Unmasked it stalled boot ~120s → camera-box started ~123s late (observed on cam3). If
+  a fresh box pings but `:22` never comes up, this is the first thing to suspect, not dead hardware.
+- **`ro` remount fails with EBUSY, box stuck `rw` (#547)** — `fwupd` holds an open write handle on
+  `/var/lib/fwupd/pending.db`, so `mount -o remount,ro /` fails and the box never becomes a proper
+  ro appliance (hit on cam1/cam4). The appliance never firmware-updates itself → `setup-device.sh`
+  STEP 15 **purges fwupd**. On an already-live box: `apt-get purge -y fwupd fwupd-signed` (or
+  `dpkg --purge --force-depends fwupd fwupd-signed` if apt is wedged), then remount ro (or reboot,
+  which restores ro from fstab).
+- **Kernel update on the ro appliance fails with "No space left on device" (#547)** — `mkinitramfs`
+  builds the initramfs in `/var/tmp`, a **50M tmpfs**, far too small for a ~400M initramfs → no
+  initrd → a half-installed, unbootable kernel (the `#295` brick-guard aborts the reboot, correctly,
+  but the install is stuck). The `#295` `zz-camera-box-initrd-guarantee` postinst hook now builds
+  with `TMPDIR=/root/.itmp` (the real ~51G disk) so the guarantee actually works on the ro box. To
+  update a kernel manually: `mount -o remount,rw /` → `TMPDIR=/root/.itmp dpkg --configure -a` (or
+  the install) → confirm `/boot/initrd.img-<ver>` exists → `mount -o remount,ro /` / reboot. NEVER
+  run `update-grub` without confirming every `/boot/vmlinuz-*` has a matching initrd first.
 - **No `curl` on the base image** silently failed the STEP 3 binary download and STEP 17 dantesync
   download. `create-usb-linux.sh` now ships `curl`; `setup-device.sh` also has a pre-flight
   curl-install step before either download runs.

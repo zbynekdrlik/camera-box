@@ -47,6 +47,12 @@
 #   (g) /usr/lib/ndi/libndi.so.6 is a root-owned symlink chain to a root-owned regular file
 #   (h) avahi mDNS NDI discovery sees this box's NDI source (avahi-browse -tp _ndi._tcp)
 #   (i) capture chroma metric reports "colour", not "grayscale" (#299 regression signal)
+#   (j) root filesystem mounted read-only (#547 -- ro appliance)
+#   (k) exactly ONE installed kernel, equal to the running one (#547; optional KERNEL_PIN match)
+#   (l) fwupd purged (#547 -- it holds a write handle that blocks the ro remount)
+#   (m) systemd-networkd-wait-online masked (#547 -- avoids the 120s boot stall)
+#   (n) core-isolation kernel cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
+#   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2 -- #132/#547)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -69,6 +75,8 @@ SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
 DEVICE_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
+EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running kernel == this exact version
+NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#547)
 
 # =================================================================================================
 # PURE functions (no network, no SSH -- unit-tested from tests/verify_device_pure_functions.rs by
@@ -236,6 +244,85 @@ avahi_ndi_discoverable() {
   printf '%s\n' "$matches" | grep -qF "$want"
 }
 
+# --- (j)-(o) fleet-uniformity invariants (#547) -------------------------------------------------
+# Every cambox must be IDENTICAL: read-only root, exactly ONE pinned kernel, fwupd purged,
+# systemd-networkd-wait-online masked, the #289/#303 core-isolation cmdline, and the pinned NDI
+# runtime. These pure decision functions are unit-tested; the live flow below feeds them real
+# post-reboot signals gathered over SSH.
+
+# root_mount_is_readonly OPTS -> 0 iff the FIRST comma-token of a mount-options string is exactly
+# "ro" (the kernel always emits ro/rw first). Substring-safe: a rw mount carrying
+# "errors=remount-ro" is correctly NOT read as read-only.
+root_mount_is_readonly() {
+  case "$1" in
+    ro | ro,*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# kernels_uniform_ok BOOT_LS RUNNING -> 0 iff BOOT_LS (an `ls -1 /boot/vmlinuz-*` dump) lists
+# EXACTLY ONE installed kernel AND its version equals RUNNING (`uname -r`). Two kernels (the cam4
+# drift) or a running/installed mismatch FAILs.
+kernels_uniform_ok() {
+  local boot_ls="$1" running="$2" count ver
+  [ -n "$running" ] || return 1
+  count="$(printf '%s\n' "$boot_ls" | grep -c 'vmlinuz-' || true)"
+  [ "$count" = "1" ] || return 1
+  ver="$(printf '%s\n' "$boot_ls" | grep -oE 'vmlinuz-.*' | head -1 | sed 's#.*vmlinuz-##')"
+  [ "$ver" = "$running" ]
+}
+
+# fwupd_absent STATE -> 0 iff STATE (trimmed `systemctl is-enabled fwupd` output, or "not-found"
+# when the unit/package is gone) shows fwupd is NOT installed. The fleet PURGES fwupd (it held a
+# write handle that blocked the ro remount); a unit still present in ANY state (enabled/static/
+# disabled/masked) FAILs -- "masked but installed" is not identical to "purged".
+fwupd_absent() {
+  case "$(printf '%s' "$1" | tr -d '[:space:]')" in
+    '' | not-found) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# waitonline_masked STATE -> 0 iff STATE (trimmed `systemctl is-enabled
+# systemd-networkd-wait-online`) is exactly "masked". The fleet MASKS it -- unmasked it timed out
+# 120s and delayed network-online.target, starting camera-box ~123s late (cam3). Any other state
+# FAILs.
+waitonline_masked() {
+  [ "$(printf '%s' "$1" | tr -d '[:space:]')" = "masked" ]
+}
+
+# cmdline_has_isolation CMDLINE -> 0 iff /proc/cmdline carries ALL of the core-isolation flags
+# isolcpus=3 (#289) + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#303), each as a whole
+# space-delimited token (so nohz_full=3 never matches nohz_full=30).
+cmdline_has_isolation() {
+  local cmdline="$1" tok
+  for tok in 'isolcpus=3' 'nohz_full=3' 'rcu_nocbs=3' 'irqaffinity=0-2'; do
+    printf '%s' " $cmdline " | grep -qE "[[:space:]]${tok}[[:space:]]" || return 1
+  done
+  return 0
+}
+
+# ndi_symlink_version LS_TEXT -> the version portion of the libndi.so.6 symlink target in an
+# `ls -la /usr/lib/ndi` listing (e.g. "6.3.2.0" from "libndi.so.6 -> libndi.so.6.3.2.0"), "" if
+# the target is not resolvable. Builds on ndi_symlink_target (the root-owned symlink check).
+ndi_symlink_version() {
+  local target
+  target="$(ndi_symlink_target "$1")"
+  [ -n "$target" ] || return 0
+  printf '%s\n' "${target#libndi.so.}"
+}
+
+# ndi_version_matches ACTUAL PIN -> 0 iff ACTUAL equals PIN or begins "PIN." (so the fleet pin
+# "6.3.2" accepts both the 3-part soname "6.3.2" and the 4-part SDK string "6.3.2.0", but never
+# "6.2.1" or the deceptive "6.3.20").
+ndi_version_matches() {
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  case "$1" in
+    "$2" | "$2".*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH flow below.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -265,6 +352,14 @@ Checks:
   (g) /usr/lib/ndi/libndi.so.6 is a root-owned symlink chain to a root-owned regular file
   (h) avahi mDNS NDI discovery sees this box's NDI source (avahi-browse -tp _ndi._tcp)
   (i) capture chroma metric reports "colour" (not "grayscale") -- #299 regression signal
+  (j) root filesystem mounted read-only (ro appliance)
+  (k) exactly ONE installed kernel, equal to the running one (optional KERNEL_PIN exact match)
+  (l) fwupd purged (blocks the ro remount)
+  (m) systemd-networkd-wait-online masked (no 120s boot stall)
+  (n) core-isolation cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
+  (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2)
+
+Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2).
 
 Exit: 0 iff every check passes.
 EOF
@@ -405,6 +500,72 @@ if avahi_ndi_discoverable "$AVAHI_OUT" "$NAME_UPPER"; then
   ok "avahi mDNS sees this box's NDI source ($NAME_UPPER)"
 else
   fail "avahi-browse did not see an NDI source for $NAME_UPPER (ssh rc=$rc)"
+fi
+
+# (j) root filesystem mounted read-only (#547 -- ro appliance) -----------------------------------
+rc=0
+MOUNT_OPTS="$(ssh_box "findmnt -no OPTIONS / 2>/dev/null || awk '\$2==\"/\"{print \$4; exit}' /proc/mounts")" || rc=$?
+if root_mount_is_readonly "$MOUNT_OPTS"; then
+  ok "root filesystem mounted read-only (ro appliance)"
+else
+  fail "root filesystem is NOT read-only (opts='${MOUNT_OPTS:-<none>}', ssh rc=$rc)"
+fi
+
+# (k) exactly one installed kernel, equal to the running one (#547 -- one kernel) ----------------
+rc=0
+BOOT_LS="$(ssh_box "ls -1 /boot/vmlinuz-* 2>/dev/null")" || rc=$?
+RUNNING_KERNEL="$(ssh_box "uname -r 2>/dev/null")" || rc=$?
+if kernels_uniform_ok "$BOOT_LS" "$RUNNING_KERNEL"; then
+  ok "single installed kernel == running ($RUNNING_KERNEL)"
+else
+  fail "kernel not uniform -- want exactly one installed kernel equal to the running one (running='${RUNNING_KERNEL:-?}', installed='$(printf '%s' "$BOOT_LS" | tr '\n' ' ')', ssh rc=$rc)"
+fi
+if [ -n "$EXPECT_KERNEL" ]; then
+  if [ "$RUNNING_KERNEL" = "$EXPECT_KERNEL" ]; then
+    ok "running kernel matches the fleet pin ($EXPECT_KERNEL)"
+  else
+    fail "running kernel '${RUNNING_KERNEL:-?}' != fleet pin '$EXPECT_KERNEL' (KERNEL_PIN)"
+  fi
+fi
+
+# (l) fwupd purged (#547 -- it holds a write handle blocking the ro remount) ---------------------
+rc=0
+# NB: `systemctl is-enabled` prints the state (e.g. "masked"/"disabled") to STDOUT *and* exits
+# non-zero for those states -- so `|| true` (never `|| echo <sentinel>`, which would APPEND a
+# second word to the captured state and break the exact-match checks below); a purged unit prints
+# nothing -> empty state, which fwupd_absent accepts.
+FWUPD_STATE="$(ssh_box "systemctl is-enabled fwupd 2>/dev/null || true")" || rc=$?
+if fwupd_absent "$FWUPD_STATE"; then
+  ok "fwupd is not installed (purged)"
+else
+  fail "fwupd still present (state='${FWUPD_STATE}') -- purge it; it blocks the ro remount (ssh rc=$rc)"
+fi
+
+# (m) systemd-networkd-wait-online masked (#547 -- avoids the 120s boot stall) -------------------
+rc=0
+WAITONLINE_STATE="$(ssh_box "systemctl is-enabled systemd-networkd-wait-online 2>/dev/null || true")" || rc=$?
+if waitonline_masked "$WAITONLINE_STATE"; then
+  ok "systemd-networkd-wait-online masked (no 120s boot stall)"
+else
+  fail "systemd-networkd-wait-online not masked (state='${WAITONLINE_STATE}') -- unmasked it delays network-online.target ~120s (ssh rc=$rc)"
+fi
+
+# (n) core-isolation kernel cmdline (#289 isolcpus + #303 nohz_full/rcu_nocbs/irqaffinity) -------
+rc=0
+CMDLINE="$(ssh_box "cat /proc/cmdline 2>/dev/null")" || rc=$?
+if cmdline_has_isolation "$CMDLINE"; then
+  ok "kernel cmdline carries isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)"
+else
+  fail "kernel cmdline missing a core-isolation flag (#289/#303): '${CMDLINE:-<none>}' (ssh rc=$rc)"
+fi
+
+# (o) NDI runtime pinned to the fleet version (#132/#547) ----------------------------------------
+# Reuses NDI_LS gathered in (g); ndi_symlink_version extracts the version from the symlink target.
+NDI_VER="$(ndi_symlink_version "$NDI_LS")"
+if ndi_version_matches "$NDI_VER" "$NDI_VERSION_PIN"; then
+  ok "NDI runtime pinned to $NDI_VERSION_PIN (active: ${NDI_VER})"
+else
+  fail "NDI runtime '${NDI_VER:-?}' != fleet pin '$NDI_VERSION_PIN' (NDI_VERSION_PIN)"
 fi
 
 echo ""
