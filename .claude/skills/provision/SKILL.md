@@ -132,6 +132,7 @@ It checks (all must pass, exit 0 only if every check is OK):
 | (m) | `systemd-networkd-wait-online` **masked** | `systemctl is-enabled …` == `masked` (#547 — unmasked it stalled boot ~120s) |
 | (n) | core-isolation kernel cmdline | `/proc/cmdline` carries `isolcpus=3` (#289) + `nohz_full=3` + `rcu_nocbs=3` + `irqaffinity=0-2` (#303), each a whole token |
 | (o) | NDI runtime pinned to the fleet version | version of the `libndi.so.6` symlink target; `NDI_VERSION_PIN` (default `6.3.2`, #132/#547) |
+| (p) | `config.toml`'s `[display]` section matches `camera-set.sh`'s `CAMERA_DISPLAY_SOURCE` table entry | `cat /etc/camera-box/config.toml` over SSH, compare against the per-cam table (#528/#557/#558) — catches a box that lost its HDMI-preview config, or wrongly gained one |
 
 Every check is a hard FAIL on an unreachable/unreadable signal too (test-strictness — no silent
 pass on "couldn't tell"). `verify-device.sh`'s pure decision functions are unit-tested offline in
@@ -239,6 +240,27 @@ canonical, always-plain `ExecStart`), so a box's preview survives a re-provision
 being a manual, non-persistent SSH edit. **cam1 only** resolves to `"STRIH-SNV (interkom)"`
 today.
 
+**`scripts/setup.sh`** (the separate `curl | sudo bash` quick-install path, still documented in
+`SETUP.md` / shipped as a release artifact) joined this SAME mechanism in #557 — it used to
+hardcode `--display "STRIH-SNV (interkom)"` into EVERY box's `ExecStart`. Since it's a standalone
+script with no local repo checkout when curl-piped, it DOWNLOADS the real `scripts/camera-set.sh`
+at provision time (`CAMERA_SET_SOURCE`, default the GitHub raw URL on `main`, overridable to a
+local path for tests) rather than keeping a second, hand-copied table. Its `[display]`
+reconciliation runs on EVERY invocation (strip-then-append), not just first-install — an earlier
+version of this fix put it only inside the "config.toml doesn't exist yet" guard, so a re-run on
+an already-provisioned box (e.g. to update the binary) silently ended up with NEITHER the old
+`--display` flag NOR a `[display]` section, permanently losing the preview. `setup.sh`'s
+retire-vs-keep fate (is it still needed, or fully superseded by `setup-device.sh`?) is an open,
+deliberately-deferred decision — see #563.
+
+**cam1's own live box still shows check (p) FAIL as of 2026-07-06** (`camera-box --version
+1.7.0-dev.258`, predating #528) — it has not yet been RE-PROVISIONED with the new
+`setup-device.sh` to pick up the `[display]` section. That is #528's own remaining scope, not a
+bug in check (p) — it's the acceptance gate correctly detecting the still-open condition. **cam1
+is READ-ONLY (do not re-provision it casually)** — verify a provisioning-script change against a
+live box via `verify-device.sh`'s READ-ONLY acceptance check, never by actually re-running
+`setup.sh`/`setup-device.sh` against cam1.
+
 **cam2 is deliberately EXCLUDED from the table**, even though its live box already runs the same
 interkom preview — cam2's preview is a manual `--display` flag baked into `ExecStart`, and
 `scripts/rig-mode.sh`'s TEST/EVENT mode toggle (the QR-painter E2E harness) specifically flips
@@ -279,6 +301,40 @@ indexing by position — robust to the exact `-o` option count, which any of the
 change. Any future `sshpass`-stubbing test in this repo should use the scan form, and assert on the
 EXACT per-name summary line (not a loose `contains("SKIPPED")`) to prove the stub genuinely drove
 the offline path.
+
+**Shell-scripting gotchas found fixing #557/#558 (setup.sh + verify-device.sh check (p)):**
+
+- **A `BASH_SOURCE[0] != $0` source-guard is WRONG for a script whose real invocation is
+  `curl | sudo bash -s NAME` (stdin-piped).** `setup-device.sh`'s guard form works because it's
+  always invoked as a FILE (`./setup-device.sh` or a downloaded path) — but under `bash -s`,
+  `BASH_SOURCE[0]` is EMPTY and `$0` is literally `"bash"`, so a bare `!=` comparison ALSO matches
+  and would silently skip `main "$@"` on every real production install. Verified against all
+  three invocation modes (piped, direct-file, sourced) before landing #557's guard on `setup.sh`.
+  The fix: require `[ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "${0}" ]` — non-empty
+  AND different, not just different. Any future testable pure-function refactor of a curl-piped
+  script in this repo needs this exact form, not a copy-paste of `setup-device.sh`'s guard.
+- **A `warn()`/`log()` helper that writes to STDOUT is dangerous to call inside a function whose
+  own stdout IS its return-value channel** (any function called as `x="$(some_func ...)"`). Adding
+  a `warn "fetch failed"` call inside `resolve_display_source()` (#557-review fix) would have
+  silently corrupted the captured return value with the warning text itself on every failure path
+  — caught only because the new test asserted on the captured stdout, not because it "looked
+  wrong". Redirect the specific call to stderr (`warn "..." >&2`) instead of changing the shared
+  `warn()` function; every OTHER call site in the script legitimately wants it on stdout.
+- **A "wiring" test that does `body.contains("function_name")` is tautological** — it ALSO matches
+  the function's own `function_name() {` definition line, so it can never catch a dead/deleted
+  call site. Search for the exact CALL-SITE substring instead (the function name PLUS its real
+  argument, e.g. `body.contains(r#"resolve_display_source "$DEVICE_HOSTNAME""#)`), or slice the
+  script body past a marker (`verify_device_pure_functions.rs`'s
+  `check_p_is_wired_into_the_live_flow_and_usage_doc` does this by slicing past the source-guard
+  comment) before searching. This bug landed once in this exact ticket (#557's first wiring test)
+  and was only caught by a later review pass — write the call-site form from the start.
+- **An exact-line-anchored TOML section-header match (`/^\[display\][[:space:]]*$/`) misses a
+  header with a trailing inline comment** (`[display]  # note`, valid TOML that a hand-edit could
+  introduce). If that header drives a strip-then-append idempotent rewrite, the miss means the OLD
+  section never gets stripped while a NEW one still gets appended — an invalid DUPLICATE TOML
+  table that fails to parse and crash-loops the consuming service. Use a prefix match
+  (`/^\[display\]/`, no end-anchor) instead — verified it still can't false-match an unrelated
+  section like `[displayfoo]` (the literal substring `[display]` isn't present in it).
 
 ## After acceptance
 
