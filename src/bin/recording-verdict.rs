@@ -49,8 +49,8 @@ use camera_box::probe::recording_latency::{
     burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip,
     cam_strih_samples, chain_hop_samples_from_stream, hop_latency, painter_internal_gen_to_flip,
     per_frame_latency_csv_rows, strih_stream_samples, strih_stream_samples_from_stream,
-    write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM4, BURN_RUN_ID_IMAG,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
+    BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -172,12 +172,11 @@ struct Args {
     /// actually deployed with `CAMERA_BOX_BURN_RUN_ID` set produces a non-empty id set) — when
     /// absent, cam3 is silently skipped exactly like cam1 is today when its burn is off.
     ///
-    /// **#463 NOTE (see issue #24):** cam3 is down/deferred in Topology v2, so this default
-    /// (911003, via [`BURN_RUN_ID_IMAG`]) is now numerically the SAME id imag's own digital
-    /// corner burn claims — harmless only because cam3's capture-burn is never actually deployed
-    /// today (mutually exclusive with imag's OBS-filter burn, a different mechanism entirely).
-    /// When cam3 capture-burn work resumes, it needs a FRESH reserved id of its own.
-    #[arg(long, default_value_t = BURN_RUN_ID_IMAG)]
+    /// Defaults to [`BURN_RUN_ID_CAM3`] — a fresh, unique id reserved for cam3 (#24). #463
+    /// renamed the OLD `BURN_RUN_ID_CAM3` constant to [`BURN_RUN_ID_IMAG`] and repurposed 911003
+    /// for imag-nb's own digital corner burn, which left this default numerically colliding with
+    /// it until this fix; the two mechanisms are told apart by run_id alone again.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM3)]
     burn_cam3_run_id: u32,
     /// #24: cam4's capture-burn run_id. See `--burn-cam3-run-id`.
     #[arg(long, default_value_t = BURN_RUN_ID_CAM4)]
@@ -3721,7 +3720,7 @@ mod tests {
 
     // ---- #24 — extend the #186 per-node digital-burn contiguity check to cam3/cam4 ----
 
-    const CAM3B: u32 = 911003; // #24 cam3 per-EMIT capture burn run_id
+    const CAM3B: u32 = super::BURN_RUN_ID_CAM3; // #24 cam3 per-EMIT capture burn run_id (911008)
 
     /// Build a window of N delivered frames like [`window`], but for CAM3 as the "camera under
     /// test" instead of cam1 (mirrors the #174 cam1 capture-burn mechanism running on cam3). In
