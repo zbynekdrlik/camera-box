@@ -266,6 +266,20 @@ status is nonzero iff at least one reachable box FAILed (a fleet of all-SKIPPED/
 exits 0). Run it periodically (or after any fleet-wide change) to catch drift before it becomes
 a live-event surprise, instead of re-deriving each box's state by hand.
 
+**Test gotcha — a stubbed `sshpass` MUST scan for the `@` token, never index by position.**
+`tests/harness_verify_fleet.rs`'s first `sshpass` stub extracted the ssh target as `"${@: -1}"`
+(the last positional arg) — but the real invocation's last arg is the trailing remote COMMAND
+(`true`), not `user@host` (which sits one arg earlier, after three `-o` options). That stub
+therefore never matched any offline IP and silently reported every box reachable regardless of the
+test's `offline_ips` list — the two tests meant to pin "offline box is SKIPPED, never FAIL" passed
+only VACUOUSLY (satisfied by the always-present "SKIPPED: none" summary label). Caught by a
+code-review pass, not by the tests themselves. Fix: scan ALL remaining args for the one containing
+`@` (`for arg in "$@"; do case "$arg" in *@*) target="${arg#*@}" ;; esac; done`) instead of
+indexing by position — robust to the exact `-o` option count, which any of these scripts could
+change. Any future `sshpass`-stubbing test in this repo should use the scan form, and assert on the
+EXACT per-name summary line (not a loose `contains("SKIPPED")`) to prove the stub genuinely drove
+the offline path.
+
 ## After acceptance
 
 Once `verify-device.sh NAME` reports `ALL CLEAR`, the box is fleet-identical and ready to plug
