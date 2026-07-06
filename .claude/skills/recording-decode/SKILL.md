@@ -412,6 +412,24 @@ which returned `BurnHopVerdict`. A symbol is only dead if its WHOLE cluster is d
    locally. shellcheck any touched scripts; the harness structural tests (`harness_recording_e2e_paths`)
    ARE default-feature and run locally + CI.
 
+### Observing RED→GREEN locally for a bug tied to the bin's own CLI struct (#24 cam3 burn-id fix)
+
+Some regression tests genuinely can't be extracted into a Tier-0 pure module (the
+`src/reannounce.rs`/`src/colour_scale.rs` pattern) — e.g. a test asserting a `#[arg(long,
+default_value_t = …)]` CLI default on `recording-verdict.rs`'s `Args` struct itself is inherently
+probe-gated (the whole bin requires `--features probe`; `clap::Parser::parse_from` on `super::Args`
+only compiles there). For exactly this one-off case (verifying the RED test fails, then the fix
+makes it pass — NOT a routine workflow), the documented bypass extends naturally to a `--bin`
+target: `cargo test --bin recording-verdict --features probe <test_name> # airuleset:build-ok`.
+Confirmed live on the #24 fix (`BURN_RUN_ID_IMAG`/`BURN_RUN_ID_CAM3` collision, PR #566): RED
+against the pre-fix default, GREEN after reserving a fresh id — then re-ran the WHOLE bin's test
+module (`cargo test --bin recording-verdict --features probe`, still bypass-marked) plus the probe
+lib (`cargo test --features probe --lib`) and the burn-decode integration suites to catch fallout
+(a stale test fixture elsewhere in the same file hardcoded the OLD numeric value and needed
+updating to track the intentional constant rename — grep the WHOLE repo for the literal old value,
+not just the constant name, before assuming a rename is fully propagated). This is still a one-off
+verification during the fix — CI remains the authoritative, routine compiler for the probe path.
+
 ### Pre-push hook on a pure-deletion / cleanup commit
 
 A dead-code-removal commit changes `.rs` but ADDS no tests, so pre-push Gate-1 ("feature .rs
