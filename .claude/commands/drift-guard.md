@@ -107,6 +107,13 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    #   for src in "NDI cam5" ... ; do scripts/obs_burn_filter.py check --host <ip> --input "$src"; done
    #   # any line with burn_on=True -> add "$src=on" to the list; none -> burn_env=none
    # (The `burn_env` key name is kept for the --compare contract; its value is now the genlock_burn state.)
+   # #548 DEPLOYED-BUILD currency: the deployed vendored-genlock commit, read from the marker the
+   # deploy writes at the install root. The engine dynamically compares it to origin/main's
+   # vendored-genlock HEAD (git log <sha>..origin/main -- vendor/obs-studio vendor/distroav) — the ONLY
+   # check that catches a box left on a STALE genlock build, since the OBS/DistroAV/NDI version strings
+   # are byte-identical old-vs-new. Read the CLEAN 40-hex from BUNDLE_MANIFEST.json .build_sha:
+   $mf = "C:\Program Files\obs-studio\BUNDLE_MANIFEST.json"
+   if (Test-Path $mf) { "genlock_build_sha=" + ((Get-Content $mf -Raw | ConvertFrom-Json).build_sha) }
    ```
 
    **Get the build-under-test's manifest** (the #120 `BUNDLE_MANIFEST.json` shipped inside the genlock
@@ -162,6 +169,7 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
      genlock_capability="<the live genlock marker text>" \
      burn_env="<none, or the NAME=VALUE list from the burn-env gather>" \
      genlock_source_latency="<SOURCE=latency_ms list from step 1e>" \
+     genlock_build_sha=<BUNDLE_MANIFEST.json .build_sha from the box — #548 dynamic staleness vs origin/main> \
      av_sync_calibrated_ms=<applied_latency_ms from av-sync-last.json, stream only, if reachable>
      # stream: ndi_input_latency="NDI 2ME PGM=<n>"
    ```
