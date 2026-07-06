@@ -126,13 +126,16 @@ const RENDER_TIME_BUDGET_MULTIPLIER: f64 = 2.0;
 /// `activeFps` below this while WS is reachable = the render loop has stalled.
 const FPS_ZERO_THRESHOLD: f64 = 1.0;
 
-/// Classify one box's liveness sample. STRICT: any of the #391 detection signals
+/// Classify one box's liveness sample. STRICT: any of the #391/#89 detection signals
 /// (`Responding=False`, pegged CPU, render-skip spike, blown render-time budget,
-/// WS unreachable, wrong obs64 process count, stalled activeFps) FAILS. Priority order
-/// mirrors how decisive each signal is: a wrong process count is checked first (it can
-/// be sampled even when WS is fully dead), then WS reachability, then the wedge signals,
-/// then the fps-stall signal. Non-finite optional numeric inputs are treated as absent
-/// (never silently coerced to a passing value).
+/// WS unreachable, wrong obs64 process count, stalled activeFps, DXGI device-lost log
+/// signature) FAILS. Priority order mirrors how decisive each signal is: a wrong process
+/// count is checked first (it can be sampled even when WS is fully dead), then WS
+/// reachability, then the GPU device-removed log signature (#89 — decisive BEFORE the
+/// process-level wedge bundle, since it needs a DIFFERENT recovery and a GPU-gone box can
+/// still look process-healthy), then the wedge signals, then the fps-stall signal.
+/// Non-finite optional numeric inputs are treated as absent (never silently coerced to a
+/// passing value).
 pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
     // 1. The exactly-one-obs64 invariant — decisive on its own, checked first because it
     //    can be known even when the WS side is completely dead (0 processes).
@@ -151,7 +154,24 @@ pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
         );
     }
 
-    // 3. Process-level + render-loop wedge signals. Collected together because they are
+    // 3. GPU device-removed (DXGI TDR / driver-internal-error) log signature (#89) —
+    //    decisive on its own, checked BEFORE the process-level wedge bundle below. Once the
+    //    GPU is gone, obs64's process/render-loop signals can still look perfectly healthy
+    //    (Responding=True, normal CPU) while every render call fails — so this must win before
+    //    the wedge bundle could otherwise report WEDGED-RENDER-LAG, which is the WRONG
+    //    diagnosis for this cause: WedgedRenderLag implies a plain OBS restart likely fixes it,
+    //    but an OBS-only restart typically does NOT clear a DXGI device-removed GPU (a full PC
+    //    reboot is required — see `probe::obs_log_audit::ObsLogAudit::diagnosis`).
+    if sample.dxgi_device_lost == Some(true) {
+        return ObsHealthVerdict::GpuDeviceRemoved(
+            "DXGI device-lost signature (887A0005/6/7) found in the OBS log — GPU TDR / \
+             driver-internal-error; an OBS-only restart typically does NOT clear this, a full \
+             PC reboot is required (#89)"
+                .to_string(),
+        );
+    }
+
+    // 4. Process-level + render-loop wedge signals. Collected together because they are
     //    all evidence of the SAME underlying condition (the #391 incident showed all
     //    three at once: Responding=False + pegged CPU + a render-skip spike).
     let mut wedge_reasons = Vec::new();
@@ -194,7 +214,7 @@ pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
         return ObsHealthVerdict::WedgedRenderLag(wedge_reasons);
     }
 
-    // 4. FPS stalled while WS is still answering — a distinct wedge mode (the render
+    // 5. FPS stalled while WS is still answering — a distinct wedge mode (the render
     //    loop stopped producing frames but the websocket thread is alive).
     if let Some(fps) = sample.active_fps {
         if fps.is_finite() && fps < FPS_ZERO_THRESHOLD {
