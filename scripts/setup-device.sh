@@ -73,7 +73,9 @@ resolve_device_name() {
 # Escapes `\` and `"` before interpolating into the TOML string literal -- every table entry today
 # ("STRIH-SNV (interkom)") is quote/backslash-free, but scripts/camera-set.sh's own comment invites
 # adding future entries here, and an unescaped `"` in a future NDI source name would otherwise
-# truncate the TOML string mid-line and corrupt the rest of config.toml.
+# truncate the TOML string mid-line and corrupt the rest of config.toml. Assumes SOURCE is a
+# single-line printable string (NDI source names always are) -- a literal tab/newline is NOT
+# escaped; revisit if a future entry ever needs one.
 #
 # Omits `fb_device` -- src/config.rs's DisplayConfig already defaults it to "/dev/fb0" via serde
 # when the key is absent (`#[serde(default = "default_fb_device")]`); baking the literal here would
