@@ -97,43 +97,160 @@ fn setup_device_writes_genlock_dropin() {
     );
 }
 
-/// 3. The provisioner must add `isolcpus=3` to the kernel cmdline (GRUB_CMDLINE_LINUX), and the edit
-///    must land BEFORE `update-grub` regenerates grub.cfg or the flag never takes effect. ONLY
-///    isolcpus — the live fleet cmdline carries no nohz_full/rcu_nocbs (deferred to #303). This edit
-///    lives inside the #295 initrd-guaranteed grub step so it can never strand a box on an
-///    initrd-less kernel the way an ad-hoc grub edit did.
+/// 3. The provisioner must add `isolcpus=3` AND the #303 quiet-core companions
+///    (`nohz_full=3 rcu_nocbs=3 irqaffinity=0-2`) to the kernel cmdline (GRUB_CMDLINE_LINUX), and
+///    every one of the edits must land BEFORE `update-grub` regenerates grub.cfg or the flags never
+///    take effect. #303 closes the gap #289 left open: nohz_full stops the periodic scheduler tick
+///    on the isolated core, rcu_nocbs offloads RCU callbacks off it, and irqaffinity=0-2 defaults ALL
+///    boot IRQs onto the general cores (the only lever that moves managed MSI xhci IRQs, which
+///    reject runtime smp_affinity writes). This edit lives inside the #295 initrd-guaranteed grub
+///    step so it can never strand a box on an initrd-less kernel the way an ad-hoc grub edit did.
 #[test]
 fn setup_device_adds_isolcpus_to_grub_cmdline_before_update_grub() {
     let body = read_script();
     assert!(
         on_noncomment_line(&body, "GRUB_CMDLINE_LINUX"),
-        "setup-device.sh must edit GRUB_CMDLINE_LINUX to add the realtime-isolation kernel flag \
-         (#450/#289)"
+        "setup-device.sh must edit GRUB_CMDLINE_LINUX to add the realtime-isolation kernel flags \
+         (#450/#289/#303)"
     );
-    assert!(
-        on_noncomment_line(&body, "isolcpus=3"),
-        "setup-device.sh must add `isolcpus=3` to the kernel cmdline so core 3 is reserved for the \
-         realtime capture/emit path — the live fleet cmdline carries exactly isolcpus=3 (#289). \
-         (ONLY isolcpus — nohz_full/rcu_nocbs stay deferred to #303.)"
-    );
+    const FLAGS: [&str; 4] = [
+        "isolcpus=3",
+        "nohz_full=3",
+        "rcu_nocbs=3",
+        "irqaffinity=0-2",
+    ];
+    for flag in FLAGS {
+        assert!(
+            on_noncomment_line(&body, flag),
+            "setup-device.sh must add `{flag}` to the kernel cmdline to quiet the isolated \
+             realtime capture/emit core (#289/#303)"
+        );
+    }
     let cmds: Vec<&str> = body
         .lines()
         .map(str::trim_start)
         .filter(|t| !t.starts_with('#'))
         .collect();
-    let isolcpus_idx = cmds
-        .iter()
-        .position(|t| t.contains("isolcpus=3"))
-        .expect("isolcpus=3 present on a command line");
     let grub_idx = cmds
         .iter()
         .position(|t| t.contains("update-grub"))
         .expect("update-grub present");
+    for flag in FLAGS {
+        let flag_idx = cmds
+            .iter()
+            .position(|t| t.contains(flag))
+            .unwrap_or_else(|| panic!("{flag} present on a command line"));
+        assert!(
+            flag_idx < grub_idx,
+            "the `{flag}` GRUB_CMDLINE_LINUX edit must run BEFORE update-grub, or the regenerated \
+             grub.cfg won't carry the flag (#289/#303)"
+        );
+    }
+}
+
+/// Extract the #289/#303 `for flag_tag in ... done` grub-cmdline append loop as literal shell
+/// text, redirect its hardcoded `/etc/default/grub` path to `grub_path`, and execute it via bash.
+///
+/// This closes a review-flagged test-rigor gap in
+/// `setup_device_adds_isolcpus_to_grub_cmdline_before_update_grub` above: that test only proves
+/// the 4 flag names appear as TEXT before `update-grub` — a check satisfied even by the loop's
+/// OWN HEADER line (`for flag_tag in "isolcpus=3:#289" "nohz_full=3:#303" ...`), regardless of
+/// what the loop BODY actually does. A future regression that breaks the body (a typo in the sed
+/// pattern, a deleted append, a wrong variable) would still keep the flag names on that header
+/// line and pass every existing assertion while silently no longer writing the kernel-cmdline
+/// flags on real hardware. This test actually RUNS the real mutation logic against a simulated
+/// grub file and asserts on the resulting content, so a body regression fails HERE.
+fn run_grub_flag_loop(grub_path: &std::path::Path) {
+    let body = read_script();
+    let lines: Vec<&str> = body.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("for flag_tag in "))
+        .expect("the #289/#303 `for flag_tag in ...` loop header must be present");
+    let end = lines[start..]
+        .iter()
+        .position(|l| l.trim() == "done")
+        .map(|i| start + i)
+        .expect("the flag_tag loop's closing `done` must be present");
+    let block = lines[start..=end].join("\n");
     assert!(
-        isolcpus_idx < grub_idx,
-        "the isolcpus=3 GRUB_CMDLINE_LINUX edit must run BEFORE update-grub, or the regenerated \
-         grub.cfg won't carry the flag (#289)"
+        block.contains("/etc/default/grub"),
+        "sanity: the extracted #289/#303 loop must reference /etc/default/grub — extraction \
+         anchors may be stale"
     );
+    let redirected = block.replace("/etc/default/grub", &grub_path.to_string_lossy());
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!("set -euo pipefail\n{redirected}"))
+        .output()
+        .expect("failed to spawn bash");
+    assert!(
+        out.status.success(),
+        "the #289/#303 grub flag-append loop exited non-zero.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// 3b. FUNCTIONAL guard (not textual): actually run the #289/#303 grub-cmdline append loop
+///     against 5 realistic `/etc/default/grub` states — empty file, no GRUB_CMDLINE_LINUX line at
+///     all, the live-fleet isolcpus=3-only cmdline, mixed pre-existing content, and a pre-existing
+///     empty-quoted value — and assert every one of the 4 flags actually lands in the file, in ONE
+///     idempotent run each. A second run against the same file must never duplicate a flag. Also
+///     asserts a same-prefix decoy (`GRUB_CMDLINE_LINUX_DEFAULT=`) is never touched.
+#[test]
+fn setup_device_grub_flag_loop_is_idempotent_and_adds_all_flags() {
+    const FLAGS: [&str; 4] = [
+        "isolcpus=3",
+        "nohz_full=3",
+        "rcu_nocbs=3",
+        "irqaffinity=0-2",
+    ];
+    let cases: [(&str, &str); 5] = [
+        ("empty file", ""),
+        ("no GRUB_CMDLINE_LINUX line", "GRUB_DEFAULT=0\nGRUB_TIMEOUT=5\n"),
+        (
+            "live-fleet isolcpus=3-only",
+            "GRUB_DEFAULT=saved\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\nGRUB_CMDLINE_LINUX=\"isolcpus=3\"\n",
+        ),
+        (
+            "mixed pre-existing content",
+            "GRUB_DEFAULT=saved\nGRUB_CMDLINE_LINUX=\"quiet splash isolcpus=3\"\n",
+        ),
+        (
+            "pre-existing empty-quoted value",
+            "GRUB_DEFAULT=saved\nGRUB_CMDLINE_LINUX=\"\"\n",
+        ),
+    ];
+    for (label, initial) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grub_path = dir.path().join("grub");
+        std::fs::write(&grub_path, initial).expect("write initial simulated grub file");
+
+        run_grub_flag_loop(&grub_path);
+        let once = std::fs::read_to_string(&grub_path).expect("read grub file after 1st run");
+        for flag in FLAGS {
+            assert!(
+                once.contains(flag),
+                "case '{label}': `{flag}` missing from GRUB_CMDLINE_LINUX after the append loop \
+                 ran. Content: {once:?}"
+            );
+        }
+        if initial.contains("GRUB_CMDLINE_LINUX_DEFAULT") {
+            assert!(
+                once.contains("GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\""),
+                "case '{label}': the loop must never touch the GRUB_CMDLINE_LINUX_DEFAULT decoy \
+                 line. Content: {once:?}"
+            );
+        }
+
+        run_grub_flag_loop(&grub_path);
+        let twice = std::fs::read_to_string(&grub_path).expect("read grub file after 2nd run");
+        assert_eq!(
+            once, twice,
+            "case '{label}': re-running the append loop must be idempotent (no duplicated flags)"
+        );
+    }
 }
 
 /// 4. curl must be ENSURED before its first use. STEP 3 downloads the binary and STEP 17 downloads

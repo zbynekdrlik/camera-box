@@ -122,6 +122,15 @@ build drift as an advisory — that DRIFT is expected until someone runs the #46
 `mcp__linux-imag-nb__Shell` fallback above still works and remains useful for anything outside
 drift-guard's own facets, but is no longer required for `--check-imag` itself.
 
+**Reusable pattern for installing a NEW SSH key on a box whose sudo needs an interactive password**
+(applies to imag-nb, and any future non-cam-fleet Linux box with the same setup): writing to
+`~/.ssh/authorized_keys` needs only the UNPRIVILEGED user's own home directory, not root, so the
+`linux-imag-nb__Shell` MCP tool (which already runs as that user, no sudo) can create `~/.ssh`
+(700) + `authorized_keys` (600) and append the key directly — no interactive sudo password needed
+at all for THIS specific write. Only privileged changes elsewhere on the box (package installs,
+`/etc/*` edits) need the actual sudo password. Don't assume "sudo needs a password" blocks every
+kind of MCP-driven change — check whether the specific write is actually privileged first.
+
 ## #132/#445/#452 — `scripts/upgrade-fleet-ndi.sh` canary set + version-scoped backup
 
 Safe, canary-first NDI Linux runtime (`libndi.so.6`) upgrade across the fleet. The fleet is NOT
@@ -187,9 +196,16 @@ The cam-box grab/emit must run ALONE on the `isolcpus`-reserved core or it wobbl
   `tests/setup_device_provisioner_hardening.rs`.
 - Verify on a box: `taskset -acp $(pidof camera-box)` (capture threads on the isolated core),
   `journalctl -u camera-box | grep '#289'` (pin + IRQ log lines), `grep . /proc/irq/*/smp_affinity`.
-- **Kernel-cmdline tuning is DEFERRED** (`nohz_full`/`rcu_nocbs`/`irqaffinity=`, #303) — it needs the
-  #295 safe-grub work first. **NEVER edit `/etc/default/grub` + `update-grub`** (bricked 2 boxes, #295/#301).
-  This deferral is CAM-FLEET-ONLY — imag-nb (below) already has the full kernel-cmdline tuning.
+- **Kernel-cmdline quiet-core tuning SHIPPED in code (#303, PR closing #303):** `setup-device.sh`
+  STEP 10 now also appends `nohz_full=3 rcu_nocbs=3 irqaffinity=0-2` (alongside #289's `isolcpus=3`)
+  through the SAME idempotent per-flag append, INSIDE the #295 safe-grub path (initrd-guaranteed
+  before `update-grub`, abort-if-no-kernel guard) — never a standalone grub edit. Guard:
+  `tests/provisioning_realtime_isolation.rs`. **Applying it to a LIVE box is still a user-timed step**
+  (a fresh `setup-device.sh` run or a deliberate reprovision + reboot) — no fleet box has been
+  rebooted onto the new cmdline yet; verify with `cat /proc/cmdline` post-reboot and re-run
+  cyclictest (like #484's jitter-before/after) to confirm the isolated core actually quiets down.
+  **NEVER edit `/etc/default/grub` + `update-grub` by hand** (bricked 2 boxes, #295/#301) — always go
+  through `setup-device.sh`'s safe-grub path.
 
 ## imag-nb kernel/CPU hardening (#482/#483/#487) — preempt=full + P-core isolation
 
@@ -478,8 +494,11 @@ root → unbootable. Recovery was a dev1 chroot: `update-initramfs -c -k <ver>` 
   (abort loudly otherwise) + `grub-set-default 0`.
 - `/var/cache` tmpfs sized **512M** uniformly (was the 100M that ENOSPC'd).
 
-**Live-box rules (unchanged):** NEVER edit `/etc/default/grub` + `update-grub` on a live box — that
-is what bricked them. Kernel-cmdline tuning (#303 nohz_full/rcu_nocbs) stays DEFERRED. Safe live
+**Live-box rules (unchanged):** NEVER edit `/etc/default/grub` + `update-grub` on a live box directly
+— that is what bricked them. `setup-device.sh`'s STEP 10 (the #295 safe-grub path) is the only
+sanctioned way to change the kernel cmdline; #303's `nohz_full`/`rcu_nocbs`/`irqaffinity=` quiet-core
+flags now ship through it, but applying them to a fleet box still means running `setup-device.sh`
+(or reprovisioning) and rebooting — a user-timed step, not yet done on any live box. Safe live
 mitigation already on survivors (.61/.62/.64): kernels dpkg-held, `/var/cache` freed.
 
 **#307 SHIPPED (PR #322):** the hardening now also covers the two builders the setup scripts didn't —
