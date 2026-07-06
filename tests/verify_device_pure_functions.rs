@@ -693,18 +693,28 @@ fn display_config_verdict_all_four_cases() {
 #[test]
 fn check_p_is_wired_into_the_live_flow_and_usage_doc() {
     let body = std::fs::read_to_string(script()).unwrap();
+    // Only the LIVE-FLOW portion (after the source-guard) counts here -- the PURE function
+    // *definitions* trivially contain their own names, so searching the whole file would let this
+    // test pass even if the live flow never actually CALLS them (a dead pure function nobody
+    // invokes -- the #549-review class of gap this test exists to catch).
+    let guard_marker = "never run the live SSH flow below.";
+    let guard_pos = body
+        .find(guard_marker)
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+
     assert!(
-        body.contains("config_toml_display_source"),
-        "the live flow must call config_toml_display_source to read back config.toml's \
-         [display] section over SSH (#558)"
+        live_flow.contains("config_toml_display_source"),
+        "the LIVE FLOW (after the source-guard) must CALL config_toml_display_source to read \
+         back config.toml's [display] section over SSH (#558) -- not just define it"
     );
     assert!(
-        body.contains("display_config_verdict"),
-        "the live flow must call display_config_verdict to compare it against \
-         CAMERA_DISPLAY_SOURCE (#558)"
+        live_flow.contains("display_config_verdict"),
+        "the LIVE FLOW (after the source-guard) must CALL display_config_verdict to compare it \
+         against CAMERA_DISPLAY_SOURCE (#558) -- not just define it"
     );
     assert!(
-        body.contains("(p)"),
+        live_flow.contains("(p)"),
         "the usage doc / check list must advertise the new (p) check (#558)"
     );
 }
