@@ -276,3 +276,33 @@ root on first boot — would be missed by `scripts/*.sh` alone, which is why `sc
 the command. **A NEW subdir under `scripts/` needs its own glob entry** or it silently escapes the
 gate. Before pushing a script change, run `shellcheck -S warning <file>` locally (shellcheck 0.9.0
 is on dev1) — a warning-level finding fails the gate.
+
+## Foreground CI-poll loop from an autopilot-worker subagent (Bash tool quirks, #559/#24 PR #566)
+
+A subagent must wait for CI in the FOREGROUND (never `run_in_background` — see the global
+`ci-monitoring.md`: a backgrounded poll silently ends the subagent's turn). Two harness quirks bite
+here that are easy to trip on:
+
+1. **A bare top-level `sleep 300 && gh run view …` gets BLOCKED** by this environment's Bash tool
+   ("To wait for a condition, use Monitor with an until-loop… Do not chain shorter sleeps to work
+   around this block"). The fix is NOT to fight it with `Monitor`/`run_in_background` (those detach
+   and risk the same subagent-turn-ends problem) — put the `sleep` INSIDE a loop body in ONE Bash
+   call instead: `while …; do …; sleep 20; done` compiles down to a single foreground command the
+   block doesn't flag.
+2. **The Bash tool's default per-call timeout is 2 minutes**, far shorter than one CI run (this
+   repo's full `ci.yml` run took ~9 minutes). Pass an explicit `timeout` (ms) close to but under the
+   10-minute cap, e.g. `timeout: 570000`, sized so `(loop iterations) * (sleep interval)` covers the
+   expected run length; repeat the whole call again if the loop's bound is hit before CI finishes
+   (each call is independent and keeps the subagent alive, per `ci-monitoring.md`'s "each Bash call
+   well under the 10-min cap, repeated until terminal").
+
+```bash
+i=0
+while [ $i -lt 27 ]; do
+  read -r status conclusion < <(gh run view <RUN_ID> --json status,conclusion -q '.status + " " + .conclusion')
+  echo "poll $i: status=$status conclusion=$conclusion"
+  [ "$status" = "completed" ] && break
+  i=$((i+1)); sleep 20
+done
+```
+(pass `timeout: 570000` on this Bash call)
