@@ -2354,6 +2354,85 @@ fn imag_build_drift_report_unknown_when_git_failed_never_a_false_ok_531() {
     );
 }
 
+// ---- #548 — genlock_build_drift_report is now BOX-AGNOSTIC (the same dynamic staleness verdict for
+// strih/stream that imag-nb got in #531). The OBS/DistroAV/NDI version strings drift-guard --compare
+// checks are byte-identical across a stock vs genlock build AND across an OLD vs NEW genlock build, so
+// only this deployed-SHA-vs-origin/main compare catches a Windows box left on a stale build — the exact
+// blind spot that hid the 843-commit deploy-drift. These tests prove the DRIFT/UNKNOWN messages carry
+// the caller's box label + deploy action (NOT the hardcoded "imag-nb"/"setup-imag.sh" of the old fn).
+
+#[test]
+fn genlock_build_drift_report_carries_windows_box_label_and_action_when_behind_548() {
+    // A stale STREAM box (behind origin/main) must FAIL LOUD naming THIS box + THIS box's deploy
+    // action — never the imag-nb wording. The old imag-only fn could not produce a stream-labeled
+    // verdict; this is the whole point of the #548 generalization.
+    let body = r#"
+        rc=0
+        RANGE="cb64631fd feat:[green] #501 genlock_monitor low-bandwidth NDI exception
+af02f9bc3 feat:[green] #505 orphan the Linux GL PBO"
+        genlock_build_drift_report "stream" "redeploy the current genlock bundle to this box at a safe off-event time" "e81f8bab" "0" "$RANGE" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "stale stream box -> DRIFT exit 20: {out:?}"
+    );
+    assert!(
+        out.contains("stream genlock STALE") && out.contains("behind origin/main"),
+        "must FAIL LOUD naming the stream box (rig-mode.sh keys on 'genlock STALE'): {out:?}"
+    );
+    assert!(
+        out.contains("2 genlock-commit") && out.contains("cb64631fd") && out.contains("af02f9bc3"),
+        "must report the count + the stale commit SHAs: {out:?}"
+    );
+    assert!(
+        out.contains("redeploy the current genlock bundle"),
+        "must name THIS box's deploy action, not setup-imag.sh: {out:?}"
+    );
+    assert!(
+        !out.contains("imag-nb") && !out.contains("setup-imag.sh"),
+        "a stream verdict must NOT carry imag-nb wording: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_drift_report_ok_for_non_imag_box_548() {
+    // Empty range + git OK -> the box already carries every genlock commit on main -> OK exit 0, for
+    // ANY box label (strih here), never a DRIFT.
+    let body = r#"
+        rc=0
+        genlock_build_drift_report "strih" "redeploy via the #548 Windows deploy" "3253b94cd" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=0"), "current box -> clean exit 0: {out:?}");
+    assert!(
+        out.contains("genlock_build") && out.contains("OK") && !out.contains("DRIFT"),
+        "must report genlock_build OK, no drift: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_drift_report_unknown_names_the_box_when_sha_unread_548() {
+    // box_sha EMPTY (BUNDLE_MANIFEST.json .build_sha not read off the box) -> UNKNOWN exit 11 naming
+    // THIS box, never a false OK.
+    let body = r#"
+        rc=0
+        genlock_build_drift_report "stream" "redeploy via the #548 Windows deploy" "" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "unread sha -> UNKNOWN exit 11: {out:?}"
+    );
+    assert!(
+        out.contains("UNKNOWN") && out.contains("not read") && out.contains("stream"),
+        "must say UNKNOWN / not read and name the stream box, never OK: {out:?}"
+    );
+}
+
 #[test]
 fn imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531() {
     // #531 review: `imag_genlock_range_log` feeds an UNVALIDATED box_sha (read over SSH from

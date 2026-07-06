@@ -423,10 +423,10 @@ dantesync_locked_from_log() {
 # a git error), RANGE_LOG empty -> OK (current), RANGE_LOG non-empty -> DRIFT (box is behind — FAIL
 # LOUD with the count + the stale-commit SHAs + the exact operator action). Returns 0 OK / 20 DRIFT /
 # 11 UNKNOWN (the engine's exit-code contract).
-imag_build_drift_report() {
-  local box_sha="$1" git_rc="$2" range_log="$3"
+genlock_build_drift_report() {
+  local box_label="$1" deploy_action="$2" box_sha="$3" git_rc="$4" range_log="$5"
   if [ -z "$box_sha" ]; then
-    printf '  %-22s UNKNOWN  (GENLOCK_BUILD_SHA.txt not read on imag-nb)\n' "genlock_build"
+    printf '  %-22s UNKNOWN  (genlock build SHA not read on %s)\n' "genlock_build" "$box_label"
     return 11
   fi
   if [ "$git_rc" != "0" ]; then
@@ -445,9 +445,19 @@ imag_build_drift_report() {
   local n shas
   n="$(printf '%s\n' "$range_log" | grep -c . || true)"
   shas="$(printf '%s\n' "$range_log" | awk 'NF{print $1}' | paste -sd, - || true)"
-  printf '  %-22s DRIFT    (imag-nb genlock STALE: box=%s is %s genlock-commit(s) behind origin/main [%s]; deploy the latest build via setup-imag.sh step-12 at a safe off-event time)\n' \
-    "genlock_build" "$box_sha" "$n" "$shas"
+  printf '  %-22s DRIFT    (%s genlock STALE: box=%s is %s genlock-commit(s) behind origin/main [%s]; %s)\n' \
+    "genlock_build" "$box_label" "$box_sha" "$n" "$shas" "$deploy_action"
   return 20
+}
+
+# #531 imag-nb caller + tests use imag_build_drift_report(box_sha, git_rc, range_log); it is now a
+# thin box-specific alias over the box-agnostic genlock_build_drift_report. #548 extended the SAME
+# dynamic-staleness verdict to strih/stream (whose OBS/DistroAV/NDI version strings are IDENTICAL
+# across a stock vs genlock build, so only this deployed-SHA-vs-origin/main compare catches a
+# Windows box left on a stale genlock build — the 843-commit deploy-drift #548 exists to prevent).
+imag_build_drift_report() {
+  genlock_build_drift_report "imag-nb" \
+    "deploy the latest build via setup-imag.sh step-12 at a safe off-event time" "$@"
 }
 
 # check_imag_report EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
@@ -1198,6 +1208,16 @@ Usage:
   (gather them read-only off strih/stream via the win-* MCP tools — see
    .claude/commands/drift-guard.md). Any key you omit is reported UNKNOWN.
 
+--compare DEPLOYED-BUILD currency key (#548, opt-in — dynamic staleness vs origin/main):
+  genlock_build_sha (the deployed vendored-genlock commit — read BUNDLE_MANIFEST.json .build_sha off
+  the box, e.g. `(Get-Content 'C:\Program Files\obs-studio\BUNDLE_MANIFEST.json' | ConvertFrom-Json).build_sha`).
+  The OBS/DistroAV/NDI VERSION strings above are byte-identical across a stock vs genlock build AND
+  across an OLD vs NEW genlock build, so a box left on a STALE genlock build passes every other
+  --compare check — the exact blind spot that hid the 843-commit deploy-drift. This key runs the SAME
+  dynamic `git log <sha>..origin/main -- vendor/obs-studio vendor/distroav` staleness check imag-nb
+  got in #531: OK if current, DRIFT (fail loud) if the box is behind, UNKNOWN if the SHA was not read
+  (never a silent clean). Omit it → the check is skipped (historic behavior).
+
 --compare per-component BUILD SHA + capability keys (#122, opt-in — supply `manifest` to activate):
   manifest (path to the build-under-test's #120 BUNDLE_MANIFEST.json — download it from the
     windows-genlock / windows-genlock-fast artifact for the deployed build),
@@ -1346,6 +1366,10 @@ compare_observed() {
   # #390 best-effort cross-check against the #427-persisted last-calibrated value (opt-in when
   # av_sync_calibrated_ms= is supplied; dormant otherwise — see drift_check_calibrated_source_latency):
   local o_av_sync_calibrated_ms="${25:-}"
+  # #548 dynamic genlock-BUILD staleness for strih/stream (opt-in when genlock_build_sha= supplied):
+  # the git range vs origin/main is computed by the IMPURE caller (main) and passed in, keeping this
+  # function pure + unit-testable exactly like the imag gather/report split (#531).
+  local o_gl_build_sha="${26:-}" o_gl_build_rc="${27:-0}" o_gl_build_range="${28:-}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -1512,6 +1536,21 @@ compare_observed() {
     fi
   fi
 
+  # #548: deployed genlock-BUILD currency for strih/stream. The OBS/DistroAV/NDI version strings
+  # checked above are byte-identical across a stock vs genlock build, so a box left on a STALE genlock
+  # build passes every other --compare check — exactly how the 843-commit deploy-drift stayed invisible
+  # until #548. OPT-IN when genlock_build_sha= is supplied (the agent reads BUNDLE_MANIFEST.json
+  # .build_sha off the box); same pure verdict fn as imag (#531): return 20 DRIFT / 11 UNKNOWN / 0 OK,
+  # box-unread = UNKNOWN, never a silent clean.
+  if [ -n "$o_gl_build_sha" ]; then
+    rc=0
+    genlock_build_drift_report "$host" \
+      "redeploy the current genlock bundle to this box (see .claude/skills/obs-ops + the #548 Windows deploy) at a safe off-event time" \
+      "$o_gl_build_sha" "$o_gl_build_rc" "$o_gl_build_range" || rc=$?
+    [ "$rc" -eq 20 ] && drift=$((drift + 1))
+    [ "$rc" -eq 11 ] && unknown=$((unknown + 1))
+  fi
+
   echo
   if [ "$drift" -gt 0 ]; then
     echo "!! DRIFT DETECTED on ${host:-target}: $drift setting(s) differ from the pinned zero-loss set." >&2
@@ -1647,7 +1686,7 @@ main() {
   # --compare / --status: collect observed key=val pairs (both facets read the same inputs).
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
   local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn="" o_src_latency=""
-  local o_av_sync_calibrated_ms=""
+  local o_av_sync_calibrated_ms="" o_genlock_build_sha=""
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -1667,6 +1706,7 @@ main() {
       burn_env)              o_burn="$v" ;;         # #246: prod burn-env state ("none" or NAME=VALUE,…)
       genlock_source_latency) o_src_latency="$v" ;; # #357: per-source genlock held-latency CSV
       av_sync_calibrated_ms) o_av_sync_calibrated_ms="$v" ;; # #390: #427-persisted applied_latency_ms
+      genlock_build_sha)  o_genlock_build_sha="$v" ;; # #548: deployed vendored-genlock commit (BUNDLE_MANIFEST.json .build_sha) — DYNAMIC staleness vs origin/main
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done
@@ -1689,10 +1729,29 @@ main() {
     exit 1
   fi
 
+  # #548: compute the deployed genlock-build staleness range HERE (impure — best-effort git fetch +
+  # imag_genlock_range_log) so compare_observed stays pure/testable. Runs ONLY when genlock_build_sha=
+  # was supplied; every historic --compare call (no such key) is unchanged. Mirrors the imag
+  # gather/report split (git I/O in the caller, verdict in the pure fn). The 15s timeout bounds the
+  # fetch the same way the imag path does (never blocks going live).
+  local o_gl_build_rc=0 o_gl_build_range="" repo_root_c
+  if [ -n "$o_genlock_build_sha" ]; then
+    repo_root_c="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || repo_root_c=""
+    if [ -z "$repo_root_c" ] || [ ! -d "$repo_root_c/.git" ]; then
+      echo "WARN: could not resolve drift-guard.sh's own repo root — skipping ${host} genlock-build compare" >&2
+      o_gl_build_rc=127
+    else
+      timeout 15 git -C "$repo_root_c" fetch origin --quiet 2>/dev/null \
+        || echo "WARN: git fetch origin failed (or timed out) — comparing ${host} build against a possibly-stale origin/main" >&2
+      o_gl_build_range="$(imag_genlock_range_log "$repo_root_c" "$o_genlock_build_sha")" || o_gl_build_rc=$?
+    fi
+  fi
+
   compare_observed "$host" "$p_obs" "$p_distroav" "$p_ndi" "$p_fps" "$p_genlock" "$p_latency" "$p_plugin" \
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
     "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \
-    "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency" "$o_av_sync_calibrated_ms"
+    "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency" "$o_av_sync_calibrated_ms" \
+    "$o_genlock_build_sha" "$o_gl_build_rc" "$o_gl_build_range"
 }
 
 main "$@"

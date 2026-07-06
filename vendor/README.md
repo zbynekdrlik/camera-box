@@ -16,12 +16,13 @@ an unpinned/stock build.
 The NDI **runtime** (`libndi.so` / `Processing.NDI.Lib.x64.dll`) is NOT committed —
 licensing forbids redistribution (see the License Agreement PDF in `lib/ndi/`). Each
 machine gets it via the NDI installer / `vendor/distroav/CI/libndi-get.sh`.
-**Note (updated 2026-07-03, #132):** dev1 has since been bumped to NDI runtime **6.3.2.0**
-(`/usr/lib/ndi/libndi.so.6` -> `libndi.so.6.3.2`, the old `6.2.1` kept as `.bak`) — DistroAV
-needs ≥ 6.3.0. The production OBS boxes strih + stream also run **6.3.2.0** (≥ 6.3.0 ✓,
-verified 2026-06-14). **The cameras (cam1-4) still run 6.2.1.0** (live-verified on cam2,
-2026-07-03) — cross-version NDI interop with the 6.3.2.0 boxes works fine today, so this is
-version hygiene, not a live-breaking bug. `scripts/upgrade-fleet-ndi.sh` (#132) is the
+**Note (updated 2026-07-06, #132/#547):** the WHOLE fleet now runs NDI runtime **6.3.2.0**
+uniformly (`/usr/lib/ndi/libndi.so.6` -> `libndi.so.6.3.2`, the old `6.2.1` kept as `.bak`) —
+DistroAV needs ≥ 6.3.0. Confirmed live 2026-07-06: dev1, the production OBS boxes strih + stream,
+imag-nb, AND all cameras **cam1-4** (each `libndi.so.6.3.2`, `strings` → `6.3.2.0`; the cams were
+upgraded 2026-07-03 by the #547 fleet convergence, superseding the earlier `cam1-4 still run
+6.2.1.0` state this note used to record). The earlier cross-version period (cams 6.2.1 vs boxes
+6.3.2) is over — the fleet is single-version. `scripts/upgrade-fleet-ndi.sh` (#132) is the
 canary-first tool that rolls a candidate `libndi.so.6.x.y.z` (fetched via `libndi-get.sh`,
 same as dev1's own copy) onto the fleet once an operator runs it against the live rig.
 
