@@ -283,6 +283,21 @@ fwupd_absent() {
   esac
 }
 
+# fwupd_verdict RC STATE -> echoes "unreadable" | "ok" | "present". Guards the false-green unique to
+# (l): fwupd_absent treats an EMPTY state as "purged" (pass), but a transient ssh failure on the (l)
+# call ALSO yields empty stdout -- so an rc!=0 (unreadable) MUST be a FAIL (the file's
+# "unreachable = FAIL, never a silent pass" contract), NOT read as purged. (l) is the only new check
+# whose empty value means pass -- (j)/(k)/(m)/(n)/(o) fail-safe on empty -- so only it needs this.
+fwupd_verdict() {
+  if [ "$1" -ne 0 ] 2>/dev/null; then
+    printf 'unreadable\n'
+  elif fwupd_absent "$2"; then
+    printf 'ok\n'
+  else
+    printf 'present\n'
+  fi
+}
+
 # waitonline_masked STATE -> 0 iff STATE (trimmed `systemctl is-enabled
 # systemd-networkd-wait-online`) is exactly "masked". The fleet MASKS it -- unmasked it timed out
 # 120s and delayed network-online.target, starting camera-box ~123s late (cam3). Any other state
@@ -535,11 +550,11 @@ rc=0
 # second word to the captured state and break the exact-match checks below); a purged unit prints
 # nothing -> empty state, which fwupd_absent accepts.
 FWUPD_STATE="$(ssh_box "systemctl is-enabled fwupd 2>/dev/null || true")" || rc=$?
-if fwupd_absent "$FWUPD_STATE"; then
-  ok "fwupd is not installed (purged)"
-else
-  fail "fwupd still present (state='${FWUPD_STATE}') -- purge it; it blocks the ro remount (ssh rc=$rc)"
-fi
+case "$(fwupd_verdict "$rc" "$FWUPD_STATE")" in
+  ok) ok "fwupd is not installed (purged)" ;;
+  unreadable) fail "fwupd state unreadable (ssh rc=$rc) -- unreachable check is a FAIL, never a silent pass" ;;
+  *) fail "fwupd still present (state='${FWUPD_STATE}') -- purge it; it blocks the ro remount" ;;
+esac
 
 # (m) systemd-networkd-wait-online masked (#547 -- avoids the 120s boot stall) -------------------
 rc=0

@@ -547,3 +547,31 @@ fn ndi_version_matches_accepts_pin_prefix_only() {
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out.trim(), "YES\nYES\nNO\nNO\nNO");
 }
+
+#[test]
+fn fwupd_verdict_unreadable_on_ssh_failure_ok_on_purged_present_on_installed() {
+    // Regression for the #549-review 🟡: (l) called fwupd_absent directly, and fwupd_absent treats
+    // an EMPTY state as "purged". A transient ssh failure on the (l) call ALSO yields empty stdout
+    // (rc!=0) -> that was a false green. fwupd_verdict gates on rc: rc!=0 -> "unreadable" (FAIL),
+    // EVEN when the state string would otherwise look purged.
+    let (code, out, err) = run_sourced(
+        r#"
+        echo "rc1_empty=$(fwupd_verdict 1 '')"
+        echo "rc255_looks_purged=$(fwupd_verdict 255 'not-found')"
+        echo "ok_empty=$(fwupd_verdict 0 '')"
+        echo "ok_notfound=$(fwupd_verdict 0 'not-found')"
+        echo "present_static=$(fwupd_verdict 0 'static')"
+        echo "present_enabled=$(fwupd_verdict 0 'enabled')"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "rc1_empty=unreadable\n\
+         rc255_looks_purged=unreadable\n\
+         ok_empty=ok\n\
+         ok_notfound=ok\n\
+         present_static=present\n\
+         present_enabled=present"
+    );
+}
