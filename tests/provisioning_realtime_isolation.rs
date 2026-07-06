@@ -105,7 +105,10 @@ fn setup_device_writes_genlock_dropin() {
 fn setup_device_wires_display_source_table_into_config_toml() {
     let body = read_script();
     assert!(
-        on_noncomment_line(&body, "config_toml_display_section \"${CAMERA_DISPLAY_SOURCE:-}\""),
+        on_noncomment_line(
+            &body,
+            "config_toml_display_section \"${CAMERA_DISPLAY_SOURCE:-}\""
+        ),
         "setup-device.sh STEP 6 must call config_toml_display_section with the per-cam \
          CAMERA_DISPLAY_SOURCE table value (scripts/camera-set.sh, #528) — not a hardcoded source"
     );
