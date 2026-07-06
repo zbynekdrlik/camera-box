@@ -97,11 +97,14 @@ painter is vblank-locked at the monitor refresh (`--paint-fps` ignored); on the 
 (`PAINTER_FPS` pinned constant). NOTE: the dual-QR `vernier_ids(tick)` ALREADY emits a distinct
 `logical_id == refresh_tick` per refresh — so the bug was the RATE, never the dual-QR id logic.
 
-**Vernier methodology at 60fps capture is an OPEN decision (#310, needs-decision).** The Vernier
+**Vernier methodology at 60fps capture — RESOLVED (#310 closed).** The Vernier
 (`tick = max(left_even, right_odd)`) was designed to resolve the 60→30 BEAT between a 60Hz painter
-and a 30fps camera. At 60fps painter + 60fps capture (#11) that beat is gone, so whether to keep
-dual-QR (still anti-blur + unique per frame), switch to a single full-rate QR, or keep dual-QR for
-redundancy is a measurement-correctness decision for the USER — do NOT redesign it unilaterally.
+and a 30fps camera. At 60fps painter + 60fps capture (#11) that beat is gone. The production
+zero-loss gate has since moved OFF the optical dual-QR read entirely onto the DIGITAL burn-ID
+sequence-contiguity check (`src/probe/burn_contiguity.rs` #186 + `recording_segments.rs::segment_continuity`
+#312, run across the whole active fleet) — so #310 and the re-gate-on-optical decision (#363) are
+both CLOSED. The dual-QR still emits per-frame unique ids (anti-blur), but it is no longer the gate;
+do NOT re-open the optical-vs-digital question unilaterally (see #95).
 
 **Analysis tools on dev1:** `.qr_dual.py` (split L/R decode), `.e2e_report.py`
 (2-panel PNG: continuity line slope-2 + deviation band). NOTE: the old multitap-tap report
