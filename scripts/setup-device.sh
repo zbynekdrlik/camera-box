@@ -88,6 +88,27 @@ config_toml_display_section() {
     printf '\n# HDMI cameraman preview (#528 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\n' "$escaped"
 }
 
+# cleanup_bak_cruft DIR PATTERN... -- removes any files directly under DIR matching the given
+# glob PATTERN(s) (#453: fleet self-heal for inert `.bak` leftovers -- a manual NDI upgrade left
+# stale `/usr/lib/ndi/libndi.so.6*.bak` files on cam1/cam2/cam4, and a stale drop-in edit left
+# `camera-box.service.d/genlock.conf.bak-30` on cam1; neither is loaded by anything -- ldconfig
+# never resolves a `.bak` suffix, systemd only reads `*.conf` -- but a fresh/re-provisioned box
+# should not carry the cruft forward forever). Idempotent (a no-op when nothing matches); exact
+# glob-scoped to DIR + the given PATTERN(s) ONLY -- never a broad/recursive rm. Echoes one line
+# per file actually removed so a provisioning run shows what it cleaned.
+cleanup_bak_cruft() {
+    local dir="${1:?cleanup_bak_cruft: directory required}"
+    shift
+    local pattern f
+    for pattern in "$@"; do
+        for f in "$dir"/$pattern; do
+            [ -e "$f" ] || continue
+            rm -f -- "$f"
+            echo "  Removed stale cruft: $f"
+        done
+    done
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
 # provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -263,6 +284,7 @@ fi
 echo ""
 echo -e "${GREEN}[4/${TOTAL_STEPS}] Setting up NDI library...${NC}"
 mkdir -p /usr/lib/ndi
+cleanup_bak_cruft /usr/lib/ndi 'libndi.so.6*.bak'   # #453: drop any stale manual-upgrade backup
 # Add NDI library path to ldconfig
 echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
 if [ -f /usr/lib/ndi/libndi.so.6 ]; then
@@ -429,6 +451,8 @@ EOF
 # them here makes a fresh box match the fleet in one run. Idempotent: re-running
 # overwrites with identical content, and the daemon-reload below picks them up.
 mkdir -p /etc/systemd/system/camera-box.service.d
+cleanup_bak_cruft /etc/systemd/system/camera-box.service.d '*.bak' '*.bak-*'   # #453: drop stale
+                                                                                # drop-in leftovers
 # #289 — pin the SCHED_FIFO grab onto the isolcpus=3 reserved core. Soft (inherited)
 # CPUAffinity mask, NOT a hard cpuset: the per-thread sched_setaffinity calls in the
 # binary still move painter / --display / intercom threads OFF onto the general cores

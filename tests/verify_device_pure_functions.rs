@@ -686,6 +686,95 @@ fn display_config_verdict_all_four_cases() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// (q) .bak cruft drift -- WARNING only, never a FAIL (#453)
+//
+// Live fleet fingerprint (2026-07-06, issue #453): cam1/cam2/cam4 carry inert `.bak` leftovers
+// from a manual NDI upgrade (`/usr/lib/ndi/libndi.so.6*.bak`) and a stale drop-in edit (cam1's
+// `camera-box.service.d/genlock.conf.bak-30`). Neither is loaded by anything -- ldconfig never
+// resolves a `.bak` suffix, systemd only reads `*.conf` -- so this is drift to SURFACE, never a
+// functional defect to FAIL the box's acceptance gate on (the "gate on real signals" philosophy).
+// setup-device.sh's cleanup_bak_cruft (#453) makes a freshly (re-)provisioned box self-heal; this
+// check makes the drift visible on boxes provisioned BEFORE that fix landed.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn bak_cruft_names_finds_ls_la_and_ls_1_style_entries() {
+    // `ls -la` dump (the NDI dir, reusing the SAME listing check (g)/(o) already gather) --
+    // symlinks render "name -> target"; only the cruft REGULAR .bak file should match, never the
+    // live symlink chain.
+    const NDI_LS: &str = "\
+total 556
+drwxr-xr-x 2 root root   4096 Jul  5 10:00 .
+drwxr-xr-x 3 root root   4096 Jul  5 10:00 ..
+lrwxrwxrwx 1 root root     12 Jul  5 10:00 libndi.so -> libndi.so.6
+lrwxrwxrwx 1 root root     20 Jul  5 10:00 libndi.so.6 -> libndi.so.6.3.2.0
+-rwxr-xr-x 1 root root 545280 Jul  5 10:00 libndi.so.6.3.2.0
+-rw-r--r-- 1 root root   4213 Jul  3 09:00 libndi.so.6.2.1.bak
+";
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nbak_cruft_names \"$TEXT\"",
+        NDI_LS.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "libndi.so.6.2.1.bak",
+        "must find ONLY the inert .bak regular file, never the live symlink chain entries"
+    );
+}
+
+#[test]
+fn bak_cruft_names_finds_bak_dash_n_suffixed_dropins() {
+    // `ls -1` dump (the systemd drop-in dir) -- cam1's real `genlock.conf.bak-30` leftover.
+    const DROPIN_LS: &str = "cpu-affinity.conf\ngenlock.conf\ngenlock.conf.bak-30\n";
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nbak_cruft_names \"$TEXT\"",
+        DROPIN_LS.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "genlock.conf.bak-30",
+        "must find the .bak-30 leftover, never the real *.conf drop-ins"
+    );
+}
+
+#[test]
+fn bak_cruft_names_empty_on_a_clean_listing() {
+    const CLEAN_LS: &str = "cpu-affinity.conf\ngenlock.conf\n";
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nbak_cruft_names \"$TEXT\"",
+        CLEAN_LS.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out, "", "a clean listing must report no cruft");
+}
+
+#[test]
+fn bak_cruft_report_combines_both_dirs_with_full_paths() {
+    const NDI_LS: &str = "total 4\n-rw-r--r-- 1 root root 4213 Jul 3 09:00 libndi.so.6.bak\n";
+    const DROPIN_LS: &str = "genlock.conf\ngenlock.conf.bak-30\n";
+    let (code, out, err) = run_sourced(&format!(
+        "NDI='{}'\nDROPIN='{}'\nbak_cruft_report \"$NDI\" \"$DROPIN\"",
+        NDI_LS.replace('\'', "'\\''"),
+        DROPIN_LS.replace('\'', "'\\''"),
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "/usr/lib/ndi/libndi.so.6.bak\n/etc/systemd/system/camera-box.service.d/genlock.conf.bak-30",
+        "bak_cruft_report must prefix each finding with its real absolute path"
+    );
+}
+
+#[test]
+fn bak_cruft_report_empty_when_both_dirs_are_clean() {
+    let (code, out, err) = run_sourced(r#"bak_cruft_report "cpu-affinity.conf" "genlock.conf""#);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out, "", "clean dirs must report no cruft anywhere");
+}
+
+// ---------------------------------------------------------------------------------------------
 // Wiring — check (p) must actually be composed into the live flow + advertised in the usage doc,
 // not a dead pure function nobody calls (the #549-review class of gap).
 // ---------------------------------------------------------------------------------------------
@@ -716,5 +805,48 @@ fn check_p_is_wired_into_the_live_flow_and_usage_doc() {
     assert!(
         live_flow.contains("(p)"),
         "the usage doc / check list must advertise the new (p) check (#558)"
+    );
+}
+
+#[test]
+fn check_q_is_wired_into_the_live_flow_as_a_warning_never_a_fail() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_marker = "never run the live SSH flow below.";
+    let guard_pos = body
+        .find(guard_marker)
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+
+    assert!(
+        live_flow.contains("bak_cruft_report"),
+        "the LIVE FLOW (after the source-guard) must CALL bak_cruft_report (#453) -- not just \
+         define it"
+    );
+    assert!(
+        live_flow.contains("(q)"),
+        "the usage doc / check list must advertise the new (q) check (#453)"
+    );
+
+    // The whole point of #453's rescope is that stale .bak cruft is a WARNING, never a FAIL --
+    // find the (q) check's OWN implementation block (its comment header appears twice in
+    // live_flow: once in the `usage()` doc text, once as the real per-check header right before
+    // the actual code -- rfind picks the LATTER, the real implementation) and confirm it calls
+    // `warn`, never `fail`, on a cruft hit. (q) is the LAST check before the ALL CLEAR/VERIFY
+    // FAILED summary, so the block runs to end-of-file.
+    let q_marker = "# (q) .bak cruft drift";
+    let q_pos = live_flow
+        .rfind(q_marker)
+        .expect("(q) check implementation block must be present in the live flow");
+    let q_block = &live_flow[q_pos..];
+
+    assert!(
+        q_block.contains("warn \""),
+        "check (q) must report cruft via warn(), never fail() -- inert .bak cruft must not fail \
+         the acceptance gate. block: {q_block:?}"
+    );
+    assert!(
+        !q_block.contains("fail \""),
+        "check (q) must NEVER call fail() -- a hard FAIL would break #453's explicit \
+         'warning, not a functional defect' design. block: {q_block:?}"
     );
 }
