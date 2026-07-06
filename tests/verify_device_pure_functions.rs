@@ -828,11 +828,12 @@ fn check_q_is_wired_into_the_live_flow_as_a_warning_never_a_fail() {
     );
 
     // The whole point of #453's rescope is that stale .bak cruft is a WARNING, never a FAIL --
-    // find the (q) check's OWN implementation block (its comment header appears twice in
-    // live_flow: once in the `usage()` doc text, once as the real per-check header right before
-    // the actual code -- rfind picks the LATTER, the real implementation) and confirm it calls
-    // `warn`, never `fail`, on a cruft hit. (q) is the LAST check before the ALL CLEAR/VERIFY
-    // FAILED summary, so the block runs to end-of-file.
+    // find the (q) check's OWN implementation block. The marker `# (q) .bak cruft drift` appears
+    // exactly once in live_flow today (the usage() doc uses a different phrasing, "(q) WARNING
+    // only: ..."); rfind is used defensively so that if a doc header ever repeated the marker it
+    // would still resolve to the LATTER, real per-check block. Confirm it calls `warn`, never
+    // `fail`, on a cruft hit. (q) is the LAST check before the ALL CLEAR/VERIFY FAILED summary,
+    // so the block runs to end-of-file.
     let q_marker = "# (q) .bak cruft drift";
     let q_pos = live_flow
         .rfind(q_marker)

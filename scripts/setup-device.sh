@@ -103,6 +103,9 @@ cleanup_bak_cruft() {
     for pattern in "$@"; do
         for f in "$dir"/$pattern; do
             [ -e "$f" ] || continue
+            # Only ever remove regular files / symlinks. A stray `.bak`-named DIRECTORY would make
+            # `rm -f` exit 1 and abort the whole provisioner under `set -e` -- skip it instead.
+            [ -f "$f" ] || [ -L "$f" ] || continue
             rm -f -- "$f"
             echo "  Removed stale cruft: $f"
         done

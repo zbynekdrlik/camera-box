@@ -264,6 +264,31 @@ fn cleanup_bak_cruft_supports_multiple_glob_patterns_scoped_to_the_dir() {
     assert!(dir.join("cpu-affinity.conf").exists());
 }
 
+#[test]
+fn cleanup_bak_cruft_skips_a_bak_named_directory_without_aborting() {
+    // A `.bak`-suffixed DIRECTORY matches the glob but `rm -f` cannot remove it and would exit 1,
+    // aborting the whole `set -e` provisioner uncontrolled. The cleanup must SKIP a non-regular /
+    // non-symlink match, still remove the real `.bak` file beside it, and exit 0.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::create_dir(dir.join("oops.bak")).unwrap(); // a directory that matches `*.bak`
+    std::fs::write(dir.join("genlock.conf.bak"), b"stale").unwrap(); // a real file that must go
+
+    let (code, _out, err) = run_sourced(&format!("cleanup_bak_cruft '{}' '*.bak'", dir.display()));
+    assert_eq!(
+        code, 0,
+        "a stray .bak-named directory must NOT abort provisioning. stderr: {err}"
+    );
+    assert!(
+        dir.join("oops.bak").is_dir(),
+        "the .bak-named directory must be skipped, not removed"
+    );
+    assert!(
+        !dir.join("genlock.conf.bak").exists(),
+        "a real .bak file beside the skipped directory must still be cleaned"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wiring — the cleanup must actually be CALLED from STEP 4 (NDI dir) and STEP 7 (systemd
 // drop-in dir), not just defined as a dead pure function nobody invokes.

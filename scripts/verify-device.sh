@@ -729,9 +729,14 @@ fi
 # cruft (ldconfig/systemd never load a .bak file) is surfaced so it's visible in verify-fleet.sh's
 # rollup, but it must NEVER fail this box's acceptance gate -- setup-device.sh's cleanup_bak_cruft
 # self-heals it on the box's next provisioning pass.
-DROPIN_LS="$(ssh_box "ls -1 /etc/systemd/system/camera-box.service.d 2>/dev/null")" || true
+drc=0
+DROPIN_LS="$(ssh_box "ls -1 /etc/systemd/system/camera-box.service.d 2>/dev/null")" || drc=$?
 BAK_CRUFT="$(bak_cruft_report "$NDI_LS" "$DROPIN_LS")"
-if [ -n "$BAK_CRUFT" ]; then
+if [ "$drc" -ne 0 ]; then
+  # A transient ssh failure (or a missing drop-in dir) must NOT be silently reported as "clean" --
+  # surface it as a warning so it isn't mistaken for a verified-empty result. Still never a FAIL.
+  warn "could not list the systemd drop-in dir (ssh/ls rc=$drc) -- .bak cruft check (q) is incomplete for that dir"
+elif [ -n "$BAK_CRUFT" ]; then
   warn "stale .bak cruft present (inert -- setup-device.sh cleans this on the box's next provisioning pass, #453): $(printf '%s' "$BAK_CRUFT" | tr '\n' ' ')"
 else
   ok "no stale .bak cruft under the NDI dir or the systemd drop-in dir"
