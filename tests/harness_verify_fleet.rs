@@ -188,16 +188,27 @@ fn run_fleet(camera_set: &str, offline_ips: &[&str], fail_cams: &[&str]) -> RunR
     let bin = tmp.join("bin");
     fs::create_dir_all(&bin).unwrap();
 
-    // sshpass stub: reachability probe is `sshpass -p <pw> ssh ... user@ip true`. Fail (exit 1)
-    // when the target ip is in the offline list; succeed otherwise. The real script's ONLY use
-    // of sshpass is this reachability probe (VERIFY_CMD is invoked directly, not through ssh).
+    // sshpass stub: reachability probe is `sshpass -p <pw> ssh -o ... -o ... -o ... user@ip true`
+    // (the real invocation carries THREE `-o` options before `user@ip`, then the trailing remote
+    // command `true` — so `user@ip` is NOT simply "the last arg", it's second-to-last, and the
+    // exact offset shifts if the real script's -o count ever changes). Scan ALL remaining args for
+    // the one containing `@` instead of indexing by position — robust to that shift, and this is
+    // exactly the bug a positional `${@: -1}` extraction had (it grabbed the trailing `true`
+    // instead of `user@ip`, so the offline branch below NEVER matched and this stub silently
+    // reported every box reachable regardless of `offline_ips` — verified by reproducing the real
+    // invocation shape against the old extraction by hand before fixing it here).
+    // Fail (exit 1) when the target ip is in the offline list; succeed otherwise. The real
+    // script's ONLY use of sshpass is this reachability probe (VERIFY_CMD is invoked directly,
+    // not through ssh).
     let offline_pattern = offline_ips.join("|");
     let sshpass_body = format!(
         r#"#!/usr/bin/env bash
 shift 2  # drop -p <pass>
-mode="$1"; shift  # ssh
-last="${{@: -1}}"
-target="${{last#*@}}"
+shift    # drop ssh
+target=""
+for arg in "$@"; do
+  case "$arg" in *@*) target="${{arg#*@}}" ;; esac
+done
 case "$target" in
   {offline_pattern_case}) exit 1 ;;
   *) exit 0 ;;
@@ -290,6 +301,20 @@ fn verify_fleet_exits_nonzero_when_a_reachable_box_fails() {
     );
 }
 
+/// Find the summary line CONTAINING `label` (e.g. "PASS:", "FAIL:", "SKIPPED:") and return the
+/// text after it, trimmed. The real lines carry an ANSI color prefix (`info()`'s `\x1b[0;34m[*]
+/// \x1b[0m` before the label), so this searches for the label as a substring rather than
+/// requiring the line to literally START with it. Panics if the line is missing -- a missing
+/// summary line is itself a bug worth failing loudly on, not silently treating as "doesn't
+/// contain X".
+fn summary_line<'a>(output: &'a str, label: &str) -> &'a str {
+    output
+        .lines()
+        .find_map(|l| l.split_once(label).map(|(_, after)| after))
+        .unwrap_or_else(|| panic!("no '{label}' summary line in output:\n{output}"))
+        .trim()
+}
+
 #[test]
 fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
     // cam7 (10.77.9.67) offline -- must be SKIPPED, and since no OTHER box fails, the fleet
@@ -301,19 +326,26 @@ fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
          not a fleet FAIL. output:\n{}",
         r.output
     );
-    assert!(
-        r.output.contains("SKIPPED"),
-        "no SKIPPED reporting for the offline box; output:\n{}",
+    // Precise checks on the actual per-label summary lines (not a loose substring match that a
+    // vacuous "SKIPPED: none" could also satisfy) -- cam1 genuinely PASSED, cam7 genuinely
+    // SKIPPED, nothing FAILED.
+    assert_eq!(
+        summary_line(&r.output, "PASS:"),
+        "cam1",
+        "cam1 (reachable, verify succeeds) must be reported PASS; output:\n{}",
         r.output
     );
-    assert!(
-        !r.output.contains("cam7") || !r.output.contains("FAIL:") || {
-            // "FAIL:" summary line must not list cam7
-            !r.output
-                .lines()
-                .any(|l| l.contains("FAIL:") && l.contains("cam7"))
-        },
-        "cam7 (offline) must not appear in the FAIL summary; output:\n{}",
+    assert_eq!(
+        summary_line(&r.output, "SKIPPED:"),
+        "cam7",
+        "cam7 (offline) must be reported SKIPPED, by name, not just the label present with an \
+         empty list; output:\n{}",
+        r.output
+    );
+    assert_eq!(
+        summary_line(&r.output, "FAIL:"),
+        "none",
+        "cam7 (offline) must NOT appear in the FAIL summary; output:\n{}",
         r.output
     );
 }
@@ -328,6 +360,161 @@ fn verify_fleet_offline_box_does_not_mask_a_real_failure_elsewhere() {
         "an offline box masked a real failure elsewhere -- must still exit nonzero. output:\n{}",
         r.output
     );
-    assert!(r.output.contains("SKIPPED"), "output:\n{}", r.output);
+    assert_eq!(
+        summary_line(&r.output, "PASS:"),
+        "cam1",
+        "output:\n{}",
+        r.output
+    );
+    assert_eq!(
+        summary_line(&r.output, "FAIL:"),
+        "cam2",
+        "output:\n{}",
+        r.output
+    );
+    assert_eq!(
+        summary_line(&r.output, "SKIPPED:"),
+        "cam7",
+        "output:\n{}",
+        r.output
+    );
     assert!(r.output.contains("FLEET DRIFT"), "output:\n{}", r.output);
+}
+
+// --- Hardening from code review (2026-07-06): unknown-arg rejection, case-insensitivity, empty
+// CAMERA_SET floor, and explicit env export to VERIFY_CMD ------------------------------------
+
+#[test]
+fn verify_fleet_rejects_an_unknown_positional_argument() {
+    // verify-device.sh takes a positional NAME; an operator might reasonably try
+    // `verify-fleet.sh cam1` expecting the same per-box scoping. It must FAIL LOUD (never
+    // silently ignore the arg and check the whole fleet instead).
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("cam1")
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .output()
+        .expect("failed to run verify-fleet.sh with a positional arg");
+    assert!(
+        !out.status.success(),
+        "verify-fleet.sh must exit nonzero on an unrecognized positional argument"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("unknown argument") || combined.contains("CAMERA_SET"),
+        "error message should explain to use CAMERA_SET instead; got:\n{combined}"
+    );
+}
+
+#[test]
+fn verify_fleet_camera_set_is_case_insensitive() {
+    // setup-device.sh / verify-device.sh both advertise (and accept) case-insensitive NAMEs
+    // (CAM5 / cam5 both work) -- CAMERA_SET must honor the same convention, not silently reject
+    // uppercase entries as "invalid".
+    let r = run_fleet("CAM1 Cam2", &[], &[]);
+    assert!(
+        r.success,
+        "uppercase/mixed-case CAMERA_SET entries must resolve like their lowercase form. \
+         output:\n{}",
+        r.output
+    );
+    assert!(
+        !r.output.contains("invalid"),
+        "no camera should be reported invalid purely from case; output:\n{}",
+        r.output
+    );
+    assert_eq!(
+        summary_line(&r.output, "PASS:"),
+        "CAM1 Cam2",
+        "output:\n{}",
+        r.output
+    );
+}
+
+#[test]
+fn verify_fleet_fails_loud_on_blank_camera_set() {
+    // CAMERA_SET set to whitespace-only bypasses the `:-` default (it's non-empty) and word-splits
+    // to zero loop iterations. Without a floor this would print a vacuous "FLEET CONVERGED" for a
+    // run that checked NOTHING -- must fail loud instead.
+    let r = run_fleet("   ", &[], &[]);
+    assert!(
+        !r.success,
+        "a blank CAMERA_SET must fail loud, not silently report FLEET CONVERGED with zero boxes \
+         checked. output:\n{}",
+        r.output
+    );
+    assert!(
+        !r.output.contains("FLEET CONVERGED"),
+        "must not claim convergence when nothing was actually checked; output:\n{}",
+        r.output
+    );
+}
+
+#[test]
+fn verify_fleet_exports_ssh_env_vars_to_verify_cmd() {
+    // SSH_USER/CAM_PW/SSH_TIMEOUT must be visible to VERIFY_CMD as a genuine child-process
+    // environment variable (not merely "happens to work because the shell already had it"). A
+    // stub VERIFY_CMD that checks its OWN environment, rather than trusting an inherited default,
+    // proves the explicit `export` actually propagates.
+    let tmp = std::env::temp_dir().join(format!(
+        "verifyfleet_export_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let bin = tmp.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+
+    // sshpass stub: always "reachable" (exit 0) regardless of target.
+    let sshpass_path = bin.join("sshpass");
+    fs::write(&sshpass_path, "#!/usr/bin/env bash\nexit 0\n").unwrap();
+    set_exec(&sshpass_path);
+
+    // VERIFY_CMD stub: FAILS unless it sees the EXACT SSH_USER/CAM_PW/SSH_TIMEOUT this test set,
+    // proving they arrived via the environment rather than being silently empty/default.
+    let verify_path = tmp.join("verify-device-stub.sh");
+    fs::write(
+        &verify_path,
+        r#"#!/usr/bin/env bash
+[ "$SSH_USER" = "customuser" ] || { echo "SSH_USER not propagated: '$SSH_USER'"; exit 1; }
+[ "$CAM_PW" = "custompw" ] || { echo "CAM_PW not propagated: '$CAM_PW'"; exit 1; }
+[ "$SSH_TIMEOUT" = "42" ] || { echo "SSH_TIMEOUT not propagated: '$SSH_TIMEOUT'"; exit 1; }
+exit 0
+"#,
+    )
+    .unwrap();
+    set_exec(&verify_path);
+
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg(script())
+        .env("PATH", &path_env)
+        .env("CAMERA_SET", "cam1")
+        .env("VERIFY_CMD", &verify_path)
+        .env("SSH_USER", "customuser")
+        .env("CAM_PW", "custompw")
+        .env("SSH_TIMEOUT", "42")
+        .output()
+        .expect("failed to run verify-fleet.sh under export-test stubs");
+    let _ = fs::remove_dir_all(&tmp);
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "SSH_USER/CAM_PW/SSH_TIMEOUT were not all visible to VERIFY_CMD's environment. output:\n{combined}"
+    );
 }

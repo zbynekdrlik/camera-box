@@ -280,35 +280,38 @@ fi
 }
 
 #[test]
-fn camera_resolve_wires_cam1_and_cam2_to_the_interkom_return_monitor() {
+fn camera_resolve_wires_cam1_to_the_interkom_return_monitor() {
     // #528: cam1 had NO functional HDMI cameraman preview because setup-device.sh never wired a
     // `--display` source at all. The fix is a per-cam table entry (not a free-text SSH edit) so a
-    // re-provision keeps the preview. cam1 mirrors cam2's existing (previously hand-set-only)
-    // interkom/return-monitor class — same preview source for both.
-    for cam in ["cam1", "cam2"] {
-        let (ok, display) = resolve_display_source(cam);
-        assert!(ok, "camera_resolve {cam} should succeed");
-        assert_eq!(
-            display, "STRIH-SNV (interkom)",
-            "camera_resolve {cam} must resolve CAMERA_DISPLAY_SOURCE to the interkom/return \
-             monitor (#528); got '{display}'"
-        );
-    }
+    // re-provision keeps the preview. cam1 gets the same interkom/return-monitor class cam2's
+    // live (manual, ExecStart-baked) preview already uses.
+    let (ok, display) = resolve_display_source("cam1");
+    assert!(ok, "camera_resolve cam1 should succeed");
+    assert_eq!(
+        display, "STRIH-SNV (interkom)",
+        "camera_resolve cam1 must resolve CAMERA_DISPLAY_SOURCE to the interkom/return monitor \
+         (#528); got '{display}'"
+    );
 }
 
 #[test]
-fn camera_resolve_leaves_cam3_through_cam7_with_no_display_source() {
-    // A box with no configured cameraman preview must resolve to an EMPTY (never unset — `set -u`
-    // would trip on unset) CAMERA_DISPLAY_SOURCE, so the provisioner can tell "no table entry"
-    // apart from "table entry that happens to be empty" is not a distinction we need — empty
-    // means "no preview for this box today" either way.
-    for cam in ["cam3", "cam4", "cam5", "cam6", "cam7"] {
+fn camera_resolve_leaves_cam2_through_cam7_with_no_display_source() {
+    // A box with no CAMERA_DISPLAY_SOURCE table entry must resolve to an EMPTY (never unset —
+    // `set -u` would trip on unset) value — empty means "no provisioner-persistent preview for
+    // this box today"; callers never need to distinguish "no entry" from "entry that is empty".
+    //
+    // cam2 is DELIBERATELY here, not with cam1 above: its live box already has the SAME interkom
+    // preview, but only as a manual `--display` flag baked into ExecStart — table-driving it via
+    // config.toml would make a future re-provision silently break scripts/rig-mode.sh's
+    // ExecStart-flag-based TEST/EVENT display toggle (used by the QR-painter E2E harness). See the
+    // comment on cam2's case arm in scripts/camera-set.sh for the full mechanism.
+    for cam in ["cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
         let (ok, display) = resolve_display_source(cam);
         assert!(ok, "camera_resolve {cam} should succeed");
         assert_eq!(
             display, "",
-            "camera_resolve {cam} must resolve CAMERA_DISPLAY_SOURCE to empty (no preview \
-             configured, #528); got '{display}'"
+            "camera_resolve {cam} must resolve CAMERA_DISPLAY_SOURCE to empty (no table entry, \
+             #528); got '{display}'"
         );
     }
 }

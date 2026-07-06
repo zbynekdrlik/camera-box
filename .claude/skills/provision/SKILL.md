@@ -236,8 +236,18 @@ Adding an 8th camera means editing `camera-set.sh` ONCE — every script downstr
 cameraman-preview NDI source (empty when a box has no preview configured). `setup-device.sh`
 STEP 6 wires it into `config.toml`'s optional `[display]` section (never baked into the
 canonical, always-plain `ExecStart`), so a box's preview survives a re-provision instead of
-being a manual, non-persistent SSH edit. cam1 and cam2 both resolve to `"STRIH-SNV (interkom)"`
-today; add a table entry (never a per-box `setup-device.sh` edit) when another box needs one.
+being a manual, non-persistent SSH edit. **cam1 only** resolves to `"STRIH-SNV (interkom)"`
+today.
+
+**cam2 is deliberately EXCLUDED from the table**, even though its live box already runs the same
+interkom preview — cam2's preview is a manual `--display` flag baked into `ExecStart`, and
+`scripts/rig-mode.sh`'s TEST/EVENT mode toggle (the QR-painter E2E harness) specifically flips
+that flag via a systemd drop-in and verifies restoration by grepping `ExecStart` for `--display`.
+`config.toml`'s `[display]` section is read INDEPENDENTLY of any `ExecStart` flag, so giving cam2
+a table entry would make a future re-provision keep the preview active via `config.toml`
+regardless of `rig-mode.sh`'s drop-in override — silently breaking its fb0-arbitration checks.
+Until `rig-mode.sh` is taught to recognize both mechanisms, cam2 stays a manual edit; add a table
+entry (never a per-box `setup-device.sh` edit) for any OTHER box that needs a preview.
 
 ## Keeping the fleet converged — `scripts/verify-fleet.sh` (#552)
 

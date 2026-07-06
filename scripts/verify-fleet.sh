@@ -43,6 +43,12 @@ CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
 SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 VERIFY_CMD="${VERIFY_CMD:-$HERE/verify-device.sh}"
+# VERIFY_CMD is invoked as a plain child process (line ~140 below), not over ssh -- export the
+# three vars explicitly so verify-device.sh (or a test stub) reliably sees the SAME
+# user/password/timeout this script's own reachability probe used, regardless of how the caller
+# originally set them (a caller that assigns CAM_PW as a plain, non-exported shell variable before
+# invoking this script would otherwise leave propagation to VERIFY_CMD accidental).
+export SSH_USER CAM_PW SSH_TIMEOUT
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
@@ -86,13 +92,21 @@ Usage:
   scripts/verify-fleet.sh
   scripts/verify-fleet.sh --help
 
-CAMERA_SET (env, default cam1-7, from scripts/camera-set.sh) selects the boxes to check. An
-offline box is reported SKIPPED, never a hard FAIL. Exit: 0 iff no reachable box FAILed.
+There is no per-camera positional argument -- scope the run via the CAMERA_SET env var (env,
+default cam1-7, from scripts/camera-set.sh), e.g. CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh.
+An offline box is reported SKIPPED, never a hard FAIL. Exit: 0 iff no reachable box FAILed.
 EOF
 }
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
+  "") ;;
+  *)
+    err "unknown argument '$1' -- verify-fleet.sh takes no positional camera name (unlike \
+verify-device.sh NAME); scope the run via CAMERA_SET instead, e.g. CAMERA_SET=\"$1\" $0"
+    usage >&2
+    exit 2
+    ;;
 esac
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
@@ -102,7 +116,11 @@ echo ""
 
 declare -a PASSED=() FAILED=() SKIPPED=()
 for cam in $SET; do
-  if ! camera_resolve "$cam"; then
+  # Case-normalize before resolving -- camera-set.sh's own table is strictly lowercase, but
+  # setup-device.sh / verify-device.sh both advertise (and accept) a case-insensitive NAME, so
+  # CAMERA_SET="CAM1 CAM3" must work here too instead of silently rejecting as "invalid".
+  lc_cam="$(printf '%s' "$cam" | tr '[:upper:]' '[:lower:]')"
+  if ! camera_resolve "$lc_cam"; then
     FAILED+=("$cam(invalid)"); continue
   fi
   ip="$CAMERA_IP"
@@ -111,8 +129,8 @@ for cam in $SET; do
   echo "================================================================"
 
   reachable_rc=0
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
-    -o BatchMode=no "$SSH_USER@$ip" true >/dev/null 2>&1 || reachable_rc=$?
+  reachable_err="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+    -o BatchMode=no "$SSH_USER@$ip" true 2>&1)" || reachable_rc=$?
 
   verify_rc=0
   if [ "$reachable_rc" -eq 0 ]; then
@@ -123,7 +141,15 @@ for cam in $SET; do
   case "$status" in
     PASS)    log "[$cam] PASS"; PASSED+=("$cam") ;;
     FAIL)    err "[$cam] FAIL"; FAILED+=("$cam") ;;
-    SKIPPED) warn "[$cam] OFFLINE/unreachable -- SKIPPED (not treated as a fleet failure)"; SKIPPED+=("$cam") ;;
+    SKIPPED)
+      # Surface WHY the reachability probe failed (offline vs. e.g. an auth/host-key error from a
+      # rotated CAM_PW) instead of swallowing it -- a run where every box unexpectedly comes back
+      # SKIPPED for the SAME auth-failure reason should be obviously diagnosable from this output,
+      # not indistinguishable from "the whole fleet happens to be powered off".
+      warn "[$cam] OFFLINE/unreachable -- SKIPPED (not treated as a fleet failure)"
+      [ -n "$reachable_err" ] && warn "[$cam] reachability probe said: $reachable_err"
+      SKIPPED+=("$cam")
+      ;;
   esac
   echo ""
 done
@@ -132,6 +158,15 @@ echo "================================================================"
 info "PASS:    ${PASSED[*]:-none}"
 info "FAIL:    ${FAILED[*]:-none}"
 info "SKIPPED: ${SKIPPED[*]:-none}"
+
+# A blank/whitespace-only CAMERA_SET (e.g. an upstream scripting mistake) word-splits to ZERO loop
+# iterations -- without this floor that would silently print "FLEET CONVERGED" for a run that
+# checked NOTHING. Fail loud instead (script-failure-policy: no false "all clear").
+checked=$(( ${#PASSED[@]} + ${#FAILED[@]} + ${#SKIPPED[@]} ))
+if [ "$checked" -eq 0 ]; then
+  err "no cameras were checked -- CAMERA_SET resolved to an empty/whitespace set ('$SET')"
+  exit 2
+fi
 
 if [ "${#FAILED[@]}" -eq 0 ]; then
   log "FLEET CONVERGED -- no reachable box failed verify-device.sh (#552)"
