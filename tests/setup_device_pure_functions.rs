@@ -149,3 +149,86 @@ fn resolve_device_name_resolves_the_whole_fleet() {
         );
     }
 }
+
+// --- #528: config_toml_display_section (per-cam HDMI cameraman preview) ------------------------
+//
+// setup-device.sh's `#450`-canonical ExecStart must stay PLAIN and identical on every box
+// (`tests/setup_device_provisioner_hardening.rs::setup_device_execstart_is_canonical_plain`) —
+// #528's preview source therefore does NOT bake into ExecStart. Instead it's an optional
+// `[display]` section appended to the per-box `config.toml` (the SAME file that already carries
+// per-box variance today, e.g. the VBAN stream name) via this pure, sourced-and-unit-tested
+// function — the same seam convention as `resolve_device_name` above.
+
+/// config_toml_display_section must be a no-op (empty stdout) for a box with NO configured
+/// preview (cam2-7 today — see scripts/camera-set.sh for why cam2 is deliberately excluded) —
+/// camera-box then runs with no [display] section, i.e. no preview, exactly as every box behaved
+/// before #528.
+#[test]
+fn config_toml_display_section_is_empty_for_no_source() {
+    let (code, out, err) = run_sourced(r#"config_toml_display_section """#);
+    assert_eq!(
+        code, 0,
+        "config_toml_display_section '' must not fail. stderr: {err}"
+    );
+    assert_eq!(
+        out, "",
+        "config_toml_display_section '' must emit nothing (no [display] section) — a box with \
+         no CAMERA_DISPLAY_SOURCE table entry must not gain one; got: {out:?}"
+    );
+}
+
+/// config_toml_display_section must emit a `[display]` TOML section with the given source when
+/// one is configured (cam1 today, #528) — table-derived, not hardcoded. `fb_device` is
+/// deliberately OMITTED — src/config.rs's DisplayConfig already serde-defaults it to "/dev/fb0"
+/// when absent, so baking the literal here would just be a second, driftable copy of that default.
+#[test]
+fn config_toml_display_section_emits_display_section_for_a_configured_source() {
+    let (code, out, err) = run_sourced(r#"config_toml_display_section "STRIH-SNV (interkom)""#);
+    assert_eq!(
+        code, 0,
+        "config_toml_display_section must succeed for a configured source. stderr: {err}"
+    );
+    assert!(
+        out.contains("[display]"),
+        "config_toml_display_section must emit a [display] TOML section header; got: {out:?}"
+    );
+    assert!(
+        out.contains(r#"source = "STRIH-SNV (interkom)""#),
+        "config_toml_display_section must wire the given source into `source = \"...\"`; got: {out:?}"
+    );
+    assert!(
+        !out.contains("fb_device"),
+        "config_toml_display_section must NOT bake fb_device -- config.rs's DisplayConfig already \
+         serde-defaults it to /dev/fb0 when the key is absent; got: {out:?}"
+    );
+}
+
+/// A source containing a double-quote or backslash must be ESCAPED before landing in the TOML
+/// string literal — an unescaped `"` would terminate the string mid-line and corrupt the rest of
+/// config.toml. No table entry contains one today, but scripts/camera-set.sh's own comment invites
+/// adding future entries, so this landmine must be defused now, not discovered at boot time later.
+#[test]
+fn config_toml_display_section_escapes_quotes_and_backslashes() {
+    let (code, out, err) = run_sourced(r#"config_toml_display_section 'NDI "Weird" Source\path'"#);
+    assert_eq!(
+        code, 0,
+        "config_toml_display_section must not fail on a quote/backslash source. stderr: {err}"
+    );
+    assert!(
+        out.contains(r#"source = "NDI \"Weird\" Source\\path""#),
+        "config_toml_display_section must escape embedded \\ and \" so the TOML string stays a \
+         single well-formed literal; got: {out:?}"
+    );
+    // The whole emitted section, parsed as TOML, must decode back to the ORIGINAL source
+    // (round-trip proof, not just a substring match) -- confirms the escaping is TOML-correct,
+    // not merely something that looks plausible.
+    let parsed: toml::Value = out
+        .parse()
+        .expect("emitted [display] section must parse as TOML");
+    assert_eq!(
+        parsed["display"]["source"].as_str(),
+        Some("NDI \"Weird\" Source\\path"),
+        "round-tripping the emitted TOML must decode back to the ORIGINAL unescaped source; \
+         parsed: {parsed:?}"
+    );
+}
