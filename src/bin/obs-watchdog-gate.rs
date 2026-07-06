@@ -14,17 +14,21 @@
 //! {
 //!   "strih":  {"ws_reachable": true, "active_fps": 60.0, "avg_render_time_ms": 11.3,
 //!              "render_skipped_frac": 0.003, "target_fps": 60.0,
-//!              "obs64_count": 1, "responding": true, "cpu_percent": 5.7},
+//!              "obs64_count": 1, "responding": true, "cpu_percent": 5.7,
+//!              "dxgi_device_lost": false},
 //!   "stream": {"ws_reachable": true, "active_fps": 29.5, "avg_render_time_ms": 9.0,
 //!              "render_skipped_frac": 0.16, "target_fps": 30.0,
-//!              "obs64_count": 1, "responding": false, "cpu_percent": 168.0}
+//!              "obs64_count": 1, "responding": false, "cpu_percent": 168.0,
+//!              "dxgi_device_lost": false}
 //! }
 //! ```
 //!
 //! `ws_reachable` and `target_fps` are REQUIRED. Every other field is OPTIONAL — omit or
 //! pass JSON `null` for a signal the caller could not sample this pass (e.g. a plain
 //! dev1 timer pass with no agent/MCP process-state check has no `obs64_count` /
-//! `responding` / `cpu_percent`).
+//! `responding` / `cpu_percent` / `dxgi_device_lost`). `dxgi_device_lost: true` (#89) is
+//! decisive on its own and wins over the process-level wedge signals — see
+//! `camera_box::obs_watchdog::classify`.
 //!
 //! **Exit codes:**
 //! - `0` — every box HEALTHY
@@ -94,6 +98,7 @@ fn sample_from_json(
     let obs64_count = opt_u32(v, "obs64_count")?;
     let responding = opt_bool(v, "responding")?;
     let cpu_percent = opt_f64(v, "cpu_percent")?;
+    let dxgi_device_lost = opt_bool(v, "dxgi_device_lost")?;
     Ok((
         ObsHealthSample {
             ws_reachable,
@@ -103,6 +108,7 @@ fn sample_from_json(
             obs64_count,
             responding,
             cpu_percent,
+            dxgi_device_lost,
         },
         target_fps,
     ))
