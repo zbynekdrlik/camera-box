@@ -530,7 +530,11 @@ fi
 
 # (l) fwupd purged (#547 -- it holds a write handle blocking the ro remount) ---------------------
 rc=0
-FWUPD_STATE="$(ssh_box "systemctl is-enabled fwupd 2>/dev/null || echo not-found")" || rc=$?
+# NB: `systemctl is-enabled` prints the state (e.g. "masked"/"disabled") to STDOUT *and* exits
+# non-zero for those states -- so `|| true` (never `|| echo <sentinel>`, which would APPEND a
+# second word to the captured state and break the exact-match checks below); a purged unit prints
+# nothing -> empty state, which fwupd_absent accepts.
+FWUPD_STATE="$(ssh_box "systemctl is-enabled fwupd 2>/dev/null || true")" || rc=$?
 if fwupd_absent "$FWUPD_STATE"; then
   ok "fwupd is not installed (purged)"
 else
@@ -539,7 +543,7 @@ fi
 
 # (m) systemd-networkd-wait-online masked (#547 -- avoids the 120s boot stall) -------------------
 rc=0
-WAITONLINE_STATE="$(ssh_box "systemctl is-enabled systemd-networkd-wait-online 2>/dev/null || echo not-found")" || rc=$?
+WAITONLINE_STATE="$(ssh_box "systemctl is-enabled systemd-networkd-wait-online 2>/dev/null || true")" || rc=$?
 if waitonline_masked "$WAITONLINE_STATE"; then
   ok "systemd-networkd-wait-online masked (no 120s boot stall)"
 else
