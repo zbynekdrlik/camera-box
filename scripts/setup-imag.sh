@@ -1111,6 +1111,9 @@ if [ -S /tmp/.X11-unix/X0 ]; then
         # an un-pinned `obs` would be STARVED onto the tiny cpu0,1,12-15 remainder once isolcpus takes
         # effect. `nice -n -5` was deliberately NOT added -- the desktop user lacks CAP_SYS_NICE
         # (live-confirmed, #483 comment).
+        # shellcheck disable=SC2024  # redirect target is /tmp/obs-launch.log, world-writable and
+        # written by root (this script runs as root); sudo -u drops privilege only for the `obs`
+        # process itself, not for the redirect -- that is intentional here, not a bug.
         sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
             nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
         sleep 8

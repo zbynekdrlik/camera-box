@@ -12,8 +12,8 @@ WORK_DIR="/tmp/camera-box-build"
 
 # Partition sizes
 EFI_SIZE="256M"
-ROOT_SIZE="3G"
-OVERLAY_SIZE="512M"
+# NOTE: root/overlay partition sizes are NOT separate config knobs -- create_image() below
+# hardcodes the root partition end (3328MiB) and lets the overlay take the rest ("100%").
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
