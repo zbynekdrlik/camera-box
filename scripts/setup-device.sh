@@ -515,17 +515,24 @@ fi
 echo "  GRUB: timeout 0s, default pinned to known-good kernel with initrd [#295]"
 
 # =============================================================================
-# STEP 11: Reduce network wait timeout
+# STEP 11: Don't block boot on the network
+# #547: MASK systemd-networkd-wait-online. Unmasked it timed out at 120s and delayed
+# network-online.target -> camera-box started ~123s late (observed on cam3). The box has a static
+# IP (STEP 2), and camera-box (After=network-online.target + its own retry) never needs to wait for
+# the link to be "online", so masking is safe and cuts boot-to-stream to a few seconds.
 # =============================================================================
 echo ""
-echo -e "${GREEN}[11/${TOTAL_STEPS}] Reducing network wait timeout...${NC}"
+echo -e "${GREEN}[11/${TOTAL_STEPS}] Removing the network-wait boot stall...${NC}"
+systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
+# Keep a short-timeout override too (belt-and-braces): harmless while masked, and if the unit is
+# ever unmasked it still caps the wait at 5s instead of the 120s default.
 mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
 cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf << EOF
 [Service]
 ExecStart=
 ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --timeout=5
 EOF
-echo "  Network wait timeout: 5 seconds"
+echo "  Network wait: masked (no 120s boot stall) + 5s override fallback"
 
 # =============================================================================
 # STEP 12: Disable power button shutdown
@@ -667,22 +674,34 @@ mkdir -p /etc/kernel/postinst.d
 cat > /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee << 'EOF'
 #!/bin/sh
 # #295: guarantee every installed kernel has an initrd (a kernel without one bricked CAM3/CAM4).
+# #547: on the read-only-root appliance, mkinitramfs' default build dir /var/tmp is a 50M tmpfs --
+# far too small for a ~400M initramfs ("No space left on device" -> no initrd -> a half-installed,
+# unbootable kernel). Build in /root/.itmp (the real ~51G disk) instead. A kernel install only ever
+# runs inside a `mount -o remount,rw /` window, so /root (and /boot) are writable then.
 set -e
 version="$1"
 [ -n "$version" ] || exit 0
 if [ ! -e "/boot/initrd.img-${version}" ]; then
-    update-initramfs -c -k "${version}"
+    mkdir -p /root/.itmp
+    TMPDIR=/root/.itmp update-initramfs -c -k "${version}"
 fi
 EOF
 chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee
 echo "  #295: kernel pinned (apt-mark hold), unattended-upgrades disabled, initrd hook installed"
+# fwupd — #547: PURGE it. On the read-only-root appliance fwupd holds an open write handle on
+# /var/lib/fwupd/pending.db, which makes `mount -o remount,ro /` fail with EBUSY (blocked the ro
+# conversion on cam1/cam4). The appliance never firmware-updates itself, so remove it outright.
+systemctl disable --now fwupd.service fwupd-refresh.timer 2>/dev/null || true
+apt-get purge -y fwupd fwupd-signed 2>/dev/null \
+    || dpkg --purge --force-depends fwupd fwupd-signed 2>/dev/null \
+    || systemctl mask fwupd.service 2>/dev/null || true
 # ModemManager (not needed)
 systemctl disable --now ModemManager.service 2>/dev/null || true
 # Bluetooth (not needed)
 systemctl disable --now bluetooth.service 2>/dev/null || true
 # Printing (not needed)
 systemctl disable --now cups.service cups-browsed.service 2>/dev/null || true
-echo "  Disabled: snapd, cloud-init, auto-updates, ModemManager, bluetooth, cups"
+echo "  Disabled: snapd, cloud-init, auto-updates, fwupd (purged), ModemManager, bluetooth, cups"
 
 # =============================================================================
 # STEP 16: Install required packages
