@@ -477,9 +477,12 @@ jobs:
     # drift-guard.sh, launch-obs-genlock.sh, purge-target.sh, ...) run as ROOT on fresh cam
     # boxes + imag-nb during provisioning (#448-#454) and carry non-trivial logic (idempotent
     # GRUB_CMDLINE flag loops, git-arg-injection guards, fail-closed abort guards). A silent
-    # shell bug (bad quoting in a cmdline edit, an unguarded rm) can brick a box. Gate at
-    # `-S warning` (errors + warnings fail the build); the ~285 style-level notes are a
-    # DELIBERATE floor, not weakening -- they are advisory-only and do not block CI. GitHub's
+    # shell bug (bad quoting in a cmdline edit, an unguarded rm) can brick a box. Lints both
+    # scripts/*.sh AND scripts/lib/*.sh -- lib/ holds standalone root-run helpers like
+    # camera-box-grow-root.sh (first-boot growpart/resize2fs) that NO top-level script sources,
+    # so the non-recursive glob would otherwise leave them uncovered. Gate at `-S warning`
+    # (errors + warnings fail the build); the many style/info-level findings are a DELIBERATE
+    # floor, not weakening -- advisory-only, no CI block. GitHub's
     # ubuntu-latest ships shellcheck preinstalled, so no separate install step is needed; the
     # apt-get fallback below is a cheap belt-and-suspenders in case that ever changes upstream.
     steps:
@@ -489,7 +492,7 @@ jobs:
         run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
 
       - name: Shellcheck (warning severity, binary gate)
-        run: shellcheck -S warning scripts/*.sh
+        run: shellcheck -S warning scripts/*.sh scripts/lib/*.sh
 
   notify-on-failure:
     name: Notify on red

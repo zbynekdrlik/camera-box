@@ -3,14 +3,14 @@
 //! (#448-#454) and carry non-trivial logic (idempotent GRUB_CMDLINE flag loops, git-arg-injection
 //! guards, fail-closed abort guards) with no dedicated lint gate. `.github/workflows/ci.yml`
 //! gains a `shellcheck` job (GitHub-hosted `ubuntu-latest`, `-S warning` severity floor — errors
-//! and warnings fail the build, the ~285 style-level notes stay advisory-only) as a BINARY gate:
+//! and warnings fail the build, the many style/info-level findings stay advisory-only) as a gate:
 //! no `continue-on-error`, wired into the same `notify-on-failure` red-alert fan-in as every
 //! other gate job.
 //!
 //! These are STRUCTURAL guards on the workflow YAML — they fail loudly if a future edit drops
 //! the job, loosens its severity floor, or detaches it from the failure-notification fan-in. The
 //! DEFINITIVE proof that the scripts themselves are clean is the job actually running
-//! `shellcheck -S warning scripts/*.sh` on a real ubuntu-latest runner.
+//! `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` on a real ubuntu-latest runner.
 
 use std::fs;
 
@@ -49,9 +49,10 @@ fn shellcheck_job_exists_on_github_hosted_runner() {
 fn shellcheck_runs_at_warning_severity_as_a_binary_gate() {
     let wf = read_ci_workflow();
     assert!(
-        wf.contains("shellcheck -S warning scripts/*.sh"),
-        "#545: ci.yml must run `shellcheck -S warning scripts/*.sh` — errors and warnings fail \
-         the build, the numerous style-level notes stay a deliberate advisory floor."
+        wf.contains("shellcheck -S warning scripts/*.sh scripts/lib/*.sh"),
+        "#545: ci.yml must run `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` — covering \
+         the standalone root-run lib/ helpers too; errors and warnings fail the build, the many \
+         style/info-level findings stay a deliberate advisory floor."
     );
     assert!(
         !wf.contains("continue-on-error"),
