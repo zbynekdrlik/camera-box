@@ -150,6 +150,167 @@ fn resolve_device_name_resolves_the_whole_fleet() {
     }
 }
 
+// --- #568: color block deduped onto scripts/lib/cli-log.sh --------------------------------------
+//
+// setup-device.sh used to declare its own RED/GREEN/YELLOW/NC block (no log()/info()/warn()/err()
+// functions -- it uses raw `echo -e "${COLOR}...${NC}"` everywhere, plus its own exit-on-call
+// `fail()`). #568 replaces that local block with a `. "$HERE/lib/cli-log.sh"` source, keeping
+// `fail()` itself untouched (different message shape / behavior from cli-log.sh's `err()`, so it
+// stays script-local per the issue's own guidance). These tests prove the color values -- and
+// therefore every existing `echo -e "${RED}...${NC}"` call site -- render EXACTLY the same bytes
+// as the old local declaration (RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
+// NC='\033[0m').
+
+#[test]
+fn color_vars_are_byte_identical_to_the_pre_568_local_declaration() {
+    // Route through `echo -e` (like every real call site in the script), NOT a raw `printf '%s'`
+    // -- RED/GREEN/YELLOW/NC hold LITERAL backslash-octal text (`'\033[0;31m'`, single-quoted, no
+    // ANSI-C `$'...'` quoting); only `echo -e`'s own escape processing turns that into the actual
+    // ESC byte at render time, exactly as fail() and every `echo -e "${RED}...${NC}"` line do.
+    let (code, out, err) = run_sourced(r#"echo -en "${RED}|${GREEN}|${YELLOW}|${NC}""#);
+    assert_eq!(
+        code, 0,
+        "sourcing setup-device.sh must succeed. stderr: {err}"
+    );
+    assert_eq!(
+        out, "\x1b[0;31m|\x1b[0;32m|\x1b[1;33m|\x1b[0m",
+        "RED/GREEN/YELLOW/NC must keep the exact escape codes setup-device.sh declared locally \
+         before #568, now sourced from scripts/lib/cli-log.sh instead"
+    );
+}
+
+#[test]
+fn fail_renders_the_exact_pre_568_bytes_after_sourcing_the_shared_lib() {
+    let (code, _out, err) = run_sourced("fail 'boom'");
+    assert_eq!(code, 1, "fail() must still exit 1");
+    assert_eq!(
+        err, "\x1b[0;31mFAIL: boom\x1b[0m\n",
+        "fail()'s rendered bytes must be unchanged by #568 (RED + 'FAIL: msg' + NC, to stderr)"
+    );
+}
+
+// --- #453: fleet cruft self-heal -- .bak cleanup during provisioning ----------------------------
+//
+// Live fleet fingerprint (2026-07-06, issue #453) found inert `.bak` leftovers from a manual NDI
+// upgrade / a stale drop-in edit on cam1/cam2/cam4: `/usr/lib/ndi/libndi.so.6*.bak` and
+// `camera-box.service.d/*.bak*`. Neither is loaded by anything (ldconfig never resolves a `.bak`
+// suffix; systemd only reads `*.conf` drop-ins) -- pure inert cruft that setup-device.sh should
+// self-heal on every (re-)provisioning pass instead of carrying forward forever.
+//
+// `cleanup_bak_cruft` is exact glob-scoped to the given DIR + PATTERN(s) only -- these tests use a
+// real tempdir (never touching the host filesystem) to prove it removes ONLY matching cruft and
+// leaves everything else (including a real, non-cruft same-prefixed file) untouched.
+
+#[test]
+fn cleanup_bak_cruft_removes_matching_files_and_is_idempotent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::write(dir.join("libndi.so.6.2.1.bak"), b"stale").unwrap();
+    std::fs::write(dir.join("libndi.so.6.bak"), b"stale2").unwrap();
+    std::fs::write(dir.join("libndi.so.6"), b"live").unwrap(); // must survive -- not a .bak
+
+    let (code, out, err) = run_sourced(&format!(
+        r#"cleanup_bak_cruft '{dir}' 'libndi.so.6*.bak'
+           cleanup_bak_cruft '{dir}' 'libndi.so.6*.bak'"#, // idempotent: run twice, no error
+        dir = dir.display()
+    ));
+    assert_eq!(code, 0, "cleanup_bak_cruft must succeed. stderr: {err}");
+    assert!(
+        out.contains("libndi.so.6.2.1.bak") && out.contains("libndi.so.6.bak"),
+        "cleanup_bak_cruft should report each removed file; got: {out:?}"
+    );
+    assert!(!dir.join("libndi.so.6.2.1.bak").exists());
+    assert!(!dir.join("libndi.so.6.bak").exists());
+    assert!(
+        dir.join("libndi.so.6").exists(),
+        "cleanup_bak_cruft must NEVER remove a real (non-.bak) file, even with a matching prefix"
+    );
+}
+
+#[test]
+fn cleanup_bak_cruft_is_a_silent_noop_when_nothing_matches() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::write(dir.join("libndi.so.6"), b"live").unwrap();
+
+    let (code, out, err) = run_sourced(&format!(
+        "cleanup_bak_cruft '{}' 'libndi.so.6*.bak'",
+        dir.display()
+    ));
+    assert_eq!(code, 0, "no-op run must still succeed. stderr: {err}");
+    assert_eq!(out, "", "no cruft present -- nothing should be reported");
+    assert!(dir.join("libndi.so.6").exists());
+}
+
+#[test]
+fn cleanup_bak_cruft_supports_multiple_glob_patterns_scoped_to_the_dir() {
+    // The systemd drop-in dir cleanup needs BOTH `*.bak` and `*.bak-*` (cam1's live
+    // `genlock.conf.bak-30`), and must never touch a real `*.conf` drop-in.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::write(dir.join("genlock.conf.bak-30"), b"stale").unwrap();
+    std::fs::write(dir.join("cpu-affinity.conf.bak"), b"stale").unwrap();
+    std::fs::write(dir.join("genlock.conf"), b"live").unwrap();
+    std::fs::write(dir.join("cpu-affinity.conf"), b"live").unwrap();
+
+    let (code, _out, err) = run_sourced(&format!(
+        "cleanup_bak_cruft '{}' '*.bak' '*.bak-*'",
+        dir.display()
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(!dir.join("genlock.conf.bak-30").exists());
+    assert!(!dir.join("cpu-affinity.conf.bak").exists());
+    assert!(dir.join("genlock.conf").exists());
+    assert!(dir.join("cpu-affinity.conf").exists());
+}
+
+#[test]
+fn cleanup_bak_cruft_skips_a_bak_named_directory_without_aborting() {
+    // A `.bak`-suffixed DIRECTORY matches the glob but `rm -f` cannot remove it and would exit 1,
+    // aborting the whole `set -e` provisioner uncontrolled. The cleanup must SKIP a non-regular /
+    // non-symlink match, still remove the real `.bak` file beside it, and exit 0.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::create_dir(dir.join("oops.bak")).unwrap(); // a directory that matches `*.bak`
+    std::fs::write(dir.join("genlock.conf.bak"), b"stale").unwrap(); // a real file that must go
+
+    let (code, _out, err) = run_sourced(&format!("cleanup_bak_cruft '{}' '*.bak'", dir.display()));
+    assert_eq!(
+        code, 0,
+        "a stray .bak-named directory must NOT abort provisioning. stderr: {err}"
+    );
+    assert!(
+        dir.join("oops.bak").is_dir(),
+        "the .bak-named directory must be skipped, not removed"
+    );
+    assert!(
+        !dir.join("genlock.conf.bak").exists(),
+        "a real .bak file beside the skipped directory must still be cleaned"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring — the cleanup must actually be CALLED from STEP 4 (NDI dir) and STEP 7 (systemd
+// drop-in dir), not just defined as a dead pure function nobody invokes.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn bak_cruft_cleanup_is_wired_into_ndi_and_dropin_provisioning_steps() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("stop here -- never run the destructive")
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+    assert!(
+        live_flow.contains("cleanup_bak_cruft /usr/lib/ndi"),
+        "STEP 4 (NDI library) must call cleanup_bak_cruft on /usr/lib/ndi (#453)"
+    );
+    assert!(
+        live_flow.contains("cleanup_bak_cruft /etc/systemd/system/camera-box.service.d"),
+        "STEP 7 (systemd service) must call cleanup_bak_cruft on the drop-in dir (#453)"
+    );
+}
+
 // --- #528: config_toml_display_section (per-cam HDMI cameraman preview) ------------------------
 //
 // setup-device.sh's `#450`-canonical ExecStart must stay PLAIN and identical on every box

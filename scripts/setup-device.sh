@@ -14,11 +14,12 @@
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/cli-log.sh
+. "$HERE/lib/cli-log.sh"  # RED/GREEN/YELLOW/BLUE/NC + log()/info()/warn()/err() (#559/#568) --
+                          # this script keeps its own fail() below (different shape/behavior:
+                          # a hard exit, "FAIL: msg" not "[ERROR] msg" -- so it stays local rather
+                          # than folding into cli-log.sh's err()).
 
 # fail MSG -- print in red to stderr and exit non-zero. This is a ONE-SHOT provisioner
 # (script-failure-policy): every install step that could otherwise leave the box
@@ -28,7 +29,6 @@ fail() {
     exit 1
 }
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
 
@@ -86,6 +86,30 @@ config_toml_display_section() {
     local escaped="${source//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
     printf '\n# HDMI cameraman preview (#528 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\n' "$escaped"
+}
+
+# cleanup_bak_cruft DIR PATTERN... -- removes any files directly under DIR matching the given
+# glob PATTERN(s) (#453: fleet self-heal for inert `.bak` leftovers -- a manual NDI upgrade left
+# stale `/usr/lib/ndi/libndi.so.6*.bak` files on cam1/cam2/cam4, and a stale drop-in edit left
+# `camera-box.service.d/genlock.conf.bak-30` on cam1; neither is loaded by anything -- ldconfig
+# never resolves a `.bak` suffix, systemd only reads `*.conf` -- but a fresh/re-provisioned box
+# should not carry the cruft forward forever). Idempotent (a no-op when nothing matches); exact
+# glob-scoped to DIR + the given PATTERN(s) ONLY -- never a broad/recursive rm. Echoes one line
+# per file actually removed so a provisioning run shows what it cleaned.
+cleanup_bak_cruft() {
+    local dir="${1:?cleanup_bak_cruft: directory required}"
+    shift
+    local pattern f
+    for pattern in "$@"; do
+        for f in "$dir"/$pattern; do
+            [ -e "$f" ] || continue
+            # Only ever remove regular files / symlinks. A stray `.bak`-named DIRECTORY would make
+            # `rm -f` exit 1 and abort the whole provisioner under `set -e` -- skip it instead.
+            [ -f "$f" ] || [ -L "$f" ] || continue
+            rm -f -- "$f"
+            echo "  Removed stale cruft: $f"
+        done
+    done
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
@@ -263,6 +287,7 @@ fi
 echo ""
 echo -e "${GREEN}[4/${TOTAL_STEPS}] Setting up NDI library...${NC}"
 mkdir -p /usr/lib/ndi
+cleanup_bak_cruft /usr/lib/ndi 'libndi.so.6*.bak'   # #453: drop any stale manual-upgrade backup
 # Add NDI library path to ldconfig
 echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
 if [ -f /usr/lib/ndi/libndi.so.6 ]; then
@@ -429,6 +454,8 @@ EOF
 # them here makes a fresh box match the fleet in one run. Idempotent: re-running
 # overwrites with identical content, and the daemon-reload below picks them up.
 mkdir -p /etc/systemd/system/camera-box.service.d
+cleanup_bak_cruft /etc/systemd/system/camera-box.service.d '*.bak' '*.bak-*'   # #453: drop stale
+                                                                                # drop-in leftovers
 # #289 — pin the SCHED_FIFO grab onto the isolcpus=3 reserved core. Soft (inherited)
 # CPUAffinity mask, NOT a hard cpuset: the per-thread sched_setaffinity calls in the
 # binary still move painter / --display / intercom threads OFF onto the general cores

@@ -55,15 +55,18 @@
 #   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2 -- #132/#547)
 #   (p) config.toml [display] section matches camera-set.sh's CAMERA_DISPLAY_SOURCE table entry
 #       (#528/#557/#558 -- catches a box that lost its HDMI-preview config, or wrongly gained one)
+#   (q) WARNING only (never fails the gate): stale `.bak` cruft under /usr/lib/ndi or the systemd
+#       drop-in dir (#453 -- inert leftovers from a manual NDI upgrade / a stale drop-in edit;
+#       setup-device.sh self-heals this on the box's next provisioning pass)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
 
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
-
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/cli-log.sh
+. "$HERE/lib/cli-log.sh"         # RED/GREEN/YELLOW/BLUE/NC + log()/info()/warn()/err() (#559/#568)
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"          # camera_resolve() -- NAME -> IP / CAMERA_GENLOCK_FPS (#24/#451)
 # shellcheck source=scripts/lib/ndi-alive.sh
@@ -400,6 +403,43 @@ display_config_verdict() {
   fi
 }
 
+# --- (q) .bak cruft drift -- WARNING only, never a FAIL (#453) ----------------------------------
+# Inert `.bak` backups left behind by a manual NDI upgrade (fleet cam1/cam2/cam4:
+# /usr/lib/ndi/libndi.so.6*.bak) or a stale drop-in edit (cam1:
+# camera-box.service.d/genlock.conf.bak-30) are DEAD files -- ldconfig/systemd never load them --
+# so they are drift to surface, not a functional defect. setup-device.sh's cleanup_bak_cruft
+# (#453) makes a fresh/re-provisioned box self-heal; this check makes the drift visible on boxes
+# provisioned BEFORE that fix landed, without failing their acceptance gate for something with
+# zero functional impact.
+
+# bak_cruft_names LS_TEXT -> newline-separated list of `.bak` / `.bak-*`-suffixed entry names
+# found in LS_TEXT (an `ls -la DIR` or `ls -1 DIR` dump). Empty output means no cruft. Handles
+# both an `ls -1` dump (one bare name per line) and an `ls -la` dump (permission/owner rows,
+# symlinks rendered "name -> target") by taking the LAST whitespace-separated token before any
+# " -> " and matching the suffix on that -- so a live symlink's OWN name is checked, never its
+# target.
+bak_cruft_names() {
+  printf '%s\n' "$1" | awk '
+    { line = $0; sub(/ -> .*/, "", line); n = split(line, f, /[ \t]+/); name = f[n];
+      if (name ~ /\.bak(-.*)?$/) print name }
+  '
+}
+
+# bak_cruft_report NDI_LS DROPIN_LS -> newline-separated list combining any .bak cruft found in
+# the NDI dir listing (NDI_LS) and the systemd drop-in dir listing (DROPIN_LS), each prefixed with
+# its real absolute path so the report names WHERE the cruft is. Empty output == clean.
+#
+# Uses `sed` (not a `while read` loop) to prefix each name -- a `while read` loop's exit status is
+# the exit status of its OWN final (EOF-failing) `read`, which would trip `set -e` at the call
+# site on the empty-input (clean) case; `sed` on empty input is a trivially-successful no-op, and
+# the explicit `return 0` makes this pure formatting helper never itself fail.
+bak_cruft_report() {
+  local ndi_ls="$1" dropin_ls="$2"
+  bak_cruft_names "$ndi_ls" | sed 's#^#/usr/lib/ndi/#'
+  bak_cruft_names "$dropin_ls" | sed 's#^#/etc/systemd/system/camera-box.service.d/#'
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH flow below.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -436,6 +476,7 @@ Checks:
   (n) core-isolation cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2)
   (p) config.toml [display] section matches camera-set.sh's CAMERA_DISPLAY_SOURCE table entry
+  (q) WARNING only: stale .bak cruft under the NDI dir or the systemd drop-in dir (#453)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2).
 
@@ -468,6 +509,11 @@ echo -e "${GREEN}== verify-device (#454): ${NAME_UPPER} @ ${IP} ==${NC}"
 FAILS=0
 ok()   { printf "  ${GREEN}[OK]${NC}   %s\n" "$1"; }
 fail() { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; FAILS=$((FAILS + 1)); }
+# warn() intentionally SHADOWS scripts/lib/cli-log.sh's own warn() (sourced above) for the rest of
+# this script -- it matches this report's own 2-space-indented "[OK]"/"[FAIL]" column style rather
+# than cli-log.sh's "[!] msg" line, and -- unlike fail() -- never increments FAILS: a WARN never
+# fails the acceptance gate (#453's ".bak cruft is drift to surface, not a functional defect").
+warn() { printf "  ${YELLOW}[WARN]${NC} %s\n" "$1"; }
 
 ssh_box() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
@@ -676,6 +722,24 @@ else
       fail "config.toml has an UNEXPECTED [display] section (source='${DISPLAY_ACTUAL}') -- camera-set.sh has no table entry for this box"
       ;;
   esac
+fi
+
+# (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
+# Reuses NDI_LS gathered in (g)/(o); a second ssh call lists the systemd drop-in dir. Inert
+# cruft (ldconfig/systemd never load a .bak file) is surfaced so it's visible in verify-fleet.sh's
+# rollup, but it must NEVER fail this box's acceptance gate -- setup-device.sh's cleanup_bak_cruft
+# self-heals it on the box's next provisioning pass.
+drc=0
+DROPIN_LS="$(ssh_box "ls -1 /etc/systemd/system/camera-box.service.d 2>/dev/null")" || drc=$?
+BAK_CRUFT="$(bak_cruft_report "$NDI_LS" "$DROPIN_LS")"
+if [ "$drc" -ne 0 ]; then
+  # A transient ssh failure (or a missing drop-in dir) must NOT be silently reported as "clean" --
+  # surface it as a warning so it isn't mistaken for a verified-empty result. Still never a FAIL.
+  warn "could not list the systemd drop-in dir (ssh/ls rc=$drc) -- .bak cruft check (q) is incomplete for that dir"
+elif [ -n "$BAK_CRUFT" ]; then
+  warn "stale .bak cruft present (inert -- setup-device.sh cleans this on the box's next provisioning pass, #453): $(printf '%s' "$BAK_CRUFT" | tr '\n' ' ')"
+else
+  ok "no stale .bak cruft under the NDI dir or the systemd drop-in dir"
 fi
 
 echo ""

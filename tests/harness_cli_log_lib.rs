@@ -138,3 +138,38 @@ fn verify_fleet_sources_shared_cli_log_lib_and_defines_it_only_once() {
         "verify-fleet.sh must not keep its own copy of the color/log block after sourcing the shared lib"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #568 -- setup-device.sh and verify-device.sh carried their OWN, non-identical color-variable
+// blocks (no log()/info()/warn()/err() functions in either -- they use raw `echo -e`/`printf`
+// with the color vars directly, plus their own script-specific fail()/ok() helpers). Harmonizing
+// means: dedup the shared ANSI color block onto scripts/lib/cli-log.sh, and leave each script's
+// own genuinely-different helper (setup-device.sh's exit-on-call `fail()`; verify-device.sh's
+// FAILS-counting `ok()`/`fail()`/`warn()`) local, unchanged.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_sources_shared_cli_log_lib_and_defines_it_only_once() {
+    let s = read("scripts/setup-device.sh");
+    assert!(
+        s.contains("lib/cli-log.sh"),
+        "setup-device.sh must source scripts/lib/cli-log.sh (#568), not redefine the color block locally"
+    );
+    assert!(
+        !s.contains("RED='\\033"),
+        "setup-device.sh must not keep its own copy of the color block after sourcing the shared lib"
+    );
+}
+
+#[test]
+fn verify_device_sources_shared_cli_log_lib_and_defines_it_only_once() {
+    let s = read("scripts/verify-device.sh");
+    assert!(
+        s.contains("lib/cli-log.sh"),
+        "verify-device.sh must source scripts/lib/cli-log.sh (#568), not redefine the color block locally"
+    );
+    assert!(
+        !s.contains("RED='\\033"),
+        "verify-device.sh must not keep its own copy of the color block after sourcing the shared lib"
+    );
+}
