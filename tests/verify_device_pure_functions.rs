@@ -575,3 +575,146 @@ fn fwupd_verdict_unreadable_on_ssh_failure_ok_on_purged_present_on_installed() {
          present_enabled=present"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (p) config.toml [display] vs CAMERA_DISPLAY_SOURCE table (#558)
+//
+// A box that LOST its [display] section (rolled back, hand-edited, or provisioned via the
+// divergent scripts/setup.sh path -- #557) previously still reported ALL CLEAR from
+// verify-device.sh and PASS from verify-fleet.sh's FLEET CONVERGED rollup. config_toml_display_
+// source() is the READER half of setup-device.sh's config_toml_display_section() writer;
+// display_config_verdict() is the pure comparison the live flow feeds real post-reboot signals
+// into (config.toml text read over SSH vs camera-set.sh's per-cam table entry).
+// ---------------------------------------------------------------------------------------------
+
+const CONFIG_TOML_WITH_DISPLAY: &str = r#"# Camera-Box Configuration - CAM1
+ndi_name = "usb"
+device = "auto"
+
+[intercom]
+stream = "cam1"
+target = "strih.lan"
+sample_rate = 48000
+channels = 1
+
+# HDMI cameraman preview (#528 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)
+[display]
+source = "STRIH-SNV (interkom)"
+"#;
+
+const CONFIG_TOML_NO_DISPLAY: &str = r#"# Camera-Box Configuration - CAM2
+ndi_name = "usb"
+device = "auto"
+
+[intercom]
+stream = "cam2"
+target = "strih.lan"
+sample_rate = 48000
+channels = 1
+"#;
+
+#[test]
+fn config_toml_display_source_extracts_the_configured_source() {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nconfig_toml_display_source \"$TEXT\"",
+        CONFIG_TOML_WITH_DISPLAY.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "STRIH-SNV (interkom)");
+}
+
+#[test]
+fn config_toml_display_source_is_empty_when_no_display_section() {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nconfig_toml_display_source \"$TEXT\"; echo \"<END>\"",
+        CONFIG_TOML_NO_DISPLAY.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "<END>");
+}
+
+#[test]
+fn config_toml_display_source_ignores_a_source_line_outside_the_display_section() {
+    // A `source = "..."` line under a DIFFERENT section header (or before any section) must never
+    // be mistaken for the [display] section's value.
+    const TEXT: &str = r#"[intercom]
+source = "not-a-display-source"
+stream = "cam3"
+"#;
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nconfig_toml_display_source \"$TEXT\"; echo \"<END>\"",
+        TEXT.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "<END>");
+}
+
+#[test]
+fn config_toml_display_source_unescapes_quotes_and_backslashes() {
+    // Round-trips setup-device.sh's config_toml_display_section() escaping (\\ and \") back to
+    // the original literal source string.
+    const TEXT: &str = "[display]\nsource = \"NDI \\\"Weird\\\" Source\\\\path\"\n";
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nconfig_toml_display_source \"$TEXT\"",
+        TEXT.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), r#"NDI "Weird" Source\path"#);
+}
+
+#[test]
+fn display_config_verdict_all_four_cases() {
+    // non-empty table + matching config -> ok
+    // non-empty table + mismatched config -> drift
+    // non-empty table + absent config -> missing
+    // empty table + config present -> unexpected
+    // empty table + absent config -> ok
+    let (code, out, err) = run_sourced(
+        r#"
+        echo "match=$(display_config_verdict 'STRIH-SNV (interkom)' 'STRIH-SNV (interkom)')"
+        echo "drift=$(display_config_verdict 'STRIH-SNV (interkom)' 'SOME-OTHER-SOURCE')"
+        echo "missing=$(display_config_verdict 'STRIH-SNV (interkom)' '')"
+        echo "unexpected=$(display_config_verdict '' 'STRIH-SNV (interkom)')"
+        echo "bothempty=$(display_config_verdict '' '')"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "match=ok\ndrift=drift\nmissing=missing\nunexpected=unexpected\nbothempty=ok"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring — check (p) must actually be composed into the live flow + advertised in the usage doc,
+// not a dead pure function nobody calls (the #549-review class of gap).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn check_p_is_wired_into_the_live_flow_and_usage_doc() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    // Only the LIVE-FLOW portion (after the source-guard) counts here -- the PURE function
+    // *definitions* trivially contain their own names, so searching the whole file would let this
+    // test pass even if the live flow never actually CALLS them (a dead pure function nobody
+    // invokes -- the #549-review class of gap this test exists to catch).
+    let guard_marker = "never run the live SSH flow below.";
+    let guard_pos = body
+        .find(guard_marker)
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+
+    assert!(
+        live_flow.contains("config_toml_display_source"),
+        "the LIVE FLOW (after the source-guard) must CALL config_toml_display_source to read \
+         back config.toml's [display] section over SSH (#558) -- not just define it"
+    );
+    assert!(
+        live_flow.contains("display_config_verdict"),
+        "the LIVE FLOW (after the source-guard) must CALL display_config_verdict to compare it \
+         against CAMERA_DISPLAY_SOURCE (#558) -- not just define it"
+    );
+    assert!(
+        live_flow.contains("(p)"),
+        "the usage doc / check list must advertise the new (p) check (#558)"
+    );
+}

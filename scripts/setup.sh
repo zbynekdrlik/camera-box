@@ -16,6 +16,13 @@ INSTALL_DIR="/usr/local/bin"
 NDI_DIR="/usr/lib/ndi"
 CONFIG_DIR="/etc/camera-box"
 
+# HDMI cameraman preview (#528, #557): scripts/camera-set.sh's CAMERA_DISPLAY_SOURCE table is the
+# fleet's single source of truth for which NDI source a box's --display renders. This script (a
+# standalone `curl | sudo bash` quick-install path with no local repo checkout) downloads the SAME
+# camera-set.sh from this repo rather than keeping a second, hand-copied table -- the table stays
+# the ONE source of truth (#557's fix). Overridable (URL or local path) for tests / local dry-runs.
+CAMERA_SET_SOURCE="${CAMERA_SET_SOURCE:-https://raw.githubusercontent.com/${REPO}/main/scripts/camera-set.sh}"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,6 +41,109 @@ header() {
     echo -e "${BLUE}  $*${NC}"
     echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
     echo ""
+}
+
+# --- PURE functions (no root, no network beyond fetch_camera_set's own download -- unit-tested
+# from tests/setup_display_table_pure_functions.rs; the BASH_SOURCE guard at the bottom of this
+# file skips the destructive `main "$@"` install flow when sourced. Same convention as
+# scripts/setup-device.sh / scripts/setup-imag.sh.) -------------------------------------------
+
+# fetch_camera_set DEST -- writes the CURRENT scripts/camera-set.sh (the #528/#557 single source
+# of truth for the CAMERA_DISPLAY_SOURCE table) to DEST. CAMERA_SET_SOURCE may be a URL (curl) or
+# a local path (cp) -- overridden by tests to point at the real local file so no network call
+# happens; production curl-pipe installs use the default GitHub raw URL.
+fetch_camera_set() {
+    local dest="$1"
+    case "$CAMERA_SET_SOURCE" in
+        http://* | https://*) curl -fsSL "$CAMERA_SET_SOURCE" -o "$dest" ;;
+        *) cp "$CAMERA_SET_SOURCE" "$dest" ;;
+    esac
+}
+
+# resolve_display_source HOSTNAME -- resolves HOSTNAME (case-insensitive) to its
+# CAMERA_DISPLAY_SOURCE table entry via the REAL scripts/camera-set.sh (fetched by
+# fetch_camera_set, never duplicated here -- #557). Echoes the resolved source, or nothing for a
+# box with no configured preview. Unlike setup-device.sh's resolve_device_name, an UNRECOGNIZED
+# hostname is NOT fatal here: setup.sh's hostname argument defaults to "camera-box" and is not
+# required to be a fleet camN name, so an unresolved name falls back to "no preview" -- the same
+# safe default every box had before #528/#557 baked a universal preview into every ExecStart.
+resolve_display_source() {
+    local hostname_arg="${1:-}"
+    local lc
+    lc="$(printf '%s' "$hostname_arg" | tr '[:upper:]' '[:lower:]')"
+    local tmp
+    tmp="$(mktemp)"
+    if fetch_camera_set "$tmp" 2>/dev/null; then
+        # shellcheck source=scripts/camera-set.sh
+        . "$tmp"
+        rm -f "$tmp"
+        if camera_resolve "$lc" 2>/dev/null; then
+            printf '%s' "$CAMERA_DISPLAY_SOURCE"
+            return 0
+        fi
+        # An unrecognized/empty hostname (e.g. the "camera-box" default) is NOT a warning case --
+        # see the function doc above: setup.sh's hostname argument is not required to be a fleet
+        # camN name, and this is the expected, silent "no preview configured" path.
+    else
+        rm -f "$tmp"
+        # Unlike an unrecognized hostname, a FAILED FETCH is a genuine anomaly (network blip,
+        # GitHub rate-limit, DNS not yet converged on a freshly-imaged box) -- matches the warn()
+        # convention every other network fetch in this script already uses (install_dantesync /
+        # install_camera_box's release lookups below) so it isn't silently indistinguishable from
+        # "this box legitimately has no preview" in the provisioning log (#557-review finding).
+        # MUST redirect to stderr (>&2): this function's own STDOUT is its return-value channel
+        # (callers do `display_source="$(resolve_display_source ...)"`) -- warn() itself writes to
+        # stdout (matching this script's normal console-message convention elsewhere), so an
+        # unredirected warn() call HERE would corrupt the captured return value with the warning
+        # text itself, then have config_toml_display_section wire that garbage into config.toml's
+        # [display] section as if it were a real NDI source. Caught by
+        # resolve_display_source_warns_and_returns_empty_on_fetch_failure before it ever shipped.
+        warn "could not fetch scripts/camera-set.sh from $CAMERA_SET_SOURCE -- HDMI preview table lookup skipped (no preview will be configured this run)" >&2
+    fi
+    printf ''
+}
+
+# config_toml_display_section SOURCE -- byte-identical contract to setup-device.sh's function of
+# the same name (#528/#557): emits an optional `[display]` config.toml section for a box's HDMI
+# cameraman preview NDI source, or nothing when SOURCE is empty. Escapes `\` and `"` before
+# interpolating into the TOML string literal (see setup-device.sh's copy for the full rationale).
+# `fb_device` is deliberately omitted -- src/config.rs's DisplayConfig serde-defaults it to
+# "/dev/fb0" when absent.
+config_toml_display_section() {
+    local source="${1:-}"
+    [ -n "$source" ] || return 0
+    local escaped="${source//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    printf '\n# HDMI cameraman preview (#528/#557 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\n' "$escaped"
+}
+
+# strip_config_toml_display_section TEXT -> TEXT with any existing `[display]` section (and its
+# preceding "# HDMI cameraman preview" comment) entirely removed -- from that comment/header
+# through the next `[section]` header or EOF, whichever comes first. This is the idempotency half
+# of the #557-review fix: config_toml_display_section() (above) is called on EVERY run (not just
+# first-install, see install_camera_box below), so re-running it without first stripping the OLD
+# section would either duplicate it (two [display] blocks) or, worse, leave a STALE section behind
+# if CAMERA_DISPLAY_SOURCE ever changes for this box. Strip-then-append makes every run
+# self-correcting regardless of what the file already contained.
+#
+# The header match is a PREFIX match (`/^\[display\]/`, no `[[:space:]]*$` end-anchor) -- not an
+# exact-whole-line match -- so a hand-edited config.toml with a trailing inline comment
+# (`[display]  # note`) is still recognized as the header and gets stripped. An exact-line match
+# would silently fail to recognize that variant, leaving the OLD section in place while the
+# unconditional append below writes a SECOND `[display]` table -- an invalid duplicate TOML table
+# that fails `toml::from_str` in src/config.rs and crash-loops camera-box indefinitely
+# (deep-review finding: a narrow trigger, but a far worse blast radius than the bug this whole
+# reconciliation exists to fix). The prefix match still cannot false-positive on an unrelated
+# section: `[displayfoo]` does not contain the literal substring "[display]" immediately followed
+# by "]" as its own bracket close, so it never matches.
+strip_config_toml_display_section() {
+    awk '
+        /^# HDMI cameraman preview/ { skip = 1; next }
+        /^\[display\]/ { skip = 1; next }
+        /^\[/ && $0 !~ /^\[display\]/ { skip = 0 }
+        skip { next }
+        { print }
+    ' <<< "$1"
 }
 
 # Check if running as root
@@ -579,7 +689,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)"
+ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
 
@@ -640,6 +750,25 @@ mic_gain = 12.0
 headphone_gain = 15.0
 EOF
         log "Created config at $CONFIG_DIR/config.toml"
+    fi
+
+    # HDMI cameraman preview (#528/#557/#558): RECONCILED on EVERY run of this function, unlike the
+    # base config.toml content above (written ONCE, on first install, so an operator's hand-tuned
+    # intercom/gain settings survive a reinstall/binary-update re-run). The systemd unit's ExecStart
+    # is rewritten unconditionally above on every run too -- an earlier version of this fix put the
+    # [display] section ONLY inside the "doesn't exist yet" branch above, so re-running setup.sh on
+    # an already-provisioned box (e.g. to update the binary) silently ended up with NEITHER
+    # mechanism: a bare ExecStart AND no [display] section, permanently losing the preview
+    # (#557-review finding). Strip-then-append makes this self-correcting on every run regardless
+    # of what config.toml already contained (first install, a stale/wrong section, or none at all).
+    local display_source
+    display_source="$(resolve_display_source "$DEVICE_HOSTNAME")"
+    local stripped_config
+    stripped_config="$(strip_config_toml_display_section "$(cat "$CONFIG_DIR/config.toml")")"
+    printf '%s\n' "$stripped_config" > "$CONFIG_DIR/config.toml"
+    config_toml_display_section "$display_source" >> "$CONFIG_DIR/config.toml"
+    if [[ -n "$display_source" ]]; then
+        info "HDMI preview: $display_source (persists across reboot/redeploy, #528/#557)"
     fi
 
     # Create NDI directory
@@ -753,5 +882,18 @@ main() {
     sleep 5
     reboot
 }
+
+# --- source-guard: skip main() ONLY when genuinely SOURCED (e.g. by the pure-function unit
+# tests). This is NOT the same guard as setup-device.sh's `[ "${BASH_SOURCE[0]}" != "${0}" ]` --
+# that form breaks THIS script's real invocation mode. setup.sh's documented usage is
+# `curl -fsSL ... | sudo bash -s CAM1` (stdin-piped): under `bash -s`, BASH_SOURCE[0] is EMPTY
+# and $0 is "bash", so a bare `!=` comparison ("" != "bash") would ALSO match and silently skip
+# the whole install on every real curl-pipe run. Requiring BASH_SOURCE[0] to be non-empty AND
+# different from $0 distinguishes true `source`/`.` (BASH_SOURCE[0] = the sourced path) from a
+# stdin pipe (BASH_SOURCE[0] unset) -- verified against all three invocation modes (piped,
+# direct-file, sourced) before landing this (#557).
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    return 0
+fi
 
 main "$@"
