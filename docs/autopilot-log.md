@@ -2139,3 +2139,41 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   return-monitor picture on cam2 after a re-provision. The Tier-0 proof (provisioning writes
   `--display`, verify-device.sh's new sub-check catches its absence) is the acceptance for this PR;
   the visual confirmation rides a future rig session, like #579's riders.
+
+## #591 (solo, closes #591 + #550) — 2026-07-07 — strict timesync-authority gate + fresh-offset (d)
+- Root cause (found + fixed LIVE 2026-07-07): cam5/cam6 (N150) shipped with `systemd-timesyncd`
+  active+enabled ALONGSIDE dantesync → a real **5.28-second** clock desync
+  (`[NTP] offset:-5280959us`), invisible to weeks of "passing" verify runs. Two defects let it
+  through: (1) provisioning never removed timesyncd; (2) verify-device `(d)` read only the LAST
+  `[NTP] offset:` line via `tail -1` regardless of age (the stale boot-STEP line — that IS #550) and
+  never checked for a 2nd timesync daemon. Live fleet already fixed (timesyncd purged fleet-wide);
+  this PR makes recurrence impossible via provisioning + a strict verify gate.
+- Version bump `02d01e6de` (1.7.0-dev.283).
+- RED `5f64445d9`: `tests/verify_device_pure_functions.rs` (8 new — `dantesync_offset_verdict`
+  ok/drift/stale/absent + `timesync_authority_verdict`/`timesync_daemon_verdict`; removed superseded
+  `dantesync_offset_ok` test) + `tests/setup_device_provisioner_hardening.rs` (3 new — setup-device
+  purge+mask loop, purge-before-dantesync order, create-usb chroot purge). All failing (functions/
+  provisioner-text absent).
+- GREEN `19b420aec`:
+  - `scripts/setup-device.sh` STEP 17 + `scripts/create-usb-linux.sh` chroot: loop
+    `apt-get purge -y systemd-timesyncd chrony ntp ntpsec openntpd` (then `systemctl mask` backstop)
+    BEFORE the dantesync install. `apt-get -s purge systemd-timesyncd` = no cascade (standalone).
+  - `scripts/verify-device.sh`: NEW `(r)` — dantesync must be SOLE authority; any competing daemon
+    INSTALLED (even masked) / ACTIVE / enabled = hard FAIL (`timesync_authority_verdict` +
+    `timesync_daemon_verdict` + `dpkg_status_installed` + `timesync_enabled_state_neutral`). `(d)`
+    rewritten (closes #550): `dantesync_offset_verdict` reads the FRESHEST `[NTP] offset:` line from
+    a `-o short-iso` dump, rejects a stale line via `DANTESYNC_OFFSET_FRESHNESS_S` (300s) using the
+    newest journal line as a same-box "now" proxy, FAILs on a fresh offset outside ±2000µs; stale/
+    absent + PTP LOCKED passes (no false-fail — (r) guarantees sole authority), stale/absent + PTP
+    not-locked = FAIL. Removed superseded `dantesync_offset_ok`.
+- Playbook: `.claude/skills/ops/SKILL.md` (timesyncd HARD-FAIL + purge policy + Windows W32Time
+  invariant `Get-Service W32Time` = Stopped/Disabled, a Windows verify-gate noted as follow-up) and
+  `.claude/skills/provision/SKILL.md` (rewrote check (d) row, added check (r) row).
+- Design note (#550 tension resolved per the user's in-issue #550 stance): the fresh-offset verdict
+  gates on the REAL signal — a FRESH large offset is a hard desync FAIL; a stale boot-step line is
+  NOT graded (that was the #550 false-fail); "no fresh offset but PTP LOCKED" passes because (r)
+  already guarantees nothing else is stepping the clock. Not a weakening — layered defense.
+- **Not verified live (deferred to supervisor):** no auto-deploy pipeline (provisioning-script
+  change, like #562). The supervisor drives the live-rig `verify-device.sh NAME` acceptance pass
+  against the fixed fleet after merge (drive-rig-in-supervisor); the Tier-0 pure-function RED→GREEN
+  is this PR's acceptance.
