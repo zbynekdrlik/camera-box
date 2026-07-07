@@ -363,6 +363,36 @@ genlock_latency_ms_from_log() {
     | sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
 }
 
+# genlock_rt_pin_from_log TEXT -> "ok" if imag-nb's OBS log shows the genlock render-tick thread
+# achieved SCHED_FIFO (#484: vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread,
+# Linux-only — the render tick is pinned SCHED_FIFO prio 10 on the isolated nohz_full cores so it
+# gets on-time wakeups), "failed" if the log shows the WARN-and-continue SCHED_OTHER fallback (the
+# syscall failed, almost always a missing rtprio ulimit grant) — the EXACT #572 root cause: imag-nb
+# ran an entire recording on ordinary SCHED_OTHER and lost 35 single-tick 60fps render deadlines.
+# "" (UNKNOWN/absent) when TEXT carries NEITHER line — the log was never read, or the deployed
+# build predates #484 (a stale build is a SEPARATE facet, imag_build_drift_report's dynamic
+# origin/main compare; this parser only judges the pin OUTCOME a #484-or-later build always logs
+# unconditionally on Linux, so silently returning UNKNOWN rather than guessing keeps the two
+# facets from double-diagnosing the same staleness with two different reasons). PURE — no I/O.
+# Drain-safe (grep|head, never grep -q under this file's set -euo pipefail — same SIGPIPE hazard
+# genlock_capability_from_log's own comment documents: `grep -q` can flip a genuine match into a
+# false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
+genlock_rt_pin_from_log() {
+  local text="$1" ok_line failed_line
+  ok_line="$(printf '%s\n' "$text" \
+    | grep -iE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
+    | head -1 || true)"
+  if [ -n "$ok_line" ]; then
+    printf 'ok\n'
+    return 0
+  fi
+  failed_line="$(printf '%s\n' "$text" \
+    | grep -iE 'genlock: could NOT set render-tick thread SCHED_FIFO' \
+    | head -1 || true)"
+  [ -n "$failed_line" ] && printf 'failed\n'
+  return 0
+}
+
 # dantesync_locked_from_log DANTESYNC_JOURNAL_TEXT -> "locked" if a PTP LOCK/NANO or NTP-offset
 # line is present -- the SAME markers `scripts/setup-imag.sh`'s own provisioning-time dantesync
 # restart check keys on (setup-imag.sh:230, `\[PTP\][[:space:]]+(LOCK|NANO)|\[NTP\] offset`).
@@ -594,6 +624,36 @@ check_imag_report() {
   else
     printf '  %-22s DRIFT    (expected %s, observed %s)\n' "dantesync_locked" "$exp_dantesync_locked" "$obs_dantesync_locked"
     drift=$((drift + 1))
+  fi
+
+  # 7. genlock render-tick SCHED_FIFO pin (#484 intent, #572 root cause). imag-nb ONLY — the
+  # obs-video.c pin is Linux-guarded, so this marker only ever appears in imag-nb's log. Two-tier
+  # via genlock_rt_pin_from_log, same shape as genlock_capability above: an EMPTY log is UNKNOWN
+  # (never read / OBS never launched); a NON-EMPTY log with NEITHER the success nor the failure
+  # line is ALSO UNKNOWN (the deployed build predates #484 — imag_build_drift_report's dynamic
+  # origin/main compare already flags a stale build separately; this facet stays silent rather
+  # than guessing at a pin outcome the build never attempted). Only the EXPLICIT "could NOT set
+  # ... SCHED_FIFO" line is DRIFT — the exact #572 signature (missing rtprio ulimit grant leaves
+  # the render-tick thread on ordinary SCHED_OTHER, causing occasional missed 60fps deadlines).
+  if [ -z "$obs_log_text" ]; then
+    printf '  %-22s UNKNOWN  (OBS log not read on imag-nb)\n' "genlock_rt_pin"
+    unknown=$((unknown + 1))
+  else
+    local rt_pin_status
+    rt_pin_status="$(genlock_rt_pin_from_log "$obs_log_text")"
+    case "$rt_pin_status" in
+      ok)
+        printf '  %-22s OK       (render-tick thread achieved SCHED_FIFO on the isolated core)\n' "genlock_rt_pin"
+        ;;
+      failed)
+        printf '  %-22s DRIFT    (render-tick thread stuck SCHED_OTHER — missing rtprio ulimit grant, #572)\n' "genlock_rt_pin"
+        drift=$((drift + 1))
+        ;;
+      *)
+        printf '  %-22s UNKNOWN  (no genlock RT-pin marker in the OBS log — build may predate #484)\n' "genlock_rt_pin"
+        unknown=$((unknown + 1))
+        ;;
+    esac
   fi
 
   [ "$drift" -gt 0 ] && return 20
@@ -1191,7 +1251,9 @@ Usage:
   STALE = DRIFT, the #530 45fps recurrence guard — no static README pin any more), a SHA256 of
   `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the Linux plugin binary), the OBS log
   (`~/.config/obs-studio/logs/*.log`, most recent file) for the genlock capability marker + the fps +
-  latency pins, and `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.
+  latency pins + the #484 render-tick SCHED_FIFO pin outcome (#572 — DRIFT if the log shows the
+  WARN-and-continue SCHED_OTHER fallback, i.e. a missing rtprio ulimit grant), and
+  `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.
   Optional `host=` / `user=` override the imag-nb defaults (`10.77.9.182` / `newlevel`). The
   remaining live-state pins live in vendor/README.md as `distroav_so_sha256_imag` (secondary) /
   `output_fps_imag` / `genlock_latency_ms_imag` / `dantesync_locked_imag`.

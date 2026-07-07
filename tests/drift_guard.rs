@@ -1092,6 +1092,67 @@ fn genlock_capability_parser_detects_the_235_single_knob_latency_line() {
     );
 }
 
+/// The imag-nb (#484) OBS log lines for the genlock render-tick SCHED_FIFO pin — SUCCESS shape
+/// (`vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread`, Linux-only).
+const GENLOCK_RT_PIN_OK_LINE: &str =
+    "14:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n";
+
+/// The #484 WARN-and-continue FAILURE shape — the EXACT #572 root cause: the render-tick thread
+/// could not get SCHED_FIFO (missing rtprio ulimit grant) and fell back to SCHED_OTHER.
+const GENLOCK_RT_PIN_FAILED_LINE: &str = "14:27:54.392: genlock: could NOT set render-tick thread \
+     SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)\n";
+
+#[test]
+fn genlock_rt_pin_parser_detects_the_484_success_line() {
+    let out = run_sourced(
+        "genlock_rt_pin_from_log \"$LOG\"",
+        &[("LOG", GENLOCK_RT_PIN_OK_LINE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "ok",
+        "the #484 SCHED_FIFO success line must parse as ok: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_rt_pin_parser_detects_the_572_failure_line() {
+    let out = run_sourced(
+        "genlock_rt_pin_from_log \"$LOG\"",
+        &[("LOG", GENLOCK_RT_PIN_FAILED_LINE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "failed",
+        "the #572 'could NOT set ... SCHED_FIFO' line must parse as failed: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_rt_pin_parser_absent_when_neither_line_present() {
+    // A real, non-empty imag-nb log (header + fps + the #235 latency line) that carries NEITHER
+    // the #484 success nor failure line -- e.g. a build that predates #484. Must read as ""
+    // (UNKNOWN upstream), never guessed as ok or failed.
+    let pre_484_log = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n11:40:39.714: video settings reset:\n\
+        11:40:39.714: \tfps:               60/1\n07:42:38.746: genlock: latency = 3 ms (\u{2248} 0 frames @ 60.000fps)\n";
+    let out = run_sourced("genlock_rt_pin_from_log \"$LOG\"", &[("LOG", pre_484_log)]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "a log with neither RT-pin marker must read empty (UNKNOWN), never a guess: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_rt_pin_parser_empty_on_empty_text() {
+    let out = run_sourced("genlock_rt_pin_from_log \"$LOG\"", &[("LOG", "")]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "empty log text must read empty (UNKNOWN, never read): {out:?}"
+    );
+}
+
 #[test]
 fn compare_clean_when_build_sha_and_capability_match_the_manifest() {
     // Full live facet: the deployed obs.dll/distroav.dll SHAs match the #184 manifest AND the
@@ -2459,25 +2520,29 @@ fn imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531() {
     );
 }
 
-/// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line (60fps,
-/// imag's low-latency IMAG role, EPIC #466 Topology v2).
+/// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line + the #484
+/// RT-pin success line (60fps, imag's low-latency IMAG role, EPIC #466 Topology v2).
 const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
 11:40:39.714: video settings reset:\n\
 11:40:39.714: \tfps:               60/1\n\
-07:42:38.746: genlock: latency = 3 ms (\u{2248} 0 frames @ 60.000fps) (OBS_GENLOCK_LATENCY_MS) \u{2014} single user-facing latency knob, ts-align implied ON (#235)\n";
+07:42:38.746: genlock: latency = 3 ms (\u{2248} 0 frames @ 60.000fps) (OBS_GENLOCK_LATENCY_MS) \u{2014} single user-facing latency knob, ts-align implied ON (#235)\n\
+14:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n";
 
 #[test]
 fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
-    // Full live facet, all six live-state checks match the pin -> exit 0, every line OK, no
+    // Full live facet, all SEVEN live-state checks match the pin -> exit 0, every line OK, no
     // DRIFT/UNKNOWN. (#531: the build-identity check moved OUT to imag_build_drift_report.)
     // #489: the 10th/11th args are the dantesync lock pin + a realistic locked journal line —
     // must ALSO read clean, or this "everything matches" case would spuriously report DRIFT/UNKNOWN.
+    // #572: the log text now ALSO carries the #484 RT-pin success line, so the 7th genlock_rt_pin
+    // check reads OK too — otherwise this "everything matches" case would regress to UNKNOWN.
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[]);
+    let out = run_sourced(body, &[("LOG", &log)]);
     assert!(
         out.contains("RC=0"),
         "every value matches -> clean: {out:?}"
@@ -2487,11 +2552,11 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         !out.contains("UNKNOWN"),
         "no unknown line expected: {out:?}"
     );
-    // Every one of the 6 live-state checks must print its own OK line (comprehensive-logging:
+    // Every one of the 7 live-state checks must print its own OK line (comprehensive-logging:
     // values, not just a bare pass/fail).
     // #531: `genlock_build_sha` (the retired static build check) is NO LONGER one of check_imag_
     // report's lines — the DYNAMIC build-staleness now lives in imag_build_drift_report, run
-    // separately by gather_and_check_imag. So this function prints these 6 live-state lines.
+    // separately by gather_and_check_imag. So this function prints these 7 live-state lines.
     for label in [
         "distroav_so_sha256",
         "genlock_capability",
@@ -2499,6 +2564,7 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         "genlock_latency_ms_imag",
         "distroav_so_path",
         "dantesync_locked",
+        "genlock_rt_pin",
     ] {
         assert!(out.contains(label), "must report {label}: {out:?}");
     }
@@ -2616,6 +2682,92 @@ fn check_imag_report_unknown_when_values_were_not_read_never_a_silent_pass_463()
 }
 
 #[test]
+fn check_imag_report_flags_genlock_rt_pin_failure_as_drift_572() {
+    // The EXACT #572 signature: the OBS log shows the render-tick thread stuck SCHED_OTHER
+    // (missing rtprio ulimit grant) -> DRIFT, exit 20 — even though every other value matches.
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_FAILED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    assert!(
+        out.contains("RC=20"),
+        "the #572 SCHED_OTHER fallback line must DRIFT: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_rt_pin") && out.contains("DRIFT"),
+        "must flag the genlock_rt_pin line as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_genlock_rt_pin_ok_when_pin_achieved_572() {
+    // Only 9 positional args supplied (no dantesync pair) -> that row defaults to UNKNOWN
+    // (mirrors check_imag_report_flags_the_plugin_path_missing_463's own 9-arg convention), so
+    // this asserts the genlock_rt_pin LINE specifically rather than the overall exit code.
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(line.contains("OK"), "must report OK: {line:?}");
+}
+
+#[test]
+fn check_imag_report_genlock_rt_pin_unknown_when_log_never_read_572() {
+    // Empty log text (SSH failure, or OBS never launched) -> UNKNOWN, never a false DRIFT.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "an unread log must report UNKNOWN, never a false DRIFT: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_genlock_rt_pin_unknown_when_marker_absent_from_a_read_log_572() {
+    // A NON-EMPTY log (real content, genlock capability marker present) that predates #484 —
+    // carries NEITHER the success nor the failure RT-pin line -> UNKNOWN (the separate dynamic
+    // build-staleness facet, imag_build_drift_report, already flags a stale build; this facet
+    // must not guess at a pin outcome the build never attempted).
+    let pre_484_log = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\ngenlock: latency = 3 ms\n";
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", pre_484_log)]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "a read log with no RT-pin marker at all must report UNKNOWN, never a guess: {line:?}"
+    );
+    assert!(
+        out.contains("RC=11"),
+        "no other drift in this fixture -> overall UNKNOWN exit: {out:?}"
+    );
+}
+
+#[test]
 fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
     // Parse a realistic imag-nb OBS log (IMAG_LOG_60FPS_3MS) through the real fps/latency
     // *_from_log parsers, THEN feed the RAW log text (not a pre-extracted capability flag,
@@ -2725,12 +2877,21 @@ fn dantesync_locked_from_log_empty_when_journal_never_read_489() {
 #[test]
 fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     // Every OTHER value also clean, so the dantesync row is the only one exercised in isolation.
+    // #572: the log now also carries the #484 RT-pin success line so this "everything else is
+    // clean" case doesn't regress to UNKNOWN on the new genlock_rt_pin check.
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE)]);
+    let out = run_sourced(
+        body,
+        &[
+            ("LOG", log.as_str()),
+            ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+        ],
+    );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
     let line = out
         .lines()
