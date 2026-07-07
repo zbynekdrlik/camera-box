@@ -5351,10 +5351,15 @@ mod tests {
     /// optical tick), then assert the WHOLE-RECORDING imag verdict
     /// (`full_chain.loss.imag.zero_loss`, = `node_verdict_for_imag`'s `is_zero()`) and the
     /// PER-SEGMENT sweep verdict (`all_cambox_continuity.imag.overall_pass`, the honest per-window
-    /// gate) AGREE and equal `expect`. This is the #583 PARITY lock: the two paths must never diverge
-    /// again (the strict `window_segment` copy/gap divergence WAS the bug). The single window spans
-    /// the whole recording, so it maps 1:1 onto the whole-recording verdict (the only difference is
-    /// the whole-recording #575 boundary trim, which the sequences keep clean at the edges).
+    /// gate) AGREE and equal `expect` on THIS sequence. This is the #583 PARITY lock: it proves the
+    /// strict `window_segment` copy/gap false-fail (the #583 bug) is CLOSED for a benign beat and a
+    /// copy/freeze — it does NOT claim the two paths compute identically on every input (they scan
+    /// different windows: the whole optical span vs one ~30s schedule slice, so the #376 undecodable
+    /// RATE denominator and the boundary trim — #575's 3-frame lead/tail trim on the headline vs the
+    /// schedule's transition guard on the sweep — can legitimately disagree on which specific frames
+    /// fail; `imag_tick_gate::ImagZeroLoss::is_zero_loss`'s doc has the full caveat). The single
+    /// window here spans the whole recording so the two windows coincide for THIS test (the sequences
+    /// keep clean edges so the whole-recording #575 trim is a no-op vs the per-segment no-trim).
     fn assert_imag_paths_agree(tag: &str, optical_ticks: &[u32], expect: bool) {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;

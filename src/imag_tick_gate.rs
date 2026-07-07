@@ -706,11 +706,20 @@ impl ImagZeroLoss {
         self.burn_present_ok && self.burn.first_id.is_some() && self.burn.is_contiguous()
     }
 
-    /// #580v2/#583 — THE imag zero-loss decision, IDENTICAL to `NodeVerdict::is_zero` for an imag
-    /// node (colour is not wired for imag, so its always-`true` `colour_fail == 0` term is omitted):
-    /// the optical read is LIVE with no copy/freeze AND its undecodable rate is within the moiré
-    /// floor AND the digital burn is a valid delivery proof. Locked equal to the whole-recording path
-    /// by the probe-gated parity test in `bin/recording-verdict.rs`.
+    /// #580v2/#583 — THE imag zero-loss DECISION FORMULA, IDENTICAL to `NodeVerdict::is_zero` for an
+    /// imag node (colour is not wired for imag, so its always-`true` `colour_fail == 0` term is
+    /// omitted): the optical read is LIVE with no copy/freeze AND its undecodable rate is within the
+    /// moiré floor AND the digital burn is a valid delivery proof. The probe-gated parity test in
+    /// `bin/recording-verdict.rs` locks this FORMULA equal to the whole-recording path on the same
+    /// synthetic sequence — it closes the #583 copy/gap false-fail, but does NOT prove the two paths
+    /// agree on every input: they are computed over DIFFERENT windows (the whole recording's optical
+    /// span vs one ~30s schedule window), so the #376 undecodable RATE denominator and the boundary
+    /// trim (the whole-recording path applies the #575 3-frame lead/tail trim; the per-segment sweep
+    /// applies only the schedule's transition guard) can still legitimately disagree on which SPECIFIC
+    /// frames fail. That is fine — `recording-verdict.rs`'s `all_pass` ANDs BOTH the whole-recording
+    /// `nv.is_zero() && span_ok` AND the per-segment `overall_pass` independently, so the run FAILS if
+    /// either flags a problem (the stricter one governs); never rely on one path alone to prove the
+    /// other clean.
     pub fn is_zero_loss(&self, undecodable_rate_max: f64) -> bool {
         // #583 GREEN — the HARD optical term is `is_live_no_copy` (advancing AND no long Δtick==0
         // copy/freeze run), the SAME #580v2 term `NodeVerdict::optical_ok` uses for imag. It tolerates

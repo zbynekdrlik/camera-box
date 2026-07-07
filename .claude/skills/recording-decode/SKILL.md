@@ -850,9 +850,15 @@ copy WAS the bug):
 4. **PARITY lock (probe-gated, CI-only):** assert `full_chain.loss.imag.zero_loss ==
    all_cambox_continuity.imag.overall_pass` on ONE `build_and_print_verdict` call over the SAME
    synthetic imag sequence (a single window == the whole recording, guard 0) — benign beat both
-   PASS, copy-freeze both FAIL. This is what guarantees the two paths never diverge again. Keep the
-   sequence's boundaries clean so the whole-recording #575 trim is a no-op vs the per-segment
-   no-trim.
+   PASS, copy-freeze both FAIL. This closes the #583 copy/gap false-fail (proven on this sequence) —
+   it does NOT prove the two paths compute identically on every input: they scan different windows
+   (the whole optical span vs one ~30s schedule slice), so the #376 undecodable RATE denominator and
+   the boundary trim (#575's 3-frame lead/tail trim on the headline vs the schedule's transition guard
+   on the sweep) can still legitimately disagree on which SPECIFIC frames fail. That's fine —
+   `all_pass` ANDs BOTH paths independently, so the stricter one governs; never rely on one path alone
+   to prove the other clean. Keep the parity test's own sequence boundaries clean so the whole-recording
+   #575 trim is a no-op vs the per-segment no-trim (otherwise the two windows genuinely wouldn't
+   coincide, and the test would prove nothing).
 
 ## GOTCHA — the `frame()` test helper's `tick = max(frame_id)` trap bites EVERY new mixed cam2+burn fixture (cost a full CI cycle, #575/#576)
 
