@@ -7127,11 +7127,16 @@ mod tests {
         // #480-confirmed step 2 — the hardcoded IMAG_BURN_RENDER_STEP constant would have been
         // wrong here. `calibrate_burn_step` must derive 3 from the observed ids and still
         // declare a clean run zero loss.
+        //
+        // The cam2 tick base is kept WELL ABOVE the burn id range (100_000+i vs 10+3*i) —
+        // `frame()`'s `tick = max(frame_id)` over ALL payloads on the frame means a burn id that
+        // ever exceeds the cam2 id would silently hijack `.tick`, corrupting the optical
+        // contiguity check (see `imag_window_with_burn`'s doc comment for the same gotcha).
         let frames: Vec<RecordingFrame> = (0..60u32)
             .map(|i| {
                 frame(
                     i as u64,
-                    &[(CAM2, 100 + i), (super::BURN_RUN_ID_IMAG, 10 + 3 * i)],
+                    &[(CAM2, 100_000 + i), (super::BURN_RUN_ID_IMAG, 10 + 3 * i)],
                 )
             })
             .collect();
@@ -7157,10 +7162,11 @@ mod tests {
         // recording — a genuine dropped step-grid slot. The OLD hardcoded step-2 constant would
         // have attributed the WRONG grid ids entirely (see `imag_tick_gate`'s #576 unit test
         // `calibrate_burn_step_feeds_correct_missing_grid_id_into_burn_step_contiguity_576`);
-        // calibrated to the TRUE step, the exact missing grid id must be reported.
+        // calibrated to the TRUE step, the exact missing grid id must be reported. Cam2 tick
+        // base kept WELL ABOVE the burn id range for the same reason as the test above.
         let frames: Vec<RecordingFrame> = (0..60u32)
             .map(|i| {
-                let mut payloads = vec![(CAM2, 100 + i)];
+                let mut payloads = vec![(CAM2, 100_000 + i)];
                 if i != 30 {
                     payloads.push((super::BURN_RUN_ID_IMAG, 10 + 3 * i));
                 }
