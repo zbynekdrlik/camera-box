@@ -321,6 +321,121 @@ fn dantesync_offset_verdict_absent_when_no_offset_line() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// (d) dantesync LIVENESS gate (#600 / #591 review) — the offset/lock verdicts above grade the
+// journal's CONTENT, but a died/hung dantesync leaves BOTH signals computed against a STALE
+// journal and PASSES (the clock has been free-running/undisciplined the whole time). Two pure
+// helpers, gated AHEAD of the lock/offset reads:
+//   dantesync_service_active STATE   -> 0 iff STATE is exactly "active"          (catches DIED)
+//   dantesync_journal_fresh J NOW MAX -> "fresh"|"stale" — the newest journal line must be within
+//                                        MAX seconds of the box's OWN wall clock (catches HUNG-
+//                                        but-still-"active", journal not advancing).
+// ---------------------------------------------------------------------------------------------
+
+fn service_active(state: &str) -> bool {
+    let (code, out, err) = run_sourced(&format!(
+        "if dantesync_service_active '{}'; then echo YES; else echo NO; fi",
+        state.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim() == "YES"
+}
+
+#[test]
+fn dantesync_service_active_true_only_on_exactly_active() {
+    assert!(
+        service_active("active"),
+        "a running dantesync ('active') is the ONLY live state"
+    );
+    // Every non-"active" systemctl is-active state means the clock is undisciplined/free-running.
+    for s in [
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+        "",
+        "unknown",
+    ] {
+        assert!(
+            !service_active(s),
+            "'{s}' must NOT count as a live dantesync (clock free-running -> hard FAIL)"
+        );
+    }
+}
+
+// A dantesync journal whose NEWEST line is at 18:36:45+02:00 (epoch 1783442205). box_now is derived
+// from that same instant via `date -d` in the harness, so the (box_now - newest) age is exact and
+// timezone-independent — no brittle hand-computed epoch. Both timestamps are the BOX's own; the
+// verifier host's clock never enters the comparison.
+const DS_ADVANCING_JOURNAL: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:+14us (threshold:535us, adaptive)
+";
+// No ISO-timestamped line at all — the newest-line epoch is unextractable -> fail-closed to stale.
+const DS_NO_ISO_LINE: &str = "\
+some dantesync line with no leading short-iso timestamp
+another such line
+";
+
+// journal_fresh_rel: box_now = (epoch of the journal's newest line, 18:36:45+02:00) + plus_secs,
+// computed by the SAME `date -d` the helper uses, so the age is exactly `plus_secs`.
+fn journal_fresh_rel(journal: &str, plus_secs: i64, max_age: i64) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nNOW=$(( $(date -d '2026-07-07 18:36:45 +02:00' +%s) + ({plus_secs}) ))\n\
+         dantesync_journal_fresh \"$TEXT\" \"$NOW\" {max_age}",
+        journal.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+// journal_fresh_abs: explicit (possibly garbage) box_now string, to prove the fail-closed paths.
+fn journal_fresh_abs(journal: &str, box_now: &str, max_age: i64) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\ndantesync_journal_fresh \"$TEXT\" '{}' {max_age}",
+        journal.replace('\'', "'\\''"),
+        box_now.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn dantesync_journal_fresh_when_newest_line_is_within_max_age() {
+    // Newest line 5s before the box clock (max 60) -> the journal is advancing -> fresh.
+    assert_eq!(journal_fresh_rel(DS_ADVANCING_JOURNAL, 5, 60), "fresh");
+}
+
+#[test]
+fn dantesync_journal_fresh_stale_when_journal_stopped_advancing() {
+    // Newest line 600s before the box clock (max 60) -> daemon hung / not logging -> stale.
+    assert_eq!(journal_fresh_rel(DS_ADVANCING_JOURNAL, 600, 60), "stale");
+}
+
+#[test]
+fn dantesync_journal_fresh_not_stale_on_negative_age() {
+    // Box clock 30s BEHIND the newest journal line (a stepped-backward wall clock). This helper
+    // only catches "not advancing" — a stepped clock is (r)/drift's job — so a negative age is
+    // NOT stale here.
+    assert_eq!(journal_fresh_rel(DS_ADVANCING_JOURNAL, -30, 60), "fresh");
+}
+
+#[test]
+fn dantesync_journal_fresh_fail_closed_on_bad_box_now() {
+    // Empty / non-numeric box_now cannot prove freshness -> fail-closed to stale.
+    assert_eq!(journal_fresh_abs(DS_ADVANCING_JOURNAL, "", 60), "stale");
+    assert_eq!(
+        journal_fresh_abs(DS_ADVANCING_JOURNAL, "notanumber", 60),
+        "stale"
+    );
+}
+
+#[test]
+fn dantesync_journal_fresh_stale_when_no_parseable_line() {
+    // No extractable newest-line timestamp -> cannot prove the journal advanced -> stale.
+    assert_eq!(journal_fresh_abs(DS_NO_ISO_LINE, "9999999999", 60), "stale");
+}
+
+// ---------------------------------------------------------------------------------------------
 // (r) single timesync authority: dantesync ONLY, no competing daemon installed/active/enabled (#591)
 // ---------------------------------------------------------------------------------------------
 
@@ -1195,5 +1310,64 @@ fn check_q_is_wired_into_the_live_flow_as_a_warning_never_a_fail() {
         !q_block.contains("fail \""),
         "check (q) must NEVER call fail() -- a hard FAIL would break #453's explicit \
          'warning, not a functional defect' design. block: {q_block:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring — the (d) dantesync LIVENESS gate (#600) must actually be composed into the (d) live
+// flow AHEAD of the lock/offset reads (a dead pure function nobody calls would leave the
+// died/hung-daemon hole open). Non-tautological: assert the CALL SITES with their real args
+// appear in the LIVE-FLOW portion only (the pure definitions trivially contain their own names).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn check_dantesync_liveness_is_wired_into_the_d_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_marker = "never run the live SSH flow below.";
+    let guard_pos = body
+        .find(guard_marker)
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+
+    // The two liveness signals are gathered over SSH from the box itself.
+    assert!(
+        live_flow.contains("systemctl is-active dantesync"),
+        "the LIVE FLOW must gather `systemctl is-active dantesync` over SSH (#600) to detect a \
+         DIED daemon -- not just define the helper"
+    );
+    assert!(
+        live_flow.contains("date +%s"),
+        "the LIVE FLOW must gather the box's own wall clock (`date +%s`) over SSH (#600) so \
+         journal freshness is judged against the box, never the verifier host"
+    );
+    // Both helpers must be CALLED with their real args, ahead of the lock/offset reads.
+    assert!(
+        live_flow.contains("dantesync_service_active \"$DS_ACTIVE\""),
+        "the LIVE FLOW must CALL dantesync_service_active on the gathered is-active state (#600) \
+         -- a died dantesync (free-running clock) must hard-FAIL before the stale lock/offset \
+         reads are ever trusted"
+    );
+    assert!(
+        live_flow.contains(
+            "dantesync_journal_fresh \"$DS_JOURNAL\" \"$BOX_NOW\" \"$DANTESYNC_JOURNAL_MAX_AGE_S\""
+        ),
+        "the LIVE FLOW must CALL dantesync_journal_fresh on the dantesync journal + box clock + \
+         DANTESYNC_JOURNAL_MAX_AGE_S (#600) -- a hung-but-'active' daemon (journal not advancing) \
+         must hard-FAIL before the stale reads are trusted"
+    );
+    // The gate must be a hard FAIL, not a warning, for both liveness holes.
+    assert!(
+        live_flow.contains("clock undisciplined/free-running (#591 review)")
+            && live_flow.contains("daemon hung, clock free-running (#591 review)"),
+        "both liveness holes (died + hung) must fail() with a #591-review-tagged reason (#600)"
+    );
+    // A transient ssh failure on the box-clock read must fail() with its OWN distinct message, not
+    // be misattributed to the hung-daemon branch (review of #600): the box-clock read captures the
+    // ssh rc separately, and an unreadable clock hard-FAILs on its own reason.
+    assert!(
+        live_flow.contains("ds_now_rc")
+            && live_flow.contains("could not read the box wall clock over SSH"),
+        "an unreadable box clock (ssh rc captured) must hard-FAIL with a DISTINCT reason, never \
+         misattributed to 'daemon hung' (#600 review)"
     );
 }

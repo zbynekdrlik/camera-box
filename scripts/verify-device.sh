@@ -41,8 +41,10 @@
 #   (a) camera-box --version is a valid, well-formed fleet version string
 #   (b) systemctl is-active camera-box == active
 #   (c) NDI sender is streaming (journalctl emit-fps / genlock-report line), no FATAL/panic
-#   (d) dantesync PTP servo LOCKED + a FRESH clock offset within bound (#550/#591 -- rejects a
-#       stale boot-step "[NTP] offset:" line; a fresh out-of-bound offset is a hard desync FAIL)
+#   (d) dantesync running + logging (LIVENESS, #600) THEN PTP servo LOCKED + a FRESH clock offset
+#       within bound (#550/#591 -- rejects a stale boot-step "[NTP] offset:" line; a fresh
+#       out-of-bound offset is a hard desync FAIL). A died/hung daemon (journal not advancing vs
+#       the box clock) hard-FAILs before the stale lock/offset content is ever trusted.
 #   (e) genlock.conf drop-in present, CAMERA_BOX_GENLOCK_FPS matches camera-set.sh's per-cam value
 #   (f) cpu-affinity.conf drop-in present (CPUAffinity=<isolated core>)
 #   (g) /usr/lib/ndi/libndi.so.6 is a root-owned symlink chain to a root-owned regular file
@@ -93,6 +95,13 @@ DEVICE_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
 # [NTP] offset line on a ~30s cadence, so 300s is generous headroom that never false-fails a
 # healthy box yet rejects the ~1h-old boot-step line that started #550.
 DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
+# #600 (#591 review): dantesync LIVENESS bound. The (d) lock/offset checks grade the journal's
+# CONTENT, but a died/hung dantesync leaves BOTH signals computed against a STALE journal and would
+# PASS (the clock has been free-running/undisciplined the whole time). The dantesync journal must
+# have advanced within this many seconds of the box's OWN wall clock, or the daemon is presumed
+# hung / not logging. dantesync emits a [PTP] servo line ~1/s, so >60s without a new line means it
+# has stopped. Overridable via env like the other bounds.
+DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running kernel == this exact version
 NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#547)
 
@@ -215,6 +224,52 @@ dantesync_offset_verdict() {
     printf 'ok\n'
   else
     printf 'drift\n'
+  fi
+}
+
+# --- (d) dantesync LIVENESS gate (#600 / #591 review) -----------------------------------------
+# dantesync_locked_ok / dantesync_offset_verdict grade the journal's CONTENT, but a died or hung
+# dantesync leaves both signals computed against a STALE journal and passes (#600): the clock has
+# been free-running/undisciplined the whole time. These two helpers gate the CONTENT reads on the
+# daemon actually running and logging -- a SEPARATE liveness concern, added AHEAD of them. They do
+# NOT change dantesync_locked_ok / dantesync_offset_verdict (the freshness-vs-newest-line model is
+# correct for grading the OFFSET).
+
+# dantesync_service_active STATE -> 0 iff STATE (the trimmed `systemctl is-active dantesync` output)
+# is exactly "active". inactive / failed / activating / deactivating / "" -> non-zero. Catches the
+# DIED case (a dead dantesync = the clock free-running with no discipline).
+dantesync_service_active() {
+  [ "$1" = active ]
+}
+
+# dantesync_journal_fresh JOURNAL BOX_NOW_EPOCH MAX_AGE_S -> echoes "fresh" | "stale". Extracts the
+# epoch of the NEWEST `-o short-iso` timestamp line in JOURNAL (reusing _short_iso_epoch + the same
+# iso_re as dantesync_offset_verdict) and compares it against BOX_NOW_EPOCH (the box's OWN wall
+# clock, from `date +%s` on the box -- so the verifier host's clock never enters the comparison):
+#   stale -- the newest line is absent/unparseable, OR BOX_NOW is empty/unparseable (fail-closed),
+#            OR (BOX_NOW - newest_epoch) > MAX_AGE_S (the journal has stopped advancing vs the box's
+#            own wall clock -> daemon hung / not logging).
+#   fresh -- otherwise (incl. a NEGATIVE age: a box clock stepped BACKWARD is NOT stale here -- (r)
+#            and the fresh-offset drift path catch a stepped clock; this helper only catches "not
+#            advancing").
+# Catches the HUNG-but-still-"active" case. JOURNAL must be gathered with `-o short-iso`.
+dantesync_journal_fresh() {
+  local journal="$1" box_now="$2" max_age="$3"
+  local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
+  local now_iso now_e
+  # Fail-closed: BOX_NOW must be a clean non-negative integer epoch, or we cannot judge freshness.
+  if [ -z "$box_now" ] || ! printf '%s' "$box_now" | grep -qE '^[0-9]+$'; then
+    printf 'stale\n'; return 0
+  fi
+  now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
+  now_e="$(_short_iso_epoch "$now_iso")"
+  if [ -z "$now_e" ]; then
+    printf 'stale\n'; return 0
+  fi
+  if [ "$((box_now - now_e))" -gt "$max_age" ]; then
+    printf 'stale\n'
+  else
+    printf 'fresh\n'
   fi
 }
 
@@ -640,7 +695,9 @@ Checks:
   (r) dantesync is the SOLE timesync authority -- no competing daemon installed/active/enabled (#591)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
-     DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300).
+     DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
+     DANTESYNC_JOURNAL_MAX_AGE_S (max age of the newest dantesync journal line vs the box
+     clock before the daemon is treated as hung/free-running, default 60; #600).
 
 Exit: 0 iff every check passes.
 EOF
@@ -739,36 +796,57 @@ DS_JOURNAL="$(ssh_box "journalctl -u dantesync --no-pager -n 400 -o short-iso 2>
 if [ "$rc" -ne 0 ] || [ -z "$DS_JOURNAL" ]; then
   fail "dantesync journal unreadable (ssh rc=$rc)"
 else
-  ds_locked=no
-  if dantesync_locked_ok "$DS_JOURNAL"; then
-    ok "dantesync PTP servo LOCKED"
-    ds_locked=yes
+  # (d) LIVENESS gate (#600 / #591 review) — a died/hung dantesync leaves the lock + offset reads
+  # below graded on a STALE journal and would otherwise PASS while the clock free-runs. Gather the
+  # daemon's is-active state + the box's OWN wall clock, and hard-FAIL on either liveness hole
+  # BEFORE trusting the content reads. Both signals come from the box, so the verifier host's clock
+  # never enters the freshness comparison.
+  # is-active legitimately exits non-zero for an inactive service (expected, NOT an ssh error), so
+  # its rc is meaningless -- read its STDOUT ('' means unreachable). date +%s only exits non-zero on
+  # a real ssh failure, so capture that rc (the script's `rc=$?` gather pattern) to keep the
+  # "box clock unreadable" case DISTINCT from the "daemon hung" case, never misattributing a
+  # transient ssh blip to a free-running clock.
+  DS_ACTIVE="$(ssh_box "systemctl is-active dantesync 2>/dev/null")" || true
+  ds_now_rc=0
+  BOX_NOW="$(ssh_box "date +%s 2>/dev/null")" || ds_now_rc=$?
+  if ! dantesync_service_active "$DS_ACTIVE"; then
+    fail "dantesync service NOT active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running (#591 review)"
+  elif [ "$ds_now_rc" -ne 0 ] || [ -z "$BOX_NOW" ]; then
+    fail "could not read the box wall clock over SSH (date +%s, ssh rc=$ds_now_rc) -- cannot certify the dantesync journal is advancing (#591 review)"
+  elif [ "$(dantesync_journal_fresh "$DS_JOURNAL" "$BOX_NOW" "$DANTESYNC_JOURNAL_MAX_AGE_S")" = stale ]; then
+    fail "dantesync journal has not advanced within ${DANTESYNC_JOURNAL_MAX_AGE_S}s of the box clock -- daemon hung, clock free-running (#591 review)"
   else
-    fail "dantesync PTP servo not LOCKED (degraded or unknown)"
+    ds_locked=no
+    if dantesync_locked_ok "$DS_JOURNAL"; then
+      ok "dantesync PTP servo LOCKED"
+      ds_locked=yes
+    else
+      fail "dantesync PTP servo not LOCKED (degraded or unknown)"
+    fi
+    case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$DEVICE_CLOCK_BOUND_US")" in
+      ok)
+        ok "dantesync clock offset within ${DEVICE_CLOCK_BOUND_US}us bound (fresh)"
+        ;;
+      drift)
+        # A FRESH out-of-bound offset = a real clock desync happening NOW -- the cam5/6 5.28s case
+        # (a 2nd timesync daemon stepping the clock). Always a hard FAIL, regardless of PTP state.
+        fail "dantesync clock offset OUTSIDE the ${DEVICE_CLOCK_BOUND_US}us bound -- a REAL clock desync (#591: e.g. a 2nd timesync daemon stepping the clock, cam5/6 -> 5.28s)"
+        ;;
+      stale | absent)
+        # No FRESH [NTP] offset reading. dantesync emits the [NTP] offset line only intermittently
+        # (a boot step + a ~30s adaptive cadence), so a settled box may momentarily have only a stale
+        # one. If the PTP servo is LOCKED (the µs-grade real-time signal) AND the (r) sole-authority
+        # gate below confirms nothing else is stepping the clock, the offset is disciplined near-zero;
+        # reading the aged boot-step line and failing on its value was the #550 false-fail. If PTP is
+        # NOT locked, we have no trustworthy clock signal at all -> FAIL (never a silent pass).
+        if [ "$ds_locked" = yes ]; then
+          ok "dantesync offset: no FRESH [NTP] line, but PTP servo LOCKED -- clock disciplined near-zero; a stale boot-step line is deliberately NOT read (#550). Sole-authority gate (r) below guarantees no competing daemon."
+        else
+          fail "dantesync clock offset has no FRESH reading AND PTP servo is not LOCKED -- clock status UNKNOWN, never a silent pass (#550/#591)"
+        fi
+        ;;
+    esac
   fi
-  case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$DEVICE_CLOCK_BOUND_US")" in
-    ok)
-      ok "dantesync clock offset within ${DEVICE_CLOCK_BOUND_US}us bound (fresh)"
-      ;;
-    drift)
-      # A FRESH out-of-bound offset = a real clock desync happening NOW -- the cam5/6 5.28s case
-      # (a 2nd timesync daemon stepping the clock). Always a hard FAIL, regardless of PTP state.
-      fail "dantesync clock offset OUTSIDE the ${DEVICE_CLOCK_BOUND_US}us bound -- a REAL clock desync (#591: e.g. a 2nd timesync daemon stepping the clock, cam5/6 -> 5.28s)"
-      ;;
-    stale | absent)
-      # No FRESH [NTP] offset reading. dantesync emits the [NTP] offset line only intermittently
-      # (a boot step + a ~30s adaptive cadence), so a settled box may momentarily have only a stale
-      # one. If the PTP servo is LOCKED (the µs-grade real-time signal) AND the (r) sole-authority
-      # gate below confirms nothing else is stepping the clock, the offset is disciplined near-zero;
-      # reading the aged boot-step line and failing on its value was the #550 false-fail. If PTP is
-      # NOT locked, we have no trustworthy clock signal at all -> FAIL (never a silent pass).
-      if [ "$ds_locked" = yes ]; then
-        ok "dantesync offset: no FRESH [NTP] line, but PTP servo LOCKED -- clock disciplined near-zero; a stale boot-step line is deliberately NOT read (#550). Sole-authority gate (r) below guarantees no competing daemon."
-      else
-        fail "dantesync clock offset has no FRESH reading AND PTP servo is not LOCKED -- clock status UNKNOWN, never a silent pass (#550/#591)"
-      fi
-      ;;
-  esac
 fi
 
 # (r) single timesync authority: dantesync ONLY -- no competing daemon installed/active/enabled (#591)
