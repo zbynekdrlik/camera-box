@@ -59,16 +59,18 @@ pub fn trim_boundary_samples(
     lead_frames: u64,
     tail_frames: u64,
 ) -> Vec<u32> {
-    let _ = (
-        first_frame_index,
-        last_frame_index,
-        lead_frames,
-        tail_frames,
-    );
-    // #575 RED STUB: identity — returns every sample untrimmed. The real frame-position filter
-    // lands in the GREEN commit. Kept as its own commit so the boundary-trim tests below are
-    // observably RED (the artifact is NOT trimmed) before the fix, per `regression-test-first.md`.
-    samples.iter().map(|&(_, v)| v).collect()
+    // Samples with `frame_index < lead_cutoff` (the lead boundary window) or
+    // `frame_index > tail_cutoff` (the tail boundary window) are excluded. Saturating math: a
+    // recording shorter than `lead_frames + tail_frames` can make `lead_cutoff > tail_cutoff`,
+    // which correctly excludes EVERYTHING (nothing survives a trim window bigger than the whole
+    // recording) rather than underflowing/panicking.
+    let lead_cutoff = first_frame_index.saturating_add(lead_frames);
+    let tail_cutoff = last_frame_index.saturating_sub(tail_frames);
+    samples
+        .iter()
+        .filter(|&&(idx, _)| idx >= lead_cutoff && idx <= tail_cutoff)
+        .map(|&(_, v)| v)
+        .collect()
 }
 
 #[cfg(test)]
