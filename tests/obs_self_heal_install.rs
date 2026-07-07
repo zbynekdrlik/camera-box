@@ -776,7 +776,7 @@ fn enable_reboot_defaults_to_false_when_omitted() {
     let (code, out, _err) = run_script(&["--box", "strih"]);
     assert_eq!(code, 0);
     assert!(
-        out.contains("$RebootEnabledOverride = $false"),
+        out.contains("$RebootEnabledOverride    = $false"),
         "#89: an omitted --enable-reboot must install $false, never $true or $null (this is a \
          plain boolean opt-in, not a tunable magic number). out=\n{out}"
     );
@@ -788,7 +788,7 @@ fn enable_reboot_flag_flows_through_as_true() {
     let (code, out, _err) = run_script(&["--box", "strih", "--enable-reboot"]);
     assert_eq!(code, 0);
     assert!(
-        out.contains("$RebootEnabledOverride = $true"),
+        out.contains("$RebootEnabledOverride    = $true"),
         "#89: --enable-reboot must install $true. out=\n{out}"
     );
 }
