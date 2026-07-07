@@ -7560,11 +7560,14 @@ mod tests {
     }
 
     // ============================================================================
-    // #580 — imag's optical zero-loss gate recognizes the 60Hz-monitor vs 60fps-camera sampling
-    // BEAT as net-zero, replacing strict step-1 tick contiguity as the primary optical decision.
-    // Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
-    // frames=21873, present=21851, missing=19, dups=22, surplus=-3, digital burn 0-missing — a
-    // genuinely zero-NET-loss run that strict step-1 (missing=19) false-fails.
+    // #580v2 — imag's optical zero-loss gate recognizes the 60Hz-monitor vs 60fps-camera sampling
+    // BEAT via RUN-LENGTH (max consecutive Δtick==0), replacing strict step-1 tick contiguity AND
+    // the v1 `surplus <= 0` aggregate as the primary optical decision. Confirmed live (run 572001,
+    // post-#575 trim + #576 calibration, RE-SIGNED to the real numbers after the v1 gate shipped
+    // with a sign-flipped fixture): expected=21870, frames=21867, present=21851, missing=19,
+    // dups=22, surplus=+3, digital burn 0-missing — a genuinely zero-loss run that BOTH strict
+    // step-1 (missing=19) AND a naive `surplus <= 0` aggregate (surplus is +3, not negative)
+    // false-fail; the run-length gate (`is_live_no_copy`) correctly passes it.
     // ============================================================================
 
     #[test]

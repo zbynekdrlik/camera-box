@@ -330,30 +330,40 @@ pub fn max_consecutive_stuck_run(ticks_in_order: &[u32]) -> u32 {
     max_run
 }
 
-/// #580 — the optical-BEAT verdict for imag's PRIMARY (cam2 dual-QR) zero-loss signal, replacing
+/// #580v2 — the optical-BEAT verdict for imag's PRIMARY (cam2 dual-QR) zero-loss signal, replacing
 /// strict step-1 [`tick_contiguity`] as the hard optical gate. cam2's 60Hz monitor and the
 /// broadcast camera's free-running 60fps are two UNSYNCHRONIZED same-rate clocks — they BEAT: the
-/// camera captures some painter ticks twice (a duplicate) and misses others (a skip), and when
-/// dups and skips are BALANCED (frame-count conserved) that is ZERO NET loss, not a fault. Strict
+/// camera captures some painter ticks twice (a duplicate) and misses others (a skip). Strict
 /// step-1 contiguity false-fails a truly-zero-loss run whenever ANY skip occurs, even when fully
-/// compensated. Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
-/// frames=21873, present=21851, missing=19, dups=22, surplus=-3 — a genuinely zero-net-loss run
-/// that strict step-1 (missing=19) false-fails.
+/// compensated. Confirmed live (run 572001, post-#575 trim + #576 calibration, RE-SIGNED to the
+/// real numbers after the v1 gate shipped with a SIGN-FLIPPED fixture that never caught its own
+/// false-fail): expected=21870, frames=21867, present=21851, missing=19, dups=22, surplus=+3 — a
+/// genuinely zero-loss run that strict step-1 (missing=19) false-fails, and that carries a small
+/// POSITIVE clock-residual surplus a naive `surplus <= 0` aggregate gate ALSO false-fails on.
 ///
-/// Two independent checks, both required (see [`Self::is_net_zero`]):
+/// The HARD gate is [`Self::is_live_no_copy`] — run-length, not an aggregate — composed of two
+/// independent checks, both required:
 /// - **advance-guard** ([`Self::is_advancing`]): the tick sequence must genuinely ADVANCE at
 ///   ~[`Self::expected_step`] — a frozen/stuck optical read (the camera stuck on one QR: the tick
 ///   range collapses, `avg_step` ≈ 0) FAILS. This is STRICTER than the OLD strict-step-1 gate,
 ///   which ALSO false-passed a frozen read (`first_tick == last_tick` is trivially "contiguous",
 ///   `missing_ticks` empty) — #580 closes that pre-existing hole, it does not open a new one.
-/// - **net-zero** ([`Self::is_net_zero`]'s `surplus <= 0` term): `surplus = expected_count -
-///   frames_count` — an AGGREGATE window count of painter ticks NET missing after every
-///   duplicate-oversampled frame is credited against a skip. `surplus <= 0` ⇒ dups net-cover skips
-///   across the window ⇒ OPTICAL tracking PASS. `surplus > 0` ⇒ more skips than dups ⇒ a net
-///   optical loss ⇒ FAIL. This is aggregate, NOT per-value (see [`Self::is_net_zero`]'s doc): a real
-///   one-off drop offset by an unrelated beat dup can still net to `<= 0` — deliberate (a beat skip
-///   and a real drop are optically indistinguishable at 60/60), with per-frame DELIVERY proven
-///   independently by the STRICT digital burn ANDed in `NodeVerdict::is_zero` (#463).
+/// - **no-stuck-copy** ([`Self::no_stuck_copy`], the CENTERPIECE — see [`max_consecutive_stuck_run`]'s
+///   doc): the MAXIMUM CONSECUTIVE run of Δtick==0 samples must stay within
+///   [`IMAG_OPTICAL_MAX_STUCK_RUN`]. A benign same-rate beat dups a tick at most ONCE in a row; a
+///   COPY/FREEZE (stalled upstream content, or a stuck camera) repeats the same tick for hundreds of
+///   frames. Two adversarial Opus reviews proved a content freeze conserves the wall-clock frame
+///   count (so the whole-window AGGREGATES `surplus`/`avg_step` stay near zero) and is blind to the
+///   free-running digital burn (which advances on imag's own RENDER, not on the upstream content) —
+///   run-length is the only term that catches it.
+///
+/// `surplus` / `avg_step` / [`Self::is_net_zero`] are now DIAGNOSTIC ONLY (reported, never gated):
+/// on two free-running same-rate clocks a tiny clock-residual `surplus > 0` is unavoidable (run
+/// 572001 = +3), so gating on `surplus <= 0` false-fails a genuinely-zero run — the exact bug that
+/// reopened #580. Per-frame DELIVERY accounting is not the optical leg's job on a free-running rig;
+/// the STRICT digital corner burn is the delivery authority (`NodeVerdict::imag_burn_ok`,
+/// #463/#584/#585), ANDed in `NodeVerdict::is_zero`. This verdict's job is only: the injection is
+/// LIVE (advancing) and there is no copy/freeze.
 ///
 /// This is the SAME `avg_step` / `surplus` beat math already computed (diagnostic-only) in
 /// `probe::recording_verdict::verdict` (`expected_step`, `surplus`, `beat_balanced` — see that
