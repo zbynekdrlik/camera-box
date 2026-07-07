@@ -1143,8 +1143,7 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // burn ids (paired with frame_index via `burn_ids_with_frame_index_in`) before calibration
     // AND before the contiguity check — a boundary-artifact burn id must not skew the calibrated
     // step either.
-    let imag_burn_samples = burn_ids_with_frame_index_in(frames, BURN_RUN_ID_IMAG);
-    let imag_burn_ids = trim_to_boundary(&imag_burn_samples);
+    let imag_burn_ids = trim_to_boundary(&burn_ids_with_frame_index_in(frames, BURN_RUN_ID_IMAG));
     let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(&imag_burn_ids);
     let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
     let imag_burn_contiguity = NodeContiguity {

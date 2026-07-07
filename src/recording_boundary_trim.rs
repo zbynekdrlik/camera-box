@@ -24,6 +24,15 @@
 //! Sibling of `recording_span_gate.rs` / `imag_tick_gate.rs` (Tier-0, no probe deps) so it
 //! unit-tests on default features; the probe-gated `bin/recording-verdict` extracts each
 //! `RecordingFrame`'s `frame_index` + decoded value and feeds them here.
+//!
+//! **Scope — this trim applies ONLY to the loss/missing-id CONTIGUITY inputs, deliberately NOT**
+//! to the separate `optical_span_frames` / `optical_undecodable` diagnostic (a DIFFERENT, tolerant
+//! rate-ceiling gate computed from the recording's FULL, untrimmed frame set). Those two axes
+//! answer different questions — "is there a phantom gap in the analyzed span" (this module) vs
+//! "is the fraction of undecodable frames within the calibrated moiré floor" (untouched) — so a
+//! boundary-artifact frame can legitimately still count toward the latter without needing to be
+//! excluded from it too. See `bin/recording-verdict.rs`'s `node_verdict_for_imag` for where each
+//! is computed.
 
 /// #575 — how many frames at the very START of a recording to exclude from contiguity analysis
 /// (the genlock-fifo pre-roll flush window; confirmed live at ~34ms / frame_index <= 2 on run
