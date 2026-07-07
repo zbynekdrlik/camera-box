@@ -2207,3 +2207,30 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   — `.claude/skills/ops/SKILL.md` now states the invariant + check command; a Windows gate itself
   remains a soft follow-up (dispatch's own acceptance criterion), distinct from #595/#596 above which
   are NEW review findings and ARE filed.
+
+## #600 (solo, closes #600) — 2026-07-07 — verify-device (d) dantesync LIVENESS gate (PR TBD, v1.7.0-dev.284)
+- Fix-forward of the just-merged #591 gate: an opus adversarial review (MEDIUM-LOW) found the (d)
+  block grades PTP-lock by journal POSITION and offset freshness vs the newest journal LINE, but
+  never checked dantesync is actually running + logging. A died/hung dantesync (long-uptime box)
+  leaves both signals computed against a ~10-min-STALE journal and PASSES `OK … clock disciplined
+  near-zero` while the clock has been free-running (undisciplined) the whole time. Does NOT re-open
+  the cam5/6 2nd-authority hole ((r) + fresh-offset drift still catch that) — a SEPARATE liveness gate.
+- Version bump `1ebfaee6f`. RED `40f64c797`, GREEN `243068d46` (git log order proves RED-before-GREEN).
+- Two pure helpers (default-feature Tier-0 testable, sourced + called directly like
+  `dantesync_offset_verdict`), added AHEAD of the content reads — the offset/lock verdicts are
+  UNCHANGED (their freshness-vs-newest-line model is correct for grading the OFFSET):
+  - `dantesync_service_active STATE` → 0 iff STATE is exactly `active` (catches DIED). Test:
+    `dantesync_service_active_true_only_on_exactly_active`.
+  - `dantesync_journal_fresh JOURNAL BOX_NOW MAX_AGE` → `fresh`|`stale`; newest `-o short-iso` line
+    must be within MAX_AGE of the box's OWN `date +%s` (catches HUNG-but-`active`). Negative age
+    (stepped-back clock) NOT stale (that's (r)/drift); fail-closed on empty/garbage BOX_NOW / no
+    parseable line. Tests: `dantesync_journal_fresh_{when_newest_line_is_within_max_age,
+    stale_when_journal_stopped_advancing,not_stale_on_negative_age,fail_closed_on_bad_box_now,
+    stale_when_no_parseable_line}`.
+- Live-flow wiring: gather `systemctl is-active dantesync` + box `date +%s`, hard-FAIL on either
+  hole BEFORE the lock/offset reads. Non-tautological wiring test
+  `check_dantesync_liveness_is_wired_into_the_d_live_flow` greps the CALL SITES (real args) in the
+  live-flow portion only. New env const `DANTESYNC_JOURNAL_MAX_AGE_S` (default 60; dantesync logs
+  ~1 line/s → >60s without a new line = stopped).
+- Live-rig re-verify (running verify-device against the fleet) DEFERRED to the supervisor
+  (drive-rig-in-supervisor); no auto-deploy pipeline — provisioning-script change only.
