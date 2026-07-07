@@ -282,6 +282,35 @@ pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
     }
 }
 
+/// #576 — minimum distinct burn ids [`calibrate_burn_step`] requires before it trusts a
+/// calibrated mode over the [`IMAG_BURN_RENDER_STEP`] fallback (fewer distinct ids than this
+/// yields too few consecutive deltas to call any one value "dominant" rather than noise).
+const MIN_IDS_FOR_STEP_CALIBRATION: usize = 4;
+
+/// #576 — self-calibrate the free-running burn step from the OBSERVED cadence instead of
+/// trusting a hardcoded constant to still match the live render pipeline. #480 confirmed step 2
+/// at the time (OBS Studio-Mode double-render); the #572 live-rig investigation (run 554307)
+/// found the REAL rig now free-running at step 3 (e.g. consecutive ids 22197/22200/22203) —
+/// Studio-Mode render timing is not a stable API contract, so a hardcoded constant is latent
+/// brittleness: it can attribute the WRONG grid ids (and possibly the wrong COUNT) to a future
+/// genuine drop. imag's corner burn is a CLEAN free-running render tick (one dominant,
+/// near-uniform step) — UNLIKE cam1's own capture burn, which rides a genuine 60→30 beat and
+/// where a naive modal/median step is WRONG (#571) — so the MODE of consecutive present-id
+/// deltas is the correct estimator HERE.
+///
+/// Ties (two deltas equally frequent) resolve to the SMALLER delta — the stricter, safer choice
+/// whenever ambiguous, never the looser one. Falls back to [`IMAG_BURN_RENDER_STEP`] when there
+/// are fewer than [`MIN_IDS_FOR_STEP_CALIBRATION`] distinct ids to trust a calibrated estimate
+/// (never invent a number from noise — mirrors every other pure gate's "not enough signal ⇒ fall
+/// back to the safe/known default" rule).
+///
+/// #576 RED STUB: always returns [`IMAG_BURN_RENDER_STEP`] — the real modal calculation lands in
+/// the GREEN commit. Kept as its own commit so the new calibration tests below are observably
+/// RED (failing on the hardcoded fallback) before the fix, per `regression-test-first.md`.
+pub fn calibrate_burn_step(_ids: &[u32]) -> u32 {
+    IMAG_BURN_RENDER_STEP
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +631,109 @@ mod tests {
             expected_count,
             u32::MAX,
             "saturates instead of wrapping to 0"
+        );
+    }
+
+    // ============================================================================
+    // #576 — self-calibrate IMAG_BURN_RENDER_STEP from the OBSERVED burn cadence. The #572
+    // live-rig investigation (run 554307) found imag's REAL corner burn free-running at step 3
+    // (e.g. 22197/22200/22203), not the hardcoded step-2 constant confirmed by #480. Harmless
+    // TODAY (the floor-division tolerance absorbs a step-2-or-3 gap as zero either way — see
+    // `burn_step_contiguity`'s doc), but a hardcoded step that disagrees with the real cadence
+    // WILL attribute the wrong grid ids (and possibly the wrong count) to a future genuine drop.
+    // ============================================================================
+
+    /// A clean free-running burn at step 3 (matches the confirmed live rig cadence, run 554307).
+    fn free_running_step3_burn_ids() -> Vec<u32> {
+        (22197..22197 + 3 * 40).step_by(3).collect()
+    }
+
+    #[test]
+    fn calibrate_burn_step_finds_the_dominant_step_for_a_clean_step3_burn_576() {
+        let ids = free_running_step3_burn_ids();
+        assert_eq!(
+            calibrate_burn_step(&ids),
+            3,
+            "a clean free-running step-3 cadence must calibrate to 3, not the hardcoded \
+             IMAG_BURN_RENDER_STEP (2)"
+        );
+    }
+
+    #[test]
+    fn calibrate_burn_step_tolerates_one_genuine_extra_gap_in_an_otherwise_clean_step3_burn_576() {
+        // One step-grid slot is genuinely missing (a real dropped output frame) — the dominant
+        // delta must still calibrate to 3 (the vast majority of deltas), not be thrown off by
+        // the single outlier gap of 6.
+        let mut ids = free_running_step3_burn_ids();
+        let dropped = ids[10]; // remove one interior id -> a gap of 6 at that one spot
+        ids.retain(|&id| id != dropped);
+        assert_eq!(
+            calibrate_burn_step(&ids),
+            3,
+            "one outlier gap must not throw off the dominant (modal) step"
+        );
+    }
+
+    #[test]
+    fn calibrate_burn_step_falls_back_to_the_constant_when_too_few_ids_576() {
+        assert_eq!(
+            calibrate_burn_step(&[]),
+            IMAG_BURN_RENDER_STEP,
+            "no ids at all -> fall back, nothing to calibrate from"
+        );
+        assert_eq!(
+            calibrate_burn_step(&[42]),
+            IMAG_BURN_RENDER_STEP,
+            "a single id has no delta at all -> fall back"
+        );
+        assert_eq!(
+            calibrate_burn_step(&[10, 13, 16]),
+            IMAG_BURN_RENDER_STEP,
+            "only 3 distinct ids (2 deltas) is below MIN_IDS_FOR_STEP_CALIBRATION -> fall back, \
+             never trust a 2-sample mode"
+        );
+    }
+
+    #[test]
+    fn calibrate_burn_step_prefers_the_smaller_delta_on_a_tie_576() {
+        // deltas: 2,2,3,3 — both step 2 and step 3 occur twice. The smaller (stricter) delta
+        // must win the tie, never the looser one.
+        let ids = [0u32, 2, 4, 7, 10];
+        assert_eq!(
+            calibrate_burn_step(&ids),
+            2,
+            "a tied mode must resolve to the SMALLER (stricter) delta"
+        );
+    }
+
+    #[test]
+    fn calibrate_burn_step_feeds_correct_missing_grid_id_into_burn_step_contiguity_576() {
+        // #576's real payoff: calibrating to the TRUE step attributes the CORRECT missing grid
+        // id for a genuine drop, where the OLD hardcoded step-2 constant would attribute the
+        // WRONG ids entirely (a real drop at true step 3 reads as a gap of 6 under step 2 ->
+        // excess = 6/2-1 = 2 phantom ids, neither of which is the real missing grid point).
+        let mut ids = free_running_step3_burn_ids();
+        let dropped = ids[10];
+        ids.retain(|&id| id != dropped);
+
+        let calibrated = calibrate_burn_step(&ids);
+        let sc_calibrated = burn_step_contiguity(&ids, calibrated);
+        assert_eq!(
+            sc_calibrated.missing_ids,
+            vec![dropped],
+            "calibrated to the true step, the EXACT missing grid id must be reported: {:?}",
+            sc_calibrated
+        );
+
+        // Sanity: the OLD hardcoded step-2 constant on the SAME ids attributes the WRONG grid
+        // ids (never the true missing one) — this is the latent brittleness #576 fixes.
+        let sc_hardcoded = burn_step_contiguity(&ids, IMAG_BURN_RENDER_STEP);
+        assert_ne!(
+            sc_hardcoded.missing_ids,
+            vec![dropped],
+            "sanity: the hardcoded step-2 model does NOT recover the true missing grid id \
+             (demonstrates the #576 brittleness): {:?}",
+            sc_hardcoded
         );
     }
 }
