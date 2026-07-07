@@ -1109,8 +1109,7 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // change can never silently attribute the wrong grid ids to a genuine drop again.
     let imag_burn_ids = burn_ids_in(frames, BURN_RUN_ID_IMAG);
     let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(&imag_burn_ids);
-    let burn_sc =
-        camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
+    let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
     let imag_burn_contiguity = NodeContiguity {
         node: "imag-burn".to_string(),
         first_id: burn_sc.first_id,
@@ -7083,7 +7082,12 @@ mod tests {
         // wrong here. `calibrate_burn_step` must derive 3 from the observed ids and still
         // declare a clean run zero loss.
         let frames: Vec<RecordingFrame> = (0..60u32)
-            .map(|i| frame(i as u64, &[(CAM2, 100 + i), (super::BURN_RUN_ID_IMAG, 10 + 3 * i)]))
+            .map(|i| {
+                frame(
+                    i as u64,
+                    &[(CAM2, 100 + i), (super::BURN_RUN_ID_IMAG, 10 + 3 * i)],
+                )
+            })
             .collect();
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
