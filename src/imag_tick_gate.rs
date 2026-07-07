@@ -306,10 +306,13 @@ pub const IMAG_OPTICAL_EXPECTED_STEP: u32 = 1;
 ///   which ALSO false-passed a frozen read (`first_tick == last_tick` is trivially "contiguous",
 ///   `missing_ticks` empty) — #580 closes that pre-existing hole, it does not open a new one.
 /// - **net-zero** ([`Self::is_net_zero`]'s `surplus <= 0` term): `surplus = expected_count -
-///   frames_count` — the number of painter ticks NET missing after every duplicate-oversampled
-///   frame is credited against a skip. `surplus <= 0` ⇒ every distinct painter tick is net-covered
-///   by the raw frame count (dups pair skips, or pure oversampling) ⇒ PASS. `surplus > 0` ⇒ more
-///   skips than dups ⇒ a GENUINE net loss ⇒ FAIL — strictness is UNCHANGED for a real drop.
+///   frames_count` — an AGGREGATE window count of painter ticks NET missing after every
+///   duplicate-oversampled frame is credited against a skip. `surplus <= 0` ⇒ dups net-cover skips
+///   across the window ⇒ OPTICAL tracking PASS. `surplus > 0` ⇒ more skips than dups ⇒ a net
+///   optical loss ⇒ FAIL. This is aggregate, NOT per-value (see [`Self::is_net_zero`]'s doc): a real
+///   one-off drop offset by an unrelated beat dup can still net to `<= 0` — deliberate (a beat skip
+///   and a real drop are optically indistinguishable at 60/60), with per-frame DELIVERY proven
+///   independently by the STRICT digital burn ANDed in `NodeVerdict::is_zero` (#463).
 ///
 /// This is the SAME `avg_step` / `surplus` beat math already computed (diagnostic-only) in
 /// `probe::recording_verdict::verdict` (`expected_step`, `surplus`, `beat_balanced` — see that
@@ -318,7 +321,13 @@ pub const IMAG_OPTICAL_EXPECTED_STEP: u32 = 1;
 /// num_pairs` telescopes to EXACTLY `expected_count - frames_count` (`sum_steps` telescopes to
 /// `last - first` for ANY chronological walk regardless of individual step values, `num_pairs =
 /// frames_count - 1`, so `surplus = (last-first) - (frames_count-1) = expected_count -
-/// frames_count`) — this is a faithful port of the already-proven formula, not a new one.
+/// frames_count`) — a faithful port of the already-proven formula, not a new one. The final step
+/// `(last - first) + 1 == expected_count` assumes the CHRONOLOGICAL endpoints equal the NUMERIC
+/// min/max — i.e. a monotonically non-decreasing capture, which a genuinely advancing tick always
+/// is. The CODE does not rely on that equality (it takes `expected_count`/`present_count` straight
+/// from [`tick_contiguity`]'s BTreeSet and `avg_step` from the positional endpoints, independently);
+/// a misdecoded OUT-OF-ORDER tick would merely push `avg_step` off `expected_step` and FAIL
+/// [`Self::is_advancing`] — a SAFE false-FAIL direction, never a false-PASS.
 ///
 /// A minor, deliberately-accepted simplification vs `verdict()`: `verdict()` walks the RAW frame
 /// stream and breaks the pairing chain across an undecodable (`None`) frame, so a step is never
@@ -368,9 +377,22 @@ impl OpticalBeatVerdict {
     }
 
     /// THE #580 pass/fail decision: genuinely advancing AND the analyzed span is net-zero loss
-    /// (`surplus <= 0`). Never weaker than the old strict-step-1 check for a genuine drop (a real
-    /// net loss always has `surplus > 0`, which always fails here too); STRICTER than it for a
-    /// frozen/stuck read (see [`Self::is_advancing`]'s doc).
+    /// (`surplus <= 0`); STRICTER than the old strict-step-1 check for a frozen/stuck read (see
+    /// [`Self::is_advancing`]'s doc).
+    ///
+    /// `surplus` is a WHOLE-WINDOW AGGREGATE (`expected_count - frames_count`), NOT a per-value
+    /// pairing — so this is an OPTICAL-TRACKING proof, not a per-frame delivery proof. A genuine
+    /// one-off optical drop CAN be numerically offset to `surplus <= 0` by an unrelated,
+    /// naturally-occurring beat duplicate elsewhere in the same window (e.g. a real skip of 110
+    /// offset by a beat dup at 121), so this term ALONE is NOT sufficient to prove every frame was
+    /// delivered — and the aggregate is deliberate: at matched 60Hz/60fps a beat skip and a real
+    /// drop are OPTICALLY indistinguishable, so per-value pairing would re-introduce the exact
+    /// 572001 false-FAIL #580 exists to close. Per-frame DELIVERY is proven independently by the
+    /// STRICT digital corner burn (`NodeVerdict::imag_burn_ok`, #463 — a clean free-running render
+    /// tick where a genuinely dropped frame DOES show a gap); `NodeVerdict::is_zero` ANDs both, so a
+    /// real drop coincidentally optical-offset here is still caught by the burn. On the pre-#463
+    /// optical-only fallback (no burn) that aggregate-offset edge is unguarded — tracked as a
+    /// follow-up; the live rig always paints the burn.
     pub fn is_net_zero(&self) -> bool {
         self.is_advancing() && self.surplus <= 0
     }

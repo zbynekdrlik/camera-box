@@ -1100,10 +1100,14 @@ fn node_verdict_with_optical(
 /// #576): expected=21870, frames=21873, missing=19, dups=22, surplus=-3, digital burn 0-missing.
 /// [`camera_box::imag_tick_gate::optical_beat_net_zero`] replaces it, ANDing an
 /// advance-guard (never a frozen/stuck read — closes a hole strict step-1 ALSO vacuously passed)
-/// with the net-zero check (a genuine net loss, `surplus > 0`, still FAILS — never weakened). The
-/// RAW strict [`camera_box::imag_tick_gate::tick_contiguity`] result still populates `contiguity`
-/// for display (see [`NodeVerdict::imag_optical_beat_pass`] for how the pass/fail JUDGMENT moves
-/// to the beat verdict without changing what is shown).
+/// with the net-zero check (a net optical loss, `surplus > 0`, still FAILS). `surplus` is a
+/// whole-window AGGREGATE, so this is an OPTICAL-TRACKING proof, not per-frame delivery — a real
+/// one-off drop optically offset by an unrelated beat dup is caught by the STRICT digital burn
+/// ANDed below (#463), not by this term (see
+/// [`is_net_zero`](camera_box::imag_tick_gate::OpticalBeatVerdict::is_net_zero)'s doc). The RAW
+/// strict [`camera_box::imag_tick_gate::tick_contiguity`] result still populates `contiguity` for
+/// display (see [`NodeVerdict::imag_optical_beat_pass`] for how the pass/fail JUDGMENT moves to the
+/// beat verdict without changing what is shown).
 ///
 /// **#463 — imag NOW ALSO carries its own digital corner burn** (run_id [`BURN_RUN_ID_IMAG`],
 /// the OBS filter's `Corner::BottomCenterLeft`). When the recording carries it, its OWN
