@@ -2263,6 +2263,9 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   name) — cam7 still resolves to "" (no preview) post-fix, same as any unknown name; a dedicated
   test (`resolve_display_source_treats_cam7_as_no_preview_since_it_was_never_built`) documents this
   so it isn't mistaken for "the whole fleet sweep" (which now excludes cam7 entirely).
-- Acceptance: `grep -rn 'cam7|CAM7' scripts/ tests/ targets.md .claude/` returns only explicit
+- Acceptance: `grep -rnE 'cam7|CAM7' scripts/ tests/ targets.md .claude/` returns only explicit
   "never built / not yet built" comments and cam7-rejection test code — never an active-fleet entry.
+  (Review finding: the undocumented plain `grep -rn 'cam7|CAM7'` — without `-E`/`\|` — treats `|`
+  as a literal character and vacuously matches nothing; verified empirically. Documenting `-E` here
+  so a future re-run of this acceptance check is not silently a no-op.)
 - Pure code/test/doc cleanup — no live-rig action, no deploy pipeline surface.
