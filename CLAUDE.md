@@ -61,6 +61,37 @@ and `#N` are not adjacent (e.g. "the live purge for #504 is separate" instead of
 #504"). Recovery: `gh issue reopen <N>` + a `gh issue comment <N>` explaining the accidental
 auto-close (see issuecomment-4887235757 on #504 for the template).
 
+## GOTCHA — `git commit -m "..."` with literal backticks in a DOUBLE-quoted message is mangled
+
+This repo's commit messages routinely reference code with backtick-quoted spans
+(`` `function_name()` ``, `` `field_name` ``, `` `4/2-1=1` `` style arithmetic) — exactly the style
+`gh-cli-recipes.md` already warns about for `gh issue create --body`, but the SAME shell mangling
+hits **any** `git commit -m "..."` when the message is a double-quoted string: bash treats each
+backtick pair inside double quotes as command substitution and silently replaces it with that
+"command"'s (usually empty) output, deleting the quoted text. **Incident (2026-07-07, PR #587):** a
+commit message written as `git commit -m "...dropped the now-unused \`step\` param..."` (plain
+double quotes, no heredoc) landed with `` `step` `` silently deleted (`Bash completed with no
+output` plus a stray `step: command not found` on the terminal) — the word vanished from the
+committed message, and every OTHER backtick-quoted span in that same message lost its backticks
+too, even where the "command" happened to fail silently instead of printing an error.
+
+**Mitigation:** for ANY commit message containing a backtick, `$`, or `%`, use the same
+quoted-heredoc pattern the global commit-conventions template already shows:
+```bash
+git commit -m "$(cat <<'EOF'
+fix(#N): message with `backticks`, $VARS, and 100% safe symbols
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+EOF
+)" -- <exact paths>
+```
+The single-quoted `'EOF'` delimiter disables ALL shell expansion inside the heredoc body — backticks,
+`$(...)`, and `%` all pass through literally. A plain `git commit -m "..."` is safe ONLY when the
+message contains none of those three characters; once you write a single backtick, switch to the
+heredoc form for the WHOLE message, not just the backtick-containing line. **Never amend/rewrite a
+commit that shipped with a mangled message** (`commit-conventions.md` — no history rewrites); the
+next commit's message is where you note the correction if it matters.
+
 ## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
 
 `~/devel/camera-box` is a single shared clone with **no git worktree isolation** — every worker's

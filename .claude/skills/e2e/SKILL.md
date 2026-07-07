@@ -718,6 +718,27 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
 - **Honest limitation (120Hz makes it rigorous):** on the 60/60 rig the run-length guard is a
   HEURISTIC (robust because the beat physically cannot produce a long Δ0 run, but a heuristic). A
   120Hz monitor makes copy-detection RIGOROUS (at 2:1 a copy shows as Δ0 where it must be 2).
+- **Residual gap (filed, not fixed):** a systematic short-run stutter (many Δ0 runs each ≤K, spread
+  evenly across the whole recording) evades run-length, the whole-window aggregates, AND the
+  render-free-running digital burn alike — not a v2 regression, both old and new gates miss it
+  equally. Needs live 572001 data to calibrate a real fix (or the 120Hz upgrade). See #588.
+- **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
+  design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
+  it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
+  implemented LITERALLY and shipped a fail-open: `present_count` (`BurnStepContiguity::present_count`)
+  is a DISTINCT-id count that is FRAME-scale (one id per captured frame, regardless of the render
+  step spacing between consecutive id VALUES), so dividing the frame-scale `reference_frames` by
+  `step` before comparing against a frame-scale `present_count` silently loosened a 50%-intended
+  floor to 16.7% at the real rig's step 3. A correctness reviewer caught it by tracing what
+  `present_count` is actually COMPUTED from (a `BTreeSet::len()` over one id per frame) rather than
+  trusting the design comment's algebra. Same session, a SEPARATE tie-break direction
+  (`calibrate_burn_step`) was flipped mid-development to fix a cosmetic diagnostic over-count, without
+  re-deriving whether the new direction could instead MASK a real drop (it could — proven
+  adversarially with a concrete counter-example). **The general rule: when a design spec states a
+  formula in terms of a named field, re-derive what that field is COMPUTED FROM in the actual code
+  before trusting the formula's scale/units — a terse spec comment can silently mismatch the
+  implementation's real semantics, and unit fixtures built to match the (wrong) implementation will
+  not catch it (exactly the failure mode that shipped the original #580 sign-flipped fixture).**
 
 **`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
 strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS
