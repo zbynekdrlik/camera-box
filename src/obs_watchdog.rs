@@ -44,6 +44,12 @@ pub struct ObsHealthSample {
     /// Sustained obs64.exe CPU percent (e.g. `Get-Process obs64 | Select CPU` deltas).
     /// Agent/MCP-only signal. The #391 incident measured ~168%.
     pub cpu_percent: Option<f64>,
+    /// True when this pass's OBS-log audit found the DXGI device-lost signature (#89 —
+    /// `crate::dxgi_device_lost::line_is_device_lost`, the SAME matcher `probe::obs_log_audit`
+    /// uses for the #81 harness-side diagnosis). Agent/MCP-only signal (reading the OBS log
+    /// needs the win-* MCP or a local read on the self-heal box) — `None` means "not sampled
+    /// this pass", never "known absent".
+    pub dxgi_device_lost: Option<bool>,
 }
 
 /// Strict liveness verdict — the five states named in #391.
@@ -61,6 +67,12 @@ pub enum ObsHealthVerdict {
     FpsZero(String),
     /// The exactly-one-obs64 invariant is broken (0 or >1 processes).
     ObsCountWrong(String),
+    /// The OBS log carries the DXGI device-lost signature (#89 — a GPU TDR / driver-internal-
+    /// error). Distinct from `WedgedRenderLag`: obs64's process/render-loop signals can look
+    /// perfectly healthy while the GPU device itself is gone, and — critically — the correct
+    /// recovery is NOT the same (a plain OBS restart typically does NOT clear this; a full PC
+    /// reboot is required, unlike a `WedgedRenderLag` process wedge).
+    GpuDeviceRemoved(String),
 }
 
 impl ObsHealthVerdict {
@@ -77,6 +89,7 @@ impl ObsHealthVerdict {
             ObsHealthVerdict::WsDead(_) => "WS-DEAD",
             ObsHealthVerdict::FpsZero(_) => "FPS-ZERO",
             ObsHealthVerdict::ObsCountWrong(_) => "OBS-COUNT-WRONG",
+            ObsHealthVerdict::GpuDeviceRemoved(_) => "GPU-DEVICE-REMOVED",
         }
     }
 
@@ -87,7 +100,8 @@ impl ObsHealthVerdict {
             ObsHealthVerdict::WedgedRenderLag(r) => r.clone(),
             ObsHealthVerdict::WsDead(r)
             | ObsHealthVerdict::FpsZero(r)
-            | ObsHealthVerdict::ObsCountWrong(r) => vec![r.clone()],
+            | ObsHealthVerdict::ObsCountWrong(r)
+            | ObsHealthVerdict::GpuDeviceRemoved(r) => vec![r.clone()],
         }
     }
 }
@@ -112,13 +126,16 @@ const RENDER_TIME_BUDGET_MULTIPLIER: f64 = 2.0;
 /// `activeFps` below this while WS is reachable = the render loop has stalled.
 const FPS_ZERO_THRESHOLD: f64 = 1.0;
 
-/// Classify one box's liveness sample. STRICT: any of the #391 detection signals
+/// Classify one box's liveness sample. STRICT: any of the #391/#89 detection signals
 /// (`Responding=False`, pegged CPU, render-skip spike, blown render-time budget,
-/// WS unreachable, wrong obs64 process count, stalled activeFps) FAILS. Priority order
-/// mirrors how decisive each signal is: a wrong process count is checked first (it can
-/// be sampled even when WS is fully dead), then WS reachability, then the wedge signals,
-/// then the fps-stall signal. Non-finite optional numeric inputs are treated as absent
-/// (never silently coerced to a passing value).
+/// WS unreachable, wrong obs64 process count, stalled activeFps, DXGI device-lost log
+/// signature) FAILS. Priority order mirrors how decisive each signal is: a wrong process
+/// count is checked first (it can be sampled even when WS is fully dead), then WS
+/// reachability, then the GPU device-removed log signature (#89 — decisive BEFORE the
+/// process-level wedge bundle, since it needs a DIFFERENT recovery and a GPU-gone box can
+/// still look process-healthy), then the wedge signals, then the fps-stall signal.
+/// Non-finite optional numeric inputs are treated as absent (never silently coerced to a
+/// passing value).
 pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
     // 1. The exactly-one-obs64 invariant — decisive on its own, checked first because it
     //    can be known even when the WS side is completely dead (0 processes).
@@ -137,7 +154,24 @@ pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
         );
     }
 
-    // 3. Process-level + render-loop wedge signals. Collected together because they are
+    // 3. GPU device-removed (DXGI TDR / driver-internal-error) log signature (#89) —
+    //    decisive on its own, checked BEFORE the process-level wedge bundle below. Once the
+    //    GPU is gone, obs64's process/render-loop signals can still look perfectly healthy
+    //    (Responding=True, normal CPU) while every render call fails — so this must win before
+    //    the wedge bundle could otherwise report WEDGED-RENDER-LAG, which is the WRONG
+    //    diagnosis for this cause: WedgedRenderLag implies a plain OBS restart likely fixes it,
+    //    but an OBS-only restart typically does NOT clear a DXGI device-removed GPU (a full PC
+    //    reboot is required — see `probe::obs_log_audit::ObsLogAudit::diagnosis`).
+    if sample.dxgi_device_lost == Some(true) {
+        return ObsHealthVerdict::GpuDeviceRemoved(
+            "DXGI device-lost signature (887A0005/6/7) found in the OBS log — GPU TDR / \
+             driver-internal-error; an OBS-only restart typically does NOT clear this, a full \
+             PC reboot is required (#89)"
+                .to_string(),
+        );
+    }
+
+    // 4. Process-level + render-loop wedge signals. Collected together because they are
     //    all evidence of the SAME underlying condition (the #391 incident showed all
     //    three at once: Responding=False + pegged CPU + a render-skip spike).
     let mut wedge_reasons = Vec::new();
@@ -180,7 +214,7 @@ pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
         return ObsHealthVerdict::WedgedRenderLag(wedge_reasons);
     }
 
-    // 4. FPS stalled while WS is still answering — a distinct wedge mode (the render
+    // 5. FPS stalled while WS is still answering — a distinct wedge mode (the render
     //    loop stopped producing frames but the websocket thread is alive).
     if let Some(fps) = sample.active_fps {
         if fps.is_finite() && fps < FPS_ZERO_THRESHOLD {
@@ -210,6 +244,7 @@ mod tests {
             obs64_count: None,
             responding: None,
             cpu_percent: None,
+            dxgi_device_lost: None,
         }
     }
 
@@ -246,6 +281,7 @@ mod tests {
             obs64_count: Some(1),
             responding: Some(false),
             cpu_percent: Some(168.0),
+            dxgi_device_lost: None,
         };
         let v = classify(sample, 30.0);
         match &v {
@@ -271,6 +307,7 @@ mod tests {
             obs64_count: None,
             responding: None,
             cpu_percent: None,
+            dxgi_device_lost: None,
         };
         let v = classify(sample, 60.0);
         assert_eq!(v.label(), "WS-DEAD");
@@ -310,6 +347,7 @@ mod tests {
             obs64_count: None,
             responding: None,
             cpu_percent: None,
+            dxgi_device_lost: None,
         };
         let v = classify(sample, 60.0);
         assert_eq!(v.label(), "FPS-ZERO");
@@ -422,5 +460,59 @@ mod tests {
             "WS-DEAD",
             "an empty/no-signal sample must never read as HEALTHY"
         );
+    }
+
+    #[test]
+    fn dxgi_device_lost_signature_fails_gpu_device_removed_even_with_clean_process_stats() {
+        // #89: a GPU device-removed/TDR can leave obs64's OWN process/render-loop signals
+        // looking perfectly healthy (the process is alive, CPU/render stats are clean) while
+        // the compositor cannot create textures at all. The OBS-log DXGI audit is the ONLY
+        // signal that catches this — it must be decisive on its own.
+        let sample = ObsHealthSample {
+            dxgi_device_lost: Some(true),
+            ..healthy_ws_only(60.0, 10.0, 0.0)
+        };
+        let v = classify(sample, 60.0);
+        assert_eq!(
+            v.label(),
+            "GPU-DEVICE-REMOVED",
+            "a confirmed DXGI device-lost log signature must classify GPU-DEVICE-REMOVED even \
+             with otherwise-clean render/process stats, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn dxgi_device_lost_wins_over_process_level_wedge_signals() {
+        // The GPU-device-removed diagnosis must be checked BEFORE the process-level wedge
+        // bundle: a WedgedRenderLag verdict implies a plain OBS restart likely fixes it, which
+        // is WRONG guidance for a GPU TDR (a full PC reboot is required) — so when both signals
+        // are present, GpuDeviceRemoved must win, never get masked by WedgedRenderLag.
+        let sample = ObsHealthSample {
+            dxgi_device_lost: Some(true),
+            responding: Some(false),
+            cpu_percent: Some(168.0),
+            ..healthy_ws_only(60.0, 10.0, 0.0)
+        };
+        let v = classify(sample, 60.0);
+        assert_eq!(
+            v.label(),
+            "GPU-DEVICE-REMOVED",
+            "dxgi_device_lost must win over process-level wedge signals, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn dxgi_device_lost_false_or_absent_does_not_trigger_gpu_device_removed() {
+        let false_sample = ObsHealthSample {
+            dxgi_device_lost: Some(false),
+            ..healthy_ws_only(60.0, 10.0, 0.0)
+        };
+        assert!(classify(false_sample, 60.0).is_healthy());
+
+        let absent_sample = ObsHealthSample {
+            dxgi_device_lost: None,
+            ..healthy_ws_only(60.0, 10.0, 0.0)
+        };
+        assert!(classify(absent_sample, 60.0).is_healthy());
     }
 }

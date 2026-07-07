@@ -6,9 +6,11 @@ always reachable from dev1 with NO ssh/MCP needed — builds an
 `obs_watchdog::ObsHealthSample`-shaped JSON per box, OPTIONALLY layers in
 agent/MCP-only Windows process signals (obs64 count / `Responding` / CPU%,
 passed in via `--process-state` since a plain dev1 systemd timer cannot read
-them), and pipes the combined sample to the `obs-watchdog-gate` Rust binary for
-the strict verdict (HEALTHY / WEDGED-RENDER-LAG / WS-DEAD / FPS-ZERO /
-OBS-COUNT-WRONG). The decision lives ONLY in `camera_box::obs_watchdog::classify`
+them) AND an agent/MCP-sampled OBS-log DXGI device-lost audit result
+(`--log-audit`, #89 — see `camera_box::dxgi_device_lost`), and pipes the
+combined sample to the `obs-watchdog-gate` Rust binary for the strict verdict
+(HEALTHY / WEDGED-RENDER-LAG / WS-DEAD / FPS-ZERO / OBS-COUNT-WRONG /
+GPU-DEVICE-REMOVED). The decision lives ONLY in `camera_box::obs_watchdog::classify`
 — this front just measures and pipes (mirrors `render-budget-gate.py`).
 
 A box whose WS connection fails entirely (unreachable, wedged hard enough that
@@ -23,6 +25,13 @@ now cut-to-stream only at 30fps, the 60fps IMAG role moved to imag-nb):
 With agent/MCP-sampled process state layered in (repeatable, one per box):
   python3 scripts/obs-liveness-probe.py --box stream=10.77.9.204:30 \\
     --process-state stream=count:1,responding:false,cpu:168.0
+
+With an agent/MCP-sampled OBS-log DXGI audit layered in (#89 — an agent reads the box's OBS
+log via the win-* MCP, runs the SAME matcher `camera_box::dxgi_device_lost::line_is_device_lost`
+uses, and passes the precomputed boolean here — never a raw log path, which would need a SECOND
+independently-drifting DXGI-code matcher reimplemented in Python):
+  python3 scripts/obs-liveness-probe.py --box stream=10.77.9.204:30 \\
+    --log-audit stream=true
 
 Exit codes (propagated from the Rust binary):
   0  every box HEALTHY
@@ -158,6 +167,37 @@ def _merge_process_state(sample: dict, state: "dict | None") -> dict:
     return out
 
 
+def _parse_log_audit(spec: str) -> "tuple[str, bool]":
+    """Parse `LABEL=true|false` (#89) -> (label, dxgi_device_lost). An agent/MCP-sampled
+    BOOLEAN signal, mirroring `--process-state`'s `responding:true|false` flag — the agent
+    reads the box's OBS log (via the win-* MCP, or a probe-tools binary calling
+    `camera_box::dxgi_device_lost::line_is_device_lost`) and passes the PRECOMPUTED audit
+    result here. This deliberately does NOT accept a raw log path/text: doing the substring
+    match here too would be a second, independently-drifting reimplementation of the DXGI
+    code list in Python."""
+    if "=" not in spec:
+        raise ValueError(f"--log-audit must be LABEL=true|false, got {spec!r}")
+    label, val = spec.split("=", 1)
+    label = label.strip()
+    val = val.strip().lower()
+    if not label:
+        raise ValueError(f"--log-audit must be LABEL=true|false, got {spec!r}")
+    if val not in ("true", "false"):
+        raise ValueError(f"--log-audit value must be true/false, got {val!r}")
+    return label, val == "true"
+
+
+def _merge_log_audit(sample: dict, dxgi_device_lost: "bool | None") -> dict:
+    """Layer the OPTIONAL dxgi_device_lost signal (#89) onto a measured sample. Absent (`None`
+    — no `--log-audit` given for this box) leaves the sample UNCHANGED: the Rust binary's
+    `opt_bool` reader treats a missing field as "not sampled this pass", never "known false" —
+    same discipline as `_merge_process_state`."""
+    out = dict(sample)
+    if dxgi_device_lost is not None:
+        out["dxgi_device_lost"] = dxgi_device_lost
+    return out
+
+
 def _find_verdict_bin(explicit: "str | None") -> str:
     """Locate the obs-watchdog-gate Rust binary (same search order the E2E uses
     for frozen-camera-gate / render-budget-gate)."""
@@ -261,6 +301,9 @@ def main():
     ap.add_argument("--process-state", action="append", default=[],
                      help="LABEL=count:N,responding:true|false,cpu:N.N (repeatable, "
                           "agent/MCP-sampled Windows process signals)")
+    ap.add_argument("--log-audit", action="append", default=[],
+                     help="LABEL=true|false (#89, repeatable, agent/MCP-sampled OBS-log "
+                          "DXGI device-lost audit result)")
     ap.add_argument("--window-s", type=float, default=4.0)
     ap.add_argument("--verdict-bin", default=None)
     args = ap.parse_args()
@@ -268,6 +311,7 @@ def main():
     try:
         boxes = [_parse_box(b) for b in args.box]
         states = dict(_parse_process_state(p) for p in args.process_state)
+        log_audits = dict(_parse_log_audit(p) for p in args.log_audit)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
 
@@ -276,7 +320,8 @@ def main():
     samples = {}
     for label, host, target in boxes:
         measured = _measure_box(label, host, target, args.window_s)
-        samples[label] = _merge_process_state(measured, states.get(label))
+        merged = _merge_process_state(measured, states.get(label))
+        samples[label] = _merge_log_audit(merged, log_audits.get(label))
 
     result = subprocess.run(
         [verdict_bin], input=json.dumps(samples).encode(), capture_output=True

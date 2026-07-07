@@ -133,9 +133,13 @@ It checks (all must pass, exit 0 only if every check is OK):
 | (n) | core-isolation kernel cmdline | `/proc/cmdline` carries `isolcpus=3` (#289) + `nohz_full=3` + `rcu_nocbs=3` + `irqaffinity=0-2` (#303), each a whole token |
 | (o) | NDI runtime pinned to the fleet version | version of the `libndi.so.6` symlink target; `NDI_VERSION_PIN` (default `6.3.2`, #132/#547) |
 | (p) | `config.toml`'s `[display]` section matches `camera-set.sh`'s `CAMERA_DISPLAY_SOURCE` table entry | `cat /etc/camera-box/config.toml` over SSH, compare against the per-cam table (#528/#557/#558) — catches a box that lost its HDMI-preview config, or wrongly gained one |
+| (q) | no stale `.bak`/`.bak-*` cruft under `/usr/lib/ndi` or the systemd drop-in dir | `ls` both dirs over SSH — **WARNING only, never a FAIL** (#453). Inert leftovers (ldconfig/systemd never load a `.bak`) are surfaced as drift but don't fail an otherwise-healthy box; `setup-device.sh`'s `cleanup_bak_cruft` self-heals them on the next provisioning pass |
 
-Every check is a hard FAIL on an unreachable/unreadable signal too (test-strictness — no silent
-pass on "couldn't tell"). `verify-device.sh`'s pure decision functions are unit-tested offline in
+Every check **except (q)** is a hard FAIL on an unreachable/unreadable signal too (test-strictness —
+no silent pass on "couldn't tell"); **(q) is the sole WARNING-only check** — inert `.bak` cruft is
+drift to surface, not a functional defect, so it never fails the gate.
+Both `setup-device.sh` and `verify-device.sh` now source `scripts/lib/cli-log.sh` for their
+color/log helpers (#568) — do NOT re-add a local `RED=…`/`log()` block; extend the shared lib. `verify-device.sh`'s pure decision functions are unit-tested offline in
 `tests/verify_device_pure_functions.rs` (source the script, call the functions directly — same
 convention as `tests/setup_device_pure_functions.rs` / `tests/clock_offset_guard.rs`); the live
 SSH flow itself can only be proven against a real box (the supervisor runs it against a live

@@ -113,8 +113,19 @@ write_state_field() {
 }
 
 # ── the recovery plan embedded in every alert (agent-driven — see header) ────
+# recovery_plan_for BOX LABEL -> the recovery guidance text embedded in the alert. #89: a
+# GPU-DEVICE-REMOVED verdict gets DEDICATED, CORRECT guidance — an OBS-only restart
+# (launch-obs-genlock.sh --force) typically does NOT clear a DXGI device-removed GPU (a full
+# PC reboot is required, see probe::obs_log_audit::ObsLogAudit::diagnosis /
+# .claude/skills/obs-ops "GPU wedge on stream box"). Suggesting the generic OBS-restart command
+# for THIS cause is actively misleading (wastes an agent's time on a fix that won't work), so it
+# is REPLACED for this one verdict; every other verdict keeps the original #391 command.
 recovery_plan_for() {
-  local box="$1"
+  local box="$1" label="$2"
+  if [ "$label" = "GPU-DEVICE-REMOVED" ]; then
+    printf '#89: GPU device removed (DXGI TDR/driver-internal-error) on %s — an OBS-only restart typically does NOT clear this; a full PC reboot of the box is required (agent/human-driven, see .claude/skills/obs-ops "GPU wedge on stream box")' "$box"
+    return
+  fi
   printf 'bash scripts/launch-obs-genlock.sh --box %s --force   # paste the printed PowerShell program into the win-%s MCP Shell' "$box" "$box"
 }
 
@@ -165,13 +176,13 @@ main() {
     write_state_field "${box}_alert_passes" "$new_passes"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-      log "[dry-run] WOULD alert: $box CONFIRMED $label (alert_now=$alert_now) — recovery: $(recovery_plan_for "$box")"
+      log "[dry-run] WOULD alert: $box CONFIRMED $label (alert_now=$alert_now) — recovery: $(recovery_plan_for "$box" "$label")"
       continue
     fi
 
     if [ "${alert_now:-0}" = "1" ]; then
       local msg
-      msg="🚨 #391 obs-liveness-watchdog: **$box** OBS is **$label** ($REPO_SLUG). Reasons: ${reasons:-none}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes (no false-positive on a single blip). Recovery (agent-driven — run the win-* MCP plan): \`$(recovery_plan_for "$box")\`"
+      msg="🚨 #391 obs-liveness-watchdog: **$box** OBS is **$label** ($REPO_SLUG). Reasons: ${reasons:-none}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes (no false-positive on a single blip). Recovery (agent-driven — run the win-* MCP plan): \`$(recovery_plan_for "$box" "$label")\`"
       log "ALERT: firing Discord notification for $box ($label)"
       python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
         || log "ALERT: airuleset.py notify failed (non-fatal)"

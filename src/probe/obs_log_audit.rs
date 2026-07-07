@@ -13,16 +13,12 @@
 //! occurrence count, the first timestamp, and the DXGI codes seen) so the harness
 //! can print "downstream OBS dead? (GPU device-removed)" WITH EVIDENCE instead of a
 //! silent zero-frames result. Pure / unit-tested against real log fixtures — no rig.
+//!
+//! #89: the code list + line matcher live in the crate-root `crate::dxgi_device_lost` module
+//! (no probe deps) so the default-feature watchdog/self-heal pipeline can reuse the EXACT SAME
+//! signature match this harness-side audit uses — never a second drifting copy.
 
-/// The DXGI device-loss codes we treat as a dead-GPU signature. Both forms appear
-/// in the wedged stream log: the texture-create failure code (887A0005) and the
-/// device-removed reason code (887A0007). Either alone is enough to black-hole the
-/// output, so seeing any of them is a dead-GPU diagnosis.
-const DXGI_DEVICE_LOST_CODES: &[&str] = &[
-    "887A0005", // DXGI_ERROR_DEVICE_REMOVED
-    "887A0006", // DXGI_ERROR_DRIVER_INTERNAL_ERROR
-    "887A0007", // DXGI_ERROR_DEVICE_RESET
-];
+use crate::dxgi_device_lost::{line_is_device_lost, DXGI_DEVICE_LOST_CODES};
 
 /// Result of auditing an OBS log for the GPU device-removed signature.
 #[derive(Debug, Clone)]
@@ -64,14 +60,6 @@ impl ObsLogAudit {
                 .to_string()
         }
     }
-}
-
-/// True when a log line carries a DXGI device-lost signature. Matches the OBS
-/// texture-create-failure line, the device-removed-reason line, and any other line
-/// quoting one of the device-lost codes — so a build that logs only one of the two
-/// forms is still caught.
-fn line_is_device_lost(line: &str) -> bool {
-    DXGI_DEVICE_LOST_CODES.iter().any(|c| line.contains(c))
 }
 
 /// Extract the leading `HH:MM:SS.mmm` timestamp from an OBS log line, if present.

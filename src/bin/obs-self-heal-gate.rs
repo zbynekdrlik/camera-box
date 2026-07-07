@@ -19,7 +19,9 @@
 //!   "now_epoch_s": 1751500000,
 //!   "threshold": null,
 //!   "min_interval_s": null,
-//!   "stale_lock_s": null
+//!   "stale_lock_s": null,
+//!   "cause": null,
+//!   "reboot_enabled": null
 //! }
 //! ```
 //!
@@ -30,6 +32,14 @@
 //! omit or pass `null` to use `camera_box::obs_self_heal`'s own `DEFAULT_*` constants, which
 //! makes those constants the single actual source of truth for a default install (never a
 //! second hardcoded literal in the install script that could silently drift).
+//!
+//! `cause` (#89) is OPTIONAL — `"ProcessWedge"` (default, #411's original process/render-loop
+//! wedge) or `"GpuDeviceRemoved"` (#89's DXGI device-lost log signature) — selects which
+//! recovery plan a `Recover` decision carries (see `camera_box::obs_self_heal::recovery_plan`).
+//! `reboot_enabled` (#89) is OPTIONAL, defaulting to `DEFAULT_REBOOT_ENABLED` (`false`) — gates
+//! whether a `GpuDeviceRemoved` cause's plan may include the destructive `RebootPc` step. Both
+//! defaulting to the pre-#89 behavior means every caller that predates #89 (never sends either
+//! field) gets an IDENTICAL decision — no silent behavior change for an existing install.
 //!
 //! `lock_is_stale` + `clear_recovery_lock` are applied BEFORE `decide` (the documented
 //! caller-composition pattern from `obs_self_heal.rs`), so a crashed prior recovery cannot
@@ -69,7 +79,8 @@
 
 use camera_box::obs_self_heal::{
     clear_recovery_lock, decide, lock_is_stale, RecoveryStep, SelfHealDecision, SelfHealState,
-    DEFAULT_CONFIRM_THRESHOLD, DEFAULT_MIN_RECOVERY_INTERVAL_S, DEFAULT_STALE_LOCK_S,
+    WedgeCause, DEFAULT_CONFIRM_THRESHOLD, DEFAULT_MIN_RECOVERY_INTERVAL_S, DEFAULT_REBOOT_ENABLED,
+    DEFAULT_STALE_LOCK_S,
 };
 use std::io::Read;
 
@@ -77,6 +88,34 @@ fn req_bool(v: &serde_json::Value, key: &str) -> Result<bool, String> {
     v.get(key)
         .and_then(|x| x.as_bool())
         .ok_or_else(|| format!("missing/invalid required bool field '{key}'"))
+}
+
+fn opt_bool(v: &serde_json::Value, key: &str) -> Result<Option<bool>, String> {
+    match v.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(x) => x
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("field '{key}' is not a bool")),
+    }
+}
+
+/// Parse the OPTIONAL `cause` field (#89) — `"ProcessWedge"` (the default, #411's ORIGINAL
+/// cause) or `"GpuDeviceRemoved"` (#89's DXGI log signature). Omitted/null defaults to
+/// `WedgeCause::ProcessWedge` so every caller that predates #89 (never sends `cause`) gets
+/// EXACTLY the original recovery plan — never a silent behavior change for existing installs.
+fn opt_cause(v: &serde_json::Value, key: &str) -> Result<WedgeCause, String> {
+    match v.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(WedgeCause::ProcessWedge),
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "ProcessWedge" => Ok(WedgeCause::ProcessWedge),
+            "GpuDeviceRemoved" => Ok(WedgeCause::GpuDeviceRemoved),
+            other => Err(format!(
+                "field '{key}' must be 'ProcessWedge' or 'GpuDeviceRemoved', got {other:?}"
+            )),
+        },
+        Some(_) => Err(format!("field '{key}' must be a string")),
+    }
 }
 
 fn req_u64(v: &serde_json::Value, key: &str) -> Result<u64, String> {
@@ -119,6 +158,7 @@ fn step_name(s: &RecoveryStep) -> &'static str {
         RecoveryStep::KillAndRelaunchObs => "KillAndRelaunchObs",
         RecoveryStep::VerifyRecovered => "VerifyRecovered",
         RecoveryStep::RestartAhk => "RestartAhk",
+        RecoveryStep::RebootPc => "RebootPc",
     }
 }
 
@@ -143,6 +183,10 @@ fn run(input: &str) -> Result<(serde_json::Value, i32), String> {
     let min_interval_s =
         opt_u64(&raw, "min_interval_s")?.unwrap_or(DEFAULT_MIN_RECOVERY_INTERVAL_S);
     let stale_lock_s = opt_u64(&raw, "stale_lock_s")?.unwrap_or(DEFAULT_STALE_LOCK_S);
+    // #89: both OPTIONAL, defaulting to the pre-#89 behavior (ProcessWedge cause, reboot
+    // disabled) so every caller that predates #89 gets an IDENTICAL decision.
+    let cause = opt_cause(&raw, "cause")?;
+    let reboot_enabled = opt_bool(&raw, "reboot_enabled")?.unwrap_or(DEFAULT_REBOOT_ENABLED);
 
     let mut state = SelfHealState {
         confirm_count,
@@ -160,7 +204,15 @@ fn run(input: &str) -> Result<(serde_json::Value, i32), String> {
         state = clear_recovery_lock(state);
     }
 
-    let (decision, next_state) = decide(state, wedged, now_epoch_s, threshold, min_interval_s);
+    let (decision, next_state) = decide(
+        state,
+        wedged,
+        cause,
+        reboot_enabled,
+        now_epoch_s,
+        threshold,
+        min_interval_s,
+    );
 
     let (decision_name, extra, exit_code) = match &decision {
         SelfHealDecision::Healthy => ("Healthy", serde_json::json!({}), 0),
@@ -308,5 +360,90 @@ mod tests {
     fn malformed_json_is_a_parse_error() {
         let err = run("not json").unwrap_err();
         assert!(err.contains("JSON parse"));
+    }
+
+    // ─── #89: cause + reboot_enabled ────────────────────────────────────────────────────────
+
+    #[test]
+    fn omitted_cause_and_reboot_enabled_default_to_pre_89_behavior() {
+        // No "cause"/"reboot_enabled" fields at all — a caller that predates #89. Must produce
+        // the EXACT same Recover plan as before (ProcessWedge, reboot disabled).
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null}"#;
+        let (out, code) = run(input).expect("should parse");
+        assert_eq!(code, 1);
+        assert_eq!(out["decision"], "Recover");
+        assert_eq!(
+            out["steps"],
+            serde_json::json!([
+                "StopAhk",
+                "KillAndRelaunchObs",
+                "VerifyRecovered",
+                "RestartAhk"
+            ])
+        );
+    }
+
+    #[test]
+    fn gpu_device_removed_cause_with_reboot_disabled_yields_recover_with_empty_steps() {
+        // #89: a confirmed GpuDeviceRemoved wedge with the default (reboot disabled) opt-in —
+        // still a "Recover" decision (the confirm/throttle/lock state machine doesn't care WHAT
+        // the plan contains), but the plan itself is EMPTY: nothing safe to auto-execute.
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null,
+            "cause":"GpuDeviceRemoved","reboot_enabled":false}"#;
+        let (out, code) = run(input).expect("should parse");
+        assert_eq!(
+            code, 1,
+            "Recover still exits 1 even with an empty step plan. out={out}"
+        );
+        assert_eq!(out["decision"], "Recover");
+        assert_eq!(out["steps"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn gpu_device_removed_cause_with_reboot_enabled_yields_reboot_pc_step() {
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null,
+            "cause":"GpuDeviceRemoved","reboot_enabled":true}"#;
+        let (out, code) = run(input).expect("should parse");
+        assert_eq!(code, 1);
+        assert_eq!(out["decision"], "Recover");
+        assert_eq!(out["steps"], serde_json::json!(["RebootPc"]));
+    }
+
+    #[test]
+    fn unknown_cause_string_is_a_parse_error() {
+        let input = r#"{"confirm_count":0,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1000,
+            "cause":"SomethingElse"}"#;
+        let err = run(input).unwrap_err();
+        assert!(
+            err.contains("cause"),
+            "error should name the bad field: {err}"
+        );
+    }
+
+    #[test]
+    fn reboot_enabled_true_never_leaks_into_a_process_wedge_plan() {
+        // reboot_enabled=true with an (explicit or default) ProcessWedge cause must NOT change
+        // that cause's plan — RebootPc must never appear alongside the AHK/kill-relaunch steps.
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null,
+            "cause":"ProcessWedge","reboot_enabled":true}"#;
+        let (out, _code) = run(input).expect("should parse");
+        assert_eq!(
+            out["steps"],
+            serde_json::json!([
+                "StopAhk",
+                "KillAndRelaunchObs",
+                "VerifyRecovered",
+                "RestartAhk"
+            ])
+        );
     }
 }

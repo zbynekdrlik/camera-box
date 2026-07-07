@@ -99,6 +99,12 @@ pub mod burn_reconcile;
 // `scripts/frozen-camera-gate.py`; the thin CLI binary lives in `src/bin/frozen-camera-gate.rs`.
 pub mod frozen_camera;
 
+// #89 — pure DXGI device-lost (GPU TDR / driver-internal-error) log-signature matcher, extracted
+// from `probe::obs_log_audit` (#81) to a crate-root pure module so the default-feature
+// watchdog/self-heal pipeline can share the exact same match — never a second drifting copy.
+// No probe deps, so it unit-tests Tier-0.
+pub mod dxgi_device_lost;
+
 // #391 — broadcast-OBS liveness/wedge verdict (pure decision). Stream OBS was hung
 // "(Not Responding)" ~25h (obs64 pegged ~168% CPU, 16.0% render-lag) with nothing
 // detecting it. This is the strict Tier-0 kernel: GetStats (always available from a

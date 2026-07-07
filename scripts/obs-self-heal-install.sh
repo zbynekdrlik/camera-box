@@ -67,17 +67,25 @@ ps_null_or_number() {
 }
 
 # build_recovery_script BOX OBS_DIR TARGET_FPS [CONFIRM_THRESHOLD] [MIN_INTERVAL_S] [STALE_LOCK_S]
+#                        [ENABLE_REBOOT]
 #   -> the full PowerShell recovery script Task Scheduler runs every ~2 min on BOX. Pure string
-#      builder: never touches the network/MCP/Windows itself. The last three args are OPTIONAL —
-#      pass an empty string (or omit) to let obs-self-heal-gate.exe apply its own DEFAULT_* Rust
-#      constant; pass a number to install an explicit override.
+#      builder: never touches the network/MCP/Windows itself. CONFIRM_THRESHOLD/MIN_INTERVAL_S/
+#      STALE_LOCK_S are OPTIONAL — pass an empty string (or omit) to let obs-self-heal-gate.exe
+#      apply its own DEFAULT_* Rust constant; pass a number to install an explicit override.
+#      ENABLE_REBOOT (#89) is a plain boolean opt-in ("1" = enabled) — unlike the numeric
+#      overrides above, a bare true/false has no "magic number" drift risk to protect against, so
+#      it always installs a concrete $true/$false (never $null); omitted/anything-else = "0" =
+#      $false (a host reboot is a destructive, approval-gated action — this MUST default off,
+#      see camera_box::obs_self_heal::DEFAULT_REBOOT_ENABLED).
 build_recovery_script() {
   local box="$1" obs_dir="$2" target_fps="$3"
   local confirm_threshold="${4:-}" min_interval_s="${5:-}" stale_lock_s="${6:-}"
-  local threshold_ps min_interval_ps stale_lock_ps
+  local enable_reboot="${7:-0}"
+  local threshold_ps min_interval_ps stale_lock_ps reboot_enabled_ps
   threshold_ps="$(ps_null_or_number "$confirm_threshold")"
   min_interval_ps="$(ps_null_or_number "$min_interval_s")"
   stale_lock_ps="$(ps_null_or_number "$stale_lock_s")"
+  if [ "$enable_reboot" = "1" ]; then reboot_enabled_ps='$true'; else reboot_enabled_ps='$false'; fi
 
   # REUSE launch-obs-genlock.sh's own planner for the kill+relaunch+log-verify step — force=1
   # (self-heal only ever acts on a CONFIRMED wedge, so it always force-kills). This is the ONE
@@ -126,6 +134,10 @@ PS1
 \$ConfirmThresholdOverride = ${threshold_ps}
 \$MinIntervalSOverride     = ${min_interval_ps}
 \$StaleLockSOverride       = ${stale_lock_ps}
+# #89: a host reboot is a destructive, approval-gated action — defaults to \$false (see
+# camera_box::obs_self_heal::DEFAULT_REBOOT_ENABLED). Only an explicit --enable-reboot at
+# generation time installs \$true.
+\$RebootEnabledOverride    = ${reboot_enabled_ps}
 
 function Write-SelfHealLog(\$msg) {
   \$ts = Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'
@@ -187,6 +199,21 @@ if (\$obs64Count -ge 1) {
   \$state.last_sample_epoch_s = \$now
 }
 
+# ---- OBS-log DXGI device-lost audit (#89) — LOCAL read, no MCP/ssh needed on this box. Checks
+# ---- the SAME three codes camera_box::dxgi_device_lost::DXGI_DEVICE_LOST_CODES matches
+# ---- (887A0005/6/7) — never a re-derived/partial code list that could silently drift.
+\$dxgiDeviceLost = \$false
+\$obsLogDir = Join-Path \$env:APPDATA 'obs-studio\logs'
+if (Test-Path \$obsLogDir) {
+  \$latestObsLog = Get-ChildItem \$obsLogDir -Filter '*.txt' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (\$latestObsLog) {
+    \$dxgiDeviceLost = [bool](Select-String -Path \$latestObsLog.FullName -Pattern '887A0005|887A0006|887A0007' -Quiet -ErrorAction SilentlyContinue)
+  }
+}
+\$cause = if (\$dxgiDeviceLost) { 'GpuDeviceRemoved' } else { 'ProcessWedge' }
+Write-SelfHealLog "log-audit: dxgiDeviceLost=\$dxgiDeviceLost -> cause=\$cause"
+
 # ---- verdict: REUSE obs_watchdog::classify via obs-watchdog-gate.exe — NEVER reinvent thresholds ----
 \$sample = @{
   ws_reachable        = \$true
@@ -197,6 +224,7 @@ if (\$obs64Count -ge 1) {
   obs64_count         = \$obs64Count
   responding          = \$responding
   cpu_percent         = \$cpuPercent
+  dxgi_device_lost    = \$dxgiDeviceLost
 }
 \$payload = @{ '${box}' = \$sample } | ConvertTo-Json -Depth 5 -Compress
 if (-not (Test-Path \$GateBin)) {
@@ -244,6 +272,8 @@ if (-not (Test-Path \$SelfHealGateBin)) {
   threshold            = \$ConfirmThresholdOverride
   min_interval_s       = \$MinIntervalSOverride
   stale_lock_s         = \$StaleLockSOverride
+  cause                = \$cause
+  reboot_enabled       = \$RebootEnabledOverride
 } | ConvertTo-Json -Compress
 \$decisionLine = \$decisionInput | & \$SelfHealGateBin
 \$decisionExit = \$LASTEXITCODE
@@ -286,6 +316,10 @@ switch (\$decision.decision) {
   'Confirming'        { Write-SelfHealLog "Confirming: wedged pass \$(\$decision.confirm_count)/\$(\$decision.threshold) — not yet acting" }
   'Throttled'         { Write-SelfHealLog "Throttled: confirmed wedged but \$(\$decision.seconds_remaining)s remain before the next attempt is allowed — waiting" }
   'Recover' {
+    # #89: recovery_plan()'s CONTENT branches on cause — this if/elseif/else mirrors that
+    # branching exactly. The ORIGINAL #411 process-wedge plan (KillAndRelaunchObs present) is
+    # checked FIRST so its step sequence/log text below is completely untouched by this change.
+    if (\$decision.steps -contains 'KillAndRelaunchObs') {
     Write-SelfHealLog "RECOVER: obs-self-heal-gate.exe says ACT — starting the 4-step recovery plan (\$(\$decision.steps -join ' -> '))"
 
     # --- Step 1/4: StopAhk — MUST run before obs64 is ever touched (the AHK-race fix, #411) ---
@@ -315,6 +349,24 @@ ${ahk_start_block}
     \$state.recovery_in_progress = \$false
     Save-SelfHealState \$state
     Write-SelfHealLog "Recovery attempt complete (verified=\$verified) — lock cleared"
+    } elseif (\$decision.steps -contains 'RebootPc') {
+    # #89: GpuDeviceRemoved cause, --enable-reboot was set at generation time — the ONLY branch
+    # that ever executes a real host reboot, and only ever reached when recovery_plan() itself
+    # already decided to include RebootPc (i.e. \$RebootEnabledOverride was \$true this pass).
+    Write-SelfHealLog "RECOVER (#89): obs-self-heal-gate.exe says ACT — GPU device removed (DXGI log signature), reboot enabled — executing Restart-Computer"
+    \$state.recovery_in_progress = \$false
+    Save-SelfHealState \$state
+    Write-SelfHealLog "REBOOT (#89): restarting the host now to clear the GPU device-removed wedge (an OBS-only restart would not clear it)"
+    Restart-Computer -Force
+    } else {
+    # #89: GpuDeviceRemoved cause, reboot DISABLED (the default, \$RebootEnabledOverride = \$false)
+    # -> recovery_plan() returned an EMPTY plan — nothing safe to auto-execute (an OBS-only
+    # restart would not clear this cause). ALERT ONLY: log it and clear the lock so the next
+    # pass can re-confirm; a human/agent must reboot the box (or --enable-reboot can be set).
+    Write-SelfHealLog "RECOVER (#89): GPU device removed but auto-reboot is DISABLED (--enable-reboot not set) — ALERT ONLY, no automatic action taken; a full PC reboot is required to clear this box"
+    \$state.recovery_in_progress = \$false
+    Save-SelfHealState \$state
+    }
   }
   default { Write-SelfHealLog "FATAL: obs-self-heal-gate.exe returned an unrecognized decision '\$(\$decision.decision)' — treating as no-op, never acting on an unrecognized signal." }
 }
@@ -393,10 +445,18 @@ into a file on the box) + the Task Scheduler XML (register with schtasks) + the 
 procedure. Ships DISABLED — do not enable the task until BOTH a healthy-box dry run (no false
 force-kill) and a simulated-wedge run (genuine auto-recovery, AHK never double-launches) pass.
 
+#89: the script audits the box's own OBS log locally for the DXGI device-lost (GPU TDR /
+driver-internal-error) signature every pass. A confirmed GpuDeviceRemoved wedge does NOT
+force-kill/relaunch obs64 (an OBS-only restart typically does not clear it) — by DEFAULT it is
+ALERT ONLY (logged, no automatic action; a full PC reboot is required). Pass --enable-reboot to
+opt this box's job into actually rebooting the host when that happens (still gated behind the
+overall task's own <Enabled>false</Enabled> until the supervisor live-verifies + enables it).
+
 Usage:
   scripts/obs-self-heal-install.sh --box strih|stream
       [--obs-dir 'C:\Program Files\obs-studio']
       [--confirm-threshold 2] [--min-interval-s 600] [--stale-lock-s 900] [--interval-min 2]
+      [--enable-reboot]
   scripts/obs-self-heal-install.sh --help
 
 Exit codes: 0 = plan printed, 2 = usage error.
@@ -408,6 +468,9 @@ main() {
   # Empty by default — obs-self-heal-gate.exe applies its own camera_box::obs_self_heal::
   # DEFAULT_* Rust constant when these are unset. Only an explicit flag installs an override.
   local confirm_threshold="" min_interval_s="" stale_lock_s="" interval_min=2
+  # #89: OFF by default (a host reboot is a destructive, approval-gated action) — only an
+  # explicit --enable-reboot flips it on for this box's installed self-heal job.
+  local enable_reboot=0
   need_val() { [ "$#" -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; usage >&2; exit 2; }; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -417,6 +480,7 @@ main() {
       --min-interval-s)    need_val "$@"; min_interval_s="$2"; shift 2 ;;
       --stale-lock-s)      need_val "$@"; stale_lock_s="$2"; shift 2 ;;
       --interval-min)      need_val "$@"; interval_min="$2"; shift 2 ;;
+      --enable-reboot)     enable_reboot=1; shift 1 ;;
       -h|--help) usage; exit 0 ;;
       *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -442,7 +506,7 @@ main() {
   local confirm_threshold_display="${confirm_threshold:-DEFAULT_CONFIRM_THRESHOLD in src/obs_self_heal.rs}"
 
   local RECOVERY_SCRIPT TASK_XML
-  RECOVERY_SCRIPT="$(build_recovery_script "$box" "$obs_dir" "$target_fps" "$confirm_threshold" "$min_interval_s" "$stale_lock_s")"
+  RECOVERY_SCRIPT="$(build_recovery_script "$box" "$obs_dir" "$target_fps" "$confirm_threshold" "$min_interval_s" "$stale_lock_s" "$enable_reboot")"
   TASK_XML="$(build_task_xml "$task_name" "$ps1_path" "$interval_min")"
 
   cat <<PLAN
