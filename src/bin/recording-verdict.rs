@@ -843,40 +843,66 @@ struct NodeSpec<'a> {
     /// boundary so a foreign/previous-run paint in the lead-in cannot inflate the leading edge.
     /// `None` ⇒ the pre-#273 "any non-burn payload is cam2" rule.
     cam2_run_id: Option<u32>,
-    /// #11 mixed 60/30 → #360 REVISED: the by-design per-recorded-frame burn-id step for a
-    /// [`BurnRate::PerRenderTick`] node — the DECIMATION factor used by the step>=2 excess-gap
-    /// charging in [`burn_contiguity_in_window_with_step`]. That charging is RETAINED for a
-    /// genuinely-clean-decimation hop, but NO current node feeds it `>= 2` (see [`node_render_step`]):
-    /// strih's burn turned out to be a FREE-RUNNING render tick with an IRREGULAR step (not a clean
-    /// 2), so it uses gap-ignore (`1`) like the stream burn. Ignored for cam1 (PerEmittedFrame,
-    /// set-based). See [`node_render_step`].
+    /// #11 mixed 60/30 → #360 REVISED → #571 REVISED AGAIN: the by-design per-recorded-frame
+    /// burn-id step [`burn_contiguity_in_window_with_step`] uses for its decimation-aware
+    /// excess-gap charging (a forward gap `> step` charges the excess as a real drop; a gap
+    /// `== step` is the by-design decimation, never loss). strih/stream stay on gap-ignore (`1`
+    /// — strih's burn is a FREE-RUNNING render tick with an IRREGULAR step, not a clean
+    /// decimation, see [`node_render_step`]'s doc). #571: cam1/cam3/cam4 (PerEmittedFrame) DO now
+    /// consult `step` — the Topology-v2 cam(60fps)->strih(30fps) hop is a CLEAN 2:1 decimation
+    /// (proven live, run 554307), so their set-based real-drop detection is step-aware too. See
+    /// [`node_render_step`].
     step: i64,
 }
 
-/// #11 → #360: the per-recorded-frame burn-id step for a [`BurnRate::PerRenderTick`] node. The
-/// decimation-aware excess-gap charging in [`burn_contiguity_in_window_with_step`] (a forward gap
-/// `> step` charges the excess as a real drop) is CORRECT only when the node's burn steps by a
-/// CLEAN integer per recorded frame. The rig data refutes that for strih:
+/// #11 → #360 → #571: the per-recorded-frame burn-id step for a node's real-drop detection in
+/// [`burn_contiguity_in_window_with_step`] (a forward gap `> step` charges the excess as a real
+/// drop; a gap `== step` is the by-design decimation, never loss — see that function's own doc).
 ///
 /// - **strih** is a FREE-RUNNING DistroAV render-tick, NOT a per-output-frame counter. Read from the
 ///   30fps stream recording its per-frame step is IRREGULAR (run 354003: 0–10, mean ~4 — NOT the
 ///   assumed `round(60/30) = 2`), so a forward gap is render-clock jitter, not a lost frame: EVERY
 ///   strih gap > 8 on 354003 coincided with a CLEAN stream-burn step (the stream burn never gapped
 ///   ⇒ zero stream-output loss). The old strih=2 charging therefore manufactured ~17 300 phantom
-///   REAL DROPs. So strih now uses gap-ignore (`1`): a delivered frame MISSING its strih burn is
+///   REAL DROPs. So strih stays on gap-ignore (`1`): a delivered frame MISSING its strih burn is
 ///   still BURN-UNREADABLE (FAILS), and real loss is caught by the stream burn (per-output-frame)
-///   plus cam1 (per-emitted). A strih→stream NDI content-hold loss shows as a SMALL strih step (a
-///   held frame), never the large gap the old code charged — that detection belongs to the
+///   plus cam1/cam3/cam4 (per-emitted). A strih→stream NDI content-hold loss shows as a SMALL strih
+///   step (a held frame), never the large gap the old code charged — that detection belongs to the
 ///   per-frame continuity reconciliation (#356), not this free-running-tick gap math.
 /// - **stream** is emitted AND recorded by the same stream OBS ⇒ `1` (no decimation).
-/// - **cam1** is PerEmittedFrame (set-based) ⇒ its step is never consulted; returns `1` harmlessly.
+/// - **cam1/cam3/cam4** (#571, `CAMERA_UNDER_TEST_NODES`, `BurnRate::PerEmittedFrame`): the
+///   camera-under-test emits at `refresh_hz` (60, unchanged by Topology v2) but its forwarded
+///   capture burn is read from the CLEAN strih recording (#133), which since #459/#460 records
+///   ITS OWN cut-to-stream canvas at `capture_fps` (30 on the rig) — a CLEAN by-design 2:1
+///   DECIMATION at the cam→strih hop, proven live on run 554307: strih's OWN node burn (911002)
+///   was fully contiguous while cam1's forwarded burn (911001) read exactly the decimated half
+///   (11087 phantom `real_drop`s under the old unconditional step=1 model — the #571 bug). Unlike
+///   strih's free-running render tick, this decimation IS a clean integer ratio (the camera's own
+///   emit clock genlocked to the strih canvas rate), so `painted_tick_step(refresh_hz, capture_fps)`
+///   — the SAME by-design-decimation-ratio formula #467 already uses for the stream/imag
+///   recordings — is reused rather than a second hardcoded "2", so the step always tracks the
+///   rig-pinned CLI rates instead of being a magic constant.
 ///
-/// `strih_emit_fps` / `stream_capture_fps` stay on the CLI (and are read here) for provenance and
-/// the separate OPTICAL diagnostic step; they no longer drive the strih loss step.
-fn node_render_step(node: &str, strih_emit_fps: f64, stream_capture_fps: f64) -> i64 {
-    // Read the rig-pinned fps for provenance; no current node is a clean integer decimation, so
-    // every node uses gap-ignore (see the docstring above for why strih is NOT a clean step-2).
-    let _ = (node, strih_emit_fps, stream_capture_fps);
+/// `strih_emit_fps` / `stream_capture_fps` are read here for strih/stream's provenance and the
+/// separate OPTICAL diagnostic step; they do not drive the strih/stream loss step (gap-ignore).
+/// `refresh_hz` / `capture_fps` drive the cam1/cam3/cam4 decimation step.
+fn node_render_step(
+    node: &str,
+    strih_emit_fps: f64,
+    stream_capture_fps: f64,
+    refresh_hz: f64,
+    capture_fps: f64,
+) -> i64 {
+    // #571 [red]: still returns 1 unconditionally for EVERY node, including cam1/cam3/cam4 — the
+    // bug this ticket fixes (the GREEN commit branches on CAMERA_UNDER_TEST_NODES and derives the
+    // cam(60)->strih(30) decimation step via `painted_tick_step`).
+    let _ = (
+        node,
+        strih_emit_fps,
+        stream_capture_fps,
+        refresh_hz,
+        capture_fps,
+    );
     1
 }
 
@@ -2430,11 +2456,13 @@ fn build_and_print_verdict(
                         source: cam1_source,
                         rec_path: cam1_rec_path,
                         cam2_run_id: cam2_pin,
-                        // cam1 is set-based (PerEmittedFrame) — step is never consulted.
+                        // #571: cam1 IS decimation-aware now (the cam(60)->strih(30) hop).
                         step: node_render_step(
                             "cam1",
                             args.strih_emit_fps,
                             args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
                         ),
                     },
                     !cam1_ids.is_empty(),
@@ -2457,6 +2485,8 @@ fn build_and_print_verdict(
                             "cam3",
                             args.strih_emit_fps,
                             args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
                         ),
                     },
                     !cam3_ids.is_empty(),
@@ -2476,6 +2506,8 @@ fn build_and_print_verdict(
                             "cam4",
                             args.strih_emit_fps,
                             args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
                         ),
                     },
                     !cam4_ids.is_empty(),
@@ -2490,12 +2522,14 @@ fn build_and_print_verdict(
                         source: stream_frames,
                         rec_path: stream_path,
                         cam2_run_id: cam2_pin,
-                        // #11: the 60fps strih burn read from the 30fps stream recording ⇒ step 2
-                        // (decimation-aware — a gap > 2 charges the excess as a real drop).
+                        // #360: strih's free-running render tick uses gap-ignore (see
+                        // node_render_step's doc) — refresh_hz/capture_fps are unused for it.
                         step: node_render_step(
                             "strih",
                             args.strih_emit_fps,
                             args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
                         ),
                     },
                     !strih_ids_seq.is_empty(),
@@ -2516,6 +2550,8 @@ fn build_and_print_verdict(
                             "stream",
                             args.strih_emit_fps,
                             args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
                         ),
                     },
                     !stream_ids_seq.is_empty(),
@@ -3252,12 +3288,30 @@ fn extract_partial_flagged_frames(
     // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
     // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop); strih/stream burn
     // per-RENDER-tick (a forward gap is not loss, but a delivered frame missing its burn is).
-    // #360: the same step the merge verdict uses (node_render_step → gap-ignore for all current
-    // nodes, since strih's free-running render tick is not a clean decimation), so the on-box
-    // pixel-proof flagging matches what the merge flags.
-    let strih_step = node_render_step("strih", args.strih_emit_fps, args.stream_capture_fps);
+    // #360/#571: the SAME step the merge verdict uses (node_render_step — gap-ignore for strih's
+    // free-running render tick; the cam(60)->strih(30) decimation ratio for cam1, #571), so the
+    // on-box pixel-proof flagging matches what the merge flags.
+    let strih_step = node_render_step(
+        "strih",
+        args.strih_emit_fps,
+        args.stream_capture_fps,
+        args.refresh_hz,
+        args.capture_fps,
+    );
+    let cam1_step = node_render_step(
+        "cam1",
+        args.strih_emit_fps,
+        args.stream_capture_fps,
+        args.refresh_hz,
+        args.capture_fps,
+    );
     let owned: &[(&str, u32, BurnRate, i64)] = match box_name {
-        "strih" => &[("cam1", args.burn_cam1_run_id, BurnRate::PerEmittedFrame, 1)],
+        "strih" => &[(
+            "cam1",
+            args.burn_cam1_run_id,
+            BurnRate::PerEmittedFrame,
+            cam1_step,
+        )],
         "stream" => &[
             (
                 "strih",
@@ -5413,16 +5467,28 @@ mod tests {
     }
 
     #[test]
-    fn node_render_step_is_gap_ignore_for_all_nodes_360() {
+    fn node_render_step_is_gap_ignore_for_strih_and_stream_360() {
         // #360: strih's burn is a FREE-RUNNING render tick with an IRREGULAR step (run 354003:
         // 0–10, mean ~4), NOT the clean 60/30=2 the old code assumed — its forward gaps are
-        // render-clock jitter, not loss. So every node now uses gap-ignore (step 1); the
-        // step>=2 excess-gap charging in burn_contiguity stays as a tested capability for a
-        // genuinely-clean-decimation hop, but no current node feeds it. (Inputs ignored.)
-        assert_eq!(super::node_render_step("strih", 60.0, 30.0), 1);
-        assert_eq!(super::node_render_step("stream", 60.0, 30.0), 1);
-        assert_eq!(super::node_render_step("cam1", 60.0, 30.0), 1);
-        assert_eq!(super::node_render_step("strih", 60.0, 0.0), 1);
+        // render-clock jitter, not loss. strih/stream stay on gap-ignore (step 1) regardless of
+        // the fps inputs (irrelevant to them, see node_render_step's doc).
+        assert_eq!(super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0), 1);
+        assert_eq!(super::node_render_step("stream", 60.0, 30.0, 60.0, 30.0), 1);
+        assert_eq!(super::node_render_step("strih", 60.0, 0.0, 60.0, 30.0), 1);
+    }
+
+    #[test]
+    fn node_render_step_is_decimation_aware_for_camera_under_test_nodes_571() {
+        // #571: cam1/cam3/cam4's forwarded capture burn is read from the strih recording, which
+        // (post-#459/#460 Topology v2) records its own cut-to-stream canvas at `capture_fps` (30
+        // on the rig) while the camera keeps emitting at `refresh_hz` (60) — a clean 2:1
+        // decimation, DERIVED from the CLI rates (never a hardcoded "2"), via the SAME
+        // `painted_tick_step` formula #467 already uses for the stream/imag recordings.
+        assert_eq!(super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0), 2);
+        assert_eq!(super::node_render_step("cam3", 60.0, 30.0, 60.0, 30.0), 2);
+        assert_eq!(super::node_render_step("cam4", 60.0, 30.0, 60.0, 30.0), 2);
+        // A genuinely non-decimated rate (e.g. capture_fps == refresh_hz) must NOT be forced to 2.
+        assert_eq!(super::node_render_step("cam1", 60.0, 30.0, 60.0, 60.0), 1);
     }
 
     #[test]
@@ -5442,7 +5508,7 @@ mod tests {
                 source: &stream,
                 rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0), // = 2
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0), // = 1 (gap-ignore)
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -5453,6 +5519,79 @@ mod tests {
             v.is_zero(),
             "clean 60→30 decimation (ids step by 2) is ZERO loss: {:?}",
             v.contiguity
+        );
+    }
+
+    #[test]
+    fn node_verdict_cam1_decimation_step2_clean_is_zero_loss_571() {
+        // #571: the same clean every-other-id sequence, but for cam1 (PerEmittedFrame) — the
+        // Topology-v2 cam(60fps)->strih(30fps) hop. Before this fix cam1 was step=1 (gap-ignore
+        // was irrelevant to it; the set-based scan charged every decimated-away id as a real
+        // drop). node_render_step now derives step=2 for cam1, and the verdict must be ZERO loss.
+        let stream: Vec<RecordingFrame> = (0..6)
+            .map(|i| frame(i, &[(CAM2, 100 + i as u32), (CAM1B, 2000 + (i as u32) * 2)]))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &stream,
+                rec_path: Some(std::path::Path::new("/nonexistent.mp4")),
+                cam2_run_id: None,
+                step: super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0), // = 2
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "clean 60->30 decimation on cam1 (ids step by 2) is ZERO loss (#571): {:?}",
+            v.contiguity
+        );
+    }
+
+    #[test]
+    fn node_verdict_cam1_decimation_step2_extra_missing_id_is_not_masked_571() {
+        // #571 no-masking proof at the node_verdict level: a genuine drop on top of the clean
+        // 2:1 decimation MUST still fail the verdict — gap 2004 -> 2008 (4, not the by-design 2)
+        // charges exactly one real drop, never silently absorbed as "just decimation".
+        let stream = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 2000)]),
+            frame(1, &[(CAM2, 101), (CAM1B, 2002)]),
+            frame(2, &[(CAM2, 102), (CAM1B, 2008)]), // 2004,2006 -> one genuine drop (2006)
+            frame(3, &[(CAM2, 103), (CAM1B, 2010)]),
+        ];
+        let w = in_window_burn_frames(
+            &stream,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+            None,
+        );
+        let iw = camera_box::probe::burn_contiguity::burn_contiguity_in_window_with_step(
+            "cam1",
+            &w,
+            BurnRate::PerEmittedFrame,
+            super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0),
+        );
+        assert!(
+            !iw.contiguity.is_contiguous(),
+            "a genuine drop on top of decimation must FAIL, never be masked (#571): {:?}",
+            iw.contiguity
+        );
+        assert_eq!(
+            iw.contiguity.missing_ids,
+            vec![2006],
+            "exactly the one genuinely-lost decimation slot (4/2 - 1 = 1)"
+        );
+        assert_eq!(
+            iw.missing_slots[0].kind,
+            InWindowMissingKind::RealDrop,
+            "classified as a real drop, not burn-unreadable"
         );
     }
 
@@ -5533,7 +5672,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -5863,7 +6002,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -5906,7 +6045,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -5974,7 +6113,7 @@ mod tests {
                 source: stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[CAM1B, STRIH, STREAM],
             tmp.path(),
@@ -6080,7 +6219,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -6114,7 +6253,7 @@ mod tests {
                 source: &full,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -6146,7 +6285,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -6183,7 +6322,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[STRIH, STREAM],
             tmp.path(),
@@ -6224,7 +6363,7 @@ mod tests {
                 source: &stream,
                 rec_path: None,
                 cam2_run_id: None,
-                step: super::node_render_step("strih", 60.0, 30.0),
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
             },
             &[STRIH, STREAM],
             tmp.path(),
