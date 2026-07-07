@@ -794,6 +794,23 @@ pub fn burn_ids_in(frames: &[RecordingFrame], run_id: u32) -> Vec<u32> {
     out
 }
 
+/// #575 — like [`burn_ids_in`], but paired with each payload's `frame_index` so a caller can
+/// apply a frame-POSITION-based boundary trim (recording start/stop artifacts,
+/// `crate::recording_boundary_trim`) before feeding the ids into a contiguity check. Trimming by
+/// VALUE can't distinguish a real early/late drop from a boundary artifact; trimming by frame
+/// POSITION can, because it never has to look at what the value IS.
+pub fn burn_ids_with_frame_index_in(frames: &[RecordingFrame], run_id: u32) -> Vec<(u64, u32)> {
+    let mut out = Vec::new();
+    for f in frames {
+        for p in &f.payloads {
+            if p.run_id == run_id {
+                out.push((f.frame_index, p.frame_id));
+            }
+        }
+    }
+    out
+}
+
 /// Per-hop ABSOLUTE latency from the SINGLE stream recording, paired on the two burns
 /// CO-LOCATED in one recorded frame (#174). For each stream frame carrying BOTH the
 /// upstream burn (`up_run_id`) and the downstream burn (`down_run_id`) — both forwarded
