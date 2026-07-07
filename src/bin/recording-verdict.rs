@@ -1023,10 +1023,13 @@ fn frame_gen_ts_anchor(
 /// #583 — partition a node's decoded frames into the SAME `--switch-schedule` windows the strict
 /// sweep uses (via [`frame_gen_ts_anchor`] + [`place_frame_in_window`]), returning the
 /// RecordingFrames per window so each window can be routed through the honest imag zero-loss gate
-/// ([`camera_box::imag_tick_gate::imag_zero_loss`]). Frames with no gen_ts anchor, inside a
-/// transition guard, or outside every window are dropped (the same non-attributed frames
-/// `segment_continuity` discards). Reuses the identical window-attribution logic so the honest imag
-/// gate and the strict stream sweep can never disagree on which window a frame belongs to.
+/// ([`camera_box::imag_tick_gate::imag_zero_loss`]), PLUS the count of frames with no gen_ts anchor
+/// at all (mirrors [`segment_frames_from_recording`]'s `no_anchor` return — a #583 correctness-review
+/// finding: this diagnostic was silently dropped in an earlier draft; restored so the imag sweep
+/// reports it exactly like the stream sweep does). A frame inside a transition guard or outside
+/// every window IS anchored but simply attributed to no window — only a frame with NO anchor at all
+/// counts here. Reuses the identical window-attribution logic so the honest imag gate and the strict
+/// stream sweep can never disagree on which window a frame belongs to.
 fn partition_frames_by_window(
     frames: &[RecordingFrame],
     anchor_run_ids: &[u32],
@@ -1034,17 +1037,20 @@ fn partition_frames_by_window(
     cam2_run_id: Option<u32>,
     schedule: &[SwitchWindow],
     guard_ns: i64,
-) -> Vec<Vec<RecordingFrame>> {
+) -> (Vec<Vec<RecordingFrame>>, usize) {
     let mut out: Vec<Vec<RecordingFrame>> = vec![Vec::new(); schedule.len()];
+    let mut no_anchor: usize = 0;
     for f in frames {
-        if let Some(gen_ts) = frame_gen_ts_anchor(f, anchor_run_ids, all_burn_run_ids, cam2_run_id)
-        {
-            if let WindowPlacement::In(wi) = place_frame_in_window(gen_ts, schedule, guard_ns) {
-                out[wi].push(f.clone());
+        match frame_gen_ts_anchor(f, anchor_run_ids, all_burn_run_ids, cam2_run_id) {
+            Some(gen_ts) => {
+                if let WindowPlacement::In(wi) = place_frame_in_window(gen_ts, schedule, guard_ns) {
+                    out[wi].push(f.clone());
+                }
             }
+            None => no_anchor += 1,
         }
     }
-    out
+    (out, no_anchor)
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -3415,13 +3421,25 @@ fn build_and_print_verdict(
                     // decimation), so its optical expected step is IMAG_OPTICAL_EXPECTED_STEP — the
                     // SAME step `node_verdict_for_imag` uses (never the stream sweep's step 2).
                     let imag_optical_step = camera_box::imag_tick_gate::IMAG_OPTICAL_EXPECTED_STEP;
+                    // #583 correctness-review finding: calibrate the digital-burn render step ONCE
+                    // over the WHOLE imag recording (the largest sample available), not per short
+                    // window — the render step is a property of the whole OBS pipeline session, not
+                    // expected to vary window-to-window, and calibrating it independently per window
+                    // (a much smaller sample) can under-trust a genuinely-larger step (fewer than
+                    // `MIN_IDS_FOR_STEP_CALIBRATION` distinct ids falls back to the conservative
+                    // constant) and manufacture a phantom missing id on a clean, merely-few-sampled
+                    // window. Mirrors how `node_verdict_for_imag` calibrates once for the whole
+                    // recording. All windows below reuse this SAME calibrated step.
+                    let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(
+                        &burn_ids_in(imag_frames, BURN_RUN_ID_IMAG),
+                    );
                     // Partition imag's frames into the SAME schedule windows (by the #463 burn gen_ts
                     // anchor, fallback cam2 optical paint). The 1s transition guard already trims each
                     // window's boundary artifacts (~60 frames at 60fps — far more than the #575
                     // whole-recording 3-frame boundary trim), so NO per-window boundary trim is applied
                     // here (re-applying that whole-recording trim per short window would distort the
                     // beat — the trim is a recording-boundary concern, not a per-window one).
-                    let imag_windows = partition_frames_by_window(
+                    let (imag_windows, imag_no_anchor) = partition_frames_by_window(
                         imag_frames,
                         &[BURN_RUN_ID_IMAG],
                         &[BURN_RUN_ID_IMAG],
@@ -3432,9 +3450,10 @@ fn build_and_print_verdict(
                     println!();
                     println!(
                         "=== #467/#583 imag-nb per-segment continuity (honest #580v2 gate, its OWN \
-                         recording, {} window(s), optical step {}) ===",
+                         recording, {} window(s), optical step {}, calibrated burn step {}) ===",
                         schedule.len(),
-                        imag_optical_step
+                        imag_optical_step,
+                        imag_burn_step
                     );
                     let mut imag_overall_pass = !schedule.is_empty();
                     let mut imag_segments_json: Vec<serde_json::Value> =
@@ -3446,6 +3465,7 @@ fn build_and_print_verdict(
                         let zl = camera_box::imag_tick_gate::imag_zero_loss(
                             &ticks,
                             &burn_ids,
+                            imag_burn_step,
                             facts.undecodable_in_span as u32,
                             facts.span_frames as u32,
                             imag_optical_step,
@@ -3501,6 +3521,12 @@ fn build_and_print_verdict(
                             "note": note,
                         }));
                     }
+                    if imag_no_anchor > 0 {
+                        println!(
+                            "  ({imag_no_anchor} imag recorded frame(s) had no burn/optical gen_ts \
+                             anchor — not placed)"
+                        );
+                    }
                     println!(
                         "  >>> imag: {}",
                         if imag_overall_pass {
@@ -3514,6 +3540,8 @@ fn build_and_print_verdict(
                         "overall_pass": imag_overall_pass,
                         "guard_ns": args.switch_guard_ns.max(0),
                         "optical_expected_step": imag_optical_step,
+                        "burn_render_step": imag_burn_step,
+                        "frames_without_anchor": imag_no_anchor,
                     });
                     all_pass &= imag_overall_pass;
                 }

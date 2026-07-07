@@ -736,18 +736,31 @@ impl ImagZeroLoss {
 /// signals: the CHRONOLOGICAL decodable optical ticks (undecodable frames EXCLUDED — counted
 /// separately in `undecodable`), the decodable digital-burn ids, the in-span undecodable count and
 /// the optical span frame count. Calls the SAME #580v2 pure functions `node_verdict_for_imag` calls
-/// ([`optical_beat_net_zero`], [`calibrate_burn_step`], [`burn_step_contiguity`], [`burn_present_ok`])
-/// so the per-segment sweep window and the whole-recording headline share ONE signal computation and
-/// cannot diverge. `optical_expected_step` is imag's native-rate step ([`IMAG_OPTICAL_EXPECTED_STEP`]).
+/// ([`optical_beat_net_zero`], [`burn_step_contiguity`], [`burn_present_ok`]) so the per-segment
+/// sweep window and the whole-recording headline share ONE signal computation and cannot diverge.
+/// `optical_expected_step` is imag's native-rate step ([`IMAG_OPTICAL_EXPECTED_STEP`]).
+///
+/// `burn_step` is taken as a PARAMETER, deliberately NOT calibrated internally via
+/// [`calibrate_burn_step`] (a #583 correctness-review finding): the render step is a property of
+/// the WHOLE recording session's OBS pipeline, not expected to vary window-to-window, so
+/// calibrating it independently PER short segment window (a much smaller sample than the whole
+/// recording) can under-trust a genuinely-larger step ([`MIN_IDS_FOR_STEP_CALIBRATION`] falls back
+/// to the conservative constant on a small window) and manufacture a phantom missing id on a
+/// clean, merely-few-sampled window — a spurious FALSE FAIL the whole-recording path's much larger
+/// sample would not hit. The caller calibrates ONCE (over the largest sample it has — the whole
+/// analyzed recording, ideally) and passes the SAME step into every window, exactly mirroring how
+/// `node_verdict_for_imag` calibrates once for the whole recording. Passing a step calibrated over
+/// a SINGLE window here (matching the pre-fix per-window behaviour) is still valid input — the
+/// function itself performs no calibration decision, only contiguity math on the given step.
 pub fn imag_zero_loss(
     ticks_in_order: &[u32],
     burn_ids: &[u32],
+    burn_step: u32,
     undecodable: u32,
     optical_span_frames: u32,
     optical_expected_step: u32,
 ) -> ImagZeroLoss {
     let optical = optical_beat_net_zero(ticks_in_order, optical_expected_step);
-    let burn_step = calibrate_burn_step(burn_ids);
     let burn = burn_step_contiguity(burn_ids, burn_step);
     let present_ok = burn_present_ok(
         burn.present_count,
@@ -1637,6 +1650,7 @@ mod tests {
         let v = imag_zero_loss(
             &ticks,
             &burn,
+            calibrate_burn_step(&burn),
             0,
             ticks.len() as u32,
             IMAG_OPTICAL_EXPECTED_STEP,
@@ -1665,6 +1679,7 @@ mod tests {
         let v = imag_zero_loss(
             &ticks,
             &burn,
+            calibrate_burn_step(&burn),
             0,
             ticks.len() as u32,
             IMAG_OPTICAL_EXPECTED_STEP,
@@ -1693,6 +1708,7 @@ mod tests {
         let v = imag_zero_loss(
             &ticks,
             &[],
+            calibrate_burn_step(&[]),
             0,
             ticks.len() as u32,
             IMAG_OPTICAL_EXPECTED_STEP,
@@ -1721,6 +1737,7 @@ mod tests {
         let v = imag_zero_loss(
             &ticks,
             &burn,
+            calibrate_burn_step(&burn),
             0,
             ticks.len() as u32,
             IMAG_OPTICAL_EXPECTED_STEP,
@@ -1744,6 +1761,7 @@ mod tests {
         let v = imag_zero_loss(
             &ticks,
             &burn,
+            calibrate_burn_step(&burn),
             0,
             ticks.len() as u32,
             IMAG_OPTICAL_EXPECTED_STEP,
