@@ -289,6 +289,47 @@ pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
 /// inline magic `1` at every call site.
 pub const IMAG_OPTICAL_EXPECTED_STEP: u32 = 1;
 
+/// #580v2 — the copy/freeze run-length ceiling (K) for imag's optical no-copy gate
+/// ([`OpticalBeatVerdict::no_stuck_copy`]). A benign same-rate beat produces at most an ISOLATED
+/// duplicate (a Δtick=0 run of 1 — see [`max_consecutive_stuck_run`]'s doc); K=3 is that physical
+/// maximum plus a small jitter margin, while a genuine copy/freeze runs into the hundreds. This is a
+/// HEURISTIC threshold on the current 60Hz-monitor rig (robust because the beat physically cannot
+/// produce a long Δ0 run, but a heuristic) — a 120Hz monitor makes copy-detection RIGOROUS (at 2:1
+/// the tick must advance by exactly 2 per camera frame, so a copy shows as Δ0 where it must be 2, no
+/// run-length threshold needed). The supervisor re-decodes run 572001 and reads the live
+/// `imag_optical_max_stuck_run`; if the real value ever exceeds K, K is RE-GROUNDED from the measured
+/// beat, never loosened blindly.
+pub const IMAG_OPTICAL_MAX_STUCK_RUN: u32 = 3;
+
+/// #580v2 — THE CENTERPIECE no-copy/liveness metric: the MAXIMUM number of CONSECUTIVE zero-delta
+/// (`ticks[i] == ticks[i-1]`) steps in the CHRONOLOGICAL (capture-order) optical tick sequence.
+///
+/// A benign 60Hz-monitor-vs-60fps-camera beat can duplicate a tick at most ONCE in a row — the
+/// monitor advances every camera-frame period, so the camera physically cannot catch one painted
+/// tick three times running — so an isolated dup is a run of 1. A COPY / FREEZE (a stalled upstream
+/// content, or a stuck camera) repeats the SAME tick for many frames → a run of hundreds. RUN-LENGTH
+/// is what distinguishes the two where the whole-window AGGREGATES (`surplus`, `avg_step`) cannot: a
+/// freeze conserves the wall-clock frame count (its skips ≡ its dups) so `surplus ≈ 0`, and (if it
+/// recovers mid-recording) leaves the endpoints unchanged so `avg_step ≈ expected` — yet its Δ0 run
+/// is enormous. Two adversarial Opus reviews proved a content freeze slips past every aggregate term
+/// AND the free-running digital burn (which advances on imag's own RENDER, blind to an upstream
+/// content freeze); the run-length guard is the only term that catches it.
+///
+/// Empty / single-sample input → 0 (no adjacent pair, nothing can be stuck).
+pub fn max_consecutive_stuck_run(ticks_in_order: &[u32]) -> u32 {
+    let mut max_run = 0u32;
+    let mut cur = 0u32;
+    for pair in ticks_in_order.windows(2) {
+        if pair[0] == pair[1] {
+            cur += 1;
+            max_run = max_run.max(cur);
+        } else {
+            cur = 0;
+        }
+    }
+    max_run
+}
+
 /// #580 — the optical-BEAT verdict for imag's PRIMARY (cam2 dual-QR) zero-loss signal, replacing
 /// strict step-1 [`tick_contiguity`] as the hard optical gate. cam2's 60Hz monitor and the
 /// broadcast camera's free-running 60fps are two UNSYNCHRONIZED same-rate clocks — they BEAT: the
@@ -365,7 +406,16 @@ pub struct OpticalBeatVerdict {
     pub frames_count: u32,
     /// `expected_count as i64 - frames_count as i64`. `<= 0` ⇒ net-zero (every distinct tick is
     /// covered by the raw frame count); `> 0` ⇒ a genuine net loss of that many painter ticks.
+    /// #580v2 — DIAGNOSTIC ONLY (no longer a pass/fail term): on two free-running same-rate clocks a
+    /// tiny clock-residual `surplus > 0` is unavoidable (run 572001 = +3 over 21867 frames), so
+    /// gating on `surplus <= 0` false-fails a genuinely-zero run — the exact bug that reopened #580.
     pub surplus: i64,
+    /// #580v2 — the MAX consecutive Δtick==0 run over the chronological window
+    /// ([`max_consecutive_stuck_run`]) — imag's HARD no-copy/liveness term (see
+    /// [`Self::no_stuck_copy`] / [`Self::is_live_no_copy`]). Benign beat ⇒ ≤ 1; a copy/freeze ⇒
+    /// hundreds. Surfaced as `imag_optical_max_stuck_run` in the imag JSON so the supervisor can read
+    /// the real 572001 value and validate [`IMAG_OPTICAL_MAX_STUCK_RUN`].
+    pub max_stuck_run: u32,
 }
 
 impl OpticalBeatVerdict {
@@ -382,23 +432,35 @@ impl OpticalBeatVerdict {
             && self.avg_step.round() as i64 == self.expected_step as i64
     }
 
-    /// THE #580 pass/fail decision: genuinely advancing AND the analyzed span is net-zero loss
-    /// (`surplus <= 0`); STRICTER than the old strict-step-1 check for a frozen/stuck read (see
-    /// [`Self::is_advancing`]'s doc).
-    ///
-    /// `surplus` is a WHOLE-WINDOW AGGREGATE (`expected_count - frames_count`), NOT a per-value
-    /// pairing — so this is an OPTICAL-TRACKING proof, not a per-frame delivery proof. A genuine
-    /// one-off optical drop CAN be numerically offset to `surplus <= 0` by an unrelated,
-    /// naturally-occurring beat duplicate elsewhere in the same window (e.g. a real skip of 110
-    /// offset by a beat dup at 121), so this term ALONE is NOT sufficient to prove every frame was
-    /// delivered — and the aggregate is deliberate: at matched 60Hz/60fps a beat skip and a real
-    /// drop are OPTICALLY indistinguishable, so per-value pairing would re-introduce the exact
-    /// 572001 false-FAIL #580 exists to close. Per-frame DELIVERY is proven independently by the
-    /// STRICT digital corner burn (`NodeVerdict::imag_burn_ok`, #463 — a clean free-running render
-    /// tick where a genuinely dropped frame DOES show a gap); `NodeVerdict::is_zero` ANDs both, so a
-    /// real drop coincidentally optical-offset here is still caught by the burn. On the pre-#463
-    /// optical-only fallback (no burn) that aggregate-offset edge is unguarded — tracked as a
-    /// follow-up; the live rig always paints the burn.
+    /// #580v2 — no long COPY/FREEZE run: the max consecutive Δtick==0 run is within
+    /// [`IMAG_OPTICAL_MAX_STUCK_RUN`]. A benign same-rate beat dups a tick at most once in a row
+    /// (run ≤ 1); a content freeze / stuck camera repeats it for hundreds of frames. THIS is the
+    /// term that catches the copy/freeze the whole-window aggregates (`surplus`/`avg_step`) and the
+    /// render-free-running digital burn all miss (see [`max_consecutive_stuck_run`]'s doc).
+    pub fn no_stuck_copy(&self) -> bool {
+        self.max_stuck_run <= IMAG_OPTICAL_MAX_STUCK_RUN
+    }
+
+    /// #580v2 — THE imag optical HARD gate, replacing `surplus <= 0`: the read genuinely ADVANCES
+    /// ([`Self::is_advancing`] — a LOOSE band that rejects a frozen/blank read and gross rate/alias,
+    /// NOT a tight per-frame accounting) AND carries NO long copy/freeze run
+    /// ([`Self::no_stuck_copy`] — the centerpiece). Per-frame DELIVERY accounting is NOT the optical
+    /// leg's job on a free-running rig (two same-rate clocks cannot hit `surplus <= 0` reliably — the
+    /// clock residual that reopened #580); the STRICT digital corner burn is the delivery authority
+    /// (`NodeVerdict::imag_burn_ok`, #463/#584/#585), ANDed in `NodeVerdict::is_zero`. This gate's
+    /// job is only: the injection is LIVE (advancing) and there is NO copy/freeze.
+    pub fn is_live_no_copy(&self) -> bool {
+        // RED STUB (#580v2): still the OLD `surplus <= 0` net-zero gate — which false-fails the real
+        // 572001 (surplus +3) AND fake-greens a long copy/freeze (surplus <= 0). GREEN replaces this
+        // body with `self.is_advancing() && self.no_stuck_copy()`.
+        self.is_net_zero()
+    }
+
+    /// #580v2 — DIAGNOSTIC ONLY (surfaced/printed, NEVER the pass/fail): genuinely advancing AND
+    /// `surplus <= 0`. On two free-running same-rate clocks a tiny clock-residual `surplus > 0` is
+    /// unavoidable (run 572001 = +3), so gating on this false-fails a genuinely-zero run — the exact
+    /// bug that reopened #580. The HARD optical gate is [`Self::is_live_no_copy`]; `surplus`/`avg_step`
+    /// remain here purely to be reported.
     pub fn is_net_zero(&self) -> bool {
         self.is_advancing() && self.surplus <= 0
     }
@@ -414,6 +476,7 @@ pub fn optical_beat_verdict_from_counts(
     frames_count: u32,
     avg_step: f64,
     expected_step: u32,
+    max_stuck_run: u32,
 ) -> OpticalBeatVerdict {
     OpticalBeatVerdict {
         avg_step,
@@ -422,6 +485,7 @@ pub fn optical_beat_verdict_from_counts(
         present_count,
         frames_count,
         surplus: expected_count as i64 - frames_count as i64,
+        max_stuck_run,
     }
 }
 
@@ -471,6 +535,8 @@ pub fn optical_beat_from_contiguity(
         frames_count,
         avg_step,
         expected_step,
+        // #580v2: the chronological no-copy/liveness metric — the HARD optical term.
+        max_consecutive_stuck_run(ticks_in_order),
     )
 }
 
@@ -522,6 +588,41 @@ pub fn calibrate_burn_step(ids: &[u32]) -> u32 {
         .max_by_key(|&(delta, count)| (count, std::cmp::Reverse(delta)))
         .map(|(delta, _)| delta.max(1))
         .unwrap_or(IMAG_BURN_RENDER_STEP)
+}
+
+/// #580v2 — the calibrated burn step is trusted only up to this multiple of
+/// [`IMAG_BURN_RENDER_STEP`]; a mode ABOVE the ceiling is a sign a SUSTAINED periodic drop
+/// dominated the deltas (a majority-loss cadence inflating the modal step), so
+/// [`calibrate_burn_step`] discards it and falls back to the conservative known step rather than
+/// trusting a drop-inflated value that would read the drops as "expected" and MASK them. `2` keeps
+/// the real live rig's step 3 (= 1.5× the constant) trusted while rejecting an inflated ≥ 5.
+const MAX_CALIBRATED_BURN_STEP_MULTIPLE: u32 = 2;
+
+/// #580v2 (#585) — minimum fraction of the EXPECTED per-recording burn count a real digital burn
+/// must actually decode. Once the digital burn is the SOLE delivery authority (#580v2 demotes the
+/// optical surplus to diagnostic), an absent / occluded / frozen burn must FAIL rather than
+/// vacuously pass — see [`burn_present_ok`].
+pub const MIN_BURN_PRESENT_FRACTION: f64 = 0.5;
+
+/// #580v2 (#584/#585) — is imag's digital corner burn GENUINELY PRESENT enough to be the delivery
+/// authority? `present_count` (distinct decoded burn ids) must be at least
+/// `(reference_frames / step) * fraction`, where `reference_frames` is the recording's OWN optical
+/// frame count (an EXTERNAL reference, NOT the burn's self-derived span — a burn that decoded for
+/// only its first few frames would otherwise vacuously pass against its own tiny span). This one
+/// check closes BOTH the burn-ABSENT / near-absent hole (#585 — `optional_signal_ok(None)` and a
+/// single trivially-"contiguous" id) AND the FROZEN-burn hole (#584 — `present_count ≈ 1` while the
+/// recording ran for thousands of frames): both collapse `present_count` far below the floor. A
+/// bare `present_count < 2` can never pass (a lone id proves no advance at all).
+pub fn burn_present_ok(
+    present_count: u32,
+    reference_frames: u32,
+    step: u32,
+    fraction: f64,
+) -> bool {
+    // RED STUB (#580v2): always "present enough" — so the burn-absent / occluded / frozen tests
+    // (which assert `false`) FAIL. GREEN replaces this with the real floor.
+    let _ = (present_count, reference_frames, step, fraction);
+    true
 }
 
 #[cfg(test)]
@@ -908,14 +1009,20 @@ mod tests {
     }
 
     #[test]
-    fn calibrate_burn_step_prefers_the_smaller_delta_on_a_tie_576() {
-        // deltas: 2,2,3,3 — both step 2 and step 3 occur twice. The smaller (stricter) delta
-        // must win the tie, never the looser one.
+    fn calibrate_burn_step_prefers_the_larger_delta_on_a_tie_580v2() {
+        // #580v2 corrected the #576 tie-break: deltas 2,2,3,3 — both step 2 and step 3 occur twice.
+        // The LARGER delta must win the tie. Tie-to-SMALLER (the old #576 rule) PHANTOM-CHARGES a
+        // genuinely bimodal cadence — a real step-3 render then reads as a gap of 3 under the
+        // wrongly-picked step 2 (`3/2-1 = 0` here, but a step-6 real drop on a step-3 base reads as
+        // `6/2-1 = 2` phantom ids instead of the correct `6/3-1 = 1`), so the smaller step
+        // MIS-ATTRIBUTES the missing grid ids on a bimodal burn. Two adversarial reviews flagged
+        // this; the corrected rule is tie-to-larger (still CLAMPED, see the clamp test).
         let ids = [0u32, 2, 4, 7, 10];
         assert_eq!(
             calibrate_burn_step(&ids),
-            2,
-            "a tied mode must resolve to the SMALLER (stricter) delta"
+            3,
+            "a tied mode must resolve to the LARGER delta (#580v2 — tie-to-smaller phantom-charges \
+             a bimodal cadence)"
         );
     }
 
@@ -951,136 +1058,234 @@ mod tests {
     }
 
     // ============================================================================
-    // #580 — the imag optical BEAT net-zero gate: cam2's 60Hz monitor and the free-running 60fps
-    // camera are two unsynced same-rate clocks that BEAT (balanced dup+skip = zero NET loss).
-    // Replaces strict step-1 `tick_contiguity` as imag's PRIMARY optical zero-loss decision.
+    // #580v2 — the imag optical no-copy/liveness gate: RUN-LENGTH (not surplus) is the hard term.
+    // cam2's 60Hz monitor and the free-running 60fps camera are two unsynced same-rate clocks whose
+    // tiny clock RESIDUAL makes `surplus` a coin-flip (run 572001 = +3), so the old `surplus <= 0`
+    // gate FALSE-FAILS a genuinely-zero run. A benign beat can only produce ISOLATED Δ0 dups (max
+    // run ≤ 1); a COPY/FREEZE produces a LONG Δ0 run — so max-consecutive-Δ0 distinguishes them.
     // ============================================================================
 
     #[test]
-    fn optical_beat_net_zero_passes_the_real_572001_pattern_580() {
-        // Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
-        // frames=21873, present=21851, missing=19, dups=22, surplus=-3, digital burn 0-missing.
-        // avg_step derived the SAME way `probe::recording_verdict::verdict` would (telescoping:
-        // (expected_count-1)/(frames_count-1), true whenever there is no undecodable-frame chain
-        // break — confirmed here, optical_undecodable=0 on this run).
-        let avg_step = (21870.0 - 1.0) / (21873.0 - 1.0);
+    fn optical_beat_gate_passes_the_real_572001_counts_580v2() {
+        // Re-signed to the REAL supervisor re-decode (run 572001, post-#575 trim + #576 calibration,
+        // ALL-trimmed arithmetic): expected_count=21870, frames_count=21867 (trimmed), present=21851,
+        // missing=19, surplus=+3, avg_step≈1.000137, digital burn 0-missing. dups = frames−present =
+        // 16 post-trim. The earlier −3 fixture was SIGN-FLIPPED (trimmed range 21870 − UNtrimmed
+        // frames 21873) — that is how the shipped #580 fixture never reproduced the real false-fail.
+        // The run-length here is the benign isolated-dup structure (each of the 16 dups isolated ⇒
+        // max_stuck_run 1); the supervisor re-decode reads the LIVE `imag_optical_max_stuck_run` and
+        // validates IMAG_OPTICAL_MAX_STUCK_RUN against it. A realistic full-sequence version of this
+        // is `optical_beat_gate_passes_a_reconstructed_572001_sequence_580v2` below.
+        let avg_step = (21870.0 - 1.0) / (21867.0 - 1.0);
         let v = optical_beat_verdict_from_counts(
             21870,
             21851,
-            21873,
+            21867,
             avg_step,
             IMAG_OPTICAL_EXPECTED_STEP,
+            1, // isolated benign dups ⇒ max_stuck_run 1
         );
-        assert_eq!(v.surplus, -3, "expected(21870) - frames(21873) = -3: {v:?}");
+        assert_eq!(v.surplus, 3, "expected(21870) - frames(21867) = +3: {v:?}");
         assert!(
             v.is_advancing(),
             "avg_step {avg_step} must round to the expected step 1: {v:?}"
         );
         assert!(
-            v.is_net_zero(),
-            "the real 572001 pattern is genuinely zero NET loss (19 skips fully compensated by \
-             22 dups) — strict step-1 false-fails it, #580 must not: {v:?}"
+            !v.is_net_zero(),
+            "DIAGNOSTIC surplus IS +3 (the clock residual) — the old `surplus <= 0` gate false-fails \
+             this genuinely-zero run, which is exactly why #580 reopened: {v:?}"
+        );
+        assert!(
+            v.is_live_no_copy(),
+            "the REAL 572001 pattern is a genuinely zero-loss LIVE read with isolated dups (no \
+             copy/freeze) — the run-length gate must PASS it despite the +3 clock residual (#580v2): \
+             {v:?}"
         );
     }
 
     #[test]
-    fn optical_beat_net_zero_exact_balance_passes_580() {
-        // No skip, no dup — a perfectly clean 1:1 run. surplus == 0 (the boundary case) must PASS.
+    fn optical_beat_gate_exact_balance_passes_580v2() {
+        // No skip, no dup — a perfectly clean 1:1 run. Advancing, no copy run ⇒ the gate PASSES;
+        // the diagnostic surplus == 0 too.
         let ticks: Vec<u32> = (100..=149).collect();
         let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
         assert_eq!(v.surplus, 0, "{v:?}");
+        assert_eq!(
+            v.max_stuck_run, 0,
+            "a strictly-increasing run has no Δ0: {v:?}"
+        );
+        assert!(
+            v.is_live_no_copy(),
+            "a clean advancing run must pass the gate: {v:?}"
+        );
         assert!(
             v.is_net_zero(),
-            "exact balance (surplus == 0) must pass: {v:?}"
+            "diagnostic: exact balance surplus == 0: {v:?}"
         );
     }
 
     #[test]
-    fn optical_beat_net_zero_pure_oversample_passes_580() {
-        // One duplicate sample, no skip at all — pure oversampling (surplus < 0, no missing tick
-        // whatsoever). Must pass: excess frames are never a defect.
-        let mut ticks: Vec<u32> = vec![100];
-        ticks.extend(100..=149);
+    fn optical_beat_gate_isolated_dups_pass_580v2() {
+        // Isolated duplicates (the benign beat) — each dup is a Δ0 run of exactly 1, well within K.
+        // The gate PASSES; delivery accounting is not the optical leg's job.
+        let ticks = [100u32, 100, 101, 102, 102, 103, 104, 105, 105, 106];
         let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
-        assert_eq!(v.expected_count, 50);
-        assert_eq!(v.frames_count, 51);
-        assert_eq!(v.surplus, -1, "{v:?}");
+        assert_eq!(
+            v.max_stuck_run, 1,
+            "isolated benign-beat dups are a Δ0 run of 1: {v:?}"
+        );
+        assert!(v.no_stuck_copy(), "run 1 <= K(3): {v:?}");
         assert!(
-            v.is_net_zero(),
-            "pure oversampling (surplus < 0) must pass: {v:?}"
+            v.is_live_no_copy(),
+            "isolated dups must pass (benign beat): {v:?}"
         );
     }
 
     #[test]
-    fn optical_beat_net_zero_genuine_net_loss_fails_580() {
-        // 8 unpaired skips, ZERO compensating duplicates — a real net loss, not a beat. Must FAIL
-        // even though the sequence is genuinely advancing (this is the net-zero term catching it,
-        // not the advance-guard — checked explicitly below).
+    fn optical_beat_gate_pure_skips_pass_delivery_is_the_burns_job_580v2() {
+        // 8 unpaired skips, ZERO duplicates — a genuine net loss on the OPTICAL leg. #580v2: the
+        // optical gate is a LIVENESS/no-copy VALIDITY check, NOT per-frame delivery accounting
+        // (two free-running same-rate clocks make surplus a coin-flip). Distributed skips are NOT a
+        // copy/freeze (max_stuck_run 0), so the optical gate PASSES — and the drop is caught by the
+        // STRICT digital burn ANDed at the NodeVerdict level (proven in the probe-gated
+        // node_verdict_for_imag tests). The DIAGNOSTIC surplus still reports the +8 honestly.
         let removed = [10u32, 20, 30, 40, 50, 60, 70, 80];
         let ticks: Vec<u32> = (0..=99).filter(|t| !removed.contains(t)).collect();
         let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
-        assert_eq!(v.expected_count, 100);
-        assert_eq!(v.frames_count, 92);
-        assert_eq!(v.surplus, 8, "8 net-uncompensated skips: {v:?}");
+        assert_eq!(v.surplus, 8, "diagnostic: 8 net-uncompensated skips: {v:?}");
+        assert_eq!(
+            v.max_stuck_run, 0,
+            "distributed skips are NOT a copy/freeze: {v:?}"
+        );
+        assert!(v.is_advancing(), "the read genuinely advances: {v:?}");
         assert!(
-            v.is_advancing(),
-            "sanity: the sequence itself is genuinely advancing — the FAIL below is the \
-             net-zero term, not the advance-guard: {v:?}"
+            v.is_live_no_copy(),
+            "#580v2: distributed skips (no copy/freeze) PASS the optical VALIDITY gate — the \
+             digital burn is the delivery authority, not this leg: {v:?}"
         );
         assert!(
             !v.is_net_zero(),
-            "8 unpaired skips with zero compensating dups is a genuine net loss: {v:?}"
+            "diagnostic surplus > 0 still reports the loss honestly: {v:?}"
         );
     }
 
     #[test]
-    fn optical_beat_net_zero_frozen_read_fails_580() {
-        // The camera stuck on ONE painted QR value for the whole window — tick range collapses
-        // (first == last), avg_step == 0. The OLD strict-step-1 check ALSO false-passed this
-        // (trivially "contiguous", nothing missing in a span of one) — #580's advance-guard closes
-        // that pre-existing hole; this must now FAIL despite a hugely negative (naively
-        // "oversampled") surplus.
-        let ticks = vec![500u32; 50];
+    fn optical_beat_gate_copy_freeze_fails_even_though_aggregates_look_zero_580v2() {
+        // THE CENTERPIECE adversarial case (both Opus reviews): a long content FREEZE that the
+        // whole-window aggregates CANNOT see. 1001 clean advancing ticks (0..=1000) with a 200-frame
+        // freeze on value 500 spliced in. The freeze conserves the frame count so surplus is hugely
+        // NEGATIVE (looks like harmless oversampling) AND avg_step still rounds to the expected step
+        // (endpoints unchanged) — so the OLD `surplus <= 0` gate (`is_net_zero`) FAKE-GREENS it. Only
+        // the run-length term catches it: a 200-long Δ0 run >> K.
+        let mut ticks: Vec<u32> = (0..=500).collect();
+        ticks.extend(std::iter::repeat(500u32).take(200));
+        ticks.extend(501..=1000);
         let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
         assert_eq!(
-            v.expected_count, 1,
-            "frozen: span collapses to a single value: {v:?}"
-        );
-        assert_eq!(v.avg_step, 0.0);
-        assert!(
-            !v.is_advancing(),
-            "a frozen/stuck read must never read as genuinely advancing: {v:?}"
+            v.max_stuck_run, 200,
+            "the 200-frame freeze is a Δ0 run of 200: {v:?}"
         );
         assert!(
-            !v.is_net_zero(),
-            "a frozen read must FAIL even though surplus is hugely negative (naive oversample \
-             reading): {v:?}"
+            v.surplus <= 0,
+            "aggregate surplus looks like oversampling: {v:?}"
+        );
+        assert!(
+            v.is_advancing(),
+            "aggregate avg_step still rounds to the expected step (endpoints unchanged): {v:?}"
+        );
+        assert!(
+            v.is_net_zero(),
+            "the OLD surplus-based gate FAKE-GREENS the freeze (surplus<=0 AND advancing): {v:?}"
+        );
+        assert!(
+            !v.no_stuck_copy(),
+            "run 200 > K(3): the no-copy term must fail: {v:?}"
+        );
+        assert!(
+            !v.is_live_no_copy(),
+            "#580v2: a copy/freeze MUST fail the gate even though every aggregate looks zero: {v:?}"
         );
     }
 
     #[test]
-    fn optical_beat_net_zero_single_sample_does_not_prove_advancing_580() {
-        // A single decoded sample has no adjacent pair to prove ANY advance — deliberately not a
-        // trivial pass (unlike `TickContiguity::is_contiguous`'s single-value case): a lone sample
-        // proves nothing about the camera tracking a moving painter tick.
+    fn optical_beat_gate_frozen_read_fails_580v2() {
+        // The camera stuck on ONE painted QR value for the whole window — tick range collapses
+        // (first == last), avg_step == 0, and it is one giant Δ0 run. FAILS on BOTH the advance-guard
+        // AND the no-copy run-length term.
+        let ticks = vec![500u32; 50];
+        let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.expected_count, 1, "frozen: span collapses: {v:?}");
+        assert_eq!(v.avg_step, 0.0);
+        assert_eq!(
+            v.max_stuck_run, 49,
+            "49 consecutive Δ0 over 50 identical samples: {v:?}"
+        );
+        assert!(!v.is_advancing(), "a frozen read never advances: {v:?}");
+        assert!(!v.no_stuck_copy(), "49 >> K(3): {v:?}");
+        assert!(
+            !v.is_live_no_copy(),
+            "a frozen read must FAIL the gate: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_gate_single_sample_fails_580v2() {
+        // A single decoded sample has no adjacent pair to prove ANY advance — the gate must FAIL.
         let v = optical_beat_net_zero(&[42], IMAG_OPTICAL_EXPECTED_STEP);
         assert_eq!(v.expected_count, 1);
         assert_eq!(v.frames_count, 1);
-        assert!(
-            !v.is_advancing(),
-            "one sample proves no advance at all: {v:?}"
-        );
-        assert!(!v.is_net_zero(), "{v:?}");
+        assert!(!v.is_advancing(), "one sample proves no advance: {v:?}");
+        assert!(!v.is_live_no_copy(), "{v:?}");
     }
 
     #[test]
-    fn optical_beat_net_zero_empty_input_fails_580() {
+    fn optical_beat_gate_empty_input_fails_580v2() {
         let v = optical_beat_net_zero(&[], IMAG_OPTICAL_EXPECTED_STEP);
         assert_eq!(v.expected_count, 0);
         assert!(!v.is_advancing());
         assert!(
+            !v.is_live_no_copy(),
+            "no tick decoded at all must never pass: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_gate_passes_a_reconstructed_572001_sequence_580v2() {
+        // The STRONGEST 572001 proof — a full CHRONOLOGICAL sequence with the EXACT real aggregates,
+        // run through the real `optical_beat_net_zero` (so the run-length is COMPUTED, not asserted):
+        // span 0..=21869 (expected_count 21870), 19 interior ticks removed (present 21851, missing
+        // 19), plus 16 ISOLATED duplicates (frames 21867, surplus +3, each dup a Δ0 run of 1). This
+        // reproduces the reopened-#580 shape and proves the gate PASSES it.
+        use std::collections::HashSet;
+        let removed: HashSet<u32> = (1..=19).map(|k| k * 1000).collect(); // interior, not endpoints
+        let dup_after: HashSet<u32> = (1..=16).map(|k| 500 + k * 1200).collect(); // present, spaced
+        let mut seq: Vec<u32> = Vec::with_capacity(21867);
+        for t in 0..=21869u32 {
+            if removed.contains(&t) {
+                continue;
+            }
+            seq.push(t);
+            if dup_after.contains(&t) {
+                seq.push(t); // one isolated extra copy ⇒ a Δ0 run of exactly 1
+            }
+        }
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.expected_count, 21870, "span 0..=21869: {v:?}");
+        assert_eq!(v.present_count, 21851, "21870 - 19 removed: {v:?}");
+        assert_eq!(v.frames_count, 21867, "21851 + 16 dups: {v:?}");
+        assert_eq!(v.surplus, 3, "the real +3 clock residual: {v:?}");
+        assert_eq!(
+            v.max_stuck_run, 1,
+            "every dup isolated ⇒ max Δ0 run 1: {v:?}"
+        );
+        assert!(
             !v.is_net_zero(),
-            "no tick decoded at all must never read as a pass: {v:?}"
+            "diagnostic surplus +3 > 0 (the residual): {v:?}"
+        );
+        assert!(
+            v.is_live_no_copy(),
+            "the reconstructed real 572001 sequence is a live no-copy read ⇒ the gate must PASS \
+             despite the +3 residual (the reopened-#580 fix): {v:?}"
         );
     }
 
@@ -1114,7 +1319,111 @@ mod tests {
         assert_eq!(v.surplus, 1, "expected_count 6 - frames_count 5: {v:?}");
         assert!(
             !v.is_net_zero(),
-            "surplus 1 > 0 is a genuine net loss, never net-zero: {v:?}"
+            "surplus 1 > 0 is a genuine net loss, never net-zero (diagnostic): {v:?}"
+        );
+    }
+
+    // ---- #580v2 — the max-consecutive-Δ0 run-length metric (the no-copy centerpiece) ----
+
+    #[test]
+    fn max_consecutive_stuck_run_counts_the_longest_delta0_run_580v2() {
+        assert_eq!(max_consecutive_stuck_run(&[]), 0, "empty ⇒ nothing stuck");
+        assert_eq!(
+            max_consecutive_stuck_run(&[7]),
+            0,
+            "single sample ⇒ no pair"
+        );
+        assert_eq!(
+            max_consecutive_stuck_run(&[1, 2, 3, 4]),
+            0,
+            "strictly increasing ⇒ no Δ0"
+        );
+        assert_eq!(
+            max_consecutive_stuck_run(&[1, 1, 2, 3, 3, 4]),
+            1,
+            "two ISOLATED dups (benign beat) ⇒ max run 1"
+        );
+        assert_eq!(
+            max_consecutive_stuck_run(&[1, 1, 1, 2]),
+            2,
+            "a value caught 3× in a row ⇒ run 2 (the beat physically cannot do this)"
+        );
+        assert_eq!(
+            max_consecutive_stuck_run(&[1, 2, 2, 2, 2, 2, 3]),
+            4,
+            "a 5-long freeze on value 2 ⇒ 4 consecutive Δ0"
+        );
+    }
+
+    // ---- #580v2 (#584/#585) — the digital-burn present floor ----
+
+    #[test]
+    fn burn_present_ok_passes_a_genuinely_present_burn_580v2() {
+        // A full burn: one id per recorded frame ⇒ present ≈ reference frames. Well above the floor.
+        assert!(
+            burn_present_ok(21867, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            "a fully-present burn must clear the floor"
+        );
+        assert!(
+            burn_present_ok(30, 60, 2, MIN_BURN_PRESENT_FRACTION),
+            "floor = 60/2 * 0.5 = 15; present 30 clears it"
+        );
+    }
+
+    #[test]
+    fn burn_present_ok_fails_an_absent_burn_585() {
+        // #585: a recording with NO burn decoded at all must FAIL fail-closed — never the vacuous
+        // `optional_signal_ok(None) == true` pass, now that the burn is the SOLE delivery authority.
+        assert!(
+            !burn_present_ok(0, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            "present_count 0 (burn absent) must fail"
+        );
+    }
+
+    #[test]
+    fn burn_present_ok_fails_a_frozen_or_occluded_burn_584() {
+        // #584: a FROZEN burn (present_count ≈ 1 while the recording ran for thousands of frames)
+        // must FAIL — a single repeated id is trivially "contiguous" but proves no delivery.
+        assert!(
+            !burn_present_ok(1, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            "present_count 1 (frozen burn) must fail"
+        );
+        // An occluded corner burn that decodes only a small fraction of frames (well below the
+        // floor) must FAIL, even though its few decoded ids might be internally contiguous.
+        assert!(
+            !burn_present_ok(100, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            "present_count 100 in a 21867-frame recording (floor ~5467) must fail"
+        );
+        // Borderline: floor = 60/2 * 0.5 = 15; present 14 fails, 15 passes.
+        assert!(!burn_present_ok(14, 60, 2, MIN_BURN_PRESENT_FRACTION));
+        assert!(burn_present_ok(15, 60, 2, MIN_BURN_PRESENT_FRACTION));
+    }
+
+    // ---- #580v2 — calibrate_burn_step clamp against a drop-inflated (majority-loss) cadence ----
+
+    #[test]
+    fn calibrate_burn_step_clamps_a_drop_inflated_majority_loss_cadence_580v2() {
+        // A step-3 base cadence where SUSTAINED drops make the majority of gaps 6 — so the raw MODE
+        // of deltas is 6 (5 sixes vs 1 three). Trusting that inflated step-6 as the calibrated step
+        // would read the step-6 drops as "expected" and MASK the loss. The clamp (ceiling =
+        // IMAG_BURN_RENDER_STEP * MAX_CALIBRATED_BURN_STEP_MULTIPLE = 4) rejects the inflated 6 and
+        // falls back to the conservative known step, so the drops are STILL charged.
+        let ids = [0u32, 3, 9, 15, 21, 27, 33]; // deltas: 3,6,6,6,6,6 ⇒ raw mode 6
+        let calibrated = calibrate_burn_step(&ids);
+        assert!(
+            calibrated <= IMAG_BURN_RENDER_STEP * MAX_CALIBRATED_BURN_STEP_MULTIPLE,
+            "the drop-inflated mode 6 must be CLAMPED to <= the ceiling (4), got {calibrated}"
+        );
+        let sc = burn_step_contiguity(&ids, calibrated);
+        assert!(
+            !sc.is_contiguous(),
+            "clamped, the sustained step-6 drops must be CHARGED as loss, never masked: {sc:?}"
+        );
+        // Proof the clamp is load-bearing: had calibration trusted the inflated step 6, the SAME
+        // drops would read as contiguous (fully masked) — the exact self-mask the clamp closes.
+        assert!(
+            burn_step_contiguity(&ids, 6).is_contiguous(),
+            "sanity: at the inflated step 6 the loss WOULD be masked (why the clamp matters)"
         );
     }
 }
