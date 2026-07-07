@@ -285,6 +285,154 @@ fn painter_offset_check_uses_numeric_not_lexical_comparison() {
     );
 }
 
+// --- FRESHNESS-aware offset reading: dantesync_offset_verdict / freshest_offset_us (#550/#591/
+// #595) --------------------------------------------------------------------------------------
+//
+// offset_us_from_journal (above) is AGE-BLIND: `journalctl -n N` is COUNT-bounded, not time-
+// bounded, so a died/hung dantesync or a long gap between the adaptive-cadence `[NTP] offset:`
+// samples can leave only a stale multi-hour-old boot-STEP line in the window — grading THAT value
+// as "current" was the #550 bug. dantesync_offset_verdict (originally added to verify-device.sh
+// for #591, MOVED here for #595 so every caller shares one implementation) rejects a stale offset
+// line by comparing its OWN `-o short-iso` timestamp against the newest journal line's timestamp
+// (both from the SAME box — no host wall-clock ever enters the comparison). freshest_offset_us is
+// its value-returning sibling: it returns the raw fresh offset (or "" if stale/absent) rather than
+// a bound-graded verdict, for callers (the #326 painter gate) that must compare TWO boxes' fresh
+// offsets against EACH OTHER rather than one absolute bound. Fixtures use the real
+// `journalctl -o short-iso` timestamp form (colon in the TZ offset, e.g. +02:00) — copied from
+// tests/verify_device_pure_functions.rs:259-321 (the same fixtures that pinned #591's fix there).
+
+// Fresh, in-bound: the freshest [NTP] offset line is +14us, ~1s behind the newest PTP line.
+const DS_FRESH_OK: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:+14us (threshold:535us, adaptive)
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// The real cam5/6 desync: a FRESH [NTP] offset:-5280959us (a competing timesyncd stepping the
+// clock -> a genuine 5.28s error), ~1s behind the newest PTP line.
+const DS_FRESH_DRIFT: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:-5280959us
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// A STALE boot-step offset line (#550): the ONLY [NTP] offset line is >1h behind the newest PTP
+// line, so it must NOT be read as the current offset (the pre-#591 tail -1 bug graded on exactly
+// this stale value).
+const DS_STALE: &str = "\
+2026-07-07T17:20:13+02:00 CAM6 dantesync[900]: [NTP] offset:-4357480us
+2026-07-07T18:36:44+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// No [NTP] offset line at all — only PTP servo lines.
+const DS_ABSENT: &str = "\
+2026-07-07T18:36:44+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+fn offset_verdict(journal: &str) -> String {
+    run_sourced(
+        &format!(
+            "TEXT='{}'\ndantesync_offset_verdict \"$TEXT\" 300 2000",
+            journal.replace('\'', "'\\''")
+        ),
+        &[],
+    )
+    .trim()
+    .to_string()
+}
+
+#[test]
+fn dantesync_offset_verdict_ok_on_fresh_in_bound_offset() {
+    assert_eq!(offset_verdict(DS_FRESH_OK), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_drift_on_fresh_large_offset() {
+    // The cam5/6 5.28s desync — a FRESH out-of-bound offset is a hard DRIFT (#591). A bare
+    // "[NTP] offset:-5280959us" (no adaptive-threshold suffix) is the out-of-range fallback form.
+    assert_eq!(offset_verdict(DS_FRESH_DRIFT), "drift");
+}
+
+#[test]
+fn dantesync_offset_verdict_rejects_stale_boot_step_line() {
+    // #550/#595: the freshest [NTP] offset line is a >1h-old boot STEP; it must NOT be read as the
+    // current offset (the pre-#591 tail -1 bug graded on exactly this stale value). Verdict is
+    // "stale", never "drift" (a stale value must never look like a real current desync) nor "ok".
+    assert_eq!(offset_verdict(DS_STALE), "stale");
+}
+
+#[test]
+fn dantesync_offset_verdict_absent_when_no_offset_line() {
+    assert_eq!(offset_verdict(DS_ABSENT), "absent");
+}
+
+#[test]
+fn dantesync_offset_verdict_fails_closed_on_a_malformed_freshness_window() {
+    // Same fail-closed property as freshest_offset_us, proven through the actual verdict every
+    // gate (verify-device.sh/dantesync-gate.sh/clock-offset-painter-gate.sh) consumes: a
+    // malformed FRESHNESS_S must never let a fresh, in-bound offset (DS_FRESH_OK) read as "ok" —
+    // it must report "stale" (never a silent pass on an unvalidatable freshness knob).
+    let out = run_sourced(
+        &format!(
+            "TEXT='{}'\ndantesync_offset_verdict \"$TEXT\" abc 2000",
+            DS_FRESH_OK.replace('\'', "'\\''")
+        ),
+        &[],
+    );
+    assert_eq!(out.trim(), "stale");
+}
+
+fn freshest_offset(journal: &str, freshness_s: &str) -> String {
+    run_sourced(
+        &format!(
+            "TEXT='{}'\nfreshest_offset_us \"$TEXT\" \"$FRESH\"",
+            journal.replace('\'', "'\\''")
+        ),
+        &[("FRESH", freshness_s)],
+    )
+    .trim()
+    .to_string()
+}
+
+#[test]
+fn freshest_offset_us_returns_the_value_when_fresh() {
+    // The #326 painter gate (clock-offset-painter-gate.sh) needs the RAW fresh offset, not a
+    // bound-graded verdict, to compare two boxes' offsets against EACH OTHER (#595).
+    assert_eq!(freshest_offset(DS_FRESH_OK, "300"), "14");
+    assert_eq!(freshest_offset(DS_FRESH_DRIFT, "300"), "-5280959");
+}
+
+#[test]
+fn freshest_offset_us_empty_when_stale_or_absent() {
+    // A stale boot-step line or a wholly-absent offset line must NEVER return a value that could
+    // be silently fed into a relative comparison (test-strictness: no silent pass on a possibly
+    // stale reading).
+    assert_eq!(freshest_offset(DS_STALE, "300"), "");
+    assert_eq!(freshest_offset(DS_ABSENT, "300"), "");
+}
+
+#[test]
+fn freshest_offset_us_fails_closed_on_a_malformed_freshness_window() {
+    // FRESHNESS_S is caller-configurable ONLY via an unchecked env var
+    // (DANTESYNC_OFFSET_FRESHNESS_S / GATE_OFFSET_FRESHNESS_S / PAINTER_GATE_FRESHNESS_S) — unlike
+    // BOUND_US, which every caller validates via its own --bound-us/--guard-us CLI parsing before
+    // ever calling in. Without an explicit guard, a malformed value (a typo'd env var: "abc", a
+    // negative number, empty) would make the `-gt "$fresh"` arithmetic comparison throw a bash
+    // "integer expression expected" error — which evaluates as a FAILED test in the `||` staleness
+    // chain, silently making every reading look "fresh" regardless of true age. A fresh, in-bound
+    // offset (DS_FRESH_OK) must still be REJECTED (empty) when the freshness window itself cannot
+    // be trusted — never a silent pass on an unvalidatable knob.
+    for bad_fresh in ["abc", "-1", "", "300.5", "1 ; rm -rf /"] {
+        assert_eq!(
+            freshest_offset(DS_FRESH_OK, bad_fresh),
+            "",
+            "a malformed freshness window ({bad_fresh:?}) must refuse to certify freshness, not silently pass"
+        );
+    }
+}
+
 #[test]
 fn default_bound_is_documented_and_well_under_the_frame_period() {
     // The script exposes its chosen bound as DEFAULT_BOUND_US. It must be a sane value WELL under

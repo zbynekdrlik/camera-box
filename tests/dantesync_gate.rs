@@ -181,4 +181,10 @@ fn help_describes_the_ntp_and_ptp_requirement() {
         low.contains("ptp") && low.contains("ntp"),
         "help must describe BOTH the NTP and PTP requirement: {stdout}"
     );
+    // #595: help must document the freshness knob, not just the offset bound -- a stale-but-
+    // in-bound reading is graded differently than a plain out-of-bound one (never a silent OK).
+    assert!(
+        low.contains("fresh"),
+        "help must describe the offset FRESHNESS requirement (#550/#595), not just the bound: {stdout}"
+    );
 }

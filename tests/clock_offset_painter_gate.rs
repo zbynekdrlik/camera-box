@@ -46,16 +46,20 @@ fn run_gate(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) 
     )
 }
 
-/// Write a one-line DanteSync journald fixture with the given signed µs offset and return its path.
+/// Write a one-line DanteSync journald fixture (`journalctl -o short-iso` ISO timestamp form,
+/// #595) with the given signed µs offset and return its path. A single-line journal's own
+/// timestamp IS the journal's newest line, so freshest_offset_us always reads it as fresh
+/// (age 0s) regardless of the configured freshness window.
 fn write_journal(name: &str, offset_us: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("painter-gate-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
-    // The real DanteSync line shape the offset_us_from_journal parser is proven against.
+    // The real DanteSync line shape the offset_us_from_journal / freshest_offset_us parsers are
+    // proven against, ISO-stamped so the #595 freshness check can prove this line is current.
     writeln!(
         f,
-        "Jun 15 09:11:53 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)"
+        "2026-07-07T18:36:44+02:00 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)"
     )
     .unwrap();
     path
@@ -70,7 +74,27 @@ fn write_journal_no_offset(name: &str) -> PathBuf {
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(
         f,
-        "Jun 15 09:11:53 NODE dantesync[1]: [PTP] NANO  Drift: +10ns/s  Adj: +6ppm"
+        "2026-07-07T18:36:44+02:00 NODE dantesync[1]: [PTP] NANO  Drift: +10ns/s  Adj: +6ppm"
+    )
+    .unwrap();
+    path
+}
+
+/// Write a MULTI-LINE ISO journal whose ONLY `[NTP] offset:` line is STALE (#550-class, #595): it
+/// sits ~76 minutes behind the newer `[PTP]` servo lines that follow it — well past the default
+/// 300s freshness window — even though the offset VALUE itself is in-bound. Proves staleness
+/// alone, not magnitude, must trip the gate: the age-blind `offset_us_from_journal` (tail -1)
+/// would still read this exact line as "the current offset" and pass it.
+fn write_journal_stale(name: &str, offset_us: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("painter-gate-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.log"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        "2026-07-07T17:20:13+02:00 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)\n\
+2026-07-07T18:36:44+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm\n\
+2026-07-07T18:36:46+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm"
     )
     .unwrap();
     path
@@ -156,6 +180,27 @@ fn gate_incomplete_when_an_offset_is_unread() {
 }
 
 #[test]
+fn gate_incomplete_when_the_only_offset_line_is_a_stale_boot_step() {
+    // #550-class staleness (#595): the painter's ONLY `[NTP] offset:` line is a >1h-old boot-step
+    // sample (+300us, in-bound). The age-blind `offset_us_from_journal` (tail -1) would still read
+    // it as "the current offset" and grade it OK/PASS since the VALUE is in-bound — exactly the
+    // false-pass this gate must not repeat. The gate must instead reject it as STALE and refuse to
+    // certify dev1<->painter attribution — INCOMPLETE (11), never a silent PASS on an aged reading.
+    let dev1 = write_journal("dev1_fresh_for_stale_test", "+300");
+    let painter = write_journal_stale("painter_stale_boot_step", "+300");
+    let e = env_pair(&dev1, &painter);
+    let (code, stdout, stderr) = run_gate(
+        &["--painter", "cam2=10.77.9.62"],
+        &[(e[0].0, e[0].1.as_str()), (e[1].0, e[1].1.as_str())],
+    );
+    assert_eq!(
+        code, 11,
+        "a stale-but-in-bound offset line must be INCOMPLETE (11), never a silent PASS. stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(stderr.contains("GATE INCOMPLETE"), "stderr: {stderr}");
+}
+
+#[test]
 fn skip_env_bypasses_the_gate_loudly() {
     // SKIP_CLOCK_OFFSET_ASSERT=1 short-circuits to exit 0 — but says SKIPPED loudly so an unguarded
     // run is never mistaken for a verified one. The drifted offsets below would otherwise FAIL.
@@ -205,5 +250,11 @@ fn help_describes_the_offset_check_and_guard() {
     assert!(
         low.contains("offset") && low.contains("guard"),
         "help must describe the dev1<->painter offset check + its guard: {stdout}"
+    );
+    // #595: help must document the per-box freshness requirement, not just the relative guard --
+    // a stale reading on EITHER box refuses the comparison (INCOMPLETE), never a silent PASS.
+    assert!(
+        low.contains("fresh"),
+        "help must describe the offset FRESHNESS requirement (#550/#595), not just the guard: {stdout}"
     );
 }
