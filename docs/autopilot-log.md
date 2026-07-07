@@ -2089,3 +2089,53 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   no imag frames + no --switch-schedule in that test). Live all-cambox-sweep verification rides a
   future E2E (no sweep recording on hand); the Tier-0 parity + copy-freeze tests are the proof for
   this PR. 466/466 default lib tests green, fmt/clippy clean.
+
+## 2026-07-07 — #562 provisioner-persist cam2's ExecStart HDMI preview (PR TBD, v1.7.0-dev.282)
+
+- Found during #557/#558 review: `setup-device.sh` STEP 7 wrote an unconditional bare
+  `ExecStart=/usr/local/bin/camera-box` on every (re-)provision, silently erasing cam2's manual
+  `--display "STRIH-SNV (interkom)"` ExecStart edit (a #379 recurrence risk) — and
+  `verify-device.sh` check (p), which only ever reads `config.toml`'s `[display]` section, always
+  verdicted "ok" for cam2 (empty table entry, by design) regardless of whether cam2's REAL
+  (ExecStart) preview mechanism was present or lost.
+- Design fork asked overnight (issuecomment-4898996033, sleep window, no ping — other work
+  continued): (a) keep cam2 on ExecStart, make it provisioner-persistent + verifiable, vs (b)
+  migrate cam2 onto the `config.toml [display]` table (would require teaching `rig-mode.sh` a
+  second mechanism, since its fb0 TEST/EVENT toggle keys on the `ExecStart` `--display` flag
+  specifically). User picked **(a)** the next morning — conservative, touches zero `rig-mode.sh`
+  code.
+- `scripts/camera-set.sh`: `camera_resolve()` gains a SEPARATE `CAMERA_DISPLAY_EXECSTART_SOURCE`
+  table (cam2=`"STRIH-SNV (interkom)"`, every other box empty) — the mirror image of the existing
+  `CAMERA_DISPLAY_SOURCE` (config.toml mechanism); exactly one table is non-empty per box.
+- `scripts/setup-device.sh`: new `execstart_display_flag()` pure helper (mirrors
+  `config_toml_display_section()`'s `\`/`"` escaping, returns a leading-space
+  ` --display "<source>"` fragment or empty). STEP 7's heredoc switched from a fully single-quoted
+  `'EOF'` to an unquoted `EOF` (no other line in the unit had a `$`/backtick) so the `ExecStart`
+  line can carry `$(execstart_display_flag "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}")` — a box with no
+  table entry still renders the exact pre-#562 canonical plain
+  `ExecStart=/usr/local/bin/camera-box`.
+- `scripts/verify-device.sh`: new `execstart_display_source()` reader (awk-extracts the
+  `--display "..."` value from `systemctl show -p ExecStart --value camera-box` output — the SAME
+  command `rig-mode.sh`'s own TEST/EVENT toggle already uses at rig-mode.sh:248/353). Check (p)
+  extended with a second block reusing the EXISTING `display_config_verdict()` unchanged (no new
+  comparison logic) against `CAMERA_DISPLAY_EXECSTART_SOURCE`.
+- Updated `tests/setup_device_provisioner_hardening.rs`'s pre-existing
+  `setup_device_execstart_is_canonical_plain` assertion (renamed
+  `..._unless_the_execstart_source_table_says_otherwise`) — its OLD "the literal ExecStart line
+  must be exactly `ExecStart=/usr/local/bin/camera-box`, nothing appended" invariant was RIGHT for
+  #450 but became WRONG the moment #562 deliberately gave cam2 a table entry; the updated
+  assertions still prove no per-box string is ever hardcoded as a literal in this script's source.
+- `.claude/skills/provision/SKILL.md` updated: check (p)'s table row, and the "cam2 is deliberately
+  EXCLUDED" section split into the config.toml-exclusion (unchanged) + the new
+  ExecStart-mechanism-is-now-provisioner-persistent paragraph.
+- RED `cf166a97f` (harness_camera_set.rs 2 new tests, setup_device_pure_functions.rs 4 new tests,
+  setup_device_provisioner_hardening.rs 1 updated test, verify_device_pure_functions.rs 5 new
+  tests — 12 failures total, all for the right reason: `set -u` unbound-var / `command not found` /
+  missing wiring), GREEN `4b40f9269` (all 12 pass; full default-feature suite + fmt + clippy +
+  `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` all clean).
+- `rig-mode.sh` confirmed **byte-unchanged** (`git diff --stat -- scripts/rig-mode.sh` empty across
+  both commits) — the whole point of mechanism (a).
+- **Not verified live (no rig session, cam2 has no monitor eyes right now):** the actual HDMI
+  return-monitor picture on cam2 after a re-provision. The Tier-0 proof (provisioning writes
+  `--display`, verify-device.sh's new sub-check catches its absence) is the acceptance for this PR;
+  the visual confirmation rides a future rig session, like #579's riders.

@@ -132,7 +132,7 @@ It checks (all must pass, exit 0 only if every check is OK):
 | (m) | `systemd-networkd-wait-online` **masked** | `systemctl is-enabled …` == `masked` (#547 — unmasked it stalled boot ~120s) |
 | (n) | core-isolation kernel cmdline | `/proc/cmdline` carries `isolcpus=3` (#289) + `nohz_full=3` + `rcu_nocbs=3` + `irqaffinity=0-2` (#303), each a whole token |
 | (o) | NDI runtime pinned to the fleet version | version of the `libndi.so.6` symlink target; `NDI_VERSION_PIN` (default `6.3.2`, #132/#547) |
-| (p) | `config.toml`'s `[display]` section matches `camera-set.sh`'s `CAMERA_DISPLAY_SOURCE` table entry | `cat /etc/camera-box/config.toml` over SSH, compare against the per-cam table (#528/#557/#558) — catches a box that lost its HDMI-preview config, or wrongly gained one |
+| (p) | `config.toml`'s `[display]` section matches `camera-set.sh`'s `CAMERA_DISPLAY_SOURCE` table entry, PLUS the `ExecStart` `--display` flag matches `CAMERA_DISPLAY_EXECSTART_SOURCE` | `cat /etc/camera-box/config.toml` over SSH + `systemctl show -p ExecStart --value camera-box` over SSH, each compared against its own per-cam table (#528/#557/#558/#562) — catches a box that lost either mechanism's HDMI-preview config, or wrongly gained one |
 | (q) | no stale `.bak`/`.bak-*` cruft under `/usr/lib/ndi` or the systemd drop-in dir | `ls` both dirs over SSH — **WARNING only, never a FAIL** (#453). Inert leftovers (ldconfig/systemd never load a `.bak`) are surfaced as drift but don't fail an otherwise-healthy box; `setup-device.sh`'s `cleanup_bak_cruft` self-heals them on the next provisioning pass |
 
 Every check **except (q)** is a hard FAIL on an unreachable/unreadable signal too (test-strictness —
@@ -265,15 +265,35 @@ is READ-ONLY (do not re-provision it casually)** — verify a provisioning-scrip
 live box via `verify-device.sh`'s READ-ONLY acceptance check, never by actually re-running
 `setup.sh`/`setup-device.sh` against cam1.
 
-**cam2 is deliberately EXCLUDED from the table**, even though its live box already runs the same
-interkom preview — cam2's preview is a manual `--display` flag baked into `ExecStart`, and
-`scripts/rig-mode.sh`'s TEST/EVENT mode toggle (the QR-painter E2E harness) specifically flips
-that flag via a systemd drop-in and verifies restoration by grepping `ExecStart` for `--display`.
-`config.toml`'s `[display]` section is read INDEPENDENTLY of any `ExecStart` flag, so giving cam2
-a table entry would make a future re-provision keep the preview active via `config.toml`
-regardless of `rig-mode.sh`'s drop-in override — silently breaking its fb0-arbitration checks.
-Until `rig-mode.sh` is taught to recognize both mechanisms, cam2 stays a manual edit; add a table
-entry (never a per-box `setup-device.sh` edit) for any OTHER box that needs a preview.
+**cam2 is deliberately EXCLUDED from the `CAMERA_DISPLAY_SOURCE` (config.toml) table**, even though
+its live box already runs the same interkom preview — cam2's preview is a manual `--display` flag
+baked into `ExecStart`, and `scripts/rig-mode.sh`'s TEST/EVENT mode toggle (the QR-painter E2E
+harness) specifically flips that flag via a systemd drop-in and verifies restoration by grepping
+`ExecStart` for `--display`. `config.toml`'s `[display]` section is read INDEPENDENTLY of any
+`ExecStart` flag, so giving cam2 a `CAMERA_DISPLAY_SOURCE` table entry would make a future
+re-provision keep the preview active via `config.toml` regardless of `rig-mode.sh`'s drop-in
+override — silently breaking its fb0-arbitration checks. Add a `CAMERA_DISPLAY_SOURCE` entry
+(never a per-box `setup-device.sh` edit) for any OTHER box that needs a config.toml-mechanism
+preview.
+
+**cam2's ExecStart mechanism is now provisioner-persistent via a SEPARATE table (#562,
+`CAMERA_DISPLAY_EXECSTART_SOURCE`)** — before #562, cam2's manual `--display` edit was NOT
+tracked anywhere in `camera-set.sh`, so re-running `setup-device.sh`/`setup.sh` against cam2 (STEP 7's
+unconditional bare `ExecStart=`) silently erased it (the #379 recurrence risk), and
+`verify-device.sh` check (p) — which only ever read `config.toml` — verdicted "ok" regardless
+(structurally blind to cam2's real mechanism). The fix keeps `rig-mode.sh` completely UNTOUCHED
+(it already keys on `ExecStart`'s `--display` flag however that flag got there) and instead:
+`camera_resolve()` gained a mirror-image table, `CAMERA_DISPLAY_EXECSTART_SOURCE` (cam2 =
+`"STRIH-SNV (interkom)"`, every other box empty — exactly one of the two tables is non-empty for
+any given box); `setup-device.sh` STEP 7 builds its `ExecStart` line via the new
+`execstart_display_flag()` pure helper (mirrors `config_toml_display_section()`'s escaping) instead
+of a hardcoded literal, so a box with no ExecStart-mechanism entry still renders the exact
+pre-#562 canonical plain `ExecStart=/usr/local/bin/camera-box`; `verify-device.sh` gained
+`execstart_display_source()` (parses `systemctl show -p ExecStart --value camera-box`, the SAME
+command `rig-mode.sh` already uses) and extended check (p) to compare it via the EXISTING, reused
+`display_config_verdict()`. **Design decision (mechanism (a), issue #562, issuecomment-4898996033):**
+keep cam2 on ExecStart (not migrate it to config.toml, which would have required teaching
+`rig-mode.sh` a second mechanism) — the conservative choice that touches zero rig-mode.sh code.
 
 ## Keeping the fleet converged — `scripts/verify-fleet.sh` (#552)
 

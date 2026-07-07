@@ -315,3 +315,97 @@ fn camera_resolve_leaves_cam2_through_cam7_with_no_display_source() {
         );
     }
 }
+
+// --- #562: per-cam ExecStart-mechanism HDMI preview source table --------------------------------
+//
+// cam2's interkom preview lives in a manual `--display "STRIH-SNV (interkom)"` edit baked into
+// ExecStart (never config.toml -- see camera_resolve_leaves_cam2_through_cam7_with_no_display_source
+// above for why). CAMERA_DISPLAY_SOURCE deliberately stays empty for cam2 forever; a NEW, SEPARATE
+// table entry -- CAMERA_DISPLAY_EXECSTART_SOURCE -- makes cam2's ExecStart mechanism provisioner-
+// persistent (scripts/setup-device.sh STEP 7) without touching config.toml or rig-mode.sh's
+// ExecStart-flag-based TEST/EVENT toggle at all (mechanism (a), issuecomment-4898996033).
+
+/// Source `camera-set.sh`, run `camera_resolve <name>`, and return the resolved
+/// `CAMERA_DISPLAY_EXECSTART_SOURCE` value (empty string for a box with no ExecStart-mechanism
+/// entry, or on reject). Uses `set -u` deliberately, same as resolve_display_source above.
+fn resolve_execstart_display_source(cam: &str) -> (bool, String) {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+if camera_resolve "$CAM" 2>/dev/null; then
+  printf 'OK\n'
+  printf 'DISPLAY\t%s\n' "$CAMERA_DISPLAY_EXECSTART_SOURCE"
+else
+  printf 'REJECT\n'
+fi
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("CAM", cam)
+        .output()
+        .expect("failed to run bash resolver harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ok = out.status.success() && stdout.lines().next() == Some("OK");
+    let display = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("DISPLAY\t"))
+        .unwrap_or_default()
+        .to_string();
+    (ok, display)
+}
+
+#[test]
+fn camera_resolve_wires_cam2_to_the_execstart_interkom_preview() {
+    // #562: cam2's live box already runs with `--display "STRIH-SNV (interkom)"` baked into
+    // ExecStart as a manual edit. This table entry is what lets setup-device.sh STEP 7
+    // re-provision cam2 without silently dropping it (the #379 recurrence risk).
+    let (ok, display) = resolve_execstart_display_source("cam2");
+    assert!(ok, "camera_resolve cam2 should succeed");
+    assert_eq!(
+        display, "STRIH-SNV (interkom)",
+        "camera_resolve cam2 must resolve CAMERA_DISPLAY_EXECSTART_SOURCE to the interkom/return \
+         monitor (#562); got '{display}'"
+    );
+}
+
+#[test]
+fn camera_resolve_leaves_cam1_and_cam3_through_cam7_with_no_execstart_display_source() {
+    // cam1 already gets its preview through the config.toml [display] mechanism
+    // (CAMERA_DISPLAY_SOURCE) -- it must NOT also get an ExecStart-baked flag (that would mean two
+    // independent, driftable sources of the same preview). cam3-7 have no preview at all today.
+    for cam in ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+        let (ok, display) = resolve_execstart_display_source(cam);
+        assert!(ok, "camera_resolve {cam} should succeed");
+        assert_eq!(
+            display, "",
+            "camera_resolve {cam} must resolve CAMERA_DISPLAY_EXECSTART_SOURCE to empty (#562); \
+             got '{display}'"
+        );
+    }
+}
+
+/// #562-review: nothing in `camera_resolve()`'s `case` statement mechanically PREVENTS a future
+/// table edit from filling in BOTH `CAMERA_DISPLAY_SOURCE` and `CAMERA_DISPLAY_EXECSTART_SOURCE`
+/// for the same camera -- it's comment-only discipline today. That would be a real, silent bug:
+/// `src/main.rs`'s CLI-overrides-config precedence means the ExecStart flag would win, config.toml's
+/// `[display]` section would sit inert, and `verify-device.sh`'s two INDEPENDENT (p) checks would
+/// both report "ok" even though only one mechanism is actually active. This sweep pins the
+/// invariant across the whole real fleet so a future accidental double-entry fails a test instead
+/// of shipping silently.
+#[test]
+fn camera_resolve_never_configures_both_display_mechanisms_for_the_same_camera() {
+    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+        let (ok1, config_toml_source) = resolve_display_source(cam);
+        let (ok2, execstart_source) = resolve_execstart_display_source(cam);
+        assert!(ok1 && ok2, "camera_resolve {cam} should succeed");
+        assert!(
+            config_toml_source.is_empty() || execstart_source.is_empty(),
+            "camera_resolve {cam} has BOTH CAMERA_DISPLAY_SOURCE ('{config_toml_source}') AND \
+             CAMERA_DISPLAY_EXECSTART_SOURCE ('{execstart_source}') non-empty -- exactly ONE HDMI-\
+             preview mechanism must be configured per camera (#562), never both"
+        );
+    }
+}

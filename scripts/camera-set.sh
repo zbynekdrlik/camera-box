@@ -66,23 +66,32 @@ GENLOCK_FPS="${GENLOCK_FPS:-60}"
 # systemd drop-in override and verifies restoration by grepping ExecStart for `--display`
 # (rig-mode.sh:248/353). Camera-box's config.toml `[display]` section (what this table drives) is
 # read INDEPENDENTLY of any ExecStart flag (src/main.rs's CLI-overrides-config precedence) -- so
-# giving cam2 a table entry would make a FUTURE re-provision (config.toml keeps the [display]
+# giving cam2 a table entry HERE would make a FUTURE re-provision (config.toml keeps the [display]
 # section regardless of the ExecStart drop-in) silently break rig-mode.sh's fb0-arbitration
 # checks: TEST mode's no-display override would stop working (config.toml still supplies the
 # source) and EVENT mode's restore-check would false-FAIL forever after (no --display in ExecStart
-# to find, even though the preview genuinely still works via config.toml). Until rig-mode.sh is
-# taught to recognize BOTH mechanisms, cam2's preview stays a manual, non-provisioner-persistent
-# ExecStart edit, same as today -- no regression, just deferred (tracked as a follow-up).
+# to find, even though the preview genuinely still works via config.toml).
+#
+# CAMERA_DISPLAY_EXECSTART_SOURCE (#562) is the SEPARATE per-camera table for the OTHER mechanism:
+# a preview baked directly into the systemd unit's ExecStart CLI flag (cam2's real, live mechanism)
+# instead of config.toml. It is the mirror image of CAMERA_DISPLAY_SOURCE above -- exactly ONE of
+# the two tables is non-empty for any given box, never both (a box can only be provisioned via one
+# mechanism at a time; src/main.rs's CLI-overrides-config precedence means baking BOTH for the same
+# box would just make the ExecStart flag silently win, a second, driftable copy of the same value).
+# scripts/setup-device.sh STEP 7 reads THIS table to render cam2's ExecStart line, so a
+# re-provision no longer erases the manual edit (the #379-recurrence fixed by #562); rig-mode.sh
+# itself is UNCHANGED -- it already keys on ExecStart's `--display` flag regardless of how that
+# flag got there, so making it provisioner-persistent needs no change to rig-mode.sh at all.
 camera_resolve() {
   local name="${1:-}"
   case "$name" in
-    cam1) CAMERA_IP=10.77.9.61; CAMERA_SOURCE="CAM1 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="STRIH-SNV (interkom)" ;;
-    cam2) CAMERA_IP=10.77.9.62; CAMERA_SOURCE="CAM2 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="" ;;
-    cam3) CAMERA_IP=10.77.9.63; CAMERA_SOURCE="CAM3 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="" ;;
-    cam4) CAMERA_IP=10.77.9.64; CAMERA_SOURCE="CAM4 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="" ;;
-    cam5) CAMERA_IP=10.77.9.65; CAMERA_SOURCE="CAM5 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="" ;;
-    cam6) CAMERA_IP=10.77.9.66; CAMERA_SOURCE="CAM6 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="" ;;
-    cam7) CAMERA_IP=10.77.9.67; CAMERA_SOURCE="CAM7 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="" ;;
+    cam1) CAMERA_IP=10.77.9.61; CAMERA_SOURCE="CAM1 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE="STRIH-SNV (interkom)"; CAMERA_DISPLAY_EXECSTART_SOURCE="" ;;
+    cam2) CAMERA_IP=10.77.9.62; CAMERA_SOURCE="CAM2 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE=""; CAMERA_DISPLAY_EXECSTART_SOURCE="STRIH-SNV (interkom)" ;;
+    cam3) CAMERA_IP=10.77.9.63; CAMERA_SOURCE="CAM3 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE=""; CAMERA_DISPLAY_EXECSTART_SOURCE="" ;;
+    cam4) CAMERA_IP=10.77.9.64; CAMERA_SOURCE="CAM4 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE=""; CAMERA_DISPLAY_EXECSTART_SOURCE="" ;;
+    cam5) CAMERA_IP=10.77.9.65; CAMERA_SOURCE="CAM5 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE=""; CAMERA_DISPLAY_EXECSTART_SOURCE="" ;;
+    cam6) CAMERA_IP=10.77.9.66; CAMERA_SOURCE="CAM6 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE=""; CAMERA_DISPLAY_EXECSTART_SOURCE="" ;;
+    cam7) CAMERA_IP=10.77.9.67; CAMERA_SOURCE="CAM7 (usb)"; CAMERA_GENLOCK_FPS=60; CAMERA_DISPLAY_SOURCE=""; CAMERA_DISPLAY_EXECSTART_SOURCE="" ;;
     *)
       echo "camera-set: unknown camera '${name}' (expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7)" >&2
       return 1
@@ -100,5 +109,5 @@ CAMERA="${CAMERA:-cam2}"
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   camera_resolve "$CAMERA"
-  printf 'CAMERA=%s IP=%s SOURCE=%q FPS=%s DISPLAY=%q\n' "$CAMERA_NAME" "$CAMERA_IP" "$CAMERA_SOURCE" "$CAMERA_GENLOCK_FPS" "$CAMERA_DISPLAY_SOURCE"
+  printf 'CAMERA=%s IP=%s SOURCE=%q FPS=%s DISPLAY=%q DISPLAY_EXECSTART=%q\n' "$CAMERA_NAME" "$CAMERA_IP" "$CAMERA_SOURCE" "$CAMERA_GENLOCK_FPS" "$CAMERA_DISPLAY_SOURCE" "$CAMERA_DISPLAY_EXECSTART_SOURCE"
 fi
