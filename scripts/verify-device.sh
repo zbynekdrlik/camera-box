@@ -227,13 +227,23 @@ dantesync_offset_verdict() {
 # authority that must be present; it is deliberately NOT in the competing set.
 
 # dpkg_status_installed STATUS -> 0 iff STATUS (a `dpkg -s` "Status:" line value, e.g.
-# "install ok installed") shows the package is CURRENTLY installed. A purged package prints no
-# Status line -> "" -> not installed; "deinstall ok config-files" (removed-not-purged) -> not
-# installed either (the binary/unit is gone). Only the exact "install ok installed" triad counts.
+# "install ok installed") shows the package's files are CURRENTLY present on disk (a review-caught
+# false-green gap, #591: the ORIGINAL form only matched the exact "install ok installed" triad,
+# missing "hold ok installed" (an installed daemon the operator apt-mark-held) and every
+# files-unpacked-but-not-fully-configured state -- "install ok unpacked" / "half-configured" /
+# "half-installed" / "triggers-pending" / "triggers-awaiting" -- all of which leave the competing
+# daemon's binary+unit on disk, exactly the "installed" state this check exists to reject even
+# though it isn't yet an active systemd unit). dpkg's Status line is "<want> <flag> <state>"; the
+# ONLY states meaning "files genuinely gone" are: EMPTY (dpkg has never heard of the package --
+# never installed, or fully purged so no Status line prints at all), "not-installed", and
+# "config-files" (removed, only leftover conffiles remain -- binary/unit ARE gone). Every OTHER
+# state means the daemon's files are present on disk in some form -- treated as installed
+# (test-strictness: an ambiguous/partial state is never read as "safely absent").
 dpkg_status_installed() {
   case "$1" in
-    *"install ok installed"*) return 0 ;;
-    *) return 1 ;;
+    '') return 1 ;;
+    *' not-installed' | *' config-files') return 1 ;;
+    *) return 0 ;;
   esac
 }
 

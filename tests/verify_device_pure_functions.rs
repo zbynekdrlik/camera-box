@@ -413,6 +413,91 @@ fn timesync_daemon_verdict_ok_only_when_absent_inactive_neutral() {
     );
 }
 
+// dpkg_status_installed edge cases (independent-review finding, #591): the ORIGINAL implementation
+// matched ONLY the exact "install ok installed" triad, missing every other files-present dpkg
+// state (a held package, or one caught mid-unpack/configure) -- all of which leave the competing
+// daemon's binary+unit on disk, exactly what this check exists to reject. Verified via the pure
+// function directly (not just the composed timesync_daemon_verdict) so the dpkg-state contract is
+// pinned on its own.
+#[test]
+fn dpkg_status_installed_true_for_every_files_present_state_false_only_when_genuinely_gone() {
+    let (code, out, err) = run_sourced(
+        r#"
+        for st in \
+          "install ok installed" \
+          "hold ok installed" \
+          "install ok unpacked" \
+          "install ok half-configured" \
+          "install ok half-installed" \
+          "install ok triggers-pending" \
+          "install ok triggers-awaiting" \
+          "deinstall ok config-files" \
+          "purge ok not-installed" \
+          ""; do
+          if dpkg_status_installed "$st"; then echo "YES:$st"; else echo "NO:$st"; fi
+        done
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    // Files-present states -> YES (installed).
+    for (i, st) in [
+        "install ok installed",
+        "hold ok installed",
+        "install ok unpacked",
+        "install ok half-configured",
+        "install ok half-installed",
+        "install ok triggers-pending",
+        "install ok triggers-awaiting",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            lines[i],
+            format!("YES:{st}"),
+            "'{st}' leaves files on disk -- must be treated as installed"
+        );
+    }
+    // Genuinely-gone states -> NO (not installed).
+    for (i, st) in ["deinstall ok config-files", "purge ok not-installed", ""]
+        .iter()
+        .enumerate()
+    {
+        let idx = 7 + i;
+        assert_eq!(
+            lines[idx],
+            format!("NO:{st}"),
+            "'{st}' means the package is genuinely gone"
+        );
+    }
+}
+
+#[test]
+fn timesync_daemon_verdict_fails_on_held_or_partially_configured_daemon() {
+    // Regression for the independent-review finding: a held or mid-configure competing daemon
+    // (files present, not the exact "install ok installed" string) must still FAIL through the
+    // composed timesync_daemon_verdict, not just the isolated dpkg_status_installed.
+    let (code, out, err) = run_sourced(
+        r#"
+        timesync_daemon_verdict systemd-timesyncd "hold ok installed" inactive masked
+        timesync_daemon_verdict systemd-timesyncd "install ok unpacked" inactive ""
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].contains("INSTALLED"),
+        "held package must FAIL: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("INSTALLED"),
+        "mid-unpack package must FAIL: {}",
+        lines[1]
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // (e) genlock.conf drop-in FPS
 // ---------------------------------------------------------------------------------------------
