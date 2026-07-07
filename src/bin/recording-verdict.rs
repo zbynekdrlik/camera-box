@@ -7328,6 +7328,81 @@ mod tests {
         assert_eq!(nv.contiguity.missing_ids, vec![1005]);
     }
 
+    // ============================================================================
+    // #580 — imag's optical zero-loss gate recognizes the 60Hz-monitor vs 60fps-camera sampling
+    // BEAT as net-zero, replacing strict step-1 tick contiguity as the primary optical decision.
+    // Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
+    // frames=21873, present=21851, missing=19, dups=22, surplus=-3, digital burn 0-missing — a
+    // genuinely zero-NET-loss run that strict step-1 (missing=19) false-fails.
+    // ============================================================================
+
+    #[test]
+    fn node_verdict_for_imag_optical_beat_compensated_skip_is_zero_loss_580() {
+        use super::node_verdict_for_imag;
+        // A genuine beat stutter: at i=30 the camera re-reads the PRECEDING painted tick (129)
+        // instead of advancing to 130 — one skip (130 never appears) fully compensated by one
+        // duplicate (129 appears twice). Net-zero: the digital burn is absent entirely here (the
+        // pre-#463 optical-only shape), isolating the OPTICAL decision on its own.
+        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
+            .map(|i| {
+                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
+                frame(i as u64, &[(CAM2, tick)])
+            })
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            !nv.contiguity.is_contiguous(),
+            "sanity: the RAW strict tick sequence has a nominal gap at 130 (masked by the dup \
+             at 129): {:?}",
+            nv.contiguity
+        );
+        assert!(
+            nv.is_zero(),
+            "a skip fully compensated by a duplicate (net-zero beat) must be ZERO loss — strict \
+             step-1 false-fails this exact shape (#580): {:?}",
+            nv
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_optical_beat_frozen_read_fails_580() {
+        use super::node_verdict_for_imag;
+        // The camera stuck on ONE painted QR value for the entire window — tick range collapses
+        // to a single value. The OLD strict-step-1 check ALSO false-passed this (trivially
+        // "contiguous", nothing missing in a span of one) — #580's advance-guard must now FAIL it.
+        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
+            .map(|i| frame(i as u64, &[(CAM2, 500)]))
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.contiguity.is_contiguous(),
+            "sanity: the RAW strict check trivially (and wrongly) calls a single stuck value \
+             contiguous: {:?}",
+            nv.contiguity
+        );
+        assert!(
+            !nv.is_zero(),
+            "a frozen/stuck optical read must NEVER pass zero-loss, even though the OLD strict \
+             step-1 check vacuously passed it (#580 closes this pre-existing hole): {:?}",
+            nv
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_optical_beat_genuine_net_loss_fails_580() {
+        use super::node_verdict_for_imag;
+        // A genuinely missing tick with NO compensating duplicate anywhere — a real net loss, not
+        // a beat. Must still FAIL (never weaken a real drop).
+        let frames = imag_window(Some(30));
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            !nv.is_zero(),
+            "a genuinely uncompensated missing optical tick must still FAIL (#580 never weakens \
+             a real drop): {:?}",
+            nv
+        );
+    }
+
     #[test]
     fn args_expected_burns_for_imag_returns_its_own_digital_burn_463() {
         use super::Args;
