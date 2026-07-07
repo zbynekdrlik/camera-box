@@ -193,6 +193,49 @@ pub fn load_switch_schedule(path: &Path) -> Result<Vec<SwitchWindow>> {
     parse_switch_schedule(&text)
 }
 
+/// Where a frame at `gen_ts_ns` lands on the schedule, AFTER the transition guard. The SINGLE
+/// source of truth for how a frame is attributed to a `--switch-schedule` window, shared by
+/// [`segment_continuity`] (the strict painted-tick sweep) and the #583 honest imag per-segment gate
+/// (`bin/recording-verdict.rs::partition_frames_by_window`, which partitions the imag RecordingFrames
+/// the SAME way, then routes each window through the honest `imag_tick_gate::imag_zero_loss` gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPlacement {
+    /// In this window index, outside BOTH transition guards — attributed to that cambox.
+    In(usize),
+    /// Inside a boundary transition guard — excluded from attribution, NOT counted as loss.
+    Guard,
+    /// Outside every scheduled window — not attributed to any cambox.
+    Outside,
+}
+
+/// Which schedule window (post-transition-guard) a frame at `gen_ts_ns` belongs to. Windows are
+/// ordered + non-overlapping, so a gen_ts can fall in at most one; a frame within `guard_ns` of
+/// either boundary of its window is [`WindowPlacement::Guard`] (the switch takes a few frames to
+/// settle — excluded, not loss).
+pub fn place_frame_in_window(
+    gen_ts_ns: i64,
+    schedule: &[SwitchWindow],
+    guard_ns: i64,
+) -> WindowPlacement {
+    let guard_ns = guard_ns.max(0);
+    match schedule
+        .iter()
+        .position(|w| gen_ts_ns >= w.start_ns && gen_ts_ns < w.end_ns)
+    {
+        Some(wi) => {
+            let w = &schedule[wi];
+            let after_lead = gen_ts_ns >= w.start_ns.saturating_add(guard_ns);
+            let before_trail = gen_ts_ns < w.end_ns.saturating_sub(guard_ns);
+            if after_lead && before_trail {
+                WindowPlacement::In(wi)
+            } else {
+                WindowPlacement::Guard
+            }
+        }
+        None => WindowPlacement::Outside,
+    }
+}
+
 /// Partition `frames` into the schedule's windows by `gen_ts_ns` (discarding `guard_ns` on each
 /// side of every boundary) and run the per-window painted-tick continuity check. `expected_step`
 /// is the by-design decimation step of the painted tick in this recording (1 = full-rate, 2 =
@@ -211,23 +254,15 @@ pub fn segment_continuity(
     let mut unplaceable_frames: u32 = 0;
 
     for f in frames {
-        // Windows are ordered + non-overlapping, so a gen_ts can fall in at most one.
-        match schedule
-            .iter()
-            .position(|w| f.gen_ts_ns >= w.start_ns && f.gen_ts_ns < w.end_ns)
-        {
-            Some(wi) => {
-                let w = &schedule[wi];
-                let after_lead = f.gen_ts_ns >= w.start_ns.saturating_add(guard_ns);
-                let before_trail = f.gen_ts_ns < w.end_ns.saturating_sub(guard_ns);
-                if after_lead && before_trail {
-                    window_frames[wi].push(*f);
-                } else {
-                    // Inside the transition guard on one side of a boundary — excluded, NOT loss.
-                    discarded_guard_frames = discarded_guard_frames.saturating_add(1);
-                }
+        // #583 — the shared window-attribution source of truth (also used by the honest imag
+        // per-segment gate), so the two paths can never disagree on which window a frame belongs to.
+        match place_frame_in_window(f.gen_ts_ns, schedule, guard_ns) {
+            WindowPlacement::In(wi) => window_frames[wi].push(*f),
+            // Inside the transition guard on one side of a boundary — excluded, NOT loss.
+            WindowPlacement::Guard => {
+                discarded_guard_frames = discarded_guard_frames.saturating_add(1)
             }
-            None => unplaceable_frames = unplaceable_frames.saturating_add(1),
+            WindowPlacement::Outside => unplaceable_frames = unplaceable_frames.saturating_add(1),
         }
     }
 

@@ -712,13 +712,12 @@ impl ImagZeroLoss {
     /// floor AND the digital burn is a valid delivery proof. Locked equal to the whole-recording path
     /// by the probe-gated parity test in `bin/recording-verdict.rs`.
     pub fn is_zero_loss(&self, undecodable_rate_max: f64) -> bool {
-        // #583 RED baseline — the OLD strict painted-tick contiguity model (mirrors the per-segment
-        // `window_segment` `copies == 0 && gaps == 0`): a benign same-rate beat with ANY skip has
-        // `present_count < expected_count` and FALSE-FAILS, and a COLLAPSED single-value read
-        // (present == expected == 1) vacuously PASSES. #583 replaces this term with
-        // `self.optical.is_live_no_copy()` (GREEN).
-        (self.optical.present_count > 0
-            && self.optical.present_count == self.optical.expected_count)
+        // #583 GREEN — the HARD optical term is `is_live_no_copy` (advancing AND no long Δtick==0
+        // copy/freeze run), the SAME #580v2 term `NodeVerdict::optical_ok` uses for imag. It tolerates
+        // the benign same-rate beat the old strict `copies == 0 && gaps == 0` per-segment check
+        // false-FAILED, yet rejects a copy/freeze (run-length) and a collapsed read (advance-guard),
+        // where the old strict contiguity vacuously passed a single-value collapse.
+        self.optical.is_live_no_copy()
             && self.optical_undecodable_ok(undecodable_rate_max)
             && self.burn_ok()
     }
