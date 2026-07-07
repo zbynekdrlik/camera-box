@@ -664,6 +664,118 @@ pub fn burn_present_ok(present_count: u32, reference_frames: u32, fraction: f64)
     present_count as f64 >= floor
 }
 
+/// #583 — imag's zero-loss DECISION for ONE analyzed frame set: the WHOLE recording (the headline
+/// `node_verdict_for_imag`) OR a single `--switch-schedule` sweep WINDOW. Holds the SAME #580v2
+/// signals `node_verdict_for_imag` computes — the beat-aware optical [`OpticalBeatVerdict`], the
+/// step-aware digital-burn [`BurnStepContiguity`], the burn present-floor bool, and the in-span
+/// optical undecodable / span counts — and ANDs them the SAME way `NodeVerdict::is_zero` does for an
+/// imag node ([`Self::is_zero_loss`]). Before #583 the per-segment sweep re-ran a SEPARATE strict
+/// painted-tick check (`recording_segments::window_segment` — `copies == 0 && gaps == 0`) that
+/// FALSE-FAILED imag's benign same-rate optical beat per ~30 s window while the headline PASSED it;
+/// routing both paths through this ONE combinator (locked by the probe-gated parity test in
+/// `bin/recording-verdict.rs`) closes that divergence — a second divergent copy WAS the #583 bug.
+#[derive(Debug, Clone)]
+pub struct ImagZeroLoss {
+    /// imag's PRIMARY (cam2 optical) beat verdict — [`OpticalBeatVerdict::is_live_no_copy`] is the
+    /// HARD optical term (advancing AND no long Δtick==0 copy/freeze run).
+    pub optical: OpticalBeatVerdict,
+    /// imag's OWN digital corner-burn (911003) step-aware contiguity — the delivery authority.
+    pub burn: BurnStepContiguity,
+    /// Whether the digital burn is genuinely PRESENT enough to vouch for delivery ([`burn_present_ok`]
+    /// against the optical frame count) — an absent / occluded / frozen burn FAILS fail-closed.
+    pub burn_present_ok: bool,
+    /// In-span cam2 optical frames that did NOT decode (#363) — gated as a RATE (#376), not a count.
+    pub undecodable: u32,
+    /// The cam2 optical span frame count (first..=last decoded optical frame) — the #376 rate denom.
+    pub optical_span_frames: u32,
+}
+
+impl ImagZeroLoss {
+    /// #376 — the optical undecodable RATE is within the calibrated moiré floor (or there is no
+    /// optical span to divide over). Mirrors `NodeVerdict::optical_undecodable_ok` exactly.
+    pub fn optical_undecodable_ok(&self, undecodable_rate_max: f64) -> bool {
+        self.optical_span_frames == 0
+            || (self.undecodable as f64 / self.optical_span_frames as f64) <= undecodable_rate_max
+    }
+
+    /// #463/#584/#585 — the digital burn is a VALID delivery proof: genuinely PRESENT (the present
+    /// floor) AND its own step-grid span contiguous. Mirrors `NodeVerdict::imag_burn_ok` (the imag
+    /// branch): `burn_present_ok && imag_burn_signal() == Some(true)`, where `imag_burn_signal()` ⇔
+    /// `first_id.is_some() && is_contiguous()`. An absent burn (`first_id == None`) FAILS fail-closed.
+    pub fn burn_ok(&self) -> bool {
+        self.burn_present_ok && self.burn.first_id.is_some() && self.burn.is_contiguous()
+    }
+
+    /// #580v2/#583 — THE imag zero-loss DECISION FORMULA, IDENTICAL to `NodeVerdict::is_zero` for an
+    /// imag node (colour is not wired for imag, so its always-`true` `colour_fail == 0` term is
+    /// omitted): the optical read is LIVE with no copy/freeze AND its undecodable rate is within the
+    /// moiré floor AND the digital burn is a valid delivery proof. The probe-gated parity test in
+    /// `bin/recording-verdict.rs` locks this FORMULA equal to the whole-recording path on the same
+    /// synthetic sequence — it closes the #583 copy/gap false-fail, but does NOT prove the two paths
+    /// agree on every input: they are computed over DIFFERENT windows (the whole recording's optical
+    /// span vs one ~30s schedule window), so the #376 undecodable RATE denominator and the boundary
+    /// trim (the whole-recording path applies the #575 3-frame lead/tail trim; the per-segment sweep
+    /// applies only the schedule's transition guard) can still legitimately disagree on which SPECIFIC
+    /// frames fail. That is fine — `recording-verdict.rs`'s `all_pass` ANDs BOTH the whole-recording
+    /// `nv.is_zero() && span_ok` AND the per-segment `overall_pass` independently, so the run FAILS if
+    /// either flags a problem (the stricter one governs); never rely on one path alone to prove the
+    /// other clean.
+    pub fn is_zero_loss(&self, undecodable_rate_max: f64) -> bool {
+        // #583 GREEN — the HARD optical term is `is_live_no_copy` (advancing AND no long Δtick==0
+        // copy/freeze run), the SAME #580v2 term `NodeVerdict::optical_ok` uses for imag. It tolerates
+        // the benign same-rate beat the old strict `copies == 0 && gaps == 0` per-segment check
+        // false-FAILED, yet rejects a copy/freeze (run-length) and a collapsed read (advance-guard),
+        // where the old strict contiguity vacuously passed a single-value collapse.
+        self.optical.is_live_no_copy()
+            && self.optical_undecodable_ok(undecodable_rate_max)
+            && self.burn_ok()
+    }
+}
+
+/// #583 — compute imag's [`ImagZeroLoss`] for ONE analyzed frame set from its already-extracted
+/// signals: the CHRONOLOGICAL decodable optical ticks (undecodable frames EXCLUDED — counted
+/// separately in `undecodable`), the decodable digital-burn ids, the in-span undecodable count and
+/// the optical span frame count. Calls the SAME #580v2 pure functions `node_verdict_for_imag` calls
+/// ([`optical_beat_net_zero`], [`burn_step_contiguity`], [`burn_present_ok`]) so the per-segment
+/// sweep window and the whole-recording headline share ONE signal computation and cannot diverge.
+/// `optical_expected_step` is imag's native-rate step ([`IMAG_OPTICAL_EXPECTED_STEP`]).
+///
+/// `burn_step` is taken as a PARAMETER, deliberately NOT calibrated internally via
+/// [`calibrate_burn_step`] (a #583 correctness-review finding): the render step is a property of
+/// the WHOLE recording session's OBS pipeline, not expected to vary window-to-window, so
+/// calibrating it independently PER short segment window (a much smaller sample than the whole
+/// recording) can under-trust a genuinely-larger step ([`MIN_IDS_FOR_STEP_CALIBRATION`] falls back
+/// to the conservative constant on a small window) and manufacture a phantom missing id on a
+/// clean, merely-few-sampled window — a spurious FALSE FAIL the whole-recording path's much larger
+/// sample would not hit. The caller calibrates ONCE (over the largest sample it has — the whole
+/// analyzed recording, ideally) and passes the SAME step into every window, exactly mirroring how
+/// `node_verdict_for_imag` calibrates once for the whole recording. Passing a step calibrated over
+/// a SINGLE window here (matching the pre-fix per-window behaviour) is still valid input — the
+/// function itself performs no calibration decision, only contiguity math on the given step.
+pub fn imag_zero_loss(
+    ticks_in_order: &[u32],
+    burn_ids: &[u32],
+    burn_step: u32,
+    undecodable: u32,
+    optical_span_frames: u32,
+    optical_expected_step: u32,
+) -> ImagZeroLoss {
+    let optical = optical_beat_net_zero(ticks_in_order, optical_expected_step);
+    let burn = burn_step_contiguity(burn_ids, burn_step);
+    let present_ok = burn_present_ok(
+        burn.present_count,
+        optical.frames_count,
+        MIN_BURN_PRESENT_FRACTION,
+    );
+    ImagZeroLoss {
+        optical,
+        burn,
+        burn_present_ok: present_ok,
+        undecodable,
+        optical_span_frames,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,6 +1622,157 @@ mod tests {
         assert!(
             burn_step_contiguity(&ids, 6).is_contiguous(),
             "sanity: at the inflated step 6 the loss WOULD be masked (why the clamp matters)"
+        );
+    }
+
+    // ---- #583 — the honest per-segment imag zero-loss combinator (imag_zero_loss / ImagZeroLoss) ----
+    //
+    // The `--switch-schedule` sweep verdicts each ~30 s window; before #583 it ran the STRICT
+    // painted-tick check (`copies == 0 && gaps == 0`), false-FAILING imag's benign same-rate optical
+    // beat (an isolated dup = copy, a skip = gap) per window while the whole-recording headline PASSED
+    // it. `imag_zero_loss` routes a window through the SAME #580v2 gate the headline uses. The RATE
+    // ceiling here (0.005) is `OPTICAL_UNDECODABLE_RATE_MAX` in `bin/recording-verdict.rs`.
+
+    /// A clean present + contiguous digital burn of `n` ids (step 1, imag's own render), decoupled
+    /// from the optical tick — imag's corner burn advances on its OWN render, blind to any upstream
+    /// content freeze in the filmed optical read.
+    fn clean_burn(start: u32, n: u32) -> Vec<u32> {
+        (start..start + n).collect()
+    }
+
+    #[test]
+    fn per_segment_benign_beat_passes_the_honest_gate_583() {
+        // The #583 bug: a benign same-rate beat — an ISOLATED duplicate tick (Δ0 run of 1) and an
+        // isolated skip (103 absent) — is genuinely zero-loss but the strict per-segment check
+        // false-FAILED it (dup ⇒ copy, skip ⇒ gap). The digital burn is clean + present.
+        let ticks = [100u32, 101, 101, 102, 104, 105, 106, 107]; // dup 101 (run 1), skip 103
+        let burn = clean_burn(500, 8);
+        let v = imag_zero_loss(
+            &ticks,
+            &burn,
+            calibrate_burn_step(&burn),
+            0,
+            ticks.len() as u32,
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert!(
+            v.optical.is_live_no_copy(),
+            "a benign same-rate beat is LIVE (advancing) with no long copy run: {v:?}"
+        );
+        assert!(
+            v.is_zero_loss(0.005),
+            "#583: a benign same-rate beat window must PASS the honest gate (not false-fail): {v:?}"
+        );
+    }
+
+    #[test]
+    fn per_segment_copy_freeze_fails_the_honest_gate_583() {
+        // A content FREEZE within a window: the optical tick STUCK on 104 for 5 consecutive frames
+        // (a Δ0 run of 4 > K) then resumed. The set-based aggregates MISS it — every distinct tick
+        // 100..=107 IS present (surplus <= 0, avg_step rounds to 1), so both the OLD strict
+        // contiguity AND the OLD `surplus <= 0` gate fake-green it — and imag's digital burn keeps
+        // advancing (blind to the upstream content freeze). ONLY run-length catches it.
+        let ticks = [
+            100u32, 101, 102, 103, 104, 104, 104, 104, 104, 105, 106, 107,
+        ];
+        let burn = clean_burn(500, 12); // imag's own render advances through the freeze
+        let v = imag_zero_loss(
+            &ticks,
+            &burn,
+            calibrate_burn_step(&burn),
+            0,
+            ticks.len() as u32,
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert!(
+            v.optical.is_advancing(),
+            "the freeze keeps avg_step ≈ 1 — the advance-guard alone can't catch it: {v:?}"
+        );
+        assert!(
+            !v.optical.no_stuck_copy(),
+            "a long Δ0 run (content freeze) trips no_stuck_copy — the term that catches what the \
+             aggregates + the free-running burn all miss: {v:?}"
+        );
+        assert!(
+            !v.is_zero_loss(0.005),
+            "#583: a copy/freeze within a segment must FAIL the honest gate: {v:?}"
+        );
+    }
+
+    #[test]
+    fn per_segment_burn_absent_fails_the_honest_gate_583() {
+        // The optical read is clean + advancing, but imag's OWN digital corner burn is ABSENT
+        // (occluded / not rendered) — the burn is the SOLE per-frame delivery authority (#580v2), so
+        // an absent burn must FAIL fail-closed, never vacuously pass on the optical read alone.
+        let ticks = [400u32, 401, 402, 403, 404, 405];
+        let v = imag_zero_loss(
+            &ticks,
+            &[],
+            calibrate_burn_step(&[]),
+            0,
+            ticks.len() as u32,
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert!(
+            v.optical.is_live_no_copy(),
+            "the optical read is clean (the failure must be attributable to the absent burn): {v:?}"
+        );
+        assert!(
+            !v.burn_ok(),
+            "an absent digital burn is not a valid delivery proof (present floor fails): {v:?}"
+        );
+        assert!(
+            !v.is_zero_loss(0.005),
+            "#583: a segment with NO digital burn must FAIL (fail-closed): {v:?}"
+        );
+    }
+
+    #[test]
+    fn per_segment_short_but_clean_passes_the_honest_gate_583() {
+        // A legitimately SHORT window (8 frames — far below the whole-recording 300 s #373 floor)
+        // that is genuinely clean must PASS: the honest per-segment gate carries NO duration floor
+        // (the 300 s span floor is a whole-recording headline term, never applied per short window).
+        let ticks = [200u32, 201, 202, 203, 204, 205, 206, 207];
+        let burn = clean_burn(600, 8);
+        let v = imag_zero_loss(
+            &ticks,
+            &burn,
+            calibrate_burn_step(&burn),
+            0,
+            ticks.len() as u32,
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert!(
+            v.is_zero_loss(0.005),
+            "#583: a short-but-clean segment must PASS (no false-fail from a duration term): {v:?}"
+        );
+    }
+
+    #[test]
+    fn per_segment_collapsed_short_read_fails_the_honest_gate_583() {
+        // A COLLAPSED read: the camera stuck on ONE painted tick for the whole short window. The
+        // strict set-based contiguity VACUOUSLY passes it (present == expected == 1), the exact hole
+        // the #373 whole-recording span floor closes at scale — but per short window there is no span
+        // floor, so the advance-guard must reject it: avg_step ≈ 0 ≠ the expected step. (Its Δ0 run
+        // is only 3 = K, so no_stuck_copy does NOT catch a full 4-frame collapse — the advance-guard
+        // does.)
+        let ticks = [300u32, 300, 300, 300];
+        let burn = clean_burn(700, 4);
+        let v = imag_zero_loss(
+            &ticks,
+            &burn,
+            calibrate_burn_step(&burn),
+            0,
+            ticks.len() as u32,
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert!(
+            !v.optical.is_advancing(),
+            "a collapsed (frozen) read does not advance — the advance-guard must catch it: {v:?}"
+        );
+        assert!(
+            !v.is_zero_loss(0.005),
+            "#583: a collapsed short read must NOT vacuously PASS: {v:?}"
         );
     }
 }

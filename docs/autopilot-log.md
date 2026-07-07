@@ -2045,3 +2045,47 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   each ≤K, spread evenly across the whole recording) evades run-length, the whole-window aggregates,
   AND the render-free-running digital burn alike — not a v2 regression (both old and new gates miss
   it equally). Filed as #588.
+
+## 2026-07-07 — #583 route --switch-schedule imag segments through the honest #580v2 gate (PR TBD, v1.7.0-dev.281)
+
+- **Bug (#583, found in #580 review):** the whole-recording imag verdict
+  (`node_verdict_for_imag` → `NodeVerdict::is_zero`) uses the #580v2 honest gate
+  (`OpticalBeatVerdict::is_live_no_copy` — advance-guard + run-length no-copy K=3 — AND the digital
+  corner-burn present-floor/step-contiguity). But the `--switch-schedule` ALL-CAMBOX sweep's imag
+  per-segment path (the #467 `all_cambox_continuity.imag` block) still verdicted each ~30s window
+  with the STRICT painted-tick `recording_segments::window_segment` (`copies==0 && gaps==0`), which
+  false-FAILS imag's benign same-rate optical beat (an isolated dup=copy, a skip=gap) per window
+  while the headline PASSES it — the two paths disagreed on the same recording. A pure-logic
+  divergence (no live-rig repro possible without an all-cambox recording; the two code paths are the
+  proof). Version was already ==main so bumped .280→.281 first.
+- **Fix:** new pure Tier-0 combinator `imag_tick_gate::imag_zero_loss` / `ImagZeroLoss::is_zero_loss`
+  composes the SAME #580v2 functions (`optical_beat_net_zero`/`is_live_no_copy`, `calibrate_burn_step`,
+  `burn_step_contiguity`, `burn_present_ok`) and ANDs them IDENTICALLY to `NodeVerdict::is_zero` for
+  imag (optical live-no-copy + #376 undecodable rate floor + burn present-floor/contiguity; colour is
+  not wired for imag). `recording-verdict.rs` routes the imag sweep through it:
+  `partition_frames_by_window` slices imag's `RecordingFrame`s into the SAME schedule windows via the
+  extracted single-source `place_frame_in_window`/`WindowPlacement` (recording_segments.rs, also now
+  used by `segment_continuity` — no divergent window-attribution copy) + `frame_gen_ts_anchor`
+  (extracted from `segment_frames_from_recording`), then each window is gated by `is_zero_loss`. NO
+  300s span floor per short window (that #373 floor is a whole-recording headline term); the
+  advance-guard rejects a COLLAPSED read and run-length rejects a FREEZE, so a short window neither
+  vacuously passes a frozen read nor false-fails a legit short-clean one. NO per-window #575 boundary
+  trim (the 1s transition guard already trims each window's edges; re-applying the whole-recording
+  trim per short window distorts the beat).
+- **RED→GREEN commits:** RED `635009f58` (strict-contiguity baseline in `is_zero_loss`), GREEN
+  `1191d646a`. Tier-0 (imag_tick_gate, default features, RED→GREEN observed locally):
+  `per_segment_benign_beat_passes_the_honest_gate_583` (RED-failing), `..._copy_freeze_fails_...583`
+  (RED-failing), `..._burn_absent_fails_...583`, `..._short_but_clean_passes_...583`,
+  `..._collapsed_short_read_fails_...583` (RED-failing). Probe-gated PARITY (CI-only):
+  `imag_per_segment_benign_beat_matches_whole_recording_pass_583` (both paths PASS the beat),
+  `imag_per_segment_copy_freeze_matches_whole_recording_fail_583` (both FAIL the freeze) — asserts
+  `full_chain.loss.imag.zero_loss == all_cambox_continuity.imag.overall_pass`. Updated the existing
+  `imag_own_segment_gap_fails_...467` assertion: a dropped frame now fails via the missing DIGITAL
+  BURN id (the delivery authority), not the old strict optical "gap" count.
+- **Untouched (deliberately):** the stream per-cambox sweep (`all_cambox_continuity.segments`) keeps
+  the strict `window_segment` (its per-cambox painted-tick attribution is a different, correct
+  concern — imag is the only node whose PRIMARY gate is the optical beat). `merge_of_partials_
+  reproduces_the_fused_verdict` stays byte-identical (change lives in shared `build_and_print_verdict`,
+  no imag frames + no --switch-schedule in that test). Live all-cambox-sweep verification rides a
+  future E2E (no sweep recording on hand); the Tier-0 parity + copy-freeze tests are the proof for
+  this PR. 466/466 default lib tests green, fmt/clippy clean.

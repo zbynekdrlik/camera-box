@@ -808,6 +808,58 @@ later:
    genuinely NEW, rate-derived arithmetic (the step formula) out to a crate-root Tier-0 module
    (mirrors `imag_tick_gate.rs`) so AT LEAST that piece is locally RED→GREEN-observable.
 
+## #583 — a node whose PRIMARY gate is the optical BEAT must NOT reuse the strict `window_segment` per segment
+
+**SUPERSEDES the #467 "just call `segment_continuity` again" advice FOR imag** (only imag — the
+stream per-cambox windows still correctly use `segment_continuity`). `segment_continuity` /
+`window_segment` verdict a window with the STRICT painted-tick check (`copies == 0 && gaps == 0` —
+a duplicate tick = copy, a forward skip = gap). That is correct for the STREAM per-cambox
+attribution (each cambox's painted tick should advance cleanly on the splitter), but WRONG for
+**imag**, whose whole-recording headline gate is NOT the strict tick contiguity — it is the
+**#580v2 beat-aware gate** (`node_verdict_for_imag` → `NodeVerdict::is_zero`): cam2's 60Hz monitor
+vs imag's free-running 60fps are two same-rate clocks that BEAT (an isolated dup balanced by a skip
+= zero net loss). So the strict per-segment check false-FAILED imag's benign beat per ~30s window
+while the headline PASSED the whole recording — the two paths disagreed (#583, found in #580 review).
+
+**The fix — route BOTH imag paths through ONE shared decision, never a second copy** (a divergent
+copy WAS the bug):
+
+1. **Pure Tier-0 combinator `imag_tick_gate::imag_zero_loss` / `ImagZeroLoss::is_zero_loss`** composes
+   the SAME #580v2 functions (`optical_beat_net_zero`/`is_live_no_copy`, `calibrate_burn_step`,
+   `burn_step_contiguity`, `burn_present_ok`) and ANDs them IDENTICALLY to `NodeVerdict::is_zero` for
+   imag (optical live-no-copy + #376 undecodable rate floor + burn present-floor/step-contiguity;
+   colour is not wired for imag). RED→GREEN observable locally on default features.
+2. **`recording-verdict.rs`: `partition_frames_by_window`** slices imag's `RecordingFrame`s into the
+   SAME schedule windows via the SINGLE-SOURCE `recording_segments::place_frame_in_window` /
+   `WindowPlacement` (now also used by `segment_continuity` — so the imag path and the strict stream
+   sweep can never disagree on which window a frame belongs to) + `frame_gen_ts_anchor` (extracted
+   from `segment_frames_from_recording`, the ONE burn/optical anchor source). Each window is then
+   gated by `imag_zero_loss(...).is_zero_loss(OPTICAL_UNDECODABLE_RATE_MAX)`; report shape carries
+   `optical_advancing` / `optical_max_stuck_run` / `burn_present_ok` / `burn_missing_ids` / `pass`
+   (NOT the old `copies` / `gaps` — a dropped frame now fails via a missing DIGITAL BURN id, the
+   delivery authority, not an optical "gap").
+3. **Short-segment discipline (this is where it goes wrong):** a ~30s window carries **NO 300s span
+   floor** (the #373 floor is a WHOLE-recording headline term, applied to `full_chain.loss.imag`,
+   never per window). Don't add one. The honest gate still rejects a COLLAPSED read per window (the
+   advance-guard — `avg_step` must round to the expected step) and a COPY/FREEZE (the run-length
+   term), so a short window can neither vacuously PASS a frozen read nor false-FAIL a legit
+   short-clean one. The bounded-run K is absolute (fine on short windows); the burn present-count
+   floor is `reference_frames * 0.5` (frame-scale, scales with the window). Also do NOT re-apply the
+   #575 whole-recording boundary trim per window — the 1s transition guard already trims each
+   window's edges; re-trimming 3 more per short window distorts the beat.
+4. **PARITY lock (probe-gated, CI-only):** assert `full_chain.loss.imag.zero_loss ==
+   all_cambox_continuity.imag.overall_pass` on ONE `build_and_print_verdict` call over the SAME
+   synthetic imag sequence (a single window == the whole recording, guard 0) — benign beat both
+   PASS, copy-freeze both FAIL. This closes the #583 copy/gap false-fail (proven on this sequence) —
+   it does NOT prove the two paths compute identically on every input: they scan different windows
+   (the whole optical span vs one ~30s schedule slice), so the #376 undecodable RATE denominator and
+   the boundary trim (#575's 3-frame lead/tail trim on the headline vs the schedule's transition guard
+   on the sweep) can still legitimately disagree on which SPECIFIC frames fail. That's fine —
+   `all_pass` ANDs BOTH paths independently, so the stricter one governs; never rely on one path alone
+   to prove the other clean. Keep the parity test's own sequence boundaries clean so the whole-recording
+   #575 trim is a no-op vs the per-segment no-trim (otherwise the two windows genuinely wouldn't
+   coincide, and the test would prove nothing).
+
 ## GOTCHA — the `frame()` test helper's `tick = max(frame_id)` trap bites EVERY new mixed cam2+burn fixture (cost a full CI cycle, #575/#576)
 
 `recording-verdict.rs`'s test-module `frame(frame_index, payloads)` helper (used everywhere a
