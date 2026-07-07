@@ -692,11 +692,15 @@ advance-guard (the tick sequence must genuinely advance — a frozen/stuck camer
 range collapsed to one value, now FAILS; the OLD strict check ALSO vacuously passed a frozen read,
 so this closes a hole rather than opening one) with `surplus = expected_count - frames_count <= 0`
 (a genuine net loss, `surplus > 0`, still fails — never weakened). Wired into
-`node_verdict_for_imag` via a NEW `imag_optical_beat_pass: Option<bool>` field on `NodeVerdict`
-that overrides `is_zero()`'s `contiguity.is_contiguous()` check for imag ONLY (`None` — hence
+`node_verdict_for_imag` via a NEW `imag_optical_beat: Option<OpticalBeatVerdict>` field on
+`NodeVerdict` (stores the FULL verdict, not just a bool, so the printers/JSON can report
+avg_step/surplus honestly — `imag_optical_beat_pass()` derives the `Option<bool>` from it) that
+overrides `is_zero()`'s `contiguity.is_contiguous()` check for imag ONLY (`None` — hence
 unaffected — for every other node); `contiguity` itself still carries the RAW strict
 `tick_contiguity` values for display. The #463 digital-burn AND still applies unchanged: a
-net-zero optical beat can NEVER paper over a genuinely broken digital burn.
+net-zero optical beat can NEVER paper over a genuinely broken digital burn. A beat-compensated
+PASS is reported HONESTLY (not falsely claimed "CONTIGUOUS") and a beat FAIL always prints a
+reason (frozen "did NOT advance" vs genuine "NET loss") — never a silent/empty verdict line.
 
 **`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
 strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS
