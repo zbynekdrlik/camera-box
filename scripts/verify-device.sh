@@ -54,7 +54,10 @@
 #   (n) core-isolation kernel cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
 #   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2 -- #132/#547)
 #   (p) config.toml [display] section matches camera-set.sh's CAMERA_DISPLAY_SOURCE table entry
-#       (#528/#557/#558 -- catches a box that lost its HDMI-preview config, or wrongly gained one)
+#       (#528/#557/#558 -- catches a box that lost its HDMI-preview config, or wrongly gained one),
+#       PLUS the ExecStart --display flag matches CAMERA_DISPLAY_EXECSTART_SOURCE (#562 -- cam2's
+#       manual/provisioner-persisted ExecStart-mechanism preview, deliberately excluded from the
+#       config.toml table because scripts/rig-mode.sh's TEST/EVENT toggle flips that exact flag)
 #   (q) WARNING only (never fails the gate): stale `.bak` cruft under /usr/lib/ndi or the systemd
 #       drop-in dir (#453 -- inert leftovers from a manual NDI upgrade / a stale drop-in edit;
 #       setup-device.sh self-heals this on the box's next provisioning pass)
@@ -403,6 +406,27 @@ display_config_verdict() {
   fi
 }
 
+# execstart_display_source TEXT -> the value of a `--display "..."` flag inside TEXT (the output
+# of `systemctl show -p ExecStart --value camera-box` -- the SAME command scripts/rig-mode.sh's own
+# TEST/EVENT toggle already uses to check ExecStart, rig-mode.sh:248/353), "" if no --display flag
+# is present. This is the READER half of setup-device.sh's execstart_display_flag() writer (#562) --
+# the ExecStart-mechanism counterpart to config_toml_display_source() above. Unescapes `\"` and `\\`
+# back to their literal characters, same order as config_toml_display_source() (quotes first, then
+# backslashes, undoing the writer's backslash-then-quote escaping in reverse).
+execstart_display_source() {
+  awk '
+    match($0, /--display "([^"\\]|\\.)*"/) {
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^--display "/, "", s)
+      sub(/"$/, "", s)
+      gsub(/\\"/, "\"", s)
+      gsub(/\\\\/, "\\", s)
+      print s
+      exit
+    }
+  ' <<< "$1"
+}
+
 # --- (q) .bak cruft drift -- WARNING only, never a FAIL (#453) ----------------------------------
 # Inert `.bak` backups left behind by a manual NDI upgrade (fleet cam1/cam2/cam4:
 # /usr/lib/ndi/libndi.so.6*.bak) or a stale drop-in edit (cam1:
@@ -475,7 +499,8 @@ Checks:
   (m) systemd-networkd-wait-online masked (no 120s boot stall)
   (n) core-isolation cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2)
-  (p) config.toml [display] section matches camera-set.sh's CAMERA_DISPLAY_SOURCE table entry
+  (p) config.toml [display] + ExecStart --display both match camera-set.sh's per-mechanism tables
+      (CAMERA_DISPLAY_SOURCE / CAMERA_DISPLAY_EXECSTART_SOURCE, #562)
   (q) WARNING only: stale .bak cruft under the NDI dir or the systemd drop-in dir (#453)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2).
@@ -720,6 +745,40 @@ else
       ;;
     unexpected)
       fail "config.toml has an UNEXPECTED [display] section (source='${DISPLAY_ACTUAL}') -- camera-set.sh has no table entry for this box"
+      ;;
+  esac
+fi
+
+# (p) EXTENSION -- ExecStart --display vs camera-set.sh's CAMERA_DISPLAY_EXECSTART_SOURCE table
+# (#562). CAMERA_DISPLAY_EXECSTART_SOURCE was already resolved by camera_resolve() above -- "" for
+# every box except cam2 today. Before this check, a box that lost cam2's manual ExecStart edit (a
+# re-provision with the pre-#562 setup-device.sh, a hand rollback) still reported ALL CLEAR from
+# (p) above, because that check only ever looked at config.toml (cam2 has no [display] table entry
+# by design -- see scripts/camera-set.sh's cam2-exclusion comment). Reuses display_config_verdict
+# unchanged -- the same EXPECTED/ACTUAL contract, fed by the ExecStart mechanism instead of
+# config.toml.
+rc=0
+EXECSTART_SHOW="$(ssh_box "systemctl show -p ExecStart --value camera-box 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  fail "ExecStart unreadable (ssh rc=$rc) -- cannot verify ExecStart --display flag"
+else
+  EXECSTART_DISPLAY_ACTUAL="$(execstart_display_source "$EXECSTART_SHOW")"
+  case "$(display_config_verdict "$CAMERA_DISPLAY_EXECSTART_SOURCE" "$EXECSTART_DISPLAY_ACTUAL")" in
+    ok)
+      if [ -n "$CAMERA_DISPLAY_EXECSTART_SOURCE" ]; then
+        ok "ExecStart --display matches camera-set.sh ('$CAMERA_DISPLAY_EXECSTART_SOURCE')"
+      else
+        ok "ExecStart has no --display flag (none expected for this box)"
+      fi
+      ;;
+    missing)
+      fail "ExecStart --display flag MISSING -- expected source '$CAMERA_DISPLAY_EXECSTART_SOURCE' (camera-set.sh)"
+      ;;
+    drift)
+      fail "ExecStart --display source '${EXECSTART_DISPLAY_ACTUAL}' != camera-set.sh's '${CAMERA_DISPLAY_EXECSTART_SOURCE}'"
+      ;;
+    unexpected)
+      fail "ExecStart has an UNEXPECTED --display flag (source='${EXECSTART_DISPLAY_ACTUAL}') -- camera-set.sh has no ExecStart-mechanism table entry for this box"
       ;;
   esac
 fi

@@ -88,6 +88,28 @@ config_toml_display_section() {
     printf '\n# HDMI cameraman preview (#528 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\n' "$escaped"
 }
 
+# execstart_display_flag SOURCE -- the OTHER HDMI-preview mechanism's counterpart to
+# config_toml_display_section() above (#562, per-cam CAMERA_DISPLAY_EXECSTART_SOURCE table in
+# scripts/camera-set.sh). Echoes nothing when SOURCE is empty -- a box with no ExecStart-mechanism
+# table entry (every box except cam2 today) renders the exact pre-#562 canonical PLAIN ExecStart
+# line. For a configured SOURCE (cam2: "STRIH-SNV (interkom)"), echoes a leading-space
+# ` --display "<source>"` fragment meant to be appended directly to
+# `ExecStart=/usr/local/bin/camera-box` in STEP 7's unit heredoc -- this is what makes cam2's
+# manual ExecStart edit provisioner-persistent (the #379-recurrence risk #562 closes) WITHOUT
+# touching config.toml or scripts/rig-mode.sh's ExecStart-flag-based TEST/EVENT toggle at all.
+#
+# Escaping mirrors config_toml_display_section() exactly (backslash then quote) -- the target is a
+# double-quoted systemd ExecStart argument (systemd.service(5) "command line" quoting), which uses
+# the same `\\` / `\"` escapes as a TOML string literal. No table entry needs one today, but the
+# landmine is defused now rather than discovered at boot time later.
+execstart_display_flag() {
+    local source="${1:-}"
+    [ -n "$source" ] || return 0
+    local escaped="${source//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    printf ' --display "%s"' "$escaped"
+}
+
 # cleanup_bak_cruft DIR PATTERN... -- removes any files directly under DIR matching the given
 # glob PATTERN(s) (#453: fleet self-heal for inert `.bak` leftovers -- a manual NDI upgrade left
 # stale `/usr/lib/ndi/libndi.so.6*.bak` files on cam1/cam2/cam4, and a stale drop-in edit left
@@ -405,7 +427,16 @@ fi
 # =============================================================================
 echo ""
 echo -e "${GREEN}[7/${TOTAL_STEPS}] Creating systemd service...${NC}"
-cat > /etc/systemd/system/camera-box.service << 'EOF'
+# ExecStart's --display suffix is built from the CAMERA_DISPLAY_EXECSTART_SOURCE table (#562,
+# scripts/camera-set.sh) via execstart_display_flag() -- empty for every box except cam2 today, so
+# this renders the exact pre-#562 canonical PLAIN line everywhere else. This is what makes cam2's
+# manual --display ExecStart edit (its interkom cameraman-preview source, per camera-set.sh's
+# table) survive a re-provision instead of being silently erased by an unconditional bare
+# ExecStart (the #379-recurrence risk). The heredoc below therefore interpolates a command
+# substitution on the ExecStart line -- it is intentionally NOT single-quoted ('EOF') any more;
+# every other line in the unit is a literal string with no `$`/backtick, so switching delimiters
+# changes nothing else about the rendered file.
+cat > /etc/systemd/system/camera-box.service << EOF
 [Unit]
 Description=Camera Box - USB Video Capture to NDI
 Documentation=https://github.com/zbynekdrlik/camera-box
@@ -414,7 +445,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/camera-box
+ExecStart=/usr/local/bin/camera-box$(execstart_display_flag "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}")
 Restart=always
 RestartSec=3
 
@@ -445,6 +476,9 @@ SupplementaryGroups=video
 [Install]
 WantedBy=multi-user.target
 EOF
+if [ -n "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}" ]; then
+    echo "  HDMI preview (ExecStart): ${CAMERA_DISPLAY_EXECSTART_SOURCE} (persists across reboot/redeploy, #562)"
+fi
 
 # #289 + #11 systemd drop-ins: the realtime CPU-isolation + genlock emit-rate
 # overrides live in drop-ins (not the base unit) so they can be re-applied / tuned
