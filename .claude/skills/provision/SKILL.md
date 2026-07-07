@@ -244,6 +244,18 @@ All six emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `cam
 Adding cam7 (or any further camera) means editing `camera-set.sh` ONCE — every script downstream
 (including `verify-device.sh`) picks it up automatically.
 
+**Gotcha — removing/adding a fleet camera changes behavior DIFFERENTLY in the two
+name-resolvers (#593).** `camera_resolve()` here fails LOUD (nonzero exit) on any name not in its
+`case` table — `setup-device.sh`'s `resolve_device_name` and `verify-fleet.sh`'s per-box loop both
+propagate that as a hard reject/"invalid" verdict, since their whole job IS fleet provisioning/
+verification. But `scripts/setup.sh`'s `resolve_display_source()` is DELIBERATELY lenient: its
+hostname argument isn't required to be a fleet camN name at all (it defaults to the generic
+`"camera-box"` hostname), so an unresolvable name there silently falls through to "no preview"
+(empty, exit 0) rather than failing — same behavior whether the name was NEVER a real camera
+(cam7) or is simply not fleet-related. When removing a phantom camera (or testing what happens to
+an unknown one), check BOTH call sites — a test written against `resolve_device_name`'s hard
+reject does NOT transfer to `resolve_display_source`'s soft fallback, and vice versa.
+
 `camera_resolve()` also carries a per-cam `CAMERA_DISPLAY_SOURCE` table (#528) — the HDMI
 cameraman-preview NDI source (empty when a box has no preview configured). `setup-device.sh`
 STEP 6 wires it into `config.toml`'s optional `[display]` section (never baked into the
