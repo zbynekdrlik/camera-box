@@ -1086,9 +1086,9 @@ fn node_verdict_with_optical(
 /// same-rate clocks that BEAT: the camera captures some painter ticks twice (a duplicate) and
 /// misses others (a skip); when dups and skips are BALANCED (frame-count conserved) that is ZERO
 /// NET loss, not a fault. Strict step-1 (the pre-#580 model) false-fails a truly-zero-loss run
-/// whenever ANY skip occurs, even fully compensated — confirmed live (run 572001, post-#575 trim
-/// + #576 calibration): expected=21870, frames=21873, missing=19, dups=22, surplus=-3, digital
-/// burn 0-missing. [`camera_box::imag_tick_gate::optical_beat_net_zero`] replaces it, ANDing an
+/// whenever ANY skip occurs, even fully compensated — confirmed live (run 572001, post-#575 and
+/// #576): expected=21870, frames=21873, missing=19, dups=22, surplus=-3, digital burn 0-missing.
+/// [`camera_box::imag_tick_gate::optical_beat_net_zero`] replaces it, ANDing an
 /// advance-guard (never a frozen/stuck read — closes a hole strict step-1 ALSO vacuously passed)
 /// with the net-zero check (a genuine net loss, `surplus > 0`, still FAILS — never weakened). The
 /// RAW strict [`camera_box::imag_tick_gate::tick_contiguity`] result still populates `contiguity`
