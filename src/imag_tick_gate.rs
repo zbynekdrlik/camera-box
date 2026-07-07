@@ -1389,6 +1389,69 @@ mod tests {
         );
     }
 
+    // ============================================================================
+    // #588 — the CATCH-UP JUDDER: a systematic short-run stutter spread evenly across the WHOLE
+    // recording — each tick value held for a Δ0 run of ≤ K, the dups balanced by catch-up skips so
+    // the whole-window aggregates read ~zero. It slips ALL THREE #580v2 detectors (the advance-guard,
+    // the run-length no-copy term, AND the diagnostic surplus) — the residual gate hole #588 tracks.
+    // The 4th orthogonal term is Δ0-DENSITY (aggregate duplication rate): a benign beat is ~0.1%
+    // (run 572001), a systematic judder is tens of %.
+    // ============================================================================
+
+    /// A catch-up judder: 150 blocks × (`IMAG_OPTICAL_MAX_STUCK_RUN` + 1) identical frames — a Δ0
+    /// run of exactly K(3) per block (the MAXIMAL run that still clears `no_stuck_copy`) — each block
+    /// then jumping forward by that same hold to the next value. 600 frames, 599 adjacent pairs (well
+    /// above `MIN_PAIRS_FOR_STUCK_DENSITY`), 450 of them Δ0 (≈75% density), max run 3, avg_step ≈ 1,
+    /// surplus ≤ 0. Built entirely from maximal-but-LEGAL runs, so run-length is genuinely blind.
+    fn catch_up_judder_ticks() -> Vec<u32> {
+        let hold = IMAG_OPTICAL_MAX_STUCK_RUN + 1; // 4 frames ⇒ a Δ0 run of exactly K(3)
+        let mut seq = Vec::new();
+        for block in 0..150u32 {
+            let value = block * hold; // a catch-up skip of `hold` between consecutive blocks
+            for _ in 0..hold {
+                seq.push(value);
+            }
+        }
+        seq
+    }
+
+    #[test]
+    fn optical_beat_gate_catch_up_judder_passes_the_old_terms_588() {
+        // RED (pre-#588): the judder slips EVERY pre-#588 detector. This test is committed BEFORE the
+        // density term exists, so `is_live_no_copy()` still returns TRUE for the judder and the final
+        // assertion FAILS — the reproducer that proves the gate hole is real. The GREEN commit's 4th
+        // orthogonal `no_stuck_density` term flips `is_live_no_copy()` to FALSE and this test passes;
+        // the density term itself is asserted directly in
+        // `optical_beat_gate_catch_up_judder_density_term_588`.
+        let seq = catch_up_judder_ticks();
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(
+            v.max_stuck_run, IMAG_OPTICAL_MAX_STUCK_RUN,
+            "the judder's Δ0 runs are exactly K(3) — the MAXIMAL run that still clears no_stuck_copy: \
+             {v:?}"
+        );
+        assert!(
+            v.no_stuck_copy(),
+            "run-length is BLIND to the judder: no single Δ0 run exceeds K, so no_stuck_copy PASSES: \
+             {v:?}"
+        );
+        assert!(
+            v.is_advancing(),
+            "the whole-window avg_step still rounds to the expected step 1 (catch-up skips balance \
+             the dups): {v:?}"
+        );
+        assert!(
+            v.is_net_zero(),
+            "even the DIAGNOSTIC surplus is fooled (dups ≈ skips ⇒ surplus ≤ 0): {v:?}"
+        );
+        assert!(
+            !v.is_live_no_copy(),
+            "#588: a systematic catch-up judder MUST fail the optical gate — the 4th density term \
+             catches what the advance-guard, the run-length no-copy term, AND the aggregates all \
+             miss: {v:?}"
+        );
+    }
+
     #[test]
     fn optical_beat_gate_frozen_read_fails_580v2() {
         // The camera stuck on ONE painted QR value for the whole window — tick range collapses
