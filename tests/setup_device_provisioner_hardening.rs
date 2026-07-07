@@ -36,9 +36,15 @@
 use std::path::PathBuf;
 
 const SCRIPT: &str = "scripts/setup-device.sh";
+const USB_SCRIPT: &str = "scripts/create-usb-linux.sh";
 
 fn read_script() -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCRIPT);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+fn read_usb_script() -> String {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(USB_SCRIPT);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
@@ -307,5 +313,72 @@ fn setup_device_fstab_backup_is_idempotent() {
         "the `[ ! -f /etc/fstab.bak ]` guard must run BEFORE `cp /etc/fstab /etc/fstab.bak`, or a \
          re-run clobbers the true pre-provisioning original with the already-rewritten (ro+tmpfs) \
          fstab (#450). guard at line {guard_idx}, cp at line {cp_idx}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 8. #591 — dantesync is the SOLE clock authority: PURGE every competing timesync daemon
+// ---------------------------------------------------------------------------------------------
+// cam5/cam6 (N150) shipped with systemd-timesyncd active ALONGSIDE dantesync -> a real 5.28-second
+// clock desync ([NTP] offset:-5280959us), invisible to weeks of "passing" verification. A minimalist
+// cambox/imag appliance runs ONLY dantesync; provisioning must PURGE the competing daemon (masking is
+// a band-aid — the package must be gone), then mask it as a backstop. Belt-and-suspenders across
+// systemd-timesyncd / chrony / ntp / ntpsec / openntpd.
+
+#[test]
+fn setup_device_purges_every_competing_timesync_daemon() {
+    let body = read_script();
+    // The full competing-daemon set the provisioner iterates (unique to the #591 purge block).
+    assert!(
+        body.contains("systemd-timesyncd chrony ntp ntpsec openntpd"),
+        "setup-device.sh must handle the full competing-timesync-daemon set \
+         `systemd-timesyncd chrony ntp ntpsec openntpd` (#591) -- dantesync is the sole clock \
+         authority; a 2nd timesync daemon caused the cam5/6 5.28s desync"
+    );
+    // A PURGE (not just a mask): the package must be REMOVED from a minimalist appliance.
+    assert!(
+        on_noncomment_line(&body, r#"apt-get purge -y "$_ts""#),
+        "setup-device.sh must `apt-get purge` each competing timesync daemon (#591) -- masking \
+         alone leaves the package installed, which the verify gate (r) now hard-fails"
+    );
+    // A MASK backstop so a re-install cannot silently re-activate it.
+    assert!(
+        on_noncomment_line(&body, r#"systemctl mask "$_ts""#),
+        "setup-device.sh must also MASK each competing timesync daemon as a backstop (#591)"
+    );
+}
+
+#[test]
+fn setup_device_timesync_purge_runs_before_installing_dantesync() {
+    // Order: purge competing daemons BEFORE installing dantesync (the sole authority) — reads as
+    // "remove every other clock, then install ours". Both are in the rw window (the ro conversion
+    // is STEP 18, after both).
+    let body = read_script();
+    let purge_idx = first_noncomment_idx(&body, r#"apt-get purge -y "$_ts""#)
+        .expect("the #591 competing-timesync purge must be present");
+    let dantesync_idx = first_noncomment_idx(&body, "Installing dantesync")
+        .or_else(|| first_noncomment_idx(&body, "/usr/local/bin/dantesync"))
+        .expect("the dantesync install step must be present");
+    assert!(
+        purge_idx < dantesync_idx,
+        "the competing-timesync purge (line {purge_idx}) must run before the dantesync install \
+         (line {dantesync_idx}) (#591)"
+    );
+}
+
+#[test]
+fn create_usb_purges_timesyncd_from_the_base_image() {
+    // #591: the base debootstrap image ships systemd-timesyncd. Purge it in the chroot so a
+    // freshly-imaged box never ships a 2nd timesync daemon (dantesync is installed later by
+    // setup-device.sh as the sole authority).
+    let body = read_usb_script();
+    assert!(
+        body.contains("systemd-timesyncd"),
+        "create-usb-linux.sh must purge/mask systemd-timesyncd in the chroot (#591)"
+    );
+    assert!(
+        body.contains("apt-get purge") && body.contains("timesyncd"),
+        "create-usb-linux.sh must `apt-get purge` systemd-timesyncd from the base image so a \
+         freshly-imaged box never ships a 2nd timesync daemon (#591)"
     );
 }

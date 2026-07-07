@@ -247,16 +247,152 @@ fn dantesync_locked_ok_false_when_ntp_line_is_the_most_recent_event() {
     assert_eq!(out.trim(), "NO");
 }
 
-#[test]
-fn dantesync_offset_ok_true_within_bound_false_outside() {
+// ---------------------------------------------------------------------------------------------
+// (d) FRESH offset verdict (#550/#591) — supersedes the pre-#591 dantesync_offset_ok, which read
+// the LAST "[NTP] offset:" line via tail -1 regardless of AGE. On cam5/6 that graded on a STALE
+// boot-STEP line ("[NTP] offset:-5280959us"), not the current offset (#550). dantesync_offset_verdict
+// reads the FRESHEST offset line, REJECTS it if older than a freshness bound behind the newest
+// journal line, and only then checks |offset| against the bound. Fixtures use the real
+// `journalctl -o short-iso` timestamp form (colon in the TZ offset, e.g. +02:00).
+// ---------------------------------------------------------------------------------------------
+
+// Fresh, in-bound: the freshest [NTP] offset line is +14us, ~1s behind the newest PTP line.
+const DS_FRESH_OK: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:+14us (threshold:535us, adaptive)
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// The real cam5/6 desync: a FRESH [NTP] offset:-5280959us (a competing timesyncd stepping the
+// clock -> a genuine 5.28s error), ~1s behind the newest PTP line.
+const DS_FRESH_DRIFT: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:-5280959us
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// A STALE boot-step offset line (#550): the ONLY [NTP] offset line is >1h behind the newest PTP
+// line, so it must NOT be read as the current offset (the pre-#591 tail -1 bug graded on exactly
+// this stale value).
+const DS_STALE: &str = "\
+2026-07-07T17:20:13+02:00 CAM6 dantesync[900]: [NTP] offset:-4357480us
+2026-07-07T18:36:44+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// No [NTP] offset line at all — only PTP servo lines.
+const DS_ABSENT: &str = "\
+2026-07-07T18:36:44+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+fn offset_verdict(journal: &str) -> String {
     let (code, out, err) = run_sourced(&format!(
-        "TEXT='{}'\n\
-         if dantesync_offset_ok \"$TEXT\" 2000; then echo WITHIN; else echo OUTSIDE; fi\n\
-         if dantesync_offset_ok \"$TEXT\" 100; then echo WITHIN; else echo OUTSIDE; fi",
-        DANTESYNC_LOCKED_JOURNAL.replace('\'', "'\\''")
+        "TEXT='{}'\ndantesync_offset_verdict \"$TEXT\" 300 2000",
+        journal.replace('\'', "'\\''")
     ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn dantesync_offset_verdict_ok_on_fresh_in_bound_offset() {
+    assert_eq!(offset_verdict(DS_FRESH_OK), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_drift_on_fresh_large_offset() {
+    // The cam5/6 5.28s desync — a FRESH out-of-bound offset is a hard DRIFT (#591). A bare
+    // "[NTP] offset:-5280959us" (no adaptive-threshold suffix) is the out-of-range fallback form.
+    assert_eq!(offset_verdict(DS_FRESH_DRIFT), "drift");
+}
+
+#[test]
+fn dantesync_offset_verdict_rejects_stale_boot_step_line() {
+    // #550: the freshest [NTP] offset line is a >1h-old boot STEP; it must NOT be read as the
+    // current offset (the pre-#591 tail -1 bug graded on exactly this stale value). Verdict is
+    // "stale", never "drift" (a stale value must never look like a real current desync) nor "ok".
+    assert_eq!(offset_verdict(DS_STALE), "stale");
+}
+
+#[test]
+fn dantesync_offset_verdict_absent_when_no_offset_line() {
+    assert_eq!(offset_verdict(DS_ABSENT), "absent");
+}
+
+// ---------------------------------------------------------------------------------------------
+// (r) single timesync authority: dantesync ONLY, no competing daemon installed/active/enabled (#591)
+// ---------------------------------------------------------------------------------------------
+
+fn authority_verdict(block: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\ntimesync_authority_verdict \"$BLOCK\"",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn timesync_authority_verdict_ok_on_clean_box() {
+    // Every competing daemon not-installed (dpkg empty), inactive, no enabled state -> dantesync
+    // is the sole clock authority. Block format: NAME|DPKG_STATUS|IS_ACTIVE|IS_ENABLED.
+    let block = "\
+systemd-timesyncd||inactive|
+chrony||inactive|
+ntp||inactive|
+ntpsec||inactive|
+openntpd||inactive|";
+    assert_eq!(authority_verdict(block), "ok");
+}
+
+#[test]
+fn timesync_authority_verdict_fails_on_cam5_cam6_timesyncd() {
+    // The real cam5/6 failure: systemd-timesyncd installed + active + enabled ALONGSIDE dantesync.
+    let block = "\
+systemd-timesyncd|install ok installed|active|enabled
+chrony||inactive|
+ntp||inactive|
+ntpsec||inactive|
+openntpd||inactive|";
+    let v = authority_verdict(block);
+    assert_ne!(v, "ok", "cam5/6 double-daemon must FAIL");
+    assert!(
+        v.contains("FAIL:") && v.contains("systemd-timesyncd"),
+        "verdict must name the offender: {v}"
+    );
+}
+
+#[test]
+fn timesync_authority_verdict_fails_on_masked_but_installed() {
+    // Masking is NOT enough — a minimalist appliance PURGES it. installed = FAIL even when masked
+    // and inactive (the cam1-4 "installed-but-disabled/masked" state this gate now rejects).
+    let block = "systemd-timesyncd|install ok installed|inactive|masked";
+    let v = authority_verdict(block);
+    assert_ne!(v, "ok", "masked-but-installed must still FAIL (purge, don't mask)");
+    assert!(v.contains("systemd-timesyncd"), "must name the offender: {v}");
+}
+
+#[test]
+fn timesync_daemon_verdict_ok_only_when_absent_inactive_neutral() {
+    let (code, out, err) = run_sourced(
+        r#"
+        # absent (empty dpkg), inactive, empty enabled -> ok
+        timesync_daemon_verdict systemd-timesyncd "" inactive ""
+        # installed (even masked + inactive) -> FAIL (purge, not mask)
+        timesync_daemon_verdict systemd-timesyncd "install ok installed" inactive masked
+        # not installed but ACTIVE -> FAIL
+        timesync_daemon_verdict chrony "" active ""
+        # not installed but ENABLED (not neutral) -> FAIL
+        timesync_daemon_verdict ntp "" inactive enabled
+        "#,
+    );
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out.trim(), "WITHIN\nOUTSIDE");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "ok", "absent/inactive/neutral must be ok");
+    assert!(lines[1].contains("INSTALLED"), "installed must FAIL: {}", lines[1]);
+    assert!(lines[2].contains("ACTIVE"), "active must FAIL: {}", lines[2]);
+    assert!(lines[3].contains("enabled"), "enabled must FAIL: {}", lines[3]);
 }
 
 // ---------------------------------------------------------------------------------------------
