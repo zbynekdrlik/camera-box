@@ -103,14 +103,22 @@ pub const DEFAULT_REBOOT_ENABLED: bool = false;
 /// default; the box needs either a human to reboot it or an explicit, supervisor-set opt-in. An
 /// empty plan is deliberate, not a bug — the caller's `SelfHealDecision::Recover(vec![])` still
 /// confirms + logs the wedge (an operator/alert path acts on it), it simply executes no step.
-pub fn recovery_plan(_cause: WedgeCause, _reboot_enabled: bool) -> Vec<RecoveryStep> {
-    // TODO(#89) [red]: not yet branching on cause — always the original #411 4-step plan.
-    vec![
-        RecoveryStep::StopAhk,
-        RecoveryStep::KillAndRelaunchObs,
-        RecoveryStep::VerifyRecovered,
-        RecoveryStep::RestartAhk,
-    ]
+pub fn recovery_plan(cause: WedgeCause, reboot_enabled: bool) -> Vec<RecoveryStep> {
+    match cause {
+        WedgeCause::ProcessWedge => vec![
+            RecoveryStep::StopAhk,
+            RecoveryStep::KillAndRelaunchObs,
+            RecoveryStep::VerifyRecovered,
+            RecoveryStep::RestartAhk,
+        ],
+        WedgeCause::GpuDeviceRemoved => {
+            if reboot_enabled {
+                vec![RecoveryStep::RebootPc]
+            } else {
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// Consecutive wedged passes required before acting. Chosen to match

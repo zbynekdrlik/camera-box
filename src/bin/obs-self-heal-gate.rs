@@ -361,4 +361,89 @@ mod tests {
         let err = run("not json").unwrap_err();
         assert!(err.contains("JSON parse"));
     }
+
+    // ─── #89: cause + reboot_enabled ────────────────────────────────────────────────────────
+
+    #[test]
+    fn omitted_cause_and_reboot_enabled_default_to_pre_89_behavior() {
+        // No "cause"/"reboot_enabled" fields at all — a caller that predates #89. Must produce
+        // the EXACT same Recover plan as before (ProcessWedge, reboot disabled).
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null}"#;
+        let (out, code) = run(input).expect("should parse");
+        assert_eq!(code, 1);
+        assert_eq!(out["decision"], "Recover");
+        assert_eq!(
+            out["steps"],
+            serde_json::json!([
+                "StopAhk",
+                "KillAndRelaunchObs",
+                "VerifyRecovered",
+                "RestartAhk"
+            ])
+        );
+    }
+
+    #[test]
+    fn gpu_device_removed_cause_with_reboot_disabled_yields_recover_with_empty_steps() {
+        // #89: a confirmed GpuDeviceRemoved wedge with the default (reboot disabled) opt-in —
+        // still a "Recover" decision (the confirm/throttle/lock state machine doesn't care WHAT
+        // the plan contains), but the plan itself is EMPTY: nothing safe to auto-execute.
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null,
+            "cause":"GpuDeviceRemoved","reboot_enabled":false}"#;
+        let (out, code) = run(input).expect("should parse");
+        assert_eq!(
+            code, 1,
+            "Recover still exits 1 even with an empty step plan. out={out}"
+        );
+        assert_eq!(out["decision"], "Recover");
+        assert_eq!(out["steps"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn gpu_device_removed_cause_with_reboot_enabled_yields_reboot_pc_step() {
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null,
+            "cause":"GpuDeviceRemoved","reboot_enabled":true}"#;
+        let (out, code) = run(input).expect("should parse");
+        assert_eq!(code, 1);
+        assert_eq!(out["decision"], "Recover");
+        assert_eq!(out["steps"], serde_json::json!(["RebootPc"]));
+    }
+
+    #[test]
+    fn unknown_cause_string_is_a_parse_error() {
+        let input = r#"{"confirm_count":0,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1000,
+            "cause":"SomethingElse"}"#;
+        let err = run(input).unwrap_err();
+        assert!(
+            err.contains("cause"),
+            "error should name the bad field: {err}"
+        );
+    }
+
+    #[test]
+    fn reboot_enabled_true_never_leaks_into_a_process_wedge_plan() {
+        // reboot_enabled=true with an (explicit or default) ProcessWedge cause must NOT change
+        // that cause's plan — RebootPc must never appear alongside the AHK/kill-relaunch steps.
+        let input = r#"{"confirm_count":1,"last_attempt_epoch_s":null,
+            "recovery_in_progress":false,"wedged":true,"now_epoch_s":1700000000,
+            "threshold":null,"min_interval_s":null,
+            "cause":"ProcessWedge","reboot_enabled":true}"#;
+        let (out, _code) = run(input).expect("should parse");
+        assert_eq!(
+            out["steps"],
+            serde_json::json!([
+                "StopAhk",
+                "KillAndRelaunchObs",
+                "VerifyRecovered",
+                "RestartAhk"
+            ])
+        );
+    }
 }
