@@ -62,12 +62,49 @@ pub enum RecoveryStep {
     /// logged and left for the confirm/throttle cycle to retry (or an agent to investigate), never
     /// masked, but also never a reason to leave the box with NO respawn safety net at all.
     RestartAhk,
+    /// Reboot the host PC (#89) — the correct recovery for `WedgeCause::GpuDeviceRemoved` (an
+    /// OBS-only restart typically does NOT clear a DXGI device-removed GPU). This step can ONLY
+    /// ever appear in a plan when the caller has explicitly opted in (`reboot_enabled = true` —
+    /// see `DEFAULT_REBOOT_ENABLED`, which defaults to `false`): a host reboot is a destructive,
+    /// approval-gated action, never an unattended default.
+    RebootPc,
 }
 
-/// The fixed, ordered recovery plan (#411): always these four steps, always in this order. A
-/// `Vec` (not a const array) so callers can log/iterate uniformly with the rest of this codebase's
-/// planner shape (`launch_obs_genlock`'s `build_launch_program` also returns an owned `String`).
-pub fn recovery_plan() -> Vec<RecoveryStep> {
+/// The cause of a confirmed wedge (#89) — selects which recovery plan `recovery_plan` returns.
+/// obs64's own process/render-loop signals (`Responding` / CPU% / render-skip) can look
+/// perfectly healthy while the GPU device itself is gone (see `obs_watchdog::classify`'s
+/// `GpuDeviceRemoved` verdict, checked BEFORE its process-level wedge bundle for exactly this
+/// reason) — so the recovery ACTION must also branch on cause, never apply the process-wedge
+/// fix (kill+relaunch obs64) to a cause it cannot fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WedgeCause {
+    /// obs64's own process/render loop is wedged (Responding=False / pegged CPU / render-skip
+    /// spike) — the ORIGINAL #411 cause. Fixed by killing + relaunching obs64.
+    ProcessWedge,
+    /// The GPU device was removed/reset (DXGI TDR/driver-internal-error log signature, #89) — an
+    /// OBS-only restart does NOT clear this; a full PC reboot is required.
+    GpuDeviceRemoved,
+}
+
+/// Auto-reboot-on-`GpuDeviceRemoved` opt-in default (#89). A host reboot is a destructive,
+/// approval-gated action (`no-destructive-remote-actions.md`) — this MUST default to `false`.
+/// Only an explicit opt-in (a supervisor-set `--enable-reboot` flag, threaded through
+/// `scripts/obs-self-heal-install.sh`) flips it on for a given box's installed self-heal job.
+pub const DEFAULT_REBOOT_ENABLED: bool = false;
+
+/// The recovery plan for a confirmed wedge, branching on ITS CAUSE (#89).
+///
+/// `WedgeCause::ProcessWedge` always gets the original, fixed four-step AHK-safe kill+relaunch
+/// plan (#411) — `reboot_enabled` is irrelevant to this cause and never changes its plan.
+///
+/// `WedgeCause::GpuDeviceRemoved` gets EITHER a single `RebootPc` step (when `reboot_enabled` is
+/// `true`) OR an EMPTY plan (when `false`, the default — `DEFAULT_REBOOT_ENABLED`): an OBS-only
+/// restart does not clear this cause, so there is nothing an unattended job can safely DO by
+/// default; the box needs either a human to reboot it or an explicit, supervisor-set opt-in. An
+/// empty plan is deliberate, not a bug — the caller's `SelfHealDecision::Recover(vec![])` still
+/// confirms + logs the wedge (an operator/alert path acts on it), it simply executes no step.
+pub fn recovery_plan(_cause: WedgeCause, _reboot_enabled: bool) -> Vec<RecoveryStep> {
+    // TODO(#89) [red]: not yet branching on cause — always the original #411 4-step plan.
     vec![
         RecoveryStep::StopAhk,
         RecoveryStep::KillAndRelaunchObs,
@@ -135,11 +172,18 @@ pub enum SelfHealDecision {
 /// speculatively; a missing/failed sample is the CALLER's problem to resolve (report unhealthy or
 /// skip the pass), never silently coerced to false here.
 ///
+/// `cause` (#89) selects WHICH plan a confirmed `Recover` decision carries (see
+/// `recovery_plan`) — it does not affect confirm/throttle/lock timing at all, only the plan
+/// content. `reboot_enabled` gates whether a `GpuDeviceRemoved` cause's plan may include the
+/// destructive `RecoveryStep::RebootPc` (default `false` — see `DEFAULT_REBOOT_ENABLED`).
+///
 /// The lock (`prev.recovery_in_progress`) is checked FIRST and wins over every other signal —
 /// a recovery already in flight is never joined by a second one, healthy or not.
 pub fn decide(
     prev: SelfHealState,
     wedged: bool,
+    cause: WedgeCause,
+    reboot_enabled: bool,
     now_epoch_s: u64,
     threshold: u32,
     min_interval_s: u64,
@@ -189,7 +233,7 @@ pub fn decide(
     }
 
     (
-        SelfHealDecision::Recover(recovery_plan()),
+        SelfHealDecision::Recover(recovery_plan(cause, reboot_enabled)),
         SelfHealState {
             confirm_count,
             last_attempt_epoch_s: Some(now_epoch_s),
@@ -244,7 +288,15 @@ mod tests {
     #[test]
     fn confirmed_wedge_yields_a_recovery_plan() {
         // Two consecutive wedged passes (threshold=2, the #391 default) -> Recover.
-        let (d1, s1) = decide(SelfHealState::default(), true, T0, 2, 600);
+        let (d1, s1) = decide(
+            SelfHealState::default(),
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0,
+            2,
+            600,
+        );
         assert_eq!(
             d1,
             SelfHealDecision::Confirming {
@@ -255,12 +307,12 @@ mod tests {
         );
         assert!(!s1.recovery_in_progress);
 
-        let (d2, s2) = decide(s1, true, T0 + 10, 2, 600);
+        let (d2, s2) = decide(s1, true, WedgeCause::ProcessWedge, false, T0 + 10, 2, 600);
         match d2 {
             SelfHealDecision::Recover(steps) => {
                 assert_eq!(
                     steps,
-                    recovery_plan(),
+                    recovery_plan(WedgeCause::ProcessWedge, false),
                     "a confirmed wedge must yield the canonical recovery plan"
                 );
             }
@@ -282,7 +334,7 @@ mod tests {
             last_attempt_epoch_s: None,
             recovery_in_progress: false,
         };
-        let (decision, next) = decide(prev, false, T0, 2, 600);
+        let (decision, next) = decide(prev, false, WedgeCause::ProcessWedge, false, T0, 2, 600);
         assert_eq!(decision, SelfHealDecision::Healthy);
         assert_eq!(
             next.confirm_count, 0,
@@ -293,12 +345,28 @@ mod tests {
 
     #[test]
     fn throttle_blocks_a_too_soon_second_attempt() {
-        let (_, after_first) = decide(SelfHealState::default(), true, T0, 1, 600);
+        let (_, after_first) = decide(
+            SelfHealState::default(),
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0,
+            1,
+            600,
+        );
         let after_first = clear_recovery_lock(after_first); // simulate step-plan completion
         assert_eq!(after_first.last_attempt_epoch_s, Some(T0));
 
         // Still wedged, only 30s later (min_interval=600) -> Throttled, NOT another Recover.
-        let (decision, next) = decide(after_first, true, T0 + 30, 1, 600);
+        let (decision, next) = decide(
+            after_first,
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0 + 30,
+            1,
+            600,
+        );
         assert_eq!(
             decision,
             SelfHealDecision::Throttled {
@@ -309,7 +377,15 @@ mod tests {
         assert!(!next.recovery_in_progress);
 
         // Past the interval -> allowed to act again.
-        let (decision, _) = decide(after_first, true, T0 + 600, 1, 600);
+        let (decision, _) = decide(
+            after_first,
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0 + 600,
+            1,
+            600,
+        );
         assert!(
             matches!(decision, SelfHealDecision::Recover(_)),
             "once past min_interval_s a confirmed wedge must be allowed to recover again"
@@ -324,14 +400,16 @@ mod tests {
             recovery_in_progress: true,
         };
         // Whatever this pass's verdict is, a held lock always wins.
-        let (decision_wedged, next_wedged) = decide(locked, true, T0, 1, 0);
+        let (decision_wedged, next_wedged) =
+            decide(locked, true, WedgeCause::ProcessWedge, false, T0, 1, 0);
         assert_eq!(decision_wedged, SelfHealDecision::AlreadyRecovering);
         assert_eq!(
             next_wedged, locked,
             "state must pass through unchanged while the lock is held"
         );
 
-        let (decision_healthy, next_healthy) = decide(locked, false, T0, 1, 0);
+        let (decision_healthy, next_healthy) =
+            decide(locked, false, WedgeCause::ProcessWedge, false, T0, 1, 0);
         assert_eq!(
             decision_healthy,
             SelfHealDecision::AlreadyRecovering,
@@ -343,7 +421,7 @@ mod tests {
 
     #[test]
     fn recovery_plan_ahk_race_ordering_is_fixed() {
-        let plan = recovery_plan();
+        let plan = recovery_plan(WedgeCause::ProcessWedge, false);
         assert_eq!(
             plan,
             vec![
@@ -382,6 +460,48 @@ mod tests {
     }
 
     #[test]
+    fn gpu_device_removed_with_reboot_disabled_yields_an_empty_plan() {
+        // #89: the default (reboot_enabled=false, DEFAULT_REBOOT_ENABLED) — an OBS-only restart
+        // does not clear a GPU device-removed wedge, so there is nothing safe to auto-execute.
+        // The returned plan must NOT include RebootPc (or anything else) — never fall back to
+        // the process-wedge kill+relaunch plan, which cannot fix this cause either.
+        let plan = recovery_plan(WedgeCause::GpuDeviceRemoved, false);
+        assert_eq!(
+            plan,
+            Vec::<RecoveryStep>::new(),
+            "GpuDeviceRemoved with reboot disabled must yield an EMPTY plan (no auto action), \
+             got {plan:?}"
+        );
+        assert!(
+            !plan.contains(&RecoveryStep::KillAndRelaunchObs),
+            "must never fall back to the process-wedge kill+relaunch plan for this cause"
+        );
+    }
+
+    #[test]
+    fn gpu_device_removed_with_reboot_enabled_yields_reboot_pc_only() {
+        // #89: the explicit opt-in — the plan must contain RebootPc and NOTHING else (in
+        // particular never the AHK/kill-relaunch steps, which belong only to ProcessWedge).
+        let plan = recovery_plan(WedgeCause::GpuDeviceRemoved, true);
+        assert_eq!(
+            plan,
+            vec![RecoveryStep::RebootPc],
+            "GpuDeviceRemoved with reboot enabled must yield exactly [RebootPc], got {plan:?}"
+        );
+    }
+
+    #[test]
+    fn process_wedge_plan_is_unaffected_by_reboot_enabled() {
+        // reboot_enabled only matters for GpuDeviceRemoved — ProcessWedge always gets the
+        // original #411 plan regardless.
+        assert_eq!(
+            recovery_plan(WedgeCause::ProcessWedge, false),
+            recovery_plan(WedgeCause::ProcessWedge, true),
+            "ProcessWedge's plan must not depend on reboot_enabled"
+        );
+    }
+
+    #[test]
     fn stale_lock_is_detected_and_clearable() {
         let held = SelfHealState {
             confirm_count: 2,
@@ -406,7 +526,15 @@ mod tests {
 
         // Composition: a stale lock must be clearable and then re-enter Confirming/Recover
         // normally, never stuck AlreadyRecovering forever.
-        let (decision, _) = decide(cleared, true, T0 + 10_000, 1, 0);
+        let (decision, _) = decide(
+            cleared,
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0 + 10_000,
+            1,
+            0,
+        );
         assert!(
             matches!(decision, SelfHealDecision::Recover(_)),
             "after clearing a stale lock, a confirmed wedge must be able to recover again"
@@ -434,7 +562,15 @@ mod tests {
 
     #[test]
     fn confirm_threshold_of_one_acts_on_first_wedged_pass() {
-        let (decision, state) = decide(SelfHealState::default(), true, T0, 1, 600);
+        let (decision, state) = decide(
+            SelfHealState::default(),
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0,
+            1,
+            600,
+        );
         assert!(
             matches!(decision, SelfHealDecision::Recover(_)),
             "threshold=1 must act on the very first wedged pass"
@@ -446,7 +582,15 @@ mod tests {
     fn zero_threshold_is_treated_as_one_never_acts_with_zero_confirmations() {
         // A misconfigured threshold=0 must never mean "act before observing even one wedged
         // pass" — decide() clamps it to 1 (fail toward the safer, slower behavior).
-        let (decision, _) = decide(SelfHealState::default(), true, T0, 0, 600);
+        let (decision, _) = decide(
+            SelfHealState::default(),
+            true,
+            WedgeCause::ProcessWedge,
+            false,
+            T0,
+            0,
+            600,
+        );
         assert!(
             matches!(decision, SelfHealDecision::Recover(_)),
             "threshold clamps to >= 1, so one wedged pass is still enough to act, but never \
