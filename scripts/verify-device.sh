@@ -801,10 +801,18 @@ else
   # daemon's is-active state + the box's OWN wall clock, and hard-FAIL on either liveness hole
   # BEFORE trusting the content reads. Both signals come from the box, so the verifier host's clock
   # never enters the freshness comparison.
+  # is-active legitimately exits non-zero for an inactive service (expected, NOT an ssh error), so
+  # its rc is meaningless -- read its STDOUT ('' means unreachable). date +%s only exits non-zero on
+  # a real ssh failure, so capture that rc (the script's `rc=$?` gather pattern) to keep the
+  # "box clock unreadable" case DISTINCT from the "daemon hung" case, never misattributing a
+  # transient ssh blip to a free-running clock.
   DS_ACTIVE="$(ssh_box "systemctl is-active dantesync 2>/dev/null")" || true
-  BOX_NOW="$(ssh_box "date +%s 2>/dev/null")" || true
+  ds_now_rc=0
+  BOX_NOW="$(ssh_box "date +%s 2>/dev/null")" || ds_now_rc=$?
   if ! dantesync_service_active "$DS_ACTIVE"; then
     fail "dantesync service NOT active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running (#591 review)"
+  elif [ "$ds_now_rc" -ne 0 ] || [ -z "$BOX_NOW" ]; then
+    fail "could not read the box wall clock over SSH (date +%s, ssh rc=$ds_now_rc) -- cannot certify the dantesync journal is advancing (#591 review)"
   elif [ "$(dantesync_journal_fresh "$DS_JOURNAL" "$BOX_NOW" "$DANTESYNC_JOURNAL_MAX_AGE_S")" = stale ]; then
     fail "dantesync journal has not advanced within ${DANTESYNC_JOURNAL_MAX_AGE_S}s of the box clock -- daemon hung, clock free-running (#591 review)"
   else

@@ -1361,4 +1361,13 @@ fn check_dantesync_liveness_is_wired_into_the_d_live_flow() {
             && live_flow.contains("daemon hung, clock free-running (#591 review)"),
         "both liveness holes (died + hung) must fail() with a #591-review-tagged reason (#600)"
     );
+    // A transient ssh failure on the box-clock read must fail() with its OWN distinct message, not
+    // be misattributed to the hung-daemon branch (review of #600): the box-clock read captures the
+    // ssh rc separately, and an unreadable clock hard-FAILs on its own reason.
+    assert!(
+        live_flow.contains("ds_now_rc")
+            && live_flow.contains("could not read the box wall clock over SSH"),
+        "an unreadable box clock (ssh rc captured) must hard-FAIL with a DISTINCT reason, never \
+         misattributed to 'daemon hung' (#600 review)"
+    );
 }
