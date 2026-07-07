@@ -844,20 +844,21 @@ struct NodeSpec<'a> {
     /// `None` ⇒ the pre-#273 "any non-burn payload is cam2" rule.
     cam2_run_id: Option<u32>,
     /// #11 mixed 60/30 → #360 REVISED → #571 REVISED AGAIN: the by-design per-recorded-frame
-    /// burn-id step [`burn_contiguity_in_window_with_step`] uses for its decimation-aware
-    /// excess-gap charging (a forward gap `> step` charges the excess as a real drop; a gap
-    /// `== step` is the by-design decimation, never loss). strih/stream stay on gap-ignore (`1`
-    /// — strih's burn is a FREE-RUNNING render tick with an IRREGULAR step, not a clean
-    /// decimation, see [`node_render_step`]'s doc). #571: cam1/cam3/cam4 (PerEmittedFrame) DO now
-    /// consult `step` — the Topology-v2 cam(60fps)->strih(30fps) hop is a CLEAN 2:1 decimation
-    /// (proven live, run 554307), so their set-based real-drop detection is step-aware too. See
-    /// [`node_render_step`].
+    /// burn-id step passed to [`burn_contiguity_in_window_with_step`]. strih/stream stay on
+    /// gap-ignore (`1` — strih's burn is a FREE-RUNNING render tick with an IRREGULAR step, not a
+    /// clean decimation, see [`node_render_step`]'s doc). #571: for cam1/cam3/cam4
+    /// (PerEmittedFrame) `step` is the DECIMATED-HOP discriminator: `>= 2` (the Topology-v2
+    /// cam(60fps)->strih(30fps) hop, run 554307) ⇒ forward id gaps are by-design decimation and
+    /// are NOT charged at all (genuine loss there = a delivered frame with NO readable burn →
+    /// BURN-UNREADABLE, plus strih's own 911002 burn and the optical tick); `== 1` ⇒ the strict
+    /// pre-#571 forward-gap scan (a missing emitted id IS a real drop). See [`node_render_step`].
     step: i64,
 }
 
 /// #11 → #360 → #571: the per-recorded-frame burn-id step for a node's real-drop detection in
-/// [`burn_contiguity_in_window_with_step`] (a forward gap `> step` charges the excess as a real
-/// drop; a gap `== step` is the by-design decimation, never loss — see that function's own doc).
+/// [`burn_contiguity_in_window_with_step`]. For cam1/cam3/cam4 (PerEmittedFrame) it is the
+/// DECIMATED-HOP discriminator: `>= 2` ⇒ forward id gaps are by-design decimation, never charged;
+/// `== 1` ⇒ the strict forward-gap scan (see that function's own doc).
 ///
 /// - **strih** is a FREE-RUNNING DistroAV render-tick, NOT a per-output-frame counter. Read from the
 ///   30fps stream recording its per-frame step is IRREGULAR (run 354003: 0–10, mean ~4 — NOT the
@@ -3282,8 +3283,10 @@ fn extract_partial_flagged_frames(
     // strih + stream (their own burns are co-located with cam2's optical QR only in the stream
     // recording). These are the SAME (node, source) pairings `build_and_print_verdict` uses, so the
     // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
-    // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop); strih/stream burn
-    // per-RENDER-tick (a forward gap is not loss, but a delivered frame missing its burn is).
+    // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop ON A 1:1 HOP — #571:
+    // on the decimated cam(60)->strih(30) hop, step >= 2, forward gaps are by-design decimation
+    // and never charged); strih/stream burn per-RENDER-tick (a forward gap is not loss, but a
+    // delivered frame missing its burn is).
     // #360/#571: the SAME step the merge verdict uses (node_render_step — gap-ignore for strih's
     // free-running render tick; the cam(60)->strih(30) decimation ratio for cam1, #571), so the
     // on-box pixel-proof flagging matches what the merge flags.
