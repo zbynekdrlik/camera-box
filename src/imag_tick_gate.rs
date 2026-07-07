@@ -1085,21 +1085,36 @@ mod tests {
     }
 
     #[test]
-    fn optical_beat_from_contiguity_matches_slice_only_entry_580() {
-        // #580 review finding-2: the tc-reusing entry MUST be byte-identical to the slice-only one
-        // (the caller reuses its already-computed `tick_contiguity` instead of walking the slice
-        // twice). Exercised over a non-monotonic beat (dup at 129, skip of 130) so the
-        // positional-vs-sorted avg_step distinction actually bites.
-        let ticks = [126u32, 127, 128, 129, 129, 131, 132, 133];
-        let via_slice = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
-        let via_tc = optical_beat_from_contiguity(
+    fn optical_beat_from_contiguity_uses_positional_endpoints_for_avg_step_580() {
+        // #580 review: `avg_step` MUST derive from the CHRONOLOGICAL (positional) endpoints, NOT
+        // `tick_contiguity`'s SORTED min/max. (An earlier "parity lock" comparing the tc-reusing
+        // entry to the slice-only one was a TAUTOLOGY — `optical_beat_net_zero` now DELEGATES to
+        // `optical_beat_from_contiguity`, so it compared a wrapper to its own wrappee and could
+        // never fail. Replaced with concrete hand-computed values on a non-monotonic input that
+        // actually distinguishes positional from sorted.)
+        //
+        // A misdecoded 105 appears at position 1 (out of numeric order): positional first/last are
+        // 100/103, while the sorted min/max are 100/105. Hand-computed:
+        //   avg_step (positional)  = (103 - 100) / (5 - 1) = 0.75   (sorted would give 1.25)
+        //   tick_contiguity spans 100..=105 -> expected_count 6, present 5 (104 missing), frames 5
+        //   surplus = 6 - 5 = 1 (> 0) -> a genuine net loss, NOT net-zero.
+        let ticks = [100u32, 105, 101, 102, 103];
+        let v = optical_beat_from_contiguity(
             &ticks,
             &tick_contiguity(&ticks),
             IMAG_OPTICAL_EXPECTED_STEP,
         );
-        assert_eq!(
-            via_slice, via_tc,
-            "reusing a precomputed tick_contiguity must not change the verdict: {via_slice:?} vs {via_tc:?}"
+        assert!(
+            (v.avg_step - 0.75).abs() < 1e-9,
+            "avg_step must use POSITIONAL endpoints (0.75), not sorted min/max (1.25): {v:?}"
+        );
+        assert_eq!(v.expected_count, 6, "sorted span 100..=105: {v:?}");
+        assert_eq!(v.present_count, 5, "{v:?}");
+        assert_eq!(v.frames_count, 5, "{v:?}");
+        assert_eq!(v.surplus, 1, "expected_count 6 - frames_count 5: {v:?}");
+        assert!(
+            !v.is_net_zero(),
+            "surplus 1 > 0 is a genuine net loss, never net-zero: {v:?}"
         );
     }
 }
