@@ -63,6 +63,13 @@ PAINTER_OFFSET_GUARD_US="${PAINTER_OFFSET_GUARD_US:-200000}"
 # The painter node (cam2 — the box that paints the dual-QR monitor) "name=ip". Mirrors PAINTER_IP.
 PAINTER_GATE_TARGET="${PAINTER_GATE_TARGET:-cam2=10.77.9.62}"
 PAINTER_GATE_SSH_TIMEOUT="${CLOCK_GUARD_SSH_TIMEOUT:-8}"
+# #550/#591/#595: EITHER box's freshest "[NTP] offset:" journal line must be no older than this
+# many seconds behind that box's OWN newest journal line, or its offset is STALE and must never be
+# fed into the relative dev1<->painter comparison below -- a stale reading on one side can mask a
+# real current divergence, or manufacture a false one against the other box's genuinely fresh
+# value (the age-blind offset_us_from_journal this gate used to call could not tell the two apart).
+# Same default as verify-device.sh's DANTESYNC_OFFSET_FRESHNESS_S.
+PAINTER_GATE_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 
 usage() {
   cat <<EOF
@@ -98,7 +105,9 @@ read_dev1_journal() {
     cat "$DEV1_DANTE_JOURNAL" 2>/dev/null || true
     return 0
   fi
-  journalctl -u dantesync --no-pager -n 300 2>/dev/null || true
+  # -o short-iso (+ a wider -n 400 window) so freshest_offset_us can prove this box's offset
+  # reading is current (#550/#595), not a stale multi-hour-old boot-STEP line.
+  journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true
 }
 
 # read_painter_journal IP -> the painter's latest DanteSync journald lines over SSH, or "" if
@@ -115,7 +124,7 @@ read_painter_journal() {
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${PAINTER_GATE_SSH_TIMEOUT}" \
     "${CLOCK_GUARD_SSH_USER}@${ip}" \
-    'journalctl -u dantesync --no-pager -n 300 2>/dev/null' 2>/dev/null || true
+    'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
 }
 
 main() {
@@ -167,9 +176,19 @@ main() {
   if [ -z "$painter_journal" ]; then
     printf '  %-18s UNREACHABLE  (no DanteSync journal over SSH @ %s)\n' "$name" "$ip"
   fi
-  dev1_off="$(offset_us_from_journal "$dev1_journal")"
-  painter_off="$(offset_us_from_journal "$painter_journal")"
-  painter_offset_check "dev1<->$name" "$dev1_off" "$painter_off" "$guard" || rc=$?
+  # #550/#595: read the FRESHEST offset on EACH box (never the age-blind offset_us_from_journal
+  # tail -1) so a stale boot-step line -- or a died/hung dantesync whose journal simply stopped
+  # advancing -- can never be fed into the relative comparison below. Only when BOTH boxes report
+  # a FRESH reading does the (unchanged) painter_offset_check run.
+  dev1_off="$(freshest_offset_us "$dev1_journal" "$PAINTER_GATE_FRESHNESS_S")"
+  painter_off="$(freshest_offset_us "$painter_journal" "$PAINTER_GATE_FRESHNESS_S")"
+  if [ -z "$dev1_off" ] || [ -z "$painter_off" ]; then
+    printf '  %-18s UNKNOWN  (no FRESH [NTP] offset within %ss: dev1=%s painter=%s)\n' \
+      "dev1<->$name" "$PAINTER_GATE_FRESHNESS_S" "${dev1_off:-<none>}" "${painter_off:-<none>}"
+    rc=3
+  else
+    painter_offset_check "dev1<->$name" "$dev1_off" "$painter_off" "$guard" || rc=$?
+  fi
 
   echo
   case "$rc" in
@@ -182,8 +201,8 @@ main() {
       echo "!! Re-sync DanteSync (dev1 + painter both slaved to strih), then re-run — or SKIP_CLOCK_OFFSET_ASSERT=1 to bypass." >&2
       exit 20 ;;
     *)
-      echo "!! GATE INCOMPLETE: dev1 and/or ${name} DanteSync offset UNKNOWN — cannot certify attribution, NOT clean." >&2
-      echo "!! Ensure dantesync is running + reachable on dev1 and ${name}, then re-run." >&2
+      echo "!! GATE INCOMPLETE: dev1 and/or ${name} DanteSync offset has no FRESH reading (#550/#595) — cannot certify attribution, NOT clean." >&2
+      echo "!! Ensure dantesync is running + actively logging [NTP] offset on dev1 and ${name} (not a stale boot-step line), then re-run." >&2
       exit 11 ;;
   esac
 }

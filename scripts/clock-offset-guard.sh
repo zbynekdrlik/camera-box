@@ -99,6 +99,94 @@ abs_int() {
   printf '%s' "${n#-}"
 }
 
+# --- FRESHNESS-aware offset reading (#550/#591/#595) ----------------------------------------
+#
+# offset_us_from_journal (above) is AGE-BLIND: it `tail -1`s the LAST "[NTP] offset:" line
+# regardless of how old it is. `journalctl -n N` is COUNT-bounded, not TIME-bounded, so a
+# died/hung dantesync (the journal simply stops advancing) or a long gap between the
+# adaptive-cadence offset samples can leave only a stale multi-hour-old boot-STEP line in the
+# window -- grading THAT value as "current" is the exact #550 bug (a false-fail on a healthy box,
+# or a false-pass masking a real desync). These two helpers were originally added to
+# scripts/verify-device.sh for #591/#600 and are MOVED here for #595 so every caller (this file's
+# own callers: dantesync-gate.sh's #7 precondition, clock-offset-painter-gate.sh's #326 sweep
+# comparator, AND verify-device.sh's own #591 fleet-acceptance check) shares ONE implementation
+# instead of three copies drifting apart. Both compare the offset line's OWN `-o short-iso`
+# timestamp against the newest journal line's timestamp -- both timestamps come from the SAME
+# box, so neither the verifier host's nor another box's clock ever enters the comparison.
+
+# _short_iso_epoch ISO -> epoch seconds for a `journalctl -o short-iso` timestamp
+# (e.g. 2026-07-07T18:36:44+02:00), "" if unparseable/empty. Uses `date -d` (deterministic given
+# the input -- no network/state; the explicit numeric TZ offset makes the result independent of the
+# host's local timezone). The `T` is normalised to a space for maximal date(1) portability.
+_short_iso_epoch() {
+  local iso="$1" e
+  [ -n "$iso" ] || { printf ''; return 0; }
+  e="$(date -d "${iso/T/ }" +%s 2>/dev/null)" || true
+  printf '%s' "${e:-}"
+}
+
+# freshest_offset_us JOURNAL FRESHNESS_S -> the SIGNED microsecond VALUE of the freshest
+# "[NTP] offset:" line in JOURNAL, or "" if that line is ABSENT, STALE (older than FRESHNESS_S
+# behind the newest journal line), or malformed. This is the value-returning sibling of
+# dantesync_offset_verdict (below), for a caller that must compare TWO boxes' fresh offsets
+# against EACH OTHER (the #326 painter-gate RELATIVE comparator, #595) rather than grade one
+# offset against a single absolute bound. JOURNAL must be gathered with `-o short-iso`.
+freshest_offset_us() {
+  local journal="$1" fresh="$2"
+  local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
+  local off_line off_iso off_us now_iso now_e off_e
+  off_line="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -1 || true)"
+  [ -n "$off_line" ] || { printf ''; return 0; }
+  off_iso="$(printf '%s' "$off_line" | grep -oE "^$iso_re" | head -1 || true)"
+  now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
+  now_e="$(_short_iso_epoch "$now_iso")"
+  off_e="$(_short_iso_epoch "$off_iso")"
+  if [ -z "$now_e" ] || [ -z "$off_e" ] || [ "$((now_e - off_e))" -gt "$fresh" ]; then
+    printf ''
+    return 0
+  fi
+  off_us="$(printf '%s' "$off_line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
+  if [ -z "$off_us" ] || ! printf '%s' "$off_us" | grep -qE '^-?[0-9]+$'; then
+    printf ''
+    return 0
+  fi
+  printf '%s' "$off_us"
+}
+
+# dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US -> "ok" | "drift" | "stale" | "absent".
+# Supersedes the age-blind dantesync_offset_ok (which read the LAST "[NTP] offset:" line via tail -1
+# regardless of age -- on cam5/6 that graded on a STALE boot-STEP line, the #550 bug). It finds the
+# FRESHEST "[NTP] offset:" line (via freshest_offset_us, above) and only then grades |offset|
+# against BOUND_US.
+#   absent -- no "[NTP] offset:" line at all in JOURNAL.
+#   stale  -- the freshest "[NTP] offset:" line is older than FRESHNESS_S behind the newest journal
+#             line, OR either timestamp is unparseable, OR the offset value is malformed (we cannot
+#             prove a FRESH in-bound reading -- never a silent pass on a possibly-stale value).
+#   drift  -- a FRESH offset line whose |offset| exceeds BOUND_US (a real desync -- the cam5/6 5.28s
+#             case; a bare "[NTP] offset:-5280959us" fallback line lands here by magnitude).
+#   ok     -- a FRESH offset line within BOUND_US.
+# JOURNAL must be gathered with `-o short-iso` (ISO-timestamped lines).
+dantesync_offset_verdict() {
+  local journal="$1" fresh="$2" bound="$3"
+  local off_line off_us mag
+  off_line="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -1 || true)"
+  if [ -z "$off_line" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  off_us="$(freshest_offset_us "$journal" "$fresh")"
+  if [ -z "$off_us" ]; then
+    printf 'stale\n'
+    return 0
+  fi
+  mag="$(abs_int "$off_us")"
+  if [ "$mag" -le "$bound" ]; then
+    printf 'ok\n'
+  else
+    printf 'drift\n'
+  fi
+}
+
 # --- PTP-LOCK signal (the #7 precondition the recording-E2E gate requires) -----------------
 #
 # NTP offset alone is NOT enough for the recording E2E: cross-node per-hop latency/timestamps

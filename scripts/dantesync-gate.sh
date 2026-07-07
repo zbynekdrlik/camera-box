@@ -45,6 +45,12 @@ GATE_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
 # The four measured nodes by default: the two Linux cams over SSH; strih/stream need --win-status.
 GATE_LINUX="${GATE_LINUX:-cam1=10.77.9.61 cam2=10.77.9.62}"
 GATE_SSH_TIMEOUT="${CLOCK_GUARD_SSH_TIMEOUT:-8}"
+# #550/#591/#595: a Linux node's freshest "[NTP] offset:" journal line must be no older than this
+# many seconds behind its newest journal line, or the reading is STALE and must never be graded as
+# the current offset (the #550 false-fail/false-pass bug this gate was still exposed to before
+# #595 -- see dantesync_offset_verdict in clock-offset-guard.sh). Same default as
+# verify-device.sh's DANTESYNC_OFFSET_FRESHNESS_S.
+GATE_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 
 usage() {
   cat <<EOF
@@ -112,24 +118,44 @@ main() {
   local pair
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
+    # -o short-iso (+ a wider -n 400 window) so dantesync_offset_verdict can prove freshness
+    # (#550/#595) -- the age-blind offset_us_from_journal/offset_check this loop used to call
+    # could grade a stale multi-hour-old boot-STEP line as "the current offset".
     status="$(sshpass -p "${CLOCK_GUARD_SSH_PASS}" ssh \
       -o StrictHostKeyChecking=no -o BatchMode=no -o "ConnectTimeout=${GATE_SSH_TIMEOUT}" \
       "${CLOCK_GUARD_SSH_USER}@${ip}" \
-      'journalctl -u dantesync --no-pager -n 300 2>/dev/null' 2>/dev/null || true)"
+      'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true)"
     if [ -z "$status" ]; then
       printf '  %-14s UNREACHABLE  (no DanteSync journal over SSH @ %s)\n' "$name" "$ip"
       unknown=$((unknown + 1)); continue
     fi
-    offset="$(offset_us_from_journal "$status")"
     ptp="$(ptp_locked_from_journal "$status")"
-    rc_off=0; offset_check "$name" "$offset" "$bound" || rc_off=$?
-    rc_ptp=0; ptp_check    "$name" "$ptp"             || rc_ptp=$?
+    rc_off=0
+    case "$(dantesync_offset_verdict "$status" "$GATE_OFFSET_FRESHNESS_S" "$bound")" in
+      ok)
+        printf '  %-14s NTP OK       (fresh offset within %s us bound)\n' "$name" "$bound" ;;
+      drift)
+        printf '  %-14s NTP DRIFT    (fresh offset exceeds %s us bound)\n' "$name" "$bound"
+        rc_off=2 ;;
+      stale)
+        printf '  %-14s NTP STALE    (no FRESH [NTP] offset within %ss -- status incomplete, #550/#595)\n' \
+          "$name" "$GATE_OFFSET_FRESHNESS_S"
+        rc_off=3 ;;
+      *)
+        printf '  %-14s NTP UNKNOWN  (no [NTP] offset line at all -- status incomplete)\n' "$name"
+        rc_off=3 ;;
+    esac
+    rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
     case "$(node_verdict "$rc_off" "$rc_ptp")" in
       OK) ok=$((ok + 1)) ;; BAD) bad=$((bad + 1)) ;; UNKNOWN) unknown=$((unknown + 1)) ;;
     esac
   done
 
   # --- Windows nodes (status-pipe JSON the caller pre-fetched via MCP) ----------------------
+  # NOTE (#595 scope): the Windows status-pipe JSON blob carries no journal timestamp, so it has
+  # no freshness signal to check the way the Linux path above now does -- this snapshot path is
+  # left AGE-BLIND (offset_us_from_pipe_json) here. Tracked as part of #598 (Windows W32Time
+  # verify-gate for strih+stream), not a new issue.
   local entry file
   for entry in "${win_status[@]}"; do
     name="${entry%%=*}"; file="${entry#*=}"
