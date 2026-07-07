@@ -1101,11 +1101,16 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // cause. `first_id.is_none()` (nothing decoded at all) is still the "no burn in this
     // recording" fallback case — the NodeVerdict::imag_burn_ok() consumer treats it as
     // pass-through, so a pre-#463-build recording keeps working unchanged.
+    //
+    // #576: the step is SELF-CALIBRATED from this recording's own observed cadence
+    // (`calibrate_burn_step`), not the hardcoded `IMAG_BURN_RENDER_STEP` constant — #480
+    // confirmed step 2 at the time, but the #572 live-rig investigation found the real rig now
+    // free-running at step 3. Calibrating per-recording means a future render-pipeline timing
+    // change can never silently attribute the wrong grid ids to a genuine drop again.
     let imag_burn_ids = burn_ids_in(frames, BURN_RUN_ID_IMAG);
-    let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(
-        &imag_burn_ids,
-        camera_box::imag_tick_gate::IMAG_BURN_RENDER_STEP,
-    );
+    let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(&imag_burn_ids);
+    let burn_sc =
+        camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
     let imag_burn_contiguity = NodeContiguity {
         node: "imag-burn".to_string(),
         first_id: burn_sc.first_id,
@@ -7067,6 +7072,58 @@ mod tests {
             // step-1 40 — a genuinely missing step-grid slot is still caught, never masked.
             vec![70],
             "the exact missing digital burn id must be reported"
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_calibrates_the_burn_step_from_observed_cadence_576() {
+        use super::node_verdict_for_imag;
+        // #576: THIS recording's burn free-runs at step 3 (the #572 live-rig cadence), NOT the
+        // #480-confirmed step 2 — the hardcoded IMAG_BURN_RENDER_STEP constant would have been
+        // wrong here. `calibrate_burn_step` must derive 3 from the observed ids and still
+        // declare a clean run zero loss.
+        let frames: Vec<RecordingFrame> = (0..60u32)
+            .map(|i| frame(i as u64, &[(CAM2, 100 + i), (super::BURN_RUN_ID_IMAG, 10 + 3 * i)]))
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.is_zero(),
+            "a clean step-3 free-running burn must be zero loss once calibrated (#576): {:?}",
+            nv.imag_burn_contiguity
+        );
+        let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
+        assert_eq!(burn.first_id, Some(10));
+        assert_eq!(burn.last_id, Some(10 + 3 * 59));
+        assert!(burn.missing_ids.is_empty());
+    }
+
+    #[test]
+    fn node_verdict_for_imag_calibrated_step_attributes_the_correct_missing_grid_id_576() {
+        use super::node_verdict_for_imag;
+        // Same step-3 cadence as above, but frame index 30's burn payload never reached the
+        // recording — a genuine dropped step-grid slot. The OLD hardcoded step-2 constant would
+        // have attributed the WRONG grid ids entirely (see `imag_tick_gate`'s #576 unit test
+        // `calibrate_burn_step_feeds_correct_missing_grid_id_into_burn_step_contiguity_576`);
+        // calibrated to the TRUE step, the exact missing grid id must be reported.
+        let frames: Vec<RecordingFrame> = (0..60u32)
+            .map(|i| {
+                let mut payloads = vec![(CAM2, 100 + i)];
+                if i != 30 {
+                    payloads.push((super::BURN_RUN_ID_IMAG, 10 + 3 * i));
+                }
+                frame(i as u64, &payloads)
+            })
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            !nv.is_zero(),
+            "a genuinely missing step-3 grid slot must fail (#576)"
+        );
+        let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
+        assert_eq!(
+            burn.missing_ids,
+            vec![10 + 3 * 30],
+            "the exact missing step-3 grid id must be reported, not a step-2-derived wrong id: {burn:?}"
         );
     }
 

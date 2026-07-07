@@ -304,11 +304,33 @@ const MIN_IDS_FOR_STEP_CALIBRATION: usize = 4;
 /// (never invent a number from noise — mirrors every other pure gate's "not enough signal ⇒ fall
 /// back to the safe/known default" rule).
 ///
-/// #576 RED STUB: always returns [`IMAG_BURN_RENDER_STEP`] — the real modal calculation lands in
-/// the GREEN commit. Kept as its own commit so the new calibration tests below are observably
-/// RED (failing on the hardcoded fallback) before the fix, per `regression-test-first.md`.
-pub fn calibrate_burn_step(_ids: &[u32]) -> u32 {
-    IMAG_BURN_RENDER_STEP
+pub fn calibrate_burn_step(ids: &[u32]) -> u32 {
+    use std::collections::{BTreeSet, HashMap};
+    // Dedup + sort first (mirrors every other function in this module) — a duplicate id must
+    // never manufacture a spurious zero-delta.
+    let present: BTreeSet<u32> = ids.iter().copied().collect();
+    if present.len() < MIN_IDS_FOR_STEP_CALIBRATION {
+        return IMAG_BURN_RENDER_STEP;
+    }
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    let mut prev: Option<u32> = None;
+    for id in present {
+        if let Some(p) = prev {
+            // `present` iterates ascending (BTreeSet) and is deduped, so `id > p` always —
+            // plain subtraction can never underflow, and the delta can never be 0.
+            *counts.entry(id - p).or_insert(0) += 1;
+        }
+        prev = Some(id);
+    }
+    // The MODE (most frequent delta) is the dominant free-running step. `Reverse(delta)` in the
+    // tie-break key makes a SMALLER delta compare as "more", so ties resolve to the stricter
+    // (smaller) step, never the looser one. `counts` is never empty here (>=3 deltas guaranteed
+    // by the length check above), so `unwrap_or` is defensive only.
+    counts
+        .into_iter()
+        .max_by_key(|&(delta, count)| (count, std::cmp::Reverse(delta)))
+        .map(|(delta, _)| delta.max(1))
+        .unwrap_or(IMAG_BURN_RENDER_STEP)
 }
 
 #[cfg(test)]
