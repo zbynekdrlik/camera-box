@@ -478,15 +478,18 @@ struct NodeVerdict {
     imag_burn_contiguity: Option<NodeContiguity>,
     /// #580 — imag's PRIMARY optical zero-loss decision OVERRIDE: `None` for every non-imag node
     /// (unaffected — those keep using `contiguity.is_contiguous()` directly, see
-    /// [`Self::optical_ok`]); for imag, the result of
-    /// [`camera_box::imag_tick_gate::OpticalBeatVerdict::is_net_zero`] — the cam2 optical tick
-    /// sequence genuinely advances (never frozen/stuck) AND the analyzed span is net-zero loss
-    /// (skips fully compensated by duplicate oversampling from the 60Hz-monitor-vs-60fps-camera
-    /// BEAT, or better). Replaces strict step-1 contiguity as imag's optical decision —
-    /// `contiguity` itself stays populated with the RAW strict tick_contiguity values (unchanged,
-    /// still informative/printed), only the PASS/FAIL judgment moves to this beat-aware verdict
-    /// for imag specifically.
-    imag_optical_beat_pass: Option<bool>,
+    /// [`Self::optical_ok`]); for imag, the FULL
+    /// [`camera_box::imag_tick_gate::OpticalBeatVerdict`] — its
+    /// [`is_net_zero`](camera_box::imag_tick_gate::OpticalBeatVerdict::is_net_zero) is the pass/fail
+    /// (the cam2 optical tick sequence genuinely advances — never frozen/stuck — AND the analyzed
+    /// span is net-zero loss: skips fully compensated by duplicate oversampling from the
+    /// 60Hz-monitor-vs-60fps-camera BEAT, or better). The whole verdict (not just the bool) is
+    /// stored so [`Self::node_verdict_lines`]'s printer and [`node_verdict_json`] can report the
+    /// avg_step / surplus / dup+skip counts HONESTLY (a beat-compensated pass is NOT a strictly
+    /// "contiguous" read — #580 review findings 1/B/C). Replaces strict step-1 contiguity as imag's
+    /// optical decision — `contiguity` itself stays populated with the RAW strict tick_contiguity
+    /// values (unchanged, still informative/printed), only the PASS/FAIL judgment moves here.
+    imag_optical_beat: Option<camera_box::imag_tick_gate::OpticalBeatVerdict>,
 }
 
 impl NodeVerdict {
@@ -510,8 +513,15 @@ impl NodeVerdict {
     /// other node has always used. Isolating this as its own method (rather than inlining the
     /// `unwrap_or_else` in [`Self::is_zero`]) documents the override as its own named decision.
     fn optical_ok(&self) -> bool {
-        self.imag_optical_beat_pass
+        self.imag_optical_beat_pass()
             .unwrap_or_else(|| self.contiguity.is_contiguous())
+    }
+    /// #580 — imag's beat-aware optical PASS/FAIL as an `Option<bool>`: `Some(is_net_zero)` for an
+    /// imag node, `None` for every other node (which has no beat verdict and falls back to strict
+    /// contiguity in [`Self::optical_ok`]). Derived from the stored [`Self::imag_optical_beat`] so
+    /// the pass bit and the reportable beat detail can never drift apart.
+    fn imag_optical_beat_pass(&self) -> Option<bool> {
+        self.imag_optical_beat.map(|b| b.is_net_zero())
     }
     /// #463 — is imag's digital corner burn (when this recording carries one at all) ALSO
     /// contiguous? `true` (not applicable / nothing to fail on) for every non-imag node
@@ -1072,9 +1082,9 @@ fn node_verdict_with_optical(
         optical_span_frames,
         // #463: this second burn signal is imag-specific; every other node stays `None`.
         imag_burn_contiguity: None,
-        // #580: the beat-aware optical override is imag-specific; every other node stays `None`
-        // (unaffected — `is_zero()` falls back to `contiguity.is_contiguous()` for them).
-        imag_optical_beat_pass: None,
+        // #580 — the beat-aware optical override is imag-specific; every other node stays `None`
+        // (unaffected — `optical_ok()` falls back to `contiguity.is_contiguous()` for them).
+        imag_optical_beat: None,
     })
 }
 
@@ -1166,8 +1176,11 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // unchanged, still informative/printed); see `imag_tick_gate::OpticalBeatVerdict`'s doc for
     // the confirmed live grounding (run 572001) and the advance-guard that closes the pre-existing
     // frozen-read hole strict-step-1 ALSO vacuously passed.
-    let optical_beat = camera_box::imag_tick_gate::optical_beat_net_zero(
+    // #580 review finding-2: reuse the `tc` already built above (`tick_contiguity(&ticks)` for the
+    // raw strict `contiguity` field) instead of walking the identical slice into a second BTreeSet.
+    let optical_beat = camera_box::imag_tick_gate::optical_beat_from_contiguity(
         &ticks,
+        &tc,
         camera_box::imag_tick_gate::IMAG_OPTICAL_EXPECTED_STEP,
     );
 
@@ -1215,9 +1228,11 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
         colour_fail: 0,
         optical_span_frames: optical.span_frames,
         imag_burn_contiguity: Some(imag_burn_contiguity),
-        // #580: the beat-aware verdict is imag's PRIMARY optical pass/fail from here on —
-        // `NodeVerdict::optical_ok` consults this instead of `contiguity.is_contiguous()`.
-        imag_optical_beat_pass: Some(optical_beat.is_net_zero()),
+        // #580: the FULL beat verdict is imag's PRIMARY optical signal from here on —
+        // `NodeVerdict::optical_ok` consults its `is_net_zero()` instead of
+        // `contiguity.is_contiguous()`, and the printers/JSON report its avg_step/surplus/dup+skip
+        // counts honestly (a beat-compensated pass is NOT a strictly "contiguous" read).
+        imag_optical_beat: Some(optical_beat),
     }
 }
 
@@ -1328,8 +1343,26 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
             }
             None => String::new(),
         };
+        // #580 review finding B — an imag node can be `is_zero()` via the beat-aware verdict while
+        // the RAW strict tick sequence is NOT contiguous (a skip compensated by a duplicate). The
+        // old flat "burn-id sequence CONTIGUOUS" claim is then factually FALSE (a tick value IS
+        // genuinely missing from the range). Report the beat compensation HONESTLY instead — the
+        // no-overstatement rule: state exactly what was proven, never more.
+        let optical_phrase = match v.imag_optical_beat {
+            Some(beat) if !c.is_contiguous() => {
+                let dups = beat.frames_count.saturating_sub(beat.present_count);
+                let skips = c.missing_ids.len();
+                format!(
+                    "cam2 optical read complete via BEAT compensation ({skips} skipped tick(s) \
+                     balanced by {dups} duplicate(s), net surplus {} ≤ 0 — 60Hz monitor vs 60fps \
+                     capture, #580)",
+                    beat.surplus
+                )
+            }
+            _ => "burn-id sequence CONTIGUOUS AND cam2 optical read complete".to_string(),
+        };
         lines.push(format!(
-            "  [{}] ZERO loss — burn-id sequence CONTIGUOUS ({span}) AND cam2 optical read complete{burn_note}.",
+            "  [{}] ZERO loss — {optical_phrase} ({span}){burn_note}.",
             c.node
         ));
         return lines;
@@ -1400,13 +1433,39 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
         }
         return lines;
     }
-    // #580 — imag's RAW strict-step-1 `missing_ids` (nominal per-value gaps) is NOT a fault once
-    // the beat-aware verdict passed: a skip fully compensated by a duplicate is zero NET loss, so
-    // printing it as "N missing id(s)" here would misleadingly blame the optical read for a
-    // DIFFERENT failure (e.g. the digital burn branch above) even though the camera captured
-    // every painted tick net. `imag_optical_beat_pass` is `None` for every non-imag node, so this
-    // guard never fires there.
-    if v.imag_optical_beat_pass == Some(true) {
+    // #580 — imag's beat-aware verdict FULLY OWNS the optical fault line for imag; the RAW
+    // strict-step-1 `missing_ids` (nominal per-value gaps) is NOT itself a fault, so imag never
+    // falls through to the generic per-value "N missing id(s)" line below (that would misattribute
+    // a compensated beat, or a DIFFERENT failure like the digital burn above, to the optical read).
+    // `imag_optical_beat` is `None` for every non-imag node, so this block is skipped there and the
+    // generic burn-id logic runs unchanged.
+    if let Some(beat) = v.imag_optical_beat {
+        if beat.is_net_zero() {
+            // Beat PASSED: the strict per-value gaps are compensated — no optical fault line. Any
+            // burn / colour / undecodable fault above already printed its own reason.
+            return lines;
+        }
+        // #580 review finding 1 — the beat FAILED: say WHY, HONESTLY. This node is `is_zero() ==
+        // false`, so it MUST print a reason — never return an empty (silent) verdict. The frozen
+        // case is the one that regressed: a stuck read collapses to a single value, whose strict
+        // `missing_ids` is EMPTY, so the old `missing_ids.is_empty()` fall-through returned nothing.
+        let dups = beat.frames_count.saturating_sub(beat.present_count);
+        let skips = c.missing_ids.len();
+        if !beat.is_advancing() {
+            lines.push(format!(
+                "  [{}] NOT zero — cam2 optical tick did NOT advance ({span}): average step {:.2}, \
+                 expected {} — a FROZEN/stuck read (first==last is trivially 'contiguous' but proves \
+                 the camera captured NOTHING moving). #580 advance-guard.",
+                c.node, beat.avg_step, beat.expected_step,
+            ));
+        } else {
+            lines.push(format!(
+                "  [{}] NOT zero — cam2 optical NET loss ({span}): {skips} skipped tick(s) vs only \
+                 {dups} duplicate(s), net surplus {} > 0 — genuine dropped painter frames, not beat \
+                 jitter (#580).",
+                c.node, beat.surplus,
+            ));
+        }
         return lines;
     }
     // Burn-id faults (may be empty when the failure is PURELY optical — then only the line above
@@ -1487,6 +1546,17 @@ fn node_verdict_json(
         "imag_burn_last_id": v.imag_burn_contiguity.as_ref().and_then(|nc| nc.last_id),
         "imag_burn_missing_ids": v.imag_burn_contiguity.as_ref().map(|nc| nc.missing_ids.clone()),
         "imag_burn_ok": v.imag_burn_ok(),
+        // #580 review finding C — imag's beat-aware optical verdict, surfaced so a JSON consumer is
+        // never left with an internally-INCONSISTENT record: `zero_loss: true` alongside a
+        // non-empty `missing_ids` (a beat-compensated pass) now carries the fields that EXPLAIN it
+        // (`imag_optical_beat_net_zero: true`, `surplus <= 0`), instead of looking like a consumer
+        // bug. `null` for every non-imag node (no beat verdict; strict contiguity governs there).
+        "imag_optical_beat_net_zero": v.imag_optical_beat_pass(),
+        "imag_optical_beat_avg_step": v.imag_optical_beat.map(|b| b.avg_step),
+        "imag_optical_beat_expected_step": v.imag_optical_beat.map(|b| b.expected_step),
+        "imag_optical_beat_present_count": v.imag_optical_beat.map(|b| b.present_count),
+        "imag_optical_beat_frames_count": v.imag_optical_beat.map(|b| b.frames_count),
+        "imag_optical_beat_surplus": v.imag_optical_beat.map(|b| b.surplus),
     })
 }
 
@@ -7480,7 +7550,7 @@ mod tests {
             .collect();
         let nv = node_verdict_for_imag(&frames, None);
         assert_eq!(
-            nv.imag_optical_beat_pass,
+            nv.imag_optical_beat_pass(),
             Some(true),
             "sanity: the optical BEAT itself is net-zero and would pass alone: {nv:?}"
         );
@@ -7506,6 +7576,110 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("missing id(s) (ids")),
             "the RAW optical missing-ids line must NOT co-print once the beat passed: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_frozen_read_prints_a_failure_reason_not_silence_580() {
+        use super::node_verdict_for_imag;
+        // #580 review finding 1 — a frozen/stuck optical read is `is_zero() == false` (advance-guard
+        // fails) BUT its RAW strict `missing_ids` is EMPTY (a single value 500..=500 is trivially
+        // "contiguous"). The old printer fell through `missing_ids.is_empty()` and returned an EMPTY
+        // Vec — a node the headline FAILS printed NOTHING. It must now print an honest reason.
+        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
+            .map(|i| frame(i as u64, &[(CAM2, 500)]))
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(!nv.is_zero(), "sanity: a frozen read must fail: {nv:?}");
+        let lines = super::node_verdict_lines(&nv, true);
+        assert!(
+            !lines.is_empty(),
+            "a FAILING node must never print an empty (silent) verdict (#580 finding 1): {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("did NOT advance") && l.contains("NOT zero")),
+            "the frozen-read failure must be explained honestly: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_net_loss_prints_a_net_loss_reason_580() {
+        use super::node_verdict_for_imag;
+        // #580 review finding 1 (net-loss arm) — a genuine uncompensated drop must print a "NET
+        // loss" reason, never fall silent or misattribute to a generic "missing id(s)" line.
+        let frames = imag_window(Some(30));
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(!nv.is_zero(), "sanity: a real drop must fail: {nv:?}");
+        let lines = super::node_verdict_lines(&nv, true);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("NET loss") && l.contains("NOT zero")),
+            "a genuine optical net loss must be explained as such: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_beat_compensated_pass_line_is_honest_not_contiguous_580() {
+        use super::node_verdict_for_imag;
+        // #580 review finding B — a beat-compensated PASS (skip 130 balanced by dup 129) is
+        // `is_zero()` but NOT strictly contiguous. The PASS line must NOT claim "CONTIGUOUS" (a tick
+        // IS genuinely missing from the value range); it must report the beat compensation honestly.
+        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
+            .map(|i| {
+                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
+                frame(i as u64, &[(CAM2, tick)])
+            })
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.is_zero() && !nv.contiguity.is_contiguous(),
+            "sanity: {nv:?}"
+        );
+        let lines = super::node_verdict_lines(&nv, true);
+        let pass_line = lines
+            .iter()
+            .find(|l| l.contains("ZERO loss"))
+            .expect("a passing node prints a ZERO loss line");
+        assert!(
+            !pass_line.contains("CONTIGUOUS"),
+            "a beat-compensated pass must NOT falsely claim a contiguous read: {pass_line}"
+        );
+        assert!(
+            pass_line.contains("BEAT compensation"),
+            "the pass line must report the beat compensation honestly: {pass_line}"
+        );
+    }
+
+    #[test]
+    fn node_verdict_json_beat_compensated_pass_is_self_consistent_580() {
+        use super::{node_verdict_for_imag, node_verdict_json};
+        // #580 review finding C — for a beat-compensated pass, JSON must not read as internally
+        // inconsistent: `zero_loss: true` beside a non-empty `missing_ids` now carries the beat
+        // fields that EXPLAIN it (`imag_optical_beat_net_zero: true`, `surplus <= 0`).
+        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
+            .map(|i| {
+                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
+                frame(i as u64, &[(CAM2, tick)])
+            })
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        let j = node_verdict_json(&nv, 300.0, true, 300.0);
+        assert_eq!(j["zero_loss"], serde_json::json!(true), "{j}");
+        assert!(
+            !nv.contiguity.missing_ids.is_empty(),
+            "sanity: this pass carries a raw strict gap: {nv:?}"
+        );
+        assert_eq!(
+            j["imag_optical_beat_net_zero"],
+            serde_json::json!(true),
+            "the beat field must explain the zero_loss=true beside a non-empty missing_ids: {j}"
+        );
+        assert!(
+            j["imag_optical_beat_surplus"].as_i64().unwrap() <= 0,
+            "a net-zero beat must report surplus <= 0: {j}"
         );
     }
 

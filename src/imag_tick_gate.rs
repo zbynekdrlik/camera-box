@@ -407,18 +407,35 @@ pub fn optical_beat_verdict_from_counts(
 /// regardless of the individual dup/skip values in between (a pure algebraic identity), so this is
 /// exactly the same `avg_step` `probe::recording_verdict::verdict`'s diagnostic computes.
 pub fn optical_beat_net_zero(ticks_in_order: &[u32], expected_step: u32) -> OpticalBeatVerdict {
-    let tc = tick_contiguity(ticks_in_order);
+    optical_beat_from_contiguity(
+        ticks_in_order,
+        &tick_contiguity(ticks_in_order),
+        expected_step,
+    )
+}
+
+/// #580 review finding-2 — the SAME verdict as [`optical_beat_net_zero`] but reusing a
+/// [`tick_contiguity`] result the caller ALREADY computed for the raw strict `contiguity` field it
+/// still prints (`bin/recording-verdict.rs`'s `node_verdict_for_imag`), so the identical slice is
+/// not walked into a second `BTreeSet`. `tc` MUST be `tick_contiguity(ticks_in_order)` for the SAME
+/// slice — the aggregate counts (`expected_count`/`present_count`) come from it.
+///
+/// `avg_step` derives from the CHRONOLOGICAL endpoints, `(last - first) / (frames - 1)`: the sum of
+/// consecutive per-sample steps ALWAYS telescopes to `ticks_in_order.last() - ticks_in_order.first()`
+/// regardless of the dup/skip values between (a pure algebraic identity), so this is byte-identical
+/// to walking `.windows(2)`. Note it is NOT `tc.last_tick - tc.first_tick`: those are the SORTED
+/// min/max, not the positional endpoints a non-monotonic glitch could distinguish.
+pub fn optical_beat_from_contiguity(
+    ticks_in_order: &[u32],
+    tc: &TickContiguity,
+    expected_step: u32,
+) -> OpticalBeatVerdict {
     let frames_count = ticks_in_order.len() as u32;
-    let mut sum_steps: i64 = 0;
-    let mut num_pairs: i64 = 0;
-    for w in ticks_in_order.windows(2) {
-        sum_steps += w[1] as i64 - w[0] as i64;
-        num_pairs += 1;
-    }
-    let avg_step = if num_pairs > 0 {
-        sum_steps as f64 / num_pairs as f64
-    } else {
-        0.0
+    let avg_step = match (ticks_in_order.first(), ticks_in_order.last()) {
+        (Some(&first), Some(&last)) if frames_count > 1 => {
+            (last as f64 - first as f64) / (frames_count as f64 - 1.0)
+        }
+        _ => 0.0,
     };
     optical_beat_verdict_from_counts(
         tc.expected_count,
@@ -1036,6 +1053,25 @@ mod tests {
         assert!(
             !v.is_net_zero(),
             "no tick decoded at all must never read as a pass: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_from_contiguity_matches_slice_only_entry_580() {
+        // #580 review finding-2: the tc-reusing entry MUST be byte-identical to the slice-only one
+        // (the caller reuses its already-computed `tick_contiguity` instead of walking the slice
+        // twice). Exercised over a non-monotonic beat (dup at 129, skip of 130) so the
+        // positional-vs-sorted avg_step distinction actually bites.
+        let ticks = [126u32, 127, 128, 129, 129, 131, 132, 133];
+        let via_slice = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        let via_tc = optical_beat_from_contiguity(
+            &ticks,
+            &tick_contiguity(&ticks),
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert_eq!(
+            via_slice, via_tc,
+            "reusing a precomputed tick_contiguity must not change the verdict: {via_slice:?} vs {via_tc:?}"
         );
     }
 }
