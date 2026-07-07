@@ -301,6 +301,39 @@ pub const IMAG_OPTICAL_EXPECTED_STEP: u32 = 1;
 /// beat, never loosened blindly.
 pub const IMAG_OPTICAL_MAX_STUCK_RUN: u32 = 3;
 
+/// #588 — the aggregate Δ0 DUPLICATION-DENSITY ceiling for imag's optical no-copy gate
+/// ([`OpticalBeatVerdict::no_stuck_density`]) — the 4th orthogonal detector, closing the residual
+/// gate hole [`IMAG_OPTICAL_MAX_STUCK_RUN`] (K) cannot see: a systematic CATCH-UP JUDDER (many SHORT
+/// Δ0 runs each ≤ K, the dups balanced by catch-up skips so `avg_step ≈ 1` and `surplus ≈ 0`) slips
+/// the run-length term (no single run exceeds K), the whole-window aggregates (avg_step/surplus read
+/// ~zero), AND the render-free-running digital burn (blind to upstream CONTENT stutter) — yet its
+/// aggregate Δ0 density is in the TENS OF PERCENT ([`max_consecutive_stuck_run`]'s doc explains why
+/// the LONGEST-run metric alone is blind to it).
+///
+/// REAL-DATA-ANCHORED (never invented from a synthetic fixture — the exact mistake that caused the
+/// original #580 regression): the healthy Δ0-density MEASURED on the live re-decode of run 572001 is
+/// ≈ 0.07–0.10% (≈16 post-#575-trim / ≈22 pre-trim isolated dups over ~21866 adjacent pairs, with
+/// `max_stuck_run` = 1). This ceiling (1%) is a full ORDER OF MAGNITUDE above that measured healthy
+/// density and ~2 orders BELOW a systematic judder (tens of %), so it can neither false-fail a
+/// genuine same-rate beat nor miss a real judder. Like [`IMAG_OPTICAL_MAX_STUCK_RUN`] (K), it is
+/// RE-GROUNDED by editing this constant in a new PR should a future live re-decode ever measure a
+/// materially different healthy density — never loosened blindly, and (per this module's pure-seam
+/// contract) deliberately NOT an env knob, which would make the gate non-deterministic and untestable.
+pub const IMAG_OPTICAL_MAX_STUCK_DENSITY: f64 = 0.01;
+
+/// #588 — the MINIMUM adjacent-pair count before [`OpticalBeatVerdict::no_stuck_density`] JUDGES the
+/// Δ0 density. On a tiny window a single BENIGN isolated dup is already a huge density (1 dup over 8
+/// pairs = 12.5%), so a naive density gate would false-FAIL a legitimately short-but-clean window
+/// (the per-segment sweep's small windows, the unit fixtures). Below this floor the density term
+/// DEFERS to the run-length + advance-guard + burn gates (the exact pre-#588 behaviour) — SAFE
+/// because the #588 judder is a WHOLE-recording systematic pattern that always spans far more than
+/// this many pairs (run 572001 ≈ 21866), so requiring a real sample before judging never weakens
+/// judder detection. 300 pairs (≈5 s @ 60fps) keeps the 1% ceiling meaningfully above the benign
+/// floor (at 300 pairs the 1% ceiling is 3 dups vs a ~0.3-dup benign expectation) while excluding
+/// every tiny fixture. Mirrors the "not enough signal ⇒ fall back to the safe default" rule every
+/// other pure gate here uses ([`MIN_IDS_FOR_STEP_CALIBRATION`], `burn_present_ok`'s `< 2` guard).
+const MIN_PAIRS_FOR_STUCK_DENSITY: u32 = 300;
+
 /// #580v2 — THE CENTERPIECE no-copy/liveness metric: the MAXIMUM number of CONSECUTIVE zero-delta
 /// (`ticks[i] == ticks[i-1]`) steps in the CHRONOLOGICAL (capture-order) optical tick sequence.
 ///
@@ -316,18 +349,69 @@ pub const IMAG_OPTICAL_MAX_STUCK_RUN: u32 = 3;
 /// content freeze); the run-length guard is the only term that catches it.
 ///
 /// Empty / single-sample input → 0 (no adjacent pair, nothing can be stuck).
+///
+/// #588 — this is now `stuck_run_stats(..).max_run`: the run-length metric and the #588 Δ0-density
+/// metric share ONE `.windows(2)` walk (see [`stuck_run_stats`] / [`StuckRunStats`]).
 pub fn max_consecutive_stuck_run(ticks_in_order: &[u32]) -> u32 {
+    stuck_run_stats(ticks_in_order).max_run
+}
+
+/// #588 — the aggregate no-copy statistics over a chronological optical tick window, ALL derived in
+/// ONE `.windows(2)` walk: the longest consecutive Δ0 run (`max_run`, the #580v2 centerpiece — see
+/// [`max_consecutive_stuck_run`]) AND the total count of Δ0 (stuck) adjacent pairs (`stuck_pairs`,
+/// the #588 duplication-rate NUMERATOR) AND the total adjacent-pair count (`total_pairs`, its
+/// DENOMINATOR). One walk feeds BOTH the run-length term and the density term — no second decode, per
+/// the #588 design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StuckRunStats {
+    /// The MAX consecutive Δtick==0 run — imag's #580v2 run-length no-copy centerpiece.
+    pub max_run: u32,
+    /// The TOTAL number of adjacent pairs with `ticks[i] == ticks[i-1]` (Δ0 pairs) — #588's
+    /// duplication-rate numerator. DISTINCT from `max_run`: a judder of MANY short runs each ≤ K has
+    /// a small `max_run` yet a large `stuck_pairs`, the exact case run-length alone misses.
+    pub stuck_pairs: u32,
+    /// The TOTAL adjacent pairs walked (`len().saturating_sub(1)`) — #588's density denominator.
+    /// `0` for an empty / single-sample window.
+    pub total_pairs: u32,
+}
+
+impl StuckRunStats {
+    /// #588 — the Δ0 DUPLICATION DENSITY: `stuck_pairs / total_pairs`. `0.0` when there are no pairs
+    /// (empty / single-sample window — nothing can be stuck). A benign 60Hz-vs-60fps beat is ~0.1%
+    /// (run 572001); a systematic catch-up judder is tens of %.
+    pub fn density(&self) -> f64 {
+        if self.total_pairs == 0 {
+            0.0
+        } else {
+            self.stuck_pairs as f64 / self.total_pairs as f64
+        }
+    }
+}
+
+/// #588 — walk the chronological tick window ONCE and return all three no-copy statistics
+/// ([`StuckRunStats`]). The #580v2 [`max_consecutive_stuck_run`] is `stuck_run_stats(..).max_run`;
+/// the #588 density term is `stuck_run_stats(..).density()`. Both come from this single `.windows(2)`
+/// pass, so adding the density metric costs no extra decode.
+pub fn stuck_run_stats(ticks_in_order: &[u32]) -> StuckRunStats {
     let mut max_run = 0u32;
     let mut cur = 0u32;
+    let mut stuck_pairs = 0u32;
+    let mut total_pairs = 0u32;
     for pair in ticks_in_order.windows(2) {
+        total_pairs += 1;
         if pair[0] == pair[1] {
             cur += 1;
+            stuck_pairs += 1;
             max_run = max_run.max(cur);
         } else {
             cur = 0;
         }
     }
-    max_run
+    StuckRunStats {
+        max_run,
+        stuck_pairs,
+        total_pairs,
+    }
 }
 
 /// #580v2 — the optical-BEAT verdict for imag's PRIMARY (cam2 dual-QR) zero-loss signal, replacing
@@ -426,6 +510,12 @@ pub struct OpticalBeatVerdict {
     /// hundreds. Surfaced as `imag_optical_max_stuck_run` in the imag JSON so the supervisor can read
     /// the real 572001 value and validate [`IMAG_OPTICAL_MAX_STUCK_RUN`].
     pub max_stuck_run: u32,
+    /// #588 — the aggregate Δ0 (duplication) DENSITY over the chronological window
+    /// (`stuck_pairs / total_pairs`, see [`StuckRunStats::density`]) — imag's 4th orthogonal no-copy
+    /// term ([`Self::no_stuck_density`]). A benign beat ⇒ ~0.1% (run 572001); a systematic catch-up
+    /// judder (many SHORT Δ0 runs each ≤ [`IMAG_OPTICAL_MAX_STUCK_RUN`]) ⇒ tens of %. Surfaced as
+    /// `imag_optical_stuck_density` in the imag JSON.
+    pub stuck_density: f64,
 }
 
 impl OpticalBeatVerdict {
@@ -451,16 +541,35 @@ impl OpticalBeatVerdict {
         self.max_stuck_run <= IMAG_OPTICAL_MAX_STUCK_RUN
     }
 
-    /// #580v2 — THE imag optical HARD gate, replacing `surplus <= 0`: the read genuinely ADVANCES
-    /// ([`Self::is_advancing`] — a LOOSE band that rejects a frozen/blank read and gross rate/alias,
-    /// NOT a tight per-frame accounting) AND carries NO long copy/freeze run
-    /// ([`Self::no_stuck_copy`] — the centerpiece). Per-frame DELIVERY accounting is NOT the optical
-    /// leg's job on a free-running rig (two same-rate clocks cannot hit `surplus <= 0` reliably — the
-    /// clock residual that reopened #580); the STRICT digital corner burn is the delivery authority
-    /// (`NodeVerdict::imag_burn_ok`, #463/#584/#585), ANDed in `NodeVerdict::is_zero`. This gate's
-    /// job is only: the injection is LIVE (advancing) and there is NO copy/freeze.
+    /// #588 — no systematic short-run JUDDER: the aggregate Δ0 duplication density is within
+    /// [`IMAG_OPTICAL_MAX_STUCK_DENSITY`]. This is the 4th orthogonal no-copy term. It catches the
+    /// CATCH-UP JUDDER — MANY SHORT Δ0 runs each ≤ K, dups balanced by catch-up skips so `avg_step ≈
+    /// 1` and `surplus ≈ 0` — that [`Self::no_stuck_copy`] (which bounds only the LONGEST single run,
+    /// blind to many short ones), the whole-window aggregates, AND the render-free-running digital
+    /// burn all miss. The term is DEFERRED on a window with fewer than [`MIN_PAIRS_FOR_STUCK_DENSITY`]
+    /// adjacent pairs (`frames_count - 1`): a single benign isolated dup is a huge density on a tiny
+    /// window, so judging it there would false-fail a legitimately short-but-clean read — and the
+    /// #588 judder is a WHOLE-recording pattern that always spans far more pairs, so deferring on a
+    /// short window never weakens detection.
+    pub fn no_stuck_density(&self) -> bool {
+        let total_pairs = self.frames_count.saturating_sub(1);
+        total_pairs < MIN_PAIRS_FOR_STUCK_DENSITY
+            || self.stuck_density <= IMAG_OPTICAL_MAX_STUCK_DENSITY
+    }
+
+    /// #580v2 (#588) — THE imag optical HARD gate, replacing `surplus <= 0`: the read genuinely
+    /// ADVANCES ([`Self::is_advancing`] — a LOOSE band that rejects a frozen/blank read and gross
+    /// rate/alias, NOT a tight per-frame accounting) AND carries NO long copy/freeze run
+    /// ([`Self::no_stuck_copy`] — the run-length centerpiece) AND carries NO systematic short-run
+    /// judder ([`Self::no_stuck_density`] — the #588 4th orthogonal term: many SHORT Δ0 runs each ≤ K
+    /// that run-length, the aggregates, AND the digital burn are all blind to). Per-frame DELIVERY
+    /// accounting is NOT the optical leg's job on a free-running rig (two same-rate clocks cannot hit
+    /// `surplus <= 0` reliably — the clock residual that reopened #580); the STRICT digital corner
+    /// burn is the delivery authority (`NodeVerdict::imag_burn_ok`, #463/#584/#585), ANDed in
+    /// `NodeVerdict::is_zero`. This gate's job is only: the injection is LIVE (advancing) and there is
+    /// NO copy/freeze and NO judder.
     pub fn is_live_no_copy(&self) -> bool {
-        self.is_advancing() && self.no_stuck_copy()
+        self.is_advancing() && self.no_stuck_copy() && self.no_stuck_density()
     }
 
     /// #580v2 — DIAGNOSTIC ONLY (surfaced/printed, NEVER the pass/fail): genuinely advancing AND
@@ -484,6 +593,7 @@ pub fn optical_beat_verdict_from_counts(
     avg_step: f64,
     expected_step: u32,
     max_stuck_run: u32,
+    stuck_density: f64,
 ) -> OpticalBeatVerdict {
     OpticalBeatVerdict {
         avg_step,
@@ -493,6 +603,7 @@ pub fn optical_beat_verdict_from_counts(
         frames_count,
         surplus: expected_count as i64 - frames_count as i64,
         max_stuck_run,
+        stuck_density,
     }
 }
 
@@ -536,14 +647,17 @@ pub fn optical_beat_from_contiguity(
         }
         _ => 0.0,
     };
+    // #588: ONE `.windows(2)` walk yields BOTH the #580v2 run-length centerpiece (`max_run`) AND the
+    // #588 Δ0-density term (`density()`) — the HARD optical no-copy terms, no second decode.
+    let stuck = stuck_run_stats(ticks_in_order);
     optical_beat_verdict_from_counts(
         tc.expected_count,
         tc.present_count,
         frames_count,
         avg_step,
         expected_step,
-        // #580v2: the chronological no-copy/liveness metric — the HARD optical term.
-        max_consecutive_stuck_run(ticks_in_order),
+        stuck.max_run,
+        stuck.density(),
     )
 }
 
@@ -1259,6 +1373,11 @@ mod tests {
         // validates IMAG_OPTICAL_MAX_STUCK_RUN against it. A realistic full-sequence version of this
         // is `optical_beat_gate_passes_a_reconstructed_572001_sequence_580v2` below.
         let avg_step = (21870.0 - 1.0) / (21867.0 - 1.0);
+        // #588: the real healthy Δ0-density. Post-#575-trim the 16 duplicate frames (frames 21867 −
+        // present 21851) are isolated dups over 21866 adjacent pairs ⇒ ≈0.073% — an order of
+        // magnitude under IMAG_OPTICAL_MAX_STUCK_DENSITY (1%), and 21866 pairs ≥
+        // MIN_PAIRS_FOR_STUCK_DENSITY so the density term IS exercised here and PASSES.
+        let stuck_density = 16.0 / 21866.0;
         let v = optical_beat_verdict_from_counts(
             21870,
             21851,
@@ -1266,6 +1385,7 @@ mod tests {
             avg_step,
             IMAG_OPTICAL_EXPECTED_STEP,
             1, // isolated benign dups ⇒ max_stuck_run 1
+            stuck_density,
         );
         assert_eq!(v.surplus, 3, "expected(21870) - frames(21867) = +3: {v:?}");
         assert!(
@@ -1449,6 +1569,150 @@ mod tests {
             "#588: a systematic catch-up judder MUST fail the optical gate — the 4th density term \
              catches what the advance-guard, the run-length no-copy term, AND the aggregates all \
              miss: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_gate_catch_up_judder_density_term_588() {
+        // GREEN — the 4th orthogonal term directly: the judder's aggregate Δ0 density (450/599 ≈ 75%)
+        // is far above the 1% ceiling, so `no_stuck_density()` FAILS even though every pre-#588 term
+        // (advance-guard, run-length no-copy, AND the diagnostic surplus) PASSES. Density is the ONLY
+        // term that catches this systematic short-run stutter.
+        let seq = catch_up_judder_ticks();
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert!(
+            (v.stuck_density - 450.0 / 599.0).abs() < 1e-9,
+            "the judder's Δ0 density is 450 stuck / 599 pairs ≈ 75%: {v:?}"
+        );
+        assert!(
+            v.stuck_density > IMAG_OPTICAL_MAX_STUCK_DENSITY,
+            "≈75% is two orders of magnitude above the 1% ceiling: {v:?}"
+        );
+        assert!(
+            v.frames_count.saturating_sub(1) >= MIN_PAIRS_FOR_STUCK_DENSITY,
+            "599 pairs ≥ the min-pair floor, so the density term is genuinely APPLIED here: {v:?}"
+        );
+        assert!(
+            v.is_advancing() && v.no_stuck_copy() && v.is_net_zero(),
+            "every pre-#588 term still passes the judder — density is the sole catcher: {v:?}"
+        );
+        assert!(
+            !v.no_stuck_density(),
+            "#588: the density term is the one that FAILS the judder: {v:?}"
+        );
+        assert!(
+            !v.is_live_no_copy(),
+            "#588 GREEN: is_live_no_copy now FAILS the judder via the density term: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_gate_healthy_572001_density_passes_588() {
+        // GREEN-must-still-pass: a genuinely healthy 572001-scale read — a clean advancing span with
+        // ~22 ISOLATED dups (each a Δ0 run of 1), the real live-measured healthy density (run 572001)
+        // ≈0.10% — computed through the REAL `optical_beat_net_zero`, must PASS the density term and
+        // the whole gate. Anchors the threshold against real data, not a synthetic fixture (the #580
+        // regression failure mode).
+        use std::collections::HashSet;
+        let dup_after: HashSet<u32> = (1..=22).map(|k| 500 + k * 900).collect(); // 22 spaced ⇒ isolated
+        let mut seq: Vec<u32> = Vec::new();
+        for t in 0..=21843u32 {
+            seq.push(t);
+            if dup_after.contains(&t) {
+                seq.push(t); // one isolated extra copy ⇒ a Δ0 run of exactly 1
+            }
+        }
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.frames_count, 21866, "21844 present + 22 dups: {v:?}");
+        assert_eq!(
+            v.max_stuck_run, 1,
+            "every dup isolated ⇒ max Δ0 run 1: {v:?}"
+        );
+        assert!(
+            (v.stuck_density - 22.0 / 21865.0).abs() < 1e-9,
+            "22 stuck / 21865 pairs ≈ 0.10% — the real live-measured healthy density: {v:?}"
+        );
+        assert!(
+            v.stuck_density < IMAG_OPTICAL_MAX_STUCK_DENSITY,
+            "0.10% is an order of magnitude under the 1% ceiling: {v:?}"
+        );
+        assert!(
+            v.no_stuck_density(),
+            "#588: a genuinely healthy 572001-scale read must PASS the density term: {v:?}"
+        );
+        assert!(
+            v.is_live_no_copy(),
+            "#588: the real healthy read must still PASS the whole optical gate: {v:?}"
+        );
+    }
+
+    #[test]
+    fn no_stuck_density_defers_on_a_small_window_588() {
+        // A tiny window where a single benign isolated dup is already a huge raw density must NOT
+        // false-fail: below MIN_PAIRS_FOR_STUCK_DENSITY the density term DEFERS, and the read passes
+        // on the run-length + advance terms (the exact pre-#588 benign-beat behaviour). This is the
+        // #580v2 benign-beat fixture (`optical_beat_gate_isolated_dups_pass_580v2`) — 3 isolated dups
+        // over 9 pairs = 33% raw density — which MUST keep passing.
+        let ticks = [100u32, 100, 101, 102, 102, 103, 104, 105, 105, 106];
+        let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        assert!(
+            v.frames_count.saturating_sub(1) < MIN_PAIRS_FOR_STUCK_DENSITY,
+            "a 10-sample window (9 pairs) is far below the min-pair floor: {v:?}"
+        );
+        assert!(
+            v.stuck_density > IMAG_OPTICAL_MAX_STUCK_DENSITY,
+            "its RAW density (3/9 ≈ 33%) IS above 1% — proving the deferral is load-bearing: {v:?}"
+        );
+        assert!(
+            v.no_stuck_density(),
+            "#588: below the min-pair floor the density term DEFERS (never false-fails a tiny window): {v:?}"
+        );
+        assert!(
+            v.is_live_no_copy(),
+            "#588: a benign short beat must still PASS the whole gate (no regression): {v:?}"
+        );
+    }
+
+    #[test]
+    fn stuck_run_stats_counts_pairs_runs_and_density_588() {
+        // [1,1,1, 2, 3,3, 4]: pairs (1,1)(1,1)(1,2)(2,3)(3,3)(3,4) = 6 total; Δ0 at (1,1)(1,1)(3,3)
+        // = 3 stuck; longest Δ0 run = 2 (the triple 1s); density = 3/6 = 0.5. ONE walk, all three.
+        let s = stuck_run_stats(&[1, 1, 1, 2, 3, 3, 4]);
+        assert_eq!(s.total_pairs, 6);
+        assert_eq!(s.stuck_pairs, 3);
+        assert_eq!(s.max_run, 2);
+        assert!((s.density() - 0.5).abs() < 1e-9);
+        // Empty / single-sample ⇒ no pairs, density 0.0 (never a divide-by-zero, never a false judder).
+        assert_eq!(stuck_run_stats(&[]).density(), 0.0);
+        assert_eq!(stuck_run_stats(&[7]).total_pairs, 0);
+        assert_eq!(stuck_run_stats(&[7]).density(), 0.0);
+        // The `max_run` field is EXACTLY what the legacy `max_consecutive_stuck_run` returns (the
+        // delegation preserves the #580v2 metric byte-for-byte).
+        let seq = [5u32, 5, 5, 6, 6, 7];
+        assert_eq!(
+            stuck_run_stats(&seq).max_run,
+            max_consecutive_stuck_run(&seq)
+        );
+    }
+
+    #[test]
+    fn stuck_density_ceiling_sits_between_healthy_and_judder_588() {
+        // Guards the real-data anchor: the 1% ceiling is an ORDER OF MAGNITUDE above the measured
+        // healthy density (run 572001 ≈ 0.10%) and ~2 orders below a systematic judder (≈75%) — so it
+        // can never silently drift toward either bound.
+        let healthy = 22.0 / 21866.0; // ≈0.10%, the live-measured 572001 healthy density
+        let judder = 450.0 / 599.0; // ≈75%, catch_up_judder_ticks()
+        assert!(
+            healthy < IMAG_OPTICAL_MAX_STUCK_DENSITY,
+            "the measured healthy 0.10% must sit UNDER the 1% ceiling"
+        );
+        assert!(
+            IMAG_OPTICAL_MAX_STUCK_DENSITY < judder,
+            "the 1% ceiling must sit UNDER a ~75% systematic judder"
+        );
+        assert!(
+            IMAG_OPTICAL_MAX_STUCK_DENSITY >= healthy * 9.0,
+            "the ceiling must stay ≥ ~10x the measured healthy density (real-data-anchored margin)"
         );
     }
 

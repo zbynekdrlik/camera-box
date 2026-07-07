@@ -1564,7 +1564,7 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
                  the camera captured NOTHING moving). #580v2 advance-guard.",
                 c.node, beat.avg_step, beat.expected_step,
             ));
-        } else {
+        } else if !beat.no_stuck_copy() {
             lines.push(format!(
                 "  [{}] NOT zero — cam2 optical COPY/FREEZE ({span}): {} consecutive identical \
                  tick(s) (max Δ0 run {}, above the {} jitter ceiling) — a stalled upstream content \
@@ -1573,6 +1573,23 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
                 c.node,
                 beat.max_stuck_run.saturating_add(1),
                 beat.max_stuck_run,
+                camera_box::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN,
+            ));
+        } else {
+            // #588 — advancing AND no single long run, yet the optical gate FAILED ⇒ a SYSTEMATIC
+            // catch-up JUDDER: MANY SHORT Δ0 runs (each ≤ K) whose AGGREGATE duplication density is
+            // above the ceiling. State exactly what was proven (no-overstatement): the density is the
+            // fault, NOT a single long freeze — the run-length term, the aggregates, AND the burn all
+            // read this as clean.
+            lines.push(format!(
+                "  [{}] NOT zero — cam2 optical SYSTEMATIC JUDDER ({span}): Δ0 duplication density \
+                 {:.2}% above the {:.2}% ceiling, though no single identical-tick run exceeds {} — a \
+                 systematic short-run stutter spread across the whole recording that the run-length \
+                 term, the whole-window surplus/avg_step, AND the render-free-running digital burn \
+                 are all blind to (#588).",
+                c.node,
+                beat.stuck_density * 100.0,
+                camera_box::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_DENSITY * 100.0,
                 camera_box::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN,
             ));
         }
@@ -1666,6 +1683,14 @@ fn node_verdict_json(
         // from the live 572001 re-decode to validate `IMAG_OPTICAL_MAX_STUCK_RUN` (K). A benign beat
         // ⇒ ≤ 1; a copy/freeze ⇒ hundreds.
         "imag_optical_max_stuck_run": v.imag_optical_beat.map(|b| b.max_stuck_run),
+        // #588 — THE 4th orthogonal no-copy metric: the aggregate Δ0 (duplication) DENSITY over the
+        // trimmed window (`stuck_pairs / total_pairs`), ANDed into `is_live_no_copy` via
+        // `no_stuck_density`. A benign 60Hz-vs-60fps beat is ~0.1% (run 572001); a systematic
+        // catch-up judder (many SHORT Δ0 runs each ≤ K) is tens of % — the exact pattern the
+        // `max_stuck_run` (longest-run) term, the surplus/avg_step aggregates, AND the
+        // render-free-running digital burn are all blind to. Surfaced so a consumer sees the value the
+        // gate judged (comprehensive-logging). `null` for every non-imag node.
+        "imag_optical_stuck_density": v.imag_optical_beat.map(|b| b.stuck_density),
         // #580v2 DIAGNOSTIC-ONLY (no longer the pass/fail): `is_net_zero` (`surplus <= 0` AND
         // advancing) explains a beat-compensated read but is NOT the gate — a genuinely-zero run can
         // carry a small `surplus > 0` clock residual (run 572001 = +3). Surfaced so `zero_loss: true`
