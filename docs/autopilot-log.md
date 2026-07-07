@@ -2177,3 +2177,33 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   change, like #562). The supervisor drives the live-rig `verify-device.sh NAME` acceptance pass
   against the fixed fleet after merge (drive-rig-in-supervisor); the Tier-0 pure-function RED→GREEN
   is this PR's acceptance.
+- Deep review round (superpowers:requesting-code-review) on GREEN: fixed one real gap found by an
+  earlier independent-review pass — `dpkg_status_installed` originally matched ONLY the exact
+  `"install ok installed"` string, misreading `"hold ok installed"` / `"install ok unpacked"` /
+  `"half-configured"` / `"half-installed"` / `"triggers-pending"` / `"triggers-awaiting"` as NOT
+  installed (a false-green on a held or mid-configure competing daemon). Fixed `5eaaa3e4c` (keys on
+  the two genuinely-gone states: empty and `*' not-installed'`/`*' config-files'`); confirmed the
+  OLD function actually misclassified all three review-cited states before the fix. Added
+  `dpkg_status_installed_true_for_every_files_present_state_false_only_when_genuinely_gone` +
+  `timesync_daemon_verdict_fails_on_held_or_partially_configured_daemon`.
+- Deep-review pass found NO Critical issues in the mechanism; two Important findings were real but
+  OUT OF THIS PR's named scope (#591/#550 only, no scope creep) — filed as tracked follow-ups per
+  no-dropped-work.md rather than silently dropped:
+  - #595: the SAME #550-class staleness bug (age-blind `tail -1` offset read) is still live, unchanged,
+    in `scripts/dantesync-gate.sh` (#7 E2E precondition) and `scripts/clock-offset-painter-gate.sh`
+    (#326 sweep) — both call the untouched `offset_us_from_journal`/`offset_check`/
+    `painter_offset_check` in `scripts/clock-offset-guard.sh`. Confirmed via grep: neither gathers
+    `-o short-iso`, neither has a freshness dimension.
+  - #596: `scripts/drift-guard.sh --check-imag` (imag-nb) does NOT inherit the #591 sole-timesync-
+    authority check (unlike `verify-fleet.sh`, which gets it for free by wrapping `verify-device.sh`)
+    — #591's own issue body item 4 asked for this; it needs a `scripts/lib/` extraction (cross-file
+    design) rather than a same-PR duplication, so it's tracked, not folded in here.
+  - Added a 3rd test (`timesync_authority_verdict_ok_on_the_real_post_provisioning_steady_state`,
+    reviewer-recommended, cheap/same-file/done-now) proving the ACTUAL post-purge steady state
+    (dpkg="" + inactive + enabled=masked, since setup-device.sh/create-usb-linux.sh always mask as
+    a backstop even after a successful purge) reaches and passes the enabled-state neutral check,
+    not just the dpkg short-circuit.
+- Windows W32Time verify-gate: per this ticket's explicit dispatch scope, documented only (not filed)
+  — `.claude/skills/ops/SKILL.md` now states the invariant + check command; a Windows gate itself
+  remains a soft follow-up (dispatch's own acceptance criterion), distinct from #595/#596 above which
+  are NEW review findings and ARE filed.

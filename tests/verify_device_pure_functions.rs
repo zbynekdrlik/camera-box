@@ -347,6 +347,24 @@ openntpd||inactive|";
 }
 
 #[test]
+fn timesync_authority_verdict_ok_on_the_real_post_provisioning_steady_state() {
+    // #591 review: the fixture above only exercises "purged" (empty dpkg, empty enabled) OR
+    // "installed" (which short-circuits on dpkg alone before the enabled-state logic is ever
+    // reached) -- neither pins the ACTUAL steady state setup-device.sh / create-usb-linux.sh
+    // produce after a successful purge, since both ALSO run `systemctl mask` as an unconditional
+    // backstop even when the purge succeeds: dpkg="" (purged) but enabled=masked (not empty).
+    // Confirms timesync_enabled_state_neutral's "masked" branch is actually reached (and passes)
+    // on a genuinely-purged daemon, not just short-circuited past by the dpkg check.
+    let block = "\
+systemd-timesyncd||inactive|masked
+chrony||inactive|masked
+ntp||inactive|masked
+ntpsec||inactive|masked
+openntpd||inactive|masked";
+    assert_eq!(authority_verdict(block), "ok");
+}
+
+#[test]
 fn timesync_authority_verdict_fails_on_cam5_cam6_timesyncd() {
     // The real cam5/6 failure: systemd-timesyncd installed + active + enabled ALONGSIDE dantesync.
     let block = "\
