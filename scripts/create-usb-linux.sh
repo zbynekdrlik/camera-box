@@ -284,6 +284,19 @@ Unattended-Upgrade::Package-Blacklist {
 };
 NOKERNEL_EOF
 
+# #591: dantesync is the rig's SOLE clock authority (installed later by setup-device.sh). The base
+# debootstrap image ships systemd-timesyncd; a minimalist cambox/imag appliance must run NO other
+# timesync daemon (cam5/cam6 ran systemd-timesyncd alongside dantesync -> a real 5.28s clock
+# desync). PURGE it from the image so a freshly-imaged box never ships a 2nd timesync daemon, then
+# mask it as a backstop. chrony/ntp/ntpsec/openntpd are not in the base image but are purged too as
+# belt-and-suspenders (a no-op when absent).
+for _ts in systemd-timesyncd chrony ntp ntpsec openntpd; do
+    systemctl disable --now "$_ts" 2>/dev/null || true
+    apt-get purge -y "$_ts" 2>/dev/null \
+        || dpkg --purge --force-depends "$_ts" 2>/dev/null || true
+    systemctl mask "$_ts" 2>/dev/null || true
+done
+
 # Create user newlevel
 useradd -m -s /bin/bash -G sudo newlevel
 echo "newlevel:newlevel" | chpasswd

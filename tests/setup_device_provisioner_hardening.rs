@@ -352,13 +352,13 @@ fn setup_device_purges_every_competing_timesync_daemon() {
 fn setup_device_timesync_purge_runs_before_installing_dantesync() {
     // Order: purge competing daemons BEFORE installing dantesync (the sole authority) — reads as
     // "remove every other clock, then install ours". Both are in the rw window (the ro conversion
-    // is STEP 18, after both).
+    // is STEP 18, after both). Anchor on the dantesync DOWNLOAD (the actual install action), not
+    // the STEP 17 banner echo which also contains the words "Installing dantesync".
     let body = read_script();
     let purge_idx = first_noncomment_idx(&body, r#"apt-get purge -y "$_ts""#)
         .expect("the #591 competing-timesync purge must be present");
-    let dantesync_idx = first_noncomment_idx(&body, "Installing dantesync")
-        .or_else(|| first_noncomment_idx(&body, "/usr/local/bin/dantesync"))
-        .expect("the dantesync install step must be present");
+    let dantesync_idx = first_noncomment_idx(&body, "-o /usr/local/bin/dantesync")
+        .expect("the dantesync download (install action) must be present");
     assert!(
         purge_idx < dantesync_idx,
         "the competing-timesync purge (line {purge_idx}) must run before the dantesync install \

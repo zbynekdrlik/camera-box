@@ -838,10 +838,27 @@ chmod +x /etc/rc.local
 echo "  Created: /etc/rc.local (USB autosuspend off, CPU performance)"
 
 # =============================================================================
-# STEP 17: Install dantesync (PTP time synchronization)
+# STEP 17: Install dantesync (PTP time synchronization) -- the SOLE clock authority
 # =============================================================================
 echo ""
 echo -e "${GREEN}[17/${TOTAL_STEPS}] Installing dantesync...${NC}"
+
+# #591: dantesync is the rig's SOLE clock authority (PTP/NTP). A minimalist cambox/imag appliance
+# must run NO other timesync daemon -- cam5/cam6 (N150) shipped with systemd-timesyncd active
+# ALONGSIDE dantesync, causing a real 5.28-second clock desync ([NTP] offset:-5280959us) that was
+# invisible to weeks of "passing" verification. Masking is a band-aid; the package must be GONE, so
+# PURGE every competing timesync daemon FIRST (then install dantesync below). systemd-timesyncd is
+# the one the base Ubuntu image actually ships; chrony/ntp/ntpsec/openntpd are belt-and-suspenders
+# (normally absent -> a no-op purge). Runs in the rw window (the ro conversion is STEP 18); a masked
+# /dev/null symlink backstops each so a stray re-install can't silently re-activate it. The (r)
+# check in verify-device.sh hard-fails a box on which ANY of these is still installed/active/enabled.
+for _ts in systemd-timesyncd chrony ntp ntpsec openntpd; do
+    systemctl disable --now "$_ts" 2>/dev/null || true
+    apt-get purge -y "$_ts" 2>/dev/null \
+        || dpkg --purge --force-depends "$_ts" 2>/dev/null || true
+    systemctl mask "$_ts" 2>/dev/null || true
+done
+echo "  #591: purged + masked competing timesync daemons (dantesync is the sole clock authority)"
 
 DANTESYNC_INSTALLED=false
 

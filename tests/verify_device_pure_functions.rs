@@ -15,7 +15,7 @@
 //!   `ptp_locked_from_journal()`
 //! - `scripts/camera-set.sh`: `camera_resolve()` (NAME -> IP / `CAMERA_GENLOCK_FPS`)
 //!
-//! so this file also proves the composition (`dantesync_locked_ok` / `dantesync_offset_ok` /
+//! so this file also proves the composition (`dantesync_locked_ok` / `dantesync_offset_verdict` /
 //! `ndi_emit_ok` / `ndi_journal_has_fatal`) works against real fixture text, not just that the
 //! new script's OWN functions are correct in isolation.
 //!
@@ -369,8 +369,14 @@ fn timesync_authority_verdict_fails_on_masked_but_installed() {
     // and inactive (the cam1-4 "installed-but-disabled/masked" state this gate now rejects).
     let block = "systemd-timesyncd|install ok installed|inactive|masked";
     let v = authority_verdict(block);
-    assert_ne!(v, "ok", "masked-but-installed must still FAIL (purge, don't mask)");
-    assert!(v.contains("systemd-timesyncd"), "must name the offender: {v}");
+    assert_ne!(
+        v, "ok",
+        "masked-but-installed must still FAIL (purge, don't mask)"
+    );
+    assert!(
+        v.contains("systemd-timesyncd"),
+        "must name the offender: {v}"
+    );
 }
 
 #[test]
@@ -390,9 +396,21 @@ fn timesync_daemon_verdict_ok_only_when_absent_inactive_neutral() {
     assert_eq!(code, 0, "stderr: {err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], "ok", "absent/inactive/neutral must be ok");
-    assert!(lines[1].contains("INSTALLED"), "installed must FAIL: {}", lines[1]);
-    assert!(lines[2].contains("ACTIVE"), "active must FAIL: {}", lines[2]);
-    assert!(lines[3].contains("enabled"), "enabled must FAIL: {}", lines[3]);
+    assert!(
+        lines[1].contains("INSTALLED"),
+        "installed must FAIL: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("ACTIVE"),
+        "active must FAIL: {}",
+        lines[2]
+    );
+    assert!(
+        lines[3].contains("enabled"),
+        "enabled must FAIL: {}",
+        lines[3]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
