@@ -15,7 +15,7 @@
 //!   `ptp_locked_from_journal()`
 //! - `scripts/camera-set.sh`: `camera_resolve()` (NAME -> IP / `CAMERA_GENLOCK_FPS`)
 //!
-//! so this file also proves the composition (`dantesync_locked_ok` / `dantesync_offset_ok` /
+//! so this file also proves the composition (`dantesync_locked_ok` / `dantesync_offset_verdict` /
 //! `ndi_emit_ok` / `ndi_journal_has_fatal`) works against real fixture text, not just that the
 //! new script's OWN functions are correct in isolation.
 //!
@@ -247,16 +247,273 @@ fn dantesync_locked_ok_false_when_ntp_line_is_the_most_recent_event() {
     assert_eq!(out.trim(), "NO");
 }
 
-#[test]
-fn dantesync_offset_ok_true_within_bound_false_outside() {
+// ---------------------------------------------------------------------------------------------
+// (d) FRESH offset verdict (#550/#591) — supersedes the pre-#591 dantesync_offset_ok, which read
+// the LAST "[NTP] offset:" line via tail -1 regardless of AGE. On cam5/6 that graded on a STALE
+// boot-STEP line ("[NTP] offset:-5280959us"), not the current offset (#550). dantesync_offset_verdict
+// reads the FRESHEST offset line, REJECTS it if older than a freshness bound behind the newest
+// journal line, and only then checks |offset| against the bound. Fixtures use the real
+// `journalctl -o short-iso` timestamp form (colon in the TZ offset, e.g. +02:00).
+// ---------------------------------------------------------------------------------------------
+
+// Fresh, in-bound: the freshest [NTP] offset line is +14us, ~1s behind the newest PTP line.
+const DS_FRESH_OK: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:+14us (threshold:535us, adaptive)
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// The real cam5/6 desync: a FRESH [NTP] offset:-5280959us (a competing timesyncd stepping the
+// clock -> a genuine 5.28s error), ~1s behind the newest PTP line.
+const DS_FRESH_DRIFT: &str = "\
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:-5280959us
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// A STALE boot-step offset line (#550): the ONLY [NTP] offset line is >1h behind the newest PTP
+// line, so it must NOT be read as the current offset (the pre-#591 tail -1 bug graded on exactly
+// this stale value).
+const DS_STALE: &str = "\
+2026-07-07T17:20:13+02:00 CAM6 dantesync[900]: [NTP] offset:-4357480us
+2026-07-07T18:36:44+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+// No [NTP] offset line at all — only PTP servo lines.
+const DS_ABSENT: &str = "\
+2026-07-07T18:36:44+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM6 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+fn offset_verdict(journal: &str) -> String {
     let (code, out, err) = run_sourced(&format!(
-        "TEXT='{}'\n\
-         if dantesync_offset_ok \"$TEXT\" 2000; then echo WITHIN; else echo OUTSIDE; fi\n\
-         if dantesync_offset_ok \"$TEXT\" 100; then echo WITHIN; else echo OUTSIDE; fi",
-        DANTESYNC_LOCKED_JOURNAL.replace('\'', "'\\''")
+        "TEXT='{}'\ndantesync_offset_verdict \"$TEXT\" 300 2000",
+        journal.replace('\'', "'\\''")
     ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn dantesync_offset_verdict_ok_on_fresh_in_bound_offset() {
+    assert_eq!(offset_verdict(DS_FRESH_OK), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_drift_on_fresh_large_offset() {
+    // The cam5/6 5.28s desync — a FRESH out-of-bound offset is a hard DRIFT (#591). A bare
+    // "[NTP] offset:-5280959us" (no adaptive-threshold suffix) is the out-of-range fallback form.
+    assert_eq!(offset_verdict(DS_FRESH_DRIFT), "drift");
+}
+
+#[test]
+fn dantesync_offset_verdict_rejects_stale_boot_step_line() {
+    // #550: the freshest [NTP] offset line is a >1h-old boot STEP; it must NOT be read as the
+    // current offset (the pre-#591 tail -1 bug graded on exactly this stale value). Verdict is
+    // "stale", never "drift" (a stale value must never look like a real current desync) nor "ok".
+    assert_eq!(offset_verdict(DS_STALE), "stale");
+}
+
+#[test]
+fn dantesync_offset_verdict_absent_when_no_offset_line() {
+    assert_eq!(offset_verdict(DS_ABSENT), "absent");
+}
+
+// ---------------------------------------------------------------------------------------------
+// (r) single timesync authority: dantesync ONLY, no competing daemon installed/active/enabled (#591)
+// ---------------------------------------------------------------------------------------------
+
+fn authority_verdict(block: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\ntimesync_authority_verdict \"$BLOCK\"",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn timesync_authority_verdict_ok_on_clean_box() {
+    // Every competing daemon not-installed (dpkg empty), inactive, no enabled state -> dantesync
+    // is the sole clock authority. Block format: NAME|DPKG_STATUS|IS_ACTIVE|IS_ENABLED.
+    let block = "\
+systemd-timesyncd||inactive|
+chrony||inactive|
+ntp||inactive|
+ntpsec||inactive|
+openntpd||inactive|";
+    assert_eq!(authority_verdict(block), "ok");
+}
+
+#[test]
+fn timesync_authority_verdict_ok_on_the_real_post_provisioning_steady_state() {
+    // #591 review: the fixture above only exercises "purged" (empty dpkg, empty enabled) OR
+    // "installed" (which short-circuits on dpkg alone before the enabled-state logic is ever
+    // reached) -- neither pins the ACTUAL steady state setup-device.sh / create-usb-linux.sh
+    // produce after a successful purge, since both ALSO run `systemctl mask` as an unconditional
+    // backstop even when the purge succeeds: dpkg="" (purged) but enabled=masked (not empty).
+    // Confirms timesync_enabled_state_neutral's "masked" branch is actually reached (and passes)
+    // on a genuinely-purged daemon, not just short-circuited past by the dpkg check.
+    let block = "\
+systemd-timesyncd||inactive|masked
+chrony||inactive|masked
+ntp||inactive|masked
+ntpsec||inactive|masked
+openntpd||inactive|masked";
+    assert_eq!(authority_verdict(block), "ok");
+}
+
+#[test]
+fn timesync_authority_verdict_fails_on_cam5_cam6_timesyncd() {
+    // The real cam5/6 failure: systemd-timesyncd installed + active + enabled ALONGSIDE dantesync.
+    let block = "\
+systemd-timesyncd|install ok installed|active|enabled
+chrony||inactive|
+ntp||inactive|
+ntpsec||inactive|
+openntpd||inactive|";
+    let v = authority_verdict(block);
+    assert_ne!(v, "ok", "cam5/6 double-daemon must FAIL");
+    assert!(
+        v.contains("FAIL:") && v.contains("systemd-timesyncd"),
+        "verdict must name the offender: {v}"
+    );
+}
+
+#[test]
+fn timesync_authority_verdict_fails_on_masked_but_installed() {
+    // Masking is NOT enough — a minimalist appliance PURGES it. installed = FAIL even when masked
+    // and inactive (the cam1-4 "installed-but-disabled/masked" state this gate now rejects).
+    let block = "systemd-timesyncd|install ok installed|inactive|masked";
+    let v = authority_verdict(block);
+    assert_ne!(
+        v, "ok",
+        "masked-but-installed must still FAIL (purge, don't mask)"
+    );
+    assert!(
+        v.contains("systemd-timesyncd"),
+        "must name the offender: {v}"
+    );
+}
+
+#[test]
+fn timesync_daemon_verdict_ok_only_when_absent_inactive_neutral() {
+    let (code, out, err) = run_sourced(
+        r#"
+        # absent (empty dpkg), inactive, empty enabled -> ok
+        timesync_daemon_verdict systemd-timesyncd "" inactive ""
+        # installed (even masked + inactive) -> FAIL (purge, not mask)
+        timesync_daemon_verdict systemd-timesyncd "install ok installed" inactive masked
+        # not installed but ACTIVE -> FAIL
+        timesync_daemon_verdict chrony "" active ""
+        # not installed but ENABLED (not neutral) -> FAIL
+        timesync_daemon_verdict ntp "" inactive enabled
+        "#,
+    );
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out.trim(), "WITHIN\nOUTSIDE");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "ok", "absent/inactive/neutral must be ok");
+    assert!(
+        lines[1].contains("INSTALLED"),
+        "installed must FAIL: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("ACTIVE"),
+        "active must FAIL: {}",
+        lines[2]
+    );
+    assert!(
+        lines[3].contains("enabled"),
+        "enabled must FAIL: {}",
+        lines[3]
+    );
+}
+
+// dpkg_status_installed edge cases (independent-review finding, #591): the ORIGINAL implementation
+// matched ONLY the exact "install ok installed" triad, missing every other files-present dpkg
+// state (a held package, or one caught mid-unpack/configure) -- all of which leave the competing
+// daemon's binary+unit on disk, exactly what this check exists to reject. Verified via the pure
+// function directly (not just the composed timesync_daemon_verdict) so the dpkg-state contract is
+// pinned on its own.
+#[test]
+fn dpkg_status_installed_true_for_every_files_present_state_false_only_when_genuinely_gone() {
+    let (code, out, err) = run_sourced(
+        r#"
+        for st in \
+          "install ok installed" \
+          "hold ok installed" \
+          "install ok unpacked" \
+          "install ok half-configured" \
+          "install ok half-installed" \
+          "install ok triggers-pending" \
+          "install ok triggers-awaiting" \
+          "deinstall ok config-files" \
+          "purge ok not-installed" \
+          ""; do
+          if dpkg_status_installed "$st"; then echo "YES:$st"; else echo "NO:$st"; fi
+        done
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    // Files-present states -> YES (installed).
+    for (i, st) in [
+        "install ok installed",
+        "hold ok installed",
+        "install ok unpacked",
+        "install ok half-configured",
+        "install ok half-installed",
+        "install ok triggers-pending",
+        "install ok triggers-awaiting",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            lines[i],
+            format!("YES:{st}"),
+            "'{st}' leaves files on disk -- must be treated as installed"
+        );
+    }
+    // Genuinely-gone states -> NO (not installed).
+    for (i, st) in ["deinstall ok config-files", "purge ok not-installed", ""]
+        .iter()
+        .enumerate()
+    {
+        let idx = 7 + i;
+        assert_eq!(
+            lines[idx],
+            format!("NO:{st}"),
+            "'{st}' means the package is genuinely gone"
+        );
+    }
+}
+
+#[test]
+fn timesync_daemon_verdict_fails_on_held_or_partially_configured_daemon() {
+    // Regression for the independent-review finding: a held or mid-configure competing daemon
+    // (files present, not the exact "install ok installed" string) must still FAIL through the
+    // composed timesync_daemon_verdict, not just the isolated dpkg_status_installed.
+    let (code, out, err) = run_sourced(
+        r#"
+        timesync_daemon_verdict systemd-timesyncd "hold ok installed" inactive masked
+        timesync_daemon_verdict systemd-timesyncd "install ok unpacked" inactive ""
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].contains("INSTALLED"),
+        "held package must FAIL: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("INSTALLED"),
+        "mid-unpack package must FAIL: {}",
+        lines[1]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

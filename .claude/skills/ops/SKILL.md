@@ -34,6 +34,30 @@ All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 chrony / ptp4l / systemd-timesyncd / any other NTP/PTP tool, and NEVER run
 `timedatectl set-ntp true` (DanteSync's `install.sh` disables them).
 
+**#591 — timesyncd is a HARD-FAIL, and the appliance must not even HAVE it installed.**
+cam5/cam6 (N150) shipped with `systemd-timesyncd` **active+enabled ALONGSIDE dantesync** → a real
+**5.28-second** clock desync (`[NTP] offset:-5280959us`), invisible to weeks of "passing" verify
+runs. Masking is a band-aid — a minimalist cambox/imag appliance runs ONLY dantesync, so the
+package must be **PURGED**. Enforcement (all landed #591):
+- **Provisioning purges it:** `setup-device.sh` STEP 17 + `create-usb-linux.sh` chroot both
+  `apt-get purge -y systemd-timesyncd chrony ntp ntpsec openntpd` (loop, then `systemctl mask` as
+  backstop). `apt-get -s purge systemd-timesyncd` confirms NO cascade (standalone removal).
+- **`verify-device.sh` (r) hard-fails** any competing timesync daemon that is INSTALLED (even
+  masked) / ACTIVE / enabled (`timesync_authority_verdict`). A clean box = every competing daemon
+  not-installed, dantesync only.
+- **`verify-device.sh` (d) rewritten (#550):** grades the FRESHEST `[NTP] offset:` line (reads
+  `journalctl -o short-iso`, rejects a stale boot-step line via `DANTESYNC_OFFSET_FRESHNESS_S`
+  default 300s), FAILs on a fresh offset outside ±2000µs (`CLOCK_GUARD_BOUND_US`). The pre-#591
+  `tail -1` grabbed the stale `-5280959us` boot-step line (the #550 bug).
+
+**Windows (strih + stream) — W32Time invariant.** DanteSync is the clock authority on the Windows
+OBS boxes too; the built-in Windows Time service (`W32Time`) must be **Stopped + Disabled** (already
+fixed live fleet-wide). Check read-only via the `win-*` MCP `Shell`:
+`Get-Service W32Time | Select Status,StartType` → must show `Stopped` / `Disabled` (and
+`Get-Service dantesync` / the named-pipe status = Running). A Linux appliance verify-gate ((r)
+above) exists; **a Windows W32Time verify-gate is a FOLLOW-UP** (no automated gate asserts W32Time
+Stopped/Disabled on strih/stream yet — file one if it recurs).
+
 **`timedatectl` LIES here** — reports "System clock synchronized: no / NTP inactive"
 because DanteSync disciplines the clock DIRECTLY (not via the kernel NTP path timedatectl
 watches). This trap has recurred TWICE (2026-06-15, 2026-06-17). Trust DanteSync's own

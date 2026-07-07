@@ -2139,3 +2139,71 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   return-monitor picture on cam2 after a re-provision. The Tier-0 proof (provisioning writes
   `--display`, verify-device.sh's new sub-check catches its absence) is the acceptance for this PR;
   the visual confirmation rides a future rig session, like #579's riders.
+
+## #591 (solo, closes #591 + #550) — 2026-07-07 — strict timesync-authority gate + fresh-offset (d)
+- Root cause (found + fixed LIVE 2026-07-07): cam5/cam6 (N150) shipped with `systemd-timesyncd`
+  active+enabled ALONGSIDE dantesync → a real **5.28-second** clock desync
+  (`[NTP] offset:-5280959us`), invisible to weeks of "passing" verify runs. Two defects let it
+  through: (1) provisioning never removed timesyncd; (2) verify-device `(d)` read only the LAST
+  `[NTP] offset:` line via `tail -1` regardless of age (the stale boot-STEP line — that IS #550) and
+  never checked for a 2nd timesync daemon. Live fleet already fixed (timesyncd purged fleet-wide);
+  this PR makes recurrence impossible via provisioning + a strict verify gate.
+- Version bump `02d01e6de` (1.7.0-dev.283).
+- RED `5f64445d9`: `tests/verify_device_pure_functions.rs` (8 new — `dantesync_offset_verdict`
+  ok/drift/stale/absent + `timesync_authority_verdict`/`timesync_daemon_verdict`; removed superseded
+  `dantesync_offset_ok` test) + `tests/setup_device_provisioner_hardening.rs` (3 new — setup-device
+  purge+mask loop, purge-before-dantesync order, create-usb chroot purge). All failing (functions/
+  provisioner-text absent).
+- GREEN `19b420aec`:
+  - `scripts/setup-device.sh` STEP 17 + `scripts/create-usb-linux.sh` chroot: loop
+    `apt-get purge -y systemd-timesyncd chrony ntp ntpsec openntpd` (then `systemctl mask` backstop)
+    BEFORE the dantesync install. `apt-get -s purge systemd-timesyncd` = no cascade (standalone).
+  - `scripts/verify-device.sh`: NEW `(r)` — dantesync must be SOLE authority; any competing daemon
+    INSTALLED (even masked) / ACTIVE / enabled = hard FAIL (`timesync_authority_verdict` +
+    `timesync_daemon_verdict` + `dpkg_status_installed` + `timesync_enabled_state_neutral`). `(d)`
+    rewritten (closes #550): `dantesync_offset_verdict` reads the FRESHEST `[NTP] offset:` line from
+    a `-o short-iso` dump, rejects a stale line via `DANTESYNC_OFFSET_FRESHNESS_S` (300s) using the
+    newest journal line as a same-box "now" proxy, FAILs on a fresh offset outside ±2000µs; stale/
+    absent + PTP LOCKED passes (no false-fail — (r) guarantees sole authority), stale/absent + PTP
+    not-locked = FAIL. Removed superseded `dantesync_offset_ok`.
+- Playbook: `.claude/skills/ops/SKILL.md` (timesyncd HARD-FAIL + purge policy + Windows W32Time
+  invariant `Get-Service W32Time` = Stopped/Disabled, a Windows verify-gate noted as follow-up) and
+  `.claude/skills/provision/SKILL.md` (rewrote check (d) row, added check (r) row).
+- Design note (#550 tension resolved per the user's in-issue #550 stance): the fresh-offset verdict
+  gates on the REAL signal — a FRESH large offset is a hard desync FAIL; a stale boot-step line is
+  NOT graded (that was the #550 false-fail); "no fresh offset but PTP LOCKED" passes because (r)
+  already guarantees nothing else is stepping the clock. Not a weakening — layered defense.
+- **Not verified live (deferred to supervisor):** no auto-deploy pipeline (provisioning-script
+  change, like #562). The supervisor drives the live-rig `verify-device.sh NAME` acceptance pass
+  against the fixed fleet after merge (drive-rig-in-supervisor); the Tier-0 pure-function RED→GREEN
+  is this PR's acceptance.
+- Deep review round (superpowers:requesting-code-review) on GREEN: fixed one real gap found by an
+  earlier independent-review pass — `dpkg_status_installed` originally matched ONLY the exact
+  `"install ok installed"` string, misreading `"hold ok installed"` / `"install ok unpacked"` /
+  `"half-configured"` / `"half-installed"` / `"triggers-pending"` / `"triggers-awaiting"` as NOT
+  installed (a false-green on a held or mid-configure competing daemon). Fixed `5eaaa3e4c` (keys on
+  the two genuinely-gone states: empty and `*' not-installed'`/`*' config-files'`); confirmed the
+  OLD function actually misclassified all three review-cited states before the fix. Added
+  `dpkg_status_installed_true_for_every_files_present_state_false_only_when_genuinely_gone` +
+  `timesync_daemon_verdict_fails_on_held_or_partially_configured_daemon`.
+- Deep-review pass found NO Critical issues in the mechanism; two Important findings were real but
+  OUT OF THIS PR's named scope (#591/#550 only, no scope creep) — filed as tracked follow-ups per
+  no-dropped-work.md rather than silently dropped:
+  - #595: the SAME #550-class staleness bug (age-blind `tail -1` offset read) is still live, unchanged,
+    in `scripts/dantesync-gate.sh` (#7 E2E precondition) and `scripts/clock-offset-painter-gate.sh`
+    (#326 sweep) — both call the untouched `offset_us_from_journal`/`offset_check`/
+    `painter_offset_check` in `scripts/clock-offset-guard.sh`. Confirmed via grep: neither gathers
+    `-o short-iso`, neither has a freshness dimension.
+  - #596: `scripts/drift-guard.sh --check-imag` (imag-nb) does NOT inherit the #591 sole-timesync-
+    authority check (unlike `verify-fleet.sh`, which gets it for free by wrapping `verify-device.sh`)
+    — #591's own issue body item 4 asked for this; it needs a `scripts/lib/` extraction (cross-file
+    design) rather than a same-PR duplication, so it's tracked, not folded in here.
+  - Added a 3rd test (`timesync_authority_verdict_ok_on_the_real_post_provisioning_steady_state`,
+    reviewer-recommended, cheap/same-file/done-now) proving the ACTUAL post-purge steady state
+    (dpkg="" + inactive + enabled=masked, since setup-device.sh/create-usb-linux.sh always mask as
+    a backstop even after a successful purge) reaches and passes the enabled-state neutral check,
+    not just the dpkg short-circuit.
+- Windows W32Time verify-gate: per this ticket's explicit dispatch scope, documented only (not filed)
+  — `.claude/skills/ops/SKILL.md` now states the invariant + check command; a Windows gate itself
+  remains a soft follow-up (dispatch's own acceptance criterion), distinct from #595/#596 above which
+  are NEW review findings and ARE filed.

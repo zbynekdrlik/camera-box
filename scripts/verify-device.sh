@@ -41,7 +41,8 @@
 #   (a) camera-box --version is a valid, well-formed fleet version string
 #   (b) systemctl is-active camera-box == active
 #   (c) NDI sender is streaming (journalctl emit-fps / genlock-report line), no FATAL/panic
-#   (d) dantesync PTP servo LOCKED + clock offset within bound (scripts/clock-offset-guard.sh)
+#   (d) dantesync PTP servo LOCKED + a FRESH clock offset within bound (#550/#591 -- rejects a
+#       stale boot-step "[NTP] offset:" line; a fresh out-of-bound offset is a hard desync FAIL)
 #   (e) genlock.conf drop-in present, CAMERA_BOX_GENLOCK_FPS matches camera-set.sh's per-cam value
 #   (f) cpu-affinity.conf drop-in present (CPUAffinity=<isolated core>)
 #   (g) /usr/lib/ndi/libndi.so.6 is a root-owned symlink chain to a root-owned regular file
@@ -61,6 +62,9 @@
 #   (q) WARNING only (never fails the gate): stale `.bak` cruft under /usr/lib/ndi or the systemd
 #       drop-in dir (#453 -- inert leftovers from a manual NDI upgrade / a stale drop-in edit;
 #       setup-device.sh self-heals this on the box's next provisioning pass)
+#   (r) dantesync is the SOLE timesync authority -- NO competing timesync daemon (systemd-timesyncd
+#       / chrony / ntp / ntpsec / openntpd) is INSTALLED (even masked), ACTIVE, or enabled (#591;
+#       cam5/6 ran systemd-timesyncd alongside dantesync -> a real 5.28s clock desync)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -83,6 +87,12 @@ SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
 DEVICE_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
+# #550/#591: the freshest dantesync "[NTP] offset:" line must be no older than this many seconds
+# behind the newest journal line, or the check treats it as STALE (never grading on an aged
+# boot-step line -- the #550 bug). dantesync emits a [PTP] servo line every second and an
+# [NTP] offset line on a ~30s cadence, so 300s is generous headroom that never false-fails a
+# healthy box yet rejects the ~1h-old boot-step line that started #550.
+DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running kernel == this exact version
 NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#547)
 
@@ -156,12 +166,137 @@ dantesync_locked_ok() {
   [ "$(ptp_locked_from_journal "$1")" = "LOCKED" ]
 }
 
-# dantesync_offset_ok JOURNAL_TEXT BOUND_US -> 0 iff the most recent "[NTP] offset:" reading is
-# within BOUND_US (offset_check() from clock-offset-guard.sh; UNKNOWN/malformed is never OK).
-dantesync_offset_ok() {
-  local journal="$1" bound="$2" offset
-  offset="$(offset_us_from_journal "$journal")"
-  offset_check "dantesync" "$offset" "$bound" >/dev/null
+# _short_iso_epoch ISO -> epoch seconds for a `journalctl -o short-iso` timestamp
+# (e.g. 2026-07-07T18:36:44+02:00), "" if unparseable/empty. Uses `date -d` (deterministic given
+# the input -- no network/state; the explicit numeric TZ offset makes the result independent of the
+# host's local timezone). The `T` is normalised to a space for maximal date(1) portability.
+_short_iso_epoch() {
+  local iso="$1" e
+  [ -n "$iso" ] || { printf ''; return 0; }
+  e="$(date -d "${iso/T/ }" +%s 2>/dev/null)" || true
+  printf '%s' "${e:-}"
+}
+
+# dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US -> "ok" | "drift" | "stale" | "absent".
+# Supersedes the age-blind dantesync_offset_ok (which read the LAST "[NTP] offset:" line via tail -1
+# regardless of age -- on cam5/6 that graded on a STALE boot-STEP line, the #550 bug). It finds the
+# FRESHEST "[NTP] offset:" line, rejects it if older than FRESHNESS_S behind the newest journal line
+# (dantesync logs a [PTP] servo line every second, so the newest journal line is a reliable "now"
+# proxy -- and both timestamps come from the SAME box, so the host's own clock never enters the
+# comparison), and only then grades |offset| against BOUND_US.
+#   absent -- no "[NTP] offset:" line at all in JOURNAL.
+#   stale  -- the freshest "[NTP] offset:" line is older than FRESHNESS_S behind the newest journal
+#             line, OR either timestamp is unparseable, OR the offset value is malformed (we cannot
+#             prove a FRESH in-bound reading -- never a silent pass on a possibly-stale value).
+#   drift  -- a FRESH offset line whose |offset| exceeds BOUND_US (a real desync -- the cam5/6 5.28s
+#             case; a bare "[NTP] offset:-5280959us" fallback line lands here by magnitude).
+#   ok     -- a FRESH offset line within BOUND_US.
+# JOURNAL must be gathered with `-o short-iso` (ISO-timestamped lines). abs_int() comes from the
+# sourced clock-offset-guard.sh.
+dantesync_offset_verdict() {
+  local journal="$1" fresh="$2" bound="$3"
+  local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
+  local off_line off_iso off_us now_iso now_e off_e mag
+  off_line="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -1 || true)"
+  [ -n "$off_line" ] || { printf 'absent\n'; return 0; }
+  off_iso="$(printf '%s' "$off_line" | grep -oE "^$iso_re" | head -1 || true)"
+  now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
+  now_e="$(_short_iso_epoch "$now_iso")"
+  off_e="$(_short_iso_epoch "$off_iso")"
+  if [ -z "$now_e" ] || [ -z "$off_e" ] || [ "$((now_e - off_e))" -gt "$fresh" ]; then
+    printf 'stale\n'; return 0
+  fi
+  off_us="$(printf '%s' "$off_line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
+  if [ -z "$off_us" ] || ! printf '%s' "$off_us" | grep -qE '^-?[0-9]+$'; then
+    printf 'stale\n'; return 0
+  fi
+  mag="$(abs_int "$off_us")"
+  if [ "$mag" -le "$bound" ]; then
+    printf 'ok\n'
+  else
+    printf 'drift\n'
+  fi
+}
+
+# --- (r) single timesync authority: dantesync ONLY, no competing daemon (#591) -----------------
+# The rig's clock master is dantesync (PTP/NTP). A minimalist cambox/imag appliance must run NO
+# other timesync daemon -- cam5/cam6 shipped with systemd-timesyncd active ALONGSIDE dantesync,
+# causing a real 5.28-second clock desync ([NTP] offset:-5280959us) invisible to weeks of "passing"
+# verification. This gate makes a 2nd authority impossible to ship: a competing daemon that is
+# INSTALLED (even masked), ACTIVE, or merely enabled/unmasked is a hard FAIL. dantesync is the ONE
+# authority that must be present; it is deliberately NOT in the competing set.
+
+# dpkg_status_installed STATUS -> 0 iff STATUS (a `dpkg -s` "Status:" line value, e.g.
+# "install ok installed") shows the package's files are CURRENTLY present on disk (a review-caught
+# false-green gap, #591: the ORIGINAL form only matched the exact "install ok installed" triad,
+# missing "hold ok installed" (an installed daemon the operator apt-mark-held) and every
+# files-unpacked-but-not-fully-configured state -- "install ok unpacked" / "half-configured" /
+# "half-installed" / "triggers-pending" / "triggers-awaiting" -- all of which leave the competing
+# daemon's binary+unit on disk, exactly the "installed" state this check exists to reject even
+# though it isn't yet an active systemd unit). dpkg's Status line is "<want> <flag> <state>"; the
+# ONLY states meaning "files genuinely gone" are: EMPTY (dpkg has never heard of the package --
+# never installed, or fully purged so no Status line prints at all), "not-installed", and
+# "config-files" (removed, only leftover conffiles remain -- binary/unit ARE gone). Every OTHER
+# state means the daemon's files are present on disk in some form -- treated as installed
+# (test-strictness: an ambiguous/partial state is never read as "safely absent").
+dpkg_status_installed() {
+  case "$1" in
+    '') return 1 ;;
+    *' not-installed' | *' config-files') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# timesync_enabled_state_neutral STATE -> 0 iff STATE (trimmed `systemctl is-enabled` output) is a
+# NEUTRAL/absent state: masked / disabled / not-found / empty. Any other state (enabled / static /
+# alias / indirect / enabled-runtime / generated / linked) means the unit is still wired to start.
+timesync_enabled_state_neutral() {
+  case "$(printf '%s' "$1" | tr -d '[:space:]')" in
+    '' | masked | disabled | not-found) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# timesync_daemon_verdict NAME DPKG_STATUS IS_ACTIVE IS_ENABLED -> echoes "ok" or "FAIL: <reason>".
+# A competing timesync daemon FAILs if it is INSTALLED (dpkg) OR ACTIVE OR not in a neutral
+# enabled-state. Masking a competing daemon is NOT enough -- a minimalist appliance purges it, so
+# INSTALLED = FAIL even when masked+inactive (the cam1-4 "installed-but-disabled" state now rejected).
+timesync_daemon_verdict() {
+  local name="$1" dpkg="$2" active="$3" enabled="$4"
+  if dpkg_status_installed "$dpkg"; then
+    printf 'FAIL: %s is INSTALLED -- purge it (a minimalist appliance runs only dantesync; masking is not enough)\n' "$name"
+    return 0
+  fi
+  if [ "$(printf '%s' "$active" | tr -d '[:space:]')" = "active" ]; then
+    printf 'FAIL: %s is ACTIVE -- a 2nd timesync daemon fights dantesync (cam5/6 -> 5.28s desync)\n' "$name"
+    return 0
+  fi
+  if ! timesync_enabled_state_neutral "$enabled"; then
+    printf 'FAIL: %s is enabled (state=%s) -- must be masked/disabled/purged\n' "$name" "${enabled:-<none>}"
+    return 0
+  fi
+  printf 'ok\n'
+}
+
+# timesync_authority_verdict COLLECTED -> "ok" if EVERY competing daemon passes, else the
+# newline-joined "FAIL: ..." reasons. COLLECTED is the live flow's gathered block: one line per
+# daemon, pipe-delimited "NAME|DPKG_STATUS|IS_ACTIVE|IS_ENABLED" (the dpkg status carries spaces but
+# never a `|`, so `|` is a safe field separator). Blank lines are skipped.
+timesync_authority_verdict() {
+  local collected="$1" name dpkg active enabled verdict fails="" nl
+  nl=$'\n'
+  while IFS='|' read -r name dpkg active enabled; do
+    [ -n "$name" ] || continue
+    verdict="$(timesync_daemon_verdict "$name" "$dpkg" "$active" "$enabled")"
+    if [ "$verdict" != "ok" ]; then
+      fails="${fails:+$fails$nl}$verdict"
+    fi
+  done <<< "$collected"
+  if [ -n "$fails" ]; then
+    printf '%s\n' "$fails"
+  else
+    printf 'ok\n'
+  fi
 }
 
 # --- (e) genlock.conf drop-in --------------------------------------------------------------------
@@ -487,7 +622,7 @@ Checks:
   (a) camera-box --version is a valid, well-formed fleet version string
   (b) systemctl is-active camera-box == active
   (c) NDI sender is streaming (journalctl emit-fps / genlock-report line), no FATAL/panic
-  (d) dantesync PTP servo LOCKED + clock offset within bound (scripts/clock-offset-guard.sh)
+  (d) dantesync PTP servo LOCKED + a FRESH clock offset within bound (#550/#591)
   (e) genlock.conf drop-in present, CAMERA_BOX_GENLOCK_FPS matches camera-set.sh's per-cam value
   (f) cpu-affinity.conf drop-in present (CPUAffinity=<isolated core>)
   (g) /usr/lib/ndi/libndi.so.6 is a root-owned symlink chain to a root-owned regular file
@@ -502,8 +637,10 @@ Checks:
   (p) config.toml [display] + ExecStart --display both match camera-set.sh's per-mechanism tables
       (CAMERA_DISPLAY_SOURCE / CAMERA_DISPLAY_EXECSTART_SOURCE, #562)
   (q) WARNING only: stale .bak cruft under the NDI dir or the systemd drop-in dir (#453)
+  (r) dantesync is the SOLE timesync authority -- no competing daemon installed/active/enabled (#591)
 
-Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2).
+Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
+     DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300).
 
 Exit: 0 iff every check passes.
 EOF
@@ -593,21 +730,70 @@ else
   esac
 fi
 
-# (d) dantesync PTP lock + offset ----------------------------------------------------------------
+# (d) dantesync PTP lock + FRESH clock offset (#8 / #550 / #591) ---------------------------------
+# Gathered with `-o short-iso` (ISO timestamps) so dantesync_offset_verdict can reject a STALE
+# offset line (#550); -n 400 gives ~7min of history (dantesync logs ~1 line/s) so a fresh offset
+# line reliably falls inside the freshness window.
 rc=0
-DS_JOURNAL="$(ssh_box "journalctl -u dantesync --no-pager -n 200 2>/dev/null")" || rc=$?
+DS_JOURNAL="$(ssh_box "journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$DS_JOURNAL" ]; then
   fail "dantesync journal unreadable (ssh rc=$rc)"
 else
+  ds_locked=no
   if dantesync_locked_ok "$DS_JOURNAL"; then
     ok "dantesync PTP servo LOCKED"
+    ds_locked=yes
   else
     fail "dantesync PTP servo not LOCKED (degraded or unknown)"
   fi
-  if dantesync_offset_ok "$DS_JOURNAL" "$DEVICE_CLOCK_BOUND_US"; then
-    ok "dantesync clock offset within ${DEVICE_CLOCK_BOUND_US}us bound"
+  case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$DEVICE_CLOCK_BOUND_US")" in
+    ok)
+      ok "dantesync clock offset within ${DEVICE_CLOCK_BOUND_US}us bound (fresh)"
+      ;;
+    drift)
+      # A FRESH out-of-bound offset = a real clock desync happening NOW -- the cam5/6 5.28s case
+      # (a 2nd timesync daemon stepping the clock). Always a hard FAIL, regardless of PTP state.
+      fail "dantesync clock offset OUTSIDE the ${DEVICE_CLOCK_BOUND_US}us bound -- a REAL clock desync (#591: e.g. a 2nd timesync daemon stepping the clock, cam5/6 -> 5.28s)"
+      ;;
+    stale | absent)
+      # No FRESH [NTP] offset reading. dantesync emits the [NTP] offset line only intermittently
+      # (a boot step + a ~30s adaptive cadence), so a settled box may momentarily have only a stale
+      # one. If the PTP servo is LOCKED (the µs-grade real-time signal) AND the (r) sole-authority
+      # gate below confirms nothing else is stepping the clock, the offset is disciplined near-zero;
+      # reading the aged boot-step line and failing on its value was the #550 false-fail. If PTP is
+      # NOT locked, we have no trustworthy clock signal at all -> FAIL (never a silent pass).
+      if [ "$ds_locked" = yes ]; then
+        ok "dantesync offset: no FRESH [NTP] line, but PTP servo LOCKED -- clock disciplined near-zero; a stale boot-step line is deliberately NOT read (#550). Sole-authority gate (r) below guarantees no competing daemon."
+      else
+        fail "dantesync clock offset has no FRESH reading AND PTP servo is not LOCKED -- clock status UNKNOWN, never a silent pass (#550/#591)"
+      fi
+      ;;
+  esac
+fi
+
+# (r) single timesync authority: dantesync ONLY -- no competing daemon installed/active/enabled (#591)
+# cam5/cam6 ran systemd-timesyncd ALONGSIDE dantesync -> a real 5.28s desync. A minimalist appliance
+# runs ONLY dantesync. One SSH call gathers, per competing daemon, its dpkg install state +
+# systemctl is-active + is-enabled into a `NAME|DPKG|ACTIVE|ENABLED` block; timesync_authority_verdict
+# hard-fails on any that is installed (even masked) / active / enabled.
+rc=0
+TS_STATES="$(ssh_box '
+for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
+  _st="$(dpkg -s "$_p" 2>/dev/null | sed -n "s/^Status: //p" || true)"
+  _ac="$(systemctl is-active "$_p" 2>/dev/null || true)"
+  _en="$(systemctl is-enabled "$_p" 2>/dev/null || true)"
+  printf "%s|%s|%s|%s\n" "$_p" "$_st" "$_ac" "$_en"
+done')" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$TS_STATES" ]; then
+  fail "could not read timesync-daemon state over SSH (rc=$rc) -- cannot certify dantesync is the sole clock authority (#591)"
+else
+  TS_VERDICT="$(timesync_authority_verdict "$TS_STATES")"
+  if [ "$TS_VERDICT" = "ok" ]; then
+    ok "dantesync is the SOLE timesync authority -- no competing daemon installed/active/enabled (#591)"
   else
-    fail "dantesync clock offset outside the ${DEVICE_CLOCK_BOUND_US}us bound (or unreadable)"
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "timesync authority: ${_reason#FAIL: }"
+    done <<< "$TS_VERDICT"
   fi
 fi
 
