@@ -71,7 +71,7 @@ fn setup_device_sources_camera_set_and_resolves_by_name() {
     assert!(
         on_noncomment_line(&body, "camera-set.sh"),
         "setup-device.sh must source scripts/camera-set.sh -- the single source of truth for the \
-         cam1-7 fleet map (#450/#24)"
+         cam1-6 fleet map (#450/#24)"
     );
     assert!(
         on_noncomment_line(&body, "camera_resolve"),

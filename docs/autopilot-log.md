@@ -2234,3 +2234,38 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   ~1 line/s → >60s without a new line = stopped).
 - Live-rig re-verify (running verify-device against the fleet) DEFERRED to the supervisor
   (drive-rig-in-supervisor); no auto-deploy pipeline — provisioning-script change only.
+
+## #593 (solo, closes #593) — 2026-07-07 — remove cam7 phantom from active fleet (PR TBD, v1.7.0-dev.285)
+- cam7 was NEVER built — the user only expressed FUTURE interest in a 7th camera, no box was ever
+  purchased/connected — but it was baked in as an active 7th fleet member across
+  `scripts/camera-set.sh`'s default set + case table, every fleet-wide orchestrator's default
+  `CAMERA_SET`, `targets.md`, and `.claude/skills/provision/SKILL.md`.
+- Version bump `2f017afd6`. RED `2bec0fc5c` (4 new/updated tests fail against the pre-fix
+  camera-set.sh: `camera_set_rejects_cam7_not_yet_built`,
+  `camera_set_reject_message_lists_six_cameras_not_seven`,
+  `camera_set_default_includes_six_cameras_not_cam7`, `verify_fleet_rejects_cam7_as_invalid_not_offline`
+  — confirmed cam7 currently DOES resolve as active). GREEN `ffe8e05e1`.
+- `scripts/camera-set.sh`: `CAMERA_SET` default + the unknown-camera reject message now list only
+  the six real cameras; cam7's case arm is commented out with a "not yet built, uncomment when it
+  exists" note — one-line to reactivate.
+- `scripts/verify-fleet.sh` / `deploy-fleet.sh` / `upgrade-fleet-ndi.sh`: default `CAMERA_SET` +
+  header/usage comments trimmed to cam1-6. `verify-fleet.sh`'s "offline box" example no longer
+  names the nonexistent cam7 — its own test (`verify_fleet_treats_an_offline_box_as_skipped...`)
+  swapped the phantom cam7 for the real cam6, and a NEW test
+  (`verify_fleet_rejects_cam7_as_invalid_not_offline`) pins that an unresolvable camera NAME is a
+  distinct "invalid" verdict, never SKIPPED-as-offline.
+- `scripts/setup-device.sh` / `verify-device.sh`: "cam1-7" usage text → "cam1-6" (comments only).
+- `targets.md`: CAM7 row marked "Not built" (file itself never deleted, per CLAUDE.md).
+- `.claude/skills/provision/SKILL.md`: fleet-map block, gotcha heading, "keeping the fleet
+  converged" section updated to the 6-camera fleet, explicit "cam7 does not exist" callout added.
+- `tests/setup_display_table_pure_functions.rs`: `resolve_display_source` (scripts/setup.sh) is
+  deliberately LENIENT on any unrecognized hostname (its own arg isn't required to be a fleet camN
+  name) — cam7 still resolves to "" (no preview) post-fix, same as any unknown name; a dedicated
+  test (`resolve_display_source_treats_cam7_as_no_preview_since_it_was_never_built`) documents this
+  so it isn't mistaken for "the whole fleet sweep" (which now excludes cam7 entirely).
+- Acceptance: `grep -rnE 'cam7|CAM7' scripts/ tests/ targets.md .claude/` returns only explicit
+  "never built / not yet built" comments and cam7-rejection test code — never an active-fleet entry.
+  (Review finding: the undocumented plain `grep -rn 'cam7|CAM7'` — without `-E`/`\|` — treats `|`
+  as a literal character and vacuously matches nothing; verified empirically. Documenting `-E` here
+  so a future re-run of this acceptance check is not silently a no-op.)
+- Pure code/test/doc cleanup — no live-rig action, no deploy pipeline surface.

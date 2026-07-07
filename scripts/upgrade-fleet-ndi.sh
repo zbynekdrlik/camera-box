@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # upgrade-fleet-ndi.sh — safe, canary-first NDI Linux runtime upgrade across the fleet (#132;
-# fleet grown cam1-4 -> cam1-7 by #451).
+# fleet grown cam1-4 -> cam1-6 by #451).
 #
 # WHY THIS SCRIPT EXISTS: the fleet's NDI Linux runtime (`/usr/lib/ndi/libndi.so.6`) is not
 # uniform — the cameras run 6.2.1.0 while the production OBS boxes strih + stream already run
@@ -42,7 +42,7 @@
 #
 # Options:
 #   --so-path PATH     the candidate NDI Linux runtime .so to roll out (required)
-#   --set "cam1 ..."    camera set to upgrade (default: cam1 cam2 cam3 cam4 cam5 cam6 cam7)
+#   --set "cam1 ..."    camera set to upgrade (default: cam1 cam2 cam3 cam4 cam5 cam6)
 #   --canary "camN ..." pin the canary camera SET (space-separated; default: one representative
 #                       per distinct NDI-runtime box-class present in --set — #452, so a
 #                       real-file/no-strings box like cam3 always gets its own canary proof
@@ -336,7 +336,7 @@ NDI_DEST_DIR="${NDI_DEST_DIR:-/usr/lib/ndi}"
 . "$HERE/lib/cli-log.sh"   # log()/info()/warn()/err() (#559, shared with deploy-fleet.sh + verify-fleet.sh)
 
 SO_PATH=""
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
+SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}"
 CANARY_OVERRIDE=""
 FORCE=0
 DRY_RUN=0

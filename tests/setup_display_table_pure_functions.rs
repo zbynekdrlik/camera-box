@@ -188,6 +188,8 @@ fn resolve_display_source_warns_and_returns_empty_on_fetch_failure() {
 }
 
 /// Sweep the whole real fleet map -- only cam1 has a configured preview today.
+/// #593: cam7 is intentionally NOT swept here -- it was never built and is not part of the
+/// fleet (see resolve_display_source_treats_cam7_as_no_preview_since_it_was_never_built below).
 #[test]
 fn resolve_display_source_sweeps_the_whole_fleet() {
     let expected = [
@@ -197,7 +199,6 @@ fn resolve_display_source_sweeps_the_whole_fleet() {
         ("cam4", ""),
         ("cam5", ""),
         ("cam6", ""),
-        ("cam7", ""),
     ];
     for (input, want) in expected {
         let (code, out, err) =
@@ -212,6 +213,25 @@ fn resolve_display_source_sweeps_the_whole_fleet() {
             "resolve_display_source {input} resolved incorrectly"
         );
     }
+}
+
+/// #593: cam7 was NEVER built (the user only expressed future interest). `resolve_display_source`
+/// (scripts/setup.sh) is deliberately lenient on an unrecognized hostname -- its own hostname arg
+/// is not required to be a fleet camN name, so it must resolve to "no preview" (empty), same as
+/// any other unrecognized name, NOT be treated as part of "the whole real fleet" above.
+#[test]
+fn resolve_display_source_treats_cam7_as_no_preview_since_it_was_never_built() {
+    let (code, out, err) = run_sourced(r#"resolve_display_source cam7; echo "<END>""#);
+    assert_eq!(
+        code, 0,
+        "resolve_display_source cam7 must succeed (lenient on unknown names). stderr: {err}"
+    );
+    let got = out.trim().trim_end_matches("<END>");
+    assert_eq!(
+        got, "",
+        "#593: cam7 was never built -- resolve_display_source must resolve it to empty (no \
+         preview), not any fleet-map value"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

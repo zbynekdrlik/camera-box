@@ -25,7 +25,7 @@
 #   scripts/verify-device.sh NAME
 #   scripts/verify-device.sh --help
 #
-# NAME is resolved via scripts/camera-set.sh (cam1-7), case-insensitive (CAM5 / cam5 both work) --
+# NAME is resolved via scripts/camera-set.sh (cam1-6), case-insensitive (CAM5 / cam5 both work) --
 # same convention as setup-device.sh (#450). An unknown name fails loud through camera-set.sh's own
 # fail-closed `case` (never silently certifies the wrong box).
 #
@@ -671,7 +671,7 @@ Usage:
   scripts/verify-device.sh NAME
   scripts/verify-device.sh --help
 
-NAME is resolved via scripts/camera-set.sh (cam1-7), case-insensitive (CAM5 / cam5 both work).
+NAME is resolved via scripts/camera-set.sh (cam1-6), case-insensitive (CAM5 / cam5 both work).
 
 Checks:
   (a) camera-box --version is a valid, well-formed fleet version string

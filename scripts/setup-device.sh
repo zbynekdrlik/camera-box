@@ -7,7 +7,7 @@
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
 #
 # DEVICE_NAME is resolved via scripts/camera-set.sh (#24/#451 -- the single source of truth for
-# the cam1-7 fleet map): IP address / VBAN stream name / genlock emit-rate are all DERIVED from
+# the cam1-6 fleet map): IP address / VBAN stream name / genlock emit-rate are all DERIVED from
 # it, never passed as free-text positional args (#450). An unknown name fails loudly through
 # camera-set.sh's fail-closed `case` -- never silently provisions the wrong box.
 #
@@ -169,7 +169,7 @@ DEVICE_NAME_ARG="${1:-}"
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
     echo ""
-    echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-7) -- case-insensitive."
+    echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
     echo ""
     echo "Examples:"
     echo "  $0 CAM5"

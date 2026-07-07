@@ -153,23 +153,24 @@ fn loopback_e2e_routes_through_camera_set() {
     );
 }
 
-// --- #451: fleet growing 4 -> 7 (cam5/cam6/cam7) + per-camera CAMERA_GENLOCK_FPS -------------
+// --- #451: fleet growing 4 -> 6 (cam5/cam6) + per-camera CAMERA_GENLOCK_FPS -------------------
+// --- #593: cam7 removed -- it was NEVER built (the user only expressed future interest); it
+// must not resolve as an active camera anywhere in the fleet map. ------------------------------
 
 #[test]
-fn camera_set_resolves_cam5_cam6_cam7() {
-    // The fleet is growing 4->7 (#451). A wrong/missing IP would deploy the probe to (and
-    // certify) the WRONG box, exactly like the original cam1-4 guard above.
+fn camera_set_resolves_cam5_and_cam6() {
+    // The fleet grew 4->6 (#451). A wrong/missing IP would deploy the probe to (and certify)
+    // the WRONG box, exactly like the original cam1-4 guard above.
     let expected = [
         ("cam5", "10.77.9.65", "CAM5 (usb)"),
         ("cam6", "10.77.9.66", "CAM6 (usb)"),
-        ("cam7", "10.77.9.67", "CAM7 (usb)"),
     ];
 
     for (name, ip, source) in expected {
         let (ok, got_ip, got_src) = resolve(name);
         assert!(
             ok,
-            "camera_resolve {name} should succeed (#451 fleet growth 4->7)"
+            "camera_resolve {name} should succeed (#451 fleet growth 4->6)"
         );
         assert_eq!(got_ip, ip, "camera_resolve {name} resolved the wrong IP");
         assert_eq!(
@@ -180,26 +181,42 @@ fn camera_set_resolves_cam5_cam6_cam7() {
 }
 
 #[test]
-fn camera_set_reject_message_lists_all_seven_cameras() {
-    // The reject message must stay in sync with the real accepted set, or a typo report
-    // misleads whoever reads it about which names are actually valid.
-    let s = read("scripts/camera-set.sh");
+fn camera_set_rejects_cam7_not_yet_built() {
+    // #593: cam7 was NEVER built -- the user only expressed FUTURE interest in a 7th camera, no
+    // box was ever connected. It must be rejected as an unknown camera, exactly like any other
+    // made-up name, never silently resolved to a phantom IP/source.
+    let (ok, _ip, _src) = resolve("cam7");
     assert!(
-        s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
-        "#451: the unknown-camera reject message must list all seven cameras (cam1..cam7), \
-         not just the original four."
+        !ok,
+        "#593: camera_resolve cam7 must FAIL -- cam7 was never built and must not be part of \
+         the active fleet"
     );
 }
 
 #[test]
-fn camera_set_default_includes_all_seven_cameras() {
-    // CAMERA_SET is the "drive the whole set" default the fleet-wide orchestrators
-    // (deploy-fleet.sh, upgrade-fleet-ndi.sh) fall back to when the operator doesn't override
-    // it. #451 grows the fleet 4->7, so the default must grow with it.
+fn camera_set_reject_message_lists_six_cameras_not_seven() {
+    // The reject message must stay in sync with the real accepted set, or a typo report
+    // misleads whoever reads it about which names are actually valid. #593: cam7 is not real.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_SET=\"${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""),
-        "#451: CAMERA_SET default must list all seven cameras (cam1..cam7)."
+        s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6"),
+        "#593: the unknown-camera reject message must list the six real cameras (cam1..cam6)."
+    );
+    assert!(
+        !s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
+        "#593: the unknown-camera reject message must NOT list cam7 -- it was never built."
+    );
+}
+
+#[test]
+fn camera_set_default_includes_six_cameras_not_cam7() {
+    // CAMERA_SET is the "drive the whole set" default the fleet-wide orchestrators
+    // (deploy-fleet.sh, upgrade-fleet-ndi.sh) fall back to when the operator doesn't override
+    // it. #593: cam7 was never built, so it must not appear in the default active set.
+    let s = read("scripts/camera-set.sh");
+    assert!(
+        s.contains("CAMERA_SET=\"${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}\""),
+        "#593: CAMERA_SET default must list exactly the six real cameras (cam1..cam6), no cam7."
     );
 }
 
@@ -235,7 +252,7 @@ fn camera_resolve_emits_per_camera_genlock_fps() {
     // (today uniformly 60 for the whole program-feeding fleet) — this is the table #450's
     // provisioning drop-in generation is meant to read, distinct from the existing GLOBAL
     // GENLOCK_FPS the harness uses for its own manually-launched cam1 sender.
-    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"] {
         let fps = resolve_genlock_fps(cam);
         assert_eq!(
             fps, "60",
@@ -295,7 +312,7 @@ fn camera_resolve_wires_cam1_to_the_interkom_return_monitor() {
 }
 
 #[test]
-fn camera_resolve_leaves_cam2_through_cam7_with_no_display_source() {
+fn camera_resolve_leaves_cam2_through_cam6_with_no_display_source() {
     // A box with no CAMERA_DISPLAY_SOURCE table entry must resolve to an EMPTY (never unset —
     // `set -u` would trip on unset) value — empty means "no provisioner-persistent preview for
     // this box today"; callers never need to distinguish "no entry" from "entry that is empty".
@@ -305,7 +322,10 @@ fn camera_resolve_leaves_cam2_through_cam7_with_no_display_source() {
     // config.toml would make a future re-provision silently break scripts/rig-mode.sh's
     // ExecStart-flag-based TEST/EVENT display toggle (used by the QR-painter E2E harness). See the
     // comment on cam2's case arm in scripts/camera-set.sh for the full mechanism.
-    for cam in ["cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+    //
+    // #593: cam7 was never built and is intentionally NOT in this fleet sweep -- it must be
+    // REJECTED (see camera_set_rejects_cam7_not_yet_built), not resolve to an empty display.
+    for cam in ["cam2", "cam3", "cam4", "cam5", "cam6"] {
         let (ok, display) = resolve_display_source(cam);
         assert!(ok, "camera_resolve {cam} should succeed");
         assert_eq!(
@@ -319,7 +339,7 @@ fn camera_resolve_leaves_cam2_through_cam7_with_no_display_source() {
 // --- #562: per-cam ExecStart-mechanism HDMI preview source table --------------------------------
 //
 // cam2's interkom preview lives in a manual `--display "STRIH-SNV (interkom)"` edit baked into
-// ExecStart (never config.toml -- see camera_resolve_leaves_cam2_through_cam7_with_no_display_source
+// ExecStart (never config.toml -- see camera_resolve_leaves_cam2_through_cam6_with_no_display_source
 // above for why). CAMERA_DISPLAY_SOURCE deliberately stays empty for cam2 forever; a NEW, SEPARATE
 // table entry -- CAMERA_DISPLAY_EXECSTART_SOURCE -- makes cam2's ExecStart mechanism provisioner-
 // persistent (scripts/setup-device.sh STEP 7) without touching config.toml or rig-mode.sh's
@@ -372,11 +392,12 @@ fn camera_resolve_wires_cam2_to_the_execstart_interkom_preview() {
 }
 
 #[test]
-fn camera_resolve_leaves_cam1_and_cam3_through_cam7_with_no_execstart_display_source() {
+fn camera_resolve_leaves_cam1_and_cam3_through_cam6_with_no_execstart_display_source() {
     // cam1 already gets its preview through the config.toml [display] mechanism
     // (CAMERA_DISPLAY_SOURCE) -- it must NOT also get an ExecStart-baked flag (that would mean two
-    // independent, driftable sources of the same preview). cam3-7 have no preview at all today.
-    for cam in ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+    // independent, driftable sources of the same preview). cam3-6 have no preview at all today.
+    // #593: cam7 was never built and is intentionally excluded from this fleet sweep.
+    for cam in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
         let (ok, display) = resolve_execstart_display_source(cam);
         assert!(ok, "camera_resolve {cam} should succeed");
         assert_eq!(
@@ -397,7 +418,8 @@ fn camera_resolve_leaves_cam1_and_cam3_through_cam7_with_no_execstart_display_so
 /// of shipping silently.
 #[test]
 fn camera_resolve_never_configures_both_display_mechanisms_for_the_same_camera() {
-    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+    // #593: cam7 excluded -- it was never built and must reject, not resolve either mechanism.
+    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"] {
         let (ok1, config_toml_source) = resolve_display_source(cam);
         let (ok2, execstart_source) = resolve_execstart_display_source(cam);
         assert!(ok1 && ok2, "camera_resolve {cam} should succeed");

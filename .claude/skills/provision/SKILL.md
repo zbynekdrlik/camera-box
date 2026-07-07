@@ -2,19 +2,23 @@
 name: provision
 description: >
   New-cam-box provisioning runbook (#448-#454) — the canonical build-USB → boot → setup-device.sh
-  → verify-device.sh flow, plus the install gotchas found bringing up cam5/cam6/cam7. Load before
+  → verify-device.sh flow, plus the install gotchas found bringing up cam5/cam6. Load before
   building/flashing a new camera box, running setup-device.sh, or touching scripts/verify-device.sh.
 ---
 
 # New-cam-box provisioning runbook (#448-#454)
 
 There is no more tribal knowledge here — this is the ONE canonical way to bring a fresh camera
-box (CAM5, CAM6, CAM7, or a re-flash of an existing one) to full fleet parity. The method was
+box (CAM5, CAM6, or a re-flash of an existing one) to full fleet parity. The method was
 unified across #448 (create-usb-linux.sh), #449 (dead builders removed), #450 (setup-device.sh
-name-resolved), #451 (camera-set.sh cam1-7), #452 (upgrade-fleet canary), #453 (cam3 convergence)
+name-resolved), #451 (camera-set.sh cam1-6), #452 (upgrade-fleet canary), #453 (cam3 convergence)
 and this ticket, #454 (the runbook + the acceptance gate below). See also `.claude/skills/ops`
 for the DanteSync clock, realtime CPU isolation, and rig-recovery background this runbook builds
 on top of.
+
+**cam7 does NOT exist (#593)** — the user only expressed FUTURE interest in a 7th camera; no
+box has ever been built or connected. It is deliberately absent from `camera-set.sh`'s active
+fleet map below; add it (one line) when a real cam7 box exists.
 
 ## The 4-phase flow
 
@@ -151,7 +155,7 @@ camera as the #454 acceptance proof).
 hand-patched box. Converging an outlier onto the canonical layout is separate work (#453), not
 something `verify-device.sh` should be loosened to tolerate.
 
-## Known gotchas (found bringing up cam5/cam6/cam7 — all fixed IN THE SCRIPTS, never hand-patched)
+## Known gotchas (found bringing up cam5/cam6 — all fixed IN THE SCRIPTS, never hand-patched)
 
 - **Boot hangs with no console/SSH** was `systemd-networkd-wait-online.service` blocking
   `network-online.target` on a base image with no bound timeout — `setup-device.sh` STEP 11 now
@@ -230,13 +234,27 @@ Single source of truth for NAME → IP / NDI source name / genlock FPS, used by 
 ```
 cam1 -> 10.77.9.61 / "CAM1 (usb)"     cam5 -> 10.77.9.65 / "CAM5 (usb)"
 cam2 -> 10.77.9.62 / "CAM2 (usb)"     cam6 -> 10.77.9.66 / "CAM6 (usb)"
-cam3 -> 10.77.9.63 / "CAM3 (usb)"     cam7 -> 10.77.9.67 / "CAM7 (usb)"
+cam3 -> 10.77.9.63 / "CAM3 (usb)"
 cam4 -> 10.77.9.64 / "CAM4 (usb)"
+
+cam7 -> NOT BUILT (#593) — no box exists; add a row here (mirroring the six above) when it does.
 ```
 
-All seven emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `camera_resolve()`).
-Adding an 8th camera means editing `camera-set.sh` ONCE — every script downstream (including
-`verify-device.sh`) picks it up automatically.
+All six emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `camera_resolve()`).
+Adding cam7 (or any further camera) means editing `camera-set.sh` ONCE — every script downstream
+(including `verify-device.sh`) picks it up automatically.
+
+**Gotcha — removing/adding a fleet camera changes behavior DIFFERENTLY in the two
+name-resolvers (#593).** `camera_resolve()` here fails LOUD (nonzero exit) on any name not in its
+`case` table — `setup-device.sh`'s `resolve_device_name` and `verify-fleet.sh`'s per-box loop both
+propagate that as a hard reject/"invalid" verdict, since their whole job IS fleet provisioning/
+verification. But `scripts/setup.sh`'s `resolve_display_source()` is DELIBERATELY lenient: its
+hostname argument isn't required to be a fleet camN name at all (it defaults to the generic
+`"camera-box"` hostname), so an unresolvable name there silently falls through to "no preview"
+(empty, exit 0) rather than failing — same behavior whether the name was NEVER a real camera
+(cam7) or is simply not fleet-related. When removing a phantom camera (or testing what happens to
+an unknown one), check BOTH call sites — a test written against `resolve_device_name`'s hard
+reject does NOT transfer to `resolve_display_source`'s soft fallback, and vice versa.
 
 `camera_resolve()` also carries a per-cam `CAMERA_DISPLAY_SOURCE` table (#528) — the HDMI
 cameraman-preview NDI source (empty when a box has no preview configured). `setup-device.sh`
@@ -302,13 +320,14 @@ keep cam2 on ExecStart (not migrate it to config.toml, which would have required
 the WHOLE fleet in one pass — the fleet-wide drift-guard loop:
 
 ```bash
-scripts/verify-fleet.sh                 # cam1..cam7 (or camera-set.sh's CAMERA_SET override)
+scripts/verify-fleet.sh                 # cam1..cam6 (or camera-set.sh's CAMERA_SET override)
 CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh   # a subset
 ```
 
-Each box in the set is checked for SSH reachability FIRST — an offline box (cam7 was offline
-during the 2026-07-06 fleet convergence) is reported **SKIPPED**, never a hard FAIL; only a
-reachable box that fails `verify-device.sh`'s own acceptance gate counts as a fleet FAIL. Exit
+Each box in the set is checked for SSH reachability FIRST — an offline box (mid-reboot/deploy)
+is reported **SKIPPED**, never a hard FAIL; only a reachable box that fails
+`verify-device.sh`'s own acceptance gate counts as a fleet FAIL. An unresolvable camera NAME
+(e.g. `cam7` — never built, #593) is a distinct **invalid** verdict, not SKIPPED. Exit
 status is nonzero iff at least one reachable box FAILed (a fleet of all-SKIPPED/all-PASS boxes
 exits 0). Run it periodically (or after any fleet-wide change) to catch drift before it becomes
 a live-event surprise, instead of re-deriving each box's state by hand.

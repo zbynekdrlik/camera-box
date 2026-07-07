@@ -221,7 +221,8 @@ fn ndi_camera_class_distinguishes_cam3_from_standard_layout() {
         "cam3class",
         "#452: cam3 must be classified distinctly from the standard symlink-layout cameras"
     );
-    for cam in ["cam1", "cam2", "cam4", "cam5", "cam6", "cam7"] {
+    // #593: cam7 excluded -- it was never built and is not part of the active fleet.
+    for cam in ["cam1", "cam2", "cam4", "cam5", "cam6"] {
         assert_eq!(
             run_sourced(&format!("ndi_camera_class {cam}")).trim(),
             "standard",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Align the whole camera-box fleet (cam1-7, #451) onto ONE pinned CI-built binary, in one command (#73).
+# Align the whole camera-box fleet (cam1-6, #451) onto ONE pinned CI-built binary, in one command (#73).
 #
 # The fleet drifts: cameras get deployed at different times and end up on different versions
 # (e.g. #73 found cam1/cam4=dev.29, cam3=dev.22, cam2=dev.19 — three builds, none current, cam2
@@ -18,10 +18,10 @@
 # off-air / is there a live event". The operator who runs it guards live timing.
 #
 # Usage:
-#   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-7
+#   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-6
 #   scripts/deploy-fleet.sh --run <run-id>        # pin a specific GitHub Actions run id
 #   scripts/deploy-fleet.sh --binary ./dist/camera-box   # deploy an already-downloaded CI binary
-#   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: cam1 cam2 cam3 cam4 cam5 cam6 cam7)
+#   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: cam1 cam2 cam3 cam4 cam5 cam6)
 #
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
@@ -45,7 +45,7 @@ SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
 BRANCH="${BRANCH:-main}"
 ARTIFACT="${ARTIFACT:-camera-box-linux-amd64}"
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
+SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}"
 
 RUN_ID=""
 BINARY=""

@@ -768,8 +768,11 @@ fn avahi_ndi_discoverable_true_when_source_present() {
 
 #[test]
 fn avahi_ndi_discoverable_false_when_source_absent() {
+    // Any source not present in the browse text must read as absent -- "CAM4" is a real fleet
+    // camera, simply not present in this particular browse snippet (which only lists CAM1/CAM5);
+    // it is deliberately NOT "CAM7" (#593: cam7 was never built and is not part of the fleet).
     let (code, out, err) = run_sourced(&format!(
-        "TEXT='{}'\nif avahi_ndi_discoverable \"$TEXT\" \"CAM7\"; then echo YES; else echo NO; fi",
+        "TEXT='{}'\nif avahi_ndi_discoverable \"$TEXT\" \"CAM4\"; then echo YES; else echo NO; fi",
         AVAHI_BROWSE_WITH_CAM5.replace('\'', "'\\''")
     ));
     assert_eq!(code, 0, "stderr: {err}");
