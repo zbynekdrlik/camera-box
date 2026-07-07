@@ -2269,3 +2269,25 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   as a literal character and vacuously matches nothing; verified empirically. Documenting `-E` here
   so a future re-run of this acceptance check is not silently a no-op.)
 - Pure code/test/doc cleanup — no live-rig action, no deploy pipeline surface.
+
+## #588 — imag optical gate: catch-up judder evades run-length + aggregates + digital burn (2026-07-07)
+
+- PR #603, merged `e5024101d` (dev `cf4af6c61`). Version bump `18f266937` (1.7.0-dev.286).
+- RED `6fdb15876` (`optical_beat_gate_catch_up_judder_passes_the_old_terms_588`) → GREEN `cf4af6c61`.
+- Added `OpticalBeatVerdict::no_stuck_density` (4th orthogonal no-copy term, `stuck_pairs /
+  total_pairs`) ANDed into `is_live_no_copy`. New `StuckRunStats`/`stuck_run_stats` share ONE
+  `.windows(2)` walk with the pre-existing run-length metric — no extra decode.
+- Threshold `IMAG_OPTICAL_MAX_STUCK_DENSITY = 1%`, real-data-anchored to run 572001's live-measured
+  healthy density (~0.10%), never invented from a synthetic fixture. `MIN_PAIRS_FOR_STUCK_DENSITY =
+  300` defers the term on tiny windows so no existing small-window fixture regresses.
+- New JSON field `imag_optical_stuck_density`; a dedicated SYSTEMATIC-JUDDER failure diagnostic in
+  `recording-verdict.rs` (distinct from the pre-existing COPY/FREEZE line).
+- Both `/review` and `superpowers:requesting-code-review` clean (0 Critical/Important; two Minor —
+  one "no change required", one routed to a follow-up).
+- Filed #604 (localized/sub-span judder can still dilute below the whole-window density ceiling —
+  tracked, explicitly out of #588's scope per the reviewer's own assessment).
+- `.claude/skills/e2e/SKILL.md` updated: the pre-existing "residual gap, filed not fixed" note
+  marked CLOSED with the fix + the reusable stats-struct / real-data-anchoring / MIN_PAIRS-deferral
+  patterns, plus the new #604 follow-up note.
+- Pure Tier-0 verdict-logic + tests — no live-rig action, no deploy pipeline (repo has no
+  push-to-main deploy workflow; release is tag-triggered).
