@@ -492,7 +492,8 @@ struct NodeVerdict {
     imag_optical_beat: Option<camera_box::imag_tick_gate::OpticalBeatVerdict>,
     /// #580v2 (#584/#585) — for imag, whether the digital corner burn is GENUINELY PRESENT enough to
     /// be the SOLE delivery authority ([`camera_box::imag_tick_gate::burn_present_ok`]:
-    /// `present_count >= (optical_frames / step) * MIN_BURN_PRESENT_FRACTION`). `None` for every
+    /// `present_count >= optical_frames * MIN_BURN_PRESENT_FRACTION` — frame-scale to frame-scale,
+    /// `step` plays no role). `None` for every
     /// non-imag node (unaffected); for imag ALWAYS `Some`. `Some(false)` = the burn is absent /
     /// occluded / frozen and the node FAILS fail-closed (closes the vacuous
     /// `optional_signal_ok(None) == true` pass and the trivially-"contiguous" single-id pass).
@@ -1234,7 +1235,6 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     let imag_burn_present_ok = camera_box::imag_tick_gate::burn_present_ok(
         burn_sc.present_count,
         optical_beat.frames_count,
-        imag_burn_step,
         camera_box::imag_tick_gate::MIN_BURN_PRESENT_FRACTION,
     );
     let imag_burn_contiguity = NodeContiguity {

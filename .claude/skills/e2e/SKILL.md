@@ -700,12 +700,15 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   `is_net_zero` are now DIAGNOSTIC ONLY. Distributed real drops are NOT the optical leg's job (it's
   a validity gate) — they show as a burn gap.
 - **Digital burn = the SOLE per-frame delivery authority, HARDENED + FAIL-CLOSED.** `imag_burn_ok`
-  now requires the burn genuinely PRESENT (`burn_present_ok`: `present_count >= (optical_frames /
-  step) * MIN_BURN_PRESENT_FRACTION`, external optical-frame reference — folds in #584 frozen-burn +
-  #585 absent-burn) AND contiguous (`burn_step_contiguity`) AND `calibrate_burn_step` CLAMPED to
-  ≤ `IMAG_BURN_RENDER_STEP * 2` with tie-to-LARGER (a drop-inflated majority-loss cadence can no
-  longer mask loss). A recording with NO burn now FAILS fail-closed (was a vacuous
-  `optional_signal_ok(None)==true` pass).
+  now requires the burn genuinely PRESENT (`burn_present_ok`: `present_count >= optical_frames *
+  MIN_BURN_PRESENT_FRACTION` — frame-scale to frame-scale, `step` plays NO role here; an earlier
+  draft divided by `step` and was adversarially proven fail-open, loosening the floor to 16.7% of
+  the recording at the real rig's step 3 instead of the intended 50% — external optical-frame
+  reference — folds in #584 frozen-burn + #585 absent-burn) AND contiguous (`burn_step_contiguity`)
+  AND `calibrate_burn_step` CLAMPED to ≤ `IMAG_BURN_RENDER_STEP * 2` with tie-to-SMALLER (a
+  tie-to-larger draft was also adversarially proven fail-open — it can MASK a real drop outright,
+  not just mis-count it — so the original safer smaller-delta tie-break stays). A recording with
+  NO burn now FAILS fail-closed (was a vacuous `optional_signal_ok(None)==true` pass).
 - **imag JSON fields:** `imag_optical_beat_pass` (the GATE), `imag_optical_max_stuck_run` (the
   supervisor reads this from the live 572001 re-decode to validate K — if the real value exceeds K,
   K is re-grounded, not loosened), `imag_burn_present_ok`; `imag_optical_beat_net_zero` is now the

@@ -1989,10 +1989,11 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   `OpticalBeatVerdict::is_live_no_copy` = `is_advancing` (loose liveness band) AND `no_stuck_copy`
   (`max_consecutive_stuck_run <= IMAG_OPTICAL_MAX_STUCK_RUN`, K=3; benign beat ⇒ ≤1, freeze ⇒
   hundreds); `surplus`/`avg_step`/`is_net_zero` demoted to DIAGNOSTIC. `burn_present_ok`
-  (present_count ≥ (optical_frames/step)×`MIN_BURN_PRESENT_FRACTION`, EXTERNAL optical-frame
-  reference — folds #584 frozen + #585 absent) makes the digital burn a fail-closed delivery
-  authority. `calibrate_burn_step` tie-to-LARGER + clamp to ≤`IMAG_BURN_RENDER_STEP*2` (a
-  drop-inflated majority-loss cadence can no longer mask loss). Re-signed the 572001 fixture to the
+  (present_count ≥ optical_frames×`MIN_BURN_PRESENT_FRACTION`, frame-scale to frame-scale — `step`
+  plays NO role, EXTERNAL optical-frame reference — folds #584 frozen + #585 absent) makes the
+  digital burn a fail-closed delivery authority. `calibrate_burn_step` tie-to-SMALLER (unchanged
+  from #576) + clamp to ≤`IMAG_BURN_RENDER_STEP*2` (a drop-inflated majority-loss cadence can no
+  longer mask loss). Re-signed the 572001 fixture to the
   REAL numbers (frames_count=21867, surplus=+3, max_stuck_run 1) + a reconstructed full-sequence
   variant. RED `c8bac1e6f` (8 pure tests fail: 572001 counts + reconstructed sequence, copy-freeze,
   pure-skips, burn absent/frozen/occluded, calibrate tie/clamp) → GREEN `368ed9b57` (41/41
@@ -2014,3 +2015,33 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   merge_of_partials untouched (no imag frames). No live-rig step — pure Tier-0 verdict/gate logic;
   `recording-verdict` is a CI-built analysis tool. Supervisor re-decodes 572001 post-merge to
   confirm zero_loss=true AND read the real `imag_optical_max_stuck_run` to validate K. v1.7.0-dev.279.
+  **Post-CI-green review round (2 read-only `general-purpose` reviewers, NOT `fork` — per the #580
+  incident above): found + fixed 3 real issues before merge.** (1) A probe-gated test's whole-line
+  `!contains("CONTIGUOUS")` assertion false-failed once the pass line legitimately grew a second,
+  honestly-CONTIGUOUS burn-note clause (`4ef6027e8`) — scoped the assertion to the optical portion
+  only. (2) `burn_present_ok`'s floor was `(reference_frames/step)*fraction` — adversarially proven
+  fail-OPEN: at the real rig's step 3 this loosens the 50% floor to 16.7%, so a burn present on only
+  a ~17% PREFIX of a recording (absent for the remaining 83%) would vacuously clear it and vouch for
+  the whole recording. `present_count` is a FRAME-scale count (one distinct id per captured frame,
+  regardless of step), so the floor must be `reference_frames*fraction` with no `step` involved at
+  all — fixed, `step` param dropped from the signature (`imag_tick_gate.rs`, new test
+  `burn_present_ok_floor_does_not_scale_down_with_step_580v2`). (3) The `calibrate_burn_step`
+  tie-break had been flipped to LARGER during v2 development to avoid a diagnostic missing-id
+  over-count on a bimodal cadence — adversarially proven to be the DANGEROUS direction instead: a
+  tie-to-larger choice can MASK a real drop outright (`4/3-1=0`, invisible) where tie-to-smaller
+  correctly charges it (`4/2-1=1`) — reverted to the original #576 tie-to-SMALLER rule (a cosmetic
+  over-count is strictly safer than a masked drop). New adversarial test
+  `calibrate_burn_step_tie_to_larger_would_mask_a_real_drop_580v2` proves both directions on the
+  same ids via the real functions. Also fixed 2 stale-doc findings: the `OpticalBeatVerdict` struct
+  doc and a test-section header still described the v1 `surplus<=0` gate with the pre-fix
+  SIGN-FLIPPED 572001 numbers (`ee0bb41c3`), and the e2e-skill doc + this very log entry (above)
+  repeated both the `/step` formula and the tie-to-LARGER claim — corrected in place. All fixes are
+  Tier-0 pure-logic changes except the test-scoping fix (probe-gated, CI-verified only); 43/43
+  imag_tick_gate tests green locally, fmt/clippy clean. No PASS/FAIL outcome flips on any existing
+  fixture — every fix tightens a leniency that was dormant on the currently-committed fixtures
+  (572001's healthy near-100%-present burn and unambiguous step-3 cadence never hit either bug) but
+  would have been live fail-opens on real degraded recordings. One residual 🔵 (not fixed — genuinely
+  out of scope, needs live 572001 data to calibrate): a systematic short-run stutter (many Δ0 runs
+  each ≤K, spread evenly across the whole recording) evades run-length, the whole-window aggregates,
+  AND the render-free-running digital burn alike — not a v2 regression (both old and new gates miss
+  it equally). Filed as #588.

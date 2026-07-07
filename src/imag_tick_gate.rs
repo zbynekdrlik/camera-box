@@ -564,10 +564,16 @@ const MIN_IDS_FOR_STEP_CALIBRATION: usize = 4;
 /// deltas is the correct estimator HERE.
 ///
 /// Ties (two deltas equally frequent) resolve to the SMALLER delta — the stricter, safer choice
-/// whenever ambiguous, never the looser one. Falls back to [`IMAG_BURN_RENDER_STEP`] when there
-/// are fewer than [`MIN_IDS_FOR_STEP_CALIBRATION`] distinct ids to trust a calibrated estimate
-/// (never invent a number from noise — mirrors every other pure gate's "not enough signal ⇒ fall
-/// back to the safe/known default" rule).
+/// whenever ambiguous, never the looser one. A tie-to-LARGER was tried during #580v2 development
+/// (to avoid a diagnostic "phantom charge" — over-counting the missing-id COUNT on a bimodal
+/// cadence) and adversarially proven WRONG: choosing the larger candidate can MASK a real drop
+/// outright (a genuine single-frame drop at true step 2 produces a gap of 4; charged as
+/// `4/2-1=1` missing under the correct smaller step, but `4/3-1=0` — ZERO, invisible — under the
+/// wrongly tie-broken larger step 3). A cosmetic over-count in the diagnostic missing-id list
+/// never flips PASS/FAIL; a masked drop does. Tie-to-smaller stays the rule. Falls back to
+/// [`IMAG_BURN_RENDER_STEP`] when there are fewer than [`MIN_IDS_FOR_STEP_CALIBRATION`] distinct
+/// ids to trust a calibrated estimate (never invent a number from noise — mirrors every other
+/// pure gate's "not enough signal ⇒ fall back to the safe/known default" rule).
 pub fn calibrate_burn_step(ids: &[u32]) -> u32 {
     use std::collections::{BTreeSet, HashMap};
     // Dedup + sort first (mirrors every other function in this module) — a duplicate id must
@@ -586,14 +592,15 @@ pub fn calibrate_burn_step(ids: &[u32]) -> u32 {
         }
         prev = Some(id);
     }
-    // The MODE (most frequent delta) is the dominant free-running step. #580v2 corrected the
-    // tie-break to the LARGER delta: tie-to-smaller phantom-charges a genuinely bimodal cadence (a
-    // real step-N drop then reads as excess ids at the wrongly-picked smaller step). `counts` is
-    // never empty here (>=3 deltas guaranteed by the length check above), so `unwrap_or` is
-    // defensive only.
+    // The MODE (most frequent delta) is the dominant free-running step. Ties resolve to the
+    // SMALLER delta (`Reverse(delta)` inside `max_by_key` maximizes `count` first, then minimizes
+    // `delta` on a tie) — see this function's doc for why: a tie-break to the LARGER delta can
+    // MASK a real drop outright, which is strictly worse than the smaller choice's cosmetic
+    // over-count in the diagnostic missing-id list. `counts` is never empty here (>=3 deltas
+    // guaranteed by the length check above), so `unwrap_or` is defensive only.
     let mode = counts
         .into_iter()
-        .max_by_key(|&(delta, count)| (count, delta))
+        .max_by_key(|&(delta, count)| (count, std::cmp::Reverse(delta)))
         .map(|(delta, _)| delta.max(1))
         .unwrap_or(IMAG_BURN_RENDER_STEP);
     // #580v2 clamp: a mode ABOVE the ceiling means a SUSTAINED periodic drop dominated the deltas
@@ -624,30 +631,36 @@ const MAX_CALIBRATED_BURN_STEP_MULTIPLE: u32 = 2;
 pub const MIN_BURN_PRESENT_FRACTION: f64 = 0.5;
 
 /// #580v2 (#584/#585) — is imag's digital corner burn GENUINELY PRESENT enough to be the delivery
-/// authority? `present_count` (distinct decoded burn ids) must be at least
-/// `(reference_frames / step) * fraction`, where `reference_frames` is the recording's OWN optical
-/// frame count (an EXTERNAL reference, NOT the burn's self-derived span — a burn that decoded for
-/// only its first few frames would otherwise vacuously pass against its own tiny span). This one
-/// check closes BOTH the burn-ABSENT / near-absent hole (#585 — `optional_signal_ok(None)` and a
-/// single trivially-"contiguous" id) AND the FROZEN-burn hole (#584 — `present_count ≈ 1` while the
-/// recording ran for thousands of frames): both collapse `present_count` far below the floor. A
-/// bare `present_count < 2` can never pass (a lone id proves no advance at all).
-pub fn burn_present_ok(
-    present_count: u32,
-    reference_frames: u32,
-    step: u32,
-    fraction: f64,
-) -> bool {
+/// authority? `present_count` (DISTINCT decoded burn ids — [`BurnStepContiguity::present_count`])
+/// must be at least `reference_frames * fraction`, where `reference_frames` is the recording's OWN
+/// optical frame count (an EXTERNAL reference, NOT the burn's self-derived span — a burn that
+/// decoded for only its first few frames would otherwise vacuously pass against its own tiny
+/// span). This one check closes BOTH the burn-ABSENT / near-absent hole (#585 —
+/// `optional_signal_ok(None)` and a single trivially-"contiguous" id) AND the FROZEN-burn hole
+/// (#584 — `present_count ≈ 1` while the recording ran for thousands of frames): both collapse
+/// `present_count` far below the floor. A bare `present_count < 2` can never pass (a lone id
+/// proves no advance at all).
+///
+/// NOTE (correctness review, #580v2): the floor is `reference_frames * fraction`, NOT
+/// `(reference_frames / step) * fraction` — an EARLIER draft divided by the render step and was
+/// adversarially proven fail-OPEN. `present_count` is a FRAME-scale count (each recorded/captured
+/// frame contributes at most ONE distinct burn id — the free-running render step only changes the
+/// SPACING between consecutive ids, never how many distinct ids a healthy recording produces), so
+/// it must be compared directly against `reference_frames`, also frame-scale. Dividing by `step`
+/// silently loosened the floor to `fraction / step` of the real frame count — at the real rig's
+/// step 3 that is 16.7%, not the intended 50%: a burn present+contiguous on only the first ~17% of
+/// a recording that then goes dark for the rest would still clear the floor and vouch for the
+/// WHOLE recording's delivery, exactly the fail-open the "sole delivery authority" design must
+/// not have. `step` therefore plays no role in this floor and is not a parameter here.
+pub fn burn_present_ok(present_count: u32, reference_frames: u32, fraction: f64) -> bool {
     // A lone (or absent) id proves no advance at all — never a pass, regardless of the floor.
     if present_count < 2 {
         return false;
     }
-    let step = step.max(1);
-    // Expected per-recording burn count ≈ reference_frames / step (the burn advances ~step per
-    // decoded frame); require at least `fraction` of it actually decoded. reference_frames is the
-    // OPTICAL frame count (an EXTERNAL reference) so a burn that decoded only its first few frames
-    // cannot vacuously clear a floor derived from its own tiny span.
-    let floor = (reference_frames as f64 / step as f64) * fraction;
+    // Require at least `fraction` of the recording's OWN frame count to have a decoded burn id.
+    // reference_frames is the OPTICAL frame count (an EXTERNAL reference) so a burn that decoded
+    // only its first few frames cannot vacuously clear a floor derived from its own tiny span.
+    let floor = reference_frames as f64 * fraction;
     present_count as f64 >= floor
 }
 
@@ -1035,20 +1048,51 @@ mod tests {
     }
 
     #[test]
-    fn calibrate_burn_step_prefers_the_larger_delta_on_a_tie_580v2() {
-        // #580v2 corrected the #576 tie-break: deltas 2,2,3,3 — both step 2 and step 3 occur twice.
-        // The LARGER delta must win the tie. Tie-to-SMALLER (the old #576 rule) PHANTOM-CHARGES a
-        // genuinely bimodal cadence — a real step-3 render then reads as a gap of 3 under the
-        // wrongly-picked step 2 (`3/2-1 = 0` here, but a step-6 real drop on a step-3 base reads as
-        // `6/2-1 = 2` phantom ids instead of the correct `6/3-1 = 1`), so the smaller step
-        // MIS-ATTRIBUTES the missing grid ids on a bimodal burn. Two adversarial reviews flagged
-        // this; the corrected rule is tie-to-larger (still CLAMPED, see the clamp test).
+    fn calibrate_burn_step_prefers_the_smaller_delta_on_a_tie_576() {
+        // deltas 2,2,3,3 — both step 2 and step 3 occur twice. A #580v2 development draft tried
+        // tie-to-LARGER (to avoid a diagnostic over-count on a bimodal cadence) and a correctness
+        // review adversarially proved it can MASK a real drop outright: with ids [0,2,4,7,10,14]
+        // (appending one more gap of 4 to this same tied sequence), a genuine single-frame drop at
+        // true step 2 produces a gap of 4 — charged as `4/2-1=1` missing under the correct smaller
+        // step, but `4/3-1=0` (invisible) under the wrongly tie-broken larger step. The smaller
+        // choice's downside is only a cosmetic over-count in the diagnostic missing-id list, never
+        // a masked drop — so the tie MUST resolve to the SMALLER delta (the original #576 rule).
         let ids = [0u32, 2, 4, 7, 10];
         assert_eq!(
             calibrate_burn_step(&ids),
-            3,
-            "a tied mode must resolve to the LARGER delta (#580v2 — tie-to-smaller phantom-charges \
-             a bimodal cadence)"
+            2,
+            "a tied mode must resolve to the SMALLER delta — the larger choice can mask a real drop"
+        );
+    }
+
+    #[test]
+    fn calibrate_burn_step_tie_to_larger_would_mask_a_real_drop_580v2() {
+        // Adversarial proof for the tie-break direction: the SAME tied [2,2,3,3] cadence as the
+        // test above, plus one MORE gap of 4 (a genuine single-frame drop at the true step-2
+        // cadence). The tie still resolves to 2 (this function's own — correct, smaller — output);
+        // feeding the REAL calibrated step into `burn_step_contiguity` correctly charges the drop.
+        // Then, to document exactly why #580v2's discarded "tie-to-larger" draft was wrong, feed
+        // the DISCARDED alternative (3, the larger tied candidate) into the same real contiguity
+        // function on the same ids — it computes ZERO missing, masking the drop outright.
+        let ids = [0u32, 2, 4, 7, 10, 14];
+        let calibrated_step = calibrate_burn_step(&ids);
+        assert_eq!(
+            calibrated_step, 2,
+            "sanity: the tie must still resolve to the smaller delta"
+        );
+
+        let sc_correct = burn_step_contiguity(&ids, calibrated_step);
+        assert!(
+            !sc_correct.missing_ids.is_empty(),
+            "the real drop (gap of 4 at true step 2) must be charged, not masked: {sc_correct:?}"
+        );
+
+        let discarded_larger_tie_break = 3u32;
+        let sc_masked = burn_step_contiguity(&ids, discarded_larger_tie_break);
+        assert!(
+            sc_masked.missing_ids.is_empty(),
+            "proving the discarded larger tie-break (3) would have MASKED this exact drop: \
+             {sc_masked:?}"
         );
     }
 
@@ -1387,12 +1431,12 @@ mod tests {
     fn burn_present_ok_passes_a_genuinely_present_burn_580v2() {
         // A full burn: one id per recorded frame ⇒ present ≈ reference frames. Well above the floor.
         assert!(
-            burn_present_ok(21867, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            burn_present_ok(21867, 21867, MIN_BURN_PRESENT_FRACTION),
             "a fully-present burn must clear the floor"
         );
         assert!(
-            burn_present_ok(30, 60, 2, MIN_BURN_PRESENT_FRACTION),
-            "floor = 60/2 * 0.5 = 15; present 30 clears it"
+            burn_present_ok(30, 60, MIN_BURN_PRESENT_FRACTION),
+            "floor = 60 * 0.5 = 30; present 30 clears it (exactly at the floor)"
         );
     }
 
@@ -1401,7 +1445,7 @@ mod tests {
         // #585: a recording with NO burn decoded at all must FAIL fail-closed — never the vacuous
         // `optional_signal_ok(None) == true` pass, now that the burn is the SOLE delivery authority.
         assert!(
-            !burn_present_ok(0, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            !burn_present_ok(0, 21867, MIN_BURN_PRESENT_FRACTION),
             "present_count 0 (burn absent) must fail"
         );
     }
@@ -1411,18 +1455,34 @@ mod tests {
         // #584: a FROZEN burn (present_count ≈ 1 while the recording ran for thousands of frames)
         // must FAIL — a single repeated id is trivially "contiguous" but proves no delivery.
         assert!(
-            !burn_present_ok(1, 21867, 2, MIN_BURN_PRESENT_FRACTION),
+            !burn_present_ok(1, 21867, MIN_BURN_PRESENT_FRACTION),
             "present_count 1 (frozen burn) must fail"
         );
         // An occluded corner burn that decodes only a small fraction of frames (well below the
         // floor) must FAIL, even though its few decoded ids might be internally contiguous.
         assert!(
-            !burn_present_ok(100, 21867, 2, MIN_BURN_PRESENT_FRACTION),
-            "present_count 100 in a 21867-frame recording (floor ~5467) must fail"
+            !burn_present_ok(100, 21867, MIN_BURN_PRESENT_FRACTION),
+            "present_count 100 in a 21867-frame recording (floor ~10934) must fail"
         );
-        // Borderline: floor = 60/2 * 0.5 = 15; present 14 fails, 15 passes.
-        assert!(!burn_present_ok(14, 60, 2, MIN_BURN_PRESENT_FRACTION));
-        assert!(burn_present_ok(15, 60, 2, MIN_BURN_PRESENT_FRACTION));
+        // Borderline: floor = 60 * 0.5 = 30; present 29 fails, 30 passes.
+        assert!(!burn_present_ok(29, 60, MIN_BURN_PRESENT_FRACTION));
+        assert!(burn_present_ok(30, 60, MIN_BURN_PRESENT_FRACTION));
+    }
+
+    #[test]
+    fn burn_present_ok_floor_does_not_scale_down_with_step_580v2() {
+        // Correctness-review adversarial proof: an EARLIER draft computed the floor as
+        // `(reference_frames / step) * fraction`, which at the real rig's step 3 loosens the floor
+        // to 16.7% of the recording instead of the intended 50% — a burn present only on a ~17%
+        // PREFIX of the recording (then absent for the remaining 83%) would have vacuously cleared
+        // it and vouched for the WHOLE recording's delivery. Prove that shape now correctly FAILS:
+        // reference_frames=21867 (the real 572001 frame count), present_count=3645 (~16.7% of it —
+        // exactly what the old, wrong `/step`-scaled floor at step 3 would have accepted).
+        assert!(
+            !burn_present_ok(3645, 21867, MIN_BURN_PRESENT_FRACTION),
+            "a burn present on only ~17% of the recording must FAIL the 50% floor — step must \
+             never scale the floor down"
+        );
     }
 
     // ---- #580v2 — calibrate_burn_step clamp against a drop-inflated (majority-loss) cadence ----
