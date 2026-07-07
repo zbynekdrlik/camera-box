@@ -7766,12 +7766,21 @@ mod tests {
             .iter()
             .find(|l| l.contains("ZERO loss"))
             .expect("a passing node prints a ZERO loss line");
+        // #580v2 — the v2 pass line has TWO parts: the OPTICAL read description, then an
+        // ` AND digital corner burn CONTIGUOUS (...)` note (the burn is the delivery authority and
+        // IS genuinely contiguous here — an honest claim). This test's intent is only that the
+        // OPTICAL read must NOT be falsely called contiguous when a tick is genuinely missing, so
+        // scope the check to the optical portion (before the burn note), never the whole line.
+        let optical_portion = pass_line
+            .split(" AND digital corner burn")
+            .next()
+            .unwrap_or(pass_line);
         assert!(
-            !pass_line.contains("CONTIGUOUS"),
-            "a beat-compensated pass must NOT falsely claim a contiguous read: {pass_line}"
+            !optical_portion.contains("CONTIGUOUS"),
+            "a beat-compensated pass must NOT falsely claim a contiguous OPTICAL read: {pass_line}"
         );
         assert!(
-            pass_line.contains("BEAT compensation"),
+            optical_portion.contains("BEAT compensation"),
             "the pass line must report the beat compensation honestly: {pass_line}"
         );
     }
