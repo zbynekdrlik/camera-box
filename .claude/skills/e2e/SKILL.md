@@ -678,9 +678,25 @@ emits normally. 5 tests in `tests/harness_verdict_done_marker.rs`.
 `recording-e2e.sh` now records+decodes imag-nb (10.77.9.182, the 60fps low-latency IMAG box)
 alongside strih+stream: `[0/8]` reachability, `[4d/8]` render-budget (`--box imag=…:60`),
 `[5/8]`-`[7/8]` StartRecord/StopRecord over OBS WS, `[8/8c]` decode+merge as a third
-`--merge-partials imag=...` partial. imag's zero-loss proof is the cam2 OPTICAL tick's own
-first..=last contiguity (60fps captures the 60Hz painter 1:1, no 60→30 beat) ANDed with its OWN
+`--merge-partials imag=...` partial. imag's zero-loss proof is the cam2 OPTICAL tick sequence
+(60fps captures the 60Hz painter, no 60→30 beat like strih/stream's hops) ANDed with its OWN
 911003 digital corner burn's contiguity when present (`recording-verdict --imag`, #463).
+
+**#580 — the cam2 optical PRIMARY check is BEAT-AWARE net-zero, NOT strict first..=last
+contiguity.** cam2's 60Hz monitor and imag's free-running 60fps camera are two UNSYNCHRONIZED
+same-rate clocks that still BEAT against each other (a skip balanced by a duplicate, frame count
+conserved, is ZERO NET loss — confirmed live, run 572001 post-#575/#576: expected=21870,
+frames=21873, missing=19, dups=22, surplus=-3, digital burn 0-missing; strict step-1 false-failed
+this genuinely zero-loss run). `camera_box::imag_tick_gate::optical_beat_net_zero` ANDs an
+advance-guard (the tick sequence must genuinely advance — a frozen/stuck camera reading, tick
+range collapsed to one value, now FAILS; the OLD strict check ALSO vacuously passed a frozen read,
+so this closes a hole rather than opening one) with `surplus = expected_count - frames_count <= 0`
+(a genuine net loss, `surplus > 0`, still fails — never weakened). Wired into
+`node_verdict_for_imag` via a NEW `imag_optical_beat_pass: Option<bool>` field on `NodeVerdict`
+that overrides `is_zero()`'s `contiguity.is_contiguous()` check for imag ONLY (`None` — hence
+unaffected — for every other node); `contiguity` itself still carries the RAW strict
+`tick_contiguity` values for display. The #463 digital-burn AND still applies unchanged: a
+net-zero optical beat can NEVER paper over a genuinely broken digital burn.
 
 **`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
 strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS

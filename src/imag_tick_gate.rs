@@ -282,6 +282,198 @@ pub fn burn_step_contiguity(ids: &[u32], step: u32) -> BurnStepContiguity {
     }
 }
 
+/// #580 — imag's PRIMARY (cam2 optical) zero-loss expected per-recorded-frame step: cam2's 60Hz
+/// painter and imag's 60fps capture are the SAME rate (1:1, no beat — see the module doc), so the
+/// optical tick sequence should advance by exactly this much per captured frame. Named for
+/// symmetry with [`IMAG_BURN_RENDER_STEP`] so the value's origin is explicit rather than an
+/// inline magic `1` at every call site.
+pub const IMAG_OPTICAL_EXPECTED_STEP: u32 = 1;
+
+/// #580 — the optical-BEAT verdict for imag's PRIMARY (cam2 dual-QR) zero-loss signal, replacing
+/// strict step-1 [`tick_contiguity`] as the hard optical gate. cam2's 60Hz monitor and the
+/// broadcast camera's free-running 60fps are two UNSYNCHRONIZED same-rate clocks — they BEAT: the
+/// camera captures some painter ticks twice (a duplicate) and misses others (a skip), and when
+/// dups and skips are BALANCED (frame-count conserved) that is ZERO NET loss, not a fault. Strict
+/// step-1 contiguity false-fails a truly-zero-loss run whenever ANY skip occurs, even when fully
+/// compensated. Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
+/// frames=21873, present=21851, missing=19, dups=22, surplus=-3 — a genuinely zero-net-loss run
+/// that strict step-1 (missing=19) false-fails.
+///
+/// Two independent checks, both required (see [`Self::is_net_zero`]):
+/// - **advance-guard** ([`Self::is_advancing`]): the tick sequence must genuinely ADVANCE at
+///   ~[`Self::expected_step`] — a frozen/stuck optical read (the camera stuck on one QR: the tick
+///   range collapses, `avg_step` ≈ 0) FAILS. This is STRICTER than the OLD strict-step-1 gate,
+///   which ALSO false-passed a frozen read (`first_tick == last_tick` is trivially "contiguous",
+///   `missing_ticks` empty) — #580 closes that pre-existing hole, it does not open a new one.
+/// - **net-zero** ([`Self::is_net_zero`]'s `surplus <= 0` term): `surplus = expected_count -
+///   frames_count` — an AGGREGATE window count of painter ticks NET missing after every
+///   duplicate-oversampled frame is credited against a skip. `surplus <= 0` ⇒ dups net-cover skips
+///   across the window ⇒ OPTICAL tracking PASS. `surplus > 0` ⇒ more skips than dups ⇒ a net
+///   optical loss ⇒ FAIL. This is aggregate, NOT per-value (see [`Self::is_net_zero`]'s doc): a real
+///   one-off drop offset by an unrelated beat dup can still net to `<= 0` — deliberate (a beat skip
+///   and a real drop are optically indistinguishable at 60/60), with per-frame DELIVERY proven
+///   independently by the STRICT digital burn ANDed in `NodeVerdict::is_zero` (#463).
+///
+/// This is the SAME `avg_step` / `surplus` beat math already computed (diagnostic-only) in
+/// `probe::recording_verdict::verdict` (`expected_step`, `surplus`, `beat_balanced` — see that
+/// function's doc), promoted here into imag's HARD optical gate. For `expected_step == 1` (imag's
+/// only real configuration, [`IMAG_OPTICAL_EXPECTED_STEP`]) `verdict()`'s `surplus = sum_steps -
+/// num_pairs` telescopes to EXACTLY `expected_count - frames_count` (`sum_steps` telescopes to
+/// `last - first` for ANY chronological walk regardless of individual step values, `num_pairs =
+/// frames_count - 1`, so `surplus = (last-first) - (frames_count-1) = expected_count -
+/// frames_count`) — a faithful port of the already-proven formula, not a new one. The final step
+/// `(last - first) + 1 == expected_count` assumes the CHRONOLOGICAL endpoints equal the NUMERIC
+/// min/max — i.e. a monotonically non-decreasing capture, which a genuinely advancing tick always
+/// is. The CODE does not rely on that equality (it takes `expected_count`/`present_count` straight
+/// from [`tick_contiguity`]'s BTreeSet and `avg_step` from the positional endpoints, independently);
+/// a misdecoded OUT-OF-ORDER tick would merely push `avg_step` off `expected_step` and FAIL
+/// [`Self::is_advancing`] — a SAFE false-FAIL direction, never a false-PASS.
+///
+/// A minor, deliberately-accepted simplification vs `verdict()`: `verdict()` walks the RAW frame
+/// stream and breaks the pairing chain across an undecodable (`None`) frame, so a step is never
+/// computed ACROSS such a hole; here `ticks_in_order` has ALREADY had undecodable frames excluded
+/// (see [`optical_beat_net_zero`]), so an adjacent pair MAY span a former undecodable hole. This is
+/// negligible for imag: the #376 optical-undecodable floor caps that hole rate near zero
+/// (`OPTICAL_UNDECODABLE_RATE_MAX` in `bin/recording-verdict.rs`), and it is a SEPARATE, unchanged
+/// hard gate (`NodeVerdict::optical_undecodable_ok`) ANDed alongside this one regardless.
+///
+/// `Serialize` is derived so `NodeVerdict` (which stores the full verdict, not just its
+/// `is_net_zero()` bool, #580 review finding C) can keep its own blanket `#[derive(Serialize)]` —
+/// `bin/recording-verdict.rs`'s `node_verdict_json` still hand-picks individual fields for the
+/// actual JSON output, so this derive exists for compile-time compatibility, not because the
+/// whole struct is serialized wholesale anywhere today.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct OpticalBeatVerdict {
+    /// The average per-sample tick step over the analyzed (already boundary-trimmed) window, in
+    /// the CHRONOLOGICAL order the samples were captured. `0.0` when there are fewer than 2
+    /// samples (nothing to average over — never proven advancing, see [`Self::is_advancing`]).
+    pub avg_step: f64,
+    /// The step the optical tick SHOULD advance by per captured frame ([`IMAG_OPTICAL_EXPECTED_STEP`]
+    /// for imag's real 60Hz/60fps configuration). Clamped to `>= 1` (a `0` would make every
+    /// forward motion read as infinite deviation).
+    pub expected_step: u32,
+    /// The size of the contiguous VALUE span `first_tick..=last_tick` (mirrors
+    /// [`TickContiguity::expected_count`]) — how many distinct painter ticks the analyzed window
+    /// SHOULD have captured if nothing were lost.
+    pub expected_count: u32,
+    /// How many DISTINCT tick values were actually decoded (mirrors
+    /// [`TickContiguity::present_count`]).
+    pub present_count: u32,
+    /// How many raw (possibly duplicate) decodable samples were analyzed — the count BEFORE
+    /// deduplication. `frames_count - present_count` is the number of duplicate-oversampled
+    /// frames; `expected_count - present_count` is the number of genuinely skipped ticks.
+    pub frames_count: u32,
+    /// `expected_count as i64 - frames_count as i64`. `<= 0` ⇒ net-zero (every distinct tick is
+    /// covered by the raw frame count); `> 0` ⇒ a genuine net loss of that many painter ticks.
+    pub surplus: i64,
+}
+
+impl OpticalBeatVerdict {
+    /// Does the optical tick sequence genuinely ADVANCE at (very close to) [`Self::expected_step`]
+    /// per sample? `false` for: no samples at all (`expected_count == 0`); exactly ONE decodable
+    /// sample (no adjacent pair exists to prove any advance at all — deliberately NOT a trivial
+    /// pass, unlike [`TickContiguity::is_contiguous`]'s single-value case, because a lone sample
+    /// proves nothing about the camera tracking a moving painter tick); or a FROZEN/stuck read
+    /// (`avg_step` rounds to something other than `expected_step` — most starkly `0` for a fully
+    /// stuck camera).
+    pub fn is_advancing(&self) -> bool {
+        self.expected_count > 0
+            && self.frames_count > 1
+            && self.avg_step.round() as i64 == self.expected_step as i64
+    }
+
+    /// THE #580 pass/fail decision: genuinely advancing AND the analyzed span is net-zero loss
+    /// (`surplus <= 0`); STRICTER than the old strict-step-1 check for a frozen/stuck read (see
+    /// [`Self::is_advancing`]'s doc).
+    ///
+    /// `surplus` is a WHOLE-WINDOW AGGREGATE (`expected_count - frames_count`), NOT a per-value
+    /// pairing — so this is an OPTICAL-TRACKING proof, not a per-frame delivery proof. A genuine
+    /// one-off optical drop CAN be numerically offset to `surplus <= 0` by an unrelated,
+    /// naturally-occurring beat duplicate elsewhere in the same window (e.g. a real skip of 110
+    /// offset by a beat dup at 121), so this term ALONE is NOT sufficient to prove every frame was
+    /// delivered — and the aggregate is deliberate: at matched 60Hz/60fps a beat skip and a real
+    /// drop are OPTICALLY indistinguishable, so per-value pairing would re-introduce the exact
+    /// 572001 false-FAIL #580 exists to close. Per-frame DELIVERY is proven independently by the
+    /// STRICT digital corner burn (`NodeVerdict::imag_burn_ok`, #463 — a clean free-running render
+    /// tick where a genuinely dropped frame DOES show a gap); `NodeVerdict::is_zero` ANDs both, so a
+    /// real drop coincidentally optical-offset here is still caught by the burn. On the pre-#463
+    /// optical-only fallback (no burn) that aggregate-offset edge is unguarded — tracked as a
+    /// follow-up; the live rig always paints the burn.
+    pub fn is_net_zero(&self) -> bool {
+        self.is_advancing() && self.surplus <= 0
+    }
+}
+
+/// Build an [`OpticalBeatVerdict`] from PRECOMPUTED aggregate counts — the seam that lets a
+/// REAL-DATA-derived fixture (e.g. the exact confirmed 572001 numbers) be asserted directly
+/// without reconstructing a synthetic ~21873-sample chronological tick sequence just to recompute
+/// the same aggregates [`optical_beat_net_zero`] would derive from it.
+pub fn optical_beat_verdict_from_counts(
+    expected_count: u32,
+    present_count: u32,
+    frames_count: u32,
+    avg_step: f64,
+    expected_step: u32,
+) -> OpticalBeatVerdict {
+    OpticalBeatVerdict {
+        avg_step,
+        expected_step: expected_step.max(1),
+        expected_count,
+        present_count,
+        frames_count,
+        surplus: expected_count as i64 - frames_count as i64,
+    }
+}
+
+/// Build an [`OpticalBeatVerdict`] straight from the CHRONOLOGICAL (capture order preserved,
+/// duplicates allowed, undecodable frames already excluded) trimmed optical tick sequence — the
+/// entry point [`crate`]'s probe-gated `node_verdict_for_imag` glue calls with imag's own
+/// boundary-trimmed tick samples.
+///
+/// `avg_step` is derived from the walk of consecutive per-sample steps in the GIVEN order: the sum
+/// of consecutive differences ALWAYS telescopes to `ticks_in_order.last() - ticks_in_order.first()`
+/// regardless of the individual dup/skip values in between (a pure algebraic identity), so this is
+/// exactly the same `avg_step` `probe::recording_verdict::verdict`'s diagnostic computes.
+pub fn optical_beat_net_zero(ticks_in_order: &[u32], expected_step: u32) -> OpticalBeatVerdict {
+    optical_beat_from_contiguity(
+        ticks_in_order,
+        &tick_contiguity(ticks_in_order),
+        expected_step,
+    )
+}
+
+/// #580 review finding-2 — the SAME verdict as [`optical_beat_net_zero`] but reusing a
+/// [`tick_contiguity`] result the caller ALREADY computed for the raw strict `contiguity` field it
+/// still prints (`bin/recording-verdict.rs`'s `node_verdict_for_imag`), so the identical slice is
+/// not walked into a second `BTreeSet`. `tc` MUST be `tick_contiguity(ticks_in_order)` for the SAME
+/// slice — the aggregate counts (`expected_count`/`present_count`) come from it.
+///
+/// `avg_step` derives from the CHRONOLOGICAL endpoints, `(last - first) / (frames - 1)`: the sum of
+/// consecutive per-sample steps ALWAYS telescopes to `ticks_in_order.last() - ticks_in_order.first()`
+/// regardless of the dup/skip values between (a pure algebraic identity), so this is byte-identical
+/// to walking `.windows(2)`. Note it is NOT `tc.last_tick - tc.first_tick`: those are the SORTED
+/// min/max, not the positional endpoints a non-monotonic glitch could distinguish.
+pub fn optical_beat_from_contiguity(
+    ticks_in_order: &[u32],
+    tc: &TickContiguity,
+    expected_step: u32,
+) -> OpticalBeatVerdict {
+    let frames_count = ticks_in_order.len() as u32;
+    let avg_step = match (ticks_in_order.first(), ticks_in_order.last()) {
+        (Some(&first), Some(&last)) if frames_count > 1 => {
+            (last as f64 - first as f64) / (frames_count as f64 - 1.0)
+        }
+        _ => 0.0,
+    };
+    optical_beat_verdict_from_counts(
+        tc.expected_count,
+        tc.present_count,
+        frames_count,
+        avg_step,
+        expected_step,
+    )
+}
+
 /// #576 — minimum distinct burn ids [`calibrate_burn_step`] requires before it trusts a
 /// calibrated mode over the [`IMAG_BURN_RENDER_STEP`] fallback (fewer distinct ids than this
 /// yields too few consecutive deltas to call any one value "dominant" rather than noise).
@@ -755,6 +947,174 @@ mod tests {
             "sanity: the hardcoded step-2 model does NOT recover the true missing grid id \
              (demonstrates the #576 brittleness): {:?}",
             sc_hardcoded
+        );
+    }
+
+    // ============================================================================
+    // #580 — the imag optical BEAT net-zero gate: cam2's 60Hz monitor and the free-running 60fps
+    // camera are two unsynced same-rate clocks that BEAT (balanced dup+skip = zero NET loss).
+    // Replaces strict step-1 `tick_contiguity` as imag's PRIMARY optical zero-loss decision.
+    // ============================================================================
+
+    #[test]
+    fn optical_beat_net_zero_passes_the_real_572001_pattern_580() {
+        // Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
+        // frames=21873, present=21851, missing=19, dups=22, surplus=-3, digital burn 0-missing.
+        // avg_step derived the SAME way `probe::recording_verdict::verdict` would (telescoping:
+        // (expected_count-1)/(frames_count-1), true whenever there is no undecodable-frame chain
+        // break — confirmed here, optical_undecodable=0 on this run).
+        let avg_step = (21870.0 - 1.0) / (21873.0 - 1.0);
+        let v = optical_beat_verdict_from_counts(
+            21870,
+            21851,
+            21873,
+            avg_step,
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert_eq!(v.surplus, -3, "expected(21870) - frames(21873) = -3: {v:?}");
+        assert!(
+            v.is_advancing(),
+            "avg_step {avg_step} must round to the expected step 1: {v:?}"
+        );
+        assert!(
+            v.is_net_zero(),
+            "the real 572001 pattern is genuinely zero NET loss (19 skips fully compensated by \
+             22 dups) — strict step-1 false-fails it, #580 must not: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_net_zero_exact_balance_passes_580() {
+        // No skip, no dup — a perfectly clean 1:1 run. surplus == 0 (the boundary case) must PASS.
+        let ticks: Vec<u32> = (100..=149).collect();
+        let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.surplus, 0, "{v:?}");
+        assert!(
+            v.is_net_zero(),
+            "exact balance (surplus == 0) must pass: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_net_zero_pure_oversample_passes_580() {
+        // One duplicate sample, no skip at all — pure oversampling (surplus < 0, no missing tick
+        // whatsoever). Must pass: excess frames are never a defect.
+        let mut ticks: Vec<u32> = vec![100];
+        ticks.extend(100..=149);
+        let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.expected_count, 50);
+        assert_eq!(v.frames_count, 51);
+        assert_eq!(v.surplus, -1, "{v:?}");
+        assert!(
+            v.is_net_zero(),
+            "pure oversampling (surplus < 0) must pass: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_net_zero_genuine_net_loss_fails_580() {
+        // 8 unpaired skips, ZERO compensating duplicates — a real net loss, not a beat. Must FAIL
+        // even though the sequence is genuinely advancing (this is the net-zero term catching it,
+        // not the advance-guard — checked explicitly below).
+        let removed = [10u32, 20, 30, 40, 50, 60, 70, 80];
+        let ticks: Vec<u32> = (0..=99).filter(|t| !removed.contains(t)).collect();
+        let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.expected_count, 100);
+        assert_eq!(v.frames_count, 92);
+        assert_eq!(v.surplus, 8, "8 net-uncompensated skips: {v:?}");
+        assert!(
+            v.is_advancing(),
+            "sanity: the sequence itself is genuinely advancing — the FAIL below is the \
+             net-zero term, not the advance-guard: {v:?}"
+        );
+        assert!(
+            !v.is_net_zero(),
+            "8 unpaired skips with zero compensating dups is a genuine net loss: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_net_zero_frozen_read_fails_580() {
+        // The camera stuck on ONE painted QR value for the whole window — tick range collapses
+        // (first == last), avg_step == 0. The OLD strict-step-1 check ALSO false-passed this
+        // (trivially "contiguous", nothing missing in a span of one) — #580's advance-guard closes
+        // that pre-existing hole; this must now FAIL despite a hugely negative (naively
+        // "oversampled") surplus.
+        let ticks = vec![500u32; 50];
+        let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(
+            v.expected_count, 1,
+            "frozen: span collapses to a single value: {v:?}"
+        );
+        assert_eq!(v.avg_step, 0.0);
+        assert!(
+            !v.is_advancing(),
+            "a frozen/stuck read must never read as genuinely advancing: {v:?}"
+        );
+        assert!(
+            !v.is_net_zero(),
+            "a frozen read must FAIL even though surplus is hugely negative (naive oversample \
+             reading): {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_net_zero_single_sample_does_not_prove_advancing_580() {
+        // A single decoded sample has no adjacent pair to prove ANY advance — deliberately not a
+        // trivial pass (unlike `TickContiguity::is_contiguous`'s single-value case): a lone sample
+        // proves nothing about the camera tracking a moving painter tick.
+        let v = optical_beat_net_zero(&[42], IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.expected_count, 1);
+        assert_eq!(v.frames_count, 1);
+        assert!(
+            !v.is_advancing(),
+            "one sample proves no advance at all: {v:?}"
+        );
+        assert!(!v.is_net_zero(), "{v:?}");
+    }
+
+    #[test]
+    fn optical_beat_net_zero_empty_input_fails_580() {
+        let v = optical_beat_net_zero(&[], IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.expected_count, 0);
+        assert!(!v.is_advancing());
+        assert!(
+            !v.is_net_zero(),
+            "no tick decoded at all must never read as a pass: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_from_contiguity_uses_positional_endpoints_for_avg_step_580() {
+        // #580 review: `avg_step` MUST derive from the CHRONOLOGICAL (positional) endpoints, NOT
+        // `tick_contiguity`'s SORTED min/max. (An earlier "parity lock" comparing the tc-reusing
+        // entry to the slice-only one was a TAUTOLOGY — `optical_beat_net_zero` now DELEGATES to
+        // `optical_beat_from_contiguity`, so it compared a wrapper to its own wrappee and could
+        // never fail. Replaced with concrete hand-computed values on a non-monotonic input that
+        // actually distinguishes positional from sorted.)
+        //
+        // A misdecoded 105 appears at position 1 (out of numeric order): positional first/last are
+        // 100/103, while the sorted min/max are 100/105. Hand-computed:
+        //   avg_step (positional)  = (103 - 100) / (5 - 1) = 0.75   (sorted would give 1.25)
+        //   tick_contiguity spans 100..=105 -> expected_count 6, present 5 (104 missing), frames 5
+        //   surplus = 6 - 5 = 1 (> 0) -> a genuine net loss, NOT net-zero.
+        let ticks = [100u32, 105, 101, 102, 103];
+        let v = optical_beat_from_contiguity(
+            &ticks,
+            &tick_contiguity(&ticks),
+            IMAG_OPTICAL_EXPECTED_STEP,
+        );
+        assert!(
+            (v.avg_step - 0.75).abs() < 1e-9,
+            "avg_step must use POSITIONAL endpoints (0.75), not sorted min/max (1.25): {v:?}"
+        );
+        assert_eq!(v.expected_count, 6, "sorted span 100..=105: {v:?}");
+        assert_eq!(v.present_count, 5, "{v:?}");
+        assert_eq!(v.frames_count, 5, "{v:?}");
+        assert_eq!(v.surplus, 1, "expected_count 6 - frames_count 5: {v:?}");
+        assert!(
+            !v.is_net_zero(),
+            "surplus 1 > 0 is a genuine net loss, never net-zero: {v:?}"
         );
     }
 }
