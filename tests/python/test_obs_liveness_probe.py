@@ -185,6 +185,48 @@ def test_merge_process_state_none_leaves_sample_unmodified():
 
 
 # ---------------------------------------------------------------------------
+# --log-audit parsing + merge (#89 — DXGI device-lost signal)
+# ---------------------------------------------------------------------------
+
+def test_parse_log_audit_true():
+    label, dxgi = _mod._parse_log_audit("stream=true")
+    assert (label, dxgi) == ("stream", True)
+
+
+def test_parse_log_audit_false():
+    label, dxgi = _mod._parse_log_audit("strih=false")
+    assert (label, dxgi) == ("strih", False)
+
+
+def test_parse_log_audit_is_case_insensitive():
+    label, dxgi = _mod._parse_log_audit("stream=TRUE")
+    assert (label, dxgi) == ("stream", True)
+
+
+def test_parse_log_audit_rejects_missing_equals():
+    with pytest.raises(ValueError):
+        _mod._parse_log_audit("true")
+
+
+def test_parse_log_audit_rejects_non_boolean_value():
+    with pytest.raises(ValueError):
+        _mod._parse_log_audit("stream=maybe")
+
+
+def test_merge_log_audit_sets_field_when_present():
+    measured = _mod._unreachable_sample(30.0)
+    merged = _mod._merge_log_audit(measured, True)
+    assert merged["dxgi_device_lost"] is True
+
+
+def test_merge_log_audit_none_leaves_sample_unmodified():
+    measured = _mod._unreachable_sample(30.0)
+    merged = _mod._merge_log_audit(measured, None)
+    assert merged == measured
+    assert "dxgi_device_lost" not in merged
+
+
+# ---------------------------------------------------------------------------
 # _find_verdict_bin
 # ---------------------------------------------------------------------------
 
