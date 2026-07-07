@@ -5553,13 +5553,16 @@ mod tests {
     #[test]
     fn node_verdict_cam1_decimation_step2_extra_missing_id_is_not_masked_571() {
         // #571 no-masking proof at the node_verdict level: a genuine drop on top of the clean
-        // 2:1 decimation MUST still fail the verdict — gap 2004 -> 2008 (4, not the by-design 2)
-        // charges exactly one real drop, never silently absorbed as "just decimation".
+        // 2:1 decimation MUST still fail the verdict. Present cam1 ids [2000,2002,2004,2008] are a
+        // clean step-2 grid (observed step 2) with the grid slot 2006 dropped — gap 2004 -> 2008
+        // (4, not the by-design 2) charges exactly one real drop, never silently absorbed as
+        // "just decimation". (The prior data [2000,2002,2008,2010] was mis-constructed: its gap
+        // 2002->2008 of 6 charges TWO slots [2004,2006], contradicting the asserted single [2006].)
         let stream = vec![
             frame(0, &[(CAM2, 100), (CAM1B, 2000)]),
             frame(1, &[(CAM2, 101), (CAM1B, 2002)]),
-            frame(2, &[(CAM2, 102), (CAM1B, 2008)]), // 2004,2006 -> one genuine drop (2006)
-            frame(3, &[(CAM2, 103), (CAM1B, 2010)]),
+            frame(2, &[(CAM2, 102), (CAM1B, 2004)]),
+            frame(3, &[(CAM2, 103), (CAM1B, 2008)]), // grid slot 2006 dropped -> one real drop
         ];
         let w = in_window_burn_frames(
             &stream,
