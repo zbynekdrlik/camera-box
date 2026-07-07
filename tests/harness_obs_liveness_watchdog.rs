@@ -73,6 +73,28 @@ fn parse_kv(stdout: &str) -> HashMap<String, String> {
     map
 }
 
+fn run_recovery_plan_for(box_label: &str, label: &str) -> String {
+    let script = format!(
+        r#"set -uo pipefail
+. "$WATCHDOG"
+recovery_plan_for '{box_label}' '{label}'
+"#
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("WATCHDOG", watchdog())
+        .output()
+        .expect("run bash harness");
+    assert!(
+        out.status.success(),
+        "sourcing must not run main() and recovery_plan_for must succeed.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 fn confirm(prev: &str, wedged: &str, threshold: &str) -> HashMap<String, String> {
     let script = format!(
         r#"set -u
@@ -286,6 +308,36 @@ fn watchdog_embeds_the_agent_driven_recovery_command() {
         src.contains("--force"),
         "#391: the recovery command must force-kill the wedged obs64"
     );
+}
+
+#[test]
+fn gpu_device_removed_verdict_gets_correct_reboot_guidance_not_the_generic_restart() {
+    // #89: an OBS-only restart (launch-obs-genlock.sh --force) typically does NOT clear a DXGI
+    // device-removed GPU — embedding that suggestion for THIS verdict is actively misleading.
+    let text = run_recovery_plan_for("stream", "GPU-DEVICE-REMOVED");
+    assert!(
+        text.to_lowercase().contains("reboot"),
+        "#89: GPU-DEVICE-REMOVED guidance must mention a reboot. got: {text}"
+    );
+    assert!(
+        !text.contains("launch-obs-genlock.sh"),
+        "#89: GPU-DEVICE-REMOVED guidance must NOT suggest the generic OBS-restart command \
+         (misleading — it typically does not clear this cause). got: {text}"
+    );
+}
+
+#[test]
+fn other_verdicts_still_get_the_generic_obs_restart_command() {
+    // Every OTHER verdict (WEDGED-RENDER-LAG, WS-DEAD, FPS-ZERO, OBS-COUNT-WRONG) keeps the
+    // #391 original agent-driven OBS-restart recovery command — #89 must not regress those.
+    for label in ["WEDGED-RENDER-LAG", "WS-DEAD", "FPS-ZERO", "OBS-COUNT-WRONG"] {
+        let text = run_recovery_plan_for("stream", label);
+        assert!(
+            text.contains("launch-obs-genlock.sh") && text.contains("--force"),
+            "#89: verdict {label} must still get the generic OBS-restart recovery command. \
+             got: {text}"
+        );
+    }
 }
 
 #[test]
