@@ -67,7 +67,7 @@ fn resolve_device_name_resolves_uppercase_name() {
 
 /// Case-insensitivity: a lowercase or mixed-case input must resolve identically to the uppercase
 /// form -- the historical hostname convention is uppercase, but camera-set.sh's own table keys
-/// are lowercase (cam1..cam7).
+/// are lowercase (cam1..cam6 -- cam7 was never built, #593).
 #[test]
 fn resolve_device_name_is_case_insensitive() {
     for input in ["cam3", "Cam3", "CAM3", "cAm3"] {
@@ -119,8 +119,8 @@ fn resolve_device_name_fails_loud_on_empty_name() {
     assert!(!out.contains("UNREACHABLE"));
 }
 
-/// Every fleet camera (cam1-cam7) must resolve through the real setup-device.sh + camera-set.sh
-/// pairing -- a broad sweep so a future fleet-map edit (#451 added cam5-7) can't silently break
+/// Every fleet camera (cam1-cam6) must resolve through the real setup-device.sh + camera-set.sh
+/// pairing -- a broad sweep so a future fleet-map edit (#451 added cam5-6) can't silently break
 /// one name while the others still pass.
 #[test]
 fn resolve_device_name_resolves_the_whole_fleet() {
@@ -131,7 +131,6 @@ fn resolve_device_name_resolves_the_whole_fleet() {
         ("cam4", "CAM4", "10.77.9.64"),
         ("cam5", "CAM5", "10.77.9.65"),
         ("cam6", "CAM6", "10.77.9.66"),
-        ("cam7", "CAM7", "10.77.9.67"),
     ];
     for (input, want_name, want_ip) in expected {
         let (code, out, err) = run_sourced(&format!(
@@ -148,6 +147,26 @@ fn resolve_device_name_resolves_the_whole_fleet() {
             "resolve_device_name {input} resolved incorrectly"
         );
     }
+}
+
+/// #593: cam7 was NEVER built (the user only expressed future interest) -- resolve_device_name
+/// must fail loud on it, exactly like any other unknown camera name, never provision a phantom
+/// box.
+#[test]
+fn resolve_device_name_rejects_cam7_not_yet_built() {
+    let (code, out, _err) = run_sourced(
+        r#"resolve_device_name cam7
+           echo "UNREACHABLE""#,
+    );
+    assert_ne!(
+        code, 0,
+        "#593: resolve_device_name cam7 must exit non-zero -- cam7 was never built"
+    );
+    assert!(
+        !out.contains("UNREACHABLE"),
+        "resolve_device_name must exit immediately on cam7 -- no code after the call should run. \
+         stdout: {out}"
+    );
 }
 
 // --- #568: color block deduped onto scripts/lib/cli-log.sh --------------------------------------

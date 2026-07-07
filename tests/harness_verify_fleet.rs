@@ -11,9 +11,8 @@
 //!   1. it exists, is executable-looking, sources the single camera-set.sh source of truth (no
 //!      re-baked IP map) — same discipline as `deploy-fleet.sh` (`harness_deploy_fleet.rs`);
 //!   2. `box_status()` (the pure verdict function) treats an unreachable box as SKIPPED — NEVER a
-//!      hard FAIL (an offline box, e.g. cam7 during the 2026-07-06 convergence, could simply be
-//!      mid-reboot/deploy) — while a REACHABLE box that fails verify-device.sh's own acceptance
-//!      gate IS a fleet FAIL;
+//!      hard FAIL (an offline box could simply be mid-reboot/deploy) — while a REACHABLE box that
+//!      fails verify-device.sh's own acceptance gate IS a fleet FAIL;
 //!   3. driven end-to-end under stubs (stubbed `sshpass` controlling reachability + a stubbed
 //!      `VERIFY_CMD` standing in for `verify-device.sh`), the real script's exit status and
 //!      PASS/FAIL/SKIPPED report reflect that contract — not a re-spelling of it.
@@ -58,7 +57,7 @@ fn verify_fleet_sources_shared_camera_set() {
     assert!(
         s.contains("camera-set.sh"),
         "verify-fleet.sh must source scripts/camera-set.sh (single source of truth for the \
-         cam1-7 IP map), not re-bake device IPs."
+         cam1-6 IP map), not re-bake device IPs."
     );
     for ip in [
         "10.77.9.61",
@@ -67,7 +66,6 @@ fn verify_fleet_sources_shared_camera_set() {
         "10.77.9.64",
         "10.77.9.65",
         "10.77.9.66",
-        "10.77.9.67",
     ] {
         assert!(
             !s.contains(ip),
@@ -122,7 +120,7 @@ fn run_sourced(body: &str) -> (i32, String, String) {
 #[test]
 fn box_status_unreachable_is_skipped_never_fail() {
     // An offline box must be SKIPPED regardless of what a hypothetical verify_rc would have
-    // been -- never run/blamed as a FAIL. This is the cam7-offline-during-convergence case.
+    // been -- never run/blamed as a FAIL. This is the "box mid-reboot/deploy" case.
     for verify_rc in [0, 1] {
         let (code, out, err) = run_sourced(&format!("box_status 1 {verify_rc}"));
         assert_eq!(code, 0, "box_status must not crash. stderr: {err}");
@@ -317,9 +315,11 @@ fn summary_line<'a>(output: &'a str, label: &str) -> &'a str {
 
 #[test]
 fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
-    // cam7 (10.77.9.67) offline -- must be SKIPPED, and since no OTHER box fails, the fleet
+    // cam6 (10.77.9.66) offline -- must be SKIPPED, and since no OTHER box fails, the fleet
     // exit status must still be 0 (an offline box alone is not a fleet failure, #552).
-    let r = run_fleet("cam1 cam7", &["10.77.9.67"], &[]);
+    // #593: this used to use cam7 as the "offline" example -- cam7 was never built and is no
+    // longer a resolvable camera name at all, so a real fleet member (cam6) stands in instead.
+    let r = run_fleet("cam1 cam6", &["10.77.9.66"], &[]);
     assert!(
         r.success,
         "exited nonzero solely because one box was offline -- an offline box must be SKIPPED, \
@@ -327,7 +327,7 @@ fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
         r.output
     );
     // Precise checks on the actual per-label summary lines (not a loose substring match that a
-    // vacuous "SKIPPED: none" could also satisfy) -- cam1 genuinely PASSED, cam7 genuinely
+    // vacuous "SKIPPED: none" could also satisfy) -- cam1 genuinely PASSED, cam6 genuinely
     // SKIPPED, nothing FAILED.
     assert_eq!(
         summary_line(&r.output, "PASS:"),
@@ -337,24 +337,25 @@ fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
     );
     assert_eq!(
         summary_line(&r.output, "SKIPPED:"),
-        "cam7",
-        "cam7 (offline) must be reported SKIPPED, by name, not just the label present with an \
+        "cam6",
+        "cam6 (offline) must be reported SKIPPED, by name, not just the label present with an \
          empty list; output:\n{}",
         r.output
     );
     assert_eq!(
         summary_line(&r.output, "FAIL:"),
         "none",
-        "cam7 (offline) must NOT appear in the FAIL summary; output:\n{}",
+        "cam6 (offline) must NOT appear in the FAIL summary; output:\n{}",
         r.output
     );
 }
 
 #[test]
 fn verify_fleet_offline_box_does_not_mask_a_real_failure_elsewhere() {
-    // Mixed fleet: cam7 offline (SKIPPED) AND cam2 reachable-but-failing (FAIL) -- the offline
+    // Mixed fleet: cam6 offline (SKIPPED) AND cam2 reachable-but-failing (FAIL) -- the offline
     // box must not swallow the real failure; overall exit must still be nonzero.
-    let r = run_fleet("cam1 cam2 cam7", &["10.77.9.67"], &["cam2"]);
+    // #593: cam6 stands in for the old cam7 example -- cam7 was never built.
+    let r = run_fleet("cam1 cam2 cam6", &["10.77.9.66"], &["cam2"]);
     assert!(
         !r.success,
         "an offline box masked a real failure elsewhere -- must still exit nonzero. output:\n{}",
@@ -374,11 +375,32 @@ fn verify_fleet_offline_box_does_not_mask_a_real_failure_elsewhere() {
     );
     assert_eq!(
         summary_line(&r.output, "SKIPPED:"),
-        "cam7",
+        "cam6",
         "output:\n{}",
         r.output
     );
     assert!(r.output.contains("FLEET DRIFT"), "output:\n{}", r.output);
+}
+
+#[test]
+fn verify_fleet_rejects_cam7_as_invalid_not_offline() {
+    // #593: cam7 was NEVER built -- it must not even resolve as a camera name (unlike a real,
+    // offline fleet member such as cam6 above). camera_resolve rejects it, so verify-fleet.sh's
+    // own "invalid" branch fires, distinct from the reachability-probe-based SKIPPED path.
+    let r = run_fleet("cam1 cam7", &[], &[]);
+    assert!(
+        !r.success,
+        "verify-fleet.sh must exit nonzero when CAMERA_SET names an unresolvable camera (cam7). \
+         output:\n{}",
+        r.output
+    );
+    assert_eq!(
+        summary_line(&r.output, "FAIL:"),
+        "cam7(invalid)",
+        "cam7 must be reported as an invalid camera name, not silently skipped or passed; \
+         output:\n{}",
+        r.output
+    );
 }
 
 // --- Hardening from code review (2026-07-06): unknown-arg rejection, case-insensitivity, empty
