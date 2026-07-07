@@ -46,11 +46,11 @@ use camera_box::probe::recording::{
     DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
-    burn_ids_in, cam2_cam1_samples, cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip,
-    cam_strih_samples, chain_hop_samples_from_stream, hop_latency, painter_internal_gen_to_flip,
-    per_frame_latency_csv_rows, strih_stream_samples, strih_stream_samples_from_stream,
-    write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
-    BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,
+    cam2_cam1_samples_from_flip, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
+    painter_internal_gen_to_flip, per_frame_latency_csv_rows, strih_stream_samples,
+    strih_stream_samples_from_stream, write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1,
+    BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -1092,7 +1092,38 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // optical paint" (mirrors `frame_is_delivered_optical`'s exclusion list for strih/stream), so
     // an imag burn payload can never be mistaken for the cam2 optical mark.
     let optical = optical_span_facts(frames, &[BURN_RUN_ID_IMAG], cam2_run_id);
-    let ticks: Vec<u32> = frames.iter().filter_map(|f| f.tick).collect();
+
+    // #575: the recording's OWN frame-index bounds — anchoring the boundary trim on THESE
+    // (never on a signal's own first/last decoded value) is what makes the trim a frame-POSITION
+    // trim rather than a value-range trim (see `recording_boundary_trim`'s module doc). `frames`
+    // is always sorted by `frame_index` (`analyze_recording_with_burns`), so first()/last() are
+    // the true bounds; an empty recording defaults both to 0, which trims to nothing either way.
+    let first_frame_index = frames.first().map(|f| f.frame_index).unwrap_or(0);
+    let last_frame_index = frames.last().map(|f| f.frame_index).unwrap_or(0);
+    // #575 review: a single closure over the shared bounds/window, so the optical tick and the
+    // digital burn (below) can never silently diverge onto different trim windows — a future
+    // edit to one call site's trailing args now visibly has to touch this ONE closure, not two
+    // independent call sites.
+    let trim_to_boundary = |samples: &[(u64, u32)]| {
+        camera_box::recording_boundary_trim::trim_boundary_samples(
+            samples,
+            first_frame_index,
+            last_frame_index,
+            camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES,
+            camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES,
+        )
+    };
+
+    // #575: trim the recording start/stop boundary (genlock-fifo pre-roll flush, mux-
+    // finalization tail-drain — confirmed live, run 554307) from the cam2 optical tick BEFORE
+    // the contiguity check, so a handful of boundary-artifact frames can never manufacture a
+    // phantom "missing tick" span. See `recording_boundary_trim`'s module doc for why trimming by
+    // frame POSITION (not by decoded VALUE) can never mask a genuine mid-recording drop.
+    let tick_samples: Vec<(u64, u32)> = frames
+        .iter()
+        .filter_map(|f| f.tick.map(|t| (f.frame_index, t)))
+        .collect();
+    let ticks = trim_to_boundary(&tick_samples);
     let tc = camera_box::imag_tick_gate::tick_contiguity(&ticks);
 
     // #480: imag's OWN digital corner burn, decoded the same way every other node's burn is
@@ -1101,11 +1132,20 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // cause. `first_id.is_none()` (nothing decoded at all) is still the "no burn in this
     // recording" fallback case — the NodeVerdict::imag_burn_ok() consumer treats it as
     // pass-through, so a pre-#463-build recording keeps working unchanged.
-    let imag_burn_ids = burn_ids_in(frames, BURN_RUN_ID_IMAG);
-    let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(
-        &imag_burn_ids,
-        camera_box::imag_tick_gate::IMAG_BURN_RENDER_STEP,
-    );
+    //
+    // #576: the step is SELF-CALIBRATED from this recording's own observed cadence
+    // (`calibrate_burn_step`), not the hardcoded `IMAG_BURN_RENDER_STEP` constant — #480
+    // confirmed step 2 at the time, but the #572 live-rig investigation found the real rig now
+    // free-running at step 3. Calibrating per-recording means a future render-pipeline timing
+    // change can never silently attribute the wrong grid ids to a genuine drop again.
+    //
+    // #575: the SAME boundary trim (via the SAME `trim_to_boundary` closure above) applies to the
+    // burn ids (paired with frame_index via `burn_ids_with_frame_index_in`) before calibration
+    // AND before the contiguity check — a boundary-artifact burn id must not skew the calibrated
+    // step either.
+    let imag_burn_ids = trim_to_boundary(&burn_ids_with_frame_index_in(frames, BURN_RUN_ID_IMAG));
+    let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(&imag_burn_ids);
+    let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
     let imag_burn_contiguity = NodeContiguity {
         node: "imag-burn".to_string(),
         first_id: burn_sc.first_id,
@@ -3008,8 +3048,14 @@ fn build_and_print_verdict(
             );
         }
         all_pass &= nv.is_zero() && span_ok;
-        report["full_chain"]["loss"]["imag"] =
-            node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs);
+        let mut imag_json = node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs);
+        // #575 — note the boundary trim honestly: the exact lead/tail frame counts excluded from
+        // imag's optical tick + digital burn contiguity checks before this verdict was computed.
+        imag_json["boundary_trim_lead_frames"] =
+            serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES);
+        imag_json["boundary_trim_tail_frames"] =
+            serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES);
+        report["full_chain"]["loss"]["imag"] = imag_json;
     }
 
     // #312 Phase-1 — ALL-CAMBOX per-segment continuity (the all-active splitter proof). When a
@@ -7000,8 +7046,12 @@ mod tests {
             "60 contiguous optical ticks with no gap must be zero loss"
         );
         assert_eq!(nv.contiguity.node, "imag");
-        assert_eq!(nv.contiguity.first_id, Some(100));
-        assert_eq!(nv.contiguity.last_id, Some(159));
+        // #575: the boundary trim excludes frame_index 0..=2 (lead) and 57..=59 (tail) from a
+        // 0..=59 recording, so the analyzed tick span is 103..=156 (tick=100+i), not the raw
+        // 100..=159 — `optical_span_frames` below is UNAFFECTED (it's computed separately from
+        // ALL frames, never trimmed; #575 only trims the loss/missing-id CONTIGUITY inputs).
+        assert_eq!(nv.contiguity.first_id, Some(103));
+        assert_eq!(nv.contiguity.last_id, Some(156));
         assert!(nv.contiguity.missing_ids.is_empty());
         assert_eq!(nv.optical_span_frames, 60);
         assert_eq!(nv.colour_fail, 0, "colour gate is not wired for imag yet");
@@ -7033,10 +7083,11 @@ mod tests {
             "optical contiguous AND digital burn contiguous ⇒ zero loss (#463)"
         );
         let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
-        assert_eq!(burn.first_id, Some(10));
-        // #480: the free-running burn steps by IMAG_BURN_RENDER_STEP (2) per recorded frame —
-        // last = 10 + 2*(IMAG_WINDOW_FRAMES-1) = 10 + 2*59 = 128, not the old step-1 69.
-        assert_eq!(burn.last_id, Some(128));
+        // #575: the boundary trim excludes frame_index 0..=2 and 57..=59, so the analyzed burn
+        // span is over frame_index 3..=56 (burn id = 10 + 2*i), not the raw 0..=59 —
+        // first = 10 + 2*3 = 16, last = 10 + 2*56 = 122 (not the pre-#575 10 / 128).
+        assert_eq!(burn.first_id, Some(16));
+        assert_eq!(burn.last_id, Some(122));
         assert!(
             burn.missing_ids.is_empty(),
             "a clean step-2 free-running burn is zero loss once correctly modeled (#480): {burn:?}"
@@ -7067,6 +7118,72 @@ mod tests {
             // step-1 40 — a genuinely missing step-grid slot is still caught, never masked.
             vec![70],
             "the exact missing digital burn id must be reported"
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_calibrates_the_burn_step_from_observed_cadence_576() {
+        use super::node_verdict_for_imag;
+        // #576: THIS recording's burn free-runs at step 3 (the #572 live-rig cadence), NOT the
+        // #480-confirmed step 2 — the hardcoded IMAG_BURN_RENDER_STEP constant would have been
+        // wrong here. `calibrate_burn_step` must derive 3 from the observed ids and still
+        // declare a clean run zero loss.
+        //
+        // The cam2 tick base is kept WELL ABOVE the burn id range (100_000+i vs 10+3*i) —
+        // `frame()`'s `tick = max(frame_id)` over ALL payloads on the frame means a burn id that
+        // ever exceeds the cam2 id would silently hijack `.tick`, corrupting the optical
+        // contiguity check (see `imag_window_with_burn`'s doc comment for the same gotcha).
+        let frames: Vec<RecordingFrame> = (0..60u32)
+            .map(|i| {
+                frame(
+                    i as u64,
+                    &[(CAM2, 100_000 + i), (super::BURN_RUN_ID_IMAG, 10 + 3 * i)],
+                )
+            })
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.is_zero(),
+            "a clean step-3 free-running burn must be zero loss once calibrated (#576): {:?}",
+            nv.imag_burn_contiguity
+        );
+        let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
+        // #575: the boundary trim excludes frame_index 0..=2 and 57..=59, so the analyzed span
+        // is frame_index 3..=56 — first = 10 + 3*3 = 19, last = 10 + 3*56 = 178 (not the raw
+        // 10 / 10 + 3*59).
+        assert_eq!(burn.first_id, Some(19));
+        assert_eq!(burn.last_id, Some(178));
+        assert!(burn.missing_ids.is_empty());
+    }
+
+    #[test]
+    fn node_verdict_for_imag_calibrated_step_attributes_the_correct_missing_grid_id_576() {
+        use super::node_verdict_for_imag;
+        // Same step-3 cadence as above, but frame index 30's burn payload never reached the
+        // recording — a genuine dropped step-grid slot. The OLD hardcoded step-2 constant would
+        // have attributed the WRONG grid ids entirely (see `imag_tick_gate`'s #576 unit test
+        // `calibrate_burn_step_feeds_correct_missing_grid_id_into_burn_step_contiguity_576`);
+        // calibrated to the TRUE step, the exact missing grid id must be reported. Cam2 tick
+        // base kept WELL ABOVE the burn id range for the same reason as the test above.
+        let frames: Vec<RecordingFrame> = (0..60u32)
+            .map(|i| {
+                let mut payloads = vec![(CAM2, 100_000 + i)];
+                if i != 30 {
+                    payloads.push((super::BURN_RUN_ID_IMAG, 10 + 3 * i));
+                }
+                frame(i as u64, &payloads)
+            })
+            .collect();
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            !nv.is_zero(),
+            "a genuinely missing step-3 grid slot must fail (#576)"
+        );
+        let burn = nv.imag_burn_contiguity.as_ref().expect("burn decoded");
+        assert_eq!(
+            burn.missing_ids,
+            vec![10 + 3 * 30],
+            "the exact missing step-3 grid id must be reported, not a step-2-derived wrong id: {burn:?}"
         );
     }
 
@@ -7144,6 +7261,71 @@ mod tests {
         );
         assert_eq!(nv.contiguity.first_id, None);
         assert_eq!(nv.optical_span_frames, 0);
+    }
+
+    #[test]
+    fn node_verdict_for_imag_trims_the_start_boundary_pre_roll_artifact_575() {
+        use super::node_verdict_for_imag;
+        // Reproduces the confirmed live incident (#575, run 554307): a rogue LOW optical tick
+        // decoded at the very first recorded frame — the genlock-fifo pre-roll flush emitting a
+        // stale backlogged value before the feed catches up to the live/contiguous run. Frames
+        // 1-2 decode nothing (fifo still draining); the clean contiguous run resumes at
+        // frame_index 3. WITHOUT the boundary trim this manufactures ~900 phantom "missing"
+        // ticks between the stale value and the clean run — even though none of it is real loss.
+        let mut frames = vec![frame(0, &[(CAM2, 1)])];
+        for i in 3..IMAG_WINDOW_FRAMES {
+            frames.push(frame(i as u64, &[(CAM2, 1000 + i)]));
+        }
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.contiguity.is_contiguous(),
+            "the stale pre-roll tick at frame_index 0 must be TRIMMED, not counted as phantom \
+             missing ticks (#575): {:?}",
+            nv.contiguity
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_trims_the_stop_boundary_finalization_artifact_575() {
+        use super::node_verdict_for_imag;
+        // Mirrors the start-boundary test, but for the STOP side: the last recorded frame
+        // carries a rogue tick FAR ahead of the clean run — mux finalization at StopRecord
+        // briefly surfacing an already-elapsed painter value that never continues.
+        let mut frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES - 1)
+            .map(|i| frame(i as u64, &[(CAM2, 1000 + i)]))
+            .collect();
+        frames.push(frame((IMAG_WINDOW_FRAMES - 1) as u64, &[(CAM2, 50_000)]));
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            nv.contiguity.is_contiguous(),
+            "the rogue finalization tick at the last frame_index must be TRIMMED, not counted \
+             as phantom missing ticks (#575): {:?}",
+            nv.contiguity
+        );
+    }
+
+    #[test]
+    fn node_verdict_for_imag_boundary_trim_never_masks_a_genuine_drop_just_past_the_lead_edge_575()
+    {
+        use super::node_verdict_for_imag;
+        // Same boundary-artifact shape as the start-boundary test above, but frame_index 5 (well
+        // inside the KEPT window once the lead-3 frames are trimmed) is ALSO a genuine dropped
+        // instant — this must still FAIL, proving the trim can never mask a real mid-recording
+        // drop.
+        let mut frames = vec![frame(0, &[(CAM2, 1)])];
+        for i in 3..IMAG_WINDOW_FRAMES {
+            if i == 5 {
+                continue;
+            }
+            frames.push(frame(i as u64, &[(CAM2, 1000 + i)]));
+        }
+        let nv = node_verdict_for_imag(&frames, None);
+        assert!(
+            !nv.contiguity.is_contiguous(),
+            "a genuine drop just past the trimmed lead edge must NEVER be masked (#575): {:?}",
+            nv.contiguity
+        );
+        assert_eq!(nv.contiguity.missing_ids, vec![1005]);
     }
 
     #[test]

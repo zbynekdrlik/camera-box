@@ -783,11 +783,24 @@ fn burn_by_cam2_tick(frames: &[RecordingFrame], ids: &RunIds) -> HashMap<u32, i6
 /// from one recording, on the same integer end-to-end, with no 60→30 optical-beat ambiguity.
 /// A frame may carry several QRs; only payloads matching `run_id` are taken.
 pub fn burn_ids_in(frames: &[RecordingFrame], run_id: u32) -> Vec<u32> {
+    burn_ids_with_frame_index_in(frames, run_id)
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect()
+}
+
+/// #575 — like [`burn_ids_in`] (which now delegates to this, keeping ONE loop as the source of
+/// truth), but paired with each payload's `frame_index` so a caller can apply a
+/// frame-POSITION-based boundary trim (recording start/stop artifacts,
+/// `crate::recording_boundary_trim`) before feeding the ids into a contiguity check. Trimming by
+/// VALUE can't distinguish a real early/late drop from a boundary artifact; trimming by frame
+/// POSITION can, because it never has to look at what the value IS.
+pub fn burn_ids_with_frame_index_in(frames: &[RecordingFrame], run_id: u32) -> Vec<(u64, u32)> {
     let mut out = Vec::new();
     for f in frames {
         for p in &f.payloads {
             if p.run_id == run_id {
-                out.push(p.frame_id);
+                out.push((f.frame_index, p.frame_id));
             }
         }
     }
