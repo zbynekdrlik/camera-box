@@ -132,6 +132,20 @@ token mid-paragraph (e.g. `` [`crate::x`]: text ``) makes pulldown-cmark parse a
 definition → the next lines become a `doc_lazy_continuation` lint; reword to drop the `]:` (e.g.
 `` (in [`crate::x`] — text ``) or add a blank line.
 
+**Same class, a COMPILE error not a lint — a `serde::Serialize` (or any trait-bound) that only
+propagates under `--features probe`.** `bin/recording-verdict.rs`'s `NodeVerdict` is
+`#[derive(serde::Serialize)]`, so EVERY field type must be `Serialize`. When you change a field to
+hold a lib-crate struct (e.g. #580 changed `imag_optical_beat` from `Option<bool>` to
+`Option<OpticalBeatVerdict>` so the printers/JSON could report the beat detail), that struct MUST
+ALSO derive `Serialize` — else the whole `--features probe` build breaks with `E0277: the trait
+bound X: serde::Serialize is not satisfied`, red-X'ing Lint + Test + Build + Coverage + Windows
+probe build at once. INVISIBLE to Tier-0: `cargo check`/`clippy` on default features never compiles
+`bin/recording-verdict.rs` (`required-features = ["probe"]`), so it passes locally and only fails on
+CI (one wasted cycle, #580). Before pushing a `NodeVerdict` (or any `#[derive(Serialize)]`
+probe-struct) field-TYPE change, add the matching derive to the new field's type in `lib` (`serde` is
+already a default, non-optional dep, so `#[derive(..., serde::Serialize)]` compiles on default
+features too) — you cannot catch this locally.
+
 **Backstop:** `scripts/install-git-hooks.sh` installs a non-blocking pre-push hook running
 `scripts/purge-target.sh` (cargo clean when `target/` > `${THRESHOLD_MB:-4096}`; SKIPS while a live
 E2E has probe binaries running — matched by truncated `/proc` comm, e.g. `recording-verdi`,
