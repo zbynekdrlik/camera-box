@@ -251,4 +251,10 @@ fn help_describes_the_offset_check_and_guard() {
         low.contains("offset") && low.contains("guard"),
         "help must describe the dev1<->painter offset check + its guard: {stdout}"
     );
+    // #595: help must document the per-box freshness requirement, not just the relative guard --
+    // a stale reading on EITHER box refuses the comparison (INCOMPLETE), never a silent PASS.
+    assert!(
+        low.contains("fresh"),
+        "help must describe the offset FRESHNESS requirement (#550/#595), not just the guard: {stdout}"
+    );
 }

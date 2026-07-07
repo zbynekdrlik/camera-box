@@ -141,14 +141,16 @@ _freshest_ntp_offset_line() {
 # against EACH OTHER (the #326 painter-gate RELATIVE comparator, #595) rather than grade one
 # offset against a single absolute bound. JOURNAL must be gathered with `-o short-iso`.
 #
-# FRESHNESS_S itself is validated here (unlike BOUND_US, which every caller already validates via
-# its own --bound-us/--guard-us CLI parsing before calling in): FRESHNESS_S is caller-configurable
-# ONLY via an unchecked env var (DANTESYNC_OFFSET_FRESHNESS_S / GATE_OFFSET_FRESHNESS_S /
-# PAINTER_GATE_FRESHNESS_S), never a validated flag. A malformed value (e.g. a typo'd env var) would
-# otherwise make the `-gt "$fresh"` arithmetic comparison below throw a bash "integer expression
-# expected" error, which evaluates as a FAILED test -- silently defeating the staleness OR-chain and
-# making every reading look "fresh" regardless of its true age (a real desync would then silently
-# pass). So a non-numeric FRESHNESS_S is treated exactly like a stale reading: refuse to certify it.
+# FRESHNESS_S itself is validated here (unlike BOUND_US, which dantesync-gate.sh and
+# clock-offset-painter-gate.sh both validate via their own --bound-us/--guard-us CLI parsing before
+# calling in -- verify-device.sh's own DEVICE_CLOCK_BOUND_US is a separately-unvalidated env var too,
+# a pre-existing, unrelated gap): FRESHNESS_S is caller-configurable ONLY via an unchecked env var
+# (DANTESYNC_OFFSET_FRESHNESS_S / GATE_OFFSET_FRESHNESS_S / PAINTER_GATE_FRESHNESS_S), never a
+# validated flag. A malformed value (e.g. a typo'd env var) would otherwise make the `-gt "$fresh"`
+# arithmetic comparison below throw a bash "integer expression expected" error, which evaluates as a
+# FAILED test -- silently defeating the staleness OR-chain and making every reading look "fresh"
+# regardless of its true age (a real desync would then silently pass). So a non-numeric FRESHNESS_S
+# is treated exactly like a stale reading: refuse to certify it.
 freshest_offset_us() {
   local journal="$1" fresh="$2"
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
