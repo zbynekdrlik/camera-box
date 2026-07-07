@@ -476,20 +476,28 @@ struct NodeVerdict {
     /// [`camera_box::imag_tick_gate::optional_signal_ok`] for the shared "absent is fine,
     /// present-but-broken fails" rule this delegates to.
     imag_burn_contiguity: Option<NodeContiguity>,
-    /// #580 — imag's PRIMARY optical zero-loss decision OVERRIDE: `None` for every non-imag node
+    /// #580v2 — imag's PRIMARY optical zero-loss decision OVERRIDE: `None` for every non-imag node
     /// (unaffected — those keep using `contiguity.is_contiguous()` directly, see
     /// [`Self::optical_ok`]); for imag, the FULL
     /// [`camera_box::imag_tick_gate::OpticalBeatVerdict`] — its
-    /// [`is_net_zero`](camera_box::imag_tick_gate::OpticalBeatVerdict::is_net_zero) is the pass/fail
-    /// (the cam2 optical tick sequence genuinely advances — never frozen/stuck — AND the analyzed
-    /// span is net-zero loss: skips fully compensated by duplicate oversampling from the
-    /// 60Hz-monitor-vs-60fps-camera BEAT, or better). The whole verdict (not just the bool) is
-    /// stored so [`Self::node_verdict_lines`]'s printer and [`node_verdict_json`] can report the
-    /// avg_step / surplus / dup+skip counts HONESTLY (a beat-compensated pass is NOT a strictly
+    /// [`is_live_no_copy`](camera_box::imag_tick_gate::OpticalBeatVerdict::is_live_no_copy) is the
+    /// pass/fail (the cam2 optical tick sequence genuinely ADVANCES — never frozen/stuck — AND
+    /// carries NO long copy/freeze run; per-frame delivery accounting is the digital burn's job, not
+    /// this leg's). The whole verdict (not just the bool) is stored so
+    /// [`Self::node_verdict_lines`]'s printer and [`node_verdict_json`] can report the avg_step /
+    /// surplus / max_stuck_run / dup+skip counts HONESTLY (a beat-compensated pass is NOT a strictly
     /// "contiguous" read — #580 review findings 1/B/C). Replaces strict step-1 contiguity as imag's
     /// optical decision — `contiguity` itself stays populated with the RAW strict tick_contiguity
     /// values (unchanged, still informative/printed), only the PASS/FAIL judgment moves here.
     imag_optical_beat: Option<camera_box::imag_tick_gate::OpticalBeatVerdict>,
+    /// #580v2 (#584/#585) — for imag, whether the digital corner burn is GENUINELY PRESENT enough to
+    /// be the SOLE delivery authority ([`camera_box::imag_tick_gate::burn_present_ok`]:
+    /// `present_count >= optical_frames * MIN_BURN_PRESENT_FRACTION` — frame-scale to frame-scale,
+    /// `step` plays no role). `None` for every
+    /// non-imag node (unaffected); for imag ALWAYS `Some`. `Some(false)` = the burn is absent /
+    /// occluded / frozen and the node FAILS fail-closed (closes the vacuous
+    /// `optional_signal_ok(None) == true` pass and the trivially-"contiguous" single-id pass).
+    imag_burn_present_ok: Option<bool>,
 }
 
 impl NodeVerdict {
@@ -516,34 +524,43 @@ impl NodeVerdict {
         self.imag_optical_beat_pass()
             .unwrap_or_else(|| self.contiguity.is_contiguous())
     }
-    /// #580 — imag's beat-aware optical PASS/FAIL as an `Option<bool>`: `Some(is_net_zero)` for an
-    /// imag node, `None` for every other node (which has no beat verdict and falls back to strict
+    /// #580v2 — imag's optical PASS/FAIL as an `Option<bool>`: `Some(is_live_no_copy)` for an imag
+    /// node, `None` for every other node (which has no beat verdict and falls back to strict
     /// contiguity in [`Self::optical_ok`]). Derived from the stored [`Self::imag_optical_beat`] so
     /// the pass bit and the reportable beat detail can never drift apart.
     fn imag_optical_beat_pass(&self) -> Option<bool> {
-        self.imag_optical_beat.map(|b| b.is_net_zero())
+        // #580v2 — the HARD optical term is `is_live_no_copy` (advancing AND no long Δ0 copy/freeze
+        // run), NOT the old `is_net_zero` (`surplus <= 0`, which false-fails the 572001 clock
+        // residual AND fake-greens a content freeze). surplus/avg_step/is_net_zero stay diagnostic.
+        self.imag_optical_beat.map(|b| b.is_live_no_copy())
     }
-    /// #463 — is imag's digital corner burn (when this recording carries one at all) ALSO
-    /// contiguous? `true` (not applicable / nothing to fail on) for every non-imag node
-    /// (`imag_burn_contiguity` is always `None` there) and for an imag recording with NO burn
-    /// decoded at all (the pre-#463 optical-only fallback — `first_id.is_none()`). Only a
-    /// DECODED-but-gappy imag burn returns `false`, per the strict-test mandate: once a
-    /// stronger digital proof exists it must ALSO hold, never silently ignored in favour of the
-    /// weaker optical read alone.
+    /// #580v2 (#463/#584/#585) — is imag's digital corner burn a VALID delivery proof? `true` (not
+    /// applicable) for every non-imag node (`imag_burn_present_ok` is `None` there — they carry no
+    /// imag burn). For imag it requires BOTH the present floor ([`Self::imag_burn_present_ok`] —
+    /// genuinely present, not absent/occluded/frozen) AND contiguity (`imag_burn_signal() ==
+    /// Some(true)`).
     ///
-    /// Delegates the "absent is fine, present-but-broken fails" decision to
-    /// [`camera_box::imag_tick_gate::optional_signal_ok`] — the SAME shared rule
-    /// [`camera_box::imag_tick_gate::ImagVerdict::is_zero_loss`] uses for its own burn term, so
-    /// the rule lives in exactly one place instead of two independent reimplementations.
+    /// #580v2 made this FAIL-CLOSED: once the optical surplus is demoted to diagnostic, the burn is
+    /// imag's SOLE per-frame delivery authority, so an ABSENT burn must FAIL — closing the pre-#580v2
+    /// vacuous pass where a recording with no burn (or a single frozen id, trivially "contiguous")
+    /// slipped through `optional_signal_ok(None) == true`. Both adversarial reviews flagged that hole.
     fn imag_burn_ok(&self) -> bool {
-        camera_box::imag_tick_gate::optional_signal_ok(self.imag_burn_signal())
+        // #580v2 (#584/#585) — for imag the digital corner burn is the SOLE delivery authority (the
+        // optical surplus is demoted to diagnostic), so it must be GENUINELY PRESENT (the present
+        // floor) AND contiguous. An absent / occluded / frozen burn FAILS fail-closed — closing the
+        // vacuous `optional_signal_ok(None) == true` pass and the trivially-"contiguous" single-id
+        // pass that both reviews flagged. `imag_burn_present_ok` is `Some` only for imag; for every
+        // other node it is `None` and this returns `true` (they carry no imag burn — unaffected).
+        match self.imag_burn_present_ok {
+            Some(present_ok) => present_ok && self.imag_burn_signal() == Some(true),
+            None => true,
+        }
     }
-    /// #463 — the raw `Option<bool>` signal [`Self::imag_burn_ok`] feeds to the shared
-    /// `optional_signal_ok` rule: `None` when the field doesn't apply (non-imag node) or the
-    /// burn wasn't decoded at all (the optical-only fallback); `Some(bool)` = the burn WAS
-    /// decoded, is it contiguous. Factored out so `node_verdict_lines`'s printer can reuse the
-    /// EXACT same "is the burn present-but-broken" decision instead of re-deriving it a third
-    /// time (the #463 review caught two independent copies of this decision).
+    /// #463 — the raw `Option<bool>` burn-contiguity signal: `None` when the field doesn't apply
+    /// (non-imag node) or the burn wasn't decoded at all; `Some(contiguous)` = the burn WAS decoded,
+    /// is it contiguous. Consumed by [`Self::imag_burn_ok`] (which ANDs it with the #580v2 present
+    /// floor) and by [`Self::imag_burn_broken`] / the printer, so the "is the burn present-but-broken"
+    /// decision lives in exactly one place.
     fn imag_burn_signal(&self) -> Option<bool> {
         self.imag_burn_contiguity
             .as_ref()
@@ -1085,6 +1102,9 @@ fn node_verdict_with_optical(
         // #580 — the beat-aware optical override is imag-specific; every other node stays `None`
         // (unaffected — `optical_ok()` falls back to `contiguity.is_contiguous()` for them).
         imag_optical_beat: None,
+        // #580v2 — the burn present floor is imag-specific; every other node stays `None`
+        // (unaffected — `imag_burn_ok()` returns `true` for them).
+        imag_burn_present_ok: None,
     })
 }
 
@@ -1093,21 +1113,20 @@ fn node_verdict_with_optical(
 ///
 /// **#580 — the optical decision is the BEAT-AWARE net-zero verdict, not strict first..=last
 /// contiguity.** cam2's 60Hz monitor and imag's free-running 60fps camera are two UNSYNCHRONIZED
-/// same-rate clocks that BEAT: the camera captures some painter ticks twice (a duplicate) and
-/// misses others (a skip); when dups and skips are BALANCED (frame-count conserved) that is ZERO
-/// NET loss, not a fault. Strict step-1 (the pre-#580 model) false-fails a truly-zero-loss run
-/// whenever ANY skip occurs, even fully compensated — confirmed live (run 572001, post-#575 and
-/// #576): expected=21870, frames=21873, missing=19, dups=22, surplus=-3, digital burn 0-missing.
-/// [`camera_box::imag_tick_gate::optical_beat_net_zero`] replaces it, ANDing an
-/// advance-guard (never a frozen/stuck read — closes a hole strict step-1 ALSO vacuously passed)
-/// with the net-zero check (a net optical loss, `surplus > 0`, still FAILS). `surplus` is a
-/// whole-window AGGREGATE, so this is an OPTICAL-TRACKING proof, not per-frame delivery — a real
-/// one-off drop optically offset by an unrelated beat dup is caught by the STRICT digital burn
-/// ANDed below (#463), not by this term (see
-/// [`is_net_zero`](camera_box::imag_tick_gate::OpticalBeatVerdict::is_net_zero)'s doc). The RAW
-/// strict [`camera_box::imag_tick_gate::tick_contiguity`] result still populates `contiguity` for
-/// display (see [`NodeVerdict::imag_optical_beat_pass`] for how the pass/fail JUDGMENT moves to the
-/// beat verdict without changing what is shown).
+/// same-rate clocks whose tiny clock RESIDUAL is unavoidable — confirmed live (run 572001, post-#575
+/// trim + #576 calibration): expected_count=21870, frames_count=21867, missing=19, surplus=+3,
+/// avg_step≈1.000137, digital burn 0-missing — a genuinely ZERO-loss run. **#580v2 (two adversarial
+/// Opus reviews):** the old `surplus <= 0` gate both FALSE-FAILS that +3 residual AND FAKE-GREENS a
+/// content freeze (whose skips ≡ dups conserve the frame count, so `surplus ≈ 0` and `avg_step ≈ 1`).
+/// The honest gate is RUN-LENGTH, not aggregates:
+/// [`is_live_no_copy`](camera_box::imag_tick_gate::OpticalBeatVerdict::is_live_no_copy) = the read
+/// genuinely ADVANCES (a loose liveness band) AND carries NO long copy/freeze Δtick==0 run
+/// ([`camera_box::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN`]). `surplus`/`avg_step`/`is_net_zero`
+/// stay DIAGNOSTIC. Per-frame DELIVERY is proven independently by the STRICT digital corner burn
+/// (hardened below: present floor + contiguity + calibrate clamp), ANDed in `is_zero`. The RAW strict
+/// [`camera_box::imag_tick_gate::tick_contiguity`] result still populates `contiguity` for display
+/// (see [`NodeVerdict::imag_optical_beat_pass`] for how the pass/fail JUDGMENT moves to the beat
+/// verdict without changing what is shown).
 ///
 /// **#463 — imag NOW ALSO carries its own digital corner burn** (run_id [`BURN_RUN_ID_IMAG`],
 /// the OBS filter's `Corner::BottomCenterLeft`). When the recording carries it, its OWN
@@ -1208,6 +1227,16 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     let imag_burn_ids = trim_to_boundary(&burn_ids_with_frame_index_in(frames, BURN_RUN_ID_IMAG));
     let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(&imag_burn_ids);
     let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
+    // #580v2 (#584/#585): the burn is imag's SOLE delivery authority, so it must be genuinely
+    // PRESENT enough — measured against the OPTICAL frame count (`optical_beat.frames_count`, an
+    // EXTERNAL reference; a burn that decoded only its first few frames must not vacuously clear a
+    // floor derived from its own tiny span). An absent / occluded / frozen burn (present_count far
+    // below the floor) FAILS fail-closed in `NodeVerdict::imag_burn_ok`.
+    let imag_burn_present_ok = camera_box::imag_tick_gate::burn_present_ok(
+        burn_sc.present_count,
+        optical_beat.frames_count,
+        camera_box::imag_tick_gate::MIN_BURN_PRESENT_FRACTION,
+    );
     let imag_burn_contiguity = NodeContiguity {
         node: "imag-burn".to_string(),
         first_id: burn_sc.first_id,
@@ -1232,11 +1261,12 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
         colour_fail: 0,
         optical_span_frames: optical.span_frames,
         imag_burn_contiguity: Some(imag_burn_contiguity),
-        // #580: the FULL beat verdict is imag's PRIMARY optical signal from here on —
-        // `NodeVerdict::optical_ok` consults its `is_net_zero()` instead of
-        // `contiguity.is_contiguous()`, and the printers/JSON report its avg_step/surplus/dup+skip
-        // counts honestly (a beat-compensated pass is NOT a strictly "contiguous" read).
+        // #580v2: the FULL beat verdict is imag's PRIMARY optical signal — `NodeVerdict::optical_ok`
+        // consults its `is_live_no_copy()` (advancing AND no copy/freeze run) instead of
+        // `contiguity.is_contiguous()`, and the printers/JSON report its avg_step/surplus/dup+skip/
+        // max_stuck_run counts honestly (a beat-compensated pass is NOT a strictly "contiguous" read).
         imag_optical_beat: Some(optical_beat),
+        imag_burn_present_ok: Some(imag_burn_present_ok),
     }
 }
 
@@ -1356,10 +1386,16 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
             Some(beat) if !c.is_contiguous() => {
                 let dups = beat.frames_count.saturating_sub(beat.present_count);
                 let skips = c.missing_ids.len();
+                // #580v2 — a beat-compensated PASS is LIVE and copy-free, NOT strictly contiguous
+                // and NOT necessarily `surplus <= 0` (a genuinely-zero run can carry a small +N clock
+                // residual — run 572001 = +3). State exactly what was proven: advancing + no
+                // copy/freeze; the surplus is reported as a diagnostic, never claimed to be ≤ 0.
                 format!(
-                    "cam2 optical read complete via BEAT compensation ({skips} skipped tick(s) \
-                     balanced by {dups} duplicate(s), net surplus {} ≤ 0 — 60Hz monitor vs 60fps \
-                     capture, #580)",
+                    "cam2 optical read LIVE and copy-free via BEAT compensation ({skips} skipped \
+                     tick(s), {dups} duplicate(s), max identical-tick run {} ≤ {} — 60Hz monitor vs \
+                     60fps capture, surplus {} diagnostic, #580v2)",
+                    beat.max_stuck_run,
+                    camera_box::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN,
                     beat.surplus
                 )
             }
@@ -1394,6 +1430,25 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     }
     // #374 nit 2 — whether a SPECIFIC fault line (colour / optical) already explained the failure.
     let mut explained = false;
+    // #580v2 (#585) — imag's digital corner burn is the SOLE delivery authority: absent, occluded,
+    // or frozen (present_count below the floor) → fail-closed. Distinct from the present-but-gappy
+    // branch above; the `!= Some(false)` guard defers to that branch when the burn IS decoded but
+    // broken (so a below-floor-AND-gappy burn prints the gappy line, not both).
+    if v.imag_burn_present_ok == Some(false) && v.imag_burn_signal() != Some(false) {
+        let present = v
+            .imag_burn_contiguity
+            .as_ref()
+            .map(|nc| nc.present_count)
+            .unwrap_or(0);
+        lines.push(format!(
+            "  [{}] NOT zero — imag's OWN digital corner burn (run_id {BURN_RUN_ID_IMAG}) is ABSENT \
+             or below the present floor ({present} decoded): imag's SOLE delivery authority is not \
+             proven, so a copy/freeze the render-free-running burn is blind to could hide — \
+             fail-closed (#585).",
+            c.node,
+        ));
+        explained = true;
+    }
     // #364 — the per-camera COLOUR gate. Surface a colour failure FIRST among the non-delivery
     // faults: a node can deliver every frame, with a complete optical read, and still be WRONG in
     // colour (grayscale / hue-shift / cast). The zero-loss verdict proved DELIVERY; this proves the
@@ -1444,30 +1499,32 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     // `imag_optical_beat` is `None` for every non-imag node, so this block is skipped there and the
     // generic burn-id logic runs unchanged.
     if let Some(beat) = v.imag_optical_beat {
-        if beat.is_net_zero() {
-            // Beat PASSED: the strict per-value gaps are compensated — no optical fault line. Any
-            // burn / colour / undecodable fault above already printed its own reason.
+        if beat.is_live_no_copy() {
+            // Optical gate PASSED (live + copy-free): the strict per-value gaps are a beat, not a
+            // fault — no optical fault line. Any burn / colour / undecodable / present-floor fault
+            // above already printed its own reason (a genuine drop shows as a burn gap, not here).
             return lines;
         }
-        // #580 review finding 1 — the beat FAILED: say WHY, HONESTLY. This node is `is_zero() ==
-        // false`, so it MUST print a reason — never return an empty (silent) verdict. The frozen
-        // case is the one that regressed: a stuck read collapses to a single value, whose strict
-        // `missing_ids` is EMPTY, so the old `missing_ids.is_empty()` fall-through returned nothing.
-        let dups = beat.frames_count.saturating_sub(beat.present_count);
-        let skips = c.missing_ids.len();
+        // #580v2 — the optical gate FAILED: say WHY, HONESTLY. This node is `is_zero() == false`, so
+        // it MUST print a reason — never an empty (silent) verdict. Two failure modes: a FROZEN/blank
+        // read (does not advance) or a long COPY/FREEZE run the whole-window aggregates cannot see.
         if !beat.is_advancing() {
             lines.push(format!(
                 "  [{}] NOT zero — cam2 optical tick did NOT advance ({span}): average step {:.2}, \
                  expected {} — a FROZEN/stuck read (first==last is trivially 'contiguous' but proves \
-                 the camera captured NOTHING moving). #580 advance-guard.",
+                 the camera captured NOTHING moving). #580v2 advance-guard.",
                 c.node, beat.avg_step, beat.expected_step,
             ));
         } else {
             lines.push(format!(
-                "  [{}] NOT zero — cam2 optical NET loss ({span}): {skips} skipped tick(s) vs only \
-                 {dups} duplicate(s), net surplus {} > 0 — genuine dropped painter frames, not beat \
-                 jitter (#580).",
-                c.node, beat.surplus,
+                "  [{}] NOT zero — cam2 optical COPY/FREEZE ({span}): {} consecutive identical \
+                 tick(s) (max Δ0 run {}, above the {} jitter ceiling) — a stalled upstream content \
+                 or stuck camera that the whole-window surplus/avg_step AND the render-free-running \
+                 digital burn are all blind to (#580v2).",
+                c.node,
+                beat.max_stuck_run.saturating_add(1),
+                beat.max_stuck_run,
+                camera_box::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN,
             ));
         }
         return lines;
@@ -1550,12 +1607,21 @@ fn node_verdict_json(
         "imag_burn_last_id": v.imag_burn_contiguity.as_ref().and_then(|nc| nc.last_id),
         "imag_burn_missing_ids": v.imag_burn_contiguity.as_ref().map(|nc| nc.missing_ids.clone()),
         "imag_burn_ok": v.imag_burn_ok(),
-        // #580 review finding C — imag's beat-aware optical verdict, surfaced so a JSON consumer is
-        // never left with an internally-INCONSISTENT record: `zero_loss: true` alongside a
-        // non-empty `missing_ids` (a beat-compensated pass) now carries the fields that EXPLAIN it
-        // (`imag_optical_beat_net_zero: true`, `surplus <= 0`), instead of looking like a consumer
-        // bug. `null` for every non-imag node (no beat verdict; strict contiguity governs there).
-        "imag_optical_beat_net_zero": v.imag_optical_beat_pass(),
+        // #580v2 (#584/#585) — the digital burn present floor: `false` ⇒ absent/occluded/frozen ⇒
+        // fail-closed (`null` for non-imag nodes).
+        "imag_burn_present_ok": v.imag_burn_present_ok,
+        // #580v2 — the HARD optical gate (the read is LIVE and copy/freeze-free). `null` for every
+        // non-imag node (strict contiguity governs there).
+        "imag_optical_beat_pass": v.imag_optical_beat_pass(),
+        // #580v2 — THE CENTERPIECE metric: max consecutive Δtick==0 run. The supervisor reads this
+        // from the live 572001 re-decode to validate `IMAG_OPTICAL_MAX_STUCK_RUN` (K). A benign beat
+        // ⇒ ≤ 1; a copy/freeze ⇒ hundreds.
+        "imag_optical_max_stuck_run": v.imag_optical_beat.map(|b| b.max_stuck_run),
+        // #580v2 DIAGNOSTIC-ONLY (no longer the pass/fail): `is_net_zero` (`surplus <= 0` AND
+        // advancing) explains a beat-compensated read but is NOT the gate — a genuinely-zero run can
+        // carry a small `surplus > 0` clock residual (run 572001 = +3). Surfaced so `zero_loss: true`
+        // beside a non-empty `missing_ids` is self-explaining, not a consumer bug.
+        "imag_optical_beat_net_zero": v.imag_optical_beat.map(|b| b.is_net_zero()),
         "imag_optical_beat_avg_step": v.imag_optical_beat.map(|b| b.avg_step),
         "imag_optical_beat_expected_step": v.imag_optical_beat.map(|b| b.expected_step),
         "imag_optical_beat_present_count": v.imag_optical_beat.map(|b| b.present_count),
@@ -7167,38 +7233,72 @@ mod tests {
             .collect()
     }
 
+    /// #580v2 — a BEAT-compensated optical read (frame 30 re-reads the preceding tick 129 instead of
+    /// advancing to 130: one skip fully balanced by one duplicate) PLUS a clean step-2 digital burn
+    /// on EVERY frame. Since #580v2 makes the burn the SOLE delivery authority (an absent burn now
+    /// FAILS fail-closed, #585), a beat-compensated PASS must carry a genuinely-present burn — the
+    /// pre-#580v2 no-burn beat fixtures would now (correctly) fail. Burn ids stay below the cam2 range
+    /// so `frame()`'s `tick = max(frame_id)` always resolves to the cam2 tick (the #576 gotcha).
+    fn imag_window_beat_with_burn() -> Vec<RecordingFrame> {
+        (0..IMAG_WINDOW_FRAMES)
+            .map(|i| {
+                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
+                frame(
+                    i as u64,
+                    &[(CAM2, tick), (super::BURN_RUN_ID_IMAG, 10 + 2 * i)],
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn node_verdict_for_imag_reports_zero_loss_when_ticks_are_contiguous_461() {
+    fn node_verdict_for_imag_optical_only_no_burn_fails_closed_585() {
         use super::node_verdict_for_imag;
+        // #580v2 (#585) — contract change: a clean optical read with NO digital burn decoded at all
+        // now FAILS FAIL-CLOSED. The burn is imag's SOLE delivery authority once the optical surplus
+        // is demoted to diagnostic, so an absent burn can no longer vacuously pass
+        // (`optional_signal_ok(None)` used to return `true`). Pre-#580v2 this asserted `is_zero()`.
         let frames = imag_window(None);
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
-            nv.is_zero(),
-            "60 contiguous optical ticks with no gap must be zero loss"
+            !nv.is_zero(),
+            "no digital burn decoded ⇒ fail-closed, the burn is the sole delivery authority (#585)"
         );
         assert_eq!(nv.contiguity.node, "imag");
-        // #575: the boundary trim excludes frame_index 0..=2 (lead) and 57..=59 (tail) from a
-        // 0..=59 recording, so the analyzed tick span is 103..=156 (tick=100+i), not the raw
-        // 100..=159 — `optical_span_frames` below is UNAFFECTED (it's computed separately from
-        // ALL frames, never trimmed; #575 only trims the loss/missing-id CONTIGUITY inputs).
+        // The OPTICAL read itself is still perfectly clean (this is a burn-absence fail, not an
+        // optical fail). #575: the boundary trim excludes frame_index 0..=2 and 57..=59, so the
+        // analyzed tick span is 103..=156; `optical_span_frames` is UNAFFECTED (computed from ALL
+        // frames, never trimmed).
         assert_eq!(nv.contiguity.first_id, Some(103));
         assert_eq!(nv.contiguity.last_id, Some(156));
         assert!(nv.contiguity.missing_ids.is_empty());
         assert_eq!(nv.optical_span_frames, 60);
-        assert_eq!(nv.colour_fail, 0, "colour gate is not wired for imag yet");
-        // #463 — NO digital burn was decoded at all in this fixture (the pre-#463 shape): the
-        // fallback records `first_id: None`, and `imag_burn_ok()` still passes (optical-only).
+        assert_eq!(
+            nv.imag_optical_beat_pass(),
+            Some(true),
+            "the optical read is LIVE and copy-free — the failure is the ABSENT burn, not optical"
+        );
         let burn = nv
             .imag_burn_contiguity
             .as_ref()
             .expect("imag always computes the burn-contiguity slot, even when empty");
+        assert_eq!(burn.first_id, None, "no digital burn decoded");
         assert_eq!(
-            burn.first_id, None,
-            "no digital burn decoded ⇒ the optical-only fallback"
+            nv.imag_burn_present_ok,
+            Some(false),
+            "the present floor fails an absent burn (#585)"
         );
         assert!(
-            nv.imag_burn_ok(),
-            "no burn present ⇒ imag_burn_ok() passes through"
+            !nv.imag_burn_ok(),
+            "an absent burn must FAIL fail-closed, not vacuously pass (#585)"
+        );
+        // The printed reason must name the absent burn, honestly.
+        let lines = super::node_verdict_lines(&nv, true);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("ABSENT or below the present floor") && l.contains("NOT zero")),
+            "the fail-closed reason must be printed: {lines:?}"
         );
     }
 
@@ -7460,26 +7560,25 @@ mod tests {
     }
 
     // ============================================================================
-    // #580 — imag's optical zero-loss gate recognizes the 60Hz-monitor vs 60fps-camera sampling
-    // BEAT as net-zero, replacing strict step-1 tick contiguity as the primary optical decision.
-    // Confirmed live (run 572001, post-#575 trim + #576 calibration): expected=21870,
-    // frames=21873, present=21851, missing=19, dups=22, surplus=-3, digital burn 0-missing — a
-    // genuinely zero-NET-loss run that strict step-1 (missing=19) false-fails.
+    // #580v2 — imag's optical zero-loss gate recognizes the 60Hz-monitor vs 60fps-camera sampling
+    // BEAT via RUN-LENGTH (max consecutive Δtick==0), replacing strict step-1 tick contiguity AND
+    // the v1 `surplus <= 0` aggregate as the primary optical decision. Confirmed live (run 572001,
+    // post-#575 trim + #576 calibration, RE-SIGNED to the real numbers after the v1 gate shipped
+    // with a sign-flipped fixture): expected=21870, frames=21867, present=21851, missing=19,
+    // dups=22, surplus=+3, digital burn 0-missing — a genuinely zero-loss run that BOTH strict
+    // step-1 (missing=19) AND a naive `surplus <= 0` aggregate (surplus is +3, not negative)
+    // false-fail; the run-length gate (`is_live_no_copy`) correctly passes it.
     // ============================================================================
 
     #[test]
-    fn node_verdict_for_imag_optical_beat_compensated_skip_is_zero_loss_580() {
+    fn node_verdict_for_imag_optical_beat_compensated_skip_is_zero_loss_580v2() {
         use super::node_verdict_for_imag;
         // A genuine beat stutter: at i=30 the camera re-reads the PRECEDING painted tick (129)
-        // instead of advancing to 130 — one skip (130 never appears) fully compensated by one
-        // duplicate (129 appears twice). Net-zero: the digital burn is absent entirely here (the
-        // pre-#463 optical-only shape), isolating the OPTICAL decision on its own.
-        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
-            .map(|i| {
-                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
-                frame(i as u64, &[(CAM2, tick)])
-            })
-            .collect();
+        // instead of advancing to 130 — one skip (130 never appears) balanced by one duplicate (129
+        // appears twice, an isolated Δ0 run of 1). #580v2: paired with a clean digital burn (the burn
+        // is now the SOLE delivery authority, so a beat-compensated PASS must carry a present burn),
+        // the node is ZERO loss — strict step-1 false-fails this exact shape.
+        let frames = imag_window_beat_with_burn();
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             !nv.contiguity.is_contiguous(),
@@ -7487,10 +7586,15 @@ mod tests {
              at 129): {:?}",
             nv.contiguity
         );
+        assert_eq!(
+            nv.imag_optical_beat_pass(),
+            Some(true),
+            "the optical read is LIVE and copy-free (isolated dup, no freeze): {nv:?}"
+        );
         assert!(
             nv.is_zero(),
-            "a skip fully compensated by a duplicate (net-zero beat) must be ZERO loss — strict \
-             step-1 false-fails this exact shape (#580): {:?}",
+            "a beat skip balanced by an isolated dup + a clean digital burn must be ZERO loss \
+             (#580v2): {:?}",
             nv
         );
     }
@@ -7520,16 +7624,18 @@ mod tests {
     }
 
     #[test]
-    fn node_verdict_for_imag_optical_beat_genuine_net_loss_fails_580() {
+    fn node_verdict_for_imag_dropped_frame_no_burn_still_fails_580v2() {
         use super::node_verdict_for_imag;
-        // A genuinely missing tick with NO compensating duplicate anywhere — a real net loss, not
-        // a beat. Must still FAIL (never weaken a real drop).
+        // A genuinely dropped frame (index 30, painted tick 130 never captured) with NO digital
+        // burn. #580v2: a lone distributed skip is NOT a copy/freeze, so the optical VALIDITY gate
+        // passes it — but the recording carries no burn, so the node FAILS fail-closed (#585). On a
+        // real recording a dropped OUTPUT frame also loses its burn id, so the burn gap catches the
+        // same drop; either way a real drop can never read as zero loss.
         let frames = imag_window(Some(30));
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             !nv.is_zero(),
-            "a genuinely uncompensated missing optical tick must still FAIL (#580 never weakens \
-             a real drop): {:?}",
+            "a real drop must still FAIL — here fail-closed via the absent burn (#580v2): {:?}",
             nv
         );
     }
@@ -7609,19 +7715,39 @@ mod tests {
     }
 
     #[test]
-    fn node_verdict_for_imag_net_loss_prints_a_net_loss_reason_580() {
+    fn node_verdict_for_imag_copy_freeze_prints_a_copy_reason_580v2() {
         use super::node_verdict_for_imag;
-        // #580 review finding 1 (net-loss arm) — a genuine uncompensated drop must print a "NET
-        // loss" reason, never fall silent or misattribute to a generic "missing id(s)" line.
-        let frames = imag_window(Some(30));
+        // #580v2 — a partial content FREEZE: cam2 repeats tick 124 for 20 frames (a long Δ0 run),
+        // otherwise advancing, WITH a clean digital burn — so the ONLY failure is the optical copy
+        // (the burn free-runs on imag's OWN render, blind to an UPSTREAM content freeze). The
+        // whole-window aggregates (surplus/avg_step) cannot see it; the run-length term must, and the
+        // printer must explain it honestly as a copy/freeze — never fall silent or misattribute it.
+        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
+            .map(|i| {
+                let tick = if (25u32..45).contains(&i) {
+                    124
+                } else {
+                    100 + i
+                };
+                frame(
+                    i as u64,
+                    &[(CAM2, tick), (super::BURN_RUN_ID_IMAG, 10 + 2 * i)],
+                )
+            })
+            .collect();
         let nv = node_verdict_for_imag(&frames, None);
-        assert!(!nv.is_zero(), "sanity: a real drop must fail: {nv:?}");
+        assert_eq!(
+            nv.imag_optical_beat_pass(),
+            Some(false),
+            "the 20-frame Δ0 copy run must fail the optical no-copy gate: {nv:?}"
+        );
+        assert!(!nv.is_zero(), "a content freeze must fail the node: {nv:?}");
         let lines = super::node_verdict_lines(&nv, true);
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("NET loss") && l.contains("NOT zero")),
-            "a genuine optical net loss must be explained as such: {lines:?}"
+                .any(|l| l.contains("COPY/FREEZE") && l.contains("NOT zero")),
+            "a content freeze must be explained as a copy/freeze, honestly: {lines:?}"
         );
     }
 
@@ -7631,12 +7757,8 @@ mod tests {
         // #580 review finding B — a beat-compensated PASS (skip 130 balanced by dup 129) is
         // `is_zero()` but NOT strictly contiguous. The PASS line must NOT claim "CONTIGUOUS" (a tick
         // IS genuinely missing from the value range); it must report the beat compensation honestly.
-        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
-            .map(|i| {
-                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
-                frame(i as u64, &[(CAM2, tick)])
-            })
-            .collect();
+        // #580v2: paired with a clean burn (now the sole delivery authority).
+        let frames = imag_window_beat_with_burn();
         let nv = node_verdict_for_imag(&frames, None);
         assert!(
             nv.is_zero() && !nv.contiguity.is_contiguous(),
@@ -7647,12 +7769,21 @@ mod tests {
             .iter()
             .find(|l| l.contains("ZERO loss"))
             .expect("a passing node prints a ZERO loss line");
+        // #580v2 — the v2 pass line has TWO parts: the OPTICAL read description, then an
+        // ` AND digital corner burn CONTIGUOUS (...)` note (the burn is the delivery authority and
+        // IS genuinely contiguous here — an honest claim). This test's intent is only that the
+        // OPTICAL read must NOT be falsely called contiguous when a tick is genuinely missing, so
+        // scope the check to the optical portion (before the burn note), never the whole line.
+        let optical_portion = pass_line
+            .split(" AND digital corner burn")
+            .next()
+            .unwrap_or(pass_line);
         assert!(
-            !pass_line.contains("CONTIGUOUS"),
-            "a beat-compensated pass must NOT falsely claim a contiguous read: {pass_line}"
+            !optical_portion.contains("CONTIGUOUS"),
+            "a beat-compensated pass must NOT falsely claim a contiguous OPTICAL read: {pass_line}"
         );
         assert!(
-            pass_line.contains("BEAT compensation"),
+            optical_portion.contains("BEAT compensation"),
             "the pass line must report the beat compensation honestly: {pass_line}"
         );
     }
@@ -7663,12 +7794,8 @@ mod tests {
         // #580 review finding C — for a beat-compensated pass, JSON must not read as internally
         // inconsistent: `zero_loss: true` beside a non-empty `missing_ids` now carries the beat
         // fields that EXPLAIN it (`imag_optical_beat_net_zero: true`, `surplus <= 0`).
-        let frames: Vec<RecordingFrame> = (0..IMAG_WINDOW_FRAMES)
-            .map(|i| {
-                let tick = if i == 30 { 100 + i - 1 } else { 100 + i };
-                frame(i as u64, &[(CAM2, tick)])
-            })
-            .collect();
+        // #580v2: paired with a clean burn (now the sole delivery authority).
+        let frames = imag_window_beat_with_burn();
         let nv = node_verdict_for_imag(&frames, None);
         let j = node_verdict_json(&nv, 300.0, true, 300.0);
         assert_eq!(j["zero_loss"], serde_json::json!(true), "{j}");
@@ -7707,7 +7834,9 @@ mod tests {
 
         // --min-secs 1 so the 60-frame @60fps window (1s) trivially clears the #373 floor.
         let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
-        let imag_frames = imag_window(None);
+        // #580v2: carry a clean digital burn — the burn is now imag's sole delivery authority, so a
+        // no-burn recording would (correctly) fail fail-closed (#585).
+        let imag_frames = imag_window_with_burn(None);
 
         // NEITHER --strih NOR --stream supplied — imag must still be gated on its own.
         let (v, pass) = build_and_print_verdict(
@@ -7777,20 +7906,17 @@ mod tests {
         use std::path::PathBuf;
 
         let dir = tempfile::tempdir().unwrap();
-        // #463 review round 2: this fixture is the optical-only fallback — no digital burn was
-        // decoded, so the partial is saved with `expected_burns=[]`. That DOES now disagree with
-        // `args_expected_burns_for("imag", &default_args)`, which returns `Some(vec![
-        // BURN_RUN_ID_IMAG])` by default (imag's own corner burn) — so `run_merge`'s consistency
-        // check (the `partial.expected_burns != expected` WARN) genuinely FIRES on this call,
-        // same as it would for any strih/stream partial re-extracted under a changed --burn-*-
-        // run-id. That WARN is non-fatal (a bare `eprintln!`, not an error), so it does not
-        // affect this test's actual assertion (`run_merge` must accept the partial and NOT
-        // error) — but it is real observed output on this call, not silence. A genuinely
-        // burn-carrying partial (no WARN expected) is covered by
-        // `node_verdict_for_imag_passes_with_a_contiguous_digital_burn_present_463` above.
-        let imag_frames = imag_window(None);
-        let imag_p =
-            RecordingPartial::from_frames("imag", &PathBuf::from("imag.mkv"), &[], imag_frames);
+        // #580v2: the imag partial must carry a clean digital burn (declared in `expected_burns`) —
+        // the burn is now imag's SOLE delivery authority, so a no-burn recording fails fail-closed
+        // (#585) and `run_merge` would exit the PROCESS on that FAIL verdict, aborting the test
+        // binary. A burn-carrying, contiguous imag partial PASSES so this call returns normally.
+        let imag_frames = imag_window_with_burn(None);
+        let imag_p = RecordingPartial::from_frames(
+            "imag",
+            &PathBuf::from("imag.mkv"),
+            &[super::BURN_RUN_ID_IMAG],
+            imag_frames,
+        );
         let imag_path = dir.path().join("imag-partial.json");
         imag_p.save(&imag_path).unwrap();
         let spec = format!("imag={}", imag_path.display());

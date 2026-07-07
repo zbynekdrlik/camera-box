@@ -682,25 +682,42 @@ alongside strih+stream: `[0/8]` reachability, `[4d/8]` render-budget (`--box ima
 (60fps captures the 60Hz painter, no 60→30 beat like strih/stream's hops) ANDed with its OWN
 911003 digital corner burn's contiguity when present (`recording-verdict --imag`, #463).
 
-**#580 — the cam2 optical PRIMARY check is BEAT-AWARE net-zero, NOT strict first..=last
-contiguity.** cam2's 60Hz monitor and imag's free-running 60fps camera are two UNSYNCHRONIZED
-same-rate clocks that still BEAT against each other (a skip balanced by a duplicate, frame count
-conserved, is ZERO NET loss — confirmed live, run 572001 post-#575/#576: expected=21870,
-frames=21873, missing=19, dups=22, surplus=-3, digital burn 0-missing; strict step-1 false-failed
-this genuinely zero-loss run). `camera_box::imag_tick_gate::optical_beat_net_zero` ANDs an
-advance-guard (the tick sequence must genuinely advance — a frozen/stuck camera reading, tick
-range collapsed to one value, now FAILS; the OLD strict check ALSO vacuously passed a frozen read,
-so this closes a hole rather than opening one) with `surplus = expected_count - frames_count <= 0`
-(a genuine net loss, `surplus > 0`, still fails — never weakened). Wired into
-`node_verdict_for_imag` via a NEW `imag_optical_beat: Option<OpticalBeatVerdict>` field on
-`NodeVerdict` (stores the FULL verdict, not just a bool, so the printers/JSON can report
-avg_step/surplus honestly — `imag_optical_beat_pass()` derives the `Option<bool>` from it) that
-overrides `is_zero()`'s `contiguity.is_contiguous()` check for imag ONLY (`None` — hence
-unaffected — for every other node); `contiguity` itself still carries the RAW strict
-`tick_contiguity` values for display. The #463 digital-burn AND still applies unchanged: a
-net-zero optical beat can NEVER paper over a genuinely broken digital burn. A beat-compensated
-PASS is reported HONESTLY (not falsely claimed "CONTIGUOUS") and a beat FAIL always prints a
-reason (frozen "did NOT advance" vs genuine "NET loss") — never a silent/empty verdict line.
+**#580v2 — imag's optical gate is RUN-LENGTH no-copy/liveness, NOT surplus — and the digital burn
+is the fail-closed delivery authority.** The FIRST #580 fix (`surplus <= 0` optical gate) shipped
+BROKEN: it FALSE-FAILED the genuinely-zero run 572001 (two free-running same-rate clocks leave an
+unavoidable tiny CLOCK RESIDUAL — real numbers, post-#575 trim + #576: expected_count=21870,
+frames_count=21867, present=21851, missing=19, surplus=**+3**, avg_step≈1.000137, digital burn
+0-missing) AND, two adversarial Opus reviews proved, FAKE-GREENED a content FREEZE (skips ≡ dups
+conserve the frame count → `surplus ≈ 0`, endpoints unchanged → `avg_step ≈ 1`). The committed
+572001 fixture had been SIGN-FLIPPED to −3 (trimmed range − UNtrimmed frames), which is why the unit
+tests were green while the real binary false-failed — **unit fixtures are NOT sufficient; the
+supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LENGTH:
+- **Optical (`OpticalBeatVerdict::is_live_no_copy`)** = the read genuinely ADVANCES (a LOOSE
+  liveness band, `avg_step` rounds to the expected step — rejects frozen/blank + gross rate/alias)
+  AND the MAX consecutive Δtick==0 run ≤ `IMAG_OPTICAL_MAX_STUCK_RUN` (K=3). A benign beat dups a
+  tick at most ONCE in a row (run ≤ 1); a copy/freeze runs into the hundreds — so run-length catches
+  the freeze the aggregates AND the render-free-running burn all miss. `surplus`/`avg_step`/
+  `is_net_zero` are now DIAGNOSTIC ONLY. Distributed real drops are NOT the optical leg's job (it's
+  a validity gate) — they show as a burn gap.
+- **Digital burn = the SOLE per-frame delivery authority, HARDENED + FAIL-CLOSED.** `imag_burn_ok`
+  now requires the burn genuinely PRESENT (`burn_present_ok`: `present_count >= optical_frames *
+  MIN_BURN_PRESENT_FRACTION` — frame-scale to frame-scale, `step` plays NO role here; an earlier
+  draft divided by `step` and was adversarially proven fail-open, loosening the floor to 16.7% of
+  the recording at the real rig's step 3 instead of the intended 50% — external optical-frame
+  reference — folds in #584 frozen-burn + #585 absent-burn) AND contiguous (`burn_step_contiguity`)
+  AND `calibrate_burn_step` CLAMPED to ≤ `IMAG_BURN_RENDER_STEP * 2` with tie-to-SMALLER (a
+  tie-to-larger draft was also adversarially proven fail-open — it can MASK a real drop outright,
+  not just mis-count it — so the original safer smaller-delta tie-break stays). A recording with
+  NO burn now FAILS fail-closed (was a vacuous `optional_signal_ok(None)==true` pass).
+- **imag JSON fields:** `imag_optical_beat_pass` (the GATE), `imag_optical_max_stuck_run` (the
+  supervisor reads this from the live 572001 re-decode to validate K — if the real value exceeds K,
+  K is re-grounded, not loosened), `imag_burn_present_ok`; `imag_optical_beat_net_zero` is now the
+  DIAGNOSTIC `is_net_zero` (surplus<=0), NOT the gate. A beat-compensated PASS is reported HONESTLY
+  (never "CONTIGUOUS", never a false "surplus ≤ 0" claim); a fail prints a reason (frozen "did NOT
+  advance" / "COPY/FREEZE" / burn "ABSENT or below the present floor") — never a silent verdict.
+- **Honest limitation (120Hz makes it rigorous):** on the 60/60 rig the run-length guard is a
+  HEURISTIC (robust because the beat physically cannot produce a long Δ0 run, but a heuristic). A
+  120Hz monitor makes copy-detection RIGOROUS (at 2:1 a copy shows as Δ0 where it must be 2).
 
 **`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
 strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS
