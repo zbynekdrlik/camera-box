@@ -396,8 +396,17 @@ EOF
 # query_node_journal NAME IP -> echoes the node's latest DanteSync journald lines, or returns
 # nonzero if the node is unreachable / the daemon has no output. Read-only (journalctl). Requires
 # sshpass; an unreachable node is reported by the caller as UNKNOWN, never a silent pass.
+#
+# Overridable for tests/offline via CLOCK_GUARD_JOURNAL_OVERRIDE=<file> (mirrors the
+# DEV1_DANTE_JOURNAL/PAINTER_DANTE_JOURNAL override convention in clock-offset-painter-gate.sh) --
+# every target reads the SAME override file, which is only ever exercised with a single target in
+# tests. Pure test seam: when unset (the live/default case) behavior is unchanged (#607).
 query_node_journal() {
   local ip="$2"   # $1 (name) is the caller's label; the query only needs the IP.
+  if [ -n "${CLOCK_GUARD_JOURNAL_OVERRIDE:-}" ]; then
+    cat "$CLOCK_GUARD_JOURNAL_OVERRIDE" 2>/dev/null || true
+    return 0
+  fi
   # BatchMode=no so sshpass can feed the password (BatchMode would disable password auth). Both
   # the remote journalctl and the local ssh suppress stderr: an auth failure and a down host are
   # DELIBERATELY collapsed to "empty output" here — the caller maps empty -> UNKNOWN (never a
@@ -442,7 +451,9 @@ main() {
     exit 1
   fi
 
-  if ! command -v sshpass >/dev/null 2>&1; then
+  # sshpass is only needed for the LIVE SSH read; CLOCK_GUARD_JOURNAL_OVERRIDE (tests/offline)
+  # skips it entirely (mirrors clock-offset-painter-gate.sh's PAINTER_DANTE_JOURNAL check, #607).
+  if [ -z "${CLOCK_GUARD_JOURNAL_OVERRIDE:-}" ] && ! command -v sshpass >/dev/null 2>&1; then
     echo "ERROR: sshpass not found — required to query the camera DanteSync offset over SSH." >&2
     exit 1
   fi

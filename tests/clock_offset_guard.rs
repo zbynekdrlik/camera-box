@@ -25,7 +25,8 @@
 //! * Windows OBS boxes (strih/stream) — DanteSync status pipe emits JSON, e.g.
 //!   `{"offset_ns":..,"ntp_offset_us":1249,"is_locked":true,"mode":"NANO",...}`
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
@@ -480,6 +481,95 @@ fn run_script_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, St
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+// --- #607: the CLI's OWN main() loop (the original #8 guard invocation) must grade through the
+// freshness-aware dantesync_offset_verdict, not the age-blind offset_us_from_journal+offset_check
+// pairing it still used after #595 fixed the OTHER two callers (dantesync-gate.sh #7,
+// clock-offset-painter-gate.sh #326). Fixture shapes + the CLOCK_GUARD_JOURNAL_OVERRIDE test-seam
+// convention are copied from
+// tests/clock_offset_painter_gate.rs::gate_incomplete_when_the_only_offset_line_is_a_stale_boot_step.
+
+/// Write a one-line DanteSync journald fixture (`journalctl -o short-iso` ISO timestamp form)
+/// with the given signed µs offset and return its path. A single-line journal's own timestamp IS
+/// the journal's newest line, so the freshness check always reads it as fresh (age 0s) regardless
+/// of the configured freshness window.
+fn write_journal_fresh(name: &str, offset_us: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.log"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        "2026-07-08T18:36:44+02:00 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)"
+    )
+    .unwrap();
+    path
+}
+
+/// Write a MULTI-LINE ISO journal whose ONLY `[NTP] offset:` line is STALE (#550-class): it sits
+/// ~76 minutes behind the newer `[PTP]` servo lines that follow it — well past the default 300s
+/// freshness window — even though the offset VALUE itself is in-bound. Proves staleness alone,
+/// not magnitude, must trip the guard: the age-blind `offset_us_from_journal` (tail -1) would
+/// still read this exact line as "the current offset" and pass it.
+fn write_journal_stale(name: &str, offset_us: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.log"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        "2026-07-08T17:20:13+02:00 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)\n\
+2026-07-08T18:36:44+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm\n\
+2026-07-08T18:36:46+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm"
+    )
+    .unwrap();
+    path
+}
+
+/// Run the CLI guard against a SINGLE `cam1` target whose journal is the given override file
+/// (CLOCK_GUARD_JOURNAL_OVERRIDE — no live SSH/sshpass involved).
+fn run_guard_with_journal_override(journal: &Path) -> (i32, String, String) {
+    run_script_env(
+        &["--targets", "cam1=10.77.9.61"],
+        &[(
+            "CLOCK_GUARD_JOURNAL_OVERRIDE",
+            journal.to_str().expect("utf8 temp path"),
+        )],
+    )
+}
+
+#[test]
+fn cli_reports_incomplete_not_ok_on_a_stale_but_in_bound_offset() {
+    // #550-class staleness: cam1's ONLY `[NTP] offset:` line is a >1h-old boot-step sample
+    // (+300us, in-bound). The age-blind offset_us_from_journal (tail -1) reads it as "the current
+    // offset" and offset_check passes it (OK, exit 0) purely because the VALUE is in-bound --
+    // exactly the false-pass #595 fixed in the OTHER two callers but left standing in this CLI's
+    // own main() loop. The CLI must instead reject it as STALE and refuse to certify the node --
+    // INCOMPLETE (exit 11), never a silent OK.
+    let journal = write_journal_stale("cam1_stale_boot_step", "+300");
+    let (code, stdout, stderr) = run_guard_with_journal_override(&journal);
+    assert_eq!(
+        code, 11,
+        "a stale-but-in-bound offset line must be INCOMPLETE (11), never a silent OK/exit 0. stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stderr.to_uppercase().contains("INCOMPLETE"),
+        "stderr must say the cluster status is incomplete: {stderr}"
+    );
+}
+
+#[test]
+fn cli_still_passes_on_a_fresh_in_bound_offset() {
+    // Non-regression: a FRESH, in-bound offset line must still certify the node OK (exit 0) — the
+    // freshness-aware grading must not turn into a false-fail on a healthy, current reading.
+    let journal = write_journal_fresh("cam1_fresh_ok", "+300");
+    let (code, stdout, stderr) = run_guard_with_journal_override(&journal);
+    assert_eq!(
+        code, 0,
+        "a fresh in-bound offset must still PASS (0). stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(stdout.contains("ALL CLEAR"), "stdout: {stdout}");
 }
 
 #[test]
