@@ -2291,3 +2291,43 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   patterns, plus the new #604 follow-up note.
 - Pure Tier-0 verdict-logic + tests — no live-rig action, no deploy pipeline (repo has no
   push-to-main deploy workflow; release is tag-triggered).
+
+## #595 — #550-class clock-offset staleness bug still unfixed in dantesync-gate.sh + clock-offset-painter-gate.sh (2026-07-08)
+
+- PR #606, merged `2c4f4060e` (dev `1ebfd7f7d`). Version bump `0d5bb4432` (1.7.0-dev.287).
+- RED `f08c6f90b` (6 new tests in `tests/clock_offset_guard.rs` for `dantesync_offset_verdict`/
+  `freshest_offset_us`, both not-yet-existing; + `gate_incomplete_when_the_only_offset_line_is_a_stale_boot_step`
+  in `tests/clock_offset_painter_gate.rs` proving the painter gate PASSED on a stale-but-in-bound
+  offset line) → GREEN `b395b07f2`.
+- Moved `_short_iso_epoch` + `dantesync_offset_verdict` from `verify-device.sh` down into the
+  shared `scripts/clock-offset-guard.sh` (unchanged behavior — its own 64 tests stayed green
+  throughout) so `dantesync-gate.sh` (#7) and `clock-offset-painter-gate.sh` (#326), not just
+  `verify-device.sh` (#591), share ONE freshness-aware implementation. Added value-returning
+  sibling `freshest_offset_us(JOURNAL, FRESHNESS_S)` for the painter gate's RELATIVE dev1<->painter
+  comparator (grade each box's freshness independently BEFORE ever comparing their offsets).
+  `dantesync-gate.sh`'s Linux path: gather `-o short-iso -n 400`, map
+  `ok/drift/stale/absent` → rc `0/2/3/3` (UNCONDITIONAL — no PTP-lock escape hatch like
+  verify-device.sh has, a deliberate stricter design for the recording-E2E's real-latency
+  precondition, confirmed correct by the deep review).
+- Self-driven review pass (my own code-review 10-angle fan-out + `superpowers:requesting-code-review`
+  deep pass, both clean) found + fixed two REAL issues before merge: (1) a copy-pasted
+  `off_line` grep between `freshest_offset_us`/`dantesync_offset_verdict` → deduped into shared
+  `_freshest_ntp_offset_line()`; (2) `FRESHNESS_S` was propagated to two NEW callers with ZERO
+  numeric validation (unlike `BOUND_US`, validated via `--bound-us`/`--guard-us` CLI parsing) — a
+  malformed env var would make `[ N -gt "$fresh" ]` throw a bash "integer expression expected"
+  error, which an `if A || B || C` chain reads as "false", silently disabling the whole staleness
+  check → fixed at the root in `freshest_offset_us` (fail-closed on non-numeric FRESHNESS_S), new
+  tests with 5 malformed inputs incl. a shell-injection-shaped string. Both `/code-review` and
+  `superpowers:requesting-code-review` clean (0 Critical/Important; 4 Minor — 2 fixed same-PR,
+  1 filed #608, 1 accepted as a documented, negligible perf tradeoff).
+- Filed #607 (`clock-offset-guard.sh`'s OWN standalone CLI/`main()`, the original #8 regression
+  guard, still uses the age-blind primitives — NOT named in #595's scope, correctly tracked not
+  scope-crept) and #608 (`dantesync-gate.sh`'s Linux SSH path has no offline test-injection seam
+  unlike the painter gate — explicitly OPTIONAL per #595's own issue text, tracked per
+  no-dropped-work).
+- `.claude/skills/ops/SKILL.md` updated: the existing #550/#591 note extended with the #595
+  3-gate-consolidation story + the reusable bash gotcha (an unvalidated numeric var inside an
+  `||`-chained `[ ]` test fails OPEN, not closed) + the #607 known-remaining-gap pointer.
+- Pure Tier-0 shell/test-logic — no live-rig action; no deploy pipeline for these scripts (they run
+  in CI/on dev1, not a deployed service). Post-merge verification = confirmed main CI green
+  (`cargo nextest run --all-features`, which runs all four touched test files) on the merge commit.

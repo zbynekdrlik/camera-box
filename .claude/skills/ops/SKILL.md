@@ -49,6 +49,29 @@ package must be **PURGED**. Enforcement (all landed #591):
   `journalctl -o short-iso`, rejects a stale boot-step line via `DANTESYNC_OFFSET_FRESHNESS_S`
   default 300s), FAILs on a fresh offset outside ±2000µs (`CLOCK_GUARD_BOUND_US`). The pre-#591
   `tail -1` grabbed the stale `-5280959us` boot-step line (the #550 bug).
+- **#595 — the SAME #550-class staleness bug also lived in the OTHER two DanteSync-offset gates**
+  (found via #591's own review, ~3 weeks after #591 shipped): `scripts/dantesync-gate.sh` (#7
+  recording-E2E precondition) and `scripts/clock-offset-painter-gate.sh` (#326 all-cambox sweep
+  comparator) both still called the age-blind `offset_us_from_journal`/`offset_check` — #591 had
+  only touched `verify-device.sh`. Fixed by MOVING `dantesync_offset_verdict` +
+  `_short_iso_epoch` down into the SHARED `scripts/clock-offset-guard.sh` (so all THREE gates, plus
+  any future one, share one implementation instead of copies drifting apart) and adding a
+  value-returning sibling `freshest_offset_us(JOURNAL, FRESHNESS_S)` for the painter gate's
+  RELATIVE dev1<->painter comparator (which needs the raw fresh value from each box, not a
+  bound-graded verdict — check freshness on EACH box independently BEFORE ever comparing them).
+  **Lesson for the next DanteSync-offset caller:** grep `offset_us_from_journal\b` (the raw,
+  age-blind parser) across `scripts/*.sh` before adding a new gate — if a new caller still reaches
+  for it directly instead of `dantesync_offset_verdict`/`freshest_offset_us`, it's exposed to the
+  #550 bug. **Known remaining gap (filed #607, deliberately NOT fixed by #595):**
+  `scripts/clock-offset-guard.sh`'s OWN standalone CLI (`main()`, the original #8 regression guard
+  documented in SETUP.md) still uses the old age-blind primitives internally — it was not named in
+  #595's scope. **Bash gotcha (the one non-obvious thing #595's review caught):** a freshness-window
+  parameter fed unvalidated into `[ N -gt "$fresh" ]` — if `$fresh` is non-numeric, bash prints
+  "integer expression expected" and the test returns non-zero, which an `if A || B || C` OR-chain
+  reads as "condition false" (never surfacing the error) — silently disabling the staleness check
+  and making every reading look fresh. Any bash gate with an `||`-chained numeric guard needs its
+  own numeric inputs validated (`grep -qE '^[0-9]+$'`) the same way `--bound-us`/`--guard-us` CLI
+  flags already are in these scripts — an env-var-only knob is easy to forget.
 
 **Windows (strih + stream) — W32Time invariant.** DanteSync is the clock authority on the Windows
 OBS boxes too; the built-in Windows Time service (`W32Time`) must be **Stopped + Disabled** (already
