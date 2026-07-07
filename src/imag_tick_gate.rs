@@ -303,7 +303,6 @@ const MIN_IDS_FOR_STEP_CALIBRATION: usize = 4;
 /// are fewer than [`MIN_IDS_FOR_STEP_CALIBRATION`] distinct ids to trust a calibrated estimate
 /// (never invent a number from noise — mirrors every other pure gate's "not enough signal ⇒ fall
 /// back to the safe/known default" rule).
-///
 pub fn calibrate_burn_step(ids: &[u32]) -> u32 {
     use std::collections::{BTreeSet, HashMap};
     // Dedup + sort first (mirrors every other function in this module) — a duplicate id must

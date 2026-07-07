@@ -1100,6 +1100,19 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // the true bounds; an empty recording defaults both to 0, which trims to nothing either way.
     let first_frame_index = frames.first().map(|f| f.frame_index).unwrap_or(0);
     let last_frame_index = frames.last().map(|f| f.frame_index).unwrap_or(0);
+    // #575 review: a single closure over the shared bounds/window, so the optical tick and the
+    // digital burn (below) can never silently diverge onto different trim windows — a future
+    // edit to one call site's trailing args now visibly has to touch this ONE closure, not two
+    // independent call sites.
+    let trim_to_boundary = |samples: &[(u64, u32)]| {
+        camera_box::recording_boundary_trim::trim_boundary_samples(
+            samples,
+            first_frame_index,
+            last_frame_index,
+            camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES,
+            camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES,
+        )
+    };
 
     // #575: trim the recording start/stop boundary (genlock-fifo pre-roll flush, mux-
     // finalization tail-drain — confirmed live, run 554307) from the cam2 optical tick BEFORE
@@ -1110,13 +1123,7 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
         .iter()
         .filter_map(|f| f.tick.map(|t| (f.frame_index, t)))
         .collect();
-    let ticks = camera_box::recording_boundary_trim::trim_boundary_samples(
-        &tick_samples,
-        first_frame_index,
-        last_frame_index,
-        camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES,
-        camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES,
-    );
+    let ticks = trim_to_boundary(&tick_samples);
     let tc = camera_box::imag_tick_gate::tick_contiguity(&ticks);
 
     // #480: imag's OWN digital corner burn, decoded the same way every other node's burn is
@@ -1132,17 +1139,12 @@ fn node_verdict_for_imag(frames: &[RecordingFrame], cam2_run_id: Option<u32>) ->
     // free-running at step 3. Calibrating per-recording means a future render-pipeline timing
     // change can never silently attribute the wrong grid ids to a genuine drop again.
     //
-    // #575: the SAME boundary trim applies to the burn ids (paired with frame_index via
-    // `burn_ids_with_frame_index_in`) before calibration AND before the contiguity check — a
-    // boundary-artifact burn id must not skew the calibrated step either.
+    // #575: the SAME boundary trim (via the SAME `trim_to_boundary` closure above) applies to the
+    // burn ids (paired with frame_index via `burn_ids_with_frame_index_in`) before calibration
+    // AND before the contiguity check — a boundary-artifact burn id must not skew the calibrated
+    // step either.
     let imag_burn_samples = burn_ids_with_frame_index_in(frames, BURN_RUN_ID_IMAG);
-    let imag_burn_ids = camera_box::recording_boundary_trim::trim_boundary_samples(
-        &imag_burn_samples,
-        first_frame_index,
-        last_frame_index,
-        camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES,
-        camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES,
-    );
+    let imag_burn_ids = trim_to_boundary(&imag_burn_samples);
     let imag_burn_step = camera_box::imag_tick_gate::calibrate_burn_step(&imag_burn_ids);
     let burn_sc = camera_box::imag_tick_gate::burn_step_contiguity(&imag_burn_ids, imag_burn_step);
     let imag_burn_contiguity = NodeContiguity {
