@@ -807,3 +807,60 @@ later:
    `v["all_cambox_continuity"]["<node>"]["overall_pass"]`) and trust CI to compile+run it. Pull the
    genuinely NEW, rate-derived arithmetic (the step formula) out to a crate-root Tier-0 module
    (mirrors `imag_tick_gate.rs`) so AT LEAST that piece is locally RED→GREEN-observable.
+
+## GOTCHA — the `frame()` test helper's `tick = max(frame_id)` trap bites EVERY new mixed cam2+burn fixture (cost a full CI cycle, #575/#576)
+
+`recording-verdict.rs`'s test-module `frame(frame_index, payloads)` helper (used everywhere a
+synthetic `RecordingFrame` is built) computes `tick = payloads.iter().map(|p| p.frame_id).max()`
+— the MAX `frame_id` across **every** payload on that one frame, cam2 optical AND any node burn
+alike. This is production-faithful (`RecordingFrame::tick`'s real doc says the same), but it means
+**any fixture that pairs a cam2 tick with a burn id MUST keep the burn id strictly BELOW the cam2
+id for the ENTIRE window**, or `.tick` silently resolves to the burn's id instead of cam2's,
+corrupting the optical contiguity check with no compile error and no obviously-wrong assertion —
+just a mysteriously-failing `nv.is_zero()` deep in CI (only observable there; this file requires
+`--features probe`, banned locally per Tier-0).
+
+**Live incident:** a #576 test used `cam2 = 100+i` alongside a NEW step-3 burn `= 10+3*i` over a
+60-frame window. `imag_window_with_burn`'s EXISTING doc comment already documents this exact trap
+for its own step-2 burn (`10+2*i`, kept `< 100+i` for all `i` up to 59 — `10+2*59=128 < 159`) —
+but a step-3 burn crosses `100+i` once `i>45` (`10+3*46=148 > 146`), so simply copying the pattern
+with a different step silently breaks it. Cost a full CI round-trip to discover (the failing
+assertion printed a perfectly plausible-looking `NodeContiguity` for the BURN side, since only the
+optical `tick` was corrupted — always print BOTH `nv.contiguity` and `nv.imag_burn_contiguity` in
+a failing assertion's `{:?}`, not just one, or this exact failure mode is much harder to diagnose).
+
+**Before writing ANY new fixture that mixes cam2 + a burn payload:** pick a cam2 base comfortably
+above the burn's WORST-CASE id for the whole window (e.g. `100_000+i` — headroom, not a
+tightly-reasoned per-step bound) rather than re-deriving the crossover point every time. A
+fixture using ONLY cam2 payloads (no burn at all) never has this risk.
+
+## #575/#576 — imag's zero-loss gate is now a THREE-STAGE pure pipeline, all in `node_verdict_for_imag`
+
+Both landed together (PR #578, from the #572 live-rig investigation, run 554307): trim boundary
+→ calibrate step → check contiguity, each its own Tier-0 pure module/function so each stage is
+independently unit-tested on default features:
+
+1. **`src/recording_boundary_trim.rs::trim_boundary_samples`** (#575) — excludes samples whose
+   `frame_index` falls in a small (3-frame) lead/tail window of the RECORDING's own frame-index
+   bounds (never the signal's own decoded values — a frame-POSITION trim, not value-range, so it
+   structurally cannot mask a genuine mid-recording drop). Applied to BOTH the optical tick and
+   the digital burn, via one shared `trim_to_boundary` closure in `node_verdict_for_imag` (don't
+   call `trim_boundary_samples` directly twice with repeated trailing args — that already drifted
+   once during review).
+2. **`src/imag_tick_gate.rs::calibrate_burn_step`** (#576) — the burn's step is the MODE of
+   consecutive (post-trim) present-id deltas, not the hardcoded `IMAG_BURN_RENDER_STEP` constant
+   (#480's confirmed value, since drifted — the real rig now free-runs at 3, not 2). Falls back to
+   the constant below 4 distinct ids.
+3. **`burn_step_contiguity(&ids, calibrated_step)`** — unchanged, just fed the calibrated step.
+
+**Both fixes are scoped to `node_verdict_for_imag` ONLY** — cam1/cam3/cam4/strih/stream have a
+completely separate gate (`probe::burn_contiguity`), untouched. Whether they need the same
+boundary trim is an OPEN, unconfirmed question — filed as #579, not assumed either way; don't
+extend the trim to their gate without first confirming the same artifact actually occurs there
+(their windowing already anchors on cam2's optical delivery window via `in_window_burn_frames`,
+which may or may not already absorb it — genuinely unknown, needs live-rig data).
+
+**`optical_span_frames`/`optical_undecodable` are deliberately NOT trimmed** — that's a separate,
+tolerant rate-ceiling diagnostic computed from the recording's FULL frame set (a different
+question: "is the undecodable fraction within the moiré floor" vs "is there a phantom contiguity
+gap"). Don't conflate the two when touching this function again.
