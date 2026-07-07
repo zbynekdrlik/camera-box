@@ -103,10 +103,13 @@ GENLOCK_FPS="${GENLOCK_FPS:-60}"
 # decimation. Each feeds ITS recording's DIAGNOSTIC span (analyzed_secs = frames / capture_fps) and
 # optical expected-step (refresh_hz / capture_fps) — kept as TWO separate knobs (rather than one
 # shared constant) so a future topology change can re-diverge them without another rename. The
-# decimation LOSS step is gap-ignore for every node regardless of these rates (#360 —
-# node_render_step always returns 1); --strih-emit-fps / --stream-capture-fps below are RETAINED on
-# recording-verdict's CLI for provenance, decoupled from these diagnostic rates so they are always
-# correct regardless of which recording's --capture-fps is in effect.
+# decimation LOSS step is gap-ignore for strih/stream regardless of these rates (#360 —
+# node_render_step returns 1 for them, their free-running render tick is not a clean decimation);
+# --strih-emit-fps / --stream-capture-fps below are RETAINED on recording-verdict's CLI for
+# provenance, decoupled from these diagnostic rates so they are always correct regardless of which
+# recording's --capture-fps is in effect. #571: cam1/cam3/cam4 (the camera-under-test) now DO
+# consult a decimation step for the SEPARATE cam(60fps)->strih(30fps) hop — derived from
+# --refresh-hz (default 60, unset here) / --capture-fps (STRIH_CAPTURE_FPS, 30), never these two.
 STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
 # #462/#461: imag-nb's OWN recording rate (its own box, its own low-latency 60fps rate — never

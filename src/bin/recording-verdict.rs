@@ -893,16 +893,12 @@ fn node_render_step(
     refresh_hz: f64,
     capture_fps: f64,
 ) -> i64 {
-    // #571 [red]: still returns 1 unconditionally for EVERY node, including cam1/cam3/cam4 — the
-    // bug this ticket fixes (the GREEN commit branches on CAMERA_UNDER_TEST_NODES and derives the
-    // cam(60)->strih(30) decimation step via `painted_tick_step`).
-    let _ = (
-        node,
-        strih_emit_fps,
-        stream_capture_fps,
-        refresh_hz,
-        capture_fps,
-    );
+    if CAMERA_UNDER_TEST_NODES.contains(&node) {
+        return camera_box::recording_span_gate::painted_tick_step(refresh_hz, capture_fps);
+    }
+    // strih/stream: read the rig-pinned fps for provenance; neither is a clean integer
+    // decimation (see the docstring above for why strih is NOT a clean step-2) ⇒ gap-ignore.
+    let _ = (strih_emit_fps, stream_capture_fps);
     1
 }
 

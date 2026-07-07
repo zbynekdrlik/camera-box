@@ -448,11 +448,10 @@ pub fn burn_contiguity_in_window_with_step(
                 // an in-span drop). #133 per-emit accounting. MUST match the step-aware candidate
                 // generation below exactly, or a None inside a decimated gap fails to exclude its
                 // own grid slot there and gets double-counted as a phantom REAL DROP too.
-                // #571 [red]: still `prev + nones_since_prev` (step=1 semantics) regardless of
-                // `step_u32` — the bug this ticket fixes (the GREEN commit scales by `step_u32`).
                 if matches!(rate, BurnRate::PerEmittedFrame) {
                     if let Some(prev) = prev_present {
-                        unreadable_consumed.insert(prev.saturating_add(nones_since_prev));
+                        unreadable_consumed
+                            .insert(prev.saturating_add(nones_since_prev.saturating_mul(step_u32)));
                     }
                 }
                 missing_slots.push(MissingSlot {
@@ -473,15 +472,15 @@ pub fn burn_contiguity_in_window_with_step(
     // distinction). Each genuinely-lost id is listed ONCE, paired to the recorded slot of the next
     // present id above it for the pixel proof.
     if matches!(rate, BurnRate::PerEmittedFrame) {
-        // #571 [red]: still the RAW integer span `min..=max`, step_u32 unconsulted — the bug this
-        // ticket fixes (the GREEN commit switches to the step-aware `burn_step_contiguity` candidates).
-        let _ = step_u32;
-        let span = present_set
-            .iter()
-            .next()
-            .copied()
-            .zip(present_set.iter().next_back().copied());
-        if let Some((lo, hi)) = span {
+        // #571: no longer scans the RAW integer span `min..=max` (that was the strict step==1
+        // assumption a decimated cam(60fps)->strih(30fps) hop breaks) — the genuinely-missing
+        // candidates are generated step-aware below, via the SAME crate-root pure
+        // `burn_step_contiguity` (#480) imag-nb's own step-2 corner burn already proved correct: a
+        // gap of EXACTLY `step_u32` is by-design decimation (nothing missing there at all); a gap
+        // LARGER charges the excess. This guard only needs "at least one present id exists"
+        // (mirrors the old span's Some/None gate — a non-empty BTreeSet always has both a first
+        // and a last element).
+        if !present_set.is_empty() {
             let last_frame = frames.last().map(|f| f.frame_index).unwrap_or(0);
             // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP,
             // but ONLY when a delivered frame demonstrably fell in the gap. The proof signature
@@ -557,10 +556,21 @@ pub fn burn_contiguity_in_window_with_step(
             // below it. Spend that gap's interstitial budget (lowest absent id first) as
             // BURN-UNREADABLE; the remaining absent ids in the gap are genuine REAL DROPs.
             let mut gap_budget_used: BTreeMap<u32, u32> = BTreeMap::new();
-            // #571 [red]: still the RAW `(lo..=hi)` integer-span scan — the bug this ticket fixes
-            // (the GREEN commit reuses `imag_tick_gate::burn_step_contiguity` for step-aware candidates).
-            for missing in (lo..=hi)
-                .filter(|id| !present_set.contains(id))
+            // #571: the step-aware candidate list. `burn_step_contiguity` (imag_tick_gate.rs,
+            // Tier-0 pure, #480) walks the SAME present ids and charges only `gap/step_u32 - 1`
+            // for a gap EXCEEDING `step_u32` (a gap == step_u32 is by-design decimation and is
+            // NEVER a candidate at all — the #571 fix; #480's own
+            // `burn_step_contiguity_still_catches_a_genuine_dropped_frame_inside_the_step2_grid`
+            // proves a gap of `2*step_u32` still charges). At `step_u32 == 1` this is
+            // byte-for-byte the OLD `(lo..=hi).filter(not present)` scan — proven in
+            // imag_tick_gate's own `burn_step_contiguity_step_of_1_is_identical_to_strict_
+            // contiguity` test — so every existing non-decimated caller is unaffected.
+            let present_ids_sorted: Vec<u32> = present_set.iter().copied().collect();
+            let step_candidates =
+                crate::imag_tick_gate::burn_step_contiguity(&present_ids_sorted, step_u32)
+                    .missing_ids;
+            for missing in step_candidates
+                .into_iter()
                 .filter(|id| !unreadable_consumed.contains(id))
             {
                 let frame_index = id_to_frame

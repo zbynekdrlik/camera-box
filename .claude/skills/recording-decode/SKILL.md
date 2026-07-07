@@ -456,10 +456,13 @@ Two cooperating #360 bugs, both fixed in `recording-verdict.rs`:
    has_node_burn(f)` for ALL rates (the digital CRC-validated burn proves delivery independent of the
    cam2 optical read — extends the cam1 #204 reasoning). Lead-in/out is still trimmed by the OPTICAL
    window BOUNDARIES (so #198/#267/#273 are preserved).
-2. **`node_render_step` now returns 1 for ALL nodes** (strih gap-ignore). A delivered frame MISSING its
+2. **`node_render_step` returns 1 for strih/stream** (gap-ignore). A delivered frame MISSING its
    strih burn is still BURN-UNREADABLE (FAILS); real loss is caught by the stream burn (per-output-frame)
-   + cam1 (per-emitted). The `burn_contiguity_in_window_with_step` step≥2 capability + its #11 tests are
-   RETAINED for a genuinely-clean-decimation hop, but no current node feeds it ≥2.
+   + cam1/cam3/cam4 (per-emitted). The `burn_contiguity_in_window_with_step` step≥2 capability + its #11
+   tests are RETAINED for a genuinely-clean-decimation hop — **#571 (below) found exactly that hop: the
+   Topology-v2 cam(60fps)→strih(30fps) forwarded-burn decimation**, so as of #571 cam1/cam3/cam4 DO feed
+   it ≥2 (this #360 fix itself is unchanged for strih/stream — only the "no current node feeds it ≥2"
+   half of the claim is superseded).
 
 RED→GREEN lock: `node_verdict_strih_zero_loss_when_cam2_optical_mostly_undecodable_360`,
 `strih_burn_on_a_non_optical_frame_inside_span_is_included_360`,
@@ -492,8 +495,13 @@ large gap #11 charged, so the step≥2 charging only ever produced false positiv
 - `expected_step == 1` ⇒ today's unconditional-ignore (unchanged): the strih burn in a 60-in-60
   recording, the stream burn (recorded by its own OBS), cam render ticks. The 3-arg
   `burn_contiguity_in_window` wrapper passes 1.
-- cam1 (PerEmittedFrame) is UNAFFECTED — its real-drop detection is set-based and catches every real
-  60fps drop regardless of the recording fps.
+- cam1/cam3/cam4 (PerEmittedFrame) — pre-#571 this was UNAFFECTED (its set-based real-drop detection
+  ignored `step` entirely, always scanning the raw `min..=max` integer span). **#571 made it
+  step-aware too** (see the dedicated section below) — the Topology-v2 cam(60fps)→strih(30fps) hop
+  decimates the camera-under-test's forwarded burn exactly like a PerRenderTick hop, so its set-based
+  scan now uses the SAME `imag_tick_gate::burn_step_contiguity` (#480) math: a gap == step is by-design
+  decimation (never a candidate), a gap > step charges the excess. At step==1 it degenerates to the
+  exact pre-#571 raw-scan behavior, so a non-decimated PerEmittedFrame caller is unaffected.
 
 **THE GOTCHA — two DIFFERENT "steps", do not conflate:**
 - the **LOSS decimation step** (`recording-verdict.rs` `node_render_step` → `NodeSpec.step`): strih=2,
@@ -510,12 +518,58 @@ stream burn is emitted AND recorded by the same OBS ⇒ no decimation). RED→GR
 `..._two_lost_frames_charge_two_real_drops` (gap 6 → 2) + `..._every_other_id_is_zero_loss` (clean) +
 `..._jitter_gap_of_one_or_three_is_not_loss` + `in_window_step1_strih_recording_..._none_still_caught`.
 
-**#360 SUPERSEDES the above step-2 math at runtime:** `node_render_step` now returns **1 for ALL
-nodes** (`node_render_step_is_gap_ignore_for_all_nodes_360`) — strih's burn is a FREE-RUNNING render
-tick with an IRREGULAR step (run 354003: 0–10, mean ~4), NOT a clean 60/30=2, so a forward gap is
-render-clock jitter, not loss. The step≥2 excess-gap charging stays in `burn_contiguity` as a tested
-capability, but NO current node feeds it ≥2. (The decimation-step doc above is the historical design;
-the live value is 1.)
+**#360 SUPERSEDES the above step-2 math at runtime for strih/stream:** `node_render_step` returns
+**1 for strih/stream** (`node_render_step_is_gap_ignore_for_strih_and_stream_360`) — strih's burn is
+a FREE-RUNNING render tick with an IRREGULAR step (run 354003: 0–10, mean ~4), NOT a clean 60/30=2,
+so a forward gap is render-clock jitter, not loss. (The decimation-step doc above described strih's
+historical design; its live value stays 1.) **#571 revives the step≥2 excess-gap charging for
+cam1/cam3/cam4** — see the dedicated section below; it was never dead capability, just unfed until
+the cam(60)→strih(30) hop was recognized as a genuinely clean decimation.
+
+## #571 — cam(60fps)→strih(30fps) decimation on cam1/cam3/cam4 IS a clean ratio (revives step≥2 for PerEmittedFrame)
+
+Topology v2 (#459/#460) moved the 60→30 beat from strih→stream to **cam→strih**: strih now records
+ITS OWN 30fps cut-to-stream canvas, so the camera-under-test's forwarded capture burn (911001/cam1,
+or cam3/cam4's equivalents) arrives at 60fps but lands in strih's 30fps recording DECIMATED 2:1 —
+unlike strih's OWN free-running render tick (#360, irregular, NOT this hop), the camera's emit clock
+is genlocked to the strih canvas rate, so this ratio IS a clean integer (proven live, run 554307:
+`present_count=11105` over `370.17s` == EXACTLY strih's own 30fps span; `missing_ids` len 11087 ≈
+exactly the decimated-away half). Before #571 `node_render_step` returned 1 (gap-ignore-irrelevant)
+for cam1/cam3/cam4 too, so the PerEmittedFrame set-based scan (which never consulted `step` at all)
+charged EVERY decimated-away id as `real_drop` — 11087 phantom drops on a chain that lost nothing
+(strih's OWN node burn, 911002, was fully contiguous on the SAME run).
+
+Fix (`src/probe/burn_contiguity.rs` `burn_contiguity_in_window_with_step`'s `PerEmittedFrame`
+branch): the final missing-candidate loop no longer scans the raw `min..=max` span — it calls the
+SAME crate-root pure `imag_tick_gate::burn_step_contiguity(present_ids, step)` (#480, already proven
+for imag's own step-2 corner burn) to generate ONLY the genuinely-missing step-grid candidates (a
+gap == step is by-design decimation, never a candidate at all; a gap > step charges `gap/step − 1`).
+The `unreadable_consumed` bookkeeping (a delivered-but-unreadable frame's consumed id) is ALSO scaled
+by `step` (`prev + nones_since_prev*step`, was `prev + nones_since_prev`) — required so a None frame
+inside a decimated gap still excludes its OWN grid slot instead of leaving it to be double-charged as
+a phantom real drop. The #216/#226 interstitial-duplicate → BURN-UNREADABLE budget mechanism is
+UNCHANGED (its own `+1` gap-detection threshold is always at least as sensitive as a genuine
+`step`-excess gap, so it needs no scaling — verified by hand-trace, not just by test).
+
+`recording-verdict.rs` `node_render_step` now branches on `CAMERA_UNDER_TEST_NODES` (cam1/cam3/cam4):
+returns `recording_span_gate::painted_tick_step(refresh_hz, capture_fps)` (the SAME by-design-ratio
+formula #467 already uses for the stream/imag recordings — `round(refresh_hz/capture_fps)`, floor 1;
+= 2 on the rig: refresh_hz 60 / capture_fps 30, the STRIH_CAPTURE_FPS the harness passes) instead of
+the old hardcoded `1`. strih/stream are unchanged (still gap-ignore, #360). `extract_partial_flagged_
+frames`'s on-box pixel-proof extraction (`--extract-partial strih`) derives the SAME cam1 step so its
+flagged frames match what the merge verdict flags.
+
+RED→GREEN lock (`src/probe/burn_contiguity.rs`, `#571` test section):
+`in_window_cam1_decimation_step2_clean_matches_run_554307_signature_571` (clean decimation → zero
+loss, plus a sanity check that the OLD strict-1:1 model — `imag_tick_gate::tick_contiguity`, the
+same algorithm this branch ran before the fix — DOES false-fail the identical signature),
+`..._jitter_gap_of_one_or_three_is_not_loss_571`, `..._extra_missing_id_is_a_real_drop_not_masked_571`
+(gap 4 → exactly 1 RealDrop, the no-masking proof), `..._two_lost_frames_charge_two_real_drops_571`
+(gap 6 → 2), `..._unreadable_burn_is_not_double_counted_as_real_drop_571` (the `unreadable_consumed`
+step-scaling fix specifically), `..._unreadable_plus_genuine_drop_counts_only_the_drop_571`. Plus
+`recording-verdict.rs`: `node_render_step_is_decimation_aware_for_camera_under_test_nodes_571`,
+`node_verdict_cam1_decimation_step2_clean_is_zero_loss_571`,
+`node_verdict_cam1_decimation_step2_extra_missing_id_is_not_masked_571`.
 
 ## #363 — the cam2 OPTICAL dual-QR read is the HARD verdict gate (NEVER re-weaken it)
 
