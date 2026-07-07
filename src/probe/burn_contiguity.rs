@@ -277,19 +277,22 @@ pub fn burn_contiguity_in_window(
 /// OBS (emit rate == capture rate ⇒ step 1), and the cam render-tick semantics are all unchanged
 /// (the [`burn_contiguity_in_window`] back-compat wrapper passes `1`).
 ///
-/// #571 — cam1/cam3/cam4 ([`BurnRate::PerEmittedFrame`]) are decimation-aware via
-/// `min(observed cadence, expected_step)`: the Topology-v2 cam(60fps)->strih(30fps) hop decimates
-/// the camera-under-test's forwarded burn, so `expected_step` is the CLI-fps structural CEILING
-/// (the most the genlocked hop can decimate), and [`crate::imag_tick_gate::observed_step`] reads
-/// the recording's OWN captured cadence and LOWERS the step below that ceiling whenever the actual
-/// capture is finer than the fps claims (a non-decimated step-1 unit capture reads 1). The MIN is
-/// the never-mask side — it can only ever charge MORE gaps: a hardcoded fps step alone masked a
-/// genuine single-id drop on a step-1 capture (#356/#208), while observed-from-present-ids alone
-/// inflates when None frames hide grid slots (masking a drop) — the ceiling caps that. The result
-/// feeds the SAME `imag_tick_gate::burn_step_contiguity` math (#480): a gap of EXACTLY the step is
-/// by-design decimation (not loss); a LARGER gap charges the excess. At step 1 this is the exact
-/// pre-#571 strict first..=last scan, so every genuine single-id drop stays charged. For
-/// PerRenderTick (strih/stream) `expected_step` is used directly (the decimated-render branch).
+/// #571 — cam1/cam3/cam4 ([`BurnRate::PerEmittedFrame`]) on a DECIMATED hop (`expected_step >= 2`
+/// — the Topology-v2 cam(60fps)->strih(30fps) hop, where strih's 30fps recording samples only
+/// ~half of the camera's emitted ids): FORWARD GAPS in the captured id sequence are BY-DESIGN
+/// decimation and are NOT charged as real drops AT ALL. No gap-size math can separate them from
+/// loss — the real beat (run 554307) is bursts of delta-1 then a jump of ~7 (delta histogram
+/// {0: 2, 1: 9256, 6: 34, 7: 1767, 8: 45}, mean 1.998), so an observed-cadence step reads the
+/// dominant delta 1 and charges every jump (11087 phantom drops on a chain where strih's OWN
+/// 911002 burn was fully contiguous), while a fixed step-2 grid masks genuine step-1 drops. The
+/// correct discriminator is WHETHER THE HOP IS CONFIGURED DECIMATED (`expected_step`, from the
+/// fps ratio), not the gap size. Genuine loss on the decimated hop is caught by the signals that
+/// REMAIN IN FORCE: a delivered frame with NO readable burn (`None` → BurnUnreadable, still fails
+/// the gate), the downstream node's OWN per-render burn (strih 911002), the cam2→cam1 OPTICAL
+/// tick (a 1:1, non-decimated read), and the frozen-camera gate (#365). On a 1:1 hop
+/// (`expected_step == 1`) forward gaps ARE charged — the exact pre-#571 strict first..=last scan,
+/// unchanged (the #356/#208 never-mask invariant). For PerRenderTick (strih/stream)
+/// `expected_step` is used directly (the decimated-render branch above).
 ///
 /// The decimation-excess RealDrops are absent frames BETWEEN two delivered frames (like the cam1
 /// genuinely-absent ids), NOT delivered frames, so they are EXTRA entries in `missing_ids` and
@@ -347,31 +350,6 @@ pub fn burn_contiguity_in_window_with_step(
     // the 30-min proof exposed: 235 cam1 "real_drops" while present_ids covered the FULL
     // integer span — every emitted integer WAS present, nothing lost.)
     let present_set: std::collections::BTreeSet<u32> = present_ids.iter().copied().collect();
-    let present_ids_sorted: Vec<u32> = present_set.iter().copied().collect();
-    // #571: the DECIMATION step for the per-emit (cam1/cam3/cam4) genuine-drop check =
-    // `min(observed cadence, fps ceiling)`. Two estimators, MIN taken so the result can only ever
-    // charge MORE gaps, never mask a real one:
-    //   * `fps_step_cap` = the CLI-fps structural ceiling (`node_render_step` ->
-    //     `painted_tick_step(60,30) == 2` on the rig, 1 elsewhere). It is the MOST a genlocked
-    //     cam(60)->strih(30) hop can decimate. A hardcoded fps step alone was wrong: on a
-    //     NON-decimated (step-1) unit capture it MASKED a genuine single-id drop (gap 2 == the
-    //     assumed step ⇒ absorbed), breaking the #356/#208 never-mask invariant.
-    //   * `observed_step` = the recording's OWN captured-id cadence. It lowers the step below the
-    //     fps ceiling whenever the actual capture is finer than the fps claims (a step-1 unit
-    //     capture reads 1 ⇒ every gap of 2 is charged). But observed-from-present-ids ALONE can be
-    //     INFLATED when None (burn-unreadable) frames hide grid slots (present [1000,1004,1008]
-    //     reads mode 4, which would mask a genuine drop at 1006) — so it is CAPPED by the fps
-    //     ceiling, which no interleaving can inflate.
-    // The ORIGINAL hardcoded-1 charged every by-design decimated-away id as a phantom REAL DROP
-    // (run 554307: 11087 of them while strih's OWN burn was fully contiguous); `min` gives step 2
-    // there (0 phantom drops) yet step 1 on a non-decimated capture (every genuine drop charged).
-    // Derived ONCE here so the None-arm's consumed-id calc and the candidate generation below use
-    // the SAME step (they MUST match, per the docstring on the None arm). PerRenderTick
-    // (strih/stream) keeps the passed `expected_step` — a free-running render tick, gap-ignored.
-    let fps_step_cap: u32 = u32::try_from(expected_step.max(1)).unwrap_or(1);
-    let per_emit_step: u32 = crate::imag_tick_gate::observed_step(&present_ids_sorted)
-        .min(fps_step_cap)
-        .max(1);
 
     let mut missing_slots: Vec<MissingSlot> = Vec::new();
     let mut prev_present: Option<u32> = None;
@@ -462,19 +440,16 @@ pub fn burn_contiguity_in_window_with_step(
                 // delivered frame is NOT a clean present.
                 non_present_delivered = non_present_delivered.saturating_add(1);
                 nones_since_prev = nones_since_prev.saturating_add(1);
-                // The specific emitted id this None consumed: the next DECIMATION-GRID id after the
-                // last present (prev + step, + step per consecutive None — #571; was `prev + 1` per
-                // consecutive None before a decimated hop existed, i.e. step==1 degenerates to the
-                // exact same value). When there is no prev present yet (a leading None), it has no
-                // in-sequence id to charge — it consumes nothing from the absent set (it cannot mask
-                // an in-span drop). #133 per-emit accounting. MUST match the step-aware candidate
-                // generation below exactly, or a None inside a decimated gap fails to exclude its
-                // own grid slot there and gets double-counted as a phantom REAL DROP too.
+                // The specific emitted id this None consumed: the next contiguous id after the last
+                // present (prev + 1, + 1 per consecutive None). When there is no prev present yet
+                // (a leading None), it has no in-sequence id to charge — it consumes nothing from
+                // the absent set (it cannot mask an in-span drop). #133 per-emit accounting.
+                // #571: only the 1:1 hop's candidate generation below consumes this set; on a
+                // DECIMATED hop (expected_step >= 2) no forward-gap candidates exist at all, so
+                // the set is simply unused there (harmless).
                 if matches!(rate, BurnRate::PerEmittedFrame) {
                     if let Some(prev) = prev_present {
-                        unreadable_consumed.insert(
-                            prev.saturating_add(nones_since_prev.saturating_mul(per_emit_step)),
-                        );
+                        unreadable_consumed.insert(prev.saturating_add(nones_since_prev));
                     }
                 }
                 missing_slots.push(MissingSlot {
@@ -494,16 +469,23 @@ pub fn burn_contiguity_in_window_with_step(
     // frame consumed (those ids are undecodable, not frames that never arrived — the #133
     // distinction). Each genuinely-lost id is listed ONCE, paired to the recorded slot of the next
     // present id above it for the pixel proof.
-    if matches!(rate, BurnRate::PerEmittedFrame) {
-        // #571: no longer scans the RAW integer span `min..=max` (that was the strict step==1
-        // assumption a decimated cam(60fps)->strih(30fps) hop breaks) — the genuinely-missing
-        // candidates are generated step-aware below, via the SAME crate-root pure
-        // `burn_step_contiguity` (#480) imag-nb's own step-2 corner burn already proved correct: a
-        // gap of EXACTLY `per_emit_step` is by-design decimation (nothing missing there at all); a
-        // gap LARGER charges the excess. This guard only needs "at least one present id exists"
-        // (mirrors the old span's Some/None gate — a non-empty BTreeSet always has both a first
-        // and a last element).
-        if !present_set.is_empty() {
+    // #571: the forward-gap candidate generation runs ONLY on a 1:1 hop (`expected_step <= 1`).
+    // On a DECIMATED hop (`expected_step >= 2` — the Topology-v2 cam(60fps)->strih(30fps) hop) a
+    // forward gap is BY-DESIGN decimation and produces NO candidates at all: the real beat (run
+    // 554307: delta-1 bursts + ~7 jumps) makes every gap-size heuristic wrong in one direction or
+    // the other (charge-everything or mask-real-drops), so the forward-gap signal is simply
+    // INVALID there. Genuine decimated-hop loss is still caught by the None arm above
+    // (BurnUnreadable), the downstream node's own per-render burn, and the optical tick — see
+    // the function docstring.
+    if matches!(rate, BurnRate::PerEmittedFrame) && expected_step <= 1 {
+        // The span is MIN..=MAX of the present ids (NOT the recorded first/last, which can be out
+        // of order through the softened recording — e.g. a corrupt low id makes first > last).
+        let span = present_set
+            .iter()
+            .next()
+            .copied()
+            .zip(present_set.iter().next_back().copied());
+        if let Some((lo, hi)) = span {
             let last_frame = frames.last().map(|f| f.frame_index).unwrap_or(0);
             // #226 — a blurred-but-PRESENT cam1 burn must be BURN-UNREADABLE, never REAL DROP,
             // but ONLY when a delivered frame demonstrably fell in the gap. The proof signature
@@ -579,22 +561,8 @@ pub fn burn_contiguity_in_window_with_step(
             // below it. Spend that gap's interstitial budget (lowest absent id first) as
             // BURN-UNREADABLE; the remaining absent ids in the gap are genuine REAL DROPs.
             let mut gap_budget_used: BTreeMap<u32, u32> = BTreeMap::new();
-            // #571: the step-aware candidate list, using the OBSERVED `per_emit_step` (derived
-            // above from this window's own captured cadence, NOT the CLI-fps hint).
-            // `burn_step_contiguity` (imag_tick_gate.rs, Tier-0 pure, #480) walks the SAME present
-            // ids and charges only `gap/per_emit_step - 1` for a gap EXCEEDING `per_emit_step` (a
-            // gap == per_emit_step is by-design decimation and is NEVER a candidate at all; a gap
-            // of `2*per_emit_step` still charges — #480's own
-            // `burn_step_contiguity_still_catches_a_genuine_dropped_frame_inside_the_step2_grid`).
-            // On a step-1 (non-decimated) capture `per_emit_step == 1` and this is byte-for-byte
-            // the OLD `(lo..=hi).filter(not present)` scan — proven in imag_tick_gate's own
-            // `burn_step_contiguity_step_of_1_is_identical_to_strict_contiguity` test — so every
-            // genuine single-id drop stays a charged candidate (the #356/#208 never-mask invariant).
-            let step_candidates =
-                crate::imag_tick_gate::burn_step_contiguity(&present_ids_sorted, per_emit_step)
-                    .missing_ids;
-            for missing in step_candidates
-                .into_iter()
+            for missing in (lo..=hi)
+                .filter(|id| !present_set.contains(id))
                 .filter(|id| !unreadable_consumed.contains(id))
             {
                 let frame_index = id_to_frame
@@ -1781,36 +1749,46 @@ mod tests {
 
     // ============================================================================
     // #571 — Topology-v2 cam(60fps)->strih(30fps) DECIMATION on the PerEmittedFrame (cam1/cam3/
-    // cam4) branch. Live signature (run 554307): cam1's forwarded capture burn (911001) reads
-    // present on exactly every OTHER decimation-grid id in the 30fps strih recording — a clean
-    // 2:1 decimation, not chain loss (strih's OWN node burn, 911002, was proven fully contiguous
-    // on the SAME run — present_count=11105 == exactly strih's full 30fps span). Before this fix
-    // the PerEmittedFrame branch scanned the RAW integer span `min..=max` regardless of `step`
-    // (the same algorithm as `imag_tick_gate::tick_contiguity`, proven wrong for a free-running
-    // step-2 signal by imag's own #480), so it charged every decimated-away id as a REAL DROP
-    // (11087 phantom drops on run 554307). These tests exercise the SAME mechanism #480 already
-    // fixed for imag's own corner burn, applied here to the cam(60)->strih(30) hop.
+    // cam4) branch. Live signature (run 554307): cam1's forwarded capture burn (911001) in the
+    // 30fps strih recording is STRICTLY MONOTONE with ZERO Nones, and its forward-delta histogram
+    // is {0: 2 (benign dup), 1: 9256, 6: 34, 7: 1767, 8: 45} — bursts of ~5 consecutive ids
+    // (delta 1) then a jump of ~7, mean step 1.998 ≈ 2 (60→30). strih's OWN node burn (911002) on
+    // the SAME run had the SAME beat and was judged fully contiguous — strih dropped NOTHING, so
+    // the cam burn's forward gaps are PURE DECIMATION. And NO gap-size math can separate them
+    // from loss: the DOMINANT delta is 1, so an observed-mode step reads 1 and charges every jump
+    // (11087 phantom drops — attempt #2's failure), while a hardcoded step-2 grid masks genuine
+    // step-1 drops (attempt #1's failure). The correct discriminator is WHETHER THE HOP IS
+    // DECIMATED — `expected_step >= 2`, from the CONFIGURED fps ratio (`node_render_step` →
+    // `painted_tick_step(60,30) == 2` on the rig):
+    //   * DECIMATED hop (expected_step >= 2): forward gaps are NEVER charged. Genuine loss is
+    //     caught by the signals that remain in force — a DELIVERED frame with NO readable cam
+    //     burn (None → BurnUnreadable, still fails the gate), strih's OWN 911002 contiguity, the
+    //     cam2 optical tick (1:1, non-decimated), and the frozen-camera gate (#365).
+    //   * 1:1 hop (expected_step == 1): forward gaps ARE charged — the exact pre-#571 strict
+    //     first..=last scan, unchanged (the #356/#208 never-mask invariant).
     // ============================================================================
 
     #[test]
     fn in_window_cam1_decimation_step2_clean_matches_run_554307_signature_571() {
-        // Scaled-down run-554307 signature: cam1's forwarded burn is present on every OTHER
-        // decimation-grid id (0,2,4,..,200 — 101 present ids), never on the interstitial odd
-        // ones. This must be ZERO loss once step-aware.
-        let ids: Vec<u32> = (0..=200).step_by(2).collect();
-        // Sanity: this is EXACTLY the bug signature the pre-#571 strict-scan model (the same
-        // algorithm as `imag_tick_gate::tick_contiguity`, and what this branch computed before
-        // this fix — `(lo..=hi).filter(not present)`) false-fails on — every one of the 100 odd
-        // ids in 0..=200 would have been charged as a phantom drop.
+        // The REAL run-554307 beat in miniature: bursts of consecutive ids (delta 1) closed by a
+        // jump of 6/7/8, plus a benign duplicate — mean step ≈ 2, dominant delta 1. This is the
+        // signature that defeats every gap-math model: an observed-mode step reads 1 (dominant
+        // delta) and charges every jump as phantom drops; a fixed step-2 grid doesn't match the
+        // delta-1 bursts either. On the DECIMATED hop (expected_step = 2) it is ZERO loss.
+        let ids: Vec<u32> = vec![
+            2000, 2001, 2002, 2003, 2004, // delta-1 burst
+            2011, 2012, 2013, 2014, 2015, 2016, // jump 7, burst
+            2022, 2023, 2024, 2025, 2026, // jump 6, burst
+            2034, 2034, 2035, 2036, 2037, 2038, // jump 8, benign dup (delta 0), burst
+            2045, 2046, 2047, 2048, // jump 7, burst
+        ];
+        // Sanity: the strict 1:1 scan (`imag_tick_gate::tick_contiguity`, the same algorithm the
+        // pre-#571 per-emit branch ran) DOES false-fail this signature — every decimated-away id
+        // inside the jumps reads as a phantom drop under it.
         let old_strict = crate::imag_tick_gate::tick_contiguity(&ids);
         assert!(
             !old_strict.is_contiguous(),
             "sanity: the pre-#571 strict-scan model DOES false-fail this signature: {old_strict:?}"
-        );
-        assert_eq!(
-            old_strict.missing_ticks.len(),
-            100,
-            "every odd id in 0..=200 reads as a phantom drop under the old strict model"
         );
 
         let frames: Vec<RecordedBurnFrame> = ids
@@ -1821,24 +1799,37 @@ mod tests {
         let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
         assert!(
             w.contiguity.is_contiguous(),
-            "clean 60->30 decimation (step 2) on cam1 must be ZERO loss, matching strih's OWN \
-             contiguous node burn on the same run (#571): {:?}",
+            "the real 60->30 decimation beat (delta-1 bursts + ~7 jumps) on the DECIMATED hop \
+             must be ZERO loss, matching strih's OWN contiguous node burn on run 554307 (#571): {:?}",
             w.contiguity
         );
         assert!(
             w.missing_slots.is_empty(),
-            "no missing slot of any kind for clean decimation: {:?}",
+            "no missing slot of any kind for pure decimation: {:?}",
             w.missing_slots
         );
-        assert_eq!(w.contiguity.first_id, Some(0));
-        assert_eq!(w.contiguity.last_id, Some(200));
+
+        // The idealized every-other-id signature is equally zero loss.
+        let even_ids: Vec<u32> = (0..=200).step_by(2).collect();
+        let even_frames: Vec<RecordedBurnFrame> = even_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| rbf(i as u64, Some(id)))
+            .collect();
+        let we =
+            burn_contiguity_in_window_with_step("cam1", &even_frames, BurnRate::PerEmittedFrame, 2);
+        assert!(
+            we.contiguity.is_contiguous(),
+            "clean every-other-id decimation is ZERO loss: {:?}",
+            we.contiguity
+        );
     }
 
     #[test]
     fn in_window_cam1_decimation_step2_jitter_gap_of_one_or_three_is_not_loss_571() {
-        // Genlock 60->30 beat jitter on the cam->strih hop: an occasional gap of 1 (both frames
-        // kept) or 3 (a beat straddle) is NOT loss — integer `gap/step - 1` charges 0 for
-        // gap in {1, 2, 3} at step 2 (mirrors the PerRenderTick decimation-jitter tolerance).
+        // Genlock 60->30 beat jitter on the cam->strih hop: gaps of 1 (both frames kept), 2, or
+        // 3 (a beat straddle) are all just the decimation beat — on the decimated hop NO forward
+        // gap is charged at all.
         let ids = [2000u32, 2001, 2003, 2006, 2008];
         let frames: Vec<RecordedBurnFrame> = ids
             .iter()
@@ -1854,13 +1845,15 @@ mod tests {
     }
 
     #[test]
-    fn in_window_cam1_decimation_step2_extra_missing_id_is_a_real_drop_not_masked_571() {
-        // THE no-masking proof. Steady decimation by 2, but ONE output frame is genuinely lost:
-        // cam1's forwarded ids jump 1004 -> 1008 (gap 4 where 2 is by-design). The excess
-        // `4/2 - 1 = 1` MUST still be charged as a REAL DROP — never silently absorbed into the
-        // decimation the way the pre-#571 unconditional-per-emit scan would have (which would
-        // have charged the WHOLE gap 1005..=1007, not just the one genuinely-lost slot).
-        let ids = [1000u32, 1002, 1004, 1008, 1010];
+    fn in_window_cam1_decimation_step2_forward_gap_of_any_size_is_not_charged_571() {
+        // #571 (final model — supersedes the reverted step-aware gap math): on the DECIMATED hop
+        // a forward gap of ANY size is by-design decimation and is NOT charged. The run-554307
+        // beat (delta-1 bursts then ~7 jumps) proves gap SIZE cannot discriminate decimation from
+        // loss — a "gap 4 = one lost slot" step-2 rule false-fails the real beat's every jump,
+        // and an observed-cadence rule reads the dominant delta 1 and charges everything.
+        // Genuine loss on this hop is a None (delivered frame, no readable burn — the test
+        // below), strih's own 911002 burn, and the optical tick — NOT the forward gap.
+        let ids = [1000u32, 1002, 1004, 1008, 1010]; // gap 4 amid step-2 beat
         let frames: Vec<RecordedBurnFrame> = ids
             .iter()
             .enumerate()
@@ -1868,54 +1861,33 @@ mod tests {
             .collect();
         let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
         assert!(
-            !w.contiguity.is_contiguous(),
-            "a gap > step (real loss on top of decimation) must NOT be masked: {:?}",
+            w.contiguity.is_contiguous(),
+            "a forward gap on the decimated hop is decimation, never charged: {:?}",
             w.contiguity
         );
-        let real_drops: Vec<u32> = w
-            .missing_slots
-            .iter()
-            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(
-            real_drops,
-            vec![1006],
-            "exactly the one genuinely-lost decimation slot (4/2 - 1 = 1): {:?}",
+        assert!(
+            w.missing_slots.is_empty(),
+            "no forward-gap candidate of any kind on the decimated hop: {:?}",
             w.missing_slots
         );
-    }
 
-    #[test]
-    fn in_window_cam1_decimation_step2_two_lost_frames_charge_two_real_drops_571() {
-        // A wider real loss: gap of 6 at step 2 => `6/2 - 1 = 2` excess frames lost => two real
-        // drops, never masked as "just decimation".
-        let frames = [rbf(0, Some(500)), rbf(1, Some(502)), rbf(2, Some(508))];
-        let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
-        let real_drops: Vec<u32> = w
-            .missing_slots
-            .iter()
-            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(
-            real_drops,
-            vec![504, 506],
-            "gap 6 at step 2 = two genuinely-lost decimation slots: {:?}",
-            w.missing_slots
+        // A wider gap (6) is equally uncharged — gap size carries no loss information here.
+        let wide = [rbf(0, Some(500)), rbf(1, Some(502)), rbf(2, Some(508))];
+        let ww = burn_contiguity_in_window_with_step("cam1", &wide, BurnRate::PerEmittedFrame, 2);
+        assert!(
+            ww.contiguity.is_contiguous(),
+            "gap 6 on the decimated hop is decimation too: {:?}",
+            ww.contiguity
         );
-        assert!(!w.contiguity.is_contiguous());
+        assert!(ww.missing_slots.is_empty());
     }
 
     #[test]
     fn in_window_cam1_decimation_step2_unreadable_burn_is_not_double_counted_as_real_drop_571() {
-        // The `unreadable_consumed` step-scaling fix, specifically: on a DECIMATED (step=2)
-        // per-emit hop, a delivered frame whose cam1 burn is UNREADABLE (None) consumes ONE
-        // decimation-grid slot (prev + step), NOT the next bare integer (prev + 1) — which
-        // would never match a step-aware candidate and would let the SAME slot be double-
-        // charged as a phantom REAL DROP on top of its own BURN-UNREADABLE entry.
-        // [1000, None, 1004] at step 2: gap 1000->1004 = 4 = 2 steps; the None (true ~1002) is
-        // the ONE decimation slot between them => ZERO real drops, exactly ONE burn-unreadable.
+        // A DELIVERED frame whose cam burn is UNREADABLE (None) is the decimated hop's genuine
+        // loss signal: exactly ONE BurnUnreadable, and the gap it sits in charges NO additional
+        // phantom REAL DROP (forward gaps are never candidates on the decimated hop).
+        // [1000, None, 1004] at step 2 => ZERO real drops, exactly ONE burn-unreadable, FAILS.
         let frames = [rbf(0, Some(1000)), rbf(1, None), rbf(2, Some(1004))];
         let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
         let real_drops = w
@@ -1930,8 +1902,7 @@ mod tests {
             .count();
         assert_eq!(
             real_drops, 0,
-            "the unreadable cam1 burn consumed the gap's ONE decimation slot — NOT a real drop \
-             (the #571 unreadable_consumed step-scaling fix): {:?}",
+            "the None is the only fault — no phantom real drop on top of it: {:?}",
             w.missing_slots
         );
         assert_eq!(
@@ -1946,27 +1917,27 @@ mod tests {
     }
 
     #[test]
-    fn in_window_cam1_decimation_step2_unreadable_plus_genuine_drop_counts_only_the_drop_571() {
-        // The credit must NOT over-correct: [1000, None, 1008] at step 2: gap 8 = 4 steps; the
-        // None (~1002) is one delivered slot, 1008 is delivered => 1004 and 1006 are genuinely
-        // absent => 2 real drops + 1 burn-unreadable.
+    fn in_window_cam1_decimation_step2_none_amid_wide_gap_charges_only_the_none_571() {
+        // Rework of the reverted `..._unreadable_plus_genuine_drop_counts_only_the_drop_571`
+        // (which encoded the step-2 gap-math model): on the decimated hop the absent grid ids
+        // inside a wide gap ([1000, None, 1008] → 1004/1006) are INDISTINGUISHABLE from
+        // by-design decimation, so they are NOT charged — only the None (a DELIVERED frame with
+        // no readable burn) is a fault: 1 BurnUnreadable, 0 real drops, still FAILS the gate.
         let frames = [rbf(0, Some(1000)), rbf(1, None), rbf(2, Some(1008))];
         let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
-        let real_drops: Vec<u32> = w
+        let real_drops = w
             .missing_slots
             .iter()
             .filter(|s| s.kind == InWindowMissingKind::RealDrop)
-            .map(|s| s.id)
-            .collect();
+            .count();
         let burn_unreadable = w
             .missing_slots
             .iter()
             .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
             .count();
         assert_eq!(
-            real_drops,
-            vec![1004, 1006],
-            "two genuinely-absent decimation slots: {:?}",
+            real_drops, 0,
+            "absent grid ids inside the gap are decimation, not chargeable drops: {:?}",
             w.missing_slots
         );
         assert_eq!(
@@ -1974,23 +1945,49 @@ mod tests {
             "the one delivered None frame: {:?}",
             w.missing_slots
         );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "the None keeps the verdict NOT-zero (genuine loss is still caught)"
+        );
+
+        // Same with a following present id after the None ([1000, None, 1004, 1008] — the data
+        // of the reverted "None-inflated cadence" test): still exactly the ONE None fault.
+        let frames2 = [
+            rbf(0, Some(1000)),
+            rbf(1, None),
+            rbf(2, Some(1004)),
+            rbf(3, Some(1008)),
+        ];
+        let w2 =
+            burn_contiguity_in_window_with_step("cam1", &frames2, BurnRate::PerEmittedFrame, 2);
+        let real2 = w2
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
+            .count();
+        let unreadable2 = w2
+            .missing_slots
+            .iter()
+            .filter(|s| s.kind == InWindowMissingKind::BurnUnreadable)
+            .count();
+        assert_eq!(real2, 0, "no forward-gap charge: {:?}", w2.missing_slots);
+        assert_eq!(unreadable2, 1, "the one None: {:?}", w2.missing_slots);
+        assert!(!w2.contiguity.is_contiguous());
     }
 
     #[test]
-    fn in_window_cam1_step1_capture_charges_a_genuine_drop_even_when_fps_claims_step2_571() {
-        // THE #356/#208 never-mask invariant at the burn_contiguity level, and the exact bug the
-        // hardcoded fps step-2 caused: a NON-decimated (step-1) cam1 capture — ids present on every
-        // integer — with ONE genuinely lost id (1003), fed with `expected_step = 2` (what the rig's
-        // 60/30 fps args yield). The OBSERVED cadence is 1, so `min(1, 2) = 1` and the gap of 2 at
-        // 1003 IS charged a REAL DROP. A blanket fps step-2 (the first #571 fix) read that gap as
-        // "just decimation" and MASKED the loss.
+    fn in_window_cam1_step1_hop_forward_gap_is_still_a_real_drop_571() {
+        // The 1:1-hop never-mask invariant, explicit at the `_with_step` call (the wrapper tests
+        // above cover it implicitly): with `expected_step == 1` (a NON-decimated capture — the
+        // pre-Topology-v2 shape, or any future 1:1 hop) the strict first..=last scan is in force
+        // and a forward gap IS a genuine loss — byte-identical to pre-#571 behavior.
         let ids = [1000u32, 1001, 1002, 1004, 1005]; // 1003 genuinely dropped (gap of 2)
         let frames: Vec<RecordedBurnFrame> = ids
             .iter()
             .enumerate()
             .map(|(i, &id)| rbf(i as u64, Some(id)))
             .collect();
-        let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
+        let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 1);
         let real_drops: Vec<u32> = w
             .missing_slots
             .iter()
@@ -2000,40 +1997,9 @@ mod tests {
         assert_eq!(
             real_drops,
             vec![1003],
-            "a genuine single-id drop on a step-1 capture must be charged even when the fps hint \
-             claims step-2 decimation (min(observed=1, cap=2)=1): {:?}",
+            "a 1:1 hop still charges a forward gap as a real drop (never-mask preserved): {:?}",
             w.missing_slots
         );
         assert!(!w.contiguity.is_contiguous());
-    }
-
-    #[test]
-    fn in_window_cam1_none_inflated_cadence_cannot_mask_a_real_drop_via_the_fps_cap_571() {
-        // The None-inflation guard: present ids [1000, 1004, 1008] read a MODE-4 cadence in
-        // isolation (the intervening grid slots 1002/1006 are absent) — a raw observed step of 4
-        // would treat the gap 1004->1008 as "one decimation step" and MASK the genuinely-dropped
-        // grid slot 1006. Capping at the fps ceiling (`expected_step = 2`) forces step 2, so 1006
-        // is charged. Frames: 1002 was a delivered-but-unreadable None (BurnUnreadable, credited);
-        // 1006's frame never arrived (REAL DROP).
-        let frames = [
-            rbf(0, Some(1000)),
-            rbf(1, None), // 1002 delivered, burn unreadable
-            rbf(2, Some(1004)),
-            rbf(3, Some(1008)), // 1006 grid slot never arrived -> real drop
-        ];
-        let w = burn_contiguity_in_window_with_step("cam1", &frames, BurnRate::PerEmittedFrame, 2);
-        let real_drops: Vec<u32> = w
-            .missing_slots
-            .iter()
-            .filter(|s| s.kind == InWindowMissingKind::RealDrop)
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(
-            real_drops,
-            vec![1006],
-            "a genuinely-dropped grid slot must NOT be masked by a None-inflated observed cadence \
-             — the fps ceiling caps the step at 2: {:?}",
-            w.missing_slots
-        );
     }
 }
