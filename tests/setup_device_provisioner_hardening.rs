@@ -119,19 +119,22 @@ fn setup_device_execstart_is_canonical_plain_unless_the_execstart_source_table_s
          assembled from the CAMERA_DISPLAY_EXECSTART_SOURCE table via execstart_display_flag() \
          (#450/#562)"
     );
+    // #562-review: a bare `on_noncomment_line(&body, "execstart_display_flag")` substring check is
+    // trivially satisfied by the function's own DEFINITION line (or its explanatory comment) even
+    // if STEP 7 never actually CALLS it -- exactly the #549-review "dead pure function" class of
+    // gap this repo's other wiring tests guard against elsewhere. Require the EXACT call-site
+    // instead: this also catches a regression that hardcodes a DIFFERENT per-box literal (one that
+    // wouldn't match the "STRIH-SNV" check above), because nothing but this precise construction
+    // renders `ExecStart=/usr/local/bin/camera-box` immediately followed by the interpolation.
     assert!(
-        on_noncomment_line(&body, "execstart_display_flag"),
-        "setup-device.sh's STEP 7 must build the ExecStart line via the table-driven \
-         execstart_display_flag() helper (#562), not a bare hardcoded line"
-    );
-    assert!(
-        body.lines().any(
-            |l| l.trim().starts_with("ExecStart=/usr/local/bin/camera-box")
-                && l.trim() != "ExecStart=/usr/local/bin/camera-box"
+        body.contains(
+            r#"ExecStart=/usr/local/bin/camera-box$(execstart_display_flag "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}")"#
         ),
-        "setup-device.sh's STEP 7 ExecStart line must be `ExecStart=/usr/local/bin/camera-box` \
-         followed by an interpolated variable (not a bare literal) so cam2's table entry can \
-         append `--display \"...\"` at generation time (#562); got no such line"
+        "setup-device.sh's STEP 7 ExecStart line must be exactly \
+         `ExecStart=/usr/local/bin/camera-box$(execstart_display_flag \
+         \"${{CAMERA_DISPLAY_EXECSTART_SOURCE:-}}\")` (#562) -- a box with no table entry then \
+         renders the canonical plain form, and any hardcoded per-box literal would fail this exact \
+         match"
     );
 }
 

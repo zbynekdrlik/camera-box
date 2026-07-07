@@ -386,3 +386,26 @@ fn camera_resolve_leaves_cam1_and_cam3_through_cam7_with_no_execstart_display_so
         );
     }
 }
+
+/// #562-review: nothing in `camera_resolve()`'s `case` statement mechanically PREVENTS a future
+/// table edit from filling in BOTH `CAMERA_DISPLAY_SOURCE` and `CAMERA_DISPLAY_EXECSTART_SOURCE`
+/// for the same camera -- it's comment-only discipline today. That would be a real, silent bug:
+/// `src/main.rs`'s CLI-overrides-config precedence means the ExecStart flag would win, config.toml's
+/// `[display]` section would sit inert, and `verify-device.sh`'s two INDEPENDENT (p) checks would
+/// both report "ok" even though only one mechanism is actually active. This sweep pins the
+/// invariant across the whole real fleet so a future accidental double-entry fails a test instead
+/// of shipping silently.
+#[test]
+fn camera_resolve_never_configures_both_display_mechanisms_for_the_same_camera() {
+    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
+        let (ok1, config_toml_source) = resolve_display_source(cam);
+        let (ok2, execstart_source) = resolve_execstart_display_source(cam);
+        assert!(ok1 && ok2, "camera_resolve {cam} should succeed");
+        assert!(
+            config_toml_source.is_empty() || execstart_source.is_empty(),
+            "camera_resolve {cam} has BOTH CAMERA_DISPLAY_SOURCE ('{config_toml_source}') AND \
+             CAMERA_DISPLAY_EXECSTART_SOURCE ('{execstart_source}') non-empty -- exactly ONE HDMI-\
+             preview mechanism must be configured per camera (#562), never both"
+        );
+    }
+}

@@ -465,25 +465,26 @@ fn execstart_display_flag_is_wired_into_step7_and_the_unit_stays_canonical_for_n
         .find("stop here -- never run the destructive")
         .expect("source-guard comment must still be present");
     let live_flow = &body[guard_pos..];
+    // #562-review: a bare `live_flow.contains("execstart_display_flag")` is trivially satisfied by
+    // the function's own explanatory comment a few lines above the heredoc (which names the
+    // function), even if STEP 7 never actually CALLS it -- the #549-review "dead pure function"
+    // class of gap. Require the EXACT call-site substring instead: this is also what actually
+    // proves the ExecStart line renders the canonical plain form for a box with no table entry (a
+    // hardcoded literal for a DIFFERENT camera would fail this exact match too, unlike a bare
+    // "STRIH-SNV" check).
     assert!(
-        live_flow.contains("execstart_display_flag"),
-        "STEP 7 must CALL execstart_display_flag to build the ExecStart line from \
-         CAMERA_DISPLAY_EXECSTART_SOURCE (#562) -- not just define it"
+        live_flow.contains(
+            r#"ExecStart=/usr/local/bin/camera-box$(execstart_display_flag "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}")"#
+        ),
+        "STEP 7's ExecStart line must be exactly \
+         `ExecStart=/usr/local/bin/camera-box$(execstart_display_flag \
+         \"${{CAMERA_DISPLAY_EXECSTART_SOURCE:-}}\")` (#562) -- not a bare hardcoded line, and not \
+         merely a comment mentioning the helper's name"
     );
-    // The unit's ExecStart line must be built from a variable (never a hardcoded --display
-    // literal in this script's own source text) so a box with no table entry renders the exact
-    // pre-#562 canonical plain line, and cam2 renders it WITH the flag, both from the SAME
-    // template line.
     assert!(
         !live_flow.contains(r#"--display "STRIH-SNV"#),
         "setup-device.sh must never hardcode a literal --display flag as a string -- it must be \
          assembled from the CAMERA_DISPLAY_EXECSTART_SOURCE table via execstart_display_flag() \
          (#450/#562)"
-    );
-    assert!(
-        live_flow.contains("ExecStart=/usr/local/bin/camera-box$"),
-        "STEP 7's ExecStart line must be `ExecStart=/usr/local/bin/camera-box` followed by an \
-         interpolated variable holding execstart_display_flag()'s output (#562), so a box with no \
-         table entry renders the canonical plain form"
     );
 }
