@@ -727,6 +727,94 @@ fn plan_step_zero_mentions_both_gate_binaries() {
     );
 }
 
+// ─── #89: GPU device-removed — local OBS-log DXGI audit + cause + reboot opt-in ────────────────
+
+/// The recovery script must audit the box's OWN OBS log locally for the DXGI device-lost
+/// signature (#89) — no MCP/ssh needed on the self-heal box itself — and feed the result into
+/// BOTH the wedge-verdict sample (obs-watchdog-gate.exe) and the recovery cause (obs-self-heal-
+/// gate.exe), never re-implementing the DXGI code match (it must reference the same codes
+/// `camera_box::dxgi_device_lost::DXGI_DEVICE_LOST_CODES` uses).
+#[test]
+fn recovery_script_performs_local_obs_log_dxgi_audit() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("887A0005") && p.contains("887A0006") && p.contains("887A0007"),
+        "#89: the recovery script must check the OBS log for all three DXGI device-lost codes. \
+         Program:\n{p}"
+    );
+    assert!(
+        p.contains("dxgiDeviceLost") || p.contains("DxgiDeviceLost"),
+        "#89: the script must compute a dxgi-device-lost signal. Program:\n{p}"
+    );
+    assert!(
+        p.contains("dxgi_device_lost"),
+        "#89: the dxgi audit result must flow into the sample sent to obs-watchdog-gate.exe. \
+         Program:\n{p}"
+    );
+}
+
+/// The computed cause ("GpuDeviceRemoved" when the DXGI audit found the signature, else
+/// "ProcessWedge") must flow into the decision JSON sent to obs-self-heal-gate.exe.
+#[test]
+fn recovery_script_computes_cause_and_sends_it_to_the_self_heal_gate() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("GpuDeviceRemoved") && p.contains("ProcessWedge"),
+        "#89: the script must select between the two WedgeCause values. Program:\n{p}"
+    );
+    assert!(
+        p.contains("cause") && p.contains("reboot_enabled"),
+        "#89: both cause and reboot_enabled must be sent in the decision JSON payload. \
+         Program:\n{p}"
+    );
+}
+
+/// `--enable-reboot` defaults OFF — an omitted flag must emit `$false`, never `$true` (a host
+/// reboot is a destructive, approval-gated action per no-destructive-remote-actions.md).
+#[test]
+fn enable_reboot_defaults_to_false_when_omitted() {
+    let (code, out, _err) = run_script(&["--box", "strih"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("$RebootEnabledOverride = $false"),
+        "#89: an omitted --enable-reboot must install $false, never $true or $null (this is a \
+         plain boolean opt-in, not a tunable magic number). out=\n{out}"
+    );
+}
+
+/// An explicit `--enable-reboot` flag must flow through as `$true`.
+#[test]
+fn enable_reboot_flag_flows_through_as_true() {
+    let (code, out, _err) = run_script(&["--box", "strih", "--enable-reboot"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("$RebootEnabledOverride = $true"),
+        "#89: --enable-reboot must install $true. out=\n{out}"
+    );
+}
+
+/// The Recover switch arm must handle a `RebootPc`-only plan (executes a real reboot) AND an
+/// EMPTY plan (GpuDeviceRemoved confirmed, reboot disabled — alert-only, no automatic action) —
+/// distinct from the original 4-step process-wedge branch, which must still be present verbatim.
+#[test]
+fn recover_arm_handles_reboot_pc_and_empty_plan_branches() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("RebootPc") && p.contains("Restart-Computer"),
+        "#89: a RebootPc-only plan must actually execute a reboot. Program:\n{p}"
+    );
+    assert!(
+        p.to_lowercase().contains("auto-reboot") && p.to_lowercase().contains("disabled"),
+        "#89: an empty plan (GpuDeviceRemoved, reboot disabled) must log that auto-reboot is \
+         disabled and no action was taken. Program:\n{p}"
+    );
+    // The ORIGINAL 4-step process-wedge branch must still be reachable and unchanged.
+    assert!(
+        p.contains("KillAndRelaunchObs"),
+        "#89: the original process-wedge plan branch must still be present. Program:\n{p}"
+    );
+}
+
 // ─── behavioral cross-check: the REAL compiled obs-self-heal-gate binary ───────────────────────
 //
 // The tests above only prove the PowerShell TEXT calls obs-self-heal-gate.exe correctly. These
