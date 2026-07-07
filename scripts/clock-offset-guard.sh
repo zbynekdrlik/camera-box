@@ -125,17 +125,39 @@ _short_iso_epoch() {
   printf '%s' "${e:-}"
 }
 
+# _freshest_ntp_offset_line JOURNAL -> the LAST "[NTP] offset:" line in JOURNAL, "" if none.
+# Private helper shared by freshest_offset_us and dantesync_offset_verdict so "which line IS the
+# offset reading" is defined in exactly ONE place -- otherwise the two would each carry their own
+# copy of this grep+tail, and a future edit to the offset-line pattern could update one copy and
+# silently miss the other (the "three copies drifting apart" failure #595 exists to eliminate).
+_freshest_ntp_offset_line() {
+  printf '%s\n' "$1" | grep -E '\[NTP\] offset:' | tail -1 || true
+}
+
 # freshest_offset_us JOURNAL FRESHNESS_S -> the SIGNED microsecond VALUE of the freshest
 # "[NTP] offset:" line in JOURNAL, or "" if that line is ABSENT, STALE (older than FRESHNESS_S
 # behind the newest journal line), or malformed. This is the value-returning sibling of
 # dantesync_offset_verdict (below), for a caller that must compare TWO boxes' fresh offsets
 # against EACH OTHER (the #326 painter-gate RELATIVE comparator, #595) rather than grade one
 # offset against a single absolute bound. JOURNAL must be gathered with `-o short-iso`.
+#
+# FRESHNESS_S itself is validated here (unlike BOUND_US, which every caller already validates via
+# its own --bound-us/--guard-us CLI parsing before calling in): FRESHNESS_S is caller-configurable
+# ONLY via an unchecked env var (DANTESYNC_OFFSET_FRESHNESS_S / GATE_OFFSET_FRESHNESS_S /
+# PAINTER_GATE_FRESHNESS_S), never a validated flag. A malformed value (e.g. a typo'd env var) would
+# otherwise make the `-gt "$fresh"` arithmetic comparison below throw a bash "integer expression
+# expected" error, which evaluates as a FAILED test -- silently defeating the staleness OR-chain and
+# making every reading look "fresh" regardless of its true age (a real desync would then silently
+# pass). So a non-numeric FRESHNESS_S is treated exactly like a stale reading: refuse to certify it.
 freshest_offset_us() {
   local journal="$1" fresh="$2"
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local off_line off_iso off_us now_iso now_e off_e
-  off_line="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -1 || true)"
+  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+    printf ''
+    return 0
+  fi
+  off_line="$(_freshest_ntp_offset_line "$journal")"
   [ -n "$off_line" ] || { printf ''; return 0; }
   off_iso="$(printf '%s' "$off_line" | grep -oE "^$iso_re" | head -1 || true)"
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
@@ -169,7 +191,7 @@ freshest_offset_us() {
 dantesync_offset_verdict() {
   local journal="$1" fresh="$2" bound="$3"
   local off_line off_us mag
-  off_line="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -1 || true)"
+  off_line="$(_freshest_ntp_offset_line "$journal")"
   if [ -z "$off_line" ]; then
     printf 'absent\n'
     return 0

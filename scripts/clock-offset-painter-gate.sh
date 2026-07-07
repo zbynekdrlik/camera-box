@@ -92,6 +92,11 @@ dev1 is read locally (journalctl -u dantesync); the painter is read over SSH. Fo
 runs, feed pre-captured journald text via DEV1_DANTE_JOURNAL / PAINTER_DANTE_JOURNAL (file paths).
 Skip the whole gate with SKIP_CLOCK_OFFSET_ASSERT=1.
 
+Each box's offset must be FRESH: the freshest "[NTP] offset:" journal line must be no older than
+DANTESYNC_OFFSET_FRESHNESS_S (default ${PAINTER_GATE_FRESHNESS_S}) seconds behind that box's own
+newest journal line, or the comparison is refused (INCOMPLETE, never a silent PASS on a stale
+reading) -- see freshest_offset_us() in clock-offset-guard.sh (#550/#591/#595).
+
 Exit codes: 0 = within guard (or SKIPped), 20 = DRIFT (offset exceeds the guard),
 11 = a node UNREACHABLE / offset UNKNOWN (incomplete, NOT clean), 1 = usage/IO error.
 EOF

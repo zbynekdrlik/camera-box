@@ -368,6 +368,22 @@ fn dantesync_offset_verdict_absent_when_no_offset_line() {
     assert_eq!(offset_verdict(DS_ABSENT), "absent");
 }
 
+#[test]
+fn dantesync_offset_verdict_fails_closed_on_a_malformed_freshness_window() {
+    // Same fail-closed property as freshest_offset_us, proven through the actual verdict every
+    // gate (verify-device.sh/dantesync-gate.sh/clock-offset-painter-gate.sh) consumes: a
+    // malformed FRESHNESS_S must never let a fresh, in-bound offset (DS_FRESH_OK) read as "ok" —
+    // it must report "stale" (never a silent pass on an unvalidatable freshness knob).
+    let out = run_sourced(
+        &format!(
+            "TEXT='{}'\ndantesync_offset_verdict \"$TEXT\" abc 2000",
+            DS_FRESH_OK.replace('\'', "'\\''")
+        ),
+        &[],
+    );
+    assert_eq!(out.trim(), "stale");
+}
+
 fn freshest_offset(journal: &str, freshness_s: &str) -> String {
     run_sourced(
         &format!(
@@ -395,6 +411,26 @@ fn freshest_offset_us_empty_when_stale_or_absent() {
     // stale reading).
     assert_eq!(freshest_offset(DS_STALE, "300"), "");
     assert_eq!(freshest_offset(DS_ABSENT, "300"), "");
+}
+
+#[test]
+fn freshest_offset_us_fails_closed_on_a_malformed_freshness_window() {
+    // FRESHNESS_S is caller-configurable ONLY via an unchecked env var
+    // (DANTESYNC_OFFSET_FRESHNESS_S / GATE_OFFSET_FRESHNESS_S / PAINTER_GATE_FRESHNESS_S) — unlike
+    // BOUND_US, which every caller validates via its own --bound-us/--guard-us CLI parsing before
+    // ever calling in. Without an explicit guard, a malformed value (a typo'd env var: "abc", a
+    // negative number, empty) would make the `-gt "$fresh"` arithmetic comparison throw a bash
+    // "integer expression expected" error — which evaluates as a FAILED test in the `||` staleness
+    // chain, silently making every reading look "fresh" regardless of true age. A fresh, in-bound
+    // offset (DS_FRESH_OK) must still be REJECTED (empty) when the freshness window itself cannot
+    // be trusted — never a silent pass on an unvalidatable knob.
+    for bad_fresh in ["abc", "-1", "", "300.5", "1 ; rm -rf /"] {
+        assert_eq!(
+            freshest_offset(DS_FRESH_OK, bad_fresh),
+            "",
+            "a malformed freshness window ({bad_fresh:?}) must refuse to certify freshness, not silently pass"
+        );
+    }
 }
 
 #[test]

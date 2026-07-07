@@ -69,6 +69,11 @@ Options:
   --win-status N=FILE  a Windows node N whose DanteSync status-pipe JSON the caller wrote to FILE
                        (ssh to Windows is denied; the win-* MCP holder pre-fetches it). Repeatable.
 
+A Linux node's NTP offset must be FRESH, not just in-bound: the freshest "[NTP] offset:" journal
+line must be no older than DANTESYNC_OFFSET_FRESHNESS_S (default ${GATE_OFFSET_FRESHNESS_S}) seconds
+behind that node's newest journal line, or its offset is STALE -> UNKNOWN (never a silent OK) --
+see dantesync_offset_verdict() in clock-offset-guard.sh (#550/#591/#595).
+
 Exit: 0 = all nodes NTP+PTP OK, 20 = a node DRIFTED or PTP-DEGRADED, 11 = a node UNREACHABLE/
 UNKNOWN, 1 = usage error.
 EOF
