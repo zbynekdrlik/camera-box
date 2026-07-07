@@ -3768,6 +3768,25 @@ mod tests {
             .collect()
     }
 
+    /// #571 — like [`window`], but frame `cam1_none_at` carries NO cam1 burn payload at all (a
+    /// `None`): the frame is still DELIVERED (its cam2 optical QR and the strih burn are present),
+    /// its cam1 burn just did not decode. On the DECIMATED cam(60fps)→strih(30fps) hop this — not
+    /// a forward id gap — is the genuine-loss signature the verdict must charge (BURN-UNREADABLE).
+    /// The frame's `tick` is kept from the fully-burned frame: the real Vernier tick is computed
+    /// from the cam2 OPTICAL payloads only (node burns are excluded, see [`RecordingFrame::tick`]),
+    /// so losing the cam1 burn cannot change it.
+    fn window_none(n: u32, with_stream: bool, cam1_none_at: u32) -> Vec<RecordingFrame> {
+        window(n, with_stream, None)
+            .into_iter()
+            .map(|mut f| {
+                if f.frame_index == u64::from(cam1_none_at) {
+                    f.payloads.retain(|p| p.run_id != CAM1B);
+                }
+                f
+            })
+            .collect()
+    }
+
     // ---- #24 — extend the #186 per-node digital-burn contiguity check to cam3/cam4 ----
 
     const CAM3B: u32 = super::BURN_RUN_ID_CAM3; // #24 cam3 per-EMIT capture burn run_id (911008)
@@ -3790,6 +3809,21 @@ mod tests {
                     ps.push((STREAM, 9000 + 3 * i));
                 }
                 frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #571 — the cam3 mirror of [`window_none`]: frame `cam3_none_at` carries NO cam3 burn
+    /// payload (a delivered frame whose cam3 burn did not decode — the decimated hop's genuine
+    /// loss signature).
+    fn window_cam3_none(n: u32, with_stream: bool, cam3_none_at: u32) -> Vec<RecordingFrame> {
+        window_cam3(n, with_stream, None)
+            .into_iter()
+            .map(|mut f| {
+                if f.frame_index == u64::from(cam3_none_at) {
+                    f.payloads.retain(|p| p.run_id != CAM3B);
+                }
+                f
             })
             .collect()
     }
@@ -3848,27 +3882,34 @@ mod tests {
         );
     }
 
-    /// #24 — a REAL gap in cam3's digital burn sequence (absent from BOTH the strih and stream
-    /// recordings, so it can never be reconciled as delivered-downstream) is classified a REAL
-    /// DROP and FAILS the headline, exactly like a cam1 gap does today — the #186 gate is a
-    /// genuine HARD gate for cam3, not a vacuous always-pass.
+    /// #24 → #571 REWORK to the DECIMATED-hop model. With the rig-default rates the cam→strih hop
+    /// is decimated (cam3 emits at `--refresh-hz` 60, strih records its own canvas at
+    /// `--capture-fps` 30 ⇒ `node_render_step` = 2), so a FORWARD GAP in cam3's digital burn is
+    /// by-design decimation, NOT loss (run 554307: 11087 phantom cam1 "drops" while strih's OWN
+    /// 911002 burn was fully contiguous). The pre-Topology-v2 1:1 assertion this test used to
+    /// encode (forward gap ⇒ REAL DROP) is superseded ON THIS HOP; genuine loss here is a
+    /// DELIVERED strih frame carrying NO readable cam3 burn (a None ⇒ BURN-UNREADABLE), plus
+    /// strih's own 911002 burn and the optical tick. Both halves locked: (a) the forward gap
+    /// alone is ZERO loss; (b) the None still FAILS — nothing weakened, the invalid forward-gap
+    /// signal is replaced by the valid ones. (The 1:1 hop's forward-gap REAL DROP is preserved —
+    /// see `cam1_decimated_forward_gap_is_zero_loss_but_1to1_gap_stays_real_drop_356` and the
+    /// `_571` step-1 tests in burn_contiguity.rs.)
     #[test]
-    fn cam3_digital_burn_gap_is_a_real_drop_and_fails_24() {
+    fn cam3_decimated_forward_gap_is_zero_loss_and_a_none_still_fails_24() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
         let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
-        let strih_frames = window_cam3(60, false, Some(30));
-        let stream_frames = window_cam3(60, true, Some(30));
 
+        // (a) A forward id gap on the decimated hop is by-design decimation ⇒ ZERO loss, PASS.
         let (v, pass) = build_and_print_verdict(
             &args,
             Some(DecodedRec {
-                frames: strih_frames,
+                frames: window_cam3(60, false, Some(30)),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: stream_frames,
+                frames: window_cam3(60, true, Some(30)),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -3877,21 +3918,62 @@ mod tests {
             None, // #461: no imag frames in this test
         )
         .expect("verdict");
-
-        assert!(!pass, "#24: a cam3 burn gap must FAIL the headline: {v}");
+        assert!(
+            pass,
+            "#571: a cam3 forward gap on the decimated hop is decimation, not loss: {v}"
+        );
         assert_eq!(
             v["full_chain"]["loss"]["cam3"]["zero_loss"],
-            serde_json::json!(false),
-            "#24: cam3 must be NOT zero when its burn sequence has a gap: {}",
+            serde_json::json!(true),
+            "#571: cam3 must be ZERO loss on a pure forward gap: {}",
             v["full_chain"]["loss"]["cam3"]
         );
-        assert!(
-            v["full_chain"]["loss"]["cam3"]["real_drops"]
-                .as_u64()
-                .unwrap_or(0)
-                >= 1,
-            "#24: the gap (absent from both recordings) must be classified a REAL DROP: {}",
+        assert_eq!(
+            v["full_chain"]["loss"]["cam3"]["real_drops"],
+            serde_json::json!(0),
+            "#571: no phantom real drop from decimation: {}",
             v["full_chain"]["loss"]["cam3"]
+        );
+
+        // (b) GENUINE loss on the decimated hop: a DELIVERED strih frame with NO cam3 burn (a
+        // None) is charged BURN-UNREADABLE and FAILS the headline — the gate is NOT weakened.
+        let (v2, pass2) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window_cam3_none(60, false, 30),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window_cam3(60, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+        )
+        .expect("verdict");
+        assert!(
+            !pass2,
+            "#571: a delivered frame missing its cam3 burn must still FAIL: {v2}"
+        );
+        assert_eq!(
+            v2["full_chain"]["loss"]["cam3"]["zero_loss"],
+            serde_json::json!(false),
+            "#571: {}",
+            v2["full_chain"]["loss"]["cam3"]
+        );
+        assert_eq!(
+            v2["full_chain"]["loss"]["cam3"]["burn_unreadable"],
+            serde_json::json!(1),
+            "#571: the None is exactly one BURN-UNREADABLE: {}",
+            v2["full_chain"]["loss"]["cam3"]
+        );
+        assert_eq!(
+            v2["full_chain"]["loss"]["cam3"]["real_drops"],
+            serde_json::json!(0),
+            "#571: no phantom real drop alongside the None: {}",
+            v2["full_chain"]["loss"]["cam3"]
         );
     }
 
@@ -3900,6 +3982,14 @@ mod tests {
     /// delivered in the downstream stream recording is re-classified BURN-UNREADABLE, not REAL
     /// DROP — exactly as cam1 already does. Locks that generalizing the reconciliation condition
     /// did not silently drop this behaviour for a non-cam1 camera-under-test node.
+    ///
+    /// #571 REWORK: this reconciliation has forward-gap REAL-DROP candidates to work on ONLY on a
+    /// 1:1 (non-decimated) hop — on the rig-default DECIMATED hop (`--capture-fps` 30 ⇒ step 2) a
+    /// forward gap is by-design decimation and is never a candidate at all (see
+    /// `cam3_decimated_forward_gap_is_zero_loss_and_a_none_still_fails_24`). So this test pins the
+    /// hop 1:1 explicitly (`--capture-fps 60` ⇒ `node_render_step` = painted_tick_step(60,60) = 1
+    /// — the pre-Topology-v2 shape, or any future non-decimated capture), where the strict
+    /// forward-gap scan and the reconciliation behave exactly as pre-#571.
     ///
     /// Mirrors `cam1_real_drop_present_downstream_is_burn_unreadable_not_real_drop_356` exactly:
     /// the reconciliation only ever MOVES an id between loss BUCKETS (REAL DROP →
@@ -3916,7 +4006,14 @@ mod tests {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
-        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        // #571: --capture-fps 60 pins the cam→strih hop 1:1 (see the doc comment).
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+        ]);
         const N: u32 = 600;
         // strih (cam3's source, #133): cam3 id 6005 MISSING (unreadable through the deep buffer).
         let strih = window_cam3(N, false, Some(5));
@@ -4073,9 +4170,10 @@ mod tests {
 
     /// #208: merging the per-box partials (strih partial + stream partial) reproduces the SAME
     /// full-chain verdict the fused single-process path produces — same JSON, same PASS — for a
-    /// clean ZERO-loss run AND a run with a real cam1 drop. This is the equivalence the per-box
-    /// decode-in-place flow rests on: no recording is copied box-to-box, yet the verdict is
-    /// identical.
+    /// clean ZERO-loss run, a run with a cam1 forward gap (#571: by-design decimation on the
+    /// rig-default decimated hop ⇒ still PASS), AND a run with a genuine cam1 loss (a delivered
+    /// frame missing its burn ⇒ FAIL). This is the equivalence the per-box decode-in-place flow
+    /// rests on: no recording is copied box-to-box, yet the verdict is identical.
     #[test]
     fn merge_of_partials_reproduces_the_fused_verdict() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -4195,25 +4293,45 @@ mod tests {
             clean["full_chain"]["cam1_source"]
         );
 
-        // REAL cam1 DROP: cam1's contiguity source is the STRIH recording (#133); a forward gap
-        // (id 5005 missing from frame 5 on) is a real cam1 drop ⇒ NOT zero ⇒ FAIL. Merge agrees.
-        // Same full-length span so the FAIL is the cam1 drop, not the #373 duration floor.
-        // #356: the gap must ALSO be absent from the DOWNSTREAM stream recording, or the new
-        // cross-recording reconciliation (correctly) reads the id as delivered-downstream and
-        // re-classifies it BURN-UNREADABLE — which is not a REAL DROP. To keep this a GENUINE real
-        // drop (absent from BOTH recordings, the case the reconciliation must never mask), inject
-        // the SAME gap into the stream frames too. (The dedicated #356 reconciliation RED/GREEN +
-        // SAFETY tests lock the downgrade and the never-mask invariant.)
-        let (drop, drop_pass) = run_both(
+        // cam1 FORWARD GAP (#571): cam1's contiguity source is the STRIH recording (#133), and
+        // with the rig-default rates the cam→strih hop is DECIMATED (refresh 60 / capture 30 ⇒
+        // step 2) — a forward id gap is by-design decimation, NOT loss (run 554307: 11087
+        // phantom drops while strih's OWN 911002 burn was fully contiguous). The gap run must
+        // therefore PASS — and the merge must agree. (The 1:1 hop's forward-gap REAL DROP is
+        // locked by `cam1_decimated_forward_gap_is_zero_loss_but_1to1_gap_stays_real_drop_356`.)
+        let (gap, gap_pass) = run_both(
             window(FULL_SPAN_FRAMES, false, Some(5)),
             window(FULL_SPAN_FRAMES, true, Some(5)),
         );
-        assert!(!drop_pass, "#208: a real cam1 drop ⇒ overall FAIL");
-        assert_eq!(drop["full_chain"]["zero_loss"], serde_json::json!(false));
         assert!(
-            drop["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
-            "#208: the missing cam1 id must be classified as a REAL DROP: {}",
-            drop["full_chain"]["real_drops"]
+            gap_pass,
+            "#571: a cam1 forward gap on the decimated hop is decimation ⇒ overall PASS"
+        );
+        assert_eq!(gap["full_chain"]["zero_loss"], serde_json::json!(true));
+        assert_eq!(gap["full_chain"]["real_drops"], serde_json::json!(0));
+
+        // GENUINE cam1 loss on the decimated hop: a DELIVERED strih frame carrying NO cam1 burn
+        // (a None ⇒ BURN-UNREADABLE) ⇒ NOT zero ⇒ FAIL. Merge agrees. Same full-length span so
+        // the FAIL is the missing burn, not the #373 duration floor.
+        let (none_v, none_pass) = run_both(
+            window_none(FULL_SPAN_FRAMES, false, 5),
+            window(FULL_SPAN_FRAMES, true, None),
+        );
+        assert!(
+            !none_pass,
+            "#208/#571: a delivered frame missing its cam1 burn ⇒ overall FAIL"
+        );
+        assert_eq!(none_v["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert_eq!(
+            none_v["full_chain"]["real_drops"],
+            serde_json::json!(0),
+            "#571: the None is BURN-UNREADABLE, never a phantom REAL DROP: {}",
+            none_v["full_chain"]
+        );
+        assert!(
+            none_v["full_chain"]["burn_unreadable"].as_u64().unwrap() >= 1,
+            "#208/#571: the missing cam1 burn must be charged BURN-UNREADABLE: {}",
+            none_v["full_chain"]
         );
     }
 
@@ -4223,12 +4341,26 @@ mod tests {
     /// high-latency 60→30 hop. It must be classified BURN-UNREADABLE, NOT REAL DROP, so the merge
     /// headline stops over-counting (the #356 residual cam1 over-count). Runs through the SHARED
     /// `build_and_print_verdict` (fused == merge), so the merge production flow gets it identically.
+    ///
+    /// #571 REWORK: forward-gap REAL-DROP candidates (the reconciliation's input) exist only on a
+    /// 1:1 hop — on the rig-default DECIMATED hop a forward gap is by-design decimation and never
+    /// a candidate (see `cam1_decimated_forward_gap_is_zero_loss_but_1to1_gap_stays_real_drop_356`
+    /// and `cam1_delivered_frame_missing_burn_is_burn_unreadable_not_real_drop_356`). So this test
+    /// pins the hop 1:1 explicitly (`--capture-fps 60` ⇒ `node_render_step` =
+    /// painted_tick_step(60,60) = 1), where the strict scan + reconciliation are exactly pre-#571.
     #[test]
     fn cam1_real_drop_present_downstream_is_burn_unreadable_not_real_drop_356() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
         // --min-secs 1 so the small contiguous window trivially clears the #373 span floor.
-        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        // #571: --capture-fps 60 pins the cam→strih hop 1:1 (see the doc comment).
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+        ]);
         const N: u32 = 600;
         // strih (cam1's source, #133): cam1 id 5005 MISSING (unreadable through the deep buffer).
         let strih = window(N, false, Some(5));
@@ -4271,26 +4403,35 @@ mod tests {
         );
     }
 
-    /// #356 SAFETY (the #1 invariant): a cam1 id ABSENT from BOTH the strih AND the downstream stream
-    /// recording is a GENUINE chain loss and MUST stay REAL DROP — the reconciliation must NEVER mask
-    /// it (no false ZERO). This test FAILS if the fix is too aggressive (downgrades an unproven id).
+    /// #356 SAFETY → #571 REWORK. The old body asserted "a cam1 id absent from BOTH recordings is
+    /// a REAL DROP" with the rig-default rates — but those rates make the cam→strih hop DECIMATED
+    /// (refresh 60 / capture 30 ⇒ step 2), where a forward id gap is BY-DESIGN decimation, not
+    /// loss (run 554307: 11087 phantom drops while strih's OWN 911002 burn was fully contiguous;
+    /// the pixels proved nothing was lost). The pre-Topology-v2 1:1 model is superseded ON THE
+    /// DECIMATED HOP, so the never-mask invariant now has two honest halves:
+    ///   (a) DECIMATED hop: the forward gap is ZERO loss — no phantom drop;
+    ///   (b) 1:1 hop (`--capture-fps 60` ⇒ step 1): the SAME gap absent from both recordings
+    ///       STAYS a REAL DROP — the original #356 SAFETY assertion, byte-identical behavior.
+    /// Genuine loss ON the decimated hop is a delivered frame with NO readable burn — locked by
+    /// `cam1_delivered_frame_missing_burn_is_burn_unreadable_not_real_drop_356` and the #208
+    /// merge test's None case.
     #[test]
-    fn cam1_real_drop_absent_from_both_stays_real_drop_356() {
+    fn cam1_decimated_forward_gap_is_zero_loss_but_1to1_gap_stays_real_drop_356() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
-        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
         const N: u32 = 600;
-        // cam1 id 5005 missing from BOTH the strih AND the stream recording ⇒ genuine loss.
-        let strih = window(N, false, Some(5));
-        let stream = window(N, true, Some(5));
+
+        // (a) DECIMATED hop (rig defaults): the forward gap (5005 absent from both recordings)
+        // is by-design decimation ⇒ ZERO loss, PASS.
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
         let (v, pass) = build_and_print_verdict(
             &args,
             Some(DecodedRec {
-                frames: strih,
+                frames: window(N, false, Some(5)),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: stream,
+                frames: window(N, true, Some(5)),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -4299,11 +4440,95 @@ mod tests {
             None, // #461: no imag frames in this test
         )
         .expect("verdict");
-        assert!(!pass, "#356: a genuine cam1 loss ⇒ overall FAIL");
-        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
         assert!(
-            v["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
-            "#356 SAFETY: a cam1 id absent from BOTH recordings MUST stay REAL DROP — never masked: {}",
+            pass,
+            "#571: a cam1 forward gap on the decimated hop is decimation ⇒ PASS: {v}"
+        );
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(true));
+        assert_eq!(
+            v["full_chain"]["real_drops"],
+            serde_json::json!(0),
+            "#571: no phantom real drop from decimation: {}",
+            v["full_chain"]
+        );
+
+        // (b) 1:1 hop (--capture-fps 60 ⇒ step 1): the SAME gap stays a REAL DROP — the #356
+        // SAFETY never-mask invariant, unchanged where the forward-gap signal is valid.
+        let args_1to1 = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+        ]);
+        let (v2, pass2) = build_and_print_verdict(
+            &args_1to1,
+            Some(DecodedRec {
+                frames: window(N, false, Some(5)),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window(N, true, Some(5)),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+        )
+        .expect("verdict");
+        assert!(!pass2, "#356: a genuine 1:1-hop cam1 loss ⇒ overall FAIL");
+        assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert!(
+            v2["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
+            "#356 SAFETY: on the 1:1 hop a cam1 id absent from BOTH recordings MUST stay REAL \
+             DROP — never masked: {}",
+            v2["full_chain"]
+        );
+    }
+
+    /// #356/#571 — GENUINE loss on the DECIMATED hop is a DELIVERED strih frame carrying NO
+    /// readable cam1 burn (a None): charged BURN-UNREADABLE (real_drops 0), and the headline
+    /// still FAILS — replacing the forward-gap signal (invalid on this hop) with the valid one,
+    /// never weakening the gate. The downstream stream recording is fully contiguous here, which
+    /// must NOT excuse the missing burn (the id's frame demonstrably reached the stream, but the
+    /// strih-recording readability defect is still a fault to fix — the #356 honesty).
+    #[test]
+    fn cam1_delivered_frame_missing_burn_is_burn_unreadable_not_real_drop_356() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        const N: u32 = 600;
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window_none(N, false, 5),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window(N, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+        )
+        .expect("verdict");
+        assert!(
+            !pass,
+            "#571: a delivered frame missing its cam1 burn must FAIL the headline: {v}"
+        );
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert_eq!(
+            v["full_chain"]["real_drops"],
+            serde_json::json!(0),
+            "#571: the None is BURN-UNREADABLE, never a phantom REAL DROP: {}",
+            v["full_chain"]
+        );
+        assert!(
+            v["full_chain"]["burn_unreadable"].as_u64().unwrap() >= 1,
+            "#571: the missing cam1 burn must be charged BURN-UNREADABLE: {}",
             v["full_chain"]
         );
     }
@@ -5551,21 +5776,23 @@ mod tests {
     }
 
     #[test]
-    fn node_verdict_cam1_decimation_step2_extra_missing_id_is_not_masked_571() {
-        // #571 no-masking proof at the node_verdict level: a genuine drop on top of the clean
-        // 2:1 decimation MUST still fail the verdict. Present cam1 ids [2000,2002,2004,2008] are a
-        // clean step-2 grid (observed step 2) with the grid slot 2006 dropped — gap 2004 -> 2008
-        // (4, not the by-design 2) charges exactly one real drop, never silently absorbed as
-        // "just decimation". (The prior data [2000,2002,2008,2010] was mis-constructed: its gap
-        // 2002->2008 of 6 charges TWO slots [2004,2006], contradicting the asserted single [2006].)
-        let stream = vec![
+    fn node_verdict_cam1_decimation_step2_forward_gap_not_charged_and_none_fails_571() {
+        // #571 (final model) at the node_verdict wiring level. On the DECIMATED cam(60fps)->
+        // strih(30fps) hop (node_render_step = 2 with the rig fps) a forward gap of ANY size is
+        // by-design decimation — the run-554307 beat (delta-1 bursts + ~7 jumps, 0 Nones, 0
+        // backward jumps, strih's OWN burn fully contiguous) proves NO gap-size math can separate
+        // decimation from loss — so forward gaps are NOT charged at all. The no-mask proof on
+        // this hop is the NONE case: a DELIVERED frame (cam2 optical present) carrying NO
+        // readable cam1 burn is charged BURN-UNREADABLE and still FAILS.
+        // (a) forward gap 2004 -> 2008: NOT charged, zero loss.
+        let gap_frames = vec![
             frame(0, &[(CAM2, 100), (CAM1B, 2000)]),
             frame(1, &[(CAM2, 101), (CAM1B, 2002)]),
             frame(2, &[(CAM2, 102), (CAM1B, 2004)]),
-            frame(3, &[(CAM2, 103), (CAM1B, 2008)]), // grid slot 2006 dropped -> one real drop
+            frame(3, &[(CAM2, 103), (CAM1B, 2008)]), // gap: by-design decimation, not loss
         ];
         let w = in_window_burn_frames(
-            &stream,
+            &gap_frames,
             CAM1B,
             &[CAM1B, STRIH, STREAM],
             BurnRate::PerEmittedFrame,
@@ -5575,22 +5802,49 @@ mod tests {
             "cam1",
             &w,
             BurnRate::PerEmittedFrame,
-            super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0),
+            super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0), // = 2 (decimated)
         );
         assert!(
-            !iw.contiguity.is_contiguous(),
-            "a genuine drop on top of decimation must FAIL, never be masked (#571): {:?}",
+            iw.contiguity.is_contiguous(),
+            "a forward gap on the decimated hop is decimation, never charged (#571): {:?}",
             iw.contiguity
         );
-        assert_eq!(
-            iw.contiguity.missing_ids,
-            vec![2006],
-            "exactly the one genuinely-lost decimation slot (4/2 - 1 = 1)"
+        assert!(
+            iw.missing_slots.is_empty(),
+            "no missing slot of any kind: {:?}",
+            iw.missing_slots
         );
+
+        // (b) a DELIVERED frame with NO cam1 burn (the decimated hop's genuine-loss signal):
+        // exactly one BURN-UNREADABLE, still fails.
+        let none_frames = vec![
+            frame(0, &[(CAM2, 100), (CAM1B, 2000)]),
+            frame(1, &[(CAM2, 101)]), // delivered (optical present), cam1 burn unreadable
+            frame(2, &[(CAM2, 102), (CAM1B, 2004)]),
+        ];
+        let w2 = in_window_burn_frames(
+            &none_frames,
+            CAM1B,
+            &[CAM1B, STRIH, STREAM],
+            BurnRate::PerEmittedFrame,
+            None,
+        );
+        let iw2 = camera_box::probe::burn_contiguity::burn_contiguity_in_window_with_step(
+            "cam1",
+            &w2,
+            BurnRate::PerEmittedFrame,
+            super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0), // = 2 (decimated)
+        );
+        assert!(
+            !iw2.contiguity.is_contiguous(),
+            "a delivered frame missing its burn still FAILS on the decimated hop (#571): {:?}",
+            iw2.contiguity
+        );
+        assert_eq!(iw2.missing_slots.len(), 1, "exactly the one None fault");
         assert_eq!(
-            iw.missing_slots[0].kind,
-            InWindowMissingKind::RealDrop,
-            "classified as a real drop, not burn-unreadable"
+            iw2.missing_slots[0].kind,
+            InWindowMissingKind::BurnUnreadable,
+            "charged BURN-UNREADABLE, never a phantom REAL DROP"
         );
     }
 
