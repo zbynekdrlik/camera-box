@@ -643,7 +643,7 @@ check_imag_report() {
     rt_pin_status="$(genlock_rt_pin_from_log "$obs_log_text")"
     case "$rt_pin_status" in
       ok)
-        printf '  %-22s OK       (render-tick thread achieved SCHED_FIFO prio 10)\n' "genlock_rt_pin"
+        printf '  %-22s OK       (render-tick thread achieved SCHED_FIFO on the isolated core)\n' "genlock_rt_pin"
         ;;
       failed)
         printf '  %-22s DRIFT    (render-tick thread stuck SCHED_OTHER — missing rtprio ulimit grant, #572)\n' "genlock_rt_pin"
