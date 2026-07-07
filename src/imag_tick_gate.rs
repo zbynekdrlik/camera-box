@@ -450,10 +450,7 @@ impl OpticalBeatVerdict {
     /// (`NodeVerdict::imag_burn_ok`, #463/#584/#585), ANDed in `NodeVerdict::is_zero`. This gate's
     /// job is only: the injection is LIVE (advancing) and there is NO copy/freeze.
     pub fn is_live_no_copy(&self) -> bool {
-        // RED STUB (#580v2): still the OLD `surplus <= 0` net-zero gate — which false-fails the real
-        // 572001 (surplus +3) AND fake-greens a long copy/freeze (surplus <= 0). GREEN replaces this
-        // body with `self.is_advancing() && self.no_stuck_copy()`.
-        self.is_net_zero()
+        self.is_advancing() && self.no_stuck_copy()
     }
 
     /// #580v2 — DIAGNOSTIC ONLY (surfaced/printed, NEVER the pass/fail): genuinely advancing AND
@@ -579,15 +576,27 @@ pub fn calibrate_burn_step(ids: &[u32]) -> u32 {
         }
         prev = Some(id);
     }
-    // The MODE (most frequent delta) is the dominant free-running step. `Reverse(delta)` in the
-    // tie-break key makes a SMALLER delta compare as "more", so ties resolve to the stricter
-    // (smaller) step, never the looser one. `counts` is never empty here (>=3 deltas guaranteed
-    // by the length check above), so `unwrap_or` is defensive only.
-    counts
+    // The MODE (most frequent delta) is the dominant free-running step. #580v2 corrected the
+    // tie-break to the LARGER delta: tie-to-smaller phantom-charges a genuinely bimodal cadence (a
+    // real step-N drop then reads as excess ids at the wrongly-picked smaller step). `counts` is
+    // never empty here (>=3 deltas guaranteed by the length check above), so `unwrap_or` is
+    // defensive only.
+    let mode = counts
         .into_iter()
-        .max_by_key(|&(delta, count)| (count, std::cmp::Reverse(delta)))
+        .max_by_key(|&(delta, count)| (count, delta))
         .map(|(delta, _)| delta.max(1))
-        .unwrap_or(IMAG_BURN_RENDER_STEP)
+        .unwrap_or(IMAG_BURN_RENDER_STEP);
+    // #580v2 clamp: a mode ABOVE the ceiling means a SUSTAINED periodic drop dominated the deltas
+    // (a majority-loss cadence inflating the modal step). Trusting it would read those drops as
+    // "expected" and MASK them. Discard it and fall back to the conservative known step —
+    // SMALLER than the inflated mode, so the drops are still CHARGED (a strictly safe, louder
+    // direction), never masked. The real live rig's step 3 (= 1.5× the constant) stays trusted.
+    let ceiling = IMAG_BURN_RENDER_STEP.saturating_mul(MAX_CALIBRATED_BURN_STEP_MULTIPLE);
+    if mode > ceiling {
+        IMAG_BURN_RENDER_STEP
+    } else {
+        mode
+    }
 }
 
 /// #580v2 — the calibrated burn step is trusted only up to this multiple of
@@ -619,10 +628,17 @@ pub fn burn_present_ok(
     step: u32,
     fraction: f64,
 ) -> bool {
-    // RED STUB (#580v2): always "present enough" — so the burn-absent / occluded / frozen tests
-    // (which assert `false`) FAIL. GREEN replaces this with the real floor.
-    let _ = (present_count, reference_frames, step, fraction);
-    true
+    // A lone (or absent) id proves no advance at all — never a pass, regardless of the floor.
+    if present_count < 2 {
+        return false;
+    }
+    let step = step.max(1);
+    // Expected per-recording burn count ≈ reference_frames / step (the burn advances ~step per
+    // decoded frame); require at least `fraction` of it actually decoded. reference_frames is the
+    // OPTICAL frame count (an EXTERNAL reference) so a burn that decoded only its first few frames
+    // cannot vacuously clear a floor derived from its own tiny span.
+    let floor = (reference_frames as f64 / step as f64) * fraction;
+    present_count as f64 >= floor
 }
 
 #[cfg(test)]
@@ -1178,7 +1194,7 @@ mod tests {
         // (endpoints unchanged) — so the OLD `surplus <= 0` gate (`is_net_zero`) FAKE-GREENS it. Only
         // the run-length term catches it: a 200-long Δ0 run >> K.
         let mut ticks: Vec<u32> = (0..=500).collect();
-        ticks.extend(std::iter::repeat(500u32).take(200));
+        ticks.extend(std::iter::repeat_n(500u32, 200));
         ticks.extend(501..=1000);
         let v = optical_beat_net_zero(&ticks, IMAG_OPTICAL_EXPECTED_STEP);
         assert_eq!(
