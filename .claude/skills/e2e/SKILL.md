@@ -718,10 +718,31 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
 - **Honest limitation (120Hz makes it rigorous):** on the 60/60 rig the run-length guard is a
   HEURISTIC (robust because the beat physically cannot produce a long Δ0 run, but a heuristic). A
   120Hz monitor makes copy-detection RIGOROUS (at 2:1 a copy shows as Δ0 where it must be 2).
-- **Residual gap (filed, not fixed):** a systematic short-run stutter (many Δ0 runs each ≤K, spread
-  evenly across the whole recording) evades run-length, the whole-window aggregates, AND the
-  render-free-running digital burn alike — not a v2 regression, both old and new gates miss it
-  equally. Needs live 572001 data to calibrate a real fix (or the 120Hz upgrade). See #588.
+- **#588 — CLOSED: the systematic short-run "catch-up judder" gap, fixed by a 4th orthogonal
+  Δ0-DENSITY term.** A systematic short-run stutter (many Δ0 runs each ≤K, dups balanced by
+  catch-up skips so `avg_step≈1`/`surplus≈0`) evaded run-length (`no_stuck_copy` sees only the
+  LONGEST single run), the whole-window aggregates, AND the render-free-running digital burn
+  alike. Fix: `OpticalBeatVerdict::no_stuck_density` — `stuck_pairs / total_pairs` over the SAME
+  chronological window, ANDed into `is_live_no_copy`. **Reusable pattern: share ONE `.windows(2)`
+  walk across orthogonal metrics via a stats struct** (`stuck_run_stats` → `StuckRunStats{max_run,
+  stuck_pairs, total_pairs}`) so a new detector on an existing walk costs no extra decode — apply
+  this whenever a new gate term can be derived from data a prior term already walks.
+  **Real-data-anchoring pattern for a new heuristic threshold: never invent from a synthetic
+  fixture (the #580 regression's exact mistake) — anchor to a live number ALREADY confirmed in
+  the codebase** (here, run 572001's live-measured healthy density ≈0.10%, from the SAME
+  re-decode #580v2 already used) and lock the margin with an explicit order-of-magnitude test
+  (`stuck_density_ceiling_sits_between_healthy_and_judder_588`). **Small-window deferral pattern
+  for any density/rate metric:** a `MIN_PAIRS`-style floor (300 pairs here) makes the new term a
+  no-op below the floor, so it can never false-fail a legitimately short window (mirrors
+  `MIN_IDS_FOR_STEP_CALIBRATION` / `burn_present_ok`'s `< 2` guard) — apply this pattern to any
+  future rate-based gate term on `imag_tick_gate.rs`.
+- **#604 — tracked follow-up (NOT #588's scope): a LOCALIZED (sub-span) judder can still dilute
+  below the whole-window density ceiling.** #588's density is a whole-RECORDING aggregate; a
+  judder confined to a short sub-span of an otherwise-healthy recording gets diluted under 1% by
+  the surrounding clean frames. If real evidence ever shows this on the rig, the fix is a
+  SLIDING-WINDOW density (bounded moving window, not the whole recording) — calibrate it the same
+  real-data-anchored way, never from a synthetic fixture. Not fixed proactively; the 120Hz upgrade
+  remains the fully rigorous long-term fix for the whole class of run-length/density heuristics.
 - **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
   design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
   it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
