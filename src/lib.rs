@@ -84,6 +84,15 @@ pub mod recording_span_gate;
 // extracts `RecordingFrame::tick` for imag's recording and feeds it here.
 pub mod imag_tick_gate;
 
+// #575 — recording START/STOP boundary artifact trim (pure kernel). A recording's genlock-fifo
+// pre-roll flush (start) and mux-finalization tail-drain (stop) can inject non-real-time gaps
+// that are not pipeline loss. Trims a small, bounded, named lead/tail frame-position window
+// before a signal's ids are fed into a contiguity check — trimming by frame POSITION (not by
+// decoded VALUE) means a genuine mid-recording drop can never be masked. No probe deps, so it
+// unit-tests Tier-0; the probe-gated `bin/recording-verdict` feeds imag's optical tick + digital
+// burn samples here before `imag_tick_gate`'s contiguity checks.
+pub mod recording_boundary_trim;
+
 // #356 — cross-recording cam1 loss reconciliation (pure kernel). In the recording-verdict MERGE,
 // a cam1 REAL DROP read from the clean upstream strih recording that IS decoded in the downstream
 // stream recording was proven delivered → re-classify it BURN-UNREADABLE (a strih-recording
