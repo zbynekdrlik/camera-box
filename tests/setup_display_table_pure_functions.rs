@@ -222,7 +222,10 @@ fn resolve_display_source_sweeps_the_whole_fleet() {
 #[test]
 fn resolve_display_source_treats_cam7_as_no_preview_since_it_was_never_built() {
     let (code, out, err) = run_sourced(r#"resolve_display_source cam7; echo "<END>""#);
-    assert_eq!(code, 0, "resolve_display_source cam7 must succeed (lenient on unknown names). stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "resolve_display_source cam7 must succeed (lenient on unknown names). stderr: {err}"
+    );
     let got = out.trim().trim_end_matches("<END>");
     assert_eq!(
         got, "",
