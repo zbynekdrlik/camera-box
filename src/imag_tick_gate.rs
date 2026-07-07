@@ -336,7 +336,13 @@ pub const IMAG_OPTICAL_EXPECTED_STEP: u32 = 1;
 /// negligible for imag: the #376 optical-undecodable floor caps that hole rate near zero
 /// (`OPTICAL_UNDECODABLE_RATE_MAX` in `bin/recording-verdict.rs`), and it is a SEPARATE, unchanged
 /// hard gate (`NodeVerdict::optical_undecodable_ok`) ANDed alongside this one regardless.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `Serialize` is derived so `NodeVerdict` (which stores the full verdict, not just its
+/// `is_net_zero()` bool, #580 review finding C) can keep its own blanket `#[derive(Serialize)]` —
+/// `bin/recording-verdict.rs`'s `node_verdict_json` still hand-picks individual fields for the
+/// actual JSON output, so this derive exists for compile-time compatibility, not because the
+/// whole struct is serialized wholesale anywhere today.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct OpticalBeatVerdict {
     /// The average per-sample tick step over the analyzed (already boundary-trimmed) window, in
     /// the CHRONOLOGICAL order the samples were captured. `0.0` when there are fewer than 2
