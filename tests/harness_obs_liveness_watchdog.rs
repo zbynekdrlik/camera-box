@@ -330,7 +330,12 @@ fn gpu_device_removed_verdict_gets_correct_reboot_guidance_not_the_generic_resta
 fn other_verdicts_still_get_the_generic_obs_restart_command() {
     // Every OTHER verdict (WEDGED-RENDER-LAG, WS-DEAD, FPS-ZERO, OBS-COUNT-WRONG) keeps the
     // #391 original agent-driven OBS-restart recovery command — #89 must not regress those.
-    for label in ["WEDGED-RENDER-LAG", "WS-DEAD", "FPS-ZERO", "OBS-COUNT-WRONG"] {
+    for label in [
+        "WEDGED-RENDER-LAG",
+        "WS-DEAD",
+        "FPS-ZERO",
+        "OBS-COUNT-WRONG",
+    ] {
         let text = run_recovery_plan_for("stream", label);
         assert!(
             text.contains("launch-obs-genlock.sh") && text.contains("--force"),
