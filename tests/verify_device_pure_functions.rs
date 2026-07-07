@@ -686,6 +686,84 @@ fn display_config_verdict_all_four_cases() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// (p) EXTENSION -- ExecStart --display vs CAMERA_DISPLAY_EXECSTART_SOURCE (#562)
+//
+// cam2's interkom preview lives in a manual `--display "STRIH-SNV (interkom)"` edit baked into
+// ExecStart, never config.toml (deliberately excluded from CAMERA_DISPLAY_SOURCE -- see
+// scripts/camera-set.sh's cam2-exclusion comment). Check (p)'s config.toml comparison above is
+// structurally BLIND to cam2's real mechanism: for cam2 (expected="" actual="") it always verdicts
+// "ok" regardless of whether the box's ACTUAL preview (the ExecStart flag) is present or lost.
+// execstart_display_source() is the READER half of setup-device.sh's execstart_display_flag()
+// writer -- extracting the --display value from `systemctl show -p ExecStart --value camera-box`
+// output (the SAME command scripts/rig-mode.sh's own TEST/EVENT toggle already uses to check
+// ExecStart, rig-mode.sh:248/353). The comparison reuses display_config_verdict() unchanged -- it
+// is already a pure EXPECTED/ACTUAL function, agnostic to which mechanism produced ACTUAL.
+// ---------------------------------------------------------------------------------------------
+
+/// A `systemctl show -p ExecStart --value` dump for a unit with a baked --display flag (cam2's
+/// real live shape: a single ExecStart argv[] entry).
+const EXECSTART_SHOW_WITH_DISPLAY: &str = r#"{ path=/usr/local/bin/camera-box ; argv[]=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)" ; ignore_errors=no ; start_time=[Tue 2026-07-07 09:12:34 UTC] ; stop_time=[n/a] ; pid=2345 ; code=(null) ; status=0/0 }"#;
+
+/// The canonical PLAIN unit (every box except cam2 today) -- no --display flag anywhere.
+const EXECSTART_SHOW_NO_DISPLAY: &str = r#"{ path=/usr/local/bin/camera-box ; argv[]=/usr/local/bin/camera-box ; ignore_errors=no ; start_time=[Tue 2026-07-07 09:12:34 UTC] ; stop_time=[n/a] ; pid=1234 ; code=(null) ; status=0/0 }"#;
+
+#[test]
+fn execstart_display_source_extracts_the_configured_source() {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nexecstart_display_source \"$TEXT\"",
+        EXECSTART_SHOW_WITH_DISPLAY.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "STRIH-SNV (interkom)");
+}
+
+#[test]
+fn execstart_display_source_is_empty_when_no_display_flag() {
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nexecstart_display_source \"$TEXT\"; echo \"<END>\"",
+        EXECSTART_SHOW_NO_DISPLAY.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "<END>");
+}
+
+#[test]
+fn execstart_display_source_unescapes_quotes_and_backslashes() {
+    // Round-trips setup-device.sh's execstart_display_flag() escaping (\\ and \") back to the
+    // original literal source string.
+    const TEXT: &str = r#"{ path=/usr/local/bin/camera-box ; argv[]=/usr/local/bin/camera-box --display "NDI \"Weird\" Source\\path" ; ignore_errors=no }"#;
+    let (code, out, err) = run_sourced(&format!(
+        "TEXT='{}'\nexecstart_display_source \"$TEXT\"",
+        TEXT.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), r#"NDI "Weird" Source\path"#);
+}
+
+#[test]
+fn execstart_display_source_verdict_reuses_display_config_verdict() {
+    // The whole point of reusing display_config_verdict() (not a second bespoke comparison): the
+    // same four-case contract applies to the ExecStart mechanism.
+    let (code, out, err) = run_sourced(&format!(
+        r#"
+        ACTUAL_WITH="$(execstart_display_source '{with_display}')"
+        ACTUAL_NONE="$(execstart_display_source '{no_display}')"
+        echo "ok=$(display_config_verdict 'STRIH-SNV (interkom)' "$ACTUAL_WITH")"
+        echo "missing=$(display_config_verdict 'STRIH-SNV (interkom)' "$ACTUAL_NONE")"
+        echo "unexpected=$(display_config_verdict '' "$ACTUAL_WITH")"
+        echo "bothempty=$(display_config_verdict '' "$ACTUAL_NONE")"
+        "#,
+        with_display = EXECSTART_SHOW_WITH_DISPLAY.replace('\'', "'\\''"),
+        no_display = EXECSTART_SHOW_NO_DISPLAY.replace('\'', "'\\''"),
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "ok=ok\nmissing=missing\nunexpected=unexpected\nbothempty=ok"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // (q) .bak cruft drift -- WARNING only, never a FAIL (#453)
 //
 // Live fleet fingerprint (2026-07-06, issue #453): cam1/cam2/cam4 carry inert `.bak` leftovers
@@ -801,6 +879,17 @@ fn check_p_is_wired_into_the_live_flow_and_usage_doc() {
         live_flow.contains("display_config_verdict"),
         "the LIVE FLOW (after the source-guard) must CALL display_config_verdict to compare it \
          against CAMERA_DISPLAY_SOURCE (#558) -- not just define it"
+    );
+    assert!(
+        live_flow.contains("execstart_display_source"),
+        "the LIVE FLOW (after the source-guard) must CALL execstart_display_source to read back \
+         the box's ExecStart --display flag over SSH (#562) -- not just define it"
+    );
+    assert!(
+        live_flow.contains("CAMERA_DISPLAY_EXECSTART_SOURCE"),
+        "the LIVE FLOW must compare the ExecStart flag against camera-set.sh's \
+         CAMERA_DISPLAY_EXECSTART_SOURCE table entry (#562) -- otherwise check (p) stays blind to \
+         cam2's real (ExecStart) preview mechanism"
     );
     assert!(
         live_flow.contains("(p)"),

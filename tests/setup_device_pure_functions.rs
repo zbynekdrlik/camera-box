@@ -393,3 +393,97 @@ fn config_toml_display_section_escapes_quotes_and_backslashes() {
          parsed: {parsed:?}"
     );
 }
+
+// --- #562: execstart_display_flag (cam2's ExecStart-mechanism HDMI preview) ----------------------
+//
+// cam2's interkom preview lives in a manual `--display "STRIH-SNV (interkom)"` edit baked into
+// ExecStart (never config.toml -- rig-mode.sh's TEST/EVENT toggle flips cam2's ExecStart flag, see
+// scripts/camera-set.sh's cam2-exclusion comment). Before this fix, STEP 7 wrote an unconditional
+// bare `ExecStart=/usr/local/bin/camera-box` on EVERY (re-)provision, silently erasing that manual
+// edit (the #379 recurrence risk -- issue #562). execstart_display_flag() is the ExecStart-mechanism
+// counterpart to config_toml_display_section() above: a pure, sourced-and-unit-tested function that
+// STEP 7 uses to build a table-driven (scripts/camera-set.sh CAMERA_DISPLAY_EXECSTART_SOURCE)
+// ExecStart line instead of a hardcoded literal, so cam2's flag survives a re-provision.
+
+/// execstart_display_flag must be a no-op (empty stdout) for a box with NO ExecStart-mechanism
+/// preview configured (every box except cam2 today) -- ExecStart stays the canonical PLAIN form.
+#[test]
+fn execstart_display_flag_is_empty_for_no_source() {
+    let (code, out, err) = run_sourced(r#"execstart_display_flag """#);
+    assert_eq!(
+        code, 0,
+        "execstart_display_flag '' must not fail. stderr: {err}"
+    );
+    assert_eq!(
+        out, "",
+        "execstart_display_flag '' must emit nothing -- a box with no \
+         CAMERA_DISPLAY_EXECSTART_SOURCE table entry must get the canonical plain ExecStart; got: {out:?}"
+    );
+}
+
+/// execstart_display_flag must emit a ` --display "<source>"` suffix when a source is configured
+/// (cam2 today, #562) -- table-derived, not hardcoded.
+#[test]
+fn execstart_display_flag_emits_display_flag_for_a_configured_source() {
+    let (code, out, err) = run_sourced(r#"execstart_display_flag "STRIH-SNV (interkom)""#);
+    assert_eq!(
+        code, 0,
+        "execstart_display_flag must succeed for a configured source. stderr: {err}"
+    );
+    assert_eq!(
+        out, r#" --display "STRIH-SNV (interkom)""#,
+        "execstart_display_flag must wire the given source into ` --display \"...\"`; got: {out:?}"
+    );
+}
+
+/// A source containing a double-quote or backslash must be ESCAPED before landing in the systemd
+/// unit's ExecStart line -- an unescaped `"` would terminate the quoted argument mid-line and
+/// corrupt the rest of the unit. Same defensive posture as config_toml_display_section's escaping.
+#[test]
+fn execstart_display_flag_escapes_quotes_and_backslashes() {
+    let (code, out, err) = run_sourced(r#"execstart_display_flag 'NDI "Weird" Source\path'"#);
+    assert_eq!(
+        code, 0,
+        "execstart_display_flag must not fail on a quote/backslash source. stderr: {err}"
+    );
+    assert_eq!(
+        out, r#" --display "NDI \"Weird\" Source\\path""#,
+        "execstart_display_flag must escape embedded \\ and \" so the quoted argument stays a \
+         single well-formed token; got: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring — STEP 7 must actually build the ExecStart line via execstart_display_flag and
+// interpolate it into the systemd unit heredoc, not just define a dead pure function.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn execstart_display_flag_is_wired_into_step7_and_the_unit_stays_canonical_for_no_source() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("stop here -- never run the destructive")
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+    assert!(
+        live_flow.contains("execstart_display_flag"),
+        "STEP 7 must CALL execstart_display_flag to build the ExecStart line from \
+         CAMERA_DISPLAY_EXECSTART_SOURCE (#562) -- not just define it"
+    );
+    // The unit's ExecStart line must be built from a variable (never a hardcoded --display
+    // literal in this script's own source text) so a box with no table entry renders the exact
+    // pre-#562 canonical plain line, and cam2 renders it WITH the flag, both from the SAME
+    // template line.
+    assert!(
+        !live_flow.contains(r#"--display "STRIH-SNV"#),
+        "setup-device.sh must never hardcode a literal --display flag as a string -- it must be \
+         assembled from the CAMERA_DISPLAY_EXECSTART_SOURCE table via execstart_display_flag() \
+         (#450/#562)"
+    );
+    assert!(
+        live_flow.contains("ExecStart=/usr/local/bin/camera-box$"),
+        "STEP 7's ExecStart line must be `ExecStart=/usr/local/bin/camera-box` followed by an \
+         interpolated variable holding execstart_display_flag()'s output (#562), so a box with no \
+         table entry renders the canonical plain form"
+    );
+}
