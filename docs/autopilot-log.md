@@ -2441,3 +2441,42 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   behavior and the "verify a setup-device.sh fix live without running the destructive flow"
   technique (fetch script + libs from raw.githubusercontent.com, source, call the specific
   function directly).
+
+## 2026-07-08 — #604 localized (sub-span) judder gap in the imag optical density gate (PR #619, v1.7.0-dev.297)
+
+- Validated still real against current `dev`: `OpticalBeatVerdict::no_stuck_density` still
+  averages over the WHOLE `frames_count - 1` pairs with no localized/sub-span check anywhere in
+  `src/imag_tick_gate.rs` — no later commit/PR since #588/#603 closed the gap.
+- RED `7cae71b39` (built entirely from PRE-#604 API — `optical_beat_net_zero`,
+  `is_live_no_copy`, `no_stuck_copy`, `no_stuck_density` — so it compiles unmodified and fails
+  only on the final `!v.is_live_no_copy()` assertion, confirmed locally:
+  `stuck_density≈0.00225` under the 1% ceiling, `max_stuck_run==3` at the K ceiling), GREEN
+  `cf43aebb4`.
+- Added a 5th orthogonal no-copy term: `max_local_stuck_density()` (fixed-width sliding window
+  over the chronological tick sequence), `OpticalBeatVerdict::local_stuck_density` +
+  `no_localized_stuck_density()` ANDed into `is_live_no_copy()`, constants
+  `IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS=180` (~3s@60fps) and
+  `IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY=5%`. Real-data-anchored (no live localized-judder
+  recording exists yet — the issue text says so explicitly): the pair is picked to sit
+  comfortably under the real 572001 healthy read (the same anchor #588's whole-window ceiling
+  uses) while staying well under a realistic judder's local magnitude, favouring
+  "never false-fail a genuinely clean recording" when the two pulls are in tension.
+- Two independent review passes (a scaled-down two-agent correctness+cleanup pass, then a full
+  `superpowers:requesting-code-review` deep pass on the merged diff) — 0 Critical, 0 Important
+  both times. The cleanup pass's one real finding (a second `Vec<bool>` allocation instead of a
+  single-pass ring buffer in `max_local_stuck_density`) is the `a91f64dec` refactor commit
+  above (behavior-unchanged, re-verified against the same test fixtures). The deep pass's two
+  Minor items (the 8-arg constructor — pre-existing accepted pattern, not new debt; the
+  reasoned-not-live-calibrated constants — already honestly documented) were non-blocking;
+  filed the recommended lightweight tracking issue (#620) for the second one.
+- 5 new tests (`_604` suffix) in `src/imag_tick_gate.rs::tests`: the RED reproducer, a direct
+  API assertion on the new term (local density exactly 45/180=25%, 5x the ceiling), a ceiling
+  anchor test, a no-false-fail regression test reusing the real-572001-scale spaced-dup
+  reconstruction from #588, and a pure-function unit test of the sliding window itself. All 59
+  `imag_tick_gate` tests + all 479 lib tests pass locally (default features).
+- PR #619, merge commit `3c12c6193`; main CI green (Lint/Test/Coverage/Build/Windows-probe/
+  Drift-Guard/Shellcheck/Security/Python-harness all pass; Mutation Testing is on-demand only).
+  No deploy target applies — `recording-verdict` is a `--features probe`-gated CLI analysis
+  tool built on-demand for E2E runs, not a persistently-running daemon on any rig box.
+- Playbook: added a `.claude/skills/e2e/SKILL.md` note on the sliding-window-density pattern
+  (whole-window vs localized dilution) for future orthogonal-detector work on this gate.
