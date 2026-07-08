@@ -2413,3 +2413,31 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   service). Merge commit `b3ddfe4e1`; main CI green (Lint/Test/Coverage/Build/Windows-probe/
   Drift-Guard/Shellcheck/Security/Python-harness all pass; Mutation Testing is on-demand only
   per #70).
+
+## #599 — setup-device.sh apt purges/installs silently no-op on in-place re-run against booted ro appliance
+
+- RED: `25e64076a` (12 failing tests for `root_mount_is_readonly()`/`ensure_root_writable()`/
+  `restore_root_mode()`, not yet existing). GREEN: `fc68a1e10` (rw window spans STEP 15-18, not
+  just 15-17, since STEP 18's fstab rewrite also needs a writable root; PackageKit/
+  unattended-upgrades stop+mask around the cycle per the rig-timesync-single-authority EBUSY
+  gotcha; both helpers fail loud on remount failure). Follow-up review fix `ce5353f8d`: `findmnt`
+  failing outright must not silently read as "not ro" — fall back to `/proc/mounts` directly,
+  mirroring `verify-device.sh`'s identical read.
+- Two independent review passes (a scaled-down single-agent correctness pass, then a full
+  `superpowers:requesting-code-review` deep pass on the merged diff) — 0 Critical, 0 Important;
+  the first pass's one real finding (the `/proc/mounts` fallback) is the `ce5353f8d` commit above;
+  the deep pass's two Minor items (asymmetric re-mask in `restore_root_mode`, no functional test
+  for the `/proc/mounts` fallback specifically) were judged genuinely non-blocking/harmless and
+  left as-is.
+- Live-verified on CAM1 (a real, currently-booted `ro,relatime` appliance — exactly the #599
+  scenario): fetched the merged `main` script + its two sourced libs via raw.githubusercontent.com,
+  sourced it (no positional arg → the `BASH_SOURCE` guard skips the destructive flow), and called
+  `ensure_root_writable`/`restore_root_mode` directly. Confirmed `ro,relatime → rw,relatime →
+  ro,relatime`, `camera-box.service` stayed `active` throughout, PackageKit `inactive`/`static`
+  (never interfered). Box left in its original state; temp files cleaned up.
+- PR #617, merge commit `57e9947b5`; main CI green (Lint/Test/Coverage/Build/Windows-probe/
+  Drift-Guard/Shellcheck/Security/Python-harness all pass; Mutation Testing is on-demand only).
+- Playbook: added a `.claude/skills/provision/SKILL.md` gotcha documenting the #599 self-heal
+  behavior and the "verify a setup-device.sh fix live without running the destructive flow"
+  technique (fetch script + libs from raw.githubusercontent.com, source, call the specific
+  function directly).

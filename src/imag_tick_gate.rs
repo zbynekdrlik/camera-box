@@ -334,6 +334,43 @@ pub const IMAG_OPTICAL_MAX_STUCK_DENSITY: f64 = 0.01;
 /// other pure gate here uses ([`MIN_IDS_FOR_STEP_CALIBRATION`], `burn_present_ok`'s `< 2` guard).
 const MIN_PAIRS_FOR_STUCK_DENSITY: u32 = 300;
 
+/// #604 — the WIDTH (in adjacent PAIRS) of the fixed sliding window
+/// [`OpticalBeatVerdict::no_localized_stuck_density`] slides across the analyzed chronological
+/// tick sequence. Closes the residual gap the #588 review flagged in its OWN whole-window density
+/// term: because [`OpticalBeatVerdict::no_stuck_density`] averages over the ENTIRE recording, a
+/// judder confined to a SHORT SUB-SPAN (e.g. a ~1-2 s burst inside a multi-minute healthy
+/// recording) is diluted by the long clean remainder and can slip below the 1% whole-window
+/// ceiling — the exact dilution property [`IMAG_OPTICAL_MAX_STUCK_RUN`] (run-length) already had
+/// to be defended against for freezes, now recurring one level up for the aggregate density term.
+///
+/// 180 pairs ≈ 3 s at imag's 60fps rig ([`IMAG_OPTICAL_EXPECTED_STEP`]) — wide enough that the
+/// occasional pair of naturally-scattered ISOLATED healthy dups (run 572001: ~16-22 over ~21866
+/// pairs, i.e. one roughly every ~900-1366 pairs) essentially never lands twice inside one window
+/// (see `optical_beat_gate_healthy_572001_local_density_passes_604`), narrow enough that a
+/// genuinely LOCALIZED judder burst (illustratively 1-2 s, per #604) fills a large fraction of at
+/// least one window instead of being averaged away across the whole recording.
+pub const IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS: u32 = 180;
+
+/// #604 — the LOCAL (sliding-window) Δ0 density ceiling, judged inside every
+/// [`IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`]-wide window
+/// ([`OpticalBeatVerdict::no_localized_stuck_density`]). Deliberately LOOSER than the whole-window
+/// [`IMAG_OPTICAL_MAX_STUCK_DENSITY`] (5% vs 1%) because a short window is naturally noisier — a
+/// couple of coincidentally-close healthy dups move the local ratio far more than they would over
+/// the full recording — but still comfortably below any pattern that would actually read as
+/// localized judder: a K=3-per-block catch-up pattern (the same structure as
+/// [`IMAG_OPTICAL_MAX_STUCK_RUN`]'s maximal-legal-run judder) reads at ~25% local density even
+/// when embedded in an otherwise pristine recording (see
+/// `optical_beat_gate_localized_judder_local_density_term_604`) — 5x this ceiling.
+///
+/// No live localized-judder recording exists yet to calibrate against (the #604 issue text itself
+/// says so) — so, like every OTHER constant in this module, this is real-data-ANCHORED rather than
+/// invented from nothing: it is picked to sit comfortably UNDER the real 572001 healthy read (the
+/// same anchor [`IMAG_OPTICAL_MAX_STUCK_DENSITY`] uses) while staying well UNDER a realistic
+/// judder's local magnitude, favouring "never false-fail a genuinely clean recording" whenever the
+/// two pulls are in tension. RE-GROUNDED (never loosened blindly) the moment a live
+/// localized-judder capture gives a real number to calibrate against instead.
+pub const IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY: f64 = 0.05;
+
 /// #580v2 — THE CENTERPIECE no-copy/liveness metric: the MAXIMUM number of CONSECUTIVE zero-delta
 /// (`ticks[i] == ticks[i-1]`) steps in the CHRONOLOGICAL (capture-order) optical tick sequence.
 ///
@@ -412,6 +449,48 @@ pub fn stuck_run_stats(ticks_in_order: &[u32]) -> StuckRunStats {
         stuck_pairs,
         total_pairs,
     }
+}
+
+/// #604 — the MAXIMUM Δ0 duplication density found in ANY `window_pairs`-wide sliding window of
+/// adjacent pairs over the chronological tick sequence — the LOCALIZED counterpart to
+/// [`StuckRunStats::density`]'s whole-window aggregate. `0.0` when there are fewer than
+/// `window_pairs` total adjacent pairs (too short to slide even one full window — the same
+/// "not enough signal ⇒ defer" floor [`MIN_PAIRS_FOR_STUCK_DENSITY`] uses for the whole-window
+/// term, applied here per-window instead of once for the whole recording).
+///
+/// O(n) time, O(window_pairs) memory — a SINGLE walk of `.windows(2)` with a fixed-capacity
+/// [`VecDeque`] ring buffer holding only the last `window_pairs` Δ0 flags (the same bounded-window
+/// pattern already used elsewhere in this codebase, e.g. `qpsk_marker`'s phase history). Unlike a
+/// naive implementation that first collects EVERY pair's flag into a `Vec<bool>` the size of the
+/// whole recording and then slides over that, this never materializes more than `window_pairs`
+/// flags at once — a `#588 review`-caught cost/simplicity nit for #604 (a 20_000-frame recording is
+/// small enough either way, but the ring buffer is genuinely the simpler single-pass form).
+pub fn max_local_stuck_density(ticks_in_order: &[u32], window_pairs: u32) -> f64 {
+    if window_pairs == 0 || ticks_in_order.len() < 2 {
+        return 0.0;
+    }
+    let window_pairs = window_pairs as usize;
+    if ticks_in_order.len() - 1 < window_pairs {
+        return 0.0;
+    }
+    use std::collections::VecDeque;
+    let mut window: VecDeque<bool> = VecDeque::with_capacity(window_pairs);
+    let mut in_window: u32 = 0;
+    let mut max_in_window: u32 = 0;
+    for pair in ticks_in_order.windows(2) {
+        let stuck = pair[0] == pair[1];
+        window.push_back(stuck);
+        if stuck {
+            in_window += 1;
+        }
+        if window.len() > window_pairs && window.pop_front() == Some(true) {
+            in_window -= 1;
+        }
+        if window.len() == window_pairs {
+            max_in_window = max_in_window.max(in_window);
+        }
+    }
+    max_in_window as f64 / window_pairs as f64
 }
 
 /// #580v2 — the optical-BEAT verdict for imag's PRIMARY (cam2 dual-QR) zero-loss signal, replacing
@@ -516,6 +595,15 @@ pub struct OpticalBeatVerdict {
     /// judder (many SHORT Δ0 runs each ≤ [`IMAG_OPTICAL_MAX_STUCK_RUN`]) ⇒ tens of %. Surfaced as
     /// `imag_optical_stuck_density` in the imag JSON.
     pub stuck_density: f64,
+    /// #604 — the MAXIMUM Δ0 density found in ANY [`IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`]-wide
+    /// sliding window of the chronological tick sequence ([`max_local_stuck_density`]) — the
+    /// LOCALIZED counterpart to [`Self::stuck_density`], imag's 5th orthogonal no-copy term
+    /// ([`Self::no_localized_stuck_density`]). Catches a judder confined to a SHORT SUB-SPAN that
+    /// [`Self::no_stuck_density`]'s WHOLE-recording average dilutes below its ceiling. A benign
+    /// beat ⇒ well under 1% in any window (run 572001); a localized catch-up judder burst ⇒ ~25%
+    /// within its own window even when the WHOLE-recording average reads under 1%. Surfaced as
+    /// `imag_optical_local_stuck_density` in the imag JSON.
+    pub local_stuck_density: f64,
 }
 
 impl OpticalBeatVerdict {
@@ -557,19 +645,40 @@ impl OpticalBeatVerdict {
             || self.stuck_density <= IMAG_OPTICAL_MAX_STUCK_DENSITY
     }
 
-    /// #580v2 (#588) — THE imag optical HARD gate, replacing `surplus <= 0`: the read genuinely
-    /// ADVANCES ([`Self::is_advancing`] — a LOOSE band that rejects a frozen/blank read and gross
-    /// rate/alias, NOT a tight per-frame accounting) AND carries NO long copy/freeze run
-    /// ([`Self::no_stuck_copy`] — the run-length centerpiece) AND carries NO systematic short-run
-    /// judder ([`Self::no_stuck_density`] — the #588 4th orthogonal term: many SHORT Δ0 runs each ≤ K
-    /// that run-length, the aggregates, AND the digital burn are all blind to). Per-frame DELIVERY
-    /// accounting is NOT the optical leg's job on a free-running rig (two same-rate clocks cannot hit
-    /// `surplus <= 0` reliably — the clock residual that reopened #580); the STRICT digital corner
-    /// burn is the delivery authority (`NodeVerdict::imag_burn_ok`, #463/#584/#585), ANDed in
+    /// #604 — no LOCALIZED short-run judder: the MAXIMUM Δ0 duplication density found in any
+    /// [`IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`]-wide sliding window is within
+    /// [`IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY`]. This is the 5th orthogonal no-copy term, closing
+    /// the residual gap [`Self::no_stuck_density`] left: a judder confined to a SHORT SUB-SPAN of
+    /// an otherwise-healthy recording is diluted by the long clean remainder below the
+    /// WHOLE-window ceiling, yet reads as a high-density burst within its own local window. The
+    /// term is DEFERRED (same "not enough signal" rule as [`Self::no_stuck_density`]) on a window
+    /// with fewer than [`IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`] total adjacent pairs — there is no
+    /// full-width local window to slide at all, so [`Self::local_stuck_density`] is `0.0` and
+    /// trivially passes; kept explicit for the same self-documenting reason [`Self::no_stuck_density`]
+    /// spells its own floor out rather than relying on the field defaulting to a passing value.
+    pub fn no_localized_stuck_density(&self) -> bool {
+        let total_pairs = self.frames_count.saturating_sub(1);
+        total_pairs < IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS
+            || self.local_stuck_density <= IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY
+    }
+
+    /// #580v2 (#588, #604) — THE imag optical HARD gate, replacing `surplus <= 0`: the read
+    /// genuinely ADVANCES ([`Self::is_advancing`] — a LOOSE band that rejects a frozen/blank read
+    /// and gross rate/alias, NOT a tight per-frame accounting) AND carries NO long copy/freeze run
+    /// ([`Self::no_stuck_copy`] — the run-length centerpiece) AND carries NO systematic
+    /// WHOLE-recording short-run judder ([`Self::no_stuck_density`] — the #588 term) AND carries NO
+    /// judder LOCALIZED to a short sub-span that the whole-recording average would dilute away
+    /// ([`Self::no_localized_stuck_density`] — the #604 term). Per-frame DELIVERY accounting is NOT
+    /// the optical leg's job on a free-running rig (two same-rate clocks cannot hit `surplus <= 0`
+    /// reliably — the clock residual that reopened #580); the STRICT digital corner burn is the
+    /// delivery authority (`NodeVerdict::imag_burn_ok`, #463/#584/#585), ANDed in
     /// `NodeVerdict::is_zero`. This gate's job is only: the injection is LIVE (advancing) and there is
-    /// NO copy/freeze and NO judder.
+    /// NO copy/freeze and NO judder, whole-recording OR localized.
     pub fn is_live_no_copy(&self) -> bool {
-        self.is_advancing() && self.no_stuck_copy() && self.no_stuck_density()
+        self.is_advancing()
+            && self.no_stuck_copy()
+            && self.no_stuck_density()
+            && self.no_localized_stuck_density()
     }
 
     /// #580v2 — DIAGNOSTIC ONLY (surfaced/printed, NEVER the pass/fail): genuinely advancing AND
@@ -586,6 +695,10 @@ impl OpticalBeatVerdict {
 /// REAL-DATA-derived fixture (e.g. the exact confirmed 572001 numbers) be asserted directly
 /// without reconstructing a synthetic ~21873-sample chronological tick sequence just to recompute
 /// the same aggregates [`optical_beat_net_zero`] would derive from it.
+// #604 added the 8th argument (`local_stuck_density`) alongside the existing 7 — every argument
+// mirrors one `OpticalBeatVerdict` field 1:1 (this IS the struct's plain constructor, test-only
+// bundling a struct would just move the sprawl one level, not reduce it).
+#[allow(clippy::too_many_arguments)]
 pub fn optical_beat_verdict_from_counts(
     expected_count: u32,
     present_count: u32,
@@ -594,6 +707,7 @@ pub fn optical_beat_verdict_from_counts(
     expected_step: u32,
     max_stuck_run: u32,
     stuck_density: f64,
+    local_stuck_density: f64,
 ) -> OpticalBeatVerdict {
     OpticalBeatVerdict {
         avg_step,
@@ -604,6 +718,7 @@ pub fn optical_beat_verdict_from_counts(
         surplus: expected_count as i64 - frames_count as i64,
         max_stuck_run,
         stuck_density,
+        local_stuck_density,
     }
 }
 
@@ -650,6 +765,11 @@ pub fn optical_beat_from_contiguity(
     // #588: ONE `.windows(2)` walk yields BOTH the #580v2 run-length centerpiece (`max_run`) AND the
     // #588 Δ0-density term (`density()`) — the HARD optical no-copy terms, no second decode.
     let stuck = stuck_run_stats(ticks_in_order);
+    // #604: a SECOND pass over the same slice for the LOCALIZED sliding-window density — cannot
+    // share the `.windows(2)` walk above (it needs a running per-window sum, not a single running
+    // total), but is still O(n) on its own (see `max_local_stuck_density`'s doc).
+    let local_stuck_density =
+        max_local_stuck_density(ticks_in_order, IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS);
     optical_beat_verdict_from_counts(
         tc.expected_count,
         tc.present_count,
@@ -658,6 +778,7 @@ pub fn optical_beat_from_contiguity(
         expected_step,
         stuck.max_run,
         stuck.density(),
+        local_stuck_density,
     )
 }
 
@@ -1378,6 +1499,14 @@ mod tests {
         // magnitude under IMAG_OPTICAL_MAX_STUCK_DENSITY (1%), and 21866 pairs ≥
         // MIN_PAIRS_FOR_STUCK_DENSITY so the density term IS exercised here and PASSES.
         let stuck_density = 16.0 / 21866.0;
+        // #604: this aggregate-only fixture carries no full per-frame array to slide a real
+        // localized window over, so — same spirit as `stuck_density` above — the LOCAL density is
+        // supplied as the value a genuinely isolated-dup spread (the real 572001 dups are spaced
+        // ~1200+ pairs apart, see the reconstructed full-sequence version below) would produce: at
+        // most ONE dup per 180-pair window ⇒ 1/180. The full-sequence reconstruction
+        // (`optical_beat_gate_passes_a_reconstructed_572001_sequence_580v2`) is the STRONGER proof
+        // that runs the real slide, not an asserted stand-in.
+        let local_stuck_density = 1.0 / IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS as f64;
         let v = optical_beat_verdict_from_counts(
             21870,
             21851,
@@ -1386,6 +1515,7 @@ mod tests {
             IMAG_OPTICAL_EXPECTED_STEP,
             1, // isolated benign dups ⇒ max_stuck_run 1
             stuck_density,
+            local_stuck_density,
         );
         assert_eq!(v.surplus, 3, "expected(21870) - frames(21867) = +3: {v:?}");
         assert!(
@@ -1714,6 +1844,204 @@ mod tests {
             IMAG_OPTICAL_MAX_STUCK_DENSITY >= healthy * 9.0,
             "the ceiling must stay ≥ ~10x the measured healthy density (real-data-anchored margin)"
         );
+    }
+
+    // ============================================================================
+    // #604 — imag optical density gate: a LOCALIZED (sub-span) judder is diluted below the
+    // WHOLE-window density ceiling (#588's `no_stuck_density`). The 5th orthogonal term: a
+    // FIXED-WIDTH sliding window over the SAME chronological tick sequence, judged against a
+    // separate (looser) LOCAL ceiling, so a burst confined to a short sub-span is no longer
+    // averaged away by a long clean remainder.
+    // ============================================================================
+
+    /// A judder confined to a SHORT SUB-SPAN of an otherwise pristine recording: 15 blocks of
+    /// (`IMAG_OPTICAL_MAX_STUCK_RUN` + 1) identical frames — the SAME maximal-but-legal Δ0 run of
+    /// exactly K(3) per block as `catch_up_judder_ticks`, just FAR FEWER blocks (15 vs 150) so the
+    /// burst spans only ~2s @ 60fps instead of the whole recording — embedded between a 10_000-frame
+    /// clean lead-in and a 9_940-frame clean tail. 20_000 frames total, 19_999 whole-recording
+    /// pairs, 45 of them Δ0 (all inside the burst) ⇒ whole-window density ≈0.225% — well under the
+    /// 1% ceiling (DILUTED) — while the burst's own 59-pair span reads ~25% locally within any
+    /// 180-pair window that contains it.
+    fn localized_judder_ticks_604() -> Vec<u32> {
+        let hold = IMAG_OPTICAL_MAX_STUCK_RUN + 1; // 4 frames ⇒ a Δ0 run of exactly K(3) per block
+        let mut seq = Vec::new();
+        for t in 0..10_000u32 {
+            seq.push(t);
+        }
+        let burst_blocks = 15u32;
+        for block in 0..burst_blocks {
+            let value = 10_000 + block * hold;
+            for _ in 0..hold {
+                seq.push(value);
+            }
+        }
+        let tail_start = 10_000 + burst_blocks * hold;
+        for i in 0..9_940u32 {
+            seq.push(tail_start + i);
+        }
+        seq
+    }
+
+    #[test]
+    fn optical_beat_gate_localized_judder_diluted_below_whole_window_density_604() {
+        // #604: every PRE-#604 term PASSES this recording despite it containing a real,
+        // visually-detectable localized judder burst:
+        // - is_advancing(): the burst's own catch-up jumps balance its dups, so the WHOLE-recording
+        //   avg_step still rounds to the expected step 1.
+        // - no_stuck_copy(): each block's Δ0 run is exactly K(3) — the maximal run that still
+        //   clears it (same construction as `catch_up_judder_ticks`) — so run-length is BLIND.
+        // - no_stuck_density(): the burst's 45 stuck pairs, diluted across 19_999 WHOLE-recording
+        //   pairs, read as ≈0.23% — comfortably under the 1% whole-window ceiling.
+        // Pre-#604, `is_live_no_copy()` therefore (incorrectly) returns true — the exact gate hole
+        // #604 tracks (flagged in the #588 review as a residual, not a #588 regression). The final
+        // assertion is RED before the #604 fix (localized term does not exist / never applied) and
+        // GREEN after it.
+        let seq = localized_judder_ticks_604();
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert!(
+            v.is_advancing(),
+            "the burst's catch-up jumps balance its dups — the whole-recording avg_step still \
+             rounds to 1: {v:?}"
+        );
+        assert_eq!(
+            v.max_stuck_run, IMAG_OPTICAL_MAX_STUCK_RUN,
+            "each block's Δ0 run is exactly K(3) — the maximal run that still clears no_stuck_copy: \
+             {v:?}"
+        );
+        assert!(
+            v.no_stuck_copy(),
+            "run-length is BLIND to the judder: no single Δ0 run exceeds K: {v:?}"
+        );
+        assert!(
+            v.stuck_density < IMAG_OPTICAL_MAX_STUCK_DENSITY,
+            "the burst's 45 stuck pairs are DILUTED by the 19_940 clean surrounding pairs, well \
+             under the 1% whole-window ceiling: {v:?}"
+        );
+        assert!(
+            v.no_stuck_density(),
+            "the #588 WHOLE-window density term is BLIND to a judder this localized: {v:?}"
+        );
+        assert!(
+            !v.is_live_no_copy(),
+            "#604: a real localized judder burst must FAIL the optical gate even though it is \
+             diluted below the whole-window density ceiling: {v:?}"
+        );
+    }
+
+    #[test]
+    fn optical_beat_gate_localized_judder_local_density_term_604() {
+        // GREEN — the 5th orthogonal term directly: the burst's OWN local density (45 stuck pairs
+        // inside any 180-pair window that contains its 59-pair span) is exactly 45/180 = 25%, far
+        // above the 5% local ceiling, so `no_localized_stuck_density()` FAILS even though every
+        // pre-#604 term (advance-guard, run-length no-copy, AND the #588 whole-window density)
+        // PASSES. The localized term is the ONLY one that catches this diluted judder.
+        let seq = localized_judder_ticks_604();
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert!(
+            (v.local_stuck_density - 45.0 / IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS as f64).abs()
+                < 1e-9,
+            "the burst's 45 stuck pairs fully fit inside a single 180-pair window ⇒ local density \
+             45/180 = 25%: {v:?}"
+        );
+        assert!(
+            v.local_stuck_density > IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY,
+            "≈25% is 5x above the 5% local ceiling: {v:?}"
+        );
+        assert!(
+            v.frames_count.saturating_sub(1) >= IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS,
+            "19_999 pairs ≥ the local-window width, so the localized term is genuinely APPLIED \
+             here: {v:?}"
+        );
+        assert!(
+            v.is_advancing() && v.no_stuck_copy() && v.no_stuck_density(),
+            "every pre-#604 term still passes the diluted judder — the localized term is the sole \
+             catcher: {v:?}"
+        );
+        assert!(
+            !v.no_localized_stuck_density(),
+            "#604: the localized term is the one that FAILS the diluted judder: {v:?}"
+        );
+        assert!(
+            !v.is_live_no_copy(),
+            "#604 GREEN: is_live_no_copy now FAILS the diluted judder via the localized term: {v:?}"
+        );
+    }
+
+    #[test]
+    fn local_stuck_density_ceiling_sits_between_healthy_and_localized_judder_604() {
+        // Guards the real-data anchor (same shape as `stuck_density_ceiling_sits_between_healthy_
+        // and_judder_588`, applied to the LOCAL ceiling): 5% sits comfortably ABOVE the realistic
+        // healthy local clustering (the real 572001 dup spacing — ~900-1366 pairs apart — is far
+        // wider than the 180-pair window, so no window ever sees more than ONE isolated dup) and
+        // comfortably BELOW a localized judder burst's own local density (~25%,
+        // `localized_judder_ticks_604`) — so it can neither false-fail a benign beat nor miss a
+        // real localized burst.
+        let healthy = 1.0 / IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS as f64; // at most 1 dup/window
+        let localized_judder = 45.0 / IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS as f64; // ≈25%
+        assert!(
+            healthy < IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY,
+            "the realistic healthy local clustering must sit UNDER the 5% ceiling"
+        );
+        assert!(
+            IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY < localized_judder,
+            "the 5% ceiling must sit UNDER a localized judder burst's own ~25% local density"
+        );
+        assert!(
+            IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY >= healthy * 5.0,
+            "the ceiling must stay well above the realistic healthy local clustering \
+             (real-data-anchored margin)"
+        );
+    }
+
+    #[test]
+    fn optical_beat_gate_healthy_572001_local_density_passes_604() {
+        // GREEN-must-still-pass: the SAME genuinely healthy 572001-scale read used by
+        // `optical_beat_gate_healthy_572001_density_passes_588` (22 ISOLATED dups spaced 900 pairs
+        // apart — far wider than the 180-pair local window) must ALSO pass the new #604 localized
+        // term, proving the sliding-window check does not false-fail a real clean recording merely
+        // because it contains occasional isolated dups.
+        use std::collections::HashSet;
+        let dup_after: HashSet<u32> = (1..=22).map(|k| 500 + k * 900).collect();
+        let mut seq: Vec<u32> = Vec::new();
+        for t in 0..=21843u32 {
+            seq.push(t);
+            if dup_after.contains(&t) {
+                seq.push(t);
+            }
+        }
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert_eq!(v.frames_count, 21866, "21844 present + 22 dups: {v:?}");
+        assert!(
+            v.local_stuck_density <= 1.0 / IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS as f64 + 1e-9,
+            "dups spaced 900 pairs apart, far wider than the 180-pair window, so no window ever \
+             contains more than one isolated dup: {v:?}"
+        );
+        assert!(
+            v.no_localized_stuck_density(),
+            "#604: a genuinely healthy 572001-scale read must PASS the new localized term: {v:?}"
+        );
+        assert!(
+            v.is_live_no_copy(),
+            "#604: the real healthy read must still PASS the whole optical gate: {v:?}"
+        );
+    }
+
+    #[test]
+    fn max_local_stuck_density_basic_604() {
+        // [1,1,2,3,3,3,4]: pair Δ0-flags = [T,F,F,T,T,F] (6 pairs). Sliding a width-2 window:
+        // [T,F]=1/2, [F,F]=0/2, [F,T]=1/2, [T,T]=2/2, [T,F]=1/2 ⇒ max 2/2 = 1.0.
+        let seq = [1u32, 1, 2, 3, 3, 3, 4];
+        assert!(
+            (max_local_stuck_density(&seq, 2) - 1.0).abs() < 1e-9,
+            "the [T,T] window (the two Δ0 pairs from the triple 3s) is fully stuck"
+        );
+        // Fewer pairs than the requested window width ⇒ defer to 0.0 (never a false-fail on a
+        // legitimately short read — the same "not enough signal" rule the whole-window floor uses).
+        assert_eq!(max_local_stuck_density(&seq, 100), 0.0);
+        // Empty / single-sample / zero-width window all defer to 0.0 — never a divide-by-zero.
+        assert_eq!(max_local_stuck_density(&[], 2), 0.0);
+        assert_eq!(max_local_stuck_density(&[7], 2), 0.0);
+        assert_eq!(max_local_stuck_density(&seq, 0), 0.0);
     }
 
     #[test]

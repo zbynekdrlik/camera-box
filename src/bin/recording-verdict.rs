@@ -1691,6 +1691,15 @@ fn node_verdict_json(
         // render-free-running digital burn are all blind to. Surfaced so a consumer sees the value the
         // gate judged (comprehensive-logging). `null` for every non-imag node.
         "imag_optical_stuck_density": v.imag_optical_beat.map(|b| b.stuck_density),
+        // #604 — THE 5th orthogonal no-copy metric: the MAXIMUM Δ0 duplication density found in any
+        // fixed-width sliding window of the trimmed sequence, ANDed into `is_live_no_copy` via
+        // `no_localized_stuck_density`. Catches a judder confined to a SHORT SUB-SPAN that the #588
+        // WHOLE-window `imag_optical_stuck_density` dilutes below its own ceiling — a benign beat
+        // stays well under 1% in any window; a localized catch-up judder burst reads ~25% within
+        // its own window even when the whole-recording average is diluted under 1%. Surfaced so a
+        // consumer sees the value the gate judged (comprehensive-logging). `null` for every
+        // non-imag node.
+        "imag_optical_local_stuck_density": v.imag_optical_beat.map(|b| b.local_stuck_density),
         // #580v2 DIAGNOSTIC-ONLY (no longer the pass/fail): `is_net_zero` (`surplus <= 0` AND
         // advancing) explains a beat-compensated read but is NOT the gate — a genuinely-zero run can
         // carry a small `surplus > 0` clock residual (run 572001 = +3). Surfaced so `zero_loss: true`
