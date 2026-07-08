@@ -35,10 +35,10 @@
 #                  which would self-kill a shell whose cmdline contains "frame-probe"); the QPSK audio
 #                  marker is a THREAD inside that same process (#420: no separate stop needed), so this
 #                  also stops the marker. RESTORE the permanent cam2-painter.service stopped above
-#                  (#440: symmetric guard). REMOVE the transient no-display drop-in TEST mode installed
-#                  (#291), then reload + restart camera-box and verify the service is active +
-#                  --display restored. Then PRINT the OBS event step (burns OFF: the #246 guard; the
-#                  wrapper refuses to launch otherwise).
+#                  (#440: symmetric guard). REMOVE the transient CAMERA_BOX_NO_DISPLAY=1 drop-in
+#                  TEST mode installed (#291/#528), then reload + restart camera-box and verify the
+#                  service is active + the unconditional HDMI preview restored. Then PRINT the OBS
+#                  event step (burns OFF: the #246 guard; the wrapper refuses to launch otherwise).
 #
 # The painter binary on cam2 comes from the CI probe-tools-linux-amd64 artifact:
 #   gh run download <latest CI run> -n probe-tools-linux-amd64
@@ -120,7 +120,6 @@ PAINTER_FPS="${PAINTER_FPS:-60}"             # painter rate — MUST match the 6
 PAINTER_DURATION_SECS="${PAINTER_DURATION_SECS:-7200}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
-CAMERA_BOX_BIN="${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}"   # the deployed camera-box binary on cam2
 # #420: the QPSK A/V-sync audio marker — a THREAD inside the SAME frame-probe --paint-only process
 # (src/probe/qpsk_emit.rs), never a separate daemon. TEST mode used to launch the painter WITHOUT
 # these flags at all (live evidence 2026-07-02: no audio-marker process running on cam2), so the
@@ -133,6 +132,13 @@ AUDIO_MARKER_LOG="${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}"      # emitted
 # defined in scripts/lib/rig-test-dropin.sh, sourced above — the single source shared with the e2e
 # harnesses (#309). install = painter_launch_remote; remove = painter_stop_remote (via the shared
 # rig_test_dropin_clear_cmds builder).
+#
+# #528 design pivot (2026-07-08): the drop-in used to override ExecStart to run camera-box WITHOUT
+# a --display flag (a bare ExecStart previously meant "no display thread at all"). Now that the
+# HDMI cameraman preview is UNCONDITIONAL on every cambox (baked into the binary's own
+# DEFAULT_DISPLAY_SOURCE default), a bare ExecStart no longer frees /dev/fb0 — the drop-in instead
+# sets `Environment=CAMERA_BOX_NO_DISPLAY=1`, the dedicated opt-out src/main.rs checks first (wins
+# over everything, including any --display flag). ExecStart itself is never touched any more.
 
 # --- PURE functions (no network, no ssh — unit-tested by sourcing this script) --------------------
 
@@ -170,32 +176,31 @@ fi
 REMOTE
 }
 
-# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [FPS] [CBBIN] [DROPIN] [AUDIO_DEV] [AUDIO_CADENCE]
+# painter_launch_remote BIN DUR QR PIDFILE [EXTRA] [FPS] [DROPIN] [AUDIO_DEV] [AUDIO_CADENCE]
 #   [MARKER_LOG] -> the REMOTE bash run on cam2 (over ssh) to enter TEST mode: stop any prior
-# painter, free /dev/fb0 WITHOUT killing capture+emit (#291: switch camera-box to a no-display
-# drop-in instead of stopping it), fail loud if the painter binary is absent, launch the PINNED
-# dual-QR vernier painter WITH the QPSK A/V-sync audio marker (#420: the marker is a thread inside
-# this same process — --audio-marker/--audio-marker-device/--audio-marker-cadence-ticks/
-# --marker-log — never a separate launch), recording its PID, then verify it is up AND writing
-# /dev/fb0 AND (#420) the marker's ALSA PCM is actually RUNNING — fail loud + kill the painter if
-# silent (a run with no audible marker is a wasted, unmeasured run). Pure string so a unit test can
-# assert the pinned flags + the safety properties without a live cam. Loop vars (\$i, \$!,
-# \$PAINTER_PID) are \$-escaped so they run REMOTELY; the ALSA card/dev are parsed from AUDIO_DEV
-# LOCALLY (pure bash parameter expansion) so the self-check below is a plain literal path — no
-# remote-side parsing needed inside the already-nested heredoc.
+# painter, free /dev/fb0 WITHOUT killing capture+emit (#291/#528: switch camera-box to a
+# CAMERA_BOX_NO_DISPLAY=1 drop-in instead of stopping it), fail loud if the painter binary is
+# absent, launch the PINNED dual-QR vernier painter WITH the QPSK A/V-sync audio marker (#420: the
+# marker is a thread inside this same process — --audio-marker/--audio-marker-device/
+# --audio-marker-cadence-ticks/--marker-log — never a separate launch), recording its PID, then
+# verify it is up AND writing /dev/fb0 AND (#420) the marker's ALSA PCM is actually RUNNING — fail
+# loud + kill the painter if silent (a run with no audible marker is a wasted, unmeasured run).
+# Pure string so a unit test can assert the pinned flags + the safety properties without a live
+# cam. Loop vars (\$i, \$!, \$PAINTER_PID) are \$-escaped so they run REMOTELY; the ALSA card/dev
+# are parsed from AUDIO_DEV LOCALLY (pure bash parameter expansion) so the self-check below is a
+# plain literal path — no remote-side parsing needed inside the already-nested heredoc.
 painter_launch_remote() {
   local bin="$1" dur="$2" qr="$3" pidfile="$4" extra="${5:-}"
   # #290: painter rate — positional like the other params, with the PAINTER_FPS pinned constant as
   # the fallback (keeps the builder pure; the call site passes "$PAINTER_FPS"). Paint at the 60fps
   # capture rate so the optical tick advances 60 distinct ids/s.
   local fps="${6:-${PAINTER_FPS:-60}}"
-  local cbbin="${7:-${CAMERA_BOX_BIN:-/usr/local/bin/camera-box}}"
-  local dropin="${8:-$RIG_TEST_DROPIN}"   # path single-sourced in lib/rig-test-dropin.sh (#309)
+  local dropin="${7:-$RIG_TEST_DROPIN}"   # path single-sourced in lib/rig-test-dropin.sh (#309)
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
-  # #420: the QPSK audio-marker params — same positional-with-env-fallback shape as fps/cbbin/dropin.
-  local audio_dev="${9:-${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}}"
-  local audio_cadence="${10:-${AUDIO_MARKER_CADENCE_TICKS:-180}}"
-  local marker_log="${11:-${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}}"
+  # #420: the QPSK audio-marker params — same positional-with-env-fallback shape as fps/dropin.
+  local audio_dev="${8:-${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}}"
+  local audio_cadence="${9:-${AUDIO_MARKER_CADENCE_TICKS:-180}}"
+  local marker_log="${10:-${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}}"
   # #420/#421: the ALSA CARD/DEV parsing + the audible RUNNING-poll self-check are DRY-extracted
   # into scripts/lib/audio-marker-check.sh (sourced above) — shared with recording-e2e.sh's
   # AV_RESTART_GATE painter so the two launches can never drift on what "audible" means.
@@ -215,19 +220,21 @@ pkill -x frame-probe 2>/dev/null || true
 #       without the unit is unaffected.
 $(cam2_painter_service_stop_cmds)
 # (1) free /dev/fb0 WITHOUT killing capture+emit (#291). cam2 does THREE independent things: DISPLAY
-#     (--display -> /dev/fb0/HDMI), CAPTURE (/dev/video0) and EMIT (NDI to strih). ONLY display grabs
-#     fb0; capture+emit do not. The old switch fully STOPPED the whole service, which killed all three
-#     and dropped cam2 as a measurable camera. Instead install a TRANSIENT systemd drop-in that
-#     overrides ExecStart to run camera-box WITHOUT --display, then reload + restart: display output
-#     stops (fb0 freed for the painter) while capture+emit keep running. The drop-in lives in /run
-#     (tmpfs) so a reboot auto-reverts to the deployed --display unit; EVENT mode removes it
-#     explicitly. Because the drop-in IS the active ExecStart, the unit's Restart=always now respawns
-#     the NO-display command — a restart can never re-grab fb0 (the footgun a naive kill+respawn had).
+#     (the HDMI preview -> /dev/fb0), CAPTURE (/dev/video0) and EMIT (NDI to strih). ONLY display
+#     grabs fb0; capture+emit do not. The old switch fully STOPPED the whole service, which killed
+#     all three and dropped cam2 as a measurable camera. Instead install a TRANSIENT systemd
+#     drop-in that sets CAMERA_BOX_NO_DISPLAY=1 (#528: the preview is now unconditional on every
+#     cambox, so a bare/plain ExecStart no longer means "no display thread" — this dedicated env
+#     var opt-out is what src/main.rs::resolve_display_config checks FIRST, winning over
+#     everything else), then reload + restart: display output stops (fb0 freed for the painter)
+#     while capture+emit keep running. The drop-in lives in /run (tmpfs) so a reboot auto-reverts
+#     to the deployed unconditional-preview unit; EVENT mode removes it explicitly. Because the
+#     drop-in IS the active Environment, the unit's Restart=always now respawns the NO-display
+#     command — a restart can never re-grab fb0 (the footgun a naive kill+respawn had).
 mkdir -p "$dropin_dir"
 {
   echo '[Service]'
-  echo 'ExecStart='
-  echo "ExecStart=$cbbin"
+  echo 'Environment=CAMERA_BOX_NO_DISPLAY=1'
 } > "$dropin"
 systemctl daemon-reload
 systemctl restart camera-box
@@ -236,17 +243,18 @@ i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((
 if fuser -s /dev/fb0 2>/dev/null; then echo "FAIL: /dev/fb0 still held after switching camera-box to no-display mode" >&2; exit 1; fi
 echo "ok: /dev/fb0 free (camera-box NOT stopped — only display output dropped; capture+emit keep running)"
 # (2b) #291: verify camera-box is STILL ACTIVE (so capture+emit keep running — the whole point) and
-#      now runs WITHOUT --display, so a Restart=always respawn can never re-grab fb0. NOTE: this is a
-#      systemd is-active check (Type=simple → 'active' == process forked); it does NOT itself prove the
-#      NDI emit reached strih — that optical/network proof is a rig step (see the e2e skill).
+#      (#528) now runs WITH CAMERA_BOX_NO_DISPLAY=1 in its effective Environment, so a
+#      Restart=always respawn can never re-grab fb0. NOTE: this is a systemd is-active check
+#      (Type=simple → 'active' == process forked); it does NOT itself prove the NDI emit reached
+#      strih — that optical/network proof is a rig step (see the e2e skill).
 i=0; while [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   echo "FAIL: camera-box not active after switching to no-display mode (capture+emit must keep running)" >&2
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-if systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'; then
-  echo "FAIL: camera-box still launches with --display — fb0 would be re-grabbed" >&2
+if ! systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'; then
+  echo "FAIL: camera-box Environment missing CAMERA_BOX_NO_DISPLAY=1 — the unconditional preview would re-grab fb0" >&2
   exit 1
 fi
 echo "ok: camera-box ACTIVE in no-display mode (not stopped; capture+emit running) — fb0 free for the painter"
@@ -311,9 +319,10 @@ REMOTE
 
 # painter_stop_remote PIDFILE [DROPIN] -> the REMOTE bash run on cam2 to enter EVENT mode: stop the
 # painter cleanly via its PID file (NEVER a 'pkill -f frame-probe' — that matches the remote shell's
-# own cmdline and self-kills the cleanup), REMOVE the transient no-display drop-in TEST mode installed
-# (#291), then reload + restart camera-box and verify the service is active AND --display is restored
-# (camera-box re-grabbed /dev/fb0 to paint the interkom return on the monitor).
+# own cmdline and self-kills the cleanup), REMOVE the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST
+# mode installed (#291/#528), then reload + restart camera-box and verify the service is active AND
+# the unconditional preview is restored (camera-box re-grabbed /dev/fb0 to paint the interkom
+# return on the monitor).
 painter_stop_remote() {
   local pidfile="$1"
   local dropin="${2:-$RIG_TEST_DROPIN}"   # path single-sourced in lib/rig-test-dropin.sh (#309)
@@ -332,11 +341,12 @@ pkill -x frame-probe 2>/dev/null || true
 #       guard — a box without the unit is unaffected), so normal broadcast operation resumes with
 #       the permanent dual-QR painter running again.
 $(cam2_painter_service_start_cmds)
-# (3) wait until /dev/fb0 is released by the painter, then RESTORE the deployed --display camera-box
-#     (#291): remove the transient no-display drop-in TEST mode installed, reload, and RESTART so the
-#     unit's ExecStart reverts to --display and camera-box re-grabs /dev/fb0 for the interkom return.
-#     (TEST mode no longer STOPS camera-box — it switches it to no-display — so EVENT mode RESTARTS
-#     rather than just starts, to drop the override.)
+# (3) wait until /dev/fb0 is released by the painter, then RESTORE the unconditional-preview
+#     camera-box (#291/#528): remove the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST mode
+#     installed, reload, and RESTART so the unit's Environment drops the opt-out and camera-box
+#     re-grabs /dev/fb0 for the interkom return. (TEST mode no longer STOPS camera-box — it
+#     switches it to no-display — so EVENT mode RESTARTS rather than just starts, to drop the
+#     override.)
 i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 $(rig_test_dropin_clear_cmds "$dropin")
 systemctl restart camera-box
@@ -347,19 +357,20 @@ if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (5) verify --display is restored: the EFFECTIVE ExecStart carries --display (same resolved check
-#     TEST mode uses — 'systemctl show', NOT 'systemctl cat', so a silently-failed drop-in removal
-#     can't false-pass on the base unit's --display line) AND camera-box re-grabbed /dev/fb0.
-if ! systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'; then
-  echo "FAIL: camera-box ExecStart has no --display — interkom monitor not restored" >&2
+# (5) verify the preview is restored: the EFFECTIVE Environment no longer carries
+#     CAMERA_BOX_NO_DISPLAY=1 (same resolved-check shape TEST mode uses — 'systemctl show', NOT
+#     'systemctl cat', so a silently-failed drop-in removal can't false-pass on the base unit)
+#     AND camera-box re-grabbed /dev/fb0.
+if systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'; then
+  echo "FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored" >&2
   exit 1
 fi
 i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
 if ! fuser -s /dev/fb0 2>/dev/null; then
-  echo "FAIL: camera-box active but /dev/fb0 not held — --display not painting the interkom return" >&2
+  echo "FAIL: camera-box active but /dev/fb0 not held — the unconditional preview is not painting the interkom return" >&2
   exit 1
 fi
-echo "PASS: painter stopped, camera-box active + --display restored (holding /dev/fb0)"
+echo "PASS: painter stopped, camera-box active + unconditional preview restored (holding /dev/fb0)"
 REMOTE
 }
 
@@ -547,7 +558,7 @@ rig-mode.sh — the deterministic rig TEST-mode / EVENT-mode switch (#247).
 
 Usage:
   scripts/rig-mode.sh test     # paint the dual-QR vernier on cam2 + print the OBS burns-ON step
-  scripts/rig-mode.sh event    # stop the QR, restore camera-box --display + print the OBS burns-OFF step
+  scripts/rig-mode.sh event    # stop the QR, restore camera-box's HDMI preview + print the OBS burns-OFF step
 
 The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The OBS burn is toggled DIRECTLY
 over OBS WebSocket (scripts/obs_burn_filter.py — no relaunch); the env-free genlock relaunch (no
@@ -582,7 +593,7 @@ do_test() {
   warn_imag_genlock_stale
   echo
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
-  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$CAMERA_BOX_BIN" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
+  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
@@ -620,7 +631,7 @@ do_event() {
   echo "[obs] #524 pre-event guard: stop any stray recording left running on strih/stream (frees disk before going live):"
   stop_stray_recordings
   echo
-  echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove no-display drop-in -> restart camera-box -> verify --display restored"
+  echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove CAMERA_BOX_NO_DISPLAY drop-in -> restart camera-box -> verify HDMI preview restored"
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
@@ -631,7 +642,7 @@ do_event() {
   echo
   print_genlock_relaunch_note event
   echo
-  echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + --display interkom restored."
+  echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + unconditional HDMI preview restored."
   echo "ACHIEVED (obs side): genlock_burn=false on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "NEXT: confirm the prod scene per the obs-ops skill -> rig in clean EVENT mode (no burn on broadcast)."
   echo "RESULT: EVENT mode — cam side PASS, burns OFF."

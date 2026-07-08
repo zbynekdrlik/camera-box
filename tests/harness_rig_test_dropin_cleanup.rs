@@ -3,11 +3,12 @@
 //! ## The bug
 //!
 //! #291's `scripts/rig-mode.sh test` installs a TRANSIENT systemd drop-in
-//! (`/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf`) that overrides ExecStart
-//! to run camera-box WITHOUT `--display` (frees /dev/fb0 for the QR painter). The sibling harnesses
-//! restore camera-box in their own cleanup with NO knowledge of that drop-in — `recording-e2e.sh`
-//! cleanup runs `systemctl restart camera-box`, `loopback-e2e.sh` cleanup runs `systemctl start
-//! camera-box`.
+//! (`/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf`) that sets
+//! `Environment=CAMERA_BOX_NO_DISPLAY=1` (#528 — was an ExecStart --display override before the
+//! HDMI cameraman preview became unconditional) to run camera-box without its display thread
+//! (frees /dev/fb0 for the QR painter). The sibling harnesses restore camera-box in their own
+//! cleanup with NO knowledge of that drop-in — `recording-e2e.sh` cleanup runs `systemctl restart
+//! camera-box`, `loopback-e2e.sh` cleanup runs `systemctl start camera-box`.
 //!
 //! If an operator ran `rig-mode.sh test` and then one of these harnesses standalone, the harness
 //! "restore" brings camera-box back in NO-DISPLAY mode — the interkom return monitor stays dark while
@@ -76,11 +77,8 @@ fn shared_clear_removes_the_dropin() {
     let dropin_dir = base.join("camera-box.service.d");
     fs::create_dir_all(&dropin_dir).expect("mk fake drop-in dir");
     let dropin = dropin_dir.join(DROPIN_BASENAME);
-    fs::write(
-        &dropin,
-        "[Service]\nExecStart=\nExecStart=/usr/local/bin/camera-box\n",
-    )
-    .expect("write fake drop-in");
+    fs::write(&dropin, "[Service]\nEnvironment=CAMERA_BOX_NO_DISPLAY=1\n")
+        .expect("write fake drop-in");
     assert!(dropin.exists(), "precondition: fake drop-in created");
 
     // Source the helper, emit the clear commands for our fake path, and RUN them locally.

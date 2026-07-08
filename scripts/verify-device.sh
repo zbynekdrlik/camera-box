@@ -56,11 +56,9 @@
 #   (m) systemd-networkd-wait-online masked (#547 -- avoids the 120s boot stall)
 #   (n) core-isolation kernel cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
 #   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2 -- #132/#547)
-#   (p) config.toml [display] section matches camera-set.sh's CAMERA_DISPLAY_SOURCE table entry
-#       (#528/#557/#558 -- catches a box that lost its HDMI-preview config, or wrongly gained one),
-#       PLUS the ExecStart --display flag matches CAMERA_DISPLAY_EXECSTART_SOURCE (#562 -- cam2's
-#       manual/provisioner-persisted ExecStart-mechanism preview, deliberately excluded from the
-#       config.toml table because scripts/rig-mode.sh's TEST/EVENT toggle flips that exact flag)
+#   (p) [REMOVED, #528] the per-box config.toml [display] / ExecStart --display acceptance check
+#       no longer applies -- the HDMI cameraman preview is UNCONDITIONAL and fleet-wide (baked
+#       into the binary's own default), not a per-box config a box could lose or drift from.
 #   (q) WARNING only (never fails the gate): stale `.bak` cruft under /usr/lib/ndi or the systemd
 #       drop-in dir (#453 -- inert leftovers from a manual NDI upgrade / a stale drop-in edit;
 #       setup-device.sh self-heals this on the box's next provisioning pass)
@@ -430,87 +428,6 @@ ndi_version_matches() {
   esac
 }
 
-# --- (p) config.toml [display] vs CAMERA_DISPLAY_SOURCE table (#528/#557/#558) -------------------
-# A box that LOST its [display] section (rolled back, hand-edited, or provisioned via the
-# divergent scripts/setup.sh path -- #557) previously still reported ALL CLEAR here. These two
-# functions close that blind spot: the reader half of setup-device.sh's / setup.sh's
-# config_toml_display_section() writer, plus the pure comparison against camera-set.sh's per-cam
-# table entry.
-
-# config_toml_display_source TEXT -> the value of `source = "..."` inside a `[display]` TOML
-# section in TEXT (the contents of /etc/camera-box/config.toml), "" if no [display] section is
-# present (or it has no `source` key, or TEXT is empty/unreadable). Unescapes `\"` and `\\` back
-# to their literal characters -- the inverse of config_toml_display_section()'s escaping (undone
-# in reverse order: quotes first, then backslashes, since the writer escaped backslashes first
-# then quotes).
-config_toml_display_source() {
-  awk '
-    /^\[display\][[:space:]]*$/ { in_section = 1; next }
-    /^\[/ { in_section = 0 }
-    in_section && /^source[[:space:]]*=/ {
-      line = $0
-      sub(/^source[[:space:]]*=[[:space:]]*"/, "", line)
-      sub(/"[[:space:]]*$/, "", line)
-      gsub(/\\"/, "\"", line)
-      gsub(/\\\\/, "\\", line)
-      print line
-      exit
-    }
-  ' <<< "$1"
-}
-
-# display_config_verdict EXPECTED ACTUAL -> echoes "ok" | "missing" | "drift" | "unexpected".
-#   EXPECTED = scripts/camera-set.sh's CAMERA_DISPLAY_SOURCE table entry for this box ("" for a
-#              box with no configured preview -- every box except cam1 today).
-#   ACTUAL   = config_toml_display_source() read back from the LIVE config.toml ("" if absent).
-# ok         -- EXPECTED == ACTUAL (both empty -- no preview configured or expected -- or both the
-#               same non-empty source).
-# missing    -- EXPECTED is non-empty but ACTUAL is empty: the box SHOULD have a preview but its
-#               [display] section is absent/lost.
-# drift      -- EXPECTED and ACTUAL are both non-empty but DIFFERENT: config.toml has the WRONG
-#               source wired up.
-# unexpected -- EXPECTED is empty but ACTUAL is non-empty: a box that should have NO preview
-#               somehow got one (e.g. provisioned via a stale/divergent path).
-display_config_verdict() {
-  local expected="$1" actual="$2"
-  if [ -z "$expected" ]; then
-    if [ -z "$actual" ]; then
-      printf 'ok\n'
-    else
-      printf 'unexpected\n'
-    fi
-  else
-    if [ -z "$actual" ]; then
-      printf 'missing\n'
-    elif [ "$actual" = "$expected" ]; then
-      printf 'ok\n'
-    else
-      printf 'drift\n'
-    fi
-  fi
-}
-
-# execstart_display_source TEXT -> the value of a `--display "..."` flag inside TEXT (the output
-# of `systemctl show -p ExecStart --value camera-box` -- the SAME command scripts/rig-mode.sh's own
-# TEST/EVENT toggle already uses to check ExecStart, rig-mode.sh:248/353), "" if no --display flag
-# is present. This is the READER half of setup-device.sh's execstart_display_flag() writer (#562) --
-# the ExecStart-mechanism counterpart to config_toml_display_source() above. Unescapes `\"` and `\\`
-# back to their literal characters, same order as config_toml_display_source() (quotes first, then
-# backslashes, undoing the writer's backslash-then-quote escaping in reverse).
-execstart_display_source() {
-  awk '
-    match($0, /--display "([^"\\]|\\.)*"/) {
-      s = substr($0, RSTART, RLENGTH)
-      sub(/^--display "/, "", s)
-      sub(/"$/, "", s)
-      gsub(/\\"/, "\"", s)
-      gsub(/\\\\/, "\\", s)
-      print s
-      exit
-    }
-  ' <<< "$1"
-}
-
 # --- (q) .bak cruft drift -- WARNING only, never a FAIL (#453) ----------------------------------
 # Inert `.bak` backups left behind by a manual NDI upgrade (fleet cam1/cam2/cam4:
 # /usr/lib/ndi/libndi.so.6*.bak) or a stale drop-in edit (cam1:
@@ -583,8 +500,6 @@ Checks:
   (m) systemd-networkd-wait-online masked (no 120s boot stall)
   (n) core-isolation cmdline: isolcpus=3 + nohz_full=3 + rcu_nocbs=3 + irqaffinity=0-2 (#289/#303)
   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2)
-  (p) config.toml [display] + ExecStart --display both match camera-set.sh's per-mechanism tables
-      (CAMERA_DISPLAY_SOURCE / CAMERA_DISPLAY_EXECSTART_SOURCE, #562)
   (q) WARNING only: stale .bak cruft under the NDI dir or the systemd drop-in dir (#453)
   (r) dantesync is the SOLE timesync authority -- no competing daemon installed/active/enabled (#591)
 
@@ -871,71 +786,11 @@ else
   fail "NDI runtime '${NDI_VER:-?}' != fleet pin '$NDI_VERSION_PIN' (NDI_VERSION_PIN)"
 fi
 
-# (p) config.toml [display] vs camera-set.sh's CAMERA_DISPLAY_SOURCE table (#528/#557/#558) ------
-# CAMERA_DISPLAY_SOURCE was already resolved by camera_resolve() above (top of the live flow) --
-# "" for every box except cam1 today. A box that lost its [display] section (rolled back,
-# hand-edited, or provisioned via the divergent scripts/setup.sh path -- #557) previously still
-# reported ALL CLEAR here; a box that wrongly GAINED one is caught too (display_config_verdict's
-# "unexpected" case).
-rc=0
-CONFIG_TOML="$(ssh_box "cat /etc/camera-box/config.toml 2>/dev/null")" || rc=$?
-if [ "$rc" -ne 0 ]; then
-  fail "config.toml unreadable (ssh rc=$rc) -- cannot verify [display] section"
-else
-  DISPLAY_ACTUAL="$(config_toml_display_source "$CONFIG_TOML")"
-  case "$(display_config_verdict "$CAMERA_DISPLAY_SOURCE" "$DISPLAY_ACTUAL")" in
-    ok)
-      if [ -n "$CAMERA_DISPLAY_SOURCE" ]; then
-        ok "config.toml [display] source matches camera-set.sh ('$CAMERA_DISPLAY_SOURCE')"
-      else
-        ok "config.toml has no [display] section (none expected for this box)"
-      fi
-      ;;
-    missing)
-      fail "config.toml [display] section MISSING -- expected source '$CAMERA_DISPLAY_SOURCE' (camera-set.sh)"
-      ;;
-    drift)
-      fail "config.toml [display] source '${DISPLAY_ACTUAL}' != camera-set.sh's '${CAMERA_DISPLAY_SOURCE}'"
-      ;;
-    unexpected)
-      fail "config.toml has an UNEXPECTED [display] section (source='${DISPLAY_ACTUAL}') -- camera-set.sh has no table entry for this box"
-      ;;
-  esac
-fi
-
-# (p) EXTENSION -- ExecStart --display vs camera-set.sh's CAMERA_DISPLAY_EXECSTART_SOURCE table
-# (#562). CAMERA_DISPLAY_EXECSTART_SOURCE was already resolved by camera_resolve() above -- "" for
-# every box except cam2 today. Before this check, a box that lost cam2's manual ExecStart edit (a
-# re-provision with the pre-#562 setup-device.sh, a hand rollback) still reported ALL CLEAR from
-# (p) above, because that check only ever looked at config.toml (cam2 has no [display] table entry
-# by design -- see scripts/camera-set.sh's cam2-exclusion comment). Reuses display_config_verdict
-# unchanged -- the same EXPECTED/ACTUAL contract, fed by the ExecStart mechanism instead of
-# config.toml.
-rc=0
-EXECSTART_SHOW="$(ssh_box "systemctl show -p ExecStart --value camera-box 2>/dev/null")" || rc=$?
-if [ "$rc" -ne 0 ]; then
-  fail "ExecStart unreadable (ssh rc=$rc) -- cannot verify ExecStart --display flag"
-else
-  EXECSTART_DISPLAY_ACTUAL="$(execstart_display_source "$EXECSTART_SHOW")"
-  case "$(display_config_verdict "$CAMERA_DISPLAY_EXECSTART_SOURCE" "$EXECSTART_DISPLAY_ACTUAL")" in
-    ok)
-      if [ -n "$CAMERA_DISPLAY_EXECSTART_SOURCE" ]; then
-        ok "ExecStart --display matches camera-set.sh ('$CAMERA_DISPLAY_EXECSTART_SOURCE')"
-      else
-        ok "ExecStart has no --display flag (none expected for this box)"
-      fi
-      ;;
-    missing)
-      fail "ExecStart --display flag MISSING -- expected source '$CAMERA_DISPLAY_EXECSTART_SOURCE' (camera-set.sh)"
-      ;;
-    drift)
-      fail "ExecStart --display source '${EXECSTART_DISPLAY_ACTUAL}' != camera-set.sh's '${CAMERA_DISPLAY_EXECSTART_SOURCE}'"
-      ;;
-    unexpected)
-      fail "ExecStart has an UNEXPECTED --display flag (source='${EXECSTART_DISPLAY_ACTUAL}') -- camera-set.sh has no ExecStart-mechanism table entry for this box"
-      ;;
-  esac
-fi
+# (p) [REMOVED, #528] -----------------------------------------------------------------------------
+# The per-box config.toml [display] / ExecStart --display acceptance check (#528/#557/#558/#562)
+# no longer applies: the HDMI cameraman preview is UNCONDITIONAL and fleet-wide, baked into the
+# binary's own DEFAULT_DISPLAY_SOURCE default -- there is no per-box config left to drift from or
+# lose. See src/main.rs::resolve_display_config (unit tested) for the current contract.
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
 # Reuses NDI_LS gathered in (g)/(o); a second ssh call lists the systemd drop-in dir. Inert

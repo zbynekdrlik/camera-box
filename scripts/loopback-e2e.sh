@@ -5,10 +5,11 @@
 # off-air rig), runs the QR HDMI-loopback probe, pulls the JSON artifact, and
 # exits non-zero on a failing verdict.
 #
-# On the device, camera-box normally runs with `--display`, which holds /dev/fb0.
-# The probe's painter needs fb0, so this script stops the service and runs
-# camera-box WITHOUT --display for the duration (keeps capture->NDI alive, frees
-# fb0), then ALWAYS restores the service via a trap — even on failure.
+# On the device, camera-box normally previews the interkom monitor unconditionally, which holds
+# /dev/fb0 (#528). The probe's painter needs fb0, so this script stops the service and runs
+# camera-box manually with CAMERA_BOX_NO_DISPLAY=1 for the duration (keeps capture->NDI alive,
+# frees fb0 for frame-probe's own painter), then ALWAYS restores the service via a trap — even on
+# failure.
 #
 # Env overrides: CAM CAM_IP CAM_PASS SOURCE MODE DURATION_SECS QR_SIZE SETTLE_MS
 #                CAPTURE_FPS MAX_P99_MS MAX_FREEZE_PERIODS LOCAL_OUT
@@ -95,7 +96,7 @@ echo ">> Deploying to ${CAM_IP}:${REMOTE_BIN}"
 sshpass -p "$CAM_PASS" scp -o StrictHostKeyChecking=no target/release/frame-probe "root@${CAM_IP}:${REMOTE_BIN}"
 
 echo ">> Running ${MODE} loopback for ${DURATION_SECS}s on ${CAM_IP} (source: '${SOURCE}')"
-echo "   camera-box runs WITHOUT --display for the duration; service is restored afterwards."
+echo "   camera-box runs with CAMERA_BOX_NO_DISPLAY=1 for the duration; service is restored afterwards."
 
 # Remote orchestration. Quoted heredoc — values are passed via env on the ssh line,
 # quoted by build_remote_env so a free-text value cannot inject into the remote shell.
@@ -108,10 +109,10 @@ MANUAL_PID=""
 cleanup() {
   if [ -n "$MANUAL_PID" ]; then kill "$MANUAL_PID" 2>/dev/null || true; fi
   sleep 1
-  # #309: clear any leftover #291 rig-mode no-display drop-in BEFORE restoring camera-box — else a
-  # prior `rig-mode.sh test` would make this `start` bring camera-box back WITHOUT --display (the
-  # interkom return monitor stays dark). The clear commands are single-sourced + passed in via the
-  # env prefix; idempotent (rm -f is a no-op if absent).
+  # #309/#528: clear any leftover #291 rig-mode CAMERA_BOX_NO_DISPLAY=1 drop-in BEFORE restoring
+  # camera-box — else a prior `rig-mode.sh test` would make this `start` bring camera-box back
+  # with the opt-out still set (the interkom return monitor stays dark). The clear commands are
+  # single-sourced + passed in via the env prefix; idempotent (rm -f is a no-op if absent).
   eval "${RIG_TEST_DROPIN_CLEAR:-}"
   systemctl start camera-box
   echo ">> CLEANUP: camera-box service restarted ($(systemctl is-active camera-box))"
@@ -134,7 +135,7 @@ if fuser -s /dev/video0 2>/dev/null; then
   echo "ERROR: /dev/video0 still busy after stop+sweep:"; fuser -v /dev/video0 2>&1; exit 4
 fi
 
-echo ">> start camera-box WITHOUT --display (capture->NDI only)"
+echo ">> start camera-box with CAMERA_BOX_NO_DISPLAY=1 (capture->NDI only)"
 # #66 NOTE: loopback INTENTIONALLY does NOT set CAMERA_BOX_GENLOCK_FPS here (unlike the
 # genlocked full-path run, recording-e2e.sh, which routes through the strih/stream OBS FIFO).
 # Loopback measures cam->NDI->tap on the SAME box with frame-probe reading the NDI source
@@ -142,7 +143,7 @@ echo ">> start camera-box WITHOUT --display (capture->NDI only)"
 # requirement does not apply. Loopback deliberately exercises the raw ~60fps capture path
 # (CAPTURE_FPS=60). Do NOT add the genlock env here "to match the full-path run" — it would change
 # what loopback measures.
-nohup /usr/local/bin/camera-box >/tmp/cam-manual.log 2>&1 &
+CAMERA_BOX_NO_DISPLAY=1 nohup /usr/local/bin/camera-box >/tmp/cam-manual.log 2>&1 &
 MANUAL_PID=$!
 sleep 7
 if ! kill -0 "$MANUAL_PID" 2>/dev/null; then

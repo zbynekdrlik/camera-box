@@ -14,8 +14,9 @@
 //! tests source the REAL script (its `BASH_SOURCE != $0` guard skips main), call its pure remote-
 //! command builders, and assert the PINNED painter flags + the safety properties (free /dev/fb0,
 //! fail loud on a missing binary, the PID-file stop that avoids the `pkill -f` self-match footgun,
-//! the camera-box `--display` restore). The invalid-mode contract is checked end-to-end (it exits
-//! before any ssh). NO test runs `test`/`event` end-to-end — that would ssh the live rig.
+//! the camera-box HDMI-preview restore via the CAMERA_BOX_NO_DISPLAY=1 opt-out, #528). The
+//! invalid-mode contract is checked end-to-end (it exits before any ssh). NO test runs
+//! `test`/`event` end-to-end — that would ssh the live rig.
 
 use std::fs;
 use std::path::PathBuf;
@@ -193,8 +194,10 @@ fn test_mode_painter_runs_at_60fps_capture_rate() {
 }
 
 /// #291: TEST mode frees /dev/fb0 WITHOUT a full `systemctl stop camera-box` (which killed cam2's
-/// capture+emit too). It installs a TRANSIENT systemd drop-in that overrides ExecStart to run
-/// camera-box WITHOUT `--display`, reloads + restarts, then WAITS until fb0 is actually free
+/// capture+emit too). It installs a TRANSIENT systemd drop-in that sets
+/// `Environment=CAMERA_BOX_NO_DISPLAY=1` (#528: the HDMI cameraman preview is unconditional now,
+/// so a bare/plain ExecStart no longer means "no display thread" — this dedicated env-var opt-out
+/// is what src/main.rs checks first), reloads + restarts, then WAITS until fb0 is actually free
 /// (fbdev teardown is async), failing loud if it stays held. Display output is the ONLY thing that
 /// grabs fb0; capture (/dev/video0) + NDI emit do not.
 #[test]
@@ -212,19 +215,17 @@ fn test_mode_frees_fb0_via_no_display_dropin_not_full_stop() {
         "#291: TEST mode must NOT fully stop camera-box on an executable line — that kills cam2's \
          capture+emit. Switch it to no-display instead. Got:\n{p}"
     );
-    // It installs a transient drop-in (in /run — tmpfs, so a reboot auto-reverts) overriding
-    // ExecStart to camera-box WITHOUT --display, then reloads + restarts to apply it. Assert the
-    // FULL write-redirect + the FULL no-display override line (not loose substrings that a comment
-    // could satisfy).
+    // It installs a transient drop-in (in /run — tmpfs, so a reboot auto-reverts) setting
+    // CAMERA_BOX_NO_DISPLAY=1, then reloads + restarts to apply it. Assert the FULL write-redirect
+    // + the FULL env-var override line (not loose substrings that a comment could satisfy).
     assert!(
         p.contains("> \"/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf\""),
         "#291: TEST mode must write a transient no-display systemd drop-in to /run. Got:\n{p}"
     );
     assert!(
-        p.contains("echo 'ExecStart='")
-            && p.contains("echo \"ExecStart=/usr/local/bin/camera-box\""),
-        "#291: the drop-in must reset ExecStart and set the no-display camera-box command \
-         (no --display). Got:\n{p}"
+        p.contains("echo 'Environment=CAMERA_BOX_NO_DISPLAY=1'"),
+        "#528: the drop-in must set Environment=CAMERA_BOX_NO_DISPLAY=1 (the display-thread \
+         opt-out src/main.rs checks first). Got:\n{p}"
     );
     assert!(
         p.contains("systemctl daemon-reload") && p.contains("systemctl restart camera-box"),
@@ -242,8 +243,8 @@ fn test_mode_frees_fb0_via_no_display_dropin_not_full_stop() {
 
 /// #291 headline: TEST mode KEEPS cam2 capturing + emitting NDI while the painter owns /dev/fb0 —
 /// the whole point of the fix. After switching to no-display it verifies the service is STILL active
-/// (capture+emit alive) and that the effective ExecStart no longer carries `--display` (so the
-/// unit's Restart=always can never respawn a process that re-grabs fb0).
+/// (capture+emit alive) and that the effective Environment carries CAMERA_BOX_NO_DISPLAY=1 (#528 —
+/// so the unit's Restart=always can never respawn a process that re-grabs fb0).
 #[test]
 fn test_mode_keeps_camera_box_capturing_and_emitting() {
     let p = painter_launch();
@@ -261,10 +262,10 @@ fn test_mode_keeps_camera_box_capturing_and_emitting() {
     );
     assert!(
         p.contains(
-            "systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'"
+            "systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'"
         ),
-        "#291: TEST mode must verify the EFFECTIVE ExecStart no longer has --display (so a \
-         Restart=always respawn cannot re-grab fb0). Got:\n{p}"
+        "#528: TEST mode must verify the EFFECTIVE Environment carries CAMERA_BOX_NO_DISPLAY=1 \
+         (so a Restart=always respawn cannot re-grab fb0). Got:\n{p}"
     );
 }
 
@@ -341,7 +342,7 @@ fn test_mode_starts_qpsk_audio_marker_alongside_painter() {
 fn test_mode_audio_marker_params_are_positional_overrides() {
     let p = run_sourced(
         "painter_launch_remote /usr/local/bin/frame-probe 7200 700 /run/rig-painter.pid '' 60 \
-         /usr/local/bin/camera-box /run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf \
+         /run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf \
          hw:CARD=USB,DEV=0 60 /tmp/markers.csv",
     );
     assert!(
@@ -425,10 +426,11 @@ fn test_mode_audio_check_kills_painter_on_silent_marker() {
 }
 
 /// EVENT mode stops the painter via its PID FILE and ALSO `pkill -x frame-probe` (exact NAME match —
-/// can never self-match the remote shell's cmdline), then RESTORES the deployed --display camera-box
-/// and VERIFIES the service is active AND `--display` is restored (the interkom monitor is back).
-/// #291: TEST mode no longer STOPS camera-box (it switches it to no-display via a drop-in), so EVENT
-/// mode must REMOVE that drop-in and RESTART (not just `start`) to revert ExecStart to --display.
+/// can never self-match the remote shell's cmdline), then RESTORES the unconditional-preview
+/// camera-box and VERIFIES the service is active AND the CAMERA_BOX_NO_DISPLAY=1 opt-out is gone
+/// (#528 — the interkom monitor is back). #291: TEST mode no longer STOPS camera-box (it switches
+/// it to no-display via a drop-in), so EVENT mode must REMOVE that drop-in and RESTART (not just
+/// `start`) to revert the Environment.
 #[test]
 fn event_mode_stops_via_pidfile_restores_display() {
     let p = painter_stop();
@@ -442,7 +444,7 @@ fn event_mode_stops_via_pidfile_restores_display() {
     );
     // #291: remove the transient no-display drop-in TEST mode installed, then RESTART (the unit was
     // never fully stopped — it was reconfigured to no-display — so a plain `start` would not revert).
-    // Assert the FULL removal command + the same effective --display check TEST uses (symmetric).
+    // Assert the FULL removal command + the same effective Environment check TEST uses (symmetric).
     assert!(
         p.contains(
             "rm -f \"/run/systemd/system/camera-box.service.d/zz-rig-test-no-display.conf\""
@@ -452,13 +454,13 @@ fn event_mode_stops_via_pidfile_restores_display() {
     );
     assert!(
         p.contains("systemctl daemon-reload") && p.contains("systemctl restart camera-box"),
-        "#291: EVENT mode must daemon-reload + RESTART to revert ExecStart back to --display"
+        "#291: EVENT mode must daemon-reload + RESTART to revert the Environment back to plain"
     );
     assert!(
         p.contains(
-            "systemctl show -p ExecStart --value camera-box 2>/dev/null | grep -q -- '--display'"
+            "systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'"
         ),
-        "#291: EVENT mode must verify --display restored via the EFFECTIVE ExecStart (symmetric \
+        "#528: EVENT mode must verify the opt-out is gone via the EFFECTIVE Environment (symmetric \
          with TEST, not a `systemctl cat` that could false-pass on the base unit). Got:\n{p}"
     );
     assert!(
@@ -466,8 +468,9 @@ fn event_mode_stops_via_pidfile_restores_display() {
         "#247: EVENT mode must verify the camera-box service is active (fail loud otherwise)"
     );
     assert!(
-        p.contains("grep -q -- '--display'") && p.contains("no --display"),
-        "#247: EVENT mode must verify --display is restored (the interkom monitor path)"
+        p.contains("CAMERA_BOX_NO_DISPLAY=1") && p.contains("interkom monitor not restored"),
+        "#528: EVENT mode must fail loud with a clear message if the opt-out is still present \
+         (the interkom monitor path). Got:\n{p}"
     );
 }
 

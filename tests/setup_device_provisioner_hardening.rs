@@ -6,17 +6,15 @@
 //!   1. Name-resolved single-arg invocation — source `scripts/camera-set.sh` and resolve
 //!      `DEVICE_NAME -> IP / VBAN stream / genlock FPS`, dropping the free-text 3-positional-arg
 //!      form (`setup-device.sh CAM5` alone must work).
-//!   2. Canonical PLAIN `ExecStart` — no baked `--display "STRIH-SNV (interkom)"` STRING LITERAL
-//!      in this script's own source text. #562 (2026-07-07) supersedes the ORIGINAL, stricter form
-//!      of this test (which additionally required the literal source line
-//!      `ExecStart=/usr/local/bin/camera-box` with nothing appended): cam2's interkom preview
-//!      lives in a manual `--display` edit baked into ExecStart (never config.toml — rig-mode.sh's
-//!      TEST/EVENT toggle flips that exact flag), and #562's mechanism (a) makes it
-//!      provisioner-persistent by building the ExecStart line from a table-driven variable
-//!      (`execstart_display_flag()`, fed by `CAMERA_DISPLAY_EXECSTART_SOURCE` in
-//!      `scripts/camera-set.sh`) instead of a bare hardcoded line. The updated test below still
-//!      proves NO per-box string is ever hardcoded in this script, and that a box with no table
-//!      entry (every box except cam2) renders the exact pre-#562 plain ExecStart.
+//!   2. Canonical PLAIN `ExecStart` — no baked `--display "STRIH-SNV (interkom)"` STRING LITERAL,
+//!      and no per-box variance at all: `ExecStart=/usr/local/bin/camera-box`, unconditionally, on
+//!      EVERY box. #562 (2026-07-07) had briefly made cam2 an exception via a table-driven
+//!      `execstart_display_flag()`; #528's 2026-07-08 design pivot retired that whole per-box
+//!      mechanism (the owner rejected static per-box preview config — camboxes have no
+//!      keyboard/mouse and the monitor moves between cameras during an event) in favor of an
+//!      UNCONDITIONAL, fleet-wide default baked into the binary itself
+//!      (`DEFAULT_DISPLAY_SOURCE` in `src/main.rs`). ExecStart is back to being the exact
+//!      canonical PLAIN line, on every box, with zero exceptions.
 //!   3. Fail-loud posture (script-failure-policy) — `set -euo pipefail`; hard-exit non-zero on
 //!      binary/NDI/ALSA/dantesync install failure instead of warn-and-continue.
 //!   4. Hard-fail if `/usr/lib/ndi/libndi.so.6` is still missing at the end (was: print "ACTION
@@ -109,38 +107,42 @@ fn setup_device_no_longer_takes_three_positional_args() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn setup_device_execstart_is_canonical_plain_unless_the_execstart_source_table_says_otherwise() {
-    // #562: superseded from a stricter "the literal line must be exactly
-    // ExecStart=/usr/local/bin/camera-box" check. That invariant was RIGHT for #450 (no box had an
-    // ExecStart-mechanism preview) but became WRONG the moment #562 deliberately gave cam2 one --
-    // enforcing it verbatim would have meant setup-device.sh could never persist cam2's manual
-    // ExecStart edit across a re-provision (the exact #379-recurrence bug #562 fixes). The updated
-    // contract: no per-box string is ever hardcoded in THIS script's source (still proven below),
-    // and the ExecStart line is built from a variable fed by the table -- so a box with no entry
-    // (every box except cam2 today) still renders byte-identical to the pre-#562 plain form.
+fn setup_device_execstart_is_canonical_plain_unconditionally() {
+    // #528 design pivot (2026-07-08): the #562 per-box ExecStart-mechanism table
+    // (CAMERA_DISPLAY_EXECSTART_SOURCE / execstart_display_flag()) that used to let cam2 bake a
+    // --display flag into ExecStart is GONE -- the owner rejected the whole per-box-config
+    // approach (camboxes have no keyboard/mouse; the preview monitor moves between cameras during
+    // an event). The HDMI cameraman preview is now UNCONDITIONAL and fleet-wide, baked into the
+    // binary's own default (DEFAULT_DISPLAY_SOURCE in src/main.rs) -- ExecStart is the exact
+    // canonical PLAIN line on EVERY box, no exceptions, no per-cam variance, no table lookup.
     let body = read_script();
     assert!(
         !body.contains(r#"--display "STRIH-SNV"#),
-        "setup-device.sh must never hardcode a literal --display flag as a string -- it must be \
-         assembled from the CAMERA_DISPLAY_EXECSTART_SOURCE table via execstart_display_flag() \
-         (#450/#562)"
+        "setup-device.sh must never hardcode a literal --display flag as a string -- the preview \
+         lives entirely in the binary's own unconditional default (#450/#528)"
     );
-    // #562-review: a bare `on_noncomment_line(&body, "execstart_display_flag")` substring check is
-    // trivially satisfied by the function's own DEFINITION line (or its explanatory comment) even
-    // if STEP 7 never actually CALLS it -- exactly the #549-review "dead pure function" class of
-    // gap this repo's other wiring tests guard against elsewhere. Require the EXACT call-site
-    // instead: this also catches a regression that hardcodes a DIFFERENT per-box literal (one that
-    // wouldn't match the "STRIH-SNV" check above), because nothing but this precise construction
-    // renders `ExecStart=/usr/local/bin/camera-box` immediately followed by the interpolation.
+    // NON-comment lines only: an explanatory "this used to call X" comment legitimately mentions
+    // the retired names for history — only an actual definition/call site is a real regression.
     assert!(
-        body.contains(
-            r#"ExecStart=/usr/local/bin/camera-box$(execstart_display_flag "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}")"#
-        ),
-        "setup-device.sh's STEP 7 ExecStart line must be exactly \
-         `ExecStart=/usr/local/bin/camera-box$(execstart_display_flag \
-         \"${{CAMERA_DISPLAY_EXECSTART_SOURCE:-}}\")` (#562) -- a box with no table entry then \
-         renders the canonical plain form, and any hardcoded per-box literal would fail this exact \
-         match"
+        !on_noncomment_line(&body, "execstart_display_flag")
+            && !on_noncomment_line(&body, "CAMERA_DISPLAY_EXECSTART_SOURCE"),
+        "#528: setup-device.sh must no longer define/call execstart_display_flag or reference the \
+         retired CAMERA_DISPLAY_EXECSTART_SOURCE table -- ExecStart is unconditionally plain"
+    );
+    assert!(
+        on_noncomment_line(&body, "ExecStart=/usr/local/bin/camera-box") && {
+            let line = body
+                .lines()
+                .find(|l| {
+                    l.trim_start()
+                        .starts_with("ExecStart=/usr/local/bin/camera-box")
+                        && !l.trim_start().starts_with('#')
+                })
+                .expect("the ExecStart line must be present");
+            line.trim() == "ExecStart=/usr/local/bin/camera-box"
+        },
+        "setup-device.sh's STEP 7 ExecStart line must be EXACTLY \
+         `ExecStart=/usr/local/bin/camera-box` -- unconditionally, on every box (#528)"
     );
 }
 

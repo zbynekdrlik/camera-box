@@ -7,7 +7,7 @@ use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
 use camera_box::capture::VideoCapture;
-use camera_box::config::Config;
+use camera_box::config::{Config, DisplayConfig};
 use camera_box::intercom;
 use camera_box::ndi::NdiSender;
 use camera_box::ndi_display::{self, NdiDisplayConfig};
@@ -104,6 +104,60 @@ fn apply_cpu_affinity() {
     camera_box::affinity::pin_capture_thread();
 }
 
+/// #528: fleet-wide default HDMI cameraman-preview source. camboxes have no keyboard/mouse and
+/// the preview monitor gets physically moved between cameras during an event, so a per-box
+/// static source table (the earlier #556 design) cannot work — every box previews the SAME
+/// source unconditionally, and the existing ~1s DRM-connector poll (`ndi_display`) already
+/// delivers "plug in -> shows preview, unplug -> stops, move the monitor to another box -> that
+/// box shows it" for free. This is the interkom/return/talkback monitor cam1/cam2 already
+/// showed before #556 — NOT the cameraman Multiview camera grid (owner correction, 2026-07-08).
+const DEFAULT_DISPLAY_SOURCE: &str = "STRIH-SNV (interkom)";
+
+/// #528: E2E-harness opt-out. When this env var is set (to any value), the display thread does
+/// not start at all, freeing `/dev/fb0` for the QR painter (`scripts/rig-mode.sh test`). This
+/// replaces the old "run camera-box with no --display flag" toggle now that the preview is
+/// unconditional (a bare ExecStart used to mean no display thread at all; it no longer does).
+const NO_DISPLAY_ENV: &str = "CAMERA_BOX_NO_DISPLAY";
+
+/// #528: resolve which NDI display config (if any) camera-box should run this launch, given the
+/// CLI `--display`/`--fb-device` flags, the optional `config.toml [display]` section, and the
+/// E2E harness's `CAMERA_BOX_NO_DISPLAY` opt-out (checked first — it must win over everything
+/// else so `rig-mode.sh test` can reliably free `/dev/fb0` for the QR painter). Precedence below
+/// that mirrors the pre-existing CLI-overrides-config rule. Pure + unit-tested so the "no
+/// --display flag and no [display] section" case is provably covered (the exact fleet gap #528
+/// reported: cam1 had neither, so this function used to return `None` — no preview at all).
+fn resolve_display_config(
+    cli_source: Option<&str>,
+    cli_fb_device: &str,
+    config_display: Option<&DisplayConfig>,
+    no_display_opt_out: bool,
+) -> Option<NdiDisplayConfig> {
+    if no_display_opt_out {
+        return None;
+    }
+    if let Some(source) = cli_source {
+        return Some(NdiDisplayConfig {
+            source_name: source.to_string(),
+            fb_device: cli_fb_device.to_string(),
+            find_timeout_secs: 30,
+        });
+    }
+    if let Some(display) = config_display {
+        return Some(NdiDisplayConfig {
+            source_name: display.source.clone(),
+            fb_device: display.fb_device.clone(),
+            find_timeout_secs: 30,
+        });
+    }
+    // #528: no CLI flag, no config.toml [display] section — every cambox still previews the
+    // fleet-wide default (the exact case that used to return None, the reported bug).
+    Some(NdiDisplayConfig {
+        source_name: DEFAULT_DISPLAY_SOURCE.to_string(),
+        fb_device: cli_fb_device.to_string(),
+        find_timeout_secs: 30,
+    })
+}
+
 /// Simple USB video capture to NDI streaming appliance
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -188,20 +242,22 @@ async fn main() -> Result<()> {
         config.device_path()?
     };
 
-    // Determine display source (CLI overrides config)
-    let display_config = if let Some(ref source) = args.display_source {
-        Some(NdiDisplayConfig {
-            source_name: source.clone(),
-            fb_device: args.fb_device.clone(),
-            find_timeout_secs: 30,
-        })
-    } else {
-        config.display.as_ref().map(|display| NdiDisplayConfig {
-            source_name: display.source.clone(),
-            fb_device: display.fb_device.clone(),
-            find_timeout_secs: 30,
-        })
-    };
+    // Determine display source (CLI overrides config overrides the #528 fleet-wide default).
+    // The E2E harness opts out entirely via CAMERA_BOX_NO_DISPLAY (rig-mode.sh test), freeing
+    // /dev/fb0 for the QR painter.
+    let no_display_opt_out = std::env::var_os(NO_DISPLAY_ENV).is_some();
+    if no_display_opt_out {
+        tracing::info!(
+            "NDI display disabled via {} (E2E harness mode)",
+            NO_DISPLAY_ENV
+        );
+    }
+    let display_config = resolve_display_config(
+        args.display_source.as_deref(),
+        &args.fb_device,
+        config.display.as_ref(),
+        no_display_opt_out,
+    );
 
     // Determine intercom config (CLI overrides config)
     let intercom_config = if let Some(ref stream) = args.intercom_stream {
@@ -964,5 +1020,73 @@ mod tests {
         assert!(args.debug);
         assert_eq!(args.intercom_stream, Some("cam2".to_string()));
         assert_eq!(args.intercom_target, "host.lan");
+    }
+
+    // --- #528: resolve_display_config — the HDMI cameraman preview is UNCONDITIONAL ------------
+    //
+    // The reported bug: cam1 had no `--display` CLI flag and no `[display]` config.toml section,
+    // so the display thread never started at all — no cameraman preview, at all, ever. The fix
+    // makes every cambox preview `DEFAULT_DISPLAY_SOURCE` unless a CLI flag or config section
+    // explicitly overrides it, and adds a single opt-out (`CAMERA_BOX_NO_DISPLAY`) for the E2E
+    // harness's QR painter to reclaim /dev/fb0.
+
+    #[test]
+    fn resolve_display_config_defaults_to_the_fleet_wide_interkom_source_when_unconfigured() {
+        // #528 headline: NO CLI flag, NO config.toml [display] section (cam1's exact live state
+        // before this fix) must still resolve to a display config — never `None`.
+        let cfg = resolve_display_config(None, "/dev/fb0", None, false).expect(
+            "the HDMI cameraman preview must be unconditional — Some even with no CLI flag and \
+             no [display] config section (#528: this was the exact cam1 bug)",
+        );
+        assert_eq!(cfg.source_name, DEFAULT_DISPLAY_SOURCE);
+        assert_eq!(cfg.fb_device, "/dev/fb0");
+        assert_eq!(cfg.find_timeout_secs, 30);
+    }
+
+    #[test]
+    fn resolve_display_config_cli_flag_overrides_the_default() {
+        let cfg = resolve_display_config(Some("Custom Source"), "/dev/fb1", None, false)
+            .expect("Some when an explicit --display source is given");
+        assert_eq!(cfg.source_name, "Custom Source");
+        assert_eq!(cfg.fb_device, "/dev/fb1");
+    }
+
+    #[test]
+    fn resolve_display_config_config_toml_overrides_the_default_when_no_cli_flag() {
+        let display = DisplayConfig {
+            source: "Config Source".to_string(),
+            fb_device: "/dev/fb2".to_string(),
+        };
+        let cfg = resolve_display_config(None, "/dev/fb0", Some(&display), false)
+            .expect("Some when a config.toml [display] section is given");
+        assert_eq!(cfg.source_name, "Config Source");
+        assert_eq!(cfg.fb_device, "/dev/fb2");
+    }
+
+    #[test]
+    fn resolve_display_config_cli_flag_wins_over_config_toml() {
+        // Pre-existing precedence rule (unchanged by #528): CLI overrides config.
+        let display = DisplayConfig {
+            source: "Config Source".to_string(),
+            fb_device: "/dev/fb2".to_string(),
+        };
+        let cfg = resolve_display_config(Some("CLI Source"), "/dev/fb1", Some(&display), false)
+            .expect("Some");
+        assert_eq!(cfg.source_name, "CLI Source");
+        assert_eq!(cfg.fb_device, "/dev/fb1");
+    }
+
+    #[test]
+    fn resolve_display_config_no_display_opt_out_disables_display_entirely() {
+        // #528: rig-mode.sh test sets CAMERA_BOX_NO_DISPLAY so the QR painter can reliably own
+        // /dev/fb0 — this must win even when a CLI flag or config section is also present,
+        // replacing the old "bare ExecStart == no display thread" toggle that #528 breaks.
+        assert!(resolve_display_config(Some("Whatever"), "/dev/fb0", None, true).is_none());
+        assert!(resolve_display_config(None, "/dev/fb0", None, true).is_none());
+        let display = DisplayConfig {
+            source: "Config Source".to_string(),
+            fb_device: "/dev/fb2".to_string(),
+        };
+        assert!(resolve_display_config(None, "/dev/fb0", Some(&display), true).is_none());
     }
 }
