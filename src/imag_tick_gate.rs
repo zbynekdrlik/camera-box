@@ -1716,6 +1716,86 @@ mod tests {
         );
     }
 
+    // ============================================================================
+    // #604 RED — imag optical density gate: a LOCALIZED (sub-span) judder is diluted below the
+    // WHOLE-window density ceiling (#588's `no_stuck_density`). This reproducer is built entirely
+    // from PRE-#604 API (no new field/method/function yet) so it compiles and FAILS against the
+    // current code, proving the gate hole is real.
+    // ============================================================================
+
+    /// A judder confined to a SHORT SUB-SPAN of an otherwise pristine recording: 15 blocks of
+    /// (`IMAG_OPTICAL_MAX_STUCK_RUN` + 1) identical frames — the SAME maximal-but-legal Δ0 run of
+    /// exactly K(3) per block as `catch_up_judder_ticks`, just FAR FEWER blocks (15 vs 150) so the
+    /// burst spans only ~2s @ 60fps instead of the whole recording — embedded between a 10_000-frame
+    /// clean lead-in and a 9_940-frame clean tail. 20_000 frames total, 19_999 whole-recording
+    /// pairs, 45 of them Δ0 (all inside the burst) ⇒ whole-window density ≈0.225% — well under the
+    /// 1% ceiling (DILUTED).
+    fn localized_judder_ticks_604() -> Vec<u32> {
+        let hold = IMAG_OPTICAL_MAX_STUCK_RUN + 1; // 4 frames ⇒ a Δ0 run of exactly K(3) per block
+        let mut seq = Vec::new();
+        for t in 0..10_000u32 {
+            seq.push(t);
+        }
+        let burst_blocks = 15u32;
+        for block in 0..burst_blocks {
+            let value = 10_000 + block * hold;
+            for _ in 0..hold {
+                seq.push(value);
+            }
+        }
+        let tail_start = 10_000 + burst_blocks * hold;
+        for i in 0..9_940u32 {
+            seq.push(tail_start + i);
+        }
+        seq
+    }
+
+    #[test]
+    fn optical_beat_gate_localized_judder_diluted_below_whole_window_density_604() {
+        // #604: every PRE-#604 term PASSES this recording despite it containing a real,
+        // visually-detectable localized judder burst:
+        // - is_advancing(): the burst's own catch-up jumps balance its dups, so the WHOLE-recording
+        //   avg_step still rounds to the expected step 1.
+        // - no_stuck_copy(): each block's Δ0 run is exactly K(3) — the maximal run that still
+        //   clears it (same construction as `catch_up_judder_ticks`) — so run-length is BLIND.
+        // - no_stuck_density(): the burst's 45 stuck pairs, diluted across 19_999 WHOLE-recording
+        //   pairs, read as ≈0.23% — comfortably under the 1% whole-window ceiling.
+        // Pre-#604, `is_live_no_copy()` therefore (incorrectly) returns true — the exact gate hole
+        // #604 tracks (flagged in the #588 review as a residual, not a #588 regression). The final
+        // assertion is RED before the #604 fix (localized term does not exist / never applied) and
+        // GREEN after it.
+        let seq = localized_judder_ticks_604();
+        let v = optical_beat_net_zero(&seq, IMAG_OPTICAL_EXPECTED_STEP);
+        assert!(
+            v.is_advancing(),
+            "the burst's catch-up jumps balance its dups — the whole-recording avg_step still \
+             rounds to 1: {v:?}"
+        );
+        assert_eq!(
+            v.max_stuck_run, IMAG_OPTICAL_MAX_STUCK_RUN,
+            "each block's Δ0 run is exactly K(3) — the maximal run that still clears no_stuck_copy: \
+             {v:?}"
+        );
+        assert!(
+            v.no_stuck_copy(),
+            "run-length is BLIND to the judder: no single Δ0 run exceeds K: {v:?}"
+        );
+        assert!(
+            v.stuck_density < IMAG_OPTICAL_MAX_STUCK_DENSITY,
+            "the burst's 45 stuck pairs are DILUTED by the 19_940 clean surrounding pairs, well \
+             under the 1% whole-window ceiling: {v:?}"
+        );
+        assert!(
+            v.no_stuck_density(),
+            "the #588 WHOLE-window density term is BLIND to a judder this localized: {v:?}"
+        );
+        assert!(
+            !v.is_live_no_copy(),
+            "#604: a real localized judder burst must FAIL the optical gate even though it is \
+             diluted below the whole-window density ceiling: {v:?}"
+        );
+    }
+
     #[test]
     fn optical_beat_gate_frozen_read_fails_580v2() {
         // The camera stuck on ONE painted QR value for the whole window — tick range collapses
