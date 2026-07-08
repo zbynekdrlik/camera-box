@@ -97,6 +97,64 @@ cleanup_bak_cruft() {
     done
 }
 
+# root_mount_is_readonly OPTS -> 0 iff the FIRST comma-token of a mount-options string is exactly
+# "ro" (the kernel always emits ro/rw first). Substring-safe: a rw mount carrying
+# "errors=remount-ro" is correctly NOT read as read-only. Mirrors verify-device.sh's function of
+# the same name/contract (#547) -- kept as a local copy (not a shared-lib extraction) to keep
+# #599's fix scoped to this file.
+root_mount_is_readonly() {
+    case "$1" in
+        ro | ro,*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ROOT_WAS_RO -- set by ensure_root_writable(), read by restore_root_mode() (#599). Tracks whether
+# THIS run found root already read-only (an in-place re-provisioning pass against an
+# already-booted appliance) so restore_root_mode() only remounts back to ro if THIS run is the one
+# that changed it. A first-provisioning run (root naturally rw -- STEP 18 below only WRITES the ro
+# fstab; that only takes effect on the NEXT reboot) must never be force-remounted ro early.
+ROOT_WAS_RO=false
+
+# ensure_root_writable -- #599: STEP 15-18 below run apt-get/dpkg/systemctl and write files under
+# /etc, all of which require a writable root. On a FIRST provisioning run root is naturally rw, but
+# on an IN-PLACE RE-RUN against an already-booted ro appliance (the box's own "self-heal on the
+# next provisioning pass"), root is `ro` -- every apt-get/dpkg call in STEP 15-17 then fails and is
+# swallowed by the `|| true`/`2>/dev/null` guards, silently leaving a purge/install that never took
+# effect while the script still reports success. Detect ro root up front and remount rw BEFORE any
+# of those steps run. Stop+mask PackageKit and unattended-upgrades first (rig-timesync-single-
+# authority incident: PackageKit is D-Bus-activated by apt and holds an open write handle on
+# /var/lib/PackageKit/transactions.db, which later blocks `mount -o remount,ro /` with EBUSY) so
+# neither can reactivate mid-run. FAIL LOUD if the remount itself doesn't succeed -- never silently
+# proceed on a still-ro root and claim success afterward.
+ensure_root_writable() {
+    local opts
+    opts="$(findmnt -no OPTIONS / 2>/dev/null || true)"
+    if root_mount_is_readonly "$opts"; then
+        ROOT_WAS_RO=true
+        echo "  Root is read-only (re-provisioning an already-booted appliance) -- remounting rw"
+        systemctl stop packagekit unattended-upgrades 2>/dev/null || true
+        systemctl mask packagekit unattended-upgrades 2>/dev/null || true
+        mount -o remount,rw / \
+            || fail "root is read-only ('$opts') and 'mount -o remount,rw /' failed -- cannot safely apply package/config changes on a re-run (#599)"
+    fi
+}
+
+# restore_root_mode -- #599 counterpart to ensure_root_writable(): if THIS run remounted rw, put
+# root back to ro once every write in STEP 15-18 is done, instead of leaving a re-provisioned box
+# unexpectedly rw until its next reboot. Stops PackageKit + unattended-upgrades again first (an
+# apt-get call in STEP 15-17 may have D-Bus-reactivated PackageKit despite the earlier mask), then
+# FAILS LOUD if the remount back to ro does not stick -- a script that silently leaves the box rw
+# after printing "Setup Complete!" is exactly the false-success failure #599 exists to close.
+restore_root_mode() {
+    if [ "$ROOT_WAS_RO" = true ]; then
+        systemctl stop packagekit unattended-upgrades 2>/dev/null || true
+        mount -o remount,ro / \
+            || fail "could not remount root back to read-only after applying package/config changes (#599) -- box would be left unexpectedly rw"
+        echo "  Root remounted back to read-only"
+    fi
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
 # provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -682,6 +740,13 @@ echo "  EEE (Green Ethernet): disabled"
 echo "  Flow control: disabled"
 
 # =============================================================================
+# #599: ensure root is writable before STEP 15-18 apply package/config changes -- a no-op on a
+# first-provisioning run (root already rw); remounts rw on an in-place re-run against an
+# already-booted ro appliance. Paired with restore_root_mode() after STEP 18.
+# =============================================================================
+ensure_root_writable
+
+# =============================================================================
 # STEP 15: Disable unnecessary services
 # =============================================================================
 echo ""
@@ -910,6 +975,13 @@ FSTABEOF
 echo "  Root filesystem: read-only (ro)"
 echo "  tmpfs mounts: /tmp, /var/log, /var/tmp, /var/cache, /var/spool"
 echo "  To remount read-write: mount -o remount,rw /"
+
+# =============================================================================
+# #599: restore root to its original mode now that STEP 15-18 are done -- a no-op on a
+# first-provisioning run (ro only takes effect on the next reboot via the fstab just written
+# above); remounts back to ro on an in-place re-run that ensure_root_writable() had remounted rw.
+# =============================================================================
+restore_root_mode
 
 # =============================================================================
 # STEP 19: Final verification + summary
