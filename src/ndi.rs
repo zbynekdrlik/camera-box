@@ -34,7 +34,7 @@ fn get_wall_clock_100ns() -> i64 {
 /// `1/fps` seconds, so the rate is parameterized — at 60 fps boundaries fall
 /// every 16.667 ms (frame 0 = 0.000 ms, frame 1 = 16.667 ms, ... frame 59 =
 /// 983.333 ms); at 30 fps every 33.333 ms.
-fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
+pub(crate) fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     if fps <= 0 {
         return now_100ns;
     }

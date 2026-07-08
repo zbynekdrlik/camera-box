@@ -23,6 +23,10 @@ pub mod grab_record;
 pub mod intercom;
 #[cfg(target_os = "linux")]
 pub mod ndi;
+// #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
+// the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
+#[cfg(target_os = "linux")]
+pub mod genlock_stamp;
 #[cfg(target_os = "linux")]
 pub mod ndi_display;
 pub mod vban;
