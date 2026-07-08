@@ -317,15 +317,23 @@ cleanup() {
   echo "[cleanup] #328 FREE cam1/cam2 capture devices FIRST (never gated behind OBS teardown)"
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
+  # #626: the pattern MUST be digit-anchored ('camera-box-burn-[0-9]') — a bare 'camera-box-burn-'
+  # is a SELF-MATCH: the remote `sh -c "..."` process invoked BY ssh has this exact substring in
+  # its OWN /proc/*/cmdline (it's the literal text of the pkill argument being run), so `pkill -f`
+  # kills that shell before it ever reaches `systemctl restart` — a live 3h40m undetected outage
+  # on cam1/cam3/cam4 traced to this exact bug (#626). The real target's argv0 always has a run-id
+  # digit immediately after the hyphen (e.g. /tmp/camera-box-burn-1783530925 or
+  # /tmp/camera-box-burn-cam3-1783530925); the invoking shell's own cmdline has a quote character
+  # there instead, so the anchored pattern matches ONLY the real target.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-    "pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+    "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   # #624: cam3/cam4 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above actually ran
   # (gated the same way) so a plain single-camera run never touches these two boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     for _cip in "$CAM3_IP" "$CAM4_IP"; do
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
-        "pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+        "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
          rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
     done
   fi
@@ -1197,9 +1205,12 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -
 # cam1: send SIGINT (graceful) so camera-box's shutdown handler runs and writes the
 # cam2→cam1 LOSS sidecar (CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt — cam1's V4L2
 # capture-drop count). Give it a moment to flush, then SIGKILL any straggler.
+# #626: digit-anchored pattern — see the cleanup() comment above for why a bare
+# 'camera-box-burn-' self-matches the invoking remote shell's own cmdline and kills it before
+# the rest of the command runs.
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
-  "pkill -INT -f 'camera-box-burn-' 2>/dev/null; pkill -INT -x camera-box 2>/dev/null; \
-   sleep 3; pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -9 -x camera-box 2>/dev/null; true"
+  "pkill -INT -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -INT -x camera-box 2>/dev/null; \
+   sleep 3; pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -9 -x camera-box 2>/dev/null; true"
 
 # Download the cam2 painter ground-truth CSV (tick,gen_ts_ns) for the honest cam→strih
 # optical assessment. (cam2→cam1 latency no longer needs it — #179 reads cam2's paint-ts
