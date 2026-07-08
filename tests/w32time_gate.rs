@@ -7,10 +7,11 @@
 //! but until this gate that was a manual, unverified invariant.
 //!
 //! Mirrors `tests/dantesync_gate.rs`'s shape: `run_sourced` exercises the pure verdict/extraction
-//! functions directly; `run_gate`/`run_gate_env` drive the actual gate SCRIPT end-to-end over
+//! functions directly; `run_gate` drives the actual gate SCRIPT end-to-end over
 //! `--win-status NAME=FILE` fixture files — the same offline fixture-injection seam #608 added
 //! for dantesync-gate.sh's Linux path, applied here to the ENTIRE Windows-only gate (ssh to
-//! Windows is denied, so this gate is offline-fixture-only, with no live-SSH branch at all).
+//! Windows is denied, so this gate is offline-fixture-only, with no env-var/live-SSH branch at
+//! all — unlike dantesync-gate.sh's Linux path, there is no `run_gate_env` here).
 //!
 //! Fixture text for the OK cases is the REAL output live-probed on strih and stream via the
 //! win-* MCP on 2026-07-08 (both already fixed: STOPPED + DISABLED). The FAIL-case fixtures use
@@ -202,6 +203,85 @@ fn gate_ok_when_running_but_source_is_local_cmos_clock_not_a_real_peer() {
         "a RUNNING W32Time with only a local/free-running Source must be OK. \
          stdout={stdout} stderr={stderr}"
     );
+}
+
+#[test]
+fn gate_ok_when_running_as_allsync_with_a_confirmed_local_source() {
+    // Same shape as the NTP sibling test above, for AllSync: RUNNING + Type=AllSync but a
+    // CONFIRMED-local Source ("Local CMOS Clock") must be ok, not FAIL -- AllSync is a syncing
+    // type, but it isn't actually pulling from anywhere real right now.
+    let fixture = running_ntp_client_fixture("Local CMOS Clock")
+        .replace("Type    REG_SZ    NTP\n", "Type    REG_SZ    AllSync\n");
+    let p = write_status("strih_allsync_local_source", &fixture);
+    let (code, stdout, stderr) = run_gate(&["--win-status", &format!("strih={}", p.display())]);
+    assert_eq!(
+        code, 0,
+        "RUNNING+AllSync with only a local/free-running Source must be OK. \
+         stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+fn gate_unknown_when_running_with_an_unrecognized_reg_type() {
+    // RUNNING + a real external Source, but the Type registry value is neither a known syncing
+    // type NOR a confirmed NoSync (a garbled/truncated capture) -- must be UNKNOWN, never silently
+    // "ok" the way a genuinely-confirmed NoSync would be. This is the demonstrated live gap a
+    // review pass found: a garbled Type used to fall through identically to NoSync.
+    let fixture = running_ntp_client_fixture("pool.ntp.org,0x9")
+        .replace("Type    REG_SZ    NTP\n", "Type    REG_SZ    Gxrbled\n");
+    let p = write_status("strih_running_garbled_type", &fixture);
+    let (code, stdout, stderr) = run_gate(&["--win-status", &format!("strih={}", p.display())]);
+    assert_eq!(
+        code, 11,
+        "RUNNING with an unrecognized Type must be UNKNOWN/INCOMPLETE (11), never a silent PASS \
+         (the box could genuinely be syncing to a real external Source). stdout={stdout} \
+         stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+}
+
+#[test]
+fn gate_unknown_when_auto_start_with_an_unrecognized_reg_type() {
+    // Same class as above, in the not-running/latent branch: AUTO_START + a garbled Type must be
+    // UNKNOWN, never silently "ok".
+    let fixture = "SERVICE_NAME: w32time\n\
+        STATE              : 1  STOPPED\n\
+[SC] QueryServiceConfig SUCCESS\n\
+        START_TYPE         : 2   AUTO_START\n\
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters\n\
+    Type    REG_SZ    Gxrbled\n\
+The following error occurred: The service has not been started. (0x80070426)\n";
+    let p = write_status("stream_auto_start_garbled_type", fixture);
+    let (code, _o, stderr) = run_gate(&["--win-status", &format!("stream={}", p.display())]);
+    assert_eq!(
+        code, 11,
+        "AUTO_START with an unrecognized Type must be UNKNOWN/INCOMPLETE (11), never a silent \
+         PASS. stderr: {stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+}
+
+#[test]
+fn w32time_reg_type_known_accepts_only_the_four_real_values() {
+    let cases = [
+        ("NTP", "yes"),
+        ("NT5DS", "yes"),
+        ("NoSync", "yes"),
+        ("AllSync", "yes"),
+        ("", "no"),
+        ("Gxrbled", "no"),
+    ];
+    for (reg_type, want) in cases {
+        let out = run_sourced(
+            "w32time_reg_type_known \"$R\" && echo yes || echo no",
+            &[("R", reg_type)],
+        );
+        assert_eq!(
+            out.trim(),
+            want,
+            "w32time_reg_type_known({reg_type:?}) must be {want}: {out:?}"
+        );
+    }
 }
 
 #[test]

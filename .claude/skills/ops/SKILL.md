@@ -121,18 +121,21 @@ package must be **PURGED**. Enforcement (all landed #591):
 on the Windows OBS boxes too; the built-in Windows Time service (`W32Time`) must be **Stopped +
 Disabled** (already fixed live fleet-wide 2026-07-07). `scripts/w32time-gate.sh` +
 `scripts/lib/w32time-authority.sh` now assert this automatically: FAIL if W32Time is RUNNING as an
-active NTP/NT5DS client syncing to a real external Source, OR (mirroring #591's "masking is not
-enough" philosophy) if it is merely stopped right now but START_TYPE is AUTO_START with an
-NTP/NT5DS Type (a latent 2nd authority that would resurrect on the next reboot). OK if
-disabled/stopped (regardless of any leftover Type value) or Type=NoSync.
+active NTP/NT5DS/AllSync client syncing to a real external Source, OR (mirroring #591's "masking
+is not enough" philosophy) if it is merely stopped right now but START_TYPE is AUTO_START with an
+NTP/NT5DS/AllSync Type (a latent 2nd authority that would resurrect on the next reboot). OK if
+disabled/stopped (regardless of any leftover Type value) or Type=NoSync. UNKNOWN — never a silent
+"ok" — on anything unreadable/unrecognized: an unknown STATE/START_TYPE, or a Type value that is
+neither one of the four real registry values (NTP/NT5DS/NoSync/AllSync) nor readable at all.
 `w32time_gather_remote_snippet()` is the exact READ-ONLY command block to run per box via the
-`win-*` MCP `Shell` (`cmd /c "sc query w32time"` + `cmd /c "sc qc w32time"` +
-`reg query HKLM\SYSTEM\CurrentControlSet\Services\W32Time\Parameters /v Type` +
-`w32tm /query /status`, each piped through `cmd /c ... | Out-String -Width 300` for `sc`/`reg`
-because the bare PowerShell-native `sc.exe` invocation returned EMPTY output over the win-* MCP
-Shell in a live 2026-07-08 probe of both boxes). Write each box's combined output to a file and
-pass `--win-status NAME=FILE` (mirrors `scripts/dantesync-gate.sh`'s own convention exactly — ssh
-to Windows is denied, so this gate is offline-fixture-file-only, no live-SSH branch). A box with no
+`win-*` MCP `Shell`: `cmd /c "sc query w32time" | Out-String -Width 300` +
+`cmd /c "sc qc w32time" | Out-String -Width 300` (both routed through `cmd /c` because the bare
+PowerShell-native `sc.exe` invocation returned EMPTY output over the win-* MCP Shell in a live
+2026-07-08 probe of both boxes) + a PLAIN (no `cmd /c` wrapper needed)
+`reg query HKLM\SYSTEM\CurrentControlSet\Services\W32Time\Parameters /v Type | Out-String -Width 300`
++ `w32tm /query /status`. Write each box's combined output to a file and pass `--win-status
+NAME=FILE` (mirrors `scripts/dantesync-gate.sh`'s own convention exactly — ssh to Windows is
+denied, so this gate is offline-fixture-file-only, no live-SSH branch). A box with no
 status file is UNKNOWN, never a silent pass. Live 2026-07-08 readings (both already fixed, both
 PASS): strih `STATE=STOPPED START_TYPE=DISABLED Type=NoSync`, stream `STATE=STOPPED
 START_TYPE=DISABLED Type=NTP` (a harmless leftover config value — DISABLED means it can never run

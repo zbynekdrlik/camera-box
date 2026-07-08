@@ -69,6 +69,16 @@ w32time_running() {
 # silently assume "won't autostart" (the same fail-closed discipline w32time_state_known applies
 # to STATE, extended to START_TYPE — a review finding, #598: an unreadable START_TYPE used to fall
 # through to "not autostart" -> "ok", which could silently pass a box that actually IS AUTO_START).
+#
+# NOTE (review finding, #598): this function's job is "is START_TYPE one of the four real ENUM
+# values at all" (completeness of the known set), which is a DIFFERENT question from
+# w32time_autostarts()'s "does this value BEHAVE like autostart" -- so it deliberately keeps the
+# exact-literal `'AUTO_START(DELAYED)'` arm even though w32time_autostarts() removed the identical
+# literal as dead code. It is unreachable via w32time_start_type_from_text() today for the SAME
+# reason (that extractor's character class stops at the first space, so a real delayed-auto-start
+# line is always captured as plain "AUTO_START"), but keeping it here documents the full real
+# Windows enum rather than only what today's extractor happens to produce -- if the extractor is
+# ever tightened to preserve the "(DELAYED)" suffix, this function needs no change.
 w32time_start_type_known() {
   case "$(printf '%s' "$1" | tr -d '[:space:]')" in
     AUTO_START | 'AUTO_START(DELAYED)' | DEMAND_START | DISABLED) return 0 ;;
@@ -92,13 +102,28 @@ w32time_autostarts() {
   esac
 }
 
+# w32time_reg_type_known REG_TYPE -> 0 iff REG_TYPE is one of the four real
+# W32Time\Parameters\Type registry values (NTP / NT5DS / NoSync / AllSync). Anything else (empty,
+# garbled, a truncated capture) is NOT known -- the caller must grade that as UNKNOWN, never
+# silently treat it the same as a confirmed NoSync (a review finding, #598: a non-empty but
+# UNRECOGNIZED reg_type used to fall through to "not a syncing type" -> "ok" in BOTH the RUNNING
+# and latent-AUTO_START branches, identically to a genuinely-confirmed NoSync -- demonstrated
+# live: STATE=RUNNING + a garbled Type + a real external Source still printed GATE PASS).
+w32time_reg_type_known() {
+  case "$(printf '%s' "$1" | tr -d '[:space:]')" in
+    NTP | NT5DS | NoSync | AllSync) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # w32time_syncing_type REG_TYPE -> 0 iff REG_TYPE (the W32Time\Parameters\Type registry value) is
 # a mode that actively pulls time FROM an external/domain source -- NTP (manual peer(s)), NT5DS
 # (domain-hierarchy client), or AllSync (uses EVERY available provider, i.e. a superset that
 # includes external NTP peers too -- a review finding, #598: the original set omitted AllSync even
 # though this file's own header documents it as a real `reg query` value, which would have let a
 # RUNNING+AllSync+real-Source box silently pass as "ok"). NoSync (never syncs) and anything
-# unrecognised are NOT this.
+# unrecognised are NOT this -- callers that need to distinguish "confirmed NoSync" from "unreadable
+# garbage" must check w32time_reg_type_known() FIRST (w32time_daemon_verdict does).
 w32time_syncing_type() {
   case "$(printf '%s' "$1" | tr -d '[:space:]')" in
     NTP | NT5DS | AllSync) return 0 ;;
@@ -137,14 +162,18 @@ w32time_source_is_real() {
 # reboot (the same "masking is not enough" class #591 already treats as a hard FAIL on Linux).
 # UNKNOWN (never silently "ok" — test-strictness, a review-hardened list, #598):
 #   * STATE itself is unreadable.
-#   * W32Time is RUNNING but its Type could not be read at all (cannot certify it is inert).
+#   * W32Time is RUNNING but its Type could not be read AT ALL, OR was read but is not one of the
+#     four real registry values (garbled/truncated) -- a review finding, #598: a non-empty but
+#     UNRECOGNIZED Type used to fall through identically to a confirmed NoSync ("not a syncing
+#     type") -> "ok", so a genuinely-syncing box with a corrupted Type capture silently passed.
 #   * W32Time is RUNNING, its Type IS a syncing type (NTP/NT5DS/AllSync), but its Source could not
 #     be read at all (empty) -- this is NOT the same as a CONFIRMED-local Source ("Local CMOS
 #     Clock"): one means "we don't know", the other means "we checked and it's definitely inert".
 #   * W32Time is not running, but its START_TYPE could not be read at all -- we cannot rule out
 #     AUTO_START, so we cannot certify it won't resurrect on the next reboot.
 #   * W32Time is not running, START_TYPE is a known AUTO_START-class value, but Type could not be
-#     read at all -- we know it will start itself, but not whether it will actually sync anywhere.
+#     read AT ALL or is unrecognized -- we know it will start itself, but not whether it will
+#     actually sync anywhere.
 # OK: everything else -- in particular, disabled/stopped with no Type risk, or Type=NoSync.
 w32time_daemon_verdict() {
   local state="$1" start_type="$2" reg_type="$3" source="$4"
@@ -163,8 +192,9 @@ w32time_daemon_verdict() {
   # NTP box with a benign (non-real) Source fell through into the latent check and was wrongly
   # FAILed even though it is not, right now, syncing from anywhere real.
   if w32time_running "$state"; then
-    if [ -z "$reg_type" ]; then
-      printf 'UNKNOWN: W32Time is RUNNING but its Type registry value is unreadable -- cannot certify it is inert\n'
+    if ! w32time_reg_type_known "$reg_type"; then
+      printf 'UNKNOWN: W32Time is RUNNING but its Type registry value is unreadable/unrecognized (%s) -- cannot certify it is inert\n' \
+        "${reg_type:-<empty>}"
       return 0
     fi
     if w32time_syncing_type "$reg_type"; then
@@ -187,17 +217,17 @@ w32time_daemon_verdict() {
 
   # Not running right now: the only remaining risk is LATENT -- it will resurrect as a competing
   # authority on the next reboot. An unreadable START_TYPE can never be assumed "not autostart",
-  # and an AUTO_START box with an unreadable Type can never be assumed "won't actually sync" --
-  # both default to UNKNOWN, mirroring the RUNNING branch's own fail-closed handling above.
+  # and an AUTO_START box with an unreadable/unrecognized Type can never be assumed "won't actually
+  # sync" -- both default to UNKNOWN, mirroring the RUNNING branch's own fail-closed handling above.
   if ! w32time_start_type_known "$start_type"; then
     printf 'UNKNOWN: W32Time is not running, but its START_TYPE is unreadable (%s) -- cannot certify it will not resurrect on the next reboot\n' \
       "${start_type:-<empty>}"
     return 0
   fi
   if w32time_autostarts "$start_type"; then
-    if [ -z "$reg_type" ]; then
-      printf 'UNKNOWN: W32Time start type is %s but its Type registry value is unreadable -- cannot certify it will not sync on the next reboot\n' \
-        "$start_type"
+    if ! w32time_reg_type_known "$reg_type"; then
+      printf 'UNKNOWN: W32Time start type is %s but its Type registry value is unreadable/unrecognized (%s) -- cannot certify it will not sync on the next reboot\n' \
+        "$start_type" "${reg_type:-<empty>}"
       return 0
     fi
     if w32time_syncing_type "$reg_type"; then
