@@ -384,3 +384,70 @@ fn create_usb_purges_timesyncd_from_the_base_image() {
          freshly-imaged box never ships a 2nd timesync daemon (#591)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #597 — linuxptp (ptp4l/phc2sys) is a 2nd class of competing timesync authority: a rogue PTP
+// daemon would fight dantesync's OWN PTP servo directly on this PTP rig. Unlike the #591 NTP
+// daemons (where dpkg package name == systemd unit name, so one `for _ts in ...` loop suffices),
+// linuxptp's dpkg PACKAGE is "linuxptp" but its systemd UNITS are "ptp4l" and "phc2sys" -- so the
+// purge needs its own stanza with the package-vs-unit split modelled correctly (there is no
+// "ptp4l" or "phc2sys" apt package to purge; there is no "linuxptp" systemd unit to mask).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_purges_linuxptp_ptp4l_phc2sys() {
+    let body = read_script();
+    assert!(
+        body.contains("ptp4l") && body.contains("phc2sys"),
+        "setup-device.sh must name both linuxptp units (ptp4l, phc2sys) in its #597 purge stanza \
+         -- a rogue PTP daemon fights dantesync's own PTP servo directly"
+    );
+    assert!(
+        on_noncomment_line(&body, "apt-get purge -y linuxptp"),
+        "setup-device.sh must `apt-get purge` the linuxptp PACKAGE (#597) -- its dpkg name \
+         differs from its unit names (ptp4l/phc2sys), so it cannot reuse the #591 `for _ts in ...` \
+         loop and needs a purge line of its own. dantesync is a standalone binary \
+         (/usr/local/bin/dantesync) with no dependency on the linuxptp package"
+    );
+    assert_eq!(
+        body.lines()
+            .filter(|l| l.contains("systemctl mask") && !l.trim_start().starts_with('#'))
+            .count(),
+        2,
+        "expected exactly 2 `systemctl mask` sites: the #591 shared `\"$_ts\"`/`\"$_u\"` loop \
+         masks, plus the #597 linuxptp unit(s) backstop -- got a different count, check for a \
+         missing or duplicated mask stanza"
+    );
+}
+
+#[test]
+fn setup_device_linuxptp_purge_runs_before_installing_dantesync() {
+    // Same ordering guarantee as the #591 NTP-daemon purge: remove every competing clock BEFORE
+    // installing dantesync as the sole authority.
+    let body = read_script();
+    let purge_idx = first_noncomment_idx(&body, "apt-get purge -y linuxptp")
+        .expect("the #597 linuxptp purge must be present");
+    let dantesync_idx = first_noncomment_idx(&body, "-o /usr/local/bin/dantesync")
+        .expect("the dantesync download (install action) must be present");
+    assert!(
+        purge_idx < dantesync_idx,
+        "the linuxptp purge (line {purge_idx}) must run before the dantesync install (line \
+         {dantesync_idx}) (#597)"
+    );
+}
+
+#[test]
+fn create_usb_purges_linuxptp() {
+    // Mirrors create_usb_purges_timesyncd_from_the_base_image, but for linuxptp (#597): a freshly
+    // imaged box must never ship a 2nd PTP authority any more than a 2nd NTP one.
+    let body = read_usb_script();
+    assert!(
+        body.contains("ptp4l") && body.contains("phc2sys") && body.contains("linuxptp"),
+        "create-usb-linux.sh must purge/mask linuxptp (ptp4l/phc2sys) in the chroot (#597), \
+         mirroring the #591 NTP-daemon purge"
+    );
+    assert!(
+        on_noncomment_line(&body, "apt-get purge -y linuxptp"),
+        "create-usb-linux.sh must `apt-get purge` the linuxptp package from the base image (#597)"
+    );
+}
