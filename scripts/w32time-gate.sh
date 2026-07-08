@@ -18,6 +18,16 @@
 # dantesync-gate.sh already uses for strih/stream. A box with NO status file is UNKNOWN -> the
 # gate fails (never a silent pass).
 #
+# SCOPE — this gate covers ONLY the "W32Time is not a 2nd authority" half of the invariant. The
+# ORIGINAL #598 issue text also asked to verify "dantesync (dantesync service + tray) is running"
+# on strih/stream. That half is intentionally NOT duplicated here: scripts/dantesync-gate.sh (#7)
+# already asserts it, on every recording-E2E run, via the SAME --win-status NAME=FILE convention —
+# a strih/stream box with no reachable dantesync named-pipe status produces an empty/missing
+# status file there too, which that gate already grades UNKNOWN (never a silent pass). Run BOTH
+# gates together against the same boxes for the full "dantesync up AND W32Time not competing"
+# invariant; adding a second, independent dantesync-liveness check here would just be a driftable
+# duplicate of #7's own check.
+#
 # Usage:
 #   w32time-gate.sh --win-status strih=/tmp/w32time-strih.txt --win-status stream=/tmp/w32time-stream.txt
 #   w32time-gate.sh --help

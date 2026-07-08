@@ -63,31 +63,55 @@ w32time_running() {
   [ "$(printf '%s' "$1" | tr -d '[:space:]')" = "RUNNING" ]
 }
 
-# w32time_autostarts START_TYPE -> 0 iff START_TYPE (a trimmed `sc qc` START_TYPE word) means the
-# service starts ITSELF on the next boot with no manual trigger -- AUTO_START (2), including its
-# delayed variant. DEMAND_START (manual-only) and DISABLED never self-start, so neither counts.
+# w32time_start_type_known START_TYPE -> 0 iff START_TYPE (a trimmed `sc qc` START_TYPE word) is
+# one of the real Win32-service start types applicable to a share-process service like W32Time.
+# Anything else (empty, garbled) is NOT known -- the caller must grade that as UNKNOWN, never
+# silently assume "won't autostart" (the same fail-closed discipline w32time_state_known applies
+# to STATE, extended to START_TYPE — a review finding, #598: an unreadable START_TYPE used to fall
+# through to "not autostart" -> "ok", which could silently pass a box that actually IS AUTO_START).
+w32time_start_type_known() {
+  case "$(printf '%s' "$1" | tr -d '[:space:]')" in
+    AUTO_START | 'AUTO_START(DELAYED)' | DEMAND_START | DISABLED) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# w32time_autostarts START_TYPE -> 0 iff START_TYPE means the service starts ITSELF on the next
+# boot with no manual trigger -- AUTO_START (2), including its delayed variant. DEMAND_START
+# (manual-only) and DISABLED never self-start, so neither counts. The glob `AUTO_START*` (rather
+# than an exact `'AUTO_START(DELAYED)'` literal) is deliberate: w32time_start_type_from_text's own
+# character class stops at the first space, so a real "AUTO_START  (DELAYED)" `sc qc` line is
+# ALWAYS captured as plain "AUTO_START" today -- an exact-literal case arm for the delayed form was
+# dead code no fixture could ever reach (a review finding, #598). The glob still correctly matches
+# plain "AUTO_START" and stays forward-compatible if the extractor is ever tightened to preserve
+# the "(DELAYED)" suffix.
 w32time_autostarts() {
   case "$(printf '%s' "$1" | tr -d '[:space:]')" in
-    AUTO_START | 'AUTO_START(DELAYED)') return 0 ;;
+    AUTO_START*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 # w32time_syncing_type REG_TYPE -> 0 iff REG_TYPE (the W32Time\Parameters\Type registry value) is
-# a mode that actively pulls time FROM an external/domain source -- NTP (manual peer(s)) or NT5DS
-# (domain-hierarchy client). NoSync (never syncs) and anything unrecognised are NOT this.
+# a mode that actively pulls time FROM an external/domain source -- NTP (manual peer(s)), NT5DS
+# (domain-hierarchy client), or AllSync (uses EVERY available provider, i.e. a superset that
+# includes external NTP peers too -- a review finding, #598: the original set omitted AllSync even
+# though this file's own header documents it as a real `reg query` value, which would have let a
+# RUNNING+AllSync+real-Source box silently pass as "ok"). NoSync (never syncs) and anything
+# unrecognised are NOT this.
 w32time_syncing_type() {
   case "$(printf '%s' "$1" | tr -d '[:space:]')" in
-    NTP | NT5DS) return 0 ;;
+    NTP | NT5DS | AllSync) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# w32time_source_is_real SOURCE -> 0 iff SOURCE (the `w32tm /query /status` "Source:" line value)
-# names a genuine external/network peer: non-empty and not one of the purely-local fallback
-# references Windows itself prints when it has nothing real to sync from ("Local CMOS Clock",
-# "Free-running System Clock"). A blank/local/unreadable Source means W32Time has nothing real to
-# fight dantesync over, even if its Type says NTP/NT5DS.
+# w32time_source_is_real SOURCE -> 0 iff SOURCE (the `w32tm /query /status` "Source:" line value,
+# already CR/whitespace-trimmed by w32time_source_from_text) names a genuine external/network
+# peer: non-empty and not one of the purely-local fallback references Windows itself prints when
+# it has nothing real to sync from ("Local CMOS Clock", "Free-running System Clock"). An EMPTY
+# SOURCE is deliberately NOT "real" here, but the caller (w32time_daemon_verdict) must NOT treat
+# empty the same as a confirmed-local one — see its own UNKNOWN-on-empty-Source handling below.
 w32time_source_is_real() {
   local s
   s="$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -105,13 +129,22 @@ w32time_source_is_real() {
 #   REG_TYPE:   the W32Time\Parameters\Type registry value (e.g. "NoSync", "NTP", "NT5DS")
 #   SOURCE:     the `w32tm /query /status` "Source:" line value ("" if absent/stopped)
 #
-# FAIL (an ACTIVE 2nd clock authority): W32Time is RUNNING, its Type is NTP/NT5DS, and it reports
-# a real external Source -- it is right now pulling time from somewhere other than dantesync.
+# FAIL (an ACTIVE 2nd clock authority): W32Time is RUNNING, its Type is NTP/NT5DS/AllSync, and it
+# reports a real external Source -- it is right now pulling time from somewhere other than
+# dantesync.
 # FAIL (a LATENT 2nd clock authority): W32Time is not running now, but START_TYPE is AUTO_START
-# with an NTP/NT5DS Type -- it will come back as a competing authority on the very next reboot
-# (the same "masking is not enough" class #591 already treats as a hard FAIL on Linux).
-# UNKNOWN: STATE is unreadable (never silently graded as "not running"), or W32Time is RUNNING but
-# its Type could not be read at all (cannot certify it is inert). Neither is ever "ok".
+# with an NTP/NT5DS/AllSync Type -- it will come back as a competing authority on the very next
+# reboot (the same "masking is not enough" class #591 already treats as a hard FAIL on Linux).
+# UNKNOWN (never silently "ok" — test-strictness, a review-hardened list, #598):
+#   * STATE itself is unreadable.
+#   * W32Time is RUNNING but its Type could not be read at all (cannot certify it is inert).
+#   * W32Time is RUNNING, its Type IS a syncing type (NTP/NT5DS/AllSync), but its Source could not
+#     be read at all (empty) -- this is NOT the same as a CONFIRMED-local Source ("Local CMOS
+#     Clock"): one means "we don't know", the other means "we checked and it's definitely inert".
+#   * W32Time is not running, but its START_TYPE could not be read at all -- we cannot rule out
+#     AUTO_START, so we cannot certify it won't resurrect on the next reboot.
+#   * W32Time is not running, START_TYPE is a known AUTO_START-class value, but Type could not be
+#     read at all -- we know it will start itself, but not whether it will actually sync anywhere.
 # OK: everything else -- in particular, disabled/stopped with no Type risk, or Type=NoSync.
 w32time_daemon_verdict() {
   local state="$1" start_type="$2" reg_type="$3" source="$4"
@@ -123,32 +156,55 @@ w32time_daemon_verdict() {
   fi
 
   # RUNNING is graded ENTIRELY within this branch and never falls through to the latent-autostart
-  # check below -- a currently-RUNNING box's live behavior (active fail / unreadable Type / benign
-  # right now) is the whole story for "is it a 2nd authority THIS INSTANT"; whether it also happens
-  # to be AUTO_START is moot while it is already running (that's not a *latent* risk, it's simply
-  # covered by the active check above it). Without this early return, a RUNNING+AUTO_START+NTP box
-  # with a benign (non-real) Source fell through into the latent check and was wrongly FAILed even
-  # though it is not, right now, syncing from anywhere real.
+  # check below -- a currently-RUNNING box's live behavior (active fail / unreadable Type or Source
+  # / benign right now) is the whole story for "is it a 2nd authority THIS INSTANT"; whether it also
+  # happens to be AUTO_START is moot while it is already running (that's not a *latent* risk, it's
+  # simply covered by the active check above it). Without this early return, a RUNNING+AUTO_START+
+  # NTP box with a benign (non-real) Source fell through into the latent check and was wrongly
+  # FAILed even though it is not, right now, syncing from anywhere real.
   if w32time_running "$state"; then
     if [ -z "$reg_type" ]; then
       printf 'UNKNOWN: W32Time is RUNNING but its Type registry value is unreadable -- cannot certify it is inert\n'
       return 0
     fi
-    if w32time_syncing_type "$reg_type" && w32time_source_is_real "$source"; then
-      printf 'FAIL: W32Time is RUNNING as an active %s client syncing to "%s" -- a 2nd clock authority fighting dantesync\n' \
-        "$reg_type" "$source"
-      return 0
+    if w32time_syncing_type "$reg_type"; then
+      if w32time_source_is_real "$source"; then
+        printf 'FAIL: W32Time is RUNNING as an active %s client syncing to "%s" -- a 2nd clock authority fighting dantesync\n' \
+          "$reg_type" "$source"
+        return 0
+      fi
+      if [ -z "$source" ]; then
+        printf 'UNKNOWN: W32Time is RUNNING as a %s client but its Source could not be read -- cannot certify it is inert\n' \
+          "$reg_type"
+        return 0
+      fi
+      # else: Source was read AND is a confirmed-local placeholder ("Local CMOS Clock" /
+      # "Free-running") -- genuinely benign right now, fall through to ok.
     fi
     printf 'ok\n'
     return 0
   fi
 
   # Not running right now: the only remaining risk is LATENT -- it will resurrect as a competing
-  # authority on the next reboot.
-  if w32time_autostarts "$start_type" && w32time_syncing_type "$reg_type"; then
-    printf 'FAIL: W32Time start type is %s with Type=%s -- it will resurrect as a %s client on the next reboot even though it is not running now\n' \
-      "$start_type" "$reg_type" "$reg_type"
+  # authority on the next reboot. An unreadable START_TYPE can never be assumed "not autostart",
+  # and an AUTO_START box with an unreadable Type can never be assumed "won't actually sync" --
+  # both default to UNKNOWN, mirroring the RUNNING branch's own fail-closed handling above.
+  if ! w32time_start_type_known "$start_type"; then
+    printf 'UNKNOWN: W32Time is not running, but its START_TYPE is unreadable (%s) -- cannot certify it will not resurrect on the next reboot\n' \
+      "${start_type:-<empty>}"
     return 0
+  fi
+  if w32time_autostarts "$start_type"; then
+    if [ -z "$reg_type" ]; then
+      printf 'UNKNOWN: W32Time start type is %s but its Type registry value is unreadable -- cannot certify it will not sync on the next reboot\n' \
+        "$start_type"
+      return 0
+    fi
+    if w32time_syncing_type "$reg_type"; then
+      printf 'FAIL: W32Time start type is %s with Type=%s -- it will resurrect as a %s client on the next reboot even though it is not running now\n' \
+        "$start_type" "$reg_type" "$reg_type"
+      return 0
+    fi
   fi
 
   printf 'ok\n'
@@ -176,9 +232,12 @@ w32time_verdict_class() {
 # w32time_state_from_text TEXT -> the trimmed `sc query w32time` STATE word, "" if the STATE line
 # is absent/unparseable. Real format (live-probed on strih/stream, 2026-07-08):
 #   STATE              : 1  STOPPED
+# A single `sed -n '...p'` (no preceding `grep -oE` pre-filter) is deliberate: sed's own anchored
+# pattern already scopes the substitution to matching lines, so a separate grep step added an
+# extra forked process per call for zero behavioral difference (a review finding, #598) — verified
+# byte-identical output against every fixture in tests/w32time_gate.rs with and without the grep.
 w32time_state_from_text() {
   printf '%s\n' "$1" \
-    | grep -oE 'STATE[[:space:]]*:[[:space:]]*[0-9]+[[:space:]]+[A-Z_]+' \
     | sed -n 's/.*STATE[[:space:]]*:[[:space:]]*[0-9]\{1,\}[[:space:]]\{1,\}\([A-Z_]\{1,\}\).*/\1/p' \
     | tail -1 || true
 }
@@ -188,7 +247,6 @@ w32time_state_from_text() {
 #   START_TYPE         : 4   DISABLED
 w32time_start_type_from_text() {
   printf '%s\n' "$1" \
-    | grep -oE 'START_TYPE[[:space:]]*:[[:space:]]*[0-9]+[[:space:]]+[A-Z_()]+' \
     | sed -n 's/.*START_TYPE[[:space:]]*:[[:space:]]*[0-9]\{1,\}[[:space:]]\{1,\}\([A-Z_()]\{1,\}\).*/\1/p' \
     | tail -1 || true
 }
@@ -198,19 +256,26 @@ w32time_start_type_from_text() {
 #   Type    REG_SZ    NoSync
 w32time_reg_type_from_text() {
   printf '%s\n' "$1" \
-    | grep -oE '^[[:space:]]*Type[[:space:]]+REG_SZ[[:space:]]+[A-Za-z0-9]+' \
-    | sed -n 's/.*REG_SZ[[:space:]]\{1,\}\([A-Za-z0-9]\{1,\}\).*/\1/p' \
+    | sed -n 's/^[[:space:]]*Type[[:space:]]\{1,\}REG_SZ[[:space:]]\{1,\}\([A-Za-z0-9]\{1,\}\).*/\1/p' \
     | tail -1 || true
 }
 
-# w32time_source_from_text TEXT -> the `w32tm /query /status` "Source:" line value, "" if absent
-# (e.g. the service is stopped, so the command errors and prints no Source line at all — as
-# live-probed on both strih and stream, 2026-07-08).
+# w32time_source_from_text TEXT -> the `w32tm /query /status` "Source:" line value, CR/whitespace-
+# trimmed, "" if absent (e.g. the service is stopped, so the command errors and prints no Source
+# line at all — as live-probed on both strih and stream, 2026-07-08). The explicit `\r` strip is
+# load-bearing, not cosmetic (a review finding, #598): this file's own gather snippet routes
+# `sc query`/`sc qc` through `cmd /c ... | Out-String` because the bare PowerShell-native `sc.exe`
+# invocation returned empty output over the win-* MCP Shell — the SAME kind of console-transport
+# quirk can just as easily leave a trailing CR on `w32tm`'s own console output. An untrimmed
+# trailing `\r` rides all the way into w32time_daemon_verdict's FAIL message (embedded via `%s`)
+# and, once printed to a real terminal, snaps the cursor back to column 0 and overwrites the rest
+# of that diagnostic line — the operator reading the gate's FAIL output would see it silently
+# garbled/truncated at exactly the moment it matters most.
 w32time_source_from_text() {
   printf '%s\n' "$1" \
-    | grep -E '^Source:' \
     | sed -n 's/^Source:[[:space:]]*//p' \
-    | tail -1 || true
+    | tail -1 \
+    | tr -d '\r' || true
 }
 
 # w32time_gather_remote_snippet -> the REMOTE shell command (a string) that gathers a Windows

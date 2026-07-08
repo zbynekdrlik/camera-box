@@ -81,8 +81,14 @@ fn write_status(name: &str, text: &str) -> PathBuf {
 // key on Type alone: a DISABLED box passes regardless of its leftover Type value.
 // ---------------------------------------------------------------------------------------------
 
-const STRIH_OK_LIVE: &str = "\
-SERVICE_NAME: w32time \n\
+/// The real 2026-07-08 live-probed `sc query` + `sc qc` + `reg query` text for a STOPPED+DISABLED
+/// box, parameterized ONLY by its leftover registry Type value (the one field that differs
+/// between strih and stream) -- both boxes are otherwise byte-identical, so a single generator
+/// replaces the two near-duplicate constants a review pass flagged (#598: ~21 lines repeated for
+/// a one-word difference, the exact class `running_ntp_client_fixture` below already avoids).
+fn ok_live_fixture(reg_type: &str) -> String {
+    format!(
+        "SERVICE_NAME: w32time \n\
         TYPE               : 20  WIN32_SHARE_PROCESS  \n\
         STATE              : 1  STOPPED \n\
         WIN32_EXIT_CODE    : 1077  (0x435)\n\
@@ -102,32 +108,10 @@ SERVICE_NAME: w32time\n\
         DEPENDENCIES       : \n\
         SERVICE_START_NAME : NT AUTHORITY\\LocalService\n\
 HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters\n\
-    Type    REG_SZ    NoSync\n\
-The following error occurred: The service has not been started. (0x80070426)\n";
-
-const STREAM_OK_LIVE: &str = "\
-SERVICE_NAME: w32time \n\
-        TYPE               : 20  WIN32_SHARE_PROCESS  \n\
-        STATE              : 1  STOPPED \n\
-        WIN32_EXIT_CODE    : 1077  (0x435)\n\
-        SERVICE_EXIT_CODE  : 0  (0x0)\n\
-        CHECKPOINT         : 0x0\n\
-        WAIT_HINT          : 0x0\n\
-[SC] QueryServiceConfig SUCCESS\n\
-\n\
-SERVICE_NAME: w32time\n\
-        TYPE               : 20  WIN32_SHARE_PROCESS \n\
-        START_TYPE         : 4   DISABLED\n\
-        ERROR_CONTROL      : 1   NORMAL\n\
-        BINARY_PATH_NAME   : C:\\WINDOWS\\system32\\svchost.exe -k LocalService\n\
-        LOAD_ORDER_GROUP   : \n\
-        TAG                : 0\n\
-        DISPLAY_NAME       : Windows Time\n\
-        DEPENDENCIES       : \n\
-        SERVICE_START_NAME : NT AUTHORITY\\LocalService\n\
-HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters\n\
-    Type    REG_SZ    NTP\n\
-The following error occurred: The service has not been started. (0x80070426)\n";
+    Type    REG_SZ    {reg_type}\n\
+The following error occurred: The service has not been started. (0x80070426)\n"
+    )
+}
 
 /// A RUNNING, AUTO_START, NTP-client box actively synced to a real external peer — the standard
 /// documented `w32tm /query /status` shape with an in-LAN NTP source substituted.
@@ -169,8 +153,8 @@ Poll Interval: 1024 (17.1 mins)\n"
 #[test]
 fn gate_passes_on_the_real_live_strih_and_stream_steady_state() {
     // The ACTUAL 2026-07-08 win-* MCP probe of both boxes -- both already fixed, both must PASS.
-    let strih = write_status("strih_live_ok", STRIH_OK_LIVE);
-    let stream = write_status("stream_live_ok", STREAM_OK_LIVE);
+    let strih = write_status("strih_live_ok", &ok_live_fixture("NoSync"));
+    let stream = write_status("stream_live_ok", &ok_live_fixture("NTP"));
     let (code, stdout, stderr) = run_gate(&[
         "--win-status",
         &format!("strih={}", strih.display()),
@@ -396,6 +380,7 @@ fn w32time_verdict_class_maps_ok_fail_unknown() {
 
 #[test]
 fn extraction_parses_the_real_live_strih_fixture_fields() {
+    let fixture = ok_live_fixture("NoSync");
     let out = run_sourced(
         "w32time_state_from_text \"$T\"; \
          echo '---'; \
@@ -404,7 +389,7 @@ fn extraction_parses_the_real_live_strih_fixture_fields() {
          w32time_reg_type_from_text \"$T\"; \
          echo '---'; \
          w32time_source_from_text \"$T\"",
-        &[("T", STRIH_OK_LIVE)],
+        &[("T", &fixture)],
     );
     let parts: Vec<&str> = out.split("---\n").collect();
     assert_eq!(parts[0].trim(), "STOPPED", "state: {out:?}");
@@ -422,4 +407,150 @@ fn extraction_parses_a_running_ntp_client_fixtures_source_line() {
     let fixture = running_ntp_client_fixture("10.77.9.184");
     let out = run_sourced("w32time_source_from_text \"$T\"", &[("T", &fixture)]);
     assert_eq!(out.trim(), "10.77.9.184", "source: {out:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review-hardened cases (#598 code review, three independent passes): every one of these pins a
+// REAL gap the pure verdict/extraction logic had before the fix, not a hypothetical.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn gate_fails_when_running_as_an_allsync_client_to_a_real_source() {
+    // AllSync ("use every available time provider") is documented in this file's own header as a
+    // real `reg query` Type value alongside NTP/NT5DS, but the original w32time_syncing_type()
+    // omitted it -- a RUNNING+AllSync+real-Source box silently passed as "ok". AllSync pulls from
+    // configured NTP peers too, so it is exactly as much a 2nd authority as plain NTP.
+    // NOTE: Rust's `\`-newline string continuation strips ALL leading whitespace off the next
+    // line, so the fixture's actual bytes have NO leading spaces before "Type" despite the source
+    // indentation above looking like it does -- match without them.
+    let fixture = running_ntp_client_fixture("pool.ntp.org,0x9")
+        .replace("Type    REG_SZ    NTP\n", "Type    REG_SZ    AllSync\n");
+    assert!(
+        fixture.contains("AllSync"),
+        "fixture setup sanity: {fixture}"
+    );
+    let p = write_status("strih_allsync_active", &fixture);
+    let (code, _o, stderr) = run_gate(&["--win-status", &format!("strih={}", p.display())]);
+    assert_eq!(
+        code, 20,
+        "RUNNING+AllSync+real-Source must FAIL (20), not silently pass. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn gate_unknown_when_running_as_a_syncing_client_but_source_is_unreadable() {
+    // RUNNING + Type=NTP but NO Source line at all (distinct from "Source: Local CMOS Clock",
+    // which IS readable and IS confirmed-benign) -- we cannot certify the box is inert, so this
+    // must be UNKNOWN, never a silent "ok". Before the fix, an empty/unreadable Source was graded
+    // identically to a confirmed-local one.
+    let fixture = "SERVICE_NAME: w32time\n\
+        STATE              : 4  RUNNING\n\
+[SC] QueryServiceConfig SUCCESS\n\
+        START_TYPE         : 2   AUTO_START\n\
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters\n\
+    Type    REG_SZ    NTP\n\
+The following error occurred: some transient w32tm query failure, no Source line at all\n";
+    let p = write_status("strih_running_unreadable_source", fixture);
+    let (code, stdout, stderr) = run_gate(&["--win-status", &format!("strih={}", p.display())]);
+    assert_eq!(
+        code, 11,
+        "RUNNING+syncing-Type with an unreadable Source must be UNKNOWN/INCOMPLETE (11), never a \
+         silent PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+}
+
+#[test]
+fn gate_unknown_when_stopped_but_start_type_is_unreadable() {
+    // STATE is readable (STOPPED) but START_TYPE could not be parsed at all -- we cannot rule out
+    // AUTO_START, so this must be UNKNOWN, never a silent "ok" (the not-running-branch analogue
+    // of the RUNNING branch's own fail-closed handling).
+    let fixture = "SERVICE_NAME: w32time\n\
+        STATE              : 1  STOPPED\n\
+[SC] QueryServiceConfig SUCCESS -- but the START_TYPE line itself is missing/garbled here\n\
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters\n\
+    Type    REG_SZ    NTP\n\
+The following error occurred: The service has not been started. (0x80070426)\n";
+    let p = write_status("stream_stopped_unreadable_start_type", fixture);
+    let (code, _o, stderr) = run_gate(&["--win-status", &format!("stream={}", p.display())]);
+    assert_eq!(
+        code, 11,
+        "STOPPED with an unreadable START_TYPE must be UNKNOWN/INCOMPLETE (11), never a silent \
+         PASS. stderr: {stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+}
+
+#[test]
+fn gate_unknown_when_auto_start_but_reg_type_is_unreadable() {
+    // Not running, START_TYPE is a KNOWN autostart-class value, but the registry Type could not
+    // be parsed at all -- we know it will start itself on the next boot, but not whether it will
+    // actually sync anywhere. Must be UNKNOWN, never a silent "ok".
+    let fixture = "SERVICE_NAME: w32time\n\
+        STATE              : 1  STOPPED\n\
+[SC] QueryServiceConfig SUCCESS\n\
+        START_TYPE         : 2   AUTO_START\n\
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters -- Type value missing/garbled here\n\
+The following error occurred: The service has not been started. (0x80070426)\n";
+    let p = write_status("stream_auto_start_unreadable_type", fixture);
+    let (code, _o, stderr) = run_gate(&["--win-status", &format!("stream={}", p.display())]);
+    assert_eq!(
+        code, 11,
+        "AUTO_START with an unreadable Type must be UNKNOWN/INCOMPLETE (11), never a silent \
+         PASS. stderr: {stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+}
+
+#[test]
+fn extraction_strips_a_trailing_carriage_return_from_the_source_line() {
+    // This file's own gather snippet documents that `sc query`/`sc qc` had to be routed through
+    // `cmd /c ... | Out-String` because the bare PowerShell-native invocation returned EMPTY
+    // output over the win-* MCP Shell -- the same console-transport quirk can just as easily leave
+    // a trailing CR on w32tm's own console output. An untrimmed \r would ride into the printed
+    // FAIL diagnostic and corrupt the operator's terminal output (verified: printing a string
+    // containing a bare \r resets the cursor to column 0 on any real terminal).
+    let fixture = "Source: pool.ntp.org,0x9\r\nPoll Interval: 1024 (17.1 mins)\r\n";
+    let out = run_sourced(
+        "w32time_source_from_text \"$T\" | xxd | head -1",
+        &[("T", fixture)],
+    );
+    assert!(
+        !out.contains("0d"),
+        "extracted Source must not contain a trailing \\r (hex 0d): {out}"
+    );
+    let out2 = run_sourced("w32time_source_from_text \"$T\"", &[("T", fixture)]);
+    assert_eq!(
+        out2.trim_end_matches('\n'),
+        "pool.ntp.org,0x9",
+        "source: {out2:?}"
+    );
+}
+
+#[test]
+fn w32time_syncing_type_recognizes_allsync() {
+    let out = run_sourced("w32time_syncing_type AllSync && echo yes || echo no", &[]);
+    assert_eq!(out.trim(), "yes", "AllSync must be a syncing type: {out:?}");
+}
+
+#[test]
+fn w32time_start_type_known_rejects_empty_and_garbage() {
+    let cases = [
+        ("AUTO_START", "yes"),
+        ("DEMAND_START", "yes"),
+        ("DISABLED", "yes"),
+        ("", "no"),
+        ("GARBAGE", "no"),
+    ];
+    for (start_type, want) in cases {
+        let out = run_sourced(
+            "w32time_start_type_known \"$S\" && echo yes || echo no",
+            &[("S", start_type)],
+        );
+        assert_eq!(
+            out.trim(),
+            want,
+            "w32time_start_type_known({start_type:?}) must be {want}: {out:?}"
+        );
+    }
 }
