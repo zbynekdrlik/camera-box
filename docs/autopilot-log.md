@@ -2480,3 +2480,41 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   tool built on-demand for E2E runs, not a persistently-running daemon on any rig box.
 - Playbook: added a `.claude/skills/e2e/SKILL.md` note on the sliding-window-density pattern
   (whole-window vs localized dilution) for future orthogonal-detector work on this gate.
+
+## 2026-07-08 — #598 Windows W32Time verify-gate for strih+stream (PR #621, v1.7.0-dev.298)
+
+- New files: `scripts/lib/w32time-authority.sh` (pure verdict/extraction functions) +
+  `scripts/w32time-gate.sh` (CLI flow, mirrors `dantesync-gate.sh`'s `--win-status NAME=FILE`
+  convention). Verdict: FAIL if W32Time is RUNNING as an active NTP/NT5DS/AllSync client with a
+  real external Source, OR not-running-but-AUTO_START with a syncing Type (latent risk, mirrors
+  #591's "masking is not enough"). UNKNOWN (never silent "ok") on anything unreadable/unrecognized
+  — STATE, START_TYPE, or a Type value outside the four real registry values.
+- RED `8ef9db813` (16/16 tests fail — script doesn't exist), GREEN `b2efc0a79`.
+- Three parallel review agents (10 finder angles) + one deep `requesting-code-review` pass found
+  real gaps across two follow-up commits (`7a901b444`, `c771f0218`): a missing `AllSync` case, a
+  CRLF-trimming bug in Source extraction that could garble terminal output (this repo's
+  win-*-MCP-console-capture quirk, same class as the `sc.exe`/`cmd /c` transport fix), dead code
+  (`AUTO_START(DELAYED)`), redundant `grep -oE` pre-filters, duplicated test fixtures, and —
+  found only by the deep second pass — an unrecognized-but-non-empty `reg_type` silently falling
+  through to "ok" identically to a confirmed `NoSync` in BOTH the active and latent branches (live
+  demonstrated: a garbled Type + a real external Source still printed GATE PASS). All fixed;
+  27 tests total (up from 16).
+- Live-verified against the REAL strih+stream rig via win-* MCP (2026-07-08, not just fixtures):
+  `GATE PASS — 2 box(es) confirmed W32Time is not a (current or latent) 2nd clock authority`
+  both before AND after the hardening (strih `STATE=STOPPED START_TYPE=DISABLED Type=NoSync`,
+  stream `STATE=STOPPED START_TYPE=DISABLED Type=NTP` — a harmless leftover value).
+- Scope decision: the gate covers ONLY "W32Time is not a 2nd authority" — the original issue's
+  "dantesync is running" half is already covered by the existing `dantesync-gate.sh` (#7) via the
+  identical `--win-status` convention; documented in both file headers rather than duplicating a
+  driftable second dantesync-liveness check.
+- PR #621, merge commit `4076f4e44`; main CI green (Lint/Test/Coverage/Build/Windows-probe/
+  Drift-Guard/Shellcheck/Security/Python-harness all pass; Mutation Testing on-demand only). No
+  deploy target applies — this is a CLI verify-gate invoked ad-hoc via the win-* MCP + an operator,
+  not a persistently-running daemon on any rig box; live rig re-verification (above) is the
+  functional verification.
+- Filed #622 (extract the `--win-status NAME=FILE` arg-parse block shared with `dantesync-gate.sh`
+  — touches an out-of-diff, already-merged, already-used production script; deliberately deferred).
+- Playbook: updated `.claude/skills/ops/SKILL.md`'s stale "W32Time verify-gate is a FOLLOW-UP"
+  note to describe the real gate; added two reusable gotchas (win-* MCP console-capture CRLF;
+  Rust `\`-continuation silently stripping a fixture's next-line leading whitespace) in a
+  follow-up docs-only commit (`2481317e9`, riding on `dev` for the next PR to carry to `main`).
