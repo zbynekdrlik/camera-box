@@ -778,3 +778,36 @@ are POSIX (no `_GNU_SOURCE` needed) but the affinity side is GNU. De-risk the ~8
 `linux-genlock.yml` build FIRST by compiling the added helpers standalone: `cc -std=c11 -Wall -Wextra
 -D_GNU_SOURCE helpers.c -lpthread` with `blog`/`LOG_*` stubbed (caught 0 issues here, but the
 pattern turns a 30-min CI miss into a 2-second local one).
+
+## #286 — emitted genlock timecode must key on CAPTURE instant, not ARRIVAL (root A/V-cut cause)
+
+The camera-box appliance used to stamp its emitted NDI genlock timecode from `wall_clock_ns()` read
+at NDI-SEND time (arrival), not from when the V4L2 buffer was actually captured. Each grabber
+card's own photon→dequeue latency (`d_X`, real and per-card — #624 measured cam1/cam3 ~70ms vs
+cam4 ~56ms, a 15.78ms spread) then leaks straight into the stamp. A genlock receiver that aligns
+FIFO release on stamp-time cannot equalize that real hardware skew — cutting between cameras
+visibly shifts perceived video timing (the root cause behind repeated A/V-cut complaints).
+
+**Fix (`src/genlock_stamp.rs`, pure Tier-0):** `capture_realtime_100ns(capture_monotonic_100ns,
+mono_to_real_offset_100ns)` converts the V4L2 buffer's OWN kernel `CLOCK_MONOTONIC` timestamp
+(`metadata.timestamp`, assumed `TIMESTAMP_MONOTONIC` per the V4L2 default — not runtime-verified
+against `metadata.flags`, a known non-blocking gap) to wall-clock via a periodically-resampled
+mono→real offset, then `genlock_emit_timecode_100ns` keys the emitted boundary decision on THAT
+value, discarding arrival time entirely (kept only as an unused diagnostic argument for a future
+`stamp_arrival_divergence_100ns` wire-up — not yet called from production code, see its doc
+comment).
+
+**Critical distinction — #286 fixes the STAMP, not the hardware latency itself.** The receiver's
+genlock FIFO reserve (`genlock_latency_ms_src`, the DistroAV per-source "Latency (ms)" setting,
+floor 3ms) must ALSO be raised to ≥ the measured cross-camera spread for the corrected timecode to
+actually get USED to equalize cameras — the FIFO can only hold the faster camera's frame long
+enough to wait for the slower one if its reserve window is wide enough. Fixing the stamp without
+raising the receiver reserve changes nothing observable.
+
+**Proving cross-camera alignment visually:** a SINGLE screenshot of strih's Multiview projector
+window (NOT sequential per-source `GetSourceScreenshot` calls — those sample different real-world
+instants and are invalid) captures every camera tile's rendered content at the SAME instant. Focus
++ resize the "Projector - Multiview" window via the win-* MCP `FocusWindow`/`App(resize)` first (a
+`SetForegroundWindow`-blocked focus attempt is fixed by `MinimizeAll` then retrying `FocusWindow`)
+— the projector defaults to a tiny (~742×461) floating window whose tiles are too small to read a
+QR tick at native size otherwise.
