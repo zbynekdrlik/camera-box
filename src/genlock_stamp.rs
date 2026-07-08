@@ -40,12 +40,12 @@ pub fn genlock_emit_timecode_100ns(
     arrival_realtime_100ns: i64,
     fps: i64,
 ) -> i64 {
-    // #286 STUB (pre-fix, bug-mirror): keys on ARRIVAL, exactly as the production path does
-    // today (`ndi::send_frame_data` / `boundary_timecode_100ns` read `get_wall_clock_100ns()`
-    // at send). The tests below lock the required CAPTURE-based behavior and fail against this
-    // stub (RED); the fix flips the basis to `capture_realtime_100ns` (GREEN).
-    let _ = capture_realtime_100ns;
-    crate::ndi::next_boundary_100ns(arrival_realtime_100ns, fps)
+    // #286 FIX: key the emitted timecode on the real CAPTURE instant so each grabber card's
+    // photon->dequeue latency d_X does NOT leak into the stamp — two cameras that filmed the
+    // same real moment then emit the same timecode and the receiver genlock presents them
+    // together. `arrival` is retained only for the divergence proxy below, never the basis.
+    let _ = arrival_realtime_100ns;
+    crate::ndi::next_boundary_100ns(capture_realtime_100ns, fps)
 }
 
 /// The whole-frame divergence between where the ARRIVAL-based stamp would land and where the
