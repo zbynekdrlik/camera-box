@@ -182,8 +182,14 @@ fn gate_passes_on_the_real_live_strih_and_stream_steady_state() {
         "the real live strih+stream steady state must PASS. stdout={stdout} stderr={stderr}"
     );
     assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
-    assert!(stdout.contains("strih") && stdout.contains("OK"), "stdout: {stdout}");
-    assert!(stdout.contains("stream") && stdout.contains("OK"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("strih") && stdout.contains("OK"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("stream") && stdout.contains("OK"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -241,11 +247,12 @@ fn gate_ok_when_disabled_and_stopped_even_with_a_leftover_ntp_type() {
     // The REAL stream fixture already covers this end-to-end (Type=NTP but DISABLED+STOPPED ->
     // OK), but pin the DIRECT verdict function too since it is the core safety property: DISABLED
     // means it can never self-start, so a leftover Type value is inert.
-    let out = run_sourced(
-        "w32time_daemon_verdict STOPPED DISABLED NTP \"\"",
-        &[],
+    let out = run_sourced("w32time_daemon_verdict STOPPED DISABLED NTP \"\"", &[]);
+    assert_eq!(
+        out.trim(),
+        "ok",
+        "disabled+stopped must be ok regardless of Type: {out:?}"
     );
-    assert_eq!(out.trim(), "ok", "disabled+stopped must be ok regardless of Type: {out:?}");
 }
 
 #[test]
@@ -256,7 +263,11 @@ fn gate_ok_when_type_is_nosync_even_if_hypothetically_running() {
         "w32time_daemon_verdict RUNNING AUTO_START NoSync example.ntp.org",
         &[],
     );
-    assert_eq!(out.trim(), "ok", "NoSync must never be graded as an authority: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "ok",
+        "NoSync must never be graded as an authority: {out:?}"
+    );
 }
 
 #[test]
@@ -266,7 +277,10 @@ fn gate_incomplete_when_a_windows_status_file_is_missing() {
         "--win-status",
         "stream=/tmp/definitely-not-a-real-w32time-status.txt",
     ]);
-    assert_eq!(code, 11, "missing status -> INCOMPLETE (11). stderr: {stderr}");
+    assert_eq!(
+        code, 11,
+        "missing status -> INCOMPLETE (11). stderr: {stderr}"
+    );
     assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
 }
 
@@ -299,7 +313,10 @@ fn help_describes_the_2nd_authority_requirement() {
     let (code, stdout, _e) = run_gate(&["--help"]);
     assert_eq!(code, 0, "--help must exit 0");
     let low = stdout.to_lowercase();
-    assert!(low.contains("w32time"), "help must mention W32Time: {stdout}");
+    assert!(
+        low.contains("w32time"),
+        "help must mention W32Time: {stdout}"
+    );
     assert!(
         low.contains("dantesync"),
         "help must describe dantesync as the sole authority: {stdout}"
@@ -325,8 +342,12 @@ fn w32time_state_known_accepts_only_real_service_states() {
         ("GARBAGE", "1"),
     ];
     for (state, want_rc) in cases {
+        // `if`'s condition is exempt from `set -e` (the sourced w32time-gate.sh sets it), so this
+        // is the safe way to observe a boolean-returning function's exit code without aborting
+        // the harness on a "false" (nonzero) result -- a bare `w32time_state_known "$S"; echo $?`
+        // would kill the script on the FIRST failing case before `echo $?` ever ran.
         let out = run_sourced(
-            "w32time_state_known \"$S\"; echo $?",
+            "if w32time_state_known \"$S\"; then echo 0; else echo 1; fi",
             &[("S", state)],
         );
         assert_eq!(
@@ -339,10 +360,7 @@ fn w32time_state_known_accepts_only_real_service_states() {
 
 #[test]
 fn w32time_daemon_verdict_unknown_on_unreadable_state_never_defaults_to_ok() {
-    let out = run_sourced(
-        "w32time_daemon_verdict \"\" \"\" \"\" \"\"",
-        &[],
-    );
+    let out = run_sourced("w32time_daemon_verdict \"\" \"\" \"\" \"\"", &[]);
     assert!(
         out.trim().starts_with("UNKNOWN:"),
         "an unreadable STATE must be UNKNOWN, never ok: {out:?}"
@@ -352,10 +370,7 @@ fn w32time_daemon_verdict_unknown_on_unreadable_state_never_defaults_to_ok() {
 #[test]
 fn w32time_daemon_verdict_unknown_when_running_with_unreadable_type() {
     // RUNNING but we could not read the Type at all -- cannot certify it is inert.
-    let out = run_sourced(
-        "w32time_daemon_verdict RUNNING AUTO_START \"\" \"\"",
-        &[],
-    );
+    let out = run_sourced("w32time_daemon_verdict RUNNING AUTO_START \"\" \"\"", &[]);
     assert!(
         out.trim().starts_with("UNKNOWN:"),
         "RUNNING with unreadable Type must be UNKNOWN, never ok: {out:?}"
@@ -370,11 +385,12 @@ fn w32time_verdict_class_maps_ok_fail_unknown() {
         ("UNKNOWN: something unread", "UNKNOWN"),
     ];
     for (verdict, want) in cases {
-        let out = run_sourced(
-            "w32time_verdict_class \"$V\"",
-            &[("V", verdict)],
+        let out = run_sourced("w32time_verdict_class \"$V\"", &[("V", verdict)]);
+        assert_eq!(
+            out.trim(),
+            want,
+            "w32time_verdict_class({verdict:?}) must be {want}: {out:?}"
         );
-        assert_eq!(out.trim(), want, "w32time_verdict_class({verdict:?}) must be {want}: {out:?}");
     }
 }
 
@@ -394,7 +410,11 @@ fn extraction_parses_the_real_live_strih_fixture_fields() {
     assert_eq!(parts[0].trim(), "STOPPED", "state: {out:?}");
     assert_eq!(parts[1].trim(), "DISABLED", "start_type: {out:?}");
     assert_eq!(parts[2].trim(), "NoSync", "reg_type: {out:?}");
-    assert_eq!(parts[3].trim(), "", "source must be empty while stopped: {out:?}");
+    assert_eq!(
+        parts[3].trim(),
+        "",
+        "source must be empty while stopped: {out:?}"
+    );
 }
 
 #[test]
