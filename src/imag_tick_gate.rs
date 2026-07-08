@@ -458,30 +458,37 @@ pub fn stuck_run_stats(ticks_in_order: &[u32]) -> StuckRunStats {
 /// "not enough signal ⇒ defer" floor [`MIN_PAIRS_FOR_STUCK_DENSITY`] uses for the whole-window
 /// term, applied here per-window instead of once for the whole recording).
 ///
-/// O(n) via a running-sum slide (add the pair entering the window, drop the pair leaving it) —
-/// one boolean-stuck walk plus a single pass, never re-summing each window from scratch.
+/// O(n) time, O(window_pairs) memory — a SINGLE walk of `.windows(2)` with a fixed-capacity
+/// [`VecDeque`] ring buffer holding only the last `window_pairs` Δ0 flags (the same bounded-window
+/// pattern already used elsewhere in this codebase, e.g. `qpsk_marker`'s phase history). Unlike a
+/// naive implementation that first collects EVERY pair's flag into a `Vec<bool>` the size of the
+/// whole recording and then slides over that, this never materializes more than `window_pairs`
+/// flags at once — a `#588 review`-caught cost/simplicity nit for #604 (a 20_000-frame recording is
+/// small enough either way, but the ring buffer is genuinely the simpler single-pass form).
 pub fn max_local_stuck_density(ticks_in_order: &[u32], window_pairs: u32) -> f64 {
     if window_pairs == 0 || ticks_in_order.len() < 2 {
         return 0.0;
     }
-    let stuck: Vec<bool> = ticks_in_order
-        .windows(2)
-        .map(|pair| pair[0] == pair[1])
-        .collect();
     let window_pairs = window_pairs as usize;
-    if stuck.len() < window_pairs {
+    if ticks_in_order.len() - 1 < window_pairs {
         return 0.0;
     }
-    let mut in_window: u32 = stuck[..window_pairs].iter().filter(|&&s| s).count() as u32;
-    let mut max_in_window = in_window;
-    for i in window_pairs..stuck.len() {
-        if stuck[i] {
+    use std::collections::VecDeque;
+    let mut window: VecDeque<bool> = VecDeque::with_capacity(window_pairs);
+    let mut in_window: u32 = 0;
+    let mut max_in_window: u32 = 0;
+    for pair in ticks_in_order.windows(2) {
+        let stuck = pair[0] == pair[1];
+        window.push_back(stuck);
+        if stuck {
             in_window += 1;
         }
-        if stuck[i - window_pairs] {
+        if window.len() > window_pairs && window.pop_front() == Some(true) {
             in_window -= 1;
         }
-        max_in_window = max_in_window.max(in_window);
+        if window.len() == window_pairs {
+            max_in_window = max_in_window.max(in_window);
+        }
     }
     max_in_window as f64 / window_pairs as f64
 }
