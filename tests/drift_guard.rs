@@ -2549,6 +2549,64 @@ ntpsec||inactive|
 openntpd||inactive|";
 
 #[test]
+fn timesync_gather_remote_snippet_output_matches_what_timesync_authority_verdict_expects_596() {
+    // Code-review finding (#596): sharing timesync_gather_remote_snippet() between
+    // verify-device.sh and drift-guard.sh guarantees the two callers can't diverge FROM EACH
+    // OTHER, but nothing proved the snippet's own printf shape actually matches the
+    // `NAME|DPKG|ACTIVE|ENABLED` block timesync_authority_verdict parses -- a future edit to the
+    // daemon list or the printf format could silently break that seam with no test catching it.
+    //
+    // This EXECUTES the real snippet locally via a nested `bash -c` -- the exact same read-only
+    // `dpkg -s` / `systemctl is-active` / `is-enabled` calls the live SSH flow runs remotely
+    // (safe on any Linux CI runner: ubuntu-latest ships both dpkg and systemctl, regardless of
+    // which of these 5 packages happen to be installed) -- and feeds the REAL output straight
+    // into timesync_authority_verdict, proving the gather<->verdict seam end-to-end rather than
+    // only against hand-written Rust fixtures.
+    let body = r#"
+        snippet="$(timesync_gather_remote_snippet)"
+        gathered="$(bash -c "$snippet")"
+        printf '%s' "$gathered"
+        printf '\n---VERDICT---\n'
+        timesync_authority_verdict "$gathered"
+    "#;
+    let out = run_sourced(body, &[]);
+    let (gathered, verdict) = out
+        .split_once("---VERDICT---\n")
+        .unwrap_or_else(|| panic!("missing ---VERDICT--- marker: {out:?}"));
+    let verdict = verdict.trim();
+
+    let lines: Vec<&str> = gathered.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        5,
+        "must gather exactly the 5 competing daemons: {gathered:?}"
+    );
+    for (line, expected_name) in
+        lines
+            .iter()
+            .zip(["systemd-timesyncd", "chrony", "ntp", "ntpsec", "openntpd"])
+    {
+        let fields: Vec<&str> = line.splitn(4, '|').collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "each line must be NAME|DPKG|ACTIVE|ENABLED (4 pipe-delimited fields): {line:?}"
+        );
+        assert_eq!(
+            fields[0], expected_name,
+            "daemon name/order must match what timesync_authority_verdict iterates: {line:?}"
+        );
+    }
+    // Whatever this runner's actual daemon state happens to be, the verdict must be a real
+    // decision -- "ok" or "FAIL: <daemon> ...\n"* -- never empty, never a parse error. That
+    // proves timesync_authority_verdict can consume the snippet's REAL output end-to-end.
+    assert!(
+        verdict == "ok" || verdict.starts_with("FAIL: "),
+        "verdict must be a real ok/FAIL decision, never empty or malformed: {verdict:?}"
+    );
+}
+
+#[test]
 fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     // Full live facet, all EIGHT live-state checks match the pin -> exit 0, every line OK, no
     // DRIFT/UNKNOWN. (#531: the build-identity check moved OUT to imag_build_drift_report.)
@@ -2557,7 +2615,8 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     // #572: the log text now ALSO carries the #484 RT-pin success line, so the 7th genlock_rt_pin
     // check reads OK too — otherwise this "everything matches" case would regress to UNKNOWN.
     // #596: the 12th arg is a clean per-daemon timesync-authority block (imag-nb's own #591
-    // extension) — must ALSO read clean, or this "everything matches" case regresses to DRIFT.
+    // extension) — must ALSO read clean, or this "everything matches" case regresses to UNKNOWN
+    // (an unsupplied/empty 12th arg defaults to check #8's UNKNOWN branch, never a false DRIFT).
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
