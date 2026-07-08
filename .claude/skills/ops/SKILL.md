@@ -141,6 +141,25 @@ PASS): strih `STATE=STOPPED START_TYPE=DISABLED Type=NoSync`, stream `STATE=STOP
 START_TYPE=DISABLED Type=NTP` (a harmless leftover config value — DISABLED means it can never run
 it).
 
+**win-* MCP console-tool output can carry a trailing `\r` (#598).** Any Windows console tool
+(`sc.exe`, `reg.exe`, `w32tm.exe`, …) captured over the win-* MCP `Shell` may embed a CRLF line
+ending that survives into the captured text even after `| Out-String`. If that value is later
+`printf`'d into a diagnostic/log line, the bare `\r` snaps the terminal cursor back to column 0 and
+silently overwrites the rest of that line for a human reading it. Any parser that extracts a VALUE
+(not just a whole-line match) from win-* MCP console output should `tr -d '\r'` it before using the
+value anywhere it might get printed — see `w32time_source_from_text()` in
+`scripts/lib/w32time-authority.sh` for the pattern.
+
+**Multi-line Rust string fixtures built with `\`-newline continuation silently strip the next
+line's leading whitespace (#598).** `"foo\<newline>    bar"` in Rust yields `"foobar"`, NOT
+`"foo    bar"` — the compiler drops the newline AND every leading whitespace character on the
+continuation line, regardless of the SOURCE file's own indentation. This bit `.replace()` calls in
+`tests/w32time_gate.rs` written against what the *source* looked like indented (`"    Type
+REG_SZ    NTP\n"`), when the *actual* string value has no leading spaces at all. When editing a
+`\`-continued multi-line fixture in this repo's test files (the same pattern `dantesync_gate.rs`
+and `clock_offset_painter_gate.rs` also use), verify the ACTUAL bytes with a quick Python/grep on
+the raw source rather than trusting the visual indentation.
+
 **`timedatectl` LIES here** — reports "System clock synchronized: no / NTP inactive"
 because DanteSync disciplines the clock DIRECTLY (not via the kernel NTP path timedatectl
 watches). This trap has recurred TWICE (2026-06-15, 2026-06-17). Trust DanteSync's own
