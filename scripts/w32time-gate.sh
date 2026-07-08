@@ -41,6 +41,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/w32time-authority.sh
 . "$HERE/lib/w32time-authority.sh"
+# shellcheck source=scripts/lib/win-status-args.sh
+. "$HERE/lib/win-status-args.sh"
 
 usage() {
   cat <<EOF
@@ -86,14 +88,12 @@ main() {
   echo "   dantesync is the sole timesync authority on strih+stream (the same mandate #591 enforces on Linux)"
 
   local bad=0 unknown=0 ok=0
-  local entry name file text state start_type reg_type source verdict class
+  local entry name text state start_type reg_type source verdict class
   for entry in "${win_status[@]}"; do
-    name="${entry%%=*}"; file="${entry#*=}"
-    if [ -z "$file" ] || [ ! -s "$file" ]; then
-      printf '  %-14s UNKNOWN      (no status file %s — win-* MCP fetch missing)\n' "$name" "${file:-<none>}"
+    if ! win_status_parse_entry "$entry"; then
       unknown=$((unknown + 1)); continue
     fi
-    text="$(cat "$file" 2>/dev/null || true)"
+    name="$WIN_STATUS_NAME"; text="$WIN_STATUS_TEXT"
     state="$(w32time_state_from_text "$text")"
     start_type="$(w32time_start_type_from_text "$text")"
     reg_type="$(w32time_reg_type_from_text "$text")"

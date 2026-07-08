@@ -46,6 +46,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the shared, unit-tested DanteSync parsers (its BASH_SOURCE!=$0 guard skips its own flow).
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"
+# shellcheck source=scripts/lib/win-status-args.sh
+. "$HERE/lib/win-status-args.sh"
 
 GATE_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
 # The four measured nodes by default: the two Linux cams over SSH; strih/stream need --win-status.
@@ -188,14 +190,12 @@ main() {
   # no freshness signal to check the way the Linux path above now does -- this snapshot path is
   # left AGE-BLIND (offset_us_from_pipe_json) here. Tracked as part of #598 (Windows W32Time
   # verify-gate for strih+stream), not a new issue.
-  local entry file
+  local entry
   for entry in "${win_status[@]}"; do
-    name="${entry%%=*}"; file="${entry#*=}"
-    if [ -z "$file" ] || [ ! -s "$file" ]; then
-      printf '  %-14s UNKNOWN      (no status file %s — win-* MCP fetch missing)\n' "$name" "${file:-<none>}"
+    if ! win_status_parse_entry "$entry"; then
       unknown=$((unknown + 1)); continue
     fi
-    status="$(cat "$file" 2>/dev/null || true)"
+    name="$WIN_STATUS_NAME"; status="$WIN_STATUS_TEXT"
     offset="$(offset_us_from_pipe_json "$status")"
     ptp="$(ptp_locked_from_pipe_json "$status")"
     rc_off=0; offset_check "$name" "$offset" "$bound" || rc_off=$?
