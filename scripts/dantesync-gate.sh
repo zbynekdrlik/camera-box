@@ -17,7 +17,13 @@
 # DanteSync status and applies BOTH the offset check (NTP) and the PTP-lock check.
 #
 # NODE ACCESS (this rig):
-#   * Linux cams (cam1, cam2): journald over SSH (root/newlevel) — gathered directly here.
+#   * Linux cams (cam1, cam2): journald over SSH (root/newlevel) — gathered directly here via
+#     read_linux_node_journal(), below. Overridable per-node for tests/offline via
+#     DANTESYNC_GATE_LINUX_JOURNAL_<NAME> (NAME uppercased, e.g. DANTESYNC_GATE_LINUX_JOURNAL_CAM1)
+#     -- the SAME "caller pre-fetches the status to a file" pattern
+#     clock-offset-painter-gate.sh uses (DEV1_DANTE_JOURNAL/PAINTER_DANTE_JOURNAL, #608), keyed by
+#     node name (like --win-status NAME=FILE below) since this gate can measure MULTIPLE Linux
+#     nodes at once, unlike the painter gate's fixed dev1<->painter pair.
 #   * Windows OBS boxes (strih, stream): ssh/scp is DENIED, so this script cannot read their
 #     `\\.\pipe\dantesync` status itself. The caller (the autopilot worker / operator, who HAS
 #     the win-* MCP) writes each box's status-pipe JSON to a local file and passes it via
@@ -51,6 +57,29 @@ GATE_SSH_TIMEOUT="${CLOCK_GUARD_SSH_TIMEOUT:-8}"
 # #595 -- see dantesync_offset_verdict in clock-offset-guard.sh). Same default as
 # verify-device.sh's DANTESYNC_OFFSET_FRESHNESS_S.
 GATE_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
+
+# read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
+# or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
+# (file path; NAME uppercased, e.g. cam1 -> DANTESYNC_GATE_LINUX_JOURNAL_CAM1) -- mirrors
+# clock-offset-painter-gate.sh's read_painter_journal()/DEV1_DANTE_JOURNAL pattern (#608), so this
+# gate's Linux SSH-gather path can be proven end-to-end offline instead of only indirectly via the
+# shared dantesync_offset_verdict unit tests. Read-only; a down/absent daemon (or an unset
+# override) collapses to empty output (caller maps empty -> UNKNOWN, never a silent pass).
+read_linux_node_journal() {
+  local name="$1" ip="$2" var
+  var="DANTESYNC_GATE_LINUX_JOURNAL_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
+  if [ -n "${!var:-}" ]; then
+    cat "${!var}" 2>/dev/null || true
+    return 0
+  fi
+  # -o short-iso (+ a wider -n 400 window) so dantesync_offset_verdict can prove freshness
+  # (#550/#595) -- the age-blind offset_us_from_journal/offset_check this loop used to call could
+  # grade a stale multi-hour-old boot-STEP line as "the current offset".
+  sshpass -p "${CLOCK_GUARD_SSH_PASS}" ssh \
+    -o StrictHostKeyChecking=no -o BatchMode=no -o "ConnectTimeout=${GATE_SSH_TIMEOUT}" \
+    "${CLOCK_GUARD_SSH_USER}@${ip}" \
+    'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
+}
 
 usage() {
   cat <<EOF
@@ -123,13 +152,9 @@ main() {
   local pair
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
-    # -o short-iso (+ a wider -n 400 window) so dantesync_offset_verdict can prove freshness
-    # (#550/#595) -- the age-blind offset_us_from_journal/offset_check this loop used to call
-    # could grade a stale multi-hour-old boot-STEP line as "the current offset".
-    status="$(sshpass -p "${CLOCK_GUARD_SSH_PASS}" ssh \
-      -o StrictHostKeyChecking=no -o BatchMode=no -o "ConnectTimeout=${GATE_SSH_TIMEOUT}" \
-      "${CLOCK_GUARD_SSH_USER}@${ip}" \
-      'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true)"
+    # read_linux_node_journal (#608) is the SSH-gather seam: live over SSH, or a fixture file via
+    # DANTESYNC_GATE_LINUX_JOURNAL_<NAME> for tests/offline runs.
+    status="$(read_linux_node_journal "$name" "$ip")"
     if [ -z "$status" ]; then
       printf '  %-14s UNREACHABLE  (no DanteSync journal over SSH @ %s)\n' "$name" "$ip"
       unknown=$((unknown + 1)); continue
