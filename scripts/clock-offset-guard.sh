@@ -63,6 +63,13 @@ CLOCK_GUARD_SSH_USER="${CLOCK_GUARD_SSH_USER:-root}"
 CLOCK_GUARD_SSH_PASS="${CLOCK_GUARD_SSH_PASS:-newlevel}"
 CLOCK_GUARD_SSH_TIMEOUT="${CLOCK_GUARD_SSH_TIMEOUT:-8}"
 
+# #550/#591/#595/#607: a node's freshest "[NTP] offset:" journal line must be no older than this
+# many seconds behind its own newest journal line, or the reading is STALE and must never be
+# graded as the current offset -- see dantesync_offset_verdict() below. Mirrors the SAME knob
+# (DANTESYNC_OFFSET_FRESHNESS_S) dantesync-gate.sh (#7) and clock-offset-painter-gate.sh (#326)
+# already read, so one env var tunes the freshness window across all three callers of this file.
+CLOCK_GUARD_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
+
 # --- PURE functions (no network, no MCP — unit-tested) -------------------------------------
 
 # offset_us_from_journal TEXT -> the SIGNED microsecond offset from the LAST DanteSync
@@ -325,6 +332,33 @@ offset_check() {
   return 2
 }
 
+# offset_verdict_check LABEL JOURNAL FRESHNESS_S BOUND_US -> prints a status line; returns 0 OK /
+# 2 DRIFT / 3 UNKNOWN. The freshness-aware sibling of offset_check (#550/#591/#595/#607): it grades
+# dantesync_offset_verdict's "ok"/"drift"/"stale"/"absent" verdict instead of pairing the age-blind
+# offset_us_from_journal (tail -1) with offset_check the way this CLI's own main() loop did before
+# #607 -- dantesync-gate.sh (#7) already made this same switch for its own Linux-node loop. A
+# "stale" or "absent" verdict maps to UNKNOWN (3), NEVER a silent OK/DRIFT — a reading we could not
+# prove fresh must never be graded at all (test-strictness: no silent pass on a possibly-stale
+# value). JOURNAL must be gathered with `-o short-iso` (see query_node_journal).
+offset_verdict_check() {
+  local label="$1" journal="$2" fresh="$3" bound="$4"
+  case "$(dantesync_offset_verdict "$journal" "$fresh" "$bound")" in
+    ok)
+      printf '  %-14s OK       (fresh offset within %s us bound)\n' "$label" "$bound"
+      return 0 ;;
+    drift)
+      printf '  %-14s DRIFT    (fresh offset exceeds %s us bound)\n' "$label" "$bound"
+      return 2 ;;
+    stale)
+      printf '  %-14s UNKNOWN  (no FRESH [NTP] offset within %ss -- status incomplete, #550/#595/#607)\n' \
+        "$label" "$fresh"
+      return 3 ;;
+    *)
+      printf '  %-14s UNKNOWN  (no [NTP] offset line at all -- status incomplete)\n' "$label"
+      return 3 ;;
+  esac
+}
+
 # painter_offset_check LABEL DEV1_OFFSET_US PAINTER_OFFSET_US GUARD_US -> prints a status line;
 # returns 0 OK / 2 DRIFT / 3 UNKNOWN. This is the #326 all-cambox-sweep comparator: the sweep
 # stamps each program-switch window boundary on dev1's CLOCK_REALTIME, while the painted ticks
@@ -388,6 +422,11 @@ Default targets (Linux cameras, over SSH): ${CLOCK_GUARD_TARGETS}
 The Windows OBS boxes (strih/stream) are checked read-only via the win-* MCP tools using this
 script's shared offset_us_from_pipe_json parser.
 
+A node's offset must also be FRESH, not just in-bound: the freshest "[NTP] offset:" journal line
+must be no older than DANTESYNC_OFFSET_FRESHNESS_S (default ${CLOCK_GUARD_OFFSET_FRESHNESS_S})
+seconds behind that node's own newest journal line, or the reading is STALE -> UNKNOWN (never a
+silent pass, #550/#591/#595/#607).
+
 Exit codes: 0 = all reachable nodes within bound, 20 = DRIFT (a node exceeds the bound),
 11 = a node UNREACHABLE / offset UNKNOWN (incomplete, NOT clean), 1 = usage/IO error.
 EOF
@@ -396,8 +435,21 @@ EOF
 # query_node_journal NAME IP -> echoes the node's latest DanteSync journald lines, or returns
 # nonzero if the node is unreachable / the daemon has no output. Read-only (journalctl). Requires
 # sshpass; an unreachable node is reported by the caller as UNKNOWN, never a silent pass.
+#
+# Gathered with `-o short-iso` (+ a wider -n 400 window, #607) so dantesync_offset_verdict can
+# prove the reading is FRESH (#550/#591/#595) -- the same window this file's other two callers
+# (dantesync-gate.sh #7, clock-offset-painter-gate.sh #326) already use.
+#
+# Overridable for tests/offline via CLOCK_GUARD_JOURNAL_OVERRIDE=<file> (mirrors the
+# DEV1_DANTE_JOURNAL/PAINTER_DANTE_JOURNAL override convention in clock-offset-painter-gate.sh) --
+# every target reads the SAME override file, which is only ever exercised with a single target in
+# tests. Pure test seam: when unset (the live/default case) behavior is unchanged (#607).
 query_node_journal() {
   local ip="$2"   # $1 (name) is the caller's label; the query only needs the IP.
+  if [ -n "${CLOCK_GUARD_JOURNAL_OVERRIDE:-}" ]; then
+    cat "$CLOCK_GUARD_JOURNAL_OVERRIDE" 2>/dev/null || true
+    return 0
+  fi
   # BatchMode=no so sshpass can feed the password (BatchMode would disable password auth). Both
   # the remote journalctl and the local ssh suppress stderr: an auth failure and a down host are
   # DELIBERATELY collapsed to "empty output" here — the caller maps empty -> UNKNOWN (never a
@@ -406,7 +458,7 @@ query_node_journal() {
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${CLOCK_GUARD_SSH_TIMEOUT}" \
     "${CLOCK_GUARD_SSH_USER}@${ip}" \
-    'journalctl -u dantesync --no-pager -n 200 2>/dev/null' 2>/dev/null
+    'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null
 }
 
 main() {
@@ -442,7 +494,9 @@ main() {
     exit 1
   fi
 
-  if ! command -v sshpass >/dev/null 2>&1; then
+  # sshpass is only needed for the LIVE SSH read; CLOCK_GUARD_JOURNAL_OVERRIDE (tests/offline)
+  # skips it entirely (mirrors clock-offset-painter-gate.sh's PAINTER_DANTE_JOURNAL check, #607).
+  if [ -z "${CLOCK_GUARD_JOURNAL_OVERRIDE:-}" ] && ! command -v sshpass >/dev/null 2>&1; then
     echo "ERROR: sshpass not found — required to query the camera DanteSync offset over SSH." >&2
     exit 1
   fi
@@ -450,7 +504,8 @@ main() {
   echo "== clock-offset-guard (#8): bound ${bound} us (|offset| must stay within) =="
   echo "   master = strih (DanteSync NTP anchor + PTP servo); frame period @60fps = 16667 us"
 
-  local drift=0 unknown=0 ok=0 rc pair name ip journal offset
+  local freshness="$CLOCK_GUARD_OFFSET_FRESHNESS_S"
+  local drift=0 unknown=0 ok=0 rc pair name ip journal
   for pair in "${pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
     journal="$(query_node_journal "$name" "$ip" || true)"
@@ -459,9 +514,12 @@ main() {
       unknown=$((unknown + 1))
       continue
     fi
-    offset="$(offset_us_from_journal "$journal")"
+    # #607: grade the FRESHEST "[NTP] offset:" reading (never the age-blind tail -1 offset_check
+    # this loop used before) so a stale multi-hour-old boot-STEP line -- or a died/hung dantesync
+    # whose journal simply stopped advancing -- can never be certified as the node's current
+    # offset (the #550/#595 false-pass this CLI's own flow was still exposed to).
     rc=0
-    offset_check "$name" "$offset" "$bound" || rc=$?
+    offset_verdict_check "$name" "$journal" "$freshness" "$bound" || rc=$?
     case "$rc" in
       0) ok=$((ok + 1)) ;;
       2) drift=$((drift + 1)) ;;
