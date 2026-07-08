@@ -49,8 +49,9 @@ use camera_box::probe::recording_latency::{
     burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,
     cam2_cam1_samples_from_flip, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
     painter_internal_gen_to_flip, per_frame_latency_csv_rows, strih_stream_samples,
-    strih_stream_samples_from_stream, write_latency_csv, HopLatency, RunIds, BURN_RUN_ID_CAM1,
-    BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
+    BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
+    BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -3579,6 +3580,152 @@ fn build_and_print_verdict(
                     });
                     all_pass &= imag_overall_pass;
                 }
+
+                // #624 deliverables 1+3 — generalize the whole-recording, cam1-ONLY cam2→camera
+                // OPTICAL-INJECTION hop above (#179/#194, `full_chain.latency.cam2_cam1`, LEFT
+                // UNCHANGED) to EVERY camera-under-test node (`CAMERA_UNDER_TEST_NODES`:
+                // cam1/cam3/cam4), computed PER `--switch-schedule` window so the ALL_CAMBOX
+                // 30s-cut sweep produces a REAL per-camera number: each camera's OWN
+                // capture-time burn rides alongside cam2's optical QR only while ITS window is
+                // live (the sweep cuts each camera into strih program in turn), so
+                // `camera_burn.gen_ts_ns − cam2.gen_ts_ns`, restricted to that camera's
+                // window(s) and concatenated across every cycle the sweep repeats it, is exactly
+                // that camera's own cam2→camera latency — the #286 root-cause per-camera d_X
+                // residue. The per-camera medians then feed the hard cross-camera SPREAD gate
+                // (`camera_box::switch_latency::spread_verdict`): a differing d_X beyond half a
+                // 30fps frame (16ms) can visibly break A/V lipsync when the live program cuts
+                // between two cameras.
+                //
+                // Partition the SAME single stream recording used for the continuity sweep above
+                // into the schedule windows, anchored the SAME way (reusing `anchor_run_ids` —
+                // strih/stream burn gen_ts, falling back to the cam2 optical paint — so the two
+                // sweeps can never disagree on which window a frame belongs to). The burn
+                // exclusion list is widened to ALL FIVE reserved ids (cam1/cam3/cam4 + strih +
+                // stream) so a forwarded camera burn is never mistaken for cam2's optical QR when
+                // no anchor id was found on a frame (the continuity sweep's own 3-id `all_burns`
+                // above never needed cam3/cam4, since it never reads their payloads).
+                let latency_all_burns = [
+                    args.burn_cam1_run_id,
+                    args.burn_cam3_run_id,
+                    args.burn_cam4_run_id,
+                    args.burn_strih_run_id,
+                    args.burn_stream_run_id,
+                ];
+                let (latency_windows, latency_no_anchor) = partition_frames_by_window(
+                    stream_frames,
+                    &anchor_run_ids,
+                    &latency_all_burns,
+                    cam2_pin,
+                    &schedule,
+                    args.switch_guard_ns,
+                );
+                println!();
+                println!(
+                    "=== #624 ALL-CAMBOX per-camera cam2->camera latency ({} window(s)) ===",
+                    schedule.len()
+                );
+                let use_flip = !painter_flip_by_tick.is_empty();
+                let mut latency_json = serde_json::Map::new();
+                // Only cameras that actually produced a sample this run feed the spread gate —
+                // an absent camera (its window never in this sweep, or its burn never decoded)
+                // must never contribute a fabricated 0ms.
+                let mut measured_p50s_ms: Vec<f64> = Vec::new();
+                for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                    let own_burn = match camera {
+                        "cam1" => args.burn_cam1_run_id,
+                        "cam3" => args.burn_cam3_run_id,
+                        "cam4" => args.burn_cam4_run_id,
+                        _ => unreachable!("CAMERA_UNDER_TEST_NODES is exactly cam1/cam3/cam4"),
+                    };
+                    let other_burns: Vec<u32> = latency_all_burns
+                        .iter()
+                        .copied()
+                        .filter(|&id| id != own_burn)
+                        .collect();
+                    let mut samples: Vec<LatencySample> = Vec::new();
+                    let mut matched_windows = 0usize;
+                    for (w, win_frames) in schedule.iter().zip(latency_windows.iter()) {
+                        // #312/#333: the `cambox` schedule label is the harness's UPPERCASE
+                        // sweep label (e.g. "CAM1"); `CAMERA_UNDER_TEST_NODES` is lowercase —
+                        // compare case-insensitively (mirrors the file's existing
+                        // `eq_ignore_ascii_case` convention).
+                        if !w.cambox.eq_ignore_ascii_case(camera) {
+                            continue;
+                        }
+                        matched_windows += 1;
+                        let win_samples = if use_flip {
+                            cam2_cam1_samples_from_flip(
+                                win_frames,
+                                cam2_pin,
+                                own_burn,
+                                &other_burns,
+                                &painter_flip_by_tick,
+                            )
+                        } else {
+                            cam2_cam1_samples_from_burn(
+                                win_frames,
+                                cam2_pin,
+                                own_burn,
+                                &other_burns,
+                            )
+                        };
+                        samples.extend(win_samples);
+                    }
+                    let lat = hop_latency(&format!("cam2->{camera}"), &samples);
+                    if let Some(h) = &lat {
+                        measured_p50s_ms.push(h.stats.p50_ms);
+                    }
+                    println!(
+                        "  {camera}: {matched_windows} window(s) matched, samples={}, p50={}",
+                        samples.len(),
+                        lat.as_ref()
+                            .map(|h| format!("{:.2}ms", h.stats.p50_ms))
+                            .unwrap_or_else(|| "NO SAMPLES".to_string())
+                    );
+                    latency_json.insert(camera.to_string(), hop_lat_json(&lat));
+                }
+                if latency_no_anchor > 0 {
+                    println!(
+                        "  ({latency_no_anchor} recorded frame(s) had no burn/optical gen_ts \
+                         anchor — not placed for the #624 per-camera latency sweep)"
+                    );
+                }
+                match camera_box::switch_latency::spread_verdict(&measured_p50s_ms) {
+                    Some(sv) => {
+                        println!(
+                            "  >>> cross-camera spread: max={:.2}ms min={:.2}ms spread={:.2}ms \
+                             (threshold {:.1}ms) → {}",
+                            sv.max_p50_ms,
+                            sv.min_p50_ms,
+                            sv.spread_ms,
+                            camera_box::switch_latency::SPREAD_THRESHOLD_MS,
+                            if sv.pass { "PASS" } else { "FAIL" }
+                        );
+                        latency_json.insert(
+                            "cross_camera_spread_ms".to_string(),
+                            serde_json::json!(sv.spread_ms),
+                        );
+                        latency_json
+                            .insert("spread_gate_pass".to_string(), serde_json::json!(sv.pass));
+                        all_pass &= sv.pass;
+                    }
+                    None => {
+                        eprintln!(
+                            "WARNING: #624 cross-camera spread gate needs at least 2 measured \
+                             cameras (cam1/cam3/cam4) to compare — only {} produced samples this \
+                             run. The gate is UNMEASURED (never a fabricated pass or fail) and \
+                             does not affect the run's overall verdict.",
+                            measured_p50s_ms.len()
+                        );
+                        latency_json.insert(
+                            "cross_camera_spread_ms".to_string(),
+                            serde_json::Value::Null,
+                        );
+                        latency_json
+                            .insert("spread_gate_pass".to_string(), serde_json::Value::Null);
+                    }
+                }
+                report["all_cambox_latency"] = serde_json::Value::Object(latency_json);
             }
             None => {
                 eprintln!(
