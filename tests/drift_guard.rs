@@ -2971,10 +2971,12 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     // Every OTHER value also clean, so the dantesync row is the only one exercised in isolation.
     // #572: the log now also carries the #484 RT-pin success line so this "everything else is
     // clean" case doesn't regress to UNKNOWN on the new genlock_rt_pin check.
+    // #596: also pass a clean timesync-authority block so this case doesn't regress to UNKNOWN on
+    // the new check #8.
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(
@@ -2982,6 +2984,7 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
         &[
             ("LOG", log.as_str()),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
