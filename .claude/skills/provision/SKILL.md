@@ -192,6 +192,24 @@ something `verify-device.sh` should be loosened to tolerate.
   4. `apt-mark hold linux-image-<pinned>-generic linux-headers-<pinned>-generic` — re-pin the
      CURRENT (surviving) kernel so a future `apt-get upgrade` can't silently pull in a new one
      again. Never leave the box unheld after cleanup.
+- **`setup-device.sh` re-run against an already-booted ro appliance now self-remounts (#599)** —
+  STEP 15-18 (fwupd purge, package install, timesync/linuxptp purge, fstab rewrite) all need a
+  writable root; `ensure_root_writable()`/`restore_root_mode()` detect a ro root, remount rw for
+  the whole STEP 15-18 window, then remount back to ro, stopping/masking `packagekit` +
+  `unattended-upgrades` around the cycle (the same PackageKit-EBUSY blocker as the fwupd gotcha
+  above). Both fail loud on a remount failure. A manual `mount -o remount,rw /` before re-running
+  the script is no longer required for THIS purpose — it self-heals. Verified live on CAM1
+  (booted `ro,relatime`): sourcing the fixed script (no positional arg -> the `BASH_SOURCE` guard
+  skips the destructive flow) and calling `ensure_root_writable` / `restore_root_mode` directly
+  flipped `ro -> rw -> ro` correctly with `camera-box.service` undisturbed throughout.
+- **Verifying a setup-device.sh fix live WITHOUT running the destructive flow** — fetch the raw
+  script + `scripts/lib/cli-log.sh` + `scripts/camera-set.sh` from
+  `raw.githubusercontent.com/zbynekdrlik/camera-box/main/...` onto the box (same relative layout
+  under one tmp dir, e.g. `/tmp/setup-device.sh` + `/tmp/lib/cli-log.sh` + `/tmp/camera-set.sh` --
+  `HERE` resolves from `BASH_SOURCE`), then `. /tmp/setup-device.sh` (no positional arg -> the
+  source-guard returns before the destructive provisioning flow) and call the specific pure/helper
+  function(s) directly. Proves the REAL shipped function against REAL hardware state (findmnt,
+  systemctl, mount) without re-provisioning the box. Clean up the fetched temp files afterward.
 - **No `curl` on the base image** silently failed the STEP 3 binary download and STEP 17 dantesync
   download. `create-usb-linux.sh` now ships `curl`; `setup-device.sh` also has a pre-flight
   curl-install step before either download runs.
