@@ -50,7 +50,16 @@ pub fn genlock_emit_timecode_100ns(
 
 /// The whole-frame divergence between where the ARRIVAL-based stamp would land and where the
 /// CAPTURE-based stamp lands, in 100ns units — a per-frame proxy for this camera's grabber
-/// latency `d_X` residue. Aggregated per camera it feeds the #624 cross-camera latency gate.
+/// latency `d_X` residue.
+///
+/// NOT currently called from production code or wired into any gate: the #624 cross-camera
+/// latency gate that shipped alongside this function (`switch_latency::spread_verdict`, fed by
+/// `bin/recording-verdict`) measures `d_X` a different way — from the RECORDED stream, pairing
+/// each camera's own capture-time burn against cam2's optical QR per `--switch-schedule`
+/// window — not from this in-process arrival-vs-capture proxy. This function is kept as a
+/// tested, ready-to-wire building block for a future LIVE (no recording needed) per-camera
+/// divergence diagnostic; it is not dead in the sense of "safe to delete", but it has no caller
+/// today.
 #[inline]
 pub fn stamp_arrival_divergence_100ns(
     capture_realtime_100ns: i64,
