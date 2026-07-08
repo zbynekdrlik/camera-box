@@ -27,7 +27,11 @@
 //! - `frames`: in-window delivered frames after the guard discard.
 //! - `undecodable`: delivered frames whose painted tick did not decode.
 //! - `copies`: stale/frozen frames (the painted tick repeated — it MUST advance per frame).
-//! - `gaps`: real drops (a forward skip beyond the by-design step, or a backward jump).
+//! - `gaps`: real drops — a tick value genuinely absent from the window's observed set beyond the
+//!   by-design step, computed ORDER-INDEPENDENTLY (#625: the stream recording occasionally
+//!   delivers a frame "softened"/out of order, `#133`/`#196`/`#216` — a RECORDED-order walk
+//!   misreads that benign reorder as a fault; see [`window_segment`] and
+//!   [`crate::painted_tick_gaps::painted_tick_gaps`]).
 //! - `pass`: `frames > 0 && undecodable == 0 && copies == 0 && gaps == 0`.
 //!
 //! The painted tick increments PER PAINTED FRAME and is captured at the cambox rate, so its
@@ -293,26 +297,37 @@ pub fn segment_continuity(
 /// The per-window painted-tick continuity. Reports three disjoint counts:
 ///
 /// - `undecodable`: delivered frames whose painted tick did not decode (`tick == None`).
-/// - `copies`: stale/frozen frames — the painted tick repeated the previous present tick.
-/// - `gaps`: real dropped painted frames — a forward skip beyond the by-design `expected_step`
-///   (per the integer-division excess, crediting any `None` frames that fell in the gap), or a
-///   backward jump (the painter is monotone, so an earlier tick after a later one is a fault).
+/// - `copies`: stale/frozen frames — the painted tick repeated the immediately-preceding
+///   RECORDED present tick (a genuine repeated-image signal, order-dependent by design).
+/// - `gaps`: real dropped painted frames — a tick value genuinely absent from the window's
+///   observed set, beyond the by-design `expected_step` decimation (crediting up to `undecodable`
+///   candidate slots). See [`crate::painted_tick_gaps::painted_tick_gaps`] (#625).
 ///
-/// ## Why a direct walk and not [`burn_contiguity_in_window_with_step`]
+/// ## Why not a recorded-order walk, and not [`burn_contiguity_in_window_with_step`]
 ///
 /// The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
-/// render-tick counter. It mirrors burn_contiguity's DEFINITIONS — `None`-credit and the
-/// integer-division decimation excess (`delta / expected_step − 1`) — so it stays consistent with
-/// the proven per-node burn check, and `expected_step` is a parameter so no 30-vs-60 assumption is
-/// baked in (1 = full-rate cam→strih, 2 = 60→30 stream recording). But the burn check is the WRONG
-/// tool for the painted tick in two ways: (1) its `PerRenderTick` rate IGNORES forward gaps at
-/// step 1 (a render counter legitimately ticks faster than frames), masking a real step-1 drop;
-/// (2) its `PerEmittedFrame` rate carries the #226 "duplicate ⇒ BURN-UNREADABLE" reclassification
-/// — for a node burn a duplicate id means a delivered-but-misdecoded frame (not a drop), but for
-/// the painted tick a duplicate is a STALE/FROZEN copy and the tick missing behind a non-adjacent
-/// freeze is a REAL drop, which that reclassification would silently clear (a FALSE PASS on a
-/// zero-loss verdict). So the painted-tick continuity is computed directly here, where a duplicate
-/// is always a copy and a forward skip beyond the step is always a gap.
+/// render-tick counter, so `burn_contiguity_in_window_with_step` is the WRONG tool two ways: (1)
+/// its `PerRenderTick` rate IGNORES forward gaps at step 1 (a render counter legitimately ticks
+/// faster than frames), masking a real step-1 drop; (2) its `PerEmittedFrame` rate carries the
+/// #226 "duplicate ⇒ BURN-UNREADABLE" reclassification — for a node burn a duplicate id means a
+/// delivered-but-misdecoded frame (not a drop), but for the painted tick a duplicate is a
+/// STALE/FROZEN copy and the tick missing behind a non-adjacent freeze is a REAL drop, which that
+/// reclassification would silently clear (a FALSE PASS).
+///
+/// **#625 — `gaps` must ALSO be ORDER-INDEPENDENT.** A RECORDED-order walk (treating any backward
+/// step as an unconditional fault, any oversized forward step as an excess) is exactly the class
+/// of over-count `burn_contiguity_in_window_with_step` was hardened against for cam1's OWN burn
+/// (#216/#356): the stream recording is documented (`#133`/`#196`/`#216`) to occasionally deliver
+/// a frame "softened"/out of order (a one-frame-late 60→30 straddle) — "a reordered-but-present id
+/// is just the softened recording delivering it late, never a fault." A recorded-order walk has no
+/// such tolerance: ONE benign swap manufactures THREE phantom gaps for zero actual loss (proven
+/// live — run 1783530925's `all_cambox_continuity` FAILED every ~30s window on `gaps` alone while
+/// the SAME recording's `full_chain` proved `0 REAL DROP`). [`crate::painted_tick_gaps::
+/// painted_tick_gaps`] walks the DISTINCT present values in SORTED order instead — the painter's
+/// tick only ever increases at the SOURCE, so sorting recovers the true delivery-order-independent
+/// sequence without masking a genuinely missing value (sorting cannot make an absent value
+/// appear). `copies` stays a RECORDED-order, ADJACENT check — a genuinely repeated image is a real
+/// signal regardless of surrounding order, so reordering can never manufacture or hide it.
 fn window_segment(
     cambox: &str,
     start_ns: i64,
@@ -323,40 +338,24 @@ fn window_segment(
     let frame_count = frames.len() as u32;
     let undecodable = frames.iter().filter(|f| f.tick.is_none()).count() as u32;
 
-    // Walk the in-window frames in recorded order. `nones_since_prev` accumulates undecodable
-    // (`None`) frames so a real forward gap that straddles an undecodable frame credits it (an
-    // undecodable frame DID reach the recording — it is not also a dropped frame).
+    // `copies`: the immediately-preceding RECORDED present tick repeated — a genuine
+    // stale/frozen-content signal (the SAME image held across ≥2 physically consecutive
+    // delivered frames), unaffected by delivery reordering.
     let mut copies: u32 = 0;
-    let mut gaps: u32 = 0;
-    let mut prev: Option<u32> = None;
-    let mut nones_since_prev: i64 = 0;
+    let mut prev_recorded: Option<u32> = None;
     for f in frames {
-        match f.tick {
-            None => nones_since_prev += 1,
-            Some(t) => {
-                if let Some(p) = prev {
-                    if t == p {
-                        // The painted tick froze — a stale/duplicate copy frame.
-                        copies = copies.saturating_add(1);
-                    } else if t < p {
-                        // Backward jump — the monotone painter never goes back; a reorder/freeze fault.
-                        gaps = gaps.saturating_add(1);
-                    } else {
-                        // Forward: the slots between p and t number `delta/expected_step − 1`;
-                        // `nones_since_prev` of them were delivered-but-undecodable, the rest are
-                        // real drops. Integer division makes step±1 genlock-beat jitter charge 0.
-                        let delta = i64::from(t) - i64::from(p);
-                        let lost = (delta / expected_step) - 1 - nones_since_prev;
-                        if lost > 0 {
-                            gaps = gaps.saturating_add(lost as u32);
-                        }
-                    }
-                }
-                prev = Some(t);
-                nones_since_prev = 0;
+        if let Some(t) = f.tick {
+            if prev_recorded == Some(t) {
+                copies = copies.saturating_add(1);
             }
+            prev_recorded = Some(t);
         }
     }
+
+    // `gaps` (#625): order-independent — see the function doc above.
+    let present_ticks: Vec<u32> = frames.iter().filter_map(|f| f.tick).collect();
+    let gaps =
+        crate::painted_tick_gaps::painted_tick_gaps(&present_ticks, undecodable, expected_step);
 
     let first_tick = frames.iter().find_map(|f| f.tick);
     let last_tick = frames.iter().rev().find_map(|f| f.tick);
@@ -599,6 +598,95 @@ mod tests {
         assert!(
             v.segments[0].gaps >= 1,
             "the real drop is counted as a gap, not silently cleared: {:?}",
+            v.segments[0]
+        );
+    }
+
+    #[test]
+    fn benign_delivery_reorder_does_not_fail_the_window_625() {
+        // THE #625 regression (live evidence: run 1783530925 FAILED every ~30s all-cambox window
+        // on `gaps` alone, even though the SAME recording's full_chain proved 0 REAL DROP). The
+        // stream recording is documented (#133/#196/#216) to occasionally deliver a frame
+        // "softened"/out of order — a one-frame-late 60→30 straddle. Here cam1's clean step-2
+        // sequence 1000,1002,1004,1006,1008 is RECORDED with 1002/1004 swapped (a benign reorder,
+        // zero real loss); a recorded-order walk would see 1000→1004 (oversized forward), 1004→
+        // 1002 (backward), 1002→1006 (oversized forward) = 3 phantom gaps. The fix must report 0.
+        let schedule = vec![win("cam1", 0, 10_000)];
+        let frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(1000),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(1004),
+            }, // recorded out of order — arrived before 1002
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: Some(1002),
+            },
+            SegmentFrame {
+                frame_index: 3,
+                gen_ts_ns: 400,
+                tick: Some(1006),
+            },
+            SegmentFrame {
+                frame_index: 4,
+                gen_ts_ns: 500,
+                tick: Some(1008),
+            },
+        ];
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        assert!(
+            v.overall_pass,
+            "a benign delivery reorder with zero real loss must PASS: {v:?}"
+        );
+        assert_eq!(
+            v.segments[0].gaps, 0,
+            "reordering must not manufacture a phantom gap: {:?}",
+            v.segments[0]
+        );
+        assert_eq!(v.segments[0].undecodable, 0);
+    }
+
+    #[test]
+    fn benign_delivery_reorder_never_masks_a_real_drop_625() {
+        // The reorder-tolerance fix must never MASK a genuine drop either: 1004 is truly missing
+        // (never delivered) on top of the same 1002/1006-adjacent reorder pattern.
+        let schedule = vec![win("cam1", 0, 10_000)];
+        let frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(1000),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(1006),
+            },
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: Some(1002),
+            },
+            SegmentFrame {
+                frame_index: 3,
+                gen_ts_ns: 400,
+                tick: Some(1008),
+            },
+        ];
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        assert!(
+            !v.overall_pass,
+            "the genuinely-missing 1004 must still FAIL the window: {v:?}"
+        );
+        assert_eq!(
+            v.segments[0].gaps, 1,
+            "exactly the one genuinely-missing tick, reorder or not: {:?}",
             v.segments[0]
         );
     }

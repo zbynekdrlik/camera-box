@@ -186,5 +186,14 @@ pub mod jitter_audit;
 // `--switch-schedule` window) lives in `bin/recording-verdict`.
 pub mod switch_latency;
 
+// #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
+// continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
+// deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order
+// walk misreads that benign reorder as a backward-jump fault plus an inflated forward jump,
+// manufacturing phantom gaps on a genuinely zero-real-drop recording. No probe deps, so it
+// unit-tests Tier-0; the probe-gated `probe::recording_segments::window_segment` calls this
+// instead of its own inline recorded-order walk.
+pub mod painted_tick_gaps;
+
 #[cfg(feature = "probe")]
 pub mod probe;
