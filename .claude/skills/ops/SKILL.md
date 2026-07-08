@@ -800,3 +800,35 @@ builder alongside the live-install one. Do not delete/demote it without that dec
 
 `.github/workflows/build-image.yml` (a 5th, inline, script-less image-build path) was NOT
 retired by #449 — noted as a follow-up.
+
+## #626 — `pkill -f PATTERN` sent over ssh can self-match the invoking shell
+
+`ssh host "pkill -9 -f 'camera-box-burn-' ...; systemctl restart camera-box ..."` self-matches:
+`pkill -f` greps every process's full `/proc/*/cmdline`, and the remote `sh -c "..."` process
+running that very command literally CONTAINS the pattern text as its own argument. It SIGKILLs
+itself mid-script — everything after the pkill in the chain (the `systemctl restart`) never runs,
+and the SSH connection just drops (rc=255) with ZERO stdout/stderr — no error to notice. This
+caused a real, silent ~3h40m production camera outage (`recording-e2e.sh` cleanup()).
+
+**Fix pattern:** anchor the pkill pattern so it matches ONLY the real target's argv0, never the
+invoking command's own text — e.g. a digit immediately after the hyphen
+(`camera-box-burn-[0-9]`) when the real target is always named `/tmp/camera-box-burn-<run_id>`.
+Before writing any `pkill -f PATTERN` sent as a single ssh command string, check whether PATTERN's
+literal text could appear verbatim in the ssh command argument itself (it always can, when the
+pattern isn't built from a variable substitution) — if so, anchor it.
+
+## #625 — a RECORDED-order tick/id walk misreads a benign stream-recording reorder as a fault
+
+The stream recording is documented (`#133`/`#196`/`#216`) to occasionally deliver a frame
+"softened"/out of order (an extra NDI hop + HEVC re-encode causes a one-frame-late 60→30
+straddle). Any continuity check that walks a monotonically-increasing counter (a node burn ID, or
+here the cam2 painted-tick) in RECORDED order and treats a backward step as an unconditional fault
+will manufacture THREE phantom gaps from ONE benign swap (`a,a+4,a+2,a+6` instead of
+`a,a+2,a+4,a+6`) — for zero actual loss. `probe::burn_contiguity` was already hardened against
+this for node bursts; the all-cambox painted-tick window check (`recording_segments.rs::
+window_segment`) was not, until #625 (`src/painted_tick_gaps.rs`: sort the DISTINCT present
+values before walking — a monotone-at-the-source counter's sorted order recovers the true
+delivery-order-independent sequence; sorting can never make a genuinely-missing value appear, so a
+real drop is still caught). **Lesson for the next monotone-counter continuity check:** if the
+values can arrive out of RECORDED order (any hop through NDI/HEVC re-encode is a candidate), walk
+the sorted DISTINCT value set, never the raw delivery-order sequence.
