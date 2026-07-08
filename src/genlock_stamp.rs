@@ -84,8 +84,8 @@ mod tests {
         let fps = 30;
         let base = 100 * SEC_100NS; // start of a whole second
         let capture = base + 100_000; // 10 ms into the second (inside 30fps frame 0)
-        // Two arrivals for the SAME captured frame that straddle the next 30fps boundary
-        // (33.33 ms): a "fast card" arrives at 15 ms, a "slow card" at 40 ms.
+                                      // Two arrivals for the SAME captured frame that straddle the next 30fps boundary
+                                      // (33.33 ms): a "fast card" arrives at 15 ms, a "slow card" at 40 ms.
         let arrival_fast_card = base + 150_000; // 15 ms
         let arrival_slow_card = base + 400_000; // 40 ms
         let tc_fast = genlock_emit_timecode_100ns(capture, arrival_fast_card, fps);
@@ -104,7 +104,7 @@ mod tests {
         let base = 100 * SEC_100NS;
         let capture = base + 100_000; // 10 ms in -> next 30fps boundary is 33.33 ms
         let expected = base + SEC_100NS / fps; // first 30fps boundary after the second start
-        // Even with a LATE arrival (next frame over), the timecode tracks capture, not arrival.
+                                               // Even with a LATE arrival (next frame over), the timecode tracks capture, not arrival.
         assert_eq!(
             genlock_emit_timecode_100ns(capture, base + 400_000, fps),
             expected
