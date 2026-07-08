@@ -5407,6 +5407,224 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ---- #624 deliverables 1+3 — per-camera, per-switch-window cam2->camera latency + the
+    // cross-camera spread gate ----
+    //
+    // The whole-recording, cam1-ONLY cam2->camera OPTICAL-INJECTION hop (#179/#194,
+    // `full_chain.latency.cam2_cam1`) stays UNCHANGED (see the tests above/below that never
+    // touch `all_cambox_latency`). #624 ADDS a SECOND measurement alongside it: the SAME
+    // cam2->camera pairing (`cam2_cam1_samples_from_burn` / `_from_flip`, ALREADY generic on
+    // its 3rd `cam1_burn_id` param), generalized to EVERY `CAMERA_UNDER_TEST_NODES` label
+    // (cam1/cam3/cam4) and restricted to that camera's OWN `--switch-schedule` window(s) — the
+    // ALL_CAMBOX sweep cuts each camera into strih program in turn, so its OWN capture-time
+    // burn only rides alongside cam2's optical QR while ITS window is live. The per-camera
+    // medians then feed the hard cross-camera SPREAD gate
+    // (`camera_box::switch_latency::spread_verdict`): `max(p50) - min(p50) > 16ms` (half a
+    // 30fps frame) = FAIL — a differing photon->dequeue latency `d_X` per camera (#286's root
+    // cause) beyond that floor can visibly break A/V lipsync when the live program cuts
+    // between them.
+
+    /// Build a synthetic single continuous stream recording covering `cameras.len()` contiguous
+    /// 5s `--switch-schedule` windows (one per entry), each carrying: the STRIH burn (the
+    /// segmentation anchor), cam2's optical QR (paint ts), and THAT window's camera's OWN
+    /// capture-time burn stamped `latency_ns` AFTER cam2's paint — the injected #286 d_X. Returns
+    /// the full verdict report JSON. `cameras` is `(cambox schedule label, camera's own burn
+    /// run_id, injected cam2->camera latency in ns)`.
+    fn build_all_cambox_latency_fixture(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+    ) -> serde_json::Value {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 5_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir = std::env::temp_dir().join(format!("cb-624-latency-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let windows_json: Vec<String> = cameras
+            .iter()
+            .enumerate()
+            .map(|(wi, &(label, _, _))| {
+                let start_ns = base + (wi as i64) * win;
+                let end_ns = start_ns + win;
+                format!(r#"{{"cambox":"{label}","start_ns":{start_ns},"end_ns":{end_ns}}}"#)
+            })
+            .collect();
+        std::fs::write(&sched_path, format!("[{}]", windows_json.join(","))).unwrap();
+
+        // 20 frames per window, 0.2s apart (0.2s..4.0s inside each 5s window — well clear of any
+        // guard, and `--switch-guard-ns 0` below leaves no guard to clear anyway).
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        let mut idx = 0u64;
+        for (wi, &(_, camera_burn, latency_ns)) in cameras.iter().enumerate() {
+            let wstart = base + (wi as i64) * win;
+            for j in 0..20i64 {
+                let paint_ts = wstart + (j + 1) * (ONE_S / 5);
+                let optical = 1000u32 + idx as u32;
+                stream_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: paint_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: paint_ts,
+                        },
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 5000 + idx as u32,
+                            gen_ts_ns: paint_ts + latency_ns,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+                idx += 1;
+            }
+        }
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+
+        let (v, _pass) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this fixture
+        )
+        .expect("verdict");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        v
+    }
+
+    /// #624: cam1/cam3/cam4 all deployed, EACH camera's OWN measured cam2->camera median exactly
+    /// matches its injected latency, and a 25ms cross-camera spread (over the 16ms floor) FAILS
+    /// the gate.
+    #[test]
+    fn all_cambox_latency_measures_per_camera_windowed_latency_and_fails_a_wide_spread_624() {
+        let v = build_all_cambox_latency_fixture(
+            "fail",
+            &[
+                ("CAM1", CAM1B, 800_000_000),
+                ("CAM3", super::BURN_RUN_ID_CAM3, 820_000_000),
+                ("CAM4", super::BURN_RUN_ID_CAM4, 795_000_000),
+            ],
+        );
+
+        let lat = &v["all_cambox_latency"];
+        assert!(
+            !lat.is_null(),
+            "#624: all_cambox_latency must be reported when --switch-schedule is given: {v}"
+        );
+        assert_eq!(
+            lat["cam1"]["p50_ms"],
+            serde_json::json!(800.0),
+            "#624: cam1's OWN windowed cam2->cam1 latency: {lat}"
+        );
+        assert_eq!(
+            lat["cam3"]["p50_ms"],
+            serde_json::json!(820.0),
+            "#624: cam3's OWN windowed cam2->cam3 latency (generalized from cam1-only): {lat}"
+        );
+        assert_eq!(
+            lat["cam4"]["p50_ms"],
+            serde_json::json!(795.0),
+            "#624: cam4's OWN windowed cam2->cam4 latency (generalized from cam1-only): {lat}"
+        );
+        assert_eq!(
+            lat["cross_camera_spread_ms"],
+            serde_json::json!(25.0),
+            "#624: max(820) - min(795) = 25ms: {lat}"
+        );
+        assert_eq!(
+            lat["spread_gate_pass"],
+            serde_json::json!(false),
+            "#624: a 25ms cross-camera spread is over the 16ms floor -> the gate must FAIL: {lat}"
+        );
+    }
+
+    /// #624: the SAME 3-camera shape, but every camera's injected latency sits within 16ms of
+    /// every other's -> the spread gate PASSES.
+    #[test]
+    fn all_cambox_latency_spread_within_16ms_passes_the_gate_624() {
+        let v = build_all_cambox_latency_fixture(
+            "pass",
+            &[
+                ("CAM1", CAM1B, 800_000_000),
+                ("CAM3", super::BURN_RUN_ID_CAM3, 805_000_000),
+                ("CAM4", super::BURN_RUN_ID_CAM4, 810_000_000),
+            ],
+        );
+
+        let lat = &v["all_cambox_latency"];
+        assert_eq!(lat["cam1"]["p50_ms"], serde_json::json!(800.0));
+        assert_eq!(lat["cam3"]["p50_ms"], serde_json::json!(805.0));
+        assert_eq!(lat["cam4"]["p50_ms"], serde_json::json!(810.0));
+        assert_eq!(
+            lat["cross_camera_spread_ms"],
+            serde_json::json!(10.0),
+            "#624: max(810) - min(800) = 10ms: {lat}"
+        );
+        assert_eq!(
+            lat["spread_gate_pass"],
+            serde_json::json!(true),
+            "#624: a 10ms cross-camera spread clears the 16ms floor -> PASS: {lat}"
+        );
+    }
+
+    /// #624: only ONE camera's window is present this run (e.g. a partial sweep, or two of the
+    /// three camera boxes down) — the OTHER two cameras must surface `null` (never a fabricated
+    /// zero, matching how `hop_lat_json` already reports "no samples" everywhere else in this
+    /// file), and the spread gate — needing at least 2 measured cameras to compare — must ALSO
+    /// report `null` (unmeasured, never a fabricated pass or fail).
+    #[test]
+    fn all_cambox_latency_with_a_single_measured_camera_reports_null_not_a_fabricated_spread_624() {
+        let v = build_all_cambox_latency_fixture("single", &[("CAM1", CAM1B, 800_000_000)]);
+
+        let lat = &v["all_cambox_latency"];
+        assert_eq!(
+            lat["cam1"]["p50_ms"],
+            serde_json::json!(800.0),
+            "#624: the one measured camera still reports its real latency: {lat}"
+        );
+        assert!(
+            lat["cam3"].is_null(),
+            "#624: cam3 produced no samples this run -> null, never a fabricated zero: {lat}"
+        );
+        assert!(
+            lat["cam4"].is_null(),
+            "#624: cam4 produced no samples this run -> null, never a fabricated zero: {lat}"
+        );
+        assert!(
+            lat["cross_camera_spread_ms"].is_null(),
+            "#624: fewer than 2 measured cameras -> the spread is UNMEASURABLE, not a fabricated \
+             number: {lat}"
+        );
+        assert!(
+            lat["spread_gate_pass"].is_null(),
+            "#624: an unmeasurable spread must never fabricate a pass or a fail: {lat}"
+        );
+    }
+
     /// #583 — build a single-window `--switch-schedule` run over an imag recording whose optical
     /// tick follows `optical_ticks` (one recorded frame per tick, each carrying a CLEAN step-1
     /// digital corner burn — imag's own render, blind to any upstream content freeze in the filmed
