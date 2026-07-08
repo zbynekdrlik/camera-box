@@ -72,6 +72,22 @@ package must be **PURGED**. Enforcement (all landed #591):
   and making every reading look fresh. Any bash gate with an `||`-chained numeric guard needs its
   own numeric inputs validated (`grep -qE '^[0-9]+$'`) the same way `--bound-us`/`--guard-us` CLI
   flags already are in these scripts — an env-var-only knob is easy to forget.
+- **#596 — `drift-guard.sh --check-imag` (imag-nb) inherited the SAME `(r)` sole-timesync-authority
+  gate**, closing #591's own "verify-fleet/drift-guard should inherit it too" item for imag-nb (a
+  plain Linux box that isn't part of `verify-device.sh`/`verify-fleet.sh`'s cam1-6 fleet loop, so it
+  never got check (r) automatically). `dpkg_status_installed`/`timesync_enabled_state_neutral`/
+  `timesync_daemon_verdict`/`timesync_authority_verdict` moved into a new shared
+  `scripts/lib/timesync-authority.sh` so `drift-guard.sh` can reuse the IDENTICAL verdict instead of
+  a second copy. **Lesson for the next shared-check extraction:** sharing the VERDICT function is
+  NOT enough — a code-review pass on #596 caught that the per-daemon SSH-*gathering* for-loop
+  (the actual `dpkg -s`/`systemctl is-active`/`is-enabled` remote command) was STILL duplicated
+  verbatim between the two callers even after the verdict was shared; a future daemon added to the
+  competing set could silently diverge between them. Extracted THAT into
+  `timesync_gather_remote_snippet()` too. **Testing lesson:** a shared "remote command string"
+  function is easy to leave untested (the callers' tests only exercise hand-written fixtures
+  through the parser, never the snippet's OWN output shape) — the fix was a test that runs the
+  snippet locally via `bash -c "$snippet"` (safe read-only `dpkg`/`systemctl` calls, works on any
+  Ubuntu CI runner) and feeds its real output through the verdict parser end-to-end.
 
 **Windows (strih + stream) — W32Time invariant.** DanteSync is the clock authority on the Windows
 OBS boxes too; the built-in Windows Time service (`W32Time`) must be **Stopped + Disabled** (already

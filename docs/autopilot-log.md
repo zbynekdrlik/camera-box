@@ -2331,3 +2331,37 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - Pure Tier-0 shell/test-logic — no live-rig action; no deploy pipeline for these scripts (they run
   in CI/on dev1, not a deployed service). Post-merge verification = confirmed main CI green
   (`cargo nextest run --all-features`, which runs all four touched test files) on the merge commit.
+
+## #596 (solo, closes #596) — 2026-07-08 — drift-guard.sh --check-imag inherits #591's sole-timesync-authority gate
+
+- #591's independent review found `scripts/drift-guard.sh --check-imag` (imag-nb, a plain Linux
+  box reached over SSH the same way as the cam1-6 fleet) had NO equivalent of `verify-device.sh`'s
+  `(r)` sole-timesync-authority hard-fail — a 2nd timesync daemon on imag-nb (the exact cam5/cam6
+  #550 desync class) would go undetected there.
+- Version bump `a1e98e3d2` (1.7.0-dev.290).
+- RED `fff0bf48c`: `tests/drift_guard.rs` (4 new/updated — feeding the EXACT cam5/cam6 signature
+  through `check_imag_report` reported clean today; no `timesync_authority` line existed at all).
+- GREEN `6eec2497f`: extracted `dpkg_status_installed`/`timesync_enabled_state_neutral`/
+  `timesync_daemon_verdict`/`timesync_authority_verdict` out of `verify-device.sh` into the new
+  shared `scripts/lib/timesync-authority.sh` (mirrors the `scripts/lib/ndi-alive.sh` /
+  `scripts/clock-offset-guard.sh` #595 precedent). `verify-device.sh`'s own `(r)` live flow is
+  behavior-unchanged (now transitively sourced). `drift-guard.sh` gains check #8 in
+  `check_imag_report` (a 12th optional trailing param, same convention as #489's dantesync pair) +
+  a new SSH gather in `gather_and_check_imag`.
+- Two follow-up hardening commits from the SAME PR's own review cycle (`8d33ab0d4`, `0b7e975b6`):
+  (1) `/code-review` caught that the per-daemon SSH-gathering for-loop itself was STILL duplicated
+  verbatim between the two scripts even after the verdict function was shared — extracted
+  `timesync_gather_remote_snippet()` into the shared lib so a future daemon added to the competing
+  set can never diverge between callers; (2) the same pass caught a cosmetic double-space in the
+  DRIFT-reason display (`sed 's/;/; /g'` also matched a `;` already inside one reason's own text)
+  — fixed by switching the internal join delimiter to `|`; (3) `superpowers:requesting-code-review`
+  (deep pass) then flagged the new shared snippet function had no test locking its OWN output
+  format against what the verdict parser expects — added a test that EXECUTES the real snippet
+  locally (`bash -c`, safe on any Ubuntu CI runner) and feeds its real output through
+  `timesync_authority_verdict` end-to-end, closing that seam.
+- Both review passes clean at merge: `/code-review` (0 Critical/Important, 2 real findings fixed
+  same-PR); `superpowers:requesting-code-review` (0 Critical, 0 Important, 2 Minor fixed same-PR).
+- Pure Tier-0 shell/test-logic — no live-rig action, no deploy pipeline for these scripts (they run
+  in CI/on dev1, not a deployed service, same as #591/#595). Post-merge verification = confirmed
+  main CI green (`cargo nextest run`, all touched test files: `tests/drift_guard.rs` 102/102,
+  `tests/verify_device_pure_functions.rs` 64/64) on the merge commit `ab0619c4a`.
