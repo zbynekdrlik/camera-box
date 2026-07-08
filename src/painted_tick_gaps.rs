@@ -50,26 +50,24 @@
 /// decimation step (2 for the 60Hz painter read from a 30fps stream recording); values `<= 0`
 /// floor to `1` (no decimation).
 pub fn painted_tick_gaps(present_ticks: &[u32], undecodable: u32, expected_step: i64) -> u32 {
-    // TEMPORARY RED-PROOF STUB — pre-#625 recorded-order walk (the actual bug), to prove the
-    // regression tests below genuinely fail against it before the real (sorted) fix is applied.
     let expected_step = expected_step.max(1);
+
+    let mut sorted: Vec<u32> = present_ticks.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+
     let mut raw_gaps: i64 = 0;
-    let mut prev: Option<i64> = None;
-    for &t in present_ticks {
-        let t = i64::from(t);
-        if let Some(p) = prev {
-            if t < p {
-                raw_gaps += 1;
-            } else if t > p {
-                let delta = t - p;
-                let lost = (delta / expected_step) - 1;
-                if lost > 0 {
-                    raw_gaps += lost;
-                }
-            }
+    for w in sorted.windows(2) {
+        let delta = i64::from(w[1]) - i64::from(w[0]);
+        let lost = (delta / expected_step) - 1;
+        if lost > 0 {
+            raw_gaps += lost;
         }
-        prev = Some(t);
     }
+
+    // Each BURN-UNREADABLE (undecodable) frame reached the recording but its painted tick did not
+    // decode — it may have occupied exactly one candidate slot, so credit up to `undecodable`
+    // against the raw gap count (never below zero; never MORE than what was actually charged).
     let credited = raw_gaps - i64::from(undecodable);
     credited.max(0) as u32
 }
@@ -157,7 +155,13 @@ mod tests {
     #[test]
     fn expected_step_floors_to_one() {
         let present = [10, 11, 12];
-        assert_eq!(painted_tick_gaps(&present, 0, 0), painted_tick_gaps(&present, 0, 1));
-        assert_eq!(painted_tick_gaps(&present, 0, -5), painted_tick_gaps(&present, 0, 1));
+        assert_eq!(
+            painted_tick_gaps(&present, 0, 0),
+            painted_tick_gaps(&present, 0, 1)
+        );
+        assert_eq!(
+            painted_tick_gaps(&present, 0, -5),
+            painted_tick_gaps(&present, 0, 1)
+        );
     }
 }
