@@ -149,9 +149,13 @@ fn resolve_display_config(
             find_timeout_secs: 30,
         });
     }
-    // #528 RED->GREEN marker: earlier revisions returned `None` here (no CLI flag, no config
-    // section => no preview at all — the exact bug #528 reported). GREEN adds this fallback.
-    None
+    // #528: no CLI flag, no config.toml [display] section — every cambox still previews the
+    // fleet-wide default (the exact case that used to return None, the reported bug).
+    Some(NdiDisplayConfig {
+        source_name: DEFAULT_DISPLAY_SOURCE.to_string(),
+        fb_device: cli_fb_device.to_string(),
+        find_timeout_secs: 30,
+    })
 }
 
 /// Simple USB video capture to NDI streaming appliance
