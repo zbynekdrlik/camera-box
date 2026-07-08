@@ -60,11 +60,13 @@ GATE_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
-# (file path; NAME uppercased, e.g. cam1 -> DANTESYNC_GATE_LINUX_JOURNAL_CAM1) -- mirrors
-# clock-offset-painter-gate.sh's read_painter_journal()/DEV1_DANTE_JOURNAL pattern (#608), so this
-# gate's Linux SSH-gather path can be proven end-to-end offline instead of only indirectly via the
-# shared dantesync_offset_verdict unit tests. Read-only; a down/absent daemon (or an unset
-# override) collapses to empty output (caller maps empty -> UNKNOWN, never a silent pass).
+# (file path; NAME uppercased AND any "-" mapped to "_" so a hyphenated node name like "imag-nb"
+# still yields a valid shell variable name, e.g. cam1 -> DANTESYNC_GATE_LINUX_JOURNAL_CAM1,
+# imag-nb -> DANTESYNC_GATE_LINUX_JOURNAL_IMAG_NB) -- mirrors clock-offset-painter-gate.sh's
+# read_painter_journal()/DEV1_DANTE_JOURNAL pattern (#608), so this gate's Linux SSH-gather path
+# can be proven end-to-end offline instead of only indirectly via the shared
+# dantesync_offset_verdict unit tests. Read-only; a down/absent daemon (or an unset override)
+# collapses to empty output (caller maps empty -> UNKNOWN, never a silent pass).
 read_linux_node_journal() {
   local name="$1" ip="$2" var
   var="DANTESYNC_GATE_LINUX_JOURNAL_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"

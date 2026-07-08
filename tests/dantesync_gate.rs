@@ -369,3 +369,29 @@ fn gate_linux_journal_override_is_keyed_per_node_name_not_a_single_shared_var() 
         "stdout: {stdout}"
     );
 }
+
+#[test]
+fn gate_linux_journal_override_maps_a_hyphenated_node_name_to_a_valid_env_var() {
+    // #608 review follow-up: the NAME -> ENV_VAR mapping uppercases AND maps "-" to "_" (a bare
+    // uppercase of "imag-nb" would be "IMAG-NB", not a valid shell variable name). This node isn't
+    // one of today's real Linux gate nodes (cam1/cam2), but the mapping must not silently break on
+    // any hyphenated name a future --linux invocation could pass.
+    let j = write_dante_journal(
+        "imag_nb_ok",
+        "2026-07-08T10:00:00+02:00 imag-nb dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:05+02:00 imag-nb dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "imag-nb=10.77.9.182"],
+        &[(
+            "DANTESYNC_GATE_LINUX_JOURNAL_IMAG_NB",
+            &j.display().to_string(),
+        )],
+    );
+    assert_eq!(
+        code, 0,
+        "DANTESYNC_GATE_LINUX_JOURNAL_IMAG_NB must be honored for node name \"imag-nb\". \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
