@@ -769,7 +769,8 @@ async fn run_capture_loop(
                         gen_ts_ns: emit_wall_ns,
                         emit_timecode_100ns: camera_box::genlock_stamp::genlock_emit_timecode_100ns(
                             capture_realtime_100ns,
-                            emit_wall_ns,
+                            // `emit_wall_ns` is nanoseconds; this parameter is 100ns units.
+                            emit_wall_ns / 100,
                             send_fps as i64,
                         ),
                         render_qr,
@@ -810,7 +811,8 @@ async fn run_capture_loop(
                 // pacing) instead of re-deriving an arrival-based boundary at send time.
                 let capture_timecode_100ns = camera_box::genlock_stamp::genlock_emit_timecode_100ns(
                     capture_realtime_100ns,
-                    emit_wall_ns,
+                    // `emit_wall_ns` is nanoseconds; this parameter is 100ns units.
+                    emit_wall_ns / 100,
                     send_fps as i64,
                 );
                 if let Err(e) = sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
