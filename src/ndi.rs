@@ -34,7 +34,7 @@ fn get_wall_clock_100ns() -> i64 {
 /// `1/fps` seconds, so the rate is parameterized — at 60 fps boundaries fall
 /// every 16.667 ms (frame 0 = 0.000 ms, frame 1 = 16.667 ms, ... frame 59 =
 /// 983.333 ms); at 30 fps every 33.333 ms.
-fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
+pub(crate) fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     if fps <= 0 {
         return now_100ns;
     }
@@ -1089,14 +1089,38 @@ impl NdiSender {
         Ok(())
     }
 
-    /// Zero-copy send from FrameInfo (callback-compatible)
+    /// Zero-copy send from FrameInfo (callback-compatible).
+    ///
+    /// #286 — when `external_pacing` (genlock) is ON, stamps the caller-supplied
+    /// `capture_timecode_100ns` (the frame's real CAPTURE-instant boundary, from
+    /// [`crate::genlock_stamp::genlock_emit_timecode_100ns`]) instead of re-deriving an
+    /// ARRIVAL-based boundary from the current wall clock at send time — so a grabber
+    /// card's photon->dequeue latency `d_X` can no longer leak into the emitted genlock
+    /// timecode. When `external_pacing` is OFF, falls back to the EXACT same self-paced
+    /// blocking wait as [`Self::send_frame_data`] — that path paces off arrival/wall-clock
+    /// by design (no genlock decimation cadence to align a capture instant to) and is
+    /// deliberately unaffected by #286.
     #[inline]
     pub fn send_frame_zero_copy(
         &mut self,
         data: &[u8],
         info: crate::capture::FrameInfo,
+        capture_timecode_100ns: i64,
     ) -> Result<()> {
-        self.send_frame_data(data, info.width, info.height, info.fourcc, info.stride)
+        let timecode = if self.external_pacing {
+            capture_timecode_100ns
+        } else {
+            let fps = fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
+            wait_for_next_boundary_100ns(fps)
+        };
+        self.send_frame_data_with_timecode(
+            data,
+            info.width,
+            info.height,
+            info.fourcc,
+            info.stride,
+            timecode,
+        )
     }
 
     /// Get number of frames sent

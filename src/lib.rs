@@ -23,6 +23,10 @@ pub mod grab_record;
 pub mod intercom;
 #[cfg(target_os = "linux")]
 pub mod ndi;
+// #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
+// the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
+#[cfg(target_os = "linux")]
+pub mod genlock_stamp;
 #[cfg(target_os = "linux")]
 pub mod ndi_display;
 pub mod vban;
@@ -172,6 +176,15 @@ pub mod zero_loss_restart_survival;
 // CLI binary lives in `src/bin/genlock-jitter-report.rs`. See
 // `docs/genlock-latency-floor-rationale.md`.
 pub mod jitter_audit;
+
+// #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
+// camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
+// d_X baked in by the #286 root cause), computes the cross-camera spread and gates it against
+// the issue's fixed half-a-30fps-frame threshold (16ms). No probe deps, so it unit-tests
+// Tier-0; the probe-gated measurement (generalizing `probe::recording_latency::
+// cam2_cam1_samples_from_burn`/`_from_flip` from cam1-only to cam1/cam3/cam4, per
+// `--switch-schedule` window) lives in `bin/recording-verdict`.
+pub mod switch_latency;
 
 #[cfg(feature = "probe")]
 pub mod probe;

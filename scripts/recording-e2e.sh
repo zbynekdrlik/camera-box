@@ -70,6 +70,11 @@ camera_resolve "${CAM:-cam1}"
 
 CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films
+# #624: the OTHER two camera-under-test boxes the ALL_CAMBOX sweep cuts into strih program.
+# Only used (deployed to / restored) when ALL_CAMBOX=1 — the default single-camera path never
+# touches them. Same physical IPs camera-set.sh / cam-disk-guard.sh / rig-restore-watchdog.sh use.
+CAM3_IP="${CAM3_IP:-10.77.9.63}"
+CAM4_IP="${CAM4_IP:-10.77.9.64}"
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 # #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
@@ -121,6 +126,12 @@ IMAG_CAPTURE_FPS="${IMAG_CAPTURE_FPS:-60}"
 # (911002) / stream (911004) burn ids so all four marks are told apart by run_id. This burn
 # IS the cam1 mark in the stream recording — the reason #179 can drop the cam1 grab.
 BURN_CAM1_RUN_ID="${BURN_CAM1_RUN_ID:-911001}"
+# #624: cam3/cam4 capture-burn run_ids, deployed ONLY under ALL_CAMBOX=1 (mirrors cam1's burn
+# above but on the OTHER two camera-under-test boxes the sweep cuts into strih program). Match
+# recording-verdict's own BURN_RUN_ID_CAM3 (911008) / BURN_RUN_ID_CAM4 (911007) defaults exactly
+# so the verdict finds them without any extra flag even if these are left at default.
+BURN_CAM3_RUN_ID="${BURN_CAM3_RUN_ID:-911008}"
+BURN_CAM4_RUN_ID="${BURN_CAM4_RUN_ID:-911007}"
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
 # #359: wall-clock run start. The painter ground-truth CSV (gen_ts_ns = CLOCK_REALTIME epoch
@@ -306,9 +317,26 @@ cleanup() {
   echo "[cleanup] #328 FREE cam1/cam2 capture devices FIRST (never gated behind OBS teardown)"
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
+  # #626: the pattern MUST be digit-anchored ('camera-box-burn-[0-9]') — a bare 'camera-box-burn-'
+  # is a SELF-MATCH: the remote `sh -c "..."` process invoked BY ssh has this exact substring in
+  # its OWN /proc/*/cmdline (it's the literal text of the pkill argument being run), so `pkill -f`
+  # kills that shell before it ever reaches `systemctl restart` — a live 3h40m undetected outage
+  # on cam1/cam3/cam4 traced to this exact bug (#626). The real target's argv0 always has a run-id
+  # digit immediately after the hyphen (e.g. /tmp/camera-box-burn-1783530925 or
+  # /tmp/camera-box-burn-cam3-1783530925); the invoking shell's own cmdline has a quote character
+  # there instead, so the anchored pattern matches ONLY the real target.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-    "pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+    "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
+  # #624: cam3/cam4 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above actually ran
+  # (gated the same way) so a plain single-camera run never touches these two boxes at all.
+  if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+    for _cip in "$CAM3_IP" "$CAM4_IP"; do
+      timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+        "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+         rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
+    done
+  fi
   # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it. #309: FIRST clear any
   # leftover #291 rig-mode no-display drop-in (a prior `rig-mode.sh test` would otherwise make this
   # restart bring camera-box back WITHOUT --display — the interkom return monitor stays dark). The
@@ -449,6 +477,30 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"
 sleep 4  # let cam1's NDI sender (with the burn) become discoverable
+
+# #624: the ALL_CAMBOX sweep also cuts cam3/cam4 into strih program — without their OWN
+# capture-burn deployed the SAME way as cam1 above, recording-verdict's new per-camera
+# all_cambox_latency block would honestly report null for them (no burn to pair against), which
+# is NOT the real per-camera proof this sweep exists to produce. Mirror cam1's deploy exactly,
+# once per box, gated on ALL_CAMBOX=1 (the default single-camera path never touches cam3/cam4).
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  for _cn_ip_burn in "cam3=$CAM3_IP=$BURN_CAM3_RUN_ID" "cam4=$CAM4_IP=$BURN_CAM4_RUN_ID"; do
+    _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
+    echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624 ALL_CAMBOX)"
+    _cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"
+    sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
+      "$PROBE_BIN_DIR"/camera-box root@"$_cip":"$_cbin"
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$_cip" \
+      "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
+       chmod +x $_cbin; \
+       i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+       v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
+       (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$_cburn \
+         NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
+         nohup $_cbin >/tmp/cbox-burn-${_cn}.log 2>&1 &)"
+  done
+  sleep 4  # let cam3/cam4's NDI senders (with their burns) become discoverable
+fi
 
 echo "[3/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
@@ -1153,9 +1205,12 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" "pkill -
 # cam1: send SIGINT (graceful) so camera-box's shutdown handler runs and writes the
 # cam2→cam1 LOSS sidecar (CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt — cam1's V4L2
 # capture-drop count). Give it a moment to flush, then SIGKILL any straggler.
+# #626: digit-anchored pattern — see the cleanup() comment above for why a bare
+# 'camera-box-burn-' self-matches the invoking remote shell's own cmdline and kills it before
+# the rest of the command runs.
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
-  "pkill -INT -f 'camera-box-burn-' 2>/dev/null; pkill -INT -x camera-box 2>/dev/null; \
-   sleep 3; pkill -9 -f 'camera-box-burn-' 2>/dev/null; pkill -9 -x camera-box 2>/dev/null; true"
+  "pkill -INT -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -INT -x camera-box 2>/dev/null; \
+   sleep 3; pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -9 -x camera-box 2>/dev/null; true"
 
 # Download the cam2 painter ground-truth CSV (tick,gen_ts_ns) for the honest cam→strih
 # optical assessment. (cam2→cam1 latency no longer needs it — #179 reads cam2's paint-ts
@@ -1359,7 +1414,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
     --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
     --imag-capture-fps "$IMAG_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
-    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-cam3-run-id "$BURN_CAM3_RUN_ID" \
+    --burn-cam4-run-id "$BURN_CAM4_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
     --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
