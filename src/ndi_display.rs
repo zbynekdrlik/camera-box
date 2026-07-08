@@ -99,6 +99,17 @@ fn log_connector_state(present: bool, logged: &mut Option<bool>) {
     *logged = Some(present);
 }
 
+/// #528: the single connector-presence gate shared by BOTH the outer reconnection loop's
+/// connect-decision AND the inner frame loop's mid-stream recheck. A cambox with no monitor
+/// attached must neither CONNECT the NDI receiver (previously it connected unconditionally and
+/// only gated the *render* — wasted network/decode on every monitor-less box) nor KEEP it
+/// connected once a monitor is unplugged mid-stream. `true` (a monitor is present) means it is
+/// safe to connect/keep pulling frames; `false` means idle-poll instead of connecting, or drop
+/// the receiver instead of merely skipping the render.
+pub fn should_pull_ndi(connector_present: bool) -> bool {
+    connector_present
+}
+
 /// Run the NDI display loop with automatic reconnection
 /// This should be called from a low-priority thread
 pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> Result<()> {
@@ -149,6 +160,21 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
 
     // Outer reconnection loop - keeps trying to connect/reconnect
     while running.load(Ordering::Relaxed) {
+        // #528: poll connector presence BEFORE connecting the NDI receiver — a monitor-less
+        // cambox must not pull+decode the interkom NDI stream at all (previously this connected
+        // unconditionally and only gated the *render*, wasting network/decode on every box
+        // regardless of whether a monitor is attached). `None` (unknown sysfs layout) => treat
+        // as present, same fail-safe as everywhere else in this function (never silently go dark).
+        connector_present = any_connector_connected(DRM_CLASS_DIR).unwrap_or(true);
+        log_connector_state(connector_present, &mut logged_connector_state);
+        if !should_pull_ndi(connector_present) {
+            // No monitor plugged in anywhere on this box — idle-poll cheaply instead of
+            // connecting/pulling NDI. Picks up automatically the moment a monitor appears
+            // (plugged in, or moved here from another cambox).
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
+
         // Try to connect to NDI source
         tracing::info!(
             "NDI display: connecting to source '{}'...",
@@ -229,21 +255,23 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                     // before the inner loop).
                     log_connector_state(connector_present, &mut logged_connector_state);
 
-                    if connector_present {
-                        // Display the frame (ignore errors - display may be disconnected)
-                        if let Err(e) = display.display_frame(
-                            &frame.data,
-                            frame.width,
-                            frame.height,
-                            frame.fourcc,
-                        ) {
-                            // Only log occasionally to avoid spam
-                            if frame_count.is_multiple_of(300) {
-                                tracing::warn!(
-                                    "Display write failed (monitor disconnected?): {}",
-                                    e
-                                );
-                            }
+                    if !should_pull_ndi(connector_present) {
+                        // #528: the monitor went away mid-stream — DROP the receiver entirely
+                        // (stop pulling/decoding NDI) instead of merely skipping the render. The
+                        // outer loop's top-of-loop poll idle-polls until a monitor reappears.
+                        tracing::info!(
+                            "NDI display: monitor disconnected mid-stream — dropping receiver"
+                        );
+                        break;
+                    }
+
+                    // Display the frame (ignore errors - display may be disconnected)
+                    if let Err(e) =
+                        display.display_frame(&frame.data, frame.width, frame.height, frame.fourcc)
+                    {
+                        // Only log occasionally to avoid spam
+                        if frame_count.is_multiple_of(300) {
+                            tracing::warn!("Display write failed (monitor disconnected?): {}", e);
                         }
                     }
 
@@ -352,6 +380,21 @@ mod tests {
         assert_eq!(config.source_name, "STRIH-SNV (interkom)");
         assert_eq!(config.fb_device, "/dev/fb1");
         assert_eq!(config.find_timeout_secs, 60);
+    }
+
+    #[test]
+    fn should_pull_ndi_true_when_a_monitor_is_connected() {
+        assert!(should_pull_ndi(true));
+    }
+
+    #[test]
+    fn should_pull_ndi_false_when_no_monitor_is_connected() {
+        // #528: a monitor-less cambox must neither CONNECT the NDI receiver (outer loop) nor
+        // KEEP it connected mid-stream (inner loop) — the exact wasteful-pull gap #528's design
+        // review flagged (previously the receiver connected unconditionally and only gated the
+        // render, so a box with no monitor attached still pulled+decoded the interkom NDI stream
+        // forever).
+        assert!(!should_pull_ndi(false));
     }
 
     #[test]
