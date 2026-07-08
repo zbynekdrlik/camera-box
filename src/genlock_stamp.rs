@@ -77,13 +77,7 @@ pub const OFFSET_RESAMPLE_INTERVAL_FRAMES: u64 = 100;
 /// a fresh sample.
 #[inline]
 pub fn should_resample_mono_to_real_offset(frames_since_last_sample: u64) -> bool {
-    // #286 STUB (pre-fix, bug-mirror): never resamples — exactly the (missing) behavior
-    // production has today (main.rs has no monotonic->realtime offset sampler at all, so
-    // there is no existing cadence to mirror; this stub's "always false" is the degenerate
-    // case of that absence). The test below requires resampling once the interval elapses;
-    // it FAILS against this stub (RED). The fix applies the real cadence check (GREEN).
-    let _ = frames_since_last_sample;
-    false
+    frames_since_last_sample >= OFFSET_RESAMPLE_INTERVAL_FRAMES
 }
 
 /// Convert a raw V4L2 buffer timestamp (`sec` whole seconds, `usec` microseconds — the
@@ -93,12 +87,9 @@ pub fn should_resample_mono_to_real_offset(frames_since_last_sample: u64) -> boo
 /// wrap into a bogus timecode.
 #[inline]
 pub fn v4l_timestamp_to_monotonic_100ns(sec: i64, usec: i64) -> i64 {
-    // #286 STUB (pre-fix, bug-mirror): drops the `usec` sub-second component — exactly the
-    // (missing) behavior production has today (no V4L2-timestamp-to-100ns conversion exists
-    // at all yet). The test below requires the full sec+usec precision; it FAILS against
-    // this stub (RED). The fix adds the usec term (GREEN).
-    let _ = usec;
+    // 1 sec = 10_000_000 (100ns units); 1 usec = 10 (100ns units).
     sec.saturating_mul(10_000_000)
+        .saturating_add(usec.saturating_mul(10))
 }
 
 #[cfg(test)]

@@ -48,6 +48,35 @@ fn wall_clock_ns() -> u64 {
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
+/// #286 — monotonic clock time in ns (`CLOCK_MONOTONIC`, boot-relative). This is the same
+/// clock domain the V4L2 UVC driver stamps on a dequeued capture buffer by default (the
+/// `TIMESTAMP_MONOTONIC` flag), so sampling it back-to-back with [`wall_clock_ns`] gives the
+/// monotonic->realtime offset the capture-based genlock stamp needs
+/// ([`sample_mono_to_real_offset_100ns`]). Mirrors `wall_clock_ns`'s exact
+/// `clock_gettime` pattern.
+fn monotonic_clock_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
+}
+
+/// #286 — sample `realtime_now - monotonic_now` in 100ns units
+/// (`genlock_stamp::capture_realtime_100ns`'s `mono_to_real_offset_100ns` input). The two
+/// `clock_gettime` calls are made back-to-back so the (sub-microsecond) gap between reading
+/// each clock is negligible against the 100ns stamp granularity. Re-sampled periodically by
+/// the capture loop (see [`camera_box::genlock_stamp::should_resample_mono_to_real_offset`])
+/// so a realtime clock step/slew (e.g. DanteSync/NTP correction) cannot skew the stamp.
+fn sample_mono_to_real_offset_100ns() -> i64 {
+    let real_100ns = (wall_clock_ns() / 100) as i64;
+    let mono_100ns = (monotonic_clock_ns() / 100) as i64;
+    real_100ns - mono_100ns
+}
+
 /// Apply real-time optimizations to the current thread for lowest latency
 /// Based on media-bridge's extreme low-latency settings
 fn apply_realtime_optimizations() {
@@ -501,9 +530,17 @@ async fn run_capture_loop(
         // the sender so it can be `take`n into the burn thread. `burn_ids` is the monotonic
         // per-EMITTED-frame burn id, drawn once per emit on this thread to keep the burn id ↔
         // emitted-frame mapping strictly 1:1. `send_fps` is the genlock rate used for the
-        // gate-instant emitted-frame timecode (0 ⇒ genlock off, a degenerate no-op).
-        #[cfg(feature = "probe")]
+        // gate-instant emitted-frame timecode (0 ⇒ genlock off, a degenerate no-op) — used by
+        // BOTH the probe burn path and the #286 production capture-based timecode below.
         let send_fps: u32 = genlock_fps.unwrap_or(0);
+        // #286 — the periodically-resampled monotonic->realtime clock offset
+        // (`genlock_stamp::capture_realtime_100ns`'s `mono_to_real_offset_100ns`), plus how
+        // many captured frames have elapsed since the last sample. Sampled once here (before
+        // the first frame) and re-sampled inside the loop per
+        // `genlock_stamp::should_resample_mono_to_real_offset` so a realtime clock step/slew
+        // (DanteSync/NTP correction) never permanently skews the capture-based genlock stamp.
+        let mut mono_to_real_offset_100ns: i64 = sample_mono_to_real_offset_100ns();
+        let mut frames_since_offset_sample: u64 = 0;
         #[cfg(feature = "probe")]
         let mut burn_ids = camera_box::probe::genlock::BurnFrameIdSource::default();
         #[cfg(feature = "probe")]
@@ -620,6 +657,18 @@ async fn run_capture_loop(
         while running_capture.load(Ordering::Relaxed) {
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
+                // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
+                // EVERY captured frame toward the cadence (regardless of emit/decimate
+                // decisions below), so the offset stays fresh even during a long decimated
+                // stretch — mirrors the chroma sample's "always count captured frames" note.
+                frames_since_offset_sample += 1;
+                if camera_box::genlock_stamp::should_resample_mono_to_real_offset(
+                    frames_since_offset_sample,
+                ) {
+                    mono_to_real_offset_100ns = sample_mono_to_real_offset_100ns();
+                    frames_since_offset_sample = 0;
+                }
+
                 // #299 — chroma sample: every CHROMA_SAMPLE_FRAMES captured frames
                 // (regardless of emit/decimate decisions so we always sample the raw
                 // device output). Stored in `last_chroma`; logged on the 5-second tick.
@@ -651,6 +700,17 @@ async fn run_capture_loop(
                 // describe the SAME instant even when the async submit below back-pressures (the
                 // grab ts must not drift later than the emit, which would inflate cam2→cam1 latency).
                 let emit_wall_ns = wall_clock_ns() as i64;
+
+                // #286 — this frame's real CAPTURE instant, mapped from the V4L2-stamped
+                // CLOCK_MONOTONIC domain into CLOCK_REALTIME. THIS (not `emit_wall_ns`) is
+                // the basis for the emitted NDI genlock timecode below, so a grabber card's
+                // photon->dequeue latency can no longer leak into the stamp. `emit_wall_ns`
+                // is retained unchanged for the burn's own `gen_ts_ns` + grab-record tee
+                // (see genlock_stamp's module doc — those stay arrival-based on purpose).
+                let capture_realtime_100ns = camera_box::genlock_stamp::capture_realtime_100ns(
+                    info.capture_monotonic_100ns,
+                    mono_to_real_offset_100ns,
+                );
 
                 // #105 node 2 — tee the EMITTED (original, unburned) frame to the cam1 grab
                 // recording at the emit instant. A broken grab stream stops recording but NEVER
@@ -701,8 +761,17 @@ async fn run_capture_loop(
                         info,
                         run_id,
                         frame_id,
+                        // #286 BUG SITE #1 FIX — the emitted frame's genlock NDI timecode now
+                        // keys on the real CAPTURE instant (`capture_realtime_100ns`), not the
+                        // arrival-based `boundary_timecode_100ns(send_fps)` this used to call.
+                        // `gen_ts_ns` stays arrival (`emit_wall_ns`) unchanged — it feeds the
+                        // #624/#625 latency measurement, which is out of scope for this fix.
                         gen_ts_ns: emit_wall_ns,
-                        emit_timecode_100ns: camera_box::ndi::boundary_timecode_100ns(send_fps),
+                        emit_timecode_100ns: camera_box::genlock_stamp::genlock_emit_timecode_100ns(
+                            capture_realtime_100ns,
+                            emit_wall_ns,
+                            send_fps as i64,
+                        ),
                         render_qr,
                     };
                     // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
@@ -736,7 +805,15 @@ async fn run_capture_loop(
                 let sender = capture_sender
                     .as_mut()
                     .expect("capture_sender is present whenever the burn is inactive");
-                if let Err(e) = sender.send_frame_zero_copy(data, info) {
+                // #286 BUG SITE #2 FIX — pass the CAPTURE-based genlock timecode through to
+                // send_frame_zero_copy so it stamps the real capture instant (under external
+                // pacing) instead of re-deriving an arrival-based boundary at send time.
+                let capture_timecode_100ns = camera_box::genlock_stamp::genlock_emit_timecode_100ns(
+                    capture_realtime_100ns,
+                    emit_wall_ns,
+                    send_fps as i64,
+                );
+                if let Err(e) = sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
                     tracing::error!("Failed to send frame: {}", e);
                 }
                 emit_count += 1; // reached only when the frame passed the gate

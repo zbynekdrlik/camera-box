@@ -13,6 +13,17 @@ pub struct FrameInfo {
     pub height: u32,
     pub fourcc: FourCC,
     pub stride: u32,
+    /// #286 — this frame's real V4L2 CAPTURE instant, in `CLOCK_MONOTONIC` 100ns units
+    /// (converted from the driver's `v4l::buffer::Metadata.timestamp` via
+    /// [`crate::genlock_stamp::v4l_timestamp_to_monotonic_100ns`]). The genlock emit path
+    /// maps this into the `CLOCK_REALTIME` domain
+    /// ([`crate::genlock_stamp::capture_realtime_100ns`]) and stamps the emitted NDI
+    /// timecode from IT, not the arrival/send wall-clock — so each grabber card's
+    /// photon->dequeue latency `d_X` no longer leaks into the genlock stamp. `0` where no
+    /// real V4L2 metadata is available (e.g. [`VideoCapture::frame_info`]'s static getter,
+    /// or test fixtures) — callers that don't feed a real capture timestamp never see this
+    /// field used for genlock stamping.
+    pub capture_monotonic_100ns: i64,
 }
 
 /// Video frame data with metadata (for compatibility, still used for owned data)
@@ -873,12 +884,20 @@ impl VideoCapture {
     {
         let (buffer, metadata) = self.stream.next()?;
         let seq = metadata.sequence;
+        // #286 — the driver's real CAPTURE instant (V4L2 default clock domain is
+        // CLOCK_MONOTONIC; see the module-level doc on `FrameInfo::capture_monotonic_100ns`),
+        // converted to monotonic 100ns units for the genlock emit path.
+        let capture_monotonic_100ns = crate::genlock_stamp::v4l_timestamp_to_monotonic_100ns(
+            metadata.timestamp.sec,
+            metadata.timestamp.usec,
+        );
 
         let info = FrameInfo {
             width: self.width,
             height: self.height,
             fourcc: self.fourcc,
             stride: self.stride,
+            capture_monotonic_100ns,
         };
 
         // Zero-copy: pass buffer slice directly to callback
@@ -901,6 +920,9 @@ impl VideoCapture {
             height: self.height,
             fourcc: self.fourcc,
             stride: self.stride,
+            // No real V4L2 metadata at this static getter (no frame was just dequeued) — see
+            // the doc on `FrameInfo::capture_monotonic_100ns`.
+            capture_monotonic_100ns: 0,
         }
     }
 
@@ -1004,6 +1026,7 @@ mod tests {
             height: 1080,
             fourcc: FourCC::new(b"YUYV"),
             stride: 3840,
+            capture_monotonic_100ns: 0,
         };
         // Test Copy trait
         let copied = info;
@@ -1019,6 +1042,7 @@ mod tests {
             height: 720,
             fourcc: FourCC::new(b"MJPG"),
             stride: 2560,
+            capture_monotonic_100ns: 0,
         };
         assert_eq!(info.width, 1280);
         assert_eq!(info.height, 720);
