@@ -296,6 +296,18 @@ for _ts in systemd-timesyncd chrony ntp ntpsec openntpd; do
         || dpkg --purge --force-depends "$_ts" 2>/dev/null || true
     systemctl mask "$_ts" 2>/dev/null || true
 done
+# #597: same purge for linuxptp (ptp4l/phc2sys) -- a rogue PTP daemon would fight dantesync's own
+# PTP servo directly. Package name ("linuxptp") differs from unit names ("ptp4l"/"phc2sys"), not
+# in the base image today but purged as belt-and-suspenders (a no-op when absent). Same
+# disable -> purge -> mask order as the loop above.
+for _u in ptp4l phc2sys; do
+    systemctl disable --now "$_u" 2>/dev/null || true
+done
+apt-get purge -y linuxptp 2>/dev/null \
+    || dpkg --purge --force-depends linuxptp 2>/dev/null || true
+for _u in ptp4l phc2sys; do
+    systemctl mask "$_u" 2>/dev/null || true
+done
 
 # Create user newlevel
 useradd -m -s /bin/bash -G sudo newlevel

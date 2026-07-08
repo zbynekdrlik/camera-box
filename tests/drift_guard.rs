@@ -2576,16 +2576,23 @@ fn timesync_gather_remote_snippet_output_matches_what_timesync_authority_verdict
     let verdict = verdict.trim();
 
     let lines: Vec<&str> = gathered.lines().filter(|l| !l.is_empty()).collect();
+    // #597: linuxptp (ptp4l/phc2sys) widened the competing-daemon set from the 5 stock NTP
+    // daemons to 7 -- the 2 linuxptp UNITS ride alongside the 5 NTP daemons in the same block.
     assert_eq!(
         lines.len(),
-        5,
-        "must gather exactly the 5 competing daemons: {gathered:?}"
+        7,
+        "must gather the 5 stock NTP daemons + linuxptp's 2 units (ptp4l, phc2sys) (#597): \
+         {gathered:?}"
     );
-    for (line, expected_name) in
-        lines
-            .iter()
-            .zip(["systemd-timesyncd", "chrony", "ntp", "ntpsec", "openntpd"])
-    {
+    for (line, expected_name) in lines.iter().zip([
+        "systemd-timesyncd",
+        "chrony",
+        "ntp",
+        "ntpsec",
+        "openntpd",
+        "ptp4l",
+        "phc2sys",
+    ]) {
         let fields: Vec<&str> = line.splitn(4, '|').collect();
         assert_eq!(
             fields.len(),
@@ -2604,6 +2611,38 @@ fn timesync_gather_remote_snippet_output_matches_what_timesync_authority_verdict
         verdict == "ok" || verdict.starts_with("FAIL: "),
         "verdict must be a real ok/FAIL decision, never empty or malformed: {verdict:?}"
     );
+}
+
+#[test]
+fn timesync_gather_remote_snippet_pairs_linuxptp_units_with_the_linuxptp_package_status() {
+    // #597: ptp4l/phc2sys are systemd UNIT names but ship inside the "linuxptp" dpkg PACKAGE --
+    // there is no "ptp4l" or "phc2sys" apt package to query, so `dpkg -s ptp4l` would always read
+    // empty even when linuxptp IS installed. Both unit rows must instead carry the dpkg status of
+    // the shared "linuxptp" package.
+    let body = r#"
+        snippet="$(timesync_gather_remote_snippet)"
+        gathered="$(bash -c "$snippet")"
+        printf '%s' "$gathered"
+        printf '\n---REAL_LINUXPTP_DPKG---\n'
+        dpkg -s linuxptp 2>/dev/null | sed -n "s/^Status: //p" || true
+    "#;
+    let out = run_sourced(body, &[]);
+    let (gathered, real_dpkg) = out
+        .split_once("---REAL_LINUXPTP_DPKG---\n")
+        .unwrap_or_else(|| panic!("missing ---REAL_LINUXPTP_DPKG--- marker: {out:?}"));
+    let real_dpkg = real_dpkg.trim();
+    for name in ["ptp4l", "phc2sys"] {
+        let line = gathered
+            .lines()
+            .find(|l| l.starts_with(&format!("{name}|")))
+            .unwrap_or_else(|| panic!("no {name} row in gathered output (#597): {gathered:?}"));
+        let fields: Vec<&str> = line.splitn(4, '|').collect();
+        assert_eq!(
+            fields[1], real_dpkg,
+            "{name}'s dpkg field must come from `dpkg -s linuxptp` (the real package), not a \
+             per-unit dpkg query that would always read empty: {line:?}"
+        );
+    }
 }
 
 #[test]

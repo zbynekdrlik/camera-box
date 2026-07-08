@@ -101,6 +101,14 @@ timesync_authority_verdict() {
 # two callers). Both callers run THIS SAME string over their own transport:
 #   ssh_box "$(timesync_gather_remote_snippet)"                 (verify-device.sh)
 #   "${ssh_cmd[@]}" "$(timesync_gather_remote_snippet)"          (drift-guard.sh)
+#
+# #597: linuxptp (ptp4l/phc2sys) is a 2nd class of competing timesync authority -- a rogue PTP
+# daemon would fight dantesync's OWN PTP servo directly on this PTP rig, unlike the NTP daemons
+# above. Unlike them, its dpkg PACKAGE name ("linuxptp") differs from its systemd UNIT names
+# ("ptp4l"/"phc2sys"), so the NAME|DPKG|ACTIVE|ENABLED row is built by hand for each unit: the
+# ACTIVE/ENABLED fields come from that unit's own `systemctl` state, but the DPKG field comes from
+# the ONE shared "linuxptp" package (there is no "ptp4l" or "phc2sys" apt package to query --
+# `dpkg -s ptp4l` would always read empty even when linuxptp IS installed).
 timesync_gather_remote_snippet() {
   cat <<'REMOTE'
 for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
@@ -108,6 +116,12 @@ for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
   _ac="$(systemctl is-active "$_p" 2>/dev/null || true)"
   _en="$(systemctl is-enabled "$_p" 2>/dev/null || true)"
   printf "%s|%s|%s|%s\n" "$_p" "$_st" "$_ac" "$_en"
+done
+_ptp_st="$(dpkg -s linuxptp 2>/dev/null | sed -n "s/^Status: //p" || true)"
+for _u in ptp4l phc2sys; do
+  _ac="$(systemctl is-active "$_u" 2>/dev/null || true)"
+  _en="$(systemctl is-enabled "$_u" 2>/dev/null || true)"
+  printf "%s|%s|%s|%s\n" "$_u" "$_ptp_st" "$_ac" "$_en"
 done
 REMOTE
 }

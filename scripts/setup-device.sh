@@ -806,7 +806,23 @@ for _ts in systemd-timesyncd chrony ntp ntpsec openntpd; do
         || dpkg --purge --force-depends "$_ts" 2>/dev/null || true
     systemctl mask "$_ts" 2>/dev/null || true
 done
-echo "  #591: purged + masked competing timesync daemons (dantesync is the sole clock authority)"
+# #597: linuxptp (ptp4l/phc2sys) is a 2nd class of competing timesync authority -- a rogue PTP
+# daemon would fight dantesync's OWN PTP servo directly on this PTP rig. Unlike the NTP daemons
+# above, its dpkg PACKAGE ("linuxptp") differs from its systemd UNITS ("ptp4l"/"phc2sys"), so it
+# needs its own stanza rather than fitting the shared `for _ts in ...` loop -- but the SAME
+# disable -> purge -> mask order as that loop: disable+stop each unit, purge the ONE shared
+# package, then mask each unit as a backstop. dantesync is a standalone binary
+# (/usr/local/bin/dantesync, downloaded below) with no dependency on linuxptp -- safe to purge
+# outright.
+for _u in ptp4l phc2sys; do
+    systemctl disable --now "$_u" 2>/dev/null || true
+done
+apt-get purge -y linuxptp 2>/dev/null \
+    || dpkg --purge --force-depends linuxptp 2>/dev/null || true
+for _u in ptp4l phc2sys; do
+    systemctl mask "$_u" 2>/dev/null || true
+done
+echo "  #591/#597: purged + masked competing timesync daemons (dantesync is the sole clock authority)"
 
 DANTESYNC_INSTALLED=false
 
