@@ -409,14 +409,10 @@ fn setup_device_purges_linuxptp_ptp4l_phc2sys() {
          loop and needs a purge line of its own. dantesync is a standalone binary \
          (/usr/local/bin/dantesync) with no dependency on the linuxptp package"
     );
-    assert_eq!(
-        body.lines()
-            .filter(|l| l.contains("systemctl mask") && !l.trim_start().starts_with('#'))
-            .count(),
-        2,
-        "expected exactly 2 `systemctl mask` sites: the #591 shared `\"$_ts\"`/`\"$_u\"` loop \
-         masks, plus the #597 linuxptp unit(s) backstop -- got a different count, check for a \
-         missing or duplicated mask stanza"
+    assert!(
+        on_noncomment_line(&body, r#"systemctl mask "$_u""#),
+        "setup-device.sh must MASK each linuxptp unit as a backstop, mirroring the #591 \
+         `systemctl mask \"$_ts\"` pattern for the NTP daemons (#597)"
     );
 }
 
