@@ -80,6 +80,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/camera-set.sh"          # camera_resolve() -- NAME -> IP / CAMERA_GENLOCK_FPS (#24/#451)
 # shellcheck source=scripts/lib/ndi-alive.sh
 . "$HERE/lib/ndi-alive.sh"       # emit_ok_grep_pattern() / fatal_grep_pattern() (#451)
+# shellcheck source=scripts/lib/timesync-authority.sh
+. "$HERE/lib/timesync-authority.sh"  # dpkg_status_installed/timesync_daemon_verdict/
+                                      # timesync_authority_verdict (#591, shared with
+                                      # drift-guard.sh's --check-imag facet since #596)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -237,79 +241,12 @@ dantesync_journal_fresh() {
 # verification. This gate makes a 2nd authority impossible to ship: a competing daemon that is
 # INSTALLED (even masked), ACTIVE, or merely enabled/unmasked is a hard FAIL. dantesync is the ONE
 # authority that must be present; it is deliberately NOT in the competing set.
-
-# dpkg_status_installed STATUS -> 0 iff STATUS (a `dpkg -s` "Status:" line value, e.g.
-# "install ok installed") shows the package's files are CURRENTLY present on disk (a review-caught
-# false-green gap, #591: the ORIGINAL form only matched the exact "install ok installed" triad,
-# missing "hold ok installed" (an installed daemon the operator apt-mark-held) and every
-# files-unpacked-but-not-fully-configured state -- "install ok unpacked" / "half-configured" /
-# "half-installed" / "triggers-pending" / "triggers-awaiting" -- all of which leave the competing
-# daemon's binary+unit on disk, exactly the "installed" state this check exists to reject even
-# though it isn't yet an active systemd unit). dpkg's Status line is "<want> <flag> <state>"; the
-# ONLY states meaning "files genuinely gone" are: EMPTY (dpkg has never heard of the package --
-# never installed, or fully purged so no Status line prints at all), "not-installed", and
-# "config-files" (removed, only leftover conffiles remain -- binary/unit ARE gone). Every OTHER
-# state means the daemon's files are present on disk in some form -- treated as installed
-# (test-strictness: an ambiguous/partial state is never read as "safely absent").
-dpkg_status_installed() {
-  case "$1" in
-    '') return 1 ;;
-    *' not-installed' | *' config-files') return 1 ;;
-    *) return 0 ;;
-  esac
-}
-
-# timesync_enabled_state_neutral STATE -> 0 iff STATE (trimmed `systemctl is-enabled` output) is a
-# NEUTRAL/absent state: masked / disabled / not-found / empty. Any other state (enabled / static /
-# alias / indirect / enabled-runtime / generated / linked) means the unit is still wired to start.
-timesync_enabled_state_neutral() {
-  case "$(printf '%s' "$1" | tr -d '[:space:]')" in
-    '' | masked | disabled | not-found) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# timesync_daemon_verdict NAME DPKG_STATUS IS_ACTIVE IS_ENABLED -> echoes "ok" or "FAIL: <reason>".
-# A competing timesync daemon FAILs if it is INSTALLED (dpkg) OR ACTIVE OR not in a neutral
-# enabled-state. Masking a competing daemon is NOT enough -- a minimalist appliance purges it, so
-# INSTALLED = FAIL even when masked+inactive (the cam1-4 "installed-but-disabled" state now rejected).
-timesync_daemon_verdict() {
-  local name="$1" dpkg="$2" active="$3" enabled="$4"
-  if dpkg_status_installed "$dpkg"; then
-    printf 'FAIL: %s is INSTALLED -- purge it (a minimalist appliance runs only dantesync; masking is not enough)\n' "$name"
-    return 0
-  fi
-  if [ "$(printf '%s' "$active" | tr -d '[:space:]')" = "active" ]; then
-    printf 'FAIL: %s is ACTIVE -- a 2nd timesync daemon fights dantesync (cam5/6 -> 5.28s desync)\n' "$name"
-    return 0
-  fi
-  if ! timesync_enabled_state_neutral "$enabled"; then
-    printf 'FAIL: %s is enabled (state=%s) -- must be masked/disabled/purged\n' "$name" "${enabled:-<none>}"
-    return 0
-  fi
-  printf 'ok\n'
-}
-
-# timesync_authority_verdict COLLECTED -> "ok" if EVERY competing daemon passes, else the
-# newline-joined "FAIL: ..." reasons. COLLECTED is the live flow's gathered block: one line per
-# daemon, pipe-delimited "NAME|DPKG_STATUS|IS_ACTIVE|IS_ENABLED" (the dpkg status carries spaces but
-# never a `|`, so `|` is a safe field separator). Blank lines are skipped.
-timesync_authority_verdict() {
-  local collected="$1" name dpkg active enabled verdict fails="" nl
-  nl=$'\n'
-  while IFS='|' read -r name dpkg active enabled; do
-    [ -n "$name" ] || continue
-    verdict="$(timesync_daemon_verdict "$name" "$dpkg" "$active" "$enabled")"
-    if [ "$verdict" != "ok" ]; then
-      fails="${fails:+$fails$nl}$verdict"
-    fi
-  done <<< "$collected"
-  if [ -n "$fails" ]; then
-    printf '%s\n' "$fails"
-  else
-    printf 'ok\n'
-  fi
-}
+#
+# dpkg_status_installed() / timesync_enabled_state_neutral() / timesync_daemon_verdict() /
+# timesync_authority_verdict() now live in scripts/lib/timesync-authority.sh (#596) -- extracted so
+# scripts/drift-guard.sh's --check-imag facet (imag-nb) can share the EXACT same verdict instead of
+# duplicating it (mirrors the #595 precedent of moving the offset-verdict pair into
+# scripts/clock-offset-guard.sh for the SAME reason). Sourced above; transitively available here.
 
 # --- (e) genlock.conf drop-in --------------------------------------------------------------------
 
@@ -810,15 +747,11 @@ fi
 # cam5/cam6 ran systemd-timesyncd ALONGSIDE dantesync -> a real 5.28s desync. A minimalist appliance
 # runs ONLY dantesync. One SSH call gathers, per competing daemon, its dpkg install state +
 # systemctl is-active + is-enabled into a `NAME|DPKG|ACTIVE|ENABLED` block; timesync_authority_verdict
-# hard-fails on any that is installed (even masked) / active / enabled.
+# hard-fails on any that is installed (even masked) / active / enabled. The gathering command itself
+# is shared via timesync_gather_remote_snippet() (scripts/lib/timesync-authority.sh, #596 review
+# finding) so drift-guard.sh's --check-imag facet can never drift from this EXACT daemon list.
 rc=0
-TS_STATES="$(ssh_box '
-for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
-  _st="$(dpkg -s "$_p" 2>/dev/null | sed -n "s/^Status: //p" || true)"
-  _ac="$(systemctl is-active "$_p" 2>/dev/null || true)"
-  _en="$(systemctl is-enabled "$_p" 2>/dev/null || true)"
-  printf "%s|%s|%s|%s\n" "$_p" "$_st" "$_ac" "$_en"
-done')" || rc=$?
+TS_STATES="$(ssh_box "$(timesync_gather_remote_snippet)")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$TS_STATES" ]; then
   fail "could not read timesync-daemon state over SSH (rc=$rc) -- cannot certify dantesync is the sole clock authority (#591)"
 else

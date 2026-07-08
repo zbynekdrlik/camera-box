@@ -2528,21 +2528,105 @@ const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
 07:42:38.746: genlock: latency = 3 ms (\u{2248} 0 frames @ 60.000fps) (OBS_GENLOCK_LATENCY_MS) \u{2014} single user-facing latency knob, ts-align implied ON (#235)\n\
 14:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n";
 
+/// A clean per-daemon `NAME|DPKG|ACTIVE|ENABLED` block (#596): every competing timesync daemon
+/// purged (empty dpkg) + inactive + masked — the real post-provisioning steady state
+/// `setup-imag.sh` produces (mirrors `timesync_authority_verdict_ok_on_the_real_post_
+/// provisioning_steady_state` in tests/verify_device_pure_functions.rs).
+const TIMESYNC_STATES_CLEAN_FIXTURE: &str = "\
+systemd-timesyncd||inactive|masked
+chrony||inactive|masked
+ntp||inactive|masked
+ntpsec||inactive|masked
+openntpd||inactive|masked";
+
+/// The exact cam5/cam6 #591 failure signature, reused here for imag-nb (#596): systemd-timesyncd
+/// installed + active + enabled ALONGSIDE dantesync.
+const TIMESYNC_STATES_CAM5_STYLE_FIXTURE: &str = "\
+systemd-timesyncd|install ok installed|active|enabled
+chrony||inactive|
+ntp||inactive|
+ntpsec||inactive|
+openntpd||inactive|";
+
+#[test]
+fn timesync_gather_remote_snippet_output_matches_what_timesync_authority_verdict_expects_596() {
+    // Code-review finding (#596): sharing timesync_gather_remote_snippet() between
+    // verify-device.sh and drift-guard.sh guarantees the two callers can't diverge FROM EACH
+    // OTHER, but nothing proved the snippet's own printf shape actually matches the
+    // `NAME|DPKG|ACTIVE|ENABLED` block timesync_authority_verdict parses -- a future edit to the
+    // daemon list or the printf format could silently break that seam with no test catching it.
+    //
+    // This EXECUTES the real snippet locally via a nested `bash -c` -- the exact same read-only
+    // `dpkg -s` / `systemctl is-active` / `is-enabled` calls the live SSH flow runs remotely
+    // (safe on any Linux CI runner: ubuntu-latest ships both dpkg and systemctl, regardless of
+    // which of these 5 packages happen to be installed) -- and feeds the REAL output straight
+    // into timesync_authority_verdict, proving the gather<->verdict seam end-to-end rather than
+    // only against hand-written Rust fixtures.
+    let body = r#"
+        snippet="$(timesync_gather_remote_snippet)"
+        gathered="$(bash -c "$snippet")"
+        printf '%s' "$gathered"
+        printf '\n---VERDICT---\n'
+        timesync_authority_verdict "$gathered"
+    "#;
+    let out = run_sourced(body, &[]);
+    let (gathered, verdict) = out
+        .split_once("---VERDICT---\n")
+        .unwrap_or_else(|| panic!("missing ---VERDICT--- marker: {out:?}"));
+    let verdict = verdict.trim();
+
+    let lines: Vec<&str> = gathered.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        5,
+        "must gather exactly the 5 competing daemons: {gathered:?}"
+    );
+    for (line, expected_name) in
+        lines
+            .iter()
+            .zip(["systemd-timesyncd", "chrony", "ntp", "ntpsec", "openntpd"])
+    {
+        let fields: Vec<&str> = line.splitn(4, '|').collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "each line must be NAME|DPKG|ACTIVE|ENABLED (4 pipe-delimited fields): {line:?}"
+        );
+        assert_eq!(
+            fields[0], expected_name,
+            "daemon name/order must match what timesync_authority_verdict iterates: {line:?}"
+        );
+    }
+    // Whatever this runner's actual daemon state happens to be, the verdict must be a real
+    // decision -- "ok" or "FAIL: <daemon> ...\n"* -- never empty, never a parse error. That
+    // proves timesync_authority_verdict can consume the snippet's REAL output end-to-end.
+    assert!(
+        verdict == "ok" || verdict.starts_with("FAIL: "),
+        "verdict must be a real ok/FAIL decision, never empty or malformed: {verdict:?}"
+    );
+}
+
 #[test]
 fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
-    // Full live facet, all SEVEN live-state checks match the pin -> exit 0, every line OK, no
+    // Full live facet, all EIGHT live-state checks match the pin -> exit 0, every line OK, no
     // DRIFT/UNKNOWN. (#531: the build-identity check moved OUT to imag_build_drift_report.)
     // #489: the 10th/11th args are the dantesync lock pin + a realistic locked journal line —
     // must ALSO read clean, or this "everything matches" case would spuriously report DRIFT/UNKNOWN.
     // #572: the log text now ALSO carries the #484 RT-pin success line, so the 7th genlock_rt_pin
     // check reads OK too — otherwise this "everything matches" case would regress to UNKNOWN.
+    // #596: the 12th arg is a clean per-daemon timesync-authority block (imag-nb's own #591
+    // extension) — must ALSO read clean, or this "everything matches" case regresses to UNKNOWN
+    // (an unsupplied/empty 12th arg defaults to check #8's UNKNOWN branch, never a false DRIFT).
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("LOG", &log)]);
+    let out = run_sourced(
+        body,
+        &[("LOG", &log), ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE)],
+    );
     assert!(
         out.contains("RC=0"),
         "every value matches -> clean: {out:?}"
@@ -2552,11 +2636,11 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         !out.contains("UNKNOWN"),
         "no unknown line expected: {out:?}"
     );
-    // Every one of the 7 live-state checks must print its own OK line (comprehensive-logging:
+    // Every one of the 8 live-state checks must print its own OK line (comprehensive-logging:
     // values, not just a bare pass/fail).
     // #531: `genlock_build_sha` (the retired static build check) is NO LONGER one of check_imag_
     // report's lines — the DYNAMIC build-staleness now lives in imag_build_drift_report, run
-    // separately by gather_and_check_imag. So this function prints these 7 live-state lines.
+    // separately by gather_and_check_imag. So this function prints these 8 live-state lines.
     for label in [
         "distroav_so_sha256",
         "genlock_capability",
@@ -2565,9 +2649,103 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
         "distroav_so_path",
         "dantesync_locked",
         "genlock_rt_pin",
+        "timesync_authority",
     ] {
         assert!(out.contains(label), "must report {label}: {out:?}");
     }
+}
+
+#[test]
+fn check_imag_report_timesync_authority_ok_when_no_competing_daemon_596() {
+    // #596: extend #591's sole-timesync-authority gate to imag-nb via drift-guard's --check-imag.
+    // A clean per-daemon block -> the timesync_authority line reads OK.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "$TS_STATES" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE)]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("timesync_authority"))
+        .unwrap_or_else(|| panic!("no timesync_authority line printed: {out:?}"));
+    assert!(line.contains("OK"), "must report OK: {line:?}");
+}
+
+#[test]
+fn check_imag_report_timesync_authority_drift_when_competing_daemon_installed_596() {
+    // #596: the EXACT #591/cam5-cam6 signature (systemd-timesyncd installed+active+enabled
+    // alongside dantesync) reaching imag-nb via drift-guard's --check-imag MUST now FAIL loud —
+    // before this fix, drift-guard silently ignored this signal (the gate PASSED regardless).
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "$TS_STATES" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("TS_STATES", TIMESYNC_STATES_CAM5_STYLE_FIXTURE)]);
+    assert!(
+        out.contains("RC=20"),
+        "a competing timesync daemon installed+active+enabled must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("timesync_authority"))
+        .unwrap_or_else(|| panic!("no timesync_authority line printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT") && line.contains("systemd-timesyncd"),
+        "must flag the offending daemon by name as DRIFT: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_timesync_authority_drift_reason_has_no_double_space_596() {
+    // Code-review finding (#596): the INSTALLED reason's own text already contains a semicolon
+    // ("...runs only dantesync; masking is not enough)"). The reason-joining pipeline must not
+    // blanket-replace THAT semicolon too (which previously produced "dantesync;  masking" with a
+    // double space) -- only the delimiter BETWEEN multiple daemons' reasons gets the "; " spacing.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "$TS_STATES" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("TS_STATES", TIMESYNC_STATES_CAM5_STYLE_FIXTURE)]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("timesync_authority"))
+        .unwrap_or_else(|| panic!("no timesync_authority line printed: {out:?}"));
+    // The report line itself uses printf column-padding spaces (e.g. "DRIFT    (") which are NOT
+    // the bug -- only a semicolon immediately followed by TWO spaces (";  ") is the double-space
+    // signature the blanket `sed 's/;/; /g'` produced when it also matched the semicolon that was
+    // already part of the INSTALLED reason's own text ("...only dantesync; masking...").
+    assert!(
+        !line.contains(";  "),
+        "a semicolon inside the reason text must not gain a double space: {line:?}"
+    );
+    assert!(
+        line.contains("dantesync; masking"),
+        "the reason text must keep its ORIGINAL single-space semicolon intact: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_timesync_authority_unknown_when_not_read_596() {
+    // Empty gathered block (SSH failure, or the remote per-daemon loop produced no output at
+    // all) -> UNKNOWN, never a false OK for a mere connectivity hiccup — mirrors every other
+    // two-tier check in this function (genlock_capability / genlock_rt_pin / dantesync_locked).
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("timesync_authority"))
+        .unwrap_or_else(|| panic!("no timesync_authority line printed: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "an unread timesync-daemon block must report UNKNOWN, never a false OK/DRIFT: {line:?}"
+    );
 }
 
 // #531: the old `check_imag_report_flags_a_wrong_deployed_build_sha_463` test lived here — it
@@ -2775,11 +2953,13 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
     // minus the actual `ssh` calls. check_imag_report derives the capability marker itself.
     // #489: also feed a realistic locked dantesync journal snippet through the real
     // dantesync_locked_from_log parser, mirroring the same end-to-end wiring for the new pin.
+    // #596: also feed a clean per-daemon timesync-authority block — the imag-nb extension of
+    // #591's sole-clock-authority gate — through the shared timesync_authority_verdict.
     let body = r#"
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(
@@ -2787,12 +2967,13 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         &[
             ("LOG", IMAG_LOG_60FPS_3MS),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
         ],
     );
     assert!(
         out.contains("RC=0"),
-        "a real 60fps/3ms imag log + a locked dantesync journal parsed end-to-end must match \
-         cleanly: {out:?}"
+        "a real 60fps/3ms imag log + a locked dantesync journal + a clean timesync-authority \
+         block parsed end-to-end must match cleanly: {out:?}"
     );
 }
 
@@ -2879,10 +3060,12 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     // Every OTHER value also clean, so the dantesync row is the only one exercised in isolation.
     // #572: the log now also carries the #484 RT-pin success line so this "everything else is
     // clean" case doesn't regress to UNKNOWN on the new genlock_rt_pin check.
+    // #596: also pass a clean timesync-authority block so this case doesn't regress to UNKNOWN on
+    // the new check #8.
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
         echo "RC=$rc"
     "#;
     let out = run_sourced(
@@ -2890,6 +3073,7 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
         &[
             ("LOG", log.as_str()),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");

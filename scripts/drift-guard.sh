@@ -22,9 +22,11 @@
 #     silently shipped).
 #   * --check-imag [host=IP] [user=U] (imag-nb, Linux, #463): a plain Linux box reachable over
 #     SSH, so drift-guard gathers its OWN observed values directly (no win-* MCP round-trip) —
-#     the genlock build SHA marker, the deployed distroav.so hash, and the OBS log's genlock
-#     capability + fps + latency lines — and compares them against the imag-specific pins in
-#     vendor/README.md. Simpler than the Windows path by construction (SSH IS the gathering).
+#     the genlock build SHA marker, the deployed distroav.so hash, the OBS log's genlock
+#     capability + fps + latency lines, and (since #596) the SAME #591 sole-timesync-authority
+#     verdict verify-device.sh hard-gates on the cam1-6 fleet — and compares them against the
+#     imag-specific pins in vendor/README.md. Simpler than the Windows path by construction
+#     (SSH IS the gathering).
 #
 # Like scripts/update-av-stack.sh, the file is split into PURE functions (manifest/log parse,
 # version compare — unit-tested from tests/drift_guard.rs by sourcing this file) and a flow that
@@ -45,6 +47,14 @@
 # value UNKNOWN (drift status incomplete — never reported as clean), 1 = usage/IO error.
 
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# scripts/lib/timesync-authority.sh is sourced ONLY for its pure functions (dpkg_status_installed/
+# timesync_daemon_verdict/timesync_authority_verdict, #591) -- it performs no side effects of its
+# own. Shared with scripts/verify-device.sh's (r) fleet check so the --check-imag facet below
+# (imag-nb) runs the IDENTICAL sole-timesync-authority verdict instead of a driftable copy (#596).
+# shellcheck source=scripts/lib/timesync-authority.sh
+. "$HERE/lib/timesync-authority.sh"
 
 DEFAULT_README="vendor/README.md"
 
@@ -492,7 +502,7 @@ imag_build_drift_report() {
 
 # check_imag_report EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
 #   EXP_LATENCY_MS OBS_LATENCY_MS OBS_LOG_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
-#   EXP_DANTESYNC_LOCKED OBS_DANTESYNC_LOG_TEXT
+#   EXP_DANTESYNC_LOCKED OBS_DANTESYNC_LOG_TEXT OBS_TIMESYNC_STATES
 #   -> the #463 imag-nb (Topology v2, EPIC #466) host case. #531: the genlock BUILD-IDENTITY check
 #   (was check #1 here — the inert static empty-pin compare) moved OUT to imag_build_drift_report
 #   above, which [`gather_and_check_imag`] runs ALONGSIDE this report; so this function now covers the
@@ -516,6 +526,14 @@ imag_build_drift_report() {
 # dantesync_locked_from_log, so "journalctl never read" (empty text -> UNKNOWN) and "dantesync
 # running but never locked" (non-empty text, no marker -> DRIFT) stay distinguishable.
 #
+# OBS_TIMESYNC_STATES (#596) is the SAME per-daemon `NAME|DPKG|ACTIVE|ENABLED` block
+# scripts/verify-device.sh's (r) check gathers for the cam1-6 fleet — this closes #591's
+# remaining "drift-guard should inherit it too" gap for imag-nb. check_imag_report derives the
+# verdict itself via the shared timesync_authority_verdict (scripts/lib/timesync-authority.sh), so
+# "block never read" (empty text -> UNKNOWN, an SSH hiccup) and "read, no competing daemon" (ok)
+# vs "read, a competing daemon installed/active/enabled" (DRIFT) stay distinguishable — same
+# two-tier shape as every other facet in this function.
+#
 # Simpler than the strih/stream `--compare` path (#463 research comment): imag is a plain Linux
 # box reachable over SSH, so drift-guard can gather its OWN observed values directly instead of
 # depending on an external win-* MCP round-trip.
@@ -531,6 +549,9 @@ check_imag_report() {
   # variable` crash under this script's `set -u` (mirrors compare_observed's own optional
   # trailing params, e.g. `av_sync_calibrated_ms`).
   local exp_dantesync_locked="${10:-}" obs_dantesync_log_text="${11:-}"
+  # #596: optional 12th param (older call sites pass only 9-11 args) — default-empty, same
+  # backward-compatible convention as the #489 pair above.
+  local obs_timesync_states="${12:-}"
   local drift=0 unknown=0
 
   # 1. distroav.so hash (the Linux plugin binary itself, not just the marker file).
@@ -656,6 +677,36 @@ check_imag_report() {
     esac
   fi
 
+  # 8. dantesync sole timesync authority — no competing timesync daemon (systemd-timesyncd/
+  # chrony/ntp/ntpsec/openntpd) installed/active/enabled alongside dantesync (#591's cam1-6 fleet
+  # gate, extended to imag-nb here — #596, the remaining "drift-guard should inherit it too" gap).
+  # Two-tier via the shared timesync_authority_verdict (scripts/lib/timesync-authority.sh, sourced
+  # by both verify-device.sh and drift-guard.sh): an EMPTY gathered block (SSH failure, or the
+  # remote per-daemon loop produced no output at all) is UNKNOWN — never a false OK for a mere
+  # connectivity hiccup. A non-empty block runs the EXACT SAME per-daemon dpkg/active/enabled
+  # verdict #591 already hard-gates on the cam1-6 fleet — no README pin needed, this is an
+  # unconditional policy check, same as verify-device.sh's own (r).
+  if [ -z "$obs_timesync_states" ]; then
+    printf '  %-22s UNKNOWN  (timesync-daemon state not read on imag-nb)\n' "timesync_authority"
+    unknown=$((unknown + 1))
+  else
+    local ts_verdict
+    ts_verdict="$(timesync_authority_verdict "$obs_timesync_states")"
+    if [ "$ts_verdict" = "ok" ]; then
+      printf '  %-22s OK       (dantesync is the sole timesync authority)\n' "timesync_authority"
+    else
+      # code-review finding: joining on ';' then blanket-replacing '/;/; /g' also matched a ';'
+      # that was ALREADY part of a reason's own text (the INSTALLED message reads "...only
+      # dantesync; masking is not enough)"), producing a double space. '|' never appears inside
+      # any FAIL reason (the daemon-state block already relies on that same invariant), so it is
+      # a safe join delimiter that can be blanket-replaced without touching reason text.
+      local ts_reasons
+      ts_reasons="$(printf '%s\n' "$ts_verdict" | sed 's/^FAIL: //' | paste -sd'|' - | sed 's/|/; /g')"
+      printf '  %-22s DRIFT    (%s)\n' "timesync_authority" "$ts_reasons"
+      drift=$((drift + 1))
+    fi
+  fi
+
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
   return 0
@@ -695,6 +746,9 @@ imag_genlock_range_log() {
 #     Windows, since the log format is platform-independent libobs text)
 #   - `journalctl -u dantesync` (#489, spun out of #479) — the SAME PTP LOCK/NANO or NTP-offset
 #     markers scripts/setup-imag.sh's own provisioning-time restart check keys on (setup-imag.sh:230)
+#   - `dpkg -s` + `systemctl is-active`/`is-enabled` for systemd-timesyncd/chrony/ntp/ntpsec/
+#     openntpd (#596) — the SAME per-daemon signal scripts/verify-device.sh's (r) check gathers
+#     for the cam1-6 fleet's sole-timesync-authority gate (#591)
 gather_and_check_imag() {
   local host="$1" user="${2:-newlevel}" readme="$3"
   # #463 review: `host=`/`user=` are operator-supplied CLI values. `--` marks the end of ssh's
@@ -719,6 +773,7 @@ gather_and_check_imag() {
   exp_dantesync_locked="$(pinned_setting "$readme" dantesync_locked_imag)"
 
   local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present obs_dantesync_log
+  local obs_timesync_states
   obs_build_sha="$("${ssh_cmd[@]}" \
     'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
   # #531: DYNAMIC genlock-build staleness — compare the box's deployed GENLOCK_BUILD_SHA.txt against
@@ -794,6 +849,17 @@ gather_and_check_imag() {
   # locked dantesync always logs one well within that window.
   obs_dantesync_log="$("${ssh_cmd[@]}" \
     'journalctl -u dantesync --no-pager --since "-10min" -n 100 2>/dev/null' 2>/dev/null || true)"
+  # #596: gather per-competing-daemon state the EXACT SAME way verify-device.sh's own (r) sole-
+  # timesync-authority check does for the cam1-6 fleet — one SSH call collecting each daemon's
+  # `dpkg -s` status + `systemctl is-active` + `is-enabled` into a `NAME|DPKG|ACTIVE|ENABLED`
+  # block, so drift-guard can run the IDENTICAL timesync_authority_verdict (scripts/lib/
+  # timesync-authority.sh) against imag-nb. `|| true` (same convention as the other gathers above)
+  # keeps an SSH failure from aborting the script — an empty result reads as UNKNOWN, never a
+  # false pass, in check_imag_report's check #8. The gathering command itself is shared via
+  # timesync_gather_remote_snippet() (code-review finding: sharing only the VERDICT function while
+  # leaving this exact daemon-list for-loop duplicated would let a future daemon added to the
+  # competing set silently diverge between verify-device.sh and drift-guard.sh).
+  obs_timesync_states="$("${ssh_cmd[@]}" "$(timesync_gather_remote_snippet)" 2>/dev/null || true)"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered + git-compared; FAILS loudly on drift) =="
   # #531: the DYNAMIC genlock-build staleness check (box vs origin/main's vendored-genlock HEAD)
@@ -804,10 +870,11 @@ gather_and_check_imag() {
   # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see
   # check_imag_report's doc comment for why pre-extracting collapsed "log unreadable" and "log
   # read, no marker" into the same false-DRIFT signal. #489: `$obs_dantesync_log` is passed RAW
-  # for the identical reason.
+  # for the identical reason. #596: `$obs_timesync_states` (the 12th arg) is likewise the RAW
+  # gathered block — check_imag_report derives the ok/DRIFT/UNKNOWN verdict itself.
   check_imag_report "$exp_distroav_sha" "$obs_distroav_sha" \
     "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present" \
-    "$exp_dantesync_locked" "$obs_dantesync_log" || rc_report=$?
+    "$exp_dantesync_locked" "$obs_dantesync_log" "$obs_timesync_states" || rc_report=$?
   # Combine the two facets' exit codes into the engine's single contract: DRIFT (20) dominates, then
   # UNKNOWN (11), else clean (0). A STALE build FAILS LOUD even when every live-state pin is clean.
   if [ "$rc_build" -eq 20 ] || [ "$rc_report" -eq 20 ]; then return 20; fi

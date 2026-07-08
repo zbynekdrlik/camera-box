@@ -11,6 +11,9 @@
 //! `verify-device.sh` REUSES rather than reinvents:
 //!
 //! - `scripts/lib/ndi-alive.sh`: `emit_ok_grep_pattern()` / `fatal_grep_pattern()`
+//! - `scripts/lib/timesync-authority.sh`: `dpkg_status_installed()` / `timesync_daemon_verdict()` /
+//!   `timesync_authority_verdict()` (#591; extracted here in #596 so `scripts/drift-guard.sh`'s
+//!   `--check-imag` facet can share the SAME sole-timesync-authority verdict for imag-nb)
 //! - `scripts/clock-offset-guard.sh`: `offset_us_from_journal()` / `offset_check()` /
 //!   `ptp_locked_from_journal()`
 //! - `scripts/camera-set.sh`: `camera_resolve()` (NAME -> IP / `CAMERA_GENLOCK_FPS`)
