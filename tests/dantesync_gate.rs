@@ -57,6 +57,36 @@ fn run_gate(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// Run the gate as a subprocess WITH extra env (the #608 fixture-injection seam). Mirrors
+/// clock_offset_painter_gate.rs's run_gate(args, extra_env).
+fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(script());
+    cmd.args(args).current_dir(manifest_dir());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run dantesync-gate.sh");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Write a `journalctl -o short-iso` DanteSync journal fixture and return its path (#608). Mirrors
+/// clock_offset_painter_gate.rs's write_journal/write_journal_stale/write_journal_no_offset —
+/// same "caller pre-fetches the status to a file" pattern, extended to dantesync-gate.sh's Linux
+/// SSH-gather path (which, unlike the painter gate, ALSO grades the PTP-lock signal from the same
+/// journal text).
+fn write_dante_journal(name: &str, lines: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dante-gate-journal-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.log"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(lines.as_bytes()).unwrap();
+    path
+}
+
 /// Write `json` to a temp file and return its path (kept alive by the returned tempdir-like).
 fn write_status(name: &str, json: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dante-gate-test-{}", std::process::id()));
@@ -186,5 +216,156 @@ fn help_describes_the_ntp_and_ptp_requirement() {
     assert!(
         low.contains("fresh"),
         "help must describe the offset FRESHNESS requirement (#550/#595), not just the bound: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #608 — the Linux SSH-gather path has no offline fixture-injection seam, unlike
+// clock-offset-painter-gate.sh's DEV1_DANTE_JOURNAL/PAINTER_DANTE_JOURNAL. These tests feed
+// pre-captured journald text via DANTESYNC_GATE_LINUX_JOURNAL_<NAME> (NAME uppercased) instead of
+// live SSH, and prove the full ok/drift/stale/absent -> gate exit-code mapping end-to-end for a
+// Linux node -- previously only exercised indirectly via the dantesync_offset_verdict unit tests
+// in tests/clock_offset_guard.rs, never at the GATE (case-statement -> rc_off -> node_verdict ->
+// exit code) level the way the Windows status-file path already was above.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn gate_passes_on_a_linux_node_with_ok_fresh_offset_and_ptp_locked() {
+    // Fresh in-bound offset (+150us, default bound 2000us) followed by a NANO servo line (PTP
+    // LOCKED, still the most recent event) -> node OK -> GATE PASS (0).
+    let j = write_dante_journal(
+        "cam1_ok",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[(
+            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+            &j.display().to_string(),
+        )],
+    );
+    assert_eq!(
+        code, 0,
+        "fresh in-bound offset + PTP LOCKED must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(stdout.contains("NTP OK"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_fails_on_a_linux_node_with_a_fresh_offset_that_exceeds_the_bound() {
+    // The exact cam5/6 #591 magnitude (+5280959us) as a FRESH reading -> DRIFT -> BAD -> FAIL (20).
+    let j = write_dante_journal(
+        "cam1_drift",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+5280959us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[(
+            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+            &j.display().to_string(),
+        )],
+    );
+    assert_eq!(
+        code, 20,
+        "fresh out-of-bound offset must FAIL (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    assert!(stdout.contains("NTP DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_incomplete_on_a_linux_node_with_a_stale_offset_line() {
+    // #550/#595-class staleness: the ONLY [NTP] offset: line sits ~1h behind the newer [PTP]
+    // servo lines -- well past the default 300s freshness window -- even though the VALUE is
+    // in-bound. Must be graded STALE (not OK), which is an UNKNOWN -> GATE INCOMPLETE (11).
+    let j = write_dante_journal(
+        "cam1_stale",
+        "2026-07-08T09:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[(
+            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+            &j.display().to_string(),
+        )],
+    );
+    assert_eq!(
+        code, 11,
+        "a stale-but-in-bound offset line must be INCOMPLETE (11), never a silent PASS. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(stdout.contains("NTP STALE"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_incomplete_on_a_linux_node_with_no_ntp_offset_line_at_all() {
+    // No `[NTP] offset:` line anywhere in the journal -> "absent" -> the case statement's `*)`
+    // catch-all -> NTP UNKNOWN -> GATE INCOMPLETE (11). (The `*)` fallthrough already fails
+    // closed on a typo'd case label per #608's own scope text -- this pins the REAL "absent"
+    // verdict reaches the identical safe outcome, not just the typo-safety net.)
+    let j = write_dante_journal(
+        "cam1_absent",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[(
+            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+            &j.display().to_string(),
+        )],
+    );
+    assert_eq!(
+        code, 11,
+        "no [NTP] offset line at all must be INCOMPLETE (11), never a silent PASS. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(stdout.contains("NTP UNKNOWN"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_linux_journal_override_is_keyed_per_node_name_not_a_single_shared_var() {
+    // Two Linux nodes, each with its OWN override var -- proves the seam is keyed BY NODE NAME
+    // (mirrors dantesync-gate.sh's existing --win-status NAME=FILE per-node convention) rather
+    // than a single global override that would make a 2-node gate untestable.
+    let cam1_ok = write_dante_journal(
+        "cam1_multi_ok",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let cam2_drift = write_dante_journal(
+        "cam2_multi_drift",
+        "2026-07-08T10:00:00+02:00 cam2 dantesync[1]: [NTP] offset:+9999999us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:05+02:00 cam2 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61 cam2=10.77.9.62"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &cam1_ok.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM2",
+                &cam2_drift.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "cam1 OK + cam2 DRIFT must still fail the whole gate (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("cam1") && stdout.contains("NTP OK"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("cam2") && stdout.contains("NTP DRIFT"),
+        "stdout: {stdout}"
     );
 }
