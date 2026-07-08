@@ -736,13 +736,28 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   no-op below the floor, so it can never false-fail a legitimately short window (mirrors
   `MIN_IDS_FOR_STEP_CALIBRATION` / `burn_present_ok`'s `< 2` guard) — apply this pattern to any
   future rate-based gate term on `imag_tick_gate.rs`.
-- **#604 — tracked follow-up (NOT #588's scope): a LOCALIZED (sub-span) judder can still dilute
-  below the whole-window density ceiling.** #588's density is a whole-RECORDING aggregate; a
-  judder confined to a short sub-span of an otherwise-healthy recording gets diluted under 1% by
-  the surrounding clean frames. If real evidence ever shows this on the rig, the fix is a
-  SLIDING-WINDOW density (bounded moving window, not the whole recording) — calibrate it the same
-  real-data-anchored way, never from a synthetic fixture. Not fixed proactively; the 120Hz upgrade
-  remains the fully rigorous long-term fix for the whole class of run-length/density heuristics.
+- **#604 — CLOSED: a LOCALIZED (sub-span) judder diluted below the whole-window density ceiling,
+  fixed by a 5th orthogonal SLIDING-WINDOW density term.** #588's density is a whole-RECORDING
+  aggregate; a judder confined to a short sub-span of an otherwise-healthy recording got diluted
+  under 1% by the surrounding clean frames and slipped through. Fix:
+  `OpticalBeatVerdict::no_localized_stuck_density` — `max_local_stuck_density()` slides a FIXED
+  180-pair (~3s@60fps) window over the SAME chronological sequence, judged against a separate
+  LOOSER 5% local ceiling (a short window is naturally noisier than the whole recording), ANDed
+  into `is_live_no_copy` alongside the whole-window term. **New reusable pattern: a sliding-window
+  metric is a SEPARATE second pass, not a free extension of the shared `.windows(2)` walk** —
+  `stuck_run_stats`'s single walk gives a running TOTAL (max-run, whole-window density) cheaply,
+  but a bounded LOCAL maximum needs its own pass with a fixed-capacity ring buffer
+  (`VecDeque<bool>` sized to the window, add-entering/drop-leaving per step) so it stays O(n) time
+  / O(window) memory instead of materializing a `Vec<bool>` the size of the whole recording first.
+  **Calibration without live data:** #604's own issue text explicitly forbade inventing thresholds
+  from a synthetic fixture, but no live localized-judder recording existed to calibrate against —
+  resolved by reusing the SAME real anchor #588 already established (572001's live-measured
+  healthy density) plus an analytically-modeled judder burst (same K=3-run block construction as
+  #588's `catch_up_judder_ticks`, just confined to fewer blocks so it dilutes below the
+  whole-window ceiling while still reading ~25% in its own local window) — honestly documented as
+  reasoned-not-measured, with a follow-up issue (#620) filed to re-ground it if real footage ever
+  surfaces. The 120Hz upgrade remains the fully rigorous long-term fix for the whole class of
+  run-length/density heuristics.
 - **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
   design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
   it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
