@@ -2639,6 +2639,36 @@ fn check_imag_report_timesync_authority_drift_when_competing_daemon_installed_59
 }
 
 #[test]
+fn check_imag_report_timesync_authority_drift_reason_has_no_double_space_596() {
+    // Code-review finding (#596): the INSTALLED reason's own text already contains a semicolon
+    // ("...runs only dantesync; masking is not enough)"). The reason-joining pipeline must not
+    // blanket-replace THAT semicolon too (which previously produced "dantesync;  masking" with a
+    // double space) -- only the delimiter BETWEEN multiple daemons' reasons gets the "; " spacing.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "$TS_STATES" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("TS_STATES", TIMESYNC_STATES_CAM5_STYLE_FIXTURE)]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("timesync_authority"))
+        .unwrap_or_else(|| panic!("no timesync_authority line printed: {out:?}"));
+    // The report line itself uses printf column-padding spaces (e.g. "DRIFT    (") which are NOT
+    // the bug -- only a semicolon immediately followed by TWO spaces (";  ") is the double-space
+    // signature the blanket `sed 's/;/; /g'` produced when it also matched the semicolon that was
+    // already part of the INSTALLED reason's own text ("...only dantesync; masking...").
+    assert!(
+        !line.contains(";  "),
+        "a semicolon inside the reason text must not gain a double space: {line:?}"
+    );
+    assert!(
+        line.contains("dantesync; masking"),
+        "the reason text must keep its ORIGINAL single-space semicolon intact: {line:?}"
+    );
+}
+
+#[test]
 fn check_imag_report_timesync_authority_unknown_when_not_read_596() {
     // Empty gathered block (SSH failure, or the remote per-daemon loop produced no output at
     // all) -> UNKNOWN, never a false OK for a mere connectivity hiccup — mirrors every other

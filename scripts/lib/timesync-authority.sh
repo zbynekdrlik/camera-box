@@ -90,3 +90,24 @@ timesync_authority_verdict() {
     printf 'ok\n'
   fi
 }
+
+# timesync_gather_remote_snippet -> the REMOTE shell command (a string) that gathers each
+# competing daemon's dpkg/active/enabled state into the `NAME|DPKG|ACTIVE|ENABLED` block
+# timesync_authority_verdict expects (#596 code-review finding: verify-device.sh's (r) live flow
+# and drift-guard.sh's --check-imag facet each ran their OWN copy of this exact for-loop over
+# their own SSH wrapper -- ssh_box / "${ssh_cmd[@]}" -- which is precisely the "second, driftable
+# copy" #596 set out to eliminate; sharing the VERDICT function while leaving the GATHER command
+# duplicated would let a future daemon added to the competing set silently diverge between the
+# two callers). Both callers run THIS SAME string over their own transport:
+#   ssh_box "$(timesync_gather_remote_snippet)"                 (verify-device.sh)
+#   "${ssh_cmd[@]}" "$(timesync_gather_remote_snippet)"          (drift-guard.sh)
+timesync_gather_remote_snippet() {
+  cat <<'REMOTE'
+for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
+  _st="$(dpkg -s "$_p" 2>/dev/null | sed -n "s/^Status: //p" || true)"
+  _ac="$(systemctl is-active "$_p" 2>/dev/null || true)"
+  _en="$(systemctl is-enabled "$_p" 2>/dev/null || true)"
+  printf "%s|%s|%s|%s\n" "$_p" "$_st" "$_ac" "$_en"
+done
+REMOTE
+}

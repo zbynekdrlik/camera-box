@@ -695,8 +695,13 @@ check_imag_report() {
     if [ "$ts_verdict" = "ok" ]; then
       printf '  %-22s OK       (dantesync is the sole timesync authority)\n' "timesync_authority"
     else
+      # code-review finding: joining on ';' then blanket-replacing '/;/; /g' also matched a ';'
+      # that was ALREADY part of a reason's own text (the INSTALLED message reads "...only
+      # dantesync; masking is not enough)"), producing a double space. '|' never appears inside
+      # any FAIL reason (the daemon-state block already relies on that same invariant), so it is
+      # a safe join delimiter that can be blanket-replaced without touching reason text.
       local ts_reasons
-      ts_reasons="$(printf '%s\n' "$ts_verdict" | sed 's/^FAIL: //' | paste -sd';' - | sed 's/;/; /g')"
+      ts_reasons="$(printf '%s\n' "$ts_verdict" | sed 's/^FAIL: //' | paste -sd'|' - | sed 's/|/; /g')"
       printf '  %-22s DRIFT    (%s)\n' "timesync_authority" "$ts_reasons"
       drift=$((drift + 1))
     fi
@@ -850,14 +855,11 @@ gather_and_check_imag() {
   # block, so drift-guard can run the IDENTICAL timesync_authority_verdict (scripts/lib/
   # timesync-authority.sh) against imag-nb. `|| true` (same convention as the other gathers above)
   # keeps an SSH failure from aborting the script — an empty result reads as UNKNOWN, never a
-  # false pass, in check_imag_report's check #8.
-  obs_timesync_states="$("${ssh_cmd[@]}" '
-for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
-  _st="$(dpkg -s "$_p" 2>/dev/null | sed -n "s/^Status: //p" || true)"
-  _ac="$(systemctl is-active "$_p" 2>/dev/null || true)"
-  _en="$(systemctl is-enabled "$_p" 2>/dev/null || true)"
-  printf "%s|%s|%s|%s\n" "$_p" "$_st" "$_ac" "$_en"
-done' 2>/dev/null || true)"
+  # false pass, in check_imag_report's check #8. The gathering command itself is shared via
+  # timesync_gather_remote_snippet() (code-review finding: sharing only the VERDICT function while
+  # leaving this exact daemon-list for-loop duplicated would let a future daemon added to the
+  # competing set silently diverge between verify-device.sh and drift-guard.sh).
+  obs_timesync_states="$("${ssh_cmd[@]}" "$(timesync_gather_remote_snippet)" 2>/dev/null || true)"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered + git-compared; FAILS loudly on drift) =="
   # #531: the DYNAMIC genlock-build staleness check (box vs origin/main's vendored-genlock HEAD)

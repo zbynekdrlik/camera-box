@@ -747,15 +747,11 @@ fi
 # cam5/cam6 ran systemd-timesyncd ALONGSIDE dantesync -> a real 5.28s desync. A minimalist appliance
 # runs ONLY dantesync. One SSH call gathers, per competing daemon, its dpkg install state +
 # systemctl is-active + is-enabled into a `NAME|DPKG|ACTIVE|ENABLED` block; timesync_authority_verdict
-# hard-fails on any that is installed (even masked) / active / enabled.
+# hard-fails on any that is installed (even masked) / active / enabled. The gathering command itself
+# is shared via timesync_gather_remote_snippet() (scripts/lib/timesync-authority.sh, #596 review
+# finding) so drift-guard.sh's --check-imag facet can never drift from this EXACT daemon list.
 rc=0
-TS_STATES="$(ssh_box '
-for _p in systemd-timesyncd chrony ntp ntpsec openntpd; do
-  _st="$(dpkg -s "$_p" 2>/dev/null | sed -n "s/^Status: //p" || true)"
-  _ac="$(systemctl is-active "$_p" 2>/dev/null || true)"
-  _en="$(systemctl is-enabled "$_p" 2>/dev/null || true)"
-  printf "%s|%s|%s|%s\n" "$_p" "$_st" "$_ac" "$_en"
-done')" || rc=$?
+TS_STATES="$(ssh_box "$(timesync_gather_remote_snippet)")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$TS_STATES" ]; then
   fail "could not read timesync-daemon state over SSH (rc=$rc) -- cannot certify dantesync is the sole clock authority (#591)"
 else
