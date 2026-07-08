@@ -63,52 +63,15 @@ resolve_device_name() {
     VBAN_STREAM="$CAMERA_NAME"
 }
 
-# config_toml_display_section SOURCE -- the optional `[display]` config.toml section for a box's
-# HDMI cameraman preview (#528, per-cam CAMERA_DISPLAY_SOURCE table in scripts/camera-set.sh).
-# Echoes nothing when SOURCE is empty -- a box with no table entry gets no [display] section and
-# camera-box runs with no preview, exactly as every box behaved before #528. #450's "canonical
-# PLAIN ExecStart" stays untouched by this -- the preview lives in config.toml (already per-box
-# variance today, e.g. VBAN_STREAM above), never baked into the systemd unit's ExecStart.
-#
-# Escapes `\` and `"` before interpolating into the TOML string literal -- every table entry today
-# ("STRIH-SNV (interkom)") is quote/backslash-free, but scripts/camera-set.sh's own comment invites
-# adding future entries here, and an unescaped `"` in a future NDI source name would otherwise
-# truncate the TOML string mid-line and corrupt the rest of config.toml. Assumes SOURCE is a
-# single-line printable string (NDI source names always are) -- a literal tab/newline is NOT
-# escaped; revisit if a future entry ever needs one.
-#
-# Omits `fb_device` -- src/config.rs's DisplayConfig already defaults it to "/dev/fb0" via serde
-# when the key is absent (`#[serde(default = "default_fb_device")]`); baking the literal here would
-# just be a second, driftable copy of that same default.
-config_toml_display_section() {
-    local source="${1:-}"
-    [ -n "$source" ] || return 0
-    local escaped="${source//\\/\\\\}"
-    escaped="${escaped//\"/\\\"}"
-    printf '\n# HDMI cameraman preview (#528 -- CAMERA_DISPLAY_SOURCE table, scripts/camera-set.sh)\n[display]\nsource = "%s"\n' "$escaped"
-}
-
-# execstart_display_flag SOURCE -- the OTHER HDMI-preview mechanism's counterpart to
-# config_toml_display_section() above (#562, per-cam CAMERA_DISPLAY_EXECSTART_SOURCE table in
-# scripts/camera-set.sh). Echoes nothing when SOURCE is empty -- a box with no ExecStart-mechanism
-# table entry (every box except cam2 today) renders the exact pre-#562 canonical PLAIN ExecStart
-# line. For a configured SOURCE (cam2: "STRIH-SNV (interkom)"), echoes a leading-space
-# ` --display "<source>"` fragment meant to be appended directly to
-# `ExecStart=/usr/local/bin/camera-box` in STEP 7's unit heredoc -- this is what makes cam2's
-# manual ExecStart edit provisioner-persistent (the #379-recurrence risk #562 closes) WITHOUT
-# touching config.toml or scripts/rig-mode.sh's ExecStart-flag-based TEST/EVENT toggle at all.
-#
-# Escaping mirrors config_toml_display_section() exactly (backslash then quote) -- the target is a
-# double-quoted systemd ExecStart argument (systemd.service(5) "command line" quoting), which uses
-# the same `\\` / `\"` escapes as a TOML string literal. No table entry needs one today, but the
-# landmine is defused now rather than discovered at boot time later.
-execstart_display_flag() {
-    local source="${1:-}"
-    [ -n "$source" ] || return 0
-    local escaped="${source//\\/\\\\}"
-    escaped="${escaped//\"/\\\"}"
-    printf ' --display "%s"' "$escaped"
-}
+# #528 design pivot (2026-07-08): this script used to carry config_toml_display_section() /
+# execstart_display_flag() here, wiring a per-cam CAMERA_DISPLAY_SOURCE / CAMERA_DISPLAY_
+# EXECSTART_SOURCE table entry (scripts/camera-set.sh) into either config.toml's [display]
+# section or a baked ExecStart --display flag. The owner rejected the whole per-box-config
+# approach (camboxes have no keyboard/mouse; the preview monitor moves between cameras during an
+# event, so a static per-box table can never track it) -- the HDMI cameraman preview is now
+# UNCONDITIONAL and fleet-wide, baked directly into the binary's default (`DEFAULT_DISPLAY_SOURCE`
+# in src/main.rs). Neither STEP 6 (config.toml) nor STEP 7 (ExecStart) needs to wire anything for
+# it any more; both pure functions are gone.
 
 # cleanup_bak_cruft DIR PATTERN... -- removes any files directly under DIR matching the given
 # glob PATTERN(s) (#453: fleet self-heal for inert `.bak` leftovers -- a manual NDI upgrade left
@@ -410,33 +373,19 @@ target = "strih.lan"
 sample_rate = 48000
 channels = 1
 EOF
-# HDMI cameraman preview (#528): a box with a CAMERA_DISPLAY_SOURCE table entry (scripts/camera-set.sh)
-# gets an appended [display] section here -- persists across a re-provision. A box with no table
-# entry (today: every box except cam1 -- see the table's own comment for why cam2 is deliberately
-# excluded) gets nothing appended: config_toml_display_section returns empty, and `printf '%s' ""`
-# below is then a no-op append (no conditional needed).
-DISPLAY_SECTION="$(config_toml_display_section "${CAMERA_DISPLAY_SOURCE:-}")"
-printf '%s' "$DISPLAY_SECTION" >> /etc/camera-box/config.toml
 echo "  Config: /etc/camera-box/config.toml"
-if [ -n "${CAMERA_DISPLAY_SOURCE:-}" ]; then
-    echo "  HDMI preview: ${CAMERA_DISPLAY_SOURCE} (persists across reboot/redeploy, #528)"
-fi
+# #528: the HDMI cameraman preview is UNCONDITIONAL (baked into the binary's
+# DEFAULT_DISPLAY_SOURCE) -- no [display] section is written here any more.
 
 # =============================================================================
 # STEP 7: Create systemd service
 # =============================================================================
 echo ""
 echo -e "${GREEN}[7/${TOTAL_STEPS}] Creating systemd service...${NC}"
-# ExecStart's --display suffix is built from the CAMERA_DISPLAY_EXECSTART_SOURCE table (#562,
-# scripts/camera-set.sh) via execstart_display_flag() -- empty for every box except cam2 today, so
-# this renders the exact pre-#562 canonical PLAIN line everywhere else. This is what makes cam2's
-# manual --display ExecStart edit (its interkom cameraman-preview source, per camera-set.sh's
-# table) survive a re-provision instead of being silently erased by an unconditional bare
-# ExecStart (the #379-recurrence risk). The heredoc below therefore interpolates a command
-# substitution on the ExecStart line -- it is intentionally NOT single-quoted ('EOF') any more;
-# every other line in the unit is a literal string with no `$`/backtick, so switching delimiters
-# changes nothing else about the rendered file.
-cat > /etc/systemd/system/camera-box.service << EOF
+# #528: ExecStart is the canonical PLAIN line on every box, unconditionally -- no per-cam
+# --display flag is ever baked in any more (the #556/#562 per-box table this used to read from is
+# gone; the preview is a fleet-wide default in the binary itself, see camera-set.sh's comment).
+cat > /etc/systemd/system/camera-box.service << 'EOF'
 [Unit]
 Description=Camera Box - USB Video Capture to NDI
 Documentation=https://github.com/zbynekdrlik/camera-box
@@ -445,7 +394,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/camera-box$(execstart_display_flag "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}")
+ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
 
@@ -476,9 +425,8 @@ SupplementaryGroups=video
 [Install]
 WantedBy=multi-user.target
 EOF
-if [ -n "${CAMERA_DISPLAY_EXECSTART_SOURCE:-}" ]; then
-    echo "  HDMI preview (ExecStart): ${CAMERA_DISPLAY_EXECSTART_SOURCE} (persists across reboot/redeploy, #562)"
-fi
+# #528: canonical ExecStart, unconditional HDMI preview via the binary's own default -- nothing
+# else to report here (see the "Service created and enabled" echo below, after daemon-reload).
 
 # #289 + #11 systemd drop-ins: the realtime CPU-isolation + genlock emit-rate
 # overrides live in drop-ins (not the base unit) so they can be re-applied / tuned

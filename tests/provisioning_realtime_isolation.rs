@@ -97,32 +97,35 @@ fn setup_device_writes_genlock_dropin() {
     );
 }
 
-/// #528 — the HDMI cameraman preview must be wired from the per-cam CAMERA_DISPLAY_SOURCE table
-/// (scripts/camera-set.sh) into config.toml's optional [display] section, NEVER baked into
-/// ExecStart (that stays canonical/plain everywhere per
-/// setup_device_provisioner_hardening::setup_device_execstart_is_canonical_plain, #450).
+/// #528 design pivot (2026-07-08) — the per-box CAMERA_DISPLAY_SOURCE table wiring this test used
+/// to require (config_toml_display_section, an appended [display] config.toml section) is GONE.
+/// The owner rejected the whole per-box-config approach (camboxes have no keyboard/mouse; the
+/// preview monitor moves between cameras during an event) — the HDMI cameraman preview is now
+/// UNCONDITIONAL and fleet-wide, baked into the binary's own default (`DEFAULT_DISPLAY_SOURCE` in
+/// src/main.rs). setup-device.sh no longer wires anything display-related into config.toml OR
+/// ExecStart.
 #[test]
-fn setup_device_wires_display_source_table_into_config_toml() {
+fn setup_device_no_longer_wires_any_per_box_display_mechanism() {
     let body = read_script();
+    // NON-comment lines only: an explanatory "this used to call X" comment legitimately mentions
+    // the retired names for history — only an actual definition/call site is a real regression.
     assert!(
-        on_noncomment_line(
-            &body,
-            "config_toml_display_section \"${CAMERA_DISPLAY_SOURCE:-}\""
-        ),
-        "setup-device.sh STEP 6 must call config_toml_display_section with the per-cam \
-         CAMERA_DISPLAY_SOURCE table value (scripts/camera-set.sh, #528) — not a hardcoded source"
+        !on_noncomment_line(&body, "config_toml_display_section")
+            && !on_noncomment_line(&body, "execstart_display_flag"),
+        "#528: setup-device.sh must no longer define/call config_toml_display_section or \
+         execstart_display_flag -- the HDMI cameraman preview is unconditional (baked into the \
+         binary's default), not a per-box config this script wires"
     );
     assert!(
-        on_noncomment_line(&body, ">> /etc/camera-box/config.toml"),
-        "setup-device.sh must APPEND the [display] section to the existing config.toml (not \
-         overwrite it) so the [intercom] section written earlier in STEP 6 survives (#528)"
+        !on_noncomment_line(&body, "CAMERA_DISPLAY_SOURCE")
+            && !on_noncomment_line(&body, "CAMERA_DISPLAY_EXECSTART_SOURCE"),
+        "#528: setup-device.sh must no longer reference the retired per-cam display-source tables"
     );
-    // The #450 canonical-ExecStart guard must remain untouched by #528 — the preview never bakes
-    // into the systemd unit.
+    // #450's canonical-ExecStart invariant, now unconditional on EVERY box (no per-cam exception).
     assert!(
         !body.contains(r#"--display "STRIH-SNV"#),
-        "#528 must not reintroduce a hardcoded --display flag into ExecStart — the preview lives \
-         in config.toml's [display] section, not the systemd unit (#450)"
+        "#528: setup-device.sh must never hardcode a --display flag into ExecStart -- the preview \
+         lives entirely in the binary's own default (#450/#528)"
     );
 }
 
