@@ -127,9 +127,19 @@ ROOT_WAS_RO=false
 # /var/lib/PackageKit/transactions.db, which later blocks `mount -o remount,ro /` with EBUSY) so
 # neither can reactivate mid-run. FAIL LOUD if the remount itself doesn't succeed -- never silently
 # proceed on a still-ro root and claim success afterward.
+#
+# If a fail() call inside STEP 15-17 aborts the script while root is rw (e.g. the STEP 17
+# dantesync download failing), restore_root_mode() never runs and the live mount stays rw until
+# the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass still pins
+# ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit trap is
+# added here.
 ensure_root_writable() {
     local opts
-    opts="$(findmnt -no OPTIONS / 2>/dev/null || true)"
+    # `findmnt` failing outright (missing binary, unreadable /proc) must not silently read as "not
+    # ro" -- fall back to /proc/mounts directly, mirroring verify-device.sh's identical fallback
+    # for the same read, so a transient findmnt failure on a genuinely-ro box can't reproduce #599
+    # by skipping the remount.
+    opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null)"
     if root_mount_is_readonly "$opts"; then
         ROOT_WAS_RO=true
         echo "  Root is read-only (re-provisioning an already-booted appliance) -- remounting rw"

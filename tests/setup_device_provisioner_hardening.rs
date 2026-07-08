@@ -517,6 +517,20 @@ fn setup_device_calls_restore_root_mode_after_the_fstab_rewrite() {
 }
 
 #[test]
+fn setup_device_ensure_root_writable_falls_back_to_proc_mounts() {
+    // #599 code-review hardening: `findmnt` failing outright (missing binary, unreadable /proc)
+    // must not silently read as "not ro" (opts="") -- fall back to /proc/mounts directly, mirroring
+    // verify-device.sh's identical fallback for the same read, so a transient findmnt failure on a
+    // genuinely-ro box can't skip the remount and reproduce #599.
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, r#"awk '$2=="/"{print $4; exit}' /proc/mounts"#),
+        "ensure_root_writable's findmnt read must fall back to parsing /proc/mounts directly on \
+         failure (#599) -- mirrors verify-device.sh's MOUNT_OPTS read, which has the same fallback"
+    );
+}
+
+#[test]
 fn setup_device_handles_packagekit_around_the_remount_cycle() {
     // rig-timesync-single-authority incident: PackageKit is D-Bus-activated by apt and holds an
     // open write handle on /var/lib/PackageKit/transactions.db, which blocks `mount -o
