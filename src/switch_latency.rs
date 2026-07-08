@@ -69,16 +69,19 @@ pub struct SpreadVerdict {
 ///
 /// Order-independent — the same set of p50 values in any order yields the same spread.
 pub fn spread_verdict(p50s_ms: &[f64]) -> Option<SpreadVerdict> {
-    // #624 STUB (pre-fix, bug-mirror): ignores the real measurements entirely and always
-    // reports a trivial zero-spread PASS. The tests below lock the required max/min/spread +
-    // threshold behavior and FAIL against this stub (RED); the fix computes the real spread
-    // from `p50s_ms` (GREEN).
-    let _ = p50s_ms;
+    if p50s_ms.len() < 2 {
+        return None;
+    }
+    let max_p50_ms = p50s_ms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_p50_ms = p50s_ms.iter().copied().fold(f64::INFINITY, f64::min);
+    let spread_ms = max_p50_ms - min_p50_ms;
     Some(SpreadVerdict {
-        max_p50_ms: 0.0,
-        min_p50_ms: 0.0,
-        spread_ms: 0.0,
-        pass: true,
+        max_p50_ms,
+        min_p50_ms,
+        spread_ms,
+        // The boundary itself PASSES — only STRICTLY over the threshold fails (issue text:
+        // "> 16 ms ... = FAIL").
+        pass: spread_ms <= SPREAD_THRESHOLD_MS,
     })
 }
 
