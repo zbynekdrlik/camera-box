@@ -177,5 +177,14 @@ pub mod zero_loss_restart_survival;
 // `docs/genlock-latency-floor-rationale.md`.
 pub mod jitter_audit;
 
+// #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
+// camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
+// d_X baked in by the #286 root cause), computes the cross-camera spread and gates it against
+// the issue's fixed half-a-30fps-frame threshold (16ms). No probe deps, so it unit-tests
+// Tier-0; the probe-gated measurement (generalizing `probe::recording_latency::
+// cam2_cam1_samples_from_burn`/`_from_flip` from cam1-only to cam1/cam3/cam4, per
+// `--switch-schedule` window) lives in `bin/recording-verdict`.
+pub mod switch_latency;
+
 #[cfg(feature = "probe")]
 pub mod probe;
