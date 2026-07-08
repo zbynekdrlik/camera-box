@@ -329,3 +329,182 @@ fn bak_cruft_cleanup_is_wired_into_ndi_and_dropin_provisioning_steps() {
         "STEP 7 (systemd service) must call cleanup_bak_cruft on the drop-in dir (#453)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #599 — ensure_root_writable() / restore_root_mode(): STEP 15-18 run apt-get/dpkg/systemctl +
+// write files under /etc, all of which require a writable root. On a FIRST provisioning run root
+// is naturally rw (the ro fstab STEP 18 writes only takes effect on the NEXT reboot), but on an
+// IN-PLACE RE-RUN against an already-booted ro appliance, root is `ro` -- every apt-get/dpkg call
+// in STEP 15-17 then fails and is swallowed by the `|| true` guards, silently leaving a
+// purge/install that never took effect while the script still reports success (#599).
+//
+// `findmnt`/`mount`/`systemctl` are stubbed as bash FUNCTIONS defined AFTER sourcing the real
+// script (function definitions shadow same-named binaries for the rest of the shell), so these
+// tests exercise the REAL decision + side-effect functions from setup-device.sh without touching
+// the host's actual mount state.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn root_mount_is_readonly_matches_verify_device_semantics() {
+    // Mirrors verify-device.sh's function of the same name/contract (#547/#599): only a mount
+    // options string whose FIRST comma-token is exactly "ro" counts as read-only; "errors=remount-ro"
+    // on an rw mount must NOT be misread as ro.
+    for (opts, want) in [
+        ("ro", "RO"),
+        ("ro,relatime", "RO"),
+        ("rw,relatime", "NOT_RO"),
+        ("rw,relatime,errors=remount-ro", "NOT_RO"),
+        ("", "NOT_RO"),
+    ] {
+        let (code, out, err) = run_sourced(&format!(
+            r#"root_mount_is_readonly '{opts}' && echo RO || echo NOT_RO"#
+        ));
+        assert_eq!(
+            code, 0,
+            "harness itself must succeed for opts='{opts}'. stderr: {err}"
+        );
+        assert_eq!(
+            out.trim(),
+            want,
+            "root_mount_is_readonly('{opts}') should report {want}"
+        );
+    }
+}
+
+#[test]
+fn ensure_root_writable_remounts_rw_and_masks_packagekit_when_root_is_ro() {
+    let (code, out, err) = run_sourced(
+        r#"
+        findmnt() { echo "ro,relatime"; }
+        MOUNT_CALLS=""
+        mount() { MOUNT_CALLS="$MOUNT_CALLS|$*"; return 0; }
+        SYSTEMCTL_CALLS=""
+        systemctl() { SYSTEMCTL_CALLS="$SYSTEMCTL_CALLS|$*"; return 0; }
+        ensure_root_writable
+        printf 'ROOT_WAS_RO=%s\nMOUNT_CALLS=%s\nSYSTEMCTL_CALLS=%s\n' "$ROOT_WAS_RO" "$MOUNT_CALLS" "$SYSTEMCTL_CALLS"
+        "#,
+    );
+    assert_eq!(
+        code, 0,
+        "ensure_root_writable must succeed on a ro root it can remount. stderr: {err}"
+    );
+    assert!(
+        out.contains("ROOT_WAS_RO=true"),
+        "ROOT_WAS_RO must be set true when root started ro (#599). out: {out}"
+    );
+    assert!(
+        out.contains("remount,rw /"),
+        "ensure_root_writable must call `mount -o remount,rw /` when root is ro (#599). out: {out}"
+    );
+    assert!(
+        out.contains("packagekit"),
+        "ensure_root_writable must stop/mask packagekit before the apt steps run, or a later ro \
+         remount can be blocked EBUSY by a D-Bus-reactivated PackageKit (rig-timesync-single-\
+         authority incident, #599). out: {out}"
+    );
+}
+
+#[test]
+fn ensure_root_writable_is_noop_when_root_already_rw() {
+    let (code, out, err) = run_sourced(
+        r#"
+        findmnt() { echo "rw,relatime"; }
+        MOUNT_CALLS=""
+        mount() { MOUNT_CALLS="$MOUNT_CALLS|$*"; return 0; }
+        ensure_root_writable
+        printf 'ROOT_WAS_RO=%s MOUNT_CALLS=%s\n' "$ROOT_WAS_RO" "$MOUNT_CALLS"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "ROOT_WAS_RO=false MOUNT_CALLS=",
+        "a first-provisioning run (root already rw) must never remount and must leave ROOT_WAS_RO \
+         false -- STEP 18's ro fstab only takes effect on the next reboot (#599)"
+    );
+}
+
+#[test]
+fn ensure_root_writable_fails_loud_when_remount_rw_fails() {
+    let (code, out, err) = run_sourced(
+        r#"
+        findmnt() { echo "ro,relatime"; }
+        mount() { return 1; }
+        systemctl() { return 0; }
+        ensure_root_writable
+        echo "UNREACHABLE"
+        "#,
+    );
+    assert_ne!(
+        code, 0,
+        "ensure_root_writable must exit non-zero when `mount -o remount,rw /` fails -- a re-run \
+         must never silently proceed on a still-ro root and later report success (#599)"
+    );
+    assert!(
+        !out.contains("UNREACHABLE"),
+        "fail() must stop execution immediately. stdout: {out}"
+    );
+    assert!(
+        err.contains("FAIL:"),
+        "ensure_root_writable must fail loud via fail(). stderr: {err}"
+    );
+}
+
+#[test]
+fn restore_root_mode_remounts_ro_when_this_run_remounted_rw() {
+    let (code, out, err) = run_sourced(
+        r#"
+        ROOT_WAS_RO=true
+        MOUNT_CALLS=""
+        mount() { MOUNT_CALLS="$MOUNT_CALLS|$*"; return 0; }
+        systemctl() { return 0; }
+        restore_root_mode
+        printf 'MOUNT_CALLS=%s\n' "$MOUNT_CALLS"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("remount,ro /"),
+        "restore_root_mode must remount root back to ro when THIS run had remounted rw (#599). \
+         out: {out}"
+    );
+}
+
+#[test]
+fn restore_root_mode_is_noop_when_root_was_not_remounted() {
+    let (code, out, err) = run_sourced(
+        r#"
+        MOUNT_CALLS=""
+        mount() { MOUNT_CALLS="$MOUNT_CALLS|$*"; return 0; }
+        restore_root_mode
+        printf 'MOUNT_CALLS=%s\n' "$MOUNT_CALLS"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "MOUNT_CALLS=",
+        "a first-provisioning run must never be force-remounted ro at STEP 18 time -- ro only \
+         takes effect via fstab on the next reboot (#599)"
+    );
+}
+
+#[test]
+fn restore_root_mode_fails_loud_when_remount_ro_fails() {
+    let (code, out, err) = run_sourced(
+        r#"
+        ROOT_WAS_RO=true
+        mount() { return 1; }
+        systemctl() { return 0; }
+        restore_root_mode
+        echo "UNREACHABLE"
+        "#,
+    );
+    assert_ne!(
+        code, 0,
+        "restore_root_mode must exit non-zero when the remount back to ro fails -- a box silently \
+         left rw after \"Setup Complete!\" is exactly the false-success #599 exists to close"
+    );
+    assert!(!out.contains("UNREACHABLE"));
+    assert!(err.contains("FAIL:"));
+}

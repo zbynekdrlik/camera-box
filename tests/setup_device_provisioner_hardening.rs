@@ -59,6 +59,14 @@ fn first_noncomment_idx(body: &str, needle: &str) -> Option<usize> {
         .position(|l| l.contains(needle) && !l.trim_start().starts_with('#'))
 }
 
+/// Index of the first NON-comment line whose TRIMMED content is EXACTLY `needle` -- distinguishes
+/// a bare function CALL (e.g. `restore_root_mode`) from its DEFINITION line (`restore_root_mode() {`),
+/// since `first_noncomment_idx` would otherwise match the (textually-earlier) definition.
+fn first_noncomment_exact_idx(body: &str, needle: &str) -> Option<usize> {
+    body.lines()
+        .position(|l| l.trim() == needle && !l.trim_start().starts_with('#'))
+}
+
 // ---------------------------------------------------------------------------------------------
 // 1. Name-resolved single-arg invocation
 // ---------------------------------------------------------------------------------------------
@@ -445,5 +453,117 @@ fn create_usb_purges_linuxptp() {
     assert!(
         on_noncomment_line(&body, "apt-get purge -y linuxptp"),
         "create-usb-linux.sh must `apt-get purge` the linuxptp package from the base image (#597)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #599 — STEP 15-18 (fwupd purge, package install, timesync/linuxptp purge, fstab rewrite) all
+// need a writable root. On an IN-PLACE RE-RUN against an already-booted ro appliance, none of them
+// get it: the apt-get/dpkg calls in STEP 15-17 fail and are swallowed by `|| true` guards (silent
+// no-op), and STEP 18's fstab rewrite would hard-abort. The provisioner must remount rw BEFORE
+// STEP 15 and remount back to ro AFTER STEP 18, so an in-place re-provision actually applies
+// instead of silently doing nothing while still reporting success.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_defines_root_rw_ro_helpers() {
+    let body = read_script();
+    for needle in [
+        "root_mount_is_readonly()",
+        "ensure_root_writable()",
+        "restore_root_mode()",
+    ] {
+        assert!(
+            on_noncomment_line(&body, needle),
+            "setup-device.sh must define `{needle}` (#599) -- an in-place re-run against an \
+             already-booted ro appliance must remount rw before STEP 15-18's apt/dpkg/systemctl/\
+             fstab writes, then remount back to ro afterward, instead of silently no-op'ing"
+        );
+    }
+}
+
+#[test]
+fn setup_device_calls_ensure_root_writable_before_the_fwupd_purge() {
+    let body = read_script();
+    let call_idx = first_noncomment_exact_idx(&body, "ensure_root_writable").expect(
+        "ensure_root_writable must be CALLED (a bare invocation, not just defined) before STEP 15 \
+         (#599)",
+    );
+    let fwupd_purge_idx = first_noncomment_idx(&body, "apt-get purge -y fwupd")
+        .expect("the STEP 15 fwupd purge must be present");
+    assert!(
+        call_idx < fwupd_purge_idx,
+        "the ensure_root_writable call (line {call_idx}) must run BEFORE the STEP 15 fwupd purge \
+         (line {fwupd_purge_idx}) -- every apt-get/dpkg call in STEP 15-17 needs a writable root \
+         on an in-place re-run (#599)"
+    );
+}
+
+#[test]
+fn setup_device_calls_restore_root_mode_after_the_fstab_rewrite() {
+    let body = read_script();
+    let call_idx = first_noncomment_exact_idx(&body, "restore_root_mode").expect(
+        "restore_root_mode must be CALLED (a bare invocation, not just defined) after STEP 18 \
+         (#599)",
+    );
+    let fstab_write_idx = first_noncomment_idx(&body, "cat > /etc/fstab << FSTABEOF")
+        .expect("the STEP 18 fstab rewrite must be present");
+    assert!(
+        call_idx > fstab_write_idx,
+        "the restore_root_mode call (line {call_idx}) must run AFTER the STEP 18 fstab rewrite \
+         (line {fstab_write_idx}) -- STEP 18 also writes /etc/fstab and needs a writable root on \
+         an in-place re-run, so root must stay rw through STEP 18, not just STEP 15-17 (#599)"
+    );
+}
+
+#[test]
+fn setup_device_ensure_root_writable_falls_back_to_proc_mounts() {
+    // #599 code-review hardening: `findmnt` failing outright (missing binary, unreadable /proc)
+    // must not silently read as "not ro" (opts="") -- fall back to /proc/mounts directly, mirroring
+    // verify-device.sh's identical fallback for the same read, so a transient findmnt failure on a
+    // genuinely-ro box can't skip the remount and reproduce #599.
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, r#"awk '$2=="/"{print $4; exit}' /proc/mounts"#),
+        "ensure_root_writable's findmnt read must fall back to parsing /proc/mounts directly on \
+         failure (#599) -- mirrors verify-device.sh's MOUNT_OPTS read, which has the same fallback"
+    );
+}
+
+#[test]
+fn setup_device_handles_packagekit_around_the_remount_cycle() {
+    // rig-timesync-single-authority incident: PackageKit is D-Bus-activated by apt and holds an
+    // open write handle on /var/lib/PackageKit/transactions.db, which blocks `mount -o
+    // remount,ro /` with EBUSY. Must be stopped/masked so it can't reactivate mid-run.
+    let body = read_script();
+    assert!(
+        body.to_lowercase().contains("packagekit"),
+        "setup-device.sh must stop/mask PackageKit around the ro<->rw remount cycle (#599) -- \
+         otherwise a D-Bus-reactivated PackageKit can block the ro remount with EBUSY"
+    );
+}
+
+#[test]
+fn setup_device_root_rw_helpers_fail_loud_not_best_effort() {
+    // #599 explicitly requires FAIL LOUD (never a silent `|| true`) if the remount itself cannot
+    // be applied -- a re-run must never claim success on a still-wrongly-moded root.
+    let body = read_script();
+    let ensure_start = body
+        .find("ensure_root_writable() {")
+        .expect("ensure_root_writable definition must be present (#599)");
+    let restore_start = body
+        .find("restore_root_mode() {")
+        .expect("restore_root_mode definition must be present (#599)");
+    let ensure_window = &body[ensure_start..restore_start.max(ensure_start)];
+    assert!(
+        ensure_window.contains("fail "),
+        "ensure_root_writable() must call fail() when `mount -o remount,rw /` does not succeed \
+         (#599) -- no silent `|| true` on the remount itself"
+    );
+    let restore_window = &body[restore_start..];
+    assert!(
+        restore_window.contains("fail "),
+        "restore_root_mode() must call fail() when `mount -o remount,ro /` does not succeed (#599) \
+         -- no silent `|| true` on the remount itself"
     );
 }
