@@ -61,6 +61,46 @@ pub fn stamp_arrival_divergence_100ns(
         - crate::ndi::next_boundary_100ns(capture_realtime_100ns, fps)
 }
 
+/// How many CONSECUTIVE captured frames elapse before the monotonic->realtime offset
+/// (`capture_realtime_100ns`'s `mono_to_real_offset_100ns` input) is due for a re-sample.
+/// 100 frames is ~1.7s at 60fps / ~3.3s at 30fps — frequent enough to track NTP/PTP
+/// realtime-clock slew (per this module's doc: "re-sampled periodically so a realtime
+/// step/slew does not skew the stamp"), rare enough that the back-to-back
+/// `clock_gettime(CLOCK_REALTIME)` + `clock_gettime(CLOCK_MONOTONIC)` pair never
+/// meaningfully taxes the per-frame capture hot path. See
+/// [`should_resample_mono_to_real_offset`].
+pub const OFFSET_RESAMPLE_INTERVAL_FRAMES: u64 = 100;
+
+/// Pure cadence decision: is the monotonic->realtime offset due for a re-sample, given how
+/// many captured frames have elapsed since the last sample? The capture thread increments
+/// `frames_since_last_sample` once per captured frame and resets it to 0 right after taking
+/// a fresh sample.
+#[inline]
+pub fn should_resample_mono_to_real_offset(frames_since_last_sample: u64) -> bool {
+    // #286 STUB (pre-fix, bug-mirror): never resamples — exactly the (missing) behavior
+    // production has today (main.rs has no monotonic->realtime offset sampler at all, so
+    // there is no existing cadence to mirror; this stub's "always false" is the degenerate
+    // case of that absence). The test below requires resampling once the interval elapses;
+    // it FAILS against this stub (RED). The fix applies the real cadence check (GREEN).
+    let _ = frames_since_last_sample;
+    false
+}
+
+/// Convert a raw V4L2 buffer timestamp (`sec` whole seconds, `usec` microseconds — the
+/// `v4l::timestamp::Timestamp` fields the UVC driver stamps on dequeue, `CLOCK_MONOTONIC`
+/// domain by V4L2 default) into monotonic 100ns units, ready to feed
+/// [`capture_realtime_100ns`]. Saturating so an implausible/huge driver value can never
+/// wrap into a bogus timecode.
+#[inline]
+pub fn v4l_timestamp_to_monotonic_100ns(sec: i64, usec: i64) -> i64 {
+    // #286 STUB (pre-fix, bug-mirror): drops the `usec` sub-second component — exactly the
+    // (missing) behavior production has today (no V4L2-timestamp-to-100ns conversion exists
+    // at all yet). The test below requires the full sec+usec precision; it FAILS against
+    // this stub (RED). The fix adds the usec term (GREEN).
+    let _ = usec;
+    sec.saturating_mul(10_000_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +169,41 @@ mod tests {
             stamp_arrival_divergence_100ns(capture, arrival_next_frame, fps),
             SEC_100NS / fps,
             "a card that lags into the next genlock frame diverges by exactly one frame"
+        );
+    }
+
+    /// The monotonic->realtime offset must be re-sampled once the cadence interval has
+    /// elapsed since the last sample — never immediately, never permanently skipped.
+    #[test]
+    fn resample_offset_due_once_interval_elapsed() {
+        assert!(
+            !should_resample_mono_to_real_offset(0),
+            "must not resample immediately after taking a sample"
+        );
+        assert!(!should_resample_mono_to_real_offset(
+            OFFSET_RESAMPLE_INTERVAL_FRAMES - 1
+        ));
+        assert!(
+            should_resample_mono_to_real_offset(OFFSET_RESAMPLE_INTERVAL_FRAMES),
+            "due exactly once the cadence interval elapses"
+        );
+        assert!(
+            should_resample_mono_to_real_offset(OFFSET_RESAMPLE_INTERVAL_FRAMES + 50),
+            "stays due past the interval (a missed sample must not un-arm it)"
+        );
+    }
+
+    /// The V4L2 sec+usec pair must convert to 100ns units at FULL precision (dropping the
+    /// usec term would silently truncate every capture timestamp to whole seconds).
+    #[test]
+    fn v4l_timestamp_converts_full_sec_and_usec_precision() {
+        // 5.5 seconds = 5 * 1e7 (100ns/sec) + 500_000 usec * 10 (100ns/usec).
+        assert_eq!(v4l_timestamp_to_monotonic_100ns(5, 500_000), 55_000_000);
+        assert_eq!(v4l_timestamp_to_monotonic_100ns(0, 0), 0);
+        // Saturating: an implausible huge sec must not overflow/wrap.
+        assert_eq!(
+            v4l_timestamp_to_monotonic_100ns(i64::MAX, 999_999),
+            i64::MAX
         );
     }
 }
