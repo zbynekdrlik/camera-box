@@ -2365,3 +2365,51 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   in CI/on dev1, not a deployed service, same as #591/#595). Post-merge verification = confirmed
   main CI green (`cargo nextest run`, all touched test files: `tests/drift_guard.rs` 102/102,
   `tests/verify_device_pure_functions.rs` 64/64) on the merge commit `ab0619c4a`.
+
+## #597 + #608 (bundled, PR #615, v1.7.0-dev.293) — 2026-07-08 — linuxptp coverage + dantesync-gate offline seam
+
+- Version bump `01e8ef9fa` (1.7.0-dev.293).
+- **#597** — the #591 sole-timesync-authority gate + purge only detected the 5 stock NTP daemons
+  (dpkg package name == systemd unit name for all 5). `linuxptp` (units `ptp4l`/`phc2sys`) is a
+  DIFFERENT shape: ONE dpkg package backing TWO systemd units, so `dpkg -s ptp4l` always reads
+  empty even when linuxptp IS installed.
+  - RED `f30b2d845`: widened the #596 gather/verdict seam test (5→7 rows) + a new pairing test in
+    `tests/drift_guard.rs`; 3 new purge-content tests in `tests/setup_device_provisioner_hardening.rs`.
+  - GREEN `a507fba8d`: `scripts/lib/timesync-authority.sh`'s `timesync_gather_remote_snippet()`
+    gathers `dpkg -s linuxptp` ONCE, pairs it onto BOTH the `ptp4l` and `phc2sys` rows (each with
+    its own `systemctl is-active`/`is-enabled`); `scripts/setup-device.sh` STEP 17 +
+    `scripts/create-usb-linux.sh` chroot gained a matching purge stanza. `timesync_daemon_verdict`/
+    `timesync_authority_verdict` needed NO changes — already generic over daemon name/count; same
+    for `verify-device.sh`'s (r) check and `drift-guard.sh`'s `--check-imag` facet (both consume
+    the block generically).
+- **#608** — `clock-offset-painter-gate.sh` has an offline fixture-injection seam
+  (`DEV1_DANTE_JOURNAL`/`PAINTER_DANTE_JOURNAL`); `dantesync-gate.sh`'s Linux SSH-gather path
+  (the recording-E2E #7 precondition gate) had none — its ok/drift/stale/absent → exit-code
+  mapping was only proven indirectly via the shared `dantesync_offset_verdict` unit tests.
+  - RED `e3cd79719`: 5 new `tests/dantesync_gate.rs` tests keyed on
+    `DANTESYNC_GATE_LINUX_JOURNAL_<NAME>` (didn't exist yet) — confirmed these silently fell
+    through to a LIVE SSH read of the real rig cam1 box instead of the fixture (4/5 failed
+    outright on value mismatch; the 5th "passed" only because cam1 happened to be healthy at that
+    moment — not proof of anything).
+  - GREEN `1fb29056f`: extracted the inline SSH gather into `read_linux_node_journal(NAME, IP)`,
+    honoring `DANTESYNC_GATE_LINUX_JOURNAL_<NAME>` (NAME uppercased, `-`→`_`) as a fixture
+    override — keyed per node name (this gate measures multiple Linux nodes at once, unlike the
+    painter gate's fixed pair). Byte-identical live-path behavior when the env var is unset.
+- Deep review (`superpowers:requesting-code-review`, independent agent that re-ran the RED commits
+  itself rather than trusting the commit messages): 0 Critical, 0 Important, 2 Minor — both fixed
+  same-PR in `aff1fd856`: (1) the linuxptp purge stanza had drifted to disable→mask→purge instead
+  of the #591 loop's disable→purge→mask order (functionally identical, fixed for readability);
+  (2) the NAME→ENV_VAR mapping's `-`→`_` handling was undocumented and untested beyond
+  `cam1`/`cam2` (no hyphens) — documented + added a direct `imag-nb`→`DANTESYNC_GATE_LINUX_JOURNAL_IMAG_NB`
+  test.
+- Post-merge verification went BEYOND "CI green on the merge commit" — ran the actual widened
+  `timesync_gather_remote_snippet()` over REAL SSH against the live CAM1 box: confirmed 7 rows
+  (linuxptp genuinely absent on the real fleet, `timesync_authority_verdict` → `ok`), and ran the
+  refactored `scripts/dantesync-gate.sh --linux "cam1=10.77.9.61 cam2=10.77.9.62"` against the live
+  rig: `GATE PASS — 2 node(s) NTP-synced AND PTP-locked` (exit 0), proving the `read_linux_node_journal`
+  extraction is behavior-identical on real hardware, not just in the local bash test harness.
+- Pure Tier-0 shell/test-logic — no `src/` changes, no deploy pipeline for these scripts (same
+  class as #591/#595/#596: they run from the repo checkout on dev1/CI, not a deployed appliance
+  service). Merge commit `b3ddfe4e1`; main CI green (Lint/Test/Coverage/Build/Windows-probe/
+  Drift-Guard/Shellcheck/Security/Python-harness all pass; Mutation Testing is on-demand only
+  per #70).

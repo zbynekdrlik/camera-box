@@ -88,6 +88,34 @@ package must be **PURGED**. Enforcement (all landed #591):
   through the parser, never the snippet's OWN output shape) — the fix was a test that runs the
   snippet locally via `bash -c "$snippet"` (safe read-only `dpkg`/`systemctl` calls, works on any
   Ubuntu CI runner) and feeds its real output through the verdict parser end-to-end.
+- **#597 — linuxptp (`ptp4l`/`phc2sys`) closed the gap for a DIFFERENT class of competing daemon:
+  one dpkg PACKAGE backing TWO systemd UNITS with different names** (unlike the 5 NTP daemons,
+  where package name == unit name, so `dpkg -s "$_ts"` and `systemctl is-active "$_ts"` share one
+  loop variable). `dpkg -s ptp4l`/`dpkg -s phc2sys` always read empty even when linuxptp IS
+  installed — the fix gathers `dpkg -s linuxptp` ONCE and pairs that ONE status onto BOTH units'
+  rows (each unit still gets its own `is-active`/`is-enabled`). **Lesson for the next daemon added
+  to this competing set:** check whether its dpkg package name equals its systemd unit name before
+  reusing the `for _ts in ...` loop verbatim — if they differ (as with any daemon shipping multiple
+  units, e.g. `linuxptp`), it needs the hand-built two-step gather `timesync_gather_remote_snippet()`
+  now demonstrates, not a blind loop-variable reuse. The purge side has the same split: purge the
+  PACKAGE once, disable+mask each UNIT — see `scripts/setup-device.sh` STEP 17 and
+  `scripts/create-usb-linux.sh` for the pattern (order matches the #591 loop: disable → purge →
+  mask). **Verification technique for any future gather-snippet extension:** run it over REAL SSH
+  against a live cam box, not just the local `bash -c "$snippet"` test harness — #597's post-merge
+  check piped the sourced snippet through `sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.61` (see
+  Device Deployment below for `DEVICE_ROOT_PW`) to prove it transports correctly as an SSH
+  remote-command string (a different code path than a local `bash -c`) and that the verdict on the
+  REAL fleet is `ok` (linuxptp genuinely absent).
+- **#608 — a gate whose SSH-gather is inlined can be given the SAME offline test-injection seam as
+  `clock-offset-painter-gate.sh`'s `DEV1_DANTE_JOURNAL`/`PAINTER_DANTE_JOURNAL`, generalized to
+  N named nodes:** extract the inline `sshpass ssh ... journalctl ...` into its own function, and
+  at its top check an env var built from the node's own name
+  (`DANTESYNC_GATE_LINUX_JOURNAL_<NAME>`, NAME uppercased + `-`→`_` via
+  `tr '[:lower:]-' '[:upper:]_'` so a hyphenated name like `imag-nb` still yields a valid shell
+  variable name) via bash indirect expansion `${!var:-}` (safe under `set -u` — the `:-` default
+  protects the *target* variable being unset, not just `var` itself). This is the pattern for any
+  future gate that measures MULTIPLE named Linux nodes and needs offline fixture coverage
+  (`scripts/dantesync-gate.sh`'s `read_linux_node_journal()`).
 
 **Windows (strih + stream) — W32Time invariant.** DanteSync is the clock authority on the Windows
 OBS boxes too; the built-in Windows Time service (`W32Time`) must be **Stopped + Disabled** (already
