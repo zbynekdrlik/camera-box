@@ -686,6 +686,138 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
     );
 }
 
+/// #286 — under ALL_CAMBOX=1, BURN_TARGETS must gain strih's OWN burn on the other 5 strih NDI
+/// inputs (not just the single default STRIH_PROG_SOURCE), else recording-verdict's
+/// all_cambox_delivery_latency measures only whichever ONE camera owns STRIH_PROG_SOURCE and
+/// reports zero samples for every other camera (confirmed live, 2026-07-09 #286
+/// re-verification: only the default camera measured, the other 5 all "NO SAMPLES" — strih's
+/// render-time burn was never attached to their inputs during their windows). Mirrors the exact
+/// snippet added to recording-e2e.sh (the file itself can't be sourced directly — no
+/// BASH_SOURCE guard, see the e2e skill's "Testing the E2E harness scripts" gotcha). A
+/// companion content-assertion (below) anchors this hand-copied snippet to the REAL file so a
+/// future edit to the six-source list or the exclusion logic can't silently drift out of sync
+/// with what this test actually exercises (code-review finding on PR #644).
+#[test]
+fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
+    // Drift guard: the real script must contain this EXACT ALL_CAMBOX extension block (the
+    // six-source list + the exclusion `if`), so the behavioral snippet above can never quietly
+    // diverge from what recording-e2e.sh actually runs.
+    let real = read("scripts/recording-e2e.sh");
+    let real_block_start = real
+        .find("if [ \"${ALL_CAMBOX:-0}\" = \"1\" ]; then\n  for _acs in")
+        .expect("#286: recording-e2e.sh must define the ALL_CAMBOX BURN_TARGETS extension block");
+    let real_block_end = real_block_start
+        + real[real_block_start..]
+            .find("\nfi\ntrap cleanup EXIT")
+            .expect("#286: the ALL_CAMBOX BURN_TARGETS extension block must close just before `trap cleanup`")
+        + 1;
+    let real_block = &real[real_block_start..real_block_end];
+    assert!(
+        real_block.contains(
+            r#"for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6""#
+        ),
+        "#286: recording-e2e.sh must extend BURN_TARGETS over exactly the six canonical strih \
+         NDI inputs: {real_block}"
+    );
+    assert!(
+        real_block.contains(r#"if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then"#)
+            && real_block.contains(r#"BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")"#),
+        "#286: recording-e2e.sh must exclude the current STRIH_PROG_SOURCE and append the \
+         REMAINING sources as strih-<name>=$STRIH=<source> triples: {real_block}"
+    );
+
+    let snippet = r#"
+set -euo pipefail
+STRIH="10.77.9.202"
+STREAM="10.77.9.204"
+IMAG_IP="10.77.9.182"
+STRIH_PROG_SOURCE="$1"
+STREAM_PROG_SOURCE="NDI 2ME PGM"
+IMAG_PROG_SOURCE="NDI CAM1"
+BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6"; do
+    if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
+      BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
+    fi
+  done
+fi
+printf '%s\n' "${BURN_TARGETS[@]}"
+"#;
+    // Default path (ALL_CAMBOX unset) — unchanged, exactly 3 targets (strih/stream/imag).
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(snippet)
+        .arg("bash")
+        .arg("NDI cam5")
+        .output()
+        .expect("run snippet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        3,
+        "#286: ALL_CAMBOX unset must leave BURN_TARGETS at exactly 3 (unchanged default path): {stdout:?}"
+    );
+
+    // ALL_CAMBOX=1, default STRIH_PROG_SOURCE ("NDI cam5", cam1) — gains the OTHER 5 strih
+    // inputs (8 total: the original 3 + 5 more), and does NOT duplicate "NDI cam5" itself.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(snippet)
+        .arg("bash")
+        .arg("NDI cam5")
+        .env("ALL_CAMBOX", "1")
+        .output()
+        .expect("run snippet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        8,
+        "#286: ALL_CAMBOX=1 must extend BURN_TARGETS to 8 (3 original + 5 additional strih \
+         inputs, excluding the one STRIH_PROG_SOURCE already covers): {stdout:?}"
+    );
+    for expect in ["NDI cam1", "NDI cam3", "NDI cam2", "NDI cam4", "NDI cam6"] {
+        assert!(
+            stdout.contains(expect),
+            "#286: BURN_TARGETS must cover strih input {expect:?}: {stdout:?}"
+        );
+    }
+    assert_eq!(
+        stdout.matches("NDI cam5").count(),
+        1,
+        "#286: the default STRIH_PROG_SOURCE (NDI cam5) must NOT be duplicated: {stdout:?}"
+    );
+
+    // A NON-default STRIH_PROG_SOURCE (e.g. CAM=cam3 selects 'NDI cam1') is correctly excluded
+    // from the additional set instead of the wrong (still-default) one.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(snippet)
+        .arg("bash")
+        .arg("NDI cam1")
+        .env("ALL_CAMBOX", "1")
+        .output()
+        .expect("run snippet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        8,
+        "#286: a non-default STRIH_PROG_SOURCE must still yield exactly 8 targets: {stdout:?}"
+    );
+    assert_eq!(
+        stdout.matches("NDI cam1").count(),
+        1,
+        "#286: whichever source IS the current STRIH_PROG_SOURCE must not be duplicated \
+         either: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("NDI cam5"),
+        "#286: when STRIH_PROG_SOURCE is 'NDI cam1', 'NDI cam5' must be ADDED as one of the \
+         other 5: {stdout:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #163: recording-fetch-windows.sh must URL-ENCODE the OBS recording filename.
 //
