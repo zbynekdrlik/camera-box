@@ -1476,6 +1476,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
   VERDICT_ARGS+=(--av-marker-log "$MARKER_CSV")
   echo "    #312 item 2: --av-marker-log $MARKER_CSV (fused all_cambox_av_sync)"
 fi
+# #624 deliverable 4 / #312 item 2 PR B: the +/-20ms per-camera A/V-offset gate measures each
+# camera's DEVIATION from AV_EXPECTED_MS (default 0 -- the operator's live #398 dock dialed to
+# ~0 in practice), not from a hardcoded 0. Override when the dock is intentionally dialed to a
+# nonzero value. Always passed (matches the CLI's own default) so the gate is explicit in the
+# printed command, not silently implicit.
+AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")
 
 # #208 PER-BOX DECODE-IN-PLACE (refines #193): by default decode EACH recording ON ITS OWN BOX —
 # the strih recording ON the strih box, the stream recording ON the stream box — and merge the
@@ -1602,6 +1609,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --burn-cam3-run-id "$BURN_CAM3_RUN_ID" --burn-cam4-run-id "$BURN_CAM4_RUN_ID" \
     --burn-cam5-run-id "$BURN_CAM5_RUN_ID" --burn-cam6-run-id "$BURN_CAM6_RUN_ID" \
     --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+    --av-expected-ms "$AV_EXPECTED_MS" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
   # merely printed) — `if`-form so a missing/failed imag extract never `set -e`-aborts the merge of
