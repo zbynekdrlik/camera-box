@@ -15,9 +15,10 @@
 //! unit-tests Tier-0 (default features) — the project's CLAUDE.md "Local Build Policy" mandate
 //! (a pure seam at the crate root, mirroring `switch_latency.rs` / `colour_scale.rs`).
 //!
-//! **PR A does NOT gate the headline on this** — `all_cambox_av_sync` is reported (offsets,
-//! sample counts, any UNKNOWN cameras) but the run's overall PASS/FAIL is untouched. PR B (#312
-//! item 2 / #624 deliverable 4) wires the ±20ms cross-window bound on top of [`CameraAvSync`].
+//! **PR B wires the ±20ms cross-window bound on top of [`CameraAvSync`]** (#312 item 2 / #624
+//! deliverable 4) — see [`av_offset_gate_pass`]. PR A only reported `all_cambox_av_sync` (offsets,
+//! sample counts, any UNKNOWN cameras); this module now also decides the per-camera PASS/FAIL that
+//! the caller (`bin/recording-verdict.rs`) folds into the run's overall verdict.
 
 use crate::qpsk_marker::cluster_offset_ms;
 
@@ -105,6 +106,27 @@ pub fn pool_camera_av_sync(
             mad_ms: None,
             verdict: AvSyncVerdict::Unknown,
         },
+    }
+}
+
+/// #624 deliverable 4 / #312 item 2 PR B — the per-camera A/V-offset gate tolerance: every
+/// camera's measured `video − audio` offset must land within this many ms of the
+/// expected/dialed value (`--av-expected-ms`, the operator's live #398 dock reading — nominally
+/// ~0 since the dock is dialed to align video and audio). This exact ±20ms bound is issue #624's
+/// own deliverable-4 text: "every camera's end-to-end A/V offset ... within ±20ms of every other
+/// AND of the dialed 2ME value".
+pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 20.0;
+
+/// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
+/// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
+/// zero contributing windows (the camera never appeared in this sweep) or thin/scattered data
+/// (too few pooled candidates, no dominant cluster) — NEVER passes: this is a real gate now
+/// (#312 item 2 PR B), same fail-closed severity as the loss/latency-spread gates, no "advisory"
+/// tier. A camera with nothing to measure proves nothing about its A/V sync — it cannot pass.
+pub fn av_offset_gate_pass(sync: &CameraAvSync, expected_ms: f64) -> bool {
+    match sync.av_offset_ms {
+        Some(off) => (off - expected_ms).abs() <= AV_OFFSET_GATE_TOLERANCE_MS,
+        None => false,
     }
 }
 
@@ -295,7 +317,10 @@ mod tests {
 
     #[test]
     fn gate_boundary_at_exactly_minus_tolerance_passes() {
-        assert!(av_offset_gate_pass(&measured(-AV_OFFSET_GATE_TOLERANCE_MS), 0.0));
+        assert!(av_offset_gate_pass(
+            &measured(-AV_OFFSET_GATE_TOLERANCE_MS),
+            0.0
+        ));
     }
 
     #[test]
