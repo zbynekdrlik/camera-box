@@ -1544,6 +1544,49 @@ def switch(a):
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
 
 
+def rig_busy_check(a):
+    """#406/#312 item5: query BOTH strih and stream OBS WebSocket for GetStreamStatus.outputActive
+    and GetRecordStatus.outputActive (4 booleans total) and report whether the rig is genuinely busy
+    with a REAL broadcast/recording right now.
+
+    This is the pre-flight signal the automatic `pull_request`-triggered full-path-e2e CI gate
+    (scripts/rig-busy-gate.sh) uses before it reroutes strih/stream's production OBS program scenes
+    to run the real E2E — driving the recording harness over a LIVE broadcast would be a genuine
+    production incident, not just a wasted CI run.
+
+    Prints ONE line of JSON to stdout: ``{"busy": bool, "reasons": [str, ...]}``.
+      - busy=false, reasons=[]     -> rig fully idle on both boxes, safe to proceed. Exit 0.
+      - busy=true,  reasons=[...]  -> at least one box is streaming and/or recording; the caller must
+                                      NOT run the E2E now (exit 0 — the caller decides retry/backoff).
+      - WS unreachable on EITHER box -> never silently reported as busy=false (a rig we can't
+                                         observe must FAIL CLOSED). Exit 3.
+    """
+    reasons = []
+    errors = []
+    for label, host in (("strih", a.strih_host), ("stream", a.stream_host)):
+        try:
+            ws = _conn(host, a.password)
+            try:
+                stream_active = bool(_rpc(ws, "GetStreamStatus").get("outputActive"))
+                record_active = bool(_rpc(ws, "GetRecordStatus").get("outputActive"))
+            finally:
+                ws.close()
+        except Exception as e:
+            # Connection failure OR an RPC-level error — fail CLOSED (exit 3), never busy=false.
+            errors.append(f"{label} ({host}) unreachable: {e}")
+            continue
+        if stream_active:
+            reasons.append(f"{label} is streaming (GetStreamStatus.outputActive=true)")
+        if record_active:
+            reasons.append(f"{label} is recording (GetRecordStatus.outputActive=true)")
+
+    if errors:
+        print(json.dumps({"busy": None, "reasons": errors}))
+        sys.exit(3)
+
+    print(json.dumps({"busy": bool(reasons), "reasons": reasons}))
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -1620,10 +1663,16 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
+    # #406/#312 item5: `rig-busy-check` queries TWO hosts (strih + stream), not the single --host
+    # every other subcommand takes above — its own parser, added separately.
+    rbc = sub.add_parser("rig-busy-check")
+    rbc.add_argument("--strih-host", default=os.environ.get("STRIH_HOST", "10.77.9.202"))
+    rbc.add_argument("--stream-host", default=os.environ.get("STREAM_HOST", "10.77.9.204"))
+    rbc.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
-     "program-scene": program_scene}[a.cmd](a)
+     "program-scene": program_scene, "rig-busy-check": rig_busy_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
