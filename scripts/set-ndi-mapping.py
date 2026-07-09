@@ -17,7 +17,7 @@ strih to CAM6 but had no canonical pin, so it could silently drift on the next O
 now it is enforced like every other input.
 
 Exit codes:
-  0  PASS  — every input set to its pin AND all 4 senders distinct
+  0  PASS  — every input set to its pin AND all 6 senders distinct
   1  FAIL  — could not set an input, or a duplicate binding remains
   2  ERROR — OBS WS connection / request failure
 

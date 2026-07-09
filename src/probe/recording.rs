@@ -138,14 +138,21 @@ pub struct RecordingFrame {
     /// competed with the cam2 optical tick in this `max()`, silently corrupting `imag`'s
     /// contiguity check whenever the burn's frame_id happened to exceed cam2's on a frame. ANY
     /// future node-burn run_id MUST be added here too, or its `.tick` silently corrupts.
+    ///
+    /// **#312 (found in code review, before merge): this list was NEVER extended for cam3/cam4
+    /// (#624) and this PR's own new cam2/cam5/cam6 burns — exactly the #463 gotcha above,
+    /// recurring.** All six camera-under-test burn ids are now included so none of their
+    /// frame_ids can ever hijack the cam2 optical Vernier tick that
+    /// `segment_frames_from_recording`'s ALL-CAMBOX per-segment continuity (this PR's own
+    /// deliverable) anchors on.
     pub tick: Option<u32>,
 }
 
-/// The node-burn run_ids (cam1 capture / strih / stream / imag) — the digitally-generated marks
-/// our own code burns into the feed (`recording_latency::BURN_RUN_ID_*`). They are NOT the cam2
-/// optical Vernier tick and are excluded from [`RecordingFrame::tick`]. Mirrored here as a
-/// small const so `tick` selection doesn't pull the whole `RunIds` machinery into the
-/// per-frame hot path.
+/// The node-burn run_ids (every camera-under-test's own capture burn, plus strih/stream/imag) —
+/// the digitally-generated marks our own code burns into the feed
+/// (`recording_latency::BURN_RUN_ID_*`). They are NOT the cam2 optical Vernier tick and are
+/// excluded from [`RecordingFrame::tick`]. Mirrored here as a small const so `tick` selection
+/// doesn't pull the whole `RunIds` machinery into the per-frame hot path.
 ///
 /// **#463 — this list is for the TICK EXCLUSION filter ONLY, never for a decode's `#207`
 /// fast-path GATE** (see [`GENERIC_DIAGNOSTIC_BURN_IDS`] for that). The two purposes look
@@ -159,8 +166,13 @@ pub struct RecordingFrame {
 /// `forensic-dump`/`recording-probe`/the A/V-sync tool with ZERO accuracy benefit, since
 /// those tools never decode imag's own recording through this generic path) — caught in
 /// review, not by a test (the existing suite has no timing assertion for this gate).
-pub const NODE_BURN_RUN_IDS: [u32; 4] = [
+pub const NODE_BURN_RUN_IDS: [u32; 9] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
+    crate::probe::recording_latency::BURN_RUN_ID_CAM2,
+    crate::probe::recording_latency::BURN_RUN_ID_CAM3,
+    crate::probe::recording_latency::BURN_RUN_ID_CAM4,
+    crate::probe::recording_latency::BURN_RUN_ID_CAM5,
+    crate::probe::recording_latency::BURN_RUN_ID_CAM6,
     crate::probe::recording_latency::BURN_RUN_ID_STRIH,
     crate::probe::recording_latency::BURN_RUN_ID_STREAM,
     crate::probe::recording_latency::BURN_RUN_ID_IMAG,
@@ -856,6 +868,35 @@ mod tests {
              Vernier tick (mirrors tick_excludes_node_burns_even_when_a_burn_id_exceeds_the_\
              optical_tick's proof for cam1)"
         );
+    }
+
+    /// #312 (BUG, found in code review before merge): `NODE_BURN_RUN_IDS` was never extended for
+    /// cam3/cam4 (#624) nor for this PR's new cam2/cam5/cam6 burns — the exact #463 gotcha
+    /// documented on [`RecordingFrame::tick`] and locked by `node_burn_run_ids_includes_imag_463`
+    /// above, recurring for five more camera-under-test ids. Any one of them missing here means
+    /// that camera's own capture-burn frame_id can hijack the cam2 optical Vernier tick whenever
+    /// it exceeds cam2's on a frame, silently corrupting the ALL-CAMBOX per-segment continuity
+    /// (`segment_frames_from_recording`) this PR's own items 1+3 depend on.
+    #[test]
+    fn node_burn_run_ids_includes_every_camera_under_test_312() {
+        use crate::probe::recording_latency::{
+            BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
+            BURN_RUN_ID_CAM6,
+        };
+        for (label, id) in [
+            ("cam2", BURN_RUN_ID_CAM2),
+            ("cam3", BURN_RUN_ID_CAM3),
+            ("cam4", BURN_RUN_ID_CAM4),
+            ("cam5", BURN_RUN_ID_CAM5),
+            ("cam6", BURN_RUN_ID_CAM6),
+        ] {
+            assert!(
+                NODE_BURN_RUN_IDS.contains(&id),
+                "#312: BURN_RUN_ID_{} ({id}) must be in NODE_BURN_RUN_IDS so its frame_id never \
+                 hijacks the Vernier tick",
+                label.to_uppercase()
+            );
+        }
     }
 
     #[test]

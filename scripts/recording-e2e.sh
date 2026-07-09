@@ -1538,9 +1538,10 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
     --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
     --imag-capture-fps "$IMAG_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
-    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-cam3-run-id "$BURN_CAM3_RUN_ID" \
-    --burn-cam4-run-id "$BURN_CAM4_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
-    --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-cam2-run-id "$BURN_CAM2_RUN_ID" \
+    --burn-cam3-run-id "$BURN_CAM3_RUN_ID" --burn-cam4-run-id "$BURN_CAM4_RUN_ID" \
+    --burn-cam5-run-id "$BURN_CAM5_RUN_ID" --burn-cam6-run-id "$BURN_CAM6_RUN_ID" \
+    --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
   # merely printed) — `if`-form so a missing/failed imag extract never `set -e`-aborts the merge of
