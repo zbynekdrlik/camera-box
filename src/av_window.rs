@@ -123,10 +123,19 @@ pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 20.0;
 /// (too few pooled candidates, no dominant cluster) — NEVER passes: this is a real gate now
 /// (#312 item 2 PR B), same fail-closed severity as the loss/latency-spread gates, no "advisory"
 /// tier. A camera with nothing to measure proves nothing about its A/V sync — it cannot pass.
+///
+/// Checks `sync.verdict == Measured` EXPLICITLY, not merely `av_offset_ms.is_some()` — the two
+/// currently always agree ([`pool_camera_av_sync`] is the sole real producer and keeps them in
+/// lockstep), but this function does not rely on that convention holding forever: a future
+/// producer that ever desyncs the pair (e.g. `Unknown` with a stray `Some(x)`, or `Measured` with
+/// `None`) must still resolve to fail-closed here, not silently pass on the strength of one field
+/// alone.
 pub fn av_offset_gate_pass(sync: &CameraAvSync, expected_ms: f64) -> bool {
-    match sync.av_offset_ms {
-        Some(off) => (off - expected_ms).abs() <= AV_OFFSET_GATE_TOLERANCE_MS,
-        None => false,
+    match (sync.verdict, sync.av_offset_ms) {
+        (AvSyncVerdict::Measured, Some(off)) => {
+            (off - expected_ms).abs() <= AV_OFFSET_GATE_TOLERANCE_MS
+        }
+        _ => false,
     }
 }
 
@@ -345,5 +354,25 @@ mod tests {
         let absent = pool_camera_av_sync(0, &[], MIN_AV_SAMPLES, 60.0);
         assert_eq!(absent.verdict, AvSyncVerdict::Unknown);
         assert!(!av_offset_gate_pass(&absent, 0.0));
+    }
+
+    /// Code-review finding: `av_offset_gate_pass` must check `verdict == Measured` EXPLICITLY,
+    /// not merely `av_offset_ms.is_some()` — the two fields currently always agree in real
+    /// producers, but this locks the gate against a hand-constructed (or future-buggy) mismatch:
+    /// an `Unknown` verdict carrying a stray `Some(offset)` must still fail closed.
+    #[test]
+    fn gate_fails_closed_on_unknown_verdict_even_with_a_stray_offset_value() {
+        let mismatched = CameraAvSync {
+            windows: 1,
+            candidates: 3,
+            cluster_samples: 0,
+            av_offset_ms: Some(10.0), // stray value inconsistent with Unknown
+            mad_ms: None,
+            verdict: AvSyncVerdict::Unknown,
+        };
+        assert!(
+            !av_offset_gate_pass(&mismatched, 0.0),
+            "an Unknown verdict must never pass the gate, even if av_offset_ms happens to be Some"
+        );
     }
 }

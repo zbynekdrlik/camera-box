@@ -116,7 +116,16 @@ fn cleanup_kills_the_cam_name_infixed_all_cambox_burn_binaries() {
     let loop_region_start = body
         .find("for _cip in \"$CAM3_IP\"")
         .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
-    let loop_region = &body[loop_region_start..];
+    // Code-review finding: bound loop_region's RIGHT edge at the cam2/painter block's own start —
+    // an unbounded `&body[loop_region_start..]` would run to the end of cleanup() and swallow the
+    // painter block's own (also-widened) pkill line, so the first assertion below would still
+    // pass even if ONLY the loop's own line (not the painter's) regressed back to the narrower
+    // digit-only pattern. Isolating the two regions is the whole point of asserting them
+    // separately.
+    let painter_region_start = body
+        .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")
+        .expect("cleanup() must have the cam2/painter restore block");
+    let loop_region = &body[loop_region_start..painter_region_start];
     assert!(
         loop_region.contains("pkill -9 -f 'camera-box-burn-[a-z0-9]'")
             || loop_region.contains("pkill -9 -f \"camera-box-burn-[a-z0-9]\""),
@@ -126,9 +135,6 @@ fn cleanup_kills_the_cam_name_infixed_all_cambox_burn_binaries() {
          crash-looping camera-box: {loop_region}"
     );
 
-    let painter_region_start = body
-        .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")
-        .expect("cleanup() must have the cam2/painter restore block");
     let painter_region = &body[painter_region_start..];
     assert!(
         painter_region.contains("pkill -9 -f 'camera-box-burn-[a-z0-9]'")
