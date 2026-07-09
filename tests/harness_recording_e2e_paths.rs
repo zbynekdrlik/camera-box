@@ -693,9 +693,39 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
 /// re-verification: only the default camera measured, the other 5 all "NO SAMPLES" — strih's
 /// render-time burn was never attached to their inputs during their windows). Mirrors the exact
 /// snippet added to recording-e2e.sh (the file itself can't be sourced directly — no
-/// BASH_SOURCE guard, see the e2e skill's "Testing the E2E harness scripts" gotcha).
+/// BASH_SOURCE guard, see the e2e skill's "Testing the E2E harness scripts" gotcha). A
+/// companion content-assertion (below) anchors this hand-copied snippet to the REAL file so a
+/// future edit to the six-source list or the exclusion logic can't silently drift out of sync
+/// with what this test actually exercises (code-review finding on PR #644).
 #[test]
 fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
+    // Drift guard: the real script must contain this EXACT ALL_CAMBOX extension block (the
+    // six-source list + the exclusion `if`), so the behavioral snippet above can never quietly
+    // diverge from what recording-e2e.sh actually runs.
+    let real = read("scripts/recording-e2e.sh");
+    let real_block_start = real
+        .find("if [ \"${ALL_CAMBOX:-0}\" = \"1\" ]; then\n  for _acs in")
+        .expect("#286: recording-e2e.sh must define the ALL_CAMBOX BURN_TARGETS extension block");
+    let real_block_end = real_block_start
+        + real[real_block_start..]
+            .find("\nfi\ntrap cleanup EXIT")
+            .expect("#286: the ALL_CAMBOX BURN_TARGETS extension block must close just before `trap cleanup`")
+        + 1;
+    let real_block = &real[real_block_start..real_block_end];
+    assert!(
+        real_block.contains(
+            r#"for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6""#
+        ),
+        "#286: recording-e2e.sh must extend BURN_TARGETS over exactly the six canonical strih \
+         NDI inputs: {real_block}"
+    );
+    assert!(
+        real_block.contains(r#"if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then"#)
+            && real_block.contains(r#"BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")"#),
+        "#286: recording-e2e.sh must exclude the current STRIH_PROG_SOURCE and append the \
+         REMAINING sources as strih-<name>=$STRIH=<source> triples: {real_block}"
+    );
+
     let snippet = r#"
 set -euo pipefail
 STRIH="10.77.9.202"
