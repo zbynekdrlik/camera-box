@@ -2340,13 +2340,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build the full-chain verdict + print it + write the `--json` report, returning the report
-/// JSON and the binary PASS. Operates on ALREADY-DECODED frames so the fused path (live decode)
-/// and #208 merge path (deserialized per-box partials) share IDENTICAL logic — the merged
-/// verdict is therefore equivalent to the fused output (same fields, same PASS semantics). The
-/// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
-/// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
-#[allow(clippy::too_many_arguments)]
 /// The `VerdictConfig` for the STREAM node's per-recording tick DIAGNOSTIC. The stream box
 /// records at `stream_capture_fps` (30 in the mixed 60+30 topology), NOT the cam/strih
 /// `capture_fps` (60) — run 7020001 wired the base cfg straight through and the diagnostic
@@ -2361,6 +2354,21 @@ fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConf
     cfg
 }
 
+/// Build the full-chain verdict + print it + write the `--json` report, returning the report
+/// JSON and the binary PASS. Operates on ALREADY-DECODED frames so the fused path (live decode)
+/// and #208 merge path (deserialized per-box partials) share IDENTICAL logic — the merged
+/// verdict is therefore equivalent to the fused output (same fields, same PASS semantics). The
+/// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
+/// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
+///
+/// #312 item 2 (PR A) — found in CI review: `#[allow(clippy::too_many_arguments)]` had been
+/// MISPLACED for who knows how long (bound to `stream_diag_cfg` above, a plain 2-arg function
+/// that never needed it, instead of to THIS function) — it never mattered while this function
+/// sat at exactly 7 args (clippy's default threshold), but adding the 8th (`stream_av_sync`)
+/// below immediately tripped `-D warnings` in the `--all-features` Lint CI job (never visible
+/// locally — Tier-0 policy bans compiling `--features probe` on this box). Moved to the correct
+/// item.
+#[allow(clippy::too_many_arguments)]
 fn build_and_print_verdict(
     args: &Args,
     strih: Option<DecodedRec>,
