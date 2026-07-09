@@ -3908,7 +3908,7 @@ fn build_and_print_verdict(
                 // but does NOT gate `all_pass` on it — the ±20ms cross-window bound (#624
                 // deliverable 4) is PR B, wired on top of `av_window::pool_camera_av_sync`.
                 let av_inputs: Option<AvMarkerInputs> =
-                    match (stream_av_sync.clone(), &args.av_marker_log, &args.stream) {
+                    match (stream_av_sync, &args.av_marker_log, &args.stream) {
                         (Some(carried), _, _) => Some(carried),
                         (None, Some(marker_log_path), Some(stream_path)) => {
                             let marker_csv = std::fs::read_to_string(marker_log_path)
