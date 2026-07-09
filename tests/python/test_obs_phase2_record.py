@@ -211,6 +211,10 @@ def test_record_start_polls_record_status_until_orphan_finalizes(monkeypatch):
         {"outputActive": True, "outputTimecode": "05:27:14"},   # poll 1: still finalizing
         {"outputActive": True, "outputTimecode": "05:27:15"},   # poll 2: still finalizing
         {"outputActive": False, "outputTimecode": "00:00:00"},  # poll 3: idle (finalized)
+        # #627: two more samples for the post-StartRecord liveness check — active + growing
+        # bytes, i.e. a genuinely healthy start.
+        {"outputActive": True, "outputBytes": 1000},
+        {"outputActive": True, "outputBytes": 5000},
     ])
     grs_count = {"n": 0}
     start_marker = {"grs_at_start": None}
@@ -273,14 +277,20 @@ def test_record_start_fails_loud_if_orphan_never_finalizes(monkeypatch):
 
 
 def test_record_start_clean_box_starts_without_stop_or_poll(monkeypatch):
-    # The common case: no orphan. record() does the single pre-check, then StartRecord —
-    # no StopRecord, no idle-poll. (Characterization: holds on both the old and new code.)
+    # The common case: no orphan. record() does the single pre-check, then StartRecord,
+    # then the #627 post-start liveness check (still no StopRecord, no orphan idle-poll).
     calls = []
+    started = {"yes": False}
+    byte_seq = iter([1000, 5000])  # #627 liveness samples: active + growing bytes
 
     def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
         calls.append(rtype)
+        if rtype == "StartRecord":
+            started["yes"] = True
         if rtype == "GetRecordStatus":
-            return {"outputActive": False, "outputTimecode": "00:00:00"}
+            if not started["yes"]:
+                return {"outputActive": False, "outputTimecode": "00:00:00"}
+            return {"outputActive": True, "outputBytes": next(byte_seq)}
         return {}
 
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
@@ -291,8 +301,10 @@ def test_record_start_clean_box_starts_without_stop_or_poll(monkeypatch):
 
     assert "StopRecord" not in calls, f"a clean box must NOT StopRecord: {calls}"
     assert calls.count("StartRecord") == 1, f"StartRecord must be issued once: {calls}"
-    assert calls.count("GetRecordStatus") == 1, (
-        f"a clean box needs only the single pre-check, no idle-poll: {calls}"
+    # 1 pre-check + 2 #627 post-start liveness samples — no orphan idle-poll.
+    assert calls.count("GetRecordStatus") == 3, (
+        f"a clean box needs the single pre-check plus the #627 post-start liveness-check "
+        f"samples, no idle-poll: {calls}"
     )
 
 
@@ -302,6 +314,9 @@ def test_record_start_warns_loud_on_orphan(monkeypatch, capsys):
     status_seq = iter([
         {"outputActive": True, "outputTimecode": "05:27:13"},
         {"outputActive": False, "outputTimecode": "00:00:00"},
+        # #627: two more samples for the post-StartRecord liveness check.
+        {"outputActive": True, "outputBytes": 1000},
+        {"outputActive": True, "outputBytes": 5000},
     ])
 
     def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
@@ -381,3 +396,131 @@ def test_record_guard_no_stray_does_not_stop_and_prints_clean(monkeypatch, capsy
     assert "StopRecord" not in calls, f"a clean box must NOT StopRecord: {calls}"
     err = capsys.readouterr().err
     assert "WARN" not in err, f"a clean box must not warn: {err!r}"
+
+
+# ---------------------------------------------------------------------------
+# #627: `record --action start`'s post-StartRecord liveness check. A stream-box StartRecord
+# call reported success ("recording STARTED" logged) but GetRecordStatus ~1800s later (after
+# StopRecord) showed outputActive=false, outputBytes=0 — no file was ever written, discovered
+# only at fetch time after the whole run duration was burned. This is a fail-fast DETECTION
+# (poll a few seconds after StartRecord, abort loud if not genuinely live), NOT a root-cause
+# fix — the cause of that one silent StartRecord failure remains unproven (see #627).
+# ---------------------------------------------------------------------------
+
+
+def test_record_liveness_verdict_passes_when_active_and_bytes_growing():
+    # The healthy case: active every sample, bytes strictly increasing.
+    is_live, reason = obs_phase2._record_liveness_verdict(
+        active_flags=[True, True], byte_counts=[1000, 5000]
+    )
+    assert is_live is True
+    assert reason == ""
+
+
+def test_record_liveness_verdict_fails_on_zero_bytes_the_exact_627_symptom():
+    # The EXACT #627 symptom: outputActive stayed True (per the WS status) but outputBytes
+    # never moved off zero for the whole window — no file was ever written.
+    is_live, reason = obs_phase2._record_liveness_verdict(
+        active_flags=[True, True], byte_counts=[0, 0]
+    )
+    assert is_live is False
+    assert "outputBytes" in reason
+    assert "0" in reason
+
+
+def test_record_liveness_verdict_fails_when_output_goes_inactive():
+    # The output died during the liveness window itself — active must hold for EVERY sample.
+    is_live, reason = obs_phase2._record_liveness_verdict(
+        active_flags=[True, False], byte_counts=[1000, 1000]
+    )
+    assert is_live is False
+    assert "outputActive" in reason
+
+
+def test_record_liveness_verdict_fails_when_bytes_do_not_grow():
+    # Bytes are non-zero but STALLED (no growth across the window) — a recording that wrote
+    # a little then froze immediately. A bytes>0-only check would miss this.
+    is_live, reason = obs_phase2._record_liveness_verdict(
+        active_flags=[True, True], byte_counts=[1000, 1000]
+    )
+    assert is_live is False
+    assert "grow" in reason.lower()
+
+
+def test_record_liveness_verdict_fails_on_no_samples():
+    # Never silently pass on an empty/unreadable measurement window.
+    is_live, reason = obs_phase2._record_liveness_verdict(active_flags=[], byte_counts=[])
+    assert is_live is False
+    assert reason
+
+
+def test_record_liveness_verdict_treats_missing_outputbytes_as_dead():
+    # An older obs-ws build (or an unreadable response) with no outputBytes key at all: the
+    # caller defaults it to -1 (never a silent "live" pass on unreadable data).
+    is_live, reason = obs_phase2._record_liveness_verdict(
+        active_flags=[True, True], byte_counts=[-1, -1]
+    )
+    assert is_live is False
+
+
+def test_record_start_aborts_loud_on_dead_on_arrival_recording(monkeypatch):
+    # REGRESSION (#627): StartRecord succeeds (obs-ws reports it started), but the output
+    # writes ZERO bytes the whole time — record() must FAIL LOUD (SystemExit) within the
+    # short liveness window instead of letting the caller sleep through the entire run and
+    # discover a 0-byte file only at fetch time.
+    calls = []
+    started = {"yes": False}
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        calls.append(rtype)
+        if rtype == "StartRecord":
+            started["yes"] = True
+        if rtype == "GetRecordStatus":
+            if not started["yes"]:
+                # No orphan — the pre-check must be clean so StartRecord actually fires;
+                # otherwise this would hit the #355 orphan path instead of the #627 one.
+                return {"outputActive": False, "outputTimecode": "00:00:00"}
+            # Dead-on-arrival (active=true, 0 bytes) for both post-start liveness samples —
+            # the exact #627 symptom.
+            return {"outputActive": True, "outputBytes": 0}
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda *_a, **_k: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        obs_phase2.record(_start_args("10.77.9.204"))
+
+    assert calls.count("StartRecord") == 1, (
+        f"StartRecord must still be issued once — the check runs AFTER it, not instead: {calls}"
+    )
+    msg = str(exc_info.value)
+    assert "10.77.9.204" in msg, f"the abort must name the host: {msg!r}"
+    assert "#627" in msg, f"the abort must reference #627: {msg!r}"
+
+
+def test_record_start_passes_liveness_check_on_a_healthy_recording(monkeypatch, capsys):
+    # Characterization of the happy path: StartRecord succeeds, the output is active and
+    # bytes grow across the liveness window — record() returns normally (no SystemExit), and
+    # logs the liveness OK line for the run log.
+    started = {"yes": False}
+    byte_seq = iter([2000, 6000])
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "StartRecord":
+            started["yes"] = True
+        if rtype == "GetRecordStatus":
+            if not started["yes"]:
+                return {"outputActive": False, "outputTimecode": "00:00:00"}
+            return {"outputActive": True, "outputBytes": next(byte_seq)}
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda *_a, **_k: None)
+
+    obs_phase2.record(_start_args("10.77.9.202"))  # must not raise
+
+    err = capsys.readouterr().err
+    assert "liveness OK" in err, f"a healthy start must log the liveness OK line: {err!r}"

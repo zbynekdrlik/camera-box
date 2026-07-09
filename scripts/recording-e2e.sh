@@ -836,6 +836,8 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
           --marker-log /tmp/av-restart-markers.csv >/tmp/av-restart-painter.log 2>&1 &); \
        $(audio_marker_check_cmds "$AV_RESTART_MARKER_DEVICE" 'pkill -x frame-probe 2>/dev/null || true' "cadence=$AV_RESTART_MARKER_CADENCE ticks, label=$label" "/tmp/av-restart-markers.csv")"
     sleep 3
+    # #627: record --action start self-verifies liveness (see the [5/8] call site above) and
+    # aborts loud under set -e if the output is dead-on-arrival.
     python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
     sleep "$AV_RESTART_RECORD_SECS"
     local stream_host_path
@@ -1002,6 +1004,8 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
   zero_loss_record_and_emit_plan() {
     local label="$1"
     echo "    [zero-loss-restart/$label] recording ${ZERO_LOSS_RESTART_RECORD_SECS}s on strih+stream (program = certified prod scene)"
+    # #627: record --action start self-verifies liveness (see the [5/8] call site above) and
+    # aborts loud under set -e if the output is dead-on-arrival.
     python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
     python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
     sleep "$ZERO_LOSS_RESTART_RECORD_SECS"
@@ -1126,6 +1130,12 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
 fi
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program set by rig-mode.sh test beforehand)"
+# #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
+# raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
+# dead-on-arrival recording (StartRecord reports success but writes 0 bytes) is caught within
+# seconds instead of silently discovered only when the file is fetched at the end of the run.
+# `set -euo pipefail` (top of this script) makes that nonzero exit abort this run immediately;
+# no extra guard needed at this call site.
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
 python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start

@@ -53,6 +53,19 @@ INPUT = "phase2-probe-src"
 RECORD_FINALIZE_TIMEOUT_S = float(os.environ.get("OBS_RECORD_FINALIZE_TIMEOUT_S", "120"))
 RECORD_FINALIZE_POLL_S = float(os.environ.get("OBS_RECORD_FINALIZE_POLL_S", "2"))
 
+# #627: a stream-box StartRecord call reported success ("recording STARTED" logged), but
+# GetRecordStatus immediately after StopRecord ~1800s later showed outputActive=false,
+# outputBytes=0 — no file was EVER written. The failure was discovered only at fetch time,
+# after burning the entire run duration. This is NOT a root-cause fix (the cause of that one
+# silent StartRecord failure is unproven — possibly correlated with the #358
+# genlock_latency_ms_src force-set that runs immediately before StartRecord in the same
+# script step; that needs a live-rig reproduction, tracked separately on #627) — it is a
+# fail-fast DETECTION: poll GetRecordStatus a few seconds after StartRecord and abort loudly
+# if the output isn't genuinely active + writing growing bytes, instead of silently
+# proceeding into a multi-minute sleep that ends in a 0-byte file. Env-overridable.
+RECORD_LIVENESS_SAMPLES = int(os.environ.get("OBS_RECORD_LIVENESS_SAMPLES", "2"))
+RECORD_LIVENESS_POLL_S = float(os.environ.get("OBS_RECORD_LIVENESS_POLL_S", "2"))
+
 # #63/#149: the probe ndi_source MUST be configured EXACTLY like the live, certified, proven-
 # working genlock camera inputs (NDI cam1/3/5 on strih) so the harness measures the SAME config
 # that ships in production — never a divergent one. _LOCKED_BASELINE_KEYS below are asserted to
@@ -1341,11 +1354,83 @@ def _wait_record_idle(ws, host, timeout_s=None, poll_s=None):
         time.sleep(poll_s)
 
 
+def _record_liveness_verdict(active_flags, byte_counts):
+    """#627 pure decision: given the SEQUENCE of GetRecordStatus samples taken right after
+    StartRecord, decide whether the recording output is genuinely LIVE or DEAD-ON-ARRIVAL.
+
+    Never silently passes:
+      - no samples at all -> DEAD (a caller bug, never treated as "live by default"),
+      - any sample with outputActive=False -> DEAD (the output died during the check window),
+      - the LAST sample's outputBytes <= 0 -> DEAD (the exact #627 symptom: StartRecord
+        reported success but the output wrote nothing for the whole run),
+      - byte count did not GROW across the window (>=2 samples, last <= first) -> DEAD (the
+        output started writing something then stalled/froze immediately — byte>0-only would
+        miss this).
+
+    Returns (is_live: bool, reason: str) — *reason* is empty when is_live is True, else it
+    explains the failure for the caller's abort message.
+    """
+    if not active_flags:
+        return False, "no GetRecordStatus samples were taken"
+    if any(not active for active in active_flags):
+        return False, f"outputActive went False during the liveness window (samples={active_flags})"
+    if not byte_counts or byte_counts[-1] <= 0:
+        got = byte_counts[-1] if byte_counts else "unknown"
+        return False, (
+            f"outputBytes stayed at {got} — the recording output is writing nothing (#627: "
+            f"StartRecord can report success while the output silently writes 0 bytes for the "
+            f"whole run)"
+        )
+    if len(byte_counts) >= 2 and byte_counts[-1] <= byte_counts[0]:
+        return False, (
+            f"outputBytes did not grow across the liveness window ({byte_counts}) — the "
+            f"recording appears to have stalled immediately after starting"
+        )
+    return True, ""
+
+
+def _assert_record_is_live(ws, host, samples=None, poll_s=None):
+    """#627: poll GetRecordStatus a few times right after StartRecord and FAIL LOUD
+    (SystemExit) if the output is not genuinely active + writing growing bytes — instead of
+    silently proceeding into the caller's multi-minute sleep, which is how a dead-on-arrival
+    recording (outputActive/outputBytes both wrong from the start) went undetected until the
+    file was fetched at the END of a run, wasting the entire run duration.
+
+    This is a fail-fast DETECTION, not a root-cause fix — see RECORD_LIVENESS_SAMPLES's
+    module-level comment and #627 for what remains unproven.
+
+    `outputBytes` defaults to -1 when absent from the response (an older obs-ws build) so an
+    unreadable byte count is treated as DEAD rather than silently passing as "live".
+    """
+    samples = RECORD_LIVENESS_SAMPLES if samples is None else samples
+    poll_s = RECORD_LIVENESS_POLL_S if poll_s is None else poll_s
+    active_flags = []
+    byte_counts = []
+    for _ in range(samples):
+        time.sleep(poll_s)
+        status = _rpc(ws, "GetRecordStatus")
+        active_flags.append(status.get("outputActive", False))
+        byte_counts.append(status.get("outputBytes", -1))
+    is_live, reason = _record_liveness_verdict(active_flags, byte_counts)
+    if not is_live:
+        raise SystemExit(
+            f"[obs] {host}: recording FAILED the post-start liveness check — {reason}. "
+            f"Aborting NOW instead of burning the full run on a dead-on-arrival recording "
+            f"(#627). active={active_flags} bytes={byte_counts}"
+        )
+    sys.stderr.write(
+        f"[obs] {host}: recording liveness OK (active={active_flags} bytes={byte_counts})\n"
+    )
+
+
 def record(a):
     """#105 recording-based E2E: control OBS program recording over the WebSocket.
 
     --action start : begin recording the program output (the probe scene is on
-                     program from setup()). Prints nothing on success.
+                     program from setup()). Prints nothing on success. #627: after
+                     StartRecord, polls GetRecordStatus a few seconds and FAILS LOUD
+                     (SystemExit) if the output isn't genuinely active + writing growing
+                     bytes — never silently proceeds into a dead-on-arrival recording.
     --action stop  : stop recording; prints the recorded file's ABSOLUTE PATH on the
                      OBS host (StopRecord returns outputPath in obs-ws 5.1+). The
                      harness then downloads that file from the host to dev1.
@@ -1379,6 +1464,9 @@ def record(a):
                 _wait_record_idle(ws, a.host)
             _rpc(ws, "StartRecord")
             sys.stderr.write(f"[obs] {a.host}: recording STARTED\n")
+            # #627: StartRecord succeeding is NOT proof the output is actually writing —
+            # verify it before the caller sleeps through the whole run duration.
+            _assert_record_is_live(ws, a.host)
         elif a.action == "stop":
             out = _rpc(ws, "StopRecord", ignore_err=True)
             path = (out or {}).get("outputPath", "")
