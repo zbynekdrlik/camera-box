@@ -36,8 +36,14 @@
 # the prod 'NDI 2ME PGM' = strih's feed) and RECORDS that program for the run — NEVER a
 # probe ndi_source (which collides with the always-on prod input on the same NDI
 # source-name and records black, #163). The teardown trap restores both program scenes +
-# the cam1/cam2 camera-box services on exit (incl. cancel). The operator is the guard
-# (project decision: no automated streaming guard).
+# the SOURCE-camera/cam2 camera-box services on exit (incl. cancel). The operator is the
+# guard (project decision: no automated streaming guard).
+#
+# #24 item 1: "cam1" in the comments above is the DEFAULT SOURCE-camera role, not the only
+# one — CAM=cam1|cam3|cam4 selects which physical box plays it (camera_resolve() +
+# camera_strih_route() below resolve its IP + strih scene/NDI-input; cam2 stays the fixed
+# painter regardless). Everything downstream (the deploy, the routing, the teardown) follows
+# the resolved camera; only cam1 is the unset default (back-compat with every prior run).
 #
 # Prereqs (dev1): NDI_RUNTIME_DIR_V6=/usr/lib/ndi, cargo, sshpass, python3 +
 # websocket-client, matplotlib (for the report). OBS WebSocket :4455 on strih+stream,
@@ -67,8 +73,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/painter-csv-freshness.sh
 . "$HERE/lib/painter-csv-freshness.sh"
 camera_resolve "${CAM:-cam1}"
+# #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
+# the optical loopback + carrying the #174 render-time capture burn) is one of cam1/cam3/cam4
+# ONLY — cam2 is the fixed painter (its own monitor + /dev/fb0) and cam5/cam6 are not wired
+# into recording-verdict's CAMERA_UNDER_TEST_NODES (["cam1","cam3","cam4"],
+# src/bin/recording-verdict.rs) or a strih scene. camera_strih_route() (camera-set.sh) fails
+# loudly (via `set -e`, mirroring camera_resolve's own bare-call style above) on any other
+# CAM rather than silently certifying the wrong box; on success it sets
+# CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE, consumed below.
+camera_strih_route "$CAMERA_NAME"
+# ALL_CAMBOX=1's OWN secondary-camera deploy loop ([2b/8] below) unconditionally deploys cam3
+# AND cam4 at their FIXED physical IPs (CAM3_IP/CAM4_IP). If CAM=cam3 (or cam4) is ALSO picked
+# as the primary SOURCE camera, [2/8] would deploy that SAME physical box a second time under
+# a different burn binary — a real device/process conflict (two camera-box instances fighting
+# over /dev/video0), not just a labeling nit. Reject the combination loudly instead.
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "cam1" ]; then
+  echo "ERROR: CAM='$CAMERA_NAME' + ALL_CAMBOX=1 is not supported — ALL_CAMBOX's own [2b/8]" >&2
+  echo "       loop already deploys cam3/cam4 at their fixed IPs alongside the primary; picking" >&2
+  echo "       one of them as the primary SOURCE camera too would double-deploy the same" >&2
+  echo "       physical box. Run CAM=cam3 (or cam4) WITHOUT ALL_CAMBOX for a dedicated" >&2
+  echo "       single-node source-camera certification (#24)." >&2
+  exit 1
+fi
 
-CAM1_IP="${CAM1_IP:-10.77.9.61}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn)
+CAM1_IP="${CAM1_IP:-$CAMERA_IP}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn); resolved via CAM=/camera_resolve above (#24) — despite the name, this is whichever of cam1/cam3/cam4 was selected
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films
 # #624: the OTHER two camera-under-test boxes the ALL_CAMBOX sweep cuts into strih program.
 # Only used (deployed to / restored) when ALL_CAMBOX=1 — the default single-camera path never
@@ -132,6 +160,20 @@ BURN_CAM1_RUN_ID="${BURN_CAM1_RUN_ID:-911001}"
 # so the verdict finds them without any extra flag even if these are left at default.
 BURN_CAM3_RUN_ID="${BURN_CAM3_RUN_ID:-911008}"
 BURN_CAM4_RUN_ID="${BURN_CAM4_RUN_ID:-911007}"
+# #24 item 1: which of the three reserved ids above belongs to the box actually filling the
+# SOURCE-camera role THIS run ($CAMERA_NAME, resolved via CAM= at the top). The three ids are
+# already mutually distinct (911001/911008/911007) and already read INDEPENDENTLY by
+# recording-verdict's full-chain verdict (CAMERA_UNDER_TEST_NODES, src/bin/recording-verdict.rs)
+# — deploying the resolved camera under the id that matches its OWN role below, and leaving the
+# other two ids at their own (never-deployed-this-run, so never-present) defaults, is all that's
+# needed. No recording-verdict changes: every `--burn-cam1-run-id "$BURN_CAM1_RUN_ID"` call site
+# elsewhere in this script stays untouched (it correctly reports "no cam1 present" when a
+# different camera was actually deployed; the deployed camera's OWN flag/default catches it).
+case "$CAMERA_NAME" in
+  cam1) SRC_BURN_RUN_ID="$BURN_CAM1_RUN_ID" ;;
+  cam3) SRC_BURN_RUN_ID="$BURN_CAM3_RUN_ID" ;;
+  cam4) SRC_BURN_RUN_ID="$BURN_CAM4_RUN_ID" ;;
+esac
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
 # #359: wall-clock run start. The painter ground-truth CSV (gen_ts_ns = CLOCK_REALTIME epoch
@@ -154,23 +196,24 @@ export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 OBS_CLEANUP_TIMEOUT="${OBS_CLEANUP_TIMEOUT:-90}"
 CLEANUP_SSH_TIMEOUT="${CLEANUP_SSH_TIMEOUT:-30}"
 
-# #220: CAMERA PRE-RUN CHECKLIST. The cam2->cam1 OPTICAL injection leg (cam1 broadcast camera
-# filming the cam2 monitor QR) depends on the cam1 camera's MANUAL settings, which the harness
-# CANNOT read or set: camera-box reads /dev/video0 (the ShadowCast capture card), which does NOT
-# expose the BMPCC's shutter/focus/exposure. A 1/60 shutter integrates a full 60Hz monitor refresh
-# and SMEARS the dual-QR Vernier mid-change -> the optical read drops (the #216 ~175s gap; the
-# DIGITAL burns were unaffected, so the chain stayed 0 real loss — purely the optical-INJECTION leg).
-# Satisfy this BEFORE the run, then the cam2->cam1 read is reliable with no spurious optical gap.
+# #220: CAMERA PRE-RUN CHECKLIST. The cam2->SOURCE OPTICAL injection leg (the SOURCE camera,
+# #24: whichever of cam1/cam3/cam4 was resolved via CAM= above, filming the cam2 monitor QR)
+# depends on THAT camera's MANUAL settings, which the harness CANNOT read or set: camera-box
+# reads /dev/video0 (the ShadowCast capture card), which does NOT expose the BMPCC's
+# shutter/focus/exposure. A 1/60 shutter integrates a full 60Hz monitor refresh and SMEARS the
+# dual-QR Vernier mid-change -> the optical read drops (the #216 ~175s gap; the DIGITAL burns
+# were unaffected, so the chain stayed 0 real loss — purely the optical-INJECTION leg).
+# Satisfy this BEFORE the run, then the cam2->SOURCE read is reliable with no spurious optical gap.
 echo "=================================================================================="
-echo " CAMERA PRE-RUN CHECKLIST (cam1 broadcast camera — the harness CANNOT auto-set these)"
+echo " CAMERA PRE-RUN CHECKLIST ($CAMERA_NAME broadcast camera — the harness CANNOT auto-set these)"
 echo "   [ ] SHUTTER FAST: >= 1/500 s (ideally 1/1000) — freezes the 60Hz monitor QR, no smear"
 echo "   [ ] FOCUS: MANUAL, locked on the cam2 monitor (no autofocus hunting)"
 echo "   [ ] EXPOSURE: FIXED / manual gain (no auto-exposure drift)"
 echo " A 1/60 shutter caused the #216 ~175s optical-read gap. Fix the camera, THEN run."
 echo "=================================================================================="
 
-echo "[0/8] reachability preflight (cam1 source, cam2 painter, strih, stream, imag — #462)"
-for hp in "cam1=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
+echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
+for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
@@ -198,7 +241,7 @@ fi
 # need their DanteSync status-pipe JSON pre-fetched to a file — fetched here over the same
 # standing http.server the OBS recordings use, or supplied by the caller via
 # DANTE_STRIH_STATUS / DANTE_STREAM_STATUS (the win-* MCP holder writes them).
-echo "[0/8] DanteSync NTP+PTP gate — cam1, cam2, strih, stream must ALL be synced+locked (#7/#8)"
+echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8)"
 WIN_DANTE_PORT="${WIN_DANTE_PORT:-8898}"
 DANTE_STRIH_STATUS="${DANTE_STRIH_STATUS:-$OUTDIR/dante-strih.json}"
 DANTE_STREAM_STATUS="${DANTE_STREAM_STATUS:-$OUTDIR/dante-stream.json}"
@@ -229,7 +272,7 @@ fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
 # takes effect). Pass the value purely as the argument — behavior is identical.
 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
-  --linux "cam1=$CAM1_IP cam2=$PAINTER_IP" \
+  --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
   --win-status "strih=$DANTE_STRIH_STATUS" \
   --win-status "stream=$DANTE_STREAM_STATUS"
 
@@ -288,13 +331,13 @@ fi
 # contrast=75) was meant to aid the optical dual-QR decode but HURT it (#312 run 312005:
 # the ShadowCast box with the sharp set read ~50% undecodable while the NZXT card on
 # device defaults read the SAME monitor clean). Device defaults decode fine; saturation=0
-# also tinted/greyed the picture. The cam1 launch step ([2/8]) re-applies the same colour
+# also tinted/greyed the picture. The [2/8] deploy step re-applies the same colour
 # set at open; this is the belt-and-braces preflight the harness owns regardless.
 echo "[0/8] apply device-default colour controls (saturation=50, contrast=50) (#338/#312)"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
   "v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
    v4l2-ctl -d /dev/video0 --get-ctrl=saturation,contrast 2>/dev/null" \
-  || echo "WARNING: could not pre-apply cam1 v4l2 controls (the cam1 launch step re-applies them)" >&2
+  || echo "WARNING: could not pre-apply $CAMERA_NAME v4l2 controls (the [2/8] deploy step re-applies them)" >&2
 
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
@@ -314,7 +357,7 @@ cleanup() {
   # cam1's burn binary kept holding /dev/video0 → the prod camera-box crash-looped. Freeing the
   # device is the safety-critical action, so it leads; every cam ssh AND every OBS call below is
   # wrapped in `timeout` so nothing in cleanup() can block the trap indefinitely.
-  echo "[cleanup] #328 FREE cam1/cam2 capture devices FIRST (never gated behind OBS teardown)"
+  echo "[cleanup] #328 FREE $CAMERA_NAME/cam2 capture devices FIRST (never gated behind OBS teardown)"
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
   # #626: the pattern MUST be digit-anchored ('camera-box-burn-[0-9]') — a bare 'camera-box-burn-'
@@ -389,8 +432,11 @@ systemctl start cam2-painter 2>/dev/null || true"
 # references $STRIH_PROG_SOURCE / $STREAM_PROG_SOURCE) never hits a `set -u` unbound-variable on an
 # early abort (failed prebuilt-probe check / cargo build / cam scp-ssh, or Ctrl-C) — the exact
 # failure/abort window the burn-off guard must cover. Detailed rationale at the #183 block below.
-STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}"          # prod scene showing cam1 (NDI cam5)
-STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"     # the prod input behind 'Cam 5' (#246 burn-off target)
+# #24: default to the resolved SOURCE camera's own scene/NDI-input (camera_strih_route above,
+# e.g. 'Cam 1'/'NDI cam1' for cam3) rather than the cam1-only 'Cam 5'/'NDI cam5' — an explicit
+# override still wins.
+STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-$CAMERA_STRIH_SCENE}"   # prod scene showing the SOURCE camera
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$CAMERA_STRIH_SOURCE}" # the prod input behind that scene (#246 burn-off target)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"          # #343: record the ALREADY-ACTIVE prod scene (NDI 2ME PGM already warm) — no cold re-activation
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
@@ -446,7 +492,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
     chmod +x "$PROBE_BIN_DIR/$b" 2>/dev/null || true
   done
 else
-  echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 cam1 burn)"
+  echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 capture burn)"
   # #174: build camera-box WITH --features probe so the cam1-capture render-time QR burn is
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
@@ -455,16 +501,18 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate  # airuleset:build-ok
 fi
 
-echo "[2/8] cam1 (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ cam1 mark, NO grab #179)"
-# #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the cam1-capture
-# burn) to a cam1-LOCAL /tmp path and launch THAT — NOT the prod /usr/local/bin/camera-box
-# (the clean production binary with no burn). The burn is runtime-gated by
-# CAMERA_BOX_BURN_RUN_ID, so it draws the cam1 run_id + per-emit frame_id + CAPTURE
+echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
+# #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the #174 capture
+# burn) to a $CAMERA_NAME-LOCAL /tmp path and launch THAT — NOT the prod
+# /usr/local/bin/camera-box (the clean production binary with no burn). The burn is
+# runtime-gated by CAMERA_BOX_BURN_RUN_ID, so it draws the resolved SOURCE camera's own
+# run_id (#24: $SRC_BURN_RUN_ID, matching $CAMERA_NAME) + per-emit frame_id + CAPTURE
 # wall-clock ts into the EMITTED frame, which rides through NDI → strih → stream. #179: the
-# grab-record flags are GONE — the cam1 mark in the stream recording fully replaces the
-# 7.3GB grab, so cam1 just emits NDI with the burn. Apply the device-default colour v4l2
-# controls (saturation=50/contrast=50) directly here (#338/#312: the old sharp set
-# saturation=0/contrast=75 hurt the decode and tinted the picture; device defaults read clean).
+# grab-record flags are GONE — the burn mark in the stream recording fully replaces the
+# 7.3GB grab, so the SOURCE camera just emits NDI with the burn. Apply the device-default
+# colour v4l2 controls (saturation=50/contrast=50) directly here (#338/#312: the old sharp
+# set saturation=0/contrast=75 hurt the decode and tinted the picture; device defaults read
+# clean).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$PROBE_BIN_DIR"/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
@@ -473,10 +521,10 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    chmod +x $CAM1_BURN_BIN; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
-   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID \
+   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
      CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"
-sleep 4  # let cam1's NDI sender (with the burn) become discoverable
+sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 
 # #624: the ALL_CAMBOX sweep also cuts cam3/cam4 into strih program — without their OWN
 # capture-burn deployed the SAME way as cam1 above, recording-verdict's new per-camera
@@ -535,9 +583,10 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 # #183: the upstream NDI source-name of each box's recorded prod GENLOCK input — used to
 # FORCE genlock_preload=1 on it for the test window (then restore prod on teardown), so the
 # run measures the TRUE genlock hop (~33ms) not the prod audio-sync delay (preload≈31 ≈ 1s).
-#   strih records 'NDI cam5' whose source-name is cam1's NDI name ("CAM1 (usb)").
+#   strih records '$STRIH_PROG_SOURCE' whose source-name is the resolved SOURCE camera's own
+#   NDI name ($CAMERA_SOURCE, e.g. "CAM1 (usb)"/"CAM3 (usb)"/"CAM4 (usb)" — #24).
 #   stream records 'NDI 2ME PGM' whose source-name is strih's program NDI name ($STRIH_OUT).
-STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-CAM1 (usb)}"  # cam1's NDI name (NDI cam5 input src)
+STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-$CAMERA_SOURCE}"  # the SOURCE camera's own NDI name (#24)
 TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 for the test
 # #358: delivery-verify gate — set stream box's 'NDI 2ME PGM' to GENLOCK_TEST_LATENCY_MS (1000ms)
 # for the test window, then restore prod A/V-align (450ms) on teardown. The live FIFO audit log
@@ -545,7 +594,7 @@ TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 
 # gate). Supervisor runs the live rig-validate step; this ships the code + pure-function tests.
 GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-1000}"
 GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}"
-echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' (cam1 via NDI cam5),"
+echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' ($CAMERA_NAME via $STRIH_PROG_SOURCE),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
 echo "      #358: setting $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src=$GENLOCK_TEST_LATENCY_MS for delivery-verify"
@@ -1236,13 +1285,14 @@ if [ "$PAINTER_VERDICT" != "OK" ]; then
   exit 1
 fi
 echo "    #359 painter ground-truth FRESH: span=${PAINTER_SPAN}s offset=${PAINTER_OFFSET}s (OK)"
-# Download cam1's V4L2 capture-drop sidecar (the cam2→cam1 LOSS — the camera leg). The
-# verdict reports v4l2_dropped as cam2→cam1 loss (NOT a painter-tick compare). Best effort:
-# absent ⇒ the verdict simply omits the cam2→cam1 loss line.
+# Download the SOURCE camera's V4L2 capture-drop sidecar (the cam2→SOURCE LOSS — the camera
+# leg; #24: whichever of cam1/cam3/cam4 was resolved). The verdict reports v4l2_dropped as
+# cam2→SOURCE loss (NOT a painter-tick compare). Best effort: absent ⇒ the verdict simply
+# omits the cam2→SOURCE loss line.
 CAM1_CAPTURE_STATS="$OUTDIR/cam1-capture-stats.txt"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$CAM1_IP":/tmp/cam1-capture-stats.txt "$CAM1_CAPTURE_STATS" 2>/dev/null || \
-  echo "WARNING: could not fetch cam1 capture-stats sidecar (cam2→cam1 loss omitted)" >&2
+  echo "WARNING: could not fetch $CAMERA_NAME capture-stats sidecar (cam2→$CAMERA_NAME loss omitted)" >&2
 # #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
 # recordings to slow dev1 (the root of the download + #187 OOM + disk drain). When
 # VERDICT_ON_STREAM=1 (the default), the harness SKIPS the dev1 fetch entirely and the verdict

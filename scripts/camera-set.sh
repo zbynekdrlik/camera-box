@@ -88,6 +88,37 @@ camera_resolve() {
   return 0
 }
 
+# camera_strih_route <name>
+# On success: sets CAMERA_STRIH_SCENE / CAMERA_STRIH_SOURCE -- the strih OBS scene, and its
+# underlying NDI-input name, that shows this physical camera's feed on the certified prod
+# program -- and returns 0. On any camera NOT wired as a strih-routed "camera under test"
+# (an unknown name, cam2 -- the fixed painter/monitor box, or cam5/cam6 -- not yet reserved a
+# #174 capture-burn id or a strih scene) prints an error to stderr and returns 1.
+#
+# #24 item 1: extracted so scripts/recording-e2e.sh's single-node full-path launch can drive
+# cam1, cam3, OR cam4 as the dedicated SOURCE camera (the box filming cam2's monitor, carrying
+# the #174 render-time capture burn) instead of being hard-coded to cam1. The scene/source
+# pins mirror scripts/set-ndi-mapping.py's fixed, Claude-owned genlock mapping EXACTLY (never
+# re-derive it separately -- that mapping is the single place it is decided):
+#   NDI cam5 -> CAM1 (usb)   =>  cam1 shows on scene "Cam 5" / source "NDI cam5"
+#   NDI cam1 -> CAM3 (usb)   =>  cam3 shows on scene "Cam 1" / source "NDI cam1"
+#   NDI cam3 -> CAM4 (usb)   =>  cam4 shows on scene "Cam 3" / source "NDI cam3"
+# Literal `case` match (#39 injection-safe, same threat model as camera_resolve above) --
+# an unknown/hostile name runs no command, it just falls through to the reject arm.
+camera_strih_route() {
+  local name="${1:-}"
+  case "$name" in
+    cam1) CAMERA_STRIH_SCENE="Cam 5"; CAMERA_STRIH_SOURCE="NDI cam5" ;;
+    cam3) CAMERA_STRIH_SCENE="Cam 1"; CAMERA_STRIH_SOURCE="NDI cam1" ;;
+    cam4) CAMERA_STRIH_SCENE="Cam 3"; CAMERA_STRIH_SOURCE="NDI cam3" ;;
+    *)
+      echo "camera-set: '${name}' is not a strih-routed camera-under-test (expected one of: cam1 cam3 cam4)" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # The default camera for back-compat: every orchestrator certified cam2 before #24, so the
 # unset default stays cam2 and existing CI/behaviour is unchanged.
 CAMERA="${CAMERA:-cam2}"
@@ -97,4 +128,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   camera_resolve "$CAMERA"
   printf 'CAMERA=%s IP=%s SOURCE=%q FPS=%s\n' "$CAMERA_NAME" "$CAMERA_IP" "$CAMERA_SOURCE" "$CAMERA_GENLOCK_FPS"
+  # #24: also self-check the strih route -- only when the default camera is SOURCE-eligible
+  # (cam2's default is NOT -- it is the fixed painter, never routed through strih as a
+  # camera-under-test, so camera_strih_route rejects it; that is expected, not an error here).
+  if camera_strih_route "$CAMERA" 2>/dev/null; then
+    printf 'STRIH_SCENE=%q STRIH_SOURCE=%q\n' "$CAMERA_STRIH_SCENE" "$CAMERA_STRIH_SOURCE"
+  fi
 fi
