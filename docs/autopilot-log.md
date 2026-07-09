@@ -2683,3 +2683,39 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   staged locally. The supervisor verified it was safe (local `cargo clippy --all-targets -D
   warnings` clean with the fix applied), committed + pushed it, took over the CI wait, opened the
   PR (worker hadn't reached that step), merged, and verified main CI green.
+
+## #312 item 2 PR B — wire the +/-20ms A/V-sync gate into the ALL_CAMBOX verdict (2026-07-09)
+
+- `src/av_window.rs`: new `av_offset_gate_pass(sync, expected_ms)` — PASS iff `Measured` AND
+  `|av_offset_ms - expected_ms| <= 20.0` (`AV_OFFSET_GATE_TOLERANCE_MS`, #624 deliverable 4's own
+  number). Checks `verdict == Measured` explicitly (not just `av_offset_ms.is_some()`) after a
+  code-review pass flagged the implicit-invariant risk. RED (`1f5bc14de`) -> GREEN (`8bf7ca2a7`).
+- `src/bin/recording-verdict.rs`: new `--av-expected-ms` CLI arg (default 0.0). Every camera in
+  `CAMERA_UNDER_TEST_NODES` must pass the gate for the run's `overall_pass` -- `all_pass &=
+  av_all_pass`, same severity as `all_cambox_continuity`/`all_cambox_latency`. Superseded PR-A's
+  test asserting the block never gates with two new tests proving the AND-in wiring both ways.
+- `scripts/recording-e2e.sh`: `AV_EXPECTED_MS` env var (default 0) wired through both verdict paths.
+- Bonus fix #640 (found live while verifying this PR, same PR): `#626`'s digit-anchored
+  `pkill -9 -f 'camera-box-burn-[0-9]'` never matched cam2-6's own `camera-box-burn-<camname>-
+  <run_id>` naming -- widened to `[a-z0-9]`. RED (`a46760bc1`) -> GREEN (`92f4673c6`). A
+  code-review pass caught the new regression test's region slice was unbounded (would have missed
+  a partial-regression); fixed + manually verified it now catches that exact scenario.
+- Bonus CI fix: `src/ndi.rs` clippy `byte_char_slices` (toolchain bump, unrelated pre-existing
+  code) -- 5 FOURCC constants converted to byte-string-literal form, no behavior change.
+- **Live-verified on the rig** (RUN_ID 3120002, real 360s ALL_CAMBOX sweep, all 6 cameras + imag):
+  at the default `--av-expected-ms 0`, every measured camera FAILED (real residual offset
+  ~81-91ms, not 0) -- honest information, not a fabricated pass. Re-ran the SAME decoded data with
+  `--av-expected-ms 85` (matching the observed cluster): cam1-cam5 PASS, cam6 still UNKNOWN (0
+  cluster samples) -- fail-closed regardless of expected_ms. Re-verified post-merge with the CI
+  binary built from the merge commit against the same real decoded data -- identical result.
+  Found + fixed #640 live during this run; rig fully restored to clean EVENT mode afterward.
+- Two parallel code-review passes + one deep review pass (all via dispatched agents) found 2 real
+  issues (both fixed above) and 0 critical/blocking issues; the deep review independently flagged
+  the same "vs expected value, not vs every other camera" nuance noted below.
+- PR #641 (`68805316e`), merged 2026-07-09T14:19:49Z; main CI green (all jobs, Mutation Testing
+  skipped). Closed #640 (fixed, evidence in the issue). Closed #624 (all 4 deliverables landed
+  across PR #628 + this PR) -- with an explicit honest caveat: deliverable 4's own text asked for
+  "within +/-20ms of every other AND of the dialed value" (two conditions); what's implemented
+  checks only distance-from-dialed-value (the exact form specified in this ticket's own dispatch
+  instructions), not an explicit pairwise cross-camera comparison. Noted for anyone revisiting
+  #624's closure. `Refs #312` (deliberately non-closing -- items 4/5 remain separate future work).

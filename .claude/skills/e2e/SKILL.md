@@ -267,6 +267,47 @@ from the stream recording.
 auto-shares a LAN URL. The CSV's burn hops (cam1_strih/strih_stream/cam1_stream) must be UNBROKEN
 (0 empty cells); cam2_cam1 gaps honestly where the optical read failed.
 
+**Pulling a LARGE partial JSON (multi-MB) back via win-* MCP `FileDownload` overflows the inline
+tool result (2026-07-09).** For a strih/stream partial in the multi-MB range, the raw call errors
+with "result (N characters) exceeds maximum allowed tokens" and instead SAVES the tool result to
+a file at the path the error message gives you — that file is JSON `{"result": "[task:<id>]
+base64:<N>bytes:<b64-data>"}`, NOT a plain base64 string. Extract with a regex, not a bare
+`base64 -d`:
+```python
+import json, base64, re
+d = json.load(open(saved_path))
+b64 = re.search(r'base64:\d+bytes:(.*)$', d['result'], re.DOTALL).group(1)
+open(dest_path, 'wb').write(base64.b64decode(b64))
+```
+(A bare `jq -r '.result' file | base64 -d` fails with "invalid input" because of the leading
+`[task:...] base64:Nbytes:` prefix.)
+
+**Running `recording-verdict.exe --extract-partial` INLINE via win-* MCP `Shell` dies at the ~30-300s
+MCP idle-timeout (2026-07-09) — launch it DETACHED with `Start-Process` and POLL instead.** A
+foreground `& "recording-verdict.exe" ...` blocking call gets killed by the MCP tool's own idle
+timeout partway through a multi-minute decode (a ~360s recording decodes in ~5-8 min), and — unlike
+a bare shell timeout — the underlying process appears to die WITH the aborted MCP call (confirmed:
+`Get-Process` showed nothing running afterward, no partial output file). Fix (mirrors the
+`obs_phase2.py record` detached pattern already documented above): launch via `Start-Process
+-RedirectStandardOutput <log> -RedirectStandardError <log> -PassThru -NoNewWindow` (returns
+immediately with a real, independently-running PID even though the LAUNCHING Shell call may itself
+still hit its own timeout/abort — that's fine, the spawned process survives it), then poll with a
+separate cheap `Shell` call (`Get-Content <log> -Tail N` + `Get-Item <partial.json>` +
+`Get-Process -Id <pid>`) every few minutes until the partial JSON appears. Quote space-bearing
+paths (`` `"$rec`" `` inside the `-ArgumentList` string) exactly as the existing stream-decode
+gotcha above already warns.
+
+**A `RecordingPartial` schema-version bump (`schema_version: N`) needs redeploying `recording-verdict`
+on EVERY decode box, not just strih/stream.** The merge step hard-rejects a stale partial
+("schema_version 2 is not supported, this build expects 3") — this includes **imag-nb**, which
+decodes over plain `ssh`/`scp` (not a win-* MCP box) and is easy to forget since its own deploy
+step (`recording-verdict-on-imag.sh`) SKIPS re-uploading when a same-named binary is already
+present+executable ("skipping upload") — it does NOT check whether that binary is stale relative
+to the schema bump. Before trusting an imag `--extract-partial` after ANY Rust change to the
+`RecordingPartial` struct, `scp` a fresh CI-built `recording-verdict` to imag-nb first
+(`scp <linux-probe-tools>/recording-verdict newlevel@10.77.9.182:/home/newlevel/recording-verdict`)
+and re-run its extract, rather than assuming a same-named binary is current.
+
 **Diagnosing cam1 "REAL DROP":** if the missing ids are PERIODIC (a ~N-emit beat: deltas cluster on
 N, 2N, 3N…) AND present==expected AND the strih genlock FIFO shows `overruns=0` AND the pixels show
 the cam1 burn PRESENT-but-blurred → it's a burn-readability DECODE-MISS, NOT chain loss (#226).
@@ -593,6 +634,46 @@ digital chain, unrelated to which box paints the shared optical tick). A swept b
 empty window is never misread as chain loss. Switch boundaries are dev1 epoch-ns (DanteSync-slaved
 to the painter = the burn `gen_ts_ns` timeline); a runtime dev1↔painter offset assertion is filed
 as #326.
+
+## `all_cambox_latency`/`cross_camera_spread_ms` (#624) measures SOURCE-side `d_X` — it can NEVER prove #286's receiver-side phase-sync claim (2026-07-09)
+
+**`cross_camera_spread_ms` (the `#624 ALL-CAMBOX per-camera cam2->camera latency` block in
+`recording-verdict.rs`, calling `cam2_cam1_samples_from_burn`/`_from_flip`) computes
+`camera_burn.gen_ts_ns − cam2.gen_ts_ns` per camera — each camera's own SOURCE-SIDE
+photon-to-CAPTURE latency (`d_X`, the #286 root-cause quantity).** This is the right metric for
+#624's own question ("is the raw per-camera capture latency spread small enough that a live
+program CUT between two cameras won't visibly break lipsync") — but it is computed **entirely on
+the source side and never touches strih's receiver-side `genlock_latency_ms_src`**, the exact knob
+#286's phase-sync fix adjusts. Re-measuring `cross_camera_spread_ms` after applying differentiated
+per-source receiver latencies can **never** show a collapse (barring real physical drift in the
+cameras themselves) — it isn't sensitive to what the fix changes. A live re-run confirmed this: the
+differentiated offsets were verified still applied throughout, yet the spread didn't move in the
+expected direction at all (see #286's 2026-07-09 re-verification comment for the real numbers).
+
+**#286's own Verify criterion needs a DIFFERENT metric: `strih_burn.gen_ts_ns − camera_burn.gen_ts_ns`
+(the DELIVERY latency, which DOES include the genlock receiver hold)** — this is exactly what
+`src/probe/recording_latency.rs::n_camera_strih_samples` / `n_camera_median_latency_ms` already
+compute (doc comment: *"the #286 phase-sync measurement input to `compute_phase_sync_offsets`"*,
+2 unit tests). Before claiming ANY #286 phase-sync re-verification proves or disproves the fix,
+confirm which of the two quantities is actually being read — `all_cambox_latency`/
+`cross_camera_spread_ms` (source `d_X`, existing #624 gate, wrong tool for this) vs.
+`all_cambox_delivery_latency`/`cross_camera_spread_ms` (delivery latency, the right tool).
+
+**WIRED (2026-07-09, same-day follow-up PR):** `n_camera_strih_samples` is now called from
+`recording-verdict.rs`'s ALL_CAMBOX `--switch-schedule` block, reading the **STRIH recording**
+(not stream — each camera's own digital capture burn rides into strih's PROGRAM output during its
+own cut-in window, co-located with strih's own render burn in the same recorded frame; no window
+partitioning needed, since only the currently-cut-in camera's burn is ever present in a strih
+frame). Reported as `all_cambox_delivery_latency` — per-camera `HopLatency` JSON keyed by
+`CAMERA_UNDER_TEST_NODES` label (all SIX cameras, **including cam2** — cam2 has its own digital
+capture burn + its own `--switch-schedule` window, so it needs no optical read to be measured
+here, unlike the `all_cambox_latency` OPTICAL-INJECTION sweep which structurally excludes it) plus
+a `cross_camera_spread_ms`/`spread_gate_pass` summary (reusing `switch_latency::spread_verdict`,
+the same 16ms threshold as #624 — **report-only, does NOT fold into `all_pass`**, since #286 is
+not yet a proven/closed standing requirement). Absent (`null`) when no `--strih` recording was
+supplied. A **live re-verification run with this field populated is still needed** to actually
+prove or disprove #286's phase-sync claim — this PR only wires the metric, it does not itself
+constitute the proof.
 
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running

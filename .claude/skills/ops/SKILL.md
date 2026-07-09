@@ -817,6 +817,27 @@ Before writing any `pkill -f PATTERN` sent as a single ssh command string, check
 literal text could appear verbatim in the ssh command argument itself (it always can, when the
 pattern isn't built from a variable substitution) — if so, anchor it.
 
+**#640 correction (2026-07-09) — the digit-only anchor above was ITSELF incomplete.** cam2/cam3/
+cam4/cam5/cam6's ALL_CAMBOX deploy names their burn binary `/tmp/camera-box-burn-<camname>-<run_id>`
+(e.g. `camera-box-burn-cam3-1783530925` — a LETTER right after the hyphen, not a digit), which
+`camera-box-burn-[0-9]` never matches. Confirmed live: after an interrupted ALL_CAMBOX run, all
+five boxes' orphaned burn processes survived `cleanup()` and crash-looped `camera-box` ("Device or
+resource busy") for hours. The pattern is now `camera-box-burn-[a-z0-9]` everywhere in
+`scripts/recording-e2e.sh` — still doesn't self-match (the invoking command's own literal text has
+`[` right after the hyphen, never a letter/digit). **If you ever see this bug again (a cam box
+stuck in a systemd restart-loop with "Device or resource busy" on `/dev/video0`), the manual
+recovery is:**
+```bash
+# On the affected box (root over ssh, or the linux-camN MCP Shell):
+fuser -v /dev/video0                       # find the PID holding it (a stray camera-box-burn-*)
+kill -9 <pid>; sleep 1
+rm -f /tmp/camera-box-burn-*
+systemctl restart camera-box
+systemctl is-active camera-box             # confirm active, then fuser /dev/fb0 shows the NEW pid
+```
+Check ALL of cam2/cam3/cam4/cam5/cam6 (not just the one you noticed) — an interrupted ALL_CAMBOX
+run orphans all of them at once, not just one.
+
 ## #625 — a RECORDED-order tick/id walk misreads a benign stream-recording reorder as a fault
 
 The stream recording is documented (`#133`/`#196`/`#216`) to occasionally deliver a frame
