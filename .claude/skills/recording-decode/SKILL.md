@@ -2,7 +2,8 @@
 
 The offline recording verdict decodes every recorded frame's QR(s): the big optical
 **cam2 dual-QR** (top band, always decodes full-frame) + the small ~300px **node burns**
-(cam1 / strih / stream, bottom corners, run_ids `recording_latency::BURN_RUN_ID_*`).
+(#312: cam1/cam2/cam3/cam4/cam5/cam6 + strih/stream/imag — nine reserved run_ids total,
+`recording_latency::BURN_RUN_ID_*`, bottom corners).
 
 ## The decode functions (do NOT confuse them)
 
@@ -916,3 +917,37 @@ which may or may not already absorb it — genuinely unknown, needs live-rig dat
 tolerant rate-ceiling diagnostic computed from the recording's FULL frame set (a different
 question: "is the undecodable fraction within the moiré floor" vs "is there a phantom contiguity
 gap"). Don't conflate the two when touching this function again.
+
+## GOTCHA — adding a new camera-under-test burn id? `NODE_BURN_RUN_IDS` MUST grow too, or `.tick` silently corrupts (recurred twice, #463 → #624 → #312)
+
+`RecordingFrame::tick` (`src/probe/recording.rs`) is the cam2 OPTICAL Vernier tick used to anchor
+`segment_frames_from_recording`'s ALL-CAMBOX per-segment continuity. It is computed as
+`max(frame_id)` across every payload on the frame, so it EXCLUDES node-burn payloads via a
+hardcoded list, `NODE_BURN_RUN_IDS` — any burn run_id NOT in that list can have its (independent,
+often-larger) `frame_id` silently hijack `.tick`, corrupting the per-camera continuity check with
+no compile error and no obviously-wrong assertion.
+
+The file's own doc comment on `NODE_BURN_RUN_IDS` already warned "ANY future node-burn run_id
+MUST be added here too" — written when `#463` added imag's burn. It was STILL missed twice more:
+`#624` added cam3/cam4's capture burns without updating this list, and `#312` (this session)
+initially repeated the exact same miss adding cam2/cam5/cam6's — caught only by a SECOND,
+independent code-review pass before merge (the first parallel review missed it too). Fixed by
+widening `NODE_BURN_RUN_IDS` from 4 to 9 entries (all six camera-under-test ids +
+strih/stream/imag) and locking it with `node_burn_run_ids_includes_every_camera_under_test_312`
+(mirrors the existing `node_burn_run_ids_includes_imag_463`).
+
+**Checklist for the next new node burn:** reserving a fresh `BURN_RUN_ID_*` constant in
+`recording_latency.rs` is NOT enough by itself — also (1) add it to `NODE_BURN_RUN_IDS` in
+`src/probe/recording.rs` (this file, the tick-exclusion list), (2) add it to `CAMERA_UNDER_TEST_NODES`
+in THREE separate places if it's a camera-under-test node (`recording-verdict.rs`,
+`recording_span_gate.rs`'s own Tier-0 copy, and check whether `switch_latency.rs`'s
+`OPTICAL_INJECTION_NODES` should include it too — these three have NO shared import by design,
+Tier-0 vs probe-gated split, so nothing forces them to stay in sync except review), (3) add a
+`--burn-camN-run-id` CLI flag + NodeSpec entry in `recording-verdict.rs`, (4) add it to EVERY
+`all_burns`/`latency_all_burns`-style exclusion array in `recording-verdict.rs` (there are
+multiple, in different code sections — `#186` contiguity, `#312` Phase-1 per-segment, `#624`
+per-camera latency — each was independently missed at some point), (5) add the matching
+`BURN_CAMN_RUN_ID` env var + deploy-loop entry + `MERGE_ARGS`/`VERDICT_ARGS` flag in
+`scripts/recording-e2e.sh`. Grep for an EXISTING camera's id (e.g. `911007` for cam4) across
+`src/` and `scripts/` to find every site that needs the new id added alongside it — that is a
+faster and more reliable check than trying to remember the list above.

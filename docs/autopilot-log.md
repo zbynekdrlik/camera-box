@@ -2618,3 +2618,44 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   `python3 -c "import json; json.dump({'body': open('file.md').read()}, open('payload.json','w'))"`
   — NOT `gh api ... -f body=@file.md` (that literal-strings the `@path` instead of dereferencing
   it on this gh version; verified live, it wrote the body as the 20-char string `"@/tmp/..."`).
+
+## #312 items 1+3 (2026-07-09) — cam2 un-excluded + cam5/cam6 wired into ALL_CAMBOX sweep
+
+- Reopened + rescoped #312 (see its 2026-07-09 comments): corrected two wrong autopilot claims
+  from earlier that session ("cam2 hardware-blocked" — wrong, was a misread signal; "cam3/cam4
+  are the whole fleet" — cam5/cam6 exist and needed wiring too). This dispatch delivered ONLY
+  items 1 (cam5/cam6) + 3 (cam2) of the corrected remaining-work list; items 2 (A/V-sync fusion),
+  4 (live clean-PASS run), 5 (permanent CI gate) remain, tracked on #312 (comment posted).
+- Commits: `99deafb98` (version bump 1.7.0-dev.311), `6ec2afc73` (main items 1+3 implementation),
+  `065144bb0` (fix: un-trigger the #367 cam2-painter systemctl-guard scanner from a comment),
+  `a3f622ab6` (3-agent parallel review fixes: stale `switch_latency.rs` node-set copy, cam2
+  cleanup disk-leak, a too-narrow Phase-1 `all_burns` array, an unbounded test-scope substring
+  search, missing cam5/cam6 behavioral test), `7ef2bcd4a` (deep-review fix: `NODE_BURN_RUN_IDS`
+  never extended for cam3/cam4/cam2/cam5/cam6 — a real tick-hijack risk in the exact per-segment
+  continuity mechanism these items add cameras to; `MERGE_ARGS` missing `--burn-cam2/5/6-run-id`;
+  a stale "4 senders" docstring).
+- RED→GREEN pairs (feature-extension order, tests alongside implementation): cam2 contiguity
+  PASS/FAIL (`cam2_digital_burn_extends_the_186_contiguity_check_312` /
+  `cam2_delivered_frame_missing_burn_is_a_real_gate_312`), cam5+cam6 combined behavioral test
+  (`cam5_and_cam6_digital_burns_extend_the_186_contiguity_check_312`), the `NODE_BURN_RUN_IDS`
+  tick-hijack regression (`node_burn_run_ids_includes_every_camera_under_test_312`), the cam2
+  cleanup disk-leak regression
+  (`recording_e2e_cam2_cleanup_removes_its_deployed_burn_binary_from_disk_312`).
+- Design decision made + documented in-code: `CAMERA_UNDER_TEST_NODES` (6, digital contiguity,
+  includes cam2) vs `OPTICAL_INJECTION_NODES` (5, cam2→camera optical-injection latency,
+  EXCLUDES cam2 — it cannot optically film its own monitor). Three manually-synced copies of
+  this constant exist across `recording-verdict.rs` / `recording_span_gate.rs` /
+  `switch_latency.rs` (no shared import, by design — Tier-0 vs probe-gated split) — the review
+  process is what catches drift between them; check all three whenever any is touched again.
+- Live verification: applied the corrected 6-distinct NDI mapping to the LIVE strih rig
+  (`set-ndi-mapping.py --host 10.77.9.202`) — `NDI cam4` was live-duplicating `CAM4 (usb)`
+  (repointed to CAM5), `NDI cam6` was correctly bound but unpinned (now enforced). Screenshotted
+  both post-fix — real non-black video confirmed. cam5 (10.77.9.65) / cam6 (10.77.9.66)
+  `camera-box.service` confirmed `active` over SSH. Full live ALL_CAMBOX sweep NOT run (item 4,
+  explicitly out of scope this dispatch).
+- Filed #638 (bug, follow-up, does not block): `extract_partial_flagged_frames()`'s per-box
+  pixel-proof selection is hardcoded to cam1 only — pre-existing gap (predates this PR and the
+  earlier cam3/cam4 #624 work), does not affect the zero-loss verdict itself.
+- PR #637 (`fde495d4f`), merged 2026-07-09T10:04:25Z; main CI green (all jobs, Mutation Testing
+  skipped — no qualifying diff). `Refs #312` (deliberately non-closing — see the repo's own
+  commit-prefix-auto-close GOTCHA at the top of CLAUDE.md).
