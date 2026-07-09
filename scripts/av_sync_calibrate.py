@@ -52,6 +52,52 @@ LATENCY_MAX = 2000
 
 DEFAULT_SOURCE = "NDI 2ME PGM"
 
+# Canonical Windows-side destination this script's payload MUST end up at for the #390
+# drift-guard `av_sync_calibrated_ms` best-effort cross-check to read it (see
+# `.claude/commands/drift-guard.md` step 1e / `vendor/README.md`'s genlock_source_latency row).
+REMOTE_PROGRAMDATA_JSON_PATH = r"C:\ProgramData\camera-box\av-sync-last.json"
+
+# Known rig hosts -> their win-* MCP tool name (obs-self-heal-install.sh's --box mapping).
+# Only used to make the printed push plan concrete/copy-pasteable; an unrecognized host still
+# gets a usable plan (destination + content), just without a resolved MCP tool name.
+_KNOWN_MCP_HOSTS = {
+    "10.77.9.202": "win-strih",
+    "10.77.9.204": "win-stream-snv",
+}
+
+
+def mcp_name_for_host(host: str) -> "str | None":
+    """Resolve a rig host IP to its win-* MCP tool name, or None if not a known rig box."""
+    return _KNOWN_MCP_HOSTS.get(host)
+
+
+def remote_push_plan(host: str, payload: dict) -> str:
+    """#465 -- an explicit, copy-pasteable plan to place `payload` on the stream box's
+    ProgramData, for the operator/agent to execute via the win-* MCP FileWrite tool.
+
+    Why this exists instead of the script doing the push itself: `av_sync_calibrate.py`
+    connects to `--host` over the OBS WebSocket and does NOT need to run ON that box, so
+    `default_last_json_path()` normally falls back to a LOCAL path (no PROGRAMDATA env var on a
+    Linux control host) that nothing on the stream box can read -- confirmed live on #465 (no
+    av-sync-last.json anywhere under C:\\ProgramData\\camera-box on the stream box after an
+    off-box --apply run). scp/ssh to the Windows boxes is DENIED on this rig
+    (`recording-fetch-windows.sh`, `obs-self-heal-install.sh`) -- the only established channel
+    to place a file there is the win-* MCP `FileWrite` tool, and this script has no MCP access
+    of its own. So instead of silently leaving an unreachable local file, print the exact
+    destination + content (same PLAN convention as `obs-self-heal-install.sh`) so the caller
+    can paste it straight into a FileWrite call.
+    """
+    mcp = mcp_name_for_host(host)
+    mcp_line = mcp if mcp else "<unknown host -- resolve the win-* MCP tool manually>"
+    content = json.dumps(payload, indent=2)
+    return (
+        "[av-sync] REMOTE PUSH REQUIRED -- this file was persisted LOCALLY, not on the OBS box.\n"
+        "[av-sync]   scp/ssh to Windows is denied; push it via the win-* MCP FileWrite tool:\n"
+        f"[av-sync]   host={host}  mcp={mcp_line}\n"
+        f"[av-sync]   dest={REMOTE_PROGRAMDATA_JSON_PATH}\n"
+        f"[av-sync]   content:\n{content}"
+    )
+
 
 def default_last_json_path() -> Path:
     """Where the controller persists the last-applied calibration for the #188 OBS dock
@@ -152,12 +198,14 @@ def apply_latency(ws, source: str, current_ms: int, new_ms: int) -> int:
     )
 
 
-def write_last_json(json_path: Path, source: str, offset_ms: float, applied_latency_ms: int) -> None:
+def write_last_json(json_path: Path, source: str, offset_ms: float, applied_latency_ms: int) -> dict:
     """Persist the calibrated absolute value: {source, offset_ms, applied_latency_ms, ts}.
 
-    Read by the #188 OBS dock (vendor/av-sync-dock, Task 8) to show the last measured offset, and
-    by the #390 drift-guard pin to track the calibrated value instead of a stale hardcoded
-    constant. Written atomically (write-tmp + replace) so a reader never observes a partial file.
+    Read by the #390 drift-guard `av_sync_calibrated_ms` best-effort pin to track the calibrated
+    value instead of a stale hardcoded constant (see `.claude/commands/drift-guard.md` step 1e).
+    Written atomically (write-tmp + replace) so a reader never observes a partial file. Returns
+    the persisted payload so the caller can also feed it to `remote_push_plan()` when this write
+    landed on a local (off-box) path instead of the real stream-box ProgramData.
     """
     json_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -170,6 +218,7 @@ def write_last_json(json_path: Path, source: str, offset_ms: float, applied_late
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(json_path)
     print(f"[av-sync] persisted {json_path}: {payload}")
+    return payload
 
 
 def main():
@@ -211,12 +260,20 @@ def main():
         return
 
     applied = apply_latency(ws, args.source, current, new_ms)
+    used_default_path = args.json_path is None
     json_path = Path(args.json_path) if args.json_path else default_last_json_path()
-    write_last_json(json_path, args.source, offset, applied)
+    payload = write_last_json(json_path, args.source, offset, applied)
     print(
         f"[av-sync] APPLIED + verified: '{args.source}' {GENLOCK_SRC_LATENCY_KEY}={applied}; "
         f"persisted {json_path}"
     )
+
+    # #465: when this landed on the LOCAL off-box fallback (no PROGRAMDATA -> we are not
+    # running ON the Windows box, and the caller did not take control via --json-path), nothing
+    # on the stream box can read it yet -- print the remote push plan so the operator/agent
+    # completes the transfer via the win-* MCP FileWrite tool.
+    if used_default_path and os.environ.get("PROGRAMDATA") is None:
+        print(remote_push_plan(args.host, payload))
 
 
 if __name__ == "__main__":

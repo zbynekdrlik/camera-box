@@ -2546,3 +2546,25 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   to cam1's burn id — harmless (correctness holds, robust path is a strict superset) but means
   a live cam3/cam4 run (item 3) will hit a ~10x slower decode with a stale label until fixed.
   Genuinely cross-cutting Rust change across 3 call sites — separate issue, not this PR.
+
+## #563 + #627 — retire scripts/setup.sh + recording fail-fast liveness check (2026-07-09)
+
+- Owner decided (2026-07-09) to retire `scripts/setup.sh` entirely — `scripts/setup-device.sh`
+  is the sole provisioning path. Removed the script, its `release.yml` packaging step, and
+  `SETUP.md` references.
+- `scripts/obs_phase2.py`'s `record()` `start` path now polls `GetRecordStatus` after
+  `StartRecord` and fails loud (`SystemExit`) if the recording isn't genuinely active with
+  growing bytes — a dead-on-arrival recording (the #627 symptom: StartRecord succeeded, wrote
+  0 bytes) now aborts the run immediately instead of burning the full duration. This is a
+  fail-fast DETECTION fix, not a root-cause fix — the original correlation theory (#358's
+  `genlock_latency_ms_src` force-set timing) remains unproven; #627 stays open for that.
+- PR #633 (`6ed66594c`), merged 2026-07-09T06:40:11Z; main CI green (all jobs pass, Mutation
+  Testing skipped — no qualifying Rust diff). `Closes #563`; #627 left open with a comment
+  explaining exactly what landed and what remains.
+- NOTE: the dispatched autopilot-worker ended its own turn mid-CI-wait (the documented
+  subagent-background-CI-poll death pattern — it launched a Monitor/background wait and then
+  returned, so nothing re-invoked it specifically). The supervisor (main session) verified the
+  worker's commits were already safely pushed to `origin/dev` (no work lost), took over the CI
+  wait directly, opened the PR (the worker hadn't gotten that far), merged, and verified main CI
+  green. Lesson for future dispatches: remind workers explicitly to wait FOREGROUND through CI,
+  never background-and-return.

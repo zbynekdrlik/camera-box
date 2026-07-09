@@ -250,6 +250,55 @@ class TestDefaultLastJsonPath:
 
 
 # ---------------------------------------------------------------------------
+# (i) #465/#529 -- remote push plan: when run OFF the stream box (the normal case -- this
+# script connects to --host over the OBS WebSocket, it does not need to run ON that box),
+# default_last_json_path() falls back to a LOCAL path nothing on the stream box can read.
+# scp/ssh to Windows is denied (recording-fetch-windows.sh, obs-self-heal-install.sh), so the
+# only established channel to place a file there is the win-* MCP FileWrite tool, driven by the
+# operator/agent. remote_push_plan() prints an explicit, copy-pasteable plan -- same convention
+# as obs-self-heal-install.sh's PLAN block -- instead of silently leaving a file nobody reads.
+# ---------------------------------------------------------------------------
+
+class TestMcpNameForHost:
+    def test_stream_host_resolves_to_win_stream_snv(self):
+        assert av_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
+
+    def test_strih_host_resolves_to_win_strih(self):
+        assert av_sync_calibrate.mcp_name_for_host("10.77.9.202") == "win-strih"
+
+    def test_unknown_host_returns_none(self):
+        assert av_sync_calibrate.mcp_name_for_host("10.0.0.99") is None
+
+
+class TestRemotePushPlan:
+    def test_plan_names_the_canonical_windows_destination(self):
+        payload = {
+            "source": "NDI 2ME PGM", "offset_ms": 123.4, "applied_latency_ms": 926,
+            "ts": 1720000000.0,
+        }
+        plan = av_sync_calibrate.remote_push_plan("10.77.9.204", payload)
+        assert r"C:\ProgramData\camera-box\av-sync-last.json" in plan
+        assert "win-stream-snv" in plan
+        assert "10.77.9.204" in plan
+        assert "FileWrite" in plan
+
+    def test_plan_includes_the_exact_json_content(self):
+        payload = {
+            "source": "NDI 2ME PGM", "offset_ms": -82.4, "applied_latency_ms": 926,
+            "ts": 1720000000.0,
+        }
+        plan = av_sync_calibrate.remote_push_plan("10.77.9.204", payload)
+        embedded = json.loads(plan.split("content:\n", 1)[1])
+        assert embedded == payload
+
+    def test_plan_for_unknown_host_still_names_the_destination(self):
+        payload = {"source": "x", "offset_ms": 0.0, "applied_latency_ms": 3, "ts": 1.0}
+        plan = av_sync_calibrate.remote_push_plan("10.0.0.99", payload)
+        assert r"C:\ProgramData\camera-box\av-sync-last.json" in plan
+        assert "10.0.0.99" in plan
+
+
+# ---------------------------------------------------------------------------
 # (h) CLI wiring
 # ---------------------------------------------------------------------------
 
@@ -292,3 +341,82 @@ class TestCLI:
         data = json.loads(json_path.read_text())
         assert data["applied_latency_ms"] == fake.latency_ms
         assert data["offset_ms"] == 120.0
+
+    def test_explicit_json_path_suppresses_remote_push_plan(self, monkeypatch, tmp_path, capsys):
+        # An explicit --json-path means the caller is taking control of the destination
+        # themselves (e.g. a future on-box runner) -- no auto plan needed.
+        fake = FakeObs(latency_ms=450)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        json_path = tmp_path / "av-sync-last.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["av_sync_calibrate.py", "--host", "10.77.9.204", "--offset-ms", "120.0",
+             "--apply", "--json-path", str(json_path)],
+        )
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "REMOTE PUSH REQUIRED" not in out
+
+    def test_default_path_off_box_prints_remote_push_plan(self, monkeypatch, tmp_path, capsys):
+        # #465 finding: run from dev1 (PROGRAMDATA unset) with the DEFAULT path -- the write
+        # lands under ~/.camera-box, which nothing on the stream box can read. main() must
+        # surface an explicit push plan so the operator/agent pushes it via MCP FileWrite.
+        fake = FakeObs(latency_ms=450)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        monkeypatch.setattr(
+            av_sync_calibrate, "default_last_json_path",
+            lambda: tmp_path / ".camera-box" / "av-sync-last.json",
+        )
+        monkeypatch.setattr(
+            sys, "argv",
+            ["av_sync_calibrate.py", "--host", "10.77.9.204", "--offset-ms", "120.0", "--apply"],
+        )
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "REMOTE PUSH REQUIRED" in out
+        assert r"C:\ProgramData\camera-box\av-sync-last.json" in out
+        assert "win-stream-snv" in out
+
+    def test_printed_plan_json_matches_what_was_actually_persisted(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        # Integration-level drift guard: the plan's embedded JSON block must be byte-identical
+        # to what write_last_json() actually wrote to json_path -- never reconstructed
+        # separately (that would let the pushed content silently diverge from the local record).
+        fake = FakeObs(latency_ms=450)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        local_json_path = tmp_path / ".camera-box" / "av-sync-last.json"
+        monkeypatch.setattr(
+            av_sync_calibrate, "default_last_json_path", lambda: local_json_path,
+        )
+        monkeypatch.setattr(
+            sys, "argv",
+            ["av_sync_calibrate.py", "--host", "10.77.9.204", "--offset-ms", "120.0", "--apply"],
+        )
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+
+        persisted = json.loads(local_json_path.read_text())
+        printed = json.loads(out.split("content:\n", 1)[1])
+        assert printed == persisted
+
+    def test_default_path_on_box_does_not_print_remote_push_plan(self, monkeypatch, tmp_path, capsys):
+        # If PROGRAMDATA IS set (running ON the Windows box), default_last_json_path() already
+        # resolves to the canonical stream-box path -- no push needed.
+        fake = FakeObs(latency_ms=450)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "ProgramData"))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["av_sync_calibrate.py", "--host", "10.77.9.204", "--offset-ms", "120.0", "--apply"],
+        )
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "REMOTE PUSH REQUIRED" not in out
