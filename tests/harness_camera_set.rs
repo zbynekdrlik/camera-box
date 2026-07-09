@@ -260,3 +260,81 @@ fn camera_resolve_emits_per_camera_genlock_fps() {
         );
     }
 }
+
+// --- #24 item 1: camera_strih_route() -- which strih OBS scene shows a given physical camera,
+// so scripts/recording-e2e.sh can drive cam1, cam3, OR cam4 as the dedicated SOURCE camera
+// (the box filming cam2's monitor + carrying the #174 capture burn) instead of being
+// hard-coded to cam1. The scene/source pins mirror scripts/set-ndi-mapping.py's fixed,
+// Claude-owned genlock mapping exactly: NDI cam5->CAM1, NDI cam1->CAM3, NDI cam3->CAM4. -------
+
+/// Source `camera-set.sh`, run `camera_strih_route <name>`, and return its
+/// `SCENE\t<scene>\nSOURCE\t<source>` resolution (or REJECT on an unsupported name).
+fn resolve_strih_route(cam: &str) -> (bool, String, String) {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+if camera_strih_route "$CAM" 2>/dev/null; then
+  printf 'OK\nSCENE\t%s\nSOURCE\t%s\n' "$CAMERA_STRIH_SCENE" "$CAMERA_STRIH_SOURCE"
+else
+  printf 'REJECT\n'
+fi
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("CAM", cam)
+        .output()
+        .expect("failed to run bash camera_strih_route harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ok = stdout.lines().next() == Some("OK");
+    let mut scene = String::new();
+    let mut source = String::new();
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix("SCENE\t") {
+            scene = v.to_string();
+        } else if let Some(v) = line.strip_prefix("SOURCE\t") {
+            source = v.to_string();
+        }
+    }
+    (ok, scene, source)
+}
+
+#[test]
+fn camera_strih_route_resolves_the_three_source_eligible_cameras() {
+    // #24: the exact pins scripts/set-ndi-mapping.py programs onto strih (NDI cam5->CAM1,
+    // NDI cam1->CAM3, NDI cam3->CAM4). A wrong scene/source would route strih's PROGRAM to
+    // the WRONG box's NDI feed and silently certify nothing (or the wrong camera).
+    let expected = [
+        ("cam1", "Cam 5", "NDI cam5"),
+        ("cam3", "Cam 1", "NDI cam1"),
+        ("cam4", "Cam 3", "NDI cam3"),
+    ];
+    for (name, scene, source) in expected {
+        let (ok, got_scene, got_source) = resolve_strih_route(name);
+        assert!(ok, "camera_strih_route {name} should succeed");
+        assert_eq!(
+            got_scene, scene,
+            "camera_strih_route {name} resolved the wrong strih scene"
+        );
+        assert_eq!(
+            got_source, source,
+            "camera_strih_route {name} resolved the wrong strih NDI-input source"
+        );
+    }
+}
+
+#[test]
+fn camera_strih_route_rejects_cameras_not_wired_as_source() {
+    // cam2 is the FIXED painter (never the SOURCE camera-under-test); cam5/cam6 have no
+    // reserved #174 capture-burn id or strih scene yet (#24 only extends cam1/cam3/cam4). A
+    // typo or an out-of-scope camera must fail loudly, never silently route the wrong scene.
+    for name in ["cam2", "cam5", "cam6", "cam9", ""] {
+        let (ok, _scene, _source) = resolve_strih_route(name);
+        assert!(
+            !ok,
+            "camera_strih_route '{name}' must reject -- not a SOURCE-eligible camera (#24)"
+        );
+    }
+}
