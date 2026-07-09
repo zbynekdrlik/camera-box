@@ -1350,3 +1350,106 @@ fn recording_e2e_default_sweep_excludes_the_painter_box() {
         "#333: CAMBOX_SWEEP must remain env-overridable: {line}"
     );
 }
+
+// --- #24 item 1: the single-node full-path launch must be parameterized over which physical
+// camera plays the SOURCE-camera role (cam1/cam3/cam4), not hard-coded to cam1. -----------------
+
+#[test]
+fn recording_e2e_source_camera_ip_resolves_via_camera_set_not_hardcoded() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        !s.contains(r#"CAM1_IP="${CAM1_IP:-10.77.9.61}""#),
+        "#24: CAM1_IP must no longer default to the literal cam1 IP -- it must resolve through \
+         camera_resolve()/camera-set.sh so CAM=cam3 or CAM=cam4 deploys THAT box instead."
+    );
+    assert!(
+        s.contains(r#"CAM1_IP="${CAM1_IP:-$CAMERA_IP}""#),
+        "#24: CAM1_IP must default to $CAMERA_IP (the resolved SOURCE camera's IP, set by \
+         camera_resolve() from CAM=cam1|cam3|cam4), so an explicit CAM1_IP override still wins."
+    );
+}
+
+#[test]
+fn recording_e2e_routes_the_source_camera_via_camera_strih_route() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains(r#"camera_strih_route "$CAMERA_NAME""#),
+        "#24: recording-e2e.sh must call camera_strih_route(\"$CAMERA_NAME\") to resolve which \
+         strih scene/NDI-input shows the selected SOURCE camera -- rejecting cam2/cam5/cam6 \
+         loudly instead of silently certifying the wrong box."
+    );
+}
+
+#[test]
+fn recording_e2e_strih_scene_and_source_derive_from_the_resolved_camera() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        !s.contains(r#"STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-Cam 5}""#),
+        "#24: STRIH_PROG_SCENE must no longer hard-code scene 'Cam 5' (cam1-only) -- it must \
+         default to $CAMERA_STRIH_SCENE (resolved per the selected SOURCE camera)."
+    );
+    assert!(
+        s.contains(r#"STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-$CAMERA_STRIH_SCENE}""#),
+        "#24: STRIH_PROG_SCENE must default to $CAMERA_STRIH_SCENE so an explicit override \
+         still wins."
+    );
+    assert!(
+        !s.contains(r#"STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}""#),
+        "#24: STRIH_PROG_SOURCE must no longer hard-code 'NDI cam5' (cam1-only)."
+    );
+    assert!(
+        s.contains(r#"STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$CAMERA_STRIH_SOURCE}""#),
+        "#24: STRIH_PROG_SOURCE must default to $CAMERA_STRIH_SOURCE so an explicit override \
+         still wins."
+    );
+}
+
+#[test]
+fn recording_e2e_strih_upstream_ndi_derives_from_the_resolved_camera_source() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        !s.contains(r#"STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-CAM1 (usb)}""#),
+        "#24: STRIH_UPSTREAM_NDI must no longer hard-code cam1's NDI name -- it must default to \
+         $CAMERA_SOURCE (the selected SOURCE camera's own NDI name, e.g. 'CAM3 (usb)')."
+    );
+    assert!(
+        s.contains(r#"STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-$CAMERA_SOURCE}""#),
+        "#24: STRIH_UPSTREAM_NDI must default to $CAMERA_SOURCE so an explicit override still wins."
+    );
+}
+
+#[test]
+fn recording_e2e_deploy_uses_the_burn_id_matching_the_resolved_camera() {
+    let s = read("scripts/recording-e2e.sh");
+    // The [2/8] deploy step must launch the burn binary with the id belonging to WHICHEVER
+    // physical camera was resolved ($CAMERA_NAME) -- never unconditionally cam1's id, or
+    // deploying cam3/cam4 as the primary source would still carry cam1's reserved id (911001),
+    // silently mislabeling the frames and (if ALL_CAMBOX ever ran alongside) colliding with
+    // cam1's own real burn.
+    assert!(
+        s.contains("CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID"),
+        "#24: the [2/8] deploy step must set CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID -- the \
+         burn id resolved from BURN_CAM1_RUN_ID/BURN_CAM3_RUN_ID/BURN_CAM4_RUN_ID matching \
+         $CAMERA_NAME -- not the fixed cam1-only $BURN_CAM1_RUN_ID."
+    );
+    assert!(
+        !s.contains("CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID"),
+        "#24: the [2/8] deploy step must no longer hard-wire cam1's burn id unconditionally."
+    );
+}
+
+#[test]
+fn recording_e2e_rejects_all_cambox_combined_with_a_non_cam1_source_camera() {
+    // ALL_CAMBOX=1's OWN secondary-camera deploy loop ([2b/8]) unconditionally deploys cam3 AND
+    // cam4 at their FIXED physical IPs (CAM3_IP/CAM4_IP) alongside the primary. If CAM=cam3 (or
+    // cam4) is ALSO picked as the primary SOURCE camera, [2/8] would deploy the SAME physical
+    // box a second time under a different burn binary -- a real device/process conflict, not
+    // just a labeling nit. This combination must fail loudly instead of silently double-deploying.
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains(r#"[ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "cam1" ]"#),
+        "#24: recording-e2e.sh must reject ALL_CAMBOX=1 combined with a non-cam1 CAM -- ALL_CAMBOX's \
+         own [2b/8] loop already deploys cam3/cam4 at their fixed IPs; picking one of them as the \
+         primary SOURCE camera too would double-deploy the same physical box."
+    );
+}
