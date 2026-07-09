@@ -385,23 +385,30 @@ cleanup() {
   echo "[cleanup] #328 FREE $CAMERA_NAME/cam2 capture devices FIRST (never gated behind OBS teardown)"
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
-  # #626: the pattern MUST be digit-anchored ('camera-box-burn-[0-9]') — a bare 'camera-box-burn-'
+  # #626: the pattern MUST be anchored ('camera-box-burn-[a-z0-9]') — a bare 'camera-box-burn-'
   # is a SELF-MATCH: the remote `sh -c "..."` process invoked BY ssh has this exact substring in
   # its OWN /proc/*/cmdline (it's the literal text of the pkill argument being run), so `pkill -f`
   # kills that shell before it ever reaches `systemctl restart` — a live 3h40m undetected outage
-  # on cam1/cam3/cam4 traced to this exact bug (#626). The real target's argv0 always has a run-id
-  # digit immediately after the hyphen (e.g. /tmp/camera-box-burn-1783530925 or
-  # /tmp/camera-box-burn-cam3-1783530925); the invoking shell's own cmdline has a quote character
-  # there instead, so the anchored pattern matches ONLY the real target.
+  # on cam1/cam3/cam4 traced to this exact bug (#626). The real target's argv0 always has EITHER a
+  # run-id digit immediately after the hyphen (cam1's own /tmp/camera-box-burn-1783530925) OR a
+  # camname letter (cam2/cam3/cam4/cam5/cam6's own #624/#312 ALL_CAMBOX deploy,
+  # /tmp/camera-box-burn-cam3-1783530925 — `_cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"`); the
+  # invoking shell's own cmdline has a `[` bracket character there instead (the regex's own
+  # class-open), so the anchored `[a-z0-9]` pattern matches ONLY a real target, never itself.
+  # #640 CORRECTION: an earlier version of this comment claimed the DIGIT-only pattern
+  # ('camera-box-burn-[0-9]') already matched the camname-infixed form too — it does NOT (the
+  # character right after the hyphen there is a LETTER, not a digit). That gap orphaned
+  # cam2/cam3/cam4/cam5/cam6's burn processes across multiple runs, crash-looping camera-box
+  # ("Device or resource busy") until manually killed — found live while verifying #312 item 2 PR B.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-    "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+    "pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
   # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
-        "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+        "pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
          rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
     done
   fi
@@ -410,10 +417,10 @@ cleanup() {
   # --display — the interkom return monitor stays dark). The clear is single-sourced
   # (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent). #312: under
   # ALL_CAMBOX=1, [2b/8] ALSO deployed a manually nohup'd probe-featured burn binary here (the
-  # SAME digit-anchored kill pattern #626 requires elsewhere in this cleanup) — harmless
-  # (matches nothing) on the plain single-camera path, where [2b/8] never ran.
+  # SAME #640-widened kill pattern this cleanup uses elsewhere) — harmless (matches nothing) on
+  # the plain single-camera path, where [2b/8] never ran.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
-pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null || true
+pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true
 rm -f /tmp/camera-box-burn-* 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
@@ -1476,6 +1483,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
   VERDICT_ARGS+=(--av-marker-log "$MARKER_CSV")
   echo "    #312 item 2: --av-marker-log $MARKER_CSV (fused all_cambox_av_sync)"
 fi
+# #624 deliverable 4 / #312 item 2 PR B: the +/-20ms per-camera A/V-offset gate measures each
+# camera's DEVIATION from AV_EXPECTED_MS (default 0 -- the operator's live #398 dock dialed to
+# ~0 in practice), not from a hardcoded 0. Override when the dock is intentionally dialed to a
+# nonzero value. Always passed (matches the CLI's own default) so the gate is explicit in the
+# printed command, not silently implicit.
+AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")
 
 # #208 PER-BOX DECODE-IN-PLACE (refines #193): by default decode EACH recording ON ITS OWN BOX —
 # the strih recording ON the strih box, the stream recording ON the stream box — and merge the
@@ -1602,6 +1616,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --burn-cam3-run-id "$BURN_CAM3_RUN_ID" --burn-cam4-run-id "$BURN_CAM4_RUN_ID" \
     --burn-cam5-run-id "$BURN_CAM5_RUN_ID" --burn-cam6-run-id "$BURN_CAM6_RUN_ID" \
     --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+    --av-expected-ms "$AV_EXPECTED_MS" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
   # merely printed) — `if`-form so a missing/failed imag extract never `set -e`-aborts the merge of

@@ -136,11 +136,11 @@ struct NDIlib_video_frame_v2_t {
 }
 
 // FourCC codes
-const NDILIBD_FOURCC_UYVY: u32 = u32::from_le_bytes([b'U', b'Y', b'V', b'Y']);
+const NDILIBD_FOURCC_UYVY: u32 = u32::from_le_bytes(*b"UYVY");
 #[allow(dead_code)]
-const NDILIBD_FOURCC_BGRA: u32 = u32::from_le_bytes([b'B', b'G', b'R', b'A']);
+const NDILIBD_FOURCC_BGRA: u32 = u32::from_le_bytes(*b"BGRA");
 #[allow(dead_code)]
-const NDILIBD_FOURCC_BGRX: u32 = u32::from_le_bytes([b'B', b'G', b'R', b'X']);
+const NDILIBD_FOURCC_BGRX: u32 = u32::from_le_bytes(*b"BGRX");
 
 // Frame format types
 const NDILIB_FRAME_FORMAT_TYPE_PROGRESSIVE: c_int = 1;
@@ -1765,14 +1765,8 @@ mod tests {
 
     #[test]
     fn test_fourcc_constants() {
-        assert_eq!(
-            NDILIBD_FOURCC_UYVY,
-            u32::from_le_bytes([b'U', b'Y', b'V', b'Y'])
-        );
-        assert_eq!(
-            NDILIBD_FOURCC_BGRA,
-            u32::from_le_bytes([b'B', b'G', b'R', b'A'])
-        );
+        assert_eq!(NDILIBD_FOURCC_UYVY, u32::from_le_bytes(*b"UYVY"));
+        assert_eq!(NDILIBD_FOURCC_BGRA, u32::from_le_bytes(*b"BGRA"));
     }
 
     #[test]

@@ -15,9 +15,10 @@
 //! unit-tests Tier-0 (default features) — the project's CLAUDE.md "Local Build Policy" mandate
 //! (a pure seam at the crate root, mirroring `switch_latency.rs` / `colour_scale.rs`).
 //!
-//! **PR A does NOT gate the headline on this** — `all_cambox_av_sync` is reported (offsets,
-//! sample counts, any UNKNOWN cameras) but the run's overall PASS/FAIL is untouched. PR B (#312
-//! item 2 / #624 deliverable 4) wires the ±20ms cross-window bound on top of [`CameraAvSync`].
+//! **PR B wires the ±20ms cross-window bound on top of [`CameraAvSync`]** (#312 item 2 / #624
+//! deliverable 4) — see [`av_offset_gate_pass`]. PR A only reported `all_cambox_av_sync` (offsets,
+//! sample counts, any UNKNOWN cameras); this module now also decides the per-camera PASS/FAIL that
+//! the caller (`bin/recording-verdict.rs`) folds into the run's overall verdict.
 
 use crate::qpsk_marker::cluster_offset_ms;
 
@@ -105,6 +106,36 @@ pub fn pool_camera_av_sync(
             mad_ms: None,
             verdict: AvSyncVerdict::Unknown,
         },
+    }
+}
+
+/// #624 deliverable 4 / #312 item 2 PR B — the per-camera A/V-offset gate tolerance: every
+/// camera's measured `video − audio` offset must land within this many ms of the
+/// expected/dialed value (`--av-expected-ms`, the operator's live #398 dock reading — nominally
+/// ~0 since the dock is dialed to align video and audio). This exact ±20ms bound is issue #624's
+/// own deliverable-4 text: "every camera's end-to-end A/V offset ... within ±20ms of every other
+/// AND of the dialed 2ME value".
+pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 20.0;
+
+/// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
+/// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
+/// zero contributing windows (the camera never appeared in this sweep) or thin/scattered data
+/// (too few pooled candidates, no dominant cluster) — NEVER passes: this is a real gate now
+/// (#312 item 2 PR B), same fail-closed severity as the loss/latency-spread gates, no "advisory"
+/// tier. A camera with nothing to measure proves nothing about its A/V sync — it cannot pass.
+///
+/// Checks `sync.verdict == Measured` EXPLICITLY, not merely `av_offset_ms.is_some()` — the two
+/// currently always agree ([`pool_camera_av_sync`] is the sole real producer and keeps them in
+/// lockstep), but this function does not rely on that convention holding forever: a future
+/// producer that ever desyncs the pair (e.g. `Unknown` with a stray `Some(x)`, or `Measured` with
+/// `None`) must still resolve to fail-closed here, not silently pass on the strength of one field
+/// alone.
+pub fn av_offset_gate_pass(sync: &CameraAvSync, expected_ms: f64) -> bool {
+    match (sync.verdict, sync.av_offset_ms) {
+        (AvSyncVerdict::Measured, Some(off)) => {
+            (off - expected_ms).abs() <= AV_OFFSET_GATE_TOLERANCE_MS
+        }
+        _ => false,
     }
 }
 
@@ -246,5 +277,102 @@ mod tests {
     #[test]
     fn window_ticks_on_empty_input_is_empty() {
         assert_eq!(window_ticks(&[], 60.0, 0.0), Vec::<(u32, f64)>::new());
+    }
+
+    // ---------------------------------------------------------------------
+    // av_offset_gate_pass — #624 deliverable 4 / #312 item 2 PR B
+    // ---------------------------------------------------------------------
+
+    fn measured(av_offset_ms: f64) -> CameraAvSync {
+        CameraAvSync {
+            windows: 2,
+            candidates: 10,
+            cluster_samples: 10,
+            av_offset_ms: Some(av_offset_ms),
+            mad_ms: Some(1.0),
+            verdict: AvSyncVerdict::Measured,
+        }
+    }
+
+    #[test]
+    fn gate_passes_when_offset_within_tolerance_of_expected() {
+        // 15ms deviation from 0 is well inside the ±20ms bound.
+        assert!(av_offset_gate_pass(&measured(15.0), 0.0));
+        // Negative deviation, same bound.
+        assert!(av_offset_gate_pass(&measured(-15.0), 0.0));
+    }
+
+    #[test]
+    fn gate_fails_when_offset_outside_tolerance_of_expected() {
+        assert!(!av_offset_gate_pass(&measured(25.0), 0.0));
+        assert!(!av_offset_gate_pass(&measured(-25.0), 0.0));
+    }
+
+    #[test]
+    fn gate_measures_deviation_from_a_nonzero_expected_value_not_hardcoded_zero() {
+        // The operator's live #398 dock may be dialed to a nonzero value — the gate must measure
+        // deviation FROM THAT expected value, never from a hardcoded 0.
+        assert!(av_offset_gate_pass(&measured(55.0), 50.0));
+        assert!(!av_offset_gate_pass(&measured(55.0), 0.0));
+    }
+
+    #[test]
+    fn gate_boundary_at_exactly_plus_tolerance_passes() {
+        assert!(
+            av_offset_gate_pass(&measured(AV_OFFSET_GATE_TOLERANCE_MS), 0.0),
+            "the bound is <=, not <"
+        );
+    }
+
+    #[test]
+    fn gate_boundary_at_exactly_minus_tolerance_passes() {
+        assert!(av_offset_gate_pass(
+            &measured(-AV_OFFSET_GATE_TOLERANCE_MS),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn gate_just_outside_the_boundary_fails() {
+        assert!(!av_offset_gate_pass(
+            &measured(AV_OFFSET_GATE_TOLERANCE_MS + 0.01),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn gate_fails_closed_on_unknown_verdict_from_thin_data() {
+        // The camera DID appear in the sweep (windows_matched=1) but too few pooled candidates to
+        // clear MIN_AV_SAMPLES — Unknown. Must fail, never a fabricated pass.
+        let thin = pool_camera_av_sync(1, &[vec![10.0, 11.0]], MIN_AV_SAMPLES, 60.0);
+        assert_eq!(thin.verdict, AvSyncVerdict::Unknown);
+        assert!(!av_offset_gate_pass(&thin, 0.0));
+    }
+
+    #[test]
+    fn gate_fails_closed_when_camera_never_appeared_in_the_sweep() {
+        let absent = pool_camera_av_sync(0, &[], MIN_AV_SAMPLES, 60.0);
+        assert_eq!(absent.verdict, AvSyncVerdict::Unknown);
+        assert!(!av_offset_gate_pass(&absent, 0.0));
+    }
+
+    /// Code-review finding: `av_offset_gate_pass` must check `verdict == Measured` EXPLICITLY,
+    /// not merely `av_offset_ms.is_some()` — the two fields currently always agree in real
+    /// producers, but this locks the gate against a hand-constructed (or future-buggy) mismatch:
+    /// an `Unknown` verdict carrying a stray `Some(offset)` must still fail closed.
+    #[test]
+    fn gate_fails_closed_on_unknown_verdict_even_with_a_stray_offset_value() {
+        let mismatched = CameraAvSync {
+            windows: 1,
+            candidates: 3,
+            cluster_samples: 0,
+            av_offset_ms: Some(10.0), // stray value inconsistent with Unknown
+            mad_ms: None,
+            verdict: AvSyncVerdict::Unknown,
+        };
+        assert!(
+            !av_offset_gate_pass(&mismatched, 0.0),
+            "an Unknown verdict must never pass the gate, even if av_offset_ms happens to be Some"
+        );
     }
 }

@@ -309,6 +309,13 @@ struct Args {
     /// are rejected. Default 60.
     #[arg(long, default_value_t = 60.0)]
     av_cluster_tol_ms: f64,
+    /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
+    /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
+    /// and audio). The per-camera A/V-offset gate measures each camera's DEVIATION from this
+    /// value, never from a hardcoded 0 — so a rig intentionally dialed to a nonzero offset still
+    /// gates correctly. Default 0.0 (the "operator dials to ~0 in practice" default case).
+    #[arg(long, default_value_t = 0.0)]
+    av_expected_ms: f64,
 }
 
 impl Args {
@@ -3893,8 +3900,8 @@ fn build_and_print_verdict(
                 }
                 report["all_cambox_latency"] = serde_json::Value::Object(latency_json);
 
-                // #312 item 2 (PR A) — fuse the per-camera A/V-sync measurement (#188) into this
-                // SAME run/verdict, alongside the loss (all_cambox_continuity) + latency
+                // #312 item 2 — fuse the per-camera A/V-sync measurement (#188) into this SAME
+                // run/verdict, alongside the loss (all_cambox_continuity) + latency
                 // (all_cambox_latency) blocks above. Triggered when EITHER (a) this fused
                 // single-process run was handed --av-marker-log directly (VERDICT_ON_STREAM=0,
                 // the legacy decode-on-dev1 fallback), OR (b) the stream partial already carries
@@ -3904,9 +3911,10 @@ fn build_and_print_verdict(
                 // cam2 dual-QR video co-located, so its extract decodes them there and carries
                 // them through the small partial JSON — mirrors #377's `colour` carry exactly).
                 //
-                // PR A reports `all_cambox_av_sync` (offsets, sample counts, any UNKNOWN cameras)
-                // but does NOT gate `all_pass` on it — the ±20ms cross-window bound (#624
-                // deliverable 4) is PR B, wired on top of `av_window::pool_camera_av_sync`.
+                // PR A (#639) reported `all_cambox_av_sync` (offsets, sample counts, any UNKNOWN
+                // cameras) without gating `all_pass`. PR B (this) wires the ±20ms cross-window
+                // bound (#624 deliverable 4, `av_window::av_offset_gate_pass`) into `all_pass` —
+                // same severity as the loss/latency-spread gates, no "advisory" tier.
                 let av_inputs: Option<AvMarkerInputs> =
                     match (stream_av_sync, &args.av_marker_log, &args.stream) {
                         (Some(carried), _, _) => Some(carried),
@@ -3936,6 +3944,10 @@ fn build_and_print_verdict(
                         av.audio_markers.len()
                     );
                     let mut av_json = serde_json::Map::new();
+                    // #624 deliverable 4 / #312 item 2 PR B: every camera under test must PASS
+                    // the ±20ms A/V-offset gate for the run's overall verdict to pass — folded
+                    // into `all_pass` below, alongside all_cambox_continuity + all_cambox_latency.
+                    let mut av_all_pass = true;
                     for &camera in CAMERA_UNDER_TEST_NODES.iter() {
                         // cam2 is the emitter/painter itself: it has NO own schedule window where
                         // the optical dual-QR is visible (cam2's OWN camera does not film its own
@@ -3992,8 +4004,12 @@ fn build_and_print_verdict(
                             av_window::MIN_AV_SAMPLES,
                             args.av_cluster_tol_ms,
                         );
+                        let gate_pass =
+                            av_window::av_offset_gate_pass(&cam_sync, args.av_expected_ms);
+                        av_all_pass &= gate_pass;
                         println!(
-                            "  {camera}: {} windows={} candidates={} cluster_samples={} → {}",
+                            "  {camera}: {} windows={} candidates={} cluster_samples={} → {} \
+                             [gate {}]",
                             if whole_recording {
                                 "(whole-recording pool)"
                             } else {
@@ -4009,7 +4025,8 @@ fn build_and_print_verdict(
                                     cam_sync.mad_ms.unwrap_or(0.0)
                                 ),
                                 AvSyncVerdict::Unknown => "UNKNOWN (too few samples)".to_string(),
-                            }
+                            },
+                            if gate_pass { "PASS" } else { "FAIL" }
                         );
                         av_json.insert(
                             camera.to_string(),
@@ -4025,19 +4042,38 @@ fn build_and_print_verdict(
                                     AvSyncVerdict::Measured => "measured",
                                     AvSyncVerdict::Unknown => "unknown",
                                 },
+                                "gate_pass": gate_pass,
                             }),
                         );
                     }
+                    println!(
+                        "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {}",
+                        args.av_expected_ms,
+                        av_window::AV_OFFSET_GATE_TOLERANCE_MS,
+                        if av_all_pass { "PASS" } else { "FAIL" }
+                    );
+                    av_json.insert(
+                        "expected_ms".to_string(),
+                        serde_json::json!(args.av_expected_ms),
+                    );
+                    av_json.insert(
+                        "gate_tolerance_ms".to_string(),
+                        serde_json::json!(av_window::AV_OFFSET_GATE_TOLERANCE_MS),
+                    );
+                    av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
                     av_json.insert(
                         "gate".to_string(),
-                        serde_json::json!(
-                            "not enforced yet — see #624 deliverable 4 / #312 item 2 PR B"
-                        ),
+                        serde_json::json!(format!(
+                            "enforced — every camera under test must be within ±{:.0}ms of \
+                             expected_ms (#624 deliverable 4 / #312 item 2 PR B)",
+                            av_window::AV_OFFSET_GATE_TOLERANCE_MS
+                        )),
                     );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
-                    // PR A deliberately does NOT gate `all_pass` on this block — see the module
-                    // doc comment above + the #312 item 2 issue text (measure + report now, gate
-                    // in a follow-up PR).
+                    // #312 item 2 PR B: the per-camera A/V-offset gate now folds into the run's
+                    // overall verdict, same severity as all_cambox_continuity / all_cambox_latency
+                    // above — no separate "advisory" tier. See av_window's module doc comment.
+                    all_pass &= av_all_pass;
                 }
             }
             None => {
@@ -6419,17 +6455,19 @@ mod tests {
         );
     }
 
-    /// #312 item 2 (PR A) — build the SAME 2-window `--switch-schedule` shape
+    /// #312 item 2 — build the SAME N-window `--switch-schedule` shape
     /// `build_all_cambox_latency_fixture` uses (20 frames/window, globally-unique
     /// `frame_index`/optical `tick` = `1000 + idx`, 5s windows), but ALSO run
-    /// `build_and_print_verdict` with the given (fused-mode) `av` inputs, returning the report
-    /// JSON. `cameras` is `(cambox label, camera burn run_id, injected cam2->camera latency ns)` —
-    /// the latency value is irrelevant to A/V-sync itself, just realistic filler so the fixture
-    /// mirrors a real ALL_CAMBOX sweep.
+    /// `build_and_print_verdict` with the given (fused-mode) `av` inputs + `--av-expected-ms
+    /// av_expected_ms` (#624 deliverable 4 / PR B), returning the report JSON. `cameras` is
+    /// `(cambox label, camera burn run_id, injected cam2->camera latency ns)` — the latency value
+    /// is irrelevant to A/V-sync itself, just realistic filler so the fixture mirrors a real
+    /// ALL_CAMBOX sweep.
     fn build_all_cambox_av_sync_fixture(
         tag: &str,
         cameras: &[(&str, u32, i64)],
         av: Option<AvMarkerInputs>,
+        av_expected_ms: f64,
     ) -> serde_json::Value {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
@@ -6491,6 +6529,8 @@ mod tests {
             "0",
             "--switch-expected-step",
             "2",
+            "--av-expected-ms",
+            &av_expected_ms.to_string(),
         ]);
 
         let (v, _pass) = build_and_print_verdict(
@@ -6512,11 +6552,16 @@ mod tests {
         v
     }
 
-    /// #312 item 2 (PR A) — cam1's window carries 10 real emit-log/audio-marker pairs, each a
+    /// #312 item 2 — cam1's window carries 10 real emit-log/audio-marker pairs, each a
     /// constant 500ms `video - audio` offset; cam3's window has NO matching emit-log frame_id
     /// (its ticks fall outside the emit log's range); cam4/cam5/cam6 never appear in the sweep at
     /// all. cam2 pools the WHOLE recording (unwindowed) and picks up the SAME real cam1-range
-    /// candidates. Asserts every fail-closed case from the same test in one shot.
+    /// candidates. Asserts every fail-closed case from the same test in one shot, PLUS (#624
+    /// deliverable 4 / PR B) the per-camera `gate_pass` field: at the default `av_expected_ms=0`,
+    /// cam1's real 500ms offset is far outside the ±20ms bound (FAILS the gate despite being a
+    /// real, clean measurement — the gate is about closeness to expected, not data quality), and
+    /// every Unknown camera fails closed too — so the run's `overall_pass` MUST be false
+    /// regardless of what the loss/latency gates alone would have decided.
     #[test]
     fn all_cambox_av_sync_measures_a_real_camera_and_fails_closed_on_the_rest_312() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -6533,6 +6578,7 @@ mod tests {
             "real",
             &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)],
             Some(av),
+            0.0, // default expected offset
         );
 
         let av_sync = &v["all_cambox_av_sync"];
@@ -6554,6 +6600,11 @@ mod tests {
             av_sync["cam1"]["cluster_samples"],
             serde_json::json!(10),
             "#312: all 10 candidates land in the same cluster (no scatter injected): {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam1"]["gate_pass"],
+            serde_json::json!(false),
+            "#624: 500ms is far outside the +/-20ms bound of the default expected_ms=0: {av_sync}"
         );
         assert_eq!(
             av_sync["cam2"]["verdict"],
@@ -6587,6 +6638,11 @@ mod tests {
             serde_json::json!(0),
             "#312: no emit-log frame_id falls inside cam3's tick range: {av_sync}"
         );
+        assert_eq!(
+            av_sync["cam3"]["gate_pass"],
+            serde_json::json!(false),
+            "#624: unknown-on-thin-data must fail the gate closed, never a fabricated pass: {av_sync}"
+        );
         for absent in ["cam4", "cam5", "cam6"] {
             assert_eq!(
                 av_sync[absent]["verdict"],
@@ -6598,21 +6654,37 @@ mod tests {
                 serde_json::json!(0),
                 "#312: {absent} matched ZERO schedule windows this run: {av_sync}"
             );
+            assert_eq!(
+                av_sync[absent]["gate_pass"],
+                serde_json::json!(false),
+                "#624: {absent} absent from the sweep must also fail the gate closed: {av_sync}"
+            );
         }
+        assert_eq!(
+            av_sync["gate_pass"],
+            serde_json::json!(false),
+            "#624: the OVERALL av_sync gate must be false when ANY camera fails: {av_sync}"
+        );
         assert!(
-            av_sync["gate"]
-                .as_str()
-                .unwrap()
-                .contains("not enforced yet"),
-            "#312 PR A: the gate string must say it is not enforced yet (PR B wires it): {av_sync}"
+            av_sync["gate"].as_str().unwrap().contains("enforced"),
+            "#312 PR B: the gate string must say it is enforced now: {av_sync}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#624/#312 PR B: the run's overall verdict MUST fail when the av_sync gate fails -- \
+             regardless of what the loss/latency gates alone would have decided: {v}"
         );
     }
 
-    /// #312 item 2 (PR A) — the identical fixture, run TWICE (once with av_sync inputs, once
-    /// without), must produce the IDENTICAL overall PASS/FAIL — proving the block genuinely does
-    /// NOT gate the headline verdict, exactly as the PR spec requires.
+    /// #624 deliverable 4 / #312 item 2 PR B — a FAILING av_sync gate forces the run's overall
+    /// verdict to FAIL, unconditionally (the AND-in semantics: `all_pass &= av_all_pass`, and
+    /// ANDing with `false` can never be undone by any other gate). This SUPERSEDES PR A's
+    /// `all_cambox_av_sync_never_affects_the_overall_verdict_312` — that test asserted the
+    /// opposite invariant (block reported but never gates), which was PR A's OWN explicitly
+    /// temporary contract ("PR B wires it"); this test proves PR B actually did.
     #[test]
-    fn all_cambox_av_sync_never_affects_the_overall_verdict_312() {
+    fn all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_312_624() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
         let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
         let av = AvMarkerInputs {
@@ -6624,8 +6696,10 @@ mod tests {
         let cameras: &[(&str, u32, i64)] =
             &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)];
 
-        let with_av = build_all_cambox_av_sync_fixture("gate-with", cameras, Some(av));
-        let without_av = build_all_cambox_av_sync_fixture("gate-without", cameras, None);
+        // cam1 measures a real 500ms offset; expected_ms=0 puts it far outside +/-20ms -> the
+        // av_sync gate FAILS (cam3/cam4/cam5/cam6 are Unknown too, doubly so).
+        let with_av = build_all_cambox_av_sync_fixture("gate-fail-with", cameras, Some(av), 0.0);
+        let without_av = build_all_cambox_av_sync_fixture("gate-fail-without", cameras, None, 0.0);
 
         assert!(
             !with_av["all_cambox_av_sync"].is_null(),
@@ -6633,12 +6707,83 @@ mod tests {
         );
         assert!(
             without_av["all_cambox_av_sync"].is_null(),
-            "sanity: the WITHOUT-av_sync run must NOT report the block at all: {without_av}"
+            "sanity: the WITHOUT-av_sync run must NOT report the block at all (unchanged from PR A): {without_av}"
+        );
+        assert_eq!(
+            with_av["all_cambox_av_sync"]["gate_pass"],
+            serde_json::json!(false),
+            "sanity: the av_sync gate must actually be failing in this fixture: {with_av}"
+        );
+        assert_eq!(
+            with_av["overall_pass"],
+            serde_json::json!(false),
+            "#624/#312 PR B: a failing av_sync gate MUST force overall_pass=false, regardless of \
+             whatever the loss/latency gates alone computed (without_av={without_av}): {with_av}"
+        );
+    }
+
+    /// #624 deliverable 4 / #312 item 2 PR B — a PASSING av_sync gate (every one of the 6
+    /// CAMERA_UNDER_TEST_NODES measured cleanly within +/-20ms of `--av-expected-ms`) must NOT
+    /// change the run's overall verdict vs the identical run with no av_sync inputs at all --
+    /// `all_pass &= true` is a no-op. Proves the "AND-in" wiring in BOTH directions together with
+    /// the sibling gate-failure test above, without needing to know the loss/latency gates' own
+    /// PASS/FAIL value for this synthetic fixture (both runs share the identical frames/schedule,
+    /// so their loss/latency contribution is identical either way).
+    #[test]
+    fn all_cambox_av_sync_gate_pass_does_not_change_the_overall_verdict_312_624() {
+        // 5 windows (cam1/cam3/cam4/cam5/cam6), 20 frames each = 100 frames, optical ticks
+        // 1000..=1099 contiguous across ALL windows. emit_log covers the FULL 1000..=1099 range
+        // so EVERY window (and cam2's whole-recording pool over all 100 frames) decodes a dense,
+        // clean 500ms offset -- no Unknown camera anywhere.
+        const N: usize = 100;
+        let emit_log: Vec<(u8, u32, i64)> = (0..N).map(|k| (k as u8, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..N)
+            .map(|k| (k as f64 / 30.0 - 0.5, k as u8)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[
+            ("CAM1", CAM1B, 800_000_000),
+            ("CAM3", CAM3B, 820_000_000),
+            ("CAM4", super::BURN_RUN_ID_CAM4, 790_000_000),
+            ("CAM5", CAM5B, 805_000_000),
+            ("CAM6", CAM6B, 815_000_000),
+        ];
+
+        // expected_ms=500.0 matches the constructed clean offset exactly -> every camera passes.
+        let with_av = build_all_cambox_av_sync_fixture("gate-pass-with", cameras, Some(av), 500.0);
+        let without_av =
+            build_all_cambox_av_sync_fixture("gate-pass-without", cameras, None, 500.0);
+
+        assert!(
+            !with_av["all_cambox_av_sync"].is_null(),
+            "sanity: the WITH-av_sync run must actually have reported the block: {with_av}"
+        );
+        for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"] {
+            assert_eq!(
+                with_av["all_cambox_av_sync"][cam]["verdict"],
+                serde_json::json!("measured"),
+                "sanity: {cam} must be cleanly measured in this fixture: {with_av}"
+            );
+            assert_eq!(
+                with_av["all_cambox_av_sync"][cam]["gate_pass"],
+                serde_json::json!(true),
+                "sanity: {cam}'s clean 500ms offset must pass the gate vs expected_ms=500: {with_av}"
+            );
+        }
+        assert_eq!(
+            with_av["all_cambox_av_sync"]["gate_pass"],
+            serde_json::json!(true),
+            "sanity: the OVERALL av_sync gate must pass when every camera passes: {with_av}"
         );
         assert_eq!(
             with_av["overall_pass"], without_av["overall_pass"],
-            "#312 PR A: reporting all_cambox_av_sync must NEVER change the run's overall \
-             PASS/FAIL — with={with_av}, without={without_av}"
+            "#624/#312 PR B: a PASSING av_sync gate must be a no-op on the overall verdict -- \
+             with={with_av}, without={without_av}"
         );
     }
 
