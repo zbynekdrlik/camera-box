@@ -98,3 +98,80 @@ fn cleanup_force_kills_the_cam1_burn_binary() {
          runs (#626)."
     );
 }
+
+/// #626's own comment claimed the digit-anchored pattern ALSO matches the camname-infixed form
+/// (`/tmp/camera-box-burn-cam3-1783530925`) that cam2/cam3/cam4/cam5/cam6 actually use (#312/#624
+/// ALL_CAMBOX deploy, `_cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"`) -- it does NOT: the
+/// character right after the hyphen there is a LETTER ('c' of "cam3"), not a digit, so
+/// `camera-box-burn-[0-9]` never matches it. Empirically confirmed live on the rig (2026-07-09):
+/// cam2/cam3/cam4/cam5/cam6 orphaned burn processes survived cleanup() across multiple runs,
+/// crash-looping camera-box ("Device or resource busy") until manually killed. The pattern must
+/// widen to `camera-box-burn-[a-z0-9]` at BOTH the cam3/4/5/6 loop and the cam2/painter restore.
+#[test]
+fn cleanup_kills_the_cam_name_infixed_all_cambox_burn_binaries() {
+    let body = cleanup_body(&read("scripts/recording-e2e.sh"));
+
+    let loop_region_start = body
+        .find("for _cip in \"$CAM3_IP\"")
+        .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
+    let loop_region = &body[loop_region_start..];
+    assert!(
+        loop_region.contains("pkill -9 -f 'camera-box-burn-[a-z0-9]'")
+            || loop_region.contains("pkill -9 -f \"camera-box-burn-[a-z0-9]\""),
+        "#624/#312: the cam3/4/5/6 restore must use the WIDENED pattern \
+         ('camera-box-burn-[a-z0-9]') -- the digit-only pattern never matches their \
+         'camera-box-burn-<camname>-<run_id>' naming, orphaning the burn process and \
+         crash-looping camera-box: {loop_region}"
+    );
+
+    let painter_region_start = body
+        .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")
+        .expect("cleanup() must have the cam2/painter restore block");
+    let painter_region = &body[painter_region_start..];
+    assert!(
+        painter_region.contains("pkill -9 -f 'camera-box-burn-[a-z0-9]'")
+            || painter_region.contains("pkill -9 -f \"camera-box-burn-[a-z0-9]\""),
+        "#312: the cam2/painter restore (under ALL_CAMBOX=1) must use the WIDENED pattern too -- \
+         cam2's own manually-deployed burn binary is ALSO camname-infixed \
+         ('camera-box-burn-cam2-<run_id>'): {painter_region}"
+    );
+}
+
+/// Pure regex-behavior lock (no rig, no ssh): the widened pattern matches BOTH real target forms
+/// (cam1's plain `camera-box-burn-<run_id>` AND the camname-infixed
+/// `camera-box-burn-<camname>-<run_id>`) while STILL not matching the literal invoking pkill
+/// argument text itself -- preserving the #626 self-match fix (immediately after the hyphen in
+/// the invoking text is the regex's own `[` bracket character, never a letter or digit).
+#[test]
+fn widened_pattern_matches_both_burn_naming_forms_but_not_the_invoking_command() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let matches = |haystack: &str| -> bool {
+        let mut child = Command::new("grep")
+            .arg("-qE")
+            .arg("camera-box-burn-[a-z0-9]")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn grep");
+        child
+            .stdin
+            .take()
+            .expect("grep stdin")
+            .write_all(haystack.as_bytes())
+            .expect("write to grep stdin");
+        child.wait().expect("wait for grep").success()
+    };
+    assert!(
+        matches("root 123 /tmp/camera-box-burn-1783530925"),
+        "cam1's plain form must match"
+    );
+    assert!(
+        matches("root 123 /tmp/camera-box-burn-cam3-1783530925"),
+        "cam3/4/5/6/cam2's camname-infixed form must match"
+    );
+    assert!(
+        !matches("pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null"),
+        "the pattern must NOT self-match the invoking pkill argument's own literal text \
+         (the #626 self-match property must be preserved by the widened pattern)"
+    );
+}
