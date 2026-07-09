@@ -381,6 +381,31 @@ class TestCLI:
         assert r"C:\ProgramData\camera-box\av-sync-last.json" in out
         assert "win-stream-snv" in out
 
+    def test_printed_plan_json_matches_what_was_actually_persisted(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        # Integration-level drift guard: the plan's embedded JSON block must be byte-identical
+        # to what write_last_json() actually wrote to json_path -- never reconstructed
+        # separately (that would let the pushed content silently diverge from the local record).
+        fake = FakeObs(latency_ms=450)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        local_json_path = tmp_path / ".camera-box" / "av-sync-last.json"
+        monkeypatch.setattr(
+            av_sync_calibrate, "default_last_json_path", lambda: local_json_path,
+        )
+        monkeypatch.setattr(
+            sys, "argv",
+            ["av_sync_calibrate.py", "--host", "10.77.9.204", "--offset-ms", "120.0", "--apply"],
+        )
+        av_sync_calibrate.main()
+        out = capsys.readouterr().out
+
+        persisted = json.loads(local_json_path.read_text())
+        printed = json.loads(out.split("content:\n", 1)[1])
+        assert printed == persisted
+
     def test_default_path_on_box_does_not_print_remote_push_plan(self, monkeypatch, tmp_path, capsys):
         # If PROGRAMDATA IS set (running ON the Windows box), default_last_json_path() already
         # resolves to the canonical stream-box path -- no push needed.
