@@ -1449,9 +1449,11 @@ fn recording_e2e_cam2_cleanup_removes_its_deployed_burn_binary_from_disk_312() {
         .expect("#312: cam2's restore block must (re)start cam2-painter.service");
     let cam2_restore = &s[cam2_restore_start..cam2_restore_end];
     assert!(
-        cam2_restore.contains("pkill -9 -f 'camera-box-burn-[0-9]'"),
-        "#312/#626: cam2's restore block must force-kill its manually deployed burn binary with \
-         the digit-anchored pattern: {cam2_restore:?}"
+        cam2_restore.contains("pkill -9 -f 'camera-box-burn-[a-z0-9]'"),
+        "#312/#626/#628: cam2's restore block must force-kill its manually deployed burn binary \
+         with the anchored pattern (widened to [a-z0-9] by #628 -- cam2's own burn is \
+         camname-infixed, camera-box-burn-cam2-<run_id>, which the original digit-only pattern \
+         never matched): {cam2_restore:?}"
     );
     assert!(
         cam2_restore.contains("rm -f /tmp/camera-box-burn-*"),

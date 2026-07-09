@@ -81,21 +81,23 @@ fn cleanup_obs_calls_are_timeout_bounded() {
 /// The cam-device free step itself must FORCE-kill the burn binary so /dev/video0 is reliably
 /// released even if it is mid-write (the #328 incident needed a manual `kill -9`).
 ///
-/// #626: the pattern must be digit-anchored (`camera-box-burn-[0-9]`), not the bare
+/// #626/#628: the pattern must be anchored (`camera-box-burn-[a-z0-9]`), not the bare
 /// `camera-box-burn-` this test used to require — the bare pattern self-matches the invoking
 /// remote shell's own cmdline (it literally contains the pkill argument text) and SIGKILLs the
 /// shell running the whole cleanup command before `systemctl restart camera-box` ever executes.
+/// (Widened from the original digit-only `[0-9]` to `[a-z0-9]` by #628 — see
+/// `cleanup_kills_the_cam_name_infixed_all_cambox_burn_binaries` for why digit-only wasn't enough.)
 #[test]
 fn cleanup_force_kills_the_cam1_burn_binary() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
     assert!(
-        body.contains("pkill -9 -f 'camera-box-burn-[0-9]'")
-            || body.contains("pkill -9 -f \"camera-box-burn-[0-9]\""),
-        "#328/#626: cleanup() must force-kill (pkill -9 -f) the cam1 burn binary with a \
-         digit-anchored pattern ('camera-box-burn-[0-9]') so it reliably releases /dev/video0 \
+        body.contains("pkill -9 -f 'camera-box-burn-[a-z0-9]'")
+            || body.contains("pkill -9 -f \"camera-box-burn-[a-z0-9]\""),
+        "#328/#626/#628: cleanup() must force-kill (pkill -9 -f) the cam1 burn binary with an \
+         anchored pattern ('camera-box-burn-[a-z0-9]') so it reliably releases /dev/video0 \
          (a plain TERM can leave it mid-write holding the device) WITHOUT the pattern \
          self-matching the invoking ssh shell's own cmdline and killing it before the restart \
-         runs (#626)."
+         runs (#626), AND without missing the camname-infixed cam2-6 form (#628)."
     );
 }
 
