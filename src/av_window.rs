@@ -247,4 +247,78 @@ mod tests {
     fn window_ticks_on_empty_input_is_empty() {
         assert_eq!(window_ticks(&[], 60.0, 0.0), Vec::<(u32, f64)>::new());
     }
+
+    // ---------------------------------------------------------------------
+    // av_offset_gate_pass — #624 deliverable 4 / #312 item 2 PR B
+    // ---------------------------------------------------------------------
+
+    fn measured(av_offset_ms: f64) -> CameraAvSync {
+        CameraAvSync {
+            windows: 2,
+            candidates: 10,
+            cluster_samples: 10,
+            av_offset_ms: Some(av_offset_ms),
+            mad_ms: Some(1.0),
+            verdict: AvSyncVerdict::Measured,
+        }
+    }
+
+    #[test]
+    fn gate_passes_when_offset_within_tolerance_of_expected() {
+        // 15ms deviation from 0 is well inside the ±20ms bound.
+        assert!(av_offset_gate_pass(&measured(15.0), 0.0));
+        // Negative deviation, same bound.
+        assert!(av_offset_gate_pass(&measured(-15.0), 0.0));
+    }
+
+    #[test]
+    fn gate_fails_when_offset_outside_tolerance_of_expected() {
+        assert!(!av_offset_gate_pass(&measured(25.0), 0.0));
+        assert!(!av_offset_gate_pass(&measured(-25.0), 0.0));
+    }
+
+    #[test]
+    fn gate_measures_deviation_from_a_nonzero_expected_value_not_hardcoded_zero() {
+        // The operator's live #398 dock may be dialed to a nonzero value — the gate must measure
+        // deviation FROM THAT expected value, never from a hardcoded 0.
+        assert!(av_offset_gate_pass(&measured(55.0), 50.0));
+        assert!(!av_offset_gate_pass(&measured(55.0), 0.0));
+    }
+
+    #[test]
+    fn gate_boundary_at_exactly_plus_tolerance_passes() {
+        assert!(
+            av_offset_gate_pass(&measured(AV_OFFSET_GATE_TOLERANCE_MS), 0.0),
+            "the bound is <=, not <"
+        );
+    }
+
+    #[test]
+    fn gate_boundary_at_exactly_minus_tolerance_passes() {
+        assert!(av_offset_gate_pass(&measured(-AV_OFFSET_GATE_TOLERANCE_MS), 0.0));
+    }
+
+    #[test]
+    fn gate_just_outside_the_boundary_fails() {
+        assert!(!av_offset_gate_pass(
+            &measured(AV_OFFSET_GATE_TOLERANCE_MS + 0.01),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn gate_fails_closed_on_unknown_verdict_from_thin_data() {
+        // The camera DID appear in the sweep (windows_matched=1) but too few pooled candidates to
+        // clear MIN_AV_SAMPLES — Unknown. Must fail, never a fabricated pass.
+        let thin = pool_camera_av_sync(1, &[vec![10.0, 11.0]], MIN_AV_SAMPLES, 60.0);
+        assert_eq!(thin.verdict, AvSyncVerdict::Unknown);
+        assert!(!av_offset_gate_pass(&thin, 0.0));
+    }
+
+    #[test]
+    fn gate_fails_closed_when_camera_never_appeared_in_the_sweep() {
+        let absent = pool_camera_av_sync(0, &[], MIN_AV_SAMPLES, 60.0);
+        assert_eq!(absent.verdict, AvSyncVerdict::Unknown);
+        assert!(!av_offset_gate_pass(&absent, 0.0));
+    }
 }
