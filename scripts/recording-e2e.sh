@@ -395,7 +395,7 @@ cleanup() {
   # /tmp/camera-box-burn-cam3-1783530925 — `_cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"`); the
   # invoking shell's own cmdline has a `[` bracket character there instead (the regex's own
   # class-open), so the anchored `[a-z0-9]` pattern matches ONLY a real target, never itself.
-  # #628 CORRECTION: an earlier version of this comment claimed the DIGIT-only pattern
+  # #640 CORRECTION: an earlier version of this comment claimed the DIGIT-only pattern
   # ('camera-box-burn-[0-9]') already matched the camname-infixed form too — it does NOT (the
   # character right after the hyphen there is a LETTER, not a digit). That gap orphaned
   # cam2/cam3/cam4/cam5/cam6's burn processes across multiple runs, crash-looping camera-box
@@ -417,7 +417,7 @@ cleanup() {
   # --display — the interkom return monitor stays dark). The clear is single-sourced
   # (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent). #312: under
   # ALL_CAMBOX=1, [2b/8] ALSO deployed a manually nohup'd probe-featured burn binary here (the
-  # SAME #628-widened kill pattern this cleanup uses elsewhere) — harmless (matches nothing) on
+  # SAME #640-widened kill pattern this cleanup uses elsewhere) — harmless (matches nothing) on
   # the plain single-camera path, where [2b/8] never ran.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true
