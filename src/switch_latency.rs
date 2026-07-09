@@ -30,12 +30,20 @@
 //! RED→GREEN-verified locally). The probe-gated `bin/recording-verdict` extracts each
 //! measured camera's `HopLatency.stats.p50_ms` and calls in here.
 
-/// #24 — the camera-under-test node labels, mirrored from `bin/recording-verdict.rs`'s
-/// `CAMERA_UNDER_TEST_NODES` (kept as a local copy, like `recording_span_gate.rs`'s own copy,
-/// so this crate-root module has zero dependency on the probe-gated binary). Purely
-/// documentary here — [`spread_verdict`] itself is camera-label-agnostic (it takes plain p50
-/// values), this constant just names the set the #624 gate applies to.
-pub const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
+/// #24/#312 — the OPTICAL-INJECTION node labels this SPREAD gate applies to, mirrored from
+/// `bin/recording-verdict.rs`'s `OPTICAL_INJECTION_NODES` (kept as a local copy, like
+/// `recording_span_gate.rs` keeps its own copy of the BROADER `CAMERA_UNDER_TEST_NODES`, so this
+/// crate-root module has zero dependency on the probe-gated binary). Purely documentary here —
+/// [`spread_verdict`] itself is camera-label-agnostic (it takes plain p50 values), this constant
+/// just names the set the #624 gate applies to.
+///
+/// **Deliberately the NARROWER `OPTICAL_INJECTION_NODES` set (5 members), NOT the broader
+/// `CAMERA_UNDER_TEST_NODES` (6, includes cam2) — was itself a stale 3-member
+/// `CAMERA_UNDER_TEST_NODES`-named copy before #312 caught + fixed it.** This module's SPREAD
+/// gate is specifically about the cam2→camera OPTICAL-INJECTION latency (see the module doc
+/// above) — cam2 is the painter, not an optical-injection camera, so it correctly has no place
+/// in this set, unlike the digital-contiguity `CAMERA_UNDER_TEST_NODES` which DOES include it.
+pub const OPTICAL_INJECTION_NODES: [&str; 5] = ["cam1", "cam3", "cam4", "cam5", "cam6"];
 
 /// The #624 issue's fixed cross-camera spread threshold, in milliseconds: half a 30fps
 /// program frame (`1000.0 / 30.0 / 2.0 ≈ 16.667`, rounded down to the issue's literal `16ms`).

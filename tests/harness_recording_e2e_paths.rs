@@ -1394,10 +1394,22 @@ fn recording_e2e_cam2_deploy_stops_the_permanent_painter_service_before_launchin
     // The [2b/8] loop body: find the block between the `for _cn_ip_burn in` loop header and its
     // matching `done`, and confirm it stops cam2-painter.service unconditionally for every box in
     // the loop (harmless no-op on cam3/cam4/cam5/cam6) BEFORE it stops/replaces camera-box.
+    //
+    // The slice is BOUNDED to the loop's own `done` (the first one after the header — this loop
+    // has no nested loop of its own) — NOT left open to end-of-file. recording-e2e.sh contains
+    // near-identical "systemctl stop cam2-painter" / "systemctl stop camera-box; pkill -x
+    // camera-box" text elsewhere (the plain single-camera [3/8] painter launch, and the
+    // unrelated av_restart_record_and_emit_plan() helper) — an unbounded slice would let those
+    // LATER occurrences silently satisfy these assertions even if the real [2b/8] loop body were
+    // broken, so bounding to the matching `done` is load-bearing, not cosmetic.
     let loop_start = s
         .find("for _cn_ip_burn in")
         .expect("#312: recording-e2e.sh must define the [2b/8] ALL_CAMBOX deploy loop");
-    let loop_body = &s[loop_start..];
+    let loop_end = s[loop_start..]
+        .find("\n  done\n")
+        .map(|i| loop_start + i)
+        .expect("#312: the [2b/8] loop must be closed by its own `done`");
+    let loop_body = &s[loop_start..loop_end];
     let stop_painter_pos = loop_body
         .find("systemctl stop cam2-painter")
         .expect("#312/#440: the [2b/8] loop must stop the PERMANENT cam2-painter.service");
@@ -1415,6 +1427,37 @@ fn recording_e2e_cam2_deploy_stops_the_permanent_painter_service_before_launchin
         loop_body.contains("CAMERA_BOX_NO_DISPLAY=1"),
         "#312: the [2b/8] loop must launch cam2's binary with CAMERA_BOX_NO_DISPLAY=1 (the #291 \
          opt-out) so it never competes with the frame-probe painter for /dev/fb0"
+    );
+}
+
+/// #312 (BUG, regression-test-first) — cam2's cleanup restore block force-kills its manually
+/// deployed `/tmp/camera-box-burn-cam2-<RUN_ID>` binary (added alongside cam3/cam4/cam5/cam6's
+/// identical restore, mirroring #626's digit-anchored kill) but originally never REMOVED it from
+/// disk — unlike every other node's cleanup block, which pairs the kill with `rm -f
+/// /tmp/camera-box-burn-*`. Every ALL_CAMBOX=1 run left a fresh multi-MB binary behind on cam2's
+/// disk-constrained `/tmp`, accumulating across repeated runs.
+#[test]
+fn recording_e2e_cam2_cleanup_removes_its_deployed_burn_binary_from_disk_312() {
+    let s = read("scripts/recording-e2e.sh");
+    // Isolate cam2's OWN cleanup restore block (targets $PAINTER_IP) from the rest of cleanup().
+    let cam2_restore_start = s
+        .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")
+        .expect("#312: cleanup() must define cam2's own restore block (root@\"$PAINTER_IP\")");
+    let cam2_restore_end = s[cam2_restore_start..]
+        .find("systemctl start cam2-painter")
+        .map(|i| cam2_restore_start + i)
+        .expect("#312: cam2's restore block must (re)start cam2-painter.service");
+    let cam2_restore = &s[cam2_restore_start..cam2_restore_end];
+    assert!(
+        cam2_restore.contains("pkill -9 -f 'camera-box-burn-[0-9]'"),
+        "#312/#626: cam2's restore block must force-kill its manually deployed burn binary with \
+         the digit-anchored pattern: {cam2_restore:?}"
+    );
+    assert!(
+        cam2_restore.contains("rm -f /tmp/camera-box-burn-*"),
+        "#312: cam2's restore block must ALSO remove its deployed burn binary from disk (rm -f \
+         /tmp/camera-box-burn-*), mirroring cam1/cam3/cam4/cam5/cam6's identical cleanup — \
+         otherwise every ALL_CAMBOX=1 run leaks a fresh multi-MB binary on cam2's /tmp: {cam2_restore:?}"
     );
 }
 

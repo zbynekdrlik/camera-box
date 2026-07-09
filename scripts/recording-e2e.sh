@@ -410,6 +410,7 @@ cleanup() {
   # (matches nothing) on the plain single-camera path, where [2b/8] never ran.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null || true
+rm -f /tmp/camera-box-burn-* 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
 systemctl start cam2-painter 2>/dev/null || true"

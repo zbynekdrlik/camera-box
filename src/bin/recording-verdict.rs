@@ -3488,8 +3488,21 @@ fn build_and_print_verdict(
                     )
                 };
                 let anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+                // #312: widened from cam1-only to all six reserved camera-under-test burn ids
+                // (mirroring the SAME widening this PR made to `all_burns` in the #186 contiguity
+                // block above and `latency_all_burns` in the #624 per-camera latency block below)
+                // — defense-in-depth so a forwarded cam2/cam3/cam4/cam5/cam6 digital burn payload
+                // can never be mistaken for cam2's OPTICAL tick when `--cam2-run-id` is unpinned.
+                // In practice every recording-e2e.sh invocation always pins `--cam2-run-id`,
+                // which takes precedence over this fallback — this widening only hardens the
+                // unpinned/manual-invocation path.
                 let all_burns = [
                     args.burn_cam1_run_id,
+                    args.burn_cam2_run_id,
+                    args.burn_cam3_run_id,
+                    args.burn_cam4_run_id,
+                    args.burn_cam5_run_id,
+                    args.burn_cam6_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -4703,6 +4716,91 @@ mod tests {
                 f
             })
             .collect()
+    }
+
+    // ---- #312 — extend the #186 per-node digital-burn contiguity check to cam5/cam6 (fleet
+    // growth 4→6, #451) ----------------------------------------------------------------------
+
+    const CAM5B: u32 = super::BURN_RUN_ID_CAM5; // #312 cam5's OWN per-EMIT capture burn run_id (911010)
+    const CAM6B: u32 = super::BURN_RUN_ID_CAM6; // #312 cam6's OWN per-EMIT capture burn run_id (911011)
+
+    /// Build a window of N delivered frames carrying BOTH cam5's and cam6's digital burns in
+    /// every frame (a synthetic-only shortcut — in any REAL run only one of cam1/cam2/cam3/cam4/
+    /// cam5/cam6 is ever burned in a given schedule window, they are mutually exclusive; stamping
+    /// both here just lets ONE window prove BOTH new `NodeSpec` entries independently instead of
+    /// building two separate 60-frame windows).
+    fn window_cam5_and_cam6(n: u32, with_stream: bool) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> =
+                    vec![(CAM2, 100 + i), (CAM5B, 8000 + i), (CAM6B, 9000 + i)];
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 9500 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #312 — extends the #186 per-node digital-burn contiguity check to CAM5 and CAM6 (fleet
+    /// growth 4→6, #451). A contiguous burn end-to-end for both ⇒ the fused verdict reports BOTH
+    /// node "cam5" and node "cam6" ZERO loss — locks that reverting either `NodeSpec` tuple (or
+    /// mixing up which `--burn-camN-run-id` feeds which node) would be caught here, not just by
+    /// the structural "ids are pairwise distinct" test.
+    #[test]
+    fn cam5_and_cam6_digital_burns_extend_the_186_contiguity_check_312() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam5_and_cam6(60, false);
+        let stream_frames = window_cam5_and_cam6(60, true);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+        )
+        .expect("verdict");
+
+        assert!(pass, "#312: contiguous cam5+cam6 burns ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        for node in ["cam5", "cam6"] {
+            assert_eq!(
+                loss[node]["zero_loss"],
+                serde_json::json!(true),
+                "#312: {node} must be verdicted ZERO loss when its OWN burn is contiguous: {loss}"
+            );
+        }
+        for absent in ["cam1", "cam2", "cam3", "cam4"] {
+            assert!(
+                loss.get(absent).is_none(),
+                "#312: {absent} never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+            );
+        }
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam5"],
+            serde_json::json!(60),
+            "#312: all 60 cam5 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam6"],
+            serde_json::json!(60),
+            "#312: all 60 cam6 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
     }
 
     /// #24 — extends the #186 per-node digital-burn contiguity check (previously cam1-only) to
