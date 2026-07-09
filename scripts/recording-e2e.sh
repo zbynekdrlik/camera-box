@@ -491,6 +491,31 @@ IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"
 # is now a THIRD burn target (its own 911003 digital corner burn, #463) — the exact extension this
 # array's design already anticipated.
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
+# #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
+# NDI input the sweep currently has cut into program, not just the single default
+# STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
+# recording-verdict's all_cambox_delivery_latency (#286: strih_burn.gen_ts_ns -
+# camera_burn.gen_ts_ns, the metric that actually proves the phase-sync fix, as opposed to the
+# SOURCE-side all_cambox_latency/#624 which never touches strih's receiver-side genlock hold)
+# only ever measures whichever ONE camera happens to already own STRIH_PROG_SOURCE — every other
+# camera's window shows a strih-recorded frame with its OWN capture burn but NO strih burn to
+# pair it against, so it reports zero samples (confirmed live, 2026-07-09 #286 re-verification:
+# only the STRIH_PROG_SOURCE camera measured, the other 5 all "NO SAMPLES"). Extend the SAME
+# single-source-of-truth array the #195 ON-gate and the #246 cleanup() OFF-clear loop already
+# iterate — so this fix automatically covers BOTH ends, never a burn left on that cleanup
+# forgets to clear. The six canonical strih NDI inputs mirror set-ndi-mapping.py's DEFAULT_MAP
+# (the same fixed list this file's own FROZEN_CAM_SOURCES default already uses) — hardcoded
+# because BURN_TARGETS is defined here, well before CAMBOX_SWEEP is parsed later in the script;
+# a camera genuinely down that run simply never shows a window, so its burn being on-but-unused
+# is harmless (never fabricates a measurement, matching the "never fabricate" convention
+# n_camera_strih_samples/spread_verdict already follow).
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6"; do
+    if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
+      BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
+    fi
+  done
+fi
 trap cleanup EXIT HUP INT TERM
 # #281 Fix#3: start the rig-active heartbeat NOW (trap is armed, so cleanup() will stop it on any
 # exit). The background refresher keeps it fresh for the whole long run; the rig-restore watchdog
