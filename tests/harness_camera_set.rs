@@ -261,11 +261,12 @@ fn camera_resolve_emits_per_camera_genlock_fps() {
     }
 }
 
-// --- #24 item 1: camera_strih_route() -- which strih OBS scene shows a given physical camera,
-// so scripts/recording-e2e.sh can drive cam1, cam3, OR cam4 as the dedicated SOURCE camera
-// (the box filming cam2's monitor + carrying the #174 capture burn) instead of being
-// hard-coded to cam1. The scene/source pins mirror scripts/set-ndi-mapping.py's fixed,
-// Claude-owned genlock mapping exactly: NDI cam5->CAM1, NDI cam1->CAM3, NDI cam3->CAM4. -------
+// --- #24 item 1 / #312 item 1: camera_strih_route() -- which strih OBS scene shows a given
+// physical camera, so scripts/recording-e2e.sh can drive cam1, cam3, cam4, cam5, OR cam6 as the
+// dedicated SOURCE camera (the box filming cam2's monitor + carrying the #174 capture burn)
+// instead of being hard-coded to cam1. The scene/source pins mirror
+// scripts/set-ndi-mapping.py's fixed, Claude-owned genlock mapping exactly: NDI cam5->CAM1,
+// NDI cam1->CAM3, NDI cam3->CAM4, NDI cam4->CAM5, NDI cam6->CAM6. -------
 
 /// Source `camera-set.sh`, run `camera_strih_route <name>`, and return its
 /// `SCENE\t<scene>\nSOURCE\t<source>` resolution (or REJECT on an unsupported name).
@@ -302,14 +303,17 @@ fi
 }
 
 #[test]
-fn camera_strih_route_resolves_the_three_source_eligible_cameras() {
-    // #24: the exact pins scripts/set-ndi-mapping.py programs onto strih (NDI cam5->CAM1,
-    // NDI cam1->CAM3, NDI cam3->CAM4). A wrong scene/source would route strih's PROGRAM to
-    // the WRONG box's NDI feed and silently certify nothing (or the wrong camera).
+fn camera_strih_route_resolves_the_five_source_eligible_cameras() {
+    // #24/#312: the exact pins scripts/set-ndi-mapping.py programs onto strih (NDI cam5->CAM1,
+    // NDI cam1->CAM3, NDI cam3->CAM4, NDI cam4->CAM5, NDI cam6->CAM6). A wrong scene/source
+    // would route strih's PROGRAM to the WRONG box's NDI feed and silently certify nothing (or
+    // the wrong camera).
     let expected = [
         ("cam1", "Cam 5", "NDI cam5"),
         ("cam3", "Cam 1", "NDI cam1"),
         ("cam4", "Cam 3", "NDI cam3"),
+        ("cam5", "Cam 4", "NDI cam4"),
+        ("cam6", "Cam 6", "NDI cam6"),
     ];
     for (name, scene, source) in expected {
         let (ok, got_scene, got_source) = resolve_strih_route(name);
@@ -326,15 +330,20 @@ fn camera_strih_route_resolves_the_three_source_eligible_cameras() {
 }
 
 #[test]
-fn camera_strih_route_rejects_cameras_not_wired_as_source() {
-    // cam2 is the FIXED painter (never the SOURCE camera-under-test); cam5/cam6 have no
-    // reserved #174 capture-burn id or strih scene yet (#24 only extends cam1/cam3/cam4). A
-    // typo or an out-of-scope camera must fail loudly, never silently route the wrong scene.
-    for name in ["cam2", "cam5", "cam6", "cam9", ""] {
+fn camera_strih_route_rejects_cam2_and_unknown_cameras() {
+    // cam2 is the FIXED painter -- NEVER the SOURCE camera-under-test here, deliberately, even
+    // though #312 makes it a measurable "camera under test" for the ALL-CAMBOX sweep's digital
+    // contiguity check by a SEPARATE mechanism (recording-e2e.sh's CAMBOX_SWEEP default +
+    // [2b/8] deploy loop, keyed off $PAINTER_IP directly). Accepting "cam2" HERE would let an
+    // un-overridden recording-e2e.sh run (whose $CAMERA_NAME default IS "cam2") try to deploy
+    // the SOURCE-camera burn binary to the SAME physical box $PAINTER_IP already targets --
+    // a real /dev/video0 + /dev/fb0 device conflict. A typo or an out-of-scope camera must also
+    // fail loudly, never silently route the wrong scene.
+    for name in ["cam2", "cam9", ""] {
         let (ok, _scene, _source) = resolve_strih_route(name);
         assert!(
             !ok,
-            "camera_strih_route '{name}' must reject -- not a SOURCE-eligible camera (#24)"
+            "camera_strih_route '{name}' must reject -- not a SOURCE-eligible camera (#24/#312)"
         );
     }
 }

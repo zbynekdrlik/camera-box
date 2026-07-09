@@ -1,17 +1,20 @@
 //! #624 — cross-camera cam2→camera switch-latency SPREAD gate (pure decision).
 //!
-//! Each grabber card (cam1/cam3/cam4 — [`CAMERA_UNDER_TEST_NODES`]) bakes its OWN
-//! photon->dequeue latency `d_X` into the frame it emits (the #286 root cause: the genlock
-//! timecode used to be stamped at ARRIVAL, not at the real V4L2 CAPTURE instant, so `d_X`
-//! rides into delivery timing and the receiver's genlock cannot equalize it across cameras —
-//! cutting the live program between two cameras with different `d_X` can visibly break A/V
-//! lipsync). The cam2→camera OPTICAL-INJECTION hop (`probe::recording_latency::
-//! cam2_cam1_samples_from_burn` / `_from_flip`, generalized in #624 from cam1-only to
-//! cam1/cam3/cam4, computed PER `--switch-schedule` window in `bin/recording-verdict`) IS
-//! `d_X` for that camera: cam2 paints a monitor, the camera under test films it, and the
-//! camera's OWN capture-time burn rides alongside cam2's optical QR into the same recorded
-//! frame — so `camera_burn.gen_ts_ns − cam2.gen_ts_ns` is exactly this camera's photon-to-
-//! delivery latency.
+//! Each grabber card that OPTICALLY films cam2's painted monitor (cam1/cam3/cam4/cam5/cam6 —
+//! `bin/recording-verdict`'s `OPTICAL_INJECTION_NODES`; #312 widened the fleet from 4→6 and
+//! explicitly EXCLUDES cam2 itself here, since cam2 IS the painter and has no second
+//! camera-vs-monitor optical hop to measure) bakes its OWN photon->dequeue latency `d_X` into
+//! the frame it emits (the #286 root cause: the genlock timecode used to be stamped at
+//! ARRIVAL, not at the real V4L2 CAPTURE instant, so `d_X` rides into delivery timing and the
+//! receiver's genlock cannot equalize it across cameras — cutting the live program between two
+//! cameras with different `d_X` can visibly break A/V lipsync). The cam2→camera
+//! OPTICAL-INJECTION hop (`probe::recording_latency::cam2_cam1_samples_from_burn` /
+//! `_from_flip`, generalized in #624 from cam1-only to cam1/cam3/cam4 and further in #312 to
+//! cam5/cam6, computed PER `--switch-schedule` window in `bin/recording-verdict`) IS `d_X` for
+//! that camera: cam2 paints a monitor, the camera under test films it, and the camera's OWN
+//! capture-time burn rides alongside cam2's optical QR into the same recorded frame — so
+//! `camera_burn.gen_ts_ns − cam2.gen_ts_ns` is exactly this camera's photon-to-delivery
+//! latency.
 //!
 //! This module is the FINAL pure decision on top of that per-camera measurement: given each
 //! measured camera's median (p50) latency, is the SPREAD across cameras small enough that a
@@ -27,12 +30,20 @@
 //! RED→GREEN-verified locally). The probe-gated `bin/recording-verdict` extracts each
 //! measured camera's `HopLatency.stats.p50_ms` and calls in here.
 
-/// #24 — the camera-under-test node labels, mirrored from `bin/recording-verdict.rs`'s
-/// `CAMERA_UNDER_TEST_NODES` (kept as a local copy, like `recording_span_gate.rs`'s own copy,
-/// so this crate-root module has zero dependency on the probe-gated binary). Purely
-/// documentary here — [`spread_verdict`] itself is camera-label-agnostic (it takes plain p50
-/// values), this constant just names the set the #624 gate applies to.
-pub const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
+/// #24/#312 — the OPTICAL-INJECTION node labels this SPREAD gate applies to, mirrored from
+/// `bin/recording-verdict.rs`'s `OPTICAL_INJECTION_NODES` (kept as a local copy, like
+/// `recording_span_gate.rs` keeps its own copy of the BROADER `CAMERA_UNDER_TEST_NODES`, so this
+/// crate-root module has zero dependency on the probe-gated binary). Purely documentary here —
+/// [`spread_verdict`] itself is camera-label-agnostic (it takes plain p50 values), this constant
+/// just names the set the #624 gate applies to.
+///
+/// **Deliberately the NARROWER `OPTICAL_INJECTION_NODES` set (5 members), NOT the broader
+/// `CAMERA_UNDER_TEST_NODES` (6, includes cam2) — was itself a stale 3-member
+/// `CAMERA_UNDER_TEST_NODES`-named copy before #312 caught + fixed it.** This module's SPREAD
+/// gate is specifically about the cam2→camera OPTICAL-INJECTION latency (see the module doc
+/// above) — cam2 is the painter, not an optical-injection camera, so it correctly has no place
+/// in this set, unlike the digital-contiguity `CAMERA_UNDER_TEST_NODES` which DOES include it.
+pub const OPTICAL_INJECTION_NODES: [&str; 5] = ["cam1", "cam3", "cam4", "cam5", "cam6"];
 
 /// The #624 issue's fixed cross-camera spread threshold, in milliseconds: half a 30fps
 /// program frame (`1000.0 / 30.0 / 2.0 ≈ 16.667`, rounded down to the issue's literal `16ms`).

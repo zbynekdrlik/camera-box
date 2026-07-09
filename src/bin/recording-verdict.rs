@@ -50,8 +50,8 @@ use camera_box::probe::recording_latency::{
     cam2_cam1_samples_from_flip, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
     painter_internal_gen_to_flip, per_frame_latency_csv_rows, strih_stream_samples,
     strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
-    BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
-    BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
+    BURN_RUN_ID_CAM6, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -183,6 +183,18 @@ struct Args {
     /// #24: cam4's capture-burn run_id. See `--burn-cam3-run-id`.
     #[arg(long, default_value_t = BURN_RUN_ID_CAM4)]
     burn_cam4_run_id: u32,
+    /// #312: cam2's OWN capture-burn run_id — mirrors `--burn-cam3-run-id` exactly, but on the
+    /// fixed dual-QR PAINTER box (its camera-box daemon keeps capturing+emitting throughout a
+    /// TEST run since #291; only its framebuffer is freed for the separate painter process).
+    /// Defaults to [`BURN_RUN_ID_CAM2`].
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM2)]
+    burn_cam2_run_id: u32,
+    /// #312: cam5's capture-burn run_id (fleet growth 4→6, #451). See `--burn-cam3-run-id`.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM5)]
+    burn_cam5_run_id: u32,
+    /// #312: cam6's capture-burn run_id (fleet growth 4→6, #451). See `--burn-cam3-run-id`.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM6)]
+    burn_cam6_run_id: u32,
     /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
     /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
     /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
@@ -427,12 +439,33 @@ fn frame_is_delivered_optical(
 /// discipline) — it tolerates the rig's proven moiré floor, never a genuine read failure.
 const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 
-/// #24 — the node labels that occupy the "camera under test" role: whichever ONE of the four
-/// physical source cameras is deployed with `CAMERA_BOX_BURN_RUN_ID` set this run (mutually
-/// exclusive — a real run only ever has ONE producing a non-empty id set). Both the clean-source
-/// selection (#133, `cam1_source`/`cam1_rec_path`) and the #356 cross-recording reconciliation
-/// apply identically to any of them; strih/stream never do.
-const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
+/// #24/#312 — the node labels that occupy the "camera under test" role: whichever physical
+/// source camera(s) are deployed with `CAMERA_BOX_BURN_RUN_ID` set this run. In the plain
+/// single-camera mode exactly ONE produces a non-empty id set (mutually exclusive); in the
+/// ALL-CAMBOX sweep (`scripts/recording-e2e.sh ALL_CAMBOX=1`) ALL SIX are deployed at once, each
+/// with its own reserved id, and each is "present" only during the schedule window(s) the sweep
+/// actually cuts it into strih program. **cam2 is included here (#312)** — since #291 its
+/// camera-box daemon keeps capturing + emitting its own NDI throughout a TEST run (only its
+/// framebuffer is freed for the separate dual-QR painter), so its OWN chain is measurable by the
+/// SAME digital contiguity check as cam1/cam3/cam4/cam5/cam6. Both the clean-source selection
+/// (#133, `cam1_source`/`cam1_rec_path`) and the #356 cross-recording reconciliation apply
+/// identically to every member; strih/stream never do.
+///
+/// NOTE: this is the CONTIGUITY/loss set. It is deliberately BROADER than
+/// [`OPTICAL_INJECTION_NODES`] (below), which drives the cam2→camera OPTICAL-INJECTION latency
+/// loop and excludes cam2 itself (cam2 cannot optically film its own monitor).
+const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"];
+
+/// #312 — the SUBSET of [`CAMERA_UNDER_TEST_NODES`] that physically films cam2's painted
+/// monitor via the HDMI-splitter optical loopback (a real lens + capture card pointed at cam2's
+/// screen). Used ONLY by the `#624` per-camera cam2→camera OPTICAL-INJECTION latency loop
+/// (`camera_burn.gen_ts_ns − cam2_optical.gen_ts_ns`) — cam2 is EXCLUDED here because cam2 IS
+/// the painter: there is no second camera-vs-monitor optical hop to measure when the "camera
+/// under test" is cam2 itself (that would degenerate into measuring cam2 against its own
+/// framebuffer paint, not a real optical-injection latency). cam2 still gets its own DIGITAL
+/// contiguity/loss proof via [`CAMERA_UNDER_TEST_NODES`] above — only this narrower optical
+/// latency measurement excludes it.
+const OPTICAL_INJECTION_NODES: [&str; 5] = ["cam1", "cam3", "cam4", "cam5", "cam6"];
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
 /// contiguous, every missing id classified from the pixels.
@@ -2661,17 +2694,25 @@ fn build_and_print_verdict(
             ),
         };
         let cam1_ids = burn_ids_in(cam1_source, args.burn_cam1_run_id);
-        // #24 — cam3/cam4 occupy the SAME "camera under test" role as cam1 (mutually exclusive in
-        // any real run: only the ONE camera actually deployed with CAMERA_BOX_BURN_RUN_ID set
-        // produces a non-empty id set here), so they read from the SAME clean source
-        // (`cam1_source`, #133) with their OWN reserved burn run_id.
+        // #24/#312 — cam2/cam3/cam4/cam5/cam6 occupy the SAME "camera under test" role as cam1
+        // (in the plain single-camera mode, mutually exclusive: only the ONE camera actually
+        // deployed with CAMERA_BOX_BURN_RUN_ID set produces a non-empty id set here; in the
+        // ALL-CAMBOX sweep all six are deployed at once, each present only in its own schedule
+        // window), so they all read from the SAME clean source (`cam1_source`, #133) with their
+        // OWN reserved burn run_id.
+        let cam2_ids = burn_ids_in(cam1_source, args.burn_cam2_run_id);
         let cam3_ids = burn_ids_in(cam1_source, args.burn_cam3_run_id);
         let cam4_ids = burn_ids_in(cam1_source, args.burn_cam4_run_id);
+        let cam5_ids = burn_ids_in(cam1_source, args.burn_cam5_run_id);
+        let cam6_ids = burn_ids_in(cam1_source, args.burn_cam6_run_id);
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
         let any_burn = !cam1_ids.is_empty()
+            || !cam2_ids.is_empty()
             || !cam3_ids.is_empty()
             || !cam4_ids.is_empty()
+            || !cam5_ids.is_empty()
+            || !cam6_ids.is_empty()
             || !strih_ids_seq.is_empty()
             || !stream_ids_seq.is_empty();
         if any_burn {
@@ -2680,35 +2721,49 @@ fn build_and_print_verdict(
                 "=== #174 FULL-CHAIN per-hop verdict (camera-under-test from the {cam1_source_label}; strih/stream from the stream recording) ==="
             );
             println!(
-                "  burn ids: cam1={} cam3={} cam4={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
+                "  burn ids: cam1={} cam2={} cam3={} cam4={} cam5={} cam6={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
                 cam1_ids.len(),
+                cam2_ids.len(),
                 cam3_ids.len(),
                 cam4_ids.len(),
+                cam5_ids.len(),
+                cam6_ids.len(),
                 strih_ids_seq.len(),
                 stream_ids_seq.len()
             );
             report["full_chain"]["burn_ids_present"] = serde_json::json!({
-                "cam1": cam1_ids.len(), "cam3": cam3_ids.len(), "cam4": cam4_ids.len(),
+                "cam1": cam1_ids.len(), "cam2": cam2_ids.len(), "cam3": cam3_ids.len(),
+                "cam4": cam4_ids.len(), "cam5": cam5_ids.len(), "cam6": cam6_ids.len(),
                 "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
             report["full_chain"]["cam1_source"] = serde_json::json!(cam1_source_label);
-            // #133 (review, #24 generalized): if --strih was supplied (so the camera-under-test's
-            // source IS the strih recording) but NONE of cam1/cam3/cam4 carried a burn there, the
-            // camera leg is silently SKIPPED below and an all-zero headline could stand WITHOUT the
-            // camera having been measured. The capture burn (CAMERA_BOX_BURN_RUN_ID on whichever
-            // camera is under test) rides into strih's program, so its absence in a --strih run
-            // means the burn was OFF or never reached strih — loudly WARN so a "ZERO loss" headline
-            // is never read as a camera→strih proof when the camera was unmeasured. (No hard fail:
+            // #133 (review, #24/#312 generalized): if --strih was supplied (so the
+            // camera-under-test's source IS the strih recording) but NONE of the six carried a
+            // burn there, the camera leg is silently SKIPPED below and an all-zero headline could
+            // stand WITHOUT the camera having been measured. The capture burn
+            // (CAMERA_BOX_BURN_RUN_ID on whichever camera is under test) rides into strih's
+            // program, so its absence in a --strih run means the burn was OFF or never reached
+            // strih — loudly WARN so a "ZERO loss" headline is never read as a camera→strih proof
+            // when the camera was unmeasured. (No hard fail:
             // a deliberate burn-off / strih+stream-only diagnostic run is still valid.)
-            let camera_under_test_measured =
-                !cam1_ids.is_empty() || !cam3_ids.is_empty() || !cam4_ids.is_empty();
+            let camera_under_test_measured = !cam1_ids.is_empty()
+                || !cam2_ids.is_empty()
+                || !cam3_ids.is_empty()
+                || !cam4_ids.is_empty()
+                || !cam5_ids.is_empty()
+                || !cam6_ids.is_empty();
             if strih_data.is_some() && !camera_under_test_measured {
                 eprintln!(
                     "WARNING: --strih supplied but NO camera-under-test burn found in the strih \
-                     recording (checked cam1={}, cam3={}, cam4={}) — the camera→strih hop is \
-                     UNMEASURED this run (burn OFF or not reaching strih). A ZERO-loss headline \
-                     below covers strih/stream ONLY.",
-                    args.burn_cam1_run_id, args.burn_cam3_run_id, args.burn_cam4_run_id
+                     recording (checked cam1={}, cam2={}, cam3={}, cam4={}, cam5={}, cam6={}) — \
+                     the camera→strih hop is UNMEASURED this run (burn OFF or not reaching \
+                     strih). A ZERO-loss headline below covers strih/stream ONLY.",
+                    args.burn_cam1_run_id,
+                    args.burn_cam2_run_id,
+                    args.burn_cam3_run_id,
+                    args.burn_cam4_run_id,
+                    args.burn_cam5_run_id,
+                    args.burn_cam6_run_id
                 );
                 report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
             }
@@ -2725,8 +2780,11 @@ fn build_and_print_verdict(
             // ===========================================================================
             let all_burns = [
                 args.burn_cam1_run_id,
+                args.burn_cam2_run_id,
                 args.burn_cam3_run_id,
                 args.burn_cam4_run_id,
+                args.burn_cam5_run_id,
+                args.burn_cam6_run_id,
                 args.burn_strih_run_id,
                 args.burn_stream_run_id,
             ];
@@ -2829,6 +2887,74 @@ fn build_and_print_verdict(
                         ),
                     },
                     !cam4_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
+                    // #312 — cam2 occupies the SAME camera-under-test role for the DIGITAL
+                    // contiguity check (see the `CAMERA_UNDER_TEST_NODES` doc comment) even
+                    // though it is also the fixed optical painter — its own camera-box daemon
+                    // keeps capturing+emitting throughout a TEST run (#291). `present`
+                    // (`!cam2_ids.is_empty()`) is false unless the ALL-CAMBOX sweep deployed its
+                    // burn, so this is purely additive.
+                    NodeSpec {
+                        node: "cam2",
+                        burn_run_id: args.burn_cam2_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam2",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
+                        ),
+                    },
+                    !cam2_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
+                    // #312 — cam5 (fleet growth 4→6, #451), see the cam3 comment above.
+                    NodeSpec {
+                        node: "cam5",
+                        burn_run_id: args.burn_cam5_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam5",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
+                        ),
+                    },
+                    !cam5_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
+                    // #312 — cam6 (fleet growth 4→6, #451), see the cam3 comment above.
+                    NodeSpec {
+                        node: "cam6",
+                        burn_run_id: args.burn_cam6_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam6",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
+                        ),
+                    },
+                    !cam6_ids.is_empty(),
                     cam1_optical,
                     cam1_carried_colour,
                 ),
@@ -3362,8 +3488,21 @@ fn build_and_print_verdict(
                     )
                 };
                 let anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+                // #312: widened from cam1-only to all six reserved camera-under-test burn ids
+                // (mirroring the SAME widening this PR made to `all_burns` in the #186 contiguity
+                // block above and `latency_all_burns` in the #624 per-camera latency block below)
+                // — defense-in-depth so a forwarded cam2/cam3/cam4/cam5/cam6 digital burn payload
+                // can never be mistaken for cam2's OPTICAL tick when `--cam2-run-id` is unpinned.
+                // In practice every recording-e2e.sh invocation always pins `--cam2-run-id`,
+                // which takes precedence over this fallback — this widening only hardens the
+                // unpinned/manual-invocation path.
                 let all_burns = [
                     args.burn_cam1_run_id,
+                    args.burn_cam2_run_id,
+                    args.burn_cam3_run_id,
+                    args.burn_cam4_run_id,
+                    args.burn_cam5_run_id,
+                    args.burn_cam6_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -3583,31 +3722,35 @@ fn build_and_print_verdict(
 
                 // #624 deliverables 1+3 — generalize the whole-recording, cam1-ONLY cam2→camera
                 // OPTICAL-INJECTION hop above (#179/#194, `full_chain.latency.cam2_cam1`, LEFT
-                // UNCHANGED) to EVERY camera-under-test node (`CAMERA_UNDER_TEST_NODES`:
-                // cam1/cam3/cam4), computed PER `--switch-schedule` window so the ALL_CAMBOX
-                // 30s-cut sweep produces a REAL per-camera number: each camera's OWN
-                // capture-time burn rides alongside cam2's optical QR only while ITS window is
-                // live (the sweep cuts each camera into strih program in turn), so
-                // `camera_burn.gen_ts_ns − cam2.gen_ts_ns`, restricted to that camera's
-                // window(s) and concatenated across every cycle the sweep repeats it, is exactly
-                // that camera's own cam2→camera latency — the #286 root-cause per-camera d_X
-                // residue. The per-camera medians then feed the hard cross-camera SPREAD gate
-                // (`camera_box::switch_latency::spread_verdict`): a differing d_X beyond half a
-                // 30fps frame (16ms) can visibly break A/V lipsync when the live program cuts
-                // between two cameras.
+                // UNCHANGED) to EVERY OPTICAL-INJECTION camera-under-test node
+                // (`OPTICAL_INJECTION_NODES`: cam1/cam3/cam4/cam5/cam6 — #312: NOT cam2, which is
+                // the painter itself and has no second camera-vs-monitor optical hop to measure),
+                // computed PER `--switch-schedule` window so the ALL_CAMBOX 30s-cut sweep
+                // produces a REAL per-camera number: each camera's OWN capture-time burn rides
+                // alongside cam2's optical QR only while ITS window is live (the sweep cuts each
+                // camera into strih program in turn), so `camera_burn.gen_ts_ns − cam2.gen_ts_ns`,
+                // restricted to that camera's window(s) and concatenated across every cycle the
+                // sweep repeats it, is exactly that camera's own cam2→camera latency — the #286
+                // root-cause per-camera d_X residue. The per-camera medians then feed the hard
+                // cross-camera SPREAD gate (`camera_box::switch_latency::spread_verdict`): a
+                // differing d_X beyond half a 30fps frame (16ms) can visibly break A/V lipsync
+                // when the live program cuts between two cameras.
                 //
                 // Partition the SAME single stream recording used for the continuity sweep above
                 // into the schedule windows, anchored the SAME way (reusing `anchor_run_ids` —
                 // strih/stream burn gen_ts, falling back to the cam2 optical paint — so the two
                 // sweeps can never disagree on which window a frame belongs to). The burn
-                // exclusion list is widened to ALL FIVE reserved ids (cam1/cam3/cam4 + strih +
-                // stream) so a forwarded camera burn is never mistaken for cam2's optical QR when
-                // no anchor id was found on a frame (the continuity sweep's own 3-id `all_burns`
-                // above never needed cam3/cam4, since it never reads their payloads).
+                // exclusion list is widened to ALL EIGHT reserved ids (cam1/cam2/cam3/cam4/cam5/
+                // cam6 + strih + stream) so a forwarded camera burn is never mistaken for cam2's
+                // optical QR when no anchor id was found on a frame (the continuity sweep's own
+                // `all_burns` above never needed all of them, since it never reads every payload).
                 let latency_all_burns = [
                     args.burn_cam1_run_id,
+                    args.burn_cam2_run_id,
                     args.burn_cam3_run_id,
                     args.burn_cam4_run_id,
+                    args.burn_cam5_run_id,
+                    args.burn_cam6_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -3630,12 +3773,16 @@ fn build_and_print_verdict(
                 // an absent camera (its window never in this sweep, or its burn never decoded)
                 // must never contribute a fabricated 0ms.
                 let mut measured_p50s_ms: Vec<f64> = Vec::new();
-                for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                for &camera in OPTICAL_INJECTION_NODES.iter() {
                     let own_burn = match camera {
                         "cam1" => args.burn_cam1_run_id,
                         "cam3" => args.burn_cam3_run_id,
                         "cam4" => args.burn_cam4_run_id,
-                        _ => unreachable!("CAMERA_UNDER_TEST_NODES is exactly cam1/cam3/cam4"),
+                        "cam5" => args.burn_cam5_run_id,
+                        "cam6" => args.burn_cam6_run_id,
+                        _ => unreachable!(
+                            "OPTICAL_INJECTION_NODES is exactly cam1/cam3/cam4/cam5/cam6"
+                        ),
                     };
                     let other_burns: Vec<u32> = latency_all_burns
                         .iter()
@@ -3712,9 +3859,9 @@ fn build_and_print_verdict(
                     None => {
                         eprintln!(
                             "WARNING: #624 cross-camera spread gate needs at least 2 measured \
-                             cameras (cam1/cam3/cam4) to compare — only {} produced samples this \
-                             run. The gate is UNMEASURED (never a fabricated pass or fail) and \
-                             does not affect the run's overall verdict.",
+                             cameras (cam1/cam3/cam4/cam5/cam6) to compare — only {} produced \
+                             samples this run. The gate is UNMEASURED (never a fabricated pass \
+                             or fail) and does not affect the run's overall verdict.",
                             measured_p50s_ms.len()
                         );
                         latency_json.insert(
@@ -4197,6 +4344,36 @@ mod tests {
         node_verdict_with_optical, optical_span_facts, parse_cam1_capture_stats_str, parse_grab_ts,
         parse_painter_flip_str, parse_painter_ticks_str,
     };
+
+    /// #312 — locks the key design split: `CAMERA_UNDER_TEST_NODES` (digital contiguity) is
+    /// broader than `OPTICAL_INJECTION_NODES` (cam2→camera optical-injection latency) by EXACTLY
+    /// one member — cam2 — which participates in the former (its own chain is digitally
+    /// measurable, #291) but not the latter (it cannot optically film its own monitor).
+    #[test]
+    fn optical_injection_nodes_excludes_cam2_camera_under_test_nodes_includes_it_312() {
+        assert!(
+            super::CAMERA_UNDER_TEST_NODES.contains(&"cam2"),
+            "#312: cam2 must be a digital contiguity camera-under-test node"
+        );
+        assert!(
+            !super::OPTICAL_INJECTION_NODES.contains(&"cam2"),
+            "#312: cam2 must NOT be an optical-injection node — it is the painter itself, with \
+             no second camera-vs-monitor optical hop to measure"
+        );
+        for cam in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
+            assert!(
+                super::CAMERA_UNDER_TEST_NODES.contains(&cam)
+                    && super::OPTICAL_INJECTION_NODES.contains(&cam),
+                "#312: {cam} must be in BOTH sets — it is a real physical camera filming cam2's \
+                 monitor AND has its own digitally-measurable chain"
+            );
+        }
+        assert_eq!(
+            super::CAMERA_UNDER_TEST_NODES.len(),
+            super::OPTICAL_INJECTION_NODES.len() + 1,
+            "#312: CAMERA_UNDER_TEST_NODES must be exactly OPTICAL_INJECTION_NODES plus cam2"
+        );
+    }
     use camera_box::probe::burn_contiguity::{BurnRate, InWindowMissingKind};
     use camera_box::probe::payload::Payload;
     use camera_box::probe::recording::RecordingFrame;
@@ -4228,6 +4405,37 @@ mod tests {
              run_id {other_reserved:?} (#24) — BURN_RUN_ID_IMAG=911003 is imag-nb's OWN digital \
              corner burn (#463); reserve cam3 a FRESH, unique run_id instead of reusing it",
             args.burn_cam3_run_id
+        );
+    }
+
+    /// #312 — cam2/cam5/cam6's default capture-burn run_ids must ALSO be unique among every
+    /// other reserved id (mirrors the #24 cam3 regression test above — the same class of latent
+    /// collision bug is exactly what reserving a FRESH id per new camera-under-test guards
+    /// against). All NINE reserved ids must be pairwise distinct.
+    #[test]
+    fn all_nine_reserved_burn_run_ids_are_pairwise_distinct_312() {
+        use clap::Parser;
+        use std::collections::HashSet;
+
+        let args = super::Args::parse_from(["recording-verdict"]);
+        let ids: [(&str, u32); 9] = [
+            ("cam1", super::BURN_RUN_ID_CAM1),
+            ("cam2", args.burn_cam2_run_id),
+            ("cam3", super::BURN_RUN_ID_CAM3),
+            ("cam4", super::BURN_RUN_ID_CAM4),
+            ("cam5", args.burn_cam5_run_id),
+            ("cam6", args.burn_cam6_run_id),
+            ("strih", super::BURN_RUN_ID_STRIH),
+            ("stream", super::BURN_RUN_ID_STREAM),
+            ("imag", super::BURN_RUN_ID_IMAG),
+        ];
+        let unique: HashSet<u32> = ids.iter().map(|(_, id)| *id).collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "#312: every reserved burn run_id must be pairwise distinct — got {ids:?}, which \
+             has a duplicate (a colliding id would make the verdict tell two nodes' payloads \
+             apart incorrectly)"
         );
     }
 
@@ -4377,6 +4585,222 @@ mod tests {
                 f
             })
             .collect()
+    }
+
+    // ---- #312 — extend the #186 per-node digital-burn contiguity check to cam2 (the fixed
+    // dual-QR painter, made measurable by #291) ----------------------------------------------
+
+    const CAM2B: u32 = super::BURN_RUN_ID_CAM2; // #312 cam2's OWN per-EMIT capture burn run_id (911009)
+
+    /// Build a window of N delivered frames like [`window_cam3`], but for CAM2 as the "camera
+    /// under test" — cam2's OWN camera-box daemon keeps capturing+emitting throughout a TEST run
+    /// (#291), so its own chain is measurable by the SAME digital capture-burn mechanism as
+    /// cam1/cam3/cam4/cam5/cam6.
+    fn window_cam2(n: u32, with_stream: bool, cam2_gap_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i)];
+                let cam2b_id = match cam2_gap_at {
+                    Some(g) if i >= g => 7000 + i + 1,
+                    _ => 7000 + i,
+                };
+                ps.push((CAM2B, cam2b_id));
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 9000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #312 — extends the #186 per-node digital-burn contiguity check to CAM2. A contiguous cam2
+    /// burn end-to-end ⇒ the fused verdict reports node "cam2" ZERO loss, exactly like
+    /// cam1/cam3/cam4/cam5/cam6; cam1/cam3/cam4/cam5/cam6 themselves were never emitted this run
+    /// and must NOT appear in the loss report at all (they are mutually-exclusive
+    /// camera-under-test roles in a real single-camera run).
+    #[test]
+    fn cam2_digital_burn_extends_the_186_contiguity_check_312() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        // --min-secs 1 so the small contiguous window trivially clears the #373 span floor.
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam2(60, false, None);
+        let stream_frames = window_cam2(60, true, None);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+        )
+        .expect("verdict");
+
+        assert!(pass, "#312: contiguous cam2 burn ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        assert_eq!(
+            loss["cam2"]["zero_loss"],
+            serde_json::json!(true),
+            "#312: cam2 must be verdicted ZERO loss when its OWN burn is contiguous: {loss}"
+        );
+        for absent in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
+            assert!(
+                loss.get(absent).is_none(),
+                "#312: {absent} never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+            );
+        }
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam2"],
+            serde_json::json!(60),
+            "#312: all 60 cam2 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+    }
+
+    /// #312 — a cam2 burn GAP (a delivered frame missing its burn payload, mirroring
+    /// [`window_cam3_none`]) must still FAIL the headline — cam2's contiguity check is a real
+    /// gate, not a rubber stamp.
+    #[test]
+    fn cam2_delivered_frame_missing_burn_is_a_real_gate_312() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        // The gap sits on the STRIH recording (cam1_source — where cam2's contiguity is read
+        // from, #133/#571 pattern); the stream recording carries the FULL burn sequence.
+        let strih_frames = window_cam2_none(60, false, 30);
+        let stream_frames = window_cam2(60, true, None);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        assert!(
+            !pass,
+            "#312: a genuine cam2 burn gap must FAIL the headline, not pass: {v}"
+        );
+    }
+
+    /// #571-style mirror of [`window_cam3_none`] for cam2: frame `cam2_none_at` carries NO cam2
+    /// burn payload (a delivered frame whose cam2 burn did not decode).
+    fn window_cam2_none(n: u32, with_stream: bool, cam2_none_at: u32) -> Vec<RecordingFrame> {
+        window_cam2(n, with_stream, None)
+            .into_iter()
+            .map(|mut f| {
+                if f.frame_index == u64::from(cam2_none_at) {
+                    f.payloads.retain(|p| p.run_id != CAM2B);
+                }
+                f
+            })
+            .collect()
+    }
+
+    // ---- #312 — extend the #186 per-node digital-burn contiguity check to cam5/cam6 (fleet
+    // growth 4→6, #451) ----------------------------------------------------------------------
+
+    const CAM5B: u32 = super::BURN_RUN_ID_CAM5; // #312 cam5's OWN per-EMIT capture burn run_id (911010)
+    const CAM6B: u32 = super::BURN_RUN_ID_CAM6; // #312 cam6's OWN per-EMIT capture burn run_id (911011)
+
+    /// Build a window of N delivered frames carrying BOTH cam5's and cam6's digital burns in
+    /// every frame (a synthetic-only shortcut — in any REAL run only one of cam1/cam2/cam3/cam4/
+    /// cam5/cam6 is ever burned in a given schedule window, they are mutually exclusive; stamping
+    /// both here just lets ONE window prove BOTH new `NodeSpec` entries independently instead of
+    /// building two separate 60-frame windows).
+    fn window_cam5_and_cam6(n: u32, with_stream: bool) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> =
+                    vec![(CAM2, 100 + i), (CAM5B, 8000 + i), (CAM6B, 9000 + i)];
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 9500 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #312 — extends the #186 per-node digital-burn contiguity check to CAM5 and CAM6 (fleet
+    /// growth 4→6, #451). A contiguous burn end-to-end for both ⇒ the fused verdict reports BOTH
+    /// node "cam5" and node "cam6" ZERO loss — locks that reverting either `NodeSpec` tuple (or
+    /// mixing up which `--burn-camN-run-id` feeds which node) would be caught here, not just by
+    /// the structural "ids are pairwise distinct" test.
+    #[test]
+    fn cam5_and_cam6_digital_burns_extend_the_186_contiguity_check_312() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam5_and_cam6(60, false);
+        let stream_frames = window_cam5_and_cam6(60, true);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+        )
+        .expect("verdict");
+
+        assert!(pass, "#312: contiguous cam5+cam6 burns ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        for node in ["cam5", "cam6"] {
+            assert_eq!(
+                loss[node]["zero_loss"],
+                serde_json::json!(true),
+                "#312: {node} must be verdicted ZERO loss when its OWN burn is contiguous: {loss}"
+            );
+        }
+        for absent in ["cam1", "cam2", "cam3", "cam4"] {
+            assert!(
+                loss.get(absent).is_none(),
+                "#312: {absent} never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+            );
+        }
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam5"],
+            serde_json::json!(60),
+            "#312: all 60 cam5 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam6"],
+            serde_json::json!(60),
+            "#312: all 60 cam6 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
     }
 
     /// #24 — extends the #186 per-node digital-burn contiguity check (previously cam1-only) to

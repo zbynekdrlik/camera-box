@@ -44,9 +44,10 @@ pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool
 
 /// #373 — the node labels whose burn is read from the CLEAN strih recording (#133) at
 /// `capture_fps`, rather than from the stream recording at `stream_capture_fps`. cam1 is the
-/// original "camera under test"; #24 extends the SAME role to cam3/cam4 (mutually exclusive in
-/// any real run — see `recording-verdict.rs`'s `CAMERA_UNDER_TEST_NODES`, which this mirrors).
-const CAMERA_UNDER_TEST_NODES: [&str; 3] = ["cam1", "cam3", "cam4"];
+/// original "camera under test"; #24 extends the SAME role to cam3/cam4, and #312 further to
+/// cam2/cam5/cam6 (all six emit 60fps NDI — mirrors `recording-verdict.rs`'s
+/// `CAMERA_UNDER_TEST_NODES`, which this is kept in sync with).
+const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"];
 
 /// #461 — the imag-nb node label (EPIC #466 Topology v2). imag records ON ITS OWN recording at
 /// its own rate (60fps, low-latency IMAG) — neither the camera-under-test's `capture_fps` (read
@@ -213,6 +214,22 @@ mod tests {
             60.0,
             "cam4's optical span ALSO comes from the 60 fps strih recording, like cam1"
         );
+    }
+
+    #[test]
+    fn node_capture_fps_treats_cam2_cam5_cam6_like_cam1_312() {
+        // #312 — cam2 (the fixed painter, whose OWN camera-box daemon keeps capturing/emitting
+        // since #291) and cam5/cam6 (fleet growth 4→6, #451) join the "camera under test" role
+        // for the #186 digital-burn contiguity check. Before this fix they fell through to
+        // `stream_capture_fps` exactly like the pre-#24 cam3/cam4 bug.
+        let (cap, stream_cap) = (60.0, 30.0);
+        for node in ["cam2", "cam5", "cam6"] {
+            assert_eq!(
+                node_capture_fps(node, cap, stream_cap, IMAG_FPS),
+                60.0,
+                "{node}'s optical span ALSO comes from the 60 fps strih recording, like cam1"
+            );
+        }
     }
 
     #[test]

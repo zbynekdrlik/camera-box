@@ -66,9 +66,6 @@ def _extract_cambox_sweep_default():
     return m.group(1)
 
 
-PAINTER_CAMERA = "CAM2"  # #333: the physical dual-QR painter box, never a swept capture source
-
-
 def test_cambox_sweep_default_matches_canonical_ndi_mapping():
     """Every (scene, label) pair the sweep defaults to must match the CURRENT #399 pinned
     mapping — a scene label pointing at the wrong camera silently mis-attributes that camera's
@@ -88,17 +85,28 @@ def test_cambox_sweep_default_matches_canonical_ndi_mapping():
         )
 
 
-def test_cambox_sweep_default_covers_every_non_painter_camera():
-    """#24: the default sweep must include EVERY camera in the canonical mapping except the
-    painter (CAM2) — a camera that drops out of the default (e.g. because it used to be down)
-    must be re-added once it's no longer excluded for a real reason."""
+def test_cambox_sweep_default_covers_every_camera_in_the_canonical_mapping():
+    """#24/#312: the default sweep must include EVERY camera in the canonical mapping — a camera
+    that drops out of the default (e.g. because it used to be down, or was never wired) must be
+    re-added once it's no longer excluded for a real reason.
+
+    #333 used to exclude CAM2 here (the physical dual-QR painter box) on the theory that "while
+    painting the monitor it does NOT capture/emit its OWN camera NDI" — but #291 (closed
+    2026-06-28) fixed exactly that: cam2's camera-box daemon keeps CAPTURING + EMITTING its own
+    NDI feed throughout a TEST run (only its framebuffer is freed for the separate painter
+    process). #312 corrected the stale exclusion: cam2's OWN chain is now ALSO swept + digitally
+    burn-measured, exactly like every other camera in the fleet (deployed via
+    scripts/recording-e2e.sh's `[2b/8]` loop with `CAMERA_BOX_NO_DISPLAY=1` so the painter can
+    still own /dev/fb0). There is no more "painter exclusion" at the scene/sweep level — cam2
+    being the fixed optical-tick SOURCE is an orthogonal, separate role from being a swept
+    camera-under-test."""
     canonical = _scene_to_camera_from_default_map()
-    expected_cameras = {cam for cam in canonical.values() if cam != PAINTER_CAMERA}
+    expected_cameras = set(canonical.values())
 
     sweep_default = _extract_cambox_sweep_default()
     swept_cameras = {label for _scene, label in switch_schedule.parse_sweep(sweep_default)}
 
     assert swept_cameras == expected_cameras, (
-        f"CAMBOX_SWEEP default covers {sorted(swept_cameras)}, expected every non-painter camera "
-        f"{sorted(expected_cameras)} (painter {PAINTER_CAMERA} is correctly excluded, #333)"
+        f"CAMBOX_SWEEP default covers {sorted(swept_cameras)}, expected every camera in the "
+        f"canonical mapping {sorted(expected_cameras)} (#312: cam2 is no longer excluded)"
     )

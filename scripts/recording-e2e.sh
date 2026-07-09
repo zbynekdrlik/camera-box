@@ -74,35 +74,43 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/painter-csv-freshness.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
-# the optical loopback + carrying the #174 render-time capture burn) is one of cam1/cam3/cam4
-# ONLY — cam2 is the fixed painter (its own monitor + /dev/fb0) and cam5/cam6 are not wired
-# into recording-verdict's CAMERA_UNDER_TEST_NODES (["cam1","cam3","cam4"],
-# src/bin/recording-verdict.rs) or a strih scene. camera_strih_route() (camera-set.sh) fails
-# loudly (via `set -e`, mirroring camera_resolve's own bare-call style above) on any other
-# CAM rather than silently certifying the wrong box; on success it sets
-# CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE, consumed below.
+# the optical loopback + carrying the #174 render-time capture burn) is one of
+# cam1/cam3/cam4/cam5/cam6 ONLY (#312 fleet growth 4→6, #451) — cam2 is deliberately EXCLUDED
+# from this role: it is the fixed painter (its own monitor + /dev/fb0), and camera_strih_route()
+# rejects it by design so it can never be selected as SOURCE (see that function's own doc for
+# why — the device conflict with $PAINTER_IP). cam2 IS separately wired as a "camera under
+# test" for the ALL-CAMBOX sweep's digital-burn contiguity check (recording-verdict.rs's
+# CAMERA_UNDER_TEST_NODES) via its own dedicated scene "Cam 2"/"NDI cam2" and burn id, keyed
+# off $PAINTER_IP directly in the [2b/8] deploy loop below — NEVER through this SOURCE-camera
+# resolution. camera_strih_route() (camera-set.sh) fails loudly (via `set -e`, mirroring
+# camera_resolve's own bare-call style above) on any unsupported CAM rather than silently
+# certifying the wrong box; on success it sets CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE, consumed
+# below.
 camera_strih_route "$CAMERA_NAME"
-# ALL_CAMBOX=1's OWN secondary-camera deploy loop ([2b/8] below) unconditionally deploys cam3
-# AND cam4 at their FIXED physical IPs (CAM3_IP/CAM4_IP). If CAM=cam3 (or cam4) is ALSO picked
-# as the primary SOURCE camera, [2/8] would deploy that SAME physical box a second time under
-# a different burn binary — a real device/process conflict (two camera-box instances fighting
-# over /dev/video0), not just a labeling nit. Reject the combination loudly instead.
+# ALL_CAMBOX=1's OWN secondary-camera deploy loop ([2b/8] below) unconditionally deploys
+# cam2/cam3/cam4/cam5/cam6 at their FIXED physical IPs. If CAM=cam3/cam4/cam5/cam6 is ALSO
+# picked as the primary SOURCE camera, [2/8] would deploy that SAME physical box a second time
+# under a different burn binary — a real device/process conflict (two camera-box instances
+# fighting over /dev/video0), not just a labeling nit. Reject the combination loudly instead.
 if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "cam1" ]; then
   echo "ERROR: CAM='$CAMERA_NAME' + ALL_CAMBOX=1 is not supported — ALL_CAMBOX's own [2b/8]" >&2
-  echo "       loop already deploys cam3/cam4 at their fixed IPs alongside the primary; picking" >&2
-  echo "       one of them as the primary SOURCE camera too would double-deploy the same" >&2
-  echo "       physical box. Run CAM=cam3 (or cam4) WITHOUT ALL_CAMBOX for a dedicated" >&2
-  echo "       single-node source-camera certification (#24)." >&2
+  echo "       loop already deploys cam2/cam3/cam4/cam5/cam6 at their fixed IPs alongside the" >&2
+  echo "       primary; picking one of them as the primary SOURCE camera too would" >&2
+  echo "       double-deploy the same physical box. Run CAM=cam3/cam4/cam5/cam6 WITHOUT" >&2
+  echo "       ALL_CAMBOX for a dedicated single-node source-camera certification (#24)." >&2
   exit 1
 fi
 
-CAM1_IP="${CAM1_IP:-$CAMERA_IP}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn); resolved via CAM=/camera_resolve above (#24) — despite the name, this is whichever of cam1/cam3/cam4 was selected
-PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films
-# #624: the OTHER two camera-under-test boxes the ALL_CAMBOX sweep cuts into strih program.
-# Only used (deployed to / restored) when ALL_CAMBOX=1 — the default single-camera path never
-# touches them. Same physical IPs camera-set.sh / cam-disk-guard.sh / rig-restore-watchdog.sh use.
+CAM1_IP="${CAM1_IP:-$CAMERA_IP}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn); resolved via CAM=/camera_resolve above (#24) — despite the name, this is whichever of cam1/cam3/cam4/cam5/cam6 was selected
+PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films; #312: ALSO deployed as its OWN camera-under-test node ([2b/8] below), keyed off this same IP
+# #624/#312: the OTHER camera-under-test boxes the ALL_CAMBOX sweep cuts into strih program
+# (cam2's own chain + cam3/cam4/cam5/cam6). Only used (deployed to / restored) when
+# ALL_CAMBOX=1 — the default single-camera path never touches them. Same physical IPs
+# camera-set.sh / cam-disk-guard.sh / rig-restore-watchdog.sh use.
 CAM3_IP="${CAM3_IP:-10.77.9.63}"
 CAM4_IP="${CAM4_IP:-10.77.9.64}"
+CAM5_IP="${CAM5_IP:-10.77.9.65}"
+CAM6_IP="${CAM6_IP:-10.77.9.66}"
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 # #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
@@ -155,24 +163,37 @@ IMAG_CAPTURE_FPS="${IMAG_CAPTURE_FPS:-60}"
 # IS the cam1 mark in the stream recording — the reason #179 can drop the cam1 grab.
 BURN_CAM1_RUN_ID="${BURN_CAM1_RUN_ID:-911001}"
 # #624: cam3/cam4 capture-burn run_ids, deployed ONLY under ALL_CAMBOX=1 (mirrors cam1's burn
-# above but on the OTHER two camera-under-test boxes the sweep cuts into strih program). Match
+# above but on the OTHER camera-under-test boxes the sweep cuts into strih program). Match
 # recording-verdict's own BURN_RUN_ID_CAM3 (911008) / BURN_RUN_ID_CAM4 (911007) defaults exactly
 # so the verdict finds them without any extra flag even if these are left at default.
 BURN_CAM3_RUN_ID="${BURN_CAM3_RUN_ID:-911008}"
 BURN_CAM4_RUN_ID="${BURN_CAM4_RUN_ID:-911007}"
-# #24 item 1: which of the three reserved ids above belongs to the box actually filling the
-# SOURCE-camera role THIS run ($CAMERA_NAME, resolved via CAM= at the top). The three ids are
-# already mutually distinct (911001/911008/911007) and already read INDEPENDENTLY by
-# recording-verdict's full-chain verdict (CAMERA_UNDER_TEST_NODES, src/bin/recording-verdict.rs)
-# — deploying the resolved camera under the id that matches its OWN role below, and leaving the
-# other two ids at their own (never-deployed-this-run, so never-present) defaults, is all that's
-# needed. No recording-verdict changes: every `--burn-cam1-run-id "$BURN_CAM1_RUN_ID"` call site
-# elsewhere in this script stays untouched (it correctly reports "no cam1 present" when a
-# different camera was actually deployed; the deployed camera's OWN flag/default catches it).
+# #312: cam2's OWN capture-burn run_id, deployed ONLY under ALL_CAMBOX=1 -- cam2 is the fixed
+# dual-QR PAINTER but (since #291) its camera-box daemon keeps capturing+emitting its own NDI
+# feed throughout the run, so its OWN chain is ALSO measurable by this SAME mechanism. Matches
+# recording-verdict's BURN_RUN_ID_CAM2 (911009) default.
+BURN_CAM2_RUN_ID="${BURN_CAM2_RUN_ID:-911009}"
+# #312: cam5/cam6 capture-burn run_ids (fleet growth 4→6, #451), deployed ONLY under
+# ALL_CAMBOX=1. Match recording-verdict's BURN_RUN_ID_CAM5 (911010) / BURN_RUN_ID_CAM6 (911011)
+# defaults exactly.
+BURN_CAM5_RUN_ID="${BURN_CAM5_RUN_ID:-911010}"
+BURN_CAM6_RUN_ID="${BURN_CAM6_RUN_ID:-911011}"
+# #24 item 1: which of the reserved ids above belongs to the box actually filling the
+# SOURCE-camera role THIS run ($CAMERA_NAME, resolved via CAM= at the top; NEVER cam2 — see
+# camera_strih_route()'s own doc). The ids are already mutually distinct and already read
+# INDEPENDENTLY by recording-verdict's full-chain verdict (CAMERA_UNDER_TEST_NODES,
+# src/bin/recording-verdict.rs) — deploying the resolved camera under the id that matches its
+# OWN role below, and leaving the other ids at their own (never-deployed-this-run, so
+# never-present) defaults, is all that's needed. No recording-verdict changes: every
+# `--burn-cam1-run-id "$BURN_CAM1_RUN_ID"` call site elsewhere in this script stays untouched
+# (it correctly reports "no cam1 present" when a different camera was actually deployed; the
+# deployed camera's OWN flag/default catches it).
 case "$CAMERA_NAME" in
   cam1) SRC_BURN_RUN_ID="$BURN_CAM1_RUN_ID" ;;
   cam3) SRC_BURN_RUN_ID="$BURN_CAM3_RUN_ID" ;;
   cam4) SRC_BURN_RUN_ID="$BURN_CAM4_RUN_ID" ;;
+  cam5) SRC_BURN_RUN_ID="$BURN_CAM5_RUN_ID" ;;
+  cam6) SRC_BURN_RUN_ID="$BURN_CAM6_RUN_ID" ;;
 esac
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
@@ -371,20 +392,25 @@ cleanup() {
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
     "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
-  # #624: cam3/cam4 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above actually ran
-  # (gated the same way) so a plain single-camera run never touches these two boxes at all.
+  # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
+  # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-    for _cip in "$CAM3_IP" "$CAM4_IP"; do
+    for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
         "pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
          rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
     done
   fi
-  # cam2 (painter): we stopped its camera-box to free /dev/fb0; restart it. #309: FIRST clear any
-  # leftover #291 rig-mode no-display drop-in (a prior `rig-mode.sh test` would otherwise make this
-  # restart bring camera-box back WITHOUT --display — the interkom return monitor stays dark). The
-  # clear is single-sourced (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent).
+  # cam2 (painter): restart it. #309: FIRST clear any leftover #291 rig-mode no-display drop-in
+  # (a prior `rig-mode.sh test` would otherwise make this restart bring camera-box back WITHOUT
+  # --display — the interkom return monitor stays dark). The clear is single-sourced
+  # (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent). #312: under
+  # ALL_CAMBOX=1, [2b/8] ALSO deployed a manually nohup'd probe-featured burn binary here (the
+  # SAME digit-anchored kill pattern #626 requires elsewhere in this cleanup) — harmless
+  # (matches nothing) on the plain single-camera path, where [2b/8] never ran.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
+pkill -9 -f 'camera-box-burn-[0-9]' 2>/dev/null || true
+rm -f /tmp/camera-box-burn-* 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
 systemctl start cam2-painter 2>/dev/null || true"
@@ -526,28 +552,48 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 
-# #624: the ALL_CAMBOX sweep also cuts cam3/cam4 into strih program — without their OWN
-# capture-burn deployed the SAME way as cam1 above, recording-verdict's new per-camera
-# all_cambox_latency block would honestly report null for them (no burn to pair against), which
-# is NOT the real per-camera proof this sweep exists to produce. Mirror cam1's deploy exactly,
-# once per box, gated on ALL_CAMBOX=1 (the default single-camera path never touches cam3/cam4).
+# #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4/cam5/cam6 into strih program —
+# without their OWN capture-burn deployed the SAME way as cam1 above, recording-verdict's
+# per-camera all_cambox_latency/contiguity blocks would honestly report null for them (no burn
+# to pair against), which is NOT the real per-camera proof this sweep exists to produce. Mirror
+# cam1's deploy exactly, once per box, gated on ALL_CAMBOX=1 (the default single-camera path
+# never touches any of them).
+#
+# cam2 is a SPECIAL CASE in this loop: it is ALSO the fixed dual-QR PAINTER, so its manually
+# nohup'd binary MUST carry CAMERA_BOX_NO_DISPLAY=1 (the SAME #291 opt-out rig-mode.sh uses) —
+# every other camera-under-test box's binary is launched WITHOUT it (nothing else claims their
+# fb0, so their normal unconditional HDMI preview is harmless). This is what lets the SEPARATE
+# frame-probe painter (launched next, [3/8]) own /dev/fb0 without stopping cam2's OWN measured
+# capture+NDI-emit chain. Stopping the PERMANENT painter unit (see the guarded stop command
+# below, #440) is unconditionally attempted for every box in the loop — a harmless no-op on
+# cam3/cam4/cam5/cam6 (unit doesn't exist there, `2>/dev/null || true` swallows it) — but is
+# REQUIRED on cam2 to avoid the #328/#440 two-painters-fighting-over-fb0 bug (the permanent
+# service and this loop's transient probe-featured binary must never both hold fb0/run at once).
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _cn_ip_burn in "cam3=$CAM3_IP=$BURN_CAM3_RUN_ID" "cam4=$CAM4_IP=$BURN_CAM4_RUN_ID"; do
+  for _cn_ip_burn in \
+    "cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID" \
+    "cam3=$CAM3_IP=$BURN_CAM3_RUN_ID" \
+    "cam4=$CAM4_IP=$BURN_CAM4_RUN_ID" \
+    "cam5=$CAM5_IP=$BURN_CAM5_RUN_ID" \
+    "cam6=$CAM6_IP=$BURN_CAM6_RUN_ID"; do
     _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
-    echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624 ALL_CAMBOX)"
+    echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624/#312 ALL_CAMBOX)"
     _cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"
+    _cnodisplay=""
+    if [ "$_cn" = "cam2" ]; then _cnodisplay="CAMERA_BOX_NO_DISPLAY=1 "; fi
     sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
       "$PROBE_BIN_DIR"/camera-box root@"$_cip":"$_cbin"
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$_cip" \
-      "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
+      "systemctl stop cam2-painter 2>/dev/null || true; \
+       systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
        chmod +x $_cbin; \
        i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
        v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
-       (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$_cburn \
+       (${_cnodisplay}CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$_cburn \
          NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
          nohup $_cbin >/tmp/cbox-burn-${_cn}.log 2>&1 &)"
   done
-  sleep 4  # let cam3/cam4's NDI senders (with their burns) become discoverable
+  sleep 4  # let cam2/cam3/cam4/cam5/cam6's NDI senders (with their burns) become discoverable
 fi
 
 echo "[3/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
@@ -557,9 +603,19 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # clean --duration-secs self-exit, so a painter killed early (or a prior aborted run) leaves a
 # STALE /tmp/painter.csv in place. Removing it before launch guarantees the file we later pull
 # is THIS run's — never a silently-trusted leftover (run 354002's 14.9h-offset fake FAIL).
+#
+# #312: under ALL_CAMBOX=1, [2b/8] above ALREADY redeployed cam2's camera-box as a
+# probe-featured, no-display, OWN-burn binary — it keeps capture+NDI-emit alive (#291) and
+# never touches /dev/fb0, so fb0 is free for the painter WITHOUT touching camera-box again
+# here. The plain single-camera path (ALL_CAMBOX unset) never runs [2b/8], so it still needs
+# the ORIGINAL stop-camera-box step here (cam2 is not a measured node in that mode).
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  _cam2_prep="rm -f /tmp/painter.csv;"
+else
+  _cam2_prep="systemctl stop cam2-painter 2>/dev/null || true; systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
+fi
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-  "systemctl stop cam2-painter 2>/dev/null || true; \
-   systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv; \
+  "$_cam2_prep \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
       --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+60)) \
@@ -667,7 +723,10 @@ FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
 # broadcast signal — sampling it false-aborts DETERMINISTICALLY (run 7020001: identical hash
 # across 4 retry attempts while cam2's emitter ran healthy at 60 fps). Derive the source list
 # live: keep every default input EXCEPT those bound to FROZEN_CAM_EXCLUDE_SENDER. An explicit
-# FROZEN_CAM_SOURCES env still overrides everything (operator escape hatch, unchanged).
+# FROZEN_CAM_SOURCES env still overrides everything (operator escape hatch, unchanged). #312:
+# widened the checked input set to all six canonical NDI-input slots (fleet growth 4→6, #451,
+# and cam2 itself is no longer skipped a priori — it is excluded here ONLY if its sender name
+# actually matches FROZEN_CAM_EXCLUDE_SENDER at gate time, same as every other input).
 FROZEN_CAM_EXCLUDE_SENDER="${FROZEN_CAM_EXCLUDE_SENDER:-CAM2 (usb)}"
 if [ -z "${FROZEN_CAM_SOURCES:-}" ]; then
   FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" <<'PYEOF'
@@ -677,7 +736,7 @@ m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 host, exclude = sys.argv[1], sys.argv[2]
 ws = m._conn(host, os.environ.get("OBS_PASSWORD", ""))
 keep = []
-for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam5"]:
+for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6"]:
     try:
         s = m._rpc(ws, "GetInputSettings", {"inputName": inp}).get("inputSettings", {})
         sender = s.get("ndi_source_name", "")
@@ -699,7 +758,7 @@ for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
       --host "$STRIH" \
       --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
       --samples   "${FROZEN_CAM_SAMPLES:-8}" \
-      --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam5}"; then
+      --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6}"; then
     frozen_ok=1
     break
   fi
@@ -1152,19 +1211,24 @@ python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start
 ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # scene:label pairs, per the CANONICAL #399 strih NDI-input->camera mapping (set-ndi-mapping.py
 # DEFAULT_MAP; scene names follow the input labels 1:1, .claude/skills/genlock/SKILL.md):
-#   'Cam 5'->CAM1(.61)  'Cam 1'->CAM3(.63)  'Cam 3'->CAM4(.64)
+#   'Cam 5'->CAM1(.61)  'Cam 1'->CAM3(.63)  'Cam 3'->CAM4(.64)  'Cam 2'->CAM2(.62)
+#   'Cam 4'->CAM5(.65)  'Cam 6'->CAM6(.66)
 # #24/#399: CAM3 is back in the default — its original exclusion (#301, cam3 SSH down) closed
 # 2026-06-30, and #399 later re-pinned 'Cam 1' from CAM4 to CAM3 (a prior default here still said
 # 'Cam 1'->CAM4, silently mis-attributing CAM3's frames to the "CAM4" label — see
 # tests/python/test_cambox_sweep_mapping.py, which cross-checks this default against DEFAULT_MAP
-# so a future re-map can't desync it again). #333: the default sweeps ONLY the non-painter CAPTURE
-# boxes. CAM2/.62 is the dual-QR PAINTER — while painting the monitor (/dev/fb0 → HDMI splitter) it
-# does NOT capture/emit its OWN camera NDI (#179 "cam2 paints, NO grab"), so switching strih
-# program to its scene shows nothing → frames=0, a guaranteed FAIL that also inflates
-# frames_without_anchor. So the painter can never be a swept capture source; it is excluded from
-# the default. To prove the painter box itself, override $CAMBOX_SWEEP for a run where a DIFFERENT
-# box paints.
-CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4}"
+# so a future re-map can't desync it again).
+#
+# #312 CORRECTS the #333 painter exclusion: this default used to sweep ONLY cam1/cam3/cam4,
+# excluding CAM2 on the theory that "while painting the monitor it does NOT capture/emit its OWN
+# camera NDI" (#179). That reasoning went STALE the moment #291 (closed 2026-06-28) landed:
+# cam2's camera-box daemon keeps CAPTURING + EMITTING its own NDI feed throughout a TEST run
+# (only its framebuffer is freed for the separate frame-probe painter process, via
+# CAMERA_BOX_NO_DISPLAY=1 — see the `[2b/8]` deploy loop below). cam2's OWN chain is therefore
+# JUST AS MEASURABLE as cam1/cam3/cam4/cam5/cam6's, via the SAME digital capture-burn mechanism
+# (recording-verdict.rs's CAMERA_UNDER_TEST_NODES) — this default now includes it. cam5/cam6
+# (fleet growth 4→6, #451) are added the same way cam3/cam4 were by #624.
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,
@@ -1474,9 +1538,10 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --min-secs 300 --capture-fps "$STRIH_CAPTURE_FPS" \
     --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
     --imag-capture-fps "$IMAG_CAPTURE_FPS" --cam2-run-id "$RUN_ID" \
-    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-cam3-run-id "$BURN_CAM3_RUN_ID" \
-    --burn-cam4-run-id "$BURN_CAM4_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
-    --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+    --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-cam2-run-id "$BURN_CAM2_RUN_ID" \
+    --burn-cam3-run-id "$BURN_CAM3_RUN_ID" --burn-cam4-run-id "$BURN_CAM4_RUN_ID" \
+    --burn-cam5-run-id "$BURN_CAM5_RUN_ID" --burn-cam6-run-id "$BURN_CAM6_RUN_ID" \
+    --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
   # merely printed) — `if`-form so a missing/failed imag extract never `set -e`-aborts the merge of

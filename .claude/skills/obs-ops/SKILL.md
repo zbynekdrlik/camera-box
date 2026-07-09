@@ -158,6 +158,22 @@ The user has repeated this 2-3× and gets angry when re-asked which recovery met
    - **Reading the OBS log on stream:** it is DROWNED by `ytfast.py`/`ytslow.py` script spam
      (~4 lines/s). Filter first: `Get-Content $log | Where-Object { $_ -notmatch 'Unknown Script|ytfast|ytslow' }`.
 
+4. **Unkillable obs64 after an NVENC crash** (2026-07-09, stream box): a stale obs64 instance left
+   over from an earlier session — "Recording error: NVENC EncodeAPI Internal Error
+   (NV_ENC_ERR_INVALID_PARAM)" + a stale "OBS has crashed!" crash-reporter dialog both still open —
+   survived BOTH `Stop-Process -Id <pid> -Force` (returns OK, process still there after) AND
+   `taskkill /PID <pid> /F` (printed `ERROR: The process with PID <pid> could not be terminated.
+   Reason: There is no running instance of the task.` — a misleading message; the process was
+   provably still running via `Get-Process`). No classic TDR/DXGI signature (`nvidia-smi` showed
+   healthy 0% util, normal temp — unlike point 3's GPU wedge) and `Responding: True` throughout (not
+   the #391 pegged-CPU/Responding=False signature either) — this is a THIRD distinct unkillable
+   pattern, not yet root-caused. **Fix: `Restart-Computer -Force`** (same dev-rig-recovery
+   authority as point 3) — confirmed clean afterward (`(Get-Process obs64).Count == 0` post-boot,
+   fresh launch via `launch-obs-genlock.sh --box stream --force` came up with a single instance,
+   genlock render tick ENABLED, and a real recording produced real bytes). If you hit an obs64 that
+   `Stop-Process -Force` claims to kill but `Get-Process` still shows running a few seconds later,
+   don't loop retrying kill commands — go straight to the reboot.
+
 Do NOT use AskUserQuestion for OBS recovery — just recover it.
 
 ## #391 — broadcast-OBS liveness watchdog (detect+alert; ships disabled)

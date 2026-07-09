@@ -334,3 +334,26 @@ job. This is a GitHub-side runner-pool capacity hiccup, unrelated to the diff. P
 re-queues the SAME run (same run id, same commit) — no need to re-push or investigate the diff.
 If a SECOND rerun hits the identical annotation, treat it as a genuine (rare) GitHub outage, not a
 repo problem.
+
+## `gh pr edit -F file.md` can silently no-op on gh 2.45.0 (PR #635)
+
+Editing a PR body (e.g. to fix a post-review-finding correction) via `gh pr edit 635 -F body.md`
+failed with `GraphQL: Projects (classic) is being deprecated... (repository.pullRequest.projectCards)`
+and exited 1 — but the body was genuinely unchanged, not just an unrelated warning. Retrying the
+identical `gh pr edit` command hit the same error every time on this gh version (2.45.0) whenever
+the repo has GitHub Projects enabled (`gh pr edit` fetches `projectCards` as part of its response
+handling and this repo's Projects state trips it).
+
+**Workaround — `gh api` with `--input`, NOT `-f field=@file`:**
+```bash
+python3 -c "
+import json
+with open('body.md') as f: body = f.read()
+json.dump({'body': body}, open('payload.json', 'w'))
+"
+gh api repos/OWNER/REPO/pulls/N -X PATCH --input payload.json
+```
+**`gh api ... -f body=@file.md` does NOT dereference the `@path` on this gh version** — verified
+live, it wrote the PR body as the literal 20-character string `"@/tmp/pr-body.md"`, not the file's
+contents. Always build a small JSON payload file and use `--input`, never trust `-f key=@file` to
+read from disk here.

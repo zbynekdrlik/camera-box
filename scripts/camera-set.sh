@@ -91,18 +91,39 @@ camera_resolve() {
 # camera_strih_route <name>
 # On success: sets CAMERA_STRIH_SCENE / CAMERA_STRIH_SOURCE -- the strih OBS scene, and its
 # underlying NDI-input name, that shows this physical camera's feed on the certified prod
-# program -- and returns 0. On any camera NOT wired as a strih-routed "camera under test"
-# (an unknown name, cam2 -- the fixed painter/monitor box, or cam5/cam6 -- not yet reserved a
-# #174 capture-burn id or a strih scene) prints an error to stderr and returns 1.
+# program -- and returns 0. On any camera NOT wired as a strih-routed SOURCE camera (an unknown
+# name, or cam2 -- see below) prints an error to stderr and returns 1.
 #
 # #24 item 1: extracted so scripts/recording-e2e.sh's single-node full-path launch can drive
 # cam1, cam3, OR cam4 as the dedicated SOURCE camera (the box filming cam2's monitor, carrying
-# the #174 render-time capture burn) instead of being hard-coded to cam1. The scene/source
-# pins mirror scripts/set-ndi-mapping.py's fixed, Claude-owned genlock mapping EXACTLY (never
-# re-derive it separately -- that mapping is the single place it is decided):
+# the #174 render-time capture burn) instead of being hard-coded to cam1. #312 (fleet growth
+# 4->6, #451) extends this to cam5/cam6 too.
+#
+# cam2 is DELIBERATELY NOT a case here, and never should be: recording-e2e.sh's `$CAMERA_NAME`
+# default IS "cam2" (back-compat, see below) while `$PAINTER_IP` is ALSO hardcoded to cam2's
+# physical IP -- if this function accepted "cam2" as a valid SOURCE route, an un-overridden
+# recording-e2e.sh run would try to deploy the SOURCE-camera capture-burn binary AND the painter
+# process to the SAME physical box simultaneously (a real /dev/video0 + /dev/fb0 device
+# conflict), instead of failing loudly here as designed. #312 DOES make cam2 a measurable
+# "camera under test" for the ALL-CAMBOX sweep's digital-burn contiguity check (see
+# `recording-verdict.rs`'s `CAMERA_UNDER_TEST_NODES` + its own scene "Cam 2"/"NDI cam2" pin) --
+# but that wiring is deliberately kept OUT of this function and lives directly in
+# scripts/recording-e2e.sh's `CAMBOX_SWEEP` default + its `[2b/8]` deploy loop (keyed off
+# `$PAINTER_IP`, never through a `camera_strih_route "cam2"` call), so the single-SOURCE-camera
+# path above can never accidentally select cam2.
+#
+# The scene/source pins mirror scripts/set-ndi-mapping.py's fixed, Claude-owned genlock mapping
+# EXACTLY (never re-derive it separately -- that mapping is the single place it is decided):
 #   NDI cam5 -> CAM1 (usb)   =>  cam1 shows on scene "Cam 5" / source "NDI cam5"
 #   NDI cam1 -> CAM3 (usb)   =>  cam3 shows on scene "Cam 1" / source "NDI cam1"
 #   NDI cam3 -> CAM4 (usb)   =>  cam4 shows on scene "Cam 3" / source "NDI cam3"
+#   NDI cam4 -> CAM5 (usb)   =>  cam5 shows on scene "Cam 4" / source "NDI cam4" (#312: this slot
+#                                previously DUPLICATED CAM4 (usb), the exact drift bug
+#                                set-ndi-mapping.py's own docstring warns about -- repointed to
+#                                the previously-unwired CAM5 physical box instead)
+#   NDI cam6 -> CAM6 (usb)   =>  cam6 shows on scene "Cam 6" / source "NDI cam6" (#312: already
+#                                correctly bound live on strih; now canonically pinned so it
+#                                survives an OBS relaunch like the other four)
 # Literal `case` match (#39 injection-safe, same threat model as camera_resolve above) --
 # an unknown/hostile name runs no command, it just falls through to the reject arm.
 camera_strih_route() {
@@ -111,8 +132,10 @@ camera_strih_route() {
     cam1) CAMERA_STRIH_SCENE="Cam 5"; CAMERA_STRIH_SOURCE="NDI cam5" ;;
     cam3) CAMERA_STRIH_SCENE="Cam 1"; CAMERA_STRIH_SOURCE="NDI cam1" ;;
     cam4) CAMERA_STRIH_SCENE="Cam 3"; CAMERA_STRIH_SOURCE="NDI cam3" ;;
+    cam5) CAMERA_STRIH_SCENE="Cam 4"; CAMERA_STRIH_SOURCE="NDI cam4" ;;
+    cam6) CAMERA_STRIH_SCENE="Cam 6"; CAMERA_STRIH_SOURCE="NDI cam6" ;;
     *)
-      echo "camera-set: '${name}' is not a strih-routed camera-under-test (expected one of: cam1 cam3 cam4)" >&2
+      echo "camera-set: '${name}' is not a strih-routed SOURCE camera (expected one of: cam1 cam3 cam4 cam5 cam6)" >&2
       return 1
       ;;
   esac

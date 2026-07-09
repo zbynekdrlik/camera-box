@@ -93,3 +93,44 @@ plan (same shape as the `[8/8a-c]` per-box decode-in-place plan) — only the fi
 binary call (on the two small pulled-back JSONs) runs directly in the script. The live
 two-recording rig proof (a real OBS stop→start bracketed by two measurements) is
 supervisor-driven, not exercised in CI.
+
+## #465/#529 — `av_sync_calibrate.py` persist-location gap (FIXED) + the loop actually converges
+
+**`scripts/av_sync_calibrate.py` connects to `--host` over the OBS WebSocket and does not need to
+run ON the stream box** — so when run off-box (the normal case, e.g. from dev1),
+`default_last_json_path()` falls back to `~/.camera-box/av-sync-last.json` (local), which nothing
+on the stream box's ProgramData can read. Confirmed live (2026-07-09): no `av-sync-last.json`
+existed anywhere under `C:\ProgramData\camera-box` on the stream box after an off-box `--apply`
+run. **This breaks the #390 drift-guard `av_sync_calibrated_ms` best-effort cross-check** (reads
+exactly that path) — it does NOT affect the #398 dock (see below, the dock never read this file
+at all, that was a wrong assumption in an earlier session's comment).
+
+**Fixed**: `main()` now prints an explicit REMOTE PUSH plan (dest path + resolved win-* MCP tool +
+exact JSON content) whenever the write lands off-box. The operator/agent completes the transfer
+via `win-stream-snv FileWrite` to `C:\ProgramData\camera-box\av-sync-last.json` — same PLAN
+convention `obs-self-heal-install.sh` already uses (scp/ssh to Windows is denied on this rig).
+
+**Correction (was wrongly claimed on #465's thread): the #398 A/V-sync dock does NOT read
+`av-sync-last.json`.** Checked the vendored dock source
+(`vendor/av-sync-dock/src/*.cpp,*.hpp`, `src/av_sync_dock.rs`) — it's a pure LIVE QPSK+QR decoder
+with zero file I/O. The ONLY real consumer of that JSON is drift-guard's best-effort facet.
+
+**The measure→apply→re-measure loop genuinely converges — proven live (2026-07-09, stream box):**
+at the stale `genlock_latency_ms_src=1000`, measured **+82.3ms**; applied the computed correction
+(→918ms); RE-measured with a fresh recording: **-7.2ms** residual. Refined to 925ms. This is the
+direct functional proof that dialing `genlock_latency_ms_src` to the calibrated value actually
+zeroes the true offset — equivalent to what the #398 dock would show live (its decode is
+byte-for-byte proven identical to this offline kernel via its own committed C++ self-test,
+`vendor/av-sync-dock/test/camera-box-selftest.cpp`), without needing to fight OBS's Docks menu
+blind over the win-* MCP click interface (tried it once — burns huge context on repeated
+full-desktop screenshots for uncertain payoff; the offline re-measurement is the cheaper
+equivalent proof).
+
+**`mad_ms` ran ~25ms on two independent live recordings** — above this skill's ~15ms healthy
+reference and the #137 gate's 20ms "untrustworthy" cutoff, but consistent across both runs (not a
+fluke). Not root-caused; treat as a secondary quality signal on this rig/cadence, not a blocker —
+the functional offset correction (+82ms → -7ms) is solid regardless.
+
+**`scripts/phase_sync_calibrate.py` has the identical persist-location gap** (its
+`default_last_json_path()` deliberately mirrors `av_sync_calibrate`'s old buggy one) — filed as
+#636, not fixed yet.
