@@ -654,12 +654,26 @@ expected direction at all (see #286's 2026-07-09 re-verification comment for the
 (the DELIVERY latency, which DOES include the genlock receiver hold)** — this is exactly what
 `src/probe/recording_latency.rs::n_camera_strih_samples` / `n_camera_median_latency_ms` already
 compute (doc comment: *"the #286 phase-sync measurement input to `compute_phase_sync_offsets`"*,
-2 unit tests) — **but neither is ever called from `recording-verdict.rs`** (`grep -rn
-"n_camera_strih_samples" src/bin/recording-verdict.rs` → zero hits). Before claiming ANY #286
-phase-sync re-verification proves or disproves the fix, confirm which of the two quantities is
-actually being read — `all_cambox_latency`/`cross_camera_spread_ms` (source `d_X`, existing #624
-gate, wrong tool for this) vs. a windowed `n_camera_median_latency_ms`-based report (delivery
-latency, the right tool, not yet wired into the ALL_CAMBOX per-window sweep as of 2026-07-09).
+2 unit tests). Before claiming ANY #286 phase-sync re-verification proves or disproves the fix,
+confirm which of the two quantities is actually being read — `all_cambox_latency`/
+`cross_camera_spread_ms` (source `d_X`, existing #624 gate, wrong tool for this) vs.
+`all_cambox_delivery_latency`/`cross_camera_spread_ms` (delivery latency, the right tool).
+
+**WIRED (2026-07-09, same-day follow-up PR):** `n_camera_strih_samples` is now called from
+`recording-verdict.rs`'s ALL_CAMBOX `--switch-schedule` block, reading the **STRIH recording**
+(not stream — each camera's own digital capture burn rides into strih's PROGRAM output during its
+own cut-in window, co-located with strih's own render burn in the same recorded frame; no window
+partitioning needed, since only the currently-cut-in camera's burn is ever present in a strih
+frame). Reported as `all_cambox_delivery_latency` — per-camera `HopLatency` JSON keyed by
+`CAMERA_UNDER_TEST_NODES` label (all SIX cameras, **including cam2** — cam2 has its own digital
+capture burn + its own `--switch-schedule` window, so it needs no optical read to be measured
+here, unlike the `all_cambox_latency` OPTICAL-INJECTION sweep which structurally excludes it) plus
+a `cross_camera_spread_ms`/`spread_gate_pass` summary (reusing `switch_latency::spread_verdict`,
+the same 16ms threshold as #624 — **report-only, does NOT fold into `all_pass`**, since #286 is
+not yet a proven/closed standing requirement). Absent (`null`) when no `--strih` recording was
+supplied. A **live re-verification run with this field populated is still needed** to actually
+prove or disprove #286's phase-sync claim — this PR only wires the metric, it does not itself
+constitute the proof.
 
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running

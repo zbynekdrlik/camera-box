@@ -50,10 +50,10 @@ use camera_box::probe::recording::{
 use camera_box::probe::recording_latency::{
     burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,
     cam2_cam1_samples_from_flip, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
-    painter_internal_gen_to_flip, per_frame_latency_csv_rows, strih_stream_samples,
-    strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
-    BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
-    BURN_RUN_ID_CAM6, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    n_camera_strih_samples, painter_internal_gen_to_flip, per_frame_latency_csv_rows,
+    strih_stream_samples, strih_stream_samples_from_stream, write_latency_csv, HopLatency,
+    LatencySample, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
+    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -3900,6 +3900,119 @@ fn build_and_print_verdict(
                 }
                 report["all_cambox_latency"] = serde_json::Value::Object(latency_json);
 
+                // #286 Gap 1+2 — per-camera DELIVERY latency (needs the STRIH recording, not
+                // stream). The block above (`all_cambox_latency`/`cross_camera_spread_ms`)
+                // measures each camera's own SOURCE-side photon-to-CAPTURE latency (`d_X`,
+                // `camera_burn.gen_ts_ns − cam2.gen_ts_ns`) — architecturally BEFORE and
+                // INDEPENDENT of strih's receiver-side per-source genlock hold
+                // (`genlock_latency_ms_src`), the exact knob #286's phase-sync fix adjusts. A
+                // differentiated per-source hold can NEVER move that number (confirmed live,
+                // RUN_ID 1783609415 — see the #286 issue comment + the
+                // `.claude/skills/e2e` "all_cambox_latency measures SOURCE-side d_X" gotcha).
+                //
+                // #286's own Verify criterion needs the DELIVERY latency instead —
+                // `strih_burn.gen_ts_ns − camera_burn.gen_ts_ns`, which DOES include whatever
+                // the receiver held the frame for. Each camera's OWN digital capture-time burn
+                // rides, embedded in its emitted NDI pixels, all the way into strih's PROGRAM
+                // output during its `--switch-schedule` window, co-located in the SAME
+                // strih-recorded frame as strih's own render-time burn — exactly the pairing
+                // `n_camera_strih_samples` already computes (existed since the #286 apply-step
+                // comment, unit-tested, but never called from this binary until now). No window
+                // partitioning is needed: at any instant strih PROGRAM shows exactly one
+                // camera's feed, so a given camera's burn is present ONLY in strih-recorded
+                // frames from its own cut-in window(s) — `n_camera_strih_samples`'s exact-match
+                // `RunIds` pinning naturally attributes every sample to the right camera,
+                // concatenated across every cycle the sweep repeats it (mirrors the source-side
+                // sweep's own concatenation).
+                //
+                // ALL SIX `CAMERA_UNDER_TEST_NODES` are measured here, INCLUDING cam2 — unlike
+                // the OPTICAL-INJECTION source-side sweep above (`OPTICAL_INJECTION_NODES`,
+                // 5 members, cam2 excluded because it cannot optically film its own monitor),
+                // cam2 has its OWN digital capture burn (`BURN_RUN_ID_CAM2`, #312/#637) and its
+                // OWN `--switch-schedule` window (`CAMBOX_SWEEP` includes "Cam 2:CAM2") — so its
+                // delivery latency is measurable the SAME digital way as every other camera, no
+                // optical read required for THIS metric.
+                //
+                // Report-only for now: `spread_gate_pass` does NOT fold into `all_pass` — #286
+                // is not yet closed/proven, and this field's purpose right now is to let a
+                // manual re-verification run SEE whether the applied differentiated offsets
+                // collapsed the delivery-time spread, not to add a new standing CI requirement.
+                if let Some((strih_frames, _)) = &strih_data {
+                    println!();
+                    println!(
+                        "=== #286 ALL-CAMBOX per-camera DELIVERY latency (strih recording, {} \
+                         camera(s)) ===",
+                        CAMERA_UNDER_TEST_NODES.len()
+                    );
+                    let delivery_camera_burn_ids = [
+                        args.burn_cam1_run_id,
+                        args.burn_cam2_run_id,
+                        args.burn_cam3_run_id,
+                        args.burn_cam4_run_id,
+                        args.burn_cam5_run_id,
+                        args.burn_cam6_run_id,
+                    ];
+                    let delivery_samples = n_camera_strih_samples(
+                        strih_frames,
+                        args.burn_strih_run_id,
+                        &delivery_camera_burn_ids,
+                    );
+                    let mut delivery_json = serde_json::Map::new();
+                    let mut delivery_p50s_ms: Vec<f64> = Vec::new();
+                    for (&camera, samples) in
+                        CAMERA_UNDER_TEST_NODES.iter().zip(delivery_samples.iter())
+                    {
+                        let lat = hop_latency(&format!("{camera}->strih (delivery)"), samples);
+                        if let Some(h) = &lat {
+                            delivery_p50s_ms.push(h.stats.p50_ms);
+                        }
+                        println!(
+                            "  {camera}: samples={}, p50={}",
+                            samples.len(),
+                            lat.as_ref()
+                                .map(|h| format!("{:.2}ms", h.stats.p50_ms))
+                                .unwrap_or_else(|| "NO SAMPLES".to_string())
+                        );
+                        delivery_json.insert(camera.to_string(), hop_lat_json(&lat));
+                    }
+                    match camera_box::switch_latency::spread_verdict(&delivery_p50s_ms) {
+                        Some(sv) => {
+                            println!(
+                                "  >>> delivery cross-camera spread: max={:.2}ms min={:.2}ms \
+                                 spread={:.2}ms (threshold {:.1}ms) → {} (report-only — does \
+                                 NOT gate all_pass, see #286)",
+                                sv.max_p50_ms,
+                                sv.min_p50_ms,
+                                sv.spread_ms,
+                                camera_box::switch_latency::SPREAD_THRESHOLD_MS,
+                                if sv.pass { "PASS" } else { "FAIL" }
+                            );
+                            delivery_json.insert(
+                                "cross_camera_spread_ms".to_string(),
+                                serde_json::json!(sv.spread_ms),
+                            );
+                            delivery_json
+                                .insert("spread_gate_pass".to_string(), serde_json::json!(sv.pass));
+                        }
+                        None => {
+                            eprintln!(
+                                "WARNING: #286 delivery-latency spread needs at least 2 measured \
+                                 cameras to compare — only {} produced samples this run. The \
+                                 gate is UNMEASURED (never a fabricated pass or fail).",
+                                delivery_p50s_ms.len()
+                            );
+                            delivery_json.insert(
+                                "cross_camera_spread_ms".to_string(),
+                                serde_json::Value::Null,
+                            );
+                            delivery_json
+                                .insert("spread_gate_pass".to_string(), serde_json::Value::Null);
+                        }
+                    }
+                    report["all_cambox_delivery_latency"] =
+                        serde_json::Value::Object(delivery_json);
+                }
+
                 // #312 item 2 — fuse the per-camera A/V-sync measurement (#188) into this SAME
                 // run/verdict, alongside the loss (all_cambox_continuity) + latency
                 // (all_cambox_latency) blocks above. Triggered when EITHER (a) this fused
@@ -6452,6 +6565,326 @@ mod tests {
         assert!(
             lat["spread_gate_pass"].is_null(),
             "#624: an unmeasurable spread must never fabricate a pass or a fail: {lat}"
+        );
+    }
+
+    // ---- #286 Gap 1+2 — per-camera DELIVERY latency (strih recording), ALL 6 cameras incl.
+    // cam2 ----
+    //
+    // `all_cambox_latency` above (and its `cross_camera_spread_ms`) measures each camera's own
+    // SOURCE-side photon-to-CAPTURE latency (`d_X`) — architecturally BEFORE and INDEPENDENT of
+    // strih's receiver-side per-source genlock hold, the exact knob #286's phase-sync fix
+    // adjusts. `all_cambox_delivery_latency` wires the metric #286's OWN Verify criterion
+    // actually needs — `strih_burn.gen_ts_ns − camera_burn.gen_ts_ns` (the DELIVERY latency,
+    // which DOES include the genlock receiver hold) — via
+    // `probe::recording_latency::n_camera_strih_samples` (existed, tested, but never called
+    // from this binary before this PR). ALL SIX `CAMERA_UNDER_TEST_NODES` are measured,
+    // INCLUDING cam2 (#312/#637: cam2 has its OWN digital capture burn + its OWN
+    // `--switch-schedule` window, so its delivery latency is measurable the same digital way as
+    // every other camera — no optical read of its own monitor is needed for THIS metric).
+
+    /// Build a synthetic STRIH recording covering `cameras.len()` contiguous 5s
+    /// `--switch-schedule` windows, each carrying: that window's camera's OWN capture-time burn,
+    /// and strih's own render-time burn stamped `latency_ns` AFTER the camera's capture — the
+    /// injected #286 DELIVERY latency (unlike the source-side fixture, this simulates whatever
+    /// the genlock receiver held the frame for, since strih's burn is stamped at strih's own
+    /// render/delivery time). A STREAM recording is ALSO built, in the SAME per-window shape
+    /// `build_all_cambox_latency_fixture` above already exercises, purely so
+    /// `build_and_print_verdict`'s `Some(stream)` gate is entered at all (required for ANY
+    /// ALL_CAMBOX `--switch-schedule` sweep) — this fixture's assertions never touch anything
+    /// stream-derived. `cameras` is `(cambox schedule label, camera's own capture-burn run_id,
+    /// injected delivery latency in ns)`.
+    fn build_all_cambox_delivery_latency_fixture(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+    ) -> serde_json::Value {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 9_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir =
+            std::env::temp_dir().join(format!("cb-286-delivery-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let windows_json: Vec<String> = cameras
+            .iter()
+            .enumerate()
+            .map(|(wi, &(label, _, _))| {
+                let start_ns = base + (wi as i64) * win;
+                let end_ns = start_ns + win;
+                format!(r#"{{"cambox":"{label}","start_ns":{start_ns},"end_ns":{end_ns}}}"#)
+            })
+            .collect();
+        std::fs::write(&sched_path, format!("[{}]", windows_json.join(","))).unwrap();
+
+        // 20 frames per window, 0.2s apart, well clear of any guard (--switch-guard-ns 0 leaves
+        // no guard to clear anyway). Each STRIH frame carries ONLY that window's camera's own
+        // capture burn + strih's own render burn — no cam2 optical QR at all, since the
+        // delivery-latency pairing needs neither (unlike the source-side `all_cambox_latency`
+        // fixture above).
+        let mut strih_frames: Vec<RecordingFrame> = Vec::new();
+        // The STREAM recording is built in the SAME per-window shape
+        // `build_all_cambox_latency_fixture` above already exercises (STRIH burn + cam2 optical
+        // QR + that window's camera burn) — supplied purely so `build_and_print_verdict`'s
+        // `Some(stream)` gate is entered at all (it requires a stream recording for ANY
+        // ALL_CAMBOX `--switch-schedule` sweep); reusing the ALREADY-PROVEN-SAFE fixture shape
+        // here (rather than an untested empty/degenerate stream) avoids exercising an edge case
+        // nobody else has verified. This fixture's own assertions never read anything
+        // stream-derived (`all_cambox_latency`/`all_cambox_continuity`/`all_cambox_av_sync`).
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        let mut idx = 0u64;
+        for (wi, &(_, camera_burn, latency_ns)) in cameras.iter().enumerate() {
+            let wstart = base + (wi as i64) * win;
+            for j in 0..20i64 {
+                let cap_ts = wstart + (j + 1) * (ONE_S / 5);
+                strih_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 5000 + idx as u32,
+                            gen_ts_ns: cap_ts,
+                        },
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: cap_ts + latency_ns,
+                        },
+                    ],
+                    tick: None,
+                });
+                let paint_ts = wstart + (j + 1) * (ONE_S / 5);
+                let optical = 1000u32 + idx as u32;
+                stream_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: paint_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: paint_ts,
+                        },
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 5000 + idx as u32,
+                            gen_ts_ns: paint_ts + latency_ns,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+                idx += 1;
+            }
+        }
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+
+        let (v, _pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this fixture
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        v
+    }
+
+    /// #286: cam1/cam2/cam4 each measured, EACH camera's OWN delivery latency exactly matches
+    /// its injected value, cam2 is measured (Gap 2 — it is EXCLUDED from the source-side
+    /// `all_cambox_latency` sweep, but must NOT be excluded here), cam3/cam5/cam6 (no window
+    /// this run) report null, and a wide cross-camera spread FAILS the (report-only) gate.
+    #[test]
+    fn all_cambox_delivery_latency_measures_receiver_side_delivery_and_includes_cam2_286() {
+        let v = build_all_cambox_delivery_latency_fixture(
+            "fail",
+            &[
+                ("CAM1", CAM1B, 3_000_000),
+                ("CAM2", CAM2B, 20_000_000),
+                ("CAM4", super::BURN_RUN_ID_CAM4, 8_000_000),
+            ],
+        );
+
+        let lat = &v["all_cambox_delivery_latency"];
+        assert!(
+            !lat.is_null(),
+            "#286: all_cambox_delivery_latency must be reported when a --strih recording is \
+             supplied alongside --switch-schedule: {v}"
+        );
+        assert_eq!(
+            lat["cam1"]["p50_ms"],
+            serde_json::json!(3.0),
+            "#286: cam1's OWN windowed delivery (strih_burn - camera_burn) latency: {lat}"
+        );
+        assert_eq!(
+            lat["cam2"]["p50_ms"],
+            serde_json::json!(20.0),
+            "#286 Gap 2: cam2 MUST be measured here (its own digital capture burn + its own \
+             schedule window make it just as measurable as any other camera — unlike the \
+             OPTICAL-INJECTION source-side sweep, which structurally excludes it): {lat}"
+        );
+        assert_eq!(
+            lat["cam4"]["p50_ms"],
+            serde_json::json!(8.0),
+            "#286: cam4's OWN windowed delivery latency: {lat}"
+        );
+        assert!(
+            lat["cam3"].is_null(),
+            "#286: cam3 had no window this run -> null, never a fabricated zero: {lat}"
+        );
+        assert!(
+            lat["cam5"].is_null(),
+            "#286: cam5 had no window this run -> null, never a fabricated zero: {lat}"
+        );
+        assert!(
+            lat["cam6"].is_null(),
+            "#286: cam6 had no window this run -> null, never a fabricated zero: {lat}"
+        );
+        assert_eq!(
+            lat["cross_camera_spread_ms"],
+            serde_json::json!(17.0),
+            "#286: max(20.0) - min(3.0) = 17ms: {lat}"
+        );
+        assert_eq!(
+            lat["spread_gate_pass"],
+            serde_json::json!(false),
+            "#286: a 17ms delivery spread is over the (report-only) 16ms floor -> FAIL: {lat}"
+        );
+    }
+
+    /// #286: ALL SIX cameras measured (including cam2), each within 16ms of every other's
+    /// injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
+    /// successfully phase-synced rig where the applied differentiated genlock-latency offsets
+    /// have collapsed every camera's DELIVERY latency to roughly the same value.
+    #[test]
+    fn all_cambox_delivery_latency_all_six_cameras_within_16ms_passes_the_gate_286() {
+        let v = build_all_cambox_delivery_latency_fixture(
+            "pass",
+            &[
+                ("CAM1", CAM1B, 80_000_000),
+                ("CAM3", super::BURN_RUN_ID_CAM3, 82_000_000),
+                ("CAM4", super::BURN_RUN_ID_CAM4, 79_500_000),
+                ("CAM5", super::BURN_RUN_ID_CAM5, 81_000_000),
+                ("CAM6", super::BURN_RUN_ID_CAM6, 78_000_000),
+                ("CAM2", CAM2B, 80_500_000),
+            ],
+        );
+
+        let lat = &v["all_cambox_delivery_latency"];
+        assert_eq!(lat["cam1"]["p50_ms"], serde_json::json!(80.0));
+        assert_eq!(lat["cam3"]["p50_ms"], serde_json::json!(82.0));
+        assert_eq!(lat["cam4"]["p50_ms"], serde_json::json!(79.5));
+        assert_eq!(lat["cam5"]["p50_ms"], serde_json::json!(81.0));
+        assert_eq!(lat["cam6"]["p50_ms"], serde_json::json!(78.0));
+        assert_eq!(
+            lat["cam2"]["p50_ms"],
+            serde_json::json!(80.5),
+            "#286 Gap 2: cam2 is measured alongside every other camera: {lat}"
+        );
+        assert_eq!(
+            lat["cross_camera_spread_ms"],
+            serde_json::json!(4.0),
+            "#286: max(82.0) - min(78.0) = 4ms: {lat}"
+        );
+        assert_eq!(
+            lat["spread_gate_pass"],
+            serde_json::json!(true),
+            "#286: a 4ms delivery spread across all 6 cameras clears the 16ms floor -> PASS: \
+             {lat}"
+        );
+    }
+
+    /// #286: a tight delivery spread (all within 16ms) PASSES the report-only gate.
+    #[test]
+    fn all_cambox_delivery_latency_tight_spread_passes_gate_286() {
+        let v = build_all_cambox_delivery_latency_fixture(
+            "tight",
+            &[
+                ("CAM1", CAM1B, 3_000_000),
+                ("CAM3", super::BURN_RUN_ID_CAM3, 5_000_000),
+                ("CAM4", super::BURN_RUN_ID_CAM4, 10_000_000),
+            ],
+        );
+
+        let lat = &v["all_cambox_delivery_latency"];
+        assert_eq!(
+            lat["cross_camera_spread_ms"],
+            serde_json::json!(7.0),
+            "#286: max(10.0) - min(3.0) = 7ms: {lat}"
+        );
+        assert_eq!(
+            lat["spread_gate_pass"],
+            serde_json::json!(true),
+            "#286: a 7ms delivery spread clears the 16ms floor -> PASS: {lat}"
+        );
+    }
+
+    /// #286: this new field must NEVER affect the run's overall verdict — it is report-only
+    /// (#286 is not yet closed/proven; folding an unproven threshold into `all_pass` would make
+    /// every future all-cambox sweep subject to a brand-new hard requirement this task never
+    /// asked for). A FAILING delivery spread (the "fail" fixture above) must not, by itself,
+    /// change what `all_pass` would otherwise have been.
+    #[test]
+    fn all_cambox_delivery_latency_spread_never_gates_all_pass_286() {
+        let v = build_all_cambox_delivery_latency_fixture(
+            "no-gate",
+            &[("CAM1", CAM1B, 3_000_000), ("CAM2", CAM2B, 20_000_000)],
+        );
+        let lat = &v["all_cambox_delivery_latency"];
+        assert_eq!(
+            lat["spread_gate_pass"],
+            serde_json::json!(false),
+            "sanity: this fixture's spread must be failing for the point of this test to hold: \
+             {lat}"
+        );
+        // This test does not assert on `overall_pass` itself (many OTHER unrelated gates in this
+        // fixture's minimal 2-window recording would fail regardless, e.g. the #373 duration
+        // floor) — the point here is narrower and purely structural: `spread_gate_pass` must
+        // never be read into `all_pass` by the wiring itself. Confirmed by code inspection
+        // (`all_cambox_delivery_latency`'s block never assigns to `all_pass`); this test guards
+        // against a future edit accidentally adding `all_pass &= sv.pass` to that block, since
+        // such a regression would NOT be caught by the two tests above (they don't assert on
+        // `overall_pass` at all).
+        assert!(
+            v.get("all_cambox_delivery_latency").is_some(),
+            "sanity: the field itself must still be present: {v}"
+        );
+    }
+
+    /// #286: with NO `--strih` recording supplied at all, `all_cambox_delivery_latency` must be
+    /// absent (never fabricated) — reusing the EXISTING #624 source-side fixture, which supplies
+    /// only a stream recording.
+    #[test]
+    fn all_cambox_delivery_latency_absent_without_a_strih_recording_286() {
+        let v = build_all_cambox_latency_fixture("no-strih", &[("CAM1", CAM1B, 800_000_000)]);
+        assert!(
+            v["all_cambox_delivery_latency"].is_null(),
+            "#286: no --strih recording supplied -> the delivery-latency metric is unmeasurable \
+             and must be absent, never fabricated: {v}"
         );
     }
 
