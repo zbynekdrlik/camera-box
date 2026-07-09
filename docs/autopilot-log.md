@@ -2568,3 +2568,53 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   wait directly, opened the PR (the worker hadn't gotten that far), merged, and verified main CI
   green. Lesson for future dispatches: remind workers explicitly to wait FOREGROUND through CI,
   never background-and-return.
+
+## #529 + #465 — av_sync_calibrate persist-location fix + live A/V-sync recalibration (2026-07-09)
+
+- Bundled batch (same root cause, same fix): #529 (event finding — operator hand-dialed ~844ms
+  live because the "sync guarantee" was a stale constant) and #465 (re-measure A/V-sync offset
+  live after Topology v2 + verify the #398 dock reflects it). Both had already been deeply
+  investigated across many prior sessions (see the issue threads); this batch closed the
+  remaining code gap + did the live verification both tickets were blocked on.
+- **Code fix**: `scripts/av_sync_calibrate.py` connects to `--host` over the OBS WebSocket and
+  does not need to run ON the stream box, so `default_last_json_path()` silently fell back to a
+  LOCAL path (`~/.camera-box/av-sync-last.json`) when run off-box (the normal case) — nothing on
+  the stream box's ProgramData could ever read it, breaking the #390 drift-guard
+  `av_sync_calibrated_ms` best-effort cross-check. Added `remote_push_plan()` +
+  `mcp_name_for_host()`: `main()` now prints an explicit, copy-pasteable REMOTE PUSH plan (dest
+  path + resolved win-* MCP tool + exact JSON content) whenever the write lands off-box — mirrors
+  `obs-self-heal-install.sh`'s PLAN convention (scp/ssh to Windows is denied on this rig).
+  RED `309a8b7d7` → GREEN `53c08c04a`, deep-review follow-up `d43528fda` (added an
+  integration-level test asserting the printed plan's JSON is byte-identical to what was actually
+  persisted, not reconstructed separately).
+- **Correction recorded on #465**: an earlier session's comment claimed "the #398 dock reads
+  `av-sync-last.json`" — false. Checked the vendored dock source
+  (`vendor/av-sync-dock/src/*.cpp,*.hpp`, `src/av_sync_dock.rs`): it's a pure LIVE QPSK+QR
+  decoder with zero file I/O. Only drift-guard's best-effort facet reads that JSON.
+- **Live verification on the rig (stream box 10.77.9.204)**: cam2 → TEST mode (dual-QR + QPSK
+  marker confirmed painting/running); recorded ~161s of stream program; decoded via
+  `recording-verdict --av-sync`: measured **+82.3ms** at the stale `genlock_latency_ms_src=1000`.
+  Ran `av_sync_calibrate.py --apply` → computed+applied `918ms`, persisted locally, printed the
+  REMOTE PUSH plan; pushed via `win-stream-snv` MCP `FileWrite` to
+  `C:\ProgramData\camera-box\av-sync-last.json` — confirmed present on the box. Re-measured with a
+  fresh ~107s recording at the corrected value: **-7.2ms** residual (down from +82.3ms) — proves
+  the measure→apply→re-measure loop converges live. Refined to `925ms`, re-pushed the final JSON
+  (left on the box). Rig restored to clean EVENT mode (painter stopped, `genlock_burn=false` on
+  all boxes, NDI mapping re-enforced).
+- **Rig recovery mid-session**: stream OBS had a stale NVENC-crashed instance from an earlier
+  session, unkillable via `Stop-Process -Force` AND `taskkill /F` (both silently failed to
+  terminate PID 15508 — consistent with a driver-level wedge, though `nvidia-smi` showed no
+  classic DXGI-wedge symptoms). Recovered with a host reboot per the documented dev-rig recovery
+  policy (`Restart-Computer -Force`); confirmed healthy afterward (single obs64 instance, genlock
+  render tick ENABLED, recording works with real bytes).
+- Filed #636 (follow-up, correctly out of scope for this PR): `scripts/phase_sync_calibrate.py`
+  has the identical persist-location gap (different file, #286's concern).
+- PR #635 (`bc5a13953`), merged 2026-07-09T07:45:34Z; main CI green (all jobs pass, Mutation
+  Testing skipped — no qualifying diff for it). `Closes #529`, `Closes #465`.
+- **Gotcha for the next worker touching PR bodies**: `gh pr edit -F file.md` hit a real gh 2.45.0
+  bug (`GraphQL: Projects (classic) is being deprecated... (repository.pullRequest.projectCards)`)
+  that silently no-ops the edit while still exiting 1. Workaround: `gh api
+  repos/OWNER/REPO/pulls/N -X PATCH --input payload.json` where `payload.json` is built via
+  `python3 -c "import json; json.dump({'body': open('file.md').read()}, open('payload.json','w'))"`
+  — NOT `gh api ... -f body=@file.md` (that literal-strings the `@path` instead of dereferencing
+  it on this gh version; verified live, it wrote the body as the 20-char string `"@/tmp/..."`).
