@@ -708,6 +708,21 @@ TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 
 # gate). Supervisor runs the live rig-validate step; this ships the code + pure-function tests.
 GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-1000}"
 GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}"
+
+# #406/#312 item5: belt-and-braces re-check, immediately before rerouting strih/stream's
+# PRODUCTION program scenes. The CI-level scripts/rig-busy-gate.sh check (when this harness
+# runs under the automatic pull_request-triggered full-path-e2e.yml gate) may have passed
+# tens of minutes ago — [1/8]-[3/8] (build/deploy/painter-start) can take a while — so a real
+# broadcast could have started in that window. Never reroute a rig that just went live.
+echo "[4/8 pre-check] #406 re-verifying the rig is still free right before the prod-scene reroute"
+BUSY_RECHECK=$(python3 "$HERE/obs_phase2.py" rig-busy-check \
+  --strih-host "$STRIH" --stream-host "$STREAM" --password "${OBS_PASSWORD:-}")
+echo "    $BUSY_RECHECK"
+if ! printf '%s' "$BUSY_RECHECK" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d["busy"] else 1)'; then
+  echo "ERROR: rig went BUSY between the CI busy-gate check and this reroute step — aborting BEFORE touching prod scenes: $BUSY_RECHECK" >&2
+  exit 1
+fi
+
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' ($CAMERA_NAME via $STRIH_PROG_SOURCE),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
