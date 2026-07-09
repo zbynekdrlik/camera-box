@@ -186,6 +186,19 @@ pub mod jitter_audit;
 // `--switch-schedule` window) lives in `bin/recording-verdict`.
 pub mod switch_latency;
 
+// #312 item 2 (PR A) — per-camera A/V-sync WINDOW POOLING (pure decision): given a camera's
+// per-`--switch-schedule`-window candidate offset lists (`qpsk_marker::av_offset_candidates`,
+// computed per window in the probe-gated `bin/recording-verdict` from that window's decoded
+// `(tick, video_ts)` samples), pools them and decides the fail-closed per-camera verdict
+// (`AvSyncVerdict::Measured`/`Unknown`) — never a fabricated number from too few samples or a
+// scattered non-cluster. Also holds `window_ticks`, the pure `(tick, video_ts)` builder shared
+// by every camera's window (mirrors `probe::av_sync_recording::av_sync_from_recording`'s
+// identical whole-recording construction, LEFT UNTOUCHED). No probe deps, so it unit-tests
+// Tier-0; fuses into `all_cambox_continuity` / `all_cambox_latency`'s SAME `--switch-schedule`
+// sweep. PR A reports `all_cambox_av_sync`; it does NOT gate the headline (PR B / #624
+// deliverable 4 wires the ±20ms bound on top of this).
+pub mod av_window;
+
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
 // continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
 // deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order

@@ -9,11 +9,11 @@
 //! (`recording-verdict --extract-partial <box>`) into this partial; dev1 combines the partials
 //! (`recording-verdict --merge-partials strih=… stream=…`) into the identical full verdict.
 //!
-//! ## JSON schema (`schema_version = 2`)
+//! ## JSON schema (`schema_version = 3`)
 //!
 //! ```json
 //! {
-//!   "schema_version": 2,
+//!   "schema_version": 3,
 //!   "box": "strih",                 // which box decoded this — "strih" | "stream"
 //!   "recording": "strih-1234.mkv",  // basename of the local recording (provenance only)
 //!   "expected_burns": [911001, 911002],  // node-burn run_ids this extract decoded for (#207)
@@ -24,8 +24,11 @@
 //!       "tick": 100 }
 //!     // …
 //!   ],
-//!   "colour": null                  // #377 per-recording NodeColourSummary (Some only after a
+//!   "colour": null,                 // #377 per-recording NodeColourSummary (Some only after a
 //!                                   // --colour-gate extract; absent/null on delivery-only runs)
+//!   "av_sync": null                 // #312 item 2 (PR A) per-recording AvMarkerInputs (Some only
+//!                                   // after `--extract-partial stream --av-marker-log <path>`;
+//!                                   // absent/null on a run without the continuous QPSK marker)
 //! }
 //! ```
 //!
@@ -36,6 +39,7 @@
 //! frames, so the merged verdict is equivalent to the fused single-process output.
 
 use crate::colour_verify::NodeColourSummary;
+use crate::probe::av_sync_recording::AvMarkerInputs;
 use crate::probe::recording::RecordingFrame;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -47,10 +51,19 @@ use std::path::Path;
 /// v2 (#377) adds the optional `colour` field — the per-recording [`NodeColourSummary`] the
 /// box computed on-host during `--colour-gate` extract, carried through to the dev1 merge. extract
 /// and merge always run from the SAME binary build, so a mixed v1/v2 read never occurs in practice.
-pub const PARTIAL_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 (#312 item 2 PR A) adds the optional `av_sync` field — the per-recording
+/// [`AvMarkerInputs`] the STREAM box computed on-host during `--extract-partial stream
+/// --av-marker-log <path>` (the only box that has both the audio marker track and the cam2
+/// dual-QR video co-located), carried through to the dev1 merge exactly like `colour` above.
+pub const PARTIAL_SCHEMA_VERSION: u32 = 3;
 
 /// One box's decode-in-place result — the small JSON the cross-box merge consumes (#208).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// NOTE: no longer derives `Eq` (only `PartialEq`) — `av_sync` carries `f64` fields (offsets/
+/// timestamps), which have no total ordering / no `Eq` impl. Every existing use of this type only
+/// ever needed `PartialEq` (`assert_eq!` et al.), so this is a compile-time-safe narrowing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordingPartial {
     /// Wire-format version (see [`PARTIAL_SCHEMA_VERSION`]).
     pub schema_version: u32,
@@ -74,6 +87,15 @@ pub struct RecordingPartial {
     /// mapping). `None` when `--colour-gate` was off (delivery-only runs), so old behaviour is unchanged.
     #[serde(default)]
     pub colour: Option<NodeColourSummary>,
+    /// #312 item 2 (PR A) — the STREAM recording's [`AvMarkerInputs`], computed ON the box during
+    /// `--extract-partial stream --av-marker-log <path>` (the audio marker track + the cam2
+    /// dual-QR video are ONLY co-located in the stream recording). The dev1 merge pairs this
+    /// against the carried `frames`' per-window `.tick` samples (`crate::av_window::window_ticks`)
+    /// to fuse the per-camera A/V-sync measurement into the SAME `--switch-schedule` sweep. `None`
+    /// when `--av-marker-log` was not given at extract (delivery-only / non-ALL_CAMBOX runs), so
+    /// old behaviour is unchanged.
+    #[serde(default)]
+    pub av_sync: Option<AvMarkerInputs>,
 }
 
 impl RecordingPartial {
@@ -96,6 +118,7 @@ impl RecordingPartial {
             expected_burns: expected_burns.to_vec(),
             frames,
             colour: None,
+            av_sync: None,
         }
     }
 
@@ -104,6 +127,15 @@ impl RecordingPartial {
     /// pure ids+timestamps constructor and the colour I/O lives in the probe-gated caller.
     pub fn with_colour(mut self, colour: Option<NodeColourSummary>) -> Self {
         self.colour = colour;
+        self
+    }
+
+    /// Attach the per-recording A/V-sync marker inputs (#312 item 2 PR A) — set by
+    /// `--extract-partial stream` when `--av-marker-log` is given, after decoding THIS box's
+    /// recording's audio marker track + emit log. Builder so `from_frames` stays a pure
+    /// ids+timestamps constructor and the ffmpeg/ffprobe I/O lives in the probe-gated caller.
+    pub fn with_av_sync(mut self, av_sync: Option<AvMarkerInputs>) -> Self {
+        self.av_sync = av_sync;
         self
     }
 
@@ -228,9 +260,39 @@ mod tests {
         // without the field must deserialize to None via #[serde(default)], never error.
         let p = RecordingPartial::from_frames("strih", Path::new("strih-1.mkv"), &[], vec![]);
         assert_eq!(p.colour, None, "from_frames defaults colour to None");
-        let j = r#"{"schema_version":2,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
+        let j = r#"{"schema_version":3,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
         let restored = RecordingPartial::from_json(j).unwrap();
         assert_eq!(restored.colour, None, "absent colour field ⇒ None");
+        assert_eq!(restored.av_sync, None, "absent av_sync field ⇒ None");
+    }
+
+    #[test]
+    fn av_sync_inputs_survive_the_partial_roundtrip_312() {
+        // #312 item 2 (PR A) — the carried AvMarkerInputs (emit log + rebased audio markers + fps
+        // + video_start_s) must round-trip through the partial JSON so the dev1 merge can pair
+        // them against the carried frames' per-window ticks without ever re-reading the recording.
+        let av = AvMarkerInputs {
+            fps: 29.97,
+            video_start_s: 0.021,
+            emit_log: vec![
+                (0, 100, 1_700_000_000_000_000_000),
+                (1, 260, 1_700_000_003_000_000_000),
+            ],
+            audio_markers: vec![(0.812, 0), (3.805, 1)],
+        };
+        let p = RecordingPartial::from_frames(
+            "stream",
+            Path::new("stream-312.mp4"),
+            &[911001, 911002, 911004],
+            vec![],
+        )
+        .with_av_sync(Some(av.clone()));
+        let restored = RecordingPartial::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(
+            restored.av_sync,
+            Some(av),
+            "the carried A/V-sync inputs must survive the roundtrip exactly"
+        );
     }
 
     #[test]

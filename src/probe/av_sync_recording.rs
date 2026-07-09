@@ -14,6 +14,7 @@ use crate::qpsk_marker::{
     parse_qpsk_marker_log, AudioParams, AvOffset,
 };
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -223,5 +224,68 @@ pub fn av_sync_from_recording(
         video_ticks,
         emit_rows: emit_log.len(),
         candidates: n_cand,
+    })
+}
+
+/// #312 item 2 (PR A) — the shared ingredients a per-camera, per-`--switch-schedule`-window A/V
+/// fusion needs from ONE recording: the emit log, the QPSK-decoded audio markers (rebased onto
+/// the container origin, exactly like [`av_sync_from_recording`]'s `audio_markers`), the measured
+/// video fps, and the video stream's `start_time`. Serializable so the #208 per-box
+/// `--extract-partial stream` (the ONLY box that has both the audio marker track and the cam2
+/// dual-QR video co-located) can carry it through the small partial JSON to the dev1 merge —
+/// mirrors exactly how `RecordingPartial.colour` (#377) carries a per-recording computed summary
+/// through the same JSON contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AvMarkerInputs {
+    /// Measured video frame rate (ffprobe `r_frame_rate` of the recording's first video stream).
+    pub fps: f64,
+    /// `start_time` (s) of the video stream — usually 0, carried so a non-zero mux edit list is
+    /// never silently dropped (mirrors [`av_sync_from_recording`]'s `video_start`).
+    pub video_start_s: f64,
+    /// The cam2 emitter's parsed marker log: `(index, frame_id, emit_ts_ns)` rows.
+    pub emit_log: Vec<(u8, u32, i64)>,
+    /// QPSK-decoded audio markers: `(container-relative ts_s, index)` — the audio stream's
+    /// `start_time` is ALREADY baked in (mirrors `av_sync_from_recording`'s `audio_markers`), so a
+    /// caller pairs these directly against `(tick, video_ts)` samples built on the SAME container
+    /// timeline (see `crate::av_window::window_ticks`).
+    pub audio_markers: Vec<(f64, u8)>,
+}
+
+/// Decode the [`AvMarkerInputs`] for `recording` — the exact SAME ffmpeg/ffprobe glue
+/// [`av_sync_from_recording`] uses for its own front half (this function is a sibling, not a
+/// replacement: `av_sync_from_recording`'s whole-recording `--av-sync` standalone mode is LEFT
+/// COMPLETELY UNTOUCHED, per #312 item 2 PR A's explicit "zero regression risk" scope).
+///
+/// Deliberately stops SHORT of decoding the video track: the caller (the probe-gated fused/merge
+/// glue in `bin/recording-verdict`) already has this recording's frames decoded — with `.tick`
+/// per frame — from the zero-loss pass itself, so re-running `analyze_recording` here would be
+/// pure waste. The caller builds its own per-window `(tick, video_ts)` samples from those
+/// already-decoded frames (`crate::av_window::window_ticks`) and pairs them against the
+/// `emit_log`/`audio_markers` this function returns via `qpsk_marker::av_offset_candidates`.
+pub fn decode_av_marker_inputs(
+    recording: &Path,
+    marker_log_csv: &str,
+    params: &AudioParams,
+    audio_track: u32,
+    threshold: f64,
+) -> Result<AvMarkerInputs> {
+    let fps = probe_video_fps(recording)?;
+    let emit_log = parse_qpsk_marker_log(marker_log_csv);
+    anyhow::ensure!(
+        !emit_log.is_empty(),
+        "emit log is empty (no markers logged)"
+    );
+    let video_start = probe_stream_start_time(recording, "v:0")?;
+    let audio_start = probe_stream_start_time(recording, &format!("a:{audio_track}"))?;
+    let audio = extract_audio_mono_f32(recording, audio_track, params.sample_rate)?;
+    let audio_markers: Vec<(f64, u8)> = decode_markers(&audio, params, threshold)
+        .into_iter()
+        .map(|(ts, idx)| (audio_start + ts, idx))
+        .collect();
+    Ok(AvMarkerInputs {
+        fps,
+        video_start_s: video_start,
+        emit_log,
+        audio_markers,
     })
 }
