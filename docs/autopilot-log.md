@@ -2659,3 +2659,27 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - PR #637 (`fde495d4f`), merged 2026-07-09T10:04:25Z; main CI green (all jobs, Mutation Testing
   skipped — no qualifying diff). `Refs #312` (deliberately non-closing — see the repo's own
   commit-prefix-auto-close GOTCHA at the top of CLAUDE.md).
+
+## #312 item 2 PR A — fuse A/V-sync measurement into ALL_CAMBOX verdict (2026-07-09)
+
+- Architecture designed via a gated Fable-advisor call (budget gate OPEN, 23%/58% weekly usage):
+  continuous QPSK marker emission (no sync channel needed — audio path is camera-invariant, all
+  attribution happens on the video side via the existing `--switch-schedule` + burn-id partitioning);
+  fused mode keyed on `--av-marker-log` + `--switch-schedule` (legacy single-camera `--av-sync` path
+  untouched); pooled per-camera clustering across all of that camera's windows in the run.
+- `scripts/recording-e2e.sh`: cam2's ALL_CAMBOX painter now continuously emits the QPSK marker for
+  the whole sweep. New `src/av_window.rs` (Tier-0 pure module) + wiring in
+  `src/bin/recording-verdict.rs` produce a new `all_cambox_av_sync` report block: per-camera
+  pooled-cluster A/V offset, `MIN_AV_SAMPLES=8` fail-closes to `Unknown` on thin data. Does NOT
+  change the overall pass/fail verdict yet — explicitly labeled `gate: not enforced yet`.
+- Live-verified: continuous marker confirmed emitting for the full sweep, `all_cambox_av_sync`
+  produced real (non-Unknown) numbers, cam2's own pooled number reproduced the historical
+  single-camera measurement (the sanity anchor) — confirms the fusion plumbing is correct.
+- PR #639 (`00af1a59c`), merged 2026-07-09T11:54:39Z; main CI green (all jobs, Mutation Testing
+  skipped). `Refs #312` + `Refs #624` (both deliberately non-closing — PR B, the ±20ms gate
+  wire-in, follows next).
+- NOTE: the dispatched worker again ended its own turn mid-CI-wait (the same subagent-background-
+  CI-poll death pattern as PR #633). It left a small uncommitted clippy fix (redundant `.clone()`)
+  staged locally. The supervisor verified it was safe (local `cargo clippy --all-targets -D
+  warnings` clean with the fix applied), committed + pushed it, took over the CI wait, opened the
+  PR (worker hadn't reached that step), merged, and verified main CI green.
