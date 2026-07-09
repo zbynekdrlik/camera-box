@@ -109,6 +109,24 @@ pub const BURN_RUN_ID_CAM4: u32 = 911007;
 /// harmless in practice, but real). Reserved outside every other used id
 /// (911001/911002/911003/911004/911007).
 pub const BURN_RUN_ID_CAM3: u32 = 911008;
+/// #312 — cam2's OWN capture-burn run_id. cam2 is the fixed dual-QR PAINTER (its own
+/// framebuffer feeds the optical loopback every other camera-under-test box films), but since
+/// #291 its camera-box daemon keeps CAPTURING + EMITTING its own NDI feed throughout a TEST-mode
+/// run (a transient no-display drop-in frees only `/dev/fb0` for the separate painter process,
+/// never touching `/dev/video0`/NDI). That makes cam2's OWN chain (cam2 capture → strih →
+/// stream) measurable by the SAME digital render-time capture-burn mechanism as cam1/cam3/cam4 —
+/// this is the id `CAMERA_BOX_BURN_RUN_ID` is set to when the ALL-CAMBOX sweep deploys the
+/// probe-featured binary on cam2 (scripts/recording-e2e.sh `[2b/8]`). Reserved fresh, outside
+/// every id already in use (911001/911002/911003/911004/911007/911008).
+pub const BURN_RUN_ID_CAM2: u32 = 911009;
+/// #312 — cam5's capture-burn run_id, extending the #24/#624 mechanism to the 5th physical
+/// camera (fleet growth 4→6, #451). See [`BURN_RUN_ID_CAM4`]'s doc — same role, same mutual
+/// exclusivity, fresh id outside every id already in use.
+pub const BURN_RUN_ID_CAM5: u32 = 911010;
+/// #312 — cam6's capture-burn run_id, extending the #24/#624 mechanism to the 6th physical
+/// camera (fleet growth 4→6, #451). See [`BURN_RUN_ID_CAM4`]'s doc — same role, same mutual
+/// exclusivity, fresh id outside every id already in use.
+pub const BURN_RUN_ID_CAM6: u32 = 911011;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.

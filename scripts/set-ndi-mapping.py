@@ -4,12 +4,17 @@
 The strih NDI-input→camera-box bindings drift from the pins (the recurring bug: two inputs both on
 CAM4, so a camera shows twice and another is missing). A pure hot WS rebind does NOT survive a
 force-kill OBS relaunch (a distroav.dll swap reverts to the stale saved scene). So rig activation
-(scripts/rig-mode.sh) must ENFORCE the correct 4-distinct mapping every time — set it + verify every
+(scripts/rig-mode.sh) must ENFORCE the correct 6-distinct mapping every time — set it + verify every
 input is bound to a DISTINCT camera — instead of the operator/agent re-doing it by hand.
 
 The mapping is Claude-owned + fixed (never a user question). The pins (offset per the rig-ndi-source
-label convention): NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4, NDI cam2→CAM2. CAM3 is the down box —
-its input binds correctly for when it returns; the other 3 are distinct live feeds.
+label convention): NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4, NDI cam2→CAM2, NDI cam4→CAM5,
+NDI cam6→CAM6. CAM3 is the down box — its input binds correctly for when it returns; the other 5
+are distinct live feeds. #312 (fleet growth 4→6, #451) added the last two pins: "NDI cam4" USED TO
+duplicate CAM4's own feed (the exact drift bug this module exists to catch) — repointed to the
+previously-unwired CAM5 physical box instead; "NDI cam6" was already correctly bound live on
+strih to CAM6 but had no canonical pin, so it could silently drift on the next OBS relaunch —
+now it is enforced like every other input.
 
 Exit codes:
   0  PASS  — every input set to its pin AND all 4 senders distinct
@@ -30,12 +35,14 @@ import time
 
 PORT = 4455
 
-# #399 — the fixed 4-distinct strih NDI mapping (Claude-owned; never a user question).
+# #399/#312 — the fixed 6-distinct strih NDI mapping (Claude-owned; never a user question).
 DEFAULT_MAP = [
     ("NDI cam5", "CAM1 (usb)"),
     ("NDI cam1", "CAM3 (usb)"),
     ("NDI cam3", "CAM4 (usb)"),
     ("NDI cam2", "CAM2 (usb)"),
+    ("NDI cam4", "CAM5 (usb)"),
+    ("NDI cam6", "CAM6 (usb)"),
 ]
 
 # websocket-client is imported LAZILY (inside the WS helpers), not at module top: the pure helpers
