@@ -63,7 +63,6 @@ jobs:
         run: |
           cp scripts/install.sh ./artifacts/
           cp scripts/install-binary.sh ./artifacts/
-          cp scripts/setup.sh ./artifacts/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -73,5 +72,4 @@ jobs:
             artifacts/camera-box-linux-amd64.tar.gz.sha256
             artifacts/install.sh
             artifacts/install-binary.sh
-            artifacts/setup.sh
           generate_release_notes: true

@@ -9,9 +9,10 @@
 //!   3. `/var/cache` tmpfs was sized inconsistently across the fleet (100M vs 500M) — provisioning
 //!      drift that made the ENOSPC failure box-specific.
 //!
-//! The durable fix lives in the PROVISIONING scripts (`setup.sh` + `setup-device.sh`) so a
-//! re-provisioned box can NEVER recreate the brick — not a one-off live edit (live grub edits are
-//! exactly what bricked the boxes). These tests pin the load-bearing contract of that fix:
+//! The durable fix lives in the PROVISIONING script (`setup-device.sh` — the sole provisioning
+//! path since `scripts/setup.sh` was retired in #563) so a re-provisioned box can NEVER recreate
+//! the brick — not a one-off live edit (live grub edits are exactly what bricked the boxes). These
+//! tests pin the load-bearing contract of that fix:
 //!   - the appliance kernel is PINNED (`apt-mark hold`) AND automatic kernel upgrades are disabled,
 //!   - every installed kernel is GUARANTEED an initrd before `update-grub` runs, and future kernel
 //!     installs regenerate a missing initrd via a `/etc/kernel/postinst.d` hook,
@@ -35,10 +36,11 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// Both provisioning paths that build a live (rw-root) cam box. The brick reproduced on boxes
-/// provisioned by these scripts, so BOTH must carry the hardening (a fix in only one leaves the
-/// other path able to recreate the brick).
-const SETUP_SCRIPTS: [&str; 2] = ["scripts/setup.sh", "scripts/setup-device.sh"];
+/// The provisioning path that builds a live (rw-root) cam box. The brick reproduced on boxes
+/// provisioned by this script, so it must carry the hardening. (`scripts/setup.sh` used to be
+/// checked here too — it was retired in #563; `scripts/setup-device.sh` is now the sole
+/// provisioning path.)
+const SETUP_SCRIPTS: [&str; 1] = ["scripts/setup-device.sh"];
 
 /// Minimum `/var/cache` tmpfs size (MiB). 100M filled up on .61 and broke apt with ENOSPC, which
 /// is what left the auto-installed kernel without an initrd. The fix sizes it uniformly ≥512M.
@@ -246,18 +248,19 @@ fn setup_md_documents_the_ro_root_overlay_target() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// #307 — extend the #295 boot-hardening to the two builders the setup scripts do NOT cover:
+// #307 — extend the #295 boot-hardening to the two builders the setup script does NOT cover:
 //   (1) `scripts/create-usb-linux.sh` — the MASTER base-image builder. It builds the "clean Ubuntu
-//       + SSH only" image that `setup.sh` later hardens, so there is a narrow first-boot window
-//       (before setup.sh runs) where the original brick exposure exists. It must carry the same
-//       kernel-pin + unattended-upgrades-off + saved-grub-default hardening at the source.
+//       + SSH only" image that `setup-device.sh` later hardens, so there is a narrow first-boot
+//       window (before setup-device.sh runs) where the original brick exposure exists. It must
+//       carry the same kernel-pin + unattended-upgrades-off + saved-grub-default hardening at the
+//       source.
 //   (2) `scripts/build-image.sh` `install_bootloader` — the durable ro-root+overlay image. It pins
-//       a saved grub default but never VALIDATES (like the setup scripts do) that the generated
+//       a saved grub default but never VALIDATES (like the setup script does) that the generated
 //       default entry has BOTH a kernel image AND an initrd before pinning. Add the same fail-closed
-//       guard so the durable image stays consistent with setup.sh / setup-device.sh.
+//       guard so the durable image stays consistent with setup-device.sh.
 // Style mirrors the #295 tests above: read the REAL scripts and assert on the REAL contract.
 
-/// The master base-image builder ("clean Ubuntu + SSH" image that setup.sh later hardens).
+/// The master base-image builder ("clean Ubuntu + SSH" image that setup-device.sh later hardens).
 const BASE_IMAGE_BUILDER: &str = "scripts/create-usb-linux.sh";
 
 /// The durable read-only-root + overlay image builder (the long-term appliance target, #301).
@@ -284,8 +287,8 @@ fn extract_shell_function(script: &str, name: &str) -> Option<String> {
 }
 
 /// 6. The base-image builder must PIN the appliance kernel — the same `apt-mark hold` the setup
-///    scripts use. Without it the base image can gain a surprise kernel in the window before setup.sh
-///    runs, recreating the #295 exposure at the source.
+///    script uses. Without it the base image can gain a surprise kernel in the window before
+///    setup-device.sh runs, recreating the #295 exposure at the source.
 #[test]
 fn base_image_builder_holds_the_appliance_kernel() {
     const HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
@@ -293,7 +296,7 @@ fn base_image_builder_holds_the_appliance_kernel() {
     assert!(
         body.contains(HOLD_CMD),
         "{BASE_IMAGE_BUILDER} must run `{HOLD_CMD}` so the base image can never gain a surprise \
-         kernel before setup.sh hardens the box (#307, extends #295)"
+         kernel before setup-device.sh hardens the box (#307, extends #295)"
     );
 }
 
@@ -312,7 +315,7 @@ fn base_image_builder_disables_automatic_kernel_upgrades() {
     assert!(
         body.contains(r#"APT::Periodic::Unattended-Upgrade "0""#),
         "{BASE_IMAGE_BUILDER} must set `APT::Periodic::Unattended-Upgrade \"0\"` so the base image \
-         never auto-installs a kernel before setup.sh runs (#307, extends #295)"
+         never auto-installs a kernel before setup-device.sh runs (#307, extends #295)"
     );
 }
 
@@ -340,7 +343,7 @@ fn base_image_builder_pins_a_saved_grub_default() {
 }
 
 /// 9. The ro-root+overlay image builder's `install_bootloader` must carry the SAME fail-closed
-///    grub-default validation the setup scripts use: before pinning the saved default, read the
+///    grub-default validation the setup script uses: before pinning the saved default, read the
 ///    generated /boot/grub/grub.cfg, extract its default menuentry, and assert it references BOTH a
 ///    kernel image AND an initrd — aborting loudly otherwise. Scope the assertions to the function
 ///    body so a mention elsewhere cannot satisfy the guard.
@@ -352,7 +355,7 @@ fn ro_image_builder_validates_grub_default_before_pinning() {
     assert!(
         func.contains("grub.cfg") && func.contains("menuentry "),
         "install_bootloader must read the generated /boot/grub/grub.cfg and extract its default \
-         menuentry to validate it before pinning (#307, mirrors setup.sh)"
+         menuentry to validate it before pinning (#307, mirrors setup-device.sh)"
     );
     let validates_kernel_image = func
         .lines()
@@ -403,14 +406,11 @@ fn ro_image_builder_validates_grub_default_before_pinning() {
 
 /// Every path that builds a runnable cam box must carry the NDI/audio runtime deps:
 ///   - `create-usb-linux.sh` — the base-image builder (the fresh-clone source; the #362 incident),
-///   - `setup.sh` / `setup-device.sh` — the two provisioning paths.
+///   - `setup-device.sh` — the provisioning path (`scripts/setup.sh` used to be checked here too;
+///     it was retired in #563).
 ///
 /// A gap in ANY one leaves a path that produces a camera-box which cannot dlopen libndi.
-const NDI_RUNTIME_SCRIPTS: [&str; 3] = [
-    "scripts/create-usb-linux.sh",
-    "scripts/setup.sh",
-    "scripts/setup-device.sh",
-];
+const NDI_RUNTIME_SCRIPTS: [&str; 2] = ["scripts/create-usb-linux.sh", "scripts/setup-device.sh"];
 
 /// The exact runtime packages camera-box needs to load libndi + run intercom audio — each confirmed
 /// MISSING on the fresh CAM3 clone (#362), each crash-looping camera-box in turn:
@@ -515,15 +515,14 @@ fn builders_enable_avahi_daemon_for_ndi_discovery() {
 // Fixes tested here:
 //   13. Both image builders install cloud-guest-utils (provides growpart) so auto-grow can run.
 //   14. Both image builders enable camera-box-grow-root.service so the root partition auto-
-//       expands to fill the disk on first boot — no manual setup.sh run required.
+//       expands to fill the disk on first boot — no manual setup-device.sh run required.
 //   15. Both image builders write a ≥512M /var/cache tmpfs line to fstab — matching the
-//       setup.sh / setup-device.sh provisioning paths that already carry this line (#295).
+//       setup-device.sh provisioning path that already carries this line (#295).
 //   16. The fleet disk-space guard threshold decision (scripts/lib/disk-guard-thresholds.sh)
 //       is behaviorally correct: ≥80% triggers an alert, <80% does not.
 
-/// The two image builders that were MISSING the grow-root + 512M /var/cache. The setup-script
-/// paths (setup.sh + setup-device.sh) already carry these; these tests extend coverage to the
-/// builders.
+/// The two image builders that were MISSING the grow-root + 512M /var/cache. The setup-device.sh
+/// path already carries these; these tests extend coverage to the builders.
 const IMAGE_BUILDERS: [&str; 2] = ["scripts/create-usb-linux.sh", "scripts/build-image.sh"];
 
 /// 13. Both image builders must INSTALL cloud-guest-utils (growpart) so the first-boot
@@ -543,7 +542,7 @@ fn image_builders_install_cloud_guest_utils() {
 }
 
 /// 14. Both image builders must ENABLE camera-box-grow-root.service so the root partition
-///     auto-expands to fill the disk on first boot — no manual setup.sh run required. Without
+///     auto-expands to fill the disk on first boot — no manual setup-device.sh run required. Without
 ///     this, a fresh USB key written to a large disk ships with the image's small root partition
 ///     and will fill up prematurely (the exact cam4 ENOSPC brick path, #369).
 #[test]
@@ -563,8 +562,8 @@ fn image_builders_enable_grow_root_service() {
     }
 }
 
-/// 15. Both image builders must write a ≥512M /var/cache tmpfs line to fstab. The setup
-///     provisioning scripts (setup.sh + setup-device.sh) already carry this line (#295/#306);
+/// 15. Both image builders must write a ≥512M /var/cache tmpfs line to fstab. The setup-device.sh
+///     provisioning path already carries this line (#295/#306);
 ///     the image builders were missing it, leaving cam1 with a 100M /var/cache that filled up
 ///     and triggered an apt ENOSPC → initrd-less kernel → brick (#369 follow-on to #295).
 ///
@@ -1002,4 +1001,35 @@ fn create_usb_linux_is_the_sole_live_install_builder() {
             "{rel} must stay removed — {BASE_IMAGE_BUILDER} is the sole live-install builder (#449)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #563 — retire `scripts/setup.sh`. It was the separate `curl | sudo bash` quick-install path
+// (#557's own text asked whether it was still needed or fully superseded by `setup-device.sh`);
+// the owner decided (2026-07-09) to retire it entirely — one provisioning path, less to
+// maintain. Pins the retirement so a future revert (a stray re-add, or a release workflow change
+// that starts packaging it again) is caught immediately, mirroring the #449 dead-builder pattern
+// above.
+
+/// `scripts/setup.sh` must never exist in the repo again.
+#[test]
+fn setup_sh_is_removed() {
+    let p = manifest_dir().join("scripts/setup.sh");
+    assert!(
+        !p.exists(),
+        "scripts/setup.sh must stay removed — retired in #563, superseded by \
+         scripts/setup-device.sh (the sole provisioning path)"
+    );
+}
+
+/// The release workflow must never package `scripts/setup.sh` into a release artifact again —
+/// it used to `cp scripts/setup.sh ./artifacts/` and ship it as a release asset.
+#[test]
+fn release_workflow_does_not_package_setup_sh() {
+    let body = read(".github/workflows/release.yml");
+    assert!(
+        !body.contains("setup.sh"),
+        "release.yml must not reference setup.sh anywhere — it was retired in #563 and must \
+         never be copied into artifacts/ or listed as a release asset again"
+    );
 }

@@ -2518,3 +2518,31 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   note to describe the real gate; added two reusable gotchas (win-* MCP console-capture CRLF;
   Rust `\`-continuation silently stripping a fixture's next-line leading whitespace) in a
   follow-up docs-only commit (`2481317e9`, riding on `dev` for the next PR to carry to `main`).
+
+## #24 item 1 — recording-e2e.sh drives cam1, cam3, or cam4 as the SOURCE camera (2026-07-09)
+
+- Scope: only item 1 of #24 (the harness was hard-coded to cam1 as the ONLY possible SOURCE
+  camera for the single-node full-path launch). Item 2 (optical dual-QR self-loopback hardware
+  for cam1/cam3/cam4) re-confirmed LIVE hardware-blocked (no `/dev/fb0`, all HDMI connectors
+  `disconnected` on cam1/cam3/cam4 via linux-cam1/3/4 MCP). Item 3 (a live multi-hour 4-camera
+  sweep) deferred as separate future verification. Issue #24 stays OPEN.
+- `scripts/camera-set.sh`: new `camera_strih_route()` resolves cam1/cam3/cam4 to the strih OBS
+  scene + NDI-input pin (mirrors `scripts/set-ndi-mapping.py` exactly); rejects cam2/cam5/cam6.
+  RED `8edf64926` → GREEN `13cd973d7`.
+- `scripts/recording-e2e.sh`: `CAM1_IP`/`STRIH_PROG_SCENE`/`STRIH_PROG_SOURCE`/
+  `STRIH_UPSTREAM_NDI`/the deploy step's `CAMERA_BOX_BURN_RUN_ID` now all resolve per
+  `CAM=cam1|cam3|cam4` instead of being hard-coded to cam1; added a guard rejecting
+  `ALL_CAMBOX=1` + non-cam1 CAM (would double-deploy the same physical box). NO
+  `recording-verdict` (Rust) changes needed — it already reads the three per-camera burn ids
+  independently (`CAMERA_UNDER_TEST_NODES`, from earlier #436/#566). RED `48023df8c` → GREEN
+  `77471c8bf`, cosmetic log-line follow-up `ae4dfa7ad` (found by the deep code-review pass:
+  the operator-actionable pre-run camera checklist banner was still unconditionally "cam1").
+- PR #631, merge commit `c90fbb5a5`; main CI green (Lint/Test/Coverage/Build/Windows-probe/
+  Drift-Guard/Shellcheck/Security/Python-harness all pass; Mutation Testing skipped — no Rust
+  src changes, test-file-only diff for cargo-mutants purposes). Code-only change (no `src/`
+  touched) — no deployable device-behavior change, no live deploy/verify needed.
+- Filed #632: the deep review surfaced that `recording-verdict.rs`'s fast/robust decode-path
+  gate (`args_expected_burns_for`/`decode_for`) and its `cam2→cam1` report label are hardcoded
+  to cam1's burn id — harmless (correctness holds, robust path is a strict superset) but means
+  a live cam3/cam4 run (item 3) will hit a ~10x slower decode with a stale label until fixed.
+  Genuinely cross-cutting Rust change across 3 call sites — separate issue, not this PR.

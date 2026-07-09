@@ -320,3 +320,17 @@ while [ $i -lt 27 ]; do
 done
 ```
 (pass `timeout: 570000` on this Bash call)
+
+## "Job was not acquired by Runner" — transient GitHub-hosted acquisition failure (#24 item 1, PR #631)
+
+All jobs in `ci.yml` run on GitHub-hosted runners (`ubuntu-latest`/`ubuntu-22.04`/`windows-2022`
+— no self-hosted runners in this repo, unlike the rig-facing win-* MCP boxes). Occasionally a run
+sits `queued` for 10-15+ minutes, then every job completes with `conclusion: cancelled` and the
+overall run reports `conclusion: failure` — NOT a real code/test/lint failure. Confirm the root
+cause via `gh run view <id>` (the plain text summary, not just `--json`): the ANNOTATIONS section
+shows `"The job was not acquired by Runner of type hosted even after multiple attempts"` for every
+job. This is a GitHub-side runner-pool capacity hiccup, unrelated to the diff. Per
+`ci-monitoring.md`'s "one rerun is acceptable to rule out transient issues": `gh run rerun <id>`
+re-queues the SAME run (same run id, same commit) — no need to re-push or investigate the diff.
+If a SECOND rerun hits the identical annotation, treat it as a genuine (rare) GitHub outage, not a
+repo problem.

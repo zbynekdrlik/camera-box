@@ -147,6 +147,35 @@ hops, VERDICT=FAIL (correctly); genlock-on-both-hops pending (#8).
 cam1 (10.77.9.61) has NO /dev/fb0 (only fbcon), ALL HDMI connectors disconnected,
 /dev/video0 held by prod camera-box → QR test is inherently a **cam2 proxy for cam→strih**.
 cam1/3/4 each need an HDMI-out→capture loopback to be QR-verified directly (#24).
+Re-confirmed LIVE 2026-07-09 (via linux-cam1/cam3/cam4 MCP): all three STILL have no `/dev/fb*`
+and every `card0-HDMI-A-*` connector reports `disconnected` — cam3's SSH is reachable now
+(contrary to an earlier 2026-07-05 note that it was down); worth re-checking whenever this
+hardware gap is revisited.
+
+## `recording-e2e.sh` now drives cam1, cam3, OR cam4 as the SOURCE camera (#24 item 1, PR #631)
+
+`CAM=cam1|cam3|cam4` (env var, defaults to `cam1` for back-compat) selects which physical box
+plays the SOURCE-camera role for the single-node full-path launch (the box filming cam2's
+monitor + carrying the #174 capture burn) — it is no longer hard-coded to cam1. Resolution
+chain: `camera_resolve("$CAM")` (pre-existing, `scripts/camera-set.sh`) sets `CAMERA_IP`/
+`CAMERA_SOURCE`; the NEW `camera_strih_route("$CAMERA_NAME")` (same file) resolves which strih
+OBS scene/NDI-input shows that camera (mirrors `scripts/set-ndi-mapping.py`'s fixed pins:
+`NDI cam5`→CAM1, `NDI cam1`→CAM3, `NDI cam3`→CAM4 — cam2/cam5/cam6 are rejected, not
+SOURCE-eligible). `recording-verdict` (Rust) needed ZERO changes: it already reads
+`--burn-cam1-run-id`/`--burn-cam3-run-id`/`--burn-cam4-run-id` as three independent roles
+(`CAMERA_UNDER_TEST_NODES`, from earlier #436/#566) with per-role CLI defaults matching the
+shell's own reserved constants (911001/911008/911007) — deploying the resolved camera under
+ITS OWN matching id is all that's needed. `ALL_CAMBOX=1` + a non-cam1 `CAM` is rejected loudly
+(ALL_CAMBOX's own secondary-camera loop already deploys cam3/cam4 at fixed IPs — picking one of
+them as the primary too would double-deploy the same physical box).
+
+**Known follow-up gap (#632, NOT yet fixed):** `recording-verdict.rs`'s fast/robust decode-path
+gate (`args_expected_burns_for`/`decode_for`) and its `cam2→cam1` report label are STILL
+hardcoded to cam1's burn id (911001) — harmless for correctness (the robust path is a strict
+superset, the #186 0-miss guarantee holds), but a live run with `CAM=cam3`/`CAM=cam4` will hit
+a ~10x slower decode (every frame takes the expensive robust path since cam1's id is never
+found) and the report will mislabel the hop `cam2→cam1` even when cam3/cam4 was actually under
+test. Fix before running the item-3 live 4-camera sweep, or budget the extra decode time.
 
 ## Recording-Proof Run Recipe (recording-e2e.sh, the 4-node 0-loss proof)
 
