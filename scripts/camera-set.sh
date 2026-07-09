@@ -128,4 +128,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   camera_resolve "$CAMERA"
   printf 'CAMERA=%s IP=%s SOURCE=%q FPS=%s\n' "$CAMERA_NAME" "$CAMERA_IP" "$CAMERA_SOURCE" "$CAMERA_GENLOCK_FPS"
+  # #24: also self-check the strih route -- only when the default camera is SOURCE-eligible
+  # (cam2's default is NOT -- it is the fixed painter, never routed through strih as a
+  # camera-under-test, so camera_strih_route rejects it; that is expected, not an error here).
+  if camera_strih_route "$CAMERA" 2>/dev/null; then
+    printf 'STRIH_SCENE=%q STRIH_SOURCE=%q\n' "$CAMERA_STRIH_SCENE" "$CAMERA_STRIH_SOURCE"
+  fi
 fi

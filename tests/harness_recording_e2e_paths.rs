@@ -69,10 +69,16 @@ fn recording_e2e_does_not_record_the_cam1_grab() {
 #[test]
 fn recording_e2e_keeps_the_cam1_capture_burn_enabled() {
     let s = read("scripts/recording-e2e.sh");
+    // #24 item 1: the deploy step now sets CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID -- resolved
+    // per the SOURCE camera ($CAMERA_NAME), defaulting to $BURN_CAM1_RUN_ID's value for cam1 (the
+    // unset default) -- rather than the fixed $BURN_CAM1_RUN_ID, so cam3/cam4 can also be the
+    // deployed camera. The burn is still unconditionally enabled; only WHICH reserved id is used
+    // is now resolved. See recording_e2e_deploy_uses_the_burn_id_matching_the_resolved_camera.
     assert!(
-        s.contains("CAMERA_BOX_BURN_RUN_ID=$BURN_CAM1_RUN_ID"),
-        "#179/#174: cam1 must launch with CAMERA_BOX_BURN_RUN_ID set so the capture burn \
-         rides into the stream recording (the cam1 mark that lets the grab be dropped)."
+        s.contains("CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID"),
+        "#179/#174/#24: the SOURCE camera must launch with CAMERA_BOX_BURN_RUN_ID set (resolved \
+         via $SRC_BURN_RUN_ID) so the capture burn rides into the stream recording (the mark \
+         that lets the grab be dropped)."
     );
     assert!(
         s.contains("--burn-cam1-run-id"),
