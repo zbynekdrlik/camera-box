@@ -37,6 +37,8 @@
 //! Exit code: 0 on PASS for every verdict, non-zero on ANY fail.
 
 use anyhow::{Context, Result};
+use camera_box::av_window::{self, AvSyncVerdict};
+use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
     burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind, NodeContiguity,
     RecordedBurnFrame,
@@ -61,6 +63,7 @@ use camera_box::probe::recording_segments::{
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
+use camera_box::qpsk_marker::av_offset_candidates;
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2325,22 +2328,18 @@ fn main() -> Result<()> {
         },
     };
 
-    // Fused path: no carried colour — `build_node_colour_fail` samples each node's recording directly.
+    // Fused path: no carried colour — `build_node_colour_fail` samples each node's recording
+    // directly. Same for A/V-sync (`None`, #312 item 2 PR A): the fused path decodes it directly
+    // from `args.av_marker_log` + `args.stream` INSIDE `build_and_print_verdict` when both are
+    // given — there is nothing to carry here (carrying only applies to the #208 merge path).
     let (_report, all_pass) =
-        build_and_print_verdict(&args, strih, stream, cam1, None, None, imag)?;
+        build_and_print_verdict(&args, strih, stream, cam1, None, None, imag, None)?;
     if !all_pass {
         std::process::exit(1);
     }
     Ok(())
 }
 
-/// Build the full-chain verdict + print it + write the `--json` report, returning the report
-/// JSON and the binary PASS. Operates on ALREADY-DECODED frames so the fused path (live decode)
-/// and #208 merge path (deserialized per-box partials) share IDENTICAL logic — the merged
-/// verdict is therefore equivalent to the fused output (same fields, same PASS semantics). The
-/// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
-/// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
-#[allow(clippy::too_many_arguments)]
 /// The `VerdictConfig` for the STREAM node's per-recording tick DIAGNOSTIC. The stream box
 /// records at `stream_capture_fps` (30 in the mixed 60+30 topology), NOT the cam/strih
 /// `capture_fps` (60) — run 7020001 wired the base cfg straight through and the diagnostic
@@ -2355,6 +2354,21 @@ fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConf
     cfg
 }
 
+/// Build the full-chain verdict + print it + write the `--json` report, returning the report
+/// JSON and the binary PASS. Operates on ALREADY-DECODED frames so the fused path (live decode)
+/// and #208 merge path (deserialized per-box partials) share IDENTICAL logic — the merged
+/// verdict is therefore equivalent to the fused output (same fields, same PASS semantics). The
+/// ONLY recording-dependent step is pixel-proof PNG extraction, skipped when a `DecodedRec` has
+/// no `rec_path` (merge mode); the contiguity/PASS gate is pure and unaffected.
+///
+/// #312 item 2 (PR A) — found in CI review: `#[allow(clippy::too_many_arguments)]` had been
+/// MISPLACED for who knows how long (bound to `stream_diag_cfg` above, a plain 2-arg function
+/// that never needed it, instead of to THIS function) — it never mattered while this function
+/// sat at exactly 7 args (clippy's default threshold), but adding the 8th (`stream_av_sync`)
+/// below immediately tripped `-D warnings` in the `--all-features` Lint CI job (never visible
+/// locally — Tier-0 policy bans compiling `--features probe` on this box). Moved to the correct
+/// item.
+#[allow(clippy::too_many_arguments)]
 fn build_and_print_verdict(
     args: &Args,
     strih: Option<DecodedRec>,
@@ -2369,6 +2383,11 @@ fn build_and_print_verdict(
     // #461: imag-nb's OWN recording (EPIC #466 Topology v2) — independent of strih/stream, no
     // burn, gated by the cam2 optical tick's own contiguity (see `node_verdict_for_imag`).
     imag: Option<DecodedRec>,
+    // #312 item 2 (PR A) — the STREAM recording's carried A/V-sync marker inputs (`Some` only in
+    // MERGE mode, when the stream box extracted with `--av-marker-log`; see `run_merge`). `None`
+    // on the fused path — there, `all_cambox_av_sync` decodes directly from `args.stream` +
+    // `args.av_marker_log` when both are given (see the `--switch-schedule` block below).
+    stream_av_sync: Option<AvMarkerInputs>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -3873,6 +3892,153 @@ fn build_and_print_verdict(
                     }
                 }
                 report["all_cambox_latency"] = serde_json::Value::Object(latency_json);
+
+                // #312 item 2 (PR A) — fuse the per-camera A/V-sync measurement (#188) into this
+                // SAME run/verdict, alongside the loss (all_cambox_continuity) + latency
+                // (all_cambox_latency) blocks above. Triggered when EITHER (a) this fused
+                // single-process run was handed --av-marker-log directly (VERDICT_ON_STREAM=0,
+                // the legacy decode-on-dev1 fallback), OR (b) the stream partial already carries
+                // the decoded A/V-sync ingredients from its own on-box
+                // `--extract-partial stream --av-marker-log` (VERDICT_ON_STREAM=1, the default —
+                // the stream box is the ONLY place that has both the audio marker track and the
+                // cam2 dual-QR video co-located, so its extract decodes them there and carries
+                // them through the small partial JSON — mirrors #377's `colour` carry exactly).
+                //
+                // PR A reports `all_cambox_av_sync` (offsets, sample counts, any UNKNOWN cameras)
+                // but does NOT gate `all_pass` on it — the ±20ms cross-window bound (#624
+                // deliverable 4) is PR B, wired on top of `av_window::pool_camera_av_sync`.
+                let av_inputs: Option<AvMarkerInputs> =
+                    match (stream_av_sync, &args.av_marker_log, &args.stream) {
+                        (Some(carried), _, _) => Some(carried),
+                        (None, Some(marker_log_path), Some(stream_path)) => {
+                            let marker_csv = std::fs::read_to_string(marker_log_path)
+                                .with_context(|| {
+                                    format!("read --av-marker-log {}", marker_log_path.display())
+                                })?;
+                            let params = camera_box::qpsk_marker::AudioParams::rig60();
+                            Some(decode_av_marker_inputs(
+                                stream_path,
+                                &marker_csv,
+                                &params,
+                                args.av_audio_track,
+                                args.av_threshold,
+                            )?)
+                        }
+                        _ => None,
+                    };
+                if let Some(av) = av_inputs {
+                    println!();
+                    println!(
+                        "=== #312 item 2 ALL-CAMBOX per-camera A/V-sync (fps={:.3}, \
+                         emit_log_rows={}, audio_markers={}) ===",
+                        av.fps,
+                        av.emit_log.len(),
+                        av.audio_markers.len()
+                    );
+                    let mut av_json = serde_json::Map::new();
+                    for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                        // cam2 is the emitter/painter itself: it has NO own schedule window where
+                        // the optical dual-QR is visible (cam2's OWN camera does not film its own
+                        // monitor — only cam1/cam3/cam4/cam5/cam6 do, each during THEIR window,
+                        // see OPTICAL_INJECTION_NODES above). The A/V relationship being measured
+                        // (cam2's paint tick vs cam2's own QPSK marker) is identical no matter
+                        // which camera happens to be cut into strih program at that instant, so
+                        // cam2's own number pools the WHOLE recording (unwindowed) — mirrors
+                        // exactly how the legacy single-camera `.claude/skills/av-sync`
+                        // measurement was taken (one continuous recording, no switch-schedule at
+                        // all). This is also this PR's own sanity check: cam2's fused number
+                        // should reproduce roughly that historical measurement.
+                        let whole_recording = camera == "cam2";
+                        let (windows_matched, per_window_candidates): (usize, Vec<Vec<f64>>) =
+                            if whole_recording {
+                                let ticks = av_window::window_ticks(
+                                    &stream_frames
+                                        .iter()
+                                        .map(|f| (f.frame_index, f.tick))
+                                        .collect::<Vec<_>>(),
+                                    av.fps,
+                                    av.video_start_s,
+                                );
+                                let cands =
+                                    av_offset_candidates(&av.emit_log, &av.audio_markers, &ticks);
+                                (1, vec![cands])
+                            } else {
+                                let mut matched = 0usize;
+                                let mut per_window = Vec::new();
+                                for (w, win_frames) in schedule.iter().zip(latency_windows.iter()) {
+                                    if !w.cambox.eq_ignore_ascii_case(camera) {
+                                        continue;
+                                    }
+                                    matched += 1;
+                                    let ticks = av_window::window_ticks(
+                                        &win_frames
+                                            .iter()
+                                            .map(|f| (f.frame_index, f.tick))
+                                            .collect::<Vec<_>>(),
+                                        av.fps,
+                                        av.video_start_s,
+                                    );
+                                    per_window.push(av_offset_candidates(
+                                        &av.emit_log,
+                                        &av.audio_markers,
+                                        &ticks,
+                                    ));
+                                }
+                                (matched, per_window)
+                            };
+                        let cam_sync = av_window::pool_camera_av_sync(
+                            windows_matched,
+                            &per_window_candidates,
+                            av_window::MIN_AV_SAMPLES,
+                            args.av_cluster_tol_ms,
+                        );
+                        println!(
+                            "  {camera}: {} windows={} candidates={} cluster_samples={} → {}",
+                            if whole_recording {
+                                "(whole-recording pool)"
+                            } else {
+                                "(per-window pool)"
+                            },
+                            cam_sync.windows,
+                            cam_sync.candidates,
+                            cam_sync.cluster_samples,
+                            match cam_sync.verdict {
+                                AvSyncVerdict::Measured => format!(
+                                    "{:.1}ms (mad {:.1}ms)",
+                                    cam_sync.av_offset_ms.unwrap_or(0.0),
+                                    cam_sync.mad_ms.unwrap_or(0.0)
+                                ),
+                                AvSyncVerdict::Unknown => "UNKNOWN (too few samples)".to_string(),
+                            }
+                        );
+                        av_json.insert(
+                            camera.to_string(),
+                            serde_json::json!({
+                                "node": camera,
+                                "windowing": if whole_recording { "whole_recording" } else { "per_window" },
+                                "windows": cam_sync.windows,
+                                "candidates": cam_sync.candidates,
+                                "cluster_samples": cam_sync.cluster_samples,
+                                "av_offset_ms": cam_sync.av_offset_ms,
+                                "mad_ms": cam_sync.mad_ms,
+                                "verdict": match cam_sync.verdict {
+                                    AvSyncVerdict::Measured => "measured",
+                                    AvSyncVerdict::Unknown => "unknown",
+                                },
+                            }),
+                        );
+                    }
+                    av_json.insert(
+                        "gate".to_string(),
+                        serde_json::json!(
+                            "not enforced yet — see #624 deliverable 4 / #312 item 2 PR B"
+                        ),
+                    );
+                    report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
+                    // PR A deliberately does NOT gate `all_pass` on this block — see the module
+                    // doc comment above + the #312 item 2 issue text (measure + report now, gate
+                    // in a follow-up PR).
+                }
             }
             None => {
                 eprintln!(
@@ -4153,8 +4319,35 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     } else {
         None
     };
+    // #312 item 2 (PR A) — when --av-marker-log is given AND this is the STREAM box (the ONLY
+    // recording that co-locates the audio marker track with the cam2 dual-QR video), decode the
+    // A/V-sync marker inputs ON-HOST here and carry them through the partial (mirrors the
+    // --colour-gate carry above exactly). Silently omitted for strih/imag — passing
+    // --av-marker-log there is simply a no-op, never an error, since only the stream recording can
+    // ever have the marker.
+    let av_sync = if box_name == "stream" {
+        match &args.av_marker_log {
+            Some(marker_log_path) => {
+                let marker_csv = std::fs::read_to_string(marker_log_path).with_context(|| {
+                    format!("read --av-marker-log {}", marker_log_path.display())
+                })?;
+                let params = camera_box::qpsk_marker::AudioParams::rig60();
+                Some(decode_av_marker_inputs(
+                    rec_path,
+                    &marker_csv,
+                    &params,
+                    args.av_audio_track,
+                    args.av_threshold,
+                )?)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames)
-        .with_colour(colour);
+        .with_colour(colour)
+        .with_av_sync(av_sync);
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -4191,6 +4384,11 @@ fn run_merge(args: &Args) -> Result<()> {
     // split decode path (the gate is fused/on-host — the recording is only on the box).
     let mut strih_colour: Option<camera_box::colour_verify::NodeColourSummary> = None;
     let mut stream_colour: Option<camera_box::colour_verify::NodeColourSummary> = None;
+    // #312 item 2 (PR A) — the stream partial's carried A/V-sync marker inputs (Some only when
+    // that box extracted with `--av-marker-log`). Only the STREAM recording ever carries this
+    // (the audio marker track + the cam2 dual-QR video are co-located there only), mirroring
+    // `stream_colour` above.
+    let mut stream_av_sync: Option<AvMarkerInputs> = None;
     // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
     // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
     let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
@@ -4229,8 +4427,10 @@ fn run_merge(args: &Args) -> Result<()> {
             }
         }
         box_paths.push((box_name.to_string(), PathBuf::from(path)));
-        // #377 — take the carried colour summary before `frames` moves into the DecodedRec.
+        // #377/#312 — take the carried colour summary + A/V-sync inputs before `frames` moves
+        // into the DecodedRec.
         let colour = partial.colour;
+        let av_sync = partial.av_sync;
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
@@ -4243,6 +4443,7 @@ fn run_merge(args: &Args) -> Result<()> {
             "stream" => {
                 stream = Some(rec);
                 stream_colour = colour;
+                stream_av_sync = av_sync;
             }
             // #461: imag carries no burns, so there is no colour to carry either in this ticket.
             "imag" => {
@@ -4287,6 +4488,7 @@ fn run_merge(args: &Args) -> Result<()> {
         strih_colour,
         stream_colour,
         imag,
+        stream_av_sync, // #312 item 2 (PR A): carried from the stream partial's --av-marker-log extract
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -4374,6 +4576,7 @@ mod tests {
             "#312: CAMERA_UNDER_TEST_NODES must be exactly OPTICAL_INJECTION_NODES plus cam2"
         );
     }
+    use camera_box::probe::av_sync_recording::AvMarkerInputs;
     use camera_box::probe::burn_contiguity::{BurnRate, InWindowMissingKind};
     use camera_box::probe::payload::Payload;
     use camera_box::probe::recording::RecordingFrame;
@@ -4643,6 +4846,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -4695,6 +4899,7 @@ mod tests {
             None,
             None,
             None,
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -4771,6 +4976,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -4831,6 +5037,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -4891,6 +5098,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         assert!(
@@ -4926,6 +5134,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         assert!(
@@ -5009,6 +5218,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -5089,6 +5299,7 @@ mod tests {
                 strih_colour,
                 stream_colour,
                 None, // #461: no imag frames in this test
+                None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
             )
             .expect("verdict")
         };
@@ -5176,6 +5387,7 @@ mod tests {
                 None,
                 None,
                 None, // #461: no imag frames in this test
+                None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
             )
             .expect("fused verdict");
 
@@ -5208,6 +5420,7 @@ mod tests {
                 None,
                 None,
                 None, // #461: no imag frames in this test
+                None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
             )
             .expect("merged verdict");
 
@@ -5355,6 +5568,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         // The node still FAILs (the id IS missing from the strih recording — a real burn-readability
@@ -5413,6 +5627,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         assert!(
@@ -5450,6 +5665,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         assert!(!pass2, "#356: a genuine 1:1-hop cam1 loss ⇒ overall FAIL");
@@ -5488,6 +5704,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         assert!(
@@ -5548,6 +5765,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
         assert!(
@@ -5644,6 +5862,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("fused verdict");
 
@@ -5667,6 +5886,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("merged verdict");
 
@@ -5799,6 +6019,7 @@ mod tests {
                 frames: imag_frames,
                 rec_path: None,
             }),
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -5930,6 +6151,7 @@ mod tests {
                 frames: imag_frames,
                 rec_path: None,
             }),
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -6080,6 +6302,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this fixture
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -6196,6 +6419,229 @@ mod tests {
         );
     }
 
+    /// #312 item 2 (PR A) — build the SAME 2-window `--switch-schedule` shape
+    /// `build_all_cambox_latency_fixture` uses (20 frames/window, globally-unique
+    /// `frame_index`/optical `tick` = `1000 + idx`, 5s windows), but ALSO run
+    /// `build_and_print_verdict` with the given (fused-mode) `av` inputs, returning the report
+    /// JSON. `cameras` is `(cambox label, camera burn run_id, injected cam2->camera latency ns)` —
+    /// the latency value is irrelevant to A/V-sync itself, just realistic filler so the fixture
+    /// mirrors a real ALL_CAMBOX sweep.
+    fn build_all_cambox_av_sync_fixture(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+        av: Option<AvMarkerInputs>,
+    ) -> serde_json::Value {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 5_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir = std::env::temp_dir().join(format!("cb-312-avsync-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let windows_json: Vec<String> = cameras
+            .iter()
+            .enumerate()
+            .map(|(wi, &(label, _, _))| {
+                let start_ns = base + (wi as i64) * win;
+                let end_ns = start_ns + win;
+                format!(r#"{{"cambox":"{label}","start_ns":{start_ns},"end_ns":{end_ns}}}"#)
+            })
+            .collect();
+        std::fs::write(&sched_path, format!("[{}]", windows_json.join(","))).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        let mut idx = 0u64;
+        for (wi, &(_, camera_burn, latency_ns)) in cameras.iter().enumerate() {
+            let wstart = base + (wi as i64) * win;
+            for j in 0..20i64 {
+                let paint_ts = wstart + (j + 1) * (ONE_S / 5);
+                let optical = 1000u32 + idx as u32;
+                stream_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: paint_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: paint_ts,
+                        },
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 5000 + idx as u32,
+                            gen_ts_ns: paint_ts + latency_ns,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+                idx += 1;
+            }
+        }
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+
+        let (v, _pass) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this fixture
+            av,
+        )
+        .expect("verdict");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        v
+    }
+
+    /// #312 item 2 (PR A) — cam1's window carries 10 real emit-log/audio-marker pairs, each a
+    /// constant 500ms `video - audio` offset; cam3's window has NO matching emit-log frame_id
+    /// (its ticks fall outside the emit log's range); cam4/cam5/cam6 never appear in the sweep at
+    /// all. cam2 pools the WHOLE recording (unwindowed) and picks up the SAME real cam1-range
+    /// candidates. Asserts every fail-closed case from the same test in one shot.
+    #[test]
+    fn all_cambox_av_sync_measures_a_real_camera_and_fails_closed_on_the_rest_312() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8)
+            .map(|k| (k as f64 / 30.0 - 0.5, k)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let v = build_all_cambox_av_sync_fixture(
+            "real",
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)],
+            Some(av),
+        );
+
+        let av_sync = &v["all_cambox_av_sync"];
+        assert!(
+            !av_sync.is_null(),
+            "#312: all_cambox_av_sync must be reported when av_sync inputs are given: {v}"
+        );
+        assert_eq!(
+            av_sync["cam1"]["verdict"],
+            serde_json::json!("measured"),
+            "#312: cam1's window carries 10 real candidates -> measured: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam1"]["av_offset_ms"],
+            serde_json::json!(500.0),
+            "#312: every candidate was constructed as exactly 500ms: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam1"]["cluster_samples"],
+            serde_json::json!(10),
+            "#312: all 10 candidates land in the same cluster (no scatter injected): {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam2"]["verdict"],
+            serde_json::json!("measured"),
+            "#312: cam2 pools the WHOLE recording and picks up the same real cam1-range \
+             candidates (the sanity-check property from the PR spec): {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam2"]["av_offset_ms"],
+            serde_json::json!(500.0),
+            "#312: cam2's whole-recording number reproduces the real offset: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam2"]["windowing"],
+            serde_json::json!("whole_recording"),
+            "#312: cam2 is NEVER windowed (it has no own optical-visible window): {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["verdict"],
+            serde_json::json!("unknown"),
+            "#312: cam3's window exists but has ZERO matching emit-log frame_ids -> unknown, \
+             never a fabricated number: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["windows"],
+            serde_json::json!(1),
+            "#312: cam3's window DID match the schedule (windows=1), just produced 0 candidates: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["candidates"],
+            serde_json::json!(0),
+            "#312: no emit-log frame_id falls inside cam3's tick range: {av_sync}"
+        );
+        for absent in ["cam4", "cam5", "cam6"] {
+            assert_eq!(
+                av_sync[absent]["verdict"],
+                serde_json::json!("unknown"),
+                "#312: {absent} never appeared in this sweep -> unknown: {av_sync}"
+            );
+            assert_eq!(
+                av_sync[absent]["windows"],
+                serde_json::json!(0),
+                "#312: {absent} matched ZERO schedule windows this run: {av_sync}"
+            );
+        }
+        assert!(
+            av_sync["gate"]
+                .as_str()
+                .unwrap()
+                .contains("not enforced yet"),
+            "#312 PR A: the gate string must say it is not enforced yet (PR B wires it): {av_sync}"
+        );
+    }
+
+    /// #312 item 2 (PR A) — the identical fixture, run TWICE (once with av_sync inputs, once
+    /// without), must produce the IDENTICAL overall PASS/FAIL — proving the block genuinely does
+    /// NOT gate the headline verdict, exactly as the PR spec requires.
+    #[test]
+    fn all_cambox_av_sync_never_affects_the_overall_verdict_312() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] =
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)];
+
+        let with_av = build_all_cambox_av_sync_fixture("gate-with", cameras, Some(av));
+        let without_av = build_all_cambox_av_sync_fixture("gate-without", cameras, None);
+
+        assert!(
+            !with_av["all_cambox_av_sync"].is_null(),
+            "sanity: the WITH-av_sync run must actually have reported the block: {with_av}"
+        );
+        assert!(
+            without_av["all_cambox_av_sync"].is_null(),
+            "sanity: the WITHOUT-av_sync run must NOT report the block at all: {without_av}"
+        );
+        assert_eq!(
+            with_av["overall_pass"], without_av["overall_pass"],
+            "#312 PR A: reporting all_cambox_av_sync must NEVER change the run's overall \
+             PASS/FAIL — with={with_av}, without={without_av}"
+        );
+    }
+
     /// #583 — build a single-window `--switch-schedule` run over an imag recording whose optical
     /// tick follows `optical_ticks` (one recorded frame per tick, each carrying a CLEAN step-1
     /// digital corner burn — imag's own render, blind to any upstream content freeze in the filmed
@@ -6301,6 +6747,7 @@ mod tests {
                 frames: imag_frames,
                 rec_path: None,
             }),
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -6525,6 +6972,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict with a failed cam1 grab");
         assert_eq!(
@@ -6553,6 +7001,7 @@ mod tests {
             None,
             None,
             None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict with a decoded cam1 grab");
         assert_eq!(
@@ -8962,6 +9411,7 @@ mod tests {
                 frames: imag_frames,
                 rec_path: None,
             }),
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 
@@ -8996,6 +9446,7 @@ mod tests {
                 frames: imag_frames,
                 rec_path: None,
             }),
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
 

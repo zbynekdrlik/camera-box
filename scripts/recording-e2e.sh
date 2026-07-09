@@ -207,6 +207,10 @@ STREAM_REC="$OUTDIR/stream-${RUN_ID}.mp4"
 REPORT_JSON="$OUTDIR/verdict-${RUN_ID}.json"
 REPORT_PNG="$OUTDIR/report-${RUN_ID}.png"
 SWITCH_SCHEDULE_JSON="$OUTDIR/switch-schedule.json"  # #312 Phase-2 all-cambox sweep (ALL_CAMBOX=1)
+# #312 item 2 (PR A): the cam2 painter's CONTINUOUS QPSK audio-marker log for the WHOLE
+# ALL_CAMBOX run duration (fuses per-camera A/V-sync into the same run/verdict, #624 deliverable
+# 4). ALL_CAMBOX=1 only — the plain single-camera path never emits this.
+MARKER_CSV="$OUTDIR/av-markers-${RUN_ID}.csv"
 export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 
 # #328: hard timeouts so a hung obs-websocket op (the #328 prod-scene/teardown hang) can NEVER
@@ -609,8 +613,28 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # never touches /dev/fb0, so fb0 is free for the painter WITHOUT touching camera-box again
 # here. The plain single-camera path (ALL_CAMBOX unset) never runs [2b/8], so it still needs
 # the ORIGINAL stop-camera-box step here (cam2 is not a measured node in that mode).
+#
+# #312 item 2 (PR A): under ALL_CAMBOX=1 the painter ALSO emits the CONTINUOUS QPSK audio
+# marker for the WHOLE run duration — ONE markers.csv for the entire sweep (fuses per-camera
+# A/V-sync into this same run/verdict, #624 deliverable 4). Never gated to a camera window —
+# attribution happens entirely on the VIDEO side, per `--switch-schedule` window
+# (recording-verdict's all_cambox_av_sync). Same collection mechanism the AV_RESTART_GATE mode
+# already uses below (`--audio-marker`/`--marker-log`, #420/#421) — reused, not reinvented. The
+# plain single-camera path (ALL_CAMBOX unset) is UNCHANGED: no marker flags, no self-check.
+AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-180}"
+_cam2_marker_flags=""
+_cam2_marker_check=""
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  _cam2_prep="rm -f /tmp/painter.csv;"
+  _cam2_prep="rm -f /tmp/painter.csv /tmp/av-markers.csv;"
+  _cam2_marker_flags="--audio-marker --audio-marker-device $AV_SYNC_MARKER_DEVICE \
+      --audio-marker-cadence-ticks $AV_SYNC_MARKER_CADENCE --marker-log /tmp/av-markers.csv"
+  # #420/#431 fail-loud self-check (same mechanism AV_RESTART_GATE uses, scripts/lib/audio-marker-check.sh):
+  # confirms the marker is RUNNING *and* the log is actually GROWING before the run proceeds — a
+  # broken marker setup is caught in ~20s here, not discovered after a wasted 30-min sweep.
+  _cam2_marker_check="$(audio_marker_check_cmds "$AV_SYNC_MARKER_DEVICE" \
+    'pkill -x frame-probe 2>/dev/null || true' \
+    'all-cambox continuous marker, #312 item 2' '/tmp/av-markers.csv')"
 else
   _cam2_prep="systemctl stop cam2-painter 2>/dev/null || true; systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
 fi
@@ -619,7 +643,9 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
       --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+60)) \
-      >/tmp/painter.log 2>&1 &)"
+      $_cam2_marker_flags \
+      >/tmp/painter.log 2>&1 &); \
+   $_cam2_marker_check"
 PAINTER_LAUNCH_EPOCH="$(date +%s)"  # #359: when the painter's --duration-secs lifetime started
 sleep 3  # let the painter put the QR on the monitor cam1 films
 
@@ -1341,6 +1367,15 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$PAINTER_IP":/tmp/painter.csv "$PAINTER_CSV" 2>/dev/null || \
   echo "WARNING: could not fetch painter CSV (cam→strih assessment omitted)" >&2
+# #312 item 2 (PR A): download the cam2 continuous QPSK A/V-sync marker log (ALL_CAMBOX=1 only —
+# [3/8] never emits it on the plain single-camera path). Best-effort: a missing/failed fetch
+# degrades this run to loss+latency-only (all_cambox_av_sync simply omitted), never aborts the
+# zero-loss proof this far into the run.
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
+    root@"$PAINTER_IP":/tmp/av-markers.csv "$MARKER_CSV" 2>/dev/null || \
+    echo "WARNING: could not fetch cam2 A/V-sync marker log (all_cambox_av_sync will be absent this run)" >&2
+fi
 # #359: FAIL LOUD if the pulled painter ground-truth is stale/missing — NEVER run the verdict
 # against stale ground truth (a stale /tmp/painter.csv produced a fake 14.9h-offset catastrophic
 # FAIL on run 354002). The CSV (header `tick,gen_ts_ns,flip_ts_ns`; gen_ts_ns = CLOCK_REALTIME
@@ -1433,6 +1468,14 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
   VERDICT_ARGS+=(--switch-schedule "$SWITCH_SCHEDULE_JSON")
   echo "    #312 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON"
 fi
+# #312 item 2 (PR A): the LEGACY decode-on-dev1 fused path (VERDICT_ON_STREAM=0) has `--stream`
+# pointing at a LOCAL recording, so recording-verdict can decode the marker log directly —
+# `--av-marker-log` is enough, no partial/carry machinery needed. The default VERDICT_ON_STREAM=1
+# path wires this differently, at [8/8b] below (the stream box extracts + carries it).
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
+  VERDICT_ARGS+=(--av-marker-log "$MARKER_CSV")
+  echo "    #312 item 2: --av-marker-log $MARKER_CSV (fused all_cambox_av_sync)"
+fi
 
 # #208 PER-BOX DECODE-IN-PLACE (refines #193): by default decode EACH recording ON ITS OWN BOX —
 # the strih recording ON the strih box, the stream recording ON the stream box — and merge the
@@ -1485,6 +1528,22 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
   echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
 
+  # #312 item 2 (PR A): the cam2 continuous A/V-sync marker log lives on dev1 (pulled from cam2
+  # above, a plain Linux scp) but the stream recording — the ONLY recording that co-locates the
+  # marker's audio track with the cam2 dual-QR video — lives on the WINDOWS stream box. scp/ssh TO
+  # Windows is DENIED on this rig (same constraint every other cross-box transfer here hits), so
+  # this PUSHES the small marker CSV via the win-stream-snv MCP (FileUpload), mirroring the exact
+  # PLAN convention `av_sync_calibrate.py`'s REMOTE PUSH plan already uses. `--extract-partial
+  # stream` then decodes it ON-BOX (alongside the burns) and carries the result through the small
+  # partial JSON to the dev1 merge — never the recording itself.
+  AV_MARKER_WIN="${AV_MARKER_WIN:-$OUT_DIR_WIN\\av-markers-${RUN_ID}.csv}"
+  _av_marker_args=""
+  if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
+    echo "    --- [8/8b-pre] PUSH the cam2 A/V-sync marker log to the stream box (win-stream-snv, scp-to-Windows denied) ---"
+    echo "      win-stream-snv FileUpload $MARKER_CSV -> $AV_MARKER_WIN"
+    _av_marker_args="--av-marker-log $AV_MARKER_WIN"
+  fi
+
   echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
   # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
@@ -1496,6 +1555,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
        --cam2-run-id "$RUN_ID" \
        --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
        --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+       $_av_marker_args \
        $CG --out "$STREAM_PARTIAL_WIN"
   echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"

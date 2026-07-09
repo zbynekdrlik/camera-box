@@ -152,22 +152,35 @@ and every `card0-HDMI-A-*` connector reports `disconnected` — cam3's SSH is re
 (contrary to an earlier 2026-07-05 note that it was down); worth re-checking whenever this
 hardware gap is revisited.
 
-## `recording-e2e.sh` now drives cam1, cam3, OR cam4 as the SOURCE camera (#24 item 1, PR #631)
+## `recording-e2e.sh` now drives cam1, cam3, cam4, cam5, OR cam6 as the SOURCE camera (#24 item 1, PR #631; #312 item 1 added cam5/cam6)
 
-`CAM=cam1|cam3|cam4` (env var, defaults to `cam1` for back-compat) selects which physical box
-plays the SOURCE-camera role for the single-node full-path launch (the box filming cam2's
-monitor + carrying the #174 capture burn) — it is no longer hard-coded to cam1. Resolution
-chain: `camera_resolve("$CAM")` (pre-existing, `scripts/camera-set.sh`) sets `CAMERA_IP`/
-`CAMERA_SOURCE`; the NEW `camera_strih_route("$CAMERA_NAME")` (same file) resolves which strih
-OBS scene/NDI-input shows that camera (mirrors `scripts/set-ndi-mapping.py`'s fixed pins:
-`NDI cam5`→CAM1, `NDI cam1`→CAM3, `NDI cam3`→CAM4 — cam2/cam5/cam6 are rejected, not
-SOURCE-eligible). `recording-verdict` (Rust) needed ZERO changes: it already reads
-`--burn-cam1-run-id`/`--burn-cam3-run-id`/`--burn-cam4-run-id` as three independent roles
-(`CAMERA_UNDER_TEST_NODES`, from earlier #436/#566) with per-role CLI defaults matching the
-shell's own reserved constants (911001/911008/911007) — deploying the resolved camera under
-ITS OWN matching id is all that's needed. `ALL_CAMBOX=1` + a non-cam1 `CAM` is rejected loudly
-(ALL_CAMBOX's own secondary-camera loop already deploys cam3/cam4 at fixed IPs — picking one of
-them as the primary too would double-deploy the same physical box).
+`CAM=cam1|cam3|cam4|cam5|cam6` (env var, defaults to `cam1` for back-compat) selects which
+physical box plays the SOURCE-camera role for the single-node full-path launch (the box filming
+cam2's monitor + carrying the #174 capture burn). Resolution chain: `camera_resolve("$CAM")`
+(pre-existing, `scripts/camera-set.sh`) sets `CAMERA_IP`/`CAMERA_SOURCE`; `camera_strih_route
+("$CAMERA_NAME")` (same file) resolves which strih OBS scene/NDI-input shows that camera
+(mirrors `scripts/set-ndi-mapping.py`'s fixed 6-distinct pins).
+
+**cam2 is DELIBERATELY, PERMANENTLY excluded from `camera_strih_route()`** — never "add it
+later", this is a structural fact, not a TODO: `recording-e2e.sh`'s `$CAMERA_NAME` (SOURCE role)
+and `$PAINTER_IP` (cam2's own fixed IP) are TWO SEPARATE selections that would collide if cam2
+could be picked as SOURCE — a real `/dev/video0` + `/dev/fb0` device conflict on the SAME
+physical box. This does NOT mean cam2 is unmeasurable: `#312` wires cam2 in as a "camera under
+test" for the ALL_CAMBOX sweep's digital-burn contiguity check through a COMPLETELY SEPARATE
+path (its own `BURN_RUN_ID_CAM2`, deployed via the `[2b/8]` loop keyed off `$PAINTER_IP` directly,
+never through `camera_strih_route`) — see "All-Cambox per-SEGMENT continuity" below. Two
+different questions, two different mechanisms: "which box faces cam2's monitor as SOURCE" vs
+"is cam2's OWN capture chain zero-loss".
+
+`recording-verdict` (Rust) reads `--burn-cam1/2/3/4/5/6-run-id` as six independent roles
+(`CAMERA_UNDER_TEST_NODES`) with per-role CLI defaults matching the shell's own reserved
+constants (911001/911009/911008/911007/911010/911011 for cam1/2/3/4/5/6) — deploying the
+resolved camera under ITS OWN matching id is all that's needed. `ALL_CAMBOX=1` + a non-cam1
+`CAM` is rejected loudly (ALL_CAMBOX's own secondary-camera loop already deploys
+cam2/cam3/cam4/cam5/cam6 at fixed IPs — picking one of them as the primary too would
+double-deploy the same physical box). **When adding a new camera-under-test burn id in
+general, see `.claude/skills/recording-decode`'s `NODE_BURN_RUN_IDS` GOTCHA — reserving the
+`BURN_RUN_ID_*` constant is NOT enough by itself, there are ~5 other sites that need it too.**
 
 **Known follow-up gap (#632, NOT yet fixed):** `recording-verdict.rs`'s fast/robust decode-path
 gate (`args_expected_burns_for`/`decode_for`) and its `cam2→cam1` report label are STILL
@@ -546,7 +559,8 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
   `round(--refresh-hz / --stream-capture-fps)` = 60/30 = 2 for the stream recording; override with
   `--switch-expected-step`. Keeps the check rate-agnostic (cam→strih step 1, strih→stream step 2).
 - **Coverage honesty (#301):** a scheduled cambox with ZERO in-window frames FAILs — an absent box
-  (e.g. CAM3 down) never reads as a pass. Active set today = CAM1/2/4.
+  (e.g. CAM3 down) never reads as a pass. Active set today (#312 items 1+3) = ALL SIX cameras
+  (CAM1/2/3/4/5/6) — see the updated Phase-2 paragraph below.
 
 **Phase-2 harness (`recording-e2e.sh ALL_CAMBOX=1`) — RUNS ON THE DEFAULT `VERDICT_ON_STREAM=1`
 (#332).** The sweep (`switch_schedule.py` + `obs_phase2.py switch`) writes `switch-schedule.json`
@@ -556,14 +570,29 @@ AND the DEFAULT per-box `MERGE_ARGS` (the `--merge-partials` step). The per-camb
 calls), so the merge path produces it IDENTICALLY to the fused/legacy path — the all-cambox verdict
 now runs ON the stream box (#193, decode where the video lives), NOT forced onto dev1. The old guard
 that forced `VERDICT_ON_STREAM=0` is GONE (#332). Just run `ALL_CAMBOX=1 bash scripts/recording-e2e.sh`
-(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default **`Cam 5:CAM1 Cam 1:CAM4`** —
-the non-painter CAPTURE boxes; **CAM2/.62 the dual-QR PAINTER is EXCLUDED (#333)** — while painting
-it emits no camera NDI so its window is empty/frames=0 by construction; CAM3/.63 down #301 also
-excluded), `SEGMENT_SECS` (default 30). To prove the painter box itself, a DIFFERENT box must paint
-that run (override `$CAMBOX_SWEEP`). A swept box that yields `frames=0` FAILs with an explicit
-`CamboxSegment.note` painter/no-emit diagnostic (#333), so an empty window is never misread as chain
-loss. Switch boundaries are dev1 epoch-ns (DanteSync-slaved to the painter = the burn `gen_ts_ns`
-timeline); a runtime dev1↔painter offset assertion is filed as #326.
+(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default, since #312 items 1+3:
+**`Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6`** — ALL SIX cameras, incl.
+cam2), `SEGMENT_SECS` (default 30).
+
+**cam2's #333 exclusion was CORRECTED by #312 — do NOT reintroduce it.** #333 originally excluded
+CAM2/.62 (the dual-QR painter) reasoning "while painting it emits no camera NDI so its window is
+empty/frames=0 by construction". That went stale the moment `#291` landed: cam2's camera-box
+daemon keeps CAPTURING + EMITTING its own NDI feed throughout a TEST run (`CAMERA_BOX_NO_DISPLAY=1`
+frees only its framebuffer for the separate painter process) — so cam2's OWN chain is now measured
+too, via its own reserved digital burn (`BURN_RUN_ID_CAM2`, see `.claude/skills/recording-decode`).
+If you ever see code/docs saying "cam2 is excluded from the sweep, it can't also be captured" —
+that claim is WRONG and stale; verify live (`systemctl is-active camera-box` on cam2 during a
+TEST-mode run) before trusting an old comment over the current `#291`/`#312` behavior.
+
+CAM3/.63 down #301 is excluded only when genuinely unreachable — the default sweep above assumes
+all six are up; drop a box from `$CAMBOX_SWEEP` if it's known-down that run. To prove the painter
+box's OPTICAL role specifically (not its digital chain), a DIFFERENT box must paint that run
+(override the painter's IP/setup separately — the sweep's inclusion of "Cam 2:CAM2" is about cam2's
+digital chain, unrelated to which box paints the shared optical tick). A swept box that yields
+`frames=0` FAILs with an explicit `CamboxSegment.note` painter/no-emit diagnostic (#333), so an
+empty window is never misread as chain loss. Switch boundaries are dev1 epoch-ns (DanteSync-slaved
+to the painter = the burn `gen_ts_ns` timeline); a runtime dev1↔painter offset assertion is filed
+as #326.
 
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
