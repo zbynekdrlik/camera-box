@@ -671,9 +671,51 @@ here, unlike the `all_cambox_latency` OPTICAL-INJECTION sweep which structurally
 a `cross_camera_spread_ms`/`spread_gate_pass` summary (reusing `switch_latency::spread_verdict`,
 the same 16ms threshold as #624 — **report-only, does NOT fold into `all_pass`**, since #286 is
 not yet a proven/closed standing requirement). Absent (`null`) when no `--strih` recording was
-supplied. A **live re-verification run with this field populated is still needed** to actually
-prove or disprove #286's phase-sync claim — this PR only wires the metric, it does not itself
-constitute the proof.
+supplied.
+
+**#286 CLOSED (2026-07-09) — proven live on all 6 cameras.** The first live re-verification run
+with this field found only 1 of 6 cameras producing samples — root cause + fix below. The
+second re-verification run (RUN_ID 1783619061, with the fix) measured real
+`all_cambox_delivery_latency` samples for all 6 cameras (~1800 each): cam1=71.08ms,
+cam2=72.15ms, cam3=71.00ms, cam4=68.80ms, cam5=77.70ms, cam6=78.95ms — cross-camera spread
+10.16ms, comfortably under the 16ms/half-frame threshold. Full evidence on the closed ticket.
+
+**GOTCHA — `all_cambox_delivery_latency` needs strih's OWN burn on EVERY strih NDI input during
+the sweep, not just the single default program source (fixed in `recording-e2e.sh`).** The
+metric pairs each camera's own capture burn against **strih's own render-time burn** (911002) —
+but the `[4b/8]` pre-record burn-ON gate used to only ever turn that burn on for the ONE default
+`STRIH_PROG_SOURCE` (`NDI cam5` under the plain single-camera path). During any OTHER camera's
+`--switch-schedule` window, its strih input never had the burn filter enabled, so strih's burn
+was never drawn into those frames — the pairing legitimately found zero samples for the other 5
+cameras (confirmed live). Fixed by extending the shared `BURN_TARGETS` array (the SAME array the
+ON-gate and the `cleanup()` OFF-clear loop both iterate — see the `#252` design comment in
+`recording-e2e.sh`) to cover all six canonical strih NDI inputs under `ALL_CAMBOX=1`, excluding
+whichever one is already the current default. If you add a NEW per-camera strih-burn-dependent
+metric in the future, this coverage is now automatic — no further harness change needed.
+
+**GOTCHA — do NOT feed `all_cambox_delivery_latency` numbers straight back into
+`phase_sync_calibrate.py --measured-json` for a "final" recalibration once differentiated
+offsets are ALREADY applied.** The script's offset math (`compute_phase_sync_offsets`) expects a
+CLEAN baseline measurement — each camera's natural cam→strih latency before any differentiated
+per-source hold was layered on. Feeding it delivery-latency numbers measured WHILE non-uniform
+holds are already live corrects an already-corrected system (confirmed: re-feeding this run's
+numbers back in proposed a DIFFERENT offset set, 11/10/11/13/4/3ms, that would only make sense
+starting from a reset). If the measured cross-camera spread already passes (as it did for #286),
+there's no need to chase a "more optimal" recalibration — only reset every source to the floor
+and re-sweep first if you genuinely need a from-scratch baseline.
+
+**Reusable technique — transferring a multi-MB file dev1↔win-* MCP box without blowing up
+context or the MCP call size.** `win-strih`/`win-stream-snv` `FileUpload`'s `data_base64` param
+inlines the WHOLE file as a tool-call argument — fine for a few KB (a CSV), but a multi-MB binary
+(e.g. a freshly CI-built `recording-verdict.exe`) as base64 text is far too large to pass inline.
+Instead, serve it over the LAN: `python3 -m http.server <port> --bind <dev1's LAN IP>` from the
+directory holding the file (dev1 and the rig Windows boxes share the SAME `10.77.9.x` subnet —
+confirm dev1's LAN IP via `ip -4 addr show`, NOT `100.x` tailscale or `172.x` docker), then on the
+Windows box: `Invoke-WebRequest -Uri "http://<dev1-ip>:<port>/<file>" -OutFile <dest>`. Verify the
+`Length` matches the source file's size after both `FileUpload`-of-something-small (CSV) and this
+HTTP-pull-of-something-large (the `.exe`) to confirm the transfer landed intact. Pick an unused
+port (`curl -s -o /dev/null -w '%{http_code}' http://<ip>:<port>/<file>` — `Address already in
+use` means try another).
 
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running

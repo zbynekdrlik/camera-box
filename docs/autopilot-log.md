@@ -2719,3 +2719,41 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   checks only distance-from-dialed-value (the exact form specified in this ticket's own dispatch
   instructions), not an explicit pairwise cross-camera comparison. Noted for anyone revisiting
   #624's closure. `Refs #312` (deliberately non-closing -- items 4/5 remain separate future work).
+
+## #286 phase-sync — wire delivery-latency metric + include cam2, prove all 6 cameras live (2026-07-09)
+
+- **Gap 1 (PR #643, `5bfd74904`):** the existing `all_cambox_latency`/`cross_camera_spread_ms`
+  (#624) measures each camera's SOURCE-side photon-to-capture latency, architecturally
+  independent of strih's receiver-side `genlock_latency_ms_src` hold -- the exact knob #286's
+  fix adjusts. Wired the previously-uncalled `probe::recording_latency::n_camera_strih_samples`
+  into `recording-verdict.rs`'s ALL_CAMBOX block as a new report field,
+  `all_cambox_delivery_latency` (`strih_burn.gen_ts_ns - camera_burn.gen_ts_ns`, reading the
+  STRIH recording), report-only (does not gate `all_pass` -- #286 wasn't yet proven). 5 new
+  tests including cam2 inclusion, null-for-unmeasured, both pass/fail spread cases, and the
+  never-gates-`all_pass` invariant. Reviewed clean by 3 parallel review passes + 1 deep review
+  (0 critical/important findings). Main CI green.
+- **Gap 2 (same PR):** `all_cambox_delivery_latency` measures ALL SIX `CAMERA_UNDER_TEST_NODES`
+  including cam2 -- unlike the OPTICAL-INJECTION source-side sweep (structurally excludes cam2),
+  cam2's own digital capture burn + its own `--switch-schedule` window make it just as
+  measurable digitally as any other camera.
+- **First live re-verification (RUN_ID 1783615904) found only 1 of 6 cameras produced samples.**
+  Root cause: `recording-e2e.sh`'s pre-record burn-ON gate only turned on strih's OWN
+  measurement burn on the single default strih program input -- every other camera's window
+  never had strih's burn drawn into its frames. Fixed in PR #644 (`1cd190f39` + `5b4a2074e`,
+  merged `7b7640018`): extend the single-source-of-truth `BURN_TARGETS` array (shared by the
+  ON-gate and the OFF-clear cleanup) to cover all 6 canonical strih NDI inputs under
+  `ALL_CAMBOX=1`. New test `recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286`
+  (behavioral mirror + a drift guard anchoring it to the real script content, added after a
+  code-review finding). Main CI green.
+- **Second live re-verification (RUN_ID 1783619061) is the real proof:** confirmed live that all
+  6 strih inputs showed `burn_on=True` before recording and `burn_on=False` after cleanup.
+  Measured `all_cambox_delivery_latency` for all 6 cameras with real samples (~1800 each):
+  cam1=71.08ms, cam2=72.15ms, cam3=71.00ms, cam4=68.80ms, cam5=77.70ms, cam6=78.95ms.
+  Cross-camera delivery-latency spread = 10.16ms -- PASS (16ms/half-frame threshold), with the
+  previously-applied differentiated `genlock_latency_ms_src` (cam1=3, cam3=3, cam4=20, cam5=8,
+  cam6=13, cam2=default floor 3, confirmed unchanged throughout) still live. Rig restored to
+  clean EVENT mode; confirmed no stray burn processes or leftover TEST-mode drop-ins.
+- Closed #286 with the full evidence (issuecomment-4928367795) -- an honest residual note that
+  cam2's own offset was never deliberately recalculated (still at the default floor, which
+  empirically already passes) is included, plus confirmation that #642 (cam1/cam3 OPTICAL read
+  degradation) is unrelated to this DIGITAL delivery-latency proof and does not block closure.
