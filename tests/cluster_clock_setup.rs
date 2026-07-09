@@ -10,9 +10,12 @@
 //! A camera re-provisioned from the old setup script would therefore sync to a DIFFERENT clock
 //! than the rest of the cluster and silently break genlock — the exact regression #8 guards.
 //!
-//! These tests pin that BOTH setup scripts point dantesync at the cluster master (so the fix
+//! These tests pin that the setup script points dantesync at the cluster master (so the fix
 //! survives a reprovision), and that the mechanism + measured baseline + the offset bound are
 //! documented in the repo (SETUP.md), per the #8 acceptance criteria.
+//!
+//! `scripts/setup.sh` used to be checked here too; it was retired in #563 and
+//! `scripts/setup-device.sh` is now the sole provisioning path.
 //!
 //! RED before the fix (bare `dantesync` in both scripts; no SETUP.md sync section); GREEN after.
 
@@ -37,29 +40,30 @@ fn read(rel: &str) -> String {
 fn setup_scripts_point_dantesync_at_the_cluster_master() {
     // strih's IP from targets.md — the single source of truth for the cluster master reference.
     const MASTER_IP: &str = "10.77.9.202";
-    for script in ["scripts/setup.sh", "scripts/setup-device.sh"] {
-        let body = read(script);
-        assert!(
-            body.contains(&format!("dantesync --ntp-server {MASTER_IP}")),
-            "{script} must launch dantesync against the cluster master by IP \
-             (--ntp-server {MASTER_IP}) so a re-provisioned camera disciplines to the SAME clock \
-             as the rest of the cluster — not a bare `dantesync` (public-pool default) and not a \
-             `.lan` hostname that may not resolve on the read-only rootfs"
-        );
-        // The bare ExecStart with no server must NOT remain — a bare line would let the daemon
-        // fall back to the public-pool default and silently leave the camera on the wrong clock.
-        assert!(
-            !body.contains("ExecStart=/usr/local/bin/dantesync\n"),
-            "{script} still has a BARE `ExecStart=/usr/local/bin/dantesync` (no --ntp-server) — \
-             that desyncs a re-provisioned camera from the cluster master. Point it at {MASTER_IP}."
-        );
-        // A `.lan` master reference is explicitly rejected (DNS-resolution risk on the device).
-        assert!(
-            !body.contains("dantesync --ntp-server strih.lan"),
-            "{script} points dantesync at the `.lan` hostname — use the IP {MASTER_IP} (targets.md) \
-             so a failed `.lan` resolve cannot silently drop the camera to the public-pool default"
-        );
-    }
+    // Only one script left to check since #563 retired scripts/setup.sh — a plain value instead
+    // of a single-element loop (clippy::single_element_loop).
+    let script = "scripts/setup-device.sh";
+    let body = read(script);
+    assert!(
+        body.contains(&format!("dantesync --ntp-server {MASTER_IP}")),
+        "{script} must launch dantesync against the cluster master by IP \
+         (--ntp-server {MASTER_IP}) so a re-provisioned camera disciplines to the SAME clock \
+         as the rest of the cluster — not a bare `dantesync` (public-pool default) and not a \
+         `.lan` hostname that may not resolve on the read-only rootfs"
+    );
+    // The bare ExecStart with no server must NOT remain — a bare line would let the daemon
+    // fall back to the public-pool default and silently leave the camera on the wrong clock.
+    assert!(
+        !body.contains("ExecStart=/usr/local/bin/dantesync\n"),
+        "{script} still has a BARE `ExecStart=/usr/local/bin/dantesync` (no --ntp-server) — \
+         that desyncs a re-provisioned camera from the cluster master. Point it at {MASTER_IP}."
+    );
+    // A `.lan` master reference is explicitly rejected (DNS-resolution risk on the device).
+    assert!(
+        !body.contains("dantesync --ntp-server strih.lan"),
+        "{script} points dantesync at the `.lan` hostname — use the IP {MASTER_IP} (targets.md) \
+         so a failed `.lan` resolve cannot silently drop the camera to the public-pool default"
+    );
 }
 
 /// #8 acceptance: the sync mechanism + reference clock + measured baseline + offset bound must be

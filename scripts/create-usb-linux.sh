@@ -261,10 +261,11 @@ ldconfig
 systemctl enable avahi-daemon
 
 # #295/#307: harden the appliance kernel at the SOURCE. This builds the "clean Ubuntu + SSH" base
-# image that setup.sh later hardens, so there is a narrow first-boot window (before setup.sh runs)
-# where the original brick exposure exists. Pin the kernel so a surprise kernel can never be
-# installed, and disable unattended upgrades — an active unattended-upgrades auto-installed the
-# initrd-less kernel that bricked CAM3/CAM4. (Same idiom as setup.sh harden_appliance_kernel.)
+# image that setup-device.sh later hardens, so there is a narrow first-boot window (before
+# setup-device.sh runs) where the original brick exposure exists. Pin the kernel so a surprise
+# kernel can never be installed, and disable unattended upgrades — an active unattended-upgrades
+# auto-installed the initrd-less kernel that bricked CAM3/CAM4. (Same idiom as setup-device.sh's
+# kernel-pin step; scripts/setup.sh, which used to carry this too, was retired in #563.)
 apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUTOUPG_EOF'

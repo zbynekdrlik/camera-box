@@ -239,10 +239,11 @@ something `verify-device.sh` should be loosened to tolerate.
   default; `systemd/camera-box-grow-root.service` (run-once first-boot) handles it. See
   `.claude/skills/ops` "#369 — auto-grow root partition" for the fault-tolerant `growpart` details
   (root is not always the last partition, depending on which builder made the image).
-- **`#295` boot-hardening (kernel pinning + guaranteed initrd)** is baked into BOTH
-  `setup.sh`/`setup-device.sh` — never hand-edit `/etc/default/grub` + `update-grub` on a live box;
-  that is exactly what bricked CAM3/CAM4 historically. If GRUB needs a change, change it in the
-  provisioning script so every future box gets it too.
+- **`#295` boot-hardening (kernel pinning + guaranteed initrd)** is baked into
+  `setup-device.sh` (the sole provisioning script since `scripts/setup.sh` was retired in #563) —
+  never hand-edit `/etc/default/grub` + `update-grub` on a live box; that is exactly what bricked
+  CAM3/CAM4 historically. If GRUB needs a change, change it in the provisioning script so every
+  future box gets it too.
 
 ## The fleet map (`scripts/camera-set.sh`, #24/#451)
 
@@ -262,17 +263,13 @@ All six emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `cam
 Adding cam7 (or any further camera) means editing `camera-set.sh` ONCE — every script downstream
 (including `verify-device.sh`) picks it up automatically.
 
-**Gotcha — removing/adding a fleet camera changes behavior DIFFERENTLY in the two
-name-resolvers (#593).** `camera_resolve()` here fails LOUD (nonzero exit) on any name not in its
+**Gotcha — removing/adding a fleet camera changes behavior DIFFERENTLY across resolvers (#593),
+historically.** `camera_resolve()` here fails LOUD (nonzero exit) on any name not in its
 `case` table — `setup-device.sh`'s `resolve_device_name` and `verify-fleet.sh`'s per-box loop both
 propagate that as a hard reject/"invalid" verdict, since their whole job IS fleet provisioning/
-verification. But `scripts/setup.sh`'s `resolve_display_source()` is DELIBERATELY lenient: its
-hostname argument isn't required to be a fleet camN name at all (it defaults to the generic
-`"camera-box"` hostname), so an unresolvable name there silently falls through to "no preview"
-(empty, exit 0) rather than failing — same behavior whether the name was NEVER a real camera
-(cam7) or is simply not fleet-related. When removing a phantom camera (or testing what happens to
-an unknown one), check BOTH call sites — a test written against `resolve_device_name`'s hard
-reject does NOT transfer to `resolve_display_source`'s soft fallback, and vice versa.
+verification. (Historical note: `scripts/setup.sh` — retired in #563 — used to carry its own
+DELIBERATELY lenient `resolve_display_source()`, whose hostname argument wasn't required to be a
+fleet camN name at all; that second resolver no longer exists, so this divergence is now moot.)
 
 `camera_resolve()` also carries a per-cam `CAMERA_DISPLAY_SOURCE` table (#528) — the HDMI
 cameraman-preview NDI source (empty when a box has no preview configured). `setup-device.sh`
@@ -281,18 +278,16 @@ canonical, always-plain `ExecStart`), so a box's preview survives a re-provision
 being a manual, non-persistent SSH edit. **cam1 only** resolves to `"STRIH-SNV (interkom)"`
 today.
 
-**`scripts/setup.sh`** (the separate `curl | sudo bash` quick-install path, still documented in
-`SETUP.md` / shipped as a release artifact) joined this SAME mechanism in #557 — it used to
-hardcode `--display "STRIH-SNV (interkom)"` into EVERY box's `ExecStart`. Since it's a standalone
-script with no local repo checkout when curl-piped, it DOWNLOADS the real `scripts/camera-set.sh`
-at provision time (`CAMERA_SET_SOURCE`, default the GitHub raw URL on `main`, overridable to a
-local path for tests) rather than keeping a second, hand-copied table. Its `[display]`
-reconciliation runs on EVERY invocation (strip-then-append), not just first-install — an earlier
-version of this fix put it only inside the "config.toml doesn't exist yet" guard, so a re-run on
-an already-provisioned box (e.g. to update the binary) silently ended up with NEITHER the old
-`--display` flag NOR a `[display]` section, permanently losing the preview. `setup.sh`'s
-retire-vs-keep fate (is it still needed, or fully superseded by `setup-device.sh`?) is an open,
-deliberately-deferred decision — see #563.
+**RESOLVED (#563, 2026-07-09): `scripts/setup.sh` (the separate `curl | sudo bash` quick-install
+path) is RETIRED — deleted from the repo, dropped from the release artifact packaging, and
+`setup-device.sh` is now the ONE canonical provisioning path.** Historical context, for anyone
+reading old issue history: `setup.sh` had joined the `[display]`-section mechanism in #557 (used to
+hardcode `--display "STRIH-SNV (interkom)"` into EVERY box's `ExecStart`; since it was a standalone
+script with no local repo checkout when curl-piped, it downloaded `scripts/camera-set.sh` at
+provision time rather than keeping a second, hand-copied table). Its `config_toml_display_section()`
+duplication with `setup-device.sh` was mooted by the #528 design pivot (both copies removed when
+the per-box display-config mechanism was dropped in favor of an unconditional default), so nothing
+needed to be deduplicated at retirement time — see #563 for the full decision record.
 
 **cam1's own live box still shows check (p) FAIL as of 2026-07-06** (`camera-box --version
 1.7.0-dev.258`, predating #528) — it has not yet been RE-PROVISIONED with the new
@@ -300,7 +295,7 @@ deliberately-deferred decision — see #563.
 bug in check (p) — it's the acceptance gate correctly detecting the still-open condition. **cam1
 is READ-ONLY (do not re-provision it casually)** — verify a provisioning-script change against a
 live box via `verify-device.sh`'s READ-ONLY acceptance check, never by actually re-running
-`setup.sh`/`setup-device.sh` against cam1.
+`setup-device.sh` against cam1.
 
 **cam2 is deliberately EXCLUDED from the `CAMERA_DISPLAY_SOURCE` (config.toml) table**, even though
 its live box already runs the same interkom preview — cam2's preview is a manual `--display` flag
@@ -315,7 +310,7 @@ preview.
 
 **cam2's ExecStart mechanism is now provisioner-persistent via a SEPARATE table (#562,
 `CAMERA_DISPLAY_EXECSTART_SOURCE`)** — before #562, cam2's manual `--display` edit was NOT
-tracked anywhere in `camera-set.sh`, so re-running `setup-device.sh`/`setup.sh` against cam2 (STEP 7's
+tracked anywhere in `camera-set.sh`, so re-running `setup-device.sh` against cam2 (STEP 7's
 unconditional bare `ExecStart=`) silently erased it (the #379 recurrence risk), and
 `verify-device.sh` check (p) — which only ever read `config.toml` — verdicted "ok" regardless
 (structurally blind to cam2's real mechanism). The fix keeps `rig-mode.sh` completely UNTOUCHED
@@ -364,7 +359,9 @@ change. Any future `sshpass`-stubbing test in this repo should use the scan form
 EXACT per-name summary line (not a loose `contains("SKIPPED")`) to prove the stub genuinely drove
 the offline path.
 
-**Shell-scripting gotchas found fixing #557/#558 (setup.sh + verify-device.sh check (p)):**
+**Shell-scripting gotchas found fixing #557/#558 (setup.sh + verify-device.sh check (p)) — kept as
+historical wisdom even though `scripts/setup.sh` itself was retired in #563; the curl-piped-script
+gotcha below still applies to any future curl-piped script in this repo:**
 
 - **A `BASH_SOURCE[0] != $0` source-guard is WRONG for a script whose real invocation is
   `curl | sudo bash -s NAME` (stdin-piped).** `setup-device.sh`'s guard form works because it's

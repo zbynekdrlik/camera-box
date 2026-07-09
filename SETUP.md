@@ -117,7 +117,7 @@ NOT genlocked. So cluster clock sync is a hard prerequisite, not an optimization
   `.lan` DNS may not resolve on a freshly-provisioned read-only-rootfs camera, and a failed
   resolve makes dantesync fall back to its public-pool default and silently desync.
 - Every Linux camera runs `dantesync --ntp-server 10.77.9.202` as an enabled systemd service,
-  written by `scripts/setup.sh` / `scripts/setup-device.sh` so it survives the read-only rootfs
+  written by `scripts/setup-device.sh` so it survives the read-only rootfs
   and a reboot. **The `--ntp-server 10.77.9.202` arg is essential** — a bare `dantesync` defaults
   to a *public* NTP pool (e.g. `time.cloudflare.com`), which would discipline the camera to a
   clock *different* from the rest of the cluster and break genlock. Do not hand-edit the unit; fix
@@ -155,10 +155,11 @@ ALL CLEAR — 4 node(s) within the 2000 us offset bound. Genlock clock assumptio
 (`ExecStart=/usr/local/bin/dantesync`, dantesync 1.8.2) — its NTP path was failing (defaulting to
 the public pool it could not reach), so it had no readable absolute offset even though PTP held it
 NANO-locked. Re-enrolled to the cluster standard (latest dantesync binary + the
-`--ntp-server 10.77.9.202` unit produced by `scripts/setup.sh`'s `install_dantesync`); NTP
-immediately converged (−24/+4/+11/+24 µs) and the unit is `enabled` so it survives reboot + the
-read-only-rootfs remount cycle. No script change was needed — the setup path already writes the
-correct unit; cam3 just predated the fix.
+`--ntp-server 10.77.9.202` unit produced by the setup script's dantesync install step, at the time
+`scripts/setup.sh`'s `install_dantesync` — now `scripts/setup-device.sh`'s equivalent step since
+`scripts/setup.sh` was retired in #563); NTP immediately converged (−24/+4/+11/+24 µs) and the unit
+is `enabled` so it survives reboot + the read-only-rootfs remount cycle. No script change was
+needed — the setup path already writes the correct unit; cam3 just predated the fix.
 
 ### Offset bound + the regression guard
 
@@ -357,9 +358,10 @@ chain: an active `unattended-upgrades` auto-installed a new kernel; a full 100M 
 broke apt with `ENOSPC` so the initrd was never generated; a later `update-grub` happily made that
 initrd-less kernel the default boot entry.
 
-The provisioning scripts (`scripts/setup.sh` and `scripts/setup-device.sh`) now make this
-**impossible to recreate on a re-provision** — never a one-off live edit (live grub edits are what
-bricked the boxes). What they do, enforced by `tests/appliance_boot_hardening.rs`:
+The provisioning script (`scripts/setup-device.sh` — the sole provisioning path since
+`scripts/setup.sh` was retired in #563) now makes this **impossible to recreate on a re-provision**
+— never a one-off live edit (live grub edits are what bricked the boxes). What it does, enforced by
+`tests/appliance_boot_hardening.rs`:
 
 1. **Pin the kernel** — `apt-mark hold linux-image-generic linux-headers-generic linux-generic`.
    An appliance must never silently gain a new kernel.
