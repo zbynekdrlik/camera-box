@@ -267,6 +267,32 @@ from the stream recording.
 auto-shares a LAN URL. The CSV's burn hops (cam1_strih/strih_stream/cam1_stream) must be UNBROKEN
 (0 empty cells); cam2_cam1 gaps honestly where the optical read failed.
 
+**Pulling a LARGE partial JSON (multi-MB) back via win-* MCP `FileDownload` overflows the inline
+tool result (2026-07-09).** For a strih/stream partial in the multi-MB range, the raw call errors
+with "result (N characters) exceeds maximum allowed tokens" and instead SAVES the tool result to
+a file at the path the error message gives you — that file is JSON `{"result": "[task:<id>]
+base64:<N>bytes:<b64-data>"}`, NOT a plain base64 string. Extract with a regex, not a bare
+`base64 -d`:
+```python
+import json, base64, re
+d = json.load(open(saved_path))
+b64 = re.search(r'base64:\d+bytes:(.*)$', d['result'], re.DOTALL).group(1)
+open(dest_path, 'wb').write(base64.b64decode(b64))
+```
+(A bare `jq -r '.result' file | base64 -d` fails with "invalid input" because of the leading
+`[task:...] base64:Nbytes:` prefix.)
+
+**A `RecordingPartial` schema-version bump (`schema_version: N`) needs redeploying `recording-verdict`
+on EVERY decode box, not just strih/stream.** The merge step hard-rejects a stale partial
+("schema_version 2 is not supported, this build expects 3") — this includes **imag-nb**, which
+decodes over plain `ssh`/`scp` (not a win-* MCP box) and is easy to forget since its own deploy
+step (`recording-verdict-on-imag.sh`) SKIPS re-uploading when a same-named binary is already
+present+executable ("skipping upload") — it does NOT check whether that binary is stale relative
+to the schema bump. Before trusting an imag `--extract-partial` after ANY Rust change to the
+`RecordingPartial` struct, `scp` a fresh CI-built `recording-verdict` to imag-nb first
+(`scp <linux-probe-tools>/recording-verdict newlevel@10.77.9.182:/home/newlevel/recording-verdict`)
+and re-run its extract, rather than assuming a same-named binary is current.
+
 **Diagnosing cam1 "REAL DROP":** if the missing ids are PERIODIC (a ~N-emit beat: deltas cluster on
 N, 2N, 3N…) AND present==expected AND the strih genlock FIFO shows `overruns=0` AND the pixels show
 the cam1 burn PRESENT-but-blurred → it's a burn-readability DECODE-MISS, NOT chain loss (#226).
