@@ -563,11 +563,11 @@ sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 # every other camera-under-test box's binary is launched WITHOUT it (nothing else claims their
 # fb0, so their normal unconditional HDMI preview is harmless). This is what lets the SEPARATE
 # frame-probe painter (launched next, [3/8]) own /dev/fb0 without stopping cam2's OWN measured
-# capture+NDI-emit chain. `systemctl stop cam2-painter` (the PERMANENT painter service, #440) is
-# unconditionally attempted for every box in the loop — a harmless no-op on cam3/cam4/cam5/cam6
-# (unit doesn't exist there, `2>/dev/null || true` swallows it) — but is REQUIRED on cam2 to
-# avoid the #328/#440 two-painters-fighting-over-fb0 bug (the permanent service and this loop's
-# transient probe-featured binary must never both hold fb0/run at once).
+# capture+NDI-emit chain. Stopping the PERMANENT painter unit (see the guarded stop command
+# below, #440) is unconditionally attempted for every box in the loop — a harmless no-op on
+# cam3/cam4/cam5/cam6 (unit doesn't exist there, `2>/dev/null || true` swallows it) — but is
+# REQUIRED on cam2 to avoid the #328/#440 two-painters-fighting-over-fb0 bug (the permanent
+# service and this loop's transient probe-featured binary must never both hold fb0/run at once).
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   for _cn_ip_burn in \
     "cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID" \
