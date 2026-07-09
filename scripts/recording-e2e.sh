@@ -196,15 +196,16 @@ export NDI_RUNTIME_DIR_V6="${NDI_RUNTIME_DIR_V6:-/usr/lib/ndi}"
 OBS_CLEANUP_TIMEOUT="${OBS_CLEANUP_TIMEOUT:-90}"
 CLEANUP_SSH_TIMEOUT="${CLEANUP_SSH_TIMEOUT:-30}"
 
-# #220: CAMERA PRE-RUN CHECKLIST. The cam2->cam1 OPTICAL injection leg (cam1 broadcast camera
-# filming the cam2 monitor QR) depends on the cam1 camera's MANUAL settings, which the harness
-# CANNOT read or set: camera-box reads /dev/video0 (the ShadowCast capture card), which does NOT
-# expose the BMPCC's shutter/focus/exposure. A 1/60 shutter integrates a full 60Hz monitor refresh
-# and SMEARS the dual-QR Vernier mid-change -> the optical read drops (the #216 ~175s gap; the
-# DIGITAL burns were unaffected, so the chain stayed 0 real loss — purely the optical-INJECTION leg).
-# Satisfy this BEFORE the run, then the cam2->cam1 read is reliable with no spurious optical gap.
+# #220: CAMERA PRE-RUN CHECKLIST. The cam2->SOURCE OPTICAL injection leg (the SOURCE camera,
+# #24: whichever of cam1/cam3/cam4 was resolved via CAM= above, filming the cam2 monitor QR)
+# depends on THAT camera's MANUAL settings, which the harness CANNOT read or set: camera-box
+# reads /dev/video0 (the ShadowCast capture card), which does NOT expose the BMPCC's
+# shutter/focus/exposure. A 1/60 shutter integrates a full 60Hz monitor refresh and SMEARS the
+# dual-QR Vernier mid-change -> the optical read drops (the #216 ~175s gap; the DIGITAL burns
+# were unaffected, so the chain stayed 0 real loss — purely the optical-INJECTION leg).
+# Satisfy this BEFORE the run, then the cam2->SOURCE read is reliable with no spurious optical gap.
 echo "=================================================================================="
-echo " CAMERA PRE-RUN CHECKLIST (cam1 broadcast camera — the harness CANNOT auto-set these)"
+echo " CAMERA PRE-RUN CHECKLIST ($CAMERA_NAME broadcast camera — the harness CANNOT auto-set these)"
 echo "   [ ] SHUTTER FAST: >= 1/500 s (ideally 1/1000) — freezes the 60Hz monitor QR, no smear"
 echo "   [ ] FOCUS: MANUAL, locked on the cam2 monitor (no autofocus hunting)"
 echo "   [ ] EXPOSURE: FIXED / manual gain (no auto-exposure drift)"
@@ -240,7 +241,7 @@ fi
 # need their DanteSync status-pipe JSON pre-fetched to a file — fetched here over the same
 # standing http.server the OBS recordings use, or supplied by the caller via
 # DANTE_STRIH_STATUS / DANTE_STREAM_STATUS (the win-* MCP holder writes them).
-echo "[0/8] DanteSync NTP+PTP gate — cam1, cam2, strih, stream must ALL be synced+locked (#7/#8)"
+echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8)"
 WIN_DANTE_PORT="${WIN_DANTE_PORT:-8898}"
 DANTE_STRIH_STATUS="${DANTE_STRIH_STATUS:-$OUTDIR/dante-strih.json}"
 DANTE_STREAM_STATUS="${DANTE_STREAM_STATUS:-$OUTDIR/dante-stream.json}"
@@ -330,13 +331,13 @@ fi
 # contrast=75) was meant to aid the optical dual-QR decode but HURT it (#312 run 312005:
 # the ShadowCast box with the sharp set read ~50% undecodable while the NZXT card on
 # device defaults read the SAME monitor clean). Device defaults decode fine; saturation=0
-# also tinted/greyed the picture. The cam1 launch step ([2/8]) re-applies the same colour
+# also tinted/greyed the picture. The [2/8] deploy step re-applies the same colour
 # set at open; this is the belt-and-braces preflight the harness owns regardless.
 echo "[0/8] apply device-default colour controls (saturation=50, contrast=50) (#338/#312)"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
   "v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
    v4l2-ctl -d /dev/video0 --get-ctrl=saturation,contrast 2>/dev/null" \
-  || echo "WARNING: could not pre-apply cam1 v4l2 controls (the cam1 launch step re-applies them)" >&2
+  || echo "WARNING: could not pre-apply $CAMERA_NAME v4l2 controls (the [2/8] deploy step re-applies them)" >&2
 
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
@@ -356,7 +357,7 @@ cleanup() {
   # cam1's burn binary kept holding /dev/video0 → the prod camera-box crash-looped. Freeing the
   # device is the safety-critical action, so it leads; every cam ssh AND every OBS call below is
   # wrapped in `timeout` so nothing in cleanup() can block the trap indefinitely.
-  echo "[cleanup] #328 FREE cam1/cam2 capture devices FIRST (never gated behind OBS teardown)"
+  echo "[cleanup] #328 FREE $CAMERA_NAME/cam2 capture devices FIRST (never gated behind OBS teardown)"
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
   # #626: the pattern MUST be digit-anchored ('camera-box-burn-[0-9]') — a bare 'camera-box-burn-'
@@ -491,7 +492,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
     chmod +x "$PROBE_BIN_DIR/$b" 2>/dev/null || true
   done
 else
-  echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 cam1 burn)"
+  echo "[1/8] build frame-probe + recording-verdict + camera-box (probe-featured for the #174 capture burn)"
   # #174: build camera-box WITH --features probe so the cam1-capture render-time QR burn is
   # present (the production artifact stays probe-free / clean; only this TEST binary carries
   # the burn + qrcode dep). The burn is still gated at runtime by CAMERA_BOX_BURN_RUN_ID.
@@ -1284,13 +1285,14 @@ if [ "$PAINTER_VERDICT" != "OK" ]; then
   exit 1
 fi
 echo "    #359 painter ground-truth FRESH: span=${PAINTER_SPAN}s offset=${PAINTER_OFFSET}s (OK)"
-# Download cam1's V4L2 capture-drop sidecar (the cam2→cam1 LOSS — the camera leg). The
-# verdict reports v4l2_dropped as cam2→cam1 loss (NOT a painter-tick compare). Best effort:
-# absent ⇒ the verdict simply omits the cam2→cam1 loss line.
+# Download the SOURCE camera's V4L2 capture-drop sidecar (the cam2→SOURCE LOSS — the camera
+# leg; #24: whichever of cam1/cam3/cam4 was resolved). The verdict reports v4l2_dropped as
+# cam2→SOURCE loss (NOT a painter-tick compare). Best effort: absent ⇒ the verdict simply
+# omits the cam2→SOURCE loss line.
 CAM1_CAPTURE_STATS="$OUTDIR/cam1-capture-stats.txt"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$CAM1_IP":/tmp/cam1-capture-stats.txt "$CAM1_CAPTURE_STATS" 2>/dev/null || \
-  echo "WARNING: could not fetch cam1 capture-stats sidecar (cam2→cam1 loss omitted)" >&2
+  echo "WARNING: could not fetch $CAMERA_NAME capture-stats sidecar (cam2→$CAMERA_NAME loss omitted)" >&2
 # #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
 # recordings to slow dev1 (the root of the download + #187 OOM + disk drain). When
 # VERDICT_ON_STREAM=1 (the default), the harness SKIPS the dev1 fetch entirely and the verdict
