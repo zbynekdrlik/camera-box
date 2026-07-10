@@ -182,6 +182,44 @@ are also worthless (cam2 SSH RTT 0.4-0.8s while painting → ±0.4s error swamps
 
 Fixed 2026-06-12: strih's upstream was dead `10.77.8.2` (old network); set to `162.159.200.1`.
 
+**A single NTP/PTP gate failure on ONE node during preflight is often a genuinely TRANSIENT blip —
+recheck before assuming the rig is broken (2026-07-10).** `dantesync-gate.sh` failed once with
+`cam2 NTP DRIFT (fresh offset exceeds 2000us bound)` mid-preflight; the box's own journal showed an
+active `[NTP] Stepped ...us` correction in progress at that exact moment (a normal sawtooth
+re-lock, not a real problem) — PTP was already back to LOCK. A ~20s wait + re-check showed a clean
+GATE PASS. Don't loosen the bound or bypass the gate on a single failure; do re-run it once after a
+short wait and read the box's OWN freshest journal line (`journalctl -u dantesync -n 10`) to confirm
+it's mid-correction rather than genuinely stuck DEGRADED.
+
+## The strih/stream `:8899` `BundleStateServer` scheduled task has NO restart-on-failure by default (found 2026-07-10)
+
+`version-integrity-gate` (drift-guard's live stack-state check) reads each Windows box's
+`http://<box>:8899/bundle-state.json`, served by the `BundleStateServer` Scheduled Task (`ONSTART`
+trigger, `run-bundle-state-server.ps1` — see `scripts/bundle-state-server.py`/
+`bundle_state_gather.py`, #650). This task's default `Settings` ship with **`RestartCount=0`** — if
+the underlying `python.exe` process ever crashes/is killed, the task just sits `Ready` (not
+`Running`) FOREVER until the next reboot, and every subsequent `recording-e2e.sh` preflight reports
+that box `UNKNOWN` (`version-integrity-gate` refuses to proceed on an unread box, by design — never
+silently treats a missing state file as "fine").
+
+**Diagnose:** `Get-ScheduledTaskInfo -TaskName "BundleStateServer"` — a `LastTaskResult` of
+`3221225786` (`0xC000013A`, STATUS_CONTROL_C_EXIT) with the task `State=Ready` (not `Running`) means
+it died and never restarted. Confirm with `Get-Process python | ... ; (unreachable :8899)`.
+
+**Fix (live, one-time per box, then hardened so it self-heals going forward):**
+```powershell
+Start-ScheduledTask -TaskName "BundleStateServer"   # bring it back up NOW
+$newSettings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+  -ExecutionTimeLimit (New-TimeSpan -Hours 0) -StartWhenAvailable -DontStopOnIdleEnd
+Set-ScheduledTask -TaskName "BundleStateServer" -Settings $newSettings
+```
+Applied to BOTH strih and stream 2026-07-10 — the task now retries up to 999 times at 1-minute
+intervals with no execution time limit, so a future crash self-heals instead of silently stranding
+the gate until someone notices. There is no repo script that CREATES this task (it predates any
+committed setup script, per #650's own history) — if a future re-provision recreates it from
+scratch, re-apply this `Set-ScheduledTask` hardening (or fold it into whatever script eventually
+DOES create the task).
+
 ## Device Deployment
 
 Camera devices (CAM1-4) run x86_64 Ubuntu. Build in CI (never locally); download artifact, deploy over SSH.

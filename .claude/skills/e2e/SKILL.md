@@ -717,6 +717,46 @@ HTTP-pull-of-something-large (the `.exe`) to confirm the transfer landed intact.
 port (`curl -s -o /dev/null -w '%{http_code}' http://<ip>:<port>/<file>` — `Address already in
 use` means try another).
 
+**Reverse direction — pulling the small partial JSON + #186 pixel-proof dir BACK box→dev1, manually
+driving a full `ZERO_LOSS_RESTART_GATE`-style before/restart/after protocol (#466, 2026-07-10).**
+`win-strih`/`win-stream-snv` `FileDownload` is also base64-inline and hits the SAME size limit in
+this direction, and a pixel-proof dir is a whole DIRECTORY, not one file. The reusable recipe:
+1. `Start-Process` the `recording-verdict.exe --extract-partial ...` DETACHED (per the inline-dies
+   -at-MCP-idle-timeout gotcha above), poll to completion.
+2. `Compress-Archive -Path <box>:\camera-box\verdict-out\<node>-partial-<run>-pixels -DestinationPath
+   ...-pixels.zip -Force` on the box (bundles the whole pixel-proof dir into one file).
+3. Serve BOTH the partial JSON and the pixels zip from the box's OWN `verdict-out` dir via
+   `Start-Process python -m http.server <port> --bind <box-ip> -WorkingDirectory <verdict-out>`
+   (same HTTP-serve pattern as the forward direction, just run FROM the box instead of dev1).
+4. `curl -fsS -o <dest> http://<box-ip>:<port>/<file>` from dev1 for each of the 4 files (2 boxes ×
+   {partial JSON, pixels zip}).
+5. **`unzip` on Linux warns "appears to use backslashes as path separators" for a Windows-built zip
+   and returns exit 1 (a warning-level failure) even on a fully successful extract.** Never chain
+   `unzip -q -o a.zip -d . && unzip -q -o b.zip -d .` — the FIRST unzip's exit-1 warning
+   short-circuits the `&&` and the SECOND zip never runs, silently leaving that box's pixel-proof
+   dir missing. Run each `unzip` as its OWN standalone command (or with `; true` after it), and
+   verify the resulting directory populated afterward rather than trusting the exit code.
+6. Feed both nodes' partials (+ imag's own partial, which extracts directly via plain ssh, no MCP
+   needed) into one `recording-verdict --merge-partials ...` call on dev1 exactly as
+   `recording-e2e.sh`'s own printed `[8/8d]` plan describes.
+
+This full manual loop (steps 1-6, run TWICE bracketing a real `launch-obs-genlock.sh --force`
+restart on both boxes) is how `ZERO_LOSS_RESTART_GATE`'s protocol was completed WITHOUT using the
+harness's own built-in restart-confirmation pause (which needs a mid-script MCP action the harness
+cannot synchronize with a single foreground invocation) — two independent full `recording-e2e.sh`
+passes + a manual restart in between + the gate binary on the two resulting verdict JSONs
+reproduces the exact same proof the built-in mode's internal helper would produce.
+
+**PowerShell `Start-Process -ArgumentList` gotcha — an array element containing a SPACE (a Windows
+path like `D:\_REC\2026-07-10 17-10-31.mkv`) gets word-split into TWO argv entries unless it is
+ITSELF wrapped in escaped double quotes inside the array literal.** `@('--strih', 'D:\_REC\2026-07-10
+17-10-31.mkv', ...)` passes the exe two separate args (`D:\_REC\2026-07-10` and
+`17-10-31.mkv"`) — `recording-verdict.exe` then fails with `error: unexpected argument '17-10-31.mkv'
+found`. Fix: quote the space-containing element itself — `@('--strih', '"D:\_REC\2026-07-10
+17-10-31.mkv"', ...)` — so `Start-Process` sees it as one quoted token in the built command line.
+This is DIFFERENT from the already-documented "quote space-bearing paths in the whole `-ArgumentList`
+STRING" gotcha elsewhere in this skill — it applies the same fix to the ARRAY form of `-ArgumentList`.
+
 **Design gotcha — do NOT reuse `burn_contiguity` for the painted tick (it false-passes at step 1).**
 The painted tick is a per-painted-FRAME counter sampled at the cambox rate, NOT a free-running
 render-tick counter, so `burn_contiguity_in_window_with_step` is the wrong tool two ways: (1) its
@@ -967,6 +1007,20 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
     the only known healthy anchor, 572001, sits ~50x below it). The root cause of the periodic
     defect itself was filed separately as #656 (out of scope for a calibration ticket) — a
     calibration ticket's job is to get the THRESHOLD right, not to fix what it measures.
+- **#656 CLOSED (2026-07-10)** — root cause was cam1's ShadowCast 2 silently delivering ~64fps
+  instead of its negotiated 60.000fps (fixed live via a USB unbind/rebind reset, no physical
+  access). Two permanent preventions shipped: an appliance-side WARN (`src/capture_rate_health.rs`)
+  once captured fps sustains >1% deviation for 30s, and an E2E preflight
+  (`scripts/lib/capture-rate-guard.sh`) that greps the source camera's journal for that WARN and
+  fails fast before burning a 30-min run on an already-defective grabber.
+- **#660 OPEN (filed 2026-07-10, found while running #466's restart-survival dispatch)** — a
+  DIFFERENT, NEWLY discovered imag-optical-tail defect: the LAST ~15-30 frames of a recording
+  occasionally decode a FROZEN, valid QR carrying a STALE run_id (a timestamp from BEFORE the
+  current run — NOT the periodic #656 pattern, NOT random noise: the exact same value repeats for
+  15-30 consecutive frames). Reproduced on TWO independent runs with TWO different stale values,
+  both times only in the tail — `recording_boundary_trim`'s current 3-frame lead/tail window is
+  not wide enough to absorb it. Confirmed NOT restart-related (identical shape before AND after an
+  OBS restart). See #660 for the full frame-by-frame evidence before re-deriving from scratch.
 - **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
   design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
   it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
