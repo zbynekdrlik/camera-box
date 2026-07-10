@@ -1026,3 +1026,17 @@ full-flow rig gate that exercises the ACTUAL system, not just the decision logic
 `workflow_dispatch`-only, so a regression in the system itself (not the gate logic) is only caught
 by a manual dispatch. That remaining automation gap is infra/operator-scheduling work, not a code
 fix — see the doc for why.
+
+## GOTCHA — ad-hoc `record --action start` outside the harness MUST carry a bounded stop (2× live incident, 2026-07-10)
+
+Both overnight "mystery" recordings that RIG_BUSY-deadlocked the #647 CI gate were OUR OWN: OBS
+logs pinned each `Recording Start` to a WebSocket client from dev1 (10.77.9.165) — once during a
+worker's live [0/8]-gate verification window (03:07), once at another worker's session start
+(04:40). Nobody at the rig touches recording (owner's standing statement). `recording-e2e.sh`'s
+cleanup trap now stops ONLY recordings the harness itself started (#649 flags) — which means an
+AD-HOC `obs_phase2.py record --action start` (outside the harness) is covered by NOTHING. Rule:
+never fire an ad-hoc StartRecord without an explicit bounded stop in the SAME session (foreground
+sleep → StopRecord, or an armed re-check), and always StopRecord before ending a session that
+started one. A leftover recording blocks every subsequent CI gate run as RIG_BUSY until someone
+manually diagnoses it (rig-busy-gate.sh now prints per-box timecode + stray-vs-broadcast hints,
+#649 item 3).

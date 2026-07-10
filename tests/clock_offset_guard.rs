@@ -727,3 +727,154 @@ fn ptp_check_maps_state_to_exit_code() {
         );
     }
 }
+
+// --- updated_ts_from_pipe_json / pipe_json_freshness_verdict (#648) -------------------------
+//
+// dantesync#47 gave every managed box a network status endpoint (http://<box>:8898/status)
+// serving the SAME JSON the status pipe emits, PLUS "updated_ts" (unix epoch seconds of the
+// daemon's last self-report). Fixtures below are the REAL payload shapes curled live from strih
+// (10.77.9.202) and stream (10.77.9.204) on 2026-07-10 (see #648's own issue comment / dispatch
+// context for the exact captured bytes).
+
+const HTTP_STATUS_STRIH_FIXTURE: &str = "\
+{\"offset_ns\":164707,\"drift_ppm\":-7.675453123651787,\"gm_uuid\":[0,0,0,0,1,0],\
+\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":1783647854,\"is_locked\":true,\
+\"smoothed_rate_ppm\":0.8499261548115417,\"ntp_offset_us\":0,\"mode\":\"NANO\",\
+\"ntp_failed\":false,\"accumulated_phase_us\":164.86878554117786}";
+
+const HTTP_STATUS_STREAM_FIXTURE: &str = "\
+{\"offset_ns\":2100422,\"drift_ppm\":-4.368687646861424,\"gm_uuid\":[0,0,0,0,1,0],\
+\"gm_source_ip\":\"10.77.7.109\",\"settled\":true,\"updated_ts\":1783647854,\"is_locked\":true,\
+\"smoothed_rate_ppm\":-1.0190139408153804,\"ntp_offset_us\":189,\"mode\":\"NANO\",\
+\"ntp_failed\":false,\"accumulated_phase_us\":6.691978464014342}";
+
+#[test]
+fn parses_updated_ts_from_real_http_status_payloads() {
+    let out = run_sourced(
+        "updated_ts_from_pipe_json \"$JSON\"",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "1783647854",
+        "must read strih's updated_ts: {out:?}"
+    );
+
+    let out = run_sourced(
+        "updated_ts_from_pipe_json \"$JSON\"",
+        &[("JSON", HTTP_STATUS_STREAM_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "1783647854",
+        "must read stream's updated_ts: {out:?}"
+    );
+
+    // No updated_ts field at all -> empty (UNKNOWN), never a silent value.
+    let none = "{\"ntp_offset_us\":10,\"is_locked\":true}";
+    let out = run_sourced("updated_ts_from_pipe_json \"$JSON\"", &[("JSON", none)]);
+    assert_eq!(out.trim(), "", "missing updated_ts -> empty: {out:?}");
+}
+
+#[test]
+fn pipe_json_freshness_verdict_fresh_when_within_the_window() {
+    // updated_ts=1783647854, now=1783647860 (6s later), freshness bound 300s -> well within.
+    let out = run_sourced(
+        "pipe_json_freshness_verdict \"$JSON\" 1783647860 300",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(out.trim(), "fresh", "6s old, 300s bound -> fresh: {out:?}");
+}
+
+#[test]
+fn pipe_json_freshness_verdict_stale_when_older_than_the_window() {
+    // Same reading, but "now" is 1000s later than updated_ts -- past the 300s freshness bound.
+    // This is the box-died-but-http-server-kept-serving-a-cached-snapshot case #648 must catch.
+    let out = run_sourced(
+        "pipe_json_freshness_verdict \"$JSON\" 1783648854 300",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "stale",
+        "1000s old, 300s bound -> stale: {out:?}"
+    );
+}
+
+#[test]
+fn pipe_json_freshness_verdict_stale_at_exactly_one_second_past_the_bound() {
+    // updated_ts=1783647854, freshness bound 300s -> exactly at the bound (delta=300) is fresh,
+    // one second past it (delta=301) must flip to stale. Pins the boundary is <= not <.
+    let at_bound = run_sourced(
+        "pipe_json_freshness_verdict \"$JSON\" 1783648154 300",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        at_bound.trim(),
+        "fresh",
+        "delta exactly 300s == bound -> fresh: {at_bound:?}"
+    );
+
+    let past_bound = run_sourced(
+        "pipe_json_freshness_verdict \"$JSON\" 1783648155 300",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        past_bound.trim(),
+        "stale",
+        "delta 301s > bound -> stale: {past_bound:?}"
+    );
+}
+
+#[test]
+fn pipe_json_freshness_verdict_absent_when_updated_ts_is_missing() {
+    let no_ts = "{\"ntp_offset_us\":10,\"is_locked\":true,\"mode\":\"NANO\"}";
+    let out = run_sourced(
+        "pipe_json_freshness_verdict \"$JSON\" 1783647860 300",
+        &[("JSON", no_ts)],
+    );
+    assert_eq!(
+        out.trim(),
+        "absent",
+        "no updated_ts field -> absent: {out:?}"
+    );
+}
+
+#[test]
+fn pipe_json_freshness_verdict_fails_closed_on_a_malformed_now_or_freshness_window() {
+    // A malformed NOW_EPOCH or FRESHNESS_S must never let a plainly-fresh reading grade as
+    // "fresh" -- test-strictness: no silent pass on a value the check cannot prove. Both bad
+    // "now" and bad "freshness" collapse to "absent" (never "fresh", never a bash arithmetic
+    // error that would abort the caller under set -e).
+    for (bad_now, bad_fresh) in [
+        ("abc", "300"),
+        ("1783647860", "abc"),
+        ("", "300"),
+        ("-1", "300"),
+    ] {
+        let out = run_sourced(
+            &format!("pipe_json_freshness_verdict \"$JSON\" '{bad_now}' '{bad_fresh}'"),
+            &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+        );
+        assert_eq!(
+            out.trim(),
+            "absent",
+            "malformed now={bad_now:?} fresh={bad_fresh:?} must refuse to certify freshness, not silently pass: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn pipe_json_freshness_verdict_stale_when_updated_ts_is_in_the_future() {
+    // now BEFORE updated_ts (clock skew / a bogus future timestamp) must also be stale, not
+    // fresh -- the check is on |delta|, not a one-sided "not yet expired" comparison.
+    let out = run_sourced(
+        "pipe_json_freshness_verdict \"$JSON\" 1783647000 300",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "stale",
+        "updated_ts 854s in the caller's future must be stale, not fresh: {out:?}"
+    );
+}

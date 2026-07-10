@@ -262,44 +262,22 @@ fi
 # AND PTP-locked (µs-grade fine servo, GM 10.77.9.184 up — NOT the ±1 ms NTP sawtooth
 # fallback): cross-node per-hop latency and per-frame timestamp alignment are meaningless
 # otherwise. The gate fails fast (non-zero, per-node diagnostic) and the run does NOT
-# proceed to recording. The Linux cams are read over SSH; the Windows boxes (ssh denied)
-# need their DanteSync status-pipe JSON pre-fetched to a file — fetched here over the same
-# standing http.server the OBS recordings use, or supplied by the caller via
-# DANTE_STRIH_STATUS / DANTE_STREAM_STATUS (the win-* MCP holder writes them).
-echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8)"
-WIN_DANTE_PORT="${WIN_DANTE_PORT:-8898}"
-DANTE_STRIH_STATUS="${DANTE_STRIH_STATUS:-$OUTDIR/dante-strih.json}"
-DANTE_STREAM_STATUS="${DANTE_STREAM_STATUS:-$OUTDIR/dante-stream.json}"
-# Try to fetch each Windows box's DanteSync status JSON over its http.server (a standing
-# helper on the box dumps \\.\pipe\dantesync to a file the server exposes as /dantesync.json).
-# A failure leaves the file absent -> the gate reports that node UNKNOWN and refuses to pass,
-# unless the caller already placed a status file there via the win-* MCP.
-fetch_dante_status() {
-  local host="$1" dest="$2"
-  [ -s "$dest" ] && { echo "    using pre-fetched DanteSync status: $dest"; return 0; }
-  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_DANTE_PORT}/dantesync.json" 2>/dev/null; then
-    echo "    fetched DanteSync status from ${host}:${WIN_DANTE_PORT} -> $dest"
-  else
-    echo "    NOTE: could not fetch DanteSync status from ${host} (http :$WIN_DANTE_PORT) — the" >&2
-    echo "          win-* MCP holder must write it to $dest, else the gate will fail this node." >&2
-  fi
-}
-fetch_dante_status "$STRIH"  "$DANTE_STRIH_STATUS"  || true
-fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
-# ALWAYS pass --win-status for strih AND stream (NOT conditional on the file existing). If a
-# fetch failed and the file is absent, the gate marks that node UNKNOWN and FAILS — never a
-# silent pass with the Windows boxes unverified. Dropping the node here (the previous bug) let
-# the gate certify only cam1+cam2 and exit 0 with strih/stream NTP/PTP never checked.
-# #253: the explicit --bound-us arg below already carries the bound (and OVERRIDES the gate's own
-# CLOCK_GUARD_BOUND_US default), so the leading CLOCK_GUARD_BOUND_US=... env-prefix was redundant
-# AND shellcheck-flagged (SC2097/SC2098: the prefix is only seen by the forked process, while the
-# same-line $CLOCK_GUARD_BOUND_US expansion is resolved by the CURRENT shell before the prefix
-# takes effect). Pass the value purely as the argument — behavior is identical.
+# proceed to recording. The Linux cams are read over SSH; the Windows boxes (ssh denied) are
+# queried LIVE over HTTP from dantesync#47's own network status endpoint
+# (http://<box>:8898/status, #648) via dantesync-gate.sh's --win-http — no win-* MCP, no human
+# pre-fetch, so this gate is fully unattended. (Superseded the pre-#648 flow: this script used
+# to curl each box's status to a LOCAL FILE and hand the gate --win-status FILE, which needed a
+# human/agent with win-* MCP access to backfill on a fetch failure — the automatic
+# pull_request-triggered CI run on dev1 has neither. dantesync-gate.sh's own
+# DANTESYNC_GATE_WIN_HTTP_<NAME> env var is the offline/fixture test seam now, mirroring its
+# existing DANTESYNC_GATE_LINUX_JOURNAL_<NAME> convention for the Linux nodes.)
+echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8/#648)"
 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
+  --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
-  --win-status "strih=$DANTE_STRIH_STATUS" \
-  --win-status "stream=$DANTE_STREAM_STATUS"
+  --win-http "strih=$STRIH" \
+  --win-http "stream=$STREAM"
 
 # Version-integrity precondition gate (#123) — THE OTHER hard step, alongside DanteSync. The whole
 # test is worthless unless the LIVE strih+stream OBS stack is the PINNED build (a randomly-deployed /
@@ -316,7 +294,9 @@ VERSION_STRIH_STATE="${VERSION_STRIH_STATE:-$OUTDIR/version-strih.json}"
 VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-$OUTDIR/version-stream.json}"
 # Try to fetch each Windows box's stack-state JSON over its http.server; a failure leaves the file
 # absent -> the gate reports that box UNKNOWN and refuses, unless the caller already placed a state
-# file there via the win-* MCP. Mirrors fetch_dante_status() exactly.
+# file there via the win-* MCP. (The DanteSync gate above no longer uses this file-relay pattern —
+# it queries strih/stream LIVE over HTTP via dantesync-gate.sh's --win-http, #648 — but this
+# version-integrity gate still does; #123/#119 is unrelated, separate scope.)
 fetch_box_state() {
   local host="$1" dest="$2"
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
@@ -367,7 +347,44 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
-  # #281 Fix#3: clear the rig-active heartbeat + stop its refresher FIRST — before the cam/OBS
+  # #649: StopRecord is the VERY FIRST thing cleanup() does — before EVEN the heartbeat/marker
+  # clears below, and well before the #328 cam-device-free block. Root cause of the live incident
+  # (2026-07-10): a GitHub Actions cancellation sends SIGINT, then SIGKILLs after a short grace
+  # window; the OLD cleanup() reached StopRecord only AFTER the heartbeat/marker clears + the cam1
+  # ssh restore + the cam2 ssh restore (each up to CLEANUP_SSH_TIMEOUT=30s) — so a SIGKILL landing
+  # inside that grace window killed the trap before it ever stopped strih/stream/imag's recording.
+  # The orphaned recording then self-deadlocks EVERY later gate run as RIG_BUSY (rig-busy-gate.sh
+  # can't tell "our own leftover" from a real broadcast) until someone manually stops it (#649).
+  # StopRecord itself is a single, normally-instant obs-websocket round trip — moving it first
+  # costs nothing in the happy path and means it lands even when the grace window is too short to
+  # reach anything after it. #328's "free the cam device before OBS" lesson is UNCHANGED for the
+  # ssh/OBS-scene work further down (that ordering is what the #312 incident needed); this is a
+  # narrower, even-earlier safety-critical action ahead of it.
+  #
+  # #649 item 2: NEVER blind-StopRecord a box this harness never itself started recording on — an
+  # early abort (before step [5/8]'s own StartRecord ever ran) must leave whatever IS recording
+  # alone, since blindly stopping it could kill a REAL broadcast's recording (worse than the
+  # original bug). Each
+  # *_RECORDING_STARTED flag is set to 1 ONLY right after that box's OWN StartRecord call actually
+  # succeeded ([5/8] below); a box whose StartRecord never ran (or never succeeded) keeps its
+  # flag at the 0 default declared before the trap arms, so this block is a no-op for it.
+  echo "[cleanup] #649 StopRecord FIRST (harness-started boxes only, before anything slower)"
+  if [ "${STRIH_RECORDING_STARTED:-0}" = "1" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STRIH" --action stop >/dev/null 2>&1 \
+      && echo "    [cleanup] strih: StopRecord ok" \
+      || echo "    WARNING #649: strih StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
+  fi
+  if [ "${STREAM_RECORDING_STARTED:-0}" = "1" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1 \
+      && echo "    [cleanup] stream: StopRecord ok" \
+      || echo "    WARNING #649: stream StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
+  fi
+  if [ "${IMAG_RECORDING_STARTED:-0}" = "1" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop >/dev/null 2>&1 \
+      && echo "    [cleanup] imag: StopRecord ok" \
+      || echo "    WARNING #649: imag StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
+  fi
+  # #281 Fix#3: clear the rig-active heartbeat + stop its refresher — before the cam/OBS
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
   # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
   rig_heartbeat_stop 2>/dev/null || true
@@ -427,13 +444,11 @@ systemctl restart camera-box 2>/dev/null || true
 systemctl start cam2-painter 2>/dev/null || true"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
+  # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
+  # only) — no separate record-stop call belongs here any more; #462's "imag never had its program
+  # scene routed by THIS harness" note still holds (rig-mode.sh test owns that), it just no longer
+  # needs its own StopRecord line since the #649 block above covers it.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop >/dev/null 2>&1
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
-  # #462: imag never had its program scene routed by THIS harness (rig-mode.sh test owns that), so
-  # there is no scene state to restore — only a StopRecord safety net (a leftover recording must
-  # finalize even if the run aborted mid-flight).
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop >/dev/null 2>&1
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
@@ -491,6 +506,15 @@ IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"
 # is now a THIRD burn target (its own 911003 digital corner burn, #463) — the exact extension this
 # array's design already anticipated.
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
+# #649: "did THIS harness itself start recording on <box>" flags — default UNSET (0) here, before
+# the trap arms, so an EARLY abort (before [5/8] ever runs) leaves cleanup()'s StopRecord-first
+# block a no-op on all three boxes. Each flips to 1 ONLY right after that box's OWN StartRecord
+# actually succeeds ([5/8] below). cleanup() stops ONLY flagged boxes — a blind StopRecord on a
+# box this run never started recording on could kill a REAL broadcast's recording if a run gets
+# cancelled while still waiting on an earlier gate (the #649 "worse than the original bug" case).
+STRIH_RECORDING_STARTED=0
+STREAM_RECORDING_STARTED=0
+IMAG_RECORDING_STARTED=0
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -708,6 +732,21 @@ TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 
 # gate). Supervisor runs the live rig-validate step; this ships the code + pure-function tests.
 GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-1000}"
 GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}"
+
+# #406/#312 item5: belt-and-braces re-check, immediately before rerouting strih/stream's
+# PRODUCTION program scenes. The CI-level scripts/rig-busy-gate.sh check (when this harness
+# runs under the automatic pull_request-triggered full-path-e2e.yml gate) may have passed
+# tens of minutes ago — [1/8]-[3/8] (build/deploy/painter-start) can take a while — so a real
+# broadcast could have started in that window. Never reroute a rig that just went live.
+echo "[4/8 pre-check] #406 re-verifying the rig is still free right before the prod-scene reroute"
+BUSY_RECHECK=$(python3 "$HERE/obs_phase2.py" rig-busy-check \
+  --strih-host "$STRIH" --stream-host "$STREAM" --password "${OBS_PASSWORD:-}")
+echo "    $BUSY_RECHECK"
+if ! printf '%s' "$BUSY_RECHECK" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d["busy"] else 1)'; then
+  echo "ERROR: rig went BUSY between the CI busy-gate check and this reroute step — aborting BEFORE touching prod scenes: $BUSY_RECHECK" >&2
+  exit 1
+fi
+
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' ($CAMERA_NAME via $STRIH_PROG_SOURCE),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
@@ -1254,8 +1293,11 @@ echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + ima
 # `set -euo pipefail` (top of this script) makes that nonzero exit abort this run immediately;
 # no extra guard needed at this call site.
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
+STRIH_RECORDING_STARTED=1   # #649: flag so cleanup()'s StopRecord-first block stops THIS box
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
+STREAM_RECORDING_STARTED=1  # #649: same — set only once this box's OWN StartRecord succeeded
 python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start
+IMAG_RECORDING_STARTED=1    # #649: same — set only once this box's OWN StartRecord succeeded
 
 # #312 Phase-2 ALL-CAMBOX SWEEP (opt-in via ALL_CAMBOX=1). Instead of one steady-state hold on a
 # single cambox, sequentially cut EACH active cambox into strih PROGRAM for ~SEGMENT_SECS, cycling

@@ -370,6 +370,135 @@ fn gate_linux_journal_override_is_keyed_per_node_name_not_a_single_shared_var() 
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #648 — the --win-http path: strih/stream queried LIVE over HTTP from dantesync#47's own
+// network status endpoint (http://<box>:8898/status), instead of a human/agent pre-fetching the
+// status pipe's JSON to a file (--win-status above). No live boxes in CI, so these tests feed
+// the REAL captured payload shape (curled from strih/stream on 2026-07-10) via
+// DANTESYNC_GATE_WIN_HTTP_<NAME> -- the same "caller pre-fetches to a file, keyed by node name"
+// fixture-injection convention as DANTESYNC_GATE_LINUX_JOURNAL_<NAME> above (#608).
+// ---------------------------------------------------------------------------------------------
+
+/// Real strih (10.77.9.202) DanteSync HTTP status payload, curled 2026-07-10. NANO-locked,
+/// ntp_offset_us=0 (well within any sane bound), fresh (updated_ts must be paired with a "now"
+/// close to it by the caller in each test).
+const HTTP_STRIH_OK: &str = "{\"offset_ns\":164707,\"drift_ppm\":-7.68,\"gm_source_ip\":\"10.77.9.184\",\
+\"settled\":true,\"updated_ts\":1783647854,\"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\
+\"ntp_failed\":false}";
+
+/// Write `json` to a temp file and return its path -- the DANTESYNC_GATE_WIN_HTTP_<NAME> fixture.
+fn write_win_http_fixture(name: &str, json: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dante-gate-http-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.json"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(json.as_bytes()).unwrap();
+    path
+}
+
+#[test]
+fn gate_passes_a_win_http_node_that_is_fresh_locked_and_in_bound() {
+    // The gate computes "now" internally via `date +%s` (not injectable), so a fixture proving
+    // the PASS path needs a genuinely current updated_ts -- unlike gate_fails_when_a_win_http_node_is_stale
+    // below (which relies on a FIXED past capture staying stale forever), this one must be built
+    // with the real wall clock at test-run time.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let fresh = format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{now},\
+         \"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false}}"
+    );
+    let p = write_win_http_fixture("strih_http_ok", &fresh);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "fresh+locked+in-bound --win-http node must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_fails_when_a_win_http_node_is_stale() {
+    // dantesync-gate.sh's own flow computes "now" internally via `date +%s`, so a fixture whose
+    // updated_ts is deliberately far in the PAST (year ~2026-07-10 real capture, well behind
+    // whenever this test actually runs) is always graded STALE against the real wall clock --
+    // simulates the box's HTTP server serving a cached snapshot after dantesync itself died.
+    let p = write_win_http_fixture("strih_http_stale", HTTP_STRIH_OK);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "a stale updated_ts must be INCOMPLETE (11), never a silent PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(stdout.contains("NTP STALE"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_fails_when_a_win_http_node_is_unreachable() {
+    // No DANTESYNC_GATE_WIN_HTTP_STRIH override and no real box to curl (the TEST-ONLY
+    // unroutable 192.0.2.0/24 range, RFC 5737 TEST-NET-1) -> UNREACHABLE -> UNKNOWN -> GATE
+    // INCOMPLETE (11), never a silent pass. CLOCK_GUARD_HTTP_TIMEOUT=1 keeps the test fast
+    // instead of waiting out the gate's real default (10s) connect timeout.
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "", "--win-http", "strih=192.0.2.1"],
+        &[("CLOCK_GUARD_HTTP_TIMEOUT", "1")],
+    );
+    assert_eq!(
+        code, 11,
+        "unreachable --win-http node must be INCOMPLETE (11). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(stdout.contains("UNREACHABLE"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_fails_when_a_win_http_node_updated_ts_field_is_absent() {
+    // A payload missing "updated_ts" entirely (an incompatible/older endpoint) must be UNKNOWN,
+    // never silently graded on offset/PTP alone with no freshness proof at all.
+    let no_ts = "{\"ntp_offset_us\":0,\"is_locked\":true,\"mode\":\"NANO\"}";
+    let p = write_win_http_fixture("strih_http_no_ts", no_ts);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "no updated_ts field must be INCOMPLETE (11). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("NTP UNKNOWN"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_with_only_win_http_nodes_still_refuses_zero_nodes() {
+    // --linux "" and --win-status absent, but --win-http also absent -> still zero nodes -> usage
+    // error (1). Proves the "no nodes" guard was extended to cover --win-http, not just the two
+    // pre-existing arrays.
+    let (code, _o, stderr) = run_gate(&["--linux", ""]);
+    assert_eq!(code, 1, "zero nodes -> usage error (1). stderr: {stderr}");
+}
+
+#[test]
+fn help_describes_win_http_and_its_freshness_requirement() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--win-http"),
+        "help must document --win-http (#648): {stdout}"
+    );
+    assert!(
+        stdout.to_lowercase().contains("updated_ts"),
+        "help must document the --win-http freshness field (updated_ts, #648): {stdout}"
+    );
+}
+
 #[test]
 fn gate_linux_journal_override_maps_a_hyphenated_node_name_to_a_valid_env_var() {
     // #608 review follow-up: the NAME -> ENV_VAR mapping uppercases AND maps "-" to "_" (a bare

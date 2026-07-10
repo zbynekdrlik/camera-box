@@ -1544,6 +1544,119 @@ def switch(a):
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
 
 
+def _rig_busy_hint(diagnostics):
+    """#649 item 3 (pure, testable — no I/O): turn per-box streaming/recording booleans into a
+    short plain-English hint that distinguishes OUR OWN stray/leftover test recording from a real
+    broadcast, so a future RIG_BUSY incident is a 2-minute diagnosis instead of a manual
+    investigation.
+
+    Live incident this codifies (2026-07-10, #649): a cancelled recording-e2e.sh CI run left strih
+    AND stream recording (GetRecordStatus.outputActive=true) with NO streaming active, at 4 AM —
+    every later gate run then saw RIG_BUSY with no way to tell "our own leftover" from "a real
+    broadcast" apart from SSHing in and reading OBS by hand.
+
+    The heuristic matches how this rig is actually used: a REAL broadcast streams (to FB/YouTube)
+    AND records at the same time (see scripts/rig-mode.sh EVENT mode); recording-e2e.sh (this
+    project's own harness) ONLY ever calls StartRecord — it never touches GetStreamStatus. So:
+      - recording=true, streaming=false on a box  -> matches a stray harness leftover (#649).
+      - recording=true, streaming=true  on a box  -> matches a REAL broadcast; do NOT touch it.
+      - streaming=true,  recording=false on a box -> doesn't match the harness's own pattern either
+                                                      way; flag for a manual look.
+
+    *diagnostics* is a list of ``{"host": str, "streaming": bool, "recording": bool,
+    "recordTimecode": str|None}`` dicts (one per box). Returns "" when nothing is busy (no hint
+    needed).
+    """
+    recording_only = [d["host"] for d in diagnostics if d["recording"] and not d["streaming"]]
+    real_broadcast = [d["host"] for d in diagnostics if d["recording"] and d["streaming"]]
+    streaming_only = [d["host"] for d in diagnostics if d["streaming"] and not d["recording"]]
+    parts = []
+    if real_broadcast:
+        parts.append(
+            f"{'/'.join(real_broadcast)}: recording AND streaming both ON -- matches a REAL "
+            f"broadcast; do NOT stop it automatically."
+        )
+    if recording_only:
+        parts.append(
+            f"{'/'.join(recording_only)}: recording ON but streaming OFF -- matches OUR OWN "
+            f"stray/E2E test recording left by a cancelled recording-e2e.sh run (#649), not a "
+            f"live broadcast (a real broadcast streams AND records together). Check the "
+            f"outputTimecode above (a long timecode at an off-hour is a strong tell), then clear "
+            f"it: python3 scripts/obs_phase2.py record --host <ip> --action stop (StopRecord "
+            f"only -- keeps the file, never touches program routing)."
+        )
+    if streaming_only:
+        parts.append(
+            f"{'/'.join(streaming_only)}: streaming ON but recording OFF -- does not match the "
+            f"harness's own record-only pattern; check manually."
+        )
+    return " ".join(parts)
+
+
+def rig_busy_check(a):
+    """#406/#312 item5: query BOTH strih and stream OBS WebSocket for GetStreamStatus.outputActive
+    and GetRecordStatus.outputActive (4 booleans total) and report whether the rig is genuinely busy
+    with a REAL broadcast/recording right now.
+
+    This is the pre-flight signal the automatic `pull_request`-triggered full-path-e2e CI gate
+    (scripts/rig-busy-gate.sh) uses before it reroutes strih/stream's production OBS program scenes
+    to run the real E2E — driving the recording harness over a LIVE broadcast would be a genuine
+    production incident, not just a wasted CI run.
+
+    Prints ONE line of JSON to stdout:
+    ``{"busy": bool, "reasons": [str, ...], "diagnostics": [...], "hint": str}``.
+      - busy=false, reasons=[]     -> rig fully idle on both boxes, safe to proceed. Exit 0.
+      - busy=true,  reasons=[...]  -> at least one box is streaming and/or recording; the caller must
+                                      NOT run the E2E now (exit 0 — the caller decides retry/backoff).
+      - WS unreachable on EITHER box -> never silently reported as busy=false (a rig we can't
+                                         observe must FAIL CLOSED). Exit 3.
+
+    #649 item 3: when busy, ``diagnostics`` carries per-box streaming/recording booleans + the
+    recording's outputTimecode, and ``hint`` is a short plain-English pointer (via _rig_busy_hint,
+    above) distinguishing a stray leftover test recording from a real broadcast — so a future
+    RIG_BUSY incident is diagnosable straight from the CI log, no manual SSH/OBS inspection needed.
+    """
+    reasons = []
+    errors = []
+    diagnostics = []
+    for label, host in (("strih", a.strih_host), ("stream", a.stream_host)):
+        try:
+            ws = _conn(host, a.password)
+            try:
+                stream_status = _rpc(ws, "GetStreamStatus")
+                record_status = _rpc(ws, "GetRecordStatus")
+            finally:
+                ws.close()
+        except Exception as e:
+            # Connection failure OR an RPC-level error — fail CLOSED (exit 3), never busy=false.
+            errors.append(f"{label} ({host}) unreachable: {e}")
+            continue
+        stream_active = bool(stream_status.get("outputActive"))
+        record_active = bool(record_status.get("outputActive"))
+        record_tc = record_status.get("outputTimecode") if record_active else None
+        diagnostics.append({
+            "host": label, "streaming": stream_active, "recording": record_active,
+            "recordTimecode": record_tc,
+        })
+        if stream_active:
+            reasons.append(f"{label} is streaming (GetStreamStatus.outputActive=true)")
+        if record_active:
+            tc_suffix = f", outputTimecode={record_tc}" if record_tc else ""
+            reasons.append(f"{label} is recording (GetRecordStatus.outputActive=true{tc_suffix})")
+
+    if errors:
+        print(json.dumps({"busy": None, "reasons": errors}))
+        sys.exit(3)
+
+    busy = bool(reasons)
+    out = {"busy": busy, "reasons": reasons, "diagnostics": diagnostics}
+    if busy:
+        hint = _rig_busy_hint(diagnostics)
+        if hint:
+            out["hint"] = hint
+    print(json.dumps(out))
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -1620,10 +1733,16 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
+    # #406/#312 item5: `rig-busy-check` queries TWO hosts (strih + stream), not the single --host
+    # every other subcommand takes above — its own parser, added separately.
+    rbc = sub.add_parser("rig-busy-check")
+    rbc.add_argument("--strih-host", default=os.environ.get("STRIH_HOST", "10.77.9.202"))
+    rbc.add_argument("--stream-host", default=os.environ.get("STREAM_HOST", "10.77.9.204"))
+    rbc.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
-     "program-scene": program_scene}[a.cmd](a)
+     "program-scene": program_scene, "rig-busy-check": rig_busy_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
