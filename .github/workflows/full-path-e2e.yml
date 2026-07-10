@@ -130,7 +130,14 @@ jobs:
           echo "START pid=$$ ppid=$PPID $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" > "$LOG"
           trap 'echo "TRAP_RAN sig_exit=$? $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"' EXIT HUP INT TERM
           echo "SLEEPING pid=$$ $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"
-          sleep 180
+          # #657 FIX-VERIFICATION PASS 2: a bash shell blocked in a plain foreground `sleep N`
+          # defers ALL signal handling (trapped or default) until that wait4() syscall
+          # returns on its own — i.e. until the sleep finishes naturally. `wait` (no args, or
+          # on a specific backgrounded PID), by contrast, is documented to return immediately
+          # once a trapped signal arrives. Background the sleep and `wait` on it instead of
+          # blocking on it directly.
+          sleep 180 &
+          wait $!
           echo "SLEEP_COMPLETED_NORMALLY (not cancelled in time) $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"
           INNER_EOF
           chmod +x /tmp/trap-test-657-inner.sh
