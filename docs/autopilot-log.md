@@ -2974,3 +2974,35 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   Commented the full evidence + honest conclusion on #466 (still OPEN, now blocked on #660);
   #660 filed with full reproduction evidence for whoever investigates next. No PR, no merge, no
   version bump (pure investigation + a rig-config fix already logged under #656 above).
+
+## 2026-07-10 — #660 fix (PR #662, v1.7.0-dev.333→334) + #466 restart-survival re-dispatch
+
+- **#660 root cause**: `probe::kms::KmsPresenter` drives cam2's HDMI CRTC through its own DRM dumb
+  buffers and never touches `/dev/fb0`. On `Drop` (painter self-exit), releasing DRM master lets
+  the kernel's fbdev-emulation client regain the CRTC and scan out `/dev/fb0`'s memory again —
+  whatever a prior `VsyncFb` fallback or camera-box's own `--display` module last left there
+  (nothing clears it between painter runs). Confirmed by matching both runs' imag last-genuine
+  tick to `painter-<run>.csv`'s own final row — the stale reveal happens exactly at teardown.
+- **Fix**: `KmsPresenter::Drop` blanks `/dev/fb0` (all-zero, its visible page) BEFORE releasing
+  master/fbcon. New pure module `src/fb_blank.rs` (`visible_page_range`, Tier-0 tested);
+  `probe::fb::blank_fbdev` (the ioctl+write) shares a new `open_and_read_screeninfo` helper with
+  `VsyncFb::open` (code-review cleanup); `KmsPresenter::open/open_inner/with_master/build` thread
+  an `fb_device` field through for the Drop to use.
+- Commits: `test(#660)` fb_blank.rs geometry tests → `fix(#660)` the wiring →
+  `refactor(#660)` shared ioctl helper → `polish(#660)` success-path log line (review feedback).
+  PR #662 merged `7d6013be7`; dev bumped to 1.7.0-dev.334 post-merge.
+- **Live-verified 3 ways**: (1) CI hardware E2E gate (run 29112349824) — imag's last real tick
+  matched the painter's own final tick, tail genuinely undecodable not frozen; (2)
+  `/tmp/painter.log` on cam2 showed `blanked fbdev visible page before KMS teardown (#660)` firing
+  right after `painter: emitted N frames`; (3) full manual restart-survival re-dispatch (below).
+- **#466 re-dispatch**: hit cam1's ShadowCast 2 USB grabber over-delivering ~63fps AGAIN (same
+  #656 class) on the first baseline attempt — fixed live with the same `authorized` 0→1 USB reset,
+  filed the recurrence as **#663** (a one-time #656 reset doesn't hold). Re-ran clean: BEFORE
+  (run 1433351954) / OBS force-restart (both boxes, genlock tick re-confirmed) / AFTER
+  (run 69560109). Neither run shows #660's COPY/FREEZE signature — confirmed fixed. But
+  `zero-loss-restart-gate` still FAILs: `real_drops=0 burn_unreadable=0` on every node in BOTH
+  measurements (zero restart-introduced loss, the actual #109 question), yet imag's `#588`
+  systematic-judder gate fails both times (Δ0 density 4.72%/5.62%, matching #656's original
+  investigation numbers) — the SAME pre-existing cam1-grabber defect #663 now tracks, unrelated
+  to #660 or the restart. Per strict-test-mandate, did NOT force a false PASS: #466 stays OPEN,
+  updated with the honest before/after evidence, now blocked on #663 instead of #660.
