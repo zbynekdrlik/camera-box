@@ -1068,3 +1068,18 @@ sleep → StopRecord, or an armed re-check), and always StopRecord before ending
 started one. A leftover recording blocks every subsequent CI gate run as RIG_BUSY until someone
 manually diagnoses it (rig-busy-gate.sh now prints per-box timecode + stray-vs-broadcast hints,
 #649 item 3).
+
+## TOPOLOGY FACT — ONE camera + HDMI splitter feeds ALL cam boxes the IDENTICAL signal (owner-corrected 2026-07-10)
+
+The optical leg is: cam2 paints its monitor → **ONE physical camera** films that monitor → the
+camera's output goes through an **HDMI splitter** → EVERY cam box's USB capture card receives the
+IDENTICAL video signal. There are NOT separate cameras per box. Consequences:
+- A "per-camera optical degradation" (one box decodes, another doesn't) is IMPOSSIBLE as optics —
+  the difference is always in the BOX (USB capture card, delivery rate, decode). Never claim
+  lenses/focus/optics for a per-box decode difference (the #642 mistake: "cam1+cam3 optical read
+  degraded" was actually both boxes' ShadowCast USB grabbers over-delivering ~62-64fps instead of
+  60, creating source-side duplicate/corrupt frames; fixed by remote USB reset — unbind →
+  `authorized` 0→1 → rebind, no physical access needed).
+- Capture-rate health check first: `journalctl -u camera-box | grep Streaming:` — captured fps
+  must be ≈ the configured rate (60). Over-delivery (62-64fps) = defective USB grabber state →
+  USB-reset it (#656 prevention adds an automatic WARN + E2E preflight for this).
