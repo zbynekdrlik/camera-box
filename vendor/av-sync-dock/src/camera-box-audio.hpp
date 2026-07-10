@@ -340,4 +340,73 @@ struct RollingOffsetCluster {
 	}
 };
 
+/* ---- #634 audit-logging: lock-state transition classification (pure, no I/O) ----
+ *
+ * The dock silently applies whatever `RollingOffsetCluster::push()` returns: a new
+ * `sync_found`/`audio_marker_found` every time `est.ok` is true, and nothing at all when it is
+ * false. That leaves zero log trail for diagnosing a live desync after the fact (the ask behind
+ * #634, following the #529 incident). `CbLockAuditTracker` wraps that same `CbAvOffset` stream
+ * and decides WHAT (if anything) is worth a log line: a lock acquired, a lock lost, or the
+ * locked offset moving enough to matter — never a re-log of an unchanged, already-locked value
+ * (that would spam a line per marker, ~once every few seconds while locked, for no new
+ * information). The dock-side glue (sync-test-output.cpp) just `push()`es this every estimate
+ * and `blog()`s the returned event — kept deliberately trivial so it doesn't need the 150-min
+ * windows-genlock.yml frontend build to verify; this class is unit-tested off-rig via the same
+ * twin-harness pattern as tests/obs_titlebar_newlevel_parse.rs (see
+ * tests/av_sync_dock_audit_log.rs). */
+enum class CbLockEventKind {
+	None,     // nothing changed this push — do not log
+	Locked,   // transitioned from unlocked (or startup) to a trusted cluster estimate
+	Updated,  // still locked, but the offset moved by more than the stable tolerance
+	Unlocked, // transitioned from locked to untrusted (est.ok went false)
+};
+
+struct CbLockAuditEvent {
+	CbLockEventKind kind = CbLockEventKind::None;
+	double offset_ms = 0.0; // the (new, or last-known-before-unlock) offset
+	size_t matched = 0;     // cluster size backing the value ("source": the densest cluster)
+	double mad_ms = 0.0;    // cluster dispersion backing the value
+};
+
+class CbLockAuditTracker {
+public:
+	// stable_tol_ms: while already locked, only classify as Updated when the new offset differs
+	// from the last-logged one by more than this many ms (default mirrors CB_CLUSTER_TOL_MS/12,
+	// well under the cluster's own ~60ms grouping window so a genuine re-alignment is caught).
+	explicit CbLockAuditTracker(double stable_tol_ms = 5.0)
+		: locked_(false), last_offset_ms_(0.0), stable_tol_ms_(stable_tol_ms)
+	{
+	}
+
+	CbLockAuditEvent push(const CbAvOffset &est)
+	{
+		CbLockAuditEvent ev;
+		if (!est.ok) {
+			if (locked_) {
+				ev.kind = CbLockEventKind::Unlocked;
+				ev.offset_ms = last_offset_ms_;
+			}
+			locked_ = false;
+			return ev;
+		}
+
+		if (!locked_) {
+			ev.kind = CbLockEventKind::Locked;
+		} else if (std::fabs(est.offset_ms - last_offset_ms_) > stable_tol_ms_) {
+			ev.kind = CbLockEventKind::Updated;
+		}
+		ev.offset_ms = est.offset_ms;
+		ev.matched = est.matched;
+		ev.mad_ms = est.mad_ms;
+		locked_ = true;
+		last_offset_ms_ = est.offset_ms;
+		return ev;
+	}
+
+private:
+	bool locked_;
+	double last_offset_ms_;
+	double stable_tol_ms_;
+};
+
 } // namespace camerabox
