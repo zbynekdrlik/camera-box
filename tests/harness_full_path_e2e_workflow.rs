@@ -75,8 +75,8 @@ fn full_path_e2e_yml_busy_gate_runs_before_the_recording_step() {
         .find("run: bash scripts/rig-busy-gate.sh")
         .expect("full-path-e2e.yml must invoke scripts/rig-busy-gate.sh as a job step");
     let recording_pos = s
-        .find("run: bash scripts/recording-e2e.sh")
-        .expect("full-path-e2e.yml must still invoke scripts/recording-e2e.sh");
+        .find("run: exec bash scripts/recording-e2e.sh")
+        .expect("full-path-e2e.yml must still invoke scripts/recording-e2e.sh (via `exec`, #657)");
     assert!(
         busy_gate_pos < recording_pos,
         "#406/#312 item5: rig-busy-gate.sh MUST run BEFORE recording-e2e.sh in the job — \

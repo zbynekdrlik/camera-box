@@ -53,15 +53,6 @@ on:
         # disk preflight fails early otherwise). Ideal soak (1800 s) is an operator opt-in.
         description: "Steady-state run seconds (>=300; cam1 grab ~20 MB/s on dev1)"
         default: "300"
-      trap_test_657:
-        # #657 investigation ONLY (remove once the investigation is closed out): runs a
-        # bash EXIT/HUP/INT/TERM trap + long `sleep` in place of the real rig E2E (busy-gate
-        # and recording-e2e.sh are both SKIPPED — no rig interaction at all). Dispatch this
-        # with trap_test_657=true, then `gh run cancel` the run while it is mid-sleep, to
-        # empirically prove whether an Actions cancellation on this self-hosted runner
-        # actually delivers a signal that runs a bash trap to completion (#657 hypothesis 1).
-        description: "#657 ONLY: 'true' runs a trap+sleep signal-delivery smoke test instead of the real E2E"
-        default: "false"
   # #406/#312 item5: the automatic BLOCKING merge gate. Fires on every dev->main PR
   # open/update — the busy-gate step protects the live rig, so this can safely run
   # unattended (never on every push to dev — only when a PR targeting main exists/changes).
@@ -102,50 +93,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: "#657 investigation: bash trap+sleep signal-delivery smoke test (no rig interaction)"
-        # ONLY runs when dispatched with trap_test_657=true. Deliberately touches NEITHER
-        # strih/stream OBS NOR any cam box — this step exists purely to answer #657
-        # hypothesis 1: does an Actions cancellation on this self-hosted runner actually
-        # deliver a signal that runs a bash EXIT/HUP/INT/TERM trap to completion, the same
-        # way recording-e2e.sh's own cleanup() trap (armed via `trap cleanup EXIT HUP INT
-        # TERM`) would need to during the real harness's long foreground `sleep` recording
-        # window? Dispatch this, then `gh run cancel` the run while the log shows
-        # "SLEEPING", then read the log file directly on dev1 (this IS the self-hosted
-        # runner host) — TRAP_RAN present = the trap fired; absent = it never ran.
-        # Deliberately no `set -e`: a step that aborts on its own trap's failure would
-        # defeat the point of observing whatever actually happens under cancellation.
-        if: inputs.trap_test_657 == 'true'
-        run: |
-          set -uo pipefail
-          LOG="/tmp/trap-test-657-${{ github.run_id }}.log"
-          # The trap must live in a NESTED bash process — exactly the structure recording-e2e.sh
-          # is actually invoked with (`run: bash scripts/recording-e2e.sh`, a plain external
-          # command from this outer runner-managed script, NOT `exec`'d and NOT inline in this
-          # step's own top-level process). Testing the trap inline in THIS top-level script would
-          # be a structurally different case from the real harness and could answer a different
-          # question than #657 is actually asking.
-          cat > /tmp/trap-test-657-inner.sh <<'INNER_EOF'
-          #!/usr/bin/env bash
-          set -uo pipefail
-          echo "START pid=$$ ppid=$PPID $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" > "$LOG"
-          trap 'echo "TRAP_RAN sig_exit=$? $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"' EXIT HUP INT TERM
-          echo "SLEEPING pid=$$ $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"
-          # #657 FIX-VERIFICATION PASS 2: a bash shell blocked in a plain foreground `sleep N`
-          # defers ALL signal handling (trapped or default) until that wait4() syscall
-          # returns on its own — i.e. until the sleep finishes naturally. `wait` (no args, or
-          # on a specific backgrounded PID), by contrast, is documented to return immediately
-          # once a trapped signal arrives. Background the sleep and `wait` on it instead of
-          # blocking on it directly.
-          sleep 180 &
-          wait $!
-          echo "SLEEP_COMPLETED_NORMALLY (not cancelled in time) $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"
-          INNER_EOF
-          chmod +x /tmp/trap-test-657-inner.sh
-          # #657 FIX-VERIFICATION PASS: exec REPLACES this process image with the inner
-          # script's bash — no separate child process exists to be orphaned, so the
-          # runner's SIGINT/SIGTERM lands DIRECTLY on the trap-holding process.
-          exec env LOG="$LOG" bash /tmp/trap-test-657-inner.sh
-
       - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs)
         id: docs-only
         # #646: a RUNTIME `if:`-based skip, NEVER `on.pull_request.paths`/`paths-ignore` at the
@@ -155,7 +102,7 @@ jobs:
         # runs the job and reports a genuine (skipped) outcome instead. workflow_dispatch has no
         # PR to diff — never treated as docs-only, always runs in full (an operator-run manual
         # soak should never be silently skipped).
-        if: github.event_name == 'pull_request' && inputs.trap_test_657 != 'true'
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -180,8 +127,7 @@ jobs:
         # unreachable (fails CLOSED, never assumes "free"). See scripts/rig-busy-gate.sh.
         # #646: SKIPPED (reported skipped, not silently absent) on a confirmed docs-only PR;
         # always runs for workflow_dispatch (manual soak) regardless.
-        # #657: also SKIPPED when trap_test_657=true — that mode never touches the rig.
-        if: inputs.trap_test_657 != 'true' && (github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true')
+        if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
         run: bash scripts/rig-busy-gate.sh
 
       - name: Recording-based 4-node cam2→cam1→strih→stream zero-loss E2E (HARD GATE)
@@ -193,14 +139,22 @@ jobs:
         # in the window between this gate passing and the reroute actually happening).
         # #646: SKIPPED alongside the busy-gate on a confirmed docs-only PR (never just one of
         # the two skipped) — always runs for workflow_dispatch regardless.
-        # #657: also SKIPPED when trap_test_657=true — that mode never touches the rig.
-        if: inputs.trap_test_657 != 'true' && (github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true')
+        if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
         env:
           NDI_RUNTIME_DIR_V6: /usr/lib/ndi
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
           # on a pull_request event); workflow_dispatch keeps its own default/operator override.
           DURATION: ${{ inputs.duration_secs || '300' }}
-        run: bash scripts/recording-e2e.sh
+        # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
+        # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
+        # signals directly (empirically confirmed: it signals only the single top-level step PID
+        # it started). Without `exec`, that outer wrapper eventually dies to the signal itself
+        # (deferred ~10s) and orphans the inner trap-holding bash (reparented to pid 1) BEFORE the
+        # runner's "kill entire process tree" sweep — so the orphan survives that sweep and is
+        # only reaped later by an untrappable kill, and cleanup()'s trap never runs at all. With
+        # `exec`, there is no separate child to orphan: the runner's direct-PID signal lands on
+        # the actual trap-holding process.
+        run: exec bash scripts/recording-e2e.sh
 
       - name: Upload verdict JSON + report PNG + pixel proof
         if: always() # keep the evidence even on a failing verdict
