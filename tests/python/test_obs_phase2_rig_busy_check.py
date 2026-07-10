@@ -103,7 +103,14 @@ def test_rig_busy_check_both_idle_reports_not_busy(monkeypatch, capsys):
     obs_phase2.rig_busy_check(_args())  # must NOT raise/exit
 
     out = json.loads(capsys.readouterr().out)
-    assert out == {"busy": False, "reasons": []}
+    assert out["busy"] is False
+    assert out["reasons"] == []
+    # #649 item 3: diagnostics are ALWAYS present (busy or not) — one entry per box.
+    assert out["diagnostics"] == [
+        {"host": "strih", "streaming": False, "recording": False, "recordTimecode": None},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    assert "hint" not in out  # no hint when nothing is busy
 
 
 def test_rig_busy_check_strih_streaming_reports_busy_with_reason(monkeypatch, capsys):
@@ -144,6 +151,81 @@ def test_rig_busy_check_both_boxes_fully_busy_reports_all_four_reasons(monkeypat
     out = json.loads(capsys.readouterr().out)
     assert out["busy"] is True
     assert len(out["reasons"]) == 4
+
+
+def _fake_rpc_factory_with_timecode(strih_stream, strih_record, strih_tc,
+                                     stream_stream, stream_record, stream_tc):
+    """Same shape as _fake_rpc_factory, but GetRecordStatus also returns outputTimecode (#649
+    item 3) — needed to test the timecode-in-reason and the record-only-vs-real-broadcast hint."""
+    current = {"host": None}
+
+    def fake_conn(host, password=""):
+        current["host"] = host
+        return _FakeWS()
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        is_strih = current["host"] == "10.77.9.202"
+        if rtype == "GetStreamStatus":
+            return {"outputActive": strih_stream if is_strih else stream_stream}
+        elif rtype == "GetRecordStatus":
+            active = strih_record if is_strih else stream_record
+            tc = strih_tc if is_strih else stream_tc
+            return {"outputActive": active, "outputTimecode": tc}
+        raise AssertionError(f"unexpected request type {rtype!r}")
+
+    return fake_conn, fake_rpc
+
+
+def test_rig_busy_check_reason_includes_output_timecode_when_recording(monkeypatch, capsys):
+    fake_conn, fake_rpc = _fake_rpc_factory_with_timecode(
+        False, True, "00:12:34.567", False, False, "00:00:00.000")
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is True
+    assert any("00:12:34.567" in r for r in out["reasons"])
+    strih_diag = next(d for d in out["diagnostics"] if d["host"] == "strih")
+    assert strih_diag == {
+        "host": "strih", "streaming": False, "recording": True,
+        "recordTimecode": "00:12:34.567",
+    }
+
+
+def test_rig_busy_check_hint_flags_record_only_as_a_likely_stray_recording(monkeypatch, capsys):
+    # #649 live incident shape: BOTH boxes recording, NEITHER streaming.
+    fake_conn, fake_rpc = _fake_rpc_factory_with_timecode(
+        False, True, "03:22:11.000", False, True, "00:41:56.000")
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is True
+    assert "hint" in out
+    assert "strih" in out["hint"] and "stream" in out["hint"]
+    assert "#649" in out["hint"]
+    assert "REAL" not in out["hint"]  # must NOT claim this looks like a real broadcast
+
+
+def test_rig_busy_check_hint_flags_record_and_stream_as_a_real_broadcast(monkeypatch, capsys):
+    # A box streaming AND recording together must be called out as a likely REAL broadcast, and
+    # the hint must say not to stop it automatically.
+    fake_conn, fake_rpc = _fake_rpc_factory_with_timecode(
+        True, True, "00:05:00.000", False, False, "00:00:00.000")
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is True
+    assert "hint" in out
+    assert "REAL" in out["hint"]
+    assert "do NOT stop" in out["hint"]
 
 
 def test_rig_busy_check_strih_unreachable_fails_closed_exit_3(monkeypatch, capsys):
@@ -223,3 +305,58 @@ def test_rig_busy_check_rpc_error_on_one_host_fails_closed_not_busy_false(monkey
     assert exc_info.value.code == 3
     out = json.loads(capsys.readouterr().out)
     assert out["busy"] is None
+
+
+# ── #649 item 3: _rig_busy_hint — pure, no I/O, tested directly (no fake WebSocket needed) ──────
+
+def test_rig_busy_hint_empty_when_nothing_busy():
+    diagnostics = [
+        {"host": "strih", "streaming": False, "recording": False, "recordTimecode": None},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    assert obs_phase2._rig_busy_hint(diagnostics) == ""
+
+
+def test_rig_busy_hint_record_only_matches_stray_recording_pattern():
+    diagnostics = [
+        {"host": "strih", "streaming": False, "recording": True, "recordTimecode": "03:07:49.000"},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    hint = obs_phase2._rig_busy_hint(diagnostics)
+    assert "strih" in hint
+    assert "#649" in hint
+    assert "stray" in hint
+    assert "REAL" not in hint
+
+
+def test_rig_busy_hint_record_and_stream_matches_real_broadcast_pattern():
+    diagnostics = [
+        {"host": "strih", "streaming": True, "recording": True, "recordTimecode": "00:05:00.000"},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    hint = obs_phase2._rig_busy_hint(diagnostics)
+    assert "strih" in hint
+    assert "REAL" in hint
+    assert "do NOT stop" in hint
+
+
+def test_rig_busy_hint_streaming_only_flags_for_manual_check():
+    diagnostics = [
+        {"host": "strih", "streaming": True, "recording": False, "recordTimecode": None},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    hint = obs_phase2._rig_busy_hint(diagnostics)
+    assert "strih" in hint
+    assert "check manually" in hint
+
+
+def test_rig_busy_hint_combines_multiple_boxes_in_one_hint():
+    # strih looks like a stray recording, stream looks like a real broadcast — both parts must
+    # appear (the hint must never collapse to only the first match).
+    diagnostics = [
+        {"host": "strih", "streaming": False, "recording": True, "recordTimecode": "01:00:00.000"},
+        {"host": "stream", "streaming": True, "recording": True, "recordTimecode": "00:10:00.000"},
+    ]
+    hint = obs_phase2._rig_busy_hint(diagnostics)
+    assert "strih" in hint and "stray" in hint
+    assert "stream" in hint and "REAL" in hint
