@@ -291,5 +291,11 @@ pub fn blank_fbdev(device: &str) -> Result<()> {
     let zeros = vec![0u8; len as usize];
     file.write_all_at(&zeros, start)
         .with_context(|| format!("write black frame to {device}"))?;
+    tracing::info!(
+        device = device,
+        start = start,
+        len = len,
+        "blanked fbdev visible page before KMS teardown (#660)"
+    );
     Ok(())
 }
