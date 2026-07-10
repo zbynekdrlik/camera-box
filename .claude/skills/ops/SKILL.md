@@ -922,3 +922,61 @@ this repo's scripts.
 — e.g. 0.7.0.dev1 (what strih/stream ran before the #555 convergence to dev8) is commit `66e33c2`.
 Reinstall a pinned commit via `git+https://github.com/zbynekdrlik/remoteos-mcp.git@<sha>` (Linux) or
 `.../archive/<sha>.zip` (Windows, same as the installer's `master.zip` but a specific ref).
+
+## #663 — capture-delivery-rate SELF-HEAL (automatic USB reset) + physical-fix escalation
+
+#656 shipped DETECT only (`src/capture_rate_health.rs` WARNs once captured fps sustains a >1%
+deviation from the negotiated rate for 6 consecutive 5s windows, ~30s) — recovery still needed a
+human/agent to notice the WARN, SSH in, and manually run the USB reset. #663's live finding: that
+manual fix is only TEMPORARY — cam1's ShadowCast 2 recurred the SAME defect within hours, three
+times in one day (2026-07-10). `src/capture_rate_selfheal.rs` closes the loop: the capture loop now
+acts automatically the instant #656's WARN fires.
+
+**Mechanism (fully in-process, no external script):** `systemd/camera-box.service` has no `User=`
+(runs as root) and already grants `ReadWritePaths=/dev /sys /run /proc/irq` (added for #289's IRQ
+affinity `ExecStartPre`) on top of `ProtectSystem=strict` — so the binary can already write
+`/sys/bus/usb/drivers/uvcvideo/unbind` + `/sys/bus/usb/devices/*/authorized` directly. On a
+confirmed sustained deviation the capture loop: (1) best-effort unbinds the uvcvideo driver from the
+capture device's USB interface, (2) writes `authorized` 0 then 1 (forces full re-enumeration —
+mirrors the manually-verified #656 fix sequence exactly), (3) **exits the process** (exit code 77)
+so the unit's `Restart=always`/`RestartSec=3` brings it back up fresh against whatever device node
+the kernel just re-enumerated (`Config::device_path()`'s `"auto"` re-detects it). No `systemctl
+stop`/`start` needed — the process exit + `Restart=always` IS the stop+start.
+
+**Resolving the sysfs `authorized` path for the open device:** `/sys/class/video4linux/<videoN>/
+device` symlinks to the USB INTERFACE directory (e.g. live-confirmed on cam1:
+`/sys/devices/pci0000:00/0000:00:14.0/usb2/2-3/2-3:1.0`). Sysfs always nests an interface directory
+DIRECTLY under its USB device directory regardless of hub depth, so the interface path's immediate
+PARENT is always the device directory carrying `authorized` (here: `.../usb2/2-3/authorized`) — no
+special-casing needed for a device behind nested hubs. `capture_rate_selfheal::
+authorized_path_from_interface_syspath` / `interface_busid_from_syspath` are the pure derivations
+(unit-tested against this exact live path).
+
+**Rate-limit + escalation (state MUST survive the restart the fix triggers):** since the fix path
+deliberately restarts the whole process, in-memory bookkeeping can't carry "when did we last heal" —
+it's persisted to `/run/camera-box/capture-rate-selfheal.state` (tmpfs, already `ReadWritePaths`-
+granted; cleared on reboot, which is correct — a fresh boot deserves a fresh attempt count). Simple
+`key=value` text, mirrors the bash state-file convention (`rig-restore-decision.sh`) ported to Rust.
+- **Max one reset attempt per 10 min** (`DEFAULT_MIN_HEAL_INTERVAL_S=600`) — a genuinely dying
+  grabber can't reset-loop forever (the WARN keeps firing every window while the defect persists).
+- **3 heals within a 1h recurrence window** (`DEFAULT_CRITICAL_ESCALATION_HEALS=3` /
+  `DEFAULT_RECURRENCE_WINDOW_S=3600` — matches #663's own live incident) → a `CRITICAL #663: ...
+  Grabber hardware likely failing — replace the USB cable/port/device.` log line. The heal STILL
+  runs even when escalating — this is the honest signal for the physical fix the owner may
+  ultimately need, not a stop condition. **When you see this line in the journal, the software
+  self-heal has done what it can — the next step is physically inspecting/replacing the ShadowCast
+  2's USB cable, the box's USB port, or the dongle itself**, not chasing more code.
+- A gap longer than the recurrence window resets the heal count to 1 (a fresh occurrence, not a
+  continuation of a failing streak) — so a box that heals once, stays healthy for days, then
+  re-drifts months later is NOT treated as "still failing" from the earlier incident.
+
+**Verifying it worked on a box:** `journalctl -u camera-box | grep -E "#656|#663"` — look for the
+`#656 capture-delivery-rate DEFECTIVE` WARN immediately followed by `#663 self-heal: USB-resetting
+capture device ...` / `USB reset complete ... process will exit (code 77)`, then a fresh
+`camera-box.service` start (PID changes) with `Streaming: ... fps` settling back near the
+negotiated rate (~60.0) within a few seconds. `systemctl status camera-box` shows the recent restart
+with exit code 77 if it just self-healed.
+
+**Generic across the fleet:** this lives in the shared capture loop every cam box runs — no per-box
+config. Any cam box (cam1, cam3, or any future box) running a ShadowCast-class or similar USB
+capture dongle that drifts off its negotiated rate self-heals identically once deployed.
