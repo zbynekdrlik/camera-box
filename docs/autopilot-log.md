@@ -3006,3 +3006,48 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   investigation numbers) — the SAME pre-existing cam1-grabber defect #663 now tracks, unrelated
   to #660 or the restart. Per strict-test-mandate, did NOT force a false PASS: #466 stays OPEN,
   updated with the honest before/after evidence, now blocked on #663 instead of #660.
+
+## #663 — automatic USB-reset self-heal for the capture-rate defect (PR #664)
+
+- **Problem**: #656 shipped DETECT-only (a WARN once captured fps sustains >1% deviation for
+  30s). #663's live finding: the manual USB-reset fix from #656 was only TEMPORARY — cam1's
+  ShadowCast 2 recurred the same defect within hours, three times in one day.
+- **Fix**: new `src/capture_rate_selfheal.rs` — pure decide_selfheal (throttle 600s + recurrence-
+  window escalation, 3 heals within 3600s → CRITICAL "replace the hardware" log line) + the
+  actual sysfs reset I/O (uvcvideo unbind + `authorized` 0→1 toggle, mirroring #656's manually-
+  verified fix). Wired into `src/main.rs`'s existing #656 WARN block. Runs in-process (systemd
+  unit already root + `ReadWritePaths=/sys`); exits (code 77 success / 78 reset-failed) AFTER the
+  capture loop's normal shutdown cleanup (grab-recorder flush, burn-thread join) so systemd's
+  `Restart=always` brings it back up against the re-enumerated device without truncating an
+  in-flight `--record-grab` E2E recording.
+- **Review**: self-review before requesting review found + fixed 2 gaps (unretried reauthorize
+  failure left a device permanently disconnected; unguarded busid-level assumption could toggle
+  the wrong sysfs node). `requesting-code-review` subagent found 3 more Important issues, all
+  fixed: raw `process::exit` skipped shutdown cleanup (now graceful); total reset failure had no
+  CRITICAL visibility (now logs CRITICAL + exits with a distinct code); escalation wording
+  overstated certainty ("self-healed" → "had N USB-reset attempts").
+- **20 Tier-0 unit tests** (throttle, recurrence-window escalation matching #663's own incident,
+  state parse/format round-trip, sysfs path derivation pinned against cam1's live-confirmed
+  layout, is_interface_level_busid guard).
+- Commits: `feat(#663)` the module + wiring → `docs(#663)` ops skill → `harden(#663)` review
+  fixes round 1 → `fix(#663)` graceful shutdown + CRITICAL-on-failure (review round 2). PR #664
+  merged `911c8e1db`; dev bumped to 1.7.0-dev.335 post-merge.
+- **Deployed to the full active fleet** (cam1/cam2/cam3/cam4) and **live-verified extensively**:
+  - **cam3**: caught a full natural cycle live — `#656` WARN sustained 100+ consecutive windows →
+    self-heal fired (attempt #2, correctly rate-limited from attempt #1 right after deploy) →
+    USB-resetting `/dev/video1` → USB reset complete → graceful exit(77) → systemd restarted
+    (new PID) → fps recovered to ~59.5-60.2 captured. Recurred again ~20 min later (attempt #3
+    pending, correctly rate-limited) — confirms the defect's genuine multi-times-per-hour
+    recurrence rate and the self-heal correctly handling it every time.
+  - **cam2**: a DIFFERENT, persistent under-rate pattern (~55-59fps captured, not the ShadowCast
+    over-rate quantization) survived 3 full USB-reset attempts within the hour → self-heal
+    correctly escalated to CRITICAL (`has had 3 USB-reset attempts within 3600s without the
+    defect staying fixed ... Grabber hardware likely failing — replace the USB cable/port/
+    device`) while STILL performing the 3rd reset (never a stop condition, per design). Filed as
+    a distinct follow-up: **#665** (may be a resource-contention or hardware issue unrelated to
+    the #656/#663 ShadowCast class, since resets aren't holding).
+  - **cam1/cam4**: healthy throughout (60.0-60.9 fps captured), no false-positive self-heal
+    triggers on normal startup transients (confirms the 6-consecutive-window/30s confirm gate
+    correctly rejects blips).
+- Closed #663 with this evidence (cam3's full detect→heal→recover cycle IS the live proof the
+  issue asked for).
