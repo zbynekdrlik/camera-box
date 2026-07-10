@@ -71,6 +71,15 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
     exit 0
   fi
 
+  # #649 item 3: surface obs_phase2.py's plain-English diagnostic hint (per-box streaming vs
+  # recording state -> stray-test-recording-vs-real-broadcast) as its OWN log line, not just
+  # buried inside the raw JSON above — a future RIG_BUSY incident should be a 2-minute log read,
+  # not a manual SSH+OBS inspection.
+  HINT=$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hint",""))' 2>/dev/null || true)
+  if [ -n "$HINT" ]; then
+    echo "[rig-busy-gate] HINT: $HINT"
+  fi
+
   echo "[rig-busy-gate] rig busy — will retry."
   if [ "$i" -lt "$MAX_ITERATIONS" ]; then
     sleep "$SLEEP_SECS"

@@ -98,16 +98,33 @@ fn cleanup_stoprecord_calls_are_guarded_by_started_flags() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
 
     for (label, flag, call) in [
-        ("strih", "STRIH_RECORDING_STARTED", "record --host \"$STRIH\" --action stop"),
-        ("stream", "STREAM_RECORDING_STARTED", "record --host \"$STREAM\" --action stop"),
-        ("imag", "IMAG_RECORDING_STARTED", "record --host \"$IMAG_IP\" --action stop"),
+        (
+            "strih",
+            "STRIH_RECORDING_STARTED",
+            "record --host \"$STRIH\" --action stop",
+        ),
+        (
+            "stream",
+            "STREAM_RECORDING_STARTED",
+            "record --host \"$STREAM\" --action stop",
+        ),
+        (
+            "imag",
+            "IMAG_RECORDING_STARTED",
+            "record --host \"$IMAG_IP\" --action stop",
+        ),
     ] {
         let call_pos = body
             .find(call)
             .unwrap_or_else(|| panic!("#649: cleanup() must StopRecord {label}"));
         // The guard must appear in the SAME if-block: look for the flag check in the ~200 bytes
         // immediately preceding the call (comfortably covers `if [ "${FLAG:-0}" = "1" ]; then`).
-        let window_start = call_pos.saturating_sub(200);
+        // The comments in this file use multi-byte UTF-8 (em dashes), so a raw byte offset can
+        // land mid-character — walk back to the nearest valid char boundary.
+        let mut window_start = call_pos.saturating_sub(200);
+        while window_start > 0 && !body.is_char_boundary(window_start) {
+            window_start -= 1;
+        }
         let window = &body[window_start..call_pos];
         assert!(
             window.contains(flag),
@@ -133,7 +150,10 @@ fn cleanup_stoprecord_calls_are_timeout_wrapped() {
             .find(call)
             .unwrap_or_else(|| panic!("#649: cleanup() must contain {call:?}"));
         let line_start = body[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let line_end = body[pos..].find('\n').map(|i| pos + i).unwrap_or(body.len());
+        let line_end = body[pos..]
+            .find('\n')
+            .map(|i| pos + i)
+            .unwrap_or(body.len());
         let line = &body[line_start..line_end];
         assert!(
             line.contains("timeout "),
@@ -173,7 +193,11 @@ fn recording_started_flags_declared_before_trap_arms_default_zero() {
     let trap_pos = s
         .find("\ntrap cleanup EXIT")
         .expect("recording-e2e.sh must arm the cleanup trap");
-    for flag in ["STRIH_RECORDING_STARTED", "STREAM_RECORDING_STARTED", "IMAG_RECORDING_STARTED"] {
+    for flag in [
+        "STRIH_RECORDING_STARTED",
+        "STREAM_RECORDING_STARTED",
+        "IMAG_RECORDING_STARTED",
+    ] {
         let decl = format!("{flag}=0");
         let pos = s
             .find(&decl)

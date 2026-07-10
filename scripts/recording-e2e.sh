@@ -347,7 +347,44 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
-  # #281 Fix#3: clear the rig-active heartbeat + stop its refresher FIRST — before the cam/OBS
+  # #649: StopRecord is the VERY FIRST thing cleanup() does — before EVEN the heartbeat/marker
+  # clears below, and well before the #328 cam-device-free block. Root cause of the live incident
+  # (2026-07-10): a GitHub Actions cancellation sends SIGINT, then SIGKILLs after a short grace
+  # window; the OLD cleanup() reached StopRecord only AFTER the heartbeat/marker clears + the cam1
+  # ssh restore + the cam2 ssh restore (each up to CLEANUP_SSH_TIMEOUT=30s) — so a SIGKILL landing
+  # inside that grace window killed the trap before it ever stopped strih/stream/imag's recording.
+  # The orphaned recording then self-deadlocks EVERY later gate run as RIG_BUSY (rig-busy-gate.sh
+  # can't tell "our own leftover" from a real broadcast) until someone manually stops it (#649).
+  # StopRecord itself is a single, normally-instant obs-websocket round trip — moving it first
+  # costs nothing in the happy path and means it lands even when the grace window is too short to
+  # reach anything after it. #328's "free the cam device before OBS" lesson is UNCHANGED for the
+  # ssh/OBS-scene work further down (that ordering is what the #312 incident needed); this is a
+  # narrower, even-earlier safety-critical action ahead of it.
+  #
+  # #649 item 2: NEVER blind-StopRecord a box this harness never itself started recording on — an
+  # early abort (before step [5/8]'s own StartRecord ever ran) must leave whatever IS recording
+  # alone, since blindly stopping it could kill a REAL broadcast's recording (worse than the
+  # original bug). Each
+  # *_RECORDING_STARTED flag is set to 1 ONLY right after that box's OWN StartRecord call actually
+  # succeeded ([5/8] below); a box whose StartRecord never ran (or never succeeded) keeps its
+  # flag at the 0 default declared before the trap arms, so this block is a no-op for it.
+  echo "[cleanup] #649 StopRecord FIRST (harness-started boxes only, before anything slower)"
+  if [ "${STRIH_RECORDING_STARTED:-0}" = "1" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STRIH" --action stop >/dev/null 2>&1 \
+      && echo "    [cleanup] strih: StopRecord ok" \
+      || echo "    WARNING #649: strih StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
+  fi
+  if [ "${STREAM_RECORDING_STARTED:-0}" = "1" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1 \
+      && echo "    [cleanup] stream: StopRecord ok" \
+      || echo "    WARNING #649: stream StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
+  fi
+  if [ "${IMAG_RECORDING_STARTED:-0}" = "1" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop >/dev/null 2>&1 \
+      && echo "    [cleanup] imag: StopRecord ok" \
+      || echo "    WARNING #649: imag StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
+  fi
+  # #281 Fix#3: clear the rig-active heartbeat + stop its refresher — before the cam/OBS
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
   # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
   rig_heartbeat_stop 2>/dev/null || true
@@ -407,13 +444,11 @@ systemctl restart camera-box 2>/dev/null || true
 systemctl start cam2-painter 2>/dev/null || true"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
+  # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
+  # only) — no separate record-stop call belongs here any more; #462's "imag never had its program
+  # scene routed by THIS harness" note still holds (rig-mode.sh test owns that), it just no longer
+  # needs its own StopRecord line since the #649 block above covers it.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action stop >/dev/null 2>&1
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop >/dev/null 2>&1
-  # #462: imag never had its program scene routed by THIS harness (rig-mode.sh test owns that), so
-  # there is no scene state to restore — only a StopRecord safety net (a leftover recording must
-  # finalize even if the run aborted mid-flight).
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop >/dev/null 2>&1
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
@@ -471,6 +506,15 @@ IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"
 # is now a THIRD burn target (its own 911003 digital corner burn, #463) — the exact extension this
 # array's design already anticipated.
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
+# #649: "did THIS harness itself start recording on <box>" flags — default UNSET (0) here, before
+# the trap arms, so an EARLY abort (before [5/8] ever runs) leaves cleanup()'s StopRecord-first
+# block a no-op on all three boxes. Each flips to 1 ONLY right after that box's OWN StartRecord
+# actually succeeds ([5/8] below). cleanup() stops ONLY flagged boxes — a blind StopRecord on a
+# box this run never started recording on could kill a REAL broadcast's recording if a run gets
+# cancelled while still waiting on an earlier gate (the #649 "worse than the original bug" case).
+STRIH_RECORDING_STARTED=0
+STREAM_RECORDING_STARTED=0
+IMAG_RECORDING_STARTED=0
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -1249,8 +1293,11 @@ echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + ima
 # `set -euo pipefail` (top of this script) makes that nonzero exit abort this run immediately;
 # no extra guard needed at this call site.
 python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
+STRIH_RECORDING_STARTED=1   # #649: flag so cleanup()'s StopRecord-first block stops THIS box
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
+STREAM_RECORDING_STARTED=1  # #649: same — set only once this box's OWN StartRecord succeeded
 python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start
+IMAG_RECORDING_STARTED=1    # #649: same — set only once this box's OWN StartRecord succeeded
 
 # #312 Phase-2 ALL-CAMBOX SWEEP (opt-in via ALL_CAMBOX=1). Instead of one steady-state hold on a
 # single cambox, sequentially cut EACH active cambox into strih PROGRAM for ~SEGMENT_SECS, cycling
