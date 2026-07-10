@@ -106,6 +106,55 @@ abs_int() {
   printf '%s' "${n#-}"
 }
 
+# --- Windows HTTP status freshness (#648) ---------------------------------------------------
+#
+# dantesync#47 gave every managed box a network status endpoint (http://<box>:8898/status)
+# serving the SAME JSON the status pipe already emits — including "updated_ts" (unix epoch
+# seconds of the daemon's last self-report). Before #648 this field went unused here: the
+# status-pipe JSON path was documented (see dantesync-gate.sh's own #595-scope note) as
+# AGE-BLIND because comparing it to "now" needs a real wall-clock reference, unlike the Linux
+# journal path's freshness check (which compares two lines from the SAME journal, no wall clock
+# needed). #648's --win-http gate flow supplies that reference explicitly (via `date +%s` at the
+# call site), keeping these two functions pure and deterministically testable.
+
+# updated_ts_from_pipe_json TEXT -> the unsigned integer value of the JSON "updated_ts" field
+# (unix epoch seconds), "" if absent/malformed. `|| true` survives a no-match under set -e.
+updated_ts_from_pipe_json() {
+  printf '%s\n' "$1" \
+    | grep -oE '"updated_ts"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | sed -n 's/.*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | tail -1 || true
+}
+
+# pipe_json_freshness_verdict TEXT NOW_EPOCH FRESHNESS_S -> "fresh" | "stale" | "absent".
+#   absent -- no "updated_ts" field in TEXT, OR NOW_EPOCH/FRESHNESS_S is not a plain non-negative
+#             integer. A malformed input must never be graded as fresh (test-strictness: no
+#             silent pass on a value we cannot prove) -- the caller maps "absent" to UNKNOWN,
+#             same as a genuinely missing field.
+#   stale  -- |NOW_EPOCH - updated_ts| exceeds FRESHNESS_S (the box's HTTP server is serving a
+#             cached/stuck snapshot -- e.g. the dantesync daemon died but the server kept running
+#             -- OR, oddly, a clock in the future; either way not trustworthy as "current").
+#   fresh  -- updated_ts is within FRESHNESS_S of NOW_EPOCH.
+pipe_json_freshness_verdict() {
+  local text="$1" now="$2" fresh="$3" ts delta
+  if ! printf '%s' "$now" | grep -qE '^[0-9]+$' || ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+    printf 'absent\n'
+    return 0
+  fi
+  ts="$(updated_ts_from_pipe_json "$text")"
+  if [ -z "$ts" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  delta=$(( now - ts ))
+  delta="$(abs_int "$delta")"
+  if [ "$delta" -le "$fresh" ]; then
+    printf 'fresh\n'
+  else
+    printf 'stale\n'
+  fi
+}
+
 # --- FRESHNESS-aware offset reading (#550/#591/#595) ----------------------------------------
 #
 # offset_us_from_journal (above) is AGE-BLIND: it `tail -1`s the LAST "[NTP] offset:" line

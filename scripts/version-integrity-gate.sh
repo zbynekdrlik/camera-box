@@ -24,6 +24,9 @@
 # scripts) try to FETCH each box's state JSON over the box's standing http.server first
 # (fetch_box_state, mirroring fetch_dante_status), falling back to the caller-pre-fetched file. A box
 # with NO state file is UNKNOWN -> the gate REFUSES (never a silent pass with the box unverified).
+# (dantesync-gate.sh's OWN DanteSync gate no longer uses this file-relay pattern for strih/stream
+# — it queries them LIVE over HTTP via --win-http, #648 — but this version-integrity gate still
+# does; #123/#119 is unrelated, separate scope.)
 #
 # State file = a flat JSON object of the drift-guard --compare observed keys for that box, e.g.
 #   { "obs_version":"32.1.2", "distroav_version":"6.2.1", "ndi_runtime":"6.3.2.0",

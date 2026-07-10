@@ -262,44 +262,22 @@ fi
 # AND PTP-locked (µs-grade fine servo, GM 10.77.9.184 up — NOT the ±1 ms NTP sawtooth
 # fallback): cross-node per-hop latency and per-frame timestamp alignment are meaningless
 # otherwise. The gate fails fast (non-zero, per-node diagnostic) and the run does NOT
-# proceed to recording. The Linux cams are read over SSH; the Windows boxes (ssh denied)
-# need their DanteSync status-pipe JSON pre-fetched to a file — fetched here over the same
-# standing http.server the OBS recordings use, or supplied by the caller via
-# DANTE_STRIH_STATUS / DANTE_STREAM_STATUS (the win-* MCP holder writes them).
-echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8)"
-WIN_DANTE_PORT="${WIN_DANTE_PORT:-8898}"
-DANTE_STRIH_STATUS="${DANTE_STRIH_STATUS:-$OUTDIR/dante-strih.json}"
-DANTE_STREAM_STATUS="${DANTE_STREAM_STATUS:-$OUTDIR/dante-stream.json}"
-# Try to fetch each Windows box's DanteSync status JSON over its http.server (a standing
-# helper on the box dumps \\.\pipe\dantesync to a file the server exposes as /dantesync.json).
-# A failure leaves the file absent -> the gate reports that node UNKNOWN and refuses to pass,
-# unless the caller already placed a status file there via the win-* MCP.
-fetch_dante_status() {
-  local host="$1" dest="$2"
-  [ -s "$dest" ] && { echo "    using pre-fetched DanteSync status: $dest"; return 0; }
-  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_DANTE_PORT}/dantesync.json" 2>/dev/null; then
-    echo "    fetched DanteSync status from ${host}:${WIN_DANTE_PORT} -> $dest"
-  else
-    echo "    NOTE: could not fetch DanteSync status from ${host} (http :$WIN_DANTE_PORT) — the" >&2
-    echo "          win-* MCP holder must write it to $dest, else the gate will fail this node." >&2
-  fi
-}
-fetch_dante_status "$STRIH"  "$DANTE_STRIH_STATUS"  || true
-fetch_dante_status "$STREAM" "$DANTE_STREAM_STATUS" || true
-# ALWAYS pass --win-status for strih AND stream (NOT conditional on the file existing). If a
-# fetch failed and the file is absent, the gate marks that node UNKNOWN and FAILS — never a
-# silent pass with the Windows boxes unverified. Dropping the node here (the previous bug) let
-# the gate certify only cam1+cam2 and exit 0 with strih/stream NTP/PTP never checked.
-# #253: the explicit --bound-us arg below already carries the bound (and OVERRIDES the gate's own
-# CLOCK_GUARD_BOUND_US default), so the leading CLOCK_GUARD_BOUND_US=... env-prefix was redundant
-# AND shellcheck-flagged (SC2097/SC2098: the prefix is only seen by the forked process, while the
-# same-line $CLOCK_GUARD_BOUND_US expansion is resolved by the CURRENT shell before the prefix
-# takes effect). Pass the value purely as the argument — behavior is identical.
+# proceed to recording. The Linux cams are read over SSH; the Windows boxes (ssh denied) are
+# queried LIVE over HTTP from dantesync#47's own network status endpoint
+# (http://<box>:8898/status, #648) via dantesync-gate.sh's --win-http — no win-* MCP, no human
+# pre-fetch, so this gate is fully unattended. (Superseded the pre-#648 flow: this script used
+# to curl each box's status to a LOCAL FILE and hand the gate --win-status FILE, which needed a
+# human/agent with win-* MCP access to backfill on a fetch failure — the automatic
+# pull_request-triggered CI run on dev1 has neither. dantesync-gate.sh's own
+# DANTESYNC_GATE_WIN_HTTP_<NAME> env var is the offline/fixture test seam now, mirroring its
+# existing DANTESYNC_GATE_LINUX_JOURNAL_<NAME> convention for the Linux nodes.)
+echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8/#648)"
 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
+  --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
-  --win-status "strih=$DANTE_STRIH_STATUS" \
-  --win-status "stream=$DANTE_STREAM_STATUS"
+  --win-http "strih=$STRIH" \
+  --win-http "stream=$STREAM"
 
 # Version-integrity precondition gate (#123) — THE OTHER hard step, alongside DanteSync. The whole
 # test is worthless unless the LIVE strih+stream OBS stack is the PINNED build (a randomly-deployed /
@@ -316,7 +294,9 @@ VERSION_STRIH_STATE="${VERSION_STRIH_STATE:-$OUTDIR/version-strih.json}"
 VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-$OUTDIR/version-stream.json}"
 # Try to fetch each Windows box's stack-state JSON over its http.server; a failure leaves the file
 # absent -> the gate reports that box UNKNOWN and refuses, unless the caller already placed a state
-# file there via the win-* MCP. Mirrors fetch_dante_status() exactly.
+# file there via the win-* MCP. (The DanteSync gate above no longer uses this file-relay pattern —
+# it queries strih/stream LIVE over HTTP via dantesync-gate.sh's --win-http, #648 — but this
+# version-integrity gate still does; #123/#119 is unrelated, separate scope.)
 fetch_box_state() {
   local host="$1" dest="$2"
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
