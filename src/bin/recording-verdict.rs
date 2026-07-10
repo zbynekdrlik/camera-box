@@ -4238,6 +4238,38 @@ fn build_and_print_verdict(
     Ok((report, all_pass))
 }
 
+/// #638: map a single [`CAMERA_UNDER_TEST_NODES`] entry to its own `--burn-cam*-run-id` arg.
+/// Callers always iterate `CAMERA_UNDER_TEST_NODES` itself, so the `_` arm is unreachable in
+/// practice — panicking there (rather than returning a bogus default) surfaces a caller bug
+/// immediately instead of silently mis-mapping a camera's burn id.
+fn burn_run_id_for_camera(node: &str, args: &Args) -> u32 {
+    match node {
+        "cam1" => args.burn_cam1_run_id,
+        "cam2" => args.burn_cam2_run_id,
+        "cam3" => args.burn_cam3_run_id,
+        "cam4" => args.burn_cam4_run_id,
+        "cam5" => args.burn_cam5_run_id,
+        "cam6" => args.burn_cam6_run_id,
+        _ => unreachable!(
+            "burn_run_id_for_camera called with {node:?} — expected a CAMERA_UNDER_TEST_NODES entry"
+        ),
+    }
+}
+
+/// #638: every [`CAMERA_UNDER_TEST_NODES`] entry's own reserved burn id, as a Vec — the SET this
+/// box's recording could carry the camera-under-test's burn under. Exactly ONE of these ever
+/// appears in a real single-camera run (cam1/cam2/cam3/cam4/cam5/cam6 are mutually exclusive —
+/// only the camera actually deployed with `CAMERA_BOX_BURN_RUN_ID` set produces a non-empty id
+/// set), so iterating all six here and letting the absent five contribute nothing is cheap and
+/// correct — unlike REQUIRING all six simultaneously (see `extract_partial_flagged_frames`'s
+/// `owned` construction below for where this matters).
+fn camera_under_test_burn_ids(args: &Args) -> Vec<u32> {
+    CAMERA_UNDER_TEST_NODES
+        .iter()
+        .map(|&node| burn_run_id_for_camera(node, args))
+        .collect()
+}
+
 /// #208 + #186: the sibling directory (BESIDE the partial JSON) where `--extract-partial` writes
 /// this box's pixel-proof PNGs and `--merge-partials` looks for the pulled-back copies. For a
 /// partial `…/strih-partial-42.json` it is `…/strih-partial-42-pixels`. Deriving it the SAME way
@@ -4262,7 +4294,9 @@ fn partial_pixels_dir(partial_path: &Path) -> PathBuf {
 ///   • the recording's UNDECODABLE frames (no readable QR at all — the `report_recording_diag` set), and
 ///   • the missing-burn slots for the nodes this box AUTHORITATIVELY backs — the SAME slots the
 ///     merge would flag, so the PNGs pulled back are exactly the #186 proofs:
-///       - strih box → cam1 (its burn is read from the clean 1080p strih recording, #133),
+///       - strih box → whichever ONE of [`CAMERA_UNDER_TEST_NODES`] is actually deployed (#638;
+///         its burn is read from the clean 1080p strih recording, #133 — mutually exclusive, so
+///         at most one of the six ever has a non-empty window),
 ///       - stream box → strih + stream (their burns are read from the stream recording).
 /// `undecodable` is the undecodable subset (so `extract_frames_png` runs its sharp-but-flagged
 /// self-check on those frames). PURE (no I/O) so the selection is unit-testable; the PNG write is
@@ -4272,11 +4306,14 @@ fn extract_partial_flagged_frames(
     frames: &[RecordingFrame],
     args: &Args,
 ) -> (Vec<u64>, HashSet<u64>) {
-    let all_burns = [
-        args.burn_cam1_run_id,
-        args.burn_strih_run_id,
-        args.burn_stream_run_id,
-    ];
+    // #638: every possible node burn id — all six CAMERA_UNDER_TEST_NODES ids + strih + stream —
+    // must be excluded from "is this cam2's optical QR" (see `frame_is_delivered_optical`). Before
+    // #638 this list only knew about cam1, so a cam3/cam4/cam5/cam6/cam2 burn on an unpinned
+    // extract would have been misread as cam2's optical payload once those cameras could be the
+    // one actually under test riding through this box's recording.
+    let mut all_burns = camera_under_test_burn_ids(args);
+    all_burns.push(args.burn_strih_run_id);
+    all_burns.push(args.burn_stream_run_id);
     // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
     let ticks = FrameTick::from_recording_frames(frames);
     let cfg = VerdictConfig {
@@ -4289,9 +4326,10 @@ fn extract_partial_flagged_frames(
     let mut flagged: Vec<u64> = v.undecodable_frames.clone();
 
     // The missing-burn slots for the nodes THIS box authoritatively backs (#133): the strih box
-    // backs cam1 (its burn is crispest in the clean 1080p strih recording); the stream box backs
-    // strih + stream (their own burns are co-located with cam2's optical QR only in the stream
-    // recording). These are the SAME (node, source) pairings `build_and_print_verdict` uses, so the
+    // backs whichever ONE of CAMERA_UNDER_TEST_NODES is actually deployed (#638; its burn is
+    // crispest in the clean 1080p strih recording); the stream box backs strih + stream (their
+    // own burns are co-located with cam2's optical QR only in the stream recording). These are
+    // the SAME (node, source) pairings `build_and_print_verdict` uses, so the
     // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
     // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop ON A 1:1 HOP — #571:
     // on the decimated cam(60)->strih(30) hop, step >= 2, forward gaps are by-design decimation
@@ -4307,21 +4345,30 @@ fn extract_partial_flagged_frames(
         args.refresh_hz,
         args.capture_fps,
     );
-    let cam1_step = node_render_step(
-        "cam1",
-        args.strih_emit_fps,
-        args.stream_capture_fps,
-        args.refresh_hz,
-        args.capture_fps,
-    );
-    let owned: &[(&str, u32, BurnRate, i64)] = match box_name {
-        "strih" => &[(
-            "cam1",
-            args.burn_cam1_run_id,
-            BurnRate::PerEmittedFrame,
-            cam1_step,
-        )],
-        "stream" => &[
+    let owned: Vec<(&str, u32, BurnRate, i64)> = match box_name {
+        // #638: the strih recording carries whichever ONE of CAMERA_UNDER_TEST_NODES is
+        // actually deployed (forwarded through, #133) — flag ITS missing-burn slots, mirroring
+        // how `build_and_print_verdict`'s own NodeSpec loop already treats all six uniformly.
+        // Mutually exclusive in a real run, so at most one of the six ever has a non-empty
+        // window here; iterating all six costs nothing extra for the five that never appear.
+        "strih" => CAMERA_UNDER_TEST_NODES
+            .iter()
+            .map(|&node| {
+                (
+                    node,
+                    burn_run_id_for_camera(node, args),
+                    BurnRate::PerEmittedFrame,
+                    node_render_step(
+                        node,
+                        args.strih_emit_fps,
+                        args.stream_capture_fps,
+                        args.refresh_hz,
+                        args.capture_fps,
+                    ),
+                )
+            })
+            .collect(),
+        "stream" => vec![
             (
                 "strih",
                 args.burn_strih_run_id,
@@ -4335,13 +4382,13 @@ fn extract_partial_flagged_frames(
                 1,
             ),
         ],
-        _ => &[],
+        _ => Vec::new(),
     };
     // #273: thread the cam2 pin so the on-box pixel-proof flagging anchors the optical window to
     // THIS run's paint exactly as the merge verdict does (a foreign-run lead-in is not flagged as
     // delivered). `None` for an unpinned extract (e.g. the strih box runs without --cam2-run-id).
     let cam2_pin = args.cam2_pin();
-    for &(node, burn_run_id, rate, step) in owned {
+    for &(node, burn_run_id, rate, step) in owned.iter() {
         let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate, cam2_pin);
         let iw = burn_contiguity_in_window_with_step(node, &window, rate, step);
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
