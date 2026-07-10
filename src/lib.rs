@@ -217,5 +217,13 @@ pub mod capture_rate_health;
 // instead of its own inline recorded-order walk.
 pub mod painted_tick_gaps;
 
+// #660 — the fbdev "visible page" byte range to BLANK on `probe::kms::KmsPresenter` teardown, so
+// releasing DRM master reveals a deterministic black frame instead of whatever ARBITRARILY OLD
+// content another writer (the fbdev-fallback presenter, or camera-box's own `--display` module)
+// last left in `/dev/fb0`'s memory — the root cause of a stale, unrelated run's QR content
+// decoding at the imag optical read's recording tail. No probe deps, so it unit-tests Tier-0; the
+// probe-gated `probe::fb::blank_fbdev` (the actual ioctl + write) uses this geometry decision.
+pub mod fb_blank;
+
 #[cfg(feature = "probe")]
 pub mod probe;
