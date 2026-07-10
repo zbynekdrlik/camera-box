@@ -222,26 +222,29 @@ echo "REACHED_VERDICT args=${#VERDICT_ARGS[@]}"
     );
 }
 
-/// The gate must ALWAYS receive a --win-status for strih AND stream (NOT conditional on the
-/// status file existing). If the fetch failed and the file is absent, the gate must mark that
-/// node UNKNOWN and FAIL — never silently drop it and certify only cam1+cam2 (the review bug).
+/// The gate must ALWAYS receive a --win-http for strih AND stream (NOT conditional on anything
+/// — no pre-fetch, no file-existence check). If the box is unreachable, the gate itself (not
+/// this script) marks that node UNKNOWN and FAILS — never silently drop it and certify only
+/// cam1+cam2 (the original review bug this test guarded before #648 replaced the file-relay
+/// pre-fetch dance with a direct, unconditional --win-http call per node).
 #[test]
-fn gate_always_passes_win_status_for_both_windows_nodes() {
+fn gate_always_passes_win_http_for_both_windows_nodes() {
     let s = read("scripts/recording-e2e.sh");
     assert!(
-        s.contains("--win-status \"strih=$DANTE_STRIH_STATUS\""),
-        "the gate must ALWAYS be given strih=--win-status (so a missing file -> UNKNOWN -> fail)"
+        s.contains("--win-http \"strih=$STRIH\""),
+        "the gate must ALWAYS be given strih=--win-http (#648; no MCP/file relay involved), so \
+         an unreachable box -> UNKNOWN -> fail inside the gate itself"
     );
     assert!(
-        s.contains("--win-status \"stream=$DANTE_STREAM_STATUS\""),
-        "the gate must ALWAYS be given stream=--win-status (so a missing file -> UNKNOWN -> fail)"
+        s.contains("--win-http \"stream=$STREAM\""),
+        "the gate must ALWAYS be given stream=--win-http (#648)"
     );
-    // The previous bug gated the --win-status args on `[ -s "$DANTE_..._STATUS" ]` (file exists),
-    // which dropped a node whose fetch failed. That conditional must be gone.
+    // #648 removed the pre-#648 file pre-fetch dance entirely (fetch_dante_status(),
+    // DANTE_STRIH_STATUS/DANTE_STREAM_STATUS, --win-status for the DanteSync gate) — the gate now
+    // queries strih/stream LIVE over HTTP itself via dantesync-gate.sh's own --win-http.
     assert!(
-        !s.contains("[ -s \"$DANTE_STRIH_STATUS\" ]  && GATE_WIN_ARGS")
-            && !s.contains("GATE_WIN_ARGS+=(--win-status \"strih="),
-        "the --win-status args must NOT be conditional on the status file existing"
+        !s.contains("fetch_dante_status") && !s.contains("DANTE_STRIH_STATUS"),
+        "the pre-#648 DanteSync-gate file pre-fetch dance must be gone: {s}"
     );
 }
 
