@@ -448,3 +448,83 @@ def test_rig_busy_hint_combines_multiple_boxes_in_one_hint():
     hint = obs_phase2._rig_busy_hint(diagnostics)
     assert "strih" in hint and "stray" in hint
     assert "stream" in hint and "REAL" in hint
+
+
+# ── #657: _stray_recording_hosts — pure, no I/O — the self-heal DECISION list ────────────────────
+
+def test_stray_recording_hosts_empty_when_nothing_busy():
+    diagnostics = [
+        {"host": "strih", "streaming": False, "recording": False, "recordTimecode": None},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    assert obs_phase2._stray_recording_hosts(diagnostics) == []
+
+
+def test_stray_recording_hosts_includes_recording_only_box():
+    diagnostics = [
+        {"host": "strih", "streaming": False, "recording": True, "recordTimecode": "03:07:49.000"},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    assert obs_phase2._stray_recording_hosts(diagnostics) == ["strih"]
+
+
+def test_stray_recording_hosts_never_includes_a_real_broadcast_box():
+    # #657 safety invariant: a box that is BOTH recording and streaming must NEVER appear in the
+    # self-heal list, no matter what — that's a real broadcast, never touch it automatically.
+    diagnostics = [
+        {"host": "strih", "streaming": True, "recording": True, "recordTimecode": "00:05:00.000"},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    assert obs_phase2._stray_recording_hosts(diagnostics) == []
+
+
+def test_stray_recording_hosts_never_includes_streaming_only_box():
+    diagnostics = [
+        {"host": "strih", "streaming": True, "recording": False, "recordTimecode": None},
+        {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None},
+    ]
+    assert obs_phase2._stray_recording_hosts(diagnostics) == []
+
+
+def test_stray_recording_hosts_can_include_both_boxes_at_once():
+    # The exact #657 live-incident shape: both boxes left recording (neither streaming).
+    diagnostics = [
+        {"host": "strih", "streaming": False, "recording": True, "recordTimecode": "03:22:11.000"},
+        {"host": "stream", "streaming": False, "recording": True, "recordTimecode": "00:41:56.000"},
+    ]
+    assert obs_phase2._stray_recording_hosts(diagnostics) == ["strih", "stream"]
+
+
+def test_stray_recording_hosts_mixed_picks_only_the_stray_one():
+    # strih is a real broadcast (never touch); stream is our own stray leftover.
+    diagnostics = [
+        {"host": "strih", "streaming": True, "recording": True, "recordTimecode": "00:05:00.000"},
+        {"host": "stream", "streaming": False, "recording": True, "recordTimecode": "00:41:56.000"},
+    ]
+    assert obs_phase2._stray_recording_hosts(diagnostics) == ["stream"]
+
+
+def test_rig_busy_check_json_includes_stray_hosts_when_present(monkeypatch, capsys):
+    fake_conn, fake_rpc = _fake_rpc_factory_with_timecode(
+        False, True, "03:22:11.000", False, False, "00:00:00.000")
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is True
+    assert out["stray_hosts"] == ["strih"]
+
+
+def test_rig_busy_check_json_omits_stray_hosts_when_it_is_a_real_broadcast(monkeypatch, capsys):
+    fake_conn, fake_rpc = _fake_rpc_factory_with_timecode(
+        True, True, "00:05:00.000", False, False, "00:00:00.000")
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is True
+    assert "stray_hosts" not in out
