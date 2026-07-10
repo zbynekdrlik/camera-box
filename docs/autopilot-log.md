@@ -2906,3 +2906,71 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   indefinite per this run's own instructions) — still open at end of session. All 3 commits sit
   ready on local `dev`; next worker/supervisor pushes once #655 clears. See `gh issue comment` on
   #620 for the full write-up.
+
+## 2026-07-10 — #656 capture-delivery-rate WARN + E2E preflight (PR #659, v1.7.0-dev.331)
+
+- Version bumped `1.7.0-dev.330` -> `1.7.0-dev.331` (`3bcabbb6f`, pre-work).
+- `908de9453` (feat): new pure Tier-0 `src/capture_rate_health.rs` (mirrors
+  `reannounce.rs`/`colour_scale.rs` crate-root pattern) — WARNs when captured fps sustains >1%
+  deviation from the device's negotiated capture rate for 6 consecutive 5s report windows. 12
+  unit tests incl. the real #656 incident numbers (63.2/64.02fps vs configured 60.0fps). Wired
+  into `src/main.rs`'s existing "Streaming: X fps emitted / Y fps captured" report loop.
+- `fbfd9a5ee` (feat): new `scripts/lib/capture-rate-guard.sh` (pure grep-pattern + message
+  formatter) + a new `[0/8]` preflight step in `recording-e2e.sh` (right after the
+  DanteSync/version gates, before any deploy/record) that SSHes the source camera, greps its
+  recent journal for the #656 WARN, and exit-1s fast with "camX capture rate defective
+  (~Yfps, expected Zfps) — USB-reset the grabber (see #656)" instead of burning a doomed
+  30-min E2E. `tests/harness_capture_rate_guard.rs`: 8 tests, RED->GREEN verified by
+  temporarily removing the `exit 1` and confirming the wiring test fails, then restoring it.
+  Full local `cargo test` (537+ tests) re-run clean after the `recording-e2e.sh` edit per this
+  repo's own cross-test-anchor-collision GOTCHA.
+- Local: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings` clean,
+  `shellcheck -S warning` clean, `cargo test --no-run` compiles every target.
+- CI: `dantesync-gate` transiently DRIFTED on `stream` (offset 2976us) on the first full-path-e2e
+  attempt — a live transient (self-healed within ~1 min, confirmed via the box's own `:8899`
+  status endpoint) — rerun passed. Second discovery: strih's standing `BundleStateServer`
+  scheduled task had silently crashed (`LastTaskResult=0xC000013A`, no auto-restart configured)
+  causing a `version-integrity-gate` UNKNOWN; fixed live (`Start-ScheduledTask` + hardened BOTH
+  boxes' task settings with `RestartCount=999 RestartInterval=1min ExecutionTimeLimit=indefinite
+  StartWhenAvailable` so this class of flake self-heals going forward) — no repo code involved,
+  a live Windows Task Scheduler config fix. Third rerun: full-path-e2e green.
+- PR #659 merged `29e618624` (merge commit into main); main CI green. Live-verified: the new
+  `[0/8]` preflight actually ran against real cam1 hardware during the passing full-path-e2e CI
+  run and printed "ok: no sustained capture-rate defect in cam1's recent journal" (item 2
+  verified live); item 1's WARN logic itself unit-tested with the real incident numbers (a live
+  induced-fault verification would require deliberately breaking a camera, not attempted).
+  Discord card fired for #656.
+- **GOTCHA hit mid-session**: another autopilot worker (working #642, closed the same session)
+  committed directly onto this SAME shared dev1 checkout's local `dev` branch (docs-only,
+  `32c751db3`), landing unpushed on top of my HEAD after my own push. Left it untouched (never
+  `git reset`/rebase) per the repo's own documented multi-worker GOTCHA — it rides along on the
+  next push, harmless (a completed, closed-issue doc commit).
+
+## 2026-07-10 — #466 EPIC: imag-inclusive restart-survival dispatch (no code change — investigation + evidence)
+
+- Investigated `full-path-e2e.yml`: `workflow_dispatch` only exposes `duration_secs`, no way to
+  pass `ZERO_LOSS_RESTART_GATE=1` through GH Actions. Also discovered (documented, not new): the
+  automated CI path never actually completes the win-strih/win-stream decode+merge itself (it
+  only PRINTS the plan — `scp`/`ssh` to Windows is denied for bash) — the CI job's own exit code
+  is NOT the zero-loss verdict for ANY run, restart-mode or not; only a human/agent-driven manual
+  merge produces the real PASS/FAIL. So dispatched directly on dev1 (the actual GH self-hosted
+  runner box for this repo).
+- Ran a genuine BEFORE/RESTART/AFTER protocol manually (two full `recording-e2e.sh` runs bracketing
+  a real `launch-obs-genlock.sh --force` restart of BOTH strih+stream OBS, genlock render-tick
+  re-confirmed), driving the win-strih/win-stream-snv MCP extraction + merge by hand for each
+  (`Start-Process`-detached decode, HTTP-served pull-back to dev1 per the e2e skill's documented
+  multi-MB-transfer technique), then fed both verdict JSONs to the real `zero-loss-restart-gate`
+  binary.
+- **Result: digital delivery PERFECT across the restart** — `real_drops=0 burn_unreadable=0` on
+  EVERY node (cam1/strih/stream/imag) in BOTH measurements; the restart introduced zero frame
+  loss anywhere. But the strict `zero-loss-restart-gate` still reports FAIL because neither
+  measurement achieved a clean OPTICAL-read pass: strih/stream sit marginally above the
+  calibrated 0.5% moiré floor (69/69 undecodable, identical both runs); imag hit a NEWLY
+  DISCOVERED, reproducible tail-boundary artifact — filed as **#660** — where a stale run's QR
+  content (frozen for the last 15-30 frames) gets decoded, manufacturing a false COPY/FREEZE.
+  Reproduced TWICE (once before, once after the restart) with two DIFFERENT stale run_ids, both
+  timestamps from before their respective run — proving the artifact is restart-INDEPENDENT.
+- Per `strict-test-mandate` (never force/loosen a gate to fake a pass): did NOT close #466.
+  Commented the full evidence + honest conclusion on #466 (still OPEN, now blocked on #660);
+  #660 filed with full reproduction evidence for whoever investigates next. No PR, no merge, no
+  version bump (pure investigation + a rig-config fix already logged under #656 above).
