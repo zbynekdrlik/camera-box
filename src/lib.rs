@@ -199,6 +199,15 @@ pub mod switch_latency;
 // deliverable 4 wires the ±20ms bound on top of this).
 pub mod av_window;
 
+// #656 — capture-delivery-rate sanity check (pure decision, prevention item 1). Given the
+// periodic captured-fps sample the appliance's own capture loop already computes, decides
+// whether the box's capture device has silently drifted off its negotiated rate for enough
+// CONSECUTIVE report windows to be a real defect (e.g. a USB capture dongle re-negotiating
+// ~64fps instead of a configured 60fps, #656's cam1 ShadowCast 2 root cause) rather than a
+// momentary blip. No probe deps, so it unit-tests Tier-0; `src/main.rs`'s capture loop calls it
+// every ~5s report window and logs a WARN when it fires.
+pub mod capture_rate_health;
+
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
 // continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
 // deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order
