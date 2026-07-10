@@ -134,7 +134,10 @@ jobs:
           echo "SLEEP_COMPLETED_NORMALLY (not cancelled in time) $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$LOG"
           INNER_EOF
           chmod +x /tmp/trap-test-657-inner.sh
-          LOG="$LOG" bash /tmp/trap-test-657-inner.sh
+          # #657 FIX-VERIFICATION PASS: exec REPLACES this process image with the inner
+          # script's bash — no separate child process exists to be orphaned, so the
+          # runner's SIGINT/SIGTERM lands DIRECTLY on the trap-holding process.
+          exec env LOG="$LOG" bash /tmp/trap-test-657-inner.sh
 
       - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs)
         id: docs-only
