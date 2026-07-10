@@ -853,3 +853,34 @@ delivery-order-independent sequence; sorting can never make a genuinely-missing 
 real drop is still caught). **Lesson for the next monotone-counter continuity check:** if the
 values can arrive out of RECORDED order (any hop through NDI/HEVC re-encode is a candidate), walk
 the sorted DISTINCT value set, never the raw delivery-order sequence.
+
+## #555 — the `remoteos-mcp` control-channel agent is a SEPARATE project, not managed by camera-box
+
+The `win-*`/`linux-*` MCP tools this session (and every session working this rig) uses are served
+by `remoteos-mcp` — its own repo (`~/devel/remoteos-mcp`, GitHub `zbynekdrlik/remoteos-mcp`), with
+its own CLAUDE.md, its own `.claude/skills/install` playbook, and its own versioning
+(`0.7.0.devN`). camera-box does NOT install, update, or pin this agent — do not look for it in
+this repo's scripts.
+
+**How it runs on each box type** (all four rig Windows/Linux boxes, `--enable-all --port 8092`):
+- **Windows (strih/stream):** scheduled task `RemoteOSMCP` (`wscript.exe .remoteos-mcp\
+  start-remoteos.vbs`, hidden, at-logon + every-5-min repeat) launches a plain pip-installed
+  `python -m remoteos`. Upgrade = the ONE canonical one-liner (never ad-hoc pip):
+  `irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.ps1 | iex`
+  (`master` is GitHub's auto-redirect alias for the renamed default branch `main` — both resolve).
+  It preserves the existing `auth_key`/config and scheduled task, then — as its LAST step — kills
+  the OLD server process and starts the new one. **Running this via the box's OWN win-* MCP Shell
+  tool call WILL drop that call** ("transport dropped mid-call") because the script kills the very
+  process serving the request — this is expected, not a failure; the upgrade completes
+  server-side before the kill. Verify by simply calling `GetSystemInfo`/`Ping` again right after
+  (fresh HTTP request, same host:port:auth_key) and `pip show remoteos-mcp`.
+- **Linux (imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service`, package installed globally
+  via `pip install --break-system-packages --ignore-installed git+https://github.com/zbynekdrlik/
+  remoteos-mcp.git` (its own `install-linux.sh`). Same upgrade discipline: use the installer, never
+  a bare pip command.
+
+**Rollback point for a specific old version:** find the exact commit via
+`git log --oneline -- pyproject.toml` in the remoteos-mcp checkout + `git show <sha>:pyproject.toml`
+— e.g. 0.7.0.dev1 (what strih/stream ran before the #555 convergence to dev8) is commit `66e33c2`.
+Reinstall a pinned commit via `git+https://github.com/zbynekdrlik/remoteos-mcp.git@<sha>` (Linux) or
+`.../archive/<sha>.zip` (Windows, same as the installer's `master.zip` but a specific ref).

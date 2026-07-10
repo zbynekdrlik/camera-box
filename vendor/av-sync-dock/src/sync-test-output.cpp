@@ -1077,22 +1077,23 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 
 		/* #634: audit-log the lock/unlock/offset-update transition (if any) BEFORE the est.ok
 		 * gate below, so an unlock (est.ok going false) is also logged, not silently swallowed
-		 * by the `continue`. CbLockAuditTracker is pure/tested; this is only the blog() glue. */
+		 * by the `continue`. CbLockAuditTracker is pure/tested; this is only the blog() glue.
+		 * Deliberately NOT logging `idx8` here (review finding): this loop's CbAvOffset comes
+		 * from EVERY CRC-4-accepted marker candidate, including the ~1/16 false-decode rate this
+		 * file documents below -- a false marker can still recompute an already-locked cluster,
+		 * so idx8 at this point is not reliably "the frame this lock belongs to". The offset/
+		 * matched/mad_ms are the real "source of the value" (the densest cluster), and those are
+		 * unaffected by which single candidate triggered the recompute. */
 		camerabox::CbLockAuditEvent audit_ev = st->cb_lock_audit.push(est);
 		switch (audit_ev.kind) {
 		case camerabox::CbLockEventKind::Locked:
-			blog(LOG_INFO,
-			     "av-sync-dock: LOCKED offset=%.1fms idx=%u source=cluster matched=%zu mad=%.1fms",
-			     audit_ev.offset_ms, idx8, audit_ev.matched, audit_ev.mad_ms);
-			break;
 		case camerabox::CbLockEventKind::Updated:
-			blog(LOG_INFO,
-			     "av-sync-dock: UPDATED offset=%.1fms idx=%u source=cluster matched=%zu mad=%.1fms",
-			     audit_ev.offset_ms, idx8, audit_ev.matched, audit_ev.mad_ms);
+			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
+			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
+			     audit_ev.offset_ms, audit_ev.matched, audit_ev.mad_ms);
 			break;
 		case camerabox::CbLockEventKind::Unlocked:
-			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms idx=%u", audit_ev.offset_ms,
-			     idx8);
+			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
 			break;
 		case camerabox::CbLockEventKind::None:
 		default:
