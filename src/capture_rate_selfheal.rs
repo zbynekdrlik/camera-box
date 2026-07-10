@@ -265,6 +265,17 @@ pub fn authorized_path_from_interface_syspath(interface_syspath: &str) -> Option
     Some(parent.join("authorized").to_string_lossy().into_owned())
 }
 
+/// Pure: `true` when `busid` has the USB-INTERFACE-level shape (`"<bus>-<port>:<config>.<iface>"`,
+/// e.g. `"2-3:1.0"` — contains a `:`), as opposed to a bare USB-DEVICE-level name (`"2-3"`, no
+/// `:`). Every uvcvideo-backed V4L2 device registers its `device` symlink at the interface level
+/// (this appliance's only capture class), so `authorized_path_from_interface_syspath`'s
+/// "immediate parent" derivation is correct ONLY when this holds — `perform_usb_reset` refuses to
+/// proceed when it doesn't, rather than silently toggling a possibly-wrong parent sysfs node
+/// (e.g. a shared USB hub).
+pub fn is_interface_level_busid(busid: &str) -> bool {
+    busid.contains(':')
+}
+
 /// Perform the actual USB reset on the capture device backing `video_device_path` (e.g.
 /// `/dev/video1`) — mirrors the manually-verified #656 fix sequence: uvcvideo unbind (best-effort;
 /// the `authorized` toggle below is what actually forces re-enumeration, so a failed/missing
@@ -285,6 +296,22 @@ pub fn perform_usb_reset(video_device_path: &str) -> anyhow::Result<()> {
         .to_string_lossy()
         .into_owned();
 
+    // Defensive check: every uvcvideo-backed V4L2 device (this appliance's ONLY capture device
+    // class — the Genki ShadowCast 2 fleet, live-confirmed layout in the module doc) registers
+    // its "device" symlink at the USB INTERFACE level, whose basename always has the
+    // "<bus>-<port>:<config>.<iface>" shape (contains ':'). If that ever isn't true (a different
+    // capture device class, or a kernel/driver change), `authorized_path_from_interface_syspath`'s
+    // "immediate parent" derivation would silently walk up to the WRONG sysfs node (e.g. a shared
+    // USB hub) and toggle ITS `authorized` — bail loudly instead of guessing.
+    let busid = interface_busid_from_syspath(&interface_syspath)
+        .with_context(|| format!("derive USB interface bus-id from {interface_syspath}"))?;
+    anyhow::ensure!(
+        is_interface_level_busid(&busid),
+        "capture device syspath {interface_syspath} does not look like a USB INTERFACE \
+         directory (basename {busid} has no ':<config>.<iface>' suffix) — refusing to guess an \
+         `authorized` path a level up, which could toggle the WRONG USB device"
+    );
+
     let authorized_path = authorized_path_from_interface_syspath(&interface_syspath)
         .with_context(|| format!("derive `authorized` path from {interface_syspath}"))?;
 
@@ -295,23 +322,51 @@ pub fn perform_usb_reset(video_device_path: &str) -> anyhow::Result<()> {
         authorized_path
     );
 
-    if let Some(busid) = interface_busid_from_syspath(&interface_syspath) {
-        let unbind_path = "/sys/bus/usb/drivers/uvcvideo/unbind";
-        if let Err(e) = std::fs::write(unbind_path, format!("{busid}\n")) {
-            tracing::warn!(
-                "#663 self-heal: uvcvideo unbind of {} failed (non-fatal — the authorized \
-                 toggle below forces re-enumeration regardless): {}",
-                busid,
-                e
-            );
-        }
+    let unbind_path = "/sys/bus/usb/drivers/uvcvideo/unbind";
+    if let Err(e) = std::fs::write(unbind_path, format!("{busid}\n")) {
+        tracing::warn!(
+            "#663 self-heal: uvcvideo unbind of {} failed (non-fatal — the authorized \
+             toggle below forces re-enumeration regardless): {}",
+            busid,
+            e
+        );
     }
 
     std::fs::write(&authorized_path, "0\n")
         .with_context(|| format!("deauthorize USB device ({authorized_path})"))?;
     std::thread::sleep(std::time::Duration::from_millis(1500));
-    std::fs::write(&authorized_path, "1\n")
-        .with_context(|| format!("reauthorize USB device ({authorized_path})"))?;
+
+    // #663 review finding: a device successfully DEAUTHORIZED but then failing to reauthorize
+    // would be left permanently disconnected — strictly WORSE than the original rate defect (no
+    // capture at all, vs a wrong rate). Retry the reauthorize write a few times before giving up,
+    // since transient sysfs contention during re-enumeration is far more likely than a permanent
+    // failure, and the cost of one extra write attempt is negligible.
+    const REAUTHORIZE_ATTEMPTS: u32 = 3;
+    let mut reauthorize_result = Err(anyhow::anyhow!("reauthorize not attempted"));
+    for attempt in 1..=REAUTHORIZE_ATTEMPTS {
+        reauthorize_result = std::fs::write(&authorized_path, "1\n")
+            .with_context(|| format!("reauthorize USB device ({authorized_path})"));
+        if reauthorize_result.is_ok() {
+            break;
+        }
+        if attempt < REAUTHORIZE_ATTEMPTS {
+            tracing::warn!(
+                "#663 self-heal: reauthorize attempt {}/{} failed for {} — retrying: {:?}",
+                attempt,
+                REAUTHORIZE_ATTEMPTS,
+                authorized_path,
+                reauthorize_result.as_ref().err()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+    reauthorize_result.with_context(|| {
+        format!(
+            "device {authorized_path} was deauthorized and FAILED to reauthorize after {REAUTHORIZE_ATTEMPTS} \
+             attempts — it is now DISCONNECTED, worse than the original rate defect; needs manual \
+             `echo 1 > {authorized_path}` recovery"
+        )
+    })?;
 
     tracing::warn!(
         "#663 self-heal: USB reset complete for {} — process will exit (code {}) so systemd's \
@@ -656,5 +711,23 @@ mod tests {
     #[test]
     fn syspath_helpers_return_none_on_a_rootless_path() {
         assert_eq!(authorized_path_from_interface_syspath("/"), None);
+    }
+
+    #[test]
+    fn is_interface_level_busid_accepts_the_live_confirmed_cam1_shape() {
+        assert!(is_interface_level_busid("2-3:1.0"));
+        assert!(
+            is_interface_level_busid("1-2.3.1:1.0"),
+            "nested-hub interface ids also qualify"
+        );
+    }
+
+    #[test]
+    fn is_interface_level_busid_rejects_a_bare_device_level_name() {
+        assert!(
+            !is_interface_level_busid("2-3"),
+            "a device-level name (no ':<config>.<iface>' suffix) must be rejected — \
+             perform_usb_reset's guard depends on this to avoid toggling the wrong sysfs node"
+        );
     }
 }
