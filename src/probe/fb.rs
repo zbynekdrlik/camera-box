@@ -254,3 +254,44 @@ impl VsyncFb {
         Ok(())
     }
 }
+
+/// #660: write an all-zero (black) frame into `device`'s CURRENTLY visible page,
+/// so a caller handing control of the CRTC back to another display client (the
+/// kernel's fbdev-emulation helper — see `crate::probe::kms::KmsPresenter`'s
+/// `Drop`) reveals a KNOWN black screen, never whatever ARBITRARILY OLD content
+/// (a prior `VsyncFb` run, or camera-box's own `--display` module's last frame)
+/// happened to still be sitting in the device's memory. `KmsPresenter` never
+/// touches this device itself (it drives the CRTC through its own separate DRM
+/// dumb buffers), so nothing else clears it between painter runs — see
+/// `crate::fb_blank` for the full incident writeup.
+///
+/// Best-effort by design: the caller (`Drop`) cannot propagate an error, so this
+/// returns `Result` for the caller to log-and-continue on failure rather than
+/// abort teardown.
+pub fn blank_fbdev(device: &str) -> Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(device)
+        .with_context(|| format!("open framebuffer {device} to blank"))?;
+    let fd = file.as_raw_fd();
+
+    let mut vinfo = FbVarScreenInfo::default();
+    if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut vinfo) } < 0 {
+        bail!("FBIOGET_VSCREENINFO failed while blanking {device}");
+    }
+    let mut finfo = FbFixScreenInfo::default();
+    if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO, &mut finfo) } < 0 {
+        bail!("FBIOGET_FSCREENINFO failed while blanking {device}");
+    }
+
+    let (start, len) =
+        crate::fb_blank::visible_page_range(vinfo.yoffset, vinfo.yres, finfo.line_length);
+    if len == 0 {
+        bail!("degenerate fbdev geometry while blanking {device} (yres or line_length is 0)");
+    }
+    let zeros = vec![0u8; len as usize];
+    file.write_all_at(&zeros, start)
+        .with_context(|| format!("write black frame to {device}"))?;
+    Ok(())
+}

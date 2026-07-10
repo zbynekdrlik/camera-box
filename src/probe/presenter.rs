@@ -83,7 +83,7 @@ pub fn open_presenter(
     match kind {
         PresenterKind::Fbdev => Ok(Box::new(VsyncFb::open(fb_device)?)),
         PresenterKind::Kms => Ok(Box::new(KmsPresenter::open(
-            drm_device, canvas_w, canvas_h,
+            drm_device, fb_device, canvas_w, canvas_h,
         )?)),
         PresenterKind::Auto => {
             // #464: the actual KMS-open ATTEMPT stays here (it's the I/O); which presenter is
@@ -92,7 +92,11 @@ pub fn open_presenter(
             // presenter-aware liveness gate documents its expectations against. Matched as a
             // (decision, result) pair rather than `.expect()`/`.expect_err()` so this compiles
             // without requiring `KmsPresenter`/its error to be `Debug`.
-            let kms_result = KmsPresenter::open(drm_device, canvas_w, canvas_h);
+            //
+            // #660: `fb_device` is passed through even on the KMS path so its `Drop` can blank
+            // that device before releasing DRM master — see `crate::fb_blank`. KMS itself still
+            // never reads/writes it during normal operation.
+            let kms_result = KmsPresenter::open(drm_device, fb_device, canvas_w, canvas_h);
             let resolved = resolve_presenter_kind(kind, kms_result.is_ok());
             match (resolved.kind, kms_result) {
                 (PresenterKind::Kms, Ok(p)) => {
