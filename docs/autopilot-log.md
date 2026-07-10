@@ -2757,3 +2757,19 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   cam2's own offset was never deliberately recalculated (still at the default floor, which
   empirically already passes) is included, plus confirmation that #642 (cam1/cam3 OPTICAL read
   degradation) is unrelated to this DIGITAL delivery-latency proof and does not block closure.
+- **#650 — standing :8899 bundle-state/recording HTTP service (2026-07-10):** commits `0e5032c6d`
+  (version bump), `65bd948a4` (feat: bundle_state_gather.py + bundle-state-server.py +
+  run-bundle-state-server.ps1 + 23 pure-function tests), `f3e760c39` (fix: ASCII-only .ps1 +
+  consistent UTF8 log encoding, both bugs found live on first deploy). Deployed + running on
+  strih (10.77.9.202) and stream (10.77.9.204) as Scheduled Task `BundleStateServer` (ONSTART).
+  Direct proof: `curl http://<box>:8899/bundle-state.json` returns fresh valid JSON on both boxes;
+  feeding both into `./scripts/version-integrity-gate.sh --win-state ...` locally returns
+  `GATE PASS` (exit 0) — proves the actual fix. Riding along on PR #647 (dev→main, #406/#312
+  item5's full-path-e2e wiring) since both live on `dev`. Could NOT observe the automatic
+  `pull_request`-triggered CI run itself reach/pass the version-integrity gate within this
+  session: the rig was genuinely, continuously busy (recording active on both boxes, briefly also
+  streaming) for the entire ~2h monitoring window — `rig-busy-gate.sh`'s own 30-min busy-wait
+  budget expired cleanly once (exit 42, correct behavior), and a retry hit a one-off transient
+  `Connection refused` during a mid-recording OBS restart on stream (filed as #651, unrelated).
+  Left #650 OPEN pending an observed clean CI pass; PR #647 NOT merged, branch protection NOT
+  flipped yet — both deferred to whenever the rig frees and the gate is observed to pass.

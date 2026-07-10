@@ -465,6 +465,62 @@ script text), `tests/version_integrity_gate.rs`'s `STRIH_PINNED`/`STREAM_PINNED`
 host=stream\|output_fps=' tests/drift_guard.rs` (and grep the OLD value across `tests/`) to find
 every affected test FIRST, not after a surprise CI failure.
 
+## #650 — standing :8899 bundle-state service (unattended version-integrity gate)
+
+`scripts/version-integrity-gate.sh --win-state` and `scripts/recording-e2e.sh`'s
+`fetch_box_state()` need a live `http://<box>:8899/bundle-state.json` on BOTH strih and stream —
+previously this was ONLY ever gathered by hand (`.claude/commands/drift-guard.md` step 1/1b/1c) or
+via an ad-hoc `python -m http.server 8899`, so the automatic `pull_request`-triggered
+full-path-e2e run always saw both boxes UNKNOWN (exit 11) and refused. Fixed by a STANDING service:
+
+- **Code**: `scripts/bundle_state_gather.py` (pure parsers, unit-tested) +
+  `scripts/bundle-state-server.py` (the on-box HTTP flow — regenerates `/bundle-state.json` FRESH
+  on every request; serves the record dir, read live via `GetRecordDirectory` over obs-websocket,
+  as static files elsewhere). Reuses `obs_phase2.py`'s `_conn`/`_rpc` (auth handshake, #328 stuck-op
+  timeout) — do NOT write a fourth OBS-WS client in this repo.
+- **`ndi_input_latency` is derived from `genlock_fifo=true`**, not a hardcoded input-name list —
+  proven live 2026-07-10 to select exactly the genlocked broadcast-path inputs (camera ingests +
+  program feed) on both boxes and nothing else (preview/CG/lyrics inputs never carry
+  `genlock_fifo`). If a future scene edit needs a DIFFERENT input excluded from the pin, that input
+  must not get `genlock_fifo=true` set — don't hand-maintain a name list here.
+- **Deploy**: `C:\ProgramData\camera-box\{bundle-state-server.py,bundle_state_gather.py,
+  obs_phase2.py,run-bundle-state-server.ps1,obs-ws-password.txt}` on each box, launched by a
+  Scheduled Task `BundleStateServer` (ONSTART trigger, InteractiveToken as `newlevel` — mirrors the
+  existing `StartOBS` task). **Both boxes have internet (GitHub) reachability** — deploy/redeploy by
+  having the box itself `Invoke-WebRequest` the raw file at a pinned commit SHA
+  (`https://raw.githubusercontent.com/zbynekdrlik/camera-box/<sha>/scripts/<file>`) rather than
+  transferring file content through an agent's own context (avoids reading a 90KB+ file like
+  `obs_phase2.py` into a session just to push it via FileWrite). The OBS-WS password file is the
+  ONE thing written directly (FileWrite) — never fetched from GitHub, never committed.
+- **GOTCHA — a non-ASCII character in a `.ps1` deployed to these Windows boxes silently corrupts
+  parsing.** `run-bundle-state-server.ps1` shipped with an em-dash inside a live double-quoted
+  string; Windows PowerShell 5.1 has no BOM on a plain-downloaded file, so it decoded the UTF-8
+  em-dash bytes as the system ANSI codepage, breaking the string literal — the wrapper failed at
+  launch with a parse error (`At line:39 char:135`) and NEVER started the server, with NO obvious
+  error surfaced beyond a generic `LastTaskResult=1`/exit 1 from Task Scheduler. Any `.ps1` deployed
+  this way (raw HTTP download, no BOM) must stay pure ASCII — `grep -nP '[^\x00-\x7F]' *.ps1` before
+  every deploy. (Python files are NOT affected — Python 3 always assumes UTF-8 source regardless of
+  BOM, per PEP 3120.)
+- **GOTCHA — `Add-Content` and the `*>>`/`>>` redirection operator default to DIFFERENT encodings
+  on Windows PowerShell 5.1** (roughly ASCII/UTF8-no-BOM vs UTF-16LE "Unicode") — mixing them into
+  the SAME log file interleaves a NUL byte after every character of whichever stream used the OTHER
+  encoding (each ASCII byte silently "widened" to a UTF-16 code unit on readback). Force
+  `-Encoding utf8` explicitly on every write path into a shared log file (`Add-Content -Encoding
+  utf8`; pipe a subprocess through `| Out-File -Append -Encoding utf8`, never bare `*>>`).
+- **Verify**: `curl http://<box>:8899/bundle-state.json` from dev1 (both boxes reachable directly,
+  no MCP needed), then feed the two fetched files straight into
+  `./scripts/version-integrity-gate.sh --win-state strih=<f> --win-state stream=<f>` locally —
+  `GATE PASS` proves the fix without needing a live CI run at all.
+- **`GetRecordDirectory` is a real obs-websocket v5 RPC** (`{"recordDirectory": "D:/_REC"}` on
+  strih, the `_NLMEDIA stream/RECORDINGS` path on stream) — use it instead of hardcoding/parsing the
+  OBS profile `.ini` (multiple stale profile `.ini` files can exist on these boxes; only the LIVE
+  RPC reflects which profile is actually active right now).
+- **Known gap, filed #651 (not fixed here)**: `rig-busy-gate.sh`'s single-poll
+  `obs_phase2.py rig-busy-check` treats one transient `Connection refused` (e.g. OBS restarting
+  mid-recording) as `RIG_UNREACHABLE` (exit 43) and aborts the whole 30-min busy-wait immediately,
+  discarding correctly-observed "still busy" state from every earlier check. Needs a short
+  retry-before-declaring-unreachable inside a single check cycle.
+
 ## strih NDI Input → Camera Mapping (INVERTED)
 
 strih OBS NDI input labels are INVERTED vs the real cameras. Always resolve by the
