@@ -208,6 +208,14 @@ pub mod av_window;
 // every ~5s report window and logs a WARN when it fires.
 pub mod capture_rate_health;
 
+// #663 — capture-delivery-rate SELF-HEAL: given a `capture_rate_health::should_warn`-confirmed
+// sustained deviation, decides WHEN to automatically USB-reset the defective grabber (rate-limited
+// so a dying grabber can't reset-loop forever, escalating to a CRITICAL "replace the hardware" log
+// once the fix keeps not holding) and performs the actual sysfs `authorized` toggle. No probe
+// deps, so the decision logic unit-tests Tier-0; `src/main.rs`'s capture loop calls it right after
+// the #656 WARN fires.
+pub mod capture_rate_selfheal;
+
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
 // continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
 // deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order

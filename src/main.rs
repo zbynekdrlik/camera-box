@@ -400,6 +400,11 @@ async fn run_capture_loop(
     let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);
 
+    // #663 — owned copy of the resolved device path for the self-heal USB reset (the capture
+    // loop below runs on a `'static` spawn_blocking closure, so the borrowed `device_path: &str`
+    // parameter can't be captured directly).
+    let device_path_owned = device_path.to_string();
+
     // Genlock #11: optionally emit NDI at a target broadcast rate, decimating the
     // faster capture onto DanteSync wall-clock boundaries, so a downstream
     // genlocked OBS (genlock_fifo) consumes exactly one frame per render tick =
@@ -889,6 +894,87 @@ async fn run_capture_loop(
                                 consecutive_rate_breaches,
                                 consecutive_rate_breaches as u64 * 5
                             );
+
+                            // #663 — self-heal: the #656 fix (a manual USB reset) is only
+                            // TEMPORARY — the same defect recurred within hours, three times in
+                            // one day (live incident). Rate-limited + escalating automatic USB
+                            // reset (see capture_rate_selfheal module doc for the full design).
+                            let now_epoch_s = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let state_path =
+                                std::path::Path::new(camera_box::capture_rate_selfheal::STATE_PATH);
+                            let prev_selfheal_state =
+                                camera_box::capture_rate_selfheal::load_state(state_path);
+                            let (selfheal_decision, next_selfheal_state) =
+                                camera_box::capture_rate_selfheal::decide_selfheal(
+                                    prev_selfheal_state,
+                                    true,
+                                    now_epoch_s,
+                                    camera_box::capture_rate_selfheal::DEFAULT_MIN_HEAL_INTERVAL_S,
+                                    camera_box::capture_rate_selfheal::DEFAULT_RECURRENCE_WINDOW_S,
+                                    camera_box::capture_rate_selfheal::DEFAULT_CRITICAL_ESCALATION_HEALS,
+                                );
+                            match selfheal_decision {
+                                camera_box::capture_rate_selfheal::SelfHealDecision::Healthy => {
+                                    // Unreachable: we only reach this block once should_warn (a
+                                    // confirmed sustained deviation) is already true.
+                                }
+                                camera_box::capture_rate_selfheal::SelfHealDecision::Throttled {
+                                    seconds_remaining,
+                                } => {
+                                    tracing::warn!(
+                                        "#663 self-heal rate-limited: the last USB reset attempt was too recent — {}s remaining before another attempt is allowed",
+                                        seconds_remaining
+                                    );
+                                }
+                                camera_box::capture_rate_selfheal::SelfHealDecision::Heal {
+                                    attempt_number,
+                                    escalate_critical,
+                                } => {
+                                    if escalate_critical {
+                                        tracing::error!(
+                                            "{}",
+                                            camera_box::capture_rate_selfheal::critical_escalation_message(
+                                                &device_path_owned,
+                                                attempt_number
+                                            )
+                                        );
+                                    }
+                                    if let Err(e) = camera_box::capture_rate_selfheal::save_state(
+                                        state_path,
+                                        &next_selfheal_state,
+                                    ) {
+                                        tracing::error!(
+                                            "#663 self-heal: failed to persist self-heal state to {}: {} (rate-limit/escalation count may not survive this restart)",
+                                            camera_box::capture_rate_selfheal::STATE_PATH,
+                                            e
+                                        );
+                                    }
+                                    match camera_box::capture_rate_selfheal::perform_usb_reset(
+                                        &device_path_owned,
+                                    ) {
+                                        Ok(()) => {
+                                            tracing::warn!(
+                                                "#663 self-heal: USB reset attempt #{} succeeded — exiting (code {}) so systemd restarts camera-box against the re-enumerated device",
+                                                attempt_number,
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE
+                                            );
+                                            std::process::exit(
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "#663 self-heal: USB reset attempt #{} FAILED: {:#} — camera-box keeps running degraded; will retry once the rate-limit window passes",
+                                                attempt_number,
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // #299 — log the most recent chroma sample alongside the fps report.
