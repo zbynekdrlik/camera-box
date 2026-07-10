@@ -355,6 +355,57 @@ class TestDefaultLastJsonPath:
 
 
 # ---------------------------------------------------------------------------
+# (i) #636 -- remote push plan: the SAME persist-location gap #465 fixed in
+# av_sync_calibrate.py. This script also connects to --host over the OBS WebSocket and does
+# not need to run ON the stream box, so default_last_json_path() falls back to a LOCAL path
+# nothing on the stream box can read. scp/ssh to Windows is denied, so the only established
+# channel to place a file there is the win-* MCP FileWrite tool, driven by the operator/agent.
+# remote_push_plan() prints an explicit, copy-pasteable plan -- same convention as
+# av_sync_calibrate.remote_push_plan() / obs-self-heal-install.sh's PLAN block.
+# ---------------------------------------------------------------------------
+
+class TestMcpNameForHost:
+    def test_stream_host_resolves_to_win_stream_snv(self):
+        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
+
+    def test_strih_host_resolves_to_win_strih(self):
+        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.202") == "win-strih"
+
+    def test_unknown_host_returns_none(self):
+        assert phase_sync_calibrate.mcp_name_for_host("10.0.0.99") is None
+
+
+class TestRemotePushPlan:
+    def test_plan_names_the_canonical_windows_destination(self):
+        payload = {
+            "cameras": [{"source": "NDI cam5", "latency_ms": 100.0, "offset_ms": 3,
+                         "applied_latency_ms": 3}],
+            "ts": 1720000000.0,
+        }
+        plan = phase_sync_calibrate.remote_push_plan("10.77.9.202", payload)
+        assert r"C:\ProgramData\camera-box\phase-sync-last.json" in plan
+        assert "win-strih" in plan
+        assert "10.77.9.202" in plan
+        assert "FileWrite" in plan
+
+    def test_plan_includes_the_exact_json_content(self):
+        payload = {
+            "cameras": [{"source": "NDI cam1", "latency_ms": 90.0, "offset_ms": 13,
+                         "applied_latency_ms": 13}],
+            "ts": 1720000000.0,
+        }
+        plan = phase_sync_calibrate.remote_push_plan("10.77.9.202", payload)
+        embedded = json.loads(plan.split("content:\n", 1)[1])
+        assert embedded == payload
+
+    def test_plan_for_unknown_host_still_names_the_destination(self):
+        payload = {"cameras": [], "ts": 1.0}
+        plan = phase_sync_calibrate.remote_push_plan("10.0.0.99", payload)
+        assert r"C:\ProgramData\camera-box\phase-sync-last.json" in plan
+        assert "10.0.0.99" in plan
+
+
+# ---------------------------------------------------------------------------
 # (h) CLI wiring
 # ---------------------------------------------------------------------------
 
@@ -415,3 +466,112 @@ class TestCLI:
         assert by_source["NDI cam1"]["applied_latency_ms"] == 13
         assert by_source["NDI cam3"]["applied_latency_ms"] == 23
         assert by_source["NDI cam5"]["latency_ms"] == 100.0
+
+    def test_explicit_json_path_suppresses_remote_push_plan(self, monkeypatch, tmp_path, capsys):
+        # An explicit --json-path means the caller is taking control of the destination
+        # themselves -- no auto plan needed (mirrors av_sync_calibrate's same test).
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {"NDI cam5": 3},
+        )
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps({"NDI cam5": 100.0}))
+        json_path = tmp_path / "phase-sync-last.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply",
+             "--json-path", str(json_path)],
+        )
+        phase_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "REMOTE PUSH REQUIRED" not in out
+
+    def test_default_path_off_box_prints_remote_push_plan(self, monkeypatch, tmp_path, capsys):
+        # #636 finding: run from dev1 (PROGRAMDATA unset) with the DEFAULT path -- the write
+        # lands under ~/.camera-box, which nothing on the stream box can read. main() must
+        # surface an explicit push plan so the operator/agent pushes it via MCP FileWrite --
+        # the SAME gap #465 fixed in av_sync_calibrate.py.
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {"NDI cam5": 3},
+        )
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "default_last_json_path",
+            lambda: tmp_path / ".camera-box" / "phase-sync-last.json",
+        )
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps({"NDI cam5": 100.0}))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply"],
+        )
+        phase_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "REMOTE PUSH REQUIRED" in out
+        assert r"C:\ProgramData\camera-box\phase-sync-last.json" in out
+        assert "win-strih" in out
+
+    def test_printed_plan_json_matches_what_was_actually_persisted(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        # Integration-level drift guard (mirrors av_sync_calibrate's own such test): the
+        # plan's embedded JSON must be byte-identical to what write_last_json() actually wrote
+        # -- never reconstructed separately (that would let the pushed content silently
+        # diverge from the local record).
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {"NDI cam5": 3},
+        )
+        monkeypatch.delenv("PROGRAMDATA", raising=False)
+        local_json_path = tmp_path / ".camera-box" / "phase-sync-last.json"
+        monkeypatch.setattr(
+            phase_sync_calibrate, "default_last_json_path", lambda: local_json_path,
+        )
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps({"NDI cam5": 100.0}))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply"],
+        )
+        phase_sync_calibrate.main()
+        out = capsys.readouterr().out
+
+        persisted = json.loads(local_json_path.read_text())
+        printed = json.loads(out.split("content:\n", 1)[1])
+        assert printed == persisted
+
+    def test_default_path_on_box_does_not_print_remote_push_plan(self, monkeypatch, tmp_path, capsys):
+        # If PROGRAMDATA IS set (running ON the Windows box), default_last_json_path() already
+        # resolves to the canonical stream-box path -- no push needed.
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {"NDI cam5": 3},
+        )
+        monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "ProgramData"))
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps({"NDI cam5": 100.0}))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply"],
+        )
+        phase_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "REMOTE PUSH REQUIRED" not in out
