@@ -134,3 +134,32 @@ the functional offset correction (+82ms → -7ms) is solid regardless.
 **`scripts/phase_sync_calibrate.py` has the identical persist-location gap** (its
 `default_last_json_path()` deliberately mirrors `av_sync_calibrate`'s old buggy one) — filed as
 #636, not fixed yet.
+
+## #634 — the dock now audit-logs its lock/unlock/offset-update transitions
+
+The dock still has zero FILE I/O (the correction above stands), but it now `blog()`s to the
+standard OBS log whenever `RollingOffsetCluster`'s estimate changes state — this is what an
+operator/agent should grep for to diagnose a live desync (like the closed #529) after the fact,
+instead of re-deriving it from a fresh recording:
+
+```
+av-sync-dock: LOCKED  offset=<ms> idx=<N> source=cluster matched=<n> mad=<ms>
+av-sync-dock: UPDATED offset=<ms> idx=<N> source=cluster matched=<n> mad=<ms>
+av-sync-dock: UNLOCKED last_offset=<ms> idx=<N>
+```
+
+`camerabox::CbLockAuditTracker` (`vendor/av-sync-dock/src/camera-box-audio.hpp`, pure/OBS-free)
+owns the transition classification (Locked/Updated/Unlocked, with an "Updated" only firing when
+the offset moves beyond a stable tolerance so a healthy lock doesn't spam a line every marker);
+`sync-test-output.cpp`'s glue is a thin `push()` + `blog()` switch. TDD'd the SAME twin-harness way
+as the cluster estimator itself: `tests/av_sync_dock_audit_log.rs` compiles+runs a tiny
+`c++ -std=c++17` program against the real header — reuse this pattern for any FUTURE dock logic
+that needs RED→GREEN proof without a rig.
+
+**Correction to the general "frontend C++ is invisible to PR CI" framing (CLAUDE.md's genlock
+gotcha applies to the OBS core/frontend, NOT this dock):** `vendor/av-sync-dock/**` has its OWN
+automatic pre-merge compile gate — `windows-genlock-fast.yml`'s "Configure/Compile-check
+av-sync-dock" job fires on every `dev` push touching this tree and does a REAL MSVC build of the
+whole plugin against the genlocked OBS SDK (see `#188` in that workflow). So a dock-only change
+gets a genuine compile proof on the SAME push-to-dev cycle as everything else — dispatching the
+full 150-min `windows-genlock.yml` afterward is a belt-and-braces extra proof, not the only gate.

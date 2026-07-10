@@ -349,6 +349,22 @@ const MIN_PAIRS_FOR_STUCK_DENSITY: u32 = 300;
 /// (see `optical_beat_gate_healthy_572001_local_density_passes_604`), narrow enough that a
 /// genuinely LOCALIZED judder burst (illustratively 1-2 s, per #604) fills a large fraction of at
 /// least one window instead of being averaged away across the whole recording.
+///
+/// #620 — RE-GROUNDED against two live recordings (RUN 1783615904 / RUN 1783619061, decoded
+/// 2026-07-09, ~367 s each, `/tmp/recording-e2e-<run>/verdict-<run>.json`). Neither turned out to
+/// be the genuinely SHORT (~1-2 s) isolated burst #604 anticipated: the Δ0 duplication recurs
+/// roughly every 15-16 adjacent pairs (a persistent ~4 Hz periodic pattern, not a one-off event —
+/// see [`IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY`]'s doc for the full finding and the filed
+/// follow-up, #656) spread through nearly the WHOLE analyzed span. Because the real pattern is
+/// pervasive rather than a bounded event, the data does not pin down a single "correct" width more
+/// precisely than before: sweeping the window from 30 to 1200 pairs on both real recordings shows
+/// the expected smooth MONOTONIC decrease in peak local density as the window widens (30 pairs ⇒
+/// ~23%, 180 pairs ⇒ ~12.2-12.8%, 1200 pairs ⇒ ~7.6-7.7%), with no sharp knee that would argue for
+/// a different width. 180 pairs stays a reasonable middle ground (narrow enough to read
+/// meaningfully ABOVE the whole-window average it exists to catch dilution against, wide enough to
+/// keep isolated healthy dups from double-counting per the paragraph above) — UNCHANGED by this
+/// re-grounding, which is why [`IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY`] is where the real numbers
+/// land instead.
 pub const IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS: u32 = 180;
 
 /// #604 — the LOCAL (sliding-window) Δ0 density ceiling, judged inside every
@@ -362,13 +378,36 @@ pub const IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS: u32 = 180;
 /// when embedded in an otherwise pristine recording (see
 /// `optical_beat_gate_localized_judder_local_density_term_604`) — 5x this ceiling.
 ///
-/// No live localized-judder recording exists yet to calibrate against (the #604 issue text itself
-/// says so) — so, like every OTHER constant in this module, this is real-data-ANCHORED rather than
-/// invented from nothing: it is picked to sit comfortably UNDER the real 572001 healthy read (the
-/// same anchor [`IMAG_OPTICAL_MAX_STUCK_DENSITY`] uses) while staying well UNDER a realistic
-/// judder's local magnitude, favouring "never false-fail a genuinely clean recording" whenever the
-/// two pulls are in tension. RE-GROUNDED (never loosened blindly) the moment a live
-/// localized-judder capture gives a real number to calibrate against instead.
+/// #620 — RE-GROUNDED against REAL data (the 25% synthetic estimate above is now SUPPLEMENTED,
+/// not replaced, by two live recordings measured 2026-07-09): RUN 1783615904 and RUN 1783619061
+/// (both ~367 s) each measure `local_stuck_density` of 0.1222 / 0.1278 (12.2% / 12.8%) in their
+/// worst 180-pair window — a REAL judder anchor sitting ~2.4-2.6x above this ceiling (see
+/// `optical_beat_verdict_matches_real_qualifying_recordings_620` and
+/// `local_stuck_density_ceiling_sits_between_healthy_and_real_judder_620`).
+///
+/// **Important finding, not just a number:** neither recording is the SHORT isolated-burst
+/// scenario #604 anticipated (see [`IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`]'s doc) — the Δ0
+/// duplication recurs roughly every 15-16 adjacent pairs (a ~4 Hz periodic cadence) across nearly
+/// the ENTIRE ~367 s span, so the WHOLE-window density (`imag_optical_stuck_density` = 0.0474 /
+/// 0.0627, i.e. 4.7% / 6.3%) is ALSO far above the existing #588 whole-window ceiling
+/// ([`IMAG_OPTICAL_MAX_STUCK_DENSITY`] = 1%) — `no_stuck_density()` alone already fails both
+/// recordings independently of this local term (both verdict JSONs' `overall_pass` was already
+/// `false` under the PRE-#620 constants — a genuinely real, sustained defect on imag-nb, not a
+/// benign rig/measurement artifact given it sits 47-63x the live healthy baseline below and
+/// persists for most of a 6-minute recording across two independent runs). The root cause is
+/// tracked separately as #656 (out of scope for this calibration ticket).
+///
+/// **The ceiling VALUE is UNCHANGED by this re-grounding** — the real numbers CONFIRM it rather
+/// than move it: the only known real healthy anchor (run 572001, ~0.10% whole-window; isolated
+/// dups spaced far wider than [`IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`] apart — the SAME anchor
+/// [`IMAG_OPTICAL_MAX_STUCK_DENSITY`] uses) sits ~50x UNDER this ceiling, and the two real judder
+/// recordings above sit ~2.4-2.6x OVER it — so 5% still correctly separates a genuinely clean read
+/// from a genuinely defective one. No real per-window healthy-side measurement exists yet to
+/// justify TIGHTENING the margin (only 572001's WHOLE-window aggregate is available) — inventing a
+/// smaller ceiling without that data would risk a false-fail exactly the way this module's
+/// real-data-anchoring discipline exists to prevent. RE-GROUNDED again (never loosened blindly)
+/// the moment a live recording gives a genuinely SHORT isolated burst, or a real per-window
+/// healthy-side reading, to calibrate against instead.
 pub const IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY: f64 = 0.05;
 
 /// #580v2 — THE CENTERPIECE no-copy/liveness metric: the MAXIMUM number of CONSECUTIVE zero-delta
@@ -2042,6 +2081,122 @@ mod tests {
         assert_eq!(max_local_stuck_density(&[], 2), 0.0);
         assert_eq!(max_local_stuck_density(&[7], 2), 0.0);
         assert_eq!(max_local_stuck_density(&seq, 0), 0.0);
+    }
+
+    // ============================================================================
+    // #620 — re-calibrate #604's local-density window/ceiling against REAL live recordings, now
+    // that the blocking precondition (#604's own text: "no live localized-judder recording exists
+    // yet") is satisfied. Two qualifying recordings (RUN 1783615904 / RUN 1783619061, decoded
+    // 2026-07-09, ~367s each, `/tmp/recording-e2e-<run>/verdict-<run>.json`) both show
+    // `avg_step ≈ 1.003` (so `is_advancing()` passes — "healthy overall" by that one metric) while
+    // `local_stuck_density` reads 0.1222 / 0.1278 in the EXISTING 180-pair window — 2.4-2.6x the
+    // 5% ceiling. These tests anchor the constants to the REAL numbers, replacing the purely
+    // synthetic #604 model for the ceiling side, and prove the finding stated in the constants'
+    // doc comments: (a) the recalibrated (in this case UNCHANGED) gate correctly FAILS both real
+    // qualifying recordings, and (b) neither is actually the SHORT isolated-burst #604 envisioned
+    // — the whole-window #588 term (`no_stuck_density`) ALREADY fails both independently, because
+    // the Δ0 duplication is pervasive (not diluted) through nearly the whole analyzed span.
+    // ============================================================================
+
+    #[test]
+    fn optical_beat_verdict_matches_real_qualifying_recordings_620() {
+        // RUN 1783615904 — exact numbers read from its `full_chain.loss.imag` verdict JSON block.
+        let run_1783615904 = optical_beat_verdict_from_counts(
+            21988,              // expected_count
+            20883,              // present_count
+            21926,              // frames_count
+            1.0028278221208666, // avg_step
+            IMAG_OPTICAL_EXPECTED_STEP,
+            2,                    // max_stuck_run
+            0.047388825541619155, // stuck_density (whole-window, #588 term) — 4.74%
+            0.12222222222222222,  // local_stuck_density (#604 term, 180-pair window) — 12.22%
+        );
+        assert!(
+            run_1783615904.is_advancing(),
+            "avg_step≈1.003 rounds to the expected step 1 — 'healthy overall' by this ONE metric: \
+             {run_1783615904:?}"
+        );
+        assert!(
+            !run_1783615904.no_stuck_density(),
+            "#588: whole-window density 4.74% is ALREADY far above the existing 1% ceiling — this \
+             recording is NOT a short burst diluted below the whole-window average, it is \
+             pervasively elevated: {run_1783615904:?}"
+        );
+        assert!(
+            !run_1783615904.no_localized_stuck_density(),
+            "#604/#620: local density 12.22% is 2.4x the 5% ceiling: {run_1783615904:?}"
+        );
+        assert!(
+            !run_1783615904.is_live_no_copy(),
+            "#620: the recalibrated gate must FAIL this real qualifying recording: \
+             {run_1783615904:?}"
+        );
+
+        // RUN 1783619061 — exact numbers read from its `full_chain.loss.imag` verdict JSON block.
+        let run_1783619061 = optical_beat_verdict_from_counts(
+            21990,              // expected_count
+            20544,              // present_count
+            21921,              // frames_count
+            1.0031478102189781, // avg_step
+            IMAG_OPTICAL_EXPECTED_STEP,
+            2,                   // max_stuck_run
+            0.06272810218978102, // stuck_density (whole-window, #588 term) — 6.27%
+            0.12777777777777777, // local_stuck_density (#604 term, 180-pair window) — 12.78%
+        );
+        assert!(
+            run_1783619061.is_advancing(),
+            "avg_step≈1.003 rounds to the expected step 1: {run_1783619061:?}"
+        );
+        assert!(
+            !run_1783619061.no_stuck_density(),
+            "#588: whole-window density 6.27% is ALREADY far above the existing 1% ceiling: \
+             {run_1783619061:?}"
+        );
+        assert!(
+            !run_1783619061.no_localized_stuck_density(),
+            "#604/#620: local density 12.78% is 2.6x the 5% ceiling: {run_1783619061:?}"
+        );
+        assert!(
+            !run_1783619061.is_live_no_copy(),
+            "#620: the recalibrated gate must FAIL this real qualifying recording: \
+             {run_1783619061:?}"
+        );
+    }
+
+    #[test]
+    fn local_stuck_density_ceiling_sits_between_healthy_and_real_judder_620() {
+        // #620 — mirrors `stuck_density_ceiling_sits_between_healthy_and_judder_588`'s
+        // order-of-magnitude sanity pattern, but for the LOCAL ceiling with a REAL (not synthetic)
+        // judder anchor. `healthy` reuses 572001's live-measured WHOLE-window density (the same
+        // anchor `IMAG_OPTICAL_MAX_STUCK_DENSITY` already uses) — no real PER-WINDOW healthy-side
+        // number exists yet, so this is a conservative (if anything, an over-estimate, since a
+        // genuinely healthy window's isolated dups are spaced ~900-1366 pairs apart — far wider
+        // than the 180-pair window — so most windows read exactly 0.0, not 0.10%) stand-in.
+        // `real_judder_local` is the SMALLER (more conservative) of the two real measured local
+        // densities (RUN 1783615904 / RUN 1783619061 — see
+        // `optical_beat_verdict_matches_real_qualifying_recordings_620`).
+        let healthy = 22.0 / 21866.0; // ≈0.10%, the live-measured 572001 healthy WHOLE-window density
+        let real_judder_local = 0.12222222222222222; // ≈12.22%, RUN 1783615904's worst 180-pair window
+        assert!(
+            healthy < IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY,
+            "the only known healthy anchor (0.10%) must sit UNDER the 5% local ceiling"
+        );
+        assert!(
+            IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY < real_judder_local,
+            "the 5% local ceiling must sit UNDER the REAL measured judder local density (12.22%)"
+        );
+        assert!(
+            real_judder_local >= IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY * 2.0,
+            "the real judder anchor must stay at least 2x the ceiling (measured: ~2.4-2.6x) — a \
+             genuine safety margin, not a hair's-breadth pass: healthy={healthy:.5}, \
+             ceiling={}, real_judder_local={real_judder_local:.5}",
+            IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY
+        );
+        assert!(
+            IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY >= healthy * 9.0,
+            "the ceiling must stay comfortably (≥9x) above the healthy anchor, mirroring #588's \
+             own margin discipline for its whole-window ceiling"
+        );
     }
 
     #[test]

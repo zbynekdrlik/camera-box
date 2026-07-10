@@ -2875,3 +2875,34 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   PR referencing them yet; regular CI (run 29082936463) green on the pushed HEAD. All three
   issues closed manually with evidence comments (parenthesized `fix(#N):`/`feat(#N):` commit forms
   per this repo's own auto-close GOTCHA — none auto-closed via PR #653, which predated the push).
+
+## #620 — re-calibrate #604 local-density constants against real judder recordings (2026-07-10, BLOCKED on push)
+
+- Version bumped `1.7.0-dev.326` → `1.7.0-dev.327` (`fc4d8025c`, pre-work).
+- `dcedd0cb1` (fix): read both qualifying recordings' `full_chain.loss.imag` verdict JSON blocks
+  plus raw per-frame tick sequences (`imag-partial-<run>.json`) directly. Correction to the
+  dispatch's premise: BOTH recordings already show `imag_optical_beat_pass: false` /
+  `overall_pass: false` under the pre-#620 (unchanged) constants — the "went green through the
+  merge gate" framing was wrong. Bigger finding: neither recording is #604's envisioned SHORT
+  isolated burst — a gap-distribution analysis on the raw ticks shows a non-random spike at
+  exactly 15 adjacent pairs apart (~4Hz at 60fps), a PERVASIVE periodic pattern across nearly the
+  whole ~367s span in both runs, so the pre-existing #588 whole-window term (4.7%/6.3%, vs its 1%
+  ceiling) already fails both independently of #604's local term. Filed #656 for the periodic
+  defect's own root-cause (out of scope here). Decision: kept `IMAG_OPTICAL_LOCAL_STUCK_WINDOW_PAIRS`
+  (180) and `IMAG_OPTICAL_MAX_LOCAL_STUCK_DENSITY` (0.05) UNCHANGED — real data confirms rather
+  than moves them (real judder local density 12.22%/12.78%, ~2.4-2.6x above the ceiling; only known
+  healthy anchor ~0.10%, ~50x below it) — replaced the synthetic-model doc citation with the real
+  one. New tests `optical_beat_verdict_matches_real_qualifying_recordings_620` (real verdict-JSON
+  numbers via `optical_beat_verdict_from_counts`) and
+  `local_stuck_density_ceiling_sits_between_healthy_and_real_judder_620` (margin sanity, mirrors
+  #588's pattern). Local: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test --lib` 525/525 (523+2 new), `cargo test --no-run` compiles every target.
+- `d98a3f55b` (docs): captured the gap-distribution + window-sweep calibration technique in
+  `.claude/skills/e2e/SKILL.md`'s #604 section (reusable for the NEXT density-gate calibration).
+- **BLOCKED on push/PR**: PR #655 (unrelated #634 — audit-log the A/V-sync dock, already fully
+  green except the rig gate) is OPEN on the SAME `dev`→`main` head/base pair — GitHub allows only
+  one open PR per pair, so no separate #620 PR can be created yet. #655 itself is blocked by the
+  rig-busy gate (`stream is streaming` — a real broadcast). Waited ~10 min (bounded, not
+  indefinite per this run's own instructions) — still open at end of session. All 3 commits sit
+  ready on local `dev`; next worker/supervisor pushes once #655 clears. See `gh issue comment` on
+  #620 for the full write-up.

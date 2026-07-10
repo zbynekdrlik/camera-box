@@ -186,6 +186,11 @@ struct sync_test_output
 	uint64_t cb_audio_pushed = 0;
 	std::vector<uint8_t> cb_src_buf;
 
+	/* #634: audit-log lock/unlock/offset-update transitions of the cluster above, so a live
+	 * desync (like the closed #529) can be diagnosed from the OBS log alone. Pure/tested in
+	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio thread. */
+	camerabox::CbLockAuditTracker cb_lock_audit;
+
 	~sync_test_output()
 	{
 		if (qr)
@@ -1069,6 +1074,32 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			resolve_ring_lap_offset_ns(audio_ts, video_ts, CAMERA_BOX_RING_CYCLE_NS);
 		const double offset_ms = (double)offset_ns / 1000000.0;
 		camerabox::CbAvOffset est = st->cb_offset_cluster.push(audio_ts, offset_ms);
+
+		/* #634: audit-log the lock/unlock/offset-update transition (if any) BEFORE the est.ok
+		 * gate below, so an unlock (est.ok going false) is also logged, not silently swallowed
+		 * by the `continue`. CbLockAuditTracker is pure/tested; this is only the blog() glue.
+		 * Deliberately NOT logging `idx8` here (review finding): this loop's CbAvOffset comes
+		 * from EVERY CRC-4-accepted marker candidate, including the ~1/16 false-decode rate this
+		 * file documents below -- a false marker can still recompute an already-locked cluster,
+		 * so idx8 at this point is not reliably "the frame this lock belongs to". The offset/
+		 * matched/mad_ms are the real "source of the value" (the densest cluster), and those are
+		 * unaffected by which single candidate triggered the recompute. */
+		camerabox::CbLockAuditEvent audit_ev = st->cb_lock_audit.push(est);
+		switch (audit_ev.kind) {
+		case camerabox::CbLockEventKind::Locked:
+		case camerabox::CbLockEventKind::Updated:
+			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
+			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
+			     audit_ev.offset_ms, audit_ev.matched, audit_ev.mad_ms);
+			break;
+		case camerabox::CbLockEventKind::Unlocked:
+			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
+			break;
+		case camerabox::CbLockEventKind::None:
+		default:
+			break;
+		}
+
 		if (!est.ok)
 			continue; // still measuring — never display an untrustworthy number
 

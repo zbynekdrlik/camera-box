@@ -939,6 +939,34 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   reasoned-not-measured, with a follow-up issue (#620) filed to re-ground it if real footage ever
   surfaces. The 120Hz upgrade remains the fully rigorous long-term fix for the whole class of
   run-length/density heuristics.
+- **#620 — CLOSED: #604's local-density constants re-grounded against real recordings; the real
+  data landed a DIFFERENT finding than expected.** Two qualifying recordings (avg_step≈1.003,
+  local_stuck_density 12.2-12.8% in the existing 180-pair window) turned up once real rig runs
+  existed. Two things worth remembering for the NEXT calibration:
+  - **Verify the dispatch's framing against the data before trusting it.** The task briefing
+    claimed "both went green through the merge gate despite 12% local density" — the REAL verdict
+    JSONs show `imag_optical_beat_pass: false` / `overall_pass: false` on BOTH under the
+    UNCHANGED constants. Always re-derive PASS/FAIL from the actual JSON, never from a summary a
+    prior comment/dispatch asserted.
+  - **A "12% local density" real anchor did NOT turn out to be a short isolated burst.** Gap-
+    between-duplicates analysis on the raw per-frame tick sequence (`imag-partial-<run>.json`'s
+    `frames[].tick`, in `frame_index` order) revealed a striking non-random spike at EXACTLY 15
+    adjacent pairs apart (~4 Hz at 60fps) recurring through nearly the WHOLE ~367s span in both
+    recordings — a pervasive periodic defect, not a bounded event. Consequence: the WHOLE-window
+    #588 term (`imag_optical_stuck_density`, 4.7%/6.3%) already failed both independently of #604's
+    local term. **Reusable technique for the next density-gate calibration:** (1) compute the
+    gap distribution between consecutive Δ0 pairs (`stuck_idx[i] - stuck_idx[i-1]`) — a sharp spike
+    at one gap value means a PERIODIC defect, a flat/uniform distribution means genuinely random
+    noise; (2) sweep `max_local_stuck_density` across several window widths (e.g. 30/60/180/
+    600/1200 pairs) — a smooth monotonic decrease with no knee means the defect is pervasive
+    (any window width works), a sharp peak at one width means a genuinely bounded burst (that
+    width is the one to keep). Both are cheap Python re-implementations of the Rust ring-buffer
+    algorithm run directly against the partial JSON — no rig access needed, no new recording.
+  - The window (180 pairs) and ceiling (5%) VALUES were kept UNCHANGED — the real numbers
+    CONFIRMED rather than moved them (real judder local density sits ~2.4-2.6x above the ceiling;
+    the only known healthy anchor, 572001, sits ~50x below it). The root cause of the periodic
+    defect itself was filed separately as #656 (out of scope for a calibration ticket) — a
+    calibration ticket's job is to get the THRESHOLD right, not to fix what it measures.
 - **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
   design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
   it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
