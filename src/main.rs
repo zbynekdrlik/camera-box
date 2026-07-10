@@ -400,6 +400,11 @@ async fn run_capture_loop(
     let frame_rate = capture.frame_rate();
     tracing::info!("Capturing at {}x{}", width, height);
 
+    // #663 — owned copy of the resolved device path for the self-heal USB reset (the capture
+    // loop below runs on a `'static` spawn_blocking closure, so the borrowed `device_path: &str`
+    // parameter can't be captured directly).
+    let device_path_owned = device_path.to_string();
+
     // Genlock #11: optionally emit NDI at a target broadcast rate, decimating the
     // faster capture onto DanteSync wall-clock boundaries, so a downstream
     // genlocked OBS (genlock_fifo) consumes exactly one frame per render tick =
@@ -528,6 +533,15 @@ async fn run_capture_loop(
         let mut consecutive_rate_breaches: u32 = 0;
         let configured_capture_fps: f64 =
             frame_rate.numerator as f64 / frame_rate.denominator.max(1) as f64;
+
+        // #663 — self-heal: set (instead of calling `std::process::exit` immediately) once a USB
+        // reset attempt has run, so the loop below stops via the NORMAL `running_capture` flag
+        // and falls through to the EXISTING shutdown cleanup (burn ring drain, grab-recorder
+        // flush, burn-thread join, capture-stats sidecar write) before the process actually
+        // exits. A raw mid-loop `process::exit` would skip all of that — harmless in plain
+        // production, but it would truncate an in-flight `--record-grab` E2E recording if a
+        // self-heal fires mid-test (review finding, #663).
+        let mut pending_self_heal_exit_code: Option<i32> = None;
 
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
@@ -889,6 +903,103 @@ async fn run_capture_loop(
                                 consecutive_rate_breaches,
                                 consecutive_rate_breaches as u64 * 5
                             );
+
+                            // #663 — self-heal: the #656 fix (a manual USB reset) is only
+                            // TEMPORARY — the same defect recurred within hours, three times in
+                            // one day (live incident). Rate-limited + escalating automatic USB
+                            // reset (see capture_rate_selfheal module doc for the full design).
+                            let now_epoch_s = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let state_path =
+                                std::path::Path::new(camera_box::capture_rate_selfheal::STATE_PATH);
+                            let prev_selfheal_state =
+                                camera_box::capture_rate_selfheal::load_state(state_path);
+                            let (selfheal_decision, next_selfheal_state) =
+                                camera_box::capture_rate_selfheal::decide_selfheal(
+                                    prev_selfheal_state,
+                                    true,
+                                    now_epoch_s,
+                                    camera_box::capture_rate_selfheal::DEFAULT_MIN_HEAL_INTERVAL_S,
+                                    camera_box::capture_rate_selfheal::DEFAULT_RECURRENCE_WINDOW_S,
+                                    camera_box::capture_rate_selfheal::DEFAULT_CRITICAL_ESCALATION_HEALS,
+                                );
+                            match selfheal_decision {
+                                camera_box::capture_rate_selfheal::SelfHealDecision::Healthy => {
+                                    // Unreachable: we only reach this block once should_warn (a
+                                    // confirmed sustained deviation) is already true.
+                                }
+                                camera_box::capture_rate_selfheal::SelfHealDecision::Throttled {
+                                    seconds_remaining,
+                                } => {
+                                    tracing::warn!(
+                                        "#663 self-heal rate-limited: the last USB reset attempt was too recent — {}s remaining before another attempt is allowed",
+                                        seconds_remaining
+                                    );
+                                }
+                                camera_box::capture_rate_selfheal::SelfHealDecision::Heal {
+                                    attempt_number,
+                                    escalate_critical,
+                                } => {
+                                    if escalate_critical {
+                                        tracing::error!(
+                                            "{}",
+                                            camera_box::capture_rate_selfheal::critical_escalation_message(
+                                                &device_path_owned,
+                                                attempt_number
+                                            )
+                                        );
+                                    }
+                                    if let Err(e) = camera_box::capture_rate_selfheal::save_state(
+                                        state_path,
+                                        &next_selfheal_state,
+                                    ) {
+                                        tracing::error!(
+                                            "#663 self-heal: failed to persist self-heal state to {}: {} (rate-limit/escalation count may not survive this restart)",
+                                            camera_box::capture_rate_selfheal::STATE_PATH,
+                                            e
+                                        );
+                                    }
+                                    match camera_box::capture_rate_selfheal::perform_usb_reset(
+                                        &device_path_owned,
+                                    ) {
+                                        Ok(()) => {
+                                            tracing::warn!(
+                                                "#663 self-heal: USB reset attempt #{} succeeded — will exit (code {}) after graceful shutdown so systemd restarts camera-box against the re-enumerated device",
+                                                attempt_number,
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE
+                                            );
+                                            running_capture.store(false, Ordering::Relaxed);
+                                            pending_self_heal_exit_code = Some(
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            // Review finding (#663): a TOTAL reset failure (e.g.
+                                            // the reauthorize retries above all failed) can leave
+                                            // the capture device WORSE than the original rate
+                                            // defect — possibly fully disconnected. That deserves
+                                            // CRITICAL visibility, not a buried error line, and the
+                                            // process should still exit so `systemctl status`
+                                            // visibly reflects the failure and a fresh process gets
+                                            // a clean shot at it next rate-limit window (the state
+                                            // file already recorded this attempt, so the 600s
+                                            // throttle applies regardless of exiting here).
+                                            tracing::error!(
+                                                "CRITICAL #663: self-heal USB reset attempt #{} FAILED: {:#} — the capture device may now be in a WORSE state than the original rate defect (possibly disconnected); exiting (code {}) after graceful shutdown so systemd retries with a fresh process",
+                                                attempt_number,
+                                                e,
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE
+                                            );
+                                            running_capture.store(false, Ordering::Relaxed);
+                                            pending_self_heal_exit_code = Some(
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // #299 — log the most recent chroma sample alongside the fps report.
@@ -984,6 +1095,20 @@ async fn run_capture_loop(
                 ),
                 Err(e) => tracing::error!("failed to write cam2→cam1 capture-stats sidecar: {e:#}"),
             }
+        }
+
+        // #663 — self-heal exit, AFTER all the shutdown cleanup above has run (burn ring drain,
+        // grab-recorder flush, burn-thread join, capture-stats sidecar write). `main()`'s own
+        // shutdown path only ever proceeds past `signal::ctrl_c().await` on an actual Ctrl+C —
+        // this capture loop exiting on its own (self-heal) would otherwise leave `main()` awaiting
+        // a signal that never comes, so the process must exit explicitly here to actually restart
+        // via systemd's `Restart=always`.
+        if let Some(code) = pending_self_heal_exit_code {
+            tracing::warn!(
+                "#663 self-heal: shutdown cleanup complete — exiting now (code {})",
+                code
+            );
+            std::process::exit(code);
         }
     });
 

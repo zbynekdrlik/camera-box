@@ -747,6 +747,43 @@ cannot synchronize with a single foreground invocation) — two independent full
 passes + a manual restart in between + the gate binary on the two resulting verdict JSONs
 reproduces the exact same proof the built-in mode's internal helper would produce.
 
+**More manual-dispatch gotchas found re-running this protocol (2026-07-10, #660/#466):**
+
+- **NEVER set `PROBE_BIN_DIR` to a pre-downloaded CI artifact dir for a manual `recording-e2e.sh`
+  dispatch.** `[1/8]` always builds fresh into `target/release` regardless of `PROBE_BIN_DIR`
+  (there is no "skip the build" mode), and `[2/8]`'s cam1 upload then looks for a binary literally
+  named `camera-box` in `$PROBE_BIN_DIR` — the CI `probe-tools-linux-amd64` artifact ships that
+  same binary as `camera-box-probe` instead, so overriding the var produces
+  `scp: stat local ".../camera-box": No such file or directory` and an early, silent-looking abort
+  (cleanup trap fires, log ends after ~2 minutes with no obvious error unless you scroll up). Just
+  leave `PROBE_BIN_DIR` at its default — the local probe-featured build here is the SANCTIONED
+  exception to the Tier-0 no-local-`--features probe` policy (this script IS the E2E gate; CI runs
+  the identical build step on the same self-hosted box).
+- **Set `COLOUR_GATE=0` for any manual painter launch that doesn't pass `--colour-scale`.** A
+  plain `frame-probe --paint-only --dual-qr` (no colour band painted) makes `--colour-gate`
+  abort BOTH `--extract-partial` (`could not localize the dual-QR colour scale in ANY of N sampled
+  frames`, no partial JSON written at all) and the final merge (`no carried colour summary`) — this
+  is documented behavior (`recording-e2e.sh`'s own `COLOUR_GATE=0` comment), not a bug. Drop
+  `--colour-gate` from every extract-partial AND the merge command consistently, or the merge will
+  error before printing any verdict.
+- **A `win-strih`/`win-stream-snv` Shell call running `recording-verdict.exe --extract-partial`
+  inline routinely exceeds the MCP tool's own idle-timeout (~300s) for a strih/stream recording at
+  30fps over ~300-330s** (the decode genuinely takes 4-6 minutes). Two outcomes are possible on
+  timeout and you cannot tell which happened without checking: (a) the process keeps running
+  server-side and finishes fine — `Test-Path` the expected output JSON a bit later; (b) the MCP
+  timeout kills the child too — nothing gets written, silently. If a plain re-run also stalls,
+  launch it DETACHED so it survives the tool call regardless: `Start-Process -FilePath
+  recording-verdict.exe -ArgumentList '...' -RedirectStandardOutput out.log -RedirectStandardError
+  err.log -PassThru` (capture `$proc.Id` to a file, since each Shell call is a FRESH PowerShell
+  session — nothing in-memory survives between calls), then poll `Get-Process -Id <id>` /
+  `Test-Path <output>` in short follow-up calls until it completes.
+- **`FileDownload` on a JSON partial >~2MB errors "exceeds maximum allowed tokens" but still saves
+  the RAW MCP response to a local `.txt` file** — that file is `{"result": "[task:...]
+  base64:NNbytes:<payload>"}`; the actual content is BASE64 but prefixed with a `[task:...]
+  base64:NNbytes:` header that must be stripped (`re.search(r"bytes:(.*)$", s,
+  re.DOTALL).group(1)`) before `base64.b64decode` — decoding the raw `result` string directly
+  fails with an "Invalid base64" padding error.
+
 **PowerShell `Start-Process -ArgumentList` gotcha — an array element containing a SPACE (a Windows
 path like `D:\_REC\2026-07-10 17-10-31.mkv`) gets word-split into TWO argv entries unless it is
 ITSELF wrapped in escaped double quotes inside the array literal.** `@('--strih', 'D:\_REC\2026-07-10
@@ -1013,14 +1050,28 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   once captured fps sustains >1% deviation for 30s, and an E2E preflight
   (`scripts/lib/capture-rate-guard.sh`) that greps the source camera's journal for that WARN and
   fails fast before burning a 30-min run on an already-defective grabber.
-- **#660 OPEN (filed 2026-07-10, found while running #466's restart-survival dispatch)** — a
-  DIFFERENT, NEWLY discovered imag-optical-tail defect: the LAST ~15-30 frames of a recording
-  occasionally decode a FROZEN, valid QR carrying a STALE run_id (a timestamp from BEFORE the
-  current run — NOT the periodic #656 pattern, NOT random noise: the exact same value repeats for
-  15-30 consecutive frames). Reproduced on TWO independent runs with TWO different stale values,
-  both times only in the tail — `recording_boundary_trim`'s current 3-frame lead/tail window is
-  not wide enough to absorb it. Confirmed NOT restart-related (identical shape before AND after an
-  OBS restart). See #660 for the full frame-by-frame evidence before re-deriving from scratch.
+- **#660 CLOSED (2026-07-10, PR #662)** — the imag-optical-tail stale-QR defect (LAST ~15-30
+  frames occasionally decoding a FROZEN, valid QR carrying a run_id from a PRIOR invocation).
+  Root cause: `probe::kms::KmsPresenter` never touches `/dev/fb0` (it drives the CRTC through its
+  own DRM dumb buffers) — on `Drop` (painter self-exit), releasing DRM master lets the kernel's
+  fbdev-emulation client regain the CRTC and reveal whatever `/dev/fb0`'s UNMANAGED memory last
+  held (a prior `VsyncFb` fallback write, or camera-box's own `--display` module's last frame).
+  Fixed: `KmsPresenter::Drop` now blanks `/dev/fb0` BEFORE releasing master/fbcon (`src/fb_blank.rs`
+  + `probe::fb::blank_fbdev`). Live-verified 3 ways (CI E2E gate showing the tail genuinely
+  undecodable not frozen, `/tmp/painter.log` logging the blank firing, and a full manual
+  restart-survival re-dispatch showing neither before/after run reproduces it). This is the SAME
+  general class as #131/#135 (`.claude/skills/display`'s phantom/latched-framebuffer history) —
+  next time a display/painter handoff shows stale content, check whether the NEW writer actually
+  clears the OLD writer's buffer before revealing it, the same question that cracked this one.
+- **cam1 ShadowCast 2 grabber judder is NOT permanently fixed by #656's USB reset — it recurred
+  same-day, filed as #663.** #656's `authorized` 0→1 toggle fixes the symptom for a while, but the
+  underlying quantized-~64fps drift can return within hours; when it does, expect BOTH (a) a
+  gross version (captured fps visibly >61 in `journalctl -u camera-box | grep Streaming:`, fixed
+  the same way) and (b) a SUBTLER version that still averages ~60fps but fails imag's `#588`
+  systematic-judder gate (Δ0 duplication density over its 1% ceiling) — the existing
+  `capture-rate-guard.sh` E2E preflight only catches (a), not (b). If a restart-survival or
+  full-path E2E run fails ONLY on imag's `#588` judder gate (never on delivery/burn contiguity),
+  re-check cam1's capture rate and USB-reset it before assuming a code regression.
 - **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
   design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
   it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
