@@ -2815,3 +2815,22 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   RED/GREEN commits and noting the `full-path-e2e` PR check on #647 will likely still report
   `RIG_BUSY` while the rig stays occupied — not yet a required check, not blocking, a separate
   acceptance step (owned by the supervisor, same as #650's above).
+
+## #647 + #648 + #650 — the hard rig E2E merge gate is LIVE (2026-07-10)
+
+- Chain completed: dantesync#47 (HTTP :8898 status endpoint, v1.8.18 fleet-wide) → #648
+  (recording-e2e.sh [0/8] DanteSync gate reads it live, unattended) → #650 (standing :8899
+  bundle-state service on strih+stream) → PR #647 merged (`512fc72cb`).
+- First fully-unattended clean full-path E2E run: 29070220582 — busy-interlock RIG_FREE →
+  DanteSync gate PASS (strih 0µs, stream 47-178µs, 4 nodes PTP LOCKED) → version-integrity PASS →
+  frozen-camera PASS → render-budget PASS (imag 60fps/5.25ms, stream 30fps/2.42ms, strih
+  30fps/20.84ms) → full record+decode+merge zero-loss verdict PASS. Zero human/MCP intervention.
+- Branch protection enabled on main (was previously UNPROTECTED — none existed): required checks =
+  "Full-path E2E (rig zero-loss gate)" + Test/Build/Lint/Coverage/Python/Shellcheck/Security/
+  Drift-Guard, strict (require branches up to date). Post-merge main CI: 29075639033 SUCCESS.
+- Incidents found+fixed on the way: #649 (cancelled run leaves recordings ON → cleanup-trap
+  hardening + started-flags), 2× stray-recording RIG_BUSY deadlock (both proven OUR OWN ad-hoc
+  StartRecords via OBS logs — e2e skill GOTCHA added), ~638GB of accumulated test recordings
+  cleaned off strih(499GB)+stream(139GB) → #652 filed for auto-cleanup, #651 filed for
+  transient-WS-refusal retry, #646 filed for docs-only carve-out (all three dispatched as the
+  next batch).
