@@ -147,6 +147,35 @@ wrong PR with no review of it.
   The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
   repo going forward.
 
+## GOTCHA — editing `scripts/recording-e2e.sh` can silently break OTHER test files' static anchors
+
+Many separate `tests/harness_*.rs` files independently `.find()` literal substrings/adjacency in
+`scripts/recording-e2e.sh` (a banner like `"[5/8] StartRecord"`, or structural adjacency like
+`fi\ntrap cleanup EXIT`) to pin ordering/structure — the same static-string-assertion model
+`tests/harness_recording_e2e_cleanup_resilient.rs` (#328) established, now reused across many
+unrelated features (`#137` av-restart-sync, `#286` all-cambox burn targets, `#649` StopRecord
+ordering, etc.). A new comment or code line you add to this file CAN accidentally (1) duplicate a
+literal anchor another test's `.find()` relies on — `.find()` returns the FIRST match in the WHOLE
+file, not the occurrence near your own edit — or (2) break a textual adjacency two unrelated tests
+hard-code (e.g. inserting a line between an `if` block's closing `fi` and the following `trap
+cleanup EXIT HUP INT TERM` line).
+
+**Confirmed live (#649, 2026-07-10):** a new `cleanup()` comment containing the literal text
+`[5/8] StartRecord` broke 3 tests in `tests/harness_av_restart_sync_gate.rs` (the `#137` gate,
+which anchors on that exact string to slice "everything before the main record step"); and adding
+new variable declarations directly before `trap cleanup EXIT HUP INT TERM` broke
+`recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286` in
+`tests/harness_recording_e2e_paths.rs` (which hard-codes that the `#286` ALL_CAMBOX block's
+closing `fi` is immediately followed by `trap cleanup EXIT`).
+
+**Mitigation:** after ANY edit to `scripts/recording-e2e.sh`, run the FULL `cargo test` suite —
+not just your own new/targeted test file — before pushing (`cargo test # airuleset:build-ok`
+locally bypasses the Tier-0 build-block for this one-off check; Tier-0 policy is otherwise
+`cargo test --no-run` only, see below). A failure elsewhere in the suite right after touching this
+file is very likely a textual collision, not a real regression — grep the failing test's
+`.find(...)` argument (or the surrounding slice logic) to see which literal string or adjacency
+moved, then reword your new text (or relocate it) so it no longer matches/breaks that anchor.
+
 ## Local Build Policy
 
 **Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**

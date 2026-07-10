@@ -2773,3 +2773,45 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   `Connection refused` during a mid-recording OBS restart on stream (filed as #651, unrelated).
   Left #650 OPEN pending an observed clean CI pass; PR #647 NOT merged, branch protection NOT
   flipped yet — both deferred to whenever the rig frees and the gate is observed to pass.
+
+## 2026-07-10 — #649 cancelled full-path-e2e leaves recordings ON → self-deadlocks RIG_BUSY
+
+- Version bump `6d8630862` (1.7.0-dev.320 → .321). RED `912da3661` (all 6 new
+  `tests/harness_recording_e2e_stoprecord_first.rs` tests + 9 of the extended
+  `tests/python/test_obs_phase2_rig_busy_check.py` tests fail against the pre-fix scripts),
+  GREEN `fc0e516d6`.
+- Root cause confirmed from the issue's own live evidence: `recording-e2e.sh`'s cleanup() reached
+  `obs_phase2.py record --action stop` only AFTER the rig-heartbeat/e2e-marker clears + the cam1
+  ssh restore + the cam2 ssh restore (each up to `CLEANUP_SSH_TIMEOUT`=30s) — a GitHub Actions
+  cancellation's SIGINT→grace→SIGKILL window landed before the trap reached StopRecord, leaving
+  strih+stream recording. Every later gate run then saw `RIG_BUSY` with no way to tell "our own
+  leftover" from a real broadcast.
+- Fix: cleanup() now StopRecords strih/stream/imag as the FIRST action (before the #328
+  cam-device-free block), each guarded by a `*_RECORDING_STARTED` flag set only right after that
+  box's own `StartRecord` succeeds at `[5/8]` — an early abort before `[5/8]` leaves every flag at
+  its 0 default, so cleanup() never blind-stops a box this run never started recording on (which
+  could otherwise kill a real broadcast's recording — issue item 2).
+- `obs_phase2.py rig-busy-check` now reports per-box streaming/recording diagnostics +
+  `outputTimecode`, plus a pure `_rig_busy_hint()` (unit-tested directly, no fake WebSocket
+  needed) distinguishing a stray leftover recording (record-only, no streaming — the exact #649
+  shape) from a real broadcast (record+stream together); `rig-busy-gate.sh` surfaces the hint as
+  its own log line (issue item 3).
+- Two textual collisions surfaced while writing the reorder: a new comment I added duplicated the
+  literal anchor `[5/8] StartRecord` that `harness_av_restart_sync_gate.rs` searches for (fixed by
+  rewording the comment), and placing the new flag declarations directly before `trap cleanup
+  EXIT` broke `harness_recording_e2e_paths.rs`'s assumption that the ALL_CAMBOX BURN_TARGETS
+  block's closing `fi` is immediately followed by `trap cleanup EXIT` (fixed by moving the flag
+  declarations earlier, right after the `BURN_TARGETS=(...)` array). Both caught locally before
+  push by running the full `cargo test` suite, not just the new test file.
+- Per this ticket's explicit scope: CODE-ONLY, no live rig E2E run (the rig was occupied by an
+  unattributed recording at dispatch time). Local verification: full default-feature `cargo test`
+  (523+ tests) green, `cargo fmt`/`clippy -D warnings`/`ruff check`/`shellcheck` all clean.
+- Commits ride PR #647's diff (shared `dev` branch, per this repo's own auto-close GOTCHA in
+  CLAUDE.md) — used `fix(#649): ...`/`test(#649): ...` parenthesized commit forms so #649 does
+  NOT get auto-closed by PR #647's eventual merge; PR #647's body was NOT touched. Regular `ci.yml`
+  green on `dev` (run 29069853022 — Lint/Test/Build/Code Coverage/Security Audit/Drift Guard/
+  Python harness tests/Windows probe build/Shellcheck all succeeded). Closed #649 manually via
+  `gh issue comment` + `gh issue close --reason completed` (issuecomment-4932120499), citing the
+  RED/GREEN commits and noting the `full-path-e2e` PR check on #647 will likely still report
+  `RIG_BUSY` while the rig stays occupied — not yet a required check, not blocking, a separate
+  acceptance step (owned by the supervisor, same as #650's above).
