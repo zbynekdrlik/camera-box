@@ -369,6 +369,16 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
+  # #657: cleanup() can now be invoked TWICE on an interrupted run — once synchronously via the
+  # INT/TERM/HUP trap (fired the instant interruptible_sleep's `wait` is interrupted, BEFORE
+  # `wait` even returns control to the caller), and again via the EXIT trap once
+  # interruptible_sleep's own `exit` call actually terminates the shell. Both traps point at the
+  # SAME function name (armed on EXIT HUP INT TERM further below), so guard re-entry here: only
+  # the FIRST invocation does the real teardown work; a second call is a safe, instant no-op.
+  if [ "${CLEANUP_HAS_RUN:-0}" = "1" ]; then
+    return
+  fi
+  CLEANUP_HAS_RUN=1
   # #649: StopRecord is the VERY FIRST thing cleanup() does — before EVEN the heartbeat/marker
   # clears below, and well before the #328 cam-device-free block. Root cause of the live incident
   # (2026-07-10): a GitHub Actions cancellation sends SIGINT, then SIGKILLs after a short grace
@@ -501,6 +511,40 @@ systemctl start cam2-painter 2>/dev/null || true"
       echo "        scripts/rig-mode.sh event (or obs_burn_filter.py remove) before any live broadcast." >&2
     fi
   done
+}
+# #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
+# that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is
+# documented bash trap behavior, not an orphaning artifact: empirically confirmed live
+# (2026-07-10) against the REAL self-hosted dev1 Actions runner — a `gh run cancel` delivered
+# SIGINT, then SIGTERM ~7.5s later, then an untrappable "kill entire process tree" ~2.5s after
+# that (the runner's OWN documented escalation, confirmed via its Worker log), while a bash
+# process sat inside a bare `sleep 180`, and the EXIT/HUP/INT/TERM trap NEVER got a chance to
+# run at all — the whole process was killed by the runner's escalation before the deferred trap
+# could ever fire. This is exactly recording-e2e.sh's own recording window (below: [6/8] steady
+# state + the ALL_CAMBOX per-segment wait) — a cancellation mid-recording would defer
+# cleanup()'s (#649 StopRecord-first) trap for the ENTIRE remaining DURATION (300-1810s), far
+# past the runner's ~10s grace window, so the trap effectively never runs on a live cancel.
+#
+# `wait` (unlike directly awaiting a foreground external command) IS documented — and here
+# empirically verified against the real runner — to return immediately once a trapped signal
+# arrives, even mid-wait, with an exit status > 128. So: background the sleep and `wait` on it
+# instead of blocking on it directly. If `wait` returns EARLY (status > 128), the EXIT/HUP/INT/
+# TERM trap has ALREADY run cleanup() (synchronously, before `wait` returns control) — kill the
+# now-superfluous background sleep and `exit` immediately, rather than letting the script
+# blunder on into the rest of the harness as though the recording had completed normally
+# (re-StopRecording an already-stopped box, downloading/decoding a run that was never meant to
+# complete).
+interruptible_sleep() {
+  local secs="$1" pid rc
+  sleep "$secs" &
+  pid=$!
+  wait "$pid"
+  rc=$?
+  if [ "$rc" -gt 128 ]; then
+    kill "$pid" 2>/dev/null || true
+    echo "interruptible_sleep: interrupted (signal $((rc - 128))) before ${secs}s elapsed -- exiting (cleanup already ran via trap, #657)" >&2
+    exit "$rc"
+  fi
 }
 # #246: define the prod scene/source names BEFORE the trap so cleanup()'s burn-clear loop (which
 # references $STRIH_PROG_SOURCE / $STREAM_PROG_SOURCE) never hits a `set -u` unbound-variable on an
@@ -1385,7 +1429,7 @@ if [ "$ALL_CAMBOX" = "1" ]; then
     else
       _SEG_BOUNDARIES+=("$_switch_ns")        # each later switch CLOSES the previous segment
     fi
-    sleep "$SEGMENT_SECS"
+    interruptible_sleep "$SEGMENT_SECS"
     _seg_i=$((_seg_i+1))
   done
   _SEG_BOUNDARIES+=("$(date +%s%N)")          # final boundary = end of the last segment (≈ stop)
@@ -1402,7 +1446,7 @@ else
   # 299.9 s < 300.0). Record DURATION + RECORD_PAD so the ANALYZED span reaches the floor.
   RECORD_PAD="${RECORD_PAD:-10}"
   echo "[6/8] steady-state run: ${DURATION}s + ${RECORD_PAD}s pad (run_id=$RUN_ID)"
-  sleep "$(( DURATION + RECORD_PAD ))"
+  interruptible_sleep "$(( DURATION + RECORD_PAD ))"
 fi
 
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"

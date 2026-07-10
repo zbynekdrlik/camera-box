@@ -142,8 +142,8 @@ fn full_path_e2e_yml_recording_step_is_conditioned_on_docs_only() {
         .find("Recording-based 4-node cam2")
         .expect("the recording-e2e step must still exist");
     let run_pos = s
-        .find("run: bash scripts/recording-e2e.sh")
-        .expect("recording-e2e.sh must still be invoked");
+        .find("run: exec bash scripts/recording-e2e.sh")
+        .expect("recording-e2e.sh must still be invoked (via `exec`, #657)");
     let block = &s[step_name_pos..run_pos];
     assert!(
         block.contains("steps.docs-only.outputs.docs_only"),

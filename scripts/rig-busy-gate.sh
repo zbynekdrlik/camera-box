@@ -16,12 +16,23 @@ set -euo pipefail
 # from "runner/rig unreachable, fail-closed" apart from a genuine code regression in the E2E step
 # that follows this gate in the same job.
 #
+# #657: even with the recording-e2e.sh cleanup-trap + interruptible-sleep hardening (belt), this
+# gate ALSO self-heals as a suspenders: obs_phase2.py's rig-busy-check already reports a
+# "stray_hosts" list — boxes matching EXACTLY "our own stray recording" (recording ON, streaming
+# OFF; a real broadcast always streams+records together, so this signature can never be a real
+# broadcast). After STRAY_HEAL_THRESHOLD CONSECUTIVE polls showing a box in that stray_hosts list,
+# this gate StopRecords that box itself (StopRecord only — keeps the file, never touches program
+# routing) and logs loudly, converting what used to be a PERMANENT self-deadlock (every later gate
+# run dying RIG_BUSY on our own leftover until a human manually intervened, #657 live incident:
+# 4+ runs failed in one session, ~45 min of rig time lost) into a self-healing one.
+#
 # Env overrides (tests + operators):
 #   STRIH_HOST / STREAM_HOST         - rig OBS WebSocket hosts (default 10.77.9.202 / .204)
 #   OBS_PASSWORD                     - OBS WebSocket password (default "" — matches recording-e2e.sh)
 #   OBS_PHASE2_PY                    - path to obs_phase2.py (default: sibling of this script)
 #   RIG_BUSY_GATE_ITERATIONS         - max poll count (default 30)
 #   RIG_BUSY_GATE_SLEEP_SECS         - seconds between polls (default 60)
+#   STRAY_HEAL_THRESHOLD             - consecutive stray-only polls before self-heal (default 3, #657)
 #   GITHUB_STEP_SUMMARY              - if set (GitHub Actions), OUTCOME=... is appended there too
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +42,7 @@ OBS_PASSWORD="${OBS_PASSWORD:-}"
 OBS_PHASE2_PY="${OBS_PHASE2_PY:-$HERE/obs_phase2.py}"
 MAX_ITERATIONS="${RIG_BUSY_GATE_ITERATIONS:-30}"
 SLEEP_SECS="${RIG_BUSY_GATE_SLEEP_SECS:-60}"
+STRAY_HEAL_THRESHOLD="${STRAY_HEAL_THRESHOLD:-3}"
 
 # Always echo the outcome to stdout (so it shows in the plain job log, and is asserted by the
 # harness tests) AND append it to GITHUB_STEP_SUMMARY when running under GitHub Actions.
@@ -38,6 +50,32 @@ report_outcome() {
   echo "$1"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "$1" >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+# #657: per-host CONSECUTIVE stray-poll counters, reset to 0 the instant a poll does NOT show
+# that host in stray_hosts (a real broadcast starting mid-wait, or the rig going genuinely free,
+# must never inherit a stale streak from an earlier, unrelated stray episode).
+declare -A STRAY_STREAK
+STRAY_STREAK[strih]=0
+STRAY_STREAK[stream]=0
+
+# #657: StopRecord ONE box (via obs_phase2.py's existing `record --action stop` — the same call
+# recording-e2e.sh's cleanup() and rig-mode.sh's stray-recording guard already use) once its
+# consecutive stray-poll streak reaches STRAY_HEAL_THRESHOLD, then reset the streak. Never called
+# for a box NOT in stray_hosts — obs_phase2.py's _stray_recording_hosts already guarantees
+# stray_hosts never includes a box that is also streaming, so this can never touch a real
+# broadcast.
+self_heal_stray_box() {
+  local label="$1" host="$2"
+  if [ "${STRAY_STREAK[$label]}" -ge "$STRAY_HEAL_THRESHOLD" ]; then
+    echo "::warning title=SELF-HEAL StopRecord (#657)::${label} (${host}) has shown OUR OWN stray recording (recording ON, streaming OFF) for ${STRAY_STREAK[$label]} consecutive polls -- StopRecording it now (file kept, program routing untouched) so this gate can proceed. Never done for a box that is also streaming."
+    if python3 "$OBS_PHASE2_PY" record --host "$host" --action stop; then
+      echo "[rig-busy-gate] #657 self-heal: ${label} StopRecord ok"
+    else
+      echo "::warning::#657 self-heal StopRecord failed for ${label} -- will retry on a later poll"
+    fi
+    STRAY_STREAK[$label]=0
   fi
 }
 
@@ -79,6 +117,21 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   if [ -n "$HINT" ]; then
     echo "[rig-busy-gate] HINT: $HINT"
   fi
+
+  # #657: update each box's consecutive-stray-poll streak from this check's stray_hosts list,
+  # then self-heal any box that just crossed the threshold. A box NOT in stray_hosts this poll
+  # (free, or now a real broadcast, or the OTHER box) has its streak reset to 0 — a streak only
+  # ever counts truly CONSECUTIVE stray polls.
+  STRAY_HOSTS_CSV=$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("stray_hosts", [])))' 2>/dev/null || true)
+  for _stray_label in strih stream; do
+    if printf ',%s,' "$STRAY_HOSTS_CSV" | grep -q ",${_stray_label},"; then
+      STRAY_STREAK[$_stray_label]=$(( STRAY_STREAK[$_stray_label] + 1 ))
+    else
+      STRAY_STREAK[$_stray_label]=0
+    fi
+  done
+  self_heal_stray_box strih "$STRIH_HOST"
+  self_heal_stray_box stream "$STREAM_HOST"
 
   echo "[rig-busy-gate] rig busy — will retry."
   if [ "$i" -lt "$MAX_ITERATIONS" ]; then

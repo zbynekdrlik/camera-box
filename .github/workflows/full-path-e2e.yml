@@ -145,7 +145,16 @@ jobs:
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
           # on a pull_request event); workflow_dispatch keeps its own default/operator override.
           DURATION: ${{ inputs.duration_secs || '300' }}
-        run: bash scripts/recording-e2e.sh
+        # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
+        # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
+        # signals directly (empirically confirmed: it signals only the single top-level step PID
+        # it started). Without `exec`, that outer wrapper eventually dies to the signal itself
+        # (deferred ~10s) and orphans the inner trap-holding bash (reparented to pid 1) BEFORE the
+        # runner's "kill entire process tree" sweep — so the orphan survives that sweep and is
+        # only reaped later by an untrappable kill, and cleanup()'s trap never runs at all. With
+        # `exec`, there is no separate child to orphan: the runner's direct-PID signal lands on
+        # the actual trap-holding process.
+        run: exec bash scripts/recording-e2e.sh
 
       - name: Upload verdict JSON + report PNG + pixel proof
         if: always() # keep the evidence even on a failing verdict

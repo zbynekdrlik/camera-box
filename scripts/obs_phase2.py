@@ -1544,6 +1544,39 @@ def switch(a):
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
 
 
+def _rig_busy_partition(diagnostics):
+    """#649/#657 (pure, testable — no I/O): partition per-box streaming/recording booleans into
+    the three mutually-exclusive categories both _rig_busy_hint (the human-readable diagnosis)
+    and _stray_recording_hosts (the #657 self-heal decision) key on:
+      - recording=true, streaming=false on a box  -> matches a stray harness leftover (#649).
+      - recording=true, streaming=true  on a box  -> matches a REAL broadcast; do NOT touch it.
+      - streaming=true,  recording=false on a box -> doesn't match the harness's own pattern
+                                                      either way; flag for a manual look.
+
+    *diagnostics* is a list of ``{"host": str, "streaming": bool, "recording": bool,
+    "recordTimecode": str|None}`` dicts (one per box). Returns
+    ``(real_broadcast, recording_only, streaming_only)`` — each a list of host labels.
+    """
+    recording_only = [d["host"] for d in diagnostics if d["recording"] and not d["streaming"]]
+    real_broadcast = [d["host"] for d in diagnostics if d["recording"] and d["streaming"]]
+    streaming_only = [d["host"] for d in diagnostics if d["streaming"] and not d["recording"]]
+    return real_broadcast, recording_only, streaming_only
+
+
+def _stray_recording_hosts(diagnostics):
+    """#657 (pure, testable — no I/O): hosts EXACTLY matching "our own stray recording"
+    (recording ON, streaming OFF) — the same signature _rig_busy_hint calls out as "matches OUR
+    OWN stray/E2E test recording" (#649). Exposed as its own function (not just baked into the
+    hint STRING) so rig-busy-gate.sh's self-heal decision — StopRecord a box after it shows
+    EXACTLY this signature for several consecutive polls — can act on the structured list
+    directly, without re-parsing hint prose. NEVER includes a host that is also streaming (a real
+    broadcast always streams+records together, per the same heuristic _rig_busy_hint uses) — so
+    a caller iterating this list can never accidentally touch a real broadcast.
+    """
+    _real_broadcast, recording_only, _streaming_only = _rig_busy_partition(diagnostics)
+    return recording_only
+
+
 def _rig_busy_hint(diagnostics):
     """#649 item 3 (pure, testable — no I/O): turn per-box streaming/recording booleans into a
     short plain-English hint that distinguishes OUR OWN stray/leftover test recording from a real
@@ -1557,19 +1590,14 @@ def _rig_busy_hint(diagnostics):
 
     The heuristic matches how this rig is actually used: a REAL broadcast streams (to FB/YouTube)
     AND records at the same time (see scripts/rig-mode.sh EVENT mode); recording-e2e.sh (this
-    project's own harness) ONLY ever calls StartRecord — it never touches GetStreamStatus. So:
-      - recording=true, streaming=false on a box  -> matches a stray harness leftover (#649).
-      - recording=true, streaming=true  on a box  -> matches a REAL broadcast; do NOT touch it.
-      - streaming=true,  recording=false on a box -> doesn't match the harness's own pattern either
-                                                      way; flag for a manual look.
+    project's own harness) ONLY ever calls StartRecord — it never touches GetStreamStatus. See
+    _rig_busy_partition for the shared category logic.
 
     *diagnostics* is a list of ``{"host": str, "streaming": bool, "recording": bool,
     "recordTimecode": str|None}`` dicts (one per box). Returns "" when nothing is busy (no hint
     needed).
     """
-    recording_only = [d["host"] for d in diagnostics if d["recording"] and not d["streaming"]]
-    real_broadcast = [d["host"] for d in diagnostics if d["recording"] and d["streaming"]]
-    streaming_only = [d["host"] for d in diagnostics if d["streaming"] and not d["recording"]]
+    real_broadcast, recording_only, streaming_only = _rig_busy_partition(diagnostics)
     parts = []
     if real_broadcast:
         parts.append(
@@ -1684,6 +1712,12 @@ def rig_busy_check(a):
         hint = _rig_busy_hint(diagnostics)
         if hint:
             out["hint"] = hint
+        # #657: structured list of hosts matching "our own stray recording" (recording ON,
+        # streaming OFF) — rig-busy-gate.sh's self-heal decision reads this directly instead of
+        # re-parsing the hint prose.
+        stray = _stray_recording_hosts(diagnostics)
+        if stray:
+            out["stray_hosts"] = stray
     print(json.dumps(out))
 
 
