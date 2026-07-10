@@ -37,7 +37,9 @@ fn full_path_e2e_yml_never_uses_trigger_level_path_filter() {
          docs-only PR would get no check run, permanently blocking branch protection"
     );
     // `paths:` under the pull_request trigger specifically (not a stray unrelated key elsewhere).
-    let pr_pos = s.find("pull_request:").expect("pull_request trigger must exist");
+    let pr_pos = s
+        .find("pull_request:")
+        .expect("pull_request trigger must exist");
     let jobs_pos = s.find("\njobs:").unwrap_or(s.len());
     let trigger_block = &s[pr_pos..jobs_pos];
     assert!(
@@ -159,7 +161,9 @@ fn full_path_e2e_yml_recording_step_is_conditioned_on_docs_only() {
 #[test]
 fn full_path_e2e_yml_permissions_include_pull_requests_read() {
     let s = read_workflow();
-    let perm_pos = s.find("permissions:").expect("permissions: block must exist");
+    let perm_pos = s
+        .find("permissions:")
+        .expect("permissions: block must exist");
     let jobs_pos = s.find("\njobs:").unwrap_or(s.len());
     let perm_block = &s[perm_pos..jobs_pos];
     assert!(

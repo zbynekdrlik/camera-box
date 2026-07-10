@@ -62,6 +62,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read  # #646: the docs-only detection step reads the PR diff via `gh pr diff`
 
 # Workflow-level: supersede a stale run on a re-push to the SAME PR (or the same ref for a
 # manual dispatch) so a fast follow-up push doesn't leave an old 30-min-busy-wait run burning
@@ -92,10 +93,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs)
+        id: docs-only
+        # #646: a RUNTIME `if:`-based skip, NEVER `on.pull_request.paths`/`paths-ignore` at the
+        # trigger level — a trigger-level path filter means a docs-only PR gets NO check run at
+        # all for this workflow, and a required status check with no check run ever created reads
+        # as eternally "pending" to branch protection (the PR could never merge). This step still
+        # runs the job and reports a genuine (skipped) outcome instead. workflow_dispatch has no
+        # PR to diff — never treated as docs-only, always runs in full (an operator-run manual
+        # soak should never be silently skipped).
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CHANGED="$(gh pr diff ${{ github.event.pull_request.number }} --name-only)"
+          echo "changed files:"
+          echo "$CHANGED"
+          DOCS_ONLY=true
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md|docs/*|.claude/*) ;;
+              *) DOCS_ONLY=false ;;
+            esac
+          done <<< "$CHANGED"
+          echo "docs_only=$DOCS_ONLY" >> "$GITHUB_OUTPUT"
+          echo "Docs-only PR: $DOCS_ONLY"
+
       - name: Rig-busy gate — refuse to reroute prod OBS while a REAL broadcast is live (#406/#312)
         # Polls OBS WebSocket on strih+stream (GetStreamStatus/GetRecordStatus) for up to 30 min.
         # Distinct exit codes: 0 = free (proceed), 42 = still busy after the budget, 43 = rig
         # unreachable (fails CLOSED, never assumes "free"). See scripts/rig-busy-gate.sh.
+        # #646: SKIPPED (reported skipped, not silently absent) on a confirmed docs-only PR;
+        # always runs for workflow_dispatch (manual soak) regardless.
+        if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
         run: bash scripts/rig-busy-gate.sh
 
       - name: Recording-based 4-node cam2→cam1→strih→stream zero-loss E2E (HARD GATE)
@@ -105,6 +137,9 @@ jobs:
         # #406: recording-e2e.sh ALSO re-checks rig-busy-check itself immediately before it
         # reroutes strih/stream's program scenes (belt-and-braces against the rig going busy
         # in the window between this gate passing and the reroute actually happening).
+        # #646: SKIPPED alongside the busy-gate on a confirmed docs-only PR (never just one of
+        # the two skipped) — always runs for workflow_dispatch regardless.
+        if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
         env:
           NDI_RUNTIME_DIR_V6: /usr/lib/ndi
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
