@@ -229,6 +229,8 @@ def test_rig_busy_check_hint_flags_record_and_stream_as_a_real_broadcast(monkeyp
 
 
 def test_rig_busy_check_strih_unreachable_fails_closed_exit_3(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     def fake_conn(host, password=""):
         if host == "10.77.9.202":
             raise ConnectionRefusedError("no route to host")
@@ -251,6 +253,8 @@ def test_rig_busy_check_strih_unreachable_fails_closed_exit_3(monkeypatch, capsy
 
 
 def test_rig_busy_check_stream_unreachable_fails_closed_exit_3(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     def fake_conn(host, password=""):
         if host == "10.77.9.204":
             raise TimeoutError("connect timed out")
@@ -272,6 +276,8 @@ def test_rig_busy_check_stream_unreachable_fails_closed_exit_3(monkeypatch, caps
 
 
 def test_rig_busy_check_both_unreachable_reports_both_and_exits_3(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     def fake_conn(host, password=""):
         raise OSError(f"unreachable: {host}")
 
@@ -368,6 +374,8 @@ def test_rig_busy_check_retry_sleeps_the_configured_backoff_between_attempts(mon
 
 
 def test_rig_busy_check_rpc_error_on_one_host_fails_closed_not_busy_false(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     # An RPC-level error (e.g. OBS returns a request-status failure) on strih must ALSO fail
     # closed — never silently treated as "strih is idle".
     def fake_conn(host, password=""):

@@ -1593,6 +1593,40 @@ def _rig_busy_hint(diagnostics):
     return " ".join(parts)
 
 
+# #651 live incident (2026-07-10, PR #647 run 29065733523): stream's OBS process restarted
+# mid-broadcast (a legitimate event, not an outage) and the ONE WebSocket connection attempt hit
+# `[Errno 111] Connection refused` during that ~1-2s window — rig_busy_check() had no retry, so
+# it immediately reported that box unreachable (fail-closed, exit 3) and aborted the whole 30-min
+# rig-busy-gate wait, discarding up to 25 minutes of correctly-observed "still busy" state. Retry
+# a per-box connect+query a bounded number of times with a short backoff BEFORE counting it as
+# unreachable — a single transient blip now recovers within the SAME check; a GENUINE persistent
+# outage (every attempt fails) still fails closed exactly as before (never weakened to fail-open).
+RIG_BUSY_QUERY_RETRIES = int(os.environ.get("RIG_BUSY_QUERY_RETRIES", "2"))
+RIG_BUSY_QUERY_RETRY_SLEEP_S = float(os.environ.get("RIG_BUSY_QUERY_RETRY_SLEEP_S", "2"))
+
+
+def _query_box_status(host, password):
+    """Connect + GetStreamStatus/GetRecordStatus for one box, retrying a transient failure
+    (connection refused, timeout, an RPC-level error) up to RIG_BUSY_QUERY_RETRIES extra times
+    with a RIG_BUSY_QUERY_RETRY_SLEEP_S backoff between attempts (#651). Returns
+    (stream_status, record_status) on the first success; re-raises the LAST exception once every
+    attempt (1 + RIG_BUSY_QUERY_RETRIES total) has failed — the caller then correctly treats the
+    box as genuinely unreachable and fails closed."""
+    last_exc = None
+    for attempt in range(RIG_BUSY_QUERY_RETRIES + 1):
+        try:
+            ws = _conn(host, password)
+            try:
+                return _rpc(ws, "GetStreamStatus"), _rpc(ws, "GetRecordStatus")
+            finally:
+                ws.close()
+        except Exception as e:  # noqa: BLE001 - any connect/RPC failure is a retry candidate
+            last_exc = e
+            if attempt < RIG_BUSY_QUERY_RETRIES:
+                time.sleep(RIG_BUSY_QUERY_RETRY_SLEEP_S)
+    raise last_exc
+
+
 def rig_busy_check(a):
     """#406/#312 item5: query BOTH strih and stream OBS WebSocket for GetStreamStatus.outputActive
     and GetRecordStatus.outputActive (4 booleans total) and report whether the rig is genuinely busy
@@ -1621,14 +1655,10 @@ def rig_busy_check(a):
     diagnostics = []
     for label, host in (("strih", a.strih_host), ("stream", a.stream_host)):
         try:
-            ws = _conn(host, a.password)
-            try:
-                stream_status = _rpc(ws, "GetStreamStatus")
-                record_status = _rpc(ws, "GetRecordStatus")
-            finally:
-                ws.close()
+            stream_status, record_status = _query_box_status(host, a.password)
         except Exception as e:
-            # Connection failure OR an RPC-level error — fail CLOSED (exit 3), never busy=false.
+            # Every attempt (1 + RIG_BUSY_QUERY_RETRIES retries, #651) failed — a GENUINE
+            # persistent outage, not a transient blip. Fail CLOSED (exit 3), never busy=false.
             errors.append(f"{label} ({host}) unreachable: {e}")
             continue
         stream_active = bool(stream_status.get("outputActive"))
