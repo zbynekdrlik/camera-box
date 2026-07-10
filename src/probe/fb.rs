@@ -112,24 +112,35 @@ pub struct VsyncFb {
     vsync_wait: bool,
 }
 
+/// Open `device` and read its CURRENT `FBIOGET_VSCREENINFO`/`FBIOGET_FSCREENINFO`
+/// geometry, without changing anything. Shared by [`VsyncFb::open`] (which then
+/// additionally negotiates double buffering via a `FBIOPUT_VSCREENINFO`) and
+/// `blank_fbdev` (#660 — which only ever needs to READ the current geometry,
+/// never to change it).
+fn open_and_read_screeninfo(device: &str) -> Result<(File, FbVarScreenInfo, FbFixScreenInfo)> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(device)
+        .with_context(|| format!("open framebuffer {device}"))?;
+    let fd = file.as_raw_fd();
+
+    let mut vinfo = FbVarScreenInfo::default();
+    if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut vinfo) } < 0 {
+        bail!("FBIOGET_VSCREENINFO failed for {device}");
+    }
+    let mut finfo = FbFixScreenInfo::default();
+    if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO, &mut finfo) } < 0 {
+        bail!("FBIOGET_FSCREENINFO failed for {device}");
+    }
+    Ok((file, vinfo, finfo))
+}
+
 impl VsyncFb {
     /// Open the framebuffer and try to enable double buffering.
     pub fn open(device: &str) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(device)
-            .with_context(|| format!("open framebuffer {}", device))?;
+        let (file, vinfo, finfo) = open_and_read_screeninfo(device)?;
         let fd = file.as_raw_fd();
-
-        let mut vinfo = FbVarScreenInfo::default();
-        if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut vinfo) } < 0 {
-            bail!("FBIOGET_VSCREENINFO failed");
-        }
-        let mut finfo = FbFixScreenInfo::default();
-        if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO, &mut finfo) } < 0 {
-            bail!("FBIOGET_FSCREENINFO failed");
-        }
         let width = vinfo.xres;
         let height = vinfo.yres;
         let line_length = finfo.line_length;
@@ -269,21 +280,8 @@ impl VsyncFb {
 /// returns `Result` for the caller to log-and-continue on failure rather than
 /// abort teardown.
 pub fn blank_fbdev(device: &str) -> Result<()> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(device)
-        .with_context(|| format!("open framebuffer {device} to blank"))?;
-    let fd = file.as_raw_fd();
-
-    let mut vinfo = FbVarScreenInfo::default();
-    if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut vinfo) } < 0 {
-        bail!("FBIOGET_VSCREENINFO failed while blanking {device}");
-    }
-    let mut finfo = FbFixScreenInfo::default();
-    if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO, &mut finfo) } < 0 {
-        bail!("FBIOGET_FSCREENINFO failed while blanking {device}");
-    }
+    let (file, vinfo, finfo) = open_and_read_screeninfo(device)
+        .with_context(|| format!("open/read {device} geometry to blank"))?;
 
     let (start, len) =
         crate::fb_blank::visible_page_range(vinfo.yoffset, vinfo.yres, finfo.line_length);
