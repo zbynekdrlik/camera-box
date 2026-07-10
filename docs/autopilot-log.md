@@ -2834,3 +2834,44 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   cleaned off strih(499GB)+stream(139GB) → #652 filed for auto-cleanup, #651 filed for
   transient-WS-refusal retry, #646 filed for docs-only carve-out (all three dispatched as the
   next batch).
+
+## #638 + #632 + #636 — code-only fixes exposed by #24/#631 camera parameterization (2026-07-10)
+
+- Version bumped `1.7.0-dev.323` → `1.7.0-dev.324` (`ce3b7e9c0`, pre-work).
+- **#638** (bug): `extract_partial_flagged_frames`'s "strih" arm hardcoded a single owned entry
+  for cam1, so `--extract-partial`'s per-box pixel-proof extraction only ever flagged CAM1's
+  missing-burn slots. RED `c41705b90` / GREEN `758c77b3e` — generalized to iterate all
+  `CAMERA_UNDER_TEST_NODES` via two new shared helpers (`burn_run_id_for_camera`,
+  `camera_under_test_burn_ids`); also widened the cam2-optical-exclusion `all_burns` set to all
+  six camera ids (was cam1-only, a latent misread risk for cam3/cam4/cam5/cam6).
+- **#632** (enhancement, `e378d526a`): the #207 fast/robust decode gate and the
+  `--cam1-capture-stats` V4L2 label were both hardcoded to cam1. Confirmed the issue's own
+  suggested "union all six ids into one flat mandatory list" fix would NOT work — it reproduces
+  the exact `GENERIC_DIAGNOSTIC_BURN_IDS`/#463 regression class (permanently unsatisfiable AND-gate
+  when only one camera is ever deployed). Implemented a genuine MANDATORY/ANY-OF split instead:
+  `decode_qr_luma_all_fast_then_robust_grouped(_pathed)` (qr.rs),
+  `decode_recording_frame_with_grouped_burns` / `analyze_recording_with_grouped_burns` /
+  `decode_stream_parallel` (recording.rs), `camera_under_test_burn_ids()` / `decode_for_grouped()`
+  (recording-verdict.rs) — all additive, zero behavior change for existing cam1-only/imag/generic
+  callers (verified: the old flat functions now delegate to the grouped ones with an empty any-of
+  group). The label gap got a pure `resolve_camera_under_test_label()` helper.
+- **#636** (enhancement, `374936caa`): `phase_sync_calibrate.py` had the SAME persist-location gap
+  #465 fixed in `av_sync_calibrate.py` (off-box run → local fallback path nothing on the stream
+  box can read). Applied the identical `remote_push_plan()`/`mcp_name_for_host()` fix pattern from
+  PR #635, kept as phase_sync's own copy (not imported) per that PR's stated convention.
+- **Local verification constraint**: this repo's Tier-0 policy reserves `--features probe`
+  compilation for CI only (confirmed via the `block-tier0-local-build.sh` hook + CLAUDE.md) — the
+  #638/#632 Rust changes (recording-verdict.rs, qr.rs, recording.rs are ALL probe-gated) could NOT
+  be compile-checked locally at all, not even via the `# airuleset:build-ok` bypass (that only
+  covers a default-feature `cargo test --lib`, and this surface compiles under NO feature set
+  without `probe`). Verified instead by: careful manual type/signature review, `cargo fmt --all
+  -- --check` clean, brace/paren-balance diff against `origin/main` (unchanged), and the full CI
+  run. #636's Python changes WERE locally verifiable
+  (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest` — global pytest-html plugin needs
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` to load at all in this environment) — genuine RED (8 failed)
+  → GREEN (33/33, full suite 272/272, ruff clean) observed directly.
+- **PR #653 merged independently mid-batch** (supervisor-owned, `e4337e829`, 09:17:34Z) BEFORE
+  this batch's push (09:24:23Z) — so these 5 commits landed on `dev` ahead of `main` with no open
+  PR referencing them yet; regular CI (run 29082936463) green on the pushed HEAD. All three
+  issues closed manually with evidence comments (parenthesized `fix(#N):`/`feat(#N):` commit forms
+  per this repo's own auto-close GOTCHA — none auto-closed via PR #653, which predated the push).
