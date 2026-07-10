@@ -7437,6 +7437,39 @@ mod tests {
         );
     }
 
+    /// #638: the strih box must ALSO flag the missing-burn slots for cam3 (or any of cam2/cam4/
+    /// cam5/cam6) — not just cam1 — when cam3 is the camera actually under test riding through
+    /// this box's recording. Before #638 `extract_partial_flagged_frames`'s "strih" arm only
+    /// ever checked cam1's burn, so a cam3 run's missing-burn slot was silently dropped from
+    /// pixel-proof extraction entirely.
+    #[test]
+    fn extract_partial_flags_missing_burn_slots_for_cam3_on_strih_box_638() {
+        use super::extract_partial_flagged_frames;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        // strih-box frames when CAM3 (not cam1) is the camera under test: frame 1 is DELIVERED
+        // (carries cam2) but is MISSING its cam3 burn — a BURN-UNREADABLE missing slot for cam3,
+        // read from this same strih recording. cam1's burn never appears anywhere (cam1 is not
+        // deployed this run).
+        let frames = vec![
+            frame(0, &[(CAM2, 100), (CAM3B, 5000), (STRIH, 1670)]),
+            frame(1, &[(CAM2, 101), (STRIH, 1673)]), // delivered, NO cam3 burn → BurnUnreadable
+            frame(2, &[(CAM2, 102), (CAM3B, 5002), (STRIH, 1676)]),
+        ];
+        let (flagged, undecodable) = extract_partial_flagged_frames("strih", &frames, &args);
+        assert!(
+            flagged.contains(&1),
+            "#638: the cam3 missing-burn slot (delivered frame 1 with no cam3 burn) must be \
+             flagged for pixel-proof on the strih box — extract_partial_flagged_frames must \
+             cover ALL CAMERA_UNDER_TEST_NODES, not just cam1; got flagged={flagged:?}"
+        );
+        assert!(
+            undecodable.is_empty(),
+            "#638: no frame is undecodable here (all carry cam2) — only the cam3 missing-burn \
+             slot is flagged; got undecodable={undecodable:?}"
+        );
+    }
+
     /// #208: the pixel-proof dir is derived the SAME way on both sides (extract writes it, merge
     /// reads it) — `…/strih-partial-42.json` → `…/strih-partial-42-pixels` beside the JSON.
     #[test]
