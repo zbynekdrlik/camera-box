@@ -13,6 +13,11 @@ completely unattended, with no operator/agent win-* MCP round-trip:
                               keys and why). This is what closed #650: the automatic
                               pull_request-triggered full-path-e2e gate previously always saw both
                               boxes UNKNOWN (nothing listened on :8899) and refused (exit 11).
+  GET /record-dir-stats.json -> #652: read-only stats over this box's OWN OBS record directory
+                              (total bytes + file count + oldest mtime of its top-level files) —
+                              recording-e2e.sh's preflight curls this to WARN (never fail) when a
+                              box's accumulated E2E test recordings exceed a disk budget.
+
   GET /<any other path>   -> served as a static file out of OBS's OWN current record directory
                               (read live via `GetRecordDirectory` over the local obs-websocket —
                               never a hardcoded/stale path, so a profile switch can never leave
@@ -184,6 +189,8 @@ def make_handler(args, state):
             path = self.path.split("?", 1)[0]
             if path == "/bundle-state.json":
                 self._serve_bundle_state()
+            elif path == "/record-dir-stats.json":
+                self._serve_record_dir_stats()
             else:
                 self._serve_record_file(path)
 
@@ -200,6 +207,27 @@ def make_handler(args, state):
                 return
             body = json.dumps(payload, indent=2).encode("utf-8")
             log(f"served /bundle-state.json ({len(payload)} key(s): {sorted(payload)})")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_record_dir_stats(self):
+            """#652: read-only disk-usage stats over the box's OWN OBS record directory (total
+            bytes + file count + oldest mtime of its top-level files) — powers
+            recording-e2e.sh's disk-budget preflight WARN (the harness's own E2E test recordings
+            had silently accumulated to ~500 GB on strih / 139 GB on stream). Same resolve-live
+            + last-known-good fallback as the static-file GET path below — never a stale/wrong
+            directory after a profile switch."""
+            record_dir = self._resolve_record_dir()
+            if record_dir is None:
+                self.send_response(503)
+                self.end_headers()
+                return
+            stats = bsg.record_dir_stats(record_dir)
+            body = json.dumps(stats).encode("utf-8")
+            log(f"served /record-dir-stats.json for {record_dir!r}: {stats}")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

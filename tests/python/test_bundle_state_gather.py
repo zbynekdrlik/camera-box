@@ -182,3 +182,65 @@ def test_build_bundle_state_includes_only_nonempty_keys():
 
 def test_build_bundle_state_all_empty_yields_empty_dict():
     assert bsg.build_bundle_state() == {}
+
+
+# ── #652: record_dir_stats — PURE filesystem stats behind /record-dir-stats.json ────────────────
+# (the disk-budget preflight WARN in recording-e2e.sh; the harness's own E2E test recordings
+# accumulated to ~500 GB on strih / 139 GB on stream, invisible until the disk nearly filled).
+
+def test_record_dir_stats_empty_dir(tmp_path):
+    stats = bsg.record_dir_stats(str(tmp_path))
+    assert stats == {"total_bytes": 0, "file_count": 0, "oldest_mtime": None}
+
+
+def test_record_dir_stats_sums_files_and_counts(tmp_path):
+    (tmp_path / "a.mkv").write_bytes(b"x" * 100)
+    (tmp_path / "b.mp4").write_bytes(b"y" * 250)
+    stats = bsg.record_dir_stats(str(tmp_path))
+    assert stats["total_bytes"] == 350
+    assert stats["file_count"] == 2
+    assert stats["oldest_mtime"] is not None
+
+
+def test_record_dir_stats_ignores_subdirectories(tmp_path):
+    (tmp_path / "a.mkv").write_bytes(b"x" * 10)
+    sub = tmp_path / "subdir"
+    sub.mkdir()
+    (sub / "nested.mkv").write_bytes(b"z" * 999)
+    stats = bsg.record_dir_stats(str(tmp_path))
+    # Only the top-level file counts (OBS records flat; a subdir is none of this run's business).
+    assert stats["total_bytes"] == 10
+    assert stats["file_count"] == 1
+
+
+def test_record_dir_stats_oldest_mtime_is_the_minimum(tmp_path):
+    import os
+    import time
+
+    older = tmp_path / "older.mkv"
+    newer = tmp_path / "newer.mkv"
+    older.write_bytes(b"a")
+    newer.write_bytes(b"b")
+    now = time.time()
+    os.utime(older, (now - 1000, now - 1000))
+    os.utime(newer, (now - 10, now - 10))
+    stats = bsg.record_dir_stats(str(tmp_path))
+    assert stats["oldest_mtime"] == pytest_approx(now - 1000)
+
+
+def pytest_approx(value, tol=1.0):
+    """Tiny local approx helper (avoids adding a pytest.approx import just for this one check —
+    mtime precision varies by filesystem)."""
+    class _Approx:
+        def __eq__(self, other):
+            return abs(other - value) <= tol
+
+    return _Approx()
+
+
+def test_record_dir_stats_unreadable_dir_returns_zeros_never_raises():
+    # A directory the caller cannot reach (unmounted, permissions, wrong path after a profile
+    # switch) must degrade to a harmless zero result — never crash the /record-dir-stats.json
+    # endpoint, and never a false "over budget" WARN from a bogus large number.
+    stats = bsg.record_dir_stats("/this/path/does/not/exist/at/all")
+    assert stats == {"total_bytes": 0, "file_count": 0, "oldest_mtime": None}

@@ -229,6 +229,8 @@ def test_rig_busy_check_hint_flags_record_and_stream_as_a_real_broadcast(monkeyp
 
 
 def test_rig_busy_check_strih_unreachable_fails_closed_exit_3(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     def fake_conn(host, password=""):
         if host == "10.77.9.202":
             raise ConnectionRefusedError("no route to host")
@@ -251,6 +253,8 @@ def test_rig_busy_check_strih_unreachable_fails_closed_exit_3(monkeypatch, capsy
 
 
 def test_rig_busy_check_stream_unreachable_fails_closed_exit_3(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     def fake_conn(host, password=""):
         if host == "10.77.9.204":
             raise TimeoutError("connect timed out")
@@ -272,6 +276,8 @@ def test_rig_busy_check_stream_unreachable_fails_closed_exit_3(monkeypatch, caps
 
 
 def test_rig_busy_check_both_unreachable_reports_both_and_exits_3(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     def fake_conn(host, password=""):
         raise OSError(f"unreachable: {host}")
 
@@ -287,7 +293,89 @@ def test_rig_busy_check_both_unreachable_reports_both_and_exits_3(monkeypatch, c
     assert len(out["reasons"]) == 2
 
 
+def test_rig_busy_check_retries_on_transient_connection_refused_then_succeeds(monkeypatch, capsys):
+    # #651 live incident (2026-07-10, PR #647 run 29065733523): a SINGLE connection-refused
+    # blip during a legitimate mid-broadcast OBS restart on stream must NOT immediately fail
+    # the whole rig-busy-gate wait closed — a retry within the SAME check must recover it.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
+    attempts = {"stream": 0}
+
+    def fake_conn(host, password=""):
+        if host == "10.77.9.204":
+            attempts["stream"] += 1
+            if attempts["stream"] == 1:
+                raise ConnectionRefusedError("[Errno 111] Connection refused")
+        return _FakeWS()
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        return {"outputActive": False}
+
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())  # must NOT raise/exit — the retry recovers it
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is False
+    assert attempts["stream"] == 2, "expected exactly one retry after the first connection-refused"
+
+
+def test_rig_busy_check_exhausts_retries_then_still_fails_closed(monkeypatch, capsys):
+    # A GENUINE persistent outage (every attempt fails) must still fail closed exactly as
+    # before — the retry only absorbs a transient blip, never a real outage.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
+    attempts = {"strih": 0}
+
+    def fake_conn(host, password=""):
+        if host == "10.77.9.202":
+            attempts["strih"] += 1
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+        return _FakeWS()
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        return {"outputActive": False}
+
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    with pytest.raises(SystemExit) as exc_info:
+        obs_phase2.rig_busy_check(_args())
+
+    assert exc_info.value.code == 3
+    out = json.loads(capsys.readouterr().out)
+    assert out["busy"] is None
+    assert any("10.77.9.202" in r for r in out["reasons"])
+    # 1 initial attempt + RIG_BUSY_QUERY_RETRIES retries, every one exhausted before giving up.
+    assert attempts["strih"] == 1 + obs_phase2.RIG_BUSY_QUERY_RETRIES
+
+
+def test_rig_busy_check_retry_sleeps_the_configured_backoff_between_attempts(monkeypatch, capsys):
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 7)
+    sleeps = []
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda s: sleeps.append(s))
+    attempts = {"strih": 0}
+
+    def fake_conn(host, password=""):
+        if host == "10.77.9.202":
+            attempts["strih"] += 1
+            if attempts["strih"] == 1:
+                raise ConnectionRefusedError("no route to host")
+        return _FakeWS()
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        return {"outputActive": False}
+
+    monkeypatch.setattr(obs_phase2, "_conn", fake_conn)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+
+    obs_phase2.rig_busy_check(_args())
+
+    assert sleeps == [7], f"expected exactly one 7s backoff sleep between the 2 attempts, got {sleeps}"
+
+
 def test_rig_busy_check_rpc_error_on_one_host_fails_closed_not_busy_false(monkeypatch, capsys):
+    # #651: keep this fail-closed test fast — no real retry backoff sleep.
+    monkeypatch.setattr(obs_phase2, "RIG_BUSY_QUERY_RETRY_SLEEP_S", 0)
     # An RPC-level error (e.g. OBS returns a request-status failure) on strih must ALSO fail
     # closed — never silently treated as "strih is idle".
     def fake_conn(host, password=""):

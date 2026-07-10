@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 
 # The three OBS module scan paths that can each shadow-load a `distroav.dll` (#124, EPIC #125) —
 # mirrors `.claude/commands/drift-guard.md` step 1c EXACTLY (same three roots, same rationale: a
@@ -128,6 +129,55 @@ def ndi_input_latency_csv(ndi_inputs):
         pairs.append((name, str(settings["latency"])))
     pairs.sort(key=lambda kv: kv[0])
     return ",".join(f"{name}={latency}" for name, latency in pairs)
+
+
+def record_dir_stats(record_dir):
+    """#652: PURE, testable filesystem stats over the top-level files of *record_dir* (the OBS
+    record directory) — powers the `/record-dir-stats.json` endpoint (bundle-state-server.py),
+    which recording-e2e.sh's preflight curls to WARN (never fail) when a box's accumulated E2E
+    test recordings exceed a disk budget. The live incident this addresses: strih accumulated
+    ~500 GB / stream ~139 GB of forgotten test recordings (back to 2026-06-17), invisible until
+    the disk nearly filled (17 GB free).
+
+    Only the TOP-LEVEL files count (OBS records flat into this directory; a subdirectory is not
+    this harness's business). Never raises: an unreadable or missing directory (unmounted, wrong
+    path after a profile switch, permission error) returns the same zero result a genuinely empty
+    directory would — a bogus large number is worse than under-reporting, since the caller could
+    otherwise fire a false "over budget" WARN from a stat() crash it half-caught. Every degrade
+    path is logged (comprehensive-logging.md) rather than silently swallowed.
+    """
+    total_bytes = 0
+    file_count = 0
+    oldest_mtime = None
+    try:
+        with os.scandir(record_dir) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                except OSError as e:
+                    # A single entry vanishing mid-scan (deleted while we're iterating, e.g. an
+                    # in-progress OBS write finishing) is expected and harmless — skip just that
+                    # entry, never abort the whole stats gather over one transient race.
+                    print(
+                        f"WARNING: record_dir_stats: skipping unreadable entry in "
+                        f"{record_dir!r}: {e}", file=sys.stderr,
+                    )
+                    continue
+                total_bytes += st.st_size
+                file_count += 1
+                if oldest_mtime is None or st.st_mtime < oldest_mtime:
+                    oldest_mtime = st.st_mtime
+    except OSError as e:
+        # Missing/unmounted/permission-denied directory (e.g. a stale path after a profile
+        # switch) — degrade to the same zero result an empty directory would report. A bogus
+        # large number from a half-caught crash would be worse than under-reporting here.
+        print(
+            f"WARNING: record_dir_stats: could not read directory {record_dir!r}: {e}",
+            file=sys.stderr,
+        )
+    return {"total_bytes": total_bytes, "file_count": file_count, "oldest_mtime": oldest_mtime}
 
 
 def build_bundle_state(

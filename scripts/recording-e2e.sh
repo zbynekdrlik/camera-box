@@ -309,6 +309,28 @@ fetch_box_state() {
 }
 fetch_box_state "$STRIH"  "$VERSION_STRIH_STATE"  || true
 fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
+
+# #652: disk-budget preflight WARN (never fail — informational only). The harness's own E2E test
+# recordings had silently accumulated to ~500 GB on strih / 139 GB on stream (back to
+# 2026-06-17, including a single 266 GB stray), invisible until the disk nearly filled (17 GB
+# free). Best-effort: an unreachable bundle-state-server (the box's :8899 /record-dir-stats.json,
+# same standing service fetch_box_state above already relies on, #650) just skips the check —
+# this is a WARN, never a gate.
+RECORDINGS_BUDGET_GB="${RECORDINGS_BUDGET_GB:-50}"
+check_recordings_budget() {
+  local label="$1" host="$2" stats total_gb
+  stats=$(curl -fsS --max-time 10 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
+    echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping disk-budget check" >&2
+    return 0
+  }
+  total_gb=$(printf '%s' "$stats" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("total_bytes",0)/1e9)' 2>/dev/null) || return 0
+  echo "    $label recordings dir: $(printf '%.1f' "$total_gb") GB (budget ${RECORDINGS_BUDGET_GB} GB)"
+  if python3 -c "import sys; sys.exit(0 if float('$total_gb') > float('$RECORDINGS_BUDGET_GB') else 1)" 2>/dev/null; then
+    echo "WARNING #652: $label's OBS recordings directory holds ~$(printf '%.1f' "$total_gb") GB of accumulated recordings (budget ${RECORDINGS_BUDGET_GB} GB) — old E2E test recordings may be piling up; see the cleanup plan this run prints at [8/8] (KEEP_RECORDINGS=1 opts out), or clean up manually via the win-* MCP." >&2
+  fi
+}
+check_recordings_budget strih  "$STRIH"
+check_recordings_budget stream "$STREAM"
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 "$HERE/version-integrity-gate.sh" \
@@ -1721,6 +1743,18 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   echo "          PASS/FAIL is the merge recording-verdict EXIT CODE on dev1 + the pulled-back"
   echo "          JSON — read THOSE, not this script's exit 0."
   echo "    ============================================================================"
+  echo "    --- [8/8e] AFTER the merge above reports its verdict (JSON secured at $REPORT_JSON) ---"
+  if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
+    echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."
+  else
+    echo "    #652: free rig disk by deleting ONLY this run's own strih+stream recordings (the"
+    echo "    verdict + partials + pixel-proofs above are the evidence that is KEPT; the source"
+    echo "    recordings are re-derivable by re-running). NEVER a directory sweep — the EXACT"
+    echo "    paths StopRecord returned for THIS run only:"
+    echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+    echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
+  fi
   exit 0
 fi
 
@@ -1786,5 +1820,23 @@ if [ -f "$REPORT_JSON" ]; then
 fi
 
 echo "artifacts in $OUTDIR (verdict json: $REPORT_JSON, report: $REPORT_PNG)"
+
+# #652: (LEGACY VERDICT_ON_STREAM=0 path only — the per-box default path's own cleanup plan is
+# printed above, inside that branch, before its earlier `exit 0`.) The verdict ran synchronously
+# right above, so a non-empty $REPORT_JSON here means the decode+merge actually completed
+# (secured evidence) regardless of PASS/FAIL — the partials/pixel-proofs/JSON already captured
+# everything needed to diagnose a FAIL, so the multi-GB source recordings are redundant either
+# way. A missing/empty JSON (verdict CRASHed/STALLed, GATE=124/126) means nothing was secured —
+# skip the cleanup plan entirely rather than suggest deleting evidence of an unresolved failure.
+if [ -s "$REPORT_JSON" ]; then
+  if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
+    echo "KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."
+  else
+    echo "#652: verdict JSON secured at $REPORT_JSON — free rig disk by deleting ONLY this run's"
+    echo "own strih+stream recordings (never a sweep — the EXACT StopRecord paths for THIS run):"
+    echo "  win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+    echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+  fi
+fi
 
 exit "$GATE"
