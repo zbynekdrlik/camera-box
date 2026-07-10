@@ -331,6 +331,12 @@ mod hw {
         detached_fbcon: bool,
         /// We acquired the DRM master lock; release it on drop.
         held_master: bool,
+        /// #660: the fbdev device (e.g. `/dev/fb0`) to BLANK on `Drop`, before
+        /// releasing DRM master — see `crate::fb_blank` for why. This presenter
+        /// never reads/writes it during normal operation (it drives the CRTC
+        /// through its own separate dumb buffers); it is stashed purely for the
+        /// teardown blank.
+        fb_device: String,
     }
 
     impl KmsPresenter {
@@ -340,7 +346,10 @@ mod hw {
         /// larger mode the painter cannot fill is the live cam2 bug this guards),
         /// allocate two dumb BOs, and set the initial scanout. Returns an error
         /// (so the caller can fall back to fbdev) if any step fails.
-        pub fn open(device: &str, canvas_w: u32, canvas_h: u32) -> Result<Self> {
+        ///
+        /// `fb_device` (e.g. `/dev/fb0`) is stashed ONLY for the `Drop` teardown
+        /// blank (#660) — this presenter never touches it otherwise.
+        pub fn open(device: &str, fb_device: &str, canvas_w: u32, canvas_h: u32) -> Result<Self> {
             // Detaching fbcon frees the CRTC so DRM master can drive it. Best
             // effort: if there is no fbcon (already detached / headless) this is
             // a no-op. We record whether WE detached it so drop rebinds it.
@@ -353,16 +362,18 @@ mod hw {
             // compositor, or no canvas-matching mode → the bail below) would
             // leave the live HDMI console orphaned while the caller "falls back
             // to fbdev". So run the fallible body, and on error rebind fbcon.
-            Self::open_inner(device, canvas_w, canvas_h, detached_fbcon).inspect_err(|_| {
-                if detached_fbcon {
-                    if let Err(e) = super::fbcon::attach() {
-                        tracing::warn!(
-                            "KmsPresenter: rebind fbcon after failed open() failed: {:?}",
-                            e
-                        );
+            Self::open_inner(device, fb_device, canvas_w, canvas_h, detached_fbcon).inspect_err(
+                |_| {
+                    if detached_fbcon {
+                        if let Err(e) = super::fbcon::attach() {
+                            tracing::warn!(
+                                "KmsPresenter: rebind fbcon after failed open() failed: {:?}",
+                                e
+                            );
+                        }
                     }
-                }
-            })
+                },
+            )
         }
 
         /// The fallible body of [`open`](Self::open). Any DRM master it acquires
@@ -371,6 +382,7 @@ mod hw {
         /// caller via `detached_fbcon`.
         fn open_inner(
             device: &str,
+            fb_device: &str,
             canvas_w: u32,
             canvas_h: u32,
             detached_fbcon: bool,
@@ -395,18 +407,19 @@ mod hw {
             // Master is held now; every error path below must release it (the
             // `Card` File close alone does NOT drop master cleanly on all
             // kernels). `with_master` runs the rest and releases on Err.
-            Self::with_master(card, canvas_w, canvas_h, detached_fbcon)
+            Self::with_master(card, fb_device, canvas_w, canvas_h, detached_fbcon)
         }
 
         /// Runs the post-master setup; releases the DRM master lock if any step
         /// errors (so a partial open does not leave the lock held).
         fn with_master(
             card: Card,
+            fb_device: &str,
             canvas_w: u32,
             canvas_h: u32,
             detached_fbcon: bool,
         ) -> Result<Self> {
-            match Self::build(card, canvas_w, canvas_h, detached_fbcon) {
+            match Self::build(card, fb_device, canvas_w, canvas_h, detached_fbcon) {
                 Ok(this) => Ok(this),
                 Err((card, e)) => {
                     if let Err(re) = card.release_master_lock() {
@@ -425,6 +438,7 @@ mod hw {
         /// back, so map each step's error to `(card, err)`).
         fn build(
             card: Card,
+            fb_device: &str,
             canvas_w: u32,
             canvas_h: u32,
             detached_fbcon: bool,
@@ -534,6 +548,7 @@ mod hw {
                 phase_locked,
                 detached_fbcon,
                 held_master: true,
+                fb_device: fb_device.to_string(),
             })
         }
 
@@ -733,6 +748,23 @@ mod hw {
 
     impl Drop for KmsPresenter {
         fn drop(&mut self) {
+            // #660: this presenter never touches `fb_device` itself (it drives the CRTC through
+            // its own separate dumb buffers) — but the moment we release DRM master below, the
+            // kernel's fbdev-emulation client regains the CRTC and scans out THAT device's memory
+            // again, whatever it happens to hold (an old `VsyncFb` fallback write, or camera-box's
+            // own `--display` module's last frame — nothing else clears it between painter runs).
+            // Blank it FIRST, before touching master/fbcon at all, so what gets revealed is always
+            // a deterministic black frame, never a stale decodable QR from an unrelated earlier
+            // invocation (confirmed live: a run_id 13-24 minutes old, frozen for the last 15-30
+            // recorded frames, mis-read by recording-verdict as an imag optical COPY/FREEZE fault).
+            // Best-effort — log-and-continue, never abort teardown over it.
+            if let Err(e) = crate::probe::fb::blank_fbdev(&self.fb_device) {
+                tracing::warn!(
+                    "KmsPresenter: blank {} before teardown failed: {:?}",
+                    self.fb_device,
+                    e
+                );
+            }
             // Restore the console: drop master and rebind fbcon so cam2's normal
             // HDMI display returns after the run. Best-effort — log failures.
             let _ = (self.crtc, self.connector, self.mode); // keep fields used
