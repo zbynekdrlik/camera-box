@@ -72,6 +72,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # tests/harness_painter_csv_freshness.rs) — used by the fail-loud gate after the painter pull.
 # shellcheck source=scripts/lib/painter-csv-freshness.sh
 . "$HERE/lib/painter-csv-freshness.sh"
+# #656 prevention item 2: the "source camera capture-delivery-rate defective" preflight signal
+# (pure grep pattern + message formatter — the appliance itself does the fps math, see
+# src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
+# shellcheck source=scripts/lib/capture-rate-guard.sh
+. "$HERE/lib/capture-rate-guard.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -352,6 +357,25 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[0/8] dev1<->painter clock-offset gate — all-cambox window attribution must be trustworthy (#326)"
   "$HERE/clock-offset-painter-gate.sh" --painter "cam2=$PAINTER_IP"
 fi
+
+# Capture-delivery-rate preflight (#656 prevention item 2): the appliance's OWN capture loop
+# (src/capture_rate_health.rs) already WARNs when $CAMERA_NAME's captured fps has sustained a
+# >1% deviation from its negotiated rate for 6 consecutive 5s report windows — the exact #656
+# root cause (cam1's ShadowCast 2 silently delivering ~64fps instead of 60fps, producing a
+# persistent ~4Hz content-duplicate judder only caught after the fact via tick-pattern
+# archaeology on a full 6-minute recording, fixed live via a USB reset). Read the SOURCE
+# camera's recent journal for that WARN and fail FAST — before burning a doomed 30-minute run —
+# rather than re-deriving the fps math a second time here (single source of truth stays in Rust).
+echo "[0/8] capture-delivery-rate preflight — $CAMERA_NAME must not show a sustained rate defect (#656)"
+CAPTURE_RATE_DEFECT_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
+  2>/dev/null || true)"
+if [ -n "$CAPTURE_RATE_DEFECT_LINE" ]; then
+  echo "ERROR: $(capture_rate_preflight_message "$CAMERA_NAME" "$CAPTURE_RATE_DEFECT_LINE")" >&2
+  echo "       matched journal line: $CAPTURE_RATE_DEFECT_LINE" >&2
+  exit 1
+fi
+echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
 
 # cam1 v4l2 capture controls (#338/#312): apply the device-default colour controls
 # (saturation=50, contrast=50) BEFORE the run. The old "sharp set" (saturation=0,

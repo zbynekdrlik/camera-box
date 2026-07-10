@@ -522,6 +522,13 @@ async fn run_capture_loop(
         let mut last_chroma: Option<(f32, f32)> = None;
         let mut chroma_frame_ctr: u32 = 0;
 
+        // #656 — capture-delivery-rate health: consecutive-breach counter for the pure
+        // `capture_rate_health` decision, checked against the device's NEGOTIATED capture rate
+        // (`frame_rate`, read once above at capture-open time) every ~5s report window below.
+        let mut consecutive_rate_breaches: u32 = 0;
+        let configured_capture_fps: f64 =
+            frame_rate.numerator as f64 / frame_rate.denominator.max(1) as f64;
+
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
@@ -853,6 +860,37 @@ async fn run_capture_loop(
                                 dropped
                             );
                         }
+                        // #656 — capture-delivery-rate health: WARN when the captured fps has
+                        // sustained a >1% deviation from the device's negotiated capture rate
+                        // for CAPTURE_RATE_WARN_WINDOWS consecutive report windows (a real
+                        // capture-device rate defect, e.g. a USB dongle silently re-negotiating
+                        // its rate) — never on a single momentary blip. This is the automatic
+                        // regression signal that replaces after-the-fact tick-pattern
+                        // archaeology on a recorded E2E run (the #656 root cause).
+                        let rate_deviant = camera_box::capture_rate_health::is_rate_deviant(
+                            cap_fps,
+                            configured_capture_fps,
+                            camera_box::capture_rate_health::CAPTURE_RATE_TOLERANCE_PCT,
+                        );
+                        consecutive_rate_breaches =
+                            camera_box::capture_rate_health::next_consecutive_breaches(
+                                consecutive_rate_breaches,
+                                rate_deviant,
+                            );
+                        if camera_box::capture_rate_health::should_warn(
+                            consecutive_rate_breaches,
+                            camera_box::capture_rate_health::CAPTURE_RATE_WARN_WINDOWS,
+                        ) {
+                            tracing::warn!(
+                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — USB-reset the capture device (see #656)",
+                                cap_fps,
+                                configured_capture_fps,
+                                camera_box::capture_rate_health::CAPTURE_RATE_TOLERANCE_PCT,
+                                consecutive_rate_breaches,
+                                consecutive_rate_breaches as u64 * 5
+                            );
+                        }
+
                         // #299 — log the most recent chroma sample alongside the fps report.
                         // A "grayscale" line here means the capture card is delivering
                         // monochrome frames — the automatic regression signal for colour-capture.
