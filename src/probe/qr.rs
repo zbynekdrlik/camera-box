@@ -674,6 +674,26 @@ pub fn decode_qr_luma_all_fast_then_robust(
     out
 }
 
+/// #632 gap 1 — [`decode_qr_luma_all_fast_then_robust`] (the counting public wrapper) over
+/// [`decode_qr_luma_all_fast_then_robust_grouped_pathed`]'s two-group gate. See that function's
+/// doc for why the mandatory/any-of split exists.
+pub fn decode_qr_luma_all_fast_then_robust_grouped(
+    img: GrayImage,
+    mandatory_burn_run_ids: &[u32],
+    any_of_burn_run_ids: &[u32],
+) -> Vec<Payload> {
+    let (out, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed(
+        img,
+        mandatory_burn_run_ids,
+        any_of_burn_run_ids,
+    );
+    match path {
+        DecodePath::Fast => FAST_PATH_FRAMES.fetch_add(1, Ordering::Relaxed),
+        DecodePath::Robust => ROBUST_FALLBACK_FRAMES.fetch_add(1, Ordering::Relaxed),
+    };
+    out
+}
+
 /// [`decode_qr_luma_all_fast_then_robust`] that ALSO returns which [`DecodePath`] it took.
 /// This is the core; the counting public wrapper above just records the path. Returning the
 /// path makes the choice observable per-call (no global state), so the path-reachability tests
@@ -682,20 +702,53 @@ pub fn decode_qr_luma_all_fast_then_robust_pathed(
     img: GrayImage,
     expected_burn_run_ids: &[u32],
 ) -> (Vec<Payload>, DecodePath) {
+    // Every id in `expected_burn_run_ids` is MANDATORY (an empty `any_of` group is vacuously
+    // satisfied) — this is the pre-#632 behavior, unchanged for every existing caller.
+    decode_qr_luma_all_fast_then_robust_grouped_pathed(img, expected_burn_run_ids, &[])
+}
+
+/// #632 gap 1 — [`decode_qr_luma_all_fast_then_robust_pathed`] generalized with a SECOND,
+/// independent group: `mandatory_burn_run_ids` must ALL be found (unchanged semantics), and
+/// `any_of_burn_run_ids` needs only ONE member found (empty ⇒ vacuously satisfied, matching
+/// `mandatory`'s existing empty-list behavior). This is what lets a recording whose
+/// camera-under-test is cam3/cam4/cam5/cam6/cam2 (instead of the historically-hardcoded cam1)
+/// take the #207 FAST path too: cam1..cam6 are mutually exclusive in a real run (only the
+/// physically-deployed camera's burn ever appears), so requiring "cam1 AND strih" (the old
+/// single-group gate) is permanently unsatisfiable — and permanently ROBUST — for any OTHER
+/// deployed camera. Passing `mandatory = [strih]`, `any_of = [cam1, cam2, cam3, cam4, cam5,
+/// cam6]` instead fixes that: the mandatory hop burn(s) are still always required, and the
+/// deployed camera's OWN burn (whichever one it is) still satisfies the group — so a genuinely
+/// missing/unreadable deployed-camera burn on THIS frame still correctly falls through to the
+/// robust recovery (the #186 0-miss guarantee is unaffected; see the doc on
+/// [`decode_qr_luma_all_fast_then_robust_pathed`]). A flat UNION of all 6 ids into one
+/// mandatory list (requiring all of them on every frame) would NOT fix this — it would make the
+/// gate permanently unsatisfiable in the OTHER direction (an undeployed camera's id never
+/// appears either) — this is why the two groups must stay separate.
+pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed(
+    img: GrayImage,
+    mandatory_burn_run_ids: &[u32],
+    any_of_burn_run_ids: &[u32],
+) -> (Vec<Payload>, DecodePath) {
     let mut out = decode_qr_luma_all(img.clone());
 
-    // Fast path: the plain pass already carries every expected node burn — the tiled recovery
-    // could only re-find the same ids (robust is a SUPERSET that adds nothing here), so skip
-    // its ~10× cost. This is the ~99 %+ common case on a clean recording.
-    let all_burns_present = expected_burn_run_ids
+    // Fast path: the plain pass already carries every MANDATORY burn, AND (when the any-of
+    // group is non-empty) at least one of its members — the tiled recovery could only re-find
+    // the same ids (robust is a SUPERSET that adds nothing here), so skip its ~10× cost. This
+    // is the ~99 %+ common case on a clean recording.
+    let mandatory_present = mandatory_burn_run_ids
         .iter()
         .all(|id| out.iter().any(|p| p.run_id == *id));
-    if all_burns_present {
+    let any_of_present = any_of_burn_run_ids.is_empty()
+        || any_of_burn_run_ids
+            .iter()
+            .any(|id| out.iter().any(|p| p.run_id == *id));
+    if mandatory_present && any_of_present {
         return (out, DecodePath::Fast);
     }
 
-    // Robust fallback: a burn is missing — give rqrr the tiled+upscaled look (#202) that
-    // recovers the small burns the full-frame pass intermittently misses.
+    // Robust fallback: a mandatory burn is missing, or NONE of the any-of group decoded — give
+    // rqrr the tiled+upscaled look (#202) that recovers the small burns the full-frame pass
+    // intermittently misses.
     robust_tile_passes(&img, &mut out);
     (out, DecodePath::Robust)
 }
@@ -1572,6 +1625,118 @@ mod tests {
                 "fast-then-robust must read the IDENTICAL set as robust-always (blur={blur})"
             );
         }
+    }
+
+    /// #632 gap 1: the any-of group IS satisfied when the deployed camera's OWN burn (cam3, not
+    /// cam1) decoded in the plain pass — proving cam3-deployed recordings get the SAME fast path
+    /// benefit cam1-deployed ones already had, without requiring cam1's (never-emitted) burn.
+    #[test]
+    fn grouped_gate_fast_path_when_deployed_camera_is_cam3_not_cam1() {
+        const STRIH_ID: u32 = 911_002;
+        const CAM1_ID: u32 = 911_001;
+        const CAM3_ID: u32 = 911_008;
+        let left = Payload {
+            run_id: 7,
+            frame_id: 400,
+            gen_ts_ns: 1,
+        };
+        let right = Payload {
+            run_id: 7,
+            frame_id: 401,
+            gen_ts_ns: 2,
+        };
+        // Composite BOTH the strih burn and cam3's burn into the frame (two distinct node
+        // burns, as a real strih recording under cam3 test would carry: cam3's forwarded
+        // capture burn + strih's own render burn). `dual_with_bottom_burn` only blits one
+        // burn, so blit a second one manually at a different corner.
+        let strih_burn = Payload {
+            run_id: STRIH_ID,
+            frame_id: 1670,
+            gen_ts_ns: 3,
+        };
+        let cam3_burn = Payload {
+            run_id: CAM3_ID,
+            frame_id: 5000,
+            gen_ts_ns: 4,
+        };
+        let mut luma = dual_with_bottom_burn(&left, &right, &strih_burn, 360, 0.0);
+        let (w, h) = (1920u32, 1080u32);
+        let cam3_qr = render_payload_qr(&cam3_burn, 360);
+        let (qw, qh) = (cam3_qr.width(), cam3_qr.height());
+        // Bottom-RIGHT corner (measured actual size, never the requested px) — clear of the
+        // strih burn `dual_with_bottom_burn` already placed bottom-LEFT.
+        blit_burn_luma(&mut luma, &cam3_burn, 360, w - qw - 40, h - qh - 40);
+
+        // Precondition: the plain pass reads BOTH burns, never cam1's (it was never drawn).
+        let plain = decode_qr_luma_all(luma.clone());
+        assert!(
+            plain.iter().any(|p| p.run_id == STRIH_ID),
+            "precondition: strih burn must decode: {plain:?}"
+        );
+        assert!(
+            plain.iter().any(|p| p.run_id == CAM3_ID),
+            "precondition: cam3 burn must decode: {plain:?}"
+        );
+        assert!(
+            !plain.iter().any(|p| p.run_id == CAM1_ID),
+            "precondition: cam1's burn must never appear (cam3 is under test): {plain:?}"
+        );
+
+        let (got, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed(
+            luma,
+            &[STRIH_ID],
+            &[CAM1_ID, CAM3_ID],
+        );
+        assert_eq!(
+            path,
+            DecodePath::Fast,
+            "#632: strih (mandatory) present + cam3 (any-of member) present must take FAST, \
+             even though cam1 (another any-of member) never appears in this recording at all"
+        );
+        assert!(
+            got.iter().any(|p| p.run_id == CAM3_ID),
+            "fast path still returns cam3's burn: {got:?}"
+        );
+    }
+
+    /// #632: when NONE of the any-of group decoded (the deployed camera's burn genuinely missed
+    /// the plain pass on this frame), the gate must still fall back to ROBUST — the any-of group
+    /// is not a free pass, it only widens WHICH id counts, never whether recovery still runs.
+    #[test]
+    fn grouped_gate_falls_back_to_robust_when_any_of_group_entirely_absent() {
+        const STRIH_ID: u32 = 911_002;
+        const CAM1_ID: u32 = 911_001;
+        const CAM3_ID: u32 = 911_008;
+        let left = Payload {
+            run_id: 7,
+            frame_id: 500,
+            gen_ts_ns: 1,
+        };
+        let right = Payload {
+            run_id: 7,
+            frame_id: 501,
+            gen_ts_ns: 2,
+        };
+        let strih_burn = Payload {
+            run_id: STRIH_ID,
+            frame_id: 1670,
+            gen_ts_ns: 3,
+        };
+        // Only the mandatory strih burn is drawn — no camera burn at all (neither cam1 nor
+        // cam3), modeling a frame where the deployed camera's own burn failed to decode.
+        let luma = dual_with_bottom_burn(&left, &right, &strih_burn, 360, 0.0);
+        let (_got, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed(
+            luma,
+            &[STRIH_ID],
+            &[CAM1_ID, CAM3_ID],
+        );
+        assert_eq!(
+            path,
+            DecodePath::Robust,
+            "#632: mandatory satisfied but the any-of group is ENTIRELY absent — must still \
+             attempt robust recovery (the group only widens which id counts, never skips \
+             recovery when none of them are found)"
+        );
     }
 
     #[test]
