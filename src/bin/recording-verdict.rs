@@ -44,8 +44,8 @@ use camera_box::probe::burn_contiguity::{
     RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
-    analyze_recording_with_burns, extract_frames_png, select_frames_to_extract, RecordingFrame,
-    DEFAULT_MAX_PIXEL_PROOF,
+    analyze_recording_with_burns, analyze_recording_with_grouped_burns, extract_frames_png,
+    select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
     burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,
@@ -2221,6 +2221,27 @@ fn decode_for(path: Option<&Path>, expected_node_burns: &[u32]) -> Result<Option
     }))
 }
 
+/// #632 gap 1 — [`decode_for`] with the #207 fast-path gate split into MANDATORY (always
+/// required) + ANY-OF (whichever ONE of [`CAMERA_UNDER_TEST_NODES`] is actually deployed this
+/// run) groups — see [`analyze_recording_with_grouped_burns`]. Used for the fused strih/stream
+/// decode in `main()` so a cam3/cam4/cam5/cam6/cam2-deployed run gets the same #207 fast path a
+/// cam1-deployed run always could.
+fn decode_for_grouped(
+    path: Option<&Path>,
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
+) -> Result<Option<DecodedRec>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let frames = analyze_recording_with_grouped_burns(path, mandatory_burns, any_of_burns)
+        .with_context(|| format!("analyze recording {}", path.display()))?;
+    Ok(Some(DecodedRec {
+        frames,
+        rec_path: Some(path.to_path_buf()),
+    }))
+}
+
 /// #188 A/V-SYNC MODE — measure + report the video↔audio offset from one recording.
 fn run_av_sync(args: &Args) -> Result<()> {
     let recording = args.av_sync.as_ref().expect("av_sync set");
@@ -2304,18 +2325,19 @@ fn main() -> Result<()> {
 
     // FUSED: decode every supplied recording on THIS host (the legacy single-process path),
     // then build the verdict. Each recording is decoded for the burns it is KNOWN to carry
-    // (strih: cam1+strih; stream: all three; cam1 grab: cam1 only) for the #207 fast gate.
-    let strih = decode_for(
+    // (strih: strih render burn + whichever camera is deployed; stream: + stream; cam1 grab:
+    // cam1 only) for the #207 fast gate. #632 gap 1: the camera-under-test slot is an ANY-OF
+    // group (cam1..cam6 are mutually exclusive — only the deployed one's burn ever appears), not
+    // a hardcoded cam1-only mandatory check — see `camera_under_test_burn_ids`.
+    let strih = decode_for_grouped(
         args.strih.as_deref(),
-        &[args.burn_cam1_run_id, args.burn_strih_run_id],
+        &[args.burn_strih_run_id],
+        &camera_under_test_burn_ids(&args),
     )?;
-    let stream = decode_for(
+    let stream = decode_for_grouped(
         args.stream.as_deref(),
-        &[
-            args.burn_cam1_run_id,
-            args.burn_strih_run_id,
-            args.burn_stream_run_id,
-        ],
+        &[args.burn_strih_run_id, args.burn_stream_run_id],
+        &camera_under_test_burn_ids(&args),
     )?;
     // #463: imag now carries its OWN digital corner burn (run_id BURN_RUN_ID_IMAG) — decode for
     // it so the #207 fast/robust gate looks for it. Backward compatible: a recording with no
@@ -2671,6 +2693,18 @@ fn build_and_print_verdict(
         report["latency"]["strih_stream_source"] = serde_json::json!(source);
     }
 
+    // #632 gap 2: the resolved camera-under-test's node label for the cam2→SOURCE V4L2
+    // capture-drop diagnostic below (`--cam1-capture-stats`, TOP LEVEL / independent of
+    // `stream_frames_opt`). Defaults to "cam1" (the pre-#632 behavior, unchanged when no stream
+    // recording/burns are supplied at all) and is overwritten below to whichever
+    // CAMERA_UNDER_TEST_NODES entry actually decoded in THIS run — mutually exclusive in a real
+    // single-camera run, so at most one non-cam1 entry ever overrides the default. The v4l2
+    // capture-drop sidecar's CONTENT is already correct for whichever camera the harness
+    // deployed (`$CAM1_CAPTURE_STATS` in scripts/recording-e2e.sh is resolved to the actual
+    // SOURCE camera's own sidecar, despite the historical "cam1" naming) — only the PRINTED
+    // label/JSON key was stale.
+    let mut camera_under_test_label: &str = "cam1";
+
     // ===================================================================================
     // #174 — FULL-CHAIN per-hop verdict from the SINGLE stream recording, paired on the
     // CLEAN DIGITAL BURN IDs. The cam1-capture burn (run_id = burn_cam1_run_id) rides
@@ -2731,6 +2765,17 @@ fn build_and_print_verdict(
         let cam4_ids = burn_ids_in(cam1_source, args.burn_cam4_run_id);
         let cam5_ids = burn_ids_in(cam1_source, args.burn_cam5_run_id);
         let cam6_ids = burn_ids_in(cam1_source, args.burn_cam6_run_id);
+        // #632 gap 2: resolve which CAMERA_UNDER_TEST_NODES entry actually produced ids in this
+        // run, for the cam2→SOURCE V4L2 capture-drop label further down (independent of this
+        // `if let` block's scope).
+        camera_under_test_label = resolve_camera_under_test_label(
+            !cam1_ids.is_empty(),
+            !cam2_ids.is_empty(),
+            !cam3_ids.is_empty(),
+            !cam4_ids.is_empty(),
+            !cam5_ids.is_empty(),
+            !cam6_ids.is_empty(),
+        );
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
         let any_burn = !cam1_ids.is_empty()
@@ -3409,25 +3454,34 @@ fn build_and_print_verdict(
         }
     }
 
-    // cam2→cam1 LOSS = cam1's V4L2 CAPTURE-DROP count (the camera leg: cam2 monitor → cam1
-    // lens → cam1 V4L2 capture). A dropped capture = a lost frame on that leg — the kernel
-    // `sequence` gap the camera-box tracks (capture.rs), NOT a painter-tick optical compare
-    // (which the 60→30 genlock decimation confounds, flagging present readable frames as
-    // lost). The burn-id contiguity above covers the DIGITAL chain from cam1's EMITTED frame
-    // onward (cam1 burn increments per emit, after the genlock gate), so it cannot see a
+    // cam2→SOURCE LOSS = the camera-under-test's V4L2 CAPTURE-DROP count (the camera leg: cam2
+    // monitor → camera lens → its V4L2 capture). A dropped capture = a lost frame on that leg —
+    // the kernel `sequence` gap the camera-box tracks (capture.rs), NOT a painter-tick optical
+    // compare (which the 60→30 genlock decimation confounds, flagging present readable frames as
+    // lost). The burn-id contiguity above covers the DIGITAL chain from the camera's EMITTED
+    // frame onward (its burn increments per emit, after the genlock gate), so it cannot see a
     // capture drop UPSTREAM of the burn — this sidecar is that separate signal.
     //
-    // Run at TOP LEVEL (not nested under the full-chain burn block): the cam2→cam1 loss
+    // #632 gap 2: `--cam1-capture-stats` is historically cam1-named, but the sidecar file it
+    // points at is ALWAYS whichever camera the harness actually deployed (scripts/
+    // recording-e2e.sh resolves `$CAM1_CAPTURE_STATS` to the SOURCE camera's own sidecar,
+    // #24) — only the printed label/JSON key was stale, hardcoded to "cam1" regardless. Use the
+    // `camera_under_test_label` resolved above (from whichever CAMERA_UNDER_TEST_NODES burn id
+    // actually decoded this run) so a cam3/cam4/cam5/cam6 run reports its OWN name instead of a
+    // misleading "cam1".
+    //
+    // Run at TOP LEVEL (not nested under the full-chain burn block): the cam2→SOURCE loss
     // depends ONLY on --cam1-capture-stats, so a supplied gate flag is ALWAYS parsed + gated
     // and a missing/malformed file ALWAYS errors — even when --stream is absent or the stream
     // carried no burns (otherwise a supplied capture-drop sidecar showing real drops could be
     // silently ignored while OVERALL printed ZERO loss).
     if let Some(stats_path) = &args.cam1_capture_stats {
         let stats = parse_cam1_capture_stats(stats_path)?;
-        let cam1_zero = stats.v4l2_dropped == 0;
-        if cam1_zero {
+        let capture_zero = stats.v4l2_dropped == 0;
+        if capture_zero {
             println!(
-                "  [cam2→cam1] ZERO loss — cam1 V4L2 capture dropped 0 frames ({} captured).",
+                "  [cam2→{camera_under_test_label}] ZERO loss — {camera_under_test_label} V4L2 \
+                 capture dropped 0 frames ({} captured).",
                 stats.frames_captured
             );
         } else {
@@ -3435,17 +3489,20 @@ fn build_and_print_verdict(
             // (frames_captured counts only delivered buffers, not the lost ones).
             let total = stats.frames_captured.saturating_add(stats.v4l2_dropped);
             println!(
-                "  [cam2→cam1] NOT zero — cam1 V4L2 capture dropped {} of {} frames \
-                 ({} delivered; REAL capture-card drops on the camera leg).",
+                "  [cam2→{camera_under_test_label}] NOT zero — {camera_under_test_label} V4L2 \
+                 capture dropped {} of {} frames ({} delivered; REAL capture-card drops on the \
+                 camera leg).",
                 stats.v4l2_dropped, total, stats.frames_captured
             );
         }
-        all_pass &= cam1_zero;
-        report["full_chain"]["loss"]["cam2_cam1"] = serde_json::json!({
-            "zero_loss": cam1_zero,
+        all_pass &= capture_zero;
+        report["full_chain"]["loss"][format!("cam2_{camera_under_test_label}")] = serde_json::json!({
+            "zero_loss": capture_zero,
             "v4l2_dropped": stats.v4l2_dropped,
             "frames_captured": stats.frames_captured,
-            "source": "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare",
+            "source": format!(
+                "{camera_under_test_label} V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare"
+            ),
         });
     }
 
@@ -4238,6 +4295,70 @@ fn build_and_print_verdict(
     Ok((report, all_pass))
 }
 
+/// #632 gap 2 — PURE (no I/O, unit-testable) resolution of the camera-under-test's node name for
+/// the cam2→SOURCE V4L2 capture-drop label (`--cam1-capture-stats`, historically hardcoded to
+/// "cam1"): cam1/cam2/cam3/cam4/cam5/cam6 are mutually exclusive in a real single-camera run, so
+/// at most one of `cam2_present..cam6_present` is ever true. Returns "cam1" when `cam1_present`
+/// (the common case, unchanged pre-#632 behavior) OR when NONE of the others are present either
+/// (nothing to resolve — the pre-#632 default). Otherwise returns whichever of cam2..cam6 IS
+/// present, checked in that fixed order (irrelevant in practice since they're mutually exclusive).
+fn resolve_camera_under_test_label(
+    cam1_present: bool,
+    cam2_present: bool,
+    cam3_present: bool,
+    cam4_present: bool,
+    cam5_present: bool,
+    cam6_present: bool,
+) -> &'static str {
+    if !cam1_present {
+        for (node, present) in [
+            ("cam2", cam2_present),
+            ("cam3", cam3_present),
+            ("cam4", cam4_present),
+            ("cam5", cam5_present),
+            ("cam6", cam6_present),
+        ] {
+            if present {
+                return node;
+            }
+        }
+    }
+    "cam1"
+}
+
+/// #638/#632: map a single [`CAMERA_UNDER_TEST_NODES`] entry to its own `--burn-cam*-run-id`
+/// arg. Callers always iterate `CAMERA_UNDER_TEST_NODES` itself, so the `_` arm is unreachable
+/// in practice — panicking there (rather than returning a bogus default) surfaces a caller bug
+/// immediately instead of silently mis-mapping a camera's burn id.
+fn burn_run_id_for_camera(node: &str, args: &Args) -> u32 {
+    match node {
+        "cam1" => args.burn_cam1_run_id,
+        "cam2" => args.burn_cam2_run_id,
+        "cam3" => args.burn_cam3_run_id,
+        "cam4" => args.burn_cam4_run_id,
+        "cam5" => args.burn_cam5_run_id,
+        "cam6" => args.burn_cam6_run_id,
+        _ => unreachable!(
+            "burn_run_id_for_camera called with {node:?} — expected a CAMERA_UNDER_TEST_NODES entry"
+        ),
+    }
+}
+
+/// #632 gap 1 — the "any-of" burn-id group for the #207 fast-path gate: every
+/// [`CAMERA_UNDER_TEST_NODES`] entry's own reserved burn id. Exactly ONE of these ever appears
+/// in a real single-camera run (cam1/cam2/cam3/cam4/cam5/cam6 are mutually exclusive — only the
+/// camera actually deployed with `CAMERA_BOX_BURN_RUN_ID` set produces a non-empty id set), so
+/// requiring "at least one of these" (rather than "cam1 specifically") lets a cam2/cam3/cam4/
+/// cam5/cam6-deployed recording take the fast path exactly like a cam1-deployed one already
+/// could. See `decode_qr_luma_all_fast_then_robust_grouped`'s doc for why a flat UNION into one
+/// mandatory list (requiring ALL six) would NOT fix this.
+fn camera_under_test_burn_ids(args: &Args) -> Vec<u32> {
+    CAMERA_UNDER_TEST_NODES
+        .iter()
+        .map(|&node| burn_run_id_for_camera(node, args))
+        .collect()
+}
+
 /// #208 + #186: the sibling directory (BESIDE the partial JSON) where `--extract-partial` writes
 /// this box's pixel-proof PNGs and `--merge-partials` looks for the pulled-back copies. For a
 /// partial `…/strih-partial-42.json` it is `…/strih-partial-42-pixels`. Deriving it the SAME way
@@ -4262,7 +4383,9 @@ fn partial_pixels_dir(partial_path: &Path) -> PathBuf {
 ///   • the recording's UNDECODABLE frames (no readable QR at all — the `report_recording_diag` set), and
 ///   • the missing-burn slots for the nodes this box AUTHORITATIVELY backs — the SAME slots the
 ///     merge would flag, so the PNGs pulled back are exactly the #186 proofs:
-///       - strih box → cam1 (its burn is read from the clean 1080p strih recording, #133),
+///       - strih box → whichever ONE of [`CAMERA_UNDER_TEST_NODES`] is actually deployed (#638;
+///         its burn is read from the clean 1080p strih recording, #133 — mutually exclusive, so
+///         at most one of the six ever has a non-empty window),
 ///       - stream box → strih + stream (their burns are read from the stream recording).
 /// `undecodable` is the undecodable subset (so `extract_frames_png` runs its sharp-but-flagged
 /// self-check on those frames). PURE (no I/O) so the selection is unit-testable; the PNG write is
@@ -4272,11 +4395,14 @@ fn extract_partial_flagged_frames(
     frames: &[RecordingFrame],
     args: &Args,
 ) -> (Vec<u64>, HashSet<u64>) {
-    let all_burns = [
-        args.burn_cam1_run_id,
-        args.burn_strih_run_id,
-        args.burn_stream_run_id,
-    ];
+    // #638: every possible node burn id — all six CAMERA_UNDER_TEST_NODES ids + strih + stream —
+    // must be excluded from "is this cam2's optical QR" (see `frame_is_delivered_optical`). Before
+    // #638 this list only knew about cam1, so a cam3/cam4/cam5/cam6/cam2 burn on an unpinned
+    // extract would have been misread as cam2's optical payload once those cameras could be the
+    // one actually under test riding through this box's recording.
+    let mut all_burns = camera_under_test_burn_ids(args);
+    all_burns.push(args.burn_strih_run_id);
+    all_burns.push(args.burn_stream_run_id);
     // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
     let ticks = FrameTick::from_recording_frames(frames);
     let cfg = VerdictConfig {
@@ -4289,9 +4415,10 @@ fn extract_partial_flagged_frames(
     let mut flagged: Vec<u64> = v.undecodable_frames.clone();
 
     // The missing-burn slots for the nodes THIS box authoritatively backs (#133): the strih box
-    // backs cam1 (its burn is crispest in the clean 1080p strih recording); the stream box backs
-    // strih + stream (their own burns are co-located with cam2's optical QR only in the stream
-    // recording). These are the SAME (node, source) pairings `build_and_print_verdict` uses, so the
+    // backs whichever ONE of CAMERA_UNDER_TEST_NODES is actually deployed (#638; its burn is
+    // crispest in the clean 1080p strih recording); the stream box backs strih + stream (their
+    // own burns are co-located with cam2's optical QR only in the stream recording). These are
+    // the SAME (node, source) pairings `build_and_print_verdict` uses, so the
     // missing slots — and thus the extracted PNG frame indices — match what the merge would flag.
     // #198: cam1's burn is per-EMITTED-frame (a forward gap is a real drop ON A 1:1 HOP — #571:
     // on the decimated cam(60)->strih(30) hop, step >= 2, forward gaps are by-design decimation
@@ -4307,21 +4434,30 @@ fn extract_partial_flagged_frames(
         args.refresh_hz,
         args.capture_fps,
     );
-    let cam1_step = node_render_step(
-        "cam1",
-        args.strih_emit_fps,
-        args.stream_capture_fps,
-        args.refresh_hz,
-        args.capture_fps,
-    );
-    let owned: &[(&str, u32, BurnRate, i64)] = match box_name {
-        "strih" => &[(
-            "cam1",
-            args.burn_cam1_run_id,
-            BurnRate::PerEmittedFrame,
-            cam1_step,
-        )],
-        "stream" => &[
+    let owned: Vec<(&str, u32, BurnRate, i64)> = match box_name {
+        // #638: the strih recording carries whichever ONE of CAMERA_UNDER_TEST_NODES is
+        // actually deployed (forwarded through, #133) — flag ITS missing-burn slots, mirroring
+        // how `build_and_print_verdict`'s own NodeSpec loop already treats all six uniformly.
+        // Mutually exclusive in a real run, so at most one of the six ever has a non-empty
+        // window here; iterating all six costs nothing extra for the five that never appear.
+        "strih" => CAMERA_UNDER_TEST_NODES
+            .iter()
+            .map(|&node| {
+                (
+                    node,
+                    burn_run_id_for_camera(node, args),
+                    BurnRate::PerEmittedFrame,
+                    node_render_step(
+                        node,
+                        args.strih_emit_fps,
+                        args.stream_capture_fps,
+                        args.refresh_hz,
+                        args.capture_fps,
+                    ),
+                )
+            })
+            .collect(),
+        "stream" => vec![
             (
                 "strih",
                 args.burn_strih_run_id,
@@ -4335,13 +4471,13 @@ fn extract_partial_flagged_frames(
                 1,
             ),
         ],
-        _ => &[],
+        _ => Vec::new(),
     };
     // #273: thread the cam2 pin so the on-box pixel-proof flagging anchors the optical window to
     // THIS run's paint exactly as the merge verdict does (a foreign-run lead-in is not flagged as
     // delivered). `None` for an unpinned extract (e.g. the strih box runs without --cam2-run-id).
     let cam2_pin = args.cam2_pin();
-    for &(node, burn_run_id, rate, step) in owned {
+    for &(node, burn_run_id, rate, step) in owned.iter() {
         let window = in_window_burn_frames(frames, burn_run_id, &all_burns, rate, cam2_pin);
         let iw = burn_contiguity_in_window_with_step(node, &window, rate, step);
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
@@ -4353,23 +4489,32 @@ fn extract_partial_flagged_frames(
 }
 
 /// The node-burn run_ids a per-box partial is expected to carry, derived from the box name + the
-/// `--burn-*-run-id` args: the strih recording carries cam1 (forwarded) + strih; the stream
-/// recording (the chain endpoint) carries all three; the imag recording carries its OWN digital
+/// `--burn-*-run-id` args: the strih recording carries whichever ONE of
+/// [`CAMERA_UNDER_TEST_NODES`] is actually deployed (forwarded) + strih; the stream recording
+/// (the chain endpoint) carries the same + stream; the imag recording carries its OWN digital
 /// corner burn ([`BURN_RUN_ID_IMAG`], #463 — before #463 this was `Some(vec![])`, since imag-nb
 /// had no digital burn and its zero-loss proof was the cam2 optical tick's own contiguity alone;
 /// that optical fallback still applies when a recording carries no decoded burn at all — see
-/// `node_verdict_for_imag`). `None` for an unknown box. SINGLE source of truth for BOTH
-/// `--extract-partial` (what it decodes for) and the `--merge-partials` consistency check — so a
-/// manual `--burn-*-run-id` mismatch between extract and merge cannot silently misverdict
-/// (run_merge warns when a loaded partial's `expected_burns` disagree with this).
+/// `node_verdict_for_imag`). `None` for an unknown box. SINGLE source of truth for the
+/// `--merge-partials` consistency check (run_merge warns when a loaded partial's
+/// `expected_burns` disagree with this) AND for the partial's recorded metadata; #632 gap 1 split
+/// the ACTUAL `--extract-partial` #207 fast-path decode into a separate mandatory/any-of call
+/// (`analyze_recording_with_grouped_burns`, see [`extract_partial`]) rather than reusing this
+/// flat list directly — a flat list containing ALL SIX camera ids as one AND-gate would be
+/// permanently unsatisfiable (only one camera is ever deployed per run).
 fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
     match box_name {
-        "strih" => Some(vec![args.burn_cam1_run_id, args.burn_strih_run_id]),
-        "stream" => Some(vec![
-            args.burn_cam1_run_id,
-            args.burn_strih_run_id,
-            args.burn_stream_run_id,
-        ]),
+        "strih" => {
+            let mut v = camera_under_test_burn_ids(args);
+            v.push(args.burn_strih_run_id);
+            Some(v)
+        }
+        "stream" => {
+            let mut v = camera_under_test_burn_ids(args);
+            v.push(args.burn_strih_run_id);
+            v.push(args.burn_stream_run_id);
+            Some(v)
+        }
         "imag" => Some(vec![BURN_RUN_ID_IMAG]),
         _ => None,
     }
@@ -4413,8 +4558,25 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
         expected_burns = ?expected_burns,
         "extract-partial: decoding the LOCAL recording in place (#208 — nothing copied off-box)"
     );
-    let frames = analyze_recording_with_burns(rec_path, &expected_burns)
-        .with_context(|| format!("analyze recording {}", rec_path.display()))?;
+    // #632 gap 1: strih/stream split the #207 fast-path gate into MANDATORY (the box's own hop
+    // burn(s), always required) + ANY-OF (whichever ONE of CAMERA_UNDER_TEST_NODES is actually
+    // deployed this run — mutually exclusive, so "at least one" unlocks the fast path exactly
+    // like the historically-hardcoded cam1-only check did for cam1 specifically). imag has no
+    // camera-under-test any-of group, so it keeps the plain mandatory-only decode unchanged.
+    let frames = match box_name {
+        "strih" => analyze_recording_with_grouped_burns(
+            rec_path,
+            &[args.burn_strih_run_id],
+            &camera_under_test_burn_ids(args),
+        ),
+        "stream" => analyze_recording_with_grouped_burns(
+            rec_path,
+            &[args.burn_strih_run_id, args.burn_stream_run_id],
+            &camera_under_test_burn_ids(args),
+        ),
+        _ => analyze_recording_with_burns(rec_path, &expected_burns),
+    }
+    .with_context(|| format!("analyze recording {}", rec_path.display()))?;
 
     let out = args
         .out
@@ -7437,6 +7599,39 @@ mod tests {
         );
     }
 
+    /// #638: the strih box must ALSO flag the missing-burn slots for cam3 (or any of cam2/cam4/
+    /// cam5/cam6) — not just cam1 — when cam3 is the camera actually under test riding through
+    /// this box's recording. Before #638 `extract_partial_flagged_frames`'s "strih" arm only
+    /// ever checked cam1's burn, so a cam3 run's missing-burn slot was silently dropped from
+    /// pixel-proof extraction entirely.
+    #[test]
+    fn extract_partial_flags_missing_burn_slots_for_cam3_on_strih_box_638() {
+        use super::extract_partial_flagged_frames;
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict"]);
+        // strih-box frames when CAM3 (not cam1) is the camera under test: frame 1 is DELIVERED
+        // (carries cam2) but is MISSING its cam3 burn — a BURN-UNREADABLE missing slot for cam3,
+        // read from this same strih recording. cam1's burn never appears anywhere (cam1 is not
+        // deployed this run).
+        let frames = vec![
+            frame(0, &[(CAM2, 100), (CAM3B, 5000), (STRIH, 1670)]),
+            frame(1, &[(CAM2, 101), (STRIH, 1673)]), // delivered, NO cam3 burn → BurnUnreadable
+            frame(2, &[(CAM2, 102), (CAM3B, 5002), (STRIH, 1676)]),
+        ];
+        let (flagged, undecodable) = extract_partial_flagged_frames("strih", &frames, &args);
+        assert!(
+            flagged.contains(&1),
+            "#638: the cam3 missing-burn slot (delivered frame 1 with no cam3 burn) must be \
+             flagged for pixel-proof on the strih box — extract_partial_flagged_frames must \
+             cover ALL CAMERA_UNDER_TEST_NODES, not just cam1; got flagged={flagged:?}"
+        );
+        assert!(
+            undecodable.is_empty(),
+            "#638: no frame is undecodable here (all carry cam2) — only the cam3 missing-burn \
+             slot is flagged; got undecodable={undecodable:?}"
+        );
+    }
+
     /// #208: the pixel-proof dir is derived the SAME way on both sides (extract writes it, merge
     /// reads it) — `…/strih-partial-42.json` → `…/strih-partial-42-pixels` beside the JSON.
     #[test]
@@ -7503,10 +7698,14 @@ mod tests {
         );
     }
 
-    /// #208 (review): the per-box expected burns are ONE source of truth shared by extract and the
-    /// merge consistency check — strih carries cam1+strih, stream carries all three, unknown → None.
-    /// A mismatch between a partial's recorded expected_burns and this mapping is what run_merge
-    /// warns on (a manual --burn-* mismatch between extract and merge that could misverdict).
+    /// #208/#632 (review): the per-box expected burns are ONE source of truth shared by the
+    /// merge consistency check — strih carries ALL SIX camera-under-test ids (#632: whichever
+    /// ONE is actually deployed a given run, mutually exclusive) + strih; stream carries the
+    /// same + stream; unknown → None. A mismatch between a partial's recorded expected_burns and
+    /// this mapping is what run_merge warns on (a manual --burn-* mismatch between extract and
+    /// merge that could misverdict). Note: the ACTUAL `--extract-partial` decode call uses the
+    /// mandatory/any-of split (`analyze_recording_with_grouped_burns`) rather than this flat
+    /// list directly — see `extract_partial`.
     #[test]
     fn args_expected_burns_for_maps_box_to_its_burns() {
         use super::args_expected_burns_for;
@@ -7514,18 +7713,85 @@ mod tests {
         let args = super::Args::parse_from(["recording-verdict"]);
         assert_eq!(
             args_expected_burns_for("strih", &args),
-            Some(vec![CAM1B, STRIH]),
-            "strih partial carries cam1 (forwarded) + strih"
+            Some(vec![
+                CAM1B,
+                CAM2B,
+                CAM3B,
+                super::BURN_RUN_ID_CAM4,
+                CAM5B,
+                CAM6B,
+                STRIH
+            ]),
+            "strih partial carries every CAMERA_UNDER_TEST_NODES id (#632) + strih"
         );
         assert_eq!(
             args_expected_burns_for("stream", &args),
-            Some(vec![CAM1B, STRIH, STREAM]),
-            "stream partial (chain endpoint) carries all three burns"
+            Some(vec![
+                CAM1B,
+                CAM2B,
+                CAM3B,
+                super::BURN_RUN_ID_CAM4,
+                CAM5B,
+                CAM6B,
+                STRIH,
+                STREAM
+            ]),
+            "stream partial (chain endpoint) carries every CAMERA_UNDER_TEST_NODES id + strih + stream"
         );
         assert_eq!(
             args_expected_burns_for("nope", &args),
             None,
             "an unknown box has no expected burns"
+        );
+    }
+
+    /// #632 gap 2: the cam2→SOURCE V4L2 capture-drop label defaults to "cam1" — both the common
+    /// case (cam1 IS the camera under test) and the pre-#632 fallback (nothing decoded at all).
+    #[test]
+    fn resolve_camera_under_test_label_defaults_to_cam1() {
+        use super::resolve_camera_under_test_label;
+        assert_eq!(
+            resolve_camera_under_test_label(true, false, false, false, false, false),
+            "cam1",
+            "cam1 present ⇒ cam1 (even if, hypothetically, another id were also present)"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, false, false, false, false),
+            "cam1",
+            "nothing present ⇒ the pre-#632 default, unchanged"
+        );
+    }
+
+    /// #632 gap 2: when cam1 is ABSENT but cam3 (or any other CAMERA_UNDER_TEST_NODES entry) is
+    /// present, the label must resolve to THAT camera's own name — the exact bug #632 reports
+    /// (the label used to say "cam1" unconditionally, even for a cam3/cam4 run).
+    #[test]
+    fn resolve_camera_under_test_label_resolves_to_the_deployed_camera() {
+        use super::resolve_camera_under_test_label;
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, true, false, false, false),
+            "cam3",
+            "#632: cam1 absent, cam3 present ⇒ label must be cam3, not the stale cam1"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, false, true, false, false),
+            "cam4",
+            "#632: cam4 deployed ⇒ cam4"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, true, false, false, false, false),
+            "cam2",
+            "#632: cam2 (the fixed painter, ALSO camera-under-test role per #312) ⇒ cam2"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, false, false, true, false),
+            "cam5",
+            "#632: cam5 deployed ⇒ cam5"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, false, false, false, true),
+            "cam6",
+            "#632: cam6 deployed ⇒ cam6"
         );
     }
 

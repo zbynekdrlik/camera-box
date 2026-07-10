@@ -29,7 +29,10 @@
 //! the other hardware/process glue (`multi_reader`, `reader`, `run`).
 
 use crate::probe::payload::Payload;
-use crate::probe::qr::{decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_robust};
+use crate::probe::qr::{
+    decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_fast_then_robust_grouped,
+    decode_qr_luma_all_robust,
+};
 use anyhow::{Context, Result};
 use image::GrayImage;
 use serde::{Deserialize, Serialize};
@@ -246,6 +249,36 @@ pub fn decode_recording_frame_with_burns(
     }
 }
 
+/// #632 gap 1 — [`decode_recording_frame_with_burns`] with the #207 fast gate split into TWO
+/// independent groups (see [`decode_qr_luma_all_fast_then_robust_grouped`]): `mandatory_burns`
+/// must ALL decode (e.g. the strih/stream render burns), and `any_of_burns` needs only ONE
+/// member decoded (e.g. whichever ONE of cam1/cam2/cam3/cam4/cam5/cam6 is the camera physically
+/// under test THIS run — they are mutually exclusive, so requiring ALL six in one flat
+/// mandatory list, the way [`decode_recording_frame_with_burns`] would if simply handed all
+/// six ids, would be permanently unsatisfiable). This is
+/// what lets a cam3/cam4/cam5/cam6-deployed recording take the #207 FAST path the way a
+/// cam1-deployed one always could, without weakening the #186 0-miss guarantee for whichever
+/// camera actually is under test (see the qr.rs doc for the full reasoning).
+pub fn decode_recording_frame_with_grouped_burns(
+    frame_index: u64,
+    luma: GrayImage,
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
+) -> RecordingFrame {
+    let payloads = decode_qr_luma_all_fast_then_robust_grouped(luma, mandatory_burns, any_of_burns);
+    // Same tick derivation as decode_recording_frame_with_burns (node burns excluded).
+    let tick = payloads
+        .iter()
+        .filter(|p| !NODE_BURN_RUN_IDS.contains(&p.run_id))
+        .map(|p| p.frame_id)
+        .max();
+    RecordingFrame {
+        frame_index,
+        payloads,
+        tick,
+    }
+}
+
 /// Native width×height of a recording's first video stream, via `ffprobe`.
 fn probe_dimensions(path: &Path) -> Result<(u32, u32)> {
     let out = Command::new("ffprobe")
@@ -441,21 +474,25 @@ fn auto_cpu_workers() -> usize {
 /// frame in RAM at once.
 fn decode_stream_parallel(
     workers: usize,
-    expected_node_burns: &[u32],
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
     produce: impl FnOnce(&mut dyn FnMut(u64, GrayImage) -> bool) -> Result<u64>,
 ) -> Result<Vec<RecordingFrame>> {
     let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u64, GrayImage)>(workers * 2);
     let job_rx = Arc::new(Mutex::new(job_rx));
     let (res_tx, res_rx) = std::sync::mpsc::channel::<RecordingFrame>();
-    // Owned + shared so each worker thread can read the #207 fast-gate burn set without
-    // borrowing the caller's slice across the `'static` thread boundary.
-    let expected_node_burns: Arc<[u32]> = Arc::from(expected_node_burns);
+    // Owned + shared so each worker thread can read the #207 fast-gate burn sets without
+    // borrowing the caller's slices across the `'static` thread boundary. #632: split into two
+    // independent groups (mandatory / any-of) — see `decode_recording_frame_with_grouped_burns`.
+    let mandatory_burns: Arc<[u32]> = Arc::from(mandatory_burns);
+    let any_of_burns: Arc<[u32]> = Arc::from(any_of_burns);
 
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
         let job_rx = job_rx.clone();
         let res_tx = res_tx.clone();
-        let expected_node_burns = expected_node_burns.clone();
+        let mandatory_burns = mandatory_burns.clone();
+        let any_of_burns = any_of_burns.clone();
         handles.push(std::thread::spawn(move || loop {
             // Lock only to pull the next job; release before the heavy decode so
             // workers don't serialise on the mutex (the #160 pattern).
@@ -464,7 +501,12 @@ fn decode_stream_parallel(
                 rx.recv()
             };
             let Ok((idx, luma)) = job else { break };
-            let f = decode_recording_frame_with_burns(idx, luma, &expected_node_burns);
+            let f = decode_recording_frame_with_grouped_burns(
+                idx,
+                luma,
+                &mandatory_burns,
+                &any_of_burns,
+            );
             tracing::debug!(
                 frame = f.frame_index, decoded = f.payloads.len(), tick = ?f.tick,
                 "recording frame analyzed"
@@ -577,11 +619,27 @@ pub fn analyze_recording_with_burns(
     path: &Path,
     expected_node_burns: &[u32],
 ) -> Result<Vec<RecordingFrame>> {
+    // #632: mandatory-only (empty any-of group ⇒ vacuously satisfied) — IDENTICAL semantics to
+    // the pre-#632 implementation, unchanged for every existing caller.
+    analyze_recording_with_grouped_burns(path, expected_node_burns, &[])
+}
+
+/// #632 gap 1 — [`analyze_recording_with_burns`] with the #207 fast gate split into two
+/// independent groups (see [`decode_recording_frame_with_grouped_burns`]): `mandatory_burns`
+/// must ALL be found on a frame, `any_of_burns` needs only ONE member found (empty ⇒ vacuously
+/// satisfied). Pass e.g. `mandatory = [strih]`, `any_of = [cam1, cam2, cam3, cam4, cam5, cam6]`
+/// for a strih recording so the fast path fires regardless of WHICH camera is physically under
+/// test this run (they are mutually exclusive — only the deployed one's burn ever appears).
+pub fn analyze_recording_with_grouped_burns(
+    path: &Path,
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
+) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
     let workers = decode_workers(width, height);
     tracing::info!(
         file = %path.display(), width, height, workers,
-        expected_node_burns = ?expected_node_burns,
+        mandatory_burns = ?mandatory_burns, any_of_burns = ?any_of_burns,
         avail_mb = available_mem_bytes().map(|b| b / 1_048_576),
         "recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust)"
     );
@@ -593,7 +651,7 @@ pub fn analyze_recording_with_burns(
     // output growing during the decode so the detector sees real progress — the
     // deep fix, not a band-aid timeout bump (no-timeout-band-aids.md).
     const PROGRESS_EVERY: u64 = 1000;
-    let frames = decode_stream_parallel(workers, expected_node_burns, |emit| {
+    let frames = decode_stream_parallel(workers, mandatory_burns, any_of_burns, |emit| {
         read_frames(path, width, height, |idx, luma| {
             if idx > 0 && idx % PROGRESS_EVERY == 0 {
                 tracing::info!(file = %path.display(), frames_read = idx, "recording decode progress");
@@ -791,6 +849,40 @@ mod tests {
         assert!(ids.contains(&6518) && ids.contains(&6519), "ids {ids:?}");
     }
 
+    /// #632 gap 1: the new grouped wrapper (mandatory/any-of split) must decode IDENTICALLY to
+    /// the plain flat-list function when the any-of group is empty — proving the #632 addition
+    /// is a pure superset, never a behavior change for any existing (mandatory-only) caller.
+    #[test]
+    fn decode_recording_frame_with_grouped_burns_matches_flat_when_any_of_empty() {
+        let luma = dual_qr_luma(200, 201);
+        let flat = decode_recording_frame_with_burns(5, luma.clone(), &[]);
+        let grouped = decode_recording_frame_with_grouped_burns(5, luma, &[], &[]);
+        assert_eq!(
+            flat, grouped,
+            "empty mandatory + empty any-of must decode identically to the flat function"
+        );
+    }
+
+    /// #632 gap 1: the any-of group is satisfied by ANY of its members — using the dual-QR's
+    /// own run_id (always present) as a stand-in "camera burn" alongside an id that never
+    /// appears, proving the grouped decode still returns the full correct payload set.
+    #[test]
+    fn decode_recording_frame_with_grouped_burns_decodes_fully_when_any_of_satisfied() {
+        let f = decode_recording_frame_with_grouped_burns(
+            0,
+            dual_qr_luma(300, 301),
+            &[],
+            &[999_999, 6519], // 6519 = dual_qr_luma's own run_id; 999_999 never appears
+        );
+        assert_eq!(
+            f.payloads.len(),
+            2,
+            "both QRs still decode: {:?}",
+            f.payloads
+        );
+        assert_eq!(f.tick, Some(301));
+    }
+
     #[test]
     fn tick_is_max_frame_id() {
         // Effective Vernier tick = max(left, right).
@@ -945,7 +1037,7 @@ mod tests {
         // refill it at least once — the backpressure/reorder path is genuinely
         // exercised), without paying for dozens of needless frames.
         let n: u64 = 16;
-        let frames = decode_stream_parallel(4, &[], |emit| {
+        let frames = decode_stream_parallel(4, &[], &[], |emit| {
             for i in 0..n {
                 // left = even tick 2i, right = odd tick 2i+1 → tick = 2i+1, unique
                 // per frame so an order bug is detectable.
@@ -985,7 +1077,7 @@ mod tests {
         // path — the comparison is purely about ordering/parallelism, not the decode
         // path.
         for w in [1usize, 4] {
-            let par = decode_stream_parallel(w, &[], |emit| {
+            let par = decode_stream_parallel(w, &[], &[], |emit| {
                 for i in 0..n {
                     emit(i, make(i));
                 }
@@ -1007,7 +1099,7 @@ mod tests {
         // short read — otherwise a truncated decode could be read as "0 loss". The
         // burn set is irrelevant to error propagation; `&[]` keeps the one decoded
         // frame on the cheap fast path (see the module note above).
-        let r = decode_stream_parallel(4, &[], |emit| {
+        let r = decode_stream_parallel(4, &[], &[], |emit| {
             emit(0, dual_qr_luma(0, 1));
             anyhow::bail!("simulated ffmpeg failure");
         });

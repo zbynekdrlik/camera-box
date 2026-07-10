@@ -216,6 +216,17 @@ To OBSERVE RED→GREEN on a cheap default-feature test (the Tier-0 hook blocks a
 that RUNS), append the one-off bypass: `cargo test --lib <module> # airuleset:build-ok` (or
 `--test <file>`).
 
+**No bypass exists for `src/bin/recording-verdict.rs` or any `src/probe/*.rs` file itself** — the
+bin has `required-features = ["probe"]` and every file under `src/probe/` is behind the SAME
+feature gate, so `cargo check`/`clippy`/`test` on DEFAULT features doesn't even attempt to compile
+them (confirmed live, #632/#638: `cargo test --lib probe::qr::` / `qr::tests::` / `grouped_gate`
+all silently match "0 tests" — NOT a passing run, just nothing to run). The `# airuleset:build-ok`
+bypass only helps a PURE module already extracted to the crate root (above); a change confined
+entirely to `recording-verdict.rs`/`src/probe/` has **zero local verification path** — not even a
+compile check — until CI runs. Treat every such change with extra manual review rigor (type/
+signature checks, `cargo fmt --all -- --check`, diffing brace/paren balance against `origin/main`)
+before pushing, and expect CI to be the FIRST place a mistake surfaces.
+
 **Bound the shared dev1 `target/` (backstop).** Even default-feature checks + rust-analyzer
 accumulate over a day (incremental cache, never purged). Keep it under ~4 GB:
 ```bash
