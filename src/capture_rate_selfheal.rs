@@ -67,10 +67,17 @@ pub const DEFAULT_CRITICAL_ESCALATION_HEALS: u32 = 3;
 /// unit — cleared on reboot, which is correct (a fresh boot deserves a fresh attempt count).
 pub const STATE_PATH: &str = "/run/camera-box/capture-rate-selfheal.state";
 
-/// Process exit code used when this module triggers a restart-for-self-heal, distinguishing it in
-/// `journalctl`/`systemctl status` from a genuine crash. Any nonzero value works with
-/// `Restart=always`; this one is just a recognizable marker.
+/// Process exit code used when a self-heal USB reset SUCCEEDED and this module triggers a
+/// restart-for-self-heal, distinguishing it in `journalctl`/`systemctl status` from a genuine
+/// crash. Any nonzero value works with `Restart=always`; this one is just a recognizable marker.
 pub const SELF_HEAL_EXIT_CODE: i32 = 77;
+
+/// Process exit code used when the USB reset attempt itself FAILED (review finding, #663): the
+/// caller still exits (after the same graceful cleanup) so `systemctl status` visibly reflects a
+/// real failure and a fresh process gets a clean shot at it next rate-limit window, rather than
+/// camera-box quietly limping along broken. Distinct from `SELF_HEAL_EXIT_CODE` so the journal
+/// tells the two outcomes apart at a glance.
+pub const SELF_HEAL_RESET_FAILED_EXIT_CODE: i32 = 78;
 
 /// Persisted state carried across the process restart a heal triggers (mirrors
 /// `obs_self_heal::SelfHealState`'s cross-pass persistence, but cross-PROCESS here since the fix
@@ -165,11 +172,17 @@ pub fn decide_selfheal(
 
 /// The CRITICAL, human-actionable escalation line (#663 ask: "the honest signal for the physical
 /// fix the owner may ultimately need"). Pure string formatting so it's directly unit-testable.
+///
+/// Deliberately says "reset ATTEMPTS", not "self-healed" (review finding, #663) — `heal_count`
+/// counts every trigger within the recurrence window regardless of whether the individual USB
+/// reset itself later succeeded or failed (rate-limit state is saved before the attempt runs), so
+/// claiming each one was a successful "heal" would overstate what's actually known and could
+/// wrongly blame hardware for what might be a software/permissions failure.
 pub fn critical_escalation_message(video_device_path: &str, heal_count: u32) -> String {
     format!(
-        "CRITICAL #663: capture device {video_device_path} has been self-healed {heal_count} times \
-         within {}s without the fix holding — this reads as FAILING HARDWARE, not a transient \
-         re-negotiation. Grabber hardware likely failing — replace the USB cable/port/device.",
+        "CRITICAL #663: capture device {video_device_path} has had {heal_count} USB-reset attempts \
+         within {}s without the defect staying fixed — this reads as FAILING HARDWARE, not a \
+         transient re-negotiation. Grabber hardware likely failing — replace the USB cable/port/device.",
         DEFAULT_RECURRENCE_WINDOW_S
     )
 }

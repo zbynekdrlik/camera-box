@@ -534,6 +534,15 @@ async fn run_capture_loop(
         let configured_capture_fps: f64 =
             frame_rate.numerator as f64 / frame_rate.denominator.max(1) as f64;
 
+        // #663 — self-heal: set (instead of calling `std::process::exit` immediately) once a USB
+        // reset attempt has run, so the loop below stops via the NORMAL `running_capture` flag
+        // and falls through to the EXISTING shutdown cleanup (burn ring drain, grab-recorder
+        // flush, burn-thread join, capture-stats sidecar write) before the process actually
+        // exits. A raw mid-loop `process::exit` would skip all of that — harmless in plain
+        // production, but it would truncate an in-flight `--record-grab` E2E recording if a
+        // self-heal fires mid-test (review finding, #663).
+        let mut pending_self_heal_exit_code: Option<i32> = None;
+
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
@@ -957,19 +966,35 @@ async fn run_capture_loop(
                                     ) {
                                         Ok(()) => {
                                             tracing::warn!(
-                                                "#663 self-heal: USB reset attempt #{} succeeded — exiting (code {}) so systemd restarts camera-box against the re-enumerated device",
+                                                "#663 self-heal: USB reset attempt #{} succeeded — will exit (code {}) after graceful shutdown so systemd restarts camera-box against the re-enumerated device",
                                                 attempt_number,
                                                 camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE
                                             );
-                                            std::process::exit(
+                                            running_capture.store(false, Ordering::Relaxed);
+                                            pending_self_heal_exit_code = Some(
                                                 camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE,
                                             );
                                         }
                                         Err(e) => {
+                                            // Review finding (#663): a TOTAL reset failure (e.g.
+                                            // the reauthorize retries above all failed) can leave
+                                            // the capture device WORSE than the original rate
+                                            // defect — possibly fully disconnected. That deserves
+                                            // CRITICAL visibility, not a buried error line, and the
+                                            // process should still exit so `systemctl status`
+                                            // visibly reflects the failure and a fresh process gets
+                                            // a clean shot at it next rate-limit window (the state
+                                            // file already recorded this attempt, so the 600s
+                                            // throttle applies regardless of exiting here).
                                             tracing::error!(
-                                                "#663 self-heal: USB reset attempt #{} FAILED: {:#} — camera-box keeps running degraded; will retry once the rate-limit window passes",
+                                                "CRITICAL #663: self-heal USB reset attempt #{} FAILED: {:#} — the capture device may now be in a WORSE state than the original rate defect (possibly disconnected); exiting (code {}) after graceful shutdown so systemd retries with a fresh process",
                                                 attempt_number,
-                                                e
+                                                e,
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE
+                                            );
+                                            running_capture.store(false, Ordering::Relaxed);
+                                            pending_self_heal_exit_code = Some(
+                                                camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE,
                                             );
                                         }
                                     }
@@ -1070,6 +1095,20 @@ async fn run_capture_loop(
                 ),
                 Err(e) => tracing::error!("failed to write cam2→cam1 capture-stats sidecar: {e:#}"),
             }
+        }
+
+        // #663 — self-heal exit, AFTER all the shutdown cleanup above has run (burn ring drain,
+        // grab-recorder flush, burn-thread join, capture-stats sidecar write). `main()`'s own
+        // shutdown path only ever proceeds past `signal::ctrl_c().await` on an actual Ctrl+C —
+        // this capture loop exiting on its own (self-heal) would otherwise leave `main()` awaiting
+        // a signal that never comes, so the process must exit explicitly here to actually restart
+        // via systemd's `Restart=always`.
+        if let Some(code) = pending_self_heal_exit_code {
+            tracing::warn!(
+                "#663 self-heal: shutdown cleanup complete — exiting now (code {})",
+                code
+            );
+            std::process::exit(code);
         }
     });
 

@@ -938,9 +938,15 @@ affinity `ExecStartPre`) on top of `ProtectSystem=strict` — so the binary can 
 `/sys/bus/usb/drivers/uvcvideo/unbind` + `/sys/bus/usb/devices/*/authorized` directly. On a
 confirmed sustained deviation the capture loop: (1) best-effort unbinds the uvcvideo driver from the
 capture device's USB interface, (2) writes `authorized` 0 then 1 (forces full re-enumeration —
-mirrors the manually-verified #656 fix sequence exactly), (3) **exits the process** (exit code 77)
-so the unit's `Restart=always`/`RestartSec=3` brings it back up fresh against whatever device node
-the kernel just re-enumerated (`Config::device_path()`'s `"auto"` re-detects it). No `systemctl
+mirrors the manually-verified #656 fix sequence exactly), (3) **exits the process AFTER the
+capture loop's normal shutdown cleanup has run** (burn-ring drain, grab-recorder flush, burn-thread
+join, capture-stats sidecar write — the loop stops via the same `running_capture` flag a Ctrl+C
+would use, never a raw mid-loop `process::exit`, so an in-flight `--record-grab` E2E recording
+isn't truncated) so the unit's `Restart=always`/`RestartSec=3` brings it back up fresh against
+whatever device node the kernel just re-enumerated (`Config::device_path()`'s `"auto"` re-detects
+it). Exit code **77** = the USB reset itself succeeded; **78** = the reset attempt FAILED (still
+exits + still logs CRITICAL, so `systemctl status`/journal visibly reflect a real failure instead
+of camera-box quietly limping along with the device possibly left disconnected). No `systemctl
 stop`/`start` needed — the process exit + `Restart=always` IS the stop+start.
 
 **Resolving the sysfs `authorized` path for the open device:** `/sys/class/video4linux/<videoN>/
@@ -972,10 +978,12 @@ granted; cleared on reboot, which is correct — a fresh boot deserves a fresh a
 
 **Verifying it worked on a box:** `journalctl -u camera-box | grep -E "#656|#663"` — look for the
 `#656 capture-delivery-rate DEFECTIVE` WARN immediately followed by `#663 self-heal: USB-resetting
-capture device ...` / `USB reset complete ... process will exit (code 77)`, then a fresh
-`camera-box.service` start (PID changes) with `Streaming: ... fps` settling back near the
-negotiated rate (~60.0) within a few seconds. `systemctl status camera-box` shows the recent restart
-with exit code 77 if it just self-healed.
+capture device ...` / `USB reset complete` / `shutdown cleanup complete — exiting now (code 77)`,
+then a fresh `camera-box.service` start (PID changes) with `Streaming: ... fps` settling back near
+the negotiated rate (~60.0) within a few seconds. `systemctl status camera-box` shows the recent
+restart with exit code 77 if it just self-healed, or **78** if the reset attempt itself failed
+(check the CRITICAL journal line right above it — the device may need manual
+`echo 1 > <authorized path>` recovery).
 
 **Generic across the fleet:** this lives in the shared capture loop every cam box runs — no per-box
 config. Any cam box (cam1, cam3, or any future box) running a ShadowCast-class or similar USB
