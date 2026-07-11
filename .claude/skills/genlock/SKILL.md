@@ -867,3 +867,43 @@ instants and are invalid) captures every camera tile's rendered content at the S
 `SetForegroundWindow`-blocked focus attempt is fixed by `MinimizeAll` then retrying `FocusWindow`)
 — the projector defaults to a tiny (~742×461) floating window whose tiles are too small to read a
 QR tick at native size otherwise.
+
+## TECHNIQUE — find a wall-clock window inside imag-nb's multi-day OBS log via the embedded `ts_present` epoch-ns
+
+imag-nb's OBS log is a SINGLE file that can span many days (it only rotates on process restart,
+and imag's own OBS is rarely restarted); each line prints only `HH:MM:SS.mmm` — NO date — so
+grepping for a specific day/time window by timestamp alone is unreliable (you'd have to walk
+midnight rollovers). Every `genlock-fifo audit '<src>'` line already carries a real UTC epoch-ns
+field, `ts_present=<epoch_ns>` — use it directly instead:
+
+```bash
+# Convert a target UTC window to epoch seconds:
+date -u -d "2026-07-11T04:09:00Z" +%s   # -> 1783742940
+
+# Pull every genlock-fifo audit line whose ts_present falls in the window (works across any
+# number of day-rollovers in the log, no manual midnight-hunting):
+awk -F'ts_present=' '{ if (NF>1) { split($2,a," "); ts=a[1]+0; sec=int(ts/1000000000);
+  if (sec>=1783742940 && sec<=1783743240) print NR": "$0 } }' "<obs log path>"
+```
+The printed line NUMBERS then bound a `sed -n 'START,ENDp'` slice for grepping OTHER (non-audit)
+lines — reconnect events, `ndi_source_update`, recording start/stop — in the same real window.
+Confirmed live (#674 investigation, 2026-07-11): imag-nb's log-printed local time is UTC+2
+(Europe/Bratislava CEST) while `ts_present` is a real UTC epoch — cross-check ONE line's printed
+`HH:MM:SS` against `date -u -d "@<ts_present/1e9>"` once per session to confirm the offset before
+trusting it for a precise window.
+
+## TECHNIQUE — a cheap, low-risk mechanism-hunt repro beats a full E2E harness run for a hypothesis like "does OBS restart degrade imag's reception"
+
+When a full-chain finding (e.g. #674's imag judder-after-restart) needs testing a NARROW causal
+hypothesis ("does restarting strih+stream's OBS alone cause X on imag"), don't reach straight for
+a full `recording-e2e.sh` BEFORE/restart/AFTER protocol (~15-20 min, needs a clean rig, produces a
+QR-decoded judder verdict). Instead: read the SAME live signal the full harness would eventually
+measure indirectly (here: imag's own `genlock-fifo audit 'NDI CAM4'` `underruns` counter) directly
+from imag-nb's OBS log, take a delta over a short window BEFORE touching anything (a control
+baseline), do the isolated action (`launch-obs-genlock.sh --box strih --force` +
+`--box stream --force`), then take the SAME delta over a comparable window AFTER. This isolates
+the ONE variable (the restart) from everything else a full E2E session also does concurrently
+(camera burns, ALL_CAMBOX switching, imag's own scene re-routing) — a live #674 repro this way
+found ZERO underrun growth post-restart (cleaner than the control baseline), which meaningfully
+narrowed the investigation (ruled out "restart alone" as sufficient) at a fraction of the cost of
+a full harness run.
