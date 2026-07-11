@@ -576,6 +576,37 @@ systemctl start cam2-painter 2>/dev/null || true"
       echo "        scripts/rig-mode.sh event (or obs_burn_filter.py remove) before any live broadcast." >&2
     fi
   done
+  # #684: FINAL, INDEPENDENT camera-box.service verify -- the LAST thing cleanup() does, for
+  # EVERY box this run touched (source cam always; cam2/painter always; cam3-6 when
+  # ALL_CAMBOX=1). Live incident (2026-07-11): cam1 was found INACTIVE after BOTH the PR #680 and
+  # PR #683 "Full-path E2E" gate runs despite the early-cleanup restore above (#675) -- for the
+  # cam1 RUN_ID 1573931971 run (#682) the deploy-launched camera-box-burn-1573931971.service
+  # itself deactivated cleanly ~11 min after launch (journalctl on cam1: "Started ... 08:46:00" /
+  # "Deactivated successfully ... 08:57:10" -- consistent with THIS cleanup() actually having
+  # run), yet camera-box.service was never observed restarting until a human found it down 55 min
+  # later and hand-started it -- something between the early restore and the true end of
+  # cleanup() left the source cam down with no trace of a second attempt. This pass is a cheap,
+  # IDEMPOTENT camera_box_verify_active_cmds call used STANDALONE (no preceding stop/pkill/rm --
+  # nothing here tears anything down): a healthy box costs one quick SSH round trip; a box the
+  # early restore missed gets a genuine INDEPENDENT restart attempt + the same loud #675 WARNING
+  # if that ALSO fails, so it can never again go undetected until a human stumbles on it later.
+  echo "[cleanup] #684 FINAL camera-box.service verify (every box this run touched, independent of the restore above)"
+  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+    "$(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP) FINAL")" || true
+  if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+    for _cfip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
+      case "$_cfip" in
+        "$CAM3_IP") _cfcn="cam3" ;;
+        "$CAM4_IP") _cfcn="cam4" ;;
+        "$CAM5_IP") _cfcn="cam5" ;;
+        "$CAM6_IP") _cfcn="cam6" ;;
+      esac
+      timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cfip" \
+        "$(camera_box_verify_active_cmds "$_cfcn ($_cfip) FINAL")" || true
+    done
+  fi
+  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" \
+    "$(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP FINAL")" || true
 }
 # #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
 # that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is
