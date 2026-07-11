@@ -112,6 +112,51 @@ pub fn sequence_gap(prev: u32, cur: u32) -> u32 {
     }
 }
 
+/// #696 — a delivered V4L2 buffer's CONTENT health, derived PURELY from its metadata (no
+/// I/O). Live incident (2026-07-11, cam3): a 10-minute E2E run showed a ~5m20s contiguous
+/// span where 52% of cam3's optical frames were undecodable (a "speckled/mottled noise
+/// texture" replacing the QR modules, pixel-proven) — while the V4L2 `sequence` counter
+/// stayed PERFECTLY contiguous (0 dropped frames) and the app's own capture-rate health
+/// stayed green the whole time. [`sequence_gap`]-based drop-detection is therefore BLIND to
+/// this failure class entirely: the frames were delivered on schedule, just with corrupted
+/// PIXEL CONTENT — a self-heal or gate keyed only on sequence/rate would see a fully healthy
+/// stream (this is exactly the blind spot #696 identified: "frame-count-based checks would
+/// miss it entirely"). The kernel/driver DOES expose two signals for a buffer whose content
+/// it already suspects is bad:
+///   - `Flags::ERROR` — "Buffer is ready, but the data contained within is corrupted" (the
+///     V4L2 core/driver's own corruption flag; uvcvideo sets this when its own payload
+///     assembly detects a broken frame, e.g. after a URB completes with a non-zero status
+///     such as the `-71`/EPROTO seen in cam3's kernel log shortly before the corrupted span).
+///   - `bytesused` short of the format's expected byte count — for an UNCOMPRESSED format
+///     (this appliance always captures raw YUYV, never MJPEG) the driver should always
+///     deliver a full `stride*height` buffer; fewer bytes means the frame was truncated
+///     (torn) mid-capture and the tail of the buffer holds stale/garbage data from a
+///     previous frame.
+///
+/// Returns `Some(reason)` when either signal fires (the caller drops the frame rather than
+/// forwarding known-corrupted content to NDI/genlock), else `None`. This does NOT explain
+/// *why* the USB link glitches — that root cause remains open (#696) — it only gives the
+/// pipeline a way to DETECT and not propagate a frame the driver itself already flagged.
+pub fn frame_integrity_issue(
+    flags: v4l::buffer::Flags,
+    bytesused: u32,
+    expected_bytes: u32,
+) -> Option<String> {
+    if flags.contains(v4l::buffer::Flags::ERROR) {
+        return Some(
+            "V4L2_BUF_FLAG_ERROR set (driver flagged this buffer's data as corrupted, see #696)"
+                .to_string(),
+        );
+    }
+    if bytesused < expected_bytes {
+        return Some(format!(
+            "short buffer: {bytesused} bytes captured (expected {expected_bytes} for this \
+             format) — frame truncated mid-capture, see #696"
+        ));
+    }
+    None
+}
+
 /// Serialize cam1's V4L2 capture-drop statistics into the cam1-capture-stats SIDECAR the
 /// recording-verdict reads as the cam2→cam1 LOSS (per the trustworthy-measurement rework).
 ///
@@ -672,6 +717,12 @@ pub struct VideoCapture {
     /// stream's life. Paired with `dropped_captures` it is the cam2→cam1 LOSS denominator
     /// the verdict reports (`serialize_capture_stats`).
     frames_captured: u64,
+    /// #696: cumulative count of delivered buffers [`process_frame`](Self::process_frame)
+    /// flagged as content-corrupted ([`frame_integrity_issue`]) and DROPPED (never passed to
+    /// the caller's callback) over this stream's life. Distinct from `dropped_captures`
+    /// (frames the DEVICE never delivered at all) — these frames WERE delivered, on schedule,
+    /// with a good `sequence`, but their pixel content was flagged as bad.
+    corrupted_frames: u64,
 }
 
 impl VideoCapture {
@@ -783,6 +834,7 @@ impl VideoCapture {
             last_sequence: None,
             dropped_captures: 0,
             frames_captured: 0,
+            corrupted_frames: 0,
         })
     }
 
@@ -841,6 +893,16 @@ impl VideoCapture {
         self.frames_captured
     }
 
+    /// #696: cumulative count of delivered buffers dropped for failing
+    /// [`frame_integrity_issue`] (V4L2_BUF_FLAG_ERROR or a short/truncated buffer) — content
+    /// corruption the DEVICE's own `sequence` counter never signals (see the doc on
+    /// [`frame_integrity_issue`]). Surfaced in the periodic streaming report (`main.rs`),
+    /// same as `dropped_captures`, so this failure class is finally visible without needing
+    /// a full E2E optical decode to notice it.
+    pub fn corrupted_frames(&self) -> u64 {
+        self.corrupted_frames
+    }
+
     /// Write cam1's V4L2 capture-drop statistics to `path` (the cam1-capture-stats sidecar
     /// the recording-verdict reads as the cam2→cam1 LOSS). Called on shutdown of a burn/test
     /// run. The format is [`serialize_capture_stats`]. Errors are returned (the caller logs
@@ -884,6 +946,28 @@ impl VideoCapture {
     {
         let (buffer, metadata) = self.stream.next()?;
         let seq = metadata.sequence;
+
+        // #696 — drop (never forward to NDI/genlock) a buffer the driver/format itself
+        // already flags as corrupted, BEFORE any further processing. Still counted into
+        // `record_sequence` (the device DID deliver a buffer on schedule; only its CONTENT
+        // was bad) so the sequence/drop accounting stays coherent — this is a distinct
+        // failure class from a device-side drop (see `frame_integrity_issue`'s doc).
+        let expected_bytes = self.stride * self.height;
+        if let Some(reason) =
+            frame_integrity_issue(metadata.flags, metadata.bytesused, expected_bytes)
+        {
+            self.corrupted_frames += 1;
+            tracing::warn!(
+                "capture device delivered a CORRUPTED buffer (v4l2 sequence {}): {} \
+                 (total corrupted {}) — frame dropped, not sent",
+                seq,
+                reason,
+                self.corrupted_frames
+            );
+            self.record_sequence(seq);
+            return Ok(());
+        }
+
         // #286 — the driver's real CAPTURE instant (V4L2 default clock domain is
         // CLOCK_MONOTONIC; see the module-level doc on `FrameInfo::capture_monotonic_100ns`),
         // converted to monotonic 100ns units for the genlock emit path.
@@ -1188,6 +1272,54 @@ mod tests {
         // Zero V4L2 drops ⇒ ZERO cam2→cam1 loss (every captured frame was delivered).
         let s = serialize_capture_stats(0, 9001);
         assert_eq!(s, "v4l2_dropped=0\nframes_captured=9001\n");
+    }
+
+    // ---- #696: frame_integrity_issue — detect a corrupted/torn V4L2 buffer -----------------
+
+    #[test]
+    fn frame_integrity_issue_none_on_a_healthy_full_size_buffer() {
+        let flags = v4l::buffer::Flags::from(0);
+        assert_eq!(frame_integrity_issue(flags, 3840 * 1080, 3840 * 1080), None);
+    }
+
+    #[test]
+    fn frame_integrity_issue_fires_on_v4l2_buf_flag_error() {
+        let flags = v4l::buffer::Flags::ERROR;
+        let reason = frame_integrity_issue(flags, 3840 * 1080, 3840 * 1080)
+            .expect("#696: ERROR flag must be detected even with a full-size buffer");
+        assert!(
+            reason.contains("V4L2_BUF_FLAG_ERROR"),
+            "reason should name the flag: {reason}"
+        );
+    }
+
+    #[test]
+    fn frame_integrity_issue_fires_on_a_short_buffer_even_without_the_error_flag() {
+        // A torn/truncated frame: the driver delivered fewer bytes than the format requires,
+        // but did NOT set Flags::ERROR — must still be caught (never rely on the flag alone).
+        let flags = v4l::buffer::Flags::from(0);
+        let expected = 3840 * 1080;
+        let reason = frame_integrity_issue(flags, expected - 1, expected)
+            .expect("#696: a short buffer must be detected even with no ERROR flag");
+        assert!(
+            reason.contains("short buffer"),
+            "reason should explain the size mismatch: {reason}"
+        );
+    }
+
+    #[test]
+    fn frame_integrity_issue_tolerates_a_buffer_larger_than_expected() {
+        // Some drivers report bytesused with alignment padding above the strict minimum —
+        // never flag an OVER-size buffer as corrupted, only a SHORT one.
+        let flags = v4l::buffer::Flags::from(0);
+        let expected = 3840 * 1080;
+        assert_eq!(frame_integrity_issue(flags, expected + 16, expected), None);
+    }
+
+    #[test]
+    fn frame_integrity_issue_error_flag_message_cites_696() {
+        let reason = frame_integrity_issue(v4l::buffer::Flags::ERROR, 100, 100).unwrap();
+        assert!(reason.contains("#696"));
     }
 
     #[test]

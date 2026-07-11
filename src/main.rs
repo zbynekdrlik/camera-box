@@ -915,15 +915,23 @@ async fn run_capture_loop(
                         let secs = elapsed.as_secs_f64();
                         let cap_fps = frame_count as f64 / secs;
                         let dropped = capture.dropped_captures();
+                        // #696 — a cumulative count of buffers DELIVERED on schedule but
+                        // dropped for content corruption (V4L2_BUF_FLAG_ERROR / a short
+                        // buffer) — distinct from `dropped` (frames the device never
+                        // delivered at all). Surfaced alongside capture-dropped so this
+                        // failure class (previously invisible to any rate/sequence-based
+                        // check) shows up in the routine 5s report.
+                        let corrupted = capture.corrupted_frames();
                         if out_interval_ns > 0 {
                             let emit_fps = emit_count as f64 / secs;
                             tracing::info!(
-                                "Streaming: {:.1} fps emitted / {:.1} fps captured ({} sent, {} captured, {} capture-dropped)",
+                                "Streaming: {:.1} fps emitted / {:.1} fps captured ({} sent, {} captured, {} capture-dropped, {} corrupted)",
                                 emit_fps,
                                 cap_fps,
                                 emit_count,
                                 frame_count,
-                                dropped
+                                dropped,
+                                corrupted
                             );
 
                             // #666 — emit-vs-capture health: WARN when the EMITTED fps has
@@ -962,10 +970,11 @@ async fn run_capture_loop(
                             }
                         } else {
                             tracing::info!(
-                                "Streaming: {:.1} fps ({} frames, {} capture-dropped)",
+                                "Streaming: {:.1} fps ({} frames, {} capture-dropped, {} corrupted)",
                                 cap_fps,
                                 frame_count,
-                                dropped
+                                dropped,
+                                corrupted
                             );
                         }
                         // #656 — capture-delivery-rate health: WARN when the captured fps has
