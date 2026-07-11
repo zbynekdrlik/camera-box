@@ -1499,7 +1499,7 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
   exit "$GATE"
 fi
 
-echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program set by rig-mode.sh test beforehand)"
+echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
 # dead-on-arrival recording (StartRecord reports success but writes 0 bytes) is caught within
