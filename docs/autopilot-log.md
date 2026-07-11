@@ -3127,3 +3127,34 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   that was ALSO blocking the same gate, unrelated to my code change.
 - Artifacts: `/tmp/recording-e2e-{1783735291,275516850}/` on dev1 (verdict JSONs, partials,
   pixel-proofs, latency CSVs, painter CSVs).
+
+## 2026-07-11 — #675 (cleanup restart-verify) + #627 (0-byte StartRecord investigation), PR #678
+
+- **#675** — `recording-e2e.sh` cleanup()'s `systemctl restart camera-box` restore (cam1's
+  SOURCE role, the cam3/4/5/6 ALL_CAMBOX loop, and cam2/painter) used a bare
+  `2>/dev/null; true`/`|| true` that silently swallowed a failed restart — the exact bug
+  escalated in #675's own comments (cam1/cam2/cam4 all hit it across 4 occurrences in one prior
+  session, twice breaking the required Full-path E2E CI gate). Added
+  `scripts/lib/camera-box-restart-verify.sh` (`camera_box_verify_active_cmds`, same
+  "single source, many callers" model as `rig_test_dropin_clear_cmds`): polls
+  `systemctl is-active camera-box` after every restart, retries ONCE in the same ssh session, and
+  prints a loud non-swallowed `WARNING #675` if still not active — never aborts cleanup()'s trap
+  (mirrors the #649 warn-only discipline). RED test SHA `4e8ba1391`, GREEN fix SHA `e3633a692`
+  (`tests/harness_recording_e2e_cleanup_verifies_restart_675.rs`, 6 tests). Functionally verified
+  the actual bash logic (not just syntax) with 3 stubbed `systemctl` scenarios (happy path,
+  recovers-after-retry, fails-after-retry) — all behaved correctly. Full `cargo test` re-run
+  after touching `recording-e2e.sh` (per this repo's own CLAUDE.md GOTCHA) — 115/115 binaries
+  green, no static-anchor collisions with any sibling `harness_recording_e2e_*` test.
+- **#627** — live-reproduction-tested the `genlock_latency_ms_src` correlation hypothesis (the
+  #358 force-set immediately before StartRecord) directly on the real stream box: 9 varied
+  attempts (6 raw `SetInputSettings` transitions mirroring the issue's own 898→1000 pattern at
+  gaps 0-6s, 3 via the actual `prod-scene` production code path at gaps 0-2s) — **0/9
+  reproduced**; every StartRecord came back healthy with growing bytes, every finalized
+  recording ~11MB of real content. Closed as mitigated-unreproducible (PR #633's fail-fast
+  liveness check already covers the practical harm). Unrelated finding from that investigation —
+  `_assert_program_nonblack`'s black-check false-positives on dim-but-real content
+  (`OBS_NONBLACK_MIN_MEAN=20` tuned for the #312 bright test-monitor, not general camera
+  content) — filed separately as **#677**, not fixed here.
+- PR #678 (dev→main): all gates green including the "Full-path E2E (rig zero-loss gate)"
+  hardware check on the real rig; merged `5bffd07c2`. Post-merge version bump
+  `1.7.0-dev.338` → `1.7.0-dev.339` (`1bcb60fa2`).
