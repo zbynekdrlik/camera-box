@@ -164,4 +164,64 @@ mod tests {
             painted_tick_gaps(&present, 0, 1)
         );
     }
+
+    // ---------------------------------------------------------------------------------------
+    // #681 — the PER-PAIR walk itself (even sorted) is a BIASED estimator: it floors every
+    // individual pair's shortfall at zero (never crediting a "faster than nominal" local run,
+    // where `delta < expected_step`, against a LATER catch-up jump), so it manufactures large
+    // phantom gaps whenever the dual-QR Vernier's normal asynchronous even/odd sampling beat
+    // produces some finer-than-nominal local deltas. Live evidence: RUN_ID 1783727115's CAM4
+    // window (a camera independently proven clean elsewhere that session) — real sorted-distinct
+    // tick deltas were {1: 659 times, 6: 160 times, ...} at expected_step=2. The whole-window
+    // NET account is span-based and honest: expected_count=(last-first)/step+1=845,
+    // present_count=837, true residual = 8 (< 1%) — but the OLD per-pair walk summed 333 raw
+    // (329 credited after the 4 undecodable), a ~40x overcount purely from flooring each
+    // finer-than-nominal pair's negative contribution to zero instead of letting it net out
+    // against the later catch-up jumps. See `docs/autopilot-log.md` for the full investigation.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn sampling_beat_with_zero_net_loss_reports_zero_gaps_681() {
+        // Three "groups" of 5 consecutive tick values (delta=1 within a group — the Vernier
+        // resolving BOTH the even and odd half most of the time), each group separated by a
+        // delta=6 catch-up jump — the EXACT shape observed live on RUN_ID 1783727115's CAM4
+        // window. At the nominal step 2, this sequence's ACHIEVED resolution is FINER than
+        // nominal (15 distinct values across a span the step-2 grid would only expect 13 of) —
+        // provably NOT lossy: `expected_count(13) <= present_count(15)`.
+        let mut present = Vec::new();
+        let mut v: u32 = 1000;
+        for _group in 0..3 {
+            for _ in 0..5 {
+                present.push(v);
+                v += 1;
+            }
+            v += 5; // the delta=6 catch-up jump to the next group's first value
+        }
+        assert_eq!(
+            painted_tick_gaps(&present, 0, 2),
+            0,
+            "a benign sampling-beat pattern (some finer-than-nominal local deltas, netting to \
+             zero loss over the whole window) must never manufacture a phantom gap — the OLD \
+             per-pair-floor walk reported 4 phantom gaps for this exact shape"
+        );
+    }
+
+    #[test]
+    fn sampling_beat_with_a_real_gap_still_reports_the_real_loss_681() {
+        // Same benign beat pattern as above, PLUS one genuinely large real gap (a true ~36-tick
+        // loss) spliced in. The fix must still catch the real loss even amid the benign noise —
+        // netting out the beat pattern must never mask an actual drop.
+        let present: Vec<u32> = vec![
+            1000, 1001, 1002, 1003, 1004, // benign group 1
+            1010, 1011, 1012, 1013,
+            1014, // benign group 2 (delta=6 catch-up, net-zero so far)
+            1050, 1051, 1052, 1053, 1054, // group 3, after a REAL ~36-tick gap (1014 -> 1050)
+        ];
+        // expected_count = (1054-1000)/2 + 1 = 28; present_count = 15; real residual = 13.
+        assert_eq!(
+            painted_tick_gaps(&present, 0, 2),
+            13,
+            "a genuine large gap spliced amid benign beat noise must still be reported honestly"
+        );
+    }
 }

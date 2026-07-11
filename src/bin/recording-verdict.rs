@@ -7540,6 +7540,146 @@ mod tests {
         assert_imag_paths_agree("copy-freeze", &ticks, false);
     }
 
+    /// #681 point 2 — live evidence (RUN_ID 1783727115) showed EVERY one of imag's 12 per-window
+    /// segments FAIL with `optical_advancing=true`, `optical_no_stuck_copy=true` (an isolated
+    /// `max_stuck_run<=2`), `burn_present_ok=true`, `burn_missing_ids=[]` — every field the JSON
+    /// printed read CLEAN, yet `pass=false` on every single window, with NO visible reason. This
+    /// looked exactly like "the per-window loop is reading one repeated aggregate" (the issue's
+    /// own hypothesis) — DISPROVEN below (the OTHER printed fields genuinely differ per window in
+    /// the live data), but a REAL bug was found: `is_live_no_copy()` ALSO gates on the #588/#604
+    /// systematic-judder DENSITY terms (`no_stuck_density`/`no_localized_stuck_density`), which
+    /// were computed correctly per-window but were NEVER surfaced in the printed JSON at all — a
+    /// density-driven failure was therefore completely unexplainable from the report alone. This
+    /// test proves the density terms are now surfaced, turning a "mystery" failure into an
+    /// explained one.
+    #[test]
+    fn imag_per_segment_json_surfaces_the_density_terms_that_actually_gate_it_681() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 5_000 * ONE_S;
+        let win = 3_600 * ONE_S;
+        let dir = std::env::temp_dir().join(format!("cb-681-density-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        std::fs::write(
+            &sched_path,
+            format!(
+                r#"[{{"cambox":"CAM1","start_ns":{base},"end_ns":{}}}]"#,
+                base + win
+            ),
+        )
+        .unwrap();
+
+        // A systematic Δ0 duplication density (every OTHER sample repeats the previous tick — 50%
+        // density, far above the 1% ceiling), but no long single freeze run (max run = 1) and
+        // genuinely ADVANCING overall — exactly the #588 "catch-up judder" shape: clean on every
+        // OTHER field, failing ONLY on density. >=301 ticks so the 300-pair floor doesn't defer it.
+        let mut ticks: Vec<u32> = Vec::new();
+        for t in (3000u32..).take(200) {
+            ticks.push(t);
+            ticks.push(t); // duplicate
+        }
+        let imag_frames: Vec<RecordingFrame> = ticks
+            .iter()
+            .enumerate()
+            .map(|(i, &tick)| RecordingFrame {
+                frame_index: i as u64,
+                payloads: vec![Payload {
+                    run_id: super::BURN_RUN_ID_IMAG,
+                    frame_id: 5000 + i as u32,
+                    gen_ts_ns: base + (i as i64 + 1) * (ONE_S / 500),
+                }],
+                tick: Some(tick),
+            })
+            .collect();
+        let stream_frames: Vec<RecordingFrame> = (0..10u64)
+            .map(|i| {
+                let gen_ts = base + (i as i64 + 1) * ONE_S;
+                RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![Payload {
+                        run_id: STRIH,
+                        frame_id: 1670 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    }],
+                    tick: None,
+                }
+            })
+            .collect();
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--min-secs",
+            "0",
+        ]);
+
+        let (v, _pass) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            Some(DecodedRec {
+                frames: imag_frames,
+                rec_path: None,
+            }),
+            None,
+        )
+        .expect("verdict");
+
+        let seg = &v["all_cambox_continuity"]["imag"]["segments"][0];
+        assert_eq!(
+            seg["pass"],
+            serde_json::json!(false),
+            "#681: the density-heavy sequence must FAIL: {seg}"
+        );
+        assert_eq!(
+            seg["optical_no_stuck_copy"],
+            serde_json::json!(true),
+            "#681 sanity: this fixture's run-length term must read CLEAN (max run 1) — the \
+             failure must come from density, not the run-length term also failing: {seg}"
+        );
+        let density = seg["optical_stuck_density"].as_f64().unwrap_or_else(|| {
+            panic!("#681: optical_stuck_density must be surfaced in the per-window JSON: {seg}")
+        });
+        assert!(
+            density > 0.4,
+            "#681: the 50%-duplicate sequence's density must read as the real high value, got \
+             {density}: {seg}"
+        );
+        assert_eq!(
+            seg["optical_no_stuck_density"],
+            serde_json::json!(false),
+            "#681: the JSON must ALSO surface whether the density term itself passed, not just \
+             its raw value, so a failing window's cause is never a mystery: {seg}"
+        );
+        let local_density = seg["optical_local_stuck_density"].as_f64().unwrap_or_else(|| {
+            panic!("#681: optical_local_stuck_density must be surfaced in the per-window JSON: {seg}")
+        });
+        assert!(
+            local_density > 0.4,
+            "#681: the localized density must also read high for this uniform pattern, got \
+             {local_density}: {seg}"
+        );
+        assert_eq!(
+            seg["optical_no_localized_stuck_density"],
+            serde_json::json!(false),
+            "#681: the JSON must surface the localized-density pass/fail too: {seg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #186/#208 BLOCKER: `--extract-partial` must IDENTIFY this box's pixel-proof frames so the
     /// on-box decode can write the PNGs and the merge's "SEE the frame" guarantee survives the
     /// per-box split. The strih box must flag its recording's UNDECODABLE frames (no readable QR).
