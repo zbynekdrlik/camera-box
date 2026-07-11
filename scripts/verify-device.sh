@@ -65,6 +65,10 @@
 #   (r) dantesync is the SOLE timesync authority -- NO competing timesync daemon (systemd-timesyncd
 #       / chrony / ntp / ntpsec / openntpd) is INSTALLED (even masked), ACTIVE, or enabled (#591;
 #       cam5/6 ran systemd-timesyncd alongside dantesync -> a real 5.28s clock desync)
+#   (s) /var/log tmpfs is bounded against runaway growth -- /etc/logrotate.d/rsyslog has a `size`
+#       cap AND a systemd timer drop-in checks far more often than the stock daily cadence (#679;
+#       a chatty logger filled the fixed 50MB tmpfs in ~4-5 days and crashed cam2's
+#       camera-box.service)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -82,6 +86,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/timesync-authority.sh"  # dpkg_status_installed/timesync_daemon_verdict/
                                       # timesync_authority_verdict (#591, shared with
                                       # drift-guard.sh's --check-imag facet since #596)
+# shellcheck source=scripts/lib/log-bound.sh
+. "$HERE/lib/log-bound.sh"       # log_bound_verdict/log_bound_gather_remote_snippet (#679)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -677,6 +683,25 @@ else
     while IFS= read -r _reason; do
       [ -n "$_reason" ] && fail "timesync authority: ${_reason#FAIL: }"
     done <<< "$TS_VERDICT"
+  fi
+fi
+
+# (s) /var/log tmpfs bounded against runaway growth (#679) ---------------------------------------
+# Every box's /var/log is a fixed 50MB tmpfs; the stock logrotate config rotates ONLY on a weekly
+# calendar with no `size` cap, so a chatty logger (dantesync's per-second [PTP] Drift line was the
+# fleet's dominant volume driver) filled it in ~4-5 days and crashed cam2's camera-box.service
+# (2026-07-11). log_bound_verdict (scripts/lib/log-bound.sh) requires a `size` cap on
+# /etc/logrotate.d/rsyslog AND a systemd timer drop-in that checks far more often than daily.
+rc=0
+LOG_BOUND_STATE="$(ssh_box "$(log_bound_gather_remote_snippet)")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$LOG_BOUND_STATE" ]; then
+  fail "could not read logrotate/timer state over SSH (rc=$rc) -- cannot certify /var/log is bounded against runaway growth (#679)"
+else
+  LOG_BOUND_VERDICT="$(log_bound_verdict "$LOG_BOUND_STATE")"
+  if [ "$LOG_BOUND_VERDICT" = "ok" ]; then
+    ok "/var/log tmpfs is bounded -- logrotate size cap + frequent (#679) rotation check both present"
+  else
+    fail "log bound: ${LOG_BOUND_VERDICT#FAIL: }"
   fi
 fi
 

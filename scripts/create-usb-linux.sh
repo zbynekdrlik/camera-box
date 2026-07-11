@@ -39,6 +39,10 @@ MOUNT_ROOT="/mnt/usb-root"
 MOUNT_EFI="/mnt/usb-efi"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+# shellcheck source=scripts/lib/log-bound.sh
+. "$SCRIPT_DIR/lib/log-bound.sh"  # log_bound_logrotate_config/log_bound_timer_dropin (#679) --
+                                  # SAME source of truth as setup-device.sh/verify-device.sh
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -214,6 +218,15 @@ UUID=$ROOT_UUID /         ext4  errors=remount-ro 0 1
 UUID=$EFI_UUID  /boot/efi vfat  umask=0077        0 1
 tmpfs           /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
 EOF
+
+    # #679: bound /var/log against runaway growth from ANY chatty logger, baked in from first
+    # boot -- this closes the narrow window before setup-device.sh later converts /var/log to a
+    # fixed 50MB tmpfs (setup-device.sh STEP 18 writes the identical two files onto that tmpfs;
+    # this base image already carries them so a box is protected even before setup-device.sh ever
+    # runs). See scripts/lib/log-bound.sh for the full incident writeup.
+    mkdir -p "$MOUNT_ROOT$(dirname "$LOG_BOUND_TIMER_DROPIN_PATH")"
+    log_bound_logrotate_config > "$MOUNT_ROOT$LOG_BOUND_LOGROTATE_PATH"
+    log_bound_timer_dropin > "$MOUNT_ROOT$LOG_BOUND_TIMER_DROPIN_PATH"
 
     # Create setup script to run inside chroot
     cat > "$MOUNT_ROOT/tmp/setup.sh" << 'SETUP_EOF'

@@ -32,6 +32,11 @@ fail() {
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
 
+# shellcheck source=scripts/lib/log-bound.sh
+. "$HERE/lib/log-bound.sh"  # log_bound_logrotate_config/log_bound_timer_dropin (#679) -- also
+                            # sourced (unmodified) by verify-device.sh's (s) check and
+                            # create-usb-linux.sh, single source of truth for the size cap + paths
+
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
 GITHUB_REPO="zbynekdrlik/camera-box"
@@ -985,6 +990,21 @@ FSTABEOF
 echo "  Root filesystem: read-only (ro)"
 echo "  tmpfs mounts: /tmp, /var/log, /var/tmp, /var/cache, /var/spool"
 echo "  To remount read-write: mount -o remount,rw /"
+
+# =============================================================================
+# #679: bound /var/log (the fixed 50MB tmpfs above) against runaway growth from ANY chatty
+# logger. The stock logrotate config rotates ONLY on a weekly calendar with no `size` cap -- a
+# chatty logger (dantesync's per-second [PTP] Drift line was the dominant driver) filled the whole
+# tmpfs in ~4-5 days and crashed cam2's camera-box.service (2026-07-11, see scripts/lib/log-bound.sh
+# for the full writeup). Idempotent full-file overwrite (same pattern as the fstab rewrite above) --
+# safe to re-run on an already-hardened box.
+# =============================================================================
+mkdir -p "$(dirname "$LOG_BOUND_TIMER_DROPIN_PATH")"
+log_bound_logrotate_config > "$LOG_BOUND_LOGROTATE_PATH"
+log_bound_timer_dropin > "$LOG_BOUND_TIMER_DROPIN_PATH"
+systemctl daemon-reload
+systemctl restart logrotate.timer
+echo "  /var/log bound: ${LOG_BOUND_LOGROTATE_PATH} size cap ${LOG_BOUND_SIZE_CAP}, logrotate.timer every 15min (#679)"
 
 # =============================================================================
 # #599: restore root to its original mode now that STEP 15-18 are done -- a no-op on a
