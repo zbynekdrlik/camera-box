@@ -533,6 +533,11 @@ async fn run_capture_loop(
         let mut consecutive_rate_breaches: u32 = 0;
         let configured_capture_fps: f64 =
             frame_rate.numerator as f64 / frame_rate.denominator.max(1) as f64;
+        // #666 — emit-vs-capture health: consecutive-breach counter for the SAME pure
+        // `capture_rate_health` decision, but checked against the configured genlock SEND rate
+        // (`send_fps`, below) instead of the negotiated capture rate — catches a defect in the
+        // emit/genlock-gate path even while capture itself stays perfectly healthy.
+        let mut consecutive_emit_breaches: u32 = 0;
 
         // #663 — self-heal: set (instead of calling `std::process::exit` immediately) once a USB
         // reset attempt has run, so the loop below stops via the NORMAL `running_capture` flag
@@ -866,6 +871,41 @@ async fn run_capture_loop(
                                 frame_count,
                                 dropped
                             );
+
+                            // #666 — emit-vs-capture health: WARN when the EMITTED fps has
+                            // sustained a deviation from the box's configured genlock SEND rate
+                            // (not the negotiated CAPTURE rate — capture can stay perfectly
+                            // healthy while the emit/genlock-gate path alone degrades) for
+                            // CAPTURE_RATE_WARN_WINDOWS consecutive report windows. Live finding
+                            // (cam5/cam6, 2026-07-11): a transient ~20% emit deficit (captured
+                            // rate unaffected, 0 capture-dropped) that self-recovered within
+                            // ~5 minutes with no restart — this WARN is the automatic signal a
+                            // future recurrence needs instead of relying on someone noticing live.
+                            let emit_deviant = camera_box::capture_rate_health::is_rate_deviant(
+                                emit_fps,
+                                send_fps as f64,
+                                camera_box::capture_rate_health::EMIT_RATE_TOLERANCE_PCT,
+                            );
+                            consecutive_emit_breaches =
+                                camera_box::capture_rate_health::next_consecutive_breaches(
+                                    consecutive_emit_breaches,
+                                    emit_deviant,
+                                );
+                            if camera_box::capture_rate_health::should_warn(
+                                consecutive_emit_breaches,
+                                camera_box::capture_rate_health::CAPTURE_RATE_WARN_WINDOWS,
+                            ) {
+                                tracing::warn!(
+                                    "#666 emit-delivery-rate DEFECTIVE: {:.2} fps emitted vs {:.2} fps configured send rate (captured stayed {:.2} fps, {} capture-dropped) — >{:.1}% deviation sustained for {} consecutive report windows, ~{}s (network/genlock-gate hiccup, not a capture-device defect — see #666)",
+                                    emit_fps,
+                                    send_fps as f64,
+                                    cap_fps,
+                                    dropped,
+                                    camera_box::capture_rate_health::EMIT_RATE_TOLERANCE_PCT,
+                                    consecutive_emit_breaches,
+                                    consecutive_emit_breaches as u64 * 5
+                                );
+                            }
                         } else {
                             tracing::info!(
                                 "Streaming: {:.1} fps ({} frames, {} capture-dropped)",

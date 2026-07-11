@@ -29,6 +29,21 @@ pub const CAPTURE_RATE_TOLERANCE_PCT: f64 = 1.0;
 /// to catch a real rate-negotiation regression well before a 300s+ E2E recording completes.
 pub const CAPTURE_RATE_WARN_WINDOWS: u32 = 6;
 
+/// #666 — EMIT-vs-CAPTURE health tolerance: how many PERCENT the emitted fps may deviate from
+/// the box's configured genlock send rate before a report window counts as "deviant". This is a
+/// SEPARATE, looser tolerance than `CAPTURE_RATE_TOLERANCE_PCT` (1%, device-level captured-vs-
+/// negotiated) because the emit path has more natural per-window jitter (discrete genlock gate
+/// boundaries, frame-count rounding over a 5s window) — normal healthy readings observed live
+/// (cam5/cam6, 2026-07-11) sit within ~0.5-3% of the target rate. 5% keeps that jitter clear of
+/// the floor while still catching a real defect with wide margin: the live #666 finding was a
+/// SUSTAINED ~20% deficit (~45-50 fps emitted vs a configured 60 fps send rate) — cam5/cam6
+/// transiently emitting well below their healthy captured rate while capture itself stayed clean
+/// (0 capture-dropped), self-recovering after ~5 minutes with no restart. Reuses the SAME pure
+/// `is_rate_deviant`/`next_consecutive_breaches`/`should_warn` decision as the #656 capture check
+/// — only the reference rate (configured SEND fps, not the negotiated CAPTURE fps) and the
+/// tolerance differ.
+pub const EMIT_RATE_TOLERANCE_PCT: f64 = 5.0;
+
 /// True when `captured_fps` deviates from `configured_fps` by more than `tolerance_pct`
 /// percent. `configured_fps <= 0.0` (or any non-finite input) is treated as "no valid
 /// configured rate to check against" — never deviant; callers only invoke this once a real
@@ -171,5 +186,56 @@ mod tests {
         assert!(should_warn(consecutive, CAPTURE_RATE_WARN_WINDOWS));
         consecutive = next_consecutive_breaches(consecutive, false);
         assert!(!should_warn(consecutive, CAPTURE_RATE_WARN_WINDOWS));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #666 — EMIT-vs-CAPTURE health (reuses the SAME pure decision, looser tolerance + a
+    // different reference rate: configured SEND fps instead of negotiated CAPTURE fps).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn real_666_emit_deficit_is_deviant_under_the_emit_tolerance() {
+        // The live #666 finding: cam5/cam6 emitted ~45-50 fps against a configured 60 fps send
+        // rate while captured stayed healthy — a ~17-25% deficit, far past the 5% emit floor.
+        assert!(is_rate_deviant(45.0, 60.0, EMIT_RATE_TOLERANCE_PCT));
+        assert!(is_rate_deviant(48.0, 60.0, EMIT_RATE_TOLERANCE_PCT));
+        assert!(is_rate_deviant(50.0, 60.0, EMIT_RATE_TOLERANCE_PCT));
+    }
+
+    #[test]
+    fn healthy_emit_jitter_within_5_percent_is_not_deviant() {
+        // Live healthy readings (cam5/cam6, 2026-07-11): emitted sits within ~0.5-3% of the
+        // configured 60 fps send rate on a normal report window — none of these should WARN.
+        for emitted in [60.0, 59.8, 59.6, 60.1, 58.5, 57.5] {
+            assert!(
+                !is_rate_deviant(emitted, 60.0, EMIT_RATE_TOLERANCE_PCT),
+                "emitted={emitted} vs configured=60.0 should be within the {EMIT_RATE_TOLERANCE_PCT}% emit floor"
+            );
+        }
+    }
+
+    // The whole point of a SEPARATE emit constant: the emit path has more natural jitter than
+    // the device-level capture check, so its floor must be strictly wider. Both sides are
+    // `const`, so this is a compile-time assertion (clippy: assertions_on_constants) rather than
+    // a runtime `#[test]`.
+    const _: () = assert!(EMIT_RATE_TOLERANCE_PCT > CAPTURE_RATE_TOLERANCE_PCT);
+
+    #[test]
+    fn real_666_scenario_warns_exactly_at_the_configured_window() {
+        // Sustained ~20% emit deficit (48 fps vs configured 60 fps) must warn exactly at
+        // CAPTURE_RATE_WARN_WINDOWS (shared cadence with #656 — reject a blip, catch a real
+        // sustained defect), never earlier, and keep warning every window after.
+        let mut consecutive = 0u32;
+        for i in 1..=(CAPTURE_RATE_WARN_WINDOWS + 2) {
+            let deviant = is_rate_deviant(48.0, 60.0, EMIT_RATE_TOLERANCE_PCT);
+            assert!(deviant);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+            let warn = should_warn(consecutive, CAPTURE_RATE_WARN_WINDOWS);
+            if i < CAPTURE_RATE_WARN_WINDOWS {
+                assert!(!warn, "window {i} should not warn yet");
+            } else {
+                assert!(warn, "window {i} should warn");
+            }
+        }
     }
 }
