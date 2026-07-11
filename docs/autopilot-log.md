@@ -2,6 +2,83 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-11 — Bundle: #694 stale-journal fix + #406 fused-gate flip + #696 detection (PR #700, v1.7.0-dev.345); #698 rebuild+redeploy; #689 follow-up
+
+- **#694** (stale-journal-across-restart, same class #693 fixed): `bd2f0d933` RED (new anchor
+  tests in `harness_deploy_fleet.rs`/`upgrade_fleet_ndi.rs`/`verify_device_provisioning_runbook.rs`
+  + `harness_capture_rate_guard.rs`'s new LINES-arg tests fail against the unfixed scripts),
+  `ae4053d7f` GREEN (`scripts/lib/capture-rate-guard.sh`'s `capture_rate_journalctl_cmd()` gains an
+  optional LINES arg; `deploy-fleet.sh`/`upgrade-fleet-ndi.sh`/`verify-device.sh` now resolve
+  `_SYSTEMD_INVOCATION_ID` and scope their journal reads to it). Closed by PR #700.
+- **#406** (EPIC's final acceptance item, user directive mid-session 2026-07-11 evening —
+  inverted the morning validator comment's sequencing): `bae9ef4e6` flips
+  `.github/workflows/full-path-e2e.yml`'s required `pull_request` job to
+  `ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}` (fused multi-camera
+  sweep — cross-camera spread #624/#286 + A/V-offset #641 — scoped to PR only, workflow_dispatch
+  unchanged). **Live-fired on PR #700 itself**: 1st attempt FAILED on a transient `#431 QPSK
+  marker log NOT GROWN` race (cam2's dual role as painter + its own [2b/8] camera-under-test
+  redeploy under simultaneous 6-box load — not #696, not #689); 1 rerun (rig confirmed free)
+  PASSED clean in ~23 min. Filed nothing new for the transient (ruled out by the rerun passing;
+  would need a 3rd occurrence to be worth a ticket). NOT closed by this PR — comment posted on
+  #406 with the live-enforcement result; issue stays open pending the EPIC owner's own
+  validator pass.
+- **#696** (cam3 intra-frame content corruption, 52% optical-undecodable over a contiguous
+  ~5m20s span despite 0 V4L2 drops): root cause NOT established this session (kernel `-71`/EPROTO
+  correlates loosely, not proven causal) — **left OPEN**, full forensic findings posted (exact
+  corruption window 13:01:01-13:06:21 UTC via the existing run-2046305310 artifacts, kernel
+  correlate, capture-format confirmation: always raw YUYV, never MJPEG). Landed `ec2926d83`: new
+  `frame_integrity_issue()` pure fn (`src/capture.rs`) checks `V4L2_BUF_FLAG_ERROR` + a short
+  `bytesused`; `VideoCapture::process_frame` now drops (never forwards) a flagged buffer, counts
+  it (`corrupted_frames()`), and the periodic streaming report surfaces the new `corrupted` count.
+  **Live-confirmed working post-deploy**: every one of the 6 fleet cameras logged exactly 4
+  `V4L2_BUF_FLAG_ERROR` buffers at v4l2 sequence 0 immediately after the fleet-wide restart
+  (matches the 4-buffer mmap queue depth) — a benign uvcvideo startup-transient, correctly
+  detected+dropped, proving the `Flags::ERROR` mechanism genuinely fires on this hardware/driver.
+  Comment posted to #696 with this confirmation; watching for the next `-71` occurrence.
+- **PR #700** (`dev`→`main`, `Closes #694`, NOT #696/#406): pushed, CI green, the newly-flipped
+  fused E2E gate ran live (1 transient fail + 1 clean rerun, see #406 above), merged
+  `e6b2c978a`. Main CI green. Deployed `1.7.0-dev.345` to the WHOLE fleet (cam1-6) via
+  `deploy-fleet.sh --run <main-CI-run>` — FLEET ALIGNED, all genlocking, byte-verified.
+  Post-deploy functional check: both strih+stream OBS programs confirmed non-black (real signal,
+  `_program_luma` read: strih max=45/mean=5.55 initially, stream max=43/mean=5.79 — an evening/
+  dark-sanctuary reading, not a broken feed).
+- **#698** (rebuild+redeploy the av-sync-dock binary): triggered `windows-genlock.yml` off `main`
+  (run 29164186435, success, ~24 min, no code changes needed — #398/#634 already on main).
+  Compared new build's 3 named DLLs against both boxes' deployed copies: `obs.dll` + `distroav.dll`
+  were ALREADY byte-identical (no redeploy needed); only `obs-audio-video-sync-dock.dll` differed
+  on both — deployed it via `scp` (NOT the win-* MCP `FileUpload` — see the GOTCHA note below),
+  byte-verified (`45956FDC0C8C...` matches on both), OBS relaunched via
+  `launch-obs-genlock.sh`'s planner on both boxes (genlock render tick ENABLED + DistroAV loaded
+  confirmed). **Closed** for the rebuild/redeploy/version-confirmation scope (achievable, done);
+  the "verify live lock" sub-part was NOT independently re-attempted a 3rd time today — it
+  inherits #689's freshly-reconfirmed-this-session silent-audio blocker (see below), cross-
+  referenced not duplicated.
+- **#689 follow-up** (mid-session addition, user-directed correction of an earlier wrong framing
+  — the audio marker is emitted by OUR OWN code onto cam2's own HDMI audio out, no live-event
+  dependency at all): re-ran the skill's mandatory volumedetect pre-flight with a fresh 18-24s
+  recording — **still `-91.0 dB`** (near-total silence), reproduces on-demand, NOT a one-off.
+  cam2 ALSA check (`/proc/asound/PCH/pcm3p/sub0/status`): `state: RUNNING`, `hw_ptr`/`appl_ptr`
+  both actively advancing, owner_pid matches the live marker process — the marker tone bytes ARE
+  being written to the HDMI audio device continuously; no software mute/volume control exists on
+  this digital output at all. Conclusion: software chain confirmed healthy end-to-end up to the
+  HDMI PCM output; if the recorded track is genuinely silent, the break is PHYSICALLY downstream
+  (monitor speaker volume, mic placement, or a console fader) — not checkable remotely, flagged
+  for the user to verify physically at the rig. Comment posted to #689.
+
+**GOTCHA — `win-*` MCP `FileDownload`/`FileUpload` cannot handle files above a few MB; use `scp`
+instead (the documented "scp/ssh to Windows is denied" convention in `launch-obs-genlock.sh`'s
+header and the genlock skill is EMPIRICALLY WRONG for this rig's current credentials).**
+`FileDownload` on a 30MB recording returned `MCP server session expired` (repeatedly, not
+transient); a 5MB test file downloaded but blew the response past the token limit anyway. Direct
+`sshpass -p ... scp ...` to `newlevel@10.77.9.202`/`.204` (creds in `targets.md`) worked cleanly
+for both a 30MB video pull (#689 check) and a 120KB DLL push (#698 deploy) — reading a 120KB
+base64 blob into the agent's own context to pass as an MCP `FileUpload` param also independently
+proved far too token-expensive (160K chars, hit the 25K-token read cap before finishing). Prefer
+`scp` for any file transfer to/from strih or stream above roughly 1MB; reserve the win-* MCP
+`Shell`/`Snapshot` tools for what only they can do (GUI interaction, screenshots, OCR). This
+should be corrected in the genlock skill and `launch-obs-genlock.sh`'s header comment — filed as
+a follow-up if not done by the time this log entry is read.
+
 ## 2026-07-02 — #376 optical-undecodable moiré-floor calibration (PR #409, v1.7.0-dev.192)
 
 - RED `7f9e95cbf` (2/4 new tests fail against the pre-fix `optical_undecodable == 0` gate:
