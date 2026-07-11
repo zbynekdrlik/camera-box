@@ -784,6 +784,52 @@ reproduces the exact same proof the built-in mode's internal helper would produc
   re.DOTALL).group(1)`) before `base64.b64decode` — decoding the raw `result` string directly
   fails with an "Invalid base64" padding error.
 
+**CRITICAL — a leftover manually-launched cam2 painter (from debugging something else) SILENTLY
+corrupts the NEXT real E2E run's optical measurement (2026-07-10/11, #466).** If you ever manually
+launch `frame-probe`/`rig-mode.sh test` on cam2 for debugging (e.g. reproducing a DIFFERENT bug)
+and don't cleanly kill it afterward, it keeps holding `/dev/dri/card1` (KMS master). The next
+`recording-e2e.sh` run's OWN fresh painter launch then CANNOT acquire DRM master, silently falls
+back to the tearing-prone fbdev `VsyncFb` path (`camera_box::probe::presenter: DRM/KMS unavailable
+... falling back to fbdev`), and the monitor keeps showing the ORPHANED process's STALE run_id
+content for the WHOLE recording — the merged verdict then shows cam2's optical read collapsed to
+0 frames (100% dropout), which reads exactly like a catastrophic rig failure but is purely a
+leftover-process artifact. **Before trusting ANY E2E run's optical result, check cam2's
+`/tmp/painter.log` (or `/tmp/rig-painter.log` for a manual `rig-mode.sh` launch) for the "falling
+back to fbdev" WARN — its absence (clean `presenter: using DRM/KMS page-flip` line) is your
+confirmation the measurement is real.** Prevention: `fuser -v /dev/dri/card1` on cam2 before
+launching anything — it should show only the permanent `cam2-painter` service (`#440`), never a
+stray `frame-probe`; kill any stray with `kill <pid>` (or `pkill -x frame-probe`) BEFORE the next
+launch, not after.
+
+**imag's scene is ALWAYS pinned to `Cam 1` (cam1's feed) regardless of which `CAM=` you pick for
+strih's SOURCE role.** A `CAM=cam4` run's cam4/strih/stream hops can be fully ZERO-loss while imag
+STILL fails — because imag structurally always measures cam1's physical feed (Phase-1 provisioning,
+`IMAG_PROG_SCENE` fixed constant). If cam1 has an active hardware defect, imag inherits it in EVERY
+run no matter which camera is under test elsewhere — this is not a bug, don't try to route imag's
+scene to a different camera to "fix" it (that would defeat its diagnostic purpose).
+
+**`#656`/`#663` self-heal firing on the E2E harness's OWN ad-hoc burn-enabled SOURCE-camera deploy
+kills that camera's digital burn measurement for the REST OF THE RUN, with no respawn (filed
+#668).** `recording-e2e.sh`'s `[2/8]` deploy is a plain `nohup camera-box-burn-<RUN_ID> &` — NOT a
+systemd unit. If the SOURCE camera's `#656` capture-rate defect fires mid-recording, `#663`'s
+self-heal exits the process (code 77) EXPECTING systemd's `Restart=always` to bring it back — but
+nothing is watching this ad-hoc process, so it just stays dead. Symptom: that camera's `#186`
+zero-loss verdict shows a burn-id sequence that stops dead partway through with everything after
+classified `BURN-UNREADABLE`. Diagnostic: check `/tmp/cbox-burn.log` on the SOURCE camera for a
+`#656 capture-delivery-rate DEFECTIVE` / `#663 self-heal` block around the point the ids stop.
+Workaround: pick a currently-healthy `CAM=` (check `journalctl -u camera-box | grep -iE
+'Streaming:|WARN'` on each candidate box for a recent/active `#656` WARN before committing to it).
+
+**Killing a `python.exe` process on a `win-*` MCP box by NAME can kill the MCP's OWN backend and
+drop the tool's transport.** The `win-strih`/`win-stream-snv` MCP server's own remote agent runs AS
+a `python.exe` process on the box (`python -m remoteos --transport streamable...`) alongside
+anything else named python (e.g. a helper `http.server` you started for a file transfer). `Get-Process
+-Name python | Stop-Process` or `taskkill /F /IM python.exe /T` kills BOTH — the MCP call itself then
+reports "transport dropped mid-call". Before broad-killing by process NAME on one of these boxes,
+check `Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Select CommandLine` and kill only
+the specific PID(s) whose command line is what YOU started (e.g. `-m http.server`), never a name-wide
+kill.
+
 **PowerShell `Start-Process -ArgumentList` gotcha — an array element containing a SPACE (a Windows
 path like `D:\_REC\2026-07-10 17-10-31.mkv`) gets word-split into TWO argv entries unless it is
 ITSELF wrapped in escaped double quotes inside the array literal.** `@('--strih', 'D:\_REC\2026-07-10

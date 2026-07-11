@@ -3051,3 +3051,36 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
     correctly rejects blips).
 - Closed #663 with this evidence (cam3's full detect→heal→recover cycle IS the live proof the
   issue asked for).
+
+## 2026-07-10/11 — #466 + #312 rig-runs dispatch (restart-survival + all-cambox evidence)
+
+- **#466 (EPIC Topology v2, imag-inclusive restart-survival proof)**: 3 real dispatch attempts.
+  - Attempt 3 (RUN_ID 1783723036, CAM=cam1): INVALIDATED — an orphaned painter process from this
+    session's own `rig-mode.sh test` flakiness debugging (see #667) held DRM master, forcing the
+    fresh painter onto a tearing-prone fbdev fallback showing STALE content; cam2 optical read
+    collapsed to 0 frames. Discarded.
+  - Attempt 4 (RUN_ID 1783724370, CAM=cam1): clean launch. Root-caused cam1's burn dying mid-run:
+    a REAL `#656` capture-rate defect fired + `#663` self-heal exited the process expecting
+    systemd respawn — but the test's burn-enabled deploy is a plain ad-hoc `nohup`, so nothing
+    respawned it. Filed **#668** (new). imag showed a 165-tick COPY/FREEZE.
+  - Attempt 5 (RUN_ID 1783725853, CAM=cam4, healthiest box tonight): **cam4/strih/stream all
+    achieved ZERO loss** — first fully clean delivery-chain result in this EPIC's history. Only
+    imag failed (its scene is permanently pinned to cam1 regardless of SOURCE camera choice, so
+    it inherits cam1's hardware issue structurally). imag showed a 169-tick COPY/FREEZE — filed
+    **#669** (new, reproduced in 3/3 clean runs tonight, NOT #660 regression — different shape).
+  - Conclusion: the topology itself is provably zero-loss; #466 stays OPEN, blocked on a physical
+    hardware replacement for cam1's ShadowCast 2 grabber (tracked #663/#665/#668) plus root-causing
+    the new recurring imag freeze (#669).
+- **#312 item 4 (clean 6-camera ALL_CAMBOX sweep)**: 1 attempt (RUN_ID 1783727115, DURATION=360,
+  all 6 cameras, 12×30s segments). NOT clean — every per-segment window FAILed. Two distinct
+  findings: (1) a REAL fleet health problem (cam2/cam3 had ACTIVE `#656` defects, cam5/cam6 the
+  `#666` emit-deficit, cam1 the known hardware issue — half the fleet degraded simultaneously);
+  (2) an UNRESOLVED puzzle — cam4's own per-segment window showed high gap counts despite cam4
+  proving fully clean in this session's OWN dedicated measurement minutes earlier; flagged, not
+  root-caused. Item 4 stays OPEN; item 5 (CI gate) remains done (PR #647).
+- New issues filed: **#666** (cam5/cam6 transient emit deficit), **#667** (rig-mode.sh test flaky
+  exit-1 after cam2 painter launch), **#668** (self-heal kills ad-hoc test burn with no respawn),
+  **#669** (recurring imag COPY/FREEZE, 3/3 clean runs).
+- Rig restored to clean EVENT mode after all runs (verified: rig-busy-gate FREE, all 6 camera-box
+  services active, cam2-painter active, burns off both boxes, prod scenes restored).
+- Artifacts on dev1: `/tmp/recording-e2e-{1783723036,1783724370,1783725853,1783727115}/`.
