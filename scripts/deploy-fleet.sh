@@ -40,6 +40,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/ndi-alive.sh"   # emit_ok_grep_pattern(), fatal_grep_pattern() (#451, shared with upgrade-fleet-ndi.sh)
 # shellcheck source=scripts/lib/cli-log.sh
 . "$HERE/lib/cli-log.sh"   # log()/info()/warn()/err() (#559, shared with upgrade-fleet-ndi.sh + verify-fleet.sh)
+# shellcheck source=scripts/lib/capture-rate-guard.sh
+. "$HERE/lib/capture-rate-guard.sh"   # invocation-id-scoped journalctl builder (#694, shared with upgrade-fleet-ndi.sh + verify-device.sh)
 
 SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
@@ -156,11 +158,19 @@ for cam in $SET; do
 
   # Give the service a moment to produce a streaming report, then verify genlock emit + no FATAL.
   # GENLOCK_WAIT_TRIES / GENLOCK_WAIT_SECS are overridable (the test harness sets them small).
+  # #694: same stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's preflight
+  # -- `journalctl -u camera-box` spans ACROSS the restart this deploy just performed, so a
+  # WARN/FATAL from the box's PREVIOUS process instance could leak into the lookback window.
+  # Resolve the CURRENT camera-box.service InvocationID each retry (the service was JUST
+  # restarted, so early tries may still be racing systemd) and scope both reads to it via the
+  # shared capture_rate_journalctl_cmd(); empty on failure falls back to the old unscoped read.
   info "[$cam] waiting for genlock report..."
   genlock_line=""
+  cb_invocation_id=""
   for _ in $(seq 1 "${GENLOCK_WAIT_TRIES:-12}"); do
     sleep "${GENLOCK_WAIT_SECS:-5}"
-    genlock_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E '$(emit_ok_grep_pattern)' | tail -1" || true)"
+    cb_invocation_id="$(ssh_box "$ip" "systemctl show -p InvocationID --value camera-box 2>/dev/null" || true)"
+    genlock_line="$(ssh_box "$ip" "$(capture_rate_journalctl_cmd "$cb_invocation_id") | grep -E '$(emit_ok_grep_pattern)' | tail -1" || true)"
     [ -n "$genlock_line" ] && break
   done
 
@@ -168,7 +178,7 @@ for cam in $SET; do
   # CURRENT boot of the just-restarted service. We deliberately do NOT trip on `error!`-level
   # lines — the app logs recoverable events at that level in normal operation (intercom restart,
   # NDI reconnect, capture retry), so greping for 'error' would false-fail a healthy, genlocking box.
-  fatal_line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep -E \"$(fatal_grep_pattern)\" | tail -3" || true)"
+  fatal_line="$(ssh_box "$ip" "$(capture_rate_journalctl_cmd "$cb_invocation_id" 300) | grep -E \"$(fatal_grep_pattern)\" | tail -3" || true)"
 
   if [ -z "$genlock_line" ]; then
     err "[$cam] NO genlock report ('fps emitted / fps captured') seen — not genlocking"

@@ -68,6 +68,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/camera-set.sh"
 # shellcheck source=scripts/lib/ndi-alive.sh
 . "$HERE/lib/ndi-alive.sh"   # emit_ok_grep_pattern(), fatal_grep_pattern() (#451, shared with deploy-fleet.sh)
+# shellcheck source=scripts/lib/capture-rate-guard.sh
+. "$HERE/lib/capture-rate-guard.sh"   # invocation-id-scoped journalctl builder (#694, shared with deploy-fleet.sh + verify-device.sh)
 
 # --- PURE functions (no network/ssh — unit-tested from tests/upgrade_fleet_ndi.rs) ----------
 
@@ -391,9 +393,17 @@ declare -a FAILED=()
 # genlock-report signal) with no FATAL lines AND the active runtime now reads back as NEW_VER.
 verify_camera_after_swap() {
   local cam="$1" ip="$2" line="" tries="${GENLOCK_WAIT_TRIES:-12}" secs="${GENLOCK_WAIT_SECS:-5}"
+  # #694: same stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's preflight
+  # -- `journalctl -u camera-box` spans ACROSS the restart this swap just performed, so a line
+  # from the box's PREVIOUS process instance could leak into the lookback window. Resolve the
+  # CURRENT camera-box.service InvocationID each retry (the service was JUST restarted) and scope
+  # both reads to it via the shared capture_rate_journalctl_cmd(); empty on failure falls back to
+  # the old unscoped read.
+  local cb_invocation_id=""
   for _ in $(seq 1 "$tries"); do
     sleep "$secs"
-    line="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E '$(emit_ok_grep_pattern)' | tail -1" || true)"
+    cb_invocation_id="$(ssh_box "$ip" "systemctl show -p InvocationID --value camera-box 2>/dev/null" || true)"
+    line="$(ssh_box "$ip" "$(capture_rate_journalctl_cmd "$cb_invocation_id") | grep -E '$(emit_ok_grep_pattern)' | tail -1" || true)"
     if [ -n "$line" ]; then
       break
     fi
@@ -404,7 +414,7 @@ verify_camera_after_swap() {
   fi
 
   local fatal
-  fatal="$(ssh_box "$ip" "journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep -E \"$(fatal_grep_pattern)\" | tail -3" || true)"
+  fatal="$(ssh_box "$ip" "$(capture_rate_journalctl_cmd "$cb_invocation_id" 300) | grep -E \"$(fatal_grep_pattern)\" | tail -3" || true)"
   if [ -n "$fatal" ]; then
     err "[$cam] journal contains FATAL/panic lines after restart:"
     echo "$fatal"

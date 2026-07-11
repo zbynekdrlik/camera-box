@@ -43,11 +43,12 @@ capture_rate_preflight_message() {
   fi
 }
 
-# capture_rate_journalctl_cmd INVOCATION_ID -> the REMOTE journalctl command text that reads
-# ONLY the CURRENT camera-box.service process instance's log lines (scoped via
-# _SYSTEMD_INVOCATION_ID), falling back to the OLD unscoped "-u camera-box -n 200" form when
+# capture_rate_journalctl_cmd INVOCATION_ID [LINES] -> the REMOTE journalctl command text that
+# reads ONLY the CURRENT camera-box.service process instance's log lines (scoped via
+# _SYSTEMD_INVOCATION_ID), falling back to the OLD unscoped "-u camera-box -n LINES" form when
 # INVOCATION_ID is empty (systemctl show failed/unavailable -- never silently skip the whole
-# preflight just because the invocation id couldn't be read).
+# preflight just because the invocation id couldn't be read). LINES defaults to 200 (the original
+# recording-e2e.sh call site passes only the invocation id and is unaffected by this default).
 #
 # WHY (#693): `journalctl -u <unit>` spans ACROSS service restarts -- it is NOT scoped to the
 # CURRENTLY RUNNING process. Live-diagnosed 2026-07-11: cam1's camera-box.service was bounced by
@@ -61,13 +62,18 @@ capture_rate_preflight_message() {
 # -p InvocationID --value camera-box`) restricts journalctl to ONLY that exact process instance's
 # lines -- a WARN from a killed prior instance can never leak into the lookback window again.
 #
+# #694: deploy-fleet.sh / verify-device.sh / upgrade-fleet-ndi.sh have the SAME exposure but read
+# 200- or 300-line windows for their own emit-ok/FATAL/acceptance checks -- the optional LINES arg
+# lets every caller reuse this ONE scoped builder instead of duplicating the scoping logic per
+# script with a hardcoded line count.
+#
 # Pure string builder (no ssh, no I/O) -- the caller substitutes INVOCATION_ID (already resolved
 # over ssh) locally, so this is directly unit-testable without a live rig.
 capture_rate_journalctl_cmd() {
-  local invocation_id="${1:-}"
+  local invocation_id="${1:-}" lines="${2:-200}"
   if [ -n "$invocation_id" ]; then
-    printf 'journalctl _SYSTEMD_INVOCATION_ID=%s --no-pager -n 200 2>/dev/null' "$invocation_id"
+    printf 'journalctl _SYSTEMD_INVOCATION_ID=%s --no-pager -n %s 2>/dev/null' "$invocation_id" "$lines"
   else
-    printf 'journalctl -u camera-box --no-pager -n 200 2>/dev/null'
+    printf 'journalctl -u camera-box --no-pager -n %s 2>/dev/null' "$lines"
   fi
 }
