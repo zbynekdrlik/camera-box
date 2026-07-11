@@ -153,7 +153,7 @@ main() {
     win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$ONBOX_CMD"
     mkdir -p "$LOCAL_OUT_DIR"
     local partial_base local_partial
-    partial_base="$(basename "$OUT_PARTIAL")"
+    partial_base="$(win_ssh_basename "$OUT_PARTIAL")" # #703: plain `basename` doesn't split on \
     local_partial="$LOCAL_OUT_DIR/$partial_base"
     echo "[recording-verdict-on-strih] pulling back $OUT_PARTIAL -> $local_partial"
     win_ssh_download "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$OUT_PARTIAL" "$local_partial"

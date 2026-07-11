@@ -1930,8 +1930,19 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   AV_MARKER_WIN="${AV_MARKER_WIN:-$OUT_DIR_WIN\\av-markers-${RUN_ID}.csv}"
   _av_marker_args=""
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
-    echo "    --- [8/8b-pre] PUSH the cam2 A/V-sync marker log to the stream box (win-stream-snv, scp-to-Windows denied) ---"
-    echo "      win-stream-snv FileUpload $MARKER_CSV -> $AV_MARKER_WIN"
+    echo "    --- [8/8b-pre] PUSH the cam2 A/V-sync marker log to the stream box ---"
+    if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+      # #703 (live-CI-run finding, 2026-07-11): this push used to be PRINT-ONLY (the plan text
+      # below) — never a problem before, because [8/8] never actually EXECUTED anything, so the
+      # stream extract's --av-marker-log arg was never really READ. The FIRST real EXECUTE-mode
+      # ALL_CAMBOX=1 run exposed it for real: recording-verdict.exe on stream errored `os error 2
+      # — The system cannot find the file specified` trying to read a marker CSV that was never
+      # actually there. Actually scp it now.
+      echo "      win_ssh_upload $MARKER_CSV -> stream:$AV_MARKER_WIN"
+      win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM" "$MARKER_CSV" "$AV_MARKER_WIN"
+    else
+      echo "      win-stream-snv FileUpload $MARKER_CSV -> $AV_MARKER_WIN"
+    fi
     _av_marker_args="--av-marker-log $AV_MARKER_WIN"
   fi
 

@@ -27,6 +27,17 @@ win_ssh_ps_encoded_command() {
   printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | base64 -w0
 }
 
+# win_ssh_basename <windows-path> -- the filename component of a WINDOWS path (backslash- or
+# forward-slash-separated). Plain bash `basename` splits ONLY on `/` -- fed a backslash Windows
+# path (e.g. `C:\camera-box\verdict-out\strih-partial-12345.json`), it finds no `/` and returns
+# the WHOLE STRING unchanged (live-verified live-CI bug, #703, 2026-07-11: the pulled-back local
+# destination became the literal nonsense path `$LOCAL_OUT_DIR/C:\camera-box\verdict-out\...`).
+# Pure string function, no network.
+win_ssh_basename() {
+  local p="${1//\\//}" # normalize backslashes to / first (matches win_ssh_scp_source_path)
+  printf '%s' "${p##*/}"
+}
+
 # win_ssh_run <user> <pw> <host> <ps-command-text> -- run a PowerShell command on a Windows
 # box over ssh via -EncodedCommand. BLOCKS until the remote command exits; stdout/stderr
 # stream through ssh in real time. A direct ssh exec has NO idle timeout (unlike the win-*
@@ -48,10 +59,27 @@ win_ssh_upload() {
   sshpass -p "$pw" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$local" "${user}@${host}:${remote}"
 }
 
+# win_ssh_scp_source_path <windows-path> -- live-verified fix (2026-07-11, #703 real-CI-run
+# incident): a scp SOURCE spec (the box-to-dev1 DOWNLOAD direction) with a BACKSLASH Windows
+# path fails "No such file or directory" even though the file genuinely exists on the box
+# (confirmed: `scp user@host:'C:\camera-box\...\x.json' local` -> error; the IDENTICAL file via
+# `scp user@host:'C:/camera-box/.../x.json' local` -> succeeds, byte-identical). The reverse
+# (scp UPLOAD to a backslash DESTINATION) is UNAFFECTED (also live-verified) -- this conversion
+# is deliberately applied ONLY on the download side, never win_ssh_upload. Win32-OpenSSH's
+# sftp-server (what scp uses since OpenSSH 8.7+) accepts forward slashes transparently for a
+# Windows path (recording-verdict.exe itself already reads/writes fine with either separator,
+# per its own decode logs using forward-slash StopRecord-returned paths) -- only the scp CLIENT
+# side's remote-source parsing chokes on the backslash. Pure string function, no network.
+win_ssh_scp_source_path() {
+  printf '%s' "${1//\\//}"
+}
+
 # win_ssh_download <user> <pw> <host> <remote-windows-path> <local-path>
 win_ssh_download() {
   local user="$1" pw="$2" host="$3" remote="$4" local="$5"
-  sshpass -p "$pw" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${user}@${host}:${remote}" "$local"
+  local scp_remote
+  scp_remote="$(win_ssh_scp_source_path "$remote")"
+  sshpass -p "$pw" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${user}@${host}:${scp_remote}" "$local"
 }
 
 # win_ssh_download_dir <user> <pw> <host> <remote-windows-dir> <local-dir-parent> -- scp -r a
@@ -59,7 +87,9 @@ win_ssh_download() {
 # win_ssh_path_exists (best-effort -- absent on a clean run).
 win_ssh_download_dir() {
   local user="$1" pw="$2" host="$3" remote="$4" local_parent="$5"
-  sshpass -p "$pw" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -r "${user}@${host}:${remote}" "$local_parent"
+  local scp_remote
+  scp_remote="$(win_ssh_scp_source_path "$remote")"
+  sshpass -p "$pw" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -r "${user}@${host}:${scp_remote}" "$local_parent"
 }
 
 # win_ssh_path_exists <user> <pw> <host> <remote-windows-path> -- true (0) iff the path

@@ -79,6 +79,136 @@ fn win_ssh_exec_lib_is_sourceable_without_side_effects() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("SOURCED_OK"));
 }
 
+/// `win_ssh_scp_source_path` — live-CI-run-discovered bug (2026-07-11, first real EXECUTE-mode
+/// dispatch of this PR's own fix): `scp user@host:'C:\camera-box\...\x.json' dest` fails "No
+/// such file or directory" even though the file genuinely exists on the box (live-reproduced on
+/// strih); the IDENTICAL file via forward slashes (`C:/camera-box/.../x.json`) downloads fine.
+/// win_ssh_download/_dir must convert backslashes before building the scp remote spec.
+#[test]
+fn win_ssh_scp_source_path_converts_backslashes_to_forward_slashes() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; win_ssh_scp_source_path \"$2\"")
+        .arg("bash")
+        .arg(manifest_dir().join("scripts/lib/win-ssh-exec.sh"))
+        .arg(r"C:\camera-box\verdict-out\strih-partial-12345.json")
+        .output()
+        .expect("run win_ssh_scp_source_path");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "C:/camera-box/verdict-out/strih-partial-12345.json",
+        "#703: win_ssh_scp_source_path must convert every backslash to a forward slash (the \
+         live-verified scp-download fix)"
+    );
+}
+
+#[test]
+fn win_ssh_download_and_download_dir_use_the_converted_scp_source_path() {
+    let s = read("scripts/lib/win-ssh-exec.sh");
+    for func in ["win_ssh_download()", "win_ssh_download_dir()"] {
+        let fn_start = s
+            .find(func)
+            .unwrap_or_else(|| panic!("#703: {func} must be defined"));
+        let fn_end = s[fn_start..]
+            .find("\n}\n")
+            .map(|i| fn_start + i)
+            .unwrap_or_else(|| panic!("#703: {func} must have a closing brace"));
+        let body = &s[fn_start..fn_end];
+        assert!(
+            body.contains("win_ssh_scp_source_path"),
+            "#703: {func} must convert the remote path via win_ssh_scp_source_path before \
+             building the scp remote spec (the live-verified backslash-download fix): {body}"
+        );
+    }
+    // win_ssh_upload (the OPPOSITE direction — a backslash DESTINATION) is NOT broken (live-
+    // verified separately) and must stay UNCONVERTED — converting it would be an unrequested,
+    // unverified change to a path that already works.
+    let upload_start = s
+        .find("win_ssh_upload()")
+        .expect("#703: win_ssh_upload must be defined");
+    let upload_end = s[upload_start..]
+        .find("\n}\n")
+        .map(|i| upload_start + i)
+        .expect("win_ssh_upload must have a closing brace");
+    assert!(
+        !s[upload_start..upload_end].contains("win_ssh_scp_source_path"),
+        "#703: win_ssh_upload's backslash DESTINATION already works live-verified — do not \
+         convert it (that direction was never broken)"
+    );
+}
+
+/// `win_ssh_basename` — live-CI-run-discovered bug (same run): plain bash `basename` splits
+/// ONLY on `/`; fed a backslash Windows path it finds none and returns the WHOLE STRING
+/// unchanged, producing a nonsense local destination
+/// (`$LOCAL_OUT_DIR/C:\camera-box\verdict-out\...json`, live-observed in the failed run's log).
+#[test]
+fn win_ssh_basename_splits_on_backslash_not_only_forward_slash() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; win_ssh_basename \"$2\"")
+        .arg("bash")
+        .arg(manifest_dir().join("scripts/lib/win-ssh-exec.sh"))
+        .arg(r"C:\camera-box\verdict-out\strih-partial-12345.json")
+        .output()
+        .expect("run win_ssh_basename");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "strih-partial-12345.json",
+        "#703: win_ssh_basename must extract just the filename from a backslash Windows path — \
+         a bare `basename` call returns the string UNCHANGED (no / found), the live-observed bug"
+    );
+}
+
+#[test]
+fn strih_and_stream_scripts_use_win_ssh_basename_not_bare_basename_for_the_pullback() {
+    for path in [
+        "scripts/recording-verdict-on-strih.sh",
+        "scripts/recording-verdict-on-stream.sh",
+    ] {
+        let s = read(path);
+        assert!(
+            s.contains("win_ssh_basename"),
+            "#703: {path} must use win_ssh_basename (not bare `basename`) to derive the pulled- \
+             back local filename from the Windows --out path"
+        );
+        assert!(
+            !s.contains(r#"partial_base="$(basename "$OUT_PARTIAL")""#),
+            "#703: {path} must NOT use bare `basename` on a backslash Windows path (live-verified \
+             bug — it returns the whole string unchanged)"
+        );
+    }
+}
+
+/// The A/V-sync marker CSV push to the stream box — live-CI-run-discovered bug (same run): the
+/// push was PRINT-ONLY (an MCP-operator instruction) even in EXECUTE mode, so
+/// `recording-verdict.exe --extract-partial stream --av-marker-log <path>` failed `os error 2 —
+/// The system cannot find the file specified` reading a CSV that was never actually uploaded.
+/// EXECUTE mode must actually win_ssh_upload it.
+#[test]
+fn recording_e2e_actually_uploads_the_av_marker_csv_in_execute_mode() {
+    let s = read_e2e();
+    let block_start = s
+        .find("PUSH the cam2 A/V-sync marker log to the stream box")
+        .expect("#703: the AV-marker push block must exist");
+    let block_end = s[block_start..]
+        .find("--- [8/8b] extract the STREAM partial")
+        .map(|rel| block_start + rel)
+        .expect("the AV-marker push block must be followed by the [8/8b] stream extract");
+    let block = &s[block_start..block_end];
+    assert!(
+        block.contains(r#"if [ "$E2E_EXECUTE_VERDICT" = "1" ]"#),
+        "#703: the AV-marker push block must branch on E2E_EXECUTE_VERDICT: {block}"
+    );
+    assert!(
+        block
+            .contains("win_ssh_upload \"$STREAM_USER\" \"$STREAM_PW\" \"$STREAM\" \"$MARKER_CSV\""),
+        "#703: in EXECUTE mode the AV-marker CSV must be ACTUALLY uploaded via win_ssh_upload, \
+         not just printed as an MCP instruction: {block}"
+    );
+}
+
 /// `win_ssh_ps_encoded_command` — the PowerShell `-EncodedCommand` base64/UTF-16LE encoder. Pure
 /// string function, no network. Round-trips (decoded with the SAME `base64`/`iconv` coreutils
 /// the production path relies on, not a Rust base64 crate — avoids adding a new dependency for
